@@ -58,7 +58,7 @@ class Drone:
         if v.resistance is not None:
             drag_sig = float(np.hypot(SIG["drag_cfd"], v.limits.get("resistance_gci", 0.0)))
         elif v.sources.get("drag") == "cfd":
-            drag_sig = float(np.hypot(SIG["drag_cfd"], max(c[3] for c in v.drag.values())))
+            drag_sig = float(np.hypot(SIG["drag_cfd"], max([c[3] for c in v.drag.values()] + [v.limits.get("lift_gci", 0.0)])))
         else:
             drag_sig = SIG["drag_est"]
         # mean-preserving lognormal: E[scale] = 1

@@ -24,6 +24,7 @@ Each design is characterized once, and every plan reuses the result:
 |---|---|
 | Added mass | Capytaine BEM |
 | Drag | OpenFOAM: RANS k-ω SST in 6 directions for subs and quads, interFoam free surface at Fn 0.2/0.3/0.4 for boats |
+| Hull lift | Subs: the same RANS at 10° incidence in pitch and yaw, on the bare hull (wings and fins are lifting actuators already). Gives the lift and moment the 6-direction table can't, as a cross term exact on-axis and at 10° |
 | Structure | CalculiX FEA on the named parts. Hull collapse depth (linear buckling with follower-pressure and 0.5 knockdown, rated depth = collapse / 1.5); glider wing at stall lift and when handled; boat bottom slamming (ISO 12215-5); quad arm at full thrust; frame vibration modes |
 | Glider speed | One full dive/climb in the 6-DOF model |
 
@@ -51,11 +52,17 @@ These are the example platforms. Swap in the real designs when their numbers arr
 
 ## Ocean and weather data
 
-- **Wind**: the WRF `wrfout_*` files under `WRF_DIR` (default `/work/wrf`). Any WRF Lambert/Mercator
-  grid works. A single snapshot is held constant in time and labelled as such; it's refused if it is
-  more than 6 h from the mission.
-- **Currents (3-D)**: HYCOM GOFS 3.1 analysis (1/12°, 3-hourly, Dec 2018 to Sep 2024), fetched for
-  the mission box and cached. This includes the seafloor depth.
+- **Wind**: the WRF `wrfout_*` or hourly surface `wrfsfc_*` files under `WRF_DIR` (default `/work/wrf`,
+  searched recursively). Any WRF Lambert/Mercator grid works; all files must share one grid. Hourly
+  data is interpolated linearly in time. A snapshot with no other hour within 3 h of it is held
+  constant and labelled as such; it's refused if it is more than 6 h from the mission.
+- **On disk now**: UWIN-CM `run_nosal_2018020300b` (Kerns, UW), 25 hourly files, 2018-02-03 12 UTC to
+  2018-02-04 12 UTC, plus the 2023-03-07 17 UTC snapshot used for the TEPEX example. More days of the
+  2018 archive (2018-01-22 to 2018-07-20) drop in the same way: download `wrfsfc_d01_*` into a folder
+  under `WRF_DIR`.
+- **Currents (3-D)**: HYCOM GOFS 3.1 analysis (expt_93.0, 1/12°, 3-hourly, Jan 2018 to Sep 2024: the
+  GLBv grid until Feb 2020, GLBy after), fetched for the mission box and cached. This includes the
+  seafloor depth.
 - **Waves**: NOAA WAVEWATCH III (Hs, peak period, direction), fetched and cached the same way, from NOAA's
   ERDDAP or, when that copy is down (it broke on 2026-10-10), from PacIOOS directly.
 - The UWIN-CM wrfout and wrfrst files checked so far have their coupled-ocean fields
@@ -83,13 +90,16 @@ or ArduSub SITL in the loop.
 ## Proof
 
 The **Receipts** page checks each claim against a formula or a published measurement, for example:
-Wigley hull resistance against the Kajitani towing tank, REMUS drag against Prestero, and long-tube
+Wigley hull resistance against the Kajitani towing tank, REMUS drag against Prestero, hull side force
+and yaw moment at 4–12° drift against the DARPA SUBOFF captive-model tests (Roddy 1990), and long-tube
 collapse against Bresse. It also checks a free-free tube's bending stress under inertia relief against
 beam theory, and quad hover RPM against bench data. Reach is checked against exact Zermelo times, link
 statistics against exact geometry, and fast mode against ArduCopter firmware on the same mission.
 Context rows are shown for orientation and never count as a pass.
 
-Run them: `./run.sh python -m cafe.receipts /work/runs`. Adversarial review notes: `REVIEW.md`.
+Run them: `./run.sh python -m cafe.receipts /work/runs`. The slow CFD cases are produced once with
+`python -m cafe.cfd external torpedo /work/runs/t1`, `... surface wigley /work/runs/w1` and
+`... incidence suboff /work/runs/s1 3.344`. Adversarial review notes: `REVIEW.md`.
 
 ## Files
 
@@ -107,8 +117,12 @@ Server: `~/services/cafe/compose.yml` on homebase (`cafe` = API, `cafe-worker` =
 
 - The example designs (Petrel glider, Tern boat, Gnat quad) are stand-ins until the real platform
   numbers arrive. Results for them describe those examples, not your drones.
-- A single wrfout snapshot means wind is frozen in time. Long missions and reach maps flag this.
-- Hull lift at angle of attack isn't in the CFD (on-axis runs only); finned subs rely on fin lift.
+- The TEPEX date (2023-03-07) has one weather snapshot, so its wind is frozen in time (flagged in the
+  results). The 2018 UWIN-CM day has hourly wind.
+- Hull lift is a single-angle (10°) cross term: good to roughly ±15°, symmetric about each plane, forward
+  motion only. Validated against the SUBOFF captive-model drift tests (Receipts → Hull lift). A
+  reversing or stalled hull falls back to the on-axis table. Uploaded meshes should leave fins out:
+  fins are actuators, so fins in the mesh would be counted twice.
 - Boat resistance is computed at Fn 0.2–0.4 and extrapolated ∝V² above that.
 - Boats get a passive skeg sized for a typical directional-stability margin (1.5× the hull's Munk moment),
   because the on-axis CFD carries no hull lift. Enter `skeg_area` once the real one is known.

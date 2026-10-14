@@ -1,5 +1,26 @@
 # Adversarial review log
 
+## Round 3 — hull lift, hourly weather (2026-10-14)
+
+Closes two of the README's known limits. Each row was found by a run, not by reading.
+
+| # | Finding | Effect before | Fix |
+|---|---|---|---|
+| 1 | The six-direction drag table blends as d², so at incidence it only has the sin²α crossflow term; hull lift (∝ sin α cos α) was missing | SUBOFF side force 40–46 % low at 4–12° drift vs Roddy 1990 | RANS at 5° and 10° in pitch and yaw on the bare hull; residual over the d² blend tabulated as a cross term K(α), Munk moment subtracted because dyn adds it from added mass |
+| 2 | One incidence angle (10°) wasn't enough: the sin² term uses the 90° crossflow drag, which overstates crossflow before separation develops | +51 % side force at 4° (passed at 8° and 12°) | second angle (5°), K interpolated in α; now within 6 % / 3 % / 4 % at 4 / 8 / 12° |
+| 3 | Gliders' meshes include their wings, which are already lifting actuators | incidence CFD on the whole glider would count wing lift twice | incidence runs on `part_hull.stl` when the design has one |
+| 4 | At Re 1.2e7 (SUBOFF) the coarse grid of the two-grid study is out of the asymptotic range | GCI 120–160 % although the fine grid is within 3 % of the tank resistance; the Monte Carlo would widen drag silently | warning on the design when any GCI > 30 % (all current designs ≤ 12 %) |
+| 5 | Only one WRF time on disk, so every mission had frozen wind | wind held constant over a whole mission | UWIN-CM hourly `wrfsfc` files read (no LANDMASK in them: land from `LU_INDEX` vs `ISWATER`, 0.2 % of cells differ from WRF's mask); a snapshot with no hour within 3 h of it is still held and labelled |
+| 6 | With two weather spans on disk, the live-session length used the last file on disk | a 2023 session would get 1 h instead of 48; a 2018 one would ask for 48 h past the end of its data | `env.hours_after(t0)`: contiguous hours from t0, or 48 for a lone snapshot |
+| 7 | The UI showed `first → last` as one span, defaulted to the oldest | "2018 → 2023" read as five years of weather | spans listed separately; default = most recent span |
+| 8 | HYCOM GLBy starts Dec 2018 | Feb 2018 missions would get "currents unknown" | GLBv0.08 expt_93.0 (Jan 2018 – Feb 2020, same experiment, units and longitudes) as fallback |
+| 9 | Registering SUBOFF in `geom.SAMPLES` made the app seed it as a hangar design on restart, which took the single CFD slot | a validation hull with made-up power/battery appeared in the hangar and started hours of CFD | `hangar=False` on validation-only samples; job stopped and removed |
+
+New receipts: SUBOFF side force and yaw moment at 4.07 / 8 / 12.03° and resistance (Roddy 1990, via Budak 2023
+Table 6); planted-cross-term algebra through `vehicle.build` and `Dynamics.drag` (frames, CoG transfer, Munk);
+SUBOFF geometry vs Groves et al. 1989 (volume 0.699 m³, wetted area 5.988 m², both within 0.15 %); hourly wind
+time interpolation against raw netCDF values; lone snapshot still held.
+
 ## Round 2 — TEPEX features (shapes, HYCOM/WW3 ocean, range requirements, reach, live API)
 
 Same method: one reviewer for physics and numerics, with each claim backed by a derivation or a run, and

@@ -15,6 +15,18 @@ FLUIDS = {"water": dict(rho=1025.0, nu=1.19e-6), "air": dict(rho=1.20, nu=1.5e-5
 DIRS = {"+x": (1, 0, 0), "-x": (-1, 0, 0), "+y": (0, 1, 0), "-y": (0, -1, 0), "+z": (0, 0, 1), "-z": (0, 0, -1)}
 
 
+def dvec(d):
+    """Unit direction for a label: an axis ("+x") or forward motion pitched/yawed toward an axis ("x+z10" =
+    moving along +x tilted 10 deg toward +z, i.e. 10 deg angle of attack)."""
+    if d in DIRS:
+        return np.array(DIRS[d], float)
+    m = re.fullmatch(r"x([+-][yz])([0-9.]+)", d)
+    if not m:
+        raise ValueError(f"bad direction {d!r}")
+    a = np.radians(float(m.group(2)))
+    return np.cos(a) * np.array(DIRS["+x"], float) + np.sin(a) * np.array(DIRS[m.group(1)], float)
+
+
 CACHE = pathlib.Path(os.environ.get("CAFE_WORK", "/work")) / "cfdcache"
 
 
@@ -271,7 +283,7 @@ cache { grad(U); }
     omega = k / (10 * fl["nu"])
     results = {}
     for d in dirs:
-        U = -speed * np.array(DIRS[d], float)     # body moving along +d == fluid moving along -d
+        U = -speed * dvec(d)     # body moving along +d == fluid moving along -d
         fos = _forces_fo(f"rho rhoInf; rhoInf {fl['rho']};", cofr) + (SURF_FO if d == pressure_dir else "")
         write(case, "system/controlDict", _control("simpleFoam", iters, fos))
         for p in case.glob("processor*"):
@@ -291,7 +303,7 @@ cache { grad(U); }
                    iters=int(f["force"]["it"][-1]), seconds=time.time() - t1)
         if d == pressure_dir:
             res["surface_pressure"] = _keep_surface(case, "bodyPressure", fl["rho"])
-        drag = -np.dot(tot, DIRS[d])
+        drag = -np.dot(tot, dvec(d))
         log(f"{d}: drag {drag:.4g} N  (CdA {2 * drag / (fl['rho'] * speed ** 2):.4g} m2), "
             f"{res['iters']} it, {res['seconds']:.0f}s")
         results[d] = res
@@ -329,12 +341,23 @@ def characterize_external(stl, workdir, fluid, speed, cofr=(0, 0, 0), dirs=tuple
         _shrink(workdir / name)
     fine = out["fine"]
     for d, r in fine["dirs"].items():
-        drag_f = -np.dot(r["force"], DIRS[d])
-        drag_c = -np.dot(out["coarse"]["dirs"][d]["force"], DIRS[d])
+        drag_f = -np.dot(r["force"], dvec(d))
+        drag_c = -np.dot(out["coarse"]["dirs"][d]["force"], dvec(d))
         r["gci"] = gci(drag_f, drag_c)
         r["drag_coarse"] = drag_c
+        r["force_coarse"] = out["coarse"]["dirs"][d]["force"]
+        r["moment_coarse"] = out["coarse"]["dirs"][d]["moment"]
     fine["coarse_cells"] = out["coarse"]["mesh"]["cells"]
     return fine
+
+
+def characterize_incidence(stl, workdir, fluid, speed, alphas=(5.0, 10.0), planes=("+y", "+z"), cofr=(0, 0, 0), log=print):
+    """Hull lift: forward motion at each angle in `alphas` toward each plane's axis, plus the on-axis runs on the
+    SAME mesh that the cross term is measured against (same-grid differencing cancels most discretization error)."""
+    dirs = ("+x",) + tuple(planes) + tuple(f"x{p}{a:g}" for p in planes for a in alphas)
+    r = characterize_external(stl, workdir, fluid, speed, cofr, dirs=dirs, log=log)
+    r["alphas"], r["planes"] = list(alphas), list(planes)
+    return r
 
 
 def _shrink(case):
@@ -577,7 +600,11 @@ if __name__ == "__main__":
     m = s["make"]()
     stl = work / f"{sample}.stl"
     m.export(stl)
-    if what == "external":
+    if what == "incidence":
+        # model-scale tow speed (Roddy 1990 drift tests at 6.5 kn), fresh-water viscosity of the tank
+        speed = float(sys.argv[4]) if len(sys.argv) > 4 else 1.5
+        r = characterize_incidence(stl, work / sample, "water", speed, planes=("+y",))
+    elif what == "external":
         fluid, speed = ("air", 10.0) if s["kind"] == "uav" else ("water", 1.5)
         dirs = sys.argv[4].split(",") if len(sys.argv) > 4 else tuple(DIRS)
         r = characterize_external(stl, work / sample, fluid, speed, dirs=dirs)

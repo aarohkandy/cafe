@@ -172,6 +172,32 @@ def sample_torpedo():
     return normalize(loft(l - x, secs), "uuv")   # nose at +x
 
 
+def suboff_radius(x_ft):
+    """DARPA SUBOFF bare hull (AFF-1) radius in feet at x feet from the nose: Groves, Huang & Chang 1989
+    (DTRC/SHD-1298-01) analytic forebody, parallel middle body, afterbody and cap. L = 14.2917 ft = 4.356 m."""
+    R, rh, k0, k1 = 5 / 6, 0.1175, 10.0, 44.6244
+    x = np.asarray(x_ft, float)
+    a = 0.3 * x - 1
+    fore = R * np.clip(1.126395101 * x * a ** 4 + 0.442874707 * x ** 2 * a ** 3 + 1 - a ** 4 * (1.2 * x + 1), 0, None) ** (1 / 2.1)
+    xi = (13.979167 - x) / 3.333333
+    aft = R * np.sqrt(np.clip(rh ** 2 + rh * k0 * xi ** 2 + (20 - 20 * rh ** 2 - 4 * rh * k0 - k1 / 3) * xi ** 3
+                              + (-45 + 45 * rh ** 2 + 6 * rh * k0 + k1) * xi ** 4 + (36 - 36 * rh ** 2 - 4 * rh * k0 - k1) * xi ** 5
+                              + (-10 + 10 * rh ** 2 + rh * k0 + k1 / 3) * xi ** 6, 0, None))
+    cap = rh * R * np.sqrt(np.clip(1 - (3.2 * x - 44.733333) ** 2, 0, None))
+    return np.select([x <= 10 / 3, x <= 10.645833, x <= 13.979167], [fore, R, aft], cap)
+
+
+def sample_suboff():
+    """DARPA SUBOFF bare hull at model scale (4.356 m), the standard benchmark for hull forces at incidence."""
+    ft = 0.3048
+    x = np.concatenate([np.linspace(0, 10 / 3, 40), np.linspace(10 / 3, 10.645833, 10)[1:-1],
+                        np.linspace(10.645833, 13.979167, 40), np.linspace(13.979167, 14.291667, 12)[1:]])
+    r = np.maximum(suboff_radius(x), 0.004 / ft) * ft      # blunt pole so rings never collapse
+    ang = np.linspace(0, 2 * np.pi, 64, endpoint=False)
+    secs = [np.column_stack([ri * np.cos(ang), ri * np.sin(ang)]) for ri in r]
+    return normalize(loft(14.291667 * ft - x * ft, secs), "uuv")   # nose at +x
+
+
 def sample_wigley(L=2.5, B=0.25, T=0.156, freeboard=0.15):
     """Wigley hull at the Univ. of Tokyo model size (Kajitani et al. 1983). Classic test hull: y = B/2 (1-(2x/L)^2)(1-(z/T)^2), walled up to a flat deck."""
     xs = np.linspace(-L / 2, L / 2, 61)
@@ -215,6 +241,9 @@ SAMPLES = {
                    spec=dict(name="Skiff", mass=44.4, power_w=400, battery_wh=1500, hotel_w=20,
                              prop_d=0.12, material="gfrp", wall_mm=4.0, structure="shell",
                              cog=[0.0, 0.0, -0.094], design_category="D")),   # cog FRD/keel origin: KG = 0.6 draft (KM 0.124); a tank model, so sheltered water only
+    "suboff": dict(kind="uuv", make=sample_suboff, hangar=False,     # validation hull only, never a hangar design
+                   spec=dict(name="SUBOFF", mass=716.0, power_w=2000, battery_wh=5000, layout="torpedo",
+                             cog=[0.165, 0.0, 0.0])),     # moment reference = Roddy's, 2.013 m from the nose (FRD)
     "quad": dict(kind="uav", make=sample_quad,
                  spec=dict(name="Gnat", mass=1.8, power_w=1400, battery_wh=111, hotel_w=10,
                            prop_d=0.254, rotors=4, wheelbase=0.45, material="cfrp", wall_mm=3.0,
@@ -240,5 +269,10 @@ if __name__ == "__main__":
     assert abs((hs["gm"] - hs["kb"]) / bm_exact - 1) < 0.03, (hs["gm"] - hs["kb"], bm_exact)
     q = sample_quad()
     assert q.is_watertight, "quad not closed"
+    sb = sample_suboff()
+    # Groves et al. 1989 bare hull (AFF-1): 4.356 m, D 0.508 m, volume 0.699 m3, wetted surface 5.988 m2
+    # (0.718 m3 is the appended model's)
+    assert sb.is_watertight and abs(sb.extents[0] - 4.356) < 2e-3 and abs(sb.extents[1] - 0.508) < 2e-3, sb.extents
+    assert abs(sb.volume / 0.699 - 1) < 0.01 and abs(sb.area / 5.988 - 1) < 0.01, (sb.volume, sb.area)
     assert abs(projected_area(t, 0) / 0.0285 - 1) < 0.03, projected_area(t, 0)
     print("geom ok", t.extents, w.extents, q.extents, hs["draft"], hs["gm"])

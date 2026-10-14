@@ -1,6 +1,7 @@
 """Public ocean data for the mission box, used when the weather files carry no ocean:
 
-  currents  HYCOM GOFS 3.1 analysis (expt_93.0): 3-D, 1/12 deg, 3-hourly, Dec 2018 - Sep 2024 (OPeNDAP)
+  currents  HYCOM GOFS 3.1 analysis (expt_93.0): 3-D, 1/12 deg, 3-hourly, Jan 2018 - Sep 2024 (OPeNDAP; the
+            GLBv grid until Feb 2020, the GLBy grid from Dec 2018)
   waves     NOAA WAVEWATCH III global (NWW3_Global_Best): Hs, peak period, peak direction, hourly, 0.5 deg (ERDDAP)
 
 Each request is cut to the box/time window, fetched once and cached under /work/ocean, so a mission or
@@ -10,7 +11,8 @@ import datetime as dt, hashlib, json, os, pathlib, urllib.error, urllib.parse, u
 import numpy as np
 
 CACHE = pathlib.Path(os.environ.get("CAFE_WORK", "/work")) / "ocean"
-HYCOM = "https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z"
+HYCOM = ("https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z",     # same experiment, same units and
+         "https://tds.hycom.org/thredds/dodsC/GLBv0.08/expt_93.0/uv3z")     # 0-360 longitudes; first that covers t0
 WW3 = "https://coastwatch.pfeg.noaa.gov/erddap/griddap/NWW3_Global_Best"
 WW3_180 = "https://pae-paha.pacioos.hawaii.edu/erddap/griddap/ww3_global_lon180"
 EPOCH = dt.datetime(2000, 1, 1)
@@ -30,14 +32,18 @@ def currents(t0, hours, lat_range, lon_range, max_depth=250.0):
         z = np.load(f)
         return {k: z[k] for k in z.files}
     import netCDF4
-    ds = netCDF4.Dataset(HYCOM)
-    th = ds["time"][:]                                   # hours since 2000-01-01
     want0 = (t0 - EPOCH).total_seconds() / 3600 - 3
     want1 = want0 + hours + 6
-    k = np.where((th >= want0) & (th <= want1))[0]
-    if len(k) == 0:
-        raise ValueError(f"HYCOM has no data for {t0:%Y-%m-%d} (covers {EPOCH + dt.timedelta(hours=float(th[0])):%Y-%m-%d} "
-                         f"to {EPOCH + dt.timedelta(hours=float(th[-1])):%Y-%m-%d})")
+    spans = []
+    for url in HYCOM:
+        ds = netCDF4.Dataset(url)
+        th = ds["time"][:]                               # hours since 2000-01-01
+        k = np.where((th >= want0) & (th <= want1))[0]
+        if len(k):
+            break
+        spans.append(f"{EPOCH + dt.timedelta(hours=float(th[0])):%Y-%m-%d} to {EPOCH + dt.timedelta(hours=float(th[-1])):%Y-%m-%d}")
+    else:
+        raise ValueError(f"HYCOM has no data for {t0:%Y-%m-%d} (covers {', '.join(spans)})")
     lat, lon, dep = ds["lat"][:], ds["lon"][:], ds["depth"][:]
     j = np.where((lat >= min(lat_range) - 0.1) & (lat <= max(lat_range) + 0.1))[0]
     i = np.where((lon >= lo0 - 0.1) & (lon <= lo1 + 0.1))[0]

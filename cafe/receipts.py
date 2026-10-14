@@ -3,7 +3,7 @@
 `python -m cafe.receipts [results_dir]` runs them all and exits non-zero if any fail. The app shows
 the same list, so what the user sees is exactly what was tested.
 """
-import json, pathlib, sys, time
+import json, os, pathlib, sys, time
 import numpy as np
 
 from cafe import geom, vehicle, dyn, env as envm
@@ -151,6 +151,35 @@ def env_receipts():
             1e-9, "", "MIL-F-8785C")
 
 
+def weather_receipts():
+    """Hourly weather is interpolated in time (not frozen), against the raw file values; a lone snapshot is held."""
+    import datetime as dt, netCDF4
+    cat = envm.catalog()
+    t0 = dt.datetime(2018, 2, 3, 14)
+    if t0 not in cat or t0 + dt.timedelta(hours=3) not in cat:
+        return
+    os.environ["CAFE_OCEAN"] = "0"
+    E = envm.Env(t0, 2.0, (21.1, 21.3), (-158.5, -158.3))
+    raw = []
+    for h in (0, 1):
+        path, k = cat[t0 + dt.timedelta(hours=h)]
+        with netCDF4.Dataset(path) as ds:
+            lat, lon = ds["XLAT"][0][:, 0], envm.lon360(ds["XLONG"][0][0, :])
+            j, i = np.argmin(abs(lat - E.lat[3])), np.argmin(abs(lon - E.lon[3]))
+            raw.append(float(ds["U10"][k][j, i]))
+    got = float(E.surface(E.lat[3], E.lon[3], 1800.0)["U10"][0])
+    bracket("Weather", "Hourly WRF wind is time-varying (not a frozen snapshot)", float(not E.frozen), 1, 1, "",
+            "UWIN-CM run_nosal_2018020300b, hourly wrfsfc")
+    receipt("Weather", "U10 half way between two hours = mean of the two raw hours", got, np.mean(raw), 1e-4, "m/s",
+            "linear interpolation in time, raw netCDF values", rel=False)
+    lone = dt.datetime(2023, 3, 7, 17)
+    if lone in cat:
+        E2 = envm.Env(lone, 1.0, (9.9, 10.1), (-95.1, -94.9))
+        bracket("Weather", "A lone snapshot is held constant and labelled as such", float(E2.frozen and "held constant" in E2.sources["wind"]),
+                1, 1, "", "wrfout 2023-03-07 17 UTC (no neighbouring hours on disk)")
+    os.environ["CAFE_OCEAN"] = "1"
+
+
 def geometry_receipts():
     t = geom.sample_torpedo()
     receipt("Geometry", "REMUS hull wetted area", t.area, 0.709, 0.05, "m2", "Prestero 2001 Table 2.7")
@@ -216,6 +245,88 @@ def cfd_receipts(results):
             k = min(ref, key=lambda f: abs(f - fn))
             ct = res["resistance"] / (0.5 * 1025 * float(U) ** 2 * S) * 1e3
             receipt("CFD", f"Wigley Ct x1e3 at Fn {fn:.2f}", ct, ref[k], 0.15, "", "Kajitani et al. 1983, UT 2.5 m fixed")
+    s = results / "s1" / "suboff.incidence.json"
+    if s.exists():
+        suboff_receipts(json.loads(s.read_text()))
+
+
+# Roddy 1990 (DTRC/SHD-1298-08) captive-model drift tests, DARPA SUBOFF bare hull, 6.5 kn, fresh water;
+# as tabulated in Budak 2023 (Gemi ve Deniz Teknolojisi 223, Table 6): beta deg -> (sway force N, yaw moment N.m)
+RODDY_DRIFT = {4.07: (45.43, 429.81), 8.00: (155.58, 737.14), 12.03: (350.65, 977.97)}
+
+
+def hull_lift_algebra_receipts():
+    """Plant a known cross term at 5 and 10 deg (with the Munk moment RANS would contain) in synthetic incidence
+    CFD, build the vehicle the normal way, and check the dynamics reproduce the planted force/moment at 7.5 deg,
+    half way between the table points. Catches frame flips, the CoG transfer and Munk double counting."""
+    s = geom.SAMPLES["torpedo"]
+    m = s["make"]()
+    v0 = vehicle.build("uuv", m, s["spec"])
+    U, rho = 1.5, vehicle.RHO["water"]
+    q = 0.5 * rho * U ** 2
+    K = {5: (np.array([0.002, -0.02, 0.0]), np.array([0.0, 0.0, 0.010])),     # FRD, per unit d_x d_y
+         10: (np.array([0.004, -0.03, 0.0]), np.array([0.0, 0.0, 0.012]))}
+    A3 = v0.added_mass[:3, :3]
+    flu = lambda Ffrd, Mfrd: (vehicle.FLU2FRD @ (Ffrd * q), vehicle.FLU2FRD @ ((Mfrd + np.cross(v0.cog, Ffrd)) * q))
+    dirs = {}
+    for lab, frd in (("+x", "+x"), ("+y", "-y")):
+        f, mo = flu(*v0.drag[frd][:2])
+        dirs[lab] = dict(force=f.tolist(), moment=mo.tolist())
+    for deg, (KF, KM) in K.items():
+        a = np.radians(deg)
+        v = np.array([np.cos(a), -np.sin(a), 0.0])                             # "x+y<deg>" in FRD
+        cs = v[0] * v[1]
+        Fa = v[0] ** 2 * v0.drag["+x"][0] + v[1] ** 2 * v0.drag["-y"][0] + cs * KF
+        Ma = v[0] ** 2 * v0.drag["+x"][1] + v[1] ** 2 * v0.drag["-y"][1] + cs * KM + 2 / rho * np.cross(A3 @ v, v)
+        f, mo = flu(Fa, Ma)
+        dirs[f"x+y{deg}"] = dict(force=f.tolist(), moment=mo.tolist())
+    hang = dict(cfd_aoa=dict(rho=rho, speed=U, L=float(m.extents.max()), alphas=[5.0, 10.0], planes=["+y"], dirs=dirs, mesh="full"))
+    veh = vehicle.build("uuv", m, s["spec"], hang)
+    d = dyn.Dynamics(veh)
+    b = np.radians(7.5)
+    vb = U * np.array([np.cos(b), -np.sin(b), 0.0])
+    F, M = d.drag(vb[None])
+    F0, M0 = dyn.Dynamics(vehicle.build("uuv", m, s["spec"])).drag(vb[None])
+    k = q * d.drag_scale[0] * np.cos(b) * -np.sin(b)
+    want_F, want_M = (K[5][0] + K[10][0]) / 2 * k, (K[5][1] + K[10][1]) / 2 * k
+    receipt("Hull lift", "Planted cross-term side force recovered at 7.5 deg (table interpolation)", (F - F0)[0, 1], want_F[1], 1e-6, "N")
+    receipt("Hull lift", "Planted cross-term yaw moment recovered, Munk not double counted", (M - M0)[0, 2], want_M[2], 1e-6, "N.m")
+
+
+def suboff_receipts(c):
+    """Hull lift end to end: K tabulated from CFD at the computed angles (5, 10 deg), then the simulator's force
+    model predicts the measured force and moment at Roddy's drift angles: 4.07 below the table, 8 between its
+    points, 12.03 beyond it. Moments about Roddy's reference, 2.013 m from the nose."""
+    L, U, rho_tank = 4.356, 6.5 * 0.514444, 998.2
+    cog = np.array(geom.SAMPLES["suboff"]["spec"]["cog"], float)
+    cross, g = vehicle.hull_lift(c, cog, np.zeros((3, 3)))     # A cancels in steady drift (see vehicle.hull_lift)
+    q = 0.5 * c["rho"] * c["speed"] ** 2
+    side = vehicle._flip(c["planes"][0])
+    F = {d: vehicle.FLU2FRD @ np.asarray(c["dirs"][k]["force"]) / q for d, k in (("+x", "+x"), (side, c["planes"][0]))}
+    M = {d: vehicle.FLU2FRD @ np.asarray(c["dirs"][k]["moment"]) / q - np.cross(cog, F[d])
+         for d, k in (("+x", "+x"), (side, c["planes"][0]))}
+    qe = 0.5 * rho_tank * U ** 2
+    angles = ", ".join(f"{a:g}" for a in cross[1][0])
+    for beta, (Y, N) in RODDY_DRIFT.items():
+        cb, sb = np.cos(np.radians(beta)), -np.sin(np.radians(beta))         # FLU +y drift is FRD -y
+        KF, KM = vehicle.cross_k(cross[1], beta)
+        Fp = cb ** 2 * F["+x"] + sb ** 2 * F[side] + cb * sb * KF
+        Mp = cb ** 2 * M["+x"] + sb ** 2 * M[side] + cb * sb * KM
+        receipt("Hull lift", f"SUBOFF sway force Y' at {beta:g} deg drift (CFD table at {angles} deg)", abs(Fp[1]) / L ** 2,
+                Y / (qe * L ** 2), 0.25, "", "Roddy 1990 captive model; published RANS is ~10-20 % low past 8 deg")
+        receipt("Hull lift", f"SUBOFF yaw moment N' at {beta:g} deg drift", abs(Mp[2]) / L ** 3, N / (qe * L ** 3), 0.15, "",
+                "Roddy 1990 captive model, moment about 2.013 m from the nose")
+        F0 = cb ** 2 * F["+x"] + sb ** 2 * F[side]
+        context("Hull lift", f"SUBOFF Y' at {beta:g} deg WITHOUT hull lift (on-axis table only)", abs(F0[1]) / L ** 2,
+                Y / (qe * L ** 2), "", "what the simulator predicted before the incidence runs")
+        if beta == min(RODDY_DRIFT):       # the model's small-angle slope, comparable to Roddy's fitted linear term
+            vp = np.sin(np.radians(beta))
+            context("Hull lift", f"SUBOFF Y'v = Y'/v' at {beta:g} deg (magnitude)", abs(Fp[1]) / L ** 2 / vp, 0.0059, "",
+                    "Roddy 1990 linear derivative (fit of Y' = Y'v v' + Y'vvv v'^3)")
+            context("Hull lift", f"SUBOFF N'v = N'/v' at {beta:g} deg (magnitude)", abs(Mp[2]) / L ** 3 / vp, 0.0127, "", "Roddy 1990")
+    d = c["dirs"]["+x"]
+    receipt("Hull lift", "SUBOFF resistance at 6.5 kn (C_T x1e3, fine grid)", -d["force"][0] / (q * 5.988) * 1e3, 3.15, 0.10, "",
+            "Roddy 1990 bare-hull towing, C_T ~3.1-3.2e-3 near 6 kn (Budak 2023 Table 5)")
 
 
 def fea_receipts():
@@ -366,7 +477,8 @@ def fleet_receipts():
 def _t0():
     from cafe import env as envm
     cat = envm.catalog()
-    return next(iter(cat)).isoformat() if cat else "2023-03-07T17:00:00"
+    tepex = "2023-03-07T17:00:00"            # the TEPEX case every fleet receipt was written for
+    return tepex if not cat or any(t.isoformat() == tepex for t in cat) else next(iter(cat)).isoformat()
 
 
 def crosscheck_receipts(results):
@@ -388,7 +500,9 @@ if __name__ == "__main__":
     t0 = time.time()
     geometry_receipts()
     env_receipts()
+    weather_receipts()
     dynamics_receipts()
+    hull_lift_algebra_receipts()
     ocean_receipts()
     bem_receipts()
     fea_receipts()

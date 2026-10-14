@@ -1,6 +1,7 @@
 """Environment from WRF output: wind, air, and (when the run was coupled) ocean currents and waves.
 
-Reads any folder of wrfout files (WRF_DIR), each holding one or more times, on any WRF projection.
+Reads any folder of wrfout files (WRF_DIR), each holding one or more times, on any WRF projection; hourly
+surface-only wrfsfc files (UWIN-CM) work too, since every field used here is a surface field.
 Fields are cut to the mission box, rotated from grid to earth axes (COSALPHA/SINALPHA), resampled to a
 regular lat/lon grid if the projection is curvilinear, and interpolated linearly in space and time.
 
@@ -29,9 +30,10 @@ _CAT = {}
 
 
 def catalog(root=None):
-    """{datetime: (path, time index)} for every time in every wrfout file. Later files win duplicates."""
+    """{datetime: (path, time index)} for every time in every wrfout/wrfsfc file. Later files win duplicates."""
     root = pathlib.Path(root or WRF_DIR)
-    files = sorted(glob.glob(str(root / "**" / "wrfout_*"), recursive=True))
+    files = sorted(f for pat in ("wrfout_*", "wrfsfc_*") for f in glob.glob(str(root / "**" / pat), recursive=True)
+                   if not f.endswith(".part"))
     key = (str(root), tuple((f, os.path.getmtime(f)) for f in files))
     if key not in _CAT:
         out = {}
@@ -40,11 +42,26 @@ def catalog(root=None):
                 with netCDF4.Dataset(f) as ds:
                     for k, t in enumerate(_times(ds)):
                         out[t] = (f, k)
-            except OSError:
+            except (OSError, KeyError, ValueError):
                 continue          # half-downloaded or not netCDF: skip, don't crash the app
         _CAT.clear()
         _CAT[key] = dict(sorted(out.items()))
     return _CAT[key]
+
+
+def hours_after(t0, root=None, cap=48.0):
+    """How long a mission starting at t0 can run on the weather on disk: the contiguous hourly run from t0's
+    hour, or `cap` when t0 sits on a lone snapshot (held constant, see Env)."""
+    cat = catalog(root)
+    t = t0.replace(minute=0, second=0, microsecond=0)
+    if t not in cat:
+        return 0.0
+    if not any(u != t and abs((u - t).total_seconds()) <= 3 * 3600 for u in cat):
+        return cap
+    n = 0
+    while t + dt.timedelta(hours=n + 1) in cat:
+        n += 1
+    return min(float(n), cap)
 
 
 _GRID = {}
@@ -60,7 +77,13 @@ def grid(root=None):
         with netCDF4.Dataset(f) as ds:
             g = lambda n, d=None: ds[n][0].astype(float) if n in ds.variables else d
             lat, lon = g("XLAT"), g("XLONG")
-            land = (g("LANDMASK") if "LANDMASK" in ds.variables else (g("XLAND") == 1)).astype(bool)
+            if "LANDMASK" in ds.variables:
+                land = g("LANDMASK").astype(bool)
+            elif "XLAND" in ds.variables:
+                land = g("XLAND") == 1
+            else:                                  # surface-only files: land-use category, water = ISWATER (16 USGS)
+                lu = g("LU_INDEX")
+                land = (lu != getattr(ds, "ISWATER", 16)) & (lu != getattr(ds, "ISLAKE", -1))
             _GRID.clear()
             _GRID[f] = (lat, lon, land, g("COSALPHA", np.ones_like(lat)), g("SINALPHA", np.zeros_like(lat)),
                         int(getattr(ds, "MAP_PROJ", 0)))
@@ -112,16 +135,19 @@ class Env:
         want = [t0 + dt.timedelta(hours=h) for h in range(int(np.ceil(hours)) + 2)]
         have = [t for t in want if t in cat]
         self.frozen = False
-        if len(hours_on_disk) == 1:
-            # a single snapshot: hold it constant in time for the whole mission, and say so everywhere
-            have, self.frozen = hours_on_disk, True
-            self.snapshot_offset_h = (t0 - hours_on_disk[0]).total_seconds() / 3600
+        near = min(hours_on_disk, key=lambda t: abs((t - t0).total_seconds()))
+        lone = not any(t != near and abs((t - near).total_seconds()) <= 3 * 3600 for t in hours_on_disk)
+        if len(have) < len(want) and lone:
+            # an isolated snapshot (no other time within 3 h of it): hold it constant for the whole mission,
+            # and say so everywhere
+            have, self.frozen = [near], True
+            self.snapshot_offset_h = (t0 - near).total_seconds() / 3600
             if abs(self.snapshot_offset_h) > 6:
-                raise ValueError(f"the only weather on disk is {hours_on_disk[0]:%Y-%m-%d %H:%M} UTC, "
+                raise ValueError(f"the nearest weather on disk is {near:%Y-%m-%d %H:%M} UTC, "
                                  f"{abs(self.snapshot_offset_h):.0f} h from this mission; add weather for the mission time")
         elif not have:
-            raise ValueError(f"no weather data for {t0:%Y-%m-%d %H:%M} UTC (on disk: {hours_on_disk[0]:%Y-%m-%d %H}h "
-                             f".. {hours_on_disk[-1]:%Y-%m-%d %H}h, {len(hours_on_disk)} hours)")
+            raise ValueError(f"no weather data for {t0:%Y-%m-%d %H:%M} UTC (on disk: {len(hours_on_disk)} hours between "
+                             f"{hours_on_disk[0]:%Y-%m-%d %H}h and {hours_on_disk[-1]:%Y-%m-%d %H}h)")
         elif len(have) < len(want):
             missing = [t for t in want if t not in cat]
             raise ValueError(f"weather data stops at {missing[0]:%Y-%m-%d %H:%M} UTC; shorten the mission or add files")

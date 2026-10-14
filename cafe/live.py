@@ -30,9 +30,8 @@ def create(body, load_vehicle):
         raise ValueError(f"a live session takes 1 to {MAX_DRONES} drones")
     from cafe import env as envm
     import datetime as dt
-    hours_on_disk = sorted(envm.catalog())
     t0 = dt.datetime.fromisoformat(body["t0"])
-    avail = (hours_on_disk[-1] - t0).total_seconds() / 3600 if len(hours_on_disk) > 1 else 48
+    avail = envm.hours_after(t0)
     mission = dict(t0=body["t0"], max_hours=max(1.0, min(48.0, avail - 1)), samples=1, seed=body.get("seed", 0), links=body.get("links", []),
                    drones=[dict(id=x["id"], vehicle=load_vehicle(x["design"]), start=x["start"],
                                 legs=[{"type": "external"}]) for x in body["drones"]])

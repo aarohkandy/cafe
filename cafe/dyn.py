@@ -7,7 +7,7 @@ tau = gravity + panel pressure (hydrostatic + waves) + drag(nu_r) + rotational d
 Integrated with semi-implicit Euler (velocities first, then pose) — stable at the small steps used.
 """
 import numpy as np
-from cafe.vehicle import RHO, NU, G, TAU_MOTOR, prop_perf
+from cafe.vehicle import RHO, NU, G, TAU_MOTOR, prop_perf, cross_k
 
 # ------------------------------------------------------------------ quaternion helpers [w,x,y,z], body->NED
 
@@ -188,6 +188,12 @@ class Dynamics:
             w = d[:, ax] ** 2 * ((1 - self.vf[ax, sg]) + self.vf[ax, sg] * fr)
             F += w[:, None] * self.Cf[ax, sg]
             M += w[:, None] * self.Cm[ax, sg]
+        for ax, entry in (self.veh.cross or {}).items():          # hull lift (vehicle.hull_lift)
+            fwd = np.maximum(d[:, 0], 0)
+            KF, KM = cross_k(entry, np.degrees(np.arctan2(np.abs(d[:, ax]), np.maximum(fwd, 1e-9))))
+            w = (fwd * d[:, ax])[:, None]
+            F += w * KF
+            M += w * KM
         if self.veh.resistance is not None:      # boat: free-surface resistance curve replaces surge drag
             Vs, R = self.veh.resistance
             Rx = np.where(sp <= Vs[-1], np.interp(sp, Vs, R), R[-1] * (sp / Vs[-1]) ** 2)  # ponytail: V^2 past the last CFD speed

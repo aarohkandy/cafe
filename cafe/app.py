@@ -60,7 +60,7 @@ def _startup():
             _make_shape_design(d, shape, shapes.defaults(shape), dict(spec, sample=True))
     for key, s in geom.SAMPLES.items():
         d = DESIGNS / f"sample-{key}"
-        if not d.exists():
+        if s.get("hangar", True) and not d.exists():
             d.mkdir()
             s["make"]().export(d / "mesh.stl")
             spec = dict(s["spec"], kind=s["kind"], sample=True, units="m")

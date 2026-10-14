@@ -97,6 +97,7 @@ class Vehicle:
     linear_damp: np.ndarray = None  # 6 linear damping coefficients (radiation, BEM) — water drones
     length: float = 1.0
     cob: np.ndarray = None          # centre of buoyancy, FRD relative to CoG (fully submerged)
+    cross: dict = None              # hull lift: body axis (1 y, 2 z) -> (alphas, KF, KM) table, see hull_lift
 
     @property
     def M(self):
@@ -299,6 +300,12 @@ def build(kind, mesh_flu, spec, hangar=None):
         drag[d] = (F, Mo, 0.5, 0.0)     # no mesh GCI for an estimate; its 30 % spread is applied in mission
         sources.setdefault("drag", "estimate (newtonian+ITTC)")
     rot = np.array([abs(newtonian_drag(cen, nrm, area, None, np.eye(3)[k])[1][k]) for k in range(3)])
+    cross = None
+    if "cfd_aoa" in hangar:
+        A_h = A[:3, :3] if hangar["cfd_aoa"].get("mesh") != "hull" else \
+            spheroid_added_mass(hangar["cfd_aoa"]["L"], spec.get("hull_d", np.sqrt(m.extents[1] * m.extents[2])), rho)[:3, :3]
+        cross, gci_l = hull_lift(hangar["cfd_aoa"], cog, A_h)
+        sources["hull_lift"] = f"cfd ({', '.join(f'{a:g}' for a in cross[next(iter(cross))][0])} deg incidence)"
 
     acts = default_actuators(kind, m, spec)
     if kind == "usv":
@@ -321,7 +328,9 @@ def build(kind, mesh_flu, spec, hangar=None):
                 volume=float(m.volume) if m.is_watertight else 0.0, actuators=acts, drag=drag, drag_re=drag_re,
                 rot_damp=rot, battery_wh=float(spec.get("battery_wh", 100)), hotel_w=float(spec.get("hotel_w", 5)),
                 power_w=float(spec["power_w"]), cells=int(spec.get("cells", 4)), sources=sources,
-                linear_damp=lin, length=float(m.extents.max()))
+                linear_damp=lin, length=float(m.extents.max()), cross=cross)
+    if cross:
+        v.limits["lift_gci"] = gci_l
     if kind in ("uuv", "usv"):
         v.panels, v.limits["panel_volume_correction"] = _panels(mesh_flu, cog, target=600 if kind == "usv" else 1200)
         v.cob = (m.center_mass - cog) if m.is_watertight else np.zeros(3)
@@ -343,6 +352,56 @@ def build(kind, mesh_flu, spec, hangar=None):
         v.limits["gm_m"] = hs.get("gm")
         v.limits["design_category"] = spec.get("design_category", "C")
     return v
+
+
+def hull_lift(c, cog, A3):
+    """Hull lift from the incidence runs, as a cross term the on-axis table can't express:
+        F(d) = sum_ax d_ax^2 F_ax  +  max(d_x, 0) d_y K_y(a_y)  +  max(d_x, 0) d_z K_z(a_z)   (per unit 0.5 rho U^2)
+    with a_ax = atan(|d_ax| / d_x) the incidence in that plane, and at each computed angle
+        K = [F(alpha) - cos^2 F(+x) - sin^2 F(side)] / (cos sin)
+    tabulated over the computed angles and interpolated linearly in alpha (held beyond the last, like a
+    captive-model table). Zero on-axis, so the six CFD directions stay exact; exact at every computed angle.
+    Several angles are needed because the sin^2 crossflow term uses the 90 deg drag, which overstates the
+    crossflow at small incidence before separation develops (SUBOFF: +51 % side force at 4 deg with one 10 deg
+    point). RANS at incidence also contains the potential Munk moment, which dyn adds from added mass
+    ((A v) x v); it is subtracted here so it isn't counted twice. Forward motion only.
+    ponytail: odd in alpha (hulls symmetric about the plane); a stalled hull past the last angle keeps its K.
+    -> ({1: (alphas_deg, KF[n,3], KM[n,3]), 2: ...}, GCI of the normal-force coefficient at the largest angle)"""
+    from cafe.cfd import dvec, gci
+    rho, q = c["rho"], 0.5 * c["rho"] * c["speed"] ** 2
+    alphas = sorted(c.get("alphas") or [c["alpha"]])
+
+    def frd(r, F="force", M="moment"):
+        Fv = FLU2FRD @ np.asarray(r[F]) / q
+        return Fv, FLU2FRD @ np.asarray(r[M]) / q - np.cross(cog, Fv)
+
+    out, gcis = {}, []
+    for p in c["planes"]:
+        ax = 1 if p[1] == "y" else 2
+        KFs, KMs = [], []
+        for a in alphas:
+            lab = f"x{p}{a:g}"
+            v = FLU2FRD @ dvec(lab)
+            cs = v[0] * v[ax]
+            munk = 2 / rho * np.cross(A3 @ v, v)
+
+            def k(F="force", M="moment"):
+                (Fa, Ma), (Fx, Mx), (Fs, Ms) = (frd(c["dirs"][d], F, M) for d in (lab, "+x", p))
+                return (Fa - v[0] ** 2 * Fx - v[ax] ** 2 * Fs) / cs, (Ma - v[0] ** 2 * Mx - v[ax] ** 2 * Ms - munk) / cs
+
+            KF, KM = k()
+            KFs.append(KF); KMs.append(KM)
+            if a == alphas[-1] and all("force_coarse" in c["dirs"][d] for d in (lab, "+x", p)):
+                gcis.append(gci(KF[ax], k("force_coarse", "moment_coarse")[0][ax]))
+        out[ax] = (np.array(alphas, float), np.array(KFs), np.array(KMs))
+    return out, max(gcis, default=0.0)
+
+
+def cross_k(entry, alpha_deg):
+    """Interpolate a hull_lift table at incidence alpha_deg (array) -> (KF[...,3], KM[...,3])."""
+    al, KF, KM = entry
+    return (np.stack([np.interp(alpha_deg, al, KF[:, i]) for i in range(3)], -1),
+            np.stack([np.interp(alpha_deg, al, KM[:, i]) for i in range(3)], -1))
 
 
 def _flip(d):

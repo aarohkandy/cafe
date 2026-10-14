@@ -294,6 +294,31 @@ def run(design_dir, skip=()):
             msg = f"drag from estimates: CFD failed ({type(e).__name__}: {str(e)[-200:]})"
             res["warnings"].append(msg); job.log("warning: " + msg)
 
+        if kind == "uuv" and "cfd" in hangar and "aoa" not in skip:
+          try:
+              # hull lift at incidence, on the bare hull when the design has one: wings and fins are lifting
+              # actuators already, so they must not be in this mesh twice
+              hull = d / "part_hull.stl"
+              stl, which = (hull, "hull") if hull.exists() else (d / "mesh.stl", "full")
+              speed = hangar["cfd"]["speed"]
+              job.status("running", f"CFD: hull lift at 5 and 10 deg incidence ({which} mesh)", 0.5)
+              hangar["cfd_aoa"] = cfd.cached(("incidence", "water", round(speed, 3), (5.0, 10.0)), stl, job.log,
+                                             lambda: cfd.characterize_incidence(stl, d / "cfd_aoa", "water", speed, log=job.log))
+              hangar["cfd_aoa"]["mesh"] = which
+          except Exception as e:
+            msg = f"no hull lift: incidence CFD failed ({type(e).__name__}: {str(e)[-200:]})"
+            res["warnings"].append(msg); job.log("warning: " + msg)
+
+        # A two-grid GCI is only meaningful when both grids are in the asymptotic range. When the coarse grid is
+        # far off (SUBOFF at Re 1.2e7: GCI ~150 % while the fine grid is within 3-8 % of the tank), the mission
+        # Monte Carlo still uses it, which is conservative; say so instead of leaving an unexplained MARGINAL.
+        gcis = [r.get("gci", 0.0) for c in (hangar.get("cfd"), hangar.get("cfd_aoa")) if c for r in c["dirs"].values()]
+        gcis += [r.get("gci", 0.0) for r in (hangar.get("fs") or {}).get("speeds", {}).values()]
+        if gcis and max(gcis) > 0.3:
+            msg = (f"CFD grid study not converged: the coarse and fine meshes disagree (GCI up to {max(gcis):.0%}), so drag "
+                   "uncertainty is wide and verdicts lean MARGINAL. A finer mesh level would narrow it")
+            res["warnings"].append(msg); job.log("warning: " + msg)
+
         if "fea" not in skip:
           try:
               job.status("running", "FEA (CalculiX)", 0.85)

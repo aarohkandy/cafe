@@ -53,10 +53,12 @@ async function loadCoverage() {
   coverage = await api("/api/env/coverage");
   if (!coverage.hours) { $("#coverage").textContent = "no weather data on the server"; return; }
   const d = s => s.slice(0, 13).replace("T", " ") + "h";
-  $("#coverage").textContent = `WRF · ${d(coverage.first)}${coverage.hours > 1 ? " → " + d(coverage.last) : " (one snapshot)"} UTC`;
+  // one entry per contiguous run of hours, so a gap of years never reads as continuous weather
+  const span = ([a, b]) => a === b ? `${d(a)} (one snapshot)` : `${d(a)} → ${d(b)}`;
+  $("#coverage").textContent = `WRF · ${coverage.spans.map(span).join(" · ")} UTC`;
   const t0 = $("#t0");
   t0.min = coverage.first.slice(0, 16); t0.max = coverage.last.slice(0, 16);
-  if (!t0.value) t0.value = coverage.first.slice(0, 16);
+  if (!t0.value) t0.value = coverage.spans[coverage.spans.length - 1][0].slice(0, 16);
 }
 function chips(sources) {
   const box = $("#data-chips");
