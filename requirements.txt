@@ -1,0 +1,14 @@
+numpy
+scipy
+trimesh
+manifold3d
+mapbox_earcut
+shapely
+gmsh
+xarray
+netCDF4
+fastapi
+uvicorn
+python-multipart
+networkx
+pymavlink
