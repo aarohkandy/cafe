@@ -302,7 +302,7 @@ def run(design_dir, skip=()):
               stl, which = (hull, "hull") if hull.exists() else (d / "mesh.stl", "full")
               speed = hangar["cfd"]["speed"]
               job.status("running", f"CFD: hull lift at 5 and 10 deg incidence ({which} mesh)", 0.5)
-              hangar["cfd_aoa"] = cfd.cached(("incidence", "water", round(speed, 3), (5.0, 10.0)), stl, job.log,
+              hangar["cfd_aoa"] = cfd.cached(("incidence", "water", round(speed, 3), (5.0, 10.0), "3-grid"), stl, job.log,
                                              lambda: cfd.characterize_incidence(stl, d / "cfd_aoa", "water", speed, log=job.log))
               hangar["cfd_aoa"]["mesh"] = which
           except Exception as e:

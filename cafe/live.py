@@ -31,8 +31,13 @@ def create(body, load_vehicle):
     from cafe import env as envm
     import datetime as dt
     t0 = dt.datetime.fromisoformat(body["t0"])
-    avail = envm.hours_after(t0)
-    mission = dict(t0=body["t0"], max_hours=max(1.0, min(48.0, avail - 1)), samples=1, seed=body.get("seed", 0), links=body.get("links", []),
+    # A session's weather and ocean are loaded when it is created (two days of 3-D HYCOM took ~15 min on first
+    # use), and a session ends after an hour idle, so it covers `hours` (default 6) rather than all it could.
+    hours = body.get("hours", 6)
+    if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not (0.5 <= hours <= 48):
+        raise ValueError("hours must be a number from 0.5 to 48")
+    avail = envm.hours_after(t0)          # a World of H hours reads weather out to t0 + H + 2 h (mission.World)
+    mission = dict(t0=body["t0"], max_hours=max(0.5, min(float(hours), avail - 2)), samples=1, seed=body.get("seed", 0), links=body.get("links", []),
                    drones=[dict(id=x["id"], vehicle=load_vehicle(x["design"]), start=x["start"],
                                 legs=[{"type": "external"}]) for x in body["drones"]])
     w = World(mission, B=1)

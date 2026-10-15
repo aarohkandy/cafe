@@ -330,25 +330,43 @@ def gci(fine, coarse, ratio=2.0, p=2.0, fs=3.0):
     return fs * abs(eps) / (ratio ** p - 1)
 
 
-def characterize_external(stl, workdir, fluid, speed, cofr=(0, 0, 0), dirs=tuple(DIRS), log=print):
-    """Fine + coarse runs; returns the fine result with a per-direction GCI. Case dirs are deleted
-    afterwards (disk on homebase is tight); logs and pressures are kept."""
+def characterize_external(stl, workdir, fluid, speed, cofr=(0, 0, 0), dirs=tuple(DIRS), log=print, refine_above=0.3):
+    """Coarse + fine runs; returns the finest result with a per-direction GCI against the next coarser grid.
+    A two-grid GCI only means something when both grids are in the asymptotic range. Slender bare hulls at
+    level 5 aren't (SUBOFF: coarse drag 2.5x the fine one, which is within 3 % of the towing tank), so when any
+    direction's GCI exceeds `refine_above` a third, finer grid is run and the GCI is taken between fine and finer.
+    Case dirs are deleted afterwards (disk on homebase is tight); logs and pressures are kept."""
     workdir = pathlib.Path(workdir)
     out = {}
-    for name, off in (("coarse", -1), ("fine", 0)):
+
+    def run(name, off):
         log(f"--- {name} mesh")
         out[name] = external(stl, workdir / name, fluid, speed, dirs, off, cofr, log=log)
         _shrink(workdir / name)
-    fine = out["fine"]
-    for d, r in fine["dirs"].items():
-        drag_f = -np.dot(r["force"], dvec(d))
-        drag_c = -np.dot(out["coarse"]["dirs"][d]["force"], dvec(d))
-        r["gci"] = gci(drag_f, drag_c)
-        r["drag_coarse"] = drag_c
-        r["force_coarse"] = out["coarse"]["dirs"][d]["force"]
-        r["moment_coarse"] = out["coarse"]["dirs"][d]["moment"]
-    fine["coarse_cells"] = out["coarse"]["mesh"]["cells"]
-    return fine
+
+    def study(res, ref):
+        for d, r in res["dirs"].items():
+            drag_f = -np.dot(r["force"], dvec(d))
+            drag_c = -np.dot(ref["dirs"][d]["force"], dvec(d))
+            r["gci"] = gci(drag_f, drag_c)
+            r["drag_coarse"] = drag_c                    # "coarse" = the next coarser grid of the study
+            r["force_coarse"] = ref["dirs"][d]["force"]
+            r["moment_coarse"] = ref["dirs"][d]["moment"]
+        res["coarse_cells"] = ref["mesh"]["cells"]
+        return max(r["gci"] for r in res["dirs"].values())
+
+    run("coarse", -1)
+    run("fine", 0)
+    worst = study(out["fine"], out["coarse"])
+    if worst <= refine_above:
+        out["fine"]["grids"] = 2
+        return out["fine"]
+    log(f"coarse grid outside the asymptotic range (GCI {worst:.0%}): adding a finer grid")
+    run("finer", 1)
+    study(out["finer"], out["fine"])
+    out["finer"]["grids"] = 3
+    out["finer"]["gci_two_grid"] = worst
+    return out["finer"]
 
 
 def characterize_incidence(stl, workdir, fluid, speed, alphas=(5.0, 10.0), planes=("+y", "+z"), cofr=(0, 0, 0), log=print):

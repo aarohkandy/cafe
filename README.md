@@ -24,7 +24,8 @@ Each design is characterized once, and every plan reuses the result:
 |---|---|
 | Added mass | Capytaine BEM |
 | Drag | OpenFOAM: RANS k-ω SST in 6 directions for subs and quads, interFoam free surface at Fn 0.2/0.3/0.4 for boats |
-| Hull lift | Subs: the same RANS at 10° incidence in pitch and yaw, on the bare hull (wings and fins are lifting actuators already). Gives the lift and moment the 6-direction table can't, as a cross term exact on-axis and at 10° |
+| Hull lift | Subs: the same RANS at 5° and 10° incidence in pitch and yaw, on the bare hull (wings and fins are lifting actuators already). Gives the lift and moment the 6-direction table can't, as a cross term exact on-axis and at each computed angle |
+| Grid study | Every CFD case runs on two grids; when they disagree by more than a GCI of 30 % a third, finer grid runs and the uncertainty is taken from the finest pair |
 | Structure | CalculiX FEA on the named parts. Hull collapse depth (linear buckling with follower-pressure and 0.5 knockdown, rated depth = collapse / 1.5); glider wing at stall lift and when handled; boat bottom slamming (ISO 12215-5); quad arm at full thrust; frame vibration modes |
 | Glider speed | One full dive/climb in the 6-DOF model |
 
@@ -74,7 +75,7 @@ These are the example platforms. Swap in the real designs when their numbers arr
 ```python
 import requests
 api = "http://100.108.213.121:8740/api/live"
-s = requests.post(api, json={"t0": "2023-03-07T17:00", "drones": [
+s = requests.post(api, json={"t0": "2023-03-07T17:00", "hours": 2, "drones": [
         {"id": "g1", "design": "sample-petrel", "start": [10.0, -95.0, 5]},
         {"id": "boat", "design": "sample-tern", "start": [10.0, -95.01, 0]}],
     "links": [{"a": "g1", "b": "boat", "max_m": 2000}]}).json()
@@ -83,7 +84,9 @@ st = requests.post(f"{api}/{s['id']}/step", json={"seconds": 60, "targets": {
 print(st["drones"]["boat"], st["links"])
 ```
 
-The built-in autopilots fly each drone to its target, so your code is tested at the level it really
+`hours` (0.5–48, default 6) is how long the session can run; its weather and ocean are loaded when it is
+created, so the first session in a new area takes a few minutes while HYCOM currents download (cached
+after that). The built-in autopilots fly each drone to its target, so your code is tested at the level it really
 works: deciding where each drone should be. The Emulator page does the same with ArduCopter, ArduRover
 or ArduSub SITL in the loop.
 
@@ -99,7 +102,7 @@ Context rows are shown for orientation and never count as a pass.
 
 Run them: `./run.sh python -m cafe.receipts /work/runs`. The slow CFD cases are produced once with
 `python -m cafe.cfd external torpedo /work/runs/t1`, `... surface wigley /work/runs/w1` and
-`... incidence suboff /work/runs/s1 3.344`. Adversarial review notes: `REVIEW.md`.
+`... incidence suboff /work/runs/s1 3.344` (three grids, about 1 h on 6 cores). Adversarial review notes: `REVIEW.md`.
 
 ## Files
 
@@ -119,9 +122,10 @@ Server: `~/services/cafe/compose.yml` on homebase (`cafe` = API, `cafe-worker` =
   numbers arrive. Results for them describe those examples, not your drones.
 - The TEPEX date (2023-03-07) has one weather snapshot, so its wind is frozen in time (flagged in the
   results). The 2018 UWIN-CM day has hourly wind.
-- Hull lift is a single-angle (10°) cross term: good to roughly ±15°, symmetric about each plane, forward
-  motion only. Validated against the SUBOFF captive-model drift tests (Receipts → Hull lift). A
-  reversing or stalled hull falls back to the on-axis table. Uploaded meshes should leave fins out:
+- Hull lift is tabulated at 5° and 10° incidence and held beyond: reliable to roughly ±15°, symmetric
+  about each plane, forward motion only. Against the SUBOFF captive-model drift tests (Receipts → Hull
+  lift) the grid-converged side force is 5 % high at 4° and 11–21 % low at 8–12°, as RANS usually is
+  past crossflow separation. A reversing hull falls back to the on-axis table. Uploaded meshes should leave fins out:
   fins are actuators, so fins in the mesh would be counted twice.
 - Boat resistance is computed at Fn 0.2–0.4 and extrapolated ∝V² above that.
 - Boats get a passive skeg sized for a typical directional-stability margin (1.5× the hull's Munk moment),

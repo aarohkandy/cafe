@@ -325,7 +325,7 @@ def suboff_receipts(c):
                     "Roddy 1990 linear derivative (fit of Y' = Y'v v' + Y'vvv v'^3)")
             context("Hull lift", f"SUBOFF N'v = N'/v' at {beta:g} deg (magnitude)", abs(Mp[2]) / L ** 3 / vp, 0.0127, "", "Roddy 1990")
     d = c["dirs"]["+x"]
-    receipt("Hull lift", "SUBOFF resistance at 6.5 kn (C_T x1e3, fine grid)", -d["force"][0] / (q * 5.988) * 1e3, 3.15, 0.10, "",
+    receipt("Hull lift", "SUBOFF resistance at 6.5 kn (C_T x1e3, finest grid)", -d["force"][0] / (q * 5.988) * 1e3, 3.15, 0.10, "",
             "Roddy 1990 bare-hull towing, C_T ~3.1-3.2e-3 near 6 kn (Budak 2023 Table 5)")
 
 

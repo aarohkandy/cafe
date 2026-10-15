@@ -138,6 +138,8 @@ else:
     print(("ok " if moved < 3 else "ACCEPTED (bad!)") + f"  rejected batch left q's target alone (moved {moved:.1f} m in 5 s)"); bad += moved >= 3
     expect("live unknown session", c.post("/api/live/deadbeef/step", json=dict(seconds=1)), codes=(404,))
     c.delete(f"/api/live/{sid}")
+expect("live hours = 1000", c.post("/api/live", json=dict(t0=T0, hours=1000, drones=[quad()])))
+expect("live hours as text", c.post("/api/live", json=dict(t0=T0, hours="lots", drones=[quad()])))
 expect("live with 13 drones", c.post("/api/live", json=dict(t0=T0, drones=[quad(id=f"q{i}") for i in range(13)])))
 
 # ---- round 2: physics guards
