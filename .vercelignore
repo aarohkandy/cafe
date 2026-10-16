@@ -1,0 +1,5 @@
+# Vercel serves only the static demo in site/. Everything else (the Python simulator, its FastAPI app,
+# requirements.txt) runs on homebase and must not be detected or deployed as a serverless function.
+/*
+!/site
+!/vercel.json
