@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>cafe — drone fleet check</title>
+<meta name="description" content="Plan an underwater glider, a boat and a drone, then watch them run together through real weather in the Gulf of Tehuantepec.">
+<link rel="icon" href="img/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Spectral+SC:wght@500;600&family=Public+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+<script>try { const m = localStorage.getItem("palette"); if (m) document.documentElement.dataset.palette = m; } catch (e) {}</script>
+</head>
+<body class="app">
+
+<header class="masthead">
+  <a class="wordmark" href="./">cafe</a>
+  <p class="tagline">Plan a drone fleet, then run it in real weather.</p>
+  <a class="about-link" href="about.html">How it works</a>
+  <button class="palette" id="palette" type="button" aria-pressed="false">Night</button>
+</header>
+
+<main class="stage">
+  <div class="map neatline">
+    <svg id="map" role="img" aria-label="Chart of the Gulf of Tehuantepec with the drone plan"></svg>
+    <p class="hint" id="hint" aria-live="polite"></p>
+  </div>
+
+  <aside class="panel" aria-label="Plan">
+    <div class="where">
+      <h1 id="where">10.00° N, 95.00° W</h1>
+      <button type="button" class="link-btn" id="pick">Pick another spot</button>
+    </div>
+
+    <fieldset class="when">
+      <legend>When</legend>
+      <label><input type="radio" name="date" value="2023" checked> 7 Mar 2023, 17:00</label>
+      <label><input type="radio" name="date" value="2018"> 3 Feb 2018 at <select id="hour" aria-label="Start hour, UTC"></select></label>
+    </fieldset>
+
+    <ol class="fleet-list">
+      <li data-id="glider"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-glider" x="-14" y="-14" width="28" height="28"/></svg><div><b>Petrel</b> glider<br><span>dives 5 to 100 m, heads for <i>the goal</i></span></div></li>
+      <li data-id="boat"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-boat" x="-14" y="-14" width="28" height="28"/></svg><div><b>Tern</b> boat<br><span>stays over Petrel</span></div></li>
+      <li data-id="drone"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-drone" x="-14" y="-14" width="28" height="28"/></svg><div><b>Gnat</b> drone<br><span>flies 30 m over Tern for <input type="number" id="minutes" min="1" max="60" value="20" aria-label="Minutes over the boat"> min, then lands</span></div></li>
+    </ol>
+
+    <fieldset class="ranges">
+      <legend>Must stay in range</legend>
+      <label>Petrel and Tern <input type="number" id="range0" min="50" max="20000" step="50" value="1000"> m</label>
+      <label>Tern and Gnat <input type="number" id="range1" min="20" max="5000" step="10" value="300"> m</label>
+    </fieldset>
+
+    <button type="button" class="run" id="run">Run</button>
+    <p class="drag-note">Drag any vehicle, or the goal, on the chart.</p>
+
+    <div class="results" id="results" aria-live="polite"></div>
+  </aside>
+
+  <section class="timeline" aria-label="Playback">
+    <button type="button" class="play" id="play" aria-label="Play" disabled>
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path class="i-play" d="M4 2.5v11l9-5.5z"/><path class="i-pause" d="M4 2.5h3v11H4zM9 2.5h3v11H9z"/></svg>
+    </button>
+    <svg id="strip" class="strip" role="img" aria-label="Depth and height of each vehicle over time"></svg>
+    <output id="clock">0:00</output>
+  </section>
+</main>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="sym-glider" viewBox="-14 -14 28 28"><path d="M0,-12 C3,-9 3,6 2,11 L-2,11 C-3,6 -3,-9 0,-12Z M-12,-1 L12,-1 L12,2 L-12,2Z M0,9 L0,13" fill="currentColor"/></symbol>
+    <symbol id="sym-boat" viewBox="-14 -14 28 28"><path d="M0,-13 C5,-6 5,6 4,12 L-4,12 C-5,6 -5,-6 0,-13Z" fill="currentColor"/></symbol>
+    <symbol id="sym-drone" viewBox="-14 -14 28 28"><g fill="none" stroke="currentColor" stroke-width="2.2"><path d="M-8,-8L8,8M8,-8L-8,8"/><circle cx="-8" cy="-8" r="4"/><circle cx="8" cy="-8" r="4"/><circle cx="-8" cy="8" r="4"/><circle cx="8" cy="8" r="4"/></g><rect x="-3" y="-3" width="6" height="6" fill="currentColor"/></symbol>
+    <symbol id="flag-C" viewBox="0 0 30 20"><rect width="30" height="20" fill="#1f4e9c"/><rect y="4" width="30" height="12" fill="#fff"/><rect y="8" width="30" height="4" fill="#c8102e"/></symbol>
+    <symbol id="flag-U" viewBox="0 0 30 20"><rect width="30" height="20" fill="#fff"/><rect width="15" height="10" fill="#c8102e"/><rect x="15" y="10" width="15" height="10" fill="#c8102e"/></symbol>
+    <symbol id="flag-N" viewBox="0 0 30 20"><rect width="30" height="20" fill="#fff"/><g fill="#1f4e9c"><rect width="7.5" height="5"/><rect x="15" width="7.5" height="5"/><rect x="7.5" y="5" width="7.5" height="5"/><rect x="22.5" y="5" width="7.5" height="5"/><rect y="10" width="7.5" height="5"/><rect x="15" y="10" width="7.5" height="5"/><rect x="7.5" y="15" width="7.5" height="5"/><rect x="22.5" y="15" width="7.5" height="5"/></g></symbol>
+  </defs>
+</svg>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

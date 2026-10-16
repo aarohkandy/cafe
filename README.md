@@ -10,6 +10,18 @@ Built for TEPEX-style deployments (gliders, a support boat, a quad overhead), bu
 
 **Open it:** http://100.108.213.121:8740 (Tailscale only).
 
+## Try it: the fleet demo (runs in your browser)
+
+```bash
+git clone https://github.com/aarohkandy/cafe && cd cafe/site && python3 -m http.server 8000
+```
+
+Then open http://localhost:8000. Press **Run**, drag the vehicles or the goal, pick another spot on the chart.
+Everything in `site/` is static: the quick check runs on the viewer's own machine, so any static host
+(GitHub Pages, Vercel, Netlify) only serves files. `site/js/sim.check.mjs` checks it against the full simulator:
+`node --experimental-default-type=module site/js/sim.check.mjs`. The data in `site/data/` comes from
+`./run.sh python -m cafe._site_data`.
+
 ## What you put in
 
 | | How |

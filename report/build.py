@@ -18,4 +18,5 @@ data = dict(
            [f"{min(before):.0f}–{max(before):.0f} % low", "the same side force before this round"],
            ["hourly", "WRF wind, 25 h of UWIN-CM installed"]])
 html = open(sys.argv[0].replace("build.py", "template.html")).read()
-print(html.replace("/*DATA*/null", json.dumps(data, separators=(",", ":"))))
+# "<" escaped so no string in the data can close the <script> it is embedded in
+print(html.replace("/*DATA*/null", json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")))

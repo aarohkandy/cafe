@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>How cafe works</title>
+<link rel="icon" href="img/icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Spectral+SC:wght@500;600&family=Public+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="css/site.css">
+<script>try { const m = localStorage.getItem("palette"); if (m) document.documentElement.dataset.palette = m; } catch (e) {}</script>
+</head>
+<body>
+<header class="masthead">
+  <a class="wordmark" href="./">cafe</a>
+  <p class="tagline">How it works</p>
+  <a class="about-link" href="./">Back to the chart</a>
+</header>
+
+<main class="page">
+  <section class="prose">
+    <h1>How it works</h1>
+    <p>cafe answers one question before a field deployment: will this fleet of underwater, surface and aerial vehicles do its job together, in the weather that day actually had?</p>
+  </section>
+
+  <ol class="steps">
+    <li><h3>Describe each vehicle</h3><p>A few dimensions or a CAD file, plus mass, power and battery.</p></li>
+    <li><h3>Characterize it once</h3><p>OpenFOAM for drag and hull lift, Capytaine for added mass, CalculiX for collapse depth and loads.</p></li>
+    <li><h3>Fly the plan</h3><p>Every vehicle in real WRF wind, HYCOM currents and WAVEWATCH III seas, many times with the uncertain inputs varied.</p></li>
+    <li><h3>Read the verdict</h3><p>Go, marginal or no-go for every vehicle and every range requirement, with the reason.</p></li>
+  </ol>
+
+  <section class="prose">
+    <h2>The chart and the full simulator</h2>
+    <p>The chart page runs a quick check in your browser: each vehicle moves at the speed its CFD-derived power curve allows, is carried by the real current or wind, and spends its battery accordingly, under the same failure rules and verdict thresholds as the full simulator.</p>
+    <p>The full simulator, on the lab server, adds six-degree-of-freedom motion, waves acting on each hull and real autopilots. On the example plan both give the same verdict on both dates: <span id="agree"></span></p>
+  </section>
+
+  <section class="prose">
+    <h2>Proof</h2>
+    <p>Every claim is checked against a formula or a published measurement. <span id="proof-count"></span> Rows marked <i>for context</i> never count.</p>
+  </section>
+  <div class="filters" id="proof-filters" role="group" aria-label="Filter checks by subject"></div>
+  <div class="table-wrap"><table id="proof-table"><thead><tr><th scope="col">Check</th><th scope="col" class="num">cafe</th><th scope="col" class="num">Reference</th><th scope="col">Source</th></tr></thead><tbody></tbody></table></div>
+
+  <p class="prose">Code and the full validation report: <a href="https://github.com/aarohkandy/cafe">github.com/aarohkandy/cafe</a>. Built by Aaroh Kandhare.</p>
+</main>
+
+<script type="module">
+  import { initProof } from "./js/proof.js";
+  const get = n => fetch(`data/${n}.json`).then(r => r.json());
+  const [receipts, full] = await Promise.all([get("receipts"), get("fullsim")]);
+  initProof(receipts);
+  const v = k => full[k].fleet.verdict.toLowerCase();
+  document.getElementById("agree").textContent = `${v("chain2023")} on 7 March 2023, ${v("chain2018")} on 3 February 2018.`;
+</script>
+</body>
+</html>
