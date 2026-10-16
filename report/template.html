@@ -1,0 +1,209 @@
+<title>cafe Simulator Validation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (~68ch) with figures and tables allowed to run wider, like a towing-tank report */
+:root {
+  --bg: #fbfcfc; --surface: #f0f4f6; --ink: #10222f; --muted: #556673; --rule: #d3dde3;
+  --accent: #1d5c96; --measured: #c8641a; --before: #8b98a3; --good: #23784a; --warn: #a86a00; --bad: #b3261e;
+  --display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0c151d; --surface: #13202b; --ink: #e2e9ee; --muted: #94a5b2; --rule: #26394a;
+  --accent: #6aa8e3; --measured: #f0954a; --before: #6f7f8c; --good: #5cc28a; --warn: #e3a83a; --bad: #f07067; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0c151d; --surface: #13202b; --ink: #e2e9ee; --muted: #94a5b2; --rule: #26394a;
+  --accent: #6aa8e3; --measured: #f0954a; --before: #6f7f8c; --good: #5cc28a; --warn: #e3a83a; --bad: #f07067; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font: 16px/1.6 var(--body); margin: 0 }
+.page { max-width: 1040px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 72px; display: grid; gap: 56px }
+.prose { max-width: 68ch; display: grid; gap: 14px; min-width: 0 }
+h1, h2, h3 { font-family: var(--display); font-weight: 600; line-height: 1.15; margin: 0; text-wrap: balance }
+h1 { font-size: clamp(2.4rem, 6vw, 3.6rem); letter-spacing: -0.01em }
+h2 { font-size: 1.75rem }
+h3 { font-size: 1.2rem; font-weight: 600 }
+p, ul, ol { margin: 0 }
+ul, ol { padding-left: 1.2em; display: grid; gap: 6px }
+a { color: var(--accent) }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+code, .mono { font-family: var(--mono); font-size: 0.88em }
+.eyebrow { font: 600 0.78rem/1 var(--body); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted) }
+.byline { color: var(--muted); font-size: 0.95rem }
+header { display: grid; gap: 16px; max-width: 68ch }
+.lede { font-size: 1.15rem }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 6px; overflow: hidden }
+.stat { background: var(--bg); padding: 16px 18px; display: grid; gap: 4px; min-width: 0 }
+.stat b { font: 600 1.9rem/1.1 var(--display); font-variant-numeric: tabular-nums }
+.stat span { color: var(--muted); font-size: 0.9rem }
+.flow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px }
+.flow > div { border-top: 3px solid var(--accent); padding-top: 10px; display: grid; gap: 4px; align-content: start }
+.flow small { color: var(--muted); font-size: 0.88rem; line-height: 1.45 }
+@media (max-width: 760px) { .flow { grid-template-columns: 1fr 1fr } }
+@media (max-width: 420px) { .flow { grid-template-columns: 1fr } }
+section { display: grid; gap: 20px }
+.figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px }
+figure { margin: 0; display: grid; gap: 8px; min-width: 0 }
+figcaption { color: var(--muted); font-size: 0.88rem }
+svg text { font-family: var(--body); font-size: 12px; fill: var(--muted) }
+.legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 0.88rem; color: var(--muted) }
+.legend i { display: inline-block; width: 18px; height: 0; border-top: 2.5px solid; vertical-align: middle; margin-right: 6px }
+.legend i.dot { width: 9px; height: 9px; border: 0; border-radius: 50%; background: var(--measured) }
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; font-variant-numeric: tabular-nums }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--rule); vertical-align: top }
+th { font-weight: 600; color: var(--muted); font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; background: var(--surface) }
+td.num { text-align: right; white-space: nowrap; font-family: var(--mono); font-size: 0.84rem }
+tr.group td { background: var(--surface); font-family: var(--display); font-weight: 600; font-size: 1rem; color: var(--ink) }
+td.src { color: var(--muted); font-size: 0.82rem; min-width: 220px }
+.pill { display: inline-block; font: 600 0.72rem/1 var(--body); letter-spacing: 0.06em; padding: 4px 7px; border-radius: 3px; border: 1px solid currentColor; white-space: nowrap }
+.pill.pass { color: var(--good) } .pill.fail { color: var(--bad) } .pill.ctx { color: var(--muted) }
+.flag { display: inline-grid; place-items: center; width: 22px; height: 22px; font: 700 0.8rem/1 var(--display); border-radius: 2px; margin-right: 6px; vertical-align: -5px; color: #fff }
+.flag.c { background: linear-gradient(#1d4f9e 20%, #fff 20% 40%, #c8102e 40% 60%, #fff 60% 80%, #1d4f9e 80%); color: transparent }
+.flag.u { background: conic-gradient(#c8102e 0 25%, #fff 0 50%, #c8102e 0 75%, #fff 0); color: transparent }
+.flag.n { background: repeating-conic-gradient(#1d4f9e 0 25%, #fff 0 50%) 0 0 / 11px 11px; color: transparent }
+.verdicts { display: flex; flex-wrap: wrap; gap: 18px; color: var(--muted); font-size: 0.9rem }
+.callout { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; display: grid; gap: 8px }
+.asks { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px }
+.asks > div { background: var(--surface); border-radius: 6px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0 }
+.asks ul { font-size: 0.92rem }
+pre { margin: 0; background: var(--surface); border-radius: 6px; padding: 14px 16px; overflow-x: auto; font: 0.84rem/1.55 var(--mono) }
+footer { color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--rule); padding-top: 18px }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important } }
+</style>
+
+<div class="page">
+<header>
+  <div class="eyebrow">Technical report · TEPEX-C platforms</div>
+  <h1>cafe</h1>
+  <p class="lede">A feasibility checker for drone fleets that work under the water, on it, and over it. Give it each vehicle, where it deploys, what it must do, and which pairs must stay in communication range. It flies the whole fleet together through the real wind, currents and waves for that time and place, and returns GO, MARGINAL or NO-GO for every drone and every range requirement, with the reason.</p>
+  <p class="byline">Aaroh Kandhare · <span id="date">October 2026</span> · code: <a href="https://github.com/aarohkandy/cafe">github.com/aarohkandy/cafe</a></p>
+</header>
+
+<div class="stats" id="stats"></div>
+
+<section>
+  <h2>How it works</h2>
+  <div class="prose"><p>Each vehicle design is characterized once with first-principles tools, and every mission plan reuses the result. Missions are flown as a Monte Carlo ensemble in a 6-DOF model, so the verdict carries the uncertainty of the weather, the CFD, the propulsion and the battery.</p></div>
+  <div class="flow">
+    <div><h3>Design</h3><small>A simple shape (torpedo, buoyancy glider, monohull, catamaran, quad frame) or an uploaded CAD mesh, plus mass, power and battery.</small></div>
+    <div><h3>Characterize</h3><small>Added mass from Capytaine BEM. Drag from OpenFOAM RANS (k-ω SST) in six directions and now at 5° and 10° incidence; boat resistance from interFoam free-surface runs. Structure from CalculiX FEA: hull collapse depth, wing, slamming, arm loads.</small></div>
+    <div><h3>Fly</h3><small>Fossen-form 6-DOF with panel hydrostatics and waves, real autopilots, WRF wind, HYCOM 3-D currents, WAVEWATCH III seas. Optional ArduPilot SITL in the loop.</small></div>
+    <div><h3>Verdict</h3><small>Wilson interval over the runs. GO needs a 90 % interval lower bound of 0.75. Every failure is named: battery, range, depth, seafloor, grounding, capsize, current.</small></div>
+  </div>
+  <div class="verdicts"><span><span class="flag c">C</span>GO</span><span><span class="flag u">U</span>MARGINAL</span><span><span class="flag n">N</span>NO-GO</span><span>— the app shows verdicts as the signal flags for those letters.</span></div>
+</section>
+
+<section>
+  <h2>What changed this round</h2>
+  <div class="prose">
+    <h3>Hull lift at incidence</h3>
+    <p>The drag model blends six on-axis CFD results with weights cos²α and sin²α. At an angle of attack that gives only the crossflow drag term, so a hull moving slightly sideways produced too little side force and the lift of the hull itself was missing. Against the DARPA SUBOFF captive-model drift tests (Roddy 1990), the side force was 40–46 % low at every angle.</p>
+    <p>The fix runs the same RANS case at 5° and 10° incidence in pitch and in yaw, on the bare hull (glider wings and fins are modelled as lifting surfaces already, so they are left out of this mesh). The difference from the on-axis blend is stored as a coefficient K(α) on a sinα·cosα term, interpolated between the computed angles. It is zero on-axis, so the six existing CFD results stay exact. Steady RANS at incidence already contains the potential-flow Munk moment, which the 6-DOF model adds separately from the added-mass matrix, so it is subtracted before K is stored.</p>
+    <p>One angle was not enough: fitted at 10° alone, the 4° side force came out 51 % high, because the crossflow term uses the 90° drag, which overstates crossflow before the flow separates. Adding the 5° point fixed it without any tuning.</p>
+    <p>The SUBOFF runs also exposed a meshing problem. At this Reynolds number (1.2 × 10⁷) the coarse grid of the usual two-grid study is far from converged (2.5 × the fine-grid drag), which makes the grid-convergence index meaningless. The CFD step now adds a third, finer grid whenever the two-grid index exceeds 30 %. On SUBOFF the fine and finer grids agree within 1–10 %, and the finer-grid resistance is within 1.2 % of the tank. With the converged grid the side force is 11 % low at 8° and 21 % low at 12°. That matches the known behaviour of k-ω SST RANS once crossflow separation sets in: Budak's converged CFD on the same hull is 19 % and 23 % low at those angles. An earlier two-grid run had matched 12° within 4 %, but that agreement came from coarse-grid error cancelling model error, so it is not reported here.</p>
+  </div>
+  <div class="figs">
+    <figure><svg id="figY" viewBox="0 0 460 300" role="img" aria-label="SUBOFF side force coefficient versus drift angle"></svg><figcaption>Side force Y′ = Y / ½ρL²U² against drift angle. CFD was run at 5° and 10° only; 4.07° and 8° are interpolated, 12.03° is extrapolated.</figcaption></figure>
+    <figure><svg id="figN" viewBox="0 0 460 300" role="img" aria-label="SUBOFF yaw moment coefficient versus drift angle"></svg><figcaption>Yaw moment N′ = N / ½ρL³U² about 2.013 m from the nose, Roddy's reference point.</figcaption></figure>
+  </div>
+  <div class="legend"><span><i style="border-color:var(--accent)"></i>cafe, with hull lift</span><span><i style="border-color:var(--before);border-top-style:dashed"></i>cafe before (on-axis table only)</span><span><i class="dot"></i>Roddy 1990 towing tank, 6.5 kn</span></div>
+  <div class="prose">
+    <h3>Weather that changes during a mission</h3>
+    <p>Until now there was one WRF snapshot on disk (2023-03-07 17 UTC), so every mission held its wind constant. The simulator now reads hourly WRF surface output and interpolates in time. One full day of the UWIN-CM coupled model (Kerns, UW; 2018-02-03 12 UTC to 2018-02-04 12 UTC, 12 km Pacific grid) is installed, on exactly the same grid as the 2023 snapshot. The rest of the 181-day archive drops in the same way. For early-2018 dates, currents come from HYCOM's GLBv0.08 grid of the same experiment, which covers January 2018 onward. A snapshot with no neighbouring hours is still held constant and is labelled that way in the results.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Example: the TEPEX chain</h2>
+  <div class="prose" id="tepex-intro"></div>
+  <div class="tablewrap"><table id="tepex"></table></div>
+</section>
+
+<section>
+  <h2>Validation receipts</h2>
+  <div class="prose"><p>Every claim the simulator makes is checked against a formula or a published measurement, and the app shows the same list. A receipt passes when the value is within the stated tolerance of the reference. Context rows are shown for orientation and never count as a pass. Tolerances follow the scatter of the reference itself: published RANS for SUBOFF side force, for instance, is typically 10–20 % low past 8°.</p></div>
+  <div class="tablewrap"><table id="receipts"></table></div>
+</section>
+
+<section>
+  <h2>Limits, and what would close them</h2>
+  <div class="prose"><ul>
+    <li><b>The example vehicles are stand-ins.</b> Petrel (glider), Tern (boat) and Gnat (quad) use Slocum-class and typical small-USV and quad numbers. Results describe these examples, not the TEPEX platforms.</li>
+    <li><b>The TEPEX date has one weather snapshot,</b> so missions on 2023-03-07 still hold the wind constant (flagged). The 2018 day is hourly.</li>
+    <li><b>Hull lift is tabulated at 5° and 10°</b> and held beyond, so it is reliable to roughly 15°; a hull in a deep stall or moving backwards falls back to the on-axis table.</li>
+    <li><b>Boat resistance</b> is computed at Froude numbers 0.2–0.4 and extrapolated above. Boats get a passive skeg sized for a typical stability margin until the real one is entered.</li>
+    <li><b>Structure:</b> boat hulls are unstiffened shells (conservative), and quad frames are modelled as solid sections.</li>
+    <li><b>Acoustic and radio links</b> are distance thresholds. There is no propagation model yet.</li>
+  </ul></div>
+</section>
+
+<section>
+  <h2>Questions for the TEPEX team</h2>
+  <div class="asks">
+    <div><h3>Glider</h3><ul><li>Model and hull length, diameter, wing span and chord</li><li>Mass and displaced volume (trim)</li><li>Buoyancy-engine swing (cc), pump power and depth rating</li><li>Battery energy and hotel load</li></ul></div>
+    <div><h3>Surface vehicle</h3><ul><li>Hull lines or length, beam, draft, displacement</li><li>Propulsion (thrust or shaft power) and battery</li><li>Keel or skeg area</li><li>Operating sea-state limit</li></ul></div>
+    <div><h3>Aerial</h3><ul><li>Airframe, all-up mass, prop diameter</li><li>Battery (Wh) and expected endurance</li><li>Wind limit used in practice</li></ul></div>
+    <div><h3>Environment and links</h3><ul><li>The rest of the hourly WRF run that the 2023-03-07 snapshot came from (WRF 4.7.1, started 2023-03-01)</li><li>Acoustic modem model and the range the team plans around</li><li>Radio link range between boat and aircraft</li></ul></div>
+  </div>
+</section>
+
+<section>
+  <h2>Reproducing this</h2>
+  <pre>git clone https://github.com/aarohkandy/cafe
+./run.sh python -m cafe.cfd incidence suboff /work/runs/s1 3.344   # SUBOFF at 5 and 10 deg, ~15 min on 6 cores
+./run.sh python -m cafe.receipts /work/runs                         # every receipt in this report
+./run.sh python -m cafe._tepex_api                                  # the TEPEX chain</pre>
+  <div class="prose"><p>Runs on a Docker image with OpenFOAM v2506, CalculiX, gmsh and Capytaine. Design notes and every finding from three rounds of adversarial review are in <code>REVIEW.md</code>.</p></div>
+</section>
+
+<footer>References: Roddy, R. F. (1990), DTRC/SHD-1298-08, as tabulated in Budak (2023), Gemi ve Deniz Teknolojisi 223, Table 6. Groves, Huang &amp; Chang (1989), DTRC/SHD-1298-01. Prestero (2001), MIT. Kajitani et al. (1983). Kerns et al., UWIN-CM Pacific output, University of Washington. HYCOM GOFS 3.1. NOAA WAVEWATCH III.</footer>
+</div>
+
+<script>
+const DATA = /*DATA*/null;
+const $ = s => document.querySelector(s);
+const fmt = v => Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toPrecision(4) : v.toPrecision(3);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// stats
+const scored = DATA.receipts.filter(r => r.kind !== "context");
+const passed = scored.filter(r => r.ok).length;
+$("#stats").innerHTML = DATA.stats.map(([b, s]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(s)}</span></div>`).join("")
+  .replace("%RECEIPTS%", `${passed}/${scored.length}`);
+
+// receipts table
+let rows = "", group = null;
+for (const r of DATA.receipts) {
+  if (r.group !== group) { group = r.group; rows += `<tr class="group"><td colspan="5">${esc(group)}</td></tr>`; }
+  let ref, err = "";
+  if (r.kind === "bracket") ref = `${fmt(r.lo)} – ${fmt(r.hi)}`;
+  else { ref = fmt(r.reference); if (r.kind !== "context" && r.reference) err = r.rel === false ? `±${fmt(Math.abs(r.value - r.reference))}` : `${((r.value / r.reference - 1) * 100).toFixed(1)} %`; }
+  const pill = r.kind === "context" ? `<span class="pill ctx">CONTEXT</span>` : r.ok ? `<span class="pill pass">PASS</span>` : `<span class="pill fail">FAIL</span>`;
+  rows += `<tr><td>${pill}</td><td>${esc(r.claim)}</td><td class="num">${fmt(r.value)}${r.unit ? " " + esc(r.unit) : ""}</td><td class="num">${ref}${err ? `<br><span style="color:var(--muted)">${err}</span>` : ""}</td><td class="src">${esc(r.source || "")}</td></tr>`;
+}
+$("#receipts").innerHTML = `<thead><tr><th></th><th>Claim</th><th>cafe</th><th>Reference</th><th>Source</th></tr></thead><tbody>${rows}</tbody>`;
+
+// TEPEX
+$("#tepex-intro").innerHTML = DATA.tepex.intro;
+$("#tepex").innerHTML = `<thead><tr><th>Deployment</th><th>Result</th></tr></thead><tbody>${DATA.tepex.rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join("")}</tbody>`;
+
+// SUBOFF charts: one scale per chart, ticks only at values the chart reaches
+function chart(id, col, ymax, step, measured, withBefore, ylabel) {
+  const W = 460, H = 300, m = { l: 52, r: 16, t: 14, b: 42 };
+  const X = b => m.l + b / 14 * (W - m.l - m.r), Y = v => H - m.b - v / ymax * (H - m.t - m.b);
+  let s = "";
+  for (let v = 0; v <= ymax + 1e-9; v += step) s += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--rule)"/><text x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${v.toFixed(1)}</text>`;
+  for (let b = 0; b <= 14; b += 2) s += `<text x="${X(b)}" y="${H - m.b + 18}" text-anchor="middle">${b}°</text>`;
+  for (const a of DATA.cfd_angles) s += `<line x1="${X(a)}" x2="${X(a)}" y1="${m.t}" y2="${H - m.b}" stroke="var(--accent)" stroke-dasharray="2 4" opacity="0.6"/><text x="${X(a) + 4}" y="${m.t + 10}" fill="var(--accent)">CFD ${a}°</text>`;
+  const path = c => DATA.curve.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[c]).toFixed(1)}`).join("");
+  if (withBefore) s += `<path d="${path(3)}" fill="none" stroke="var(--before)" stroke-width="2" stroke-dasharray="6 4"/>`;
+  s += `<path d="${path(col)}" fill="none" stroke="var(--accent)" stroke-width="2.5"/>`;
+  for (const [b, v] of measured) s += `<circle cx="${X(b)}" cy="${Y(v)}" r="5" fill="var(--measured)"/>`;
+  s += `<text x="${(m.l + W - m.r) / 2}" y="${H - 6}" text-anchor="middle">drift angle β</text><text transform="translate(14 ${(m.t + H - m.b) / 2}) rotate(-90)" text-anchor="middle">${ylabel}</text>`;
+  $(id).innerHTML = s;
+}
+chart("#figY", 1, 4.5, 1, DATA.roddy.map(r => [r[0], r[1]]), true, "Y′ × 10³");
+chart("#figN", 2, 3.0, 0.5, DATA.roddy.map(r => [r[0], r[2]]), false, "N′ × 10³");
+</script>

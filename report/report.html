@@ -1,0 +1,210 @@
+<title>cafe Simulator Validation</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (~68ch) with figures and tables allowed to run wider, like a towing-tank report */
+:root {
+  --bg: #fbfcfc; --surface: #f0f4f6; --ink: #10222f; --muted: #556673; --rule: #d3dde3;
+  --accent: #1d5c96; --measured: #c8641a; --before: #8b98a3; --good: #23784a; --warn: #a86a00; --bad: #b3261e;
+  --display: "Barlow Semi Condensed", "Arial Narrow", system-ui, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0c151d; --surface: #13202b; --ink: #e2e9ee; --muted: #94a5b2; --rule: #26394a;
+  --accent: #6aa8e3; --measured: #f0954a; --before: #6f7f8c; --good: #5cc28a; --warn: #e3a83a; --bad: #f07067; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #0c151d; --surface: #13202b; --ink: #e2e9ee; --muted: #94a5b2; --rule: #26394a;
+  --accent: #6aa8e3; --measured: #f0954a; --before: #6f7f8c; --good: #5cc28a; --warn: #e3a83a; --bad: #f07067; color-scheme: dark }
+* { box-sizing: border-box }
+body { background: var(--bg); color: var(--ink); font: 16px/1.6 var(--body); margin: 0 }
+.page { max-width: 1040px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 72px; display: grid; gap: 56px }
+.prose { max-width: 68ch; display: grid; gap: 14px; min-width: 0 }
+h1, h2, h3 { font-family: var(--display); font-weight: 600; line-height: 1.15; margin: 0; text-wrap: balance }
+h1 { font-size: clamp(2.4rem, 6vw, 3.6rem); letter-spacing: -0.01em }
+h2 { font-size: 1.75rem }
+h3 { font-size: 1.2rem; font-weight: 600 }
+p, ul, ol { margin: 0 }
+ul, ol { padding-left: 1.2em; display: grid; gap: 6px }
+a { color: var(--accent) }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+code, .mono { font-family: var(--mono); font-size: 0.88em }
+.eyebrow { font: 600 0.78rem/1 var(--body); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted) }
+.byline { color: var(--muted); font-size: 0.95rem }
+header { display: grid; gap: 16px; max-width: 68ch }
+.lede { font-size: 1.15rem }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 6px; overflow: hidden }
+.stat { background: var(--bg); padding: 16px 18px; display: grid; gap: 4px; min-width: 0 }
+.stat b { font: 600 1.9rem/1.1 var(--display); font-variant-numeric: tabular-nums }
+.stat span { color: var(--muted); font-size: 0.9rem }
+.flow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px }
+.flow > div { border-top: 3px solid var(--accent); padding-top: 10px; display: grid; gap: 4px; align-content: start }
+.flow small { color: var(--muted); font-size: 0.88rem; line-height: 1.45 }
+@media (max-width: 760px) { .flow { grid-template-columns: 1fr 1fr } }
+@media (max-width: 420px) { .flow { grid-template-columns: 1fr } }
+section { display: grid; gap: 20px }
+.figs { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px }
+figure { margin: 0; display: grid; gap: 8px; min-width: 0 }
+figcaption { color: var(--muted); font-size: 0.88rem }
+svg text { font-family: var(--body); font-size: 12px; fill: var(--muted) }
+.legend { display: flex; flex-wrap: wrap; gap: 18px; font-size: 0.88rem; color: var(--muted) }
+.legend i { display: inline-block; width: 18px; height: 0; border-top: 2.5px solid; vertical-align: middle; margin-right: 6px }
+.legend i.dot { width: 9px; height: 9px; border: 0; border-radius: 50%; background: var(--measured) }
+.tablewrap { overflow-x: auto; border: 1px solid var(--rule); border-radius: 6px }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; font-variant-numeric: tabular-nums }
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--rule); vertical-align: top }
+th { font-weight: 600; color: var(--muted); font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; background: var(--surface) }
+td.num { text-align: right; white-space: nowrap; font-family: var(--mono); font-size: 0.84rem }
+tr.group td { background: var(--surface); font-family: var(--display); font-weight: 600; font-size: 1rem; color: var(--ink) }
+td.src { color: var(--muted); font-size: 0.82rem; min-width: 220px }
+.pill { display: inline-block; font: 600 0.72rem/1 var(--body); letter-spacing: 0.06em; padding: 4px 7px; border-radius: 3px; border: 1px solid currentColor; white-space: nowrap }
+.pill.pass { color: var(--good) } .pill.fail { color: var(--bad) } .pill.ctx { color: var(--muted) }
+.flag { display: inline-grid; place-items: center; width: 22px; height: 22px; font: 700 0.8rem/1 var(--display); border-radius: 2px; margin-right: 6px; vertical-align: -5px; color: #fff }
+.flag.c { background: linear-gradient(#1d4f9e 20%, #fff 20% 40%, #c8102e 40% 60%, #fff 60% 80%, #1d4f9e 80%); color: transparent }
+.flag.u { background: conic-gradient(#c8102e 0 25%, #fff 0 50%, #c8102e 0 75%, #fff 0); color: transparent }
+.flag.n { background: repeating-conic-gradient(#1d4f9e 0 25%, #fff 0 50%) 0 0 / 11px 11px; color: transparent }
+.verdicts { display: flex; flex-wrap: wrap; gap: 18px; color: var(--muted); font-size: 0.9rem }
+.callout { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; display: grid; gap: 8px }
+.asks { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px }
+.asks > div { background: var(--surface); border-radius: 6px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0 }
+.asks ul { font-size: 0.92rem }
+pre { margin: 0; background: var(--surface); border-radius: 6px; padding: 14px 16px; overflow-x: auto; font: 0.84rem/1.55 var(--mono) }
+footer { color: var(--muted); font-size: 0.85rem; border-top: 1px solid var(--rule); padding-top: 18px }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important } }
+</style>
+
+<div class="page">
+<header>
+  <div class="eyebrow">Technical report · TEPEX-C platforms</div>
+  <h1>cafe</h1>
+  <p class="lede">A feasibility checker for drone fleets that work under the water, on it, and over it. Give it each vehicle, where it deploys, what it must do, and which pairs must stay in communication range. It flies the whole fleet together through the real wind, currents and waves for that time and place, and returns GO, MARGINAL or NO-GO for every drone and every range requirement, with the reason.</p>
+  <p class="byline">Aaroh Kandhare · <span id="date">October 2026</span> · code: <a href="https://github.com/aarohkandy/cafe">github.com/aarohkandy/cafe</a></p>
+</header>
+
+<div class="stats" id="stats"></div>
+
+<section>
+  <h2>How it works</h2>
+  <div class="prose"><p>Each vehicle design is characterized once with first-principles tools, and every mission plan reuses the result. Missions are flown as a Monte Carlo ensemble in a 6-DOF model, so the verdict carries the uncertainty of the weather, the CFD, the propulsion and the battery.</p></div>
+  <div class="flow">
+    <div><h3>Design</h3><small>A simple shape (torpedo, buoyancy glider, monohull, catamaran, quad frame) or an uploaded CAD mesh, plus mass, power and battery.</small></div>
+    <div><h3>Characterize</h3><small>Added mass from Capytaine BEM. Drag from OpenFOAM RANS (k-ω SST) in six directions and now at 5° and 10° incidence; boat resistance from interFoam free-surface runs. Structure from CalculiX FEA: hull collapse depth, wing, slamming, arm loads.</small></div>
+    <div><h3>Fly</h3><small>Fossen-form 6-DOF with panel hydrostatics and waves, real autopilots, WRF wind, HYCOM 3-D currents, WAVEWATCH III seas. Optional ArduPilot SITL in the loop.</small></div>
+    <div><h3>Verdict</h3><small>Wilson interval over the runs. GO needs a 90 % interval lower bound of 0.75. Every failure is named: battery, range, depth, seafloor, grounding, capsize, current.</small></div>
+  </div>
+  <div class="verdicts"><span><span class="flag c">C</span>GO</span><span><span class="flag u">U</span>MARGINAL</span><span><span class="flag n">N</span>NO-GO</span><span>— the app shows verdicts as the signal flags for those letters.</span></div>
+</section>
+
+<section>
+  <h2>What changed this round</h2>
+  <div class="prose">
+    <h3>Hull lift at incidence</h3>
+    <p>The drag model blends six on-axis CFD results with weights cos²α and sin²α. At an angle of attack that gives only the crossflow drag term, so a hull moving slightly sideways produced too little side force and the lift of the hull itself was missing. Against the DARPA SUBOFF captive-model drift tests (Roddy 1990), the side force was 40–46 % low at every angle.</p>
+    <p>The fix runs the same RANS case at 5° and 10° incidence in pitch and in yaw, on the bare hull (glider wings and fins are modelled as lifting surfaces already, so they are left out of this mesh). The difference from the on-axis blend is stored as a coefficient K(α) on a sinα·cosα term, interpolated between the computed angles. It is zero on-axis, so the six existing CFD results stay exact. Steady RANS at incidence already contains the potential-flow Munk moment, which the 6-DOF model adds separately from the added-mass matrix, so it is subtracted before K is stored.</p>
+    <p>One angle was not enough: fitted at 10° alone, the 4° side force came out 51 % high, because the crossflow term uses the 90° drag, which overstates crossflow before the flow separates. Adding the 5° point fixed it without any tuning.</p>
+    <p>The SUBOFF runs also exposed a meshing problem. At this Reynolds number (1.2 × 10⁷) the coarse grid of the usual two-grid study is far from converged (2.5 × the fine-grid drag), which makes the grid-convergence index meaningless. The CFD step now adds a third, finer grid whenever the two-grid index exceeds 30 %. On SUBOFF the fine and finer grids agree within 1–10 %, and the finer-grid resistance is within 1.2 % of the tank. With the converged grid the side force is 11 % low at 8° and 21 % low at 12°. That matches the known behaviour of k-ω SST RANS once crossflow separation sets in: Budak's converged CFD on the same hull is 19 % and 23 % low at those angles. An earlier two-grid run had matched 12° within 4 %, but that agreement came from coarse-grid error cancelling model error, so it is not reported here.</p>
+  </div>
+  <div class="figs">
+    <figure><svg id="figY" viewBox="0 0 460 300" role="img" aria-label="SUBOFF side force coefficient versus drift angle"></svg><figcaption>Side force Y′ = Y / ½ρL²U² against drift angle. CFD was run at 5° and 10° only; 4.07° and 8° are interpolated, 12.03° is extrapolated.</figcaption></figure>
+    <figure><svg id="figN" viewBox="0 0 460 300" role="img" aria-label="SUBOFF yaw moment coefficient versus drift angle"></svg><figcaption>Yaw moment N′ = N / ½ρL³U² about 2.013 m from the nose, Roddy's reference point.</figcaption></figure>
+  </div>
+  <div class="legend"><span><i style="border-color:var(--accent)"></i>cafe, with hull lift</span><span><i style="border-color:var(--before);border-top-style:dashed"></i>cafe before (on-axis table only)</span><span><i class="dot"></i>Roddy 1990 towing tank, 6.5 kn</span></div>
+  <div class="prose">
+    <h3>Weather that changes during a mission</h3>
+    <p>Until now there was one WRF snapshot on disk (2023-03-07 17 UTC), so every mission held its wind constant. The simulator now reads hourly WRF surface output and interpolates in time. One full day of the UWIN-CM coupled model (Kerns, UW; 2018-02-03 12 UTC to 2018-02-04 12 UTC, 12 km Pacific grid) is installed, on exactly the same grid as the 2023 snapshot. The rest of the 181-day archive drops in the same way. For early-2018 dates, currents come from HYCOM's GLBv0.08 grid of the same experiment, which covers January 2018 onward. A snapshot with no neighbouring hours is still held constant and is labelled that way in the results.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Example: the TEPEX chain</h2>
+  <div class="prose" id="tepex-intro"></div>
+  <div class="tablewrap"><table id="tepex"></table></div>
+</section>
+
+<section>
+  <h2>Validation receipts</h2>
+  <div class="prose"><p>Every claim the simulator makes is checked against a formula or a published measurement, and the app shows the same list. A receipt passes when the value is within the stated tolerance of the reference. Context rows are shown for orientation and never count as a pass. Tolerances follow the scatter of the reference itself: published RANS for SUBOFF side force, for instance, is typically 10–20 % low past 8°.</p></div>
+  <div class="tablewrap"><table id="receipts"></table></div>
+</section>
+
+<section>
+  <h2>Limits, and what would close them</h2>
+  <div class="prose"><ul>
+    <li><b>The example vehicles are stand-ins.</b> Petrel (glider), Tern (boat) and Gnat (quad) use Slocum-class and typical small-USV and quad numbers. Results describe these examples, not the TEPEX platforms.</li>
+    <li><b>The TEPEX date has one weather snapshot,</b> so missions on 2023-03-07 still hold the wind constant (flagged). The 2018 day is hourly.</li>
+    <li><b>Hull lift is tabulated at 5° and 10°</b> and held beyond, so it is reliable to roughly 15°; a hull in a deep stall or moving backwards falls back to the on-axis table.</li>
+    <li><b>Boat resistance</b> is computed at Froude numbers 0.2–0.4 and extrapolated above. Boats get a passive skeg sized for a typical stability margin until the real one is entered.</li>
+    <li><b>Structure:</b> boat hulls are unstiffened shells (conservative), and quad frames are modelled as solid sections.</li>
+    <li><b>Acoustic and radio links</b> are distance thresholds. There is no propagation model yet.</li>
+  </ul></div>
+</section>
+
+<section>
+  <h2>Questions for the TEPEX team</h2>
+  <div class="asks">
+    <div><h3>Glider</h3><ul><li>Model and hull length, diameter, wing span and chord</li><li>Mass and displaced volume (trim)</li><li>Buoyancy-engine swing (cc), pump power and depth rating</li><li>Battery energy and hotel load</li></ul></div>
+    <div><h3>Surface vehicle</h3><ul><li>Hull lines or length, beam, draft, displacement</li><li>Propulsion (thrust or shaft power) and battery</li><li>Keel or skeg area</li><li>Operating sea-state limit</li></ul></div>
+    <div><h3>Aerial</h3><ul><li>Airframe, all-up mass, prop diameter</li><li>Battery (Wh) and expected endurance</li><li>Wind limit used in practice</li></ul></div>
+    <div><h3>Environment and links</h3><ul><li>The rest of the hourly WRF run that the 2023-03-07 snapshot came from (WRF 4.7.1, started 2023-03-01)</li><li>Acoustic modem model and the range the team plans around</li><li>Radio link range between boat and aircraft</li></ul></div>
+  </div>
+</section>
+
+<section>
+  <h2>Reproducing this</h2>
+  <pre>git clone https://github.com/aarohkandy/cafe
+./run.sh python -m cafe.cfd incidence suboff /work/runs/s1 3.344   # SUBOFF at 5 and 10 deg, ~15 min on 6 cores
+./run.sh python -m cafe.receipts /work/runs                         # every receipt in this report
+./run.sh python -m cafe._tepex_api                                  # the TEPEX chain</pre>
+  <div class="prose"><p>Runs on a Docker image with OpenFOAM v2506, CalculiX, gmsh and Capytaine. Design notes and every finding from three rounds of adversarial review are in <code>REVIEW.md</code>.</p></div>
+</section>
+
+<footer>References: Roddy, R. F. (1990), DTRC/SHD-1298-08, as tabulated in Budak (2023), Gemi ve Deniz Teknolojisi 223, Table 6. Groves, Huang &amp; Chang (1989), DTRC/SHD-1298-01. Prestero (2001), MIT. Kajitani et al. (1983). Kerns et al., UWIN-CM Pacific output, University of Washington. HYCOM GOFS 3.1. NOAA WAVEWATCH III.</footer>
+</div>
+
+<script>
+const DATA = {"receipts":[{"group":"Geometry","claim":"REMUS hull wetted area","value":0.7242302035515733,"reference":0.709,"unit":"m2","tol":0.05,"rel":true,"error":0.021481246194038572,"ok":true,"source":"Prestero 2001 Table 2.7"},{"group":"Geometry","claim":"REMUS frontal area","value":0.0285723752125,"reference":0.0285,"unit":"m2","tol":0.03,"rel":true,"error":0.002539481140350963,"ok":true,"source":"Prestero 2001 Table 2.7"},{"group":"Geometry","claim":"Wigley draft at design displacement","value":0.15614237175918333,"reference":0.156,"unit":"m","tol":0.03,"rel":true,"error":0.0009126394819443107,"ok":true,"source":"Cb = 4/9 (analytic)"},{"group":"Geometry","claim":"Wigley wetted surface","value":0.9295130116473211,"reference":0.9287050000000001,"unit":"m2","tol":0.03,"rel":true,"error":0.000870041237337027,"ok":true,"source":"Kajitani 1983"},{"group":"Geometry","claim":"Floating box: metacentric radius BM","value":0.400000000000485,"reference":0.4,"unit":"m","tol":0.01,"rel":true,"error":1.212585587495596e-12,"ok":true,"source":"BM = B^2/12T (exact)"},{"group":"Geometry","claim":"Floating box: waterplane area","value":3.6,"reference":3.5999999999999996,"unit":"m2","tol":0.005,"rel":true,"error":2.220446049250313e-16,"ok":true,"source":"L x B (exact)"},{"group":"Environment","claim":"PM sea: Hs at U10=10 m/s","value":2.253434862385321,"reference":2.2426095820591234,"unit":"m","tol":0.01,"rel":true,"error":0.0048270909090908365,"ok":true,"source":"Stewart eq. 16.30"},{"group":"Environment","claim":"Realized wave record reproduces Hs","value":2.249599230433265,"reference":2.253434862385321,"unit":"m","tol":0.1,"rel":true,"error":0.0017021268358278219,"ok":true,"source":"4*sqrt(m0)"},{"group":"Environment","claim":"Dryden sigma_u/sigma_w at 30 m","value":1.7192913047291842,"reference":1.7192913047291842,"unit":"","tol":1e-09,"rel":true,"error":0.0,"ok":true,"source":"MIL-F-8785C"},{"group":"Weather","claim":"Hourly WRF wind is time-varying (not a frozen snapshot)","value":1.0,"lo":1.0,"hi":1.0,"unit":"","ok":true,"source":"UWIN-CM run_nosal_2018020300b, hourly wrfsfc","kind":"bracket"},{"group":"Weather","claim":"U10 half way between two hours = mean of the two raw hours","value":-2.472058892250061,"reference":-2.472058892250061,"unit":"m/s","tol":0.0001,"rel":false,"error":0.0,"ok":true,"source":"linear interpolation in time, raw netCDF values"},{"group":"Weather","claim":"A lone snapshot is held constant and labelled as such","value":1.0,"lo":1.0,"hi":1.0,"unit":"","ok":true,"source":"wrfout 2023-03-07 17 UTC (no neighbouring hours on disk)","kind":"bracket"},{"group":"6-DOF","claim":"Hull panels before volume correction: enclosed volume vs true hull","value":0.9811608848381506,"reference":1.0,"unit":"","tol":0.03,"rel":true,"error":0.01883911516184944,"ok":true,"source":"discretization error the area correction removes; must be small for moments to be right"},{"group":"6-DOF","claim":"Panel pressure integrates to buoyancy rho*g*V (direction and magnitude)","value":317.3320614770098,"reference":317.33206147700935,"unit":"N","tol":0.01,"rel":true,"error":1.3322676295501878e-15,"ok":true,"source":"Archimedes"},{"group":"6-DOF","claim":"Unpowered sub drifts at current speed","value":0.49099578833300256,"reference":0.5,"unit":"m/s","tol":0.02,"rel":true,"error":0.018008423333994883,"ok":true,"source":"kinematics"},{"group":"6-DOF","claim":"Hover: vertical specific force reads -g","value":-9.81,"reference":-9.81,"unit":"m/s2","tol":0.002,"rel":true,"error":0.0,"ok":true,"source":"IMU convention"},{"group":"Propulsion","claim":"1.8 kg quad, 10\" props: hover RPM","value":5378.208219744228,"reference":5500.0,"unit":"rpm","tol":0.08,"rel":true,"error":0.022143960046503985,"ok":true,"source":"T-Motor MN3110 bench data, 450 g/motor at ~5500 rpm; model uses UIUC APC 10x4.7 C_T only"},{"group":"Propulsion","claim":"1.8 kg quad hover electrical power","value":220.92012232739717,"reference":220.0,"unit":"W","source":"motor efficiency 0.79 was fitted to this bench figure, so it is not an independent check","kind":"context","ok":null},{"group":"6-DOF","claim":"Torque-free tumbling conserves rotational energy","value":0.1402002044529086,"reference":0.14005828116551045,"unit":"J","tol":0.01,"rel":true,"error":0.001013315929748071,"ok":true,"source":"Euler's equations"},{"group":"6-DOF","claim":"Wigley free roll period (small angle)","value":0.9580000000000491,"reference":0.9793318004008453,"unit":"s","tol":0.05,"rel":true,"error":0.021781995021569744,"ok":true,"source":"linear hydrostatics, GM from geometry"},{"group":"Hull lift","claim":"Planted cross-term side force recovered at 7.5 deg (table interpolation)","value":7.461267784596107,"reference":7.461267784596107,"unit":"N","tol":1e-06,"rel":true,"error":0.0,"ok":true,"source":""},{"group":"Hull lift","claim":"Planted cross-term yaw moment recovered, Munk not double counted","value":-3.282957825222287,"reference":-3.2829578252222866,"unit":"N.m","tol":1e-06,"rel":true,"error":2.220446049250313e-16,"ok":true,"source":""},{"group":"Ocean","claim":"Current at a HYCOM grid node (20 m), east","value":0.032999999821186066,"reference":0.032999999821186066,"unit":"m/s","tol":0.001,"rel":false,"error":0.0,"ok":true,"source":"raw HYCOM GOFS 3.1 value"},{"group":"Ocean","claim":"Current at a HYCOM grid node (20 m), north","value":0.10100000351667404,"reference":0.10100000351667404,"unit":"m/s","tol":0.001,"rel":false,"error":0.0,"ok":true,"source":"raw HYCOM GOFS 3.1 value"},{"group":"BEM","claim":"REMUS sway added mass vs strip theory (rho*V)","value":30.80229338536096,"reference":32.347814625587084,"unit":"kg","tol":0.08,"rel":true,"error":0.04777822731195003,"ok":true,"source":"slender-body strip theory, 2-D circle sections"},{"group":"BEM","claim":"REMUS pitch added inertia between spheroid (slimmer ends) and strip theory (overshoots ends)","value":2.8444853157246968,"lo":1.8929501753030635,"hi":3.5173393382095255,"unit":"kg m2","ok":true,"source":"Lamb prolate spheroid of equal L, D (lower bound); strip theory (upper bound)","kind":"bracket"},{"group":"BEM","claim":"REMUS surge added mass (bare hull)","value":1.5838755204591783,"reference":0.93,"unit":"kg","source":"Prestero 2001 used an empirical ellipsoid formula; a fuller midbody should read higher","kind":"context","ok":null},{"group":"BEM","claim":"REMUS sway added mass (bare hull)","value":30.80229338536096,"reference":35.5,"unit":"kg","source":"Prestero 2001 strip theory includes fins and tail cruciform","kind":"context","ok":null},{"group":"BEM","claim":"REMUS pitch added inertia (bare hull)","value":2.8444853157246968,"reference":4.88,"unit":"kg m2","source":"Prestero 2001 strip theory includes fins, whose lever arm dominates pitch","kind":"context","ok":null},{"group":"FEA","claim":"Thin cylinder, mid-length von Mises vs membrane theory","value":29.31239518371795,"reference":28.867513459481287,"unit":"MPa","tol":0.06,"rel":true,"error":0.015411154994734888,"ok":true,"source":"hoop pR/t, axial pR/2t"},{"group":"FEA","claim":"Short capped cylinder collapse (flat 3 mm end caps)","value":1.516017,"reference":1.7011763813957286,"unit":"MPa","source":"Windenburg-Trilling assumes simply supported ends; real caps restrain more, and the 3/4 follower correction is conservative for this 4-lobe mode, so no clean reference","kind":"context","ok":null},{"group":"FEA","claim":"Long tube collapse pressure (with follower-pressure correction)","value":0.573885225,"reference":0.5461197208678218,"unit":"MPa","tol":0.1,"rel":true,"error":0.05084142372309319,"ok":true,"source":"Bresse long-cylinder formula, mid-surface diameter"},{"group":"FEA","claim":"Buckling repeats exactly on identical input","value":0.573885225,"reference":0.573885225,"unit":"","tol":1e-09,"rel":true,"error":0.0,"ok":true,"source":"determinism (single-threaded eigensolver)"},{"group":"FEA","claim":"Glider hull collapse pressure (free-floating, 7 mm Al)","value":6.110767228893749,"lo":5.488808560165044,"hi":7.788637680852924,"unit":"MPa","ok":true,"source":"Bresse long tube .. Windenburg-Trilling on the parallel section","kind":"bracket"},{"group":"FEA","claim":"Glider hull: two lowest buckling modes are a degenerate pair","value":8.104553,"reference":8.102921,"unit":"","tol":0.02,"rel":true,"error":0.00020140884996888708,"ok":true,"source":"axisymmetric shell: lobar modes come in pairs"},{"group":"FEA","claim":"Free-free tube, end load: peak bending stress at L/6","value":4.772320108668289,"reference":4.715702017537639,"unit":"MPa","tol":0.08,"rel":true,"error":0.012006291093052068,"ok":true,"source":"beam theory with inertia relief, M = 4PL/27"},{"group":"FEA","claim":"Clamped tube (quad arm) tip deflection","value":0.7602575,"reference":0.7824726799011569,"unit":"mm","tol":0.1,"rel":true,"error":0.02839099750289442,"ok":true,"source":"Euler-Bernoulli cantilever PL^3/3EI, thin-wall tube"},{"group":"FEA","claim":"Clamped tube support reaction equals the applied load","value":9.999977675010008,"reference":10.0,"unit":"N","tol":0.01,"rel":true,"error":2.2324989992217326e-06,"ok":true,"source":"statics"},{"group":"FEA","claim":"Clamped slab (glider wing) tip deflection","value":0.754976,"reference":0.7837445573294627,"unit":"mm","tol":0.08,"rel":true,"error":0.03670654814814778,"ok":true,"source":"Euler-Bernoulli cantilever, solid rectangular section"},{"group":"Reach","claim":"Time to a point 20 km downstream (uniform current)","value":4.0,"reference":3.9682539682539684,"unit":"h","tol":0.02,"rel":true,"error":0.008000000000000007,"ok":true,"source":"D/(V+c), exact"},{"group":"Reach","claim":"Time to a point 20 km upstream","value":9.33,"reference":9.25925925925926,"unit":"h","tol":0.02,"rel":true,"error":0.007639999999999869,"ok":true,"source":"D/(V-c), exact"},{"group":"Reach","claim":"Farthest round trip downstream and back in 12 h","value":17.63999999999894,"reference":18.144,"unit":"km","tol":0.08,"rel":true,"error":0.027777777777836188,"ok":true,"source":"T(V^2-c^2)/2V, exact; grid step 1.3 km"},{"group":"Reach","claim":"Time to a point 20 km across the current","value":6.11,"reference":6.061608062110899,"unit":"h","tol":0.03,"rel":true,"error":0.00798334986248661,"ok":true,"source":"D/sqrt(V^2-c^2) (crabbing), exact; grid directions add a little"},{"group":"Links","claim":"Share of time in range, drones separating at 1 m/s past a 300 m limit","value":0.5,"reference":0.5,"unit":"","tol":0.005,"rel":true,"error":0.0,"ok":true,"source":"geometry, exact"},{"group":"Links","claim":"Longest out-of-range gap","value":300.0,"reference":300.0,"unit":"s","tol":0.005,"rel":true,"error":0.0,"ok":true,"source":"geometry, exact"},{"group":"Glider","claim":"Horizontal speed made good (1 h, 5-100 m saw-tooth)","value":0.23642089292336177,"reference":0.25,"unit":"m/s","tol":0.25,"rel":true,"error":0.05431642830655292,"ok":true,"source":"Slocum-class gliders make 0.2-0.35 m/s horizontally (manufacturer-typical, not a specific vehicle)"},{"group":"Glider","claim":"Pump energy per full buoyancy swing at 100 m","value":0.4452715232464386,"reference":0.4469,"unit":"Wh","tol":0.35,"rel":true,"error":0.003643939927414297,"ok":true,"source":"rho g depth x 2 dV / 0.5 pump efficiency"},{"group":"Glider","claim":"Steady-glide formula vs 6-DOF yo (speed made good, 5-100 m)","value":0.27666637786081133,"reference":0.2392709726178106,"unit":"m/s","tol":0.25,"rel":true,"error":0.1562889339808582,"ok":true,"source":"our 6-DOF sim incl. top/bottom turns (consistency of two models, not a measurement)"},{"group":"CFD","claim":"REMUS bare hull Cd (frontal)","value":0.11906016101833625,"reference":0.12,"unit":"","tol":0.25,"rel":true,"error":0.0078319915138646,"ok":true,"source":"Prestero 2001: Hoerner estimate 0.11-0.13"},{"group":"CFD","claim":"REMUS friction drag vs ITTC-57 flat plate","value":3.0503042612666644,"reference":3.436011832271314,"unit":"N","tol":0.15,"rel":true,"error":0.11225443619898257,"ok":true,"source":"ITTC-57 line"},{"group":"CFD","claim":"Wigley Ct x1e3 at Fn 0.20","value":3.9921407788315504,"reference":4.21,"unit":"","tol":0.15,"rel":true,"error":0.05174803353169821,"ok":true,"source":"Kajitani et al. 1983, UT 2.5 m fixed"},{"group":"CFD","claim":"Wigley Ct x1e3 at Fn 0.30","value":4.848934931699353,"reference":4.96,"unit":"","tol":0.15,"rel":true,"error":0.02239215086706592,"ok":true,"source":"Kajitani et al. 1983, UT 2.5 m fixed"},{"group":"CFD","claim":"Wigley Ct x1e3 at Fn 0.40","value":5.368389055910595,"reference":5.49,"unit":"","tol":0.15,"rel":true,"error":0.022151355936139372,"ok":true,"source":"Kajitani et al. 1983, UT 2.5 m fixed"},{"group":"Hull lift","claim":"SUBOFF sway force Y' at 4.07 deg drift (CFD table at 5, 10 deg)","value":0.00044885490020301597,"reference":0.00042901897282701293,"unit":"","tol":0.25,"rel":true,"error":0.04623554815138964,"ok":true,"source":"Roddy 1990 captive model; published RANS is ~10-20 % low past 8 deg"},{"group":"Hull lift","claim":"SUBOFF yaw moment N' at 4.07 deg drift","value":0.000899284990164208,"reference":0.0009317993570607848,"unit":"","tol":0.15,"rel":true,"error":0.034894171851693745,"ok":true,"source":"Roddy 1990 captive model, moment about 2.013 m from the nose"},{"group":"Hull lift","claim":"SUBOFF Y' at 4.07 deg WITHOUT hull lift (on-axis table only)","value":0.00020915393778693115,"reference":0.00042901897282701293,"unit":"","source":"what the simulator predicted before the incidence runs","kind":"context","ok":null},{"group":"Hull lift","claim":"SUBOFF Y'v = Y'/v' at 4.07 deg (magnitude)","value":0.006324111145202892,"reference":0.0059,"unit":"","source":"Roddy 1990 linear derivative (fit of Y' = Y'v v' + Y'vvv v'^3)","kind":"context","ok":null},{"group":"Hull lift","claim":"SUBOFF N'v = N'/v' at 4.07 deg (magnitude)","value":0.012670415821324093,"reference":0.0127,"unit":"","source":"Roddy 1990","kind":"context","ok":null},{"group":"Hull lift","claim":"SUBOFF sway force Y' at 8 deg drift (CFD table at 5, 10 deg)","value":0.0013139024827605924,"reference":0.001469222359507521,"unit":"","tol":0.25,"rel":true,"error":0.10571570446218326,"ok":true,"source":"Roddy 1990 captive model; published RANS is ~10-20 % low past 8 deg"},{"group":"Hull lift","claim":"SUBOFF yaw moment N' at 8 deg drift","value":0.0016766050296338595,"reference":0.001598070259100037,"unit":"","tol":0.15,"rel":true,"error":0.04914350297592662,"ok":true,"source":"Roddy 1990 captive model, moment about 2.013 m from the nose"},{"group":"Hull lift","claim":"SUBOFF Y' at 8 deg WITHOUT hull lift (on-axis table only)","value":0.000804324949427372,"reference":0.001469222359507521,"unit":"","source":"what the simulator predicted before the incidence runs","kind":"context","ok":null},{"group":"Hull lift","claim":"SUBOFF sway force Y' at 12.03 deg drift (CFD table at 5, 10 deg)","value":0.0026000340733242045,"reference":0.0033113692014482077,"unit":"","tol":0.25,"rel":true,"error":0.21481601260678063,"ok":true,"source":"Roddy 1990 captive model; published RANS is ~10-20 % low past 8 deg"},{"group":"Hull lift","claim":"SUBOFF yaw moment N' at 12.03 deg drift","value":0.0024181817714390226,"reference":0.0021201736051388656,"unit":"","tol":0.15,"rel":true,"error":0.1405583795486589,"ok":true,"source":"Roddy 1990 captive model, moment about 2.013 m from the nose"},{"group":"Hull lift","claim":"SUBOFF Y' at 12.03 deg WITHOUT hull lift (on-axis table only)","value":0.0018039680592892345,"reference":0.0033113692014482077,"unit":"","source":"what the simulator predicted before the incidence runs","kind":"context","ok":null},{"group":"Hull lift","claim":"SUBOFF resistance at 6.5 kn (C_T x1e3, finest grid)","value":3.1125474764296532,"reference":3.15,"unit":"","tol":0.1,"rel":true,"error":0.011889690022332311,"ok":true,"source":"Roddy 1990 bare-hull towing, C_T ~3.1-3.2e-3 near 6 kn (Budak 2023 Table 5)"},{"group":"Emulator","claim":"gnat: battery left, fast mode vs ArduCopter 4.7.1","value":0.8970237556804055,"reference":0.8898323886009162,"unit":"","tol":0.03,"rel":true,"error":0.00808170973726452,"ok":true,"source":"ArduPilot SITL flying the same physics"},{"group":"Emulator","claim":"gnat: hold error p95, fast mode vs ArduCopter 4.7.1","value":0.17829259183236346,"reference":0.341997985107328,"unit":"m","tol":0.5,"rel":false,"error":0.16370539327496453,"ok":true,"source":"absolute difference; both well inside the 3 m tolerance"}],"curve":[[0.0,4e-05,2e-05,4e-05],[0.25,0.01552,0.05482,0.00075],[0.5,0.03266,0.10971,0.00312],[0.75,0.05139,0.16466,0.00707],[1.0,0.07169,0.21969,0.0126],[1.25,0.09356,0.27478,0.01972],[1.5,0.11701,0.32992,0.02841],[1.75,0.14203,0.38513,0.03869],[2.0,0.16863,0.44038,0.05054],[2.25,0.19679,0.49568,0.06396],[2.5,0.22652,0.55102,0.07897],[2.75,0.25781,0.6064,0.09555],[3.0,0.29066,0.66182,0.1137],[3.25,0.32507,0.71727,0.13343],[3.5,0.36104,0.77274,0.15473],[3.75,0.39856,0.82823,0.1776],[4.0,0.43764,0.88374,0.20203],[4.25,0.47826,0.93926,0.22803],[4.5,0.52042,0.99479,0.2556],[4.75,0.56413,1.05033,0.28472],[5.0,0.60938,1.10587,0.31541],[5.25,0.65853,1.15621,0.34765],[5.5,0.70943,1.20606,0.38145],[5.75,0.76208,1.25541,0.4168],[6.0,0.81648,1.30425,0.4537],[6.25,0.87261,1.35259,0.49215],[6.5,0.93049,1.40042,0.53214],[6.75,0.99009,1.44774,0.57367],[7.0,1.05142,1.49455,0.61674],[7.25,1.11447,1.54085,0.66134],[7.5,1.17924,1.58662,0.70748],[7.75,1.24572,1.63187,0.75514],[8.0,1.3139,1.67661,0.80432],[8.25,1.38378,1.72081,0.85503],[8.5,1.45536,1.76449,0.90725],[8.75,1.52862,1.80764,0.96099],[9.0,1.60357,1.85026,1.01623],[9.25,1.68018,1.89234,1.07297],[9.5,1.75847,1.93389,1.13122],[9.75,1.83842,1.9749,1.19096],[10.0,1.92002,2.01538,1.25219],[10.25,1.99872,2.06529,1.31491],[10.5,2.07886,2.11512,1.3791],[10.75,2.16041,2.16487,1.44478],[11.0,2.24338,2.21453,1.51192],[11.25,2.32777,2.26411,1.58053],[11.5,2.41355,2.31359,1.65061],[11.75,2.50074,2.36298,1.72214],[12.0,2.58931,2.41227,1.79511],[12.25,2.67927,2.46146,1.86954],[12.5,2.77061,2.51054,1.9454],[12.75,2.86331,2.55951,2.02269],[13.0,2.95738,2.60836,2.10141],[13.25,3.05281,2.6571,2.18156],[13.5,3.14958,2.70571,2.26312],[13.75,3.2477,2.7542,2.34608],[14.0,3.34715,2.80256,2.43045]],"cfd_angles":[5.0,10.0],"roddy":[[4.07,0.42901897282701296,0.9317993570607848],[8.0,1.4692223595075211,1.598070259100037],[12.03,3.311369201448208,2.1201736051388655]],"tepex":{"intro":"<p>The same TEPEX-style plan at 10\u00b0 N, 95\u00b0 W in the Gulf of Tehuantepec, flown 15 times on two dates: the Petrel glider surveys 2 km north at 5\u2013100 m depth, the Tern boat stays over it (1 km acoustic modem), and the Gnat quad relays 30 m above the boat for 20 minutes, then flies home (300 m radio). Wind from WRF, currents from HYCOM, waves from WAVEWATCH III. The vehicles are the stand-in examples, so the point here is what the simulator does with real weather, not the verdict for the real platforms.</p>","rows":[["<b>2023-03-07, 17 UTC</b><br><span style=\"color:var(--muted)\">one WRF snapshot, held constant</span>","<span class=\"flag u\">U</span><b>MARGINAL</b> (80 % of runs succeed, 90 % interval 59\u201392 %). Glider GO, arrives in 76 min. Boat GO, within 11 m of the glider. Both range requirements GO (peaks 222 m and 55 m apart). The quad lands with a median 22 % battery and goes under its 15 % reserve or flat in 3 of 15 runs: shorten its stint or carry more battery."],["<b>2018-02-03, 14 UTC</b><br><span style=\"color:var(--muted)\">hourly UWIN-CM wind, interpolated</span>","<span class=\"flag n\">N</span><b>NO-GO.</b> February is gap-wind season here. The seas exceed the boat's design-category C limit (2.0 m significant wave height) in every run, and the quad's median battery at landing drops to 18 %. The glider, underneath it all, is still GO in 77 min, and both links hold."],["<b>Either date:</b> the glider deployed 8 km from a boat holding station, 2 km modem","<span class=\"flag n\">N</span><b>NO-GO</b> on the link: never in range, about 9.4 km apart. The glider also can't cover its 2 km leg in the 1 h given."]]},"stats":[["%RECEIPTS%","validation receipts pass"],["3\u201321 %","error in SUBOFF side force and yaw moment, 4\u201312\u00b0 drift, grid-converged"],["45\u201351 % low","the same side force before this round"],["hourly","WRF wind, 25 h of UWIN-CM installed"]]};
+const $ = s => document.querySelector(s);
+const fmt = v => Math.abs(v) >= 100 ? v.toFixed(0) : Math.abs(v) >= 1 ? v.toPrecision(4) : v.toPrecision(3);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// stats
+const scored = DATA.receipts.filter(r => r.kind !== "context");
+const passed = scored.filter(r => r.ok).length;
+$("#stats").innerHTML = DATA.stats.map(([b, s]) => `<div class="stat"><b>${esc(b)}</b><span>${esc(s)}</span></div>`).join("")
+  .replace("%RECEIPTS%", `${passed}/${scored.length}`);
+
+// receipts table
+let rows = "", group = null;
+for (const r of DATA.receipts) {
+  if (r.group !== group) { group = r.group; rows += `<tr class="group"><td colspan="5">${esc(group)}</td></tr>`; }
+  let ref, err = "";
+  if (r.kind === "bracket") ref = `${fmt(r.lo)} – ${fmt(r.hi)}`;
+  else { ref = fmt(r.reference); if (r.kind !== "context" && r.reference) err = r.rel === false ? `±${fmt(Math.abs(r.value - r.reference))}` : `${((r.value / r.reference - 1) * 100).toFixed(1)} %`; }
+  const pill = r.kind === "context" ? `<span class="pill ctx">CONTEXT</span>` : r.ok ? `<span class="pill pass">PASS</span>` : `<span class="pill fail">FAIL</span>`;
+  rows += `<tr><td>${pill}</td><td>${esc(r.claim)}</td><td class="num">${fmt(r.value)}${r.unit ? " " + esc(r.unit) : ""}</td><td class="num">${ref}${err ? `<br><span style="color:var(--muted)">${err}</span>` : ""}</td><td class="src">${esc(r.source || "")}</td></tr>`;
+}
+$("#receipts").innerHTML = `<thead><tr><th></th><th>Claim</th><th>cafe</th><th>Reference</th><th>Source</th></tr></thead><tbody>${rows}</tbody>`;
+
+// TEPEX
+$("#tepex-intro").innerHTML = DATA.tepex.intro;
+$("#tepex").innerHTML = `<thead><tr><th>Deployment</th><th>Result</th></tr></thead><tbody>${DATA.tepex.rows.map(([a, b]) => `<tr><td>${a}</td><td>${b}</td></tr>`).join("")}</tbody>`;
+
+// SUBOFF charts: one scale per chart, ticks only at values the chart reaches
+function chart(id, col, ymax, step, measured, withBefore, ylabel) {
+  const W = 460, H = 300, m = { l: 52, r: 16, t: 14, b: 42 };
+  const X = b => m.l + b / 14 * (W - m.l - m.r), Y = v => H - m.b - v / ymax * (H - m.t - m.b);
+  let s = "";
+  for (let v = 0; v <= ymax + 1e-9; v += step) s += `<line x1="${m.l}" x2="${W - m.r}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--rule)"/><text x="${m.l - 8}" y="${Y(v) + 4}" text-anchor="end">${v.toFixed(1)}</text>`;
+  for (let b = 0; b <= 14; b += 2) s += `<text x="${X(b)}" y="${H - m.b + 18}" text-anchor="middle">${b}°</text>`;
+  for (const a of DATA.cfd_angles) s += `<line x1="${X(a)}" x2="${X(a)}" y1="${m.t}" y2="${H - m.b}" stroke="var(--accent)" stroke-dasharray="2 4" opacity="0.6"/><text x="${X(a) + 4}" y="${m.t + 10}" fill="var(--accent)">CFD ${a}°</text>`;
+  const path = c => DATA.curve.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[c]).toFixed(1)}`).join("");
+  if (withBefore) s += `<path d="${path(3)}" fill="none" stroke="var(--before)" stroke-width="2" stroke-dasharray="6 4"/>`;
+  s += `<path d="${path(col)}" fill="none" stroke="var(--accent)" stroke-width="2.5"/>`;
+  for (const [b, v] of measured) s += `<circle cx="${X(b)}" cy="${Y(v)}" r="5" fill="var(--measured)"/>`;
+  s += `<text x="${(m.l + W - m.r) / 2}" y="${H - 6}" text-anchor="middle">drift angle β</text><text transform="translate(14 ${(m.t + H - m.b) / 2}) rotate(-90)" text-anchor="middle">${ylabel}</text>`;
+  $(id).innerHTML = s;
+}
+chart("#figY", 1, 4.5, 1, DATA.roddy.map(r => [r[0], r[1]]), true, "Y′ × 10³");
+chart("#figN", 2, 3.0, 0.5, DATA.roddy.map(r => [r[0], r[2]]), false, "N′ × 10³");
+</script>
+

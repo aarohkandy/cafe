@@ -1,0 +1,8 @@
+{
+  "intro": "<p>The same TEPEX-style plan at 10° N, 95° W in the Gulf of Tehuantepec, flown 15 times on two dates: the Petrel glider surveys 2 km north at 5–100 m depth, the Tern boat stays over it (1 km acoustic modem), and the Gnat quad relays 30 m above the boat for 20 minutes, then flies home (300 m radio). Wind from WRF, currents from HYCOM, waves from WAVEWATCH III. The vehicles are the stand-in examples, so the point here is what the simulator does with real weather, not the verdict for the real platforms.</p>",
+  "rows": [
+    ["<b>2023-03-07, 17 UTC</b><br><span style=\"color:var(--muted)\">one WRF snapshot, held constant</span>", "<span class=\"flag u\">U</span><b>MARGINAL</b> (80 % of runs succeed, 90 % interval 59–92 %). Glider GO, arrives in 76 min. Boat GO, within 11 m of the glider. Both range requirements GO (peaks 222 m and 55 m apart). The quad lands with a median 22 % battery and goes under its 15 % reserve or flat in 3 of 15 runs: shorten its stint or carry more battery."],
+    ["<b>2018-02-03, 14 UTC</b><br><span style=\"color:var(--muted)\">hourly UWIN-CM wind, interpolated</span>", "<span class=\"flag n\">N</span><b>NO-GO.</b> February is gap-wind season here. The seas exceed the boat's design-category C limit (2.0 m significant wave height) in every run, and the quad's median battery at landing drops to 18 %. The glider, underneath it all, is still GO in 77 min, and both links hold."],
+    ["<b>Either date:</b> the glider deployed 8 km from a boat holding station, 2 km modem", "<span class=\"flag n\">N</span><b>NO-GO</b> on the link: never in range, about 9.4 km apart. The glider also can't cover its 2 km leg in the 1 h given."]
+  ]
+}
