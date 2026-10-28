@@ -9,8 +9,14 @@ roddy = [[b, Y / (q * L ** 2) * 1e3, N / (q * L ** 3) * 1e3]
          for b, (Y, N) in {4.07: (45.43, 429.81), 8.00: (155.58, 737.14), 12.03: (350.65, 977.97)}.items()]
 hl = [r for r in receipts if r["group"] == "Hull lift" and r["claim"].startswith("SUBOFF") and r.get("kind") != "context"
       and "drift" in r["claim"]]
+if not hl:
+    sys.exit('build.py: receipts.json has no SUBOFF drift rows to quote: need receipts with group "Hull lift", a claim starting '
+             '"SUBOFF" and containing "drift", and kind other than "context" (re-run receipts.py with the hull-lift study done)')
 errs = [abs(r["value"] / r["reference"] - 1) * 100 for r in hl]
 before = [abs(r["value"] / r["reference"] - 1) * 100 for r in receipts if "WITHOUT hull lift" in r["claim"]]
+if not before:
+    sys.exit('build.py: receipts.json has no row whose claim contains "WITHOUT hull lift" (the side force before this round); '
+             "re-run receipts.py with the hull-lift study done")
 data = dict(
     receipts=receipts, curve=curve["curve"], cfd_angles=curve["angles"], roddy=roddy, tepex=tepex,
     stats=[["%RECEIPTS%", "validation receipts pass"],
