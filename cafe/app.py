@@ -242,6 +242,13 @@ def _design_dir(did):
     return d
 
 
+def _not_sample(d, what):
+    """Example designs are what the README and every sample mission use, and re-characterizing one is hours of
+    CFD that can end in different numbers: refuse here, not just in the UI."""
+    if (_read(d / "spec.json") or {}).get("sample"):
+        raise HTTPException(400, f"{d.name} is an example design; it can't be {what}. Make your own design instead")
+
+
 @app.get("/api/designs/{did}")
 def get_design(did: str):
     d = _design_dir(did)
@@ -253,6 +260,7 @@ def get_design(did: str):
 @app.delete("/api/designs/{did}")
 def delete_design(did: str):
     d = _design_dir(did)
+    _not_sample(d, "deleted")
     if (_read(d / "status.json") or {}).get("state") == "running":
         raise HTTPException(409, "this design is being characterized right now; wait for it to finish")
     shutil.rmtree(d)
@@ -262,6 +270,7 @@ def delete_design(did: str):
 @app.post("/api/designs/{did}/rerun")
 def rerun_design(did: str):
     d = _design_dir(did)
+    _not_sample(d, "re-run")
     (d / "status.json").write_text(json.dumps(dict(state="queued", step="waiting", progress=0.0, updated=time.time())))
     return _design_summary(d)
 

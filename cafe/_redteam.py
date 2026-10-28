@@ -117,6 +117,29 @@ expect("glider chord longer than half the hull", c.post("/api/designs/shape", js
 expect("cog with text", c.post("/api/designs/shape", json=shape({"cog": ["a", 0, 0]})))
 expect("rotors = 1000", c.post("/api/designs/shape", json=shape({"rotors": 1000})))
 
+# ---- round 4: example designs can't be deleted or re-run. In-process on a scratch folder: the deployed API may
+# still be the old code, where these two calls would delete a real example / start hours of CFD.
+import json as _json, pathlib, tempfile
+from fastapi import HTTPException
+_scratch = pathlib.Path(tempfile.mkdtemp())
+for _n, _sample in (("sample-x", True), ("mine-x", False)):
+    (_scratch / _n).mkdir()
+    (_scratch / _n / "spec.json").write_text(_json.dumps(dict(kind="uav", sample=_sample)))
+    (_scratch / _n / "status.json").write_text(_json.dumps(dict(state="done")))
+_real, A.DESIGNS = A.DESIGNS, _scratch
+try:
+    for _name, _call in (("delete", A.delete_design), ("rerun", A.rerun_design)):
+        try:
+            _call("sample-x")
+            print(f"ACCEPTED (bad!)  {_name} of an example design"); bad += 1
+        except HTTPException as e:
+            print(("rejected" if e.status_code == 400 else "WRONG STATUS"), f"  {_name} of an example design: {e.detail[:90]}"); bad += e.status_code != 400
+    A.rerun_design("mine-x"); A.delete_design("mine-x")
+    print("ok  your own design can still be re-run and deleted" if not (_scratch / "mine-x").exists() else "ACCEPTED (bad!)  own delete failed")
+    bad += (_scratch / "mine-x").exists()
+finally:
+    A.DESIGNS = _real
+
 # ---- round 2: live sessions
 r = c.post("/api/live", json=dict(t0=T0, drones=[quad(), dict(id="b", design="sample-wigley", start=[LA, LO + 0.01, 0])]))
 if r.status_code != 200:
