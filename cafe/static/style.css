@@ -118,6 +118,10 @@ pre.code { font: 12px/1.5 var(--mono); background: var(--panel); border: 1px sol
 .call.good { color: var(--good); } .call.bad { color: var(--flag-red); }
 .verdict .meaning { font: italic 13px var(--serif); color: var(--ink-2); }
 .verdict .why { grid-column: 1 / -1; margin: 4px 0 2px; }
+.verdict .badges { grid-column: 1 / -1; margin: 2px 0; }
+.verdict .fixes, .linkcard .fixes { grid-column: 1 / -1; margin: 4px 0 2px; padding-left: 18px; font-size: 13px; color: var(--ink-2); }
+.fixes .lead { list-style: none; margin-left: -18px; font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: 0.06em; }
+.chip.wrap { display: block; border-radius: 6px; margin: 6px 0; line-height: 1.4; }
 .verdict dl { grid-column: 1 / -1; display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 6px 10px; margin: 4px 0 0; }
 .verdict dt, .fact dt { font-size: 11px; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.06em; }
 .verdict dd { margin: 0; font: 14px var(--mono); }

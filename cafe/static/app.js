@@ -278,17 +278,31 @@ async function pollMission(id) {
       return m;
     }
     if (st.state === "failed") { say(st.error || "The simulation failed.", true); return; }
-    say(`${st.state === "queued" ? "Waiting for the simulator…" : "Simulating…"} ${Math.round((st.progress || 0) * 100)}% of the time budget`);
+    say(st.state === "queued" ? "Waiting for the simulator…" : st.step === "fetching ocean data" ? "Fetching ocean data (currents, waves); falls back to wider uncertainty if the server doesn't answer…"
+      : `Simulating… ${Math.round((st.progress || 0) * 100)}% of the time budget`);
     await new Promise(r => setTimeout(r, 2000));
   }
 }
 
 let current = null;
-function verdictBlock(r, title, sub) {
+function verdictBlock(r, title, sub, badges = []) {
   return el("div", { class: "verdict" }, flagSVG(r.verdict),
     el("div", {}, el("div", { class: "head" }, el("span", { class: "who" }, title), el("span", { class: "call" }, r.verdict)),
       el("div", { class: "meaning" }, `Flag ${FLAGS[r.verdict][0]}: ${FLAGS[r.verdict][1]}`)),
-    el("p", { class: "why" }, sub));
+    badges.length ? el("div", { class: "chips badges" }, ...badges.map(([t, tip]) => el("span", { class: "chip warn", title: tip }, t))) : null,
+    el("p", { class: "why" }, sub),
+    r.advice?.length ? el("ul", { class: "fixes" }, el("li", { class: "lead" }, "What would make it pass:"), ...r.advice.map(a => el("li", {}, a))) : null);
+}
+// what the reader must not take for granted about this result: a stand-in platform, and coefficients that were guessed, not computed
+function badgesFor(design, kind, src) {
+  const out = [];
+  if (design?.sample) out.push(["example design, not your drone", "A stand-in platform (its numbers are not from a real vehicle). Make your own design in the Hangar to test yours."]);
+  for (const k of ["drag", "resistance"]) {
+    const v = src?.[k];
+    if (v && /^estimate/.test(v)) out.push([`${k}: ${v}`, `This ${k} was not computed by CFD (it failed, was skipped, or only covers other directions), so its spread is ±30%.`]);
+  }
+  if (kind === "usv" && !src?.resistance) out.push(["resistance: not computed", "No free-surface CFD for this hull: forward resistance is an estimate."]);
+  return out;
 }
 const pct = r => r.p_interval && r.runs ? `${Math.round(r.p_success * 100)}% of ${r.runs} runs (90% sure the true rate is ${Math.round(r.p_interval[0] * 100)}–${Math.round(r.p_interval[1] * 100)}%)` : `${Math.round(r.p_success * 100)}%`;
 
@@ -304,6 +318,7 @@ function showResult(m) {
     const why = res.fleet.reasons.length ? res.fleet.reasons.slice(0, 3).map(x => `${x.reason} (${Math.round(x.share * 100)}% of runs)`).join("; ") : "Every drone did its job and every range requirement held, in every run.";
     parts.push(el("h3", {}, "Can the fleet do it?"), verdictBlock(res.fleet, "Whole deployment", `${pct(res.fleet)}. ${why}`));
   }
+  for (const w of res.warnings || []) parts.push(el("p", { class: "chip warn wrap" }, w));
   if (res.links?.length) { parts.push(el("h3", {}, "Staying in range")); for (const lk of res.links) parts.push(linkCard(lk)); }
   parts.push(el("h3", {}, "Depth and altitude over time"), profileChart(res, ids, color, kindOf));
   parts.push(el("h3", {}, "Each drone"));
@@ -311,7 +326,8 @@ function showResult(m) {
     const r = res.drones[id];
     const legs = (r.legs || []).map(l => l.type === "goto" ? (l.eta_min_p50 != null ? `arrives in ${fmt(l.eta_min_p50, 0)} min` : "doesn't arrive") : `${l.type} within ${fmt(l.err95_m_p50, 0)} m`).join(" → ");
     const why = r.reasons?.length ? r.reasons.slice(0, 2).map(x => x.reason).join("; ") : "did its job in every run";
-    const card = verdictBlock(r, id, `${pct(r)}. ${why[0].toUpperCase() + why.slice(1)}.`);
+    const design = designs.find(x => x.id === m.mission.drones.find(y => y.id === id)?.design);
+    const card = verdictBlock(r, id, `${pct(r)}. ${why[0].toUpperCase() + why.slice(1)}.`, badgesFor(design, kindOf(id), r.sources));
     card.querySelector(".who").style.color = color(id);
     card.append(el("dl", {},
       el("div", {}, el("dt", {}, "legs"), el("dd", {}, legs || "—")),
@@ -404,7 +420,8 @@ function linkCard(lk) {
     el("p", { class: "hint" }, `In range ${fmt(lk.in_range_p50 * 100, 0)}% of the time in a typical run (worst 10% of runs: ${fmt(lk.in_range_p10 * 100, 0)}%). ` +
       `Longest gap: ${fmt(lk.longest_outage_s_p50, 0)} s typical, ${fmt(lk.longest_outage_s_p90, 0)} s in a bad run.` +
       (lk.never_acquired > 0 ? ` Never got within range in ${fmt(lk.never_acquired * 100, 0)}% of runs.` : "") +
-      ` Line: the nominal run. Shaded: the middle 80% of runs. Red zone: too far apart.`));
+      ` Line: the nominal run. Shaded: the middle 80% of runs. Red zone: too far apart.`),
+    lk.advice?.length ? el("ul", { class: "fixes" }, el("li", { class: "lead" }, "What would make it pass:"), ...lk.advice.map(a => el("li", {}, a))) : null);
 }
 function profileChart(res, ids, color, kindOf) {
   const W = 380, H = 160;

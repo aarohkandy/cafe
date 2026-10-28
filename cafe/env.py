@@ -189,7 +189,7 @@ class Env:
                     self.has_current = True
                     self.sources["current"] = "HYCOM GOFS 3.1 ocean analysis (3-D, 1/12 deg, 3-hourly)"
                 except Exception as e:
-                    self.sources["current"] += f" (HYCOM unavailable: {type(e).__name__})"
+                    self.sources["current"] += f" (HYCOM unavailable: {type(e).__name__}: {str(e)[:90]})"
             if not self.has_waves:
                 try:
                     w = ocean.waves(t0, hours, lat_r, lon_r)
@@ -209,6 +209,13 @@ class Env:
                                               bounds_error=False, fill_value=None) for k, v in data.items()}
         self._land = RegularGridInterpolator((self.lat, self.lon), self.land.astype(float), method="nearest",
                                              bounds_error=False, fill_value=1.0)
+
+    def wind_lag_h(self, t_s):
+        """Hours from t_s (seconds after self.t0) to the nearest real weather: 0 for hourly data, the distance to
+        the one snapshot when it is held constant (mission.py widens the wind error with this)."""
+        if not self.frozen:
+            return np.zeros(np.shape(t_s))
+        return np.abs(np.asarray(t_s, float) - (self.data_time - self.t0).total_seconds()) / 3600
 
     def surface(self, lat, lon, t_s):
         """Raw fields at points; t_s = seconds after t0. Vectorized over points. Points that drift past the

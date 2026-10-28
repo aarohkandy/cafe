@@ -25,8 +25,18 @@ TICK = 0.02
 # Monte Carlo spreads (1 sigma). Weather-model errors are generic reanalysis-scale assumptions, stated in the UI.
 # When the weather files carry no ocean currents, a random current with current_unknown sigma per component is
 # drawn instead of assuming slack water (tropical surface currents are routinely several tenths of a m/s).
-SIG = dict(wind=1.5, current=0.10, current_unknown=0.25, t_jitter_h=0.5, thrust=0.07, battery=0.03, drag_cfd=0.10, drag_est=0.30)
+# wind: 1.5 m/s per component is the model error of hourly weather. A frozen snapshot adds to it the change of the real
+# wind since the snapshot: wind_per_h m/s per hour of distance from it, saturating at wind_cap (further out the
+# snapshot is no better than climatology). 0.6 m/s/h: Tehuantepec gap winds go from calm to 15+ m/s in 6-12 h, and
+# 6 h persistence errors of 10 m wind are typically 2-4 m/s per component. ponytail: a guessed linear-then-flat
+# growth; a hindcast of the real events at this site replaces it.
+SIG = dict(wind=1.5, wind_per_h=0.6, wind_cap=4.0, current=0.10, current_unknown=0.25, t_jitter_h=0.5, thrust=0.07, battery=0.03, drag_cfd=0.10, drag_est=0.30)
 SEA_LIMIT_HS = dict(D=0.3, C=2.0, B=4.0, A=99.0)   # EU RCD 2013/53/EU design categories
+
+
+def wind_sigma(lag_h):
+    """Per-component wind sigma (m/s) at lag_h hours from the nearest real snapshot (0 for hourly weather)."""
+    return np.hypot(SIG["wind"], np.minimum(SIG["wind_per_h"] * np.asarray(lag_h, float), SIG["wind_cap"]))
 
 
 class Frame:
@@ -102,7 +112,7 @@ class Drone:
         self.err = [[] for _ in self.legs]       # per leg: (B,) errors at 1 Hz during hold/follow
         self.arrive = np.full((len(self.legs), B), np.nan)
         self.fail = np.full(B, "", dtype=object)
-        self.max_depth = np.zeros(B); self.max_roll = np.zeros(B); self.sat = np.zeros(B)
+        self.max_depth = np.zeros(B); self.max_roll = np.zeros(B); self.sat = np.zeros(B); self.cur_max = np.zeros(B)
         self.track = []
         fmin = ctrl.fin_min_speed(v)
         self.loiter_r = 0.0
@@ -161,16 +171,27 @@ class World:
         lead = (t0 - self.E.t0).total_seconds()        # Env starts on the hour; keep the mission's minutes
         E = self.E
         self.jitter = np.clip(np.r_[0, rng.normal(0, SIG["t_jitter_h"] * 3600, B - 1)] + lead, 0, None)
-        self.bias_w = np.r_[[[0, 0]], rng.normal(0, SIG["wind"], (B - 1, 2))]
+        self.z_w = np.r_[[[0, 0]], rng.normal(0, 1, (B - 1, 2))]      # standard-normal wind error draw; scaled by wind_sigma(lag)
+        self.warnings = []
+        if E.frozen:
+            lag = E.wind_lag_h(np.array([lead, lead + self.max_s]))
+            s0, s1 = (float(wind_sigma(x)) for x in (lag.min(), lag.max()))
+            self.warnings.append(f"wind is one snapshot ({E.data_time:%Y-%m-%d %H:%M} UTC) held fixed, so the wind error is widened with time "
+                                 f"from it: ±{s0:.1f} m/s per component at mission start ({lag.min():.1f} h from it) and ±{s1:.1f} m/s at the end "
+                                 f"({lag.max():.1f} h); assumed {SIG['wind_per_h']} m/s per hour, saturating at {SIG['wind_cap']} m/s")
         self.bias_c = np.r_[[[0, 0]], rng.normal(0, SIG["current"] if E.has_current else SIG["current_unknown"], (B - 1, 2))]
+        if not E.has_current:
+            self.warnings.append(f"no ocean current data ({E.sources['current']}): each run draws a random current of "
+                                 f"±{SIG['current_unknown']} m/s per component, so a GO here only holds if the real current is that weak")
         self.gusts = {s["id"]: envm.Gusts(int(rng.integers(1 << 30)), B) for s in specs}   # one process per drone
         # sea state per drone per sample, from the local wind (or wave model) at launch
         for d in drones:
             e = self.sample_env(d, 0.0)
-            e2 = dict(e, u10=np.hypot(*(e["wind10_ne"] + self.bias_w).T))
+            bw = self.wind_bias(0.0)
+            e2 = dict(e, u10=np.hypot(*(e["wind10_ne"] + bw).T))
             hs, tp = envm.sea_state(e2)
             heading = (e["wave_to"] if e.get("wave_to") is not None else
-                       np.arctan2(e["wind10_ne"][:, 1] + self.bias_w[:, 1], e["wind10_ne"][:, 0] + self.bias_w[:, 0]))
+                       np.arctan2(e["wind10_ne"][:, 1] + bw[:, 1], e["wind10_ne"][:, 0] + bw[:, 0]))
             d.waves = envm.Waves.stack([envm.Waves(hs[b], tp[b], heading[b], n=24, seed=int(rng.integers(1 << 30))) for b in range(B)])
             d.hs = hs
             if np.any(e["land"]):
@@ -185,11 +206,15 @@ class World:
         self.links = [Link(l, self.by_id, B) for l in mission.get("links", [])]
         self.t, self.next_rec = 0.0, 0.0
 
+    def wind_bias(self, t):
+        """(B, 2) wind error at mission time t: each run's fixed draw times the sigma at its distance from the real weather."""
+        return self.z_w * wind_sigma(self.E.wind_lag_h(np.clip(t + self.jitter, 0, None)))[:, None]
+
     def sample_env(self, d, t):
         lat, lon = self.frame.to_ll(d.st.p[:, 0], d.st.p[:, 1])
         z_up = -d.st.p[:, 2]
         e = self.E.at(lat, lon, np.clip(t + self.jitter, 0, None), z_up)
-        e["wind_ne"] = e["wind_ne"] + self.bias_w * (e["wind_ne"].shape[0] > 0)
+        e["wind_ne"] = e["wind_ne"] + self.wind_bias(t) * (e["wind_ne"].shape[0] > 0)
         e["current_ne"] = e["current_ne"] + self.bias_c * np.exp(-np.maximum(-z_up, 0) / envm.CURRENT_EFOLD_M)[:, None]
         return e
 
@@ -204,6 +229,7 @@ class World:
                 continue
             if t - d.env_t >= 1.0:
                 d.env, d.env_t = self.sample_env(d, t), t
+                d.cur_max = np.maximum(d.cur_max, np.hypot(*d.env["current_ne"].T))
             e = d.env
             k = d.veh.kind
             for _ in range(d.n_sub):
@@ -259,12 +285,16 @@ class World:
         out = dict(t_sim=self.t, wall_s=time.time() - self.t_wall, samples=self.B, env=self.E.sources, env_frozen=self.E.frozen,
                    drones={d.id: _summary(d, self.mission, self.t) for d in self.drones})
         out["links"] = [lk.summary() for lk in self.links]
+        out["warnings"] = self.warnings
         out["fleet"] = _fleet(out, self.drones, self.links, self.mission)
         return out
 
 
-def run(mission, B=None, progress=None):
+def run(mission, B=None, progress=None, stage=None):
+    stage = stage or (lambda s: None)
+    stage("fetching ocean data")          # World() builds the Env, which downloads HYCOM / WW3 on first use of a box
     w = World(mission, B)
+    stage("simulating")
     while not w.finished:
         w.tick()
         if progress and abs(w.t - round(w.t)) < TICK / 2 and int(round(w.t)) % 60 == 0:
@@ -316,6 +346,26 @@ class Link:
 
 
 
+    def advice(self, ok, frac, D):
+        """Margin and change for a failing requirement: closest approach if it never met, else minutes out of range and peak separation."""
+        mc = slice(1, None) if self.B > 1 else slice(None)
+        if ok[mc].all() or not len(D):
+            return []
+        never = np.isnan(self.acquired)[mc]
+        p90 = lambda a: float(np.percentile(a[mc], 90))
+        out = []
+        if never.any():
+            closest = D.min(0)[mc]
+            out.append(f"never within {self.max_m:.0f} m in {never.mean():.0%} of runs; closest approach {np.median(closest[never]):.0f} m "
+                       f"(worst runs {np.percentile(closest, 90):.0f} m): needs a range of at least {np.percentile(closest, 90):.0f} m, or start the pair closer")
+        if (~never & ~ok[mc]).any():
+            late = (~never & ~ok[mc])
+            gone = ((self.n_eval - self.n_in) / 60)[mc]
+            out.append(f"in range {np.median(frac[mc][late]):.0%} of the time vs {self.need:.0%} needed: {np.median(gone[late]):.1f} min out of range "
+                       f"(longest gap {p90(self.longest) / 60:.1f} min); peak separation {p90(self.max_sep):.0f} m vs {self.max_m:.0f} m, "
+                       f"so a range of at least {p90(self.max_sep):.0f} m would hold it, or keep the pair closer")
+        return out
+
     def summary(self):
         ok, frac = self.success()
         D = np.array(self.d) if self.d else np.zeros((0, self.B))
@@ -325,7 +375,7 @@ class Link:
         return dict(a=self.a.id, b=self.b.id, max_m=self.max_m, need=self.need,
                     mode="horizontal" if self.horizontal else "3d", from_min=self.from_s / 60,
                     until_min=None if np.isinf(self.until_s) else self.until_s / 60,
-                    verdict=_verdict(p, lo), p_success=p, p_interval=[lo, hi], nominal_ok=bool(ok[0]),
+                    verdict=_verdict(p, lo), p_success=p, p_interval=[lo, hi], nominal_ok=bool(ok[0]), advice=self.advice(ok, frac, D),
                     in_range_p50=float(np.median(frac[mc])), in_range_p10=float(np.percentile(frac[mc], 10)),
                     longest_outage_s_p50=float(np.median(self.longest[mc])), longest_outage_s_p90=float(np.percentile(self.longest[mc], 90)),
                     max_sep_m_p50=float(np.median(self.max_sep[mc])), never_acquired=float(np.isnan(self.acquired[mc]).mean()),
@@ -493,6 +543,36 @@ def _limits(d):
     first(st.energy_wh >= v.battery_wh * d.dyn.battery_scale, "battery empty")
 
 
+def _advice(d, why, cap, reserve, mission):
+    """What would have to change for each way this drone failed, from the runs that failed. Margins are the 90th
+    percentile over all runs (not the median), so the change holds for 9 runs in 10."""
+    v, out = d.veh, []
+    mc = slice(1, None) if len(why) > 1 else slice(None)
+    has = lambda text: any(text in x for x in why[mc])
+    p90 = lambda a: float(np.percentile(np.asarray(a)[mc], 90))
+    if has("battery"):
+        more = max(p90(d.st.energy_wh + reserve * cap - cap), 0.0)      # Wh short of finishing with the reserve in hand
+        out.append(f"battery: needs about {more:.3g} Wh more ({more / v.battery_wh:.0%} on top of {v.battery_wh:.0f} Wh) to finish 9 runs in 10 with "
+                   f"{reserve:.0%} left" + (" (at least: runs that went flat stopped drawing)" if has("battery empty") else "") +
+                   f"; or shorten the legs / cut the {v.hotel_w:g} W electronics load")
+    if has("design category"):
+        cat, hs = v.limits.get("design_category", "C"), p90(d.hs)
+        better = next((c for c, lim in SEA_LIMIT_HS.items() if lim >= hs), "A")
+        out.append(f"sea state: Hs reaches {hs:.1f} m (1 run in 10 is worse) vs the category {cat} limit of {SEA_LIMIT_HS[cat]:g} m; "
+                   f"a category {better} hull (up to {SEA_LIMIT_HS[better]:g} m) or a calmer day would pass")
+    if has("rated depth") or has("collapse"):
+        rated, deep = v.limits.get("rated_depth_m"), p90(d.max_depth)
+        out.append(f"depth: reached {deep:.0f} m vs rated {rated:.0f} m; keep the depths (and a glider's dive band) above {rated:.0f} m, "
+                   f"or a thicker wall / stronger material rated to at least {deep:.0f} m")
+    if has("ran out of time"):
+        cur, top = p90(d.cur_max), float(d.ap.v_max)
+        out.append(f"time: not finished in {mission.get('max_hours', 6):g} h; cruise {d.ap.v_cruise[0]:.2f} m/s, top speed {top:.2f} m/s, "
+                   f"strongest current {cur:.2f} m/s ({cur / max(top, 1e-6):.0%} of top speed)" +
+                   ("; the current is stronger than it can swim against: change the route, the hour, or use a faster vehicle" if cur >= top
+                    else "; allow more time or a faster vehicle"))
+    return out
+
+
 def _summary(d, mission, t_end):
     v, B = d.veh, d.st.p.shape[0]
     reserve = mission.get("reserve", 0.15)
@@ -543,6 +623,7 @@ def _summary(d, mission, t_end):
         verdict=verdict, p_success=p, p_interval=[lo_ci, hi_ci], runs=n, nominal_ok=bool(success[0]),
         nominal_reason=str(why[0]),
         reasons=[dict(reason=str(reasons[i]), share=float(counts[i] / n)) for i in order],
+        advice=_advice(d, why, cap, reserve, mission),
         legs=legs, battery_left_p50=float(np.median(left)), battery_left_p10=float(np.percentile(left, 10)),
         energy_wh_p50=float(np.median(d.st.energy_wh)), max_depth_m=float(np.max(d.max_depth)) if v.kind == "uuv" else None,
         max_roll_deg_p50=float(np.median(d.max_roll)), hs_p50=float(np.median(d.hs)),
@@ -562,8 +643,8 @@ if __name__ == "__main__":
         designs = d.parent.parent / "designs"
         for x in m["drones"]:
             x["vehicle"] = hangar.load_vehicle(designs / x["design"])
-        status(state="running", progress=0.0, step="simulating")
-        r = run(m, progress=lambda f: status(state="running", progress=round(f, 3), step="simulating"))
+        r = run(m, progress=lambda f: status(state="running", progress=round(f, 3), step="simulating"),
+                stage=lambda s: status(state="running", progress=0.0, step=s))
         for x in m["drones"]:
             x.pop("vehicle")
         (d / "result.json").write_text(json.dumps(r, default=hangar._j))

@@ -321,6 +321,7 @@ def run(d):
     frame = Frame(drones[0]["start"][0], drones[0]["start"][1])
     lats = [x["start"][0] for x in drones] + [l["to"][0] for x in drones for l in x["legs"] if l["type"] == "goto" and l["to"] != "start"]
     lons = [x["start"][1] for x in drones] + [l["to"][1] for x in drones for l in x["legs"] if l["type"] == "goto" and l["to"] != "start"]
+    status(state="running", step="fetching ocean data", progress=0.0)
     E = envm.Env(t0, max_s / 3600 + 1, (min(lats) - 0.2, max(lats) + 0.2), (min(lons) - 0.2, max(lons) + 0.2))
     sims, procs, runners = {}, [], []
     try:
