@@ -7,7 +7,7 @@
 Each request is cut to the box/time window, fetched once and cached under /work/ocean, so a mission or
 reachability map re-run costs nothing. If a server is down the caller falls back to labelled estimates.
 """
-import datetime as dt, hashlib, json, os, pathlib, urllib.error, urllib.parse, urllib.request
+import datetime as dt, hashlib, json, os, pathlib, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 import numpy as np
 
 CACHE = pathlib.Path(os.environ.get("CAFE_WORK", "/work")) / "ocean"
@@ -16,6 +16,14 @@ HYCOM = ("https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z",     # sa
 WW3 = "https://coastwatch.pfeg.noaa.gov/erddap/griddap/NWW3_Global_Best"
 WW3_180 = "https://pae-paha.pacioos.hawaii.edu/erddap/griddap/ww3_global_lon180"
 EPOCH = dt.datetime(2000, 1, 1)
+# tds.hycom.org can accept the connection and then never answer (2026-10: a 134 KB time axis returned 0 bytes in
+# 120 s), and netCDF4/libcurl have no timeout. So every HYCOM read runs in a child process we can kill. The axes
+# (time, lat, lon, depth: small) get a short deadline and are cached forever (expt_93.0 is a closed experiment);
+# the box/time slice gets a long one (a 48 h box can take minutes). After a failure HYCOM is not
+# retried for DOWN_S, so a dead server costs one deadline per few minutes, not one per mission.
+HYCOM_AXES_S = float(os.environ.get("CAFE_HYCOM_AXES_S", 90))
+HYCOM_SLICE_S = float(os.environ.get("CAFE_HYCOM_SLICE_S", 300))
+DOWN_S = 600
 
 
 def _key(*a):
@@ -31,27 +39,38 @@ def currents(t0, hours, lat_range, lon_range, max_depth=250.0):
     if f.exists():
         z = np.load(f)
         return {k: z[k] for k in z.files}
-    import netCDF4
+    down = CACHE / "hycom_down"
+    if down.exists() and time.time() - down.stat().st_mtime < DOWN_S:
+        raise TimeoutError(f"HYCOM did not answer {time.time() - down.stat().st_mtime:.0f} s ago; not retrying for {DOWN_S} s")
     want0 = (t0 - EPOCH).total_seconds() / 3600 - 3
     want1 = want0 + hours + 6
-    spans = []
-    for url in HYCOM:
-        ds = netCDF4.Dataset(url)
-        th = ds["time"][:]                               # hours since 2000-01-01
-        k = np.where((th >= want0) & (th <= want1))[0]
-        if len(k):
-            break
-        spans.append(f"{EPOCH + dt.timedelta(hours=float(th[0])):%Y-%m-%d} to {EPOCH + dt.timedelta(hours=float(th[-1])):%Y-%m-%d}")
-    else:
-        raise ValueError(f"HYCOM has no data for {t0:%Y-%m-%d} (covers {', '.join(spans)})")
-    lat, lon, dep = ds["lat"][:], ds["lon"][:], ds["depth"][:]
-    j = np.where((lat >= min(lat_range) - 0.1) & (lat <= max(lat_range) + 0.1))[0]
-    i = np.where((lon >= lo0 - 0.1) & (lon <= lo1 + 0.1))[0]
-    d = np.where(dep <= max_depth)[0]
-    d = np.r_[d, d[-1] + 1] if d[-1] + 1 < len(dep) else d
-    sl = (slice(k[0], k[-1] + 1), slice(d[0], d[-1] + 1), slice(j[0], j[-1] + 1), slice(i[0], i[-1] + 1))
-    u = np.ma.filled(ds["water_u"][sl].astype(float), np.nan)
-    v = np.ma.filled(ds["water_v"][sl].astype(float), np.nan)
+    try:
+        spans = []
+        for url in HYCOM:
+            ax = _axes(url)
+            th = ax["time"]                                  # hours since 2000-01-01
+            k = np.where((th >= want0) & (th <= want1))[0]
+            if len(k):
+                break
+            spans.append(f"{EPOCH + dt.timedelta(hours=float(th[0])):%Y-%m-%d} to {EPOCH + dt.timedelta(hours=float(th[-1])):%Y-%m-%d}")
+        else:
+            raise ValueError(f"HYCOM has no data for {t0:%Y-%m-%d} (covers {', '.join(spans)})")
+        lat, lon, dep = ax["lat"], ax["lon"], ax["depth"]
+        j = np.where((lat >= min(lat_range) - 0.1) & (lat <= max(lat_range) + 0.1))[0]
+        i = np.where((lon >= lo0 - 0.1) & (lon <= lo1 + 0.1))[0]
+        d = np.where(dep <= max_depth)[0]
+        d = np.r_[d, d[-1] + 1] if d[-1] + 1 < len(dep) else d
+        sl = [int(x) for x in (k[0], k[-1] + 1, d[0], d[-1] + 1, j[0], j[-1] + 1, i[0], i[-1] + 1)]
+        tmp = f.with_name(f"{f.stem}.{os.getpid()}.part.npz")      # per process: two missions may fetch the same box
+        _child("_slice", url, json.dumps(sl), tmp, deadline=HYCOM_SLICE_S)
+        z = np.load(tmp)
+        u, v = z["u"], z["v"]
+        tmp.unlink()
+    except (TimeoutError, RuntimeError):
+        CACHE.mkdir(parents=True, exist_ok=True)
+        down.touch()
+        raise
+    down.unlink(missing_ok=True)
     depth = np.asarray(dep[d], float)
     # seafloor: first depth level that is missing everywhere in time
     wet = ~np.isnan(u).all(0)                               # [depth, lat, lon]
@@ -61,6 +80,44 @@ def currents(t0, hours, lat_range, lon_range, max_depth=250.0):
     CACHE.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(f, **out)
     return out
+
+
+def _child(*args, deadline):
+    """Run `python -m cafe.ocean <args>` and kill it after `deadline` s: a hung OPeNDAP read can't be interrupted
+    from inside the process, but a child can be killed. Raises TimeoutError (deadline) or RuntimeError (it failed)."""
+    try:
+        r = subprocess.run([sys.executable, "-m", "cafe.ocean", *map(str, args)], capture_output=True, text=True, timeout=deadline,
+                           cwd=pathlib.Path(__file__).parent.parent)
+    except subprocess.TimeoutExpired:
+        raise TimeoutError(f"HYCOM gave no answer within {deadline:.0f} s")
+    if r.returncode:
+        raise RuntimeError("HYCOM read failed: " + (r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1][:200])
+
+
+def _axes(url):
+    """time/lat/lon/depth of one HYCOM experiment, read once (under HYCOM_AXES_S) and cached on disk."""
+    f = CACHE / f"hycom_axes_{_key(url)}.npz"
+    if not f.exists():
+        CACHE.mkdir(parents=True, exist_ok=True)
+        _child("_axes", url, f, deadline=HYCOM_AXES_S)
+    z = np.load(f)
+    return {k: z[k] for k in z.files}
+
+
+def _child_axes(url, out):
+    import netCDF4
+    ds = netCDF4.Dataset(url)
+    tmp = pathlib.Path(f"{out}.{os.getpid()}.part.npz")
+    np.savez(tmp, **{k: np.asarray(ds[k][:], float) for k in ("time", "lat", "lon", "depth")})
+    os.replace(tmp, out)
+
+
+def _child_slice(url, sl, out):
+    import netCDF4
+    k0, k1, d0, d1, j0, j1, i0, i1 = json.loads(sl)
+    ds = netCDF4.Dataset(url)
+    s = (slice(k0, k1), slice(d0, d1), slice(j0, j1), slice(i0, i1))
+    np.savez(out, **{n: np.ma.filled(ds[f"water_{n}"][s].astype(float), np.nan) for n in ("u", "v")})
 
 
 def _get(url):
@@ -122,7 +179,30 @@ def waves(t0, hours, lat_range, lon_range):
     return out
 
 
-if __name__ == "__main__":
+def _deadline_check():
+    """The deadline must fire on a server that accepts the connection and never answers (what tds.hycom.org did)."""
+    import socket, threading
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(5)
+    held = []
+    threading.Thread(target=lambda: [held.append(srv.accept()) for _ in range(9)], daemon=True).start()
+    global HYCOM_AXES_S
+    HYCOM_AXES_S, t = 4.0, time.time()
+    try:
+        _axes(f"http://127.0.0.1:{srv.getsockname()[1]}/thredds/dodsC/blackhole")
+    except TimeoutError as e:
+        assert 3.5 < time.time() - t < 8, time.time() - t
+        print("deadline ok:", e, f"({time.time() - t:.1f} s)")
+        return
+    raise AssertionError("a server that never answers did not hit the deadline")
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["_axes"]:
+    _child_axes(*sys.argv[2:])
+elif __name__ == "__main__" and sys.argv[1:2] == ["_slice"]:
+    _child_slice(*sys.argv[2:])
+elif __name__ == "__main__" and sys.argv[1:2] == ["deadline"]:
+    _deadline_check()          # ./run.sh python -m cafe.ocean deadline
+elif __name__ == "__main__":
     t0 = dt.datetime(2023, 3, 7, 17)
     c = currents(t0, 6, (9.5, 10.5), (-95.5, -94.5))
     print("HYCOM", c["u"].shape, "depths", c["depth"][:6], "...", c["depth"][-1], "surface u mean", np.nanmean(c["u"][:, 0]))
