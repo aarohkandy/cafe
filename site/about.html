@@ -33,8 +33,17 @@
 
   <section class="prose">
     <h2>The chart and the full simulator</h2>
-    <p>The chart page runs a quick check in your browser: each vehicle moves at the speed its CFD-derived power curve allows, is carried by the real current or wind, and spends its battery accordingly, under the same failure rules and verdict thresholds as the full simulator.</p>
-    <p>The full simulator, on the lab server, adds six-degree-of-freedom motion, waves acting on each hull and real autopilots. On the example plan both give the same verdict on both dates: <span id="agree"></span></p>
+    <p>The chart page runs a quick check in your browser: each vehicle moves at the speed its CFD-derived power curve allows, is carried by the real current or wind, and spends its battery accordingly, under the same failure rules and the same GO / MARGINAL / NO-GO thresholds as the full simulator. The three vehicles are example designs, not a real fleet.</p>
+    <p>The full simulator, on the lab server, adds six-degree-of-freedom motion, waves acting on each hull and real autopilots. Here is the example plan run both ways, computed when this page loaded:</p>
+    <div id="agree"></div>
+    <h3>What the quick check simplifies</h3>
+    <ul class="notes">
+      <li><b>Fixed two-hour mission.</b> Every run is two hours long, whatever you change on the chart.</li>
+      <li><b>Fewer, different runs.</b> The browser counts 23 varied runs per verdict (a 24th, plain run is drawn but not counted); the full simulator counted 15. The thresholds are the same (GO needs 90 % of runs and a 90 % Wilson lower bound of 0.75), but with different run counts and different input spreads (for example the current error is 0.05 m/s here and 0.10 m/s there) the same plan can land on the other side of a line.</li>
+      <li><b>No waves on the hull.</b> The browser knows the wave height (it fails the boat above its design limit) but not what waves do to its power, so it reports far more battery left on the boat than the full simulator does.</li>
+      <li><b>Weather edges.</b> Weather outside the wind grid (7.07 to 17.76° N, 100.98 to 88.27° W) is not extrapolated: the nearest edge value is used. The current and wave grids are a little different in extent and are held at their edges the same way.</li>
+      <li><b>Coarse seafloor.</b> Land and depth come from a 4-minute (about 7 km) grid, so shores and shoals are approximate.</li>
+    </ul>
   </section>
 
   <section class="prose">
@@ -49,11 +58,37 @@
 
 <script type="module">
   import { initProof } from "./js/proof.js";
-  const get = n => fetch(`data/${n}.json`).then(r => r.json());
+  import { Env } from "./js/env.js";
+  import { simulate } from "./js/sim.js";
+  import { defaultPlan, DATES, NAMES } from "./js/plan.js";
+  const get = n => fetch(`data/${n}.json`).then(r => { if (!r.ok) throw new Error(`data/${n}.json ${r.status}`); return r.json(); });
   const [receipts, full] = await Promise.all([get("receipts"), get("fullsim")]);
   initProof(receipts);
-  const v = k => full[k].fleet.verdict.toLowerCase();
-  document.getElementById("agree").textContent = `${v("chain2023")} on 7 March 2023, ${v("chain2018")} on 3 February 2018.`;
+
+  const box = document.getElementById("agree");
+  const line = text => { const p = document.createElement("p"); p.textContent = text; box.append(p); };
+  try {
+    const [wind, depth, V] = await Promise.all([get("wind"), get("depth"), get("vehicles")]);
+    const ocean = await get("ocean").catch(() => null);
+    const pairs = [["2023", "chain2023"], ["2018", "chain2018"]];
+    const names = { glider: "petrel", boat: "tern", drone: "gnat" };
+    for (const [date, key] of pairs) {
+      const label = DATES[date].label, ref = full[key], plan = defaultPlan(date);
+      const env = new Env({ wind, ocean, depth }, date, plan.start);
+      if (env.noOcean) { line(`${label}: no comparison shown, because the browser has no currents or waves for this date${ocean ? ` (it has them for ${Object.keys(ocean).map(k => DATES[k].label).join(" and ")})` : " (data/ocean.json did not load)"}.`); continue; }
+      const r = simulate(plan, env, V);
+      const pairsOf = [["Fleet", r.fleet.verdict, ref.fleet.verdict],
+        ...Object.entries(names).map(([id, n]) => [NAMES[id], r.vehicles[id].verdict, ref.drones[n].verdict]),
+        ...r.links.map((l, i) => [`${NAMES[l.a]} and ${NAMES[l.b]} range`, l.verdict, ref.links[i].verdict])];
+      const same = pairsOf.filter(([, a, b]) => a === b).length;
+      const diff = pairsOf.filter(([, a, b]) => a !== b).map(([n, a, b]) => `${n} ${a.toLowerCase()} here but ${b.toLowerCase()} there`);
+      line(`${label}: fleet verdict ${r.fleet.verdict.toLowerCase()} in the browser (${r.runs - 1} runs), ${ref.fleet.verdict.toLowerCase()} in the full simulator (${ref.fleet.runs} runs, mission ${ref.mission}). ` +
+        `${same} of ${pairsOf.length} verdicts match${diff.length ? "; the ones that differ: " + diff.join(", ") : ""}.`);
+    }
+  } catch (e) {
+    line("The comparison could not be computed here: " + e.message);
+  }
 </script>
+
 </body>
 </html>
