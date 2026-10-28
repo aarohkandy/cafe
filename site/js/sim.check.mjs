@@ -23,7 +23,7 @@ for (const [date, key] of [["2023", "chain2023"], ["2018", "chain2018"]]) {
   const plan = defaultPlan(date), env = new Env({ wind, ocean, depth }, date, plan.start);
   const r = simulate(plan, env, V);
   const full = missions[key];
-  console.log(`\n${date}: ${r.runs} runs in ${r.ms.toFixed(0)} ms`);
+  console.log(`\n${date}: browser ${r.runs - 1} counted runs in ${r.ms.toFixed(0)} ms; full simulator mission ${full.mission}, ${full.fleet.runs} runs`);
   const map = { glider: "petrel", boat: "tern", drone: "gnat" };
   for (const id of Object.keys(map)) check(`${id} verdict`, r.vehicles[id].verdict, full.drones[map[id]].verdict);
   check("fleet verdict", r.fleet.verdict, full.fleet.verdict);
@@ -32,4 +32,5 @@ for (const [date, key] of [["2023", "chain2023"], ["2018", "chain2018"]]) {
   check("boat battery left (median)", r.vehicles.boat.left50, full.drones.tern.battery_p50, 0.08);
   r.links.forEach((l, i) => check(`link ${l.a}-${l.b} verdict`, l.verdict, full.links[i].verdict));
 }
+console.log(bad ? `\n${bad} disagreement(s) with the full simulator` : "\nall agree");
 process.exit(bad ? 1 : 0);

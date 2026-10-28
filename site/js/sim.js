@@ -72,13 +72,16 @@ function runOnce(plan, env, V, seed, record) {
       const c = [(cs[0][0] + cs[1][0] + cs[2][0]) / 3, (cs[0][1] + cs[1][1] + cs[2][1]) / 3];
       const dn = plan.glider.goal[0] - G.n, de = plan.glider.goal[1] - G.e, d = norm(dn, de);
       if (!G.done && d < 50) { G.done = true; G.arrive = t; }
-      const vw = G.done ? 0 : gl.glide_speed * spd;
-      const vn = vw * dn / (d || 1), ve = vw * de / (d || 1);
-      G.vel = [vn + c[1], ve + c[0]];
+      // like the full simulator's ground-frame velocity command: ask for the top speed over the ground toward the goal,
+      // subtract the current, and saturate at the through-water glide speed (so it crabs against a cross current)
+      const [wn, we] = G.done ? [0, 0] : clampVec(gl.vmax * dn / (d || 1) - c[1], gl.vmax * de / (d || 1) - c[0], gl.glide_speed * spd);
+      G.vel = [wn + c[1], we + c[0]];
       G.n += G.vel[0] * DT; G.e += G.vel[1] * DT;
-      if (vw) G.hdg = Math.atan2(ve, vn);
+      if (wn || we) G.hdg = Math.atan2(we, wn);
       G.wh += gl.hotel_w * DT / 3600;
       if (plan.glider.band[1] > gl.rated_depth) G.why = `went below rated depth (${Math.round(gl.rated_depth)} m)`;
+      const floor = env.seaDepthAt(...loc.toLL(G.n, G.e));            // NaN off the depth grid: no check
+      if (nd > floor - 2) G.why = `hit the seafloor (about ${Math.max(0, Math.round(floor))} m deep here)`;   // full simulator's rule and words
       if (G.wh >= batt.glider) G.why = "battery empty";
     }
 
@@ -102,6 +105,7 @@ function runOnce(plan, env, V, seed, record) {
       B.wh += (interp(bt.power, vw) * pwr + extra) * DT / 3600;
       B.hsMax = Math.max(B.hsMax, env.hsAt(...loc.toLL(B.n, B.e), t) * hsScale);
       if (B.wh >= batt.boat) B.why = "battery empty";
+      if (env.seaDepthAt(...loc.toLL(B.n, B.e)) <= 0) B.why = "ran aground (reached land)";
     }
 
     // ---- drone: holds station above the boat for its minutes, then flies home and lands; wind is what it fights
