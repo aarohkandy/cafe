@@ -45,8 +45,11 @@ Each design is characterized once, and every plan reuses the result:
 
 - A verdict for each drone and each range requirement, as a Wilson interval over Monte Carlo runs that
   vary weather error, CFD uncertainty, propulsion and battery spread. Shown as signal flags:
-  **C** GO (≥ 90 %), **U** MARGINAL, **N** NO-GO. Every failure comes with its reason: battery empty,
-  out of range for 14 min, below rated depth, hit the seafloor, ran aground, capsized, current too strong.
+  **C** GO (≥ 90 %), **U** MARGINAL, **N** NO-GO. Every failure comes with its reason (battery empty,
+  out of range for 14 min, below rated depth, hit the seafloor, ran aground, capsized, ran out of time) and,
+  where it can be computed, the change that would pass: Wh short for the battery, Hs against the design-category
+  limit, peak separation and minutes out of range for a range requirement, depth against rated depth, the current
+  against top speed. Cards say when the design is an example (`sample`) or a drag/resistance is an estimate.
 - **Reach maps**: where a drone can get to from a point in the hours you give it, or get to and back.
   Built on Zermelo navigation over the real current or wind field. A glider sees the current averaged
   over its dive band.
@@ -61,7 +64,18 @@ On 2023-03-07 17:00 UTC at 10° N, 95° W, using WRF wind, HYCOM currents and WA
 | Petrel glider surveys 2 km north at 5–100 m; Tern boat stays over it (1 km modem); Gnat quad relays 30 m above the boat for 20 min, then flies home (300 m radio) | Both range requirements **GO** (the pairs peak at 222 m and 55 m apart). Glider GO (79 min); boat GO (within 11 m of the glider). Quad **MARGINAL**: it lands with 22 % battery and runs flat in 1 of 15 runs, so shorten its stint or carry more battery. |
 | Same glider deployed 8 km from a boat holding station, 2 km modem | Link **NO-GO**: never in range, 9.4 km apart. The glider also can't cover its 2 km in the 1 h given (0.33 m/s). |
 
-These are the example platforms. Swap in the real designs when their numbers arrive.
+These are the example platforms. Swap in the real designs when their numbers arrive. Their design ids (what
+`design` takes in a mission or live session):
+
+| Id | Name | What |
+|---|---|---|
+| `sample-petrel` | Petrel | buoyancy glider (Slocum class) |
+| `sample-tern` | Tern | 2.5 m electric workboat |
+| `sample-quad` | Gnat | quadcopter |
+| `sample-torpedo` | Remora | torpedo AUV |
+| `sample-wigley` | Skiff | Wigley hull boat |
+
+Example designs can't be deleted or re-run (the API answers 400); make your own to change anything.
 
 ## Ocean and weather data
 
@@ -75,7 +89,11 @@ These are the example platforms. Swap in the real designs when their numbers arr
   under `WRF_DIR`.
 - **Currents (3-D)**: HYCOM GOFS 3.1 analysis (expt_93.0, 1/12°, 3-hourly, Jan 2018 to Sep 2024: the
   GLBv grid until Feb 2020, GLBy after), fetched for the mission box and cached. This includes the
-  seafloor depth.
+  seafloor depth. tds.hycom.org sometimes accepts a connection and never answers, so every HYCOM read runs in a
+  child process under a hard deadline (`CAFE_HYCOM_AXES_S`, default 90 s, for the small time/lat/lon/depth axes,
+  cached on disk after the first read; `CAFE_HYCOM_SLICE_S`, default 300 s, for the data). On a timeout the run
+  continues without currents (see below) and says so in its warnings; HYCOM is not retried for 10 minutes.
+  `./run.sh python -m cafe.ocean deadline` proves the deadline fires against a server that never answers.
 - **Waves**: NOAA WAVEWATCH III (Hs, peak period, direction), fetched and cached the same way, from NOAA's
   ERDDAP or, when that copy is down (it broke on 2026-10-10), from PacIOOS directly.
 - The UWIN-CM wrfout and wrfrst files checked so far have their coupled-ocean fields
@@ -126,14 +144,26 @@ Run them: `./run.sh python -m cafe.receipts /work/runs`. The slow CFD cases are 
 
 Server: `~/services/cafe/compose.yml` on homebase (`cafe` = API, `cafe-worker` = jobs); code at
 `~/work/cafe/src` (mounted live), data at `~/work/cafe/data`. After a change, run `./sync.sh`, then
-`docker restart cafe` (jobs run as fresh processes, so the worker picks up new code by itself).
+`docker restart cafe` (jobs run as fresh processes, so the worker picks up new code by itself: all of `cafe/`
+except `worker.py`, whose loop is long-lived). After changing `worker.py`, `docker restart cafe-worker`; it re-queues
+anything marked running, so a CFD characterization in progress starts over: check `/api/designs` first.
+
+Pinned packages: `requirements.txt` holds the direct dependencies at the versions in the running image (the
+Dockerfile pins `capytaine` too); transitive packages float. The ArduPilot SITL binaries and `.parm` files in
+`~/work/cafe/data/sitl/` (`arducopter`, `ardurover`, `ardusub`) are ArduPilot 4.7.1 (git `dbe79216`), static x86-64
+builds dated 2026-10-10. Nothing in this repo or its history records where they came from or
+how they were built, so they are **not reproducible from this repository**; if they are lost, rebuild
+ArduPilot `Copter-4.7.1`/`Rover-4.7.1`/`Sub-4.7.1` for SITL (`waf configure --board sitl`) and copy the
+binaries and parm files there. sha256: arducopter `011627d4…`, ardurover `ef27042b…`, ardusub `e659c26c…`.
 
 ## Known limits: read before trusting a GO or a NO-GO
 
 - The example designs (Petrel glider, Tern boat, Gnat quad) are stand-ins until the real platform
   numbers arrive. Results for them describe those examples, not your drones.
 - The TEPEX date (2023-03-07) has one weather snapshot, so its wind is frozen in time (flagged in the
-  results). The 2018 UWIN-CM day has hourly wind.
+  results), and the wind error is widened with time from the snapshot (0.6 m/s per hour per component, capped at
+  4 m/s, added in quadrature to the 1.5 m/s model error; a guess, see `SIG` in `mission.py`). The 2018 UWIN-CM
+  day has hourly wind.
 - Hull lift is tabulated at 5° and 10° incidence and held beyond: reliable to roughly ±15°, symmetric
   about each plane, forward motion only. Against the SUBOFF captive-model drift tests (Receipts → Hull
   lift) the grid-converged side force is 5 % high at 4° and 11–21 % low at 8–12°, as RANS usually is

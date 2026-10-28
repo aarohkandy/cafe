@@ -1,5 +1,21 @@
 # Adversarial review log
 
+## Round 4 — usefulness and operations (2026-10-27)
+
+An adversarial review of what a user of a verdict can actually do with it, and of what happens when a data
+server misbehaves. Every row was reproduced before it was fixed.
+
+| # | Finding | Effect before | Fix |
+|---|---|---|---|
+| 1 | **Blocker.** `ocean.currents` opened HYCOM with `netCDF4.Dataset(url)` and read `ds["time"][:]` with no timeout. tds.hycom.org accepted the connection and then sent 0 bytes of the 134 KB time axis in 120 s | any mission or live session for a box not in the cache sat at "simulating 0 %" forever, and `env.py`'s `except Exception` fallback (currents unknown, wider uncertainty) never ran | every HYCOM read runs in a child process killed at a deadline (axes 90 s, data slice 300 s, both env-configurable); the axes of each experiment are cached on disk once, so later fetches read only the slice; after a failure HYCOM isn't retried for 10 min; the job's step reads "fetching ocean data"; the UI says so. `python -m cafe.ocean deadline` (a server that accepts and never answers: raised at 4.0 s with a 4 s deadline) and the real server (slice read killed at 20 s, second call refused at once) |
+| 2 | `DELETE /api/designs/{id}` and `POST .../rerun` didn't check for example designs; only the UI hid the button | a script could delete `sample-petrel` (every README example and sample mission) or started hours of CFD that could change its numbers | both answer 400 for `sample: true`; red-team cases run in-process on a scratch folder, so the check can't harm the deployed examples when it runs against old code |
+| 3 | wind σ was 1.5 m/s whether the wind was hourly or one snapshot held up to 6 h (Tehuantepec gap winds change by 10 m/s within hours) | a frozen-wind mission was as sure of itself 6 h from the snapshot as 0 h | each run's wind error is its fixed draw times σ(lag) = √(1.5² + min(0.6·lag_h, 4)²) m/s per component, lag = hours from the snapshot at that moment; unchanged for hourly weather (same random stream); stated in the result's new `warnings` (as is the case of no ocean-current data) and in the UI |
+| 4 | Verdicts named the failure but not the fix | "battery empty", "out of range", "below rated depth" with nothing to act on | `advice` on each drone and each range requirement, at the 90th percentile over runs so the change holds for 9 runs in 10: Wh short (and % of the battery) of finishing with the reserve; Hs vs the design-category limit and the category that would pass; depth reached vs rated; time, speed and the strongest current as a share of top speed; closest approach, minutes out of range, longest gap and peak separation vs the range. Shown on the cards. `python -m cafe._check_advice` makes each failure and asserts the advice |
+| 5 | Cards didn't say a design is an example or that a coefficient is guessed | a GO for the stand-in Tern read like a GO for the real boat; `drag: estimate (newtonian+ITTC)` was only in the JSON | "example design, not your drone" badge for `sample: true`; a badge for every drag or resistance that isn't CFD (and for a boat with no free-surface resistance), with the source string |
+| 6 | Real platforms can't be entered without CFD/FEA | users can't test a vehicle they only have a datasheet for | **not done**, design proposed in the hand-off: it needs stand-in geometry and a back-solve per vehicle type, which is more than a patch to `vehicle.build` |
+| 7 | `requirements.txt` had no versions | a rebuild silently changed numpy/scipy/gmsh/fastapi | direct dependencies pinned to the running image (`pip freeze`), `capytaine` pinned in the Dockerfile. The ArduPilot SITL binaries in `data/sitl/` are not reproducible from this repo (4.7.1, git `dbe79216`; origin unrecorded): said so in the README |
+| 8 | README docs: design ids and the worker | readers couldn't map Petrel/Tern/Gnat/Remora/Skiff to `sample-petrel`, `-tern`, `-quad`, `-torpedo`, `-wigley`; nothing said `worker.py` isn't picked up by itself | id table; `cafe-worker` must be restarted after a `worker.py` change (and that re-queues running jobs) |
+
 ## Round 3 — hull lift, hourly weather (2026-10-14)
 
 Closes two of the README's known limits. Each row was found by a run, not by reading.
