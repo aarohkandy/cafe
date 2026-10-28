@@ -1,14 +1,17 @@
-numpy
-scipy
-trimesh
-manifold3d
-mapbox_earcut
-shapely
-gmsh
-xarray
-netCDF4
-fastapi
-uvicorn
-python-multipart
-networkx
-pymavlink
+# Direct dependencies, pinned to what the running image has (pip freeze in the `cafe` container, 2026-10-27).
+# Transitive packages (pydantic, starlette, pandas, ...) still float; freeze them too if a rebuild ever drifts.
+# capytaine==3.0.0 is installed on its own line in the Dockerfile.
+numpy==2.5.3
+scipy==1.18.1
+trimesh==5.1.1
+manifold3d==3.5.4
+mapbox_earcut==2.1.0
+shapely==2.2.0
+gmsh==4.15.2
+xarray==2026.9.0
+netCDF4==1.7.4
+fastapi==0.142.4
+uvicorn==0.54.0
+python-multipart==0.0.32
+networkx==3.7
+pymavlink==2.4.50

@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /tmp/
 RUN python3 -m venv /venv && /venv/bin/pip install --no-cache-dir -r /tmp/requirements.txt
-RUN /venv/bin/pip install --no-cache-dir capytaine
+RUN /venv/bin/pip install --no-cache-dir capytaine==3.0.0
 ENV PATH=/venv/bin:$PATH PYTHONUNBUFFERED=1
 ENTRYPOINT []
 WORKDIR /app
