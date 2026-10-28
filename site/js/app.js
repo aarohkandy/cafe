@@ -1,6 +1,6 @@
 import { drawRegional } from "./chart.js";
 import { createLocal } from "./local.js";
-import { Env } from "./env.js";
+import { Env, frame } from "./env.js";
 import { simulate } from "./sim.js";
 import { defaultPlan, DATES, NAMES } from "./plan.js";
 
@@ -51,23 +51,36 @@ $("#range1").addEventListener("change", e => { plan.links[1].max = clamp(+e.targ
 function clamp(v, lo, hi, input) { const x = Math.min(hi, Math.max(lo, isFinite(v) ? v : lo)); input.value = x; return x; }
 
 // ---- picking a spot on the regional chart
-$("#pick").addEventListener("click", () => { mode = "regional"; stop(); render(); say("Click the sea to deploy there."); });
+$("#pick").addEventListener("click", () => { mode = "regional"; stale(); render(); say("Click the sea to deploy there."); });
 function onPick([lat, lon], seaDepth) {
   if (!(seaDepth > 0)) return say("That's land. Click somewhere in the sea.");
   if (seaDepth < 150) return say(`Only ${Math.round(seaDepth)} m deep there; the glider dives to 100 m. Try deeper water.`);
   plan.site = [lat, lon];
   $("#where").textContent = `${lat.toFixed(2)}° N, ${(-lon).toFixed(2)}° W`;
-  mode = "local"; stale(); render(); say("");
+  mode = "local"; stale(); render(); say(goalNote());
+}
+// the goal has to be in water deep enough for the glider's dive band
+function goalNote() {
+  const d = env.seaDepthAt(...frame(...plan.site).toLL(...plan.glider.goal)), dive = plan.glider.band[1];
+  return d <= 0 ? "The goal is on land. Drag it into the sea." : d < dive + 2 ? `The water at the goal is only ${Math.round(d)} m deep; Petrel dives to ${dive} m, so it will hit the bottom. Drag the goal to deeper water.` : "";
 }
 
 // ---- dragging on the local plan
+let held = null;                                                 // where the dragged thing was before this drag
 function onDrag(what, m, done) {
-  if (what === "goal") plan.glider.goal = m; else plan[what].start = m;
-  if (done) { stale(); render(); }
+  const slot = what === "goal" ? plan.glider : plan[what], key = what === "goal" ? "goal" : "start";
+  held ??= slot[key];
+  slot[key] = m;
+  const land = env.seaDepthAt(...frame(...plan.site).toLL(...m)) <= 0 && what !== "drone";      // the quad can take off from a beach
+  say(land ? (what === "goal" ? "The goal can't be on land." : `${NAMES[what]} can't start on land.`) : goalNote());
+  if (!done) return;
+  if (land) slot[key] = held;                                    // refused: it goes back where it was
+  held = null; stale(); render();
 }
 
 function stale() {
   result = null; stop(); frameIdx = 0;
+  $("#run").textContent = "Run";
   $("#results").innerHTML = "";
   $("#play").disabled = true;
   drawStrip();
@@ -90,7 +103,7 @@ $("#run").addEventListener("click", () => {
   const btn = $("#run");
   btn.disabled = true; btn.textContent = "Running…";
   setTimeout(() => {                                          // let the label paint before the work
-    mode = "local";
+    mode = "local"; say("");
     env = new Env(data, plan.date, plan.start);
     result = simulate(plan, env, V, 24);
     btn.disabled = false; btn.textContent = "Run again";
@@ -101,21 +114,32 @@ $("#run").addEventListener("click", () => {
   }, 30);
 });
 
+// which dates have real currents and waves in data/ocean.json
+const oceanDates = () => Object.keys(ocean || {}).filter(k => DATES[k]).map(k => DATES[k].label);
+// wide: the panel scrolls beside the chart, so show the verdict; narrow: the panel sits under the chart, so go back up to watch the run
+const reveal = () => (matchMedia("(min-width: 761px)").matches ? $("#results") : $(".ask")).scrollIntoView({ block: "start" });
 function showResults() {
+  if (env.noOcean) {                                          // no currents or waves: a verdict would be about calm water, so none is given
+    const have = oceanDates();
+    $("#results").innerHTML = `<p class="foot"><b>No verdict.</b> There are no currents or waves for ${DATES[plan.date].label}${have.length ? `; real currents are only loaded for ${have.join(" and ")}` : " (data/ocean.json did not load)"}. Press play to see the plan run in still water.</p>`;
+    reveal();
+    return;
+  }
   const r = result, flag = v => `<svg class="flag" viewBox="0 0 30 20" aria-hidden="true"><use href="#flag-${FLAG[v]}"/></svg>`;
   const runs = r.runs - 1;
   const why = rs => rs.length ? rs.slice(0, 2).map(x => `${esc(x.reason)} (${x.n} of ${runs} runs)`).join("; ") : "";
   const veh = (id, ok) => {
     const v = r.vehicles[id];
-    const good = id === "glider" ? (v.eta ? `reaches the goal in ${Math.round(v.eta)} min` : "")
+    const good = id === "glider" ? (v.eta == null ? "" : v.eta < 1 ? "starts at the goal" : `reaches the goal in ${Math.round(v.eta)} min`)
       : id === "boat" ? `stays with Petrel; waves up to ${v.hs.toFixed(1)} m` : `lands with ${Math.round(v.left50 * 100)} % battery`;
     return `<div class="res">${flag(v.verdict)}<div class="who">${NAMES[id]}</div><div class="why">${why(v.reasons) || good}</div></div>`;
   };
   let html = `<div class="res fleet">${flag(r.fleet.verdict)}<div class="who">${r.fleet.verdict === "GO" ? "Go" : r.fleet.verdict === "MARGINAL" ? "Marginal" : "No go"}</div><div class="why">${Math.round(r.fleet.p * 100)} % of ${runs} runs work${r.fleet.reasons.length ? ". Main problem: " + esc(r.fleet.reasons[0].reason) : ""}</div></div>`;
   html += ["glider", "boat", "drone"].map(id => veh(id)).join("");
   html += r.links.map(l => `<div class="res">${flag(l.verdict)}<div class="who">${NAMES[l.a]} and ${NAMES[l.b]}</div><div class="why">within ${l.max} m ${Math.round(l.share * 100)} % of the time</div></div>`).join("");
-  html += `<p class="foot">${r.runs} runs with the weather, currents, batteries and speeds varied, in ${Math.max(1, Math.round(r.ms))} ms in your browser.${env.frozen ? " Wind held from one snapshot." : ""}${env.noOcean ? " Currents and waves not loaded, so the water is calm." : ""} <a href="about.html">How this is computed</a></p>`;
+  html += `<p class="foot">${runs} runs with the weather, currents, batteries and speeds varied (plus the plain run on the chart), ${plan.hours} hours of mission each, in ${Math.max(1, Math.round(r.ms))} ms in your browser.${env.frozen ? " Wind held from one snapshot." : ""} <a href="about.html">How this is computed</a></p>`;
   $("#results").innerHTML = html;
+  reveal();
 }
 
 // ---- playback and the depth/height strip
@@ -132,7 +156,7 @@ function drawStrip() {
   ax.append("text").attr("x", L - 8).attr("y", y(-100) + 4).attr("text-anchor", "end").text("100 m");
   for (let m = 0; m <= plan.hours * 60; m += 20) ax.append("text").attr("x", x(m * 60)).attr("y", H - 2).attr("text-anchor", "middle").text(m ? `${m}` : "0 min");
   if (!result) {
-    strip.append("text").attr("class", "lbl").attr("x", (L + W) / 2).attr("y", surf + 26).attr("text-anchor", "middle").text("Press Run to see each vehicle's depth and height here");
+    strip.append("text").attr("class", "lbl").attr("x", (L + W) / 2).attr("y", surf + 26).attr("text-anchor", "middle").text(W < 420 ? "Press Run to see depth and height" : "Press Run to see each vehicle's depth and height here");
     clock.value = "0:00"; return;
   }
   const cls = { glider: "t-petrel", boat: "t-tern", drone: "t-gnat" };

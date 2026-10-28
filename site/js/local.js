@@ -5,24 +5,26 @@ import { NAMES } from "./plan.js";
 
 const P = 26, IDS = ["glider", "boat", "drone"], COLOR = { glider: "var(--sea-line)", boat: "var(--ink)", drone: "var(--magenta)" };
 const KN = 1.94384;
+const textLen = n => { try { return n.getComputedTextLength(); } catch (e) { return 0; } };      // Firefox throws on an undisplayed SVG
 const compass = deg => ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"][Math.round(((deg % 360) + 360) % 360 / 22.5) % 16];
 
 export function createLocal(svg, { onDrag }) {
-  let W, H, s, cn, ce, plan, result, env, depthHere;
-  const px = (n, e) => [W / 2 + (e - ce) * s, H / 2 - (n - cn) * s];
-  const toM = (x, y) => [cn - (y - H / 2) / s, ce + (x - W / 2) / s];
+  let W, H, s, cn, ce, plan, result, env, depthHere, narrow, top, cy;
+  const px = (n, e) => [W / 2 + (e - ce) * s, cy - (n - cn) * s];
+  const toM = (x, y) => [cn - (y - cy) / s, ce + (x - W / 2) / s];
 
   function layout(p) {
     const box = svg.node().parentNode.getBoundingClientRect();
     W = Math.max(320, box.width - 12); H = Math.max(260, box.height - 12);
     const pts = [p.glider.start, p.glider.goal, p.boat.start, p.drone.start];
     const ns = pts.map(q => q[0]), es = pts.map(q => q[1]);
+    narrow = W < 560;                                        // a small screen gets the weather as a strip along the top, not a box over the plan
+    top = narrow ? 56 : 0;
+    cy = (top + H) / 2;                                      // the plan is centred in the part of the chart that is left
     const pad = 650;
     const spanN = Math.max(...ns) - Math.min(...ns) + 2 * pad, spanE = Math.max(...es) - Math.min(...es) + 2 * pad;
-    s = Math.min((W - 2 * P - 40) / spanE, (H - 2 * P - 40) / spanN);
-    // keep the view clear of the plan panel on wide screens
-    const shift = W > 900 ? 330 / s / 2 : 0;
-    cn = (Math.max(...ns) + Math.min(...ns)) / 2; ce = (Math.max(...es) + Math.min(...es)) / 2 - shift;
+    s = Math.min((W - 2 * P - 40) / spanE, (H - top - 2 * P - 40) / spanN);
+    cn = (Math.max(...ns) + Math.min(...ns)) / 2; ce = (Math.max(...es) + Math.min(...es)) / 2;
   }
 
   function draw(p, e, depth) {
@@ -46,19 +48,20 @@ export function createLocal(svg, { onDrag }) {
     const sb = step * s;
     g.append("path").attr("class", "dim").style("stroke", "var(--ink)").attr("d", `M${W - P - 20 - sb},${H - P - 22}h${sb}M${W - P - 20 - sb},${H - P - 26}v8M${W - P - 20},${H - P - 26}v8`);
     g.append("text").attr("class", "lbl").attr("x", W - P - 20 - sb / 2).attr("y", H - P - 30).attr("text-anchor", "middle").text(step >= 1000 ? `${step / 1000} km` : `${step} m`);
-    g.append("path").attr("d", `M${W - P - 30},${P + 46}l7,20l-7,-6l-7,6z`).style("fill", "var(--ink)");
-    g.append("text").attr("class", "lbl").attr("x", W - P - 30).attr("y", P + 40).attr("text-anchor", "middle").text("N");
+    g.append("path").attr("d", `M${W - P - 30},${P + top + 46}l7,20l-7,-6l-7,6z`).style("fill", "var(--ink)");
+    g.append("text").attr("class", "lbl").attr("x", W - P - 30).attr("y", P + top + 40).attr("text-anchor", "middle").text("N");
     g.append("text").attr("class", "sounding").attr("x", P + 14).attr("y", H - P - 14)
       .text(isFinite(depthHere) ? `water ${Math.round(depthHere).toLocaleString("en")} m deep here` : "");
 
-    // weather box, top right
-    const wx = svg.append("g").attr("class", "wx").attr("transform", `translate(${W - P - 200},${P + 82})`);
-    wx.append("rect").attr("class", "cartouche-bg").attr("width", 180).attr("height", 96).attr("x", -8).attr("y", -10);
-    wx.append("path").attr("class", "barb wx-barb");
-    wx.append("text").attr("class", "lbl wx-wind").attr("x", 46).attr("y", 14);
-    wx.append("path").attr("class", "wx-cur").style("stroke", "var(--sea-line)").style("stroke-width", 1.6).style("fill", "none");
-    wx.append("text").attr("class", "lbl wx-curt").attr("x", 46).attr("y", 52);
-    wx.append("text").attr("class", "lbl wx-hs").attr("x", 46).attr("y", 72);
+    // weather at the boat: a box top left (wide), or three lines along the top (narrow)
+    const wx = svg.append("g").attr("class", "wx").attr("transform", `translate(${P + 10},${P + 10})`);
+    wx.append("rect").attr("class", "cartouche-bg").attr("width", narrow ? W - 2 * P - 20 : 184).attr("height", narrow ? top - 4 : 96).attr("x", -8).attr("y", -10);
+    const tx = narrow ? 2 : 46;
+    if (!narrow) wx.append("path").attr("class", "barb wx-barb");
+    wx.append("text").attr("class", "lbl wx-wind").attr("x", tx).attr("y", narrow ? 4 : 14);
+    if (!narrow) wx.append("path").attr("class", "wx-cur").style("stroke", "var(--sea-line)").style("stroke-width", 1.6).style("fill", "none");
+    wx.append("text").attr("class", "lbl wx-curt").attr("x", tx).attr("y", narrow ? 18 : 52);
+    wx.append("text").attr("class", "lbl wx-hs").attr("x", tx).attr("y", narrow ? 32 : 72);
 
     // goal and starts
     const [gx, gy] = px(...p.glider.goal);
@@ -79,7 +82,7 @@ export function createLocal(svg, { onDrag }) {
     for (const id of IDS) {
       const v = syms.append("g").attr("class", `veh veh-${id}`).style("color", COLOR[id]).style("cursor", "grab");
       v.append("use").attr("href", `#sym-${id}`).attr("x", -14).attr("y", -14).attr("width", 28).attr("height", 28);
-      v.append("text").attr("class", "lbl").attr("x", 17).attr("y", 4).style("fill", COLOR[id]).style("font-weight", 600).text(NAMES[id]);
+      v.append("text").attr("class", "lbl veh-name").attr("x", 17).attr("y", 4).style("fill", COLOR[id]).style("font-weight", 600).text(NAMES[id]);
       v.append("text").attr("class", "dim-text veh-sub").attr("x", 17).attr("y", 17);
     }
 
@@ -132,7 +135,13 @@ export function createLocal(svg, { onDrag }) {
       const v = svg.select(`.veh-${id}`).attr("transform", `translate(${x},${y})`);
       v.select("use").attr("transform", `rotate(${hdg * 180 / Math.PI})`);
       const where = id === "glider" ? `${Math.round(-z)} m deep` : id === "drone" ? (z > 0.5 ? `${Math.round(z)} m up` : "landed") : "on the surface";
-      v.select(".veh-sub").text(`${where}, battery ${Math.round(Math.max(b, 0) * 100)} %`);
+      const pct = Math.round(Math.max(b, 0) * 100);
+      v.select(".veh-sub").text(!result ? "" : narrow ? `${where.replace("on the ", "")}, ${pct} %` : `${where}, battery ${pct} %`);    // nothing to report before a run
+      // labels go on the side of the symbol that has room, so none runs off the edge of the chart
+      const wLab = Math.max(textLen(v.select(".veh-name").node()), textLen(v.select(".veh-sub").node()));
+      const fitsR = x + 17 + wLab <= W - P - 4, fitsL = x - 17 - wLab >= P;
+      const left = id === "boat" ? fitsL || !fitsR : !fitsR && fitsL;        // the boat's label goes left so it doesn't sit on the quad's, which hovers over it
+      v.selectAll("text").attr("x", left ? -17 : 17).attr("text-anchor", left ? "end" : "start");
     }
     for (const [k, l] of plan.links.entries()) {
       const a = pos[l.a], b = pos[l.b];
@@ -147,12 +156,12 @@ export function createLocal(svg, { onDrag }) {
     if (env) {
       const [lat, lon] = [plan.site[0] + pos.boat[0] / 111320, plan.site[1] + pos.boat[1] / (111320 * Math.cos(plan.site[0] * Math.PI / 180))];
       const [u, v] = env.windAt(lat, lon, t), [cu, cv] = env.currentAt(lat, lon, t, 0), hs = env.hsAt(lat, lon, t);
-      svg.select(".wx-barb").attr("d", barb(18, 30, u, v, 30));
+      if (!narrow) svg.select(".wx-barb").attr("d", barb(18, 30, u, v, 30));
       svg.select(".wx-wind").text(`wind ${Math.round(Math.hypot(u, v) * KN)} kn from ${compass(Math.atan2(-u, -v) * 180 / Math.PI)}`);
       const cm = Math.hypot(cu, cv), L = 26, ax = 18, ay = 48;
-      svg.select(".wx-cur").attr("d", cm > 0.005 ? `M${ax - cu / cm * L / 2},${ay + cv / cm * L / 2}L${ax + cu / cm * L / 2},${ay - cv / cm * L / 2}m${(-cu / cm * 6 + cv / cm * 4).toFixed(1)},${(cv / cm * 6 + cu / cm * 4).toFixed(1)}M${ax + cu / cm * L / 2},${ay - cv / cm * L / 2}l${(-cu / cm * 6 - cv / cm * 4).toFixed(1)},${(cv / cm * 6 - cu / cm * 4).toFixed(1)}` : "");
-      svg.select(".wx-curt").text(`current ${(cm * KN).toFixed(1)} kn to ${compass(Math.atan2(cu, cv) * 180 / Math.PI)}`);
-      svg.select(".wx-hs").text(`waves ${hs.toFixed(1)} m`);
+      if (!narrow) svg.select(".wx-cur").attr("d", cm > 0.005 ? `M${ax - cu / cm * L / 2},${ay + cv / cm * L / 2}L${ax + cu / cm * L / 2},${ay - cv / cm * L / 2}m${(-cu / cm * 6 + cv / cm * 4).toFixed(1)},${(cv / cm * 6 + cu / cm * 4).toFixed(1)}M${ax + cu / cm * L / 2},${ay - cv / cm * L / 2}l${(-cu / cm * 6 - cv / cm * 4).toFixed(1)},${(cv / cm * 6 - cu / cm * 4).toFixed(1)}` : "");
+      svg.select(".wx-curt").text(env.noOcean ? "current not loaded" : `current ${(cm * KN).toFixed(1)} kn to ${compass(Math.atan2(cu, cv) * 180 / Math.PI)}`);
+      svg.select(".wx-hs").text(env.noOcean ? "waves not loaded" : `waves ${hs.toFixed(1)} m`);
     }
   }
 

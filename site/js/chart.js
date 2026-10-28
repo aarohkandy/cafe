@@ -12,9 +12,13 @@ export function drawRegional(svg, { land, depth, wind }, { site, frame, onPick }
   // cover the box with the data area, centred on the gulf
   const merc = la => Math.log(Math.tan(Math.PI / 4 + la * Math.PI / 360));
   const s = Math.max((W - 2 * P) / ((DATA.lon[1] - DATA.lon[0]) * Math.PI / 180), (H - 2 * P) / (merc(DATA.lat[1]) - merc(DATA.lat[0])));
-  const proj = d3.geoMercator().center([-94.5, 12.4]).scale(s).translate([W / 2, H / 2]);
+  // centred on the gulf, but moved just enough that the chosen spot sits in the middle 60 % of the frame, never on its edge
+  const hv = (H - 2 * P) / (2 * s), hh = (W - 2 * P) / (2 * s) * 180 / Math.PI;
+  const cy = Math.min(Math.max(merc(12.4), merc(site[0]) - 0.6 * hv), merc(site[0]) + 0.6 * hv);
+  const cLat = (Math.atan(Math.exp(cy)) - Math.PI / 4) * 360 / Math.PI, cLon = Math.min(Math.max(-94.5, site[1] - 0.6 * hh), site[1] + 0.6 * hh);
+  const proj = d3.geoMercator().center([cLon, cLat]).scale(s).translate([W / 2, H / 2]);
   const p = (lo, la) => proj([lo, la]);
-  const [lonA, latB] = proj.invert([P, H - P]), [lonB, latA] = proj.invert([W - P, P]);
+  const [lonA, latA] = proj.invert([P, H - P]), [lonB, latB] = proj.invert([W - P, P]);     // A = south-west corner, B = north-east
   const ring = pts => "M" + pts.map(([lo, la]) => p(lo, la).map(v => v.toFixed(1)).join(",")).join("L") + "Z";
 
   svg.append("defs").append("clipPath").attr("id", "map-clip").append("rect").attr("x", P).attr("y", P).attr("width", W - 2 * P).attr("height", H - 2 * P);

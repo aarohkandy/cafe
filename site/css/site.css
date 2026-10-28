@@ -76,24 +76,32 @@ code { font: 0.92em var(--sans); }
 .neatline > svg { display: block; width: 100%; height: 100%; border: 0.75px solid var(--rule); }
 
 /* ---------- one screen: chart, panel over it, playback strip under it */
-body.app { height: 100dvh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
-.stage { position: relative; display: grid; grid-template-rows: 1fr auto; gap: 10px; padding: 12px var(--gutter) 12px; min-height: 0; }
-.map { position: relative; min-height: 0; }
-.map svg { cursor: crosshair; touch-action: none; }
+body.app { height: 100vh; height: 100dvh; display: grid; grid-template-rows: auto 1fr; overflow: hidden; }
+.stage {
+  display: grid; grid-template-columns: 300px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 8px 16px; padding: 10px var(--gutter) 12px; min-height: 0;
+}
+.ask { grid-column: 1 / -1; font: italic 500 1.1rem/1.3 var(--serif); }
+.ask b { font-style: normal; color: var(--magenta); }
+.map { position: relative; min-height: 0; grid-column: 2; grid-row: 2; }
+.map svg { cursor: crosshair; }          /* d3-drag sets touch-action on what is draggable; the rest of the chart still scrolls the page */
 .map svg.local { cursor: default; }
 .hint {
-  position: absolute; left: 50%; top: 18px; transform: translateX(-50%); pointer-events: none;
-  font: italic 1rem var(--serif); color: var(--magenta); background: var(--paper);
-  padding: 4px 12px; border: 1px solid var(--magenta); border-radius: 2px; white-space: nowrap;
+  position: absolute; left: 50%; top: 38px; transform: translateX(-50%); pointer-events: none;
+  font: italic 1rem/1.3 var(--serif); color: var(--magenta); background: var(--paper); text-align: center;
+  padding: 4px 12px; border: 1px solid var(--magenta); border-radius: 2px; width: max-content; max-width: calc(100% - 64px);
 }
 .hint:empty { display: none; }
+@media (max-width: 900px) { .hint { top: auto; bottom: 38px; } }      /* narrow charts keep their weather strip along the top */
 
 .panel {
-  position: absolute; top: 26px; left: calc(var(--gutter) + 18px); width: 300px; max-height: calc(100% - 140px); overflow-y: auto;
+  grid-column: 1; grid-row: 2 / 4; min-height: 0; overflow-y: auto;
   background: var(--paper); border: 1.4px solid var(--rule); outline: 0.5px solid var(--rule); outline-offset: -5px;
-  padding: 16px 18px 18px; display: grid; gap: 14px; font: 0.88rem/1.4 var(--sans);
+  padding: 14px 18px 16px; display: grid; gap: 11px; align-content: start; font: 0.88rem/1.4 var(--sans);
 }
 .where h1 { font: 600 1.25rem/1.2 var(--sc); letter-spacing: 0.02em; }
+.eg { font: italic 600 0.98rem/1.25 var(--serif); margin-bottom: -4px; }
+.eg span { display: block; font: 400 0.8rem var(--sans); font-style: normal; color: var(--ink-3); }
 .link-btn { font: italic 0.92rem var(--serif); color: var(--magenta); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 0.2em; }
 fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 5px; min-width: 0; }
 legend { font: italic 600 0.98rem var(--serif); margin-bottom: 4px; padding: 0; }
@@ -105,7 +113,7 @@ select, input[type="number"] {
 }
 input[type="number"] { width: 4.6em; }
 .ranges label input { margin-left: auto; }
-.fleet-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+.fleet-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
 .fleet-list li { display: grid; grid-template-columns: 26px 1fr; gap: 8px; align-items: start; }
 .fleet-list b { font: 600 0.98rem var(--serif); }
 .fleet-list span { color: var(--ink-2); }
@@ -128,7 +136,7 @@ li[data-id="glider"] .sym { color: var(--sea-line); } li[data-id="boat"] .sym { 
 .res.fleet .who { font-size: 1.1rem; }
 .foot { color: var(--ink-3); font-size: 0.78rem; padding-top: 6px; }
 
-.timeline { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; height: 104px; }
+.timeline { grid-column: 2; grid-row: 3; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px; height: 104px; }
 .strip { width: 100%; height: 100%; display: block; }
 .timeline output { font: 0.9rem var(--sans); font-variant-numeric: tabular-nums; min-width: 5ch; color: var(--ink-2); }
 .play {
@@ -142,14 +150,17 @@ li[data-id="glider"] .sym { color: var(--sea-line); } li[data-id="boat"] .sym { 
 
 @media (max-width: 760px) {
   body.app { height: auto; overflow: visible; }
-  .stage { grid-template-rows: 62vh auto auto; }
-  .panel { position: static; width: auto; max-height: none; order: 3; }
-  .timeline { order: 2; }
+  .stage { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 62vh auto auto; }
+  .ask { font-size: 1rem; }
+  .map, .timeline { grid-column: 1; }
+  .map { grid-row: 2; } .panel { grid-column: 1; grid-row: 3; overflow: visible; } .timeline { grid-row: 4; }
 }
 
 /* ---------- about page */
 .page { max-width: 980px; margin: 0 auto; padding: 32px var(--gutter) 80px; display: grid; gap: 48px; }
 .prose { max-width: 62ch; display: grid; gap: 1em; }
+.notes { margin: 0; padding-left: 1.2em; display: grid; gap: 0.6em; }
+#agree { display: grid; gap: 0.6em; max-width: 62ch; font-family: var(--sans); font-size: 0.92rem; }
 .steps { list-style: none; margin: 0; padding: 0; counter-reset: step; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 28px; }
 .steps li { counter-increment: step; display: grid; gap: 0.4em; align-content: start; padding-top: 10px; border-top: 2.2px solid var(--rule); }
 .steps li::before { content: counter(step); font: italic 400 2.2rem/1 var(--serif); color: var(--magenta); }

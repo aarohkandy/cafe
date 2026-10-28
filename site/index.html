@@ -22,6 +22,8 @@
 </header>
 
 <main class="stage">
+  <p class="ask">Will these three drones reach the goal and stay in radio range of each other? Press <b>Run</b>.</p>
+
   <div class="map neatline">
     <svg id="map" role="img" aria-label="Chart of the Gulf of Tehuantepec with the drone plan"></svg>
     <p class="hint" id="hint" aria-live="polite"></p>
@@ -39,20 +41,21 @@
       <label><input type="radio" name="date" value="2018"> 3 Feb 2018 at <select id="hour" aria-label="Start hour, UTC"></select></label>
     </fieldset>
 
+    <h2 class="eg">Example fleet <span>made-up drones, not a real fleet</span></h2>
     <ol class="fleet-list">
-      <li data-id="glider"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-glider" x="-14" y="-14" width="28" height="28"/></svg><div><b>Petrel</b> glider<br><span>dives 5 to 100 m, heads for <i>the goal</i></span></div></li>
-      <li data-id="boat"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-boat" x="-14" y="-14" width="28" height="28"/></svg><div><b>Tern</b> boat<br><span>stays over Petrel</span></div></li>
-      <li data-id="drone"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-drone" x="-14" y="-14" width="28" height="28"/></svg><div><b>Gnat</b> drone<br><span>flies 30 m over Tern for <input type="number" id="minutes" min="1" max="60" value="20" aria-label="Minutes over the boat"> min, then lands</span></div></li>
+      <li data-id="glider"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-glider" x="-14" y="-14" width="28" height="28"/></svg><div><b>Petrel</b>, underwater glider<br><span>zig-zags between 5 and 100 m deep on its way to <i>the goal</i></span></div></li>
+      <li data-id="boat"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-boat" x="-14" y="-14" width="28" height="28"/></svg><div><b>Tern</b>, support boat<br><span>sails on the surface right above Petrel</span></div></li>
+      <li data-id="drone"><svg class="sym" viewBox="-14 -14 28 28" aria-hidden="true"><use href="#sym-drone" x="-14" y="-14" width="28" height="28"/></svg><div><b>Gnat</b>, quadcopter<br><span>flies 30 m over Tern for <input type="number" id="minutes" min="1" max="60" value="20" aria-label="Minutes over the boat"> min, then lands</span></div></li>
     </ol>
 
     <fieldset class="ranges">
-      <legend>Must stay in range</legend>
+      <legend>Must stay in radio range</legend>
       <label>Petrel and Tern <input type="number" id="range0" min="50" max="20000" step="50" value="1000"> m</label>
       <label>Tern and Gnat <input type="number" id="range1" min="20" max="5000" step="10" value="300"> m</label>
     </fieldset>
 
     <button type="button" class="run" id="run">Run</button>
-    <p class="drag-note">Drag any vehicle, or the goal, on the chart.</p>
+    <p class="drag-note">You can drag any vehicle, or the goal, on the chart.</p>
 
     <div class="results" id="results" aria-live="polite"></div>
   </aside>
