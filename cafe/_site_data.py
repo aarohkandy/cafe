@@ -6,6 +6,8 @@ Writes /work/site_data/*.json; copy them to site/data/. Everything the site draw
   wind.json      WRF 10 m wind, 25 hourly UWIN-CM fields (2018-02-03/04) + the 2023-03-07 snapshot
   missions.json  the TEPEX chain on both dates: 8 Monte Carlo runs per drone every 10 s, verdicts, links
   shapes.json    side and plan outlines of each vehicle, projected from the meshes the CFD and FEA used
+  ocean.json     HYCOM currents (0/50/100 m) and WAVEWATCH III wave height, both dates
+  fullsim.json   the full simulator's verdicts for the example plan, with mission ids (the browser check is compared to it)
   hull.json      SUBOFF hull offsets, the hull-lift model curve, Roddy 1990 points, Remora dives with/without lift
 """
 import datetime as dt, json, os, pathlib, sys, time, urllib.request
@@ -215,59 +217,125 @@ def vehicles():
     save("vehicles.json", out)
 
 
-def ocean():
-    """HYCOM currents at 0, 50 and 100 m and WAVEWATCH III wave height over the gulf, for both dates."""
+HYCOM_DEADLINE_S = int(os.environ.get("HYCOM_DEADLINE_S", 900))     # per date; after that the date is left out of ocean.json
+
+
+def _hycom(key, t0, lat_r, lon_r):
+    """HYCOM currents at 0, 50 and 100 m for the 24 h from t0, or None. The local cache (with its coordinates) is
+    read first and needs no network; otherwise each URL in oc.HYCOM is tried in turn until the deadline."""
     import netCDF4
     from cafe import ocean as oc
-    lat_r, lon_r = (7.0, 18.0), (-101.0, -88.0)
-    out = {}
-    for key, t0 in (("2018", dt.datetime(2018, 2, 3, 12)), ("2023", dt.datetime(2023, 3, 7, 12))):
-        want0 = (t0 - oc.EPOCH).total_seconds() / 3600
-        for url in oc.HYCOM:
-            ds = netCDF4.Dataset(url)
-            th = ds["time"][:]
-            k = np.where((th >= want0) & (th <= want0 + 24))[0]
-            if len(k):
+    cache = OUT / f"_hycom_{key}.npz"
+    want0 = (t0 - oc.EPOCH).total_seconds() / 3600
+    z = dict(np.load(cache)) if cache.exists() else {}
+    if "lat" in z:
+        return z
+    deadline = time.time() + HYCOM_DEADLINE_S
+    for url in oc.HYCOM:
+        name = url.split("dodsC/")[1]
+        ds = None
+        for attempt in range(1, 100):                     # the THREDDS server times out under load: back off, then give up on this URL
+            try:
+                ds = netCDF4.Dataset(url)
+                th = ds["time"][:]
                 break
+            except (OSError, RuntimeError) as e:
+                ds = None
+                wait = min(30 * attempt, 120)
+                if time.time() + wait > deadline:
+                    break
+                print(f"{key}: {name} failed ({e}); retry in {wait} s", flush=True)
+                time.sleep(wait)
+        if ds is None:
+            print(f"{key}: {name} unavailable, trying the next URL", flush=True)
+            continue
+        k = np.where((th >= want0) & (th <= want0 + 24))[0]
+        if not len(k):
+            continue                                       # this experiment does not cover the date
         lat, lon, dep = ds["lat"][:], ds["lon"][:], ds["depth"][:]
         j = np.where((lat >= lat_r[0]) & (lat <= lat_r[1]))[0]
         i = np.where((lon >= lon_r[0] % 360) & (lon <= lon_r[1] % 360))[0]
-        dk = [int(np.argmin(abs(dep - z))) for z in (0, 50, 100)]
+        dk = [int(np.argmin(abs(dep - d))) for d in (0, 50, 100)]
         js, is_ = slice(j[0], j[-1] + 1, 3), slice(i[0], i[-1] + 1, 3)      # every 3rd point: 0.24 deg
-        cache = OUT / f"_hycom_{key}.npz"
-        if cache.exists():
-            z = np.load(cache)
-            cur = {n: z[n] for n in ("water_u", "water_v")}
-        else:
-            def grab(name, kk, d):                       # one time and depth per request: big strided reads trip the DAP server
-                for attempt in range(4):
-                    try:
-                        return np.ma.filled(ds[name][kk, d, js, is_].astype(float), np.nan)
-                    except RuntimeError as e:
-                        print(f"retry {name} t{kk} d{d}: {e}", flush=True)
-                        time.sleep(5 * (attempt + 1))
-                raise RuntimeError(f"HYCOM {name} t{kk} d{d} failed 4 times")
-            cur = {}
-            for name in ("water_u", "water_v"):
-                a = np.array([[grab(name, kk, d) for d in dk] for kk in k])
-                cur[name] = np.where(np.isnan(a), -9999, np.round(a * 100)).astype(int)    # cm/s; -9999 = land/seafloor
-            OUT.mkdir(parents=True, exist_ok=True)
-            np.savez(cache, **cur)
+
+        def grab(var, kk, d):                              # one time and depth per request: big strided reads trip the DAP server
+            for attempt in range(4):
+                try:
+                    return np.ma.filled(ds[var][kk, d, js, is_].astype(float), np.nan)
+                except RuntimeError as e:
+                    print(f"retry {var} t{kk} d{d}: {e}", flush=True)
+                    time.sleep(5 * (attempt + 1))
+            raise RuntimeError(f"HYCOM {var} t{kk} d{d} failed 4 times")
+        try:
+            for var in ("water_u", "water_v"):
+                if var not in z:
+                    a = np.array([[grab(var, kk, d) for d in dk] for kk in k])
+                    z[var] = np.where(np.isnan(a), -9999, np.round(a * 100)).astype(int)    # cm/s; -9999 = land/seafloor
+        except RuntimeError as e:
+            print(f"{key}: {e}; trying the next URL", flush=True)
+            continue
+        z.update(source=np.str_(name), t=(np.asarray(th[k], float) - want0) * 3600,
+                 depths=np.asarray([float(dep[d]) for d in dk]), lat=np.round(lat[js], 3), lon=np.round(np.asarray(lon[is_]) - 360, 3))
+        OUT.mkdir(parents=True, exist_ok=True)
+        np.savez(cache, **z)
+        return z
+    return None
+
+
+def ocean():
+    """HYCOM currents at 0, 50 and 100 m and WAVEWATCH III wave height over the gulf, for both dates. A date whose
+    currents cannot be fetched is left out (the page then says which dates have real currents)."""
+    from cafe import ocean as oc
+    lat_r, lon_r = (7.0, 18.0), (-101.0, -88.0)
+    prev = json.loads((OUT / "ocean.json").read_text()) if (OUT / "ocean.json").exists() else {}
+    out = {}
+    for key, t0 in (("2018", dt.datetime(2018, 2, 3, 12)), ("2023", dt.datetime(2023, 3, 7, 12))):
+        want0 = (t0 - oc.EPOCH).total_seconds() / 3600
+        cur = _hycom(key, t0, lat_r, lon_r)
+        if cur is None:
+            print(f"{key}: HYCOM unavailable; " + ("kept the previous ocean.json entry" if key in prev else "left out of ocean.json"), flush=True)
+            if key in prev:
+                out[key] = prev[key]
+            continue
         w = oc.waves(t0, 24.0, lat_r, lon_r)
         out[key] = dict(
-            currents=dict(source=url.split("dodsC/")[1], t=[(float(t) - want0) * 3600 for t in th[k]], depths=[float(dep[d]) for d in dk],
-                          lat=np.round(lat[js], 3).tolist(), lon=np.round(np.asarray(lon[is_]) - 360, 3).tolist(),
+            currents=dict(source=str(cur["source"]), t=cur["t"].tolist(), depths=cur["depths"].tolist(),
+                          lat=cur["lat"].tolist(), lon=cur["lon"].tolist(),
                           u=cur["water_u"].ravel().tolist(), v=cur["water_v"].ravel().tolist()),
             waves=dict(t=np.round(w["t_s"] - (want0 * 3600 - (t0 - oc.EPOCH).total_seconds()), 1).tolist(),
                        lat=np.round(w["lat"], 3).tolist(), lon=np.round(np.where(w["lon"] > 180, w["lon"] - 360, w["lon"]), 3).tolist(),
                        hs=np.round(np.nan_to_num(w["hs"], nan=-1) * 10).astype(int).ravel().tolist()))
         print(key, "currents", cur["water_u"].shape, "waves", np.shape(w["hs"]), flush=True)
+    if not out:
+        raise RuntimeError("no currents for either date; keeping the previous ocean.json")
     save("ocean.json", out)
+
+
+def fullsim():
+    """Reference verdicts from the full simulator's TEPEX missions, read from their result.json, with the mission ids
+    and run counts so every number is traceable. site/js/sim.check.mjs and about.html compare the browser against this."""
+    base = pathlib.Path("/work/missions")
+    out = {}
+    for key, mid in MISSIONS.items():
+        r = json.loads((base / mid / "result.json").read_text())
+        m = json.loads((base / mid / "mission.json").read_text())
+        drones = {}
+        for did, d in r["drones"].items():
+            eta = next((l["eta_min_p50"] for l in d["legs"] if l["type"] == "goto" and l.get("eta_min_p50") is not None), None)
+            drones[did] = dict(verdict=d["verdict"], p=d["p_success"], interval=d["p_interval"], runs=d["runs"],
+                               reasons=d["reasons"], battery_p50=d["battery_left_p50"], eta=eta)
+        links = [dict(a=l["a"], b=l["b"], verdict=l["verdict"], p=l["p_success"], max_m=l["max_m"], mode=l["mode"],
+                      from_min=l["from_min"], until_min=l["until_min"]) for l in r["links"]]
+        out[key] = dict(mission=mid, t0=m["t0"], hours=m["max_hours"], samples=r["samples"], env=r["env"], frozen=r["env_frozen"],
+                        fleet=dict(verdict=r["fleet"]["verdict"], p=r["fleet"]["p_success"], interval=r["fleet"]["p_interval"],
+                                   runs=r["fleet"]["runs"], reasons=r["fleet"]["reasons"]),
+                        drones=drones, links=links)
+    save("fullsim.json", out)
 
 
 if __name__ == "__main__":
     # SITE_STEPS=depth,hull reruns only those steps
     only = os.environ.get("SITE_STEPS")
-    for f in (land, depth, wind, missions, shapes, hull, vehicles, ocean):
+    for f in (land, depth, wind, missions, shapes, hull, vehicles, ocean, fullsim):
         if not only or f.__name__ in only.split(","):
             f()
