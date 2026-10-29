@@ -1,0 +1,83 @@
+# Default Stage-1 perturbation priors (BRIEF 2.5). Every entry is a PRIOR, not a measurement; the data-validation stage
+# (BRIEF 5.4) replaces wind with fitted values. `value` is the spread (1-sigma for normal/lognormal; unused for uniform,
+# where lo/hi are given); `mean`/`median` default to 0 / 1. Parameters the brief lists but gives no magnitude for
+# (propulsion efficiency, battery capacity, drag-coefficient/GCI spread) are not here: they belong in
+# config/assumptions.yaml until the Hangar and the vehicle datasheets supply them.
+wind_speed_bias:
+  dist: normal
+  mean: 0.0
+  value: 2.0
+  unit: m/s
+  citation: "BRIEF 2.5: coastal/tropical WRF 10 m wind RMSE 1.8-2.5 m/s; primary source not named in the brief"
+  kind: prior
+wind_direction_bias:
+  dist: normal
+  mean: 0.0
+  value: 15.0
+  unit: deg
+  citation: "BRIEF 2.5 (sigma = 15 deg); primary source not named in the brief"
+  kind: prior
+current_speed_scale:
+  dist: lognormal
+  median: 1.0
+  value: 0.30
+  unit: dimensionless (multiplier)
+  citation: "BRIEF 2.5: current speed +-30 %; HYCOM-vs-drifter speed correlation ~0.5 in strong-current regimes"
+  kind: prior
+current_direction_bias:
+  dist: normal
+  mean: 0.0
+  value: 20.0
+  unit: deg
+  citation: "BRIEF 2.5 (sigma = 20 deg)"
+  kind: prior
+current_correlation_length:
+  dist: fixed
+  mean: 100000.0
+  value: 0.0
+  unit: m
+  citation: "BRIEF 2.5: current error correlation length 100 km (a setting of the random-field generator, not sampled)"
+  kind: prior
+hs_scale:
+  dist: lognormal
+  median: 1.0
+  value: 0.15
+  unit: dimensionless (multiplier)
+  citation: "BRIEF 2.5: Hs +-15 %, WW3-class NRMSE 10-20 % in the equatorial Pacific"
+  kind: prior
+tp_bias:
+  dist: normal
+  mean: 0.0
+  value: 1.0
+  unit: s
+  citation: "BRIEF 2.5 (Tp +-1 s)"
+  kind: prior
+bulk_stress_scale:
+  dist: lognormal
+  median: 1.0
+  value: 0.30
+  unit: dimensionless (multiplier)
+  citation: "BRIEF 2.5 (bulk stress +-30 %)"
+  kind: prior
+glider_speed_scale:
+  dist: lognormal
+  median: 1.0
+  value: 0.10
+  unit: dimensionless (multiplier)
+  citation: "BRIEF 2.5 (glider speed through water +-10 %)"
+  kind: prior
+usv_vpp_bias:
+  dist: uniform
+  lo: -0.35
+  hi: -0.30
+  value: 0.0
+  unit: dimensionless (fractional speed change)
+  citation: "BRIEF 2.5: still-water VPPs overpredict USV SOG by 30-35 % in trials; uniform on the stated range"
+  kind: prior
+battery_capacity_scale:
+  dist: lognormal
+  median: 1.0
+  value: 0.05
+  unit: dimensionless (multiplier)
+  citation: "ASSUMED (the brief names battery capacity but gives no magnitude): +-5 % 1-sigma, a typical cell-to-cell and temperature spread for a fresh lithium pack. Replace with the lab's measured pack capacities."
+  kind: assumed

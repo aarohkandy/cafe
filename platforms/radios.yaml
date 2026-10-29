@@ -1,0 +1,55 @@
+# Radio and satellite link parameters for cafe.pm.physics.comms. `assumed: true` values have no datasheet source here;
+# the `why` says what they stand for and what would replace them.
+radios:
+  rfd900x:
+    what: RFDesign RFD900x 900 MHz telemetry modem (USV<->UAS default)
+    source: "RFDesign RFD900x datasheet: 902-928 MHz (US), +30 dBm (1 W, 0-30 dBm in 1 dB steps), receiver sensitivity >121 dBm at low air data rate"
+    center_mhz: 915.0
+    tx_dbm: 30.0
+    rx_sens_dbm: -121.0          # low air rate only. Datasheet V1.2 lists -111 dBm @ 12 kbps and ~-98 dBm @ 200 kbps: see rfd900x_fast
+    gt_dbi: 2.0                  # assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted.
+    gr_dbi: 2.0
+    cable_loss_db: 0.0
+    misc_loss_db: 3.0            # assumed: polarisation mismatch of a heeling/pitching whip + connectors. Replace with a measured range test.
+  rfd900x_fast:
+    what: RFD900x at a higher air rate (what a video/high-rate MAVLink config would use)
+    source: "retailer-quoted RFD900x table: -111 dBm @ 12 kbps, -105 dBm @ 64 kbps, -98 dBm @ 200 kbps (not the manufacturer datasheet; verify)"
+    center_mhz: 915.0
+    tx_dbm: 30.0
+    rx_sens_dbm: -105.0          # the 64 kbps row
+    gt_dbi: 2.0
+    gr_dbi: 2.0
+    cable_loss_db: 0.0
+    misc_loss_db: 3.0
+  xbee_pro_24:
+    what: Digi XBee-PRO 802.15.4 (original S1), a typical 2.4 GHz telemetry radio
+    source: "Digi XBee/XBee-PRO RF Modules 802.15.4 manual v1.xEx: 63 mW (+18 dBm), RX sensitivity -100 dBm (1 % PER) at 250 kbps, outdoor LOS 'up to 1 mile'"
+    center_mhz: 2440.0
+    tx_dbm: 18.0
+    rx_sens_dbm: -100.0
+    gt_dbi: 2.0                  # assumed: 2 dBi dipole
+    gr_dbi: 2.0
+    cable_loss_db: 0.0
+    misc_loss_db: 3.0            # assumed, as above
+
+iridium:
+  sbd:
+    what: Iridium Short Burst Data through a NAL Research 9602 modem
+    source: "NAL Research 9602 product information: MO <= 340 B, MT <= 270 B. Latency: Iridium SBD vendor guides, ~5 s (short) to ~20 s (maximum length) from message to GSS email; RockBLOCK developer guide, one session per ~40 s at best"
+    max_bytes: {MO: 340, MT: 270}
+    latency_short_s: 5.0         # published nominal, short message
+    latency_full_s: 20.0         # published nominal, maximum-length message
+    session_setup_median_s: 10.0 # assumed: signal acquisition + registration before the burst. No published distribution found; log-normal because it is positive and skewed.
+    session_setup_sigma: 0.6     # assumed (log-space sigma)
+    p_success: 0.95              # assumed per-session success with a clear sky view. No published SBD success statistic found. Replace with MO status (SBDIX 0-4) counts from the lab's own gliders/USV.
+    max_attempts: 3              # assumed: firmware/host retries per message
+    fail_cost_s: 60.0            # assumed: time burnt by a session that ends in a GSS timeout
+  rudics:
+    what: Iridium RUDICS circuit-switched data call (2.4 kbps) as used for glider/float file transfer
+    source: "Iridium RUDICS service: 2.4 kbps circuit-switched data over the Iridium network"
+    rate_bps: 2400.0
+    session_setup_median_s: 30.0 # assumed: dial + connect + login
+    session_setup_sigma: 0.4     # assumed
+    p_success: 0.90              # assumed: a call is more fragile than an SBD burst; no published figure found
+    max_attempts: 3
+    fail_cost_s: 60.0

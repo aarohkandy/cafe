@@ -1,0 +1,5 @@
+# Deliberately wrong configuration: UMWM reports wave direction as math radians TO (CCW from east); WW3 and most buoys report
+# compass bearings FROM. This tells the code to read UMWM's angles with the WW3 convention. `python -m cafe.pm receipts
+# --broken tests/fixtures/broken/wave_direction.yaml` (make broken) applies it and must FAIL at least one receipt.
+waves:
+  direction_convention: compass_from

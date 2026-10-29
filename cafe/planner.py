@@ -13,7 +13,7 @@ differ by more than max_refinement_ratio: a finer level that would is coarsened 
 import json, math, pathlib, sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-BENCH = ROOT / "bench" / "throughput.json"
+BENCH = ROOT / "config" / "throughput.json"
 
 
 def uniform_cost(T, U, V, cfl, dx):

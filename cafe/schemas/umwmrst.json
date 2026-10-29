@@ -1,0 +1,90 @@
+{
+ "title": "UMWM restart umwmrst_*.nc (00/06/12/18 Z) as read by cafe.pm.env.orca",
+ "format": "CDF-1",
+ "dims": {
+  "x": 514120,
+  "f": 37,
+  "th": 32
+ },
+ "variables": {
+  "lon": {
+   "dims": [
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "degrees east",
+   "shape": [
+    514120
+   ]
+  },
+  "lat": {
+   "dims": [
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "degrees north",
+   "shape": [
+    514120
+   ]
+  },
+  "frequency": {
+   "dims": [
+    "f"
+   ],
+   "dtype": "f4",
+   "units": "Hz",
+   "shape": [
+    37
+   ]
+  },
+  "theta": {
+   "dims": [
+    "th"
+   ],
+   "dtype": "f4",
+   "units": "rad",
+   "shape": [
+    32
+   ]
+  },
+  "ust": {
+   "dims": [
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m s^-1",
+   "shape": [
+    514120
+   ]
+  },
+  "wavenumber": {
+   "dims": [
+    "x",
+    "f"
+   ],
+   "dtype": "f4",
+   "units": "rad m^-1",
+   "shape": [
+    514120,
+    37
+   ]
+  },
+  "F": {
+   "dims": [
+    "x",
+    "th",
+    "f"
+   ],
+   "dtype": "f4",
+   "units": "m^4 rad^-1",
+   "shape": [
+    514120,
+    32,
+    37
+   ]
+  }
+ },
+ "conventions": {
+  "F": "wavenumber spectrum F(k, theta) per sea point, m^4 rad^-1; swh = 4 sqrt(sum F k dk dtheta)"
+ }
+}

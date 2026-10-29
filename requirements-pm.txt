@@ -1,0 +1,25 @@
+# Pre-mission pipeline (cafe/pm) dependencies, on top of requirements.txt. Pinned to the versions
+# resolved for Python 3.12 on 2026-10-28. wrf-python has no 3.12 wheel: its uvmet10 rotation is done
+# in cafe/pm/env/wrf.py and tested against a hand-rotated case.
+h5py==3.16.0
+pyyaml==6.0.3
+jsonschema==4.26.0
+zarr==3.4.2
+scikit-learn==1.9.1
+statsmodels==0.15.0
+smt==2.15.0
+jax[cpu]==0.12.0.1
+xlb==0.3.1
+warp-lang==1.12.1  # xlb 0.3.1 imports warp.utils.ScopedTimer, gone after 1.12
+pycoare==0.4.3
+gliderflight==1.2.1
+mannrs==2.0.0
+pyconturb==2.7.4
+arlpy==1.9.0
+pytest==9.2.0
+pytest-cov==7.1.0
+hypothesis==6.170.13
+ruff==0.17.3
+mypy==2.4.1
+mutmut==3.8.1
+pyarrow==21.0.0

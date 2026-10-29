@@ -1,0 +1,46 @@
+# Slocum (G2-class) defaults for cafe.pm.physics.glider, Merckelbach et al. form as implemented in gliderflight 1.2.1
+# (the oracle).  Same leaf rules as seaglider.yaml.  Merckelbach, Smeed & Griffiths 2010 (JTECH 27) and Merckelbach et al.
+# 2019 (JTECH 36) describe the model; numbers below come from the BRIEF's Table-1 transcription and gliderflight defaults.
+kind: slocum
+params:
+  mg:            {value: 56.4,        unit: kg,       source: "BRIEF 2.4 (Merckelbach Table 1 defaults: m_g 56.4 kg)"}
+  Vg:            {value: 0.0548,      unit: m^3,      source: "BRIEF 2.4 (Merckelbach Table 1 defaults: V_g 54.8 L)"}
+  S:             {value: 0.10,        unit: m^2,      source: "BRIEF 2.4 (Table 1: S = 0.10 m^2); gliderflight default S = 0.1"}
+  AR:            {value: 7.0,         unit: "-",      source: "BRIEF 2.4 (Table 1: AR = 7); gliderflight default AR = 7"}
+  aw:            {value: 3.7,         unit: "1/rad",  source: "BRIEF 2.4 (Table 1: a_w = 3.7 rad^-1); gliderflight awEstimate(AR=7, Omega=43 deg) = 3.73"}
+  ah:            {value: 3.8,         unit: "1/rad",  source: "gliderflight 1.2.1 ModelParameters default ah = 3.8 (hull lift slope)"}
+  Cd0:           {value: 0.10,        unit: "-",      source: "BRIEF 2.4 (C_D0 ~ 0.10)"}
+  Cd1:           {value: 10.48,       unit: "1/rad^2", source: "gliderflight cd1Estimate: aw^2/(pi e AR) + Cd1_hull = 3.7^2/(pi*0.8*7) + 9.7 (e = 0.8, Cd1_hull = 9.7 are gliderflight defaults)"}
+  epsilon:       {value: 5.0e-10,     unit: "1/Pa",   source: "gliderflight 1.2.1 default epsilon = 5e-10 (hull compressibility, cf. the Merckelbach papers)"}
+  gravity:       {value: 9.81,        unit: "m/s^2",  source: "gliderflight GliderModel.G = 9.81"}
+  rho_ref:       {value: 1024.0,      unit: "kg/m^3", source: "gliderflight GliderModel.RHO0 = 1024"}
+  u_min_ms:      {value: 0.01,        unit: m/s,      assumed: true, why: "stall threshold; same as the Seaglider's (BS3 min_stall_speed 1 cm/s)"}
+  rating_m:      {value: 1000.0,      unit: m,        assumed: true, why: "Slocum G2 1000 m variant (Teledyne Webb offers 200 m and 1000 m); the lab's vehicle replaces it"}
+  pitch_deg:     {value: 26.0,        unit: deg,      assumed: true, why: "Slocum flies a fixed battery-shift pitch of order 25 deg; the lab's value replaces it"}
+  vbd_delta_cc:  {value: 60.0,        unit: cc,       assumed: true, why: "minimum VBD margin on dive and climb: the dive setting is this far below the lightest ballast point on the profile and the climb setting this far above the heaviest, so every depth has at least this much net buoyancy in the right direction. 60 cc (~0.6 N) gives a mean horizontal speed of ~0.23 m/s with the stratification of the TEPEX box; the lab's dive/climb VBD settings replace it"}
+  vbd_min_cc:    {value: -250.0,      unit: cc,       assumed: true, why: "ballast pump travel limit about neutral (order of the Slocum G2 pump range)"}
+  vbd_range_cc:  {value: 500.0,       unit: cc,       assumed: true, why: "total ballast pump travel, vbd_min_cc .. vbd_min_cc + vbd_range_cc"}
+  t_deep_c:      {value: 4.0,         unit: degC,     assumed: true, why: "Environment has no T(z); only used for a common code path (the Slocum model has no thermal term)"}
+  thermocline_scale_m: {value: 150.0, unit: m,        assumed: true, why: "see t_deep_c"}
+  battery_J:     {value: 1.2e+7,      unit: J,        assumed: true, why: "Slocum G2 alkaline/lithium pack energy is in a Teledyne chart not accessible in this session; order of the Seaglider's 10-17 MJ. The lab's pack replaces it"}
+  reserve_frac:  {value: 0.10,        unit: "-",      assumed: true, why: "see seaglider.yaml"}
+  hotel_W:       {value: 1.0,         unit: W,        assumed: true, why: "controller + CTD; Slocum payload power is a few times a Seaglider's (NOC: sensors typically < 1 W average)"}
+  pump_eta:      {value: 0.40,        unit: "-",      assumed: true, why: "see seaglider.yaml"}
+  pump_time_s:   {value: 120.0,       unit: s,        source: "NOC glider page: about two minutes of pumping (Seaglider or Slocum, 1000 m)"}
+  apogee_overshoot: {value: 0.5,      unit: "-",      assumed: true, why: "see seaglider.yaml"}
+  attitude_J_per_dive: {value: 414.0, unit: J,        assumed: true, why: "Seaglider value (Copernicus os-2019-36) reused: the Slocum battery shift is of the same order"}
+  iridium_Bps:   {value: 200.0,       unit: "B/s",    source: "BRIEF 2.4 (Iridium ~200 B/s at surfacing)"}
+  bytes_per_dive: {value: 50000.0,    unit: B,        assumed: true, why: "see seaglider.yaml"}
+  comms_W:       {value: 3.5,         unit: W,        assumed: true, why: "see seaglider.yaml"}
+  gps_s:         {value: 120.0,       unit: s,        assumed: true, why: "see seaglider.yaml"}
+  windage:       {value: 0.01,        unit: "-",      assumed: true, why: "see seaglider.yaml"}
+  antenna_height_m: {value: 0.3,      unit: m,        assumed: true, why: "Slocum tail antenna tip above the water when surfaced; the lab's CAD replaces it"}
+  acoustic_modem: {value: benthos_atm960, unit: "-",  source: "platforms/modems.yaml (Teledyne Benthos ATM-960 series)"}
+  seafloor_margin_m: {value: 50.0,    unit: m,        assumed: true, why: "see seaglider.yaml"}
+  min_dive_m:    {value: 30.0,        unit: m,        assumed: true, why: "see seaglider.yaml"}
+mission_defaults:
+  dive_depth_m:  {value: 500.0,       unit: m,        assumed: true, why: "see seaglider.yaml"}
+  station_tol_m: {value: 5000.0,      unit: m,        assumed: true, why: "see seaglider.yaml"}
+  lost_hours:    {value: 6.0,         unit: h,        assumed: true, why: "see seaglider.yaml"}
+  wp_radius_m:   {value: 1000.0,      unit: m,        assumed: true, why: "see seaglider.yaml"}
+  unreach_hours: {value: 12.0,        unit: h,        assumed: true, why: "see seaglider.yaml"}

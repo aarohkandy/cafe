@@ -1,0 +1,424 @@
+{
+ "title": "WRF wrfout_d01 as read by cafe.pm.env.orca (from wrfout_d01_2023-03-05_00:00:00)",
+ "format": "NETCDF4/HDF5",
+ "global_attrs": {
+  "MAP_PROJ": 3,
+  "CEN_LAT": 5.0,
+  "CEN_LON": -156.0,
+  "STAND_LON": 204.0,
+  "TRUELAT1": 10.0,
+  "DX": 12000.0,
+  "DT": 60.0,
+  "SST_UPDATE": 0,
+  "SF_OCEAN_PHYSICS": 0,
+  "SIMULATION_START_DATE": "2023-03-01_00:00:00",
+  "TITLE": " OUTPUT FROM WRF V4.7.1 MODEL",
+  "MP_PHYSICS": 4,
+  "CU_PHYSICS": 16,
+  "BL_PBL_PHYSICS": 1,
+  "SF_SFCLAY_PHYSICS": 91,
+  "ISFTCFLX": 2
+ },
+ "variables": {
+  "U10": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "m s-1",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "V10": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "m s-1",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "T2": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "K",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "Q2": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "kg kg-1",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "PSFC": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "Pa",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "SST": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "K",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "TSK": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "K",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "HFX": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "W m-2",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "LH": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "W m-2",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "QFX": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "kg m-2 s-1",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "RAINNC": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "mm",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "RAINC": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "mm",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "SWDOWN": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "W m-2",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "GLW": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "W m-2",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "UST": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "m s-1",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "PBLH": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "m",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "XLAT": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "degree_north",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "XLONG": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "degree_east",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "LANDMASK": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "HGT": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "m",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "COSALPHA": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "SINALPHA": {
+   "dims": [
+    "Time",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "",
+   "shape": [
+    1,
+    699,
+    1649
+   ]
+  },
+  "U": {
+   "dims": [
+    "Time",
+    "bottom_top",
+    "south_north",
+    "west_east_stag"
+   ],
+   "dtype": "float32",
+   "units": "m s-1",
+   "shape": [
+    1,
+    43,
+    699,
+    1650
+   ]
+  },
+  "V": {
+   "dims": [
+    "Time",
+    "bottom_top",
+    "south_north_stag",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "m s-1",
+   "shape": [
+    1,
+    43,
+    700,
+    1649
+   ]
+  },
+  "PH": {
+   "dims": [
+    "Time",
+    "bottom_top_stag",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "m2 s-2",
+   "shape": [
+    1,
+    44,
+    699,
+    1649
+   ]
+  },
+  "PHB": {
+   "dims": [
+    "Time",
+    "bottom_top_stag",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "m2 s-2",
+   "shape": [
+    1,
+    44,
+    699,
+    1649
+   ]
+  },
+  "T": {
+   "dims": [
+    "Time",
+    "bottom_top",
+    "south_north",
+    "west_east"
+   ],
+   "dtype": "float32",
+   "units": "K",
+   "shape": [
+    1,
+    43,
+    699,
+    1649
+   ]
+  },
+  "Times": {
+   "dims": [
+    "Time",
+    "DateStrLen"
+   ],
+   "dtype": "|S1",
+   "units": "",
+   "shape": [
+    1,
+    19
+   ]
+  }
+ }
+}

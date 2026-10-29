@@ -1,0 +1,330 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "cafe/schemas/hycom_netcdf.json",
+ "title": "Lab HYCOM per-snapshot netCDF (ocean.source: lab_hycom)",
+ "description": "What cafe.pm.env.hycom.read_lab_netcdf assumes about one snapshot file, as checked on describe(dataset). (1) Temperature, salinity, u and v each exist under one of the listed names, as (time, vertical, lat, lon) in any dimension order; surf_el/ssh is optional (time, lat, lon). (2) Either z-levels: a 1-D vertical coordinate named depth/Depth/lev/z in metres, positive down; or hybrid layers: a layer-thickness variable thknss/dp/layer_thickness (same dims as temperature) in Pa (divided by 9806, HYCOM onem) or m, layer values are layer means and are placed at layer mid-points. (3) lat and lon are 1-D (curvilinear grids must be regridded first); lon may be -180..180 or 0..360. (4) time is a CF-decodable coordinate. (5) Velocities are TOTAL (barotropic included), already on T-points and eastward/northward. (6) Whether temperature is in-situ or potential is NOT assumed: pass temperature_kind or set the temperature_kind attribute ('in_situ' | 'potential') globally or on the temperature variable.",
+ "type": "object",
+ "required": [
+  "dims",
+  "variables"
+ ],
+ "properties": {
+  "variables": {
+   "allOf": [
+    {
+     "anyOf": [
+      {
+       "required": [
+        "water_temp"
+       ]
+      },
+      {
+       "required": [
+        "temperature"
+       ]
+      },
+      {
+       "required": [
+        "temp"
+       ]
+      },
+      {
+       "required": [
+        "thetao"
+       ]
+      }
+     ]
+    },
+    {
+     "anyOf": [
+      {
+       "required": [
+        "salinity"
+       ]
+      },
+      {
+       "required": [
+        "salin"
+       ]
+      },
+      {
+       "required": [
+        "salt"
+       ]
+      },
+      {
+       "required": [
+        "so"
+       ]
+      }
+     ]
+    },
+    {
+     "anyOf": [
+      {
+       "required": [
+        "water_u"
+       ]
+      },
+      {
+       "required": [
+        "u-velocity"
+       ]
+      },
+      {
+       "required": [
+        "u_velocity"
+       ]
+      },
+      {
+       "required": [
+        "u"
+       ]
+      },
+      {
+       "required": [
+        "uo"
+       ]
+      }
+     ]
+    },
+    {
+     "anyOf": [
+      {
+       "required": [
+        "water_v"
+       ]
+      },
+      {
+       "required": [
+        "v-velocity"
+       ]
+      },
+      {
+       "required": [
+        "v_velocity"
+       ]
+      },
+      {
+       "required": [
+        "v"
+       ]
+      },
+      {
+       "required": [
+        "vo"
+       ]
+      }
+     ]
+    },
+    {
+     "anyOf": [
+      {
+       "anyOf": [
+        {
+         "required": [
+          "depth"
+         ],
+         "properties": {
+          "depth": {
+           "required": [
+            "units"
+           ],
+           "properties": {
+            "units": {
+             "enum": [
+              "m",
+              "meter",
+              "meters",
+              "metre",
+              "metres",
+              "Meter",
+              "Meters"
+             ]
+            }
+           }
+          }
+         }
+        },
+        {
+         "required": [
+          "Depth"
+         ],
+         "properties": {
+          "Depth": {
+           "required": [
+            "units"
+           ],
+           "properties": {
+            "units": {
+             "enum": [
+              "m",
+              "meter",
+              "meters",
+              "metre",
+              "metres",
+              "Meter",
+              "Meters"
+             ]
+            }
+           }
+          }
+         }
+        },
+        {
+         "required": [
+          "lev"
+         ],
+         "properties": {
+          "lev": {
+           "required": [
+            "units"
+           ],
+           "properties": {
+            "units": {
+             "enum": [
+              "m",
+              "meter",
+              "meters",
+              "metre",
+              "metres",
+              "Meter",
+              "Meters"
+             ]
+            }
+           }
+          }
+         }
+        },
+        {
+         "required": [
+          "z"
+         ],
+         "properties": {
+          "z": {
+           "required": [
+            "units"
+           ],
+           "properties": {
+            "units": {
+             "enum": [
+              "m",
+              "meter",
+              "meters",
+              "metre",
+              "metres",
+              "Meter",
+              "Meters"
+             ]
+            }
+           }
+          }
+         }
+        }
+       ]
+      },
+      {
+       "anyOf": [
+        {
+         "required": [
+          "thknss"
+         ],
+         "properties": {
+          "thknss": {
+           "required": [
+            "units"
+           ],
+           "properties": {
+            "units": {
+             "enum": [
+              "Pa",
+              "pa",
+              "PA",
+              "pascal",
+              "Pascal",
+              "m",
+              "meter",
+              "meters",
+              "metre",
+              "metres"
+             ]
+            }
+           }
+          }
+         }
+        },
+        {
+         "required": [
+          "dp"
+         ],
+         "properties": {
+          "dp": {
+           "required": [
+            "units"
+           ],
+           "properties": {
+            "units": {
+             "enum": [
+              "Pa",
+              "pa",
+              "PA",
+              "pascal",
+              "Pascal",
+              "m",
+              "meter",
+              "meters",
+              "metre",
+              "metres"
+             ]
+            }
+           }
+          }
+         }
+        },
+        {
+         "required": [
+          "layer_thickness"
+         ],
+         "properties": {
+          "layer_thickness": {
+           "required": [
+            "units"
+           ],
+           "properties": {
+            "units": {
+             "enum": [
+              "Pa",
+              "pa",
+              "PA",
+              "pascal",
+              "Pascal",
+              "m",
+              "meter",
+              "meters",
+              "metre",
+              "metres"
+             ]
+            }
+           }
+          }
+         }
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  },
+  "attrs": {
+   "type": "object",
+   "properties": {
+    "temperature_kind": {
+     "enum": [
+      "in_situ",
+      "potential"
+     ]
+    }
+   }
+  }
+ }
+}

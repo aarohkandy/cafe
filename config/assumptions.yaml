@@ -1,0 +1,282 @@
+# Numbers no source pins down: key -> {value, unit, why, replace_with}. Code reads them from here (cafe/pm/env/subgrid.py).
+subgrid.stability_ratio_clip:
+  value: [0.2, 3.0]
+  unit: "-"
+  why: Keeps L_Mann(z/L_ob)/L_Mann(neutral) = 1/phi_m(z/L_ob) finite and inside a plausible range at extreme stability.
+  replace_with: Stage-3 LES length_scale_factor per stability class.
+subgrid.gust_front.lambda_max_per_h:
+  value: 0.3
+  unit: events/h
+  why: Event rate at heavy rain and high boundary-layer moist static energy; Wills et al. 2021 report 382 events but not a per-hour rate conditioned on model rain.
+  replace_with: Rate fitted to the Wills 2021 event catalogue against WRF RAINNC at the Saildrone tracks, or TAO buoy rain/temperature drops.
+subgrid.gust_front.lambda_bg_per_h:
+  value: 0.005
+  unit: events/h
+  why: Cold pools also pass points that WRF (12 km) sees as dry.
+  replace_with: Same fit as lambda_max_per_h.
+subgrid.gust_front.rain_scale_mm_h:
+  value: 1.0
+  unit: mm/h
+  why: e-folding rain rate of the trigger, rate factor = 1 - exp(-rain/scale).
+  replace_with: Same fit as lambda_max_per_h.
+subgrid.gust_front.theta_e_lo_K:
+  value: 335.0
+  unit: K
+  why: Surface equivalent potential temperature (Bolton 1980, from T2, Q2, PSFC) below which the CAPE-like factor is 0; a stand-in for CAPE because WRF output here has no profiles of the whole column.
+  replace_with: CAPE or moist-static-energy deficit computed from the 3-D fields for the hours a UAS flies, or ERA5 CAPE.
+subgrid.gust_front.theta_e_span_K:
+  value: 15.0
+  unit: K
+  why: The factor rises linearly from 0 at theta_e_lo to 1 at theta_e_lo + span.
+  replace_with: Same as theta_e_lo_K.
+subgrid.gust_front.direction_sigma_deg:
+  value: 45.0
+  unit: deg
+  why: Gust vector is along the mean wind plus a Gaussian angular offset; cold-pool outflow direction is not tied to the ambient wind in general.
+  replace_with: Wills 2021 composite wind direction change, or LES gust statistics.
+subgrid.gust_front.wind_rise_s:
+  value: 450.0
+  unit: s
+  why: Time from front onset to the wind peak (strongest gusts 5-10 min after the temperature front).
+  replace_with: Wills 2021 composite time series.
+subgrid.gust_front.temp_rise_s:
+  value: 600.0
+  unit: s
+  why: Wills 2021 detection window (temperature drop of at least 1.5 K within 10 min).
+  replace_with: Wills 2021 composite time series.
+subgrid.rain_lens.trigger_mm_h:
+  value: 1.0
+  unit: mm/h
+  why: Rain rate below which no lens is formed.
+  replace_with: Iyer & Drushka 2021 conditional statistics.
+subgrid.rain_lens.saturation_mm_h:
+  value: 5.0
+  unit: mm/h
+  why: Rain rate at which dS reaches its full 0.5 psu; linear in between.
+  replace_with: Iyer & Drushka 2021 dS versus rain accumulation.
+subgrid.rain_lens.tau_max_s:
+  value: 7200.0
+  unit: s
+  why: e-folding time of the lens at low wind (minutes to hours, BRIEF 2.2); shrinks to 10 min as wind approaches the 8 m/s cut-off.
+  replace_with: Iyer & Drushka 2021 persistence versus wind.
+subgrid.rain_lens.tau_min_s:
+  value: 600.0
+  unit: s
+  why: Lens e-folding time just below the wind cut-off.
+  replace_with: Iyer & Drushka 2021 persistence versus wind.
+subgrid.rain_lens.dT_K:
+  value: -0.2
+  unit: K
+  why: Rain-cooled lens relative to the surroundings (rain at wet-bulb temperature); magnitude not taken from a paper.
+  replace_with: COARE rain heat flux integrated over the lens age, or SPURS-2 skin SST composites.
+subgrid.rain_lens.edge_width_m:
+  value: 0.1
+  unit: m
+  why: Smoothing width of the lens base so dS(z) is continuous.
+  replace_with: Observed salinity profiles in lenses.
+subgrid.diurnal_jet.dT_ref_K:
+  value: 3.0
+  unit: K
+  why: Warm-layer dT at which the surface-trapped jet proxy reaches its full 0.1-0.3 m/s (top of the 0.5-3 K diurnal warm-layer range).
+  replace_with: Fit of observed afternoon surface-current anomaly to dT_warm (drifter/ADCP), or LES.
+dtmb5415.u_D_rel:
+  value: 0.010
+  unit: "-"
+  why: Experimental C_T uncertainty of the INSEAN 2340 tests; the DTIC report (ADA458075) returned HTTP 403, so the published value was not read.
+  replace_with: The u_D stated in Olivieri et al. 2001 (DTIC ADA458075) or the Tokyo 2015 workshop data.
+dtmb5415.u_S_rel:
+  value: 0.013
+  unit: "-"
+  why: Wetted-area uncertainty of the lofted hull mesh (4.900 m2 vs 4.82-4.95 m2 published for 24.83-scale models).
+  replace_with: The tank's stated static wetted area.
+dtmb5415.u_nu_rel:
+  value: 0.006
+  unit: "-"
+  why: Tank water assumed fresh at 20 C (998.2 kg/m3, 1.004e-6 m2/s); +-1 C changes nu by ~2.5 %, C_F by ~0.6 %.
+  replace_with: The measured tank water temperature.
+env.sigma.t2_k:
+  value: 1.0
+  unit: K
+  why: 1-sigma error of WRF 2 m air temperature over the tropical ocean; the TAO comparison (cafe.pm.env.tao) overwrites it when the mission window has buoy data.
+  replace_with: TAO/TRITON AIRT residual against WRF T2 over the mission window.
+env.sigma.q2_frac:
+  value: 0.10
+  unit: "-"
+  why: Relative 1-sigma error of WRF 2 m specific humidity, a typical spread of reanalysis vs buoy humidity in the warm pool.
+  replace_with: TAO RH residual converted to q.
+env.sigma.psfc_pa:
+  value: 100.0
+  unit: Pa
+  why: 1 hPa, the order of WRF surface-pressure error away from tropical cyclones.
+  replace_with: TAO BP residual.
+env.sigma.swdown_frac:
+  value: 0.20
+  unit: "-"
+  why: Relative error of hourly model shortwave under tropical convection (cloud placement).
+  replace_with: TAO SWRAD residual.
+env.sigma.glw_wm2:
+  value: 10.0
+  unit: W/m2
+  why: Typical hourly downwelling longwave error under cloud.
+  replace_with: TAO LWRAD residual.
+env.sigma.wave_dir_deg:
+  value: 20.0
+  unit: deg
+  why: Spread of model mean wave direction at moderate sea states; equal to the current-direction prior for want of a wave-buoy comparison in the box.
+  replace_with: Direction residual against a directional wave buoy or Saildrone wave data inside the box.
+env.sigma.sst_k:
+  value: 0.5
+  unit: K
+  why: WRF SST is frozen at 2023-03-01 (SST_UPDATE=0); 0.5 K is the order of 6-day SST change in the warm pool.
+  replace_with: TAO SST residual (cafe.pm.env.tao).
+bathy.gebco_rel_sigma:
+  value: 0.05
+  unit: "-"
+  why: 1-sigma fraction of depth for GEBCO_2026 between soundings; GEBCO's type-identifier grid says most of the open Pacific is predicted from altimetry, not sounded.
+  replace_with: GEBCO TID-grid-dependent error, or multibeam where the ship has it.
+bathy.umwm_rel_sigma:
+  value: 0.10
+  unit: "-"
+  why: UMWM's 12 km depth is a smoothed model input; 10 % stands for the smoothing over seamounts.
+  replace_with: Not needed once GEBCO is cached.
+# --- stage 3 windows (cafe/pm/stage3/pipeline_windows.py): geometry and resolution numbers no platform yaml carries ---
+stage3.window_s:
+  value: 10.0
+  unit: "s"
+  why: "Physical duration of one LES window; BRIEF 2.6 sizes steps for 10 s. Shortened when the CPU budget cannot afford it (steps never fall below min_flow_throughs transits)."
+  replace_with: "The Stage-1 time scale of the stress event that selected the window (gust or wave group duration)."
+stage3.box_bodies:
+  value: [3.0, 1.6, 1.6]
+  unit: "body lengths"
+  why: "Nest box (x, y, z) in lengths of the body's largest extent; 3 lengths long keeps the wake inside, 1.6 across leaves 0.3 lengths clear of a body as wide as it is long (the USV wing, span 5 m, chord 1.2 m) so the sponge never touches it."
+  replace_with: "A box study (force change with box size) on the lab's GPU."
+stage3.cells_per_delta:
+  value: 10
+  unit: "cells per boundary-layer thickness"
+  why: "Upper end of the BRIEF 2.6 range 5-10; the budget fit coarsens from here."
+  replace_with: "The lab's GPU resolution study."
+stage3.min_cells_across:
+  value: 2
+  unit: "cells"
+  why: "Smallest resolved dimension of the main body at the coarsest dx the budget fit may choose; below this the voxel body is not a body."
+  replace_with: "A resolution at which the drag coefficient is grid-independent."
+stage3.min_flow_throughs:
+  value: 3
+  unit: "box transits"
+  why: "Least run length after which the force running mean can settle (BRIEF 5.5 convergence check)."
+  replace_with: "The convergence time measured in a long window."
+stage3.spinup:
+  value: 0.3
+  unit: "fraction"
+  why: "Share of the run discarded before the coefficient mean (impulsive start of the window)."
+  replace_with: "Fraction after which the force series is stationary in a long run."
+stage3.fea_elements_along:
+  value: 20
+  unit: "elements"
+  why: "FEA mesh size = body length / this; coarse enough for a minutes-long ccx run on the pressure hull."
+  replace_with: "A mesh-convergence study of the hull utilization."
+stage3.glider.hull_diameter_m:
+  value: 0.30
+  unit: "m"
+  why: "Seaglider pressure-hull diameter; the platform yaml has the length (1.8 m) but not the diameter. About 0.30 m for the Kongsberg Seaglider (recalled, not re-read)."
+  replace_with: "The lab's CAD or the Kongsberg specification sheet."
+stage3.glider.wing_span_m:
+  value: 1.0
+  unit: "m"
+  why: "Seaglider wing span; not in the yaml (about 1.0 m, recalled)."
+  replace_with: "CAD."
+stage3.glider.wing_chord_m:
+  value: 0.20
+  unit: "m"
+  why: "Seaglider mean wing chord; not in the yaml."
+  replace_with: "CAD."
+stage3.glider.wing_thickness_m:
+  value: 0.012
+  unit: "m"
+  why: "Wing thickness as a flat plate (about 6 % of the chord)."
+  replace_with: "CAD."
+stage3.glider.wing_x_frac:
+  value: 0.0
+  unit: "fraction of length"
+  why: "Wing centre along the hull from the hull centre; near the centre of buoyancy."
+  replace_with: "CAD."
+stage3.glider.hull_thickness_m:
+  value: 0.008
+  unit: "m"
+  why: "Pressure-hull wall thickness for the FEA of the hull shell; not in any yaml."
+  replace_with: "The manufacturer's hull drawing; rating 1000 m is the check."
+stage3.glider.hull_material:
+  value: al6061
+  unit: "fea.MATERIALS key"
+  why: "Pressure-hull material for the FEA; one of cafe.fea.MATERIALS."
+  replace_with: "The manufacturer's material."
+stage3.glider.window_depth_m:
+  value: 50.0
+  unit: "m"
+  why: "Depth where the glider's through-water flight state and the current are taken for a window (upper ocean where the current stress is)."
+  replace_with: "The depth of the stress event in the stage-1 track."
+stage3.slocum.length_m:
+  value: 1.5
+  unit: "m"
+  why: "Slocum G2 length; platforms/slocum.yaml has the hydrodynamic coefficients but not the length (about 1.5 m, recalled)."
+  replace_with: "CAD or Teledyne datasheet."
+stage3.slocum.hull_diameter_m:
+  value: 0.22
+  unit: "m"
+  why: "Slocum G2 hull diameter (about 0.22 m, recalled)."
+  replace_with: "CAD or Teledyne datasheet."
+stage3.usv.hull_draft_m:
+  value: 0.45
+  unit: "m"
+  why: "Vertical semi-axis of the submerged hull body in the water window; the yaml draft (2 m) is the keel, which is modelled separately. About 0.45 m for a 7 m slender hull."
+  replace_with: "CAD (waterline sections)."
+stage3.usv.wing_t_c:
+  value: 0.15
+  unit: "-"
+  why: "Thickness/chord of the rigid wing: NACA 0015 section, as the yaml's wing_cl_alpha_2d source assumes; the wing is a flat plate of this thickness in the window."
+  replace_with: "The wing's CAD section."
+stage3.uas.window_altitude_m:
+  value: 10.0
+  unit: "m"
+  why: "Height of the wind sample for a UAS window (lowest flux-profile altitude, BRIEF 6: 10, 30, 60, 100 m)."
+  replace_with: "The altitude of the strongest-wind leg."
+stage3.uas.body_radii_m:
+  value: [0.08, 0.06, 0.03]
+  unit: "m"
+  why: "Semi-axes of the quad's central body as an ellipsoid (frame of the Armattan Chameleon 6 in class, NeuroBEM): not printed in the paper."
+  replace_with: "CAD or a photograph of the lab's frame."
+stage3.uas.arm_length_m:
+  value: 0.30
+  unit: "m"
+  why: "Arm span of the + frame (diagonal motor-to-motor 0.26 m in the yaml's motor_radius_m rationale)."
+  replace_with: "CAD."
+stage3.uas.arm_width_m:
+  value: 0.015
+  unit: "m"
+  why: "Arm width."
+  replace_with: "CAD."
+stage3.uas.arm_thickness_m:
+  value: 0.010
+  unit: "m"
+  why: "Arm thickness."
+  replace_with: "CAD."
+stage3.min_window_s:
+  value: 3.0
+  unit: "s"
+  why: "Least wall-clock slice in which a window can compile its kernel and run two chunks; below it the window is reported as not run instead of overrunning the stage budget."
+  replace_with: "Measured compile + two-chunk time on the lab's machine."
+stage3.fea_reserve_frac:
+  value: 0.25
+  unit: "fraction"
+  why: "Share of a glider window's wall-clock slice held back for its FEA."
+  replace_with: "Measured FEA time of the pressure hull at the mesh size used."
+stage3.fea_min_s:
+  value: 8.0
+  unit: "s"
+  why: "Least slice left after the LES for the FEA of the pressure hull to start (gmsh + ccx on a coarse shell mesh)."
+  replace_with: "Measured FEA time."
+stage3.chunk_steps:
+  value: 100
+  unit: "steps"
+  why: "Steps per jitted chunk: the wall-clock hook decides after each chunk; every other chunk length is another XLA compile."
+  replace_with: "Larger on a GPU, where a chunk of 100 steps is milliseconds."

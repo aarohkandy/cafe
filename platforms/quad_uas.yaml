@@ -1,0 +1,139 @@
+# Small quadrotor UAS launched from the ship (TEPEX-C Stage 1 + ArduCopter SITL).
+# Every number is {value, unit, source} or {value, unit, assumed: true, why}. cafe/pm/physics/uas.py refuses to load
+# a leaf that has neither (check_provenance), so an unsourced number cannot slip in.
+#
+# Short refs
+#   NB  = NeuroBEM data set read-me, https://rpg.ifi.uzh.ch/neuro_bem/Readme.html (mass 0.772 kg, J = diag(0.0025,
+#         0.0021, 0.0043), 400 Hz Vicon), and Bauersfeld, Kaufmann, Foehn, Sun, Scaramuzza, "NeuroBEM: Hybrid
+#         Aerodynamic Quadrotor Model", RSS 2021, arXiv:2106.08015 (Armattan Chameleon 6 in frame, Hobbywing XRotor
+#         2306 motors, 5 in three-blade props, max static thrust ~33 N, motor time constant 33 ms, Sec. IV-B, IV-D).
+#   F18 = Faessler, Franchi, Scaramuzza, "Differential Flatness of Quadrotor Dynamics Subject to Rotor Drag for
+#         Accurate Tracking of High-Speed Trajectories", IEEE RA-L 3(2), 2018, arXiv:1712.02402, Eq. (2) and Sec. VII-C.
+#   L06 = Leishman, Principles of Helicopter Aerodynamics, 2nd ed., Cambridge, 2006, Ch. 2 (momentum theory, figure of merit).
+#   AC  = ArduCopter 4.7 parameter reference (ardupilot.org/copter/docs/parameters.html).
+
+airframe:
+  mass_kg:
+    {value: 0.772, unit: kg, source: "NB read-me (0.752 kg in the RSS paper, revised to 0.772 kg on the data-set page)"}
+  inertia_kgm2:
+    {value: [0.0025, 0.0021, 0.0043], unit: kg m2, source: "NB read-me, diagonal of J about the CoG, body FLU"}
+  motor_radius_m:
+    {value: 0.13, unit: m, assumed: true,
+     why: "CoG-to-motor distance of a 6 in racing frame (~0.26 m motor-to-motor diagonal); NB does not print it. Only sets
+           roll/pitch torque per newton, i.e. the attitude-loop gain, which the controller normalises by J"}
+  hotel_w:
+    {value: 10.0, unit: W, assumed: true, why: "flight controller + companion computer + one flux sensor package; replace with the lab payload"}
+
+rotor:
+  thrust_max_n_each:
+    {value: 8.25, unit: N, source: "NB paper Sec. IV-B: 'maximum static thrust of approximately 33 N' for four rotors (33/4)"}
+  omega_max_rpm:
+    {value: 30000.0, unit: rpm, assumed: true,
+     why: "XRotor 2306 on 6S spinning 5 in props; with 8.25 N this is C_T = T/(rho n^2 D^4) = 0.108, next to the UIUC APC 10x4.7 value
+           0.11 that cafe/vehicle.py uses. Sets the T(omega) scale and so the hover throttle (about 48 %)"}
+  prop_diameter_m:
+    {value: 0.127, unit: m, source: "NB paper Sec. IV-B: 5 inch propellers"}
+  figure_of_merit:
+    {value: 0.60, unit: "-", assumed: true,
+     why: "static FM of a 5 in rotor, in the 0.4-0.65 range quoted for small low-Reynolds rotors (L06 Ch. 2; Bohorquez, Samuel, Sirohi,
+           Pines, J. AHS 48(2), 2003 - recalled, not re-read). Power = T^1.5 / (sqrt(2 rho A) FM): receipts() checks the identity and the band"}
+  motor_time_const_s:
+    {value: 0.033, unit: s, source: "NB paper Sec. IV-D, tau_Omega = 33 ms identified from motor step response"}
+  esc_motor_eff:
+    {value: 0.80, unit: "-", assumed: true, why: "ESC x brushless motor efficiency at mid throttle for 2306-class motors; replace with a dyno curve"}
+  rho_ref_kgm3:
+    {value: 1.20, unit: kg/m3, assumed: true, why: "air density at which thrust_max and omega_max are quoted (ISA 20 C); the model scales thrust and power with rho/rho_ref"}
+  yaw_torque_ratio_priority:
+    {value: 0.2, unit: "-", assumed: true, why: "yaw demand is cut to this fraction when the mix saturates (ArduCopter gives yaw lowest priority)"}
+
+aero:
+  d_x:
+    {value: 0.544, unit: 1/s, source: "F18 Sec. VII-C, circle trajectory (the faster of the two): d_x = 0.544 1/s, mass-normalised"}
+  d_y:
+    {value: 0.386, unit: 1/s, source: "F18 Sec. VII-C, circle trajectory: d_y = 0.386 1/s (d_x > d_y because the frame is wider than long)"}
+  d_z:
+    {value: 0.0, unit: 1/s, source: "F18 Sec. VII-C: 'a non zero drag coefficient in the z-direction does not improve the trajectory tracking', up to 2.5 m/s vertical"}
+
+battery:
+  energy_wh:
+    {value: 60.0, unit: Wh, assumed: true,
+     why: "sized so the nominal 20 min sortie (about 41 Wh drawn) lands near 30 % state of charge. NOTE the 0.772 kg of NB carries a ~30 Wh LiPo;
+           60 Wh needs ~0.24 kg of 250 Wh/kg Li-ion, so this treats 0.772 kg as all-up with such a pack. The lab's real pack replaces it"}
+  cells:
+    {value: 6, unit: "-", source: "NB paper: 6S-class racing platform (Hobbywing XRotor 2306 on 6S); V_ref = 4.2 V per cell"}
+  v_nom_cell:
+    {value: 3.7, unit: V, source: "nominal Li-ion/LiPo cell voltage"}
+  peukert_exponent:
+    {value: 1.05, unit: "-", source: "docs/BRIEF.md 2.4 (P ~ 1.05); Peukert 1897; Doerffel & Sharkh, J. Power Sources 155, 2006, review the exponent for Li-ion"}
+  peukert_hours:
+    {value: 1.0, unit: h, assumed: true, why: "capacity is quoted at the 1 h (1C) rate, the usual LiPo rating"}
+  r_int_ohm:
+    {value: 0.10, unit: ohm, assumed: true, why: "pack + wiring internal resistance for 6S Li-ion at 20 C; gives ~0.6 V sag at hover current"}
+  ocv_soc:
+    {value: [0.0, 0.1, 0.2, 0.5, 0.8, 1.0], unit: "-", assumed: true, why: "state-of-charge knots of a typical NMC/LiPo open-circuit curve"}
+  ocv_cell_v:
+    {value: [3.00, 3.45, 3.60, 3.78, 4.02, 4.20], unit: V, assumed: true, why: "typical NMC/LiPo per-cell open-circuit voltage at those knots; replace with a lab discharge log"}
+  cutoff_cell_v:
+    {value: 3.0, unit: V, assumed: true, why: "ESC/pack low-voltage cutoff; below it the motors are lost"}
+  reserve_frac:
+    {value: 0.20, unit: "-", assumed: true, why: "land with at least 20 % of rated charge left; the usual small-UAS operating rule"}
+
+limits:
+  max_tilt_deg:
+    {value: 35.0, unit: deg, assumed: true, why: "lean-angle limit the position controller commands (ArduCopter ANGLE_MAX analogue; cafe/ctrl.py TILT_MAX is 35 deg)"}
+  tilt_exceedance_deg:
+    {value: 42.0, unit: deg, assumed: true, why: "attitude_exceedance flag: actual tilt beyond the commanded limit by 7 deg means a gust or saturation overpowered the attitude loop"}
+  max_airspeed_ms:
+    {value: 12.0, unit: m/s, assumed: true,
+     why: "operating limit; F18's drag at the 35 deg tilt limit would allow g*tan(35 deg)/d_x = 12.6 m/s, so this is the same number rounded down"}
+
+controller:
+  pos_p: {value: 1.0, unit: 1/s, source: "AC PSC_POSXY_P default 1.0"}
+  vel_p: {value: 2.0, unit: 1/s, source: "AC PSC_VELXY_P default 2.0"}
+  vel_i: {value: 1.0, unit: 1/s2, source: "AC PSC_VELXY_I default 1.0"}
+  vel_z_p: {value: 5.0, unit: 1/s, source: "AC PSC_VELZ_P default 5.0"}
+  vel_z_i: {value: 2.0, unit: 1/s2, assumed: true, why: "stands in for ArduCopter's PSC_ACCZ_I loop; absorbs the hover-thrust error as the pack sags"}
+  accel_wp: {value: 2.5, unit: m/s2, assumed: true, why: "horizontal waypoint acceleration; cafe/ctrl.py uses 2.5 for multirotors (AC WPNAV_ACCEL default is 1.0)"}
+  accel_z: {value: 2.0, unit: m/s2, assumed: true, why: "vertical acceleration for the sqrt controller (AC WPNAV_ACCEL_Z default 1.0, doubled for a light vehicle)"}
+  speed_up: {value: 3.0, unit: m/s, assumed: true, why: "AC WPNAV_SPEED_UP default is 2.5 m/s; 3 for a TWR 4 airframe"}
+  speed_dn: {value: 1.5, unit: m/s, source: "AC WPNAV_SPEED_DN default 1.5 m/s"}
+  att_p: {value: 6.0, unit: 1/s, assumed: true, why: "attitude P (AC ATC_ANG_RLL_P default 4.5); 6 is cafe/ctrl.py's multirotor attitude bandwidth"}
+  rate_p: {value: 20.0, unit: 1/s, assumed: true, why: "rate-loop bandwidth, kept below the 1/33 ms = 30 rad/s motor pole so the loop has about 55 deg phase margin; cafe/ctrl.py uses 25"}
+  yaw_slew_degs: {value: 60.0, unit: deg/s, source: "AC ATC_SLEW_YAW default 6000 cdeg/s"}
+  vel_i_max: {value: 6.0, unit: m/s2, assumed: true, why: "integrator clamp; must exceed the rotor-drag acceleration d_x*v = 4.4 m/s2 at 8 m/s (AC PSC_*_IMAX is 1000 cm/s2 = 10 m/s2)"}
+
+sortie:
+  duration_s: {value: 1200.0, unit: s, source: "docs/BRIEF.md 6: 20 min flux-profile sortie"}
+  levels_m: {value: [10.0, 25.0, 50.0, 80.0], unit: m, assumed: true, why: "stacked flux-profile legs above the deck; surface layer 10 m to above the marine boundary-layer lowest model level"}
+  leg_speed_ms: {value: 8.0, unit: m/s, assumed: true, why: "ground-relative cruise on the legs; below max_airspeed so wind headroom remains"}
+  leg_heading: {value: upwind, unit: "-", assumed: true, why: "legs run into the wind from the ship so the sensor samples air the ship has not disturbed; a compass 'to' angle in degrees overrides it"}
+  rtl_height_m: {value: 15.0, unit: m, assumed: true, why: "return height above the deck, clear of the mast"}
+  wp_radius_m: {value: 3.0, unit: m, source: "emulator.py Runner goto tolerance for a UAV (3 m); AC WPNAV_RADIUS is 2 m"}
+  land_speed_ms: {value: 1.0, unit: m/s, assumed: true, why: "descent onto a moving deck; AC LAND_SPEED is 0.5 m/s, doubled to keep the sortie near 20 min"}
+  deck_height_m: {value: 8.0, unit: m, assumed: true, why: "helideck height above the mean sea surface; sets the height at which wind is read"}
+  time_limit_factor: {value: 1.0, unit: "-", assumed: true, why: "return-to-ship failsafe fires when airborne time exceeds duration_s times this"}
+  hard_stop_factor: {value: 1.6, unit: "-", assumed: true, why: "the run for a member that cannot get home ends at duration_s times this (it ditches long before on this battery)"}
+  battery_swap: {value: true, unit: "-", assumed: true, why: "every sortie of a mission starts on a full pack; the ship crew swaps it"}
+
+launch_rule:
+  max_mean_wind_ms: {value: 12.0, unit: m/s, assumed: true, why: "do not launch if the mean wind at flight height over the sortie exceeds the operating airspeed limit"}
+  wind_check_height_m: {value: 30.0, unit: m, assumed: true, why: "height above the deck where the forecast wind is read for the launch decision (middle of the stack)"}
+  gust_lookahead_min: {value: 15.0, unit: min, assumed: true, why: "scrub if a gust front is active at the ship within this long of launch (docs/BRIEF.md 6: no launch in a gust-front window)"}
+  gust_front_threshold_ms: {value: 2.0, unit: m/s, assumed: true, why: "horizontal gust perturbation above which a front is counted as active (below the 3-10 m/s of docs/BRIEF.md 2.2)"}
+
+failure:
+  stuck_window_s: {value: 10.0, unit: s, assumed: true, why: "wind_exceeds_airspeed: no headway for this long (longer than a start-of-leg acceleration)"}
+  stuck_closing_ms: {value: 0.3, unit: m/s, assumed: true, why: "closing speed on the target below this counts as no headway"}
+  stuck_min_cmd_ms: {value: 1.0, unit: m/s, assumed: true, why: "only while the controller is asking for more than this horizontal speed"}
+
+radio:
+  rfd900x:
+    freq_mhz: {value: [902.0, 928.0], unit: MHz, source: "RFDesign RFD900x datasheet (docs/BRIEF.md 2.8)"}
+    tx_power_dbm: {value: 30.0, unit: dBm, source: "RFDesign RFD900x datasheet: 1 W"}
+    rx_sensitivity_dbm: {value: -121.0, unit: dBm, source: "RFDesign RFD900x datasheet, lowest air data rate (docs/BRIEF.md 2.8)"}
+  link_2g4:
+    freq_mhz: {value: [2400.0, 2483.5], unit: MHz, source: "ISM band edges"}
+    tx_power_dbm: {value: 27.0, unit: dBm, assumed: true, why: "500 mW 2.4 GHz FHSS telemetry radio; replace with the lab's radio"}
+    rx_sensitivity_dbm: {value: -100.0, unit: dBm, assumed: true, why: "typical 2.4 GHz digital modem at low rate; replace with the datasheet value"}
+  uas_antenna_height_above_body_m: {value: 0.1, unit: m, assumed: true, why: "whip antenna on the top plate; the link height is deck + flight altitude + this"}
+  ship_antenna_height_m: {value: 10.0, unit: m, assumed: true, why: "mast antenna height above the sea surface"}

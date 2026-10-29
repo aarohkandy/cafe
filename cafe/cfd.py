@@ -330,6 +330,12 @@ def gci(fine, coarse, ratio=2.0, p=2.0, fs=3.0):
     return fs * abs(eps) / (ratio ** p - 1)
 
 
+def ratio_from_cells(n_fine, n_coarse):
+    """Celik et al. 2008 eq. 1-2: h = (V/N)^(1/3), so r = (N_fine/N_coarse)^(1/3). Grids that differ by one local
+    refinement box are much closer than the nominal 2 the octree level suggests (1.16-1.3 for the boat grids)."""
+    return (n_fine / n_coarse) ** (1 / 3)
+
+
 def characterize_external(stl, workdir, fluid, speed, cofr=(0, 0, 0), dirs=tuple(DIRS), log=print, refine_above=0.3):
     """Coarse + fine runs; returns the finest result with a per-direction GCI against the next coarser grid.
     A two-grid GCI only means something when both grids are in the asymptotic range. Slender bare hulls at
@@ -345,10 +351,12 @@ def characterize_external(stl, workdir, fluid, speed, cofr=(0, 0, 0), dirs=tuple
         _shrink(workdir / name)
 
     def study(res, ref):
+        rr = ratio_from_cells(res["mesh"]["cells"], ref["mesh"]["cells"])
+        res["refinement_ratio"], res["ratio_below_1_3"] = rr, rr < 1.3
         for d, r in res["dirs"].items():
             drag_f = -np.dot(r["force"], dvec(d))
             drag_c = -np.dot(ref["dirs"][d]["force"], dvec(d))
-            r["gci"] = gci(drag_f, drag_c)
+            r["gci"] = gci(drag_f, drag_c, ratio=rr)
             r["drag_coarse"] = drag_c                    # "coarse" = the next coarser grid of the study
             r["force_coarse"] = ref["dirs"][d]["force"]
             r["moment_coarse"] = ref["dirs"][d]["moment"]
@@ -603,8 +611,10 @@ def characterize_free_surface(stl, draft, workdir, speeds, log=print):
                 raise
             log("snappy can't refine the pre-refined cells at the hull; redoing both grids without snappy's surface level")
     fine = out["fine"]
+    rr = ratio_from_cells(fine["mesh"]["cells"], out["coarse"]["mesh"]["cells"])
+    fine["refinement_ratio"], fine["ratio_below_1_3"] = rr, rr < 1.3          # Celik 2008 asks for r >= 1.3
     for U, r in fine["speeds"].items():
-        r["gci"] = gci(r["resistance"], out["coarse"]["speeds"][U]["resistance"])
+        r["gci"] = gci(r["resistance"], out["coarse"]["speeds"][U]["resistance"], ratio=rr)
     fine["coarse_cells"] = out["coarse"]["mesh"]["cells"]
     return fine
 

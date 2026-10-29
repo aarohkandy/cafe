@@ -1,0 +1,28 @@
+# Acoustic modem bands for cafe.pm.physics.comms. SL = source level (dB re 1 uPa @ 1 m), snr_req = required in-band SNR.
+# Where `range_km` is given it is the vendor's published range, and the model's `implementation_loss_db` (everything
+# the budget does not know: multipath, platform noise, transducer directivity, detector margin, true SL vs. nominal) is
+# DERIVED so the budget reproduces that range with `anchor_margin_db` of margin at the reference conditions below.
+# SL and snr_req therefore cancel for those bands (only SL - snr_req - implementation_loss is constrained).
+defaults:
+  ref_wind_ms: 5.0         # reference conditions for the range anchor: mean 10 m wind of the TEPEX-C demo window is 5.4 m/s (BRIEF 1.2)
+  ref_shipping: 0.5        # Stojanovic 2007 "moderate shipping"; irrelevant above ~10 kHz
+  anchor_margin_db: 3.0    # assumed: the published range is a "range >= x" so the budget closes there with 3 dB (a normal design margin)
+  spreading_k: 1.5         # Stojanovic 2007 practical spreading (1 cylindrical, 2 spherical)
+  ambiguous_db: 6.0        # BRIEF 2.8: Bellhop runs when the Thorp margin is within +-6 dB of 0
+
+modems:
+  benthos_atm960:
+    what: Teledyne Benthos ATM-960 series (ATM-964/965/966) acoustic modem
+    source: "Teledyne Benthos ATM-960 series: LF >= 6 km, MF >= 4 km, HF/'Band C' >= 2 km (distributor listing of the Teledyne data sheet; band edges 9-14, 16-21, 22-27 kHz from BRIEF 2.8, not independently confirmed). Source level and SNR threshold not found in public documents."
+    bands:
+      LF: {f_khz: [9.0, 14.0],  range_km: 6.0, sl_db: 190.0, snr_req_db: 10.0}
+      MF: {f_khz: [16.0, 21.0], range_km: 4.0, sl_db: 190.0, snr_req_db: 10.0}
+      HF: {f_khz: [22.0, 27.0], range_km: 2.0, sl_db: 190.0, snr_req_db: 10.0}
+    assumed: "sl_db 190 (typical of commercial ~10-100 W-electrical modems) and snr_req_db 10 (non-coherent MFSK at usable BER with margin); both cancel in the anchored margin"
+  whoi_micromodem:
+    what: WHOI Micro-Modem (FSK 80 bps ... PSK 5400 bps)
+    source: "Freitag et al., 'The WHOI Micro-Modem', OCEANS 2005 (bands 3-30 kHz, FSK bandwidth 4 kHz, PSK bandwidth 5 kHz); no published km, no published SL (depends on transducer, PA supply voltage)"
+    bands:
+      long_10k:  {f_khz: [8.0, 12.0],  sl_db: 185.0, snr_req_db: 10.0, implementation_loss_like: [benthos_atm960, MF]}
+      short_25k: {f_khz: [22.5, 27.5], sl_db: 185.0, snr_req_db: 10.0, implementation_loss_like: [benthos_atm960, MF]}
+    assumed: "sl_db 185 (WHOI: SL scales with supply voltage and transducer; 25 kHz omni is ~6 dB above the 211001 ring) and implementation_loss_like: the same unmodelled loss as the Benthos MF band, because both are ~10-100 W-class MFSK/PSK modems in the same environment; a measured range replaces it"

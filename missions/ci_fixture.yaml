@@ -1,0 +1,51 @@
+# CI mission: one vehicle of every class and one link of every kind, inside the box and window of the synthetic environment
+# (tests/fixtures/ci_env/make.py reads this file to decide what to generate, so box, window and sorties here define the fixture).
+# 36 h from 2023-03-01 18Z; the quadrotor flies at 14:00 local solar time at 165W = 01Z, i.e. 2023-03-02 and 2023-03-03.
+# Run:  python -m tests.fixtures.ci_env.make $CAFE_DATA && python -m cafe.pm run --mission missions/ci_fixture.yaml --budget ci --gpus 0
+name: ci_fixture
+description: >
+  Synthetic trade-wind, equatorial-current and rain-corner environment around 0N 165W for CI. Nothing here is real data;
+  every field is an analytic function that the tests know.
+window: {start: "2023-03-01T18:00:00Z", end: "2023-03-03T06:00:00Z"}
+box: {lon_min: -166.5, lon_max: -163.5, lat_min: -1.5, lat_max: 1.5, pad_deg: 0.5}
+
+environment:
+  atmosphere: {source: orca_uwincm}
+  waves: {source: orca_umwm, restart_spectra: true}
+  ocean: {source: gofs31}
+  subgrid: {turbulence: true, gust_fronts: true, warm_layer: true, rain_lens: true, ocean_sde: true}
+
+ship: {id: ship, lon: -165.0, lat: 0.0, antenna_height_m: 15.0, modem: benthos_atm960_mf, transducer_depth_m: 5.0}
+shore: {id: shore}
+
+vehicles:
+  - id: glider_eq
+    platform: seaglider
+    deploy: {time: "2023-03-01T18:00:00Z", lon: -165.5, lat: 0.0}
+    task: {mode: station, lon: -165.5, lat: 0.0, radius_km: 5.0, lost_after_h: 12.0, dive_depth_m: 950.0}
+  - id: glider_1n
+    platform: slocum
+    deploy: {time: "2023-03-01T18:00:00Z", lon: -165.0, lat: 1.0}
+    task: {mode: drift, dive_depth_m: 500.0}
+  - id: usv
+    platform: saildrone_explorer
+    deploy: {time: "2023-03-01T18:00:00Z", lon: -165.0, lat: -1.0}
+    task:
+      mode: section
+      waypoints: [[-165.0, -1.0], [-165.0, 1.0]]
+      repeat: true
+      track_tolerance_km: 20.0
+      becalmed_after_h: 6.0
+  - id: uas
+    platform: quad_uas
+    base: ship
+    sorties: {local_solar_time: "14:00", duration_min: 20, every_days: 1, pattern: flux_profile, altitudes_m: [10, 30, 60, 100]}
+    launch_rules: {max_mean_wind_ms: 12.0, no_gust_front_within_min: 30}
+
+links:
+  - {id: usv-uas-rf, a: usv, b: uas, kind: rf, radio: rfd900x, when: uas_airborne, required_fraction: 0.95}
+  - {id: glider_eq-ship-acoustic, a: glider_eq, b: ship, kind: acoustic, modem: benthos_atm960_mf, when: surfacing, required_fraction: 0.9}
+  - {id: usv-shore-iridium, a: usv, b: shore, kind: iridium, when: always, required_fraction: 0.95}
+
+verdict: {go: 0.9, nogo: 0.6}
+seed: 20230301

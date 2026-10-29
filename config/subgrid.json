@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "note": "Sub-grid atmosphere/ocean layer (cafe/pm/env/subgrid.py). Numbers without a citation live in config/assumptions.yaml, not here. The calibration block is what Stage-3 LES overwrites; the code uses it, not the defaults below, and reports calibration.source_run.",
+  "turbulence": {
+    "model": "Mann (1994) uniform-shear spectral tensor box, mannrs 2.0.0",
+    "gamma": 3.9,
+    "lambda1_over_z": 0.7,
+    "lambda1_max_m": 42.0,
+    "L_over_lambda1": 0.8,
+    "box": {"nx": 16384, "ny": 16, "nz": 16, "dx_over_L": 0.5, "ly_over_L": 8.0, "lz_over_L": 8.0},
+    "citation": "Gamma = 3.9, L = 0.8 Lambda1, Lambda1 = 0.7 z (z <= 60 m; capped at 42 m) from IEC 61400-1 ed.3 (2005) Annex C (Mann uniform-shear model), after Mann 1994 J. Fluid Mech. 273, 141 and Mann 1998 Probab. Eng. Mech. 13, 269. sigma_u = 2.5 u*: neutral surface-layer value, Panofsky & Dutton 1984; Kaimal & Finnigan 1994 (BRIEF 2.2). Box resolution: dx = L/2 and lateral spacing L/2 resolve the 1-D spectrum to k L ~ 3 (about 80 % of the Mann variance); the delivered series is rescaled to the target sigma_u (see subgrid.turbulence)."
+  },
+  "stability": {
+    "scaling": "mixing_length",
+    "citation": "L_Mann(z/L_ob) = L_neutral / phi_m(z/L_ob), phi_m of Businger et al. 1971 / Dyer 1974 (unstable (1-16 zeta)^-1/4, stable 1+5 zeta), because Pena, Gryning & Mann 2010 QJRMS 136, 2119 tie the Mann length scale to the mixing length of the diabatic wind profile. The ratio clip is in assumptions.yaml. This rule is NOT validated against offshore data here; Stage-3 LES calibration (length_scale_factor) is the intended correction."
+  },
+  "gust_front": {
+    "detection": {"dT_K": -1.5, "within_s": 600},
+    "citation": "Cold-pool front = air temperature drop of at least 1.5 K within 10 min, 382 events from Saildrone missions in the central/eastern tropical Pacific, mostly ITCZ: Wills, Cronin & Zhang 2021, Geophys. Res. Lett. 48, doi:10.1029/2021GL093373. Strongest gusts 5-10 min after the temperature front (Wills et al. 2023 JGR-A, as summarised in search; paper not re-read). dU 3-10 m/s, duration 10-30 min, dT -1.5 K are BRIEF 2.2 ranges; their distribution shape (uniform) and the event rate are assumptions."
+  },
+  "ocean": {
+    "okubo": {"a_cm2_s": 0.0103, "p": 1.15},
+    "windage": {"fraction_min": 0.018, "fraction_max": 0.023},
+    "diurnal_jet": {"u_min": 0.1, "u_max": 0.3},
+    "citation": "SDE: Ito form dx = (u + grad K) dt + sqrt(2K) dW, Euler-Maruyama, as in the OceanParcels diffusion tutorial (AdvectionDiffusionEM); well-mixed condition Thomson 1987 JFM 180, 529. Okubo 1971 Deep-Sea Res. 18, 789: K = 0.0103 l^1.15 (cm2/s, l in cm), typed from memory. Windage 1.8-2.3 % of U10 (BRIEF 2.2) lies in the 1-4 % leeway range of Breivik & Allen 2008 J. Mar. Syst. 69, 99 and near the ~2 % wind-driven surface drift of Rohrs et al. 2012 JGR 117, C03030 (ranges recalled, not re-read). Diurnal jet +0.1-0.3 m/s downwind scaled by warm-layer dT is TEPEX-C's own hypothesis (BRIEF 2.2): modelled, not observed."
+  },
+  "rain_lens": {
+    "enabled": true,
+    "dS_psu": 0.5,
+    "thickness_m": 0.5,
+    "size_km": 7.0,
+    "wind_full_below_ms": 5.0,
+    "wind_absent_above_ms": 8.0,
+    "citation": "Iyer & Drushka 2021 (top ~0.5 m, dS ~0.5 psu, ~7 km, persists minutes-hours below ~5 m/s, absent above ~8 m/s) as summarised in BRIEF 2.2; the paper itself was not re-read. Trigger threshold, saturation, decay time and the dT of the lens are in assumptions.yaml."
+  },
+  "calibration": {
+    "source_run": null,
+    "sigma_u_over_ustar": 2.5,
+    "length_scale_factor": 1.0,
+    "gust_stats": {"dU_min": 3.0, "dU_max": 10.0, "dT": -1.5, "duration_min_s": 600.0, "duration_max_s": 1800.0}
+  }
+}

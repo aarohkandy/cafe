@@ -1,0 +1,20 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = ["network: needs orca/HYCOM/TAO over the internet (skipped offline by CAFE_OFFLINE=1)", "slow: > 60 s"]
+
+[tool.ruff]
+line-length = 160
+include = ["cafe/pm/**/*.py", "tests/**/*.py", "bench/**/*.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = ["E731", "E701", "E702", "E741", "E401"]   # E401: `import a, b` is this repo's idiom
+
+[tool.mypy]
+files = ["cafe/pm"]
+ignore_missing_imports = true
+explicit_package_bases = true
+
+[tool.coverage.run]
+source = ["cafe/pm"]

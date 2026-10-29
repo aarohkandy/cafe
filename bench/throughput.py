@@ -8,7 +8,7 @@ The first steps (startup, JIT) are excluded from every timing.
 """
 import json, os, pathlib, platform, re, subprocess, sys, tempfile, time
 
-OUT = pathlib.Path(__file__).with_name("throughput.json")
+OUT = pathlib.Path(__file__).resolve().parents[1] / "config" / "throughput.json"
 FOAM = "source /usr/lib/openfoam/openfoam2506/etc/bashrc >/dev/null 2>&1; "
 
 
@@ -120,6 +120,45 @@ def lbm(device="cpu", n=128, steps=60, warm=10):
         note="single JAX process using every core it is given; float32, BGK + Smagorinsky, periodic streaming by roll"))
 
 
+# ------------------------------------------------------------------ Stage-1 ensemble
+def stage1(sizes=(8, 32)):
+    """Stage-1 wall time per vehicle class on this machine: one batch of each size on the CI fixture mission, fitted as
+    s = a + b*M and divided by the mission days. Batch cost is mostly per environment call (a), not per member (b), so the
+    planner needs both (cafe.pm.budget)."""
+    import os, tempfile
+    root = pathlib.Path(__file__).resolve().parents[1]
+    d = tempfile.mkdtemp(prefix="cafe_bench_")
+    from tests.fixtures.ci_env.make import make
+    make(d)
+    os.environ["CAFE_DATA"] = d
+    from cafe.pm import pipeline, stage1 as s1
+    from cafe.pm.config import utc
+    pipeline.DATA = pathlib.Path(d)
+    ctx = pipeline.Context(root / "missions" / "ci_fixture.yaml", "ci", 0, pathlib.Path(d) / "run")
+    m = ctx.mission
+    days = (utc(m["window"]["end"]) - utc(m["window"]["start"])).total_seconds() / 86400
+    pri, marg = s1.priors_for(m)
+    wall = {M: s1.run_batch(m, ctx.env, list(range(M)), int(m["seed"]), pri, marg)["vehicles"] for M in sizes}
+    lo, hi = sizes
+    out = {}
+    for vid, cls in ctx.classes.items():
+        a_lo, a_hi = wall[lo][vid]["wall_s"], wall[hi][vid]["wall_s"]
+        b = max((a_hi - a_lo) / (hi - lo), 0.0)
+        a = max(a_lo - b * lo, 0.0)
+        e = out.setdefault(cls, dict(s_per_batch_day=0.0, s_per_member_day=0.0))
+        e["s_per_batch_day"] = max(e["s_per_batch_day"], a / days)              # the costlier vehicle of a class
+        e["s_per_member_day"] = max(e["s_per_member_day"], b / days)
+    load = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
+    for e in out.values():
+        e.update(measured=time.strftime("%Y-%m-%d"), host=platform.node(), cpus=os.cpu_count(), load_1min=load, sizes=list(sizes),
+                 mission="missions/ci_fixture.yaml", note="wall time of stage1.run_batch per vehicle; a + b*M per mission day")
+    data = json.loads(OUT.read_text()) if OUT.exists() else {}
+    data["stage1"] = out
+    data["machine"] = dict(id=platform.node(), cpu=_cpu(), cpus=os.cpu_count(), measured=time.strftime("%Y-%m-%d"))
+    OUT.write_text(json.dumps(data, indent=2) + "\n")
+    print(json.dumps(dict(stage1=out), indent=2))
+
+
 def _cpu():
     try:
         return next(l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name"))
@@ -128,4 +167,6 @@ def _cpu():
 
 
 if __name__ == "__main__":
-    {"foam": lambda: foam(), "lbm": lambda: lbm(*(sys.argv[2:3] or ["cpu"]))}[sys.argv[1]]()
+    jobs = {"foam": lambda: foam(), "lbm": lambda: lbm(*(sys.argv[2:3] or ["cpu"])), "stage1": lambda: stage1()}
+    for name in (list(jobs) if sys.argv[1] == "all" else [sys.argv[1]]):
+        jobs[name]()

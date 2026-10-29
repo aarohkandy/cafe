@@ -1,0 +1,100 @@
+# Saildrone Explorer class wing-sail USV for cafe.pm.physics.usv.  Same layout as seaglider.yaml: every leaf is
+# {value, unit, source} or {value, unit, assumed: true, why}; usv.load_platform refuses a file where one is missing.
+# There is NO public speed polar, CAD, mass properties or aerodynamic data for the Explorer (BRIEF 2.4): everything below
+# that is not a number printed in the BRIEF is an assumption, and the `why` says what would replace it (a lab datasheet,
+# an inclining test, a tow-tank or CFD run from the Hangar).  Sources recalled from memory and not re-read this session
+# are marked "(recalled)": check them before they go into the credibility report.
+# Calibration note: `appendage_cda_m2` (parasitic drag) was raised from 0.02 to 0.04 so that the still-water, best-heading
+# speed at 12 m/s true wind is ~2.9 m/s (Chiodi et al. 2021); cr0 and wing_area_m2 were left at their first plausible values.  That receipt is therefore a fit;
+# the 5.4 m/s mean, the 3.3 m/s cap, the SPURS-2 failure and the Sun et al. direction are not fitted to.
+kind: wing_sail_usv
+params:
+  # ---- hull and mass (BRIEF 2.4: 7 m hull, 2 m draft, keel 2.5 m) --------------------------------------------------
+  loa_m:            {value: 7.0,     unit: m,    source: "BRIEF 2.4 (Saildrone Explorer: 7 m hull)"}
+  lwl_m:            {value: 6.5,     unit: m,    assumed: true, why: "waterline length ~0.93 LOA for a slender hull with small overhangs; sets Re and Froude number. A CAD waterline replaces it"}
+  beam_wl_m:        {value: 1.2,     unit: m,    assumed: true, why: "waterline beam of the narrow hull body (the deck is wider). Sets the strip-theory sections and waterplane; CAD replaces it"}
+  mass_kg:          {value: 750.0,   unit: kg,   assumed: true, why: "Explorer displacement as recalled from the public Saildrone spec sheet (~750 kg), not re-read; weighed mass replaces it"}
+  draft_nominal_m:  {value: 2.0,     unit: m,    source: "BRIEF 2.4 ('2 m draft'); NOT used: the keel depth below is what the physics needs"}
+  wetted_area_m2:   {value: 6.5,     unit: m2,   assumed: true, why: "hull-body wetted area (keel and rudder are separate foils). ~lwl*beam*1.0 for a slender body; CAD replaces it"}
+  form_factor_k:    {value: 0.20,    unit: "-",  assumed: true, why: "viscous form factor (1+k) multiplying the ITTC-57 friction line. Order of the Watanabe-type formula for L/B~5, Cb~0.35 as quoted in Molland et al. (2011), Ship Resistance and Propulsion (recalled, not applied in code); a CFD run in the Hangar replaces it"}
+  cr0:              {value: 2.0e-3,  unit: "-",  assumed: true, why: "residuary (wave) resistance coefficient on wetted area at Fr = cr_fr_ref; C_R = cr0 (Fr/cr_fr_ref)^4. Delft-series order of magnitude for R_R/Delta at Fr 0.3-0.4 (Keuning & Sonnenberg 1998, recalled); not calibrated. A free-surface CFD/Capytaine run replaces it"}
+  cr_fr_ref:        {value: 0.35,    unit: "-",  assumed: true, why: "Froude number at which cr0 is quoted (just below the resistance hump of a displacement hull)"}
+  appendage_cda_m2: {value: 0.04,    unit: m2,   assumed: true, why: "drag area (C_D x area) of everything else in the water: sensor fairings, ADCP, through-hulls, anodes, growth. Resistance = 0.5 rho V^2 CdA. About 3x the keel profile drag area, i.e. a 0.2 m square plate normal to the flow; CALIBRATED (see header) because the clean-hull terms alone give 3.2 m/s at 12 m/s. An outfitted-hull tow or CFD replaces it"}
+  heel_resist_c:    {value: 1.0,     unit: "1/rad2", assumed: true, why: "hull resistance grows as (1 + c phi^2) with heel phi: wetted-surface and waterline-asymmetry penalty. Order from Delft heeled-resistance trends (Gerritsma et al. 1981, recalled); towing-tank heel runs replace it"}
+  gm_m:             {value: 1.2,     unit: m,    assumed: true, why: "metacentric height; sets righting moment Delta g GM sin(phi) and so heel, depowering and the capsize proxy. An inclining test (or the Hangar mass/buoyancy model with the real keel ballast) replaces it"}
+  clr_depth_m:      {value: 1.2,     unit: m,    assumed: true, why: "depth of the centre of lateral resistance below the waterline (keel centre); lever arm of the heeling moment"}
+  kyy_frac:         {value: 0.25,    unit: "-",  assumed: true, why: "pitch radius of gyration as a fraction of LWL; the usual first estimate for strip theory (Journee & Massie 2001 use 0.25 L); the Hangar CG/inertia replaces it"}
+  kxx_roll_m:       {value: 1.5,     unit: m,    assumed: true, why: "roll radius of gyration including added inertia; the 5 m wing mass high up makes it large. Gives T_roll ~ 2.8 s with gm_m. A roll-decay test replaces it"}
+  roll_damping:     {value: 0.25,    unit: "-",  assumed: true, why: "roll damping ratio (fraction of critical) of the keel+hull; deep keels damp strongly. Roll decay test replaces it"}
+  # ---- wing sail (BRIEF 2.4: 5 m rigid wing, anemometer 5.2 m) ------------------------------------------------------
+  wing_span_m:      {value: 5.0,     unit: m,    source: "BRIEF 2.4 (5 m rigid wing)"}
+  wing_area_m2:     {value: 6.0,     unit: m2,   assumed: true, why: "planform area (chord ~1.2 m); not calibrated. The Saildrone CAD replaces it"}
+  anemometer_m:     {value: 5.2,     unit: m,    source: "BRIEF 2.4 (wing anemometer at 5.2 m); the polar's true wind speed is the wind at this height"}
+  wing_cl_alpha_2d: {value: 6.3,     unit: "1/rad", source: "Sheldahl & Klimas (1981), SAND80-2114: NACA 0015 section lift slope ~0.11 per degree in the linear range at Re 0.5-1e6 (read off the tabulated curves, recalled)"}
+  wing_stall_deg:   {value: 15.0,    unit: deg,  source: "BRIEF/lead: stall beyond ~15 deg; consistent with NACA 0015 static stall 14-16 deg at Re 5e5 (Sheldahl & Klimas 1981, recalled)"}
+  wing_trim_deg:    {value: 12.0,    unit: deg,  assumed: true, why: "angle of attack the self-trimming tail holds (3 deg below stall); the tail/flap geometry and a wing-tunnel/CFD run replace it"}
+  wing_cd0:         {value: 0.015,   unit: "-",  assumed: true, why: "zero-lift drag of wing+tail+gaps: NACA 0015 section ~0.010 at Re 5e5 (Sheldahl & Klimas 1981, recalled) plus 0.005 for the tail boom and root gap"}
+  wing_oswald_e:    {value: 0.85,    unit: "-",  assumed: true, why: "span efficiency of the finite wing (lifting line); the hull/deck acts as a partial end plate. CFD replaces it"}
+  wing_ce_height_m: {value: 3.4,     unit: m,    assumed: true, why: "height of the wing centre of effort above the waterline (freeboard ~0.9 m + half of the 5 m span). Heeling lever arm"}
+  wing_ce_x_m:      {value: 0.3,     unit: m,    assumed: true, why: "longitudinal position of the wing centre of effort ahead of the CG; sets the yaw moment the rudder must cancel"}
+  heel_target_deg:  {value: 25.0,    unit: deg,  assumed: true, why: "the controller depowers (reduces wing angle of attack) to keep steady heel below this; operating limit, not a capsize limit. Saildrone's own limit replaces it"}
+  trim_min_aws_ms:  {value: 1.5,     unit: m/s,  assumed: true, why: "apparent wind speed below which the tail has too little aerodynamic moment to trim the wing against bearing friction; wing_stall fires below it"}
+  # ---- keel and rudder (BRIEF 2.4: keel 2.5 m) ---------------------------------------------------------------------
+  keel_depth_m:     {value: 2.5,     unit: m,    source: "BRIEF 2.4 (keel 2.5 m below the waterline)"}
+  keel_span_m:      {value: 2.1,     unit: m,    assumed: true, why: "keel span below the hull bottom (keel_depth_m minus ~0.4 m of hull body); sets aspect ratio"}
+  keel_area_m2:     {value: 1.4,     unit: m2,   assumed: true, why: "keel planform area (mean chord ~0.67 m); CAD replaces it"}
+  keel_t_c:         {value: 0.15,    unit: "-",  assumed: true, why: "keel section thickness ratio (profile drag); CAD replaces it"}
+  keel_stall_deg:   {value: 14.0,    unit: deg,  assumed: true, why: "leeway angle at which the keel stalls; low-aspect-ratio foils stall at 12-16 deg (Hoerner & Borst 1975, recalled)"}
+  keel_x_m:         {value: 0.1,     unit: m,    assumed: true, why: "keel centre of pressure ahead of the CG (yaw moment arm)"}
+  rudder_area_m2:   {value: 0.12,    unit: m2,   assumed: true, why: "rudder planform area; CAD replaces it"}
+  rudder_span_m:    {value: 0.6,     unit: m,    assumed: true, why: "rudder span (aspect ratio); CAD replaces it"}
+  rudder_t_c:       {value: 0.12,    unit: "-",  assumed: true, why: "rudder thickness ratio"}
+  rudder_x_m:       {value: -3.0,    unit: m,    assumed: true, why: "rudder position relative to the CG (negative = aft); lever arm that cancels the wing/keel yaw moment"}
+  rudder_cl_max:    {value: 1.0,     unit: "-",  assumed: true, why: "rudder maximum lift coefficient (stall at ~20-25 deg for a low-aspect-ratio foil)"}
+  # ---- windage -----------------------------------------------------------------------------------------------------
+  wind_area_front_m2: {value: 1.0,   unit: m2,   assumed: true, why: "frontal area of hull above water, mast, sensors"}
+  wind_area_side_m2:  {value: 2.2,   unit: m2,   assumed: true, why: "lateral area of hull above water, mast, sensors (wing is separate)"}
+  wind_cd_front:    {value: 0.8,     unit: "-",  assumed: true, why: "drag coefficient on the frontal area (bluff body, Hoerner 1965 order)"}
+  wind_cd_side:     {value: 1.1,     unit: "-",  assumed: true, why: "drag coefficient on the lateral area (bluff body, Hoerner 1965 order)"}
+  wind_height_m:    {value: 1.2,     unit: m,    assumed: true, why: "height of the windage centre of effort above the waterline"}
+  # ---- fluids ------------------------------------------------------------------------------------------------------
+  rho_water:        {value: 1023.0,  unit: kg/m3, source: "TEOS-10 (IOC et al. 2010) seawater, 28 C, 35 g/kg: ~1022.8 kg/m3 (recalled); the Environment's own density is not used by the VPP"}
+  nu_water:         {value: 0.86e-6, unit: m2/s, source: "ITTC (2011) procedure 7.5-02-01-03, seawater properties, interpolated to 28 C / 35 ppt (recalled)"}
+  rho_air:          {value: 1.16,    unit: kg/m3, assumed: true, why: "humid tropical air, 28 C, 1010 hPa (ideal gas, ~80 % RH); the Environment's psfc/T2 give it per point but the change is < 1 %"}
+  # ---- performance limits and published targets --------------------------------------------------------------------
+  stw_cap_ms:       {value: 3.3,     unit: m/s,  source: "Mazza, Zhang, Chiodi, Chen (2026) Part 1 as quoted in BRIEF 2.4: hull-speed cap 3.3 m/s (= 1.34 sqrt(23 ft) kn for the 7 m LOA)"}
+  chiodi_mean_sog_ms: {value: 0.96,  unit: m/s,  source: "Chiodi et al. (2021) as quoted in BRIEF 2.4: mean SOG 0.96 m/s"}
+  chiodi_mean_wind_ms: {value: 5.4,  unit: m/s,  source: "Chiodi et al. (2021) as quoted in BRIEF 2.4: mean wind 5.4 m/s (taken at the anemometer height)"}
+  chiodi_max_sog_ms:  {value: 2.9,   unit: m/s,  source: "Chiodi et al. (2021) as quoted in BRIEF 2.4: maximum hourly SOG 2.9 m/s"}
+  chiodi_max_wind_ms: {value: 12.0,  unit: m/s,  source: "Chiodi et al. (2021) as quoted in BRIEF 2.4: at 12 m/s wind"}
+  chiodi_band:      {value: 0.25,    unit: "-",  assumed: true, why: "relative half-width of the band around 0.18 U that counts as reproducing the mean SOG: the published value is one campaign mean with no spread quoted"}
+  sun_overpredict_lo: {value: 0.30,  unit: "-",  source: "Sun et al. (2026) as quoted in BRIEF 2.4/2.5: still-water VPPs overpredict SOG by 30-35 %"}
+  sun_overpredict_hi: {value: 0.35,  unit: "-",  source: "Sun et al. (2026) as quoted in BRIEF 2.4/2.5"}
+  # ---- energy (BRIEF 2.5: solar-powered hotel; nothing published for the Explorer) -----------------------------------
+  battery_wh:       {value: 4000.0,  unit: Wh,   assumed: true, why: "usable battery capacity; the Saildrone datasheet replaces it"}
+  solar_area_m2:    {value: 2.0,     unit: m2,   assumed: true, why: "solar-panel area on the deck and wing; datasheet replaces it"}
+  solar_eff:        {value: 0.20,    unit: "-",  assumed: true, why: "panel efficiency including cabling and MPPT"}
+  hotel_w:          {value: 80.0,    unit: W,    assumed: true, why: "mean hotel load: sensors, computer, radios, servos. Sized so the battery drains slowly in cloud and fully overnight; datasheet replaces it"}
+  soc0:             {value: 1.0,     unit: "-",  assumed: true, why: "state of charge at deployment (fraction of battery_wh)"}
+  # ---- comms (links are evaluated by cafe.pm.physics.comms from platforms/radios.yaml) -----------------------------
+  rf_antenna_height_m:      {value: 2.2, unit: m, assumed: true, why: "height of the RF whip above the waterline for the USV<->UAS link (on the hull/mast; wing is higher but shadows); CAD replaces it"}
+  iridium_antenna_height_m: {value: 2.0, unit: m, assumed: true, why: "Iridium/GPS antenna height above the waterline; CAD replaces it"}
+  radio_900mhz:     {value: rfd900x,     unit: "-", source: "platforms/radios.yaml `rfd900x` (RFDesign RFD900x, 902-928 MHz): the BRIEF's default USV<->UAS radio"}
+  radio_2g4:        {value: xbee_pro_24, unit: "-", source: "platforms/radios.yaml `xbee_pro_24` (Digi XBee-PRO 802.15.4, 2.4 GHz): the usual UAS-side 2.4 GHz telemetry radio (BRIEF 'infer the obvious extension')"}
+  iridium_link:     {value: sbd,         unit: "-", source: "platforms/radios.yaml `iridium.sbd` (Iridium Short Burst Data): the BRIEF's USV<->shore link"}
+  # ---- sampling and numerics ---------------------------------------------------------------------------------------
+  vpp_bias_mean:    {value: -0.30,   unit: "-",  source: "BRIEF 2.5: USV VPP bias -30 % (still-water VPPs overpredict SOG by 30-35 %); config/perturbations.yaml usv_vpp_bias is uniform on [-0.35, -0.30] and, when a caller passes perturb['vpp_bias'], replaces this draw"}
+  vpp_bias_sd:      {value: 0.03,    unit: "-",  assumed: true, why: "spread of the default draw when the caller passes none: chosen so +-2 sd spans the BRIEF's 30-35 % range"}
+  current_z_m:      {value: -1.0,    unit: m,    assumed: true, why: "depth at which the surface current is sampled: mid-depth of the immersed hull and upper keel"}
+  tack_time_s:      {value: 120.0,   unit: s,    assumed: true, why: "time a tack or gybe takes (wing flip, turn through the wind) during which speed is tack_speed_frac of the polar value"}
+  tack_speed_frac:  {value: 0.3,     unit: "-",  assumed: true, why: "fraction of polar speed kept while tacking"}
+  tack_horizon_s:   {value: 3600.0,  unit: s,    assumed: true, why: "time over which the distance lost in a tack must be paid back by a better VMG on the new board before the vehicle tacks"}
+  replan_s:         {value: 300.0,   unit: s,    assumed: true, why: "interval at which the heading is re-optimised (the polar is evaluated every step at the held heading); the 'well under a minute' budget for 256 members x 7 days needs it"}
+mission_defaults:
+  becalmed_after_h:   {value: 6.0,   unit: h,    assumed: true, why: "becalmed fires after this long continuously unable to stem the surface current (BRIEF 2.4 'for > N h'; demo mission uses 6 h)"}
+  track_tolerance_km: {value: 20.0,  unit: km,   assumed: true, why: "cross-track (section) or distance-from-station (station) beyond which swept_off_track fires; demo mission value"}
+  corridor_km:        {value: 5.0,   unit: km,   assumed: true, why: "half-width of the corridor the VMG search keeps the vehicle in on a section: outside it only headings that reduce the cross-track error are allowed"}
+  wp_radius_m:        {value: 1000.0, unit: m,   assumed: true, why: "waypoint capture radius (same as the glider default)"}
+  roll_limit_deg:     {value: 45.0,  unit: deg,  assumed: true, why: "peak roll (steady heel + most probable maximum wave roll) beyond which capsize_proxy fires; well short of the angle of vanishing stability, so it flags a knock-down risk, not a capsize"}
+  stall_sustain_s:    {value: 1800.0, unit: s,   assumed: true, why: "wing_stall fires after this long continuously stalled or untrimmable"}
+  cap_cycles:         {value: 100.0, unit: "-",  source: "Longuet-Higgins (1952), J. Mar. Res. 11: the most probable maximum of N narrow-band cycles is sigma sqrt(2 ln N); N = 100 is ~15 min of 9 s waves"}

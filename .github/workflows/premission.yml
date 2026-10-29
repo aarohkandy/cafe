@@ -1,0 +1,19 @@
+# Required checks for every commit (brief section 5.3/5.5). Runs in the same image the pipeline runs in.
+# The ci budget uses the synthetic environment fixture (tests/fixtures/ci_env), so no job here needs orca or HYCOM: `make ci`
+# generates it into /tmp/cafe_ci_data inside the same container, first, then runs every stage against it.
+name: premission
+on: [push, pull_request]
+jobs:
+  audit-and-ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build images
+        run: docker build -t cafe . && docker build -f Dockerfile.pm -t cafe-pm .
+      - name: make audit (code, tests, coverage gates)
+        run: docker run --rm -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make audit
+      - name: make ci (generate the synthetic environment, then every stage at toy resolution on CPU, < 10 min)
+        run: docker run --rm -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make ci MISSION=missions/ci_fixture.yaml
+      - name: broken configuration must fail a receipt
+        run: docker run --rm -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make broken

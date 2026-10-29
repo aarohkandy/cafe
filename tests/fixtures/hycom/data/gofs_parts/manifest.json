@@ -1,0 +1,71 @@
+{
+ "box": [
+  -0.12,
+  0.12,
+  179.84,
+  180.48
+ ],
+ "dataset": "synthetic GOFS 3.1 subset",
+ "parts": {
+  "ts3z_1677672000_1677682800.nc": {
+   "dataset": "ts3z",
+   "server": "ncss",
+   "bytes": 15800,
+   "sha256": "2a246200535c91a3a2f21c06b045c04cf8f8fa696b6b1db61ac268fc144e3950",
+   "t_start": 1677672000.0,
+   "t_end": 1677682800.0,
+   "seconds": 0.1,
+   "n_steps": 2
+  },
+  "ts3z_1677693600_1677693600.nc": {
+   "dataset": "ts3z",
+   "server": "ncss",
+   "bytes": 12020,
+   "sha256": "b347ae38b2cc3521861493552b563fba025b0fd2955ca38c6345de5aff273206",
+   "t_start": 1677693600.0,
+   "t_end": 1677693600.0,
+   "seconds": 0.1,
+   "n_steps": 1
+  },
+  "uv3z_1677672000_1677682800.nc": {
+   "dataset": "uv3z",
+   "server": "ncss",
+   "bytes": 15800,
+   "sha256": "29d3b3ce78f65aca696934128c655e1b873e17426b11d9e36bf12b86ea04f8e2",
+   "t_start": 1677672000.0,
+   "t_end": 1677682800.0,
+   "seconds": 0.1,
+   "n_steps": 2
+  },
+  "uv3z_1677693600_1677693600.nc": {
+   "dataset": "uv3z",
+   "server": "ncss",
+   "bytes": 12020,
+   "sha256": "3625ac111e03ad5adda2dd201cbe68d3bb8d760904de15c33fc535d3f7801751",
+   "t_start": 1677693600.0,
+   "t_end": 1677693600.0,
+   "seconds": 0.1,
+   "n_steps": 1
+  },
+  "ssh_1677672000_1677682800.nc": {
+   "dataset": "ssh",
+   "server": "ncss",
+   "bytes": 9973,
+   "sha256": "73d9bf2fd6bd01e2834f5538cb02397a1cb0e970643c65d9e27dceddb325b20f",
+   "t_start": 1677672000.0,
+   "t_end": 1677682800.0,
+   "seconds": 0.1,
+   "n_steps": 2
+  },
+  "ssh_1677693600_1677693600.nc": {
+   "dataset": "ssh",
+   "server": "ncss",
+   "bytes": 9973,
+   "sha256": "3438cddab2275f0049511ccd139347ca78e9dd46c63d5545a0cfa0f57de17928",
+   "t_start": 1677693600.0,
+   "t_end": 1677693600.0,
+   "seconds": 0.1,
+   "n_steps": 1
+  }
+ }
+}

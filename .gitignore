@@ -3,3 +3,10 @@ __pycache__/
 .venv/
 .DS_Store
 .claude/
+.hypothesis/
+.pytest_cache/
+coverage.json
+.coverage
+runs/
+checkpoints/
+emulator/train.*

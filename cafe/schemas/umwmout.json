@@ -1,0 +1,269 @@
+{
+ "title": "UMWM output umwmout_*.nc as read by cafe.pm.env.orca (from umwmout_2023-03-05_00:00:00.nc)",
+ "format": "CDF-1",
+ "dims": {
+  "x": 1480,
+  "y": 372,
+  "f": 37,
+  "th": 32,
+  "Time": 0
+ },
+ "variables": {
+  "swh": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "mwp": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "s",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "mwd": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "rad",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "dwp": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "s",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "dwd": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "rad",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "mss": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "non-dimensional",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "wspd": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m/s",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "wdir": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "rad",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "ust": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m/s",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "cd": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "non-dimensional",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "dcp": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m/s",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "dcg": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m/s",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "mwl": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "dwl": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "lon": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "degrees East",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "lat": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "degrees North",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "seamask": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "i4",
+   "units": "non-dimensional",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  },
+  "depth": {
+   "dims": [
+    "Time",
+    "y",
+    "x"
+   ],
+   "dtype": "f4",
+   "units": "m",
+   "shape": [
+    1,
+    372,
+    1480
+   ]
+  }
+ },
+ "conventions": {
+  "angles": "math, radians CCW from grid +x (east), direction travelled toward",
+  "land": "NaN where seamask = 0"
+ }
+}

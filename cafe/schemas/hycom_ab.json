@@ -1,0 +1,146 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "cafe/schemas/hycom_ab.json",
+ "title": "HYCOM archive .b header, as parsed by cafe.pm.env.hycom.read_b",
+ "description": "archv.*.b is text; archv.*.a is big-endian float32, one record per fields[] entry in order, each idm*jdm words (i fastest) padded to a multiple of 4096 words, 2**100 = no data. Layer fields (u-vel. v-vel. thknss temp salin) carry k = 1..kdm; u-vel./v-vel. are baroclinic and u_btrop/v_btrop (k = 0) are added by the reader; thknss is in Pa (/9806 = m); srfhgt is g*ssh in m2/s2 (/9.806 = m). yrflag 3 = real calendar, model day 1.0 = 1901-01-01 00:00 UTC. temp is NOT known to be in-situ or potential: the caller says.",
+ "type": "object",
+ "required": [
+  "header",
+  "idm",
+  "jdm",
+  "fields"
+ ],
+ "properties": {
+  "header": {
+   "type": "object",
+   "required": [
+    "idm",
+    "jdm"
+   ],
+   "properties": {
+    "idm": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "jdm": {
+     "type": "integer",
+     "minimum": 1
+    },
+    "yrflag": {
+     "type": "integer"
+    }
+   }
+  },
+  "idm": {
+   "type": "integer",
+   "minimum": 1
+  },
+  "jdm": {
+   "type": "integer",
+   "minimum": 1
+  },
+  "fields": {
+   "type": "array",
+   "minItems": 1,
+   "items": {
+    "type": "object",
+    "required": [
+     "name",
+     "step",
+     "day",
+     "k",
+     "dens",
+     "min",
+     "max"
+    ],
+    "properties": {
+     "name": {
+      "type": "string",
+      "minLength": 1
+     },
+     "step": {
+      "type": "integer"
+     },
+     "day": {
+      "type": "number"
+     },
+     "k": {
+      "type": "integer",
+      "minimum": 0
+     },
+     "dens": {
+      "type": "number"
+     },
+     "min": {
+      "type": "number"
+     },
+     "max": {
+      "type": "number"
+     }
+    }
+   },
+   "allOf": [
+    {
+     "contains": {
+      "properties": {
+       "name": {
+        "const": "temp"
+       }
+      },
+      "required": [
+       "name"
+      ]
+     }
+    },
+    {
+     "contains": {
+      "properties": {
+       "name": {
+        "const": "salin"
+       }
+      },
+      "required": [
+       "name"
+      ]
+     }
+    },
+    {
+     "contains": {
+      "properties": {
+       "name": {
+        "const": "thknss"
+       }
+      },
+      "required": [
+       "name"
+      ]
+     }
+    },
+    {
+     "contains": {
+      "properties": {
+       "name": {
+        "const": "u-vel."
+       }
+      },
+      "required": [
+       "name"
+      ]
+     }
+    },
+    {
+     "contains": {
+      "properties": {
+       "name": {
+        "const": "v-vel."
+       }
+      },
+      "required": [
+       "name"
+      ]
+     }
+    }
+   ]
+  }
+ }
+}

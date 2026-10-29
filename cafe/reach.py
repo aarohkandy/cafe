@@ -34,6 +34,20 @@ def endurance_h(veh, V, reserve=0.15):
     return veh.battery_wh * (1 - reserve) / max(P, 1e-6)
 
 
+def _crosses_land(land, i, j, di, dj):
+    """A step may not pass over land between its end cells: a knight step (1, 2) passes between (i, j+1) and
+    (i+1, j+1) and is blocked if either is land; a diagonal is blocked only when both corner cells are (a corner cut
+    through a solid wall)."""
+    si, sj = (di > 0) - (di < 0), (dj > 0) - (dj < 0)
+    if abs(dj) == 2:
+        return bool(land[i, j + sj] or land[i + di, j + sj])
+    if abs(di) == 2:
+        return bool(land[i + si, j] or land[i + si, j + dj])
+    if di and dj:
+        return bool(land[i + di, j] and land[i, j + dj])
+    return False
+
+
 def _dijkstra(flow, land, V, h, T_s, back=False):
     """Fastest time from the centre cell to every cell (or, back=True, from every cell to the centre)."""
     n = len(land)
@@ -47,7 +61,7 @@ def _dijkstra(flow, land, V, h, T_s, back=False):
             continue
         for di, dj in STEPS:
             a, b = i + di, j + dj
-            if not (0 <= a < n and 0 <= b < n) or land[a, b]:
+            if not (0 <= a < n and 0 <= b < n) or land[a, b] or _crosses_land(land, i, j, di, dj):
                 continue
             dvec = np.array([di, dj], float)
             dist = h * np.linalg.norm(dvec)

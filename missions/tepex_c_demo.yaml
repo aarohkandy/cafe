@@ -1,0 +1,52 @@
+# TEPEX-C demo mission (brief section 6), re-windowed to the hours that exist on orca (docs/BRIEF.md corrections):
+# orca has 2023-03-01 00Z -> 03-07 18Z; the first 12 h are WRF spin-up, so the window is 03-01 12Z -> 03-07 12Z.
+# Times are UTC. Positions are lon/lat in degrees, lon in [-180, 180). Validated against cafe/schemas/mission.json.
+name: tepex_c_demo
+description: >
+  MJO/westerly-wind-burst period at the eastern edge of the warm pool, 2023 El Nino onset. Two gliders on and
+  north of the equator, a wing-sail USV on a 2-degree meridional section at 165W, a quadrotor flying a daily
+  flux-profile sortie from a ship at 0N 165W.
+window: {start: "2023-03-01T12:00:00Z", end: "2023-03-07T12:00:00Z"}
+box: {lon_min: 165.0, lon_max: -165.0, lat_min: -5.0, lat_max: 5.0, pad_deg: 2.0}
+
+environment:
+  atmosphere: {source: orca_uwincm}
+  waves: {source: orca_umwm, restart_spectra: true}
+  ocean: {source: gofs31}                 # or {source: lab_hycom, path: /data/lab_hycom/...}
+  subgrid: {turbulence: true, gust_fronts: true, warm_layer: true, rain_lens: true, ocean_sde: true}
+
+ship: {id: ship, lon: -165.0, lat: 0.0, antenna_height_m: 15.0, modem: benthos_atm960_mf, transducer_depth_m: 5.0}
+shore: {id: shore}
+
+vehicles:
+  - id: glider_eq
+    platform: seaglider
+    deploy: {time: "2023-03-01T12:00:00Z", lon: -170.0, lat: 0.0}
+    task: {mode: station, lon: -170.0, lat: 0.0, radius_km: 5.0, lost_after_h: 12.0, dive_depth_m: 950.0}   # 1000 m is the rating: ordering it trips overdepth
+  - id: glider_2n
+    platform: slocum
+    deploy: {time: "2023-03-01T12:00:00Z", lon: -170.0, lat: 2.0}
+    task: {mode: drift, dive_depth_m: 500.0}
+  - id: usv
+    platform: saildrone_explorer
+    deploy: {time: "2023-03-01T12:00:00Z", lon: -165.0, lat: -1.0}
+    task:
+      mode: section
+      waypoints: [[-165.0, -1.0], [-165.0, 1.0]]
+      repeat: true
+      track_tolerance_km: 20.0
+      becalmed_after_h: 6.0
+  - id: uas
+    platform: quad_uas
+    base: ship
+    sorties: {local_solar_time: "14:00", duration_min: 20, every_days: 1, pattern: flux_profile, altitudes_m: [10, 30, 60, 100]}
+    launch_rules: {max_mean_wind_ms: 12.0, no_gust_front_within_min: 30}
+
+links:
+  - {id: usv-uas-rf, a: usv, b: uas, kind: rf, radio: rfd900x, when: uas_airborne, required_fraction: 0.95}
+  - {id: glider_eq-ship-acoustic, a: glider_eq, b: ship, kind: acoustic, modem: benthos_atm960_mf, when: surfacing, required_fraction: 0.9}
+  - {id: glider_2n-ship-acoustic, a: glider_2n, b: ship, kind: acoustic, modem: benthos_atm960_mf, when: surfacing, required_fraction: 0.9}
+  - {id: usv-shore-iridium, a: usv, b: shore, kind: iridium, when: always, required_fraction: 0.95}
+
+verdict: {go: 0.9, nogo: 0.6}             # P(success) cut-offs, same as the app (cafe/mission.py)
+seed: 20230301
