@@ -1,0 +1,34 @@
+{
+  "_how": "Pre-mission run settings. Every number the planner uses is here; nothing is hard-coded. Units: seconds, metres, m/s.",
+
+  "budget_s": 3600,
+  "mission_s": 10800,
+  "backend": "cpu",
+  "devices": 8,
+  "solver": "openfoam-pimpleFoam-les",
+  "_throughput": "cell-updates/s per device come from bench/throughput.json[solver]; assumed_per_device is used only when that entry is missing, and is labelled as assumed",
+  "assumed_per_device": 1e9,
+  "cfl": 1.0,
+  "max_refinement_ratio": 10,
+
+  "_shares": "fraction of budget_s per level, split across the drones that use it; the rest is the ensemble and headroom",
+  "shares": {"L2a": 0.10, "L2b": 0.20, "L3": 0.30},
+
+  "L1": {"air_dx": 12000, "ocean_dx": 9000, "_src": "UWIN-CM WRF 12 km; HYCOM 1/12 deg"},
+
+  "_media": "U: characteristic relative speed. nu: kinematic viscosity (sets the hull boundary-layer thickness). L2a/L2b: nest box [x, y, z] in m.",
+  "media": {
+    "air":   {"U": 12.5, "nu": 1.5e-5, "L2a_box": [1000, 1000, 360], "L2b_box": [200, 200, 100]},
+    "ocean": {"U": 1.0,  "nu": 1.05e-6, "L2a_box": [500, 500, 133],  "L2b_box": [100, 100, 50]}
+  },
+
+  "_hull": "L3 is graded: the boundary-layer shell around the hull at hull resolution, then bands doubling outward (each with its own CFL step) to the L2b spacing, inside a box of box_lengths body lengths. wall_dx_min: wall-modelled LES first cell (y+ 30-100); nothing finer is ever planned (no wall-resolved LES).",
+  "wall_dx_min": 0.0005,
+  "drones": {
+    "aerial":    {"media": ["air"],          "hull": {"medium": "air",   "length": 0.5, "area": 0.4, "U": 12.5, "box_lengths": 6}},
+    "saildrone": {"media": ["air", "ocean"], "hull": {"medium": "ocean", "length": 7.0, "area": 6.0, "U": 2.0,  "box_lengths": 4}},
+    "glider":    {"media": ["ocean"],        "hull": {"medium": "ocean", "length": 1.8, "area": 1.4, "U": 0.3,  "box_lengths": 6}}
+  },
+
+  "events": {"windows_per_drone": 5, "window_s": 10, "lead_s": 2}
+}
