@@ -102,7 +102,7 @@ def test_drag_is_one_when_the_vehicle_was_not_refit():
         assert stage1.refit_drag(sc, "usv", 7, [0, 1, 2]) == 1.0
 
 
-def test_refit_drag_is_lognormal_with_its_median_at_the_refit_mean():
+def test_refit_drag_is_lognormal_with_its_mean_at_the_refit_mean():
     d = stage1.refit_drag(SCALES, "usv", 7, list(range(4000)))
     z = np.log(d / 1.3)
     assert d.shape == (4000,) and (d > 0).all()
