@@ -11,9 +11,10 @@ note says `bracket [lo, hi]`); a receipt's note says whether the tolerance is re
 raises becomes a failing row, and so does one that records nothing (a required check that did not happen is not "fine"). Context rows
 are for orientation and for optional inputs that are absent here. Nothing is relabelled: a stored FAIL stays a FAIL.
 
-Slow receipts. Some receipts take tens of minutes (the emulator's n = 500 kriging, ArduCopter SITL and the 20 min sortie, the app's
-CalculiX FEA). `--slow` runs them and stores their rows in $CAFE_DATA/receipts/<group>.json with the git sha, a code digest, the date
-and the host. A default run reads them back (a stored FAIL stays a FAIL). A required group with no stored result, or one made by
+Slow receipts. Some take a long time on 2 CPUs: the emulator's n = 500 kriging (about 35 min), ArduCopter SITL and the 20 min sortie
+(about 5), the app's CalculiX FEA (about 60). `--slow` runs them and stores their rows in $CAFE_DATA/receipts/<group>.json with the
+git sha, a code digest, the date and the host. A default run reads them back (a stored FAIL stays a FAIL).
+A required group with no stored result, or one made by
 different code, is a FAIL row `<group>:not_run` whose note gives the command and the time it takes: "not run" is never reported as fine.
 The digest is pipeline.code_digest() (the whole cafe/pm tree + config + platforms) for pm groups and the hash of cafe/*.py for the app's;
 a finer per-group file list would miss a dependency, so any edit of the tree makes every stored result stale. Also under `--slow`: the
@@ -322,12 +323,12 @@ def jobs(slow=False):
     sitl_groups = ("UAS sortie", "UAS SITL vs our controller")
     return [
         ("app", lambda: _app(pathlib.Path(os.environ.get("CAFE_APP_RUNS", "/work/runs")))),
-        ("app.fea", slow_group("app.fea", 15, "app", _fea, slow)),
+        ("app.fea", slow_group("app.fea", 60, "app", _fea, slow)),
         ("pm.physics.comms", _call(pm + "physics.comms")),
         ("pm.physics.glider", _call(pm + "physics.glider")),
         ("pm.physics.usv", _call(pm + "physics.usv")),
         ("pm.physics.uas", _call(pm + "physics.uas", sitl=False, sortie=False)),
-        ("pm.physics.uas.slow", slow_group("pm.physics.uas.slow", 10, "pm", _call(pm + "physics.uas", sitl=True, sortie=True), slow,
+        ("pm.physics.uas.slow", slow_group("pm.physics.uas.slow", 5, "pm", _call(pm + "physics.uas", sitl=True, sortie=True), slow,
                                            keep=lambda r: r["group"] in sitl_groups)),
         ("pm.env.coare", _call(pm + "env.coare")),
         ("pm.env.waves", _call(pm + "env.waves")),

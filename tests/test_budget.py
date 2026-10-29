@@ -141,3 +141,21 @@ def test_wall_estimate_and_describe():
     assert "glider_eq: 20 s/batch/day + 0.01 s/member/day, measured" in text
     assert "can certify" in budget.describe(budget.plan("overnight", 0, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES))
     assert budget.wall_estimate(budget.plan("ci", 0, MISSION, thr={}))["stage1"] == 0.0
+
+
+def test_emulator_share_adds_stage_1b_only_when_no_vehicle_was_refit():
+    p = budget.plan("quick", 0, MISSION, thr={}, vehicle_classes=CLASSES)
+    base = budget.emulator_share_s(p)
+    assert base == pytest.approx(p["budget_s"] * p["shares"]["emulator"]) and base > 0
+    assert budget.emulator_share_s(p, stage1b_free=True) == pytest.approx(p["budget_s"] * (p["shares"]["emulator"] + p["shares"]["stage1b"]))
+    assert budget.emulator_share_s(p, True) > base
+
+
+def test_batch_cost_is_per_environment_call_plus_per_member_for_the_named_vehicles_and_days():
+    p = budget.plan("quick", 0, MISSION, thr=thr(20.0, 0.01), vehicle_classes=CLASSES)
+    assert p["batch"] == 32
+    per_vehicle = 20.0 + 32 * 0.01
+    assert budget.batch_cost_s(p) == pytest.approx(3 * per_vehicle * 6)
+    assert budget.batch_cost_s(p, vids=["glider_eq"]) == pytest.approx(per_vehicle * 6)
+    assert budget.batch_cost_s(p, vids=["usv", "uas"], days=1.5) == pytest.approx(2 * per_vehicle * 1.5)
+    assert budget.batch_cost_s(p, vids=[]) == 0.0
