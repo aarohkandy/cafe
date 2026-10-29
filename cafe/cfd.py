@@ -428,7 +428,18 @@ FS_FIELDS = {
 }
 
 
-def free_surface(stl, draft, case, speeds, level_offset=0, cofr=(0, 0, 0), iters=3000, log=print, surf_level=1):
+# the free-surface recipe, in hull lengths: domain (x0, x1, y0, z0, z1), background cell h0, z block edges / cells / grading, and the nested
+# horizontal-refinement boxes (x0, x1, |y|, z0, z1); cafe.pm.stage3.freesurface prices a case from the same numbers
+FS_DOMAIN = (-4.0, 2.5, -3.3, -2.8, 0.7)
+FS_H0 = 0.2
+FS_Z = (-2.8, -0.15, -0.03, 0.03, 0.2, 0.7)
+FS_NZ = (24, 14, 20, 16, 12)
+FS_GRADE = (0.05, 1, 1, 1, 6)
+FS_BOXES = ((-2.6, 1.3, 1.4, -0.6, 0.3), (-1.6, 0.95, 0.75, -0.4, 0.22), (-1.0, 0.75, 0.4, -0.3, 0.16), (-0.75, 0.62, 0.22, -0.25, 0.12))
+FS_ITERS = 3000
+
+
+def free_surface(stl, draft, case, speeds, level_offset=0, cofr=(0, 0, 0), iters=FS_ITERS, log=print, surf_level=1):
     """interFoam LTS at each speed on one mesh. Hull is shifted so the waterline is z=0.
     Returns per-speed resistance (N, full hull) and vertical force (sinkage check)."""
     case = pathlib.Path(case)
@@ -443,13 +454,12 @@ def free_surface(stl, draft, case, speeds, level_offset=0, cofr=(0, 0, 0), iters
     (case / "constant/triSurface").mkdir(parents=True)
     m.export(case / "constant/triSurface/hull.stl")
     # domain in hull lengths (DTCHull proportions): 2L ahead of the bow, 3.5L behind, 3.3L wide, 2.8L deep
-    x0, x1, y0, z0, z1 = -4.0 * L, 2.5 * L, -3.3 * L, -2.8 * L, 0.7 * L
+    x0, x1, y0, z0, z1 = (c * L for c in FS_DOMAIN)
     y1 = 0.0 if half else 3.3 * L
-    h0 = 0.2 * L
+    h0 = FS_H0 * L
     nx, ny = int((x1 - x0) / h0), int((y1 - y0) / h0)
-    zs = [z0, -0.15 * L, -0.03 * L, 0.03 * L, 0.2 * L, z1]
-    nz = [24, 14, 20, 16, 12]
-    grade = [0.05, 1, 1, 1, 6]
+    zs = [z * L for z in FS_Z]
+    nz, grade = list(FS_NZ), list(FS_GRADE)
     verts, blocks = [], []
     for z in zs:
         verts += [(x0, y0, z), (x1, y0, z), (x1, y1, z), (x0, y1, z)]
@@ -473,8 +483,7 @@ def free_surface(stl, draft, case, speeds, level_offset=0, cofr=(0, 0, 0), iters
           + "\n);\nblocks (\n" + "\n".join(blocks) + "\n);\nboundary (\n"
           + "\n".join(f"{k} {{ type {t}; faces ({' '.join(f)}); }}" for k, (t, f) in bnd.items()) + "\n);\n")
     # nested horizontal-only refinement around hull and Kelvin wedge (DTCHull's topoSet/refineMesh trick)
-    boxes = [(-2.6, 1.3, 1.4, -0.6, 0.3), (-1.6, 0.95, 0.75, -0.4, 0.22), (-1.0, 0.75, 0.4, -0.3, 0.16),
-             (-0.75, 0.62, 0.22, -0.25, 0.12)][:4 + level_offset]
+    boxes = list(FS_BOXES)[:4 + level_offset]
     write(case, "system/refineMeshDict", "set c0;\ncoordinateSystem global;\nglobalCoeffs { tan1 (1 0 0); tan2 (0 1 0); }\n"
           "directions (tan1 tan2);\nuseHexTopology no;\ngeometricCut yes;\nwriteMesh no;\n")
     for i, (bx0, bx1, by, bz0, bz1) in enumerate(boxes):
@@ -540,7 +549,7 @@ solvers
 PIMPLE
 {
     momentumPredictor no; nOuterCorrectors 1; nCorrectors 2; nNonOrthogonalCorrectors 1;
-    maxCo 10; maxAlphaCo 5; rDeltaTSmoothingCoeff 0.05; rDeltaTDampingCoeff 0.5;
+    maxCo 3; maxAlphaCo 1.5; rDeltaTSmoothingCoeff 0.05; rDeltaTDampingCoeff 0.5;
     nAlphaSpreadIter 0; nAlphaSweepIter 0; maxDeltaT 1;
 }
 relaxationFactors { equations { ".*" 1; } }

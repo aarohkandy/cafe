@@ -130,6 +130,13 @@ def test_everything_else_passes_through_unchanged(ci_full):
     assert np.allclose(w, ci_full.wind(lon, lat, 10.0, T).value)
 
 
+def test_the_analytic_env_returns_its_constructor_values_with_the_query_shape():
+    a, lon = AnalyticEnv(rho=1025.0, c=1500.0, depth=3000.0), np.zeros(3)
+    assert a.density(lon, lon, lon, 0.0).value.tolist() == [1025.0] * 3
+    assert a.sound_speed(lon, lon, lon, 0.0).value.tolist() == [1500.0] * 3
+    assert a.depth(lon, lon).value.tolist() == [3000.0] * 3
+
+
 # ------------------------------------------------------------------------------------------------------------ ocean SDE
 
 M_PER_DEG = 111195.0

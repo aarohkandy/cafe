@@ -1,0 +1,83 @@
+{
+ "schema": 1,
+ "command": "python -m cafe.pm acceptance --mission missions/tepex_c_demo.yaml --gpus 0 --update-golden",
+ "source": {
+  "git_sha": "none",
+  "code_digest": "b2bfb26ac5d6dfc884a942656a758b99f9a0ac6bfa1c228985de9f40e98e3470",
+  "date": "2026-10-29T13:56:32+00:00",
+  "budget": "quick",
+  "gpus": 0
+ },
+ "summary": {
+  "mission": "tepex_c_demo",
+  "seed": 20230301,
+  "vehicles": {
+   "glider_eq": {
+    "verdict": "MARGINAL",
+    "k_fail": 8,
+    "n": 32,
+    "p_fail": 0.25,
+    "conf": 0.9,
+    "cls": "glider",
+    "platform": "seaglider"
+   },
+   "glider_2n": {
+    "verdict": "GO",
+    "k_fail": 0,
+    "n": 32,
+    "p_fail": 0.0,
+    "conf": 0.9,
+    "cls": "glider",
+    "platform": "slocum"
+   },
+   "usv": {
+    "verdict": "NO-GO",
+    "k_fail": 31,
+    "n": 32,
+    "p_fail": 0.96875,
+    "conf": 0.9,
+    "cls": "usv",
+    "platform": "saildrone_explorer"
+   },
+   "uas": {
+    "verdict": "MARGINAL",
+    "k_fail": 4,
+    "n": 32,
+    "p_fail": 0.125,
+    "conf": 0.9,
+    "cls": "uas",
+    "platform": "quad_uas"
+   }
+  },
+  "links": {
+   "usv-uas-rf": {
+    "verdict": "NO-GO",
+    "k_fail": 32,
+    "n": 32,
+    "p_fail": 1.0,
+    "conf": 0.9
+   },
+   "glider_eq-ship-acoustic": {
+    "verdict": "NO-GO",
+    "k_fail": 32,
+    "n": 32,
+    "p_fail": 1.0,
+    "conf": 0.9
+   },
+   "glider_2n-ship-acoustic": {
+    "verdict": "NO-GO",
+    "k_fail": 32,
+    "n": 32,
+    "p_fail": 1.0,
+    "conf": 0.9
+   },
+   "usv-shore-iridium": {
+    "verdict": "GO",
+    "k_fail": 0,
+    "n": 32,
+    "p_fail": 0.0,
+    "conf": 0.9
+   }
+  }
+ }
+}

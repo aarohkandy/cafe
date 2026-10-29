@@ -26,8 +26,8 @@ def calls(monkeypatch):
     """pipeline.run replaced by a recorder that returns an object with a run_dir, as the real one does."""
     seen = []
 
-    def run(mission, budget, gpus, out, resume=True, stop_after=None, log=print):
-        seen.append(dict(mission=mission, budget=budget, gpus=gpus, out=out, resume=resume, stop_after=stop_after))
+    def run(mission, budget, gpus, out, resume=True, stop_after=None, log=print, seed=None):
+        seen.append(dict(mission=mission, budget=budget, gpus=gpus, out=out, resume=resume, stop_after=stop_after, **({} if seed is None else dict(seed=seed))))
         return type("Ctx", (), {"run_dir": out})()
     monkeypatch.setattr(pipeline, "run", run)
     return seen

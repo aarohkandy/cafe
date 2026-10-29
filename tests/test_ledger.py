@@ -132,3 +132,11 @@ def test_machine_reads_the_bench_block_when_present(monkeypatch, tmp_path):
     assert m["bench_id"] == "az_serv" and m["bench_measured"] == "2026-10-29" and m["cpus"] >= 1
     (tmp_path / "config" / "throughput.json").write_text("{}")
     assert ledger.machine()["bench_id"] is None
+
+
+def test_git_sha_falls_back_to_the_environment_when_the_copy_has_no_git(monkeypatch, tmp_path):
+    monkeypatch.setattr(ledger, "ROOT", tmp_path)                                  # not a repository: git prints nothing
+    monkeypatch.setenv("CAFE_GIT_SHA", "abc123")
+    assert ledger.git_sha() == "abc123"
+    monkeypatch.delenv("CAFE_GIT_SHA")
+    assert ledger.git_sha() == "none"

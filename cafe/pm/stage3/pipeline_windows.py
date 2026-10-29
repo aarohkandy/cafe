@@ -3,8 +3,9 @@
 For every window of `windows/windows.json` (`{vid: [{t, lon, lat, stress, basis}]}`) it builds the vehicle from its platform yaml
 (plus the numbers in config/assumptions.yaml under `stage3.*` for every dimension no yaml has), takes the inflow from `ctx.env` at the
 window's time and place, runs one wall-modelled LES window (windows.run_window) and, for the glider hull, the FEA of the pressure
-hull, and returns one row per window and part. A USV has two parts, `hull` (water) and `wing` (air): the two flows are different
-fluids with different Reynolds numbers, so one window cannot carry both.
+hull, and returns one row per window and part. A USV has three parts: `hull` (water, native LBM, viscous only), `wing` (air) and
+`hull_fs` (the same hull and keel through a free surface, interFoam or FluidX3D in a child process, total resistance: stage3/freesurface.py);
+the flows are different fluids or need different solvers, so one window cannot carry them all.
 
 Frames. The window frame is the body frame. Per class, with R the rotation of ENU into body axes, the window gets
     inflow   = R u_env          (ground-frame environment velocity at the window)
@@ -21,7 +22,8 @@ two neighbouring records); without it, the relative-flow direction: gliders head
 
 `cd_hangar`, `cl_hangar`: what the vehicle's own Stage-1 model implies at this window's speed, as coefficients on the same reference
 area and density as the window's (cd = F / (rho/2 V^2 A_ref)), so the refit ratio window / hangar means something. Sources are named in
-`cd_hangar_source`. Residuary (wave) resistance of the USV hull is left out of the hangar number: the window has no free surface.
+`cd_hangar_source`. The `hull` window has no free surface, so its hangar number leaves the residuary (wave) resistance out; the `hull_fs`
+window's hangar number is the VPP's whole hull resistance (usv.hull_resistance: friction x (1 + k) + residuary) plus the keel.
 
 Resolution. cells x steps is fitted to plan["les"]["cell_steps_per_window"] (shared between the parts of a USV window) with
 lbm.les_resolution: dx is the 10-cells-per-boundary-layer value (BRIEF 2.6) coarsened by the fourth root of the budget shortfall
@@ -38,10 +40,12 @@ import json
 import math
 import pathlib
 import pickle
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -50,7 +54,7 @@ from numpy.typing import NDArray
 
 from .. import config
 from ..physics import glider, uas, usv
-from . import lbm, windows as W
+from . import fluidx3d, freesurface, lbm, windows as W
 
 if TYPE_CHECKING:
     from ..ledger import Ledger
@@ -123,14 +127,14 @@ def glider_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, depth: f
 
 
 def usv_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, part: str) -> W.Vehicle:
-    if part == "hull":
+    if part in ("hull", "hull_fs"):
         draft = need(a, "usv.hull_draft_m")
         kc = P["keel_area_m2"] / P["keel_span_m"]
         hull = dict(type="ellipsoid", center=(0.0, 0.0, 0.0), radii=(P["lwl_m"] / 2, P["beam_wl_m"] / 2, draft))
         keel = dict(type="plate", center=(0.0, 0.0, -(draft + P["keel_span_m"] / 2)), size=(kc, P["keel_t_c"] * kc, P["keel_span_m"]))
         frontal = math.pi * (P["beam_wl_m"] / 2) * draft + P["keel_t_c"] * kc * P["keel_span_m"]
         return W.Vehicle(platform, "water", P["lwl_m"], [hull, keel], ref_area=frontal, hull=0,
-                         extra=dict(resolve_dim=min(P["beam_wl_m"], 2 * draft), part="hull"))
+                         extra=dict(resolve_dim=min(P["beam_wl_m"], 2 * draft), part=part))
     c = P["wing_area_m2"] / P["wing_span_m"]
     wing = dict(type="plate", center=(0.0, 0.0, 0.0), size=(c, P["wing_span_m"], need(a, "usv.wing_t_c") * c))     # span along y: lift axis is body z
     return W.Vehicle(platform, "air", max(c, P["wing_span_m"]), [wing], ref_area=P["wing_area_m2"], hull=0,
@@ -185,6 +189,12 @@ def glider_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehic
                 info=dict(through_water_ms=U, glide_deg=th, alpha_deg=al, pitch_deg=pitch))
 
 
+def _keel_drag(P: dict[str, Any], stw: float) -> float:
+    """The keel's friction/profile drag at zero leeway: the first term of usv._forces' dk."""
+    k_area, _, _, k_tc, k_c = usv._foil(P, "keel")
+    return float(0.5 * P["rho_water"] * stw ** 2 * k_area * 2 * usv.cf_ittc57(stw * k_c / P["nu_water"]) * (1 + 2 * k_tc + 60 * k_tc ** 4))
+
+
 def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle, a: dict[str, Any], heading: float | None,
              part: str) -> dict[str, Any]:
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
@@ -197,21 +207,25 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
     if not stw > 0.0:
         raise ValueError("the USV makes no way through the water at this window's wind (becalmed)")
     vg = cur + stw * np.array([math.sin(math.radians(track)), math.cos(math.radians(track))])
-    if part == "hull":
+    if part in ("hull", "hull_fs"):
         lee = float(np.asarray(tw["leeway_deg"]))
         rho_w = P["rho_water"]
+        r_keel = _keel_drag(P, stw)
+        u_env, v = np.array([cur[0], cur[1], 0.0]), np.array([vg[0], vg[1], 0.0])
+        kin = dict(R=rotation(heading, 0.0), u_env=u_env, v=v, heading=heading, rho_h=rho_w, area=veh.ref_area, cl_h=None,
+                   info=dict(stw_ms=stw, leeway_deg=lee, heel_deg=float(np.asarray(tw["heel_deg"]))))
+        if part == "hull_fs":                                               # the VPP's whole hull resistance, upright (the window has no heel)
+            r_hull = float(usv.hull_resistance(P, np.float64(stw), 0.0))
+            return dict(kin, cd_h=_coef(r_hull + r_keel, rho_w, stw, veh.ref_area),
+                        src="usv.hull_resistance (ITTC-57 friction x (1 + form_factor_k) + residuary cr0 (Fr / cr_fr_ref)^4 on the wetted area, upright) "
+                            f"+ keel friction/profile drag at zero leeway; rudder and appendage terms excluded; stw {stw:.3f} m/s, leeway {lee:.1f} deg")
         # viscous part of hull_resistance (ITTC-57 friction x (1 + k) on the wetted area; no residuary term: no free surface in the window)
         # plus the keel's friction/profile drag at zero leeway (usv._forces)
         re = stw * P["lwl_m"] / P["nu_water"]
         r_hull = 0.5 * rho_w * stw ** 2 * P["wetted_area_m2"] * usv.cf_ittc57(re) * (1.0 + P["form_factor_k"])
-        k_area, _, _, k_tc, k_c = usv._foil(P, "keel")
-        r_keel = 0.5 * rho_w * stw ** 2 * k_area * 2 * usv.cf_ittc57(stw * k_c / P["nu_water"]) * (1 + 2 * k_tc + 60 * k_tc ** 4)
-        u_env, v = np.array([cur[0], cur[1], 0.0]), np.array([vg[0], vg[1], 0.0])
-        return dict(R=rotation(heading, 0.0), u_env=u_env, v=v, heading=heading, rho_h=rho_w, area=veh.ref_area,
-                    cd_h=_coef(float(r_hull + r_keel), rho_w, stw, veh.ref_area), cl_h=None,
+        return dict(kin, cd_h=_coef(float(r_hull + r_keel), rho_w, stw, veh.ref_area),
                     src="usv.cf_ittc57 x (1 + form_factor_k) on the wetted area + keel friction/profile drag at zero leeway; residuary and "
-                        f"appendage terms excluded (no free surface / appendages in the window); stw {stw:.3f} m/s, leeway {lee:.1f} deg",
-                    info=dict(stw_ms=stw, leeway_deg=lee, heel_deg=float(np.asarray(tw["heel_deg"]))))
+                        f"appendage terms excluded (no free surface / appendages in the window); stw {stw:.3f} m/s, leeway {lee:.1f} deg")
     aw = wind - vg                                                          # apparent wind (air relative to the boat, over the ground frame)
     aws = float(np.hypot(*aw))
     if aws < P["trim_min_aws_ms"]:
@@ -369,14 +383,27 @@ def why_failed(checks: list[dict[str, Any]], res: dict[str, Any], wlog: dict[str
     return out
 
 
+def _base(ctx: Context, w: dict[str, Any], part: str, win_s: float | None) -> dict[str, Any]:
+    """The row of a window that did not run: every field the refit and the report read, empty."""
+    les = ctx.plan["les"]
+    return dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, reasons=[],
+                cd=None, cd_spread=None, cl=None, cl_spread=None, added_resistance=None, cd_hangar=None, cl_hangar=None,
+                cd_hangar_source=None, fea=dict(run=False, reason="the window did not run"), label=les["label"] if les["cpu_fallback"] else None,
+                wall_share_s=win_s)
+
+
+def _describe(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], vb: NDArray[np.float64], heading: float | None) -> None:
+    """Kinematics and hangar numbers of the case into the row."""
+    base.update(fluid=veh.fluid, heading_deg=case["heading"], env_enu_ms=[float(x) for x in case["u_env"]], velocity_body_ms=[float(x) for x in vb],
+                cd_hangar=case["cd_h"], cl_hangar=case["cl_h"], cd_hangar_source=case["src"], kinematics=case["info"],
+                heading_source="stage-1 median track" if heading is not None else "relative-flow direction (no stage-1 track)")
+
+
 def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platform: str, res: dict[str, Any] | None, a: dict[str, Any], n_parts: int,
          win_s: float | None, meter: dict[str, float]) -> dict[str, Any]:
     t0 = time.perf_counter()
     les = ctx.plan["les"]
-    base: dict[str, Any] = dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, reasons=[],
-                cd=None, cd_spread=None, cl=None, cl_spread=None, added_resistance=None, cd_hangar=None, cl_hangar=None,
-                cd_hangar_source=None, fea=dict(run=False, reason="the window did not run"), label=les["label"] if les["cpu_fallback"] else None,
-                wall_share_s=win_s)
+    base = _base(ctx, w, part, win_s)
 
     def fail(msg: str) -> dict[str, Any]:
         return dict(base, error=msg[:300], reasons=[msg[:300]], wall_s=time.perf_counter() - t0)
@@ -408,9 +435,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     vb = case["v"] - case["u_env"] if R is None else R @ (case["v"] - case["u_env"])
     ub = np.zeros(3)
     speed = float(np.linalg.norm(vb))
-    base.update(fluid=veh.fluid, heading_deg=case["heading"], env_enu_ms=[float(x) for x in case["u_env"]], velocity_body_ms=[float(x) for x in vb],
-                cd_hangar=case["cd_h"], cl_hangar=case["cl_h"], cd_hangar_source=case["src"], kinematics=case["info"],
-                heading_source="stage-1 median track" if heading is not None else "relative-flow direction (no stage-1 track)")
+    _describe(base, veh, case, vb, heading)
     plan_cs = les["cell_steps_per_window"] / n_parts
     fea_s = need(a, "fea_reserve_frac") * win_s if (win_s is not None and veh.extra.get("fea")) else 0.0
     run_s = None if win_s is None else win_s - fea_s
@@ -459,15 +484,118 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
                 ref_area=float(r["ref_area"]), source=r["source"], wall_s=time.perf_counter() - t0)
 
 
-PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}
+FS_GRACE_S = 30.0                                                           # how long past its own deadline the parent waits for a child to die
+PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}     # the native-LBM parts, one budget slice each
+FS_PARTS = {"usv": "hull_fs"}                                               # the free-surface part: child process, own budget
+
+
+def _fs_fail(base: dict[str, Any], msg: str, t0: float, **extra: Any) -> dict[str, Any]:
+    return dict(base, error=msg[:600], reasons=[msg[:600]], wall_s=time.perf_counter() - t0, **extra)
+
+
+def _fs_gate(est: dict[str, Any], a: dict[str, Any], plan: dict[str, Any], left_s: float, queued_s: float) -> tuple[bool, str, float]:
+    """(fits, reason, seconds the case holds in the queue). The estimate times `fs.margin` must fit the share left: minutes needed, minutes
+    available and the smallest `--budget` profile whose stage-3 share would hold it (and what is already queued) are in the sentence."""
+    from .. import budget
+    need_s = est["total_s"] * need(a, "fs.margin")
+    if need_s <= left_s:
+        return True, "", need_s
+    share = plan["shares"]["stage3"]
+    return False, (f"free-surface window not run: estimated {est['total_s'] / 60:.0f} min x {need(a, 'fs.margin')} margin = {need_s / 60:.0f} min "
+                   f"({sum(est['cells'].values()):,.0f} cells on two grids, {est['iters']} iterations, {est['cores']} cores at {est['rate'] / 1e3:.0f}k "
+                   f"cell-updates/s) against {max(left_s, 0) / 60:.1f} min left of the {plan['shares']['stage3'] * plan['budget_s'] / 60:.0f} min "
+                   f"stage-3 share; it would fit "
+                   f"{freesurface.fitting_budget(queued_s + need_s, share, budget.BUDGET_S)}"), need_s
+
+
+def _fs_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: float, geo: dict[str, float], jobdir: str, cfg: dict[str, Any],
+             est: dict[str, Any] | None, deadline: float | None, t0: float) -> dict[str, Any]:
+    """Runs one free-surface case in a child process (own process group, killed by its own watchdog at the deadline) and builds the row.
+    Never raises: a child that fails, is killed or returns nonsense gives a row with `error` and the reason."""
+    try:
+        job, out = pathlib.Path(jobdir) / "job.json", pathlib.Path(jobdir) / "out.json"
+        left = None if deadline is None else deadline - time.perf_counter()
+        if left is not None and left <= 0.0:
+            return _fs_fail(base, "free-surface window not run: the stage-3 wall-clock share was spent before its turn came", t0)
+        job.write_text(json.dumps(dict(stl=str(pathlib.Path(jobdir) / "hull.stl"), draft=geo["draft"], speeds=[speed], config=cfg,
+                                       vehicle=dataclasses.asdict(veh) if fluidx3d.available(cfg)[0] else None), default=float))
+        try:
+            p = _spawn([sys.executable, "-m", "cafe.pm.stage3.freesurface", str(job), str(out), str(1e9 if left is None else left)],
+                       capture_output=True, text=True, timeout=None if left is None else left + FS_GRACE_S, start_new_session=True,
+                       cwd=str(pathlib.Path(__file__).resolve().parents[3]))
+        except subprocess.TimeoutExpired:
+            return _fs_fail(base, f"free-surface run killed at its deadline after {time.perf_counter() - t0:.0f} s: it did not finish inside the share", t0)
+        if p.returncode or not out.exists():
+            how = "killed by its watchdog at the deadline" if p.returncode == -9 else (p.stderr.strip().splitlines() or ["no message"])[-1][:300]
+            return _fs_fail(base, f"free-surface run failed ({p.returncode}): {how}", t0)
+        r = json.loads(out.read_text())
+        r["speeds"] = {float(k): v for k, v in r["speeds"].items()}
+        f = freesurface.row_fields(r, speed, case["rho_h"], case["area"], case["cd_h"])
+    except (OSError, ValueError, KeyError, RuntimeError) as e:
+        return _fs_fail(base, f"free-surface window failed: {e}", t0)
+    ok = all(c["ok"] for c in f["checks"])
+    ratio = f["refinement_ratio"]
+    res = dict(source=r["source"], cells_fine=r["cells"], cells_coarse=r["coarse_cells"], refinement_ratio=ratio, estimate=est,
+               speed_ms=speed, hull_wetted_m2_mesh=geo["wetted_hull_m2"], estimated_s=None if est is None else est["total_s"],
+               measured_s=time.perf_counter() - t0)
+    return dict(base, resolution=res, checks=f["checks"], ok=ok, reasons=[] if ok else freesurface.reasons(f["checks"], ratio, (r["cells"], r["coarse_cells"])),
+                cd=f["cd"], cd_spread=f["cd_spread"], cl=None, cl_spread=None, added_resistance=f["added_resistance"], gci=f["gci"],
+                refinement_ratio=ratio, resistance_n=f["resistance_n"], vertical_force_n=f["vertical_force_n"], ref_area=veh.ref_area, source=r["source"],
+                fea=dict(run=False, reason="no structural model: the platform yaml has no hull or wing structure (material, thickness) to build an FEA from"),
+                wall_s=time.perf_counter() - t0)
+
+
+def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, Any], platform: str, res: dict[str, Any] | None, a: dict[str, Any],
+               st: dict[str, Any]) -> Future[dict[str, Any]]:
+    """Prepares one USV window's free-surface case (kinematics, STL, price), decides whether the share left holds it and either queues
+    it behind the earlier ones on `pool` (one at a time: they share the CPUs) or returns the finished not-run row."""
+    t0 = time.perf_counter()
+    base = _base(ctx, w, "hull_fs", None)
+    done: Future[dict[str, Any]] = Future()
+    jobdir = tempfile.mkdtemp(prefix="fs_job_")
+    cfg = {"fluidx3d": freesurface.fluidx3d_config().get("fluidx3d")}
+    try:
+        P = usv.load_platform(platform)
+        veh = usv_vehicle(P, a, platform, "hull_fs")
+        heading = track_heading(res, vid, w["t"])
+        case = usv_case(ctx, w, P, veh, a, heading, "hull_fs")
+        vb = case["R"] @ (case["v"] - case["u_env"])
+        speed = float(np.linalg.norm(vb))
+        _describe(base, veh, case, vb, heading)
+        geo = freesurface.write_stl(veh, pathlib.Path(jobdir) / "hull.stl")
+        base.update(wetted_area_mesh_m2=geo["wetted_hull_m2"], wetted_area_platform_m2=P["wetted_area_m2"], ref_area=veh.ref_area)
+        est = None if fluidx3d.available(cfg)[0] else freesurface.estimate(
+            freesurface.nproc(), need(a, "fs.snappy_cell_factor"), need(a, "fs.cost_factor"), need(a, "fs.mesh_s_per_cell"))
+        left = None if st["share"] is None else st["share"] - (time.perf_counter() - st["t_stage"]) - st["queued"]
+        if est is not None and left is not None:
+            fits, why, held = _fs_gate(est, a, ctx.plan, left, st["queued"])
+            if not fits:
+                shutil.rmtree(jobdir, ignore_errors=True)
+                done.set_result(_fs_fail(base, why, t0, resolution=dict(estimate=est, speed_ms=speed, left_s=left)))
+                return done
+            st["queued"] += held
+    except (ValueError, KeyError, RuntimeError, OSError) as e:
+        shutil.rmtree(jobdir, ignore_errors=True)
+        done.set_result(_fs_fail(base, str(e), t0))
+        return done
+
+    def work() -> dict[str, Any]:
+        try:
+            return _fs_work(base, veh, case, speed, geo, jobdir, cfg, est, st["deadline"], t0)
+        finally:
+            shutil.rmtree(jobdir, ignore_errors=True)
+    return pool.submit(work)
 
 
 def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[str, list[dict[str, Any]]]:
     """The stage-3 call. Returns {vid: [row, ...]}; every window of every vehicle is attempted (a window that cannot run gives a row
     with `error` and ok False). Per-window self-checks live in the rows; L gets only 'the stage did what it promises'.
-    Wall clock: the stage's share (stage_share_s) is split over the windows still to run, so time a window does not use passes to
+    Wall clock: the stage's share (stage_share_s) is split over the LBM windows still to run, so time a window does not use passes to
     the next; each window's LES is cut to its slice (compile included), later windows are planned with the rate measured so far,
-    and the FEA runs only if the slice has time left. A window whose slice is below `stage3.min_window_s` is reported as not run."""
+    and the FEA runs only if the slice has time left. A window whose slice is below `stage3.min_window_s` is reported as not run.
+    A USV window also gets a `hull_fs` row: its free-surface case is priced (freesurface.estimate), queued only if the estimate times
+    `stage3.fs.margin` fits what is left of the share (after the cases already queued), and runs in a child process while the LBM windows
+    run; the rows follow the LBM rows of the vehicle. One that does not fit is a row with ok False and the minutes it needs."""
     a = assumptions()
     res = _load_res(ctx)
     for f in (pathlib.Path(ctx.run_dir) / "stage1" / "res.pkl", config.CONFIG / "assumptions.yaml"):      # what the rows depend on, for the ledger
@@ -480,13 +608,21 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     _jit_cache(ctx)
     meter = dict(rate=float(ctx.plan["les"].get("rate") or 1e6), compile_s=float(need(a, "compile_s_guess")), n=0)
     rows: dict[str, list[dict[str, Any]]] = {vid: [] for vid in wins}
-    for i, (vid, w, part) in enumerate(todo):
-        win_s = None if share is None else (share - (time.perf_counter() - t_stage)) / (len(todo) - i)
-        r = _row(ctx, vid, ctx.classes[vid], w, part, plat[vid], res, a, len(PARTS[ctx.classes[vid]]), win_s, meter)
-        rows[vid].append(r)
-        msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error')}"
-        ctx.log(f"stage3 {vid}/{part} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['wall_s']:.1f} s of {win_s if win_s is None else round(win_s, 1)}]")
-    want, got = len(todo), sum(len(r) for r in rows.values())
+    st = dict(share=share, t_stage=t_stage, queued=0.0, deadline=None if share is None else t_stage + share)
+    with ThreadPoolExecutor(1) as pool:                                     # one free-surface case at a time: they share the CPUs
+        fs = [(vid, w, _fs_submit(pool, ctx, vid, w, plat[vid], res, a, st)) for vid, ws in wins.items() if ctx.classes[vid] in FS_PARTS for w in ws]
+        for i, (vid, w, part) in enumerate(todo):
+            win_s = None if share is None else (share - (time.perf_counter() - t_stage)) / (len(todo) - i)
+            r = _row(ctx, vid, ctx.classes[vid], w, part, plat[vid], res, a, len(PARTS[ctx.classes[vid]]), win_s, meter)
+            rows[vid].append(r)
+            msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error')}"
+            ctx.log(f"stage3 {vid}/{part} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['wall_s']:.1f} s of {win_s if win_s is None else round(win_s, 1)}]")
+        for vid, w, fut in fs:
+            r = fut.result()
+            rows[vid].append(r)
+            msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error')}"
+            ctx.log(f"stage3 {vid}/{FS_PARTS[ctx.classes[vid]]} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['wall_s']:.1f} s]")
+    want, got = len(todo) + len(fs), sum(len(r) for r in rows.values())
     L.check("every_window_attempted", got == want, value=got, limit=want)
     bad = [(v, i) for v, rs in rows.items() for i, r in enumerate(rs) if r["ok"] and any(not c["ok"] for c in r["checks"])]
     L.check("no_row_claims_ok_with_a_failing_check", not bad, value=len(bad), limit=0)

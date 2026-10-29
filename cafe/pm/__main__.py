@@ -1,6 +1,6 @@
 """python -m cafe.pm <command>  (bin/run_premission is `python -m cafe.pm run`)
 
-    run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--out DIR] [--fresh]   the whole pipeline, resumable
+    run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--out DIR] [--fresh] [--seed S]   the whole pipeline, resumable
     fetch     --mission M                    ingest only (orca + ocean into the cache)
     validate  --mission M                    schema and cross-checks, nothing run
     plan      --mission M --budget B --gpus N   what the budget buys on this machine
@@ -10,13 +10,15 @@
     audit     [RUN ...] [--code-only]        the ledger/code/test audit (cafe.pm.audit)
     report    --run DIR [--open]             re-render the report from a finished run; --open shows it in a browser when there is a display
     receipts  [--broken YAML] [--slow] [--only NAME,..] [--json OUT]   every receipt (app + pre-mission) as one table; see cafe/pm/receipts.py
+    acceptance --mission M --gpus N --out DIR [--golden FILE] [--update-golden] [--skip-overnight]
+                                             BRIEF 5.3: quick + overnight (+ 4h), golden diff, reproducibility, broken config; see cafe/pm/acceptance.py
 """
 from __future__ import annotations
 
 import argparse, json, os, pathlib, sys, webbrowser
 from typing import Any
 
-from . import audit, budget, pipeline, report, stage1, whatif
+from . import acceptance, audit, budget, pipeline, report, stage1, whatif
 from .config import ConfigError, load_mission
 
 
@@ -32,6 +34,8 @@ def main(argv: list[str] | None = None) -> int:
         if name in ("run", "fetch"):
             p.add_argument("--out", default=None, help="run directory (default runs/<mission>/<budget>)")
             p.add_argument("--fresh", action="store_true", help="ignore existing checkpoints")
+        if name == "run":
+            p.add_argument("--seed", type=int, default=None, help="use this seed, not the mission's (kept in plan.json and mission.yaml; in the resume hash)")
     p = sub.add_parser("report")
     p.add_argument("--run", required=True)
     p.add_argument("--open", action="store_true", help="open the report in a browser when there is a display, else just print its path")
@@ -54,8 +58,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--slow", action="store_true", help="also run the slow receipts instead of reading their stored results")
     p.add_argument("--only", default=None, help="comma-separated parts of receipt-group names to run")
     p.add_argument("--json", default=None, help="where to write the table (default runs/receipts.json, runs/receipts_broken.json with --broken)")
+    p = sub.add_parser("acceptance")
+    p.add_argument("--mission", required=True)
+    p.add_argument("--gpus", type=int, default=0)
+    p.add_argument("--out", required=True, help="where the runs, receipts and acceptance.json go (each run in its own subdirectory, removed first)")
+    p.add_argument("--golden", default=str(acceptance.GOLDEN))
+    p.add_argument("--update-golden", action="store_true", help="write the golden from the quick run; that check then fails until it is rerun without this")
+    p.add_argument("--skip-overnight", action="store_true", help="rehearsal only: the overnight check fails ('not run')")
     a = ap.parse_args(argv)
     try:
+        if a.cmd == "acceptance":
+            return acceptance.main(a)
         if a.cmd == "receipts":
             from . import receipts
             return receipts.run(a.slow, a.only.split(",") if a.only else None, a.broken, a.json)[1]
@@ -75,7 +88,8 @@ def main(argv: list[str] | None = None) -> int:
             m = load_mission(a.mission)
             bud = getattr(a, "budget", "quick")
             out = pathlib.Path(a.out or f"runs/{m['name']}/{bud}")
-            ctx = pipeline.run(a.mission, bud, getattr(a, "gpus", 0), out, resume=not a.fresh, stop_after="ingest" if a.cmd == "fetch" else None)
+            ctx = pipeline.run(a.mission, bud, getattr(a, "gpus", 0), out, resume=not a.fresh, stop_after="ingest" if a.cmd == "fetch" else None,
+                               seed=getattr(a, "seed", None))
             if a.cmd == "run":
                 print(f"report: {ctx.run_dir / 'report' / 'index.html'}")
         else:

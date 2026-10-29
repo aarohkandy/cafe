@@ -21,7 +21,7 @@ outputs are unchanged. Stage products live next to the ledgers:
 """
 from __future__ import annotations
 
-import datetime as dt, json, os, pathlib, pickle, shutil, time, zipfile
+import datetime as dt, json, os, pathlib, pickle, re, shutil, time, zipfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -57,14 +57,18 @@ class Context:
     """What the stages share: the mission, the plan, where things live, and the environment (built once, lazily)."""
 
     def __init__(self, mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: str | pathlib.Path,
-                 log: Callable[[str], None] = print) -> None:
+                 log: Callable[[str], None] = print, seed: int | None = None) -> None:
         self.mission_path = pathlib.Path(mission_path)
         self.mission = load_mission(mission_path)
+        if seed is not None:
+            self.mission["seed"] = seed                                  # `run --seed`: the one seed every stage reads; it is in the resume hash below
         self.run_dir = pathlib.Path(run_dir)
         self.cache = DATA / "cache" / self.mission["name"]
         self.log = log
         self.classes = stage1._classes(self.mission)
         self.plan = budget.plan(budget_name, gpus, self.mission, vehicle_classes=self.classes)
+        if seed is not None:
+            self.plan["seed_override"] = seed
         self.hash = digest(dict(mission=self.mission, budget=budget_name, gpus=gpus, code=code_digest()))
         self._env: GriddedEnv | None = None
 
@@ -432,8 +436,11 @@ def s_refit(ctx: Context, L: Ledger) -> None:
     out: dict[str, dict[str, Any]] = {}
     for vid, ws in rows.items():
         # Stage 1 has one drag multiplier per vehicle and it scales the water-side (or, for a UAS, the body) drag; a USV's wing is
-        # a different flow, so its windows are pooled separately and reported, never mixed into the hull's multiplier
-        main = "hull" if any(w.get("part") == "hull" for w in ws) else "body"
+        # a different flow, so its windows are pooled separately and reported, never mixed into the hull's multiplier. The multiplier
+        # scales the VPP's whole through-water resistance (stage1.refit_drag: speed ~ drag^-1/2 at fixed force), so a USV's passing
+        # free-surface windows (`hull_fs`: total resistance, wave-making included) set it when there are any, else its viscous `hull` windows
+        main = next((p for p in ("hull_fs", "hull") if any(w.get("ok") and w.get("part") == p for w in ws)),
+                    "hull" if any(w.get("part") == "hull" for w in ws) else "hull_fs" if any(w.get("part") == "hull_fs" for w in ws) else "body")
         good = [w for w in ws if w.get("ok") and w.get("part", main) == main]
         if ctx.plan["refit_iterations"] == 0:
             out[vid] = dict(used=False, reason="budget ci: no refit")
@@ -445,7 +452,9 @@ def s_refit(ctx: Context, L: Ledger) -> None:
         other = {w["part"] for w in ws if w.get("part", main) != main} if ctx.plan["refit_iterations"] else set()
         for part in sorted(other):
             pw = [w for w in ws if w.get("ok") and w.get("part") == part]
-            out[vid][f"{part}_not_used"] = dict(reason="Stage 1 has no multiplier for this part", **(refit.refit(pw) if pw else {}))
+            why = {"hull": "the hull_fs windows (total resistance with the free surface) set the multiplier; this part has no wave-making",
+                   "hull_fs": "no hull_fs window passed its checks: the viscous hull windows set the multiplier"}
+            out[vid][f"{part}_not_used"] = dict(reason=why.get(part, "Stage 1 has no multiplier for this part"), **(refit.refit(pw) if pw else {}))
     L.check("refit_uses_only_windows_that_passed", all(not v["used"] or v.get("drag", {}).get("windows", 0) > 0 for v in out.values()))
     L.output(_dump(out, ctx.path("refit", "refit.json")))
 
@@ -559,9 +568,11 @@ assert list(FUNCS) == STAGES
 
 
 def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: str | pathlib.Path, resume: bool = True, stop_after: str | None = None,
-        log: Callable[[str], None] = print) -> Context:
-    ctx = Context(mission_path, budget_name, gpus, run_dir, log)
+        log: Callable[[str], None] = print, seed: int | None = None) -> Context:
+    ctx = Context(mission_path, budget_name, gpus, run_dir, log, seed)
     shutil.copy(ctx.mission_path, ctx.path("mission.yaml"))
+    if seed is not None:                                                  # the copy is what `report` and `whatif` reload: it must carry the seed that was run
+        ctx.path("mission.yaml").write_text(re.sub(r"(?m)^seed:.*$", f"seed: {seed}", ctx.mission_path.read_text()))
     _dump(ctx.plan, ctx.path("plan.json"))
     log(budget.describe(ctx.plan))
     prev, redo = None, not resume

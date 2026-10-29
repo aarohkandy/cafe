@@ -13,7 +13,18 @@ Known gaps against the experiment, all inside E and none hidden: the hull is hel
 free to sink and trim); the raked transom overhang above the waterline is closed by a flat plate at the last
 station; appendages and bilge keels are absent; the CFD uses fresh-water density and viscosity at an assumed 20 C.
 
-Usage on homebase (see docs/BUILDERS.md):  ./pm.sh python -m cafe.pm.dtmb5415 prepare | run coarse [iters [fr,fr]] | run fine | report
+Method (second study; the first, a 151 k / 331 k pair, is discarded). Measured on it with the yPlus function object (200 iterations, same
+meshes): the fine grid had hull prism layers (2 of ~2.2 mm, 67 % of their thickness) and sat at a wetted-area-mean y+ of 192 at Fr 0.41
+(patch max 1950), the coarse grid had none (2.6 %) and sat at 960 at Fr 0.20 (max 3670). The pair therefore differed in wall-function error
+as much as in cell size, and at Fr 0.10 the fine run's resistance was still swinging by 6 % (std of the last quarter) at 2000 iterations.
+Now: the first prism layer is sized per Froude number for y+ = 100 (`first_layer`) and is the same on three grids (`GRIDS`); each case
+runs in CHUNK-iteration restarts until the last-quarter drift and scatter of the resistance history are inside DRIFT_TOL / SCATTER_TOL
+(`_converge`, `settle`) or MAX_ITERS; y+ (wetted-area mean), prism-layer coverage, drift, scatter and the viscous share of C_T are stored
+per case and receipted. U_num comes from Celik's three-grid GCI (observed order, Fs = 1.25) when it can, else from the two-grid Fs = 3
+estimate with a stated reason (`discretization`). The pseudo-time Courant limits are lowered to maxCo 3 / maxAlphaCo 1.5 (`LTS_CO`).
+All of this wraps cafe.cfd.free_surface without editing it (`case_recipe`).
+
+Usage on homebase (see docs/BUILDERS.md):  ./pm.sh python -m cafe.pm.dtmb5415 prepare | run coarse|medium|fine [max_iters [fr,fr]] | report
 """
 import contextlib
 import hashlib
@@ -22,11 +33,12 @@ import json
 import math
 import os
 import pathlib
+import re
 import shutil
 import sys
 import urllib.request
 import zipfile
-from typing import Any, Callable, Iterator, NamedTuple, Optional, cast
+from typing import Any, Callable, Iterator, NamedTuple, Optional, Sequence, cast
 
 import numpy as np
 import trimesh
@@ -35,6 +47,8 @@ from scipy.interpolate import BSpline
 from cafe import cfd
 from cafe import receipts as rc
 from cafe.pm import vv
+
+_cfd: Any = cfd        # cafe.cfd is untyped and this module patches some of its globals; going through Any keeps both quiet
 
 G = 9.81
 SIMMAN = "SIMMAN 2008 DTMB 5415 geometry and conditions, INSEAN column (http://www.simman2008.dk/5415/5415_geometry.htm)"
@@ -246,13 +260,44 @@ def tank_water() -> Iterator[None]:
         cfd.FLUIDS["water"].update(old)
 
 
-# (level_offset, snappy surface level) of the two grids. cafe.cfd.characterize_free_surface varies only the horizontal refinement
-# boxes (151 k -> 234 k cells, r = 1.16 < Celik's 1.3); adding one hull surface level to the fine grid gives 331 k cells, r = 1.30.
-GRIDS = {"coarse": (-1, 1), "fine": (0, 2)}
-ORDER = (0.28, 0.41, 0.20, 0.10)   # most informative first; run_grid skips what run_<grid>.json already holds
-ITERS = 2000          # LTS pseudo-time steps per speed: ~2.6 s each on the 330 k-cell fine grid at 6 ranks on a loaded box
-MIN_FREE_GB = 6.0      # lead's rule for the shared box: do not start a case with less free disk than this
-MAX_TREE_GB = 3.0      # and keep the whole dtmb5415 tree under this
+# Three geometrically similar grids: the background mesh of cafe.cfd.free_surface (cell size, cells per z block) scaled by k about the
+# medium grid, the refinement boxes and the snappy surface level unchanged. Counts go as k^2.4..2.8, not k^3 (boxes and prism layers do not
+# scale), so the steps are asymmetric to give measured count ratios of 2.3 (r = 1.32) on both sides; the GCI takes r from the counts.
+# The first pair (151 k / 331 k, r = 1.30) changed the hull cells and left the wall treatment out of range, which no GCI can separate.
+GRIDS = {"coarse": 1 / 1.42, "medium": 1.0, "fine": 1.35}
+GRID_ORDER = ("fine", "medium", "coarse")
+SURF_LEVEL = 2          # snappy surface level at the hull, the same on every grid (a grid that has to step down is flagged in tabulate)
+RECIPE = "layers-y100-co3-v3"     # stamped on run_<grid>.json; a file made by another recipe is refused, never extended
+ORDER = (0.20, 0.10, 0.28, 0.41)
+ITERS = 2000          # what cafe.pm.stage3.freesurface prices per production window; this study uses MIN_ITERS..MAX_ITERS below
+MIN_FREE_GB = 4.0      # do not start a case with less free disk than this ...
+ABORT_FREE_GB = 3.0    # ... and stop a running one before the shared box gets below this
+MAX_TREE_GB = 3.0      # keep the whole dtmb5415 tree under this
+
+# Wall treatment. nutUSpaldingWallFunction is built for the log layer, y+ = 30..300. The first prism layer is sized per Froude number for
+# y+ = 100 at the ITTC-57 friction velocity and is the same on all grids, so the wall-function error is the same on each and the GCI sees
+# the discretisation. The stack grows by GROWTH to a total about the hull cell size: a stack several times thicker than the cell it is carved
+# from does not extrude (10 layers of x1.3, 4x the cell, reached 6 % of their thickness; 3 layers of x2, 0.7x the cell, reach 60 %; 3 of
+# 3.4 mm x2, 1.3x the cell, 33 %), so the total is kept at or under the cell.
+Y_PLUS_AIM, Y_PLUS_BAND = 100.0, (30.0, 300.0)
+GROWTH, MAX_LAYERS = 2.0, 8
+# Iterative convergence, judged on the resistance history after every CHUNK pseudo-time steps once MIN_ITERS are done: the mean over the
+# last quarter of the run may differ from the mean over the quarter before it by DRIFT_TOL, and its standard deviation (the pseudo-time
+# oscillation of the free surface) stays within SCATTER_TOL of the mean. Not met by MAX_ITERS: the case is recorded as unconverged.
+# Coarse grid, Fr 0.20, 6000 steps with cafe.cfd.free_surface's pseudo-time limits (maxCo 10, maxAlphaCo 5): 500-step block means wandered between
+# 25.0 and 27.4 N throughout and the last-quarter scatter was 3-5 %: never converged. With maxCo 3 / maxAlphaCo 1.5 the same case settled after
+# ~2000 steps (block scatter 0.6 %, block means 24.6, 25.2, 25.4, 25.5 N); maxCo 1 / maxAlphaCo 0.5 was still decaying from the start-up at 4000.
+# cafe.cfd is not edited here, so `case_recipe` rewrites those two numbers in fvSolution before interFoam runs; production windows
+# (cafe.pm.stage3.freesurface) keep the old limits until cafe.cfd.free_surface takes the same change.
+LTS_CO = (3.0, 1.5)
+MIN_ITERS, MAX_ITERS, CHUNK = 1000, 8000, 250
+DRIFT_TOL, SCATTER_TOL = 0.005, 0.02
+INFORMATIVE = 0.10     # U_val / D at most: a validation whose uncertainty is a large part of the answer claims nothing
+P_SANE = (0.5, 2.5)    # observed GCI orders outside this are not believed; the two-grid Fs = 3, p = 2 estimate is used instead
+YPLUS_FO = """    yPlus { type yPlus; libs (fieldFunctionObjects); patches (hull); executeControl writeTime; writeControl writeTime; }
+    yPlusWet { type surfaceFieldValue; libs (fieldFunctionObjects); regionType patch; name hull; operation weightedAreaAverage;
+               weightField alpha.water; fields (yPlus); executeControl writeTime; writeControl writeTime; writeFields no; log yes; }
+"""
 
 
 def check_disk(path: pathlib.Path, min_free_gb: float = MIN_FREE_GB) -> float:
@@ -272,79 +317,221 @@ def ct(resistance: float, speed: float, area: float, rho: float = TANK["rho"]) -
     return resistance / (0.5 * rho * speed ** 2 * area)
 
 
-def _case(solver: Callable[..., dict[str, Any]], root: pathlib.Path, grid: str, draft: float, u: float, off: int, top: int, iters: int,
-          log: Callable[[str], None]) -> tuple[dict[str, Any], int]:
-    """One speed on one grid: mesh + interFoam, stepping the snappy surface level down when snappy cannot refine the
-    pre-refined cells (as cafe.cfd.characterize_free_surface does). Heavy case files are removed afterwards, even on failure."""
-    with tank_water(), contextlib.ExitStack() as cleanup:
-        cleanup.callback(_rmtree_heavy, root / grid)
-        sl = top
-        while True:
-            try:
-                return solver(str(root / "hull.stl"), draft, root / grid, [u], off, iters=iters, log=log, surf_level=sl), sl
-            except RuntimeError as e:
-                snap = root / grid / "log.snappyHexMesh"
-                if sl == 0 or not (snap.exists() and "more than 8 points" in snap.read_text(errors="replace")):
-                    raise e
-                sl -= 1
-                log(f"snappy cannot refine the pre-refined cells at the hull; retrying at surface level {sl}")
+def first_layer(u: float, y_plus: float = Y_PLUS_AIM, lpp: float = LPP, nu: float = TANK["nu"]) -> float:
+    """First prism layer thickness (m) whose centre sits at y+ = y_plus when u_tau = U sqrt(Cf / 2), Cf = ITTC-57 at Re = U Lpp / nu."""
+    return 2.0 * y_plus * nu / (u * math.sqrt(float(_cfd.ittc57(u * lpp / nu)) / 2.0))
 
 
-def run_grid(root: pathlib.Path, grid: str, iters: int = ITERS, log: Callable[[str], None] = print,
-             solver: Callable[..., dict[str, Any]] = cfd.free_surface, frs: tuple[float, ...] = ORDER) -> dict[str, Any]:
-    """interFoam LTS at the Froude numbers `frs` (default all four) on one grid (GRIDS), one meshing + solve per speed so each finished speed
-    is on disk (run_<grid>.json) and a restart skips it. Disk is checked before every case."""
-    off, top = GRIDS[grid]
-    h = json.loads((root / "hydro.json").read_text())
-    f = root / f"run_{grid}.json"
-    out = json.loads(f.read_text()) if f.exists() else dict(grid=grid, iters=iters, surf_level=top, S=h["wetted_area"], speeds={})
-    for fr in frs:
-        key = f"{fr:.2f}"
-        if key in out["speeds"]:
-            continue
-        check_disk(root)
-        u = froude_speeds()[fr]
-        r, out["surf_level"] = _case(solver, root, grid, h["draft"], u, off, out["surf_level"], iters, log)
-        s = r["speeds"][u]
-        out["speeds"][key] = dict(U=u, R=s["resistance"], R_std=s["resistance_std"], ct=ct(s["resistance"], u, h["wetted_area"]),
-                                  ct_std=ct(s["resistance_std"], u, h["wetted_area"]), iters=s["iters"], seconds=s["seconds"],
-                                  cells=r["mesh"]["cells"], failed_checks=r["mesh"]["failed_checks"])
-        f.write_text(json.dumps(out, indent=1))
-        log(f"{grid} Fr {key}: C_T {out['speeds'][key]['ct']:.5g} (reference {CT_REF[fr]:.5g}), {r['mesh']['cells']} cells")
-    out["tree_gb"] = tree_gb(root)
-    if out["tree_gb"] > MAX_TREE_GB:
-        log(f"warning: {root} is {out['tree_gb']:.1f} GB, over the {MAX_TREE_GB} GB budget")
+def layer_count(first: float, cell: float, growth: float = GROWTH, most: int = MAX_LAYERS) -> int:
+    """Layers `first`, `first` x growth, ... as many as keep their total thickness within the hull cell size `cell`, between 1 and `most`."""
+    return int(min(most, max(1, math.log(1 + (growth - 1) * cell / first) / math.log(growth))))
+
+
+def hull_cell(lwl: float, k: float, level: int = SURF_LEVEL) -> float:
+    """Horizontal cell (m) at the hull: the background cell of the grid with factor k, halved once per refinement box and surface level."""
+    return float(lwl * cfd.FS_H0 / k / 2 ** (len(cfd.FS_BOXES) + level))
+
+
+def settle(series: np.ndarray) -> tuple[float, float, float, float]:
+    """(mean, std, drift, scatter) over the last quarter of an iteration history: drift = |mean - mean of the quarter before| / |mean|,
+    scatter = std / |mean|."""
+    w = len(series) // 4
+    last, prev = series[-w:], series[-2 * w:-w]
+    mean = float(last.mean())
+    return mean, float(last.std()), abs(mean - float(prev.mean())) / abs(mean), float(last.std()) / abs(mean)
+
+
+def _set(text: str, key: str, value: object) -> str:
+    out, n = re.subn(rf"^{key} .*;$", f"{key} {value};", text, flags=re.M)
+    if n != 1:
+        raise ValueError(f"expected one `{key}` entry, found {n}")
     return out
+
+
+def _last_numbers(case: pathlib.Path, pattern: str) -> list[float]:
+    """The numbers on the last data line of the newest postProcessing file matching pattern ([] if there is none)."""
+    files = sorted(case.glob(f"postProcessing/{pattern}"), key=lambda f: float(f.parent.name))
+    lines = [ln for ln in files[-1].read_text().splitlines() if ln.strip() and ln[0] != "#"] if files else []
+    return [float(x) for x in lines[-1].replace("(", " ").replace(")", " ").split() if re.fullmatch(r"[-+.\deE]+|nan|inf", x)] if lines else []
+
+
+def _layer_cover(case: pathlib.Path) -> Optional[float]:
+    """Percent of the target layer thickness snappyHexMesh reached on the hull (last row of its patch table), None if there is none."""
+    rows = re.findall(r"^hull\s+\d+\s+\d+\s+\S+\s+\S+\s+(\S+)\s*$", (case / "log.snappyHexMesh").read_text(errors="replace"), flags=re.M)
+    return float(rows[-1]) if rows else None
+
+
+def _converge(run: Callable[[Any, str, str], None], case: pathlib.Path, cmd: str, log: str, max_iters: int) -> dict[str, Any]:
+    """interFoam in CHUNK-step restarts, with the yPlus function objects added, until the resistance history settles (judged by
+    `settle`, never before MIN_ITERS) or max_iters. Disk is checked between pieces. -> what was seen."""
+    ctl = case / "system/controlDict"
+    base = ctl.read_text().replace("functions\n{", "functions\n{\n" + YPLUS_FO, 1)
+    done = 0
+    while True:
+        done += CHUNK
+        ctl.write_text(_set(_set(_set(base, "endTime", done), "writeInterval", CHUNK), "startFrom", "latestTime" if done > CHUNK else "startTime"))
+        run(case, cmd, f"{log}.{done}")
+        forces = case / "postProcessing/forces"
+        for d in forces.glob("[0-9]*"):             # zero-padded names, so that cfd.read_forces' sorted() reads the pieces in time order
+            d.rename(forces / f"{int(d.name):08d}")
+        f = _cfd.read_forces(case)["force"]
+        mean, std, drift, scatter = settle(-f["total"][:, 0])
+        ok = done >= MIN_ITERS and drift <= DRIFT_TOL and scatter <= SCATTER_TOL
+        if ok or done >= max_iters:
+            break
+        check_disk(case, ABORT_FREE_GB)
+    wet, rng = _last_numbers(case, "yPlusWet/*/surfaceFieldValue.dat"), _last_numbers(case, "yPlus/*/yPlus.dat")
+    return dict(mean=mean, std=std, drift=drift, scatter=scatter, converged=bool(ok), iters=int(f["it"][-1]),
+                viscous=-float(f["viscous"][-(len(f["it"]) // 4):, 0].mean()),
+                y_plus=wet[-1] if wet else None, y_plus_min=rng[1] if len(rng) > 3 else None, y_plus_max=rng[2] if len(rng) > 3 else None)
+
+
+@contextlib.contextmanager
+def case_recipe(first: float, layers: int, k: float, max_iters: int = MAX_ITERS) -> Iterator[dict[str, Any]]:
+    """What this study does to cafe.cfd.free_surface without editing it, for one case: tank water; the background mesh scaled by k;
+    `layers` hull prism layers (x GROWTH from `first` metres) in place of the dictionary the module wrote, set just before snappyHexMesh
+    runs; the pseudo-time Courant limits LTS_CO written into fvSolution and interFoam run by `_converge`, both just before it starts.
+    The yielded dict is filled with what was seen (convergence, y+, layer coverage)."""
+    seen: dict[str, Any] = {}
+    real, old = _cfd.sh, (_cfd.FS_H0, _cfd.FS_NZ)
+
+    def sh(case: Any, cmd: str, log: str) -> None:
+        case = pathlib.Path(case)
+        if log == "interFoam" or log.startswith("interFoam."):
+            f = case / "system/fvSolution"
+            text, n = re.subn(r"maxCo [\d.]+; maxAlphaCo [\d.]+;", f"maxCo {LTS_CO[0]}; maxAlphaCo {LTS_CO[1]};", f.read_text())
+            if n != 1:
+                raise ValueError(f"{f}: no `maxCo ..; maxAlphaCo ..;` entry to replace")
+            f.write_text(text)
+            seen.update(_converge(real, case, cmd, log, max_iters))
+            return
+        if log == "snappyHexMesh":
+            f = case / "system/snappyHexMeshDict"
+            block = (f"addLayersControls\n{{\n    relativeSizes false;\n    layers {{ hull {{ nSurfaceLayers {layers}; }} }}\n"
+                     f"    expansionRatio {GROWTH}; firstLayerThickness {first:.6g}; minThickness {0.25 * first:.6g}; nGrow 0; featureAngle 60;\n"
+                     "    nRelaxIter 5; nSmoothSurfaceNormals 1; nSmoothNormals 3; nSmoothThickness 10;\n"
+                     "    maxFaceThicknessRatio 0.5; maxThicknessToMedialRatio 0.3; minMedialAxisAngle 90;\n"
+                     "    nBufferCellsNoExtrude 0; nLayerIter 50; nRelaxedIter 20;\n}\n")
+            text, n = re.subn(r"addLayersControls\n\{.*?\n\}\n", lambda _: block, f.read_text(), count=1, flags=re.S)
+            if n != 1:
+                raise ValueError(f"{f}: no addLayersControls block to replace")
+            f.write_text(text)
+        real(case, cmd, log)
+        if log == "snappyHexMesh":
+            seen["layer_cover"] = _layer_cover(case)
+    _cfd.sh = sh
+    _cfd.FS_H0, _cfd.FS_NZ = old[0] * (1 - 1e-9) / k, tuple(max(2, round(n * k)) for n in old[1])
+    try:
+        with tank_water():
+            yield seen
+    finally:
+        _cfd.sh, (_cfd.FS_H0, _cfd.FS_NZ) = real, old
 
 
 def _rmtree_heavy(case: pathlib.Path) -> None:
     cfd._shrink(case)
 
 
+def _case(solver: Callable[..., dict[str, Any]], root: pathlib.Path, grid: str, h: dict[str, float], fr: float, max_iters: int,
+          log: Callable[[str], None], level: int) -> dict[str, Any]:
+    """One speed on one grid, all the way to a record: prism layers sized for y+ = 100, mesh + interFoam until converged, stepping the
+    snappy surface level down from `level` when snappy cannot refine the pre-refined cells (as cafe.cfd.characterize_free_surface does). Heavy case
+    files are removed afterwards, even on failure; logs and postProcessing stay."""
+    u = froude_speeds()[fr]
+    first = first_layer(u)
+    with contextlib.ExitStack() as cleanup:
+        cleanup.callback(_rmtree_heavy, root / grid)
+        while True:
+            n = layer_count(first, hull_cell(h["lwl"], GRIDS[grid], level))
+            log(f"{grid} Fr {fr:.2f}: U {u:.3f} m/s, {n} layers from {first * 1e3:.2f} mm, surface level {level}")
+            try:
+                with case_recipe(first, n, GRIDS[grid], max_iters) as seen:
+                    r = solver(str(root / "hull.stl"), h["draft"], root / grid, [u], 0, iters=max_iters, log=log, surf_level=level)
+                break
+            except RuntimeError as e:
+                snap = root / grid / "log.snappyHexMesh"
+                if level == 0 or not (snap.exists() and "more than 8 points" in snap.read_text(errors="replace")):
+                    raise e
+                level -= 1
+                log(f"snappy cannot refine the pre-refined cells at the hull; retrying at surface level {level}")
+    s, area, k2 = r["speeds"][u], h["wetted_area"], 2.0 if r["half"] else 1.0
+    force, std = (k2 * seen["mean"], k2 * seen["std"]) if "mean" in seen else (s["resistance"], s["resistance_std"])
+    return dict(U=u, R=force, R_std=std, ct=ct(force, u, area), ct_std=ct(std, u, area), iters=s["iters"], seconds=s["seconds"],
+                cells=r["mesh"]["cells"], failed_checks=r["mesh"]["failed_checks"], surf_level=level, first_layer=first, layers=n,
+                ct_viscous=ct(k2 * seen["viscous"], u, area) if "viscous" in seen else None,
+                layer_cover=seen.get("layer_cover"), y_plus=seen.get("y_plus"), y_plus_min=seen.get("y_plus_min"),
+                y_plus_max=seen.get("y_plus_max"), drift=seen.get("drift"), scatter=seen.get("scatter"), converged=seen.get("converged"))
+
+
+def run_grid(root: pathlib.Path, grid: str, max_iters: int = MAX_ITERS, log: Callable[[str], None] = print,
+             solver: Callable[..., dict[str, Any]] = cfd.free_surface, frs: tuple[float, ...] = ORDER) -> dict[str, Any]:
+    """interFoam LTS at the Froude numbers `frs` on one grid (GRIDS), one meshing + solve per speed so each finished speed is on disk
+    (run_<grid>.json) and a restart does not repeat it. Disk is checked before every case. A file stamped with another RECIPE is refused."""
+    h = json.loads((root / "hydro.json").read_text())
+    f = root / f"run_{grid}.json"
+    out = json.loads(f.read_text()) if f.exists() else dict(grid=grid, recipe=RECIPE, S=h["wetted_area"], surf_level=SURF_LEVEL, speeds={})
+    if out.get("recipe") != RECIPE:
+        raise ValueError(f"{f} was made by recipe {out.get('recipe')!r}, not {RECIPE!r}; move it aside rather than mix the two")
+    for fr in frs:
+        key = f"{fr:.2f}"
+        if key in out["speeds"]:
+            continue
+        check_disk(root)
+        c = out["speeds"][key] = _case(solver, root, grid, h, fr, max_iters, log, out["surf_level"])
+        out["surf_level"] = c["surf_level"]              # a level snappy could not do stays down for the later speeds of this grid
+        f.write_text(json.dumps(out, indent=1))
+        log(f"{grid} Fr {key}: C_T {c['ct']:.5g} (reference {CT_REF[fr]:.5g}), {c['cells']} cells, y+ {c['y_plus']}, "
+            f"{c['iters']} iterations, converged {c['converged']}, viscous C_T {c['ct_viscous']}")
+    out["tree_gb"] = tree_gb(root)
+    if out["tree_gb"] > MAX_TREE_GB:
+        log(f"warning: {root} is {out['tree_gb']:.1f} GB, over the {MAX_TREE_GB} GB budget")
+    return out
+
+
 # ------------------------------------------------------------------ V&V 20 tabulation and receipts
 
+def discretization(values: Sequence[float], cells: Sequence[float], levels: Sequence[Any] = ()) -> tuple[float, float, str]:
+    """Relative U_num of values[0] from two or three grids, finest first, and how it was got. -> (u_rel, r fine/next, note).
+    Three grids that converge monotonically at r >= 1.3 with an observed order inside P_SANE: Celik 2008 GCI_fine with Fs = 1.25.
+    Anything else (two grids, divergence, oscillation, an unbelievable p, grids that differ in snappy surface level) falls back to
+    Roache's Fs = 3 with the order assumed to be 2 on the finest pair, and never less than half the spread of the values; the note says why."""
+    r21 = vv.refinement_ratio(cells[0], cells[1])
+    why = "two grids" if len(values) == 2 else "grids differ in snappy surface level" if len(set(levels)) > 1 else ""
+    if not why:
+        try:
+            g = vv.celik_gci(values[0], values[1], values[2], r21, vv.refinement_ratio(cells[1], cells[2]))
+        except (ValueError, RuntimeError):
+            why = "observed order undefined"
+        else:
+            why = ("oscillating" if g.oscillatory else "diverging" if not g.converging else f"r < {vv.R_MIN}" if not g.r_ok
+                   else f"p = {g.p:.2f} outside {P_SANE}" if not P_SANE[0] <= g.p <= P_SANE[1] else "")
+            if not why:
+                return g.gci_fine21, r21, f"p = {g.p:.2f}, Fs = {vv.FS_THREE_GRID}"
+    return max(vv.gci_two_grid(values[0], values[1], r21), (max(values) - min(values)) / 2 / abs(values[0])), r21, f"Fs = 3, p = 2 assumed: {why}"
+
+
 def tabulate(root: pathlib.Path) -> dict[float, vv.Vv20]:
-    """One V&V 20 row per Froude number (keyed by it) that has both grids run. S = C_T on the fine grid; U_num = two-grid GCI
-    (Roache Fs = 3, assumed p = 2, r from the cell counts of that speed's two meshes) times S, in quadrature
-    with the fine-grid iteration scatter (std of C_T over the last 20 % of iterations); U_input = S and viscosity assumptions; U_D assumed."""
-    runs = {g: json.loads((root / f"run_{g}.json").read_text()) for g in ("coarse", "fine") if (root / f"run_{g}.json").exists()}
-    if len(runs) < 2:
-        return {}
+    """One V&V 20 row per Froude number (keyed by it) that has at least two grids run. S = C_T on the finest grid; U_num = `discretization`
+    of that speed's grids times S, in quadrature with the finest grid's iteration scatter (std of C_T over the last quarter of the run);
+    U_input = S and viscosity assumptions; U_D assumed."""
+    runs = {g: json.loads(f.read_text()) for g in GRID_ORDER if (f := root / f"run_{g}.json").exists()}
     rows = {}
     for fr, ref in CT_REF.items():
         key = f"{fr:.2f}"
-        if key not in runs["fine"]["speeds"] or key not in runs["coarse"]["speeds"]:
+        got = [runs[g]["speeds"][key] for g in GRID_ORDER if g in runs and key in runs[g]["speeds"]]
+        if len(got) < 2:
             continue
-        r = vv.refinement_ratio(runs["fine"]["speeds"][key]["cells"], runs["coarse"]["speeds"][key]["cells"])
-        s_f, s_c = runs["fine"]["speeds"][key]["ct"], runs["coarse"]["speeds"][key]["ct"]
-        u_num = math.hypot(vv.gci_two_grid(s_f, s_c, r) * s_f, runs["fine"]["speeds"][key].get("ct_std", 0.0))
-        u_in = s_f * math.hypot(assumed("u_S_rel"), assumed("u_nu_rel"))
-        rows[fr] = (vv.vv20_row(f"C_T Fr {key} (r={r:.2f})", s_f, ref, u_num, u_in, assumed("u_D_rel") * ref))
+        s = got[0]["ct"]
+        u_rel, r, note = discretization([c["ct"] for c in got], [c["cells"] for c in got], [c.get("surf_level") for c in got])
+        u_num = math.hypot(u_rel * s, got[0].get("ct_std", 0.0))
+        rows[fr] = vv.vv20_row(f"C_T Fr {key} (r={r:.2f}, {note})", s, ref, u_num, s * math.hypot(assumed("u_S_rel"), assumed("u_nu_rel")),
+                               assumed("u_D_rel") * ref)
     return rows
 
 
 def receipts(root: Optional[pathlib.Path] = None) -> str:
-    """Hull-geometry receipts when hydro.json exists; per-Froude C_T rows when both grids have run. -> a status line."""
+    """Hull-geometry receipts when hydro.json exists; per-Froude C_T rows when two grids have run; per-case wall and convergence rows
+    for every case on disk (a case that recorded none of it fails them: a required check that did not happen is not fine). -> a status line."""
     root = root or data_root()
     if not (root / "hydro.json").exists():
         return f"DTMB 5415: no {root}/hydro.json (run `python -m cafe.pm.dtmb5415 prepare`); no receipts emitted"
@@ -359,7 +546,20 @@ def receipts(root: Optional[pathlib.Path] = None) -> str:
         rc.context(grp, f"C_T x1e3 at Fr {fr:.2f}: E = {row.E * 1e3:+.3f}, U_val = {row.u_val * 1e3:.3f}, U_num = {row.u_num * 1e3:.3f}",
                    row.S * 1e3, row.D * 1e3, "", src)
         rc.bracket(grp, f"C_T Fr {fr:.2f}: |E| <= U_val (ASME V&V 20)", abs(row.E), 0.0, row.u_val, "", src)
-    return f"DTMB 5415: geometry receipts + {len(rows)} Froude rows"
+        rc.bracket(grp, f"C_T Fr {fr:.2f}: U_val / D <= {INFORMATIVE} (the validation says something)", row.u_val / row.D, 0.0, INFORMATIVE, "",
+                   "a pass with U_val comparable to the quantity claims nothing; U_num must come down with grid and iteration quality")
+    n = 0
+    for g in GRID_ORDER:
+        if (root / f"run_{g}.json").exists():
+            for key, c in json.loads((root / f"run_{g}.json").read_text())["speeds"].items():
+                v = {k: math.nan if c.get(k) is None else float(c[k]) for k in ("y_plus", "drift", "scatter")}
+                rc.bracket(grp, f"{g} Fr {key}: wetted-area mean y+ in the log layer", v["y_plus"], *Y_PLUS_BAND, "",
+                           "Spalding wall function; first prism layer sized per Froude number (first_layer)")
+                rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter drift", v["drift"], 0.0, DRIFT_TOL, "", "resistance history, settle()")
+                rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter scatter", v["scatter"], 0.0, SCATTER_TOL, "",
+                           "resistance history, settle()")
+                n += 1
+    return f"DTMB 5415: geometry receipts + {len(rows)} Froude rows + {n} cases checked for y+ and convergence"
 
 
 def main(argv: list[str]) -> int:
@@ -369,7 +569,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps(prepare(root), indent=1))
     elif cmd == "run":
         frs = tuple(float(x) for x in argv[3].split(",")) if len(argv) > 3 else ORDER
-        print(json.dumps(run_grid(root, argv[1], int(argv[2]) if len(argv) > 2 else ITERS, frs=frs), indent=1))
+        print(json.dumps(run_grid(root, argv[1], int(argv[2]) if len(argv) > 2 else MAX_ITERS, frs=frs), indent=1))
     elif cmd == "report":
         print(vv.format_table(list(tabulate(root).values())))
         print(receipts(root))

@@ -26,10 +26,12 @@ class StageFailed(RuntimeError):
 
 
 def git_sha() -> str:
+    """HEAD of the checkout, else $CAFE_GIT_SHA (a copy synced without .git, e.g. into the container), else "none"."""
     try:
-        return subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10).stdout.strip() or "none"
+        sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10).stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return os.environ.get("CAFE_GIT_SHA", "none")
+        sha = ""
+    return sha or os.environ.get("CAFE_GIT_SHA", "none")
 
 
 def versions() -> dict[str, str | None]:

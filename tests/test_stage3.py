@@ -4,8 +4,11 @@ import math
 import os
 import pathlib
 import pickle
+import re
 import stat
+import tempfile
 import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -16,7 +19,7 @@ import jax.numpy as jnp
 import cafe.receipts as cr
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider as pg, uas, usv as pu
-from cafe.pm.stage3 import fluidx3d, lbm, nest, pipeline_windows as pw, refit, wallmodel as wm, windows as W
+from cafe.pm.stage3 import fluidx3d, freesurface as fs, lbm, nest, pipeline_windows as pw, refit, wallmodel as wm, windows as W
 
 STUB = pathlib.Path(__file__).parent / "fixtures" / "fluidx3d_stub.py"
 
@@ -588,9 +591,9 @@ def test_free_surface_window_uses_fluidx3d_when_enabled_else_interfoam(tmp_path)
 
     def runner(stl, draft, wd, speeds):
         calls.append((stl, draft, speeds))
-        return dict(speeds={U: dict(resistance=10 * U, gci=0.02, lift=-1.0) for U in speeds}, mesh=dict(cells=1000), coarse_cells=200)
+        return dict(speeds={U: dict(resistance=10 * U, gci=0.02, lift=-1.0, resistance_std=0.5) for U in speeds}, mesh=dict(cells=1000), coarse_cells=200)
     r2 = W.free_surface_window("hull.stl", 0.1, [1.0], tmp_path, runner=runner, config={}, vehicle=v)
-    assert r2["source"] == "interfoam" and r2["speeds"][1.0] == dict(resistance=10.0, gci=0.02, lift=-1.0)
+    assert r2["source"] == "interfoam" and r2["speeds"][1.0] == dict(resistance=10.0, gci=0.02, lift=-1.0, std=0.5)
     assert r2["cells"] == 1000 and r2["coarse_cells"] == 200 and calls == [("hull.stl", 0.1, [1.0])]
 
 
@@ -714,11 +717,32 @@ def no_wall_receipt(monkeypatch, tmp_path):
     return tmp_path
 
 
+FS = dict(R=1000.0, gci=0.04, cells=300_000, coarse=120_000, std=3.0, calls=[], spawned=[])      # what the fake interFoam returns; tests change it
+
+
+def fake_interfoam(stl, draft, wd, speeds):
+    """Stands in for cafe.cfd (OpenFOAM): checks that the stage handed it a real STL and returns the shape two_grid returns."""
+    assert pathlib.Path(stl).stat().st_size > 1000 and draft > 2.0
+    FS["calls"].append((stl, draft, list(speeds)))
+    return dict(speeds={U: dict(resistance=FS["R"], gci=FS["gci"], lift=-5.0, resistance_std=FS["std"]) for U in speeds}, mesh=dict(cells=FS["cells"]),
+                coarse_cells=FS["coarse"])
+
+
 def in_process_fea(cmd, **kw):
-    """Stands in for the child process: runs the same entry point in this process (the real subprocess is tested once, below)."""
+    """Stands in for the child processes: runs the same entry points in this process (the real subprocess is tested once, below)."""
     import subprocess
+    if "cafe.pm.stage3.freesurface" in cmd:
+        FS["spawned"].append(dict(kw, cmd=cmd))
+        return subprocess.CompletedProcess(cmd, fs.run_child(cmd[-3], cmd[-2], runner=fake_interfoam), "", "")
     rc = pw._fea_child(cmd[-2], cmd[-1])
     return subprocess.CompletedProcess(cmd, rc, "", "")
+
+
+@pytest.fixture(autouse=True)
+def fresh_fs():
+    FS.update(R=1000.0, gci=0.04, cells=300_000, coarse=120_000, std=3.0)
+    FS["calls"].clear()
+    FS["spawned"].clear()
 
 
 def cheap(monkeypatch, **over):
@@ -733,7 +757,8 @@ def test_assumptions_file_carries_every_key_the_adapter_reads():
     for k in ("window_s", "box_bodies", "cells_per_delta", "min_cells_across", "min_flow_throughs", "spinup", "fea_elements_along",
               "glider.hull_diameter_m", "glider.wing_span_m", "glider.wing_chord_m", "glider.wing_thickness_m", "glider.wing_x_frac",
               "glider.hull_thickness_m", "glider.hull_material", "glider.window_depth_m", "slocum.length_m", "slocum.hull_diameter_m",
-              "usv.hull_draft_m", "usv.wing_t_c", "uas.window_altitude_m", "uas.body_radii_m", "uas.arm_length_m", "uas.arm_width_m",
+              "usv.hull_draft_m", "usv.wing_t_c", "fs.margin", "fs.cost_factor", "fs.mesh_s_per_cell", "fs.snappy_cell_factor",
+              "uas.window_altitude_m", "uas.body_radii_m", "uas.arm_length_m", "uas.arm_width_m",
               "uas.arm_thickness_m"):
         assert pw.need(a, k) is not None
     import yaml
@@ -824,8 +849,8 @@ def test_run_all_classes_rows_have_everything_and_nothing_unvalidated_is_ok(no_w
     L = FakeL()
     wins = {v: [WIN] for v in CLASSES}
     out = pw.run(ctx, wins, L)
-    assert {k: len(v) for k, v in out.items()} == dict(g=1, g2=1, u=2, q=1)
-    assert [r["part"] for r in out["u"]] == ["hull", "wing"] and out["u"][0]["fluid"] == "water" and out["u"][1]["fluid"] == "air"
+    assert {k: len(v) for k, v in out.items()} == dict(g=1, g2=1, u=3, q=1)
+    assert [r["part"] for r in out["u"]] == ["hull", "wing", "hull_fs"] and out["u"][0]["fluid"] == "water" and out["u"][1]["fluid"] == "air"
     for rows in out.values():
         for r in rows:
             assert "error" not in r, r.get("error")
@@ -833,14 +858,15 @@ def test_run_all_classes_rows_have_everything_and_nothing_unvalidated_is_ok(no_w
                       "cl_hangar", "cd_hangar_source", "fea", "label", "wall_s", "heading_source"):
                 assert k in r
             assert np.isfinite(r["cd"]) and r["cd_hangar"] > 0 and r["wall_s"] > 0 and r["label"].startswith("CPU fallback")
-            assert r["resolution"]["dx"] > 0 and "budget_ok" in r["resolution"]
-            wall = [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]
-            assert not wall["ok"] and not r["ok"]                              # no stored passing wall-model receipt: no row may be ok
+            if r["part"] != "hull_fs":                                          # interFoam has no wall-model receipt: its checks are the GCI's
+                assert r["resolution"]["dx"] > 0 and "budget_ok" in r["resolution"]
+                wall = [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]
+                assert not wall["ok"] and not r["ok"]                          # no stored passing wall-model receipt: no row may be ok
             assert r["heading_source"].startswith("relative-flow") and r["added_resistance"] is not None
     assert out["g"][0]["fea"]["run"] and out["g"][0]["fea"]["utilization"] > 0                           # glider pressure hull
     assert not out["u"][0]["fea"]["run"] and "no structural model" in out["u"][0]["fea"]["reason"] and not out["q"][0]["fea"]["run"]
     assert out["g"][0]["cl_hangar"] is not None and out["u"][0]["cl_hangar"] is None and out["u"][1]["cl_hangar"] is not None
-    assert L.checks["every_window_attempted"][0] and L.checks["no_row_claims_ok_with_a_failing_check"][0] and L.checks["every_window_attempted"][1] == 5
+    assert L.checks["every_window_attempted"][0] and L.checks["no_row_claims_ok_with_a_failing_check"][0] and L.checks["every_window_attempted"][1] == 6
     assert any("stage3 g/body" in s for s in ctx.logs)
     assert any(f.endswith("assumptions.yaml") for f in L.inputs)             # the ledger names the numbers the rows depend on
     # the refit reads exactly these fields
@@ -1034,7 +1060,9 @@ def test_a_spent_budget_gives_reasoned_not_run_rows_and_a_tight_one_a_coarser_cu
     L = FakeL()
     out = pw.run(ctx, {v: [WIN] for v in CLASSES}, L)
     rows = [r for rs in out.values() for r in rs]
-    assert len(rows) == 5 and all("wall-clock budget is spent" in r["reasons"][0] and not r["ok"] and r["cd"] is None for r in rows)
+    assert len(rows) == 6 and all(not r["ok"] and r["cd"] is None and r["reasons"] for r in rows)
+    assert all("wall-clock budget is spent" in r["reasons"][0] for r in rows if r["part"] != "hull_fs")
+    assert [r for r in rows if r["part"] == "hull_fs"][0]["reasons"][0].startswith("free-surface window not run: estimated")     # priced, not started
     assert L.checks["every_failed_window_states_a_reason"][0] and L.checks["every_window_attempted"][0]
     assert L.checks["stage_held_its_wall_clock_share"][0]                           # nothing ran: no overrun
     # a slice that fits one window: the row says what it cut, FEA is skipped when its time is gone, the share is held (+10 %)
@@ -1062,3 +1090,404 @@ def test_viscosity_floor_is_reported_by_the_window_and_fails_the_row(no_wall_rec
     if q["resolution"]["nu_floored"]:
         assert any(c["name"] == "viscosity_floor" and not c["ok"] for c in q["checks"]) and any("viscosity raised" in x for x in q["reasons"])
     assert np.isfinite(q["cd"])                                                 # the floor keeps the coarse air window finite
+
+
+# ------------------------------------------------------------------ the free-surface hull window (stage3/freesurface.py, pipeline_windows hull_fs)
+def fs_case(tmp, ctx=None):
+    a = pw.assumptions()
+    P = pu.load_platform("saildrone_explorer")
+    ctx = ctx or fake_ctx(tmp)
+    veh = pw.usv_vehicle(P, a, "saildrone_explorer", "hull_fs")
+    return ctx, a, P, veh, pw.usv_case(ctx, WIN, P, veh, a, 0.0, "hull_fs")
+
+
+def keel_and_hull(P, stw):
+    """Independent of the code under test: the hull's whole resistance from usv.hull_resistance and the keel's profile drag from the first term of
+    usv._forces' dk, and the rudder and appendage terms of usv._forces' d, so the three can be put back together against `_forces` itself."""
+    q = 0.5 * P["rho_water"] * stw ** 2
+    k_area, _, _, k_tc, k_c = pu._foil(P, "keel")
+    r_area, _, _, r_tc, r_c = pu._foil(P, "rudder")
+    keel = q * k_area * 2 * float(pu.cf_ittc57(stw * k_c / P["nu_water"])) * (1 + 2 * k_tc + 60 * k_tc ** 4)
+    rudder = q * r_area * 2 * float(pu.cf_ittc57(stw * r_c / P["nu_water"])) * (1 + 2 * r_tc + 60 * r_tc ** 4)
+    return float(pu.hull_resistance(P, np.float64(stw), 0.0)), keel, rudder + q * P["appendage_cda_m2"]
+
+
+def test_the_hull_fs_hangar_number_is_the_vpps_whole_hull_resistance_on_the_windows_reference_area(no_wall_receipt):
+    ctx, a, P, veh, c = fs_case(no_wall_receipt)
+    stw = c["info"]["stw_ms"]
+    hull, keel, rest = keel_and_hull(P, stw)
+    q = 0.5 * P["rho_water"] * stw ** 2
+    assert c["cd_h"] == pytest.approx((hull + keel) / (q * veh.ref_area)) and c["cl_h"] is None and "residuary" in c["src"]
+    d = pu._forces(P, np.float64(stw), np.float64(0.0), np.float64(0.0), np.float64(1.0), np.float64(0.0), *(np.float64(0.0),) * 4)["d"]
+    assert hull + keel + rest == pytest.approx(float(d))                    # the three pieces are exactly the VPP's total at zero leeway, heel and wind
+    visc = pw.usv_case(ctx, WIN, P, pw.usv_vehicle(P, a, "saildrone_explorer", "hull"), a, 0.0, "hull")
+    resid = q * P["wetted_area_m2"] * P["cr0"] * (stw / math.sqrt(pu.G * P["lwl_m"]) / P["cr_fr_ref"]) ** 4
+    assert (c["cd_h"] - visc["cd_h"]) * q * veh.ref_area == pytest.approx(resid)       # the viscous `hull` number differs by the residuary term, nothing else
+    assert visc["info"] == c["info"] and np.allclose(visc["v"], c["v"]) and veh.extra["part"] == "hull_fs" and veh.fluid == "water"
+
+
+def fs_rows(tmp, monkeypatch, windows=(WIN,), ctx=None):
+    cheap(monkeypatch)
+    return pw.run(ctx or fake_ctx(tmp, budget=2e6), {"u": list(windows)}, FakeL())["u"]
+
+
+def test_every_usv_window_gets_a_hull_fs_row_with_total_resistance_on_the_hangars_reference_area(no_wall_receipt, monkeypatch):
+    w2 = dict(WIN, t=WIN["t"] + 3600.0)
+    rows = fs_rows(no_wall_receipt, monkeypatch, (WIN, w2))
+    assert [r["part"] for r in rows] == ["hull", "wing", "hull", "wing", "hull_fs", "hull_fs"]
+    assert [r["t"] for r in rows[4:]] == [WIN["t"], w2["t"]] and len(FS["calls"]) == 2
+    r, hull = rows[4], rows[0]
+    P = pu.load_platform("saildrone_explorer")
+    stw = r["kinematics"]["stw_ms"]
+    A, q = r["ref_area"], 0.5 * P["rho_water"] * stw ** 2
+    # one reference area for cd and cd_hangar
+    assert A == hull["ref_area"] and A == pytest.approx(pw.usv_vehicle(P, pw.assumptions(), "x", "hull_fs").ref_area)
+    assert r["cd"] == pytest.approx(FS["R"] / (q * A)) and r["resistance_n"] == FS["R"]                    # total resistance / (q A_ref), not a viscous part
+    h, k, _ = keel_and_hull(P, stw)
+    assert r["cd_hangar"] * q * A == pytest.approx(h + k) and r["cd_hangar"] > hull["cd_hangar"]            # friction (1+k) + residuary + keel
+    assert r["added_resistance"] == pytest.approx(r["cd"] / r["cd_hangar"] - 1.0) and r["cl"] is None and r["cl_hangar"] is None
+    assert r["source"] == "interfoam" and r["fluid"] == "water" and r["ok"] and r["reasons"] == [] and not r["fea"]["run"]
+    # the spread is GCI x cd and the force's own wobble, in quadrature
+    assert r["cd_spread"] == pytest.approx(math.hypot(0.04 * r["cd"], FS["std"] / (q * A))) and r["gci"] == 0.04
+    assert r["refinement_ratio"] == pytest.approx((300_000 / 120_000) ** (1 / 3))
+    assert [c["name"] for c in r["checks"]] == ["fs_gci", "fs_refinement_ratio", "fs_iterative_scatter"]
+    assert all(c["ok"] for c in r["checks"]) and r["resolution"]["cells_fine"] == 300_000 and r["resolution"]["cells_coarse"] == 120_000
+    # the stand-in ellipsoid is 29 % over the yaml's wetted area
+    assert r["wetted_area_platform_m2"] == P["wetted_area_m2"] and 7.5 < r["wetted_area_mesh_m2"] < 9.5
+    stl, draft, speeds = FS["calls"][0]
+    # the through-water speed; the hull's vertical semi-axis plus the keel span below the waterline
+    assert speeds == [pytest.approx(stw)] and draft == pytest.approx(0.45 + P["keel_span_m"], abs=1e-4)
+    sp = FS["spawned"][0]
+    assert sp["start_new_session"] is True and sp["cmd"][1:3] == ["-m", "cafe.pm.stage3.freesurface"]
+    assert float(sp["cmd"][-1]) == 1e9                                       # no budget: no deadline
+
+
+@pytest.mark.parametrize("gci, cells, coarse, failing, words", [
+    (None, 300_000, 120_000, "fs_gci", "no grid-convergence index"),
+    (float("nan"), 300_000, 120_000, "fs_gci", "no grid-convergence index"),
+    (0.11, 300_000, 120_000, "fs_gci", "grid-convergence index 11% is above 10%"),                  # a GCI that large is not information
+    (0.10, 300_000, 120_000, None, None),
+    (0.04, 130_000, 120_000, "fs_refinement_ratio", "refinement ratio r = 1.03 (cells 130,000 / 120,000) is below 1.3"),
+    (0.04, 263_000, 120_000, "fs_refinement_ratio", "r = 1.30"),                                      # 2.19x the cells is r = 1.2986: still below
+    (0.04, 264_000, 120_000, None, None)])                                                           # 2.2x is r = 1.3006: passes
+def test_a_missing_gci_or_a_refinement_ratio_below_1_3_fails_the_row_and_says_why(no_wall_receipt, monkeypatch, gci, cells, coarse, failing, words):
+    FS.update(gci=gci, cells=cells, coarse=coarse)
+    r = fs_rows(no_wall_receipt, monkeypatch)[-1]
+    assert r["cd"] > 0 and r["cd_spread"] > 0
+    assert [c["name"] for c in r["checks"] if not c["ok"]] == ([failing] if failing else [])
+    assert r["ok"] is (failing is None)
+    if failing:
+        assert any(words in x for x in r["reasons"]) and len(r["reasons"]) == 1
+    else:
+        assert r["reasons"] == [] and r["refinement_ratio"] >= 1.3
+
+
+def test_the_fluidx3d_plugin_replaces_interfoam_when_enabled_and_stays_off_by_default(no_wall_receipt, monkeypatch, tmp_path):
+    assert fluidx3d.available(fs.fluidx3d_config())[0] is False                      # config/premission.json as shipped: disabled
+    cheap(monkeypatch)
+    f = tmp_path / "premission.json"
+    f.write_text(json.dumps(cfg()))
+    monkeypatch.setattr(fs, "CONFIG_FILE", f)
+    ctx = fake_ctx(no_wall_receipt, budget=2e6)
+    ctx.plan.update(shares={"stage3": 0.3}, budget_s=1200.0)                         # quick: 6 min, which interFoam could never fit (see below)
+    r = pw.run(ctx, {"u": [WIN]}, FakeL())["u"][-1]
+    assert r["part"] == "hull_fs" and r["source"] == "fluidx3d" and FS["calls"] == []                  # the fake interFoam was never called
+    assert r["cd"] > 0 and r["resolution"]["estimate"] is None and r["gci"] is None
+    assert not r["ok"] and r["reasons"][0].startswith("no grid-convergence index")                    # a lattice-Boltzmann free surface has no second grid
+    f.write_text(json.dumps(cfg(enabled=False)))
+    r2 = pw.run(ctx, {"u": [WIN]}, FakeL())["u"][-1]
+    assert "source" not in r2 and r2["reasons"][0].startswith("free-surface window not run: estimated") and FS["calls"] == []
+
+
+def plan_with(ctx, share_s):
+    ctx.plan.update(shares={"stage3": 0.3}, budget_s=share_s / 0.3)
+    return ctx
+
+
+def test_the_share_decides_whether_a_free_surface_case_runs_and_a_second_one_queues_behind_the_first(no_wall_receipt, monkeypatch):
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    a = pw.assumptions()
+    est = fs.estimate(6, a["fs.snappy_cell_factor"], a["fs.cost_factor"], a["fs.mesh_s_per_cell"])
+    need = est["total_s"] * a["fs.margin"]
+    w2 = dict(WIN, t=WIN["t"] + 3600.0)
+    # a share one third short of the estimate: not run, with the numbers
+    rows = fs_rows(no_wall_receipt, monkeypatch, ctx=plan_with(fake_ctx(no_wall_receipt, budget=2e6), 0.66 * need))
+    r = rows[-1]
+    assert not r["ok"] and r["cd"] is None and FS["spawned"] == [] and r["error"] == r["reasons"][0]
+    assert f"estimated {est['total_s'] / 60:.0f} min x {a['fs.margin']} margin = {need / 60:.0f} min" in r["reasons"][0]
+    assert f"of the {0.66 * need / 60:.0f} min stage-3 share" in r["reasons"][0] and "iterations" in r["reasons"][0] and "cell-updates/s" in r["reasons"][0]
+    assert "it would fit --budget " in r["reasons"][0] and r["resolution"]["estimate"]["total_s"] == pytest.approx(est["total_s"])
+    # a share 1.5 times the need: one case fits, the second window finds only the rest of the share
+    rows = fs_rows(no_wall_receipt, monkeypatch, (WIN, w2), ctx=plan_with(fake_ctx(no_wall_receipt, budget=2e6), 1.5 * need))
+    first, second = rows[-2], rows[-1]
+    assert first["ok"] and len(FS["spawned"]) == 1 and first["resolution"]["estimated_s"] == pytest.approx(est["total_s"])
+    left = float(re.search(r"against ([\d.]+) min left", second["reasons"][0]).group(1))
+    assert not second["ok"] and second["cd"] is None and left == pytest.approx(0.5 * need / 60, abs=1.0)           # the rest of the share, not all of it
+    # a share of three times the need holds both
+    FS["spawned"].clear()
+    rows = fs_rows(no_wall_receipt, monkeypatch, (WIN, w2), ctx=plan_with(fake_ctx(no_wall_receipt, budget=2e6), 3.0 * need + 5.0))
+    assert rows[-2]["ok"] and rows[-1]["ok"] and len(FS["spawned"]) == 2
+    assert 0.0 < float(FS["spawned"][0]["cmd"][-1]) <= 3.0 * need + 5.0                 # the child's own deadline lies inside the share
+
+
+def test_the_named_budgets_quick_does_not_fit_a_free_surface_window_and_overnight_fits_one(no_wall_receipt, monkeypatch):
+    from cafe.pm import budget
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    a = pw.assumptions()
+    est = fs.estimate(6, a["fs.snappy_cell_factor"], a["fs.cost_factor"], a["fs.mesh_s_per_cell"])
+    assert sum(est["cells"].values()) == pytest.approx(0.98 * (fs.refined_cells(1) + fs.refined_cells(4)))
+    share = {k: budget.SHARE["stage3"] * v for k, v in budget.BUDGET_S.items()}
+    need = est["total_s"] * a["fs.margin"]
+    assert need > share["quick"] and need > share["4h"] and need < share["overnight"] < 2 * need                  # quick, 4h: no; overnight: exactly one
+    ctx = fake_ctx(no_wall_receipt, budget=2e6)
+    ctx.plan.update(shares=budget.SHARE, budget_s=budget.BUDGET_S["quick"])
+    r = fs_rows(no_wall_receipt, monkeypatch, ctx=ctx)[-1]
+    assert not r["ok"] and f"of the {share['quick'] / 60:.0f} min stage-3 share" in r["reasons"][0] and "it would fit --budget overnight" in r["reasons"][0]
+
+
+def test_the_hull_fs_row_failures_are_rows_with_reasons(no_wall_receipt, monkeypatch, tmp_path):
+    import subprocess
+    ctx, a, P, veh, case = fs_case(no_wall_receipt)
+    base = pw._base(ctx, WIN, "hull_fs", None)
+    geo = dict(draft=2.55, length=6.5, area=20.0, wetted_hull_m2=8.4)
+    seen: list = []
+
+    def out(cmd, R=1000.0, gci=0.05):
+        res = dict(speeds={"2.5": dict(resistance=R, gci=gci, lift=None, std=None)}, cells=3, coarse_cells=1, source="interfoam")
+        pathlib.Path(cmd[-2]).write_text(json.dumps(res))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def work(spawn, deadline=None):
+        (tmp_path / "out.json").unlink(missing_ok=True)
+
+        def rec(cmd, **k):
+            seen.append(k)
+            return spawn(cmd, **k)
+        monkeypatch.setattr(pw, "_spawn", rec)
+        return pw._fs_work(base, veh, case, 2.5, geo, str(tmp_path), {}, None, deadline, time.perf_counter())
+
+    def timeout(cmd, **k):
+        raise subprocess.TimeoutExpired(cmd, k["timeout"])
+
+    def nopython(cmd, **k):
+        raise FileNotFoundError("no python")
+    soon = time.perf_counter() + 50.0
+    for spawn, deadline, words in [
+            (timeout, soon, "killed at its deadline"),
+            (lambda cmd, **k: subprocess.CompletedProcess(cmd, 3, "", "Traceback\nRuntimeError: snappy: forced"), None,
+             "failed (3): RuntimeError: snappy: forced"),
+            (lambda cmd, **k: subprocess.CompletedProcess(cmd, -9, "", ""), soon, "killed by its watchdog"),
+            (lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "", ""), None, "failed (0): no message"),
+            (lambda cmd, **k: out(cmd, R=-4.0), None, "non-physical resistance (-4.0 N)"),
+            (nopython, None, "window failed: no python"),
+            (lambda cmd, **k: out(cmd), time.perf_counter() - 1.0, "share was spent before its turn came")]:
+        r = work(spawn, deadline)
+        assert not r["ok"] and r["cd"] is None and words in r["reasons"][0] and r["error"] == r["reasons"][0] and r["part"] == "hull_fs", words
+    # the parent waits a grace past the child's own deadline, and for ever without one
+    assert seen[0]["timeout"] == pytest.approx(50.0 + pw.FS_GRACE_S, abs=1.0) and seen[1]["timeout"] is None
+    assert len(seen) == 6                                                    # the spent deadline never starts a child
+    good = work(lambda cmd, **k: out(cmd))
+    assert good["ok"] and good["gci"] == 0.05 and good["refinement_ratio"] == pytest.approx(3 ** (1 / 3)) and good["cd"] > 0
+
+
+def test_a_free_surface_case_that_cannot_be_prepared_is_a_row_with_the_reason_and_leaves_no_job_directory(no_wall_receipt, monkeypatch):
+    import glob
+    before = set(glob.glob(f"{tempfile.gettempdir()}/fs_job_*"))
+
+    def refuse(veh, path):
+        raise ValueError("the hull and keel do not union into a closed solid")
+    monkeypatch.setattr(fs, "write_stl", refuse)
+    rows = fs_rows(no_wall_receipt, monkeypatch)
+    assert rows[-1]["part"] == "hull_fs" and rows[-1]["reasons"] == ["the hull and keel do not union into a closed solid"] and FS["spawned"] == []
+    assert set(glob.glob(f"{tempfile.gettempdir()}/fs_job_*")) == before             # the job directory goes with the failed preparation ...
+    monkeypatch.undo()
+    cheap(monkeypatch)
+    pw.run(fake_ctx(no_wall_receipt, budget=2e6), {"u": [WIN]}, FakeL())
+    assert set(glob.glob(f"{tempfile.gettempdir()}/fs_job_*")) == before             # ... and with the finished run
+
+
+def test_a_becalmed_usv_gets_a_hull_fs_row_that_says_so(no_wall_receipt, monkeypatch):
+    still = AnalyticEnv(wind=(0.0, 0.0), current=(0.0, 0.0))
+    r = fs_rows(no_wall_receipt, monkeypatch, ctx=fake_ctx(no_wall_receipt, env=still))[-1]
+    assert r["part"] == "hull_fs" and "becalmed" in r["reasons"][0] and not r["ok"] and FS["spawned"] == []
+
+
+# ------------------------------------------------------------------ freesurface.py on its own
+def test_the_stl_is_one_closed_solid_with_its_lowest_point_at_zero_and_the_waterline_at_the_draft(tmp_path):
+    import trimesh
+    a, P = pw.assumptions(), pu.load_platform("saildrone_explorer")
+    veh = pw.usv_vehicle(P, a, "saildrone_explorer", "hull_fs")
+    info = fs.write_stl(veh, tmp_path / "h.stl")
+    m = trimesh.load(tmp_path / "h.stl", force="mesh")
+    assert m.is_watertight and len(m.split(only_watertight=False)) == 1 and m.bounds[0][2] == pytest.approx(0.0, abs=1e-6)
+    assert info["draft"] == pytest.approx(a["usv.hull_draft_m"] + P["keel_span_m"], abs=1e-4) and info["length"] == pytest.approx(P["lwl_m"], abs=0.05)
+    # the ellipsoid's top is a hull semi-axis above the waterline
+    assert m.bounds[1][2] == pytest.approx(info["draft"] + a["usv.hull_draft_m"], abs=1e-2)
+    assert info["area"] == pytest.approx(m.area) and 0.9 * P["wetted_area_m2"] < info["wetted_hull_m2"] < 1.5 * P["wetted_area_m2"]
+    kc = P["keel_area_m2"] / P["keel_span_m"]
+    hull_only = W.vehicle_mesh(veh, 0)
+    assert m.volume > hull_only.volume + 0.5 * kc * P["keel_t_c"] * kc * P["keel_span_m"]                  # the keel is in it ...
+    # ... once: its overlap with the hull is not added
+    assert m.volume < hull_only.volume + kc * P["keel_t_c"] * kc * (P["keel_span_m"] + 0.25 * a["usv.hull_draft_m"])
+
+
+def test_a_union_that_is_not_a_closed_solid_is_refused(tmp_path, monkeypatch):
+    import trimesh
+    open_box = trimesh.creation.box(extents=(1, 1, 1))
+    open_box.update_faces(np.arange(len(open_box.faces)) != 0)
+    monkeypatch.setattr(trimesh.boolean, "union", lambda bodies, engine=None: open_box)
+    veh = pw.usv_vehicle(pu.load_platform("saildrone_explorer"), pw.assumptions(), "saildrone_explorer", "hull_fs")
+    with pytest.raises(ValueError, match="do not union into a closed solid"):
+        fs.write_stl(veh, tmp_path / "h.stl")
+
+
+def test_zlayers_and_the_refined_cell_count_follow_the_cfd_recipe():
+    from cafe import cfd
+    zl = fs.zlayers()
+    assert len(zl) == sum(cfd.FS_NZ) == 86 and sum(w for _, w in zl) == pytest.approx(cfd.FS_Z[-1] - cfd.FS_Z[0])
+    assert zl[0][0] == pytest.approx(cfd.FS_Z[0] + zl[0][1] / 2) and zl[-1][0] == pytest.approx(cfd.FS_Z[-1] - zl[-1][1] / 2)
+    assert zl[23][1] / zl[0][1] == pytest.approx(cfd.FS_GRADE[0])                                            # first block: last cell / first cell = the grading
+    assert all(zl[i][0] < zl[i + 1][0] for i in range(85))
+    nx, ny = int((cfd.FS_DOMAIN[1] - cfd.FS_DOMAIN[0]) / cfd.FS_H0), int(-cfd.FS_DOMAIN[2] / cfd.FS_H0)
+    assert fs.refined_cells(0) == nx * ny * 86 == 44_032
+    dx, dy = (cfd.FS_DOMAIN[1] - cfd.FS_DOMAIN[0]) / nx, -cfd.FS_DOMAIN[2] / ny
+    x0, x1, by, z0, z1 = cfd.FS_BOXES[0]
+    inside = sum(1 for z, _ in zl if z0 <= z <= z1)
+    assert fs.refined_cells(1) - fs.refined_cells(0) == pytest.approx(3 * inside * (x1 - x0) * (by + 0.01) / (dx * dy))     # each box cell becomes four
+    c = [fs.refined_cells(n) for n in range(5)]
+    assert all(c[i] < c[i + 1] for i in range(4))
+    # measured on homebase 2026-10-29 with the Explorer's hull and keel, snappy surface level 0 (cells after checkMesh): the estimate is within 3 %
+    for n, cells in {1: 70_585, 2: 101_615, 3: 143_996, 4: 209_085}.items():
+        assert 0.98 * fs.refined_cells(n) == pytest.approx(cells, rel=0.03), n
+
+
+def test_the_grid_pair_has_a_refinement_ratio_of_at_least_1_3_by_construction():
+    from cafe.pm import vv
+    a = pw.assumptions()
+    est = fs.estimate(6, a["fs.snappy_cell_factor"], a["fs.cost_factor"], a["fs.mesh_s_per_cell"])
+    assert vv.refinement_ratio(est["cells"]["fine"], est["cells"]["coarse"]) >= vv.R_MIN + 0.1
+    assert vv.refinement_ratio(fs.refined_cells(3), fs.refined_cells(4)) < vv.R_MIN                         # the app's own pair (boxes 3 and 4) could not pass
+
+
+def test_the_rate_is_interpolated_between_the_measured_core_counts():
+    meas = json.loads((pathlib.Path(pw.__file__).parents[3] / "config" / "throughput.json").read_text())[fs.SOLVER]["cell_updates_per_s"]
+    assert fs.rate(4)[0] == pytest.approx(meas["4"]) and fs.rate(1)[0] == pytest.approx(meas["1"]) and fs.rate(16)[0] == pytest.approx(meas["8"])
+    r6, src = fs.rate(6)
+    assert meas["4"] < r6 < meas["8"] and r6 == pytest.approx(0.5 * (meas["4"] + meas["8"])) and "interpolated to 6" in src and fs.SOLVER in src
+
+
+def test_the_estimate_is_cells_x_iterations_over_the_rate_times_the_measured_factor_plus_meshing():
+    from cafe.pm import dtmb5415
+    e = fs.estimate(4, 0.98, 2.0, 1e-3)
+    cells = sum(e["cells"].values())
+    assert set(e["cells"]) == {"coarse", "fine"} and cells == pytest.approx(0.98 * (fs.refined_cells(1) + fs.refined_cells(4)))
+    assert e["iters"] == dtmb5415.ITERS and e["cores"] == 4 and e["rate"] == pytest.approx(fs.rate(4)[0])
+    assert e["solve_s"] == pytest.approx(2.0 * cells * e["iters"] / e["rate"]) and e["mesh_s"] == pytest.approx(1e-3 * cells)
+    assert e["total_s"] == pytest.approx(e["solve_s"] + e["mesh_s"])
+    assert fs.estimate(8, 0.98, 2.0, 1e-3)["solve_s"] < e["solve_s"] < fs.estimate(1, 0.98, 2.0, 1e-3)["solve_s"]       # more cores, less time
+
+
+def test_the_smallest_budget_profile_that_holds_the_estimate_is_named():
+    prof = {"ci": 600, "quick": 1200, "4h": 14400, "overnight": 36000}
+    assert fs.fitting_budget(300, 0.3, prof) == "--budget quick (6 min of stage 3)" and fs.fitting_budget(361, 0.3, prof).startswith("--budget 4h")
+    assert fs.fitting_budget(5000, 0.3, prof).startswith("--budget overnight")
+    assert fs.fitting_budget(11000, 0.3, prof) == "no --budget profile (the largest gives 180 min of stage 3)"
+    assert fs.fitting_budget(100, 0.3, prof).startswith("--budget ci")
+
+
+def test_nproc_follows_the_environment(monkeypatch):
+    monkeypatch.setenv("CAFE_NPROC", "3")
+    assert fs.nproc() == 3
+    monkeypatch.delenv("CAFE_NPROC")
+    assert fs.nproc() == 6
+
+
+def test_two_grid_runs_the_coarse_and_fine_cases_and_puts_the_gci_at_the_measured_ratio(tmp_path, monkeypatch):
+    from cafe import cfd
+    from cafe.pm import dtmb5415, vv
+    calls = []
+
+    def fake(stl, draft, case, speeds, off, iters, log, surf_level):
+        calls.append((off, iters, surf_level, pathlib.Path(case).name))
+        n, R = (70_000, 1100.0) if off == -3 else (210_000, 1000.0)
+        return dict(mesh=dict(cells=n), speeds={U: dict(resistance=R, lift=-1.0, resistance_std=2.0) for U in speeds})
+    monkeypatch.setattr(cfd, "free_surface", fake)
+    monkeypatch.setattr(cfd, "_shrink", lambda case: calls.append(("shrink", pathlib.Path(case).name)))
+    r = fs.two_grid("h.stl", 2.55, tmp_path, [2.5, 3.0])
+    assert calls == [(-3, dtmb5415.ITERS, 0, "coarse"), ("shrink", "coarse"), (0, dtmb5415.ITERS, 0, "fine"), ("shrink", "fine")]
+    rr = (210_000 / 70_000) ** (1 / 3)
+    assert r["refinement_ratio"] == pytest.approx(rr) and r["ratio_below_1_3"] is False and r["coarse_cells"] == 70_000 and r["mesh"]["cells"] == 210_000
+    assert set(r["speeds"]) == {2.5, 3.0} and r["speeds"][2.5]["gci"] == pytest.approx(cfd.gci(1000.0, 1100.0, ratio=rr))
+    assert r["speeds"][2.5]["gci"] == pytest.approx(vv.gci_two_grid(1000.0, 1100.0, rr))                     # Roache at the measured r, not at 2
+
+
+def test_run_child_writes_what_free_surface_window_returns(tmp_path):
+    stl = tmp_path / "h.stl"
+    stl.write_bytes(b"x" * 2000)
+    job, out = tmp_path / "job.json", tmp_path / "out.json"
+    job.write_text(json.dumps(dict(stl=str(stl), draft=2.55, speeds=[2.5], config={}, vehicle=None)))
+    assert fs.run_child(str(job), str(out), runner=fake_interfoam) == 0
+    r = json.loads(out.read_text())
+    assert r["source"] == "interfoam" and r["speeds"]["2.5"]["resistance"] == FS["R"] and r["cells"] == 300_000 and r["coarse_cells"] == 120_000
+    assert r["speeds"]["2.5"]["std"] == FS["std"] and FS["calls"][0][2] == [2.5]
+
+
+def test_row_fields_checks_and_reasons():
+    r = dict(speeds={2.0: dict(resistance=500.0, gci=0.1, lift=3.0, std=1e-9)}, cells=250, coarse_cells=100)
+    f = fs.row_fields(r, 2.0, 1000.0, 0.5, 0.2)
+    assert f["cd"] == pytest.approx(500.0 / (0.5 * 1000 * 4.0 * 0.5)) == pytest.approx(0.5) and f["cd_spread"] == pytest.approx(0.05)
+    assert f["added_resistance"] == pytest.approx(0.5 / 0.2 - 1) and f["vertical_force_n"] == 3.0 and all(c["ok"] for c in f["checks"])
+    assert f["refinement_ratio"] == pytest.approx(2.5 ** (1 / 3)) and fs.reasons(f["checks"], f["refinement_ratio"], (250, 100)) == []
+    bad = fs.row_fields(dict(r, cells=None), 2.0, 1000.0, 0.5, 0.2)
+    assert [c["name"] for c in bad["checks"] if not c["ok"]] == ["fs_refinement_ratio"]
+    assert fs.reasons(bad["checks"], None, (None, 100)) == ["refinement ratio unknown (no cell counts)"]
+    nogci = fs.row_fields(dict(r, speeds={2.0: dict(resistance=500.0, gci=None, std=0.0)}), 2.0, 1000.0, 0.5, 0.2)
+    assert nogci["gci"] is None and nogci["cd_spread"] == 1e-12 and [c["name"] for c in nogci["checks"] if not c["ok"]] == ["fs_gci"]
+    for std, ok in ((10.0, True), (10.01, False), (None, False)):                                     # 2 % of 500 N is the limit
+        f = fs.row_fields(dict(r, speeds={2.0: dict(resistance=500.0, gci=0.1, std=std)}), 2.0, 1000.0, 0.5, 0.2)
+        assert [c["ok"] for c in f["checks"] if c["name"] == "fs_iterative_scatter"] == [ok]
+        assert ok or "not converged" in fs.reasons(f["checks"], 1.36, (250, 100))[0] or "no force history" in fs.reasons(f["checks"], 1.36, (250, 100))[0]
+    for R in (0.0, -1.0, math.nan, math.inf):
+        with pytest.raises(ValueError, match="non-physical"):
+            fs.row_fields(dict(r, speeds={2.0: dict(resistance=R, gci=0.1)}), 2.0, 1000.0, 0.5, 0.2)
+
+
+def test_the_watchdog_kills_the_group_it_leads_else_only_itself(monkeypatch):
+    calls = []
+    monkeypatch.setattr(os, "killpg", lambda g, sig: calls.append(("group", g, sig)))
+    monkeypatch.setattr(os, "kill", lambda p, sig: calls.append(("pid", p, sig)))
+    monkeypatch.setattr(os, "getpid", lambda: 77)
+    monkeypatch.setattr(os, "getpgrp", lambda: 77)
+    fs.arm_watchdog(0.01).join(5)
+    monkeypatch.setattr(os, "getpgrp", lambda: 5)
+    fs.arm_watchdog(0.01).join(5)
+    assert calls == [("group", 77, 9), ("pid", 77, 9)]
+
+
+def test_a_child_killed_by_its_watchdog_takes_everything_in_its_process_group_with_it():
+    import subprocess
+    import sys
+    code = ("import subprocess, time\nfrom cafe.pm.stage3 import freesurface as f\nf.arm_watchdog(1.0)\n"
+            "p = subprocess.Popen(['sleep', '120'])\nprint(p.pid, flush=True)\ntime.sleep(120)\n")
+    t0 = time.time()
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, start_new_session=True, timeout=60,
+                       cwd=str(pathlib.Path(pw.__file__).resolve().parents[3]))
+    assert r.returncode == -9 and time.time() - t0 < 30
+    time.sleep(0.3)
+    try:
+        state = pathlib.Path(f"/proc/{int(r.stdout.split()[0])}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        state = "gone"
+    assert state in ("gone", "Z", "X"), f"the grandchild is still running ({state})"
+
+
+@pytest.mark.slow
+def test_the_unioned_hull_meshes_and_solves_in_openfoam_at_toy_size(tmp_path, monkeypatch):
+    """The real OpenFOAM on the real stl of the Explorer's hull + keel: the coarse grid (one refinement box, surface level 0), five LTS iterations.
+    It proves that blockMesh -> refineMesh -> snappyHexMesh accepts the unioned solid and that interFoam runs on it; the numbers are not converged."""
+    from cafe import cfd
+    monkeypatch.setattr(cfd, "NPROC", 2)
+    a, P = pw.assumptions(), pu.load_platform("saildrone_explorer")
+    info = fs.write_stl(pw.usv_vehicle(P, a, "saildrone_explorer", "hull_fs"), tmp_path / "h.stl")
+    r = cfd.free_surface(str(tmp_path / "h.stl"), info["draft"], tmp_path / "case", [2.0], -3, iters=5, log=lambda *x: None, surf_level=0)
+    assert 0.9 * 70_585 < r["mesh"]["cells"] < 1.1 * 70_585 and np.isfinite(r["speeds"][2.0]["resistance"]) and r["half"]

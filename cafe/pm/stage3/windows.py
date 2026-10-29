@@ -386,5 +386,6 @@ def free_surface_window(stl: str | os.PathLike[str], draft: float, speeds: list[
     from cafe import cfd
     run = runner or cfd.characterize_free_surface
     r = run(str(stl), draft, pathlib.Path(workdir), list(speeds))
-    return dict(speeds={float(U): dict(resistance=v["resistance"], gci=v.get("gci"), lift=v.get("lift")) for U, v in r["speeds"].items()},
+    return dict(speeds={float(U): dict(resistance=v["resistance"], gci=v.get("gci"), lift=v.get("lift"), std=v.get("resistance_std"))
+                        for U, v in r["speeds"].items()},
                 cells=r.get("mesh", {}).get("cells"), coarse_cells=r.get("coarse_cells"), source="interfoam")

@@ -3,7 +3,10 @@ import hashlib
 import io
 import json
 import math
+import pathlib
+import re
 import runpy
+import shutil
 import sys
 import zipfile
 from types import SimpleNamespace as NS
@@ -201,7 +204,7 @@ def write_iges(path, patches):
         d.append(f"{128:8d}{start:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}D{2 * ent + 1:7d}")
         d.append(f"{128:8d}{0:8d}{0:8d}{len(chunks):8d}{0:8d}{'':8s}{'':8s}{'':8s}{0:8d}D{2 * ent + 2:7d}")
         ent += 1
-    d += [f"{406:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}D{2 * ent + 1:7d}",       # a property entity: skipped
+    d += [f"{406:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}{0:8d}D{2 * ent + 1:7d}",       # a property entity: ignored
           f"{406:8d}{0:8d}{0:8d}{0:8d}{0:8d}{'':8s}{'':8s}{'':8s}{0:8d}D{2 * ent + 2:7d}"]
     path.write_text("\n".join(["toy".ljust(72) + "S      1", "toy".ljust(72) + "G      1", *d, *p, "T".ljust(72) + "T      1"]) + "\n")
 
@@ -242,6 +245,13 @@ def toy_mesh(tmp_path_factory):
     f = tmp_path_factory.mktemp("toy") / "toy.igs"
     write_iges(f, toy_patches())
     return dt.build_hull(dt.read_iges(f), n_stations=120, n_girth=24, res=(40, 60))
+
+
+def test_loft_has_outward_normals_whichever_side_of_the_centre_plane_the_file_puts_the_hull(tmp_path):
+    f = tmp_path / "mirror.igs"
+    write_iges(f, [(d, k, w, c * [1, -1, 1], sp) for d, k, w, c, sp in toy_patches()])
+    m = dt.build_hull(dt.read_iges(f), n_stations=60, n_girth=12, res=(20, 30))
+    assert m.is_watertight and m.volume > 0
 
 
 def test_loft_is_closed_and_has_the_prismatic_body(toy_mesh):
@@ -368,18 +378,206 @@ def test_disk_guard_and_tree_size(tmp_path):
     assert dt.tree_gb(tmp_path) == pytest.approx(1e-6, rel=0.5)
 
 
-def fake_solver(scale=1.0, cells=100_000, fail_first=None, calls=None, fail_levels=(2,)):
+# ------------------------------------------------------------------ wall treatment, layers, convergence
+
+def test_first_layer_puts_the_first_cell_centre_at_the_requested_y_plus():
+    for fr in dt.CT_REF:
+        u = dt.froude_speeds()[fr]
+        re = u * dt.LPP / dt.TANK["nu"]
+        u_tau = u * math.sqrt(0.075 / (math.log10(re) - 2) ** 2 / 2)                      # ITTC-57 written out
+        assert dt.first_layer(u) == pytest.approx(2 * 100 * dt.TANK["nu"] / u_tau, rel=1e-12)
+        assert dt.first_layer(u, 30.0) == pytest.approx(0.3 * dt.first_layer(u), rel=1e-12)
+    slow, fast = (dt.first_layer(dt.froude_speeds()[fr]) for fr in (0.10, 0.41))
+    assert 6e-3 < slow < 7e-3 and 1.6e-3 < fast < 2e-3                                     # mm-scale layers, 3.5x thinner at Fr 0.41
+    assert 30 < dt.Y_PLUS_AIM < 300 and dt.Y_PLUS_BAND == (30.0, 300.0) and math.sqrt(30 * 300) == pytest.approx(dt.Y_PLUS_AIM, rel=0.07)
+
+
+def test_layer_count_makes_the_stack_about_as_thick_as_the_hull_cell_and_is_bounded():
+    for first, cell, g in ((1.77e-3, 0.0179, 2.0), (6.4e-3, 0.0179, 2.0), (1.77e-3, 0.0236, 2.0), (2e-3, 0.02, 1.5), (3e-3, 0.036, 1.3)):
+        n = dt.layer_count(first, cell, g)
+        total = first * (g ** n - 1) / (g - 1)
+        assert (cell - first) / g < total <= cell * (1 + 1e-12), (first, cell, g, n, total)        # the next layer would not fit
+    assert [dt.layer_count(dt.first_layer(dt.froude_speeds()[fr]), 0.0179) for fr in (0.10, 0.41)] == [1, 3]
+    assert dt.layer_count(6e-3, 0.001) == 1 and dt.layer_count(1e-5, 1.0) == dt.MAX_LAYERS
+    assert dt.hull_cell(5.72, 1.0, 2) == pytest.approx(5.72 * cfd.FS_H0 / 2 ** (len(cfd.FS_BOXES) + 2))
+    assert dt.hull_cell(5.72, 1.32) == pytest.approx(dt.hull_cell(5.72, 1.0) / 1.32)
+
+
+def test_settle_measures_drift_and_scatter_of_the_last_quarter():
+    m, s, d, sc = dt.settle(np.full(400, 5.0))
+    assert (m, s, d, sc) == (5.0, 0.0, 0.0, 0.0)
+    step = np.r_[np.full(200, 4.0), np.full(100, 4.0), np.full(100, 5.0)]
+    m, s, d, sc = dt.settle(step)
+    assert (m, s) == (5.0, 0.0) and d == pytest.approx(0.2) and sc == 0.0                    # (5 - 4) / 5
+    wave = 100.0 + 3.0 * np.tile([1.0, -1.0], 200)
+    m, s, d, sc = dt.settle(wave)
+    assert m == pytest.approx(100.0) and s == pytest.approx(3.0) and d == pytest.approx(0, abs=1e-12) and sc == pytest.approx(0.03)
+
+
+def test_set_replaces_exactly_one_entry():
+    assert dt._set("a 1;\nendTime 5;\n", "endTime", 9) == "a 1;\nendTime 9;\n"
+    for text in ("a 1;\n", "endTime 1;\nendTime 2;\n"):
+        with pytest.raises(ValueError, match="expected one"):
+            dt._set(text, "endTime", 3)
+
+
+def test_last_numbers_and_layer_cover_read_what_openfoam_writes(tmp_path):
+    assert dt._last_numbers(tmp_path, "yPlus/*/yPlus.dat") == []
+    for t, line in (("0", "250 hull 1.0 20.0 3.0"), ("250", "500 hull 2.0 700.0 105.5")):
+        d = tmp_path / "postProcessing/yPlus" / t
+        d.mkdir(parents=True)
+        (d / "yPlus.dat").write_text(f"# y+\n# Time patch min max average\n{line}\n")
+    assert dt._last_numbers(tmp_path, "yPlus/*/yPlus.dat") == [500.0, 2.0, 700.0, 105.5]       # newest time, numeric sort, patch name dropped
+    empty = tmp_path / "postProcessing/none/0"
+    empty.mkdir(parents=True)
+    (empty / "x.dat").write_text("# only a header\n")
+    assert dt._last_numbers(tmp_path, "none/*/x.dat") == []
+    log = tmp_path / "log.snappyHexMesh"
+    log.write_text("hull 3582    2      0.00218   0.00465\n\npatch faces layers avg thickness[m]\n"
+                   "hull 3582     2        0.08     0.000325   3.33  \nhull 3582 2 1.41 0.00327 67.2\n")
+    assert dt._layer_cover(tmp_path) == 67.2                                  # the 6-column final table, last row; the 5-column ones are not it
+    log.write_text("no table\n")
+    assert dt._layer_cover(tmp_path) is None
+
+
+class Foam:
+    """Stands in for cafe.cfd.sh: snappyHexMesh logs a layer table; interFoam writes force, moment and y+ files for the iterations its
+    controlDict asks for (a restart continues after the last one), the x force at iteration i being series(i)."""
+
+    def __init__(self, series=lambda i: -100.0, y_plus=105.0, cover=88.0):
+        self.series, self.y_plus, self.cover = series, y_plus, cover
+        self.calls, self.snappy, self.controls, self.at = [], "", [], 0
+
+    def __call__(self, case, cmd, log):
+        case = pathlib.Path(case)
+        self.calls.append(log)
+        if log == "snappyHexMesh":
+            self.snappy = (case / "system/snappyHexMeshDict").read_text()
+            (case / "log.snappyHexMesh").write_text(f"hull 3582 2 1.41 0.003 {self.cover}\n")
+        if log.startswith("interFoam"):
+            ctl = (case / "system/controlDict").read_text()
+            self.controls.append(ctl)
+            self.fv = (case / "system/fvSolution").read_text()
+            start, end = (0 if "startFrom startTime;" in ctl else self.at), int(re.search(r"^endTime (\d+);", ctl, re.M)[1])
+            d = case / "postProcessing/forces" / str(start)
+            d.mkdir(parents=True)
+            for kind in ("force", "moment"):
+                rows = "".join(f"{i} ({self.series(i)} 0 0) ({0.7 * self.series(i)} 0 0) ({0.3 * self.series(i)} 0 0)\n" for i in range(start + 1, end + 1))
+                (d / f"{kind}.dat").write_text("# header\n" + rows)
+            if self.y_plus is not None:
+                for fo, name, row in (("yPlusWet", "surfaceFieldValue", f"{end} {self.y_plus}"), ("yPlus", "yPlus", f"{end} hull 2.0 700.0 {self.y_plus}")):
+                    (case / "postProcessing" / fo / str(start)).mkdir(parents=True)
+                    (case / "postProcessing" / fo / str(start) / f"{name}.dat").write_text(f"# header\n{row}\n")
+            self.at = end
+
+
+FV_SOLUTION = "PIMPLE\n{\n    momentumPredictor no;\n    maxCo 10; maxAlphaCo 5; rDeltaTSmoothingCoeff 0.05; rDeltaTDampingCoeff 0.5;\n}\n"
+ADD_LAYERS = "addLayersControls\n{\n    relativeSizes true;\n    layers { hull { nSurfaceLayers 2; } }\n    nLayerIter 50;\n}\nmeshQualityControls\n{\n}\n"
+
+
+def fake_free_surface(foam, fail_levels=(), cells=100_000, calls=None, fail_log="... uses more than 8 points ..."):
+    """cafe.cfd.free_surface with the OpenFOAM calls replaced by `foam`: writes the two dictionaries the recipe edits, then makes the calls
+    in the real order."""
     def solve(stl, draft, case, speeds, off, iters, log, surf_level):
+        case = pathlib.Path(case)
         if calls is not None:
-            calls.append((off, surf_level))
-        if fail_first and surf_level in fail_levels:
-            (case).mkdir(parents=True, exist_ok=True)
-            (case / "log.snappyHexMesh").write_text(fail_first)
+            calls.append((off, surf_level, cfd.FS_H0, cfd.FS_NZ, cfd.FLUIDS["water"]["nu"]))
+        (case / "system").mkdir(parents=True, exist_ok=True)
+        (case / "system/snappyHexMeshDict").write_text("castellatedMesh true;\n" + ADD_LAYERS)
+        (case / "system/fvSolution").write_text(FV_SOLUTION)
+        if surf_level in fail_levels:
+            (case / "log.snappyHexMesh").write_text(fail_log)
             raise RuntimeError("snappy failed")
-        return dict(mesh=dict(cells=cells, failed_checks=0), L=6.1, half=True,
-                    speeds={u: dict(resistance=scale * 0.5 * dt.TANK["rho"] * u ** 2 * 4.9 * 4e-3, resistance_std=0.1, iters=iters, seconds=1.0)
-                            for u in speeds})
+        cfd.sh(case, "blockMesh", "blockMesh")
+        cfd.sh(case, "snappyHexMesh", "snappyHexMesh")
+        res = {}
+        for u in speeds:
+            (case / "system/controlDict").write_text(cfd._control("interFoam", iters, cfd._forces_fo("", (0, 0, 0), "hull")))
+            shutil.rmtree(case / "postProcessing", ignore_errors=True)
+            cfd.sh(case, "interFoam", f"interFoam.{u}")
+            res[u] = dict(resistance=7.0, resistance_std=0.5, iters=foam.at, seconds=1.0)
+        return dict(mesh=dict(cells=cells, failed_checks=0), L=5.72, half=True, speeds=res)
     return solve
+
+
+@pytest.fixture()
+def foam(monkeypatch):
+    f = Foam()
+    monkeypatch.setattr(cfd, "sh", f)
+    return f
+
+
+def test_the_recipe_replaces_the_layers_scales_the_mesh_and_restores_everything(foam, tmp_path):
+    before = (cfd.FS_H0, cfd.FS_NZ, dict(cfd.FLUIDS["water"]), cfd.sh)
+    calls = []
+    with dt.case_recipe(2.5e-3, 7, 1.32):
+        fake_free_surface(foam, calls=calls)("h.stl", 0.248, tmp_path, [1.5], 0, 3000, print, 2)
+        assert cfd.FLUIDS["water"]["nu"] == dt.TANK["nu"]
+    assert calls[0][2] == pytest.approx(cfd.FS_H0 / 1.32, rel=1e-6) and calls[0][3] == tuple(round(n * 1.32) for n in cfd.FS_NZ)
+    assert (cfd.FS_H0, cfd.FS_NZ, dict(cfd.FLUIDS["water"]), cfd.sh) == before
+    assert "nSurfaceLayers 7;" in foam.snappy and "firstLayerThickness 0.0025;" in foam.snappy and "relativeSizes false;" in foam.snappy
+    assert f"expansionRatio {dt.GROWTH};" in foam.snappy and "nSurfaceLayers 2;" not in foam.snappy and foam.snappy.count("addLayersControls") == 1
+    assert "meshQualityControls" in foam.snappy                                      # only the layer block was replaced
+    with pytest.raises(ValueError, match="no `maxCo"):
+        with dt.case_recipe(2.5e-3, 7, 1.0):
+            (tmp_path / "system/fvSolution").write_text("PIMPLE { maxCo 10; }\n")
+            cfd.sh(tmp_path, "interFoam", "interFoam.1")
+    assert cfd.sh is foam
+    with pytest.raises(ValueError, match="no addLayersControls"):
+        with dt.case_recipe(2.5e-3, 7, 1.0):
+            (tmp_path / "system/snappyHexMeshDict").write_text("nothing here\n")
+            cfd.sh(tmp_path, "snappyHexMesh", "snappyHexMesh")
+    assert (cfd.FS_H0, cfd.FS_NZ, cfd.sh) == before[:2] + (before[3],)                # restored after the failure too
+
+
+def test_interfoam_runs_in_chunks_until_the_history_settles(foam, tmp_path):
+    with dt.case_recipe(2.5e-3, 7, 1.0) as seen:
+        fake_free_surface(foam)("h.stl", 0.248, tmp_path, [1.5], 0, 3000, print, 2)
+    assert foam.calls == ["blockMesh", "snappyHexMesh"] + [f"interFoam.{u}.{n}" for u in ("1.5",) for n in (250, 500, 750, 1000)]
+    assert [re.search(r"^endTime (\d+);", c, re.M)[1] for c in foam.controls] == ["250", "500", "750", "1000"]
+    assert ["startFrom startTime;" in c for c in foam.controls] == [True, False, False, False] and all("startFrom latestTime;" in c for c in foam.controls[1:])
+    assert all("writeInterval 250;" in c and "yPlusWet" in c and c.count("yPlus {") == 1 for c in foam.controls)
+    assert "maxCo 3.0; maxAlphaCo 1.5; rDeltaTSmoothingCoeff 0.05" in foam.fv and "maxCo 10" not in foam.fv
+    assert sorted(d.name for d in (tmp_path / "postProcessing/forces").iterdir()) == ["00000000", "00000250", "00000500", "00000750"]
+    assert seen["converged"] and seen["iters"] == 1000 and seen["mean"] == 100.0 and seen["std"] == 0.0 and seen["drift"] == 0.0
+    assert seen["y_plus"] == 105.0 and (seen["y_plus_min"], seen["y_plus_max"]) == (2.0, 700.0) and seen["layer_cover"] == 88.0
+
+
+def test_a_settling_history_stops_after_the_first_chunk_that_passes_not_before_min_iters(monkeypatch, tmp_path):
+    f = Foam(series=lambda i: -(100.0 + 80.0 * math.exp(-i / 200.0)))
+    monkeypatch.setattr(cfd, "sh", f)
+    with dt.case_recipe(2.5e-3, 7, 1.0) as seen:
+        fake_free_surface(f)("h.stl", 0.248, tmp_path, [1.5], 0, 3000, print, 2)
+    assert seen["converged"] and dt.MIN_ITERS < seen["iters"] < dt.MAX_ITERS and seen["drift"] <= dt.DRIFT_TOL and seen["iters"] % dt.CHUNK == 0
+    assert dt.settle(-np.array([f.series(i) for i in range(1, seen["iters"] - dt.CHUNK + 1)]))[2] > dt.DRIFT_TOL      # the chunk before it had not passed
+    steady = Foam(series=lambda i: -100.0)
+    monkeypatch.setattr(cfd, "sh", steady)
+    with dt.case_recipe(2.5e-3, 7, 1.0, 600) as short:
+        fake_free_surface(steady)("h.stl", 0.248, tmp_path / "b", [1.5], 0, 3000, print, 2)
+    assert short["iters"] == 750 and not short["converged"]          # max_iters 600 ends after the chunk that reaches it; below MIN_ITERS: unjudged
+
+
+def test_a_history_that_never_settles_is_recorded_as_unconverged_at_max_iters(monkeypatch, tmp_path):
+    for series in (lambda i: -(100.0 + 0.05 * i), lambda i: -(100.0 + 10.0 * math.sin(i / 3.0))):         # still drifting; oscillating at 7 %
+        f = Foam(series=series)
+        monkeypatch.setattr(cfd, "sh", f)
+        with dt.case_recipe(2.5e-3, 7, 1.0, 1500) as seen:
+            fake_free_surface(f)("h.stl", 0.248, tmp_path / str(id(series)), [1.5], 0, 3000, print, 2)
+        assert seen["iters"] == 1500 and seen["converged"] is False and (seen["drift"] > dt.DRIFT_TOL or seen["scatter"] > dt.SCATTER_TOL)
+
+
+def test_a_running_case_stops_before_the_box_runs_out_of_disk(monkeypatch, tmp_path):
+    f = Foam(series=lambda i: -(100.0 + 0.05 * i))
+    monkeypatch.setattr(cfd, "sh", f)
+    monkeypatch.setattr(dt.shutil, "disk_usage", lambda p: NS(free=2e9))
+    with pytest.raises(OSError, match="GB free"):
+        with dt.case_recipe(2.5e-3, 7, 1.0):
+            fake_free_surface(f)("h.stl", 0.248, tmp_path, [1.5], 0, 3000, print, 2)
+    assert f.calls == ["blockMesh", "snappyHexMesh", "interFoam.1.5.250"]
+
+
+def fake_solver(**kw):
+    return fake_free_surface(kw.pop("foam", None) or Foam(**kw.pop("foam_kw", {})), **kw)
 
 
 def prepared(tmp_path):
@@ -389,106 +587,168 @@ def prepared(tmp_path):
     return tmp_path
 
 
-def test_run_grid_writes_ct_per_speed_and_cleans_up(tmp_path):
+def test_run_grid_records_the_case_and_cleans_up(foam, tmp_path):
     root = prepared(tmp_path)
     (root / "coarse" / "processor0").mkdir(parents=True)
-    calls = []
-    out = dt.run_grid(root, "coarse", 10, lambda s: None, fake_solver(calls=calls))
-    assert dt.GRIDS == {"coarse": (-1, 1), "fine": (0, 2)} and out["surf_level"] == 1 and out["tree_gb"] < 1e-3
-    assert [c for c in calls] == [(-1, 1)] * 4 and list(out["speeds"]) == [f"{fr:.2f}" for fr in dt.ORDER]
-    s = out["speeds"]["0.28"]
-    assert s["ct"] == pytest.approx(4e-3, rel=1e-9) and s["ct_std"] > 0 and s["cells"] == 100_000 and s["failed_checks"] == 0
-    assert json.loads((root / "run_coarse.json").read_text())["speeds"]["0.41"]["ct"] == pytest.approx(4e-3, rel=1e-9)
-    assert not (root / "coarse" / "processor0").exists()
+    calls, logs = [], []
+    out = dt.run_grid(root, "coarse", 1000, logs.append, fake_solver(foam=foam, calls=calls), frs=(0.28, 0.10))
+    assert dt.GRIDS["coarse"] < dt.GRIDS["medium"] == 1.0 < dt.GRIDS["fine"]
+    assert list(out["speeds"]) == ["0.28", "0.10"] and out["recipe"] == dt.RECIPE and out["tree_gb"] < 1e-3
+    assert all(c[:2] == (0, 2) for c in calls) and calls[0][2] == pytest.approx(cfd.FS_H0 / dt.GRIDS["coarse"], rel=1e-6)
+    c = out["speeds"]["0.28"]
+    u = dt.froude_speeds()[0.28]
+    assert c["R"] == 200.0 and c["R_std"] == 0.0 and c["ct"] == pytest.approx(200.0 / (0.5 * dt.TANK["rho"] * u ** 2 * 4.9))        # half domain: x2
+    assert c["first_layer"] == dt.first_layer(u) and c["layers"] > 1
+    assert c["layers"] == dt.layer_count(c["first_layer"], dt.hull_cell(5.7188, dt.GRIDS["coarse"]))
+    assert (c["y_plus"], c["layer_cover"], c["drift"], c["scatter"], c["converged"], c["iters"]) == (105.0, 88.0, 0.0, 0.0, True, 1000)
+    assert c["ct_viscous"] == pytest.approx(0.3 * c["ct"])                                 # the fake puts 30 % of the force in the viscous column
+    assert c["cells"] == 100_000 and c["surf_level"] == 2 and c["failed_checks"] == 0 and c["seconds"] == 1.0
+    assert out["speeds"]["0.10"]["first_layer"] > c["first_layer"] and any("layers from" in m for m in logs) and any("y+ 105" in m for m in logs)
+    assert json.loads((root / "run_coarse.json").read_text())["speeds"]["0.10"]["ct"] > 0 and not (root / "coarse" / "processor0").exists()
     assert cfd.FLUIDS["water"]["nu"] == 1.19e-6                      # tank water was only in force during the run
 
 
-def test_run_grid_runs_only_the_requested_froude_numbers(tmp_path):
-    calls = []
-    out = dt.run_grid(prepared(tmp_path), "fine", 10, print, fake_solver(calls=calls), frs=(0.1, 0.28))
-    assert list(out["speeds"]) == ["0.10", "0.28"] and len(calls) == 2
+def test_a_solver_that_never_calls_openfoam_leaves_the_diagnostics_empty(tmp_path):
+    def bare(stl, draft, case, speeds, off, iters, log, surf_level):
+        one = dict(resistance=3.0, resistance_std=0.2, iters=iters, seconds=2.0)
+        return dict(mesh=dict(cells=5, failed_checks=1), half=False, speeds={u: one for u in speeds})
+    c = dt.run_grid(prepared(tmp_path), "fine", 10, print, bare, frs=(0.41,))["speeds"]["0.41"]
+    assert c["R"] == 3.0 and c["R_std"] == 0.2 and c["iters"] == 10 and c["failed_checks"] == 1
+    assert (c["y_plus"], c["y_plus_min"], c["drift"], c["scatter"], c["converged"], c["layer_cover"], c["ct_viscous"]) == (None,) * 7
 
 
-def test_run_grid_resumes_after_a_crash(tmp_path):
+def test_run_grid_resumes_after_a_crash_and_refuses_files_of_another_recipe(foam, tmp_path):
     root = prepared(tmp_path)
-    calls = []
+    n = []
 
-    def dies_on_third(stl, draft, case, speeds, off, iters, log, surf_level):
-        calls.append(speeds[0])
-        if len(calls) == 3:
+    def dies_on_third(*a, **k):
+        n.append(1)
+        if len(n) == 3:
             raise RuntimeError("OOM")
-        return fake_solver()(stl, draft, case, speeds, off, iters, log, surf_level)
+        return fake_solver(foam=foam)(*a, **k)
     with pytest.raises(RuntimeError, match="OOM"):
-        dt.run_grid(root, "fine", 10, print, dies_on_third)
-    assert list(json.loads((root / "run_fine.json").read_text())["speeds"]) == ["0.28", "0.41"]      # finished speeds are on disk
-    calls.clear()
-    out = dt.run_grid(root, "fine", 10, print, fake_solver(calls=calls, fail_levels=()))
-    assert calls == [(0, 2), (0, 2)] and len(out["speeds"]) == 4                                      # only the two missing speeds ran
+        dt.run_grid(root, "fine", 1000, print, dies_on_third)
+    assert list(json.loads((root / "run_fine.json").read_text())["speeds"]) == ["0.20", "0.10"]      # finished speeds are on disk
+    calls = []
+    out = dt.run_grid(root, "fine", 1000, print, fake_solver(foam=foam, calls=calls))
+    assert len(calls) == 2 and len(out["speeds"]) == 4                                                # only the two missing speeds ran
+    f = root / "run_fine.json"
+    f.write_text(json.dumps(dict(grid="fine", S=4.9, iters=2000, speeds={"0.20": {}})))               # the first study's file has no recipe
+    with pytest.raises(ValueError, match="made by recipe None"):
+        dt.run_grid(root, "fine", 1000, print, fake_solver(foam=foam))
 
 
-def test_run_grid_steps_down_a_surface_level_and_reraises_other_errors(tmp_path):
+def test_run_grid_steps_down_a_surface_level_and_reraises_other_errors(foam, tmp_path):
     root = prepared(tmp_path)
     calls, logs = [], []
-    out = dt.run_grid(root, "fine", 10, logs.append, fake_solver(calls=calls, fail_first="... uses more than 8 points ..."))
-    assert calls == [(0, 2), (0, 1), (0, 1), (0, 1), (0, 1)] and out["surf_level"] == 1 and any("surface level 1" in m for m in logs)
+    out = dt.run_grid(root, "fine", 1000, logs.append, fake_solver(foam=foam, calls=calls, fail_levels=(2,)), frs=(0.1, 0.28))
+    assert [c[1] for c in calls] == [2, 1, 1] and {c["surf_level"] for c in out["speeds"].values()} == {1} and any("surface level 1" in m for m in logs)
     with pytest.raises(RuntimeError):
-        dt.run_grid(root, "coarse", 10, logs.append, fake_solver(fail_first="some other failure", fail_levels=(1,)))
-    calls.clear()
-    again = prepared(tmp_path / "again")
+        dt.run_grid(root, "coarse", 1000, logs.append, fake_solver(foam=foam, fail_levels=(2,), fail_log="some other failure"))
+    again, calls = prepared(tmp_path / "again"), []
     with pytest.raises(RuntimeError):                                     # fails at level 0 as well: no third try
-        dt.run_grid(again, "coarse", 10, logs.append, fake_solver(fail_first="more than 8 points", calls=calls, fail_levels=(0, 1)))
-    assert calls == [(-1, 1), (-1, 0)]
+        dt.run_grid(again, "coarse", 1000, logs.append, fake_solver(foam=foam, calls=calls, fail_levels=(0, 1, 2)))
+    assert [c[1] for c in calls] == [2, 1, 0]
 
 
 def test_run_grid_refuses_to_start_on_a_full_disk(tmp_path, monkeypatch):
-    monkeypatch.setattr(dt.shutil, "disk_usage", lambda p: NS(free=1e9))             # 1 GB free < the 6 GB rule
+    monkeypatch.setattr(dt.shutil, "disk_usage", lambda p: NS(free=1e9))             # 1 GB free < the 4 GB rule
     with pytest.raises(OSError, match="GB free"):
         dt.run_grid(prepared(tmp_path), "coarse", 10, print, fake_solver())
 
 
-def test_tree_budget_warning(tmp_path, monkeypatch):
+def test_tree_budget_warning(foam, tmp_path, monkeypatch):
     monkeypatch.setattr(dt, "MAX_TREE_GB", 0.0)
     logs = []
-    dt.run_grid(prepared(tmp_path), "coarse", 10, logs.append, fake_solver())
+    dt.run_grid(prepared(tmp_path), "coarse", 1000, logs.append, fake_solver(foam=foam), frs=(0.1,))
     assert any("budget" in m for m in logs)
 
 
-# ------------------------------------------------------------------ tabulation and receipts
+# ------------------------------------------------------------------ discretisation uncertainty, tabulation and receipts
 
-def two_grids(root, ct_fine=None, ct_coarse=None, cells=(330_535, 150_967), ct_std=0.0):
+def cells_for(r21, r32, n=1000.0):
+    """Cell counts, fine first, of three grids whose representative sizes step by r21 (fine/medium) and r32 (medium/coarse)."""
+    return [n * (r21 * r32) ** 3, n * r32 ** 3, n]
+
+
+def test_three_grids_in_the_asymptotic_range_give_celiks_gci_with_the_observed_order():
+    for (phi1, phi2, phi3, r21, r32), (p, _, _, _, gci), _ in TABLE1[:2]:                # Celik Table 1, columns 1 and 2
+        n = cells_for(r21, r32)
+        u, r, note = dt.discretization([phi1, phi2, phi3], n)
+        g = vv.celik_gci(phi1, phi2, phi3, r21, r32)
+        assert u == pytest.approx(gci, abs=1e-3) and r == pytest.approx(r21) and note == f"p = {g.p:.2f}, Fs = 1.25" and g.p == pytest.approx(p, abs=0.01)
+        assert u == pytest.approx(g.gci_fine21, rel=1e-9)
+
+
+def test_discretization_falls_back_to_roache_and_says_why():
+    n = cells_for(1.32, 1.32)
+    roache = lambda a, b: vv.gci_two_grid(a, b, vv.refinement_ratio(n[0], n[1]))
+    u, r, note = dt.discretization([1.0, 1.02], n[:2])                                 # two grids
+    assert u == pytest.approx(roache(1.0, 1.02)) and note == "Fs = 3, p = 2 assumed: two grids" and r == pytest.approx(1.32)
+    u, _, note = dt.discretization([1.0, 1.0, 1.0], n)                                 # equal values: no observed order
+    assert u == 0.0 and note.endswith("observed order undefined")
+    u, _, note = dt.discretization([1.02, 1.0, 0.99], n)                               # moves less between the coarse pair than the fine pair: diverging
+    assert note.endswith("diverging") and u == pytest.approx(max(roache(1.02, 1.0), 0.03 / 2 / 1.02))
+    u, _, note = dt.discretization([1.0, 1.01, 1.0], n)
+    assert note.endswith("oscillating") and u == pytest.approx(max(roache(1.0, 1.01), 0.005))
+    for p in (0.3, 3.5):                                                               # converging, but at an order nobody believes
+        assert "outside" in dt.discretization(power_law(1.0, 0.01, p, [1.0, 1.32, 1.32 ** 2])[:3], n)[2]
+    phis = [1.0 + 0.004 * h ** 2 for h in (1.0, 1.1, 1.21)]                            # converging, but r = 1.1 < 1.3
+    assert dt.discretization(phis, cells_for(1.1, 1.1))[2].endswith("r < 1.3")
+    good = power_law(1.0, 0.01, 2.0, [1.0, 1.32, 1.32 ** 2])[:3]
+    assert dt.discretization(good, n, [2, 2, 1])[2].endswith("grids differ in snappy surface level")
+    assert dt.discretization(good, n, [2, 2, 2])[2].startswith("p = 2.00")
+
+
+CELLS = {"fine": 760_000, "medium": 330_000, "coarse": 143_000}                      # r = 1.32 between neighbours
+SIZE = {g: (CELLS["fine"] / n) ** (1 / 3) for g, n in CELLS.items()}                  # representative size relative to the fine grid
+
+
+def stored(root, ct_by_grid, cells=None, **case):
+    """Write run_<grid>.json for each grid in ct_by_grid = {grid: fn(fr) -> C_T}; `case` overrides any per-case field."""
     root = prepared(root)
-    for g, n, scale in (("fine", cells[0], ct_fine), ("coarse", cells[1], ct_coarse)):
-        speeds = {f"{fr:.2f}": dict(U=1.0, R=1.0, R_std=0.0, ct=scale(fr), ct_std=ct_std, iters=1, seconds=1.0, cells=n, failed_checks=0)
-                  for fr in dt.CT_REF}
-        (root / f"run_{g}.json").write_text(json.dumps(dict(grid=g, surf_level=1, iters=1, S=4.9, speeds=speeds)))
+    cells = cells or CELLS
+    for g, fn in ct_by_grid.items():
+        speeds = {f"{fr:.2f}": dict(U=1.0, R=1.0, R_std=0.0, ct=fn(fr), ct_std=0.0, iters=1000, seconds=1.0, cells=cells[g], failed_checks=0, surf_level=2,
+                                    first_layer=2e-3, layers=9, layer_cover=90.0, y_plus=100.0, y_plus_min=5.0, y_plus_max=400.0, drift=0.001, scatter=0.005,
+                                    converged=True) | case for fr in dt.CT_REF}
+        (root / f"run_{g}.json").write_text(json.dumps(dict(grid=g, recipe=dt.RECIPE, S=4.9, speeds=speeds)))
     return root
 
 
-def test_tabulate_uses_cell_count_ratio_and_assumptions(tmp_path):
-    root = two_grids(tmp_path, lambda fr: dt.CT_REF[fr] * 1.01, lambda fr: dt.CT_REF[fr] * 1.03)
+def converging(off=1.01, a=0.004):
+    """C_T(h) = D (off + a h^2) on grids of size SIZE[g] times the fine one: exactly second order."""
+    return {g: (lambda fr, h=SIZE[g]: dt.CT_REF[fr] * (off + a * h ** 2)) for g in CELLS}
+
+
+def test_tabulate_uses_three_grids_when_it_has_them_and_two_otherwise(tmp_path):
+    root = stored(tmp_path, converging())
     rows = dt.tabulate(root)
     assert len(rows) == 4
-    r = vv.refinement_ratio(330_535, 150_967)
-    s = dt.CT_REF[0.28] * 1.01
+    s = [dt.CT_REF[0.28] * (1.01 + 0.004 * SIZE[g] ** 2) for g in CELLS]
+    r = [vv.refinement_ratio(a, b) for a, b in ((760_000, 330_000), (330_000, 143_000))]
+    g = vv.celik_gci(*s, *r)
     row = rows[0.28]
-    assert row.u_num == pytest.approx(vv.gci_two_grid(s, dt.CT_REF[0.28] * 1.03, r) * s)
-    assert row.u_input == pytest.approx(s * math.hypot(0.013, 0.006)) and row.u_D == pytest.approx(0.01 * 4.23e-3)
-    assert row.E == pytest.approx(s - 4.23e-3)
-    assert dt.tabulate(tmp_path / "nothing") == {}
-    noisy = dt.tabulate(two_grids(tmp_path / "noisy", lambda fr: dt.CT_REF[fr] * 1.01, lambda fr: dt.CT_REF[fr] * 1.03, ct_std=1e-4))
-    assert noisy[0.28].u_num == pytest.approx(math.hypot(row.u_num, 1e-4))          # iteration scatter joins U_num in quadrature
+    assert row.S == s[0] and row.u_num == pytest.approx(g.gci_fine21 * s[0]) and g.p == pytest.approx(2.0, abs=1e-6)
+    assert "p = 2.00, Fs = 1.25" in row.case
+    assert row.u_input == pytest.approx(s[0] * math.hypot(0.013, 0.006)) and row.u_D == pytest.approx(0.01 * 4.23e-3) and row.E == pytest.approx(s[0] - 4.23e-3)
+    two = dt.tabulate(stored(tmp_path / "two", {k: v for k, v in converging().items() if k != "medium"}))[0.28]       # fine + coarse only
+    assert two.u_num == pytest.approx(vv.gci_two_grid(s[0], s[2], vv.refinement_ratio(760_000, 143_000)) * s[0]) and "two grids" in two.case
+    assert dt.tabulate(tmp_path / "nothing") == {} and dt.tabulate(stored(tmp_path / "one", {"fine": converging()["fine"]})) == {}
+    noisy = dt.tabulate(stored(tmp_path / "noisy", converging(), ct_std=1e-4))[0.28]
+    assert noisy.u_num == pytest.approx(math.hypot(row.u_num, 1e-4))                     # iteration scatter joins U_num in quadrature
 
 
-def test_tabulate_skips_froude_numbers_not_run(tmp_path):
-    root = two_grids(tmp_path, lambda fr: dt.CT_REF[fr], lambda fr: dt.CT_REF[fr] * 1.02)
-    for g in ("fine", "coarse"):
+def test_tabulate_leaves_out_froude_numbers_not_run(tmp_path):
+    root = stored(tmp_path, converging())
+    for g in ("fine", "medium", "coarse"):
         j = json.loads((root / f"run_{g}.json").read_text())
         del j["speeds"]["0.20"]
         (root / f"run_{g}.json").write_text(json.dumps(j))
     assert list(dt.tabulate(root)) == [0.10, 0.28, 0.41]
     out = receipt_state()
     dt.receipts(root)                                       # rows must stay attached to their own Froude number
-    assert [x["claim"].split()[2] for x in out if x.get("kind") == "bracket"] == ["0.10:", "0.28:", "0.41:"]
+    assert [x["claim"].split()[2] for x in out if "|E| <=" in x["claim"]] == ["0.10:", "0.28:", "0.41:"]
     assert np.allclose(sorted(x["reference"] for x in out if x.get("kind") == "context"), [4.02, 4.23, 6.67])
 
 
@@ -497,43 +757,83 @@ def receipt_state():
     return rc.OUT
 
 
-def test_receipts_report_E_and_gate_on_U_val(tmp_path):
+def failing(out):
+    return [x["claim"] for x in out if x.get("ok") is False]
+
+
+def test_receipts_pass_for_a_good_study_and_name_each_requirement(tmp_path):
     out = receipt_state()
-    root = two_grids(tmp_path, lambda fr: dt.CT_REF[fr] * 1.005, lambda fr: dt.CT_REF[fr] * 1.02)
-    status = dt.receipts(root)
-    assert "4 Froude rows" in status
-    geom = [x for x in out if "Lofted" in x["claim"]]
-    assert len(geom) == 3 and all(x["ok"] for x in geom)
-    br = [x for x in out if x.get("kind") == "bracket"]
+    status = dt.receipts(stored(tmp_path, converging()))
+    assert "4 Froude rows" in status and "12 cases" in status
+    assert len([x for x in out if "Lofted" in x["claim"]]) == 3 and failing(out) == []
+    br = [x["claim"] for x in out if x.get("kind") == "bracket"]
+    assert sum("|E| <= U_val" in c for c in br) == 4 and sum("U_val / D <= 0.1" in c for c in br) == 4
+    assert [sum(w in c for c in br) for w in ("y+ in the log layer", "last-quarter drift", "last-quarter scatter")] == [12, 12, 12]
     ctx = [x for x in out if x.get("kind") == "context"]
-    assert len(br) == 4 and len(ctx) == 4 and all(x["ok"] for x in br)       # 0.5 % off with U_D alone 1 %: validated
-    assert all("E =" in x["claim"] and "U_val" in x["claim"] for x in ctx)
+    assert len(ctx) == 4 and all("E =" in x["claim"] and "U_val" in x["claim"] for x in ctx)
+
+
+def test_a_validation_whose_uncertainty_is_comparable_to_c_t_fails_even_when_E_is_inside_it(tmp_path):
+    """The first study: |E| <= U_val passed at Fr 0.10 and 0.28 with U_val ~ 100 % of C_T. That must not read as validated."""
+    out = receipt_state()
+    wide = {"fine": lambda fr: dt.CT_REF[fr], "medium": lambda fr: dt.CT_REF[fr] * 1.3, "coarse": lambda fr: dt.CT_REF[fr] * 1.9}
+    dt.receipts(stored(tmp_path, wide))
+    bad = failing(out)
+    assert len(bad) == 4 and all("U_val / D <= 0.1" in c for c in bad)
+    assert all(x["ok"] for x in out if "|E| <= U_val" in x["claim"])                      # E = 0 sits inside U_val, which is the problem
+    row = dt.tabulate(tmp_path)[0.10]
+    assert row.u_val / row.D > 0.3
 
 
 def test_receipts_fail_when_the_physics_is_wrong(tmp_path):
-    """C_T 30 % high (a wrong density, speed or area normalisation) must fail every |E| <= U_val receipt; a hull built at the
-    wrong scale must fail the geometry receipts."""
+    """C_T 30 % high (a wrong density, speed or area normalisation) must fail every |E| <= U_val receipt; a hull built at the wrong scale
+    must fail the geometry receipts; a unit slip is just as visible."""
     out = receipt_state()
-    root = two_grids(tmp_path, lambda fr: dt.CT_REF[fr] * 1.3, lambda fr: dt.CT_REF[fr] * 1.32)
+    root = stored(tmp_path, {g: (lambda fr, f=f: f(fr) * 1.3) for g, f in converging().items()})
     h = json.loads((root / "hydro.json").read_text())
     h["displacement"] *= 1.1
     h["lwl"] *= 1.02
     (root / "hydro.json").write_text(json.dumps(h))
     dt.receipts(root)
-    bad = [x["claim"] for x in out if x.get("ok") is False]
-    assert sum("|E| <= U_val" in c for c in bad) == 4 and sum("Lofted" in c for c in bad) == 2
-    # and a unit slip (C_T x 1000) is just as visible
+    bad = failing(out)
+    assert sum("|E| <= U_val" in c for c in bad) == 4 and sum("Lofted" in c for c in bad) == 2 and len(bad) == 6
     out.clear()
-    root2 = two_grids(tmp_path / "unit", lambda fr: dt.CT_REF[fr] * 1e3, lambda fr: dt.CT_REF[fr] * 1e3)
-    dt.receipts(root2)
-    assert sum(x.get("ok") is False for x in out) == 4
+    dt.receipts(stored(tmp_path / "unit", {g: (lambda fr, f=f: f(fr) * 1e3) for g, f in converging().items()}))
+    assert sum("|E| <= U_val" in c for c in failing(out)) == 4
+
+
+def test_receipts_fail_for_y_plus_outside_the_log_layer_and_for_unconverged_iterations(tmp_path):
+    out = receipt_state()
+    root = stored(tmp_path, converging(), y_plus=1500.0)                                  # no layers: the cell centre is in the outer region
+    dt.receipts(root)
+    assert len(failing(out)) == 12 and all("y+ in the log layer" in c for c in failing(out))
+    out.clear()
+    dt.receipts(stored(tmp_path / "low", converging(), y_plus=12.0))
+    assert len(failing(out)) == 12
+    out.clear()
+    dt.receipts(stored(tmp_path / "drift", converging(), drift=0.03))
+    assert len(failing(out)) == 12 and all("drift" in c for c in failing(out))
+    out.clear()
+    dt.receipts(stored(tmp_path / "wave", converging(), scatter=0.06, converged=False))
+    assert len(failing(out)) == 12 and all("scatter" in c for c in failing(out))
+
+
+def test_a_case_that_recorded_no_diagnostics_fails_them(tmp_path):
+    out = receipt_state()
+    root = stored(tmp_path, converging())
+    for g in ("fine", "medium", "coarse"):
+        j = json.loads((root / f"run_{g}.json").read_text())
+        j["speeds"]["0.41"].update(y_plus=None, drift=None, scatter=None)
+        (root / f"run_{g}.json").write_text(json.dumps(j))
+    dt.receipts(root)
+    assert len(failing(out)) == 9 and all("Fr 0.41" in c for c in failing(out))        # y+, drift and scatter on three grids
 
 
 def test_receipts_without_results_say_so_and_emit_nothing(tmp_path):
     out = receipt_state()
     assert "no" in dt.receipts(tmp_path) and out == []
     prepared(tmp_path)
-    assert "0 Froude rows" in dt.receipts(tmp_path) and len(out) == 3         # geometry only until both grids have run
+    assert "0 Froude rows + 0 cases" in dt.receipts(tmp_path) and len(out) == 3         # geometry only until two grids have run
 
 
 def test_receipts_default_root_comes_from_cafe_data(tmp_path, monkeypatch):
@@ -557,11 +857,11 @@ def test_prepare_with_a_fake_download_and_cli(tmp_path, monkeypatch, capsys):
     assert trimesh.load(root / "hull.stl").is_watertight
     monkeypatch.setenv("CAFE_DATA", str(tmp_path))
     monkeypatch.setattr(dt, "prepare", lambda r: {"ok": 1})
-    monkeypatch.setattr(dt, "run_grid", lambda r, g, n=dt.ITERS, frs=dt.ORDER: {"grid": g, "iters": n, "frs": frs})
+    monkeypatch.setattr(dt, "run_grid", lambda r, g, n=dt.MAX_ITERS, frs=dt.ORDER: {"grid": g, "iters": n, "frs": frs})
     assert dt.main(["prepare"]) == 0 and '"ok": 1' in capsys.readouterr().out
     assert dt.main(["run", "fine", "7"]) == 0 and '"iters": 7' in capsys.readouterr().out
     assert dt.main(["run", "fine", "7", "0.28,0.1"]) == 0 and '"frs": [\n  0.28,\n  0.1\n ]' in capsys.readouterr().out
-    assert dt.main(["run", "coarse"]) == 0 and f'"iters": {dt.ITERS}' in capsys.readouterr().out
+    assert dt.main(["run", "coarse"]) == 0 and f'"iters": {dt.MAX_ITERS}' in capsys.readouterr().out
     assert dt.main(["report"]) == 0 and "no" in capsys.readouterr().out
     assert dt.main(["bogus"]) == 2 and "Usage" in capsys.readouterr().out
     monkeypatch.setattr(sys, "argv", ["x", "bogus"])

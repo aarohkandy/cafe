@@ -325,3 +325,23 @@ reach.fluid_allowance_ms:
   unit: m/s
   why: "The reach grid spans (speed + this) x horizon so a current of this size can carry a vehicle across it; currents above it are cut off at the grid edge."
   replace_with: "The largest surface current in the box from the ocean source."
+stage3.fs.margin:
+  value: 1.25
+  unit: "-"
+  why: "Safety factor on the estimated minutes of a free-surface (interFoam) window: the case is started only if estimate x margin fits the share of the stage left, because a child killed at the deadline returns nothing. The estimate itself (cells x iterations / measured rate x cost factor) is good to about 20 % on a loaded box."
+  replace_with: "The spread of the measured-to-estimated ratio over a few free-surface windows."
+stage3.fs.cost_factor:
+  value: 1.5
+  unit: "-"
+  why: "interFoam LTS wall time over what config/throughput.json predicts for pimpleFoam LES at the same cell count and cores. Measured on homebase 2026-10-29: 2.775 s per iteration on the 209 k-cell fine grid at 3 ranks (75.4 k cell-updates/s) against 114 k interpolated from the table, at load 21 on 8 vCPU. The DTMB 5415 runs (2.6 s per iteration on 331 k cells, 6 ranks) give 1.2."
+  replace_with: "Re-measure on the lab machine at its load: `make bench` times pimpleFoam."
+stage3.fs.mesh_s_per_cell:
+  value: 7.0e-4
+  unit: "s/cell"
+  why: "blockMesh + surfaceFeatureExtract + refineMesh + snappyHexMesh + checkMesh wall time per final cell on homebase 2026-10-29 at 3 ranks under load: 41 s for 70.6 k cells, 72 s for 101.6 k, 143 s for 144.0 k, 114 s for 209.1 k (mean 0.71 ms)."
+  replace_with: "Re-measure on the lab machine."
+stage3.fs.snappy_cell_factor:
+  value: 0.98
+  unit: "-"
+  why: "Final cells over the blockMesh + refineMesh count at snappy surface level 0 (snappy removes the cells inside the hull): 1.002, 0.980, 0.983 and 0.975 for one to four refinement boxes, Explorer hull and keel, homebase 2026-10-29. Surface levels 1 and 2 failed on this hull (hexRef8 'more than 8 points' on refineMesh's directional splits)."
+  replace_with: "Measured cell counts of the lab's own hull and keel STL."
