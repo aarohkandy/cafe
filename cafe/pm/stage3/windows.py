@@ -204,7 +204,8 @@ def stage3_checks(series: dict, spec: nest.NestSpec, force_series: np.ndarray, b
                       note="distance from the body to the nearest relaxation layer"),
             check_row("wall_model_receipt_error", math.nan if plate_error is None else plate_error, wm.PLATE_TOL,
                       plate_error is not None and plate_error <= wm.PLATE_TOL,
-                      note="best stored wall-model receipt (flat plate vs ITTC-57, channel vs Dean); fails when none is stored or out of tolerance")]
+                      note="worse of the stored wall-model receipts (flat plate vs ITTC-57, channel vs Dean); "
+                           "fails unless both are stored and within tolerance")]
 
 
 def wall_hook(steps: int, chunk: int, wall_s: float | None, cells: int, log: dict) -> Callable:

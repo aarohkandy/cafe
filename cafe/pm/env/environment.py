@@ -145,7 +145,8 @@ class GriddedEnv:
         return Tagged(v, f"{src}; below the first level: {psrc}", self.sig["wind_ms"], "data")
 
     def _wind3d(self, lon, lat, z, t):
-        """3-D WRF wind where z is above the first mass level and t is within an ingested 3-D hour pair, else NaN."""
+        """3-D WRF wind (east, north) where z is above the first mass level and t is within an ingested 3-D hour pair, else NaN. U3/V3 are
+        grid-relative like U10, so they go through the same COSALPHA/SINALPHA rotation before the vertical interpolation."""
         T, Z = self.w3["t"], self.w3["Z"]
         t = np.broadcast_to(np.asarray(t, float), np.broadcast(lon, lat, z, t).shape)
         i = np.searchsorted(T, t, side="right") - 1
@@ -158,11 +159,13 @@ class GriddedEnv:
         for k in np.unique(i[ok]):
             m = ok & (i == k)
             w = (t[m] - T[k]) / (T[k + 1] - T[k])
+            ca, sa = (interp(self.Wstatic[a], [self.law, self.low], [latq[m], cv.wrap360(lonq[m])])[0][:, None] for a in ("COSALPHA", "SINALPHA"))
             vals = []
             for kk, ww in ((k, 1 - w), (k + 1, w)):
                 zc = np.stack([interp(Z[kk, l], [self.law, self.low], [latq[m], cv.wrap360(lonq[m])])[0] for l in range(Z.shape[1])], -1)
                 uc = np.stack([interp(self.w3["U"][kk, l], [self.law, self.low], [latq[m], cv.wrap360(lonq[m])])[0] for l in range(Z.shape[1])], -1)
                 vc = np.stack([interp(self.w3["V"][kk, l], [self.law, self.low], [latq[m], cv.wrap360(lonq[m])])[0] for l in range(Z.shape[1])], -1)
+                uc, vc = cv.rotate_grid_to_earth(uc, vc, ca, sa)             # grid-relative -> earth, like U10 (the 3-D fields are grid-relative too)
                 lz = np.log(np.maximum(zc, 1.0))
                 q = np.log(np.maximum(zq[m], 1.0))
                 j = np.clip(np.sum(lz < q[:, None], axis=1) - 1, 0, lz.shape[1] - 2)

@@ -532,3 +532,13 @@ def test_kinematics_receipt_fails_when_depth_integration_is_wrong(monkeypatch):
 
     monkeypatch.setattr(g.GliderSim, "step", bad)
     assert any("first descent" in c for c in failed(g.receipts()))
+
+
+def test_a_per_member_windage_replaces_the_platforms_on_the_surface_phase():
+    shallow = AnalyticEnv(wind=(10.0, 0.0), current=(0.0, 0.0), depth=40.0, rho=1025.0)
+    s = sim(e=shallow, lon=10.0, M=3, windage=np.array([0.018, 0.02, 0.023]))
+    s.run(DAY)
+    drift = (s.lon - 10.0) * g.metres_per_deg(0.0)[0] / (10.0 * DAY)
+    assert np.allclose(drift, [0.018, 0.02, 0.023], rtol=0.05) and drift[2] > drift[0]
+    d = sim(e=shallow, lon=10.0, M=2)
+    assert np.allclose(d.windage, SG["windage"])                                                    # without the perturbation: the platform's value

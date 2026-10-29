@@ -23,6 +23,7 @@ from cafe.pm.env.environment import GriddedEnv
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider, uas, usv
 from tests.fixtures import pm_run
+from tests.fixtures.ci_env import make as fx
 from tests.fixtures.fakes import fake_module
 
 ROOT = config.ROOT
@@ -164,10 +165,12 @@ def test_context_env_is_built_once_from_the_cache_the_ocean_and_the_surface_laye
 
 def test_ocean_is_opened_for_the_mission_box_plus_its_pad(tmp_path, monkeypatch):
     seen = []
-    monkeypatch.setattr(ocean_mod, "open_ocean", lambda spec, cache, name, box: seen.append((spec, cache, name, box)) or "OCEAN")
+    monkeypatch.setattr(ocean_mod, "open_ocean", lambda spec, cache, name, box, **kw: seen.append((spec, cache, name, box, kw)) or "OCEAN")
     ctx = ctx_for(tmp_path / "r")
     assert pipeline.ocean(ctx) == "OCEAN"
-    assert seen == [({"source": "gofs31"}, ctx.cache, "ci_fixture", (-2.0, 2.0, -167.0, -163.0))]          # (south, north, west, east), 0.5 degree pad
+    (spec, cache, name, box, kw), = seen
+    assert (spec, cache, name, box) == ({"source": "gofs31"}, ctx.cache, "ci_fixture", (-2.0, 2.0, -167.0, -163.0))   # (S, N, W, E), 0.5 degree pad
+    assert kw["fetch_bathy"] is False and set(kw["umwm"]) == {"lon", "lat", "depth"}      # offline: no download; UMWM's depth rides along for the last fallback
 
 
 def test_dump_writes_numpy_and_datetimes_as_json(tmp_path):
@@ -383,16 +386,17 @@ def test_ingest_uses_a_cache_that_covers_the_window_then_validates_against_the_m
     ctx = ctx_for(tmp_path / "r", log=log.append)
     d = run_stage(pipeline.s_ingest, ctx, "ingest")
     man = data.cache / "orca" / "manifest.json"
-    assert log == [f"ingest: orca cache {man.parent} covers the window"]
+    assert log == [f"ingest: orca cache {man.parent} covers the window"]              # everything else was cached: nothing fetched
     c = check_of(d, "orca_hours_cover_window")
     assert c["ok"] and c["value"] == 37 == c["limit"] and check_of(d, "ocean_source_covers_box")["note"] == "{'source': 'gofs31'}"
     first = d["inputs"][0]
     assert first["ref"].startswith("https://orca.") and first["sha256"] is None and first["kind"] == "remote"
     outs = {pathlib.Path(o["path"]).name: o["sha256"] for o in d["outputs"]}
-    assert set(outs) == {"manifest.json", "tao_compare.json", "priors_fitted.json"} and outs["manifest.json"] == ledger.sha256(man)
+    assert set(outs) == {"manifest.json", "tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json"} and outs["manifest.json"] == ledger.sha256(man)
 
 
 def test_ingest_fetches_when_the_manifest_is_missing_or_does_not_cover_the_window(tmp_path, data_copy, monkeypatch):
+    monkeypatch.delenv("CAFE_OFFLINE")                                              # fetching is allowed; the (fake) orca fetch is what runs
     cache = data_copy / "cache" / "ci_fixture" / "orca"
     man = cache / "manifest.json"
     saved = man.read_text()
@@ -426,11 +430,12 @@ def test_ingest_builds_the_derived_surface_layer_when_it_is_missing(tmp_path, da
     assert (ctx.cache / "derived.zarr").is_dir() and ctx.env.subgrid is not None
 
 
-def test_ingest_fails_when_the_ocean_store_is_missing_or_the_cache_has_too_few_hours(tmp_path, data_copy):
+def test_ingest_fails_when_the_ocean_store_is_missing_or_the_cache_has_too_few_hours(tmp_path, data, data_copy):
     shutil.rmtree(data_copy / "ocean")
-    with pytest.raises(ledger.StageFailed, match="ocean_source_covers_box"):
+    with pytest.raises(ledger.StageFailed, match="ocean_store_present"):
         run_stage(pipeline.s_ingest, ctx_for(tmp_path / "a"), "ingest")
-    assert not check_of(read_ledger(tmp_path / "a", "ingest"), "ocean_source_covers_box")["ok"]
+    assert not check_of(read_ledger(tmp_path / "a", "ingest"), "ocean_store_present")["ok"]
+    shutil.copytree(data.data / "ocean", data_copy / "ocean")                                                  # the store is back; now the orca cache is short
     man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
     man.write_text(man.read_text().replace('"hours": 37', '"hours": 30'))
     with pytest.raises(ledger.StageFailed, match="orca_hours_cover_window"):
@@ -487,9 +492,9 @@ def test_tao_writes_the_comparison_and_the_fitted_wind_priors(tmp_path, data):
     assert s["dist"] == w["dist"] == "normal" and s["kind"] == w["kind"] == "data" and "2 moorings" in s["citation"]
     assert "2023-03-01T18:00:00Z..2023-03-03T06:00:00Z" in s["citation"]
     c = check_of(d, "tao_moorings_compared")
-    assert c["ok"] and c["value"] == 2 and c["limit"] == 1 and d["notes"] == []
+    assert c["ok"] and c["value"] == 2 and c["limit"] == 1 and len(d["notes"]) == 1 and d["notes"][0].startswith("env sigmas fitted")
     assert any(i["ref"].endswith("tao/manifest.json") and i["sha256"] for i in d["inputs"])
-    assert {pathlib.Path(o["path"]).name for o in d["outputs"]} == {"tao_compare.json", "priors_fitted.json"}
+    assert {pathlib.Path(o["path"]).name for o in d["outputs"]} == {"tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json"}
 
 
 def test_the_fitted_wind_prior_removes_the_model_bias_and_stage1_accepts_it(tmp_path, data):
@@ -514,7 +519,8 @@ def test_without_a_tao_download_the_default_priors_stand_and_the_ledger_says_so(
 
 def test_a_negative_variance_from_rounding_gives_a_zero_spread(tmp_path, data, monkeypatch):
     ctx, t0, t1 = tao_ctx(tmp_path)
-    monkeypatch.setattr(tao, "compare", lambda wrf, moor: {"M": {}, "ALL": dict(speed_bias=0.5, speed_rmse=0.5 - 1e-12, dir_bias_deg=2.0, dir_rmse_deg=1.0)})
+    monkeypatch.setattr(tao, "compare", lambda wrf, moor: {"M": {}, "ALL": dict(speed_bias=0.5, speed_rmse=0.5 - 1e-12, dir_bias_deg=2.0,
+                                                                                      dir_rmse_deg=1.0, sst_rmse=float("nan"))})
     tao_stage(ctx, t0, t1)
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
     assert fit["wind_speed_bias"]["value"] == 0.0 and fit["wind_direction_bias"]["value"] == 0.0 and fit["wind_speed_bias"]["mean"] == -0.5
@@ -529,6 +535,63 @@ def test_moorings_outside_the_grid_fail_the_stage_through_its_self_check(tmp_pat
         tao_stage(ctx, t0, t1)
     c = check_of(read_ledger(ctx.run_dir, "ingest"), "tao_moorings_compared")
     assert (c["ok"], c["value"]) == (False, 0)
+
+
+def test_the_tao_fit_also_sets_the_sst_and_t2_sigmas_that_the_environment_is_tagged_with(tmp_path, data):
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    prior = (ctx.env.sig["sst_k"], ctx.env.sig["t2_k"])
+    d = tao_stage(ctx, t0, t1)
+    assert ctx._env is None                                                                                   # rebuilt with the fit on next use
+    cmp = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())
+    fit = json.loads((ctx.run_dir / "ingest" / "env_sigmas_fitted.json").read_text())
+    assert fit["sst_k"] == pytest.approx(cmp["ALL"]["sst_rmse"]) and fit["sst_k"] != prior[0] and 0.0 < fit["t2_k"] != prior[1]
+    # T2: pooled RMSE of WRF T2 against the AIRT of the moorings that report it (T0N165W only), computed independently
+    hours = np.arange(t0, t1 + 1, 3600.0)
+    m = tao.load_tao(pipeline.DATA / "tao", t0, t1)["T0N165W"]
+    lo, la = np.full(hours.size, m["lon"]), np.full(hours.size, m["lat"])
+    r = ctx.env.air(lo, la, hours)["T2"].value - tao._bin(m["airt"]["t"], m["airt"]["value"], hours)
+    assert fit["t2_k"] == pytest.approx(np.sqrt(np.mean(r[np.isfinite(r)] ** 2)))
+    assert d["notes"][0].startswith("env sigmas fitted") and "sst_k" in d["notes"][0] and "t2_k" in d["notes"][0]
+    e = ctx.env
+    assert e.sig["sst_k"] == fit["sst_k"] and e.sig["t2_k"] == fit["t2_k"] and e.sig["q2_frac"] == config.env_sigmas()["q2_frac"]
+    lon, lat = np.array([195.0]), np.array([0.0])
+    assert e.sst(lon, lat, t0).uncertainty == fit["sst_k"] and e.air(lon, lat, t0)["T2"].uncertainty == fit["t2_k"]
+
+
+def test_without_sst_or_air_temperature_in_the_moorings_the_sigmas_stay_the_assumptions(tmp_path, data, monkeypatch):
+    real_cmp, real_load = tao.compare, tao.load_tao
+    monkeypatch.setattr(tao, "compare", lambda w, m: (lambda r: {**r, "ALL": {**r["ALL"], "sst_rmse": float("nan")}})(real_cmp(w, m)))
+    monkeypatch.setattr(tao, "load_tao", lambda *a, **k: {n: {x: y for x, y in v.items() if x != "airt"} for n, v in real_load(*a, **k).items()})
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    d = tao_stage(ctx, t0, t1)
+    assert not (ctx.run_dir / "ingest" / "env_sigmas_fitted.json").exists() and "none" in d["notes"][0]
+    assert ctx.env.sig["sst_k"] == config.env_sigmas()["sst_k"] and ctx.env.sig["t2_k"] == config.env_sigmas()["t2_k"]
+
+
+def test_the_assumptions_text_for_the_sigmas_the_tao_fit_replaces_says_what_the_code_does():
+    a = config.assumptions()
+    for k in ("env.sigma.t2_k", "env.sigma.sst_k"):
+        assert "env_sigmas_fitted.json" in a[k]["why"] and "pipeline._tao" in a[k]["why"]
+
+
+def test_the_umwm_depth_fallback_is_reachable_from_the_pipeline(tmp_path, data_copy, monkeypatch):
+    shutil.rmtree(data_copy / "bathy")
+    monkeypatch.setattr(ocean_mod.bathy, "from_gofs", boom)                                                  # GEBCO is gone and the GOFS floor fails
+    b = pipeline.ocean(ctx_for(tmp_path / "r")).bathy
+    assert b.source == "UMWM depth" and [t.split(":")[0] for t in b.tried] == ["gebco", "gofs"]
+    assert float(b(195.0, 0.0).value) == pytest.approx(float(fx.seafloor(195.0, 0.0)), rel=1e-6)
+    assert pipeline._umwm_depth(tmp_path / "no_cache") is None
+
+
+def test_the_mission_switches_reach_the_surface_layer_the_environment_is_built_with(tmp_path, data):
+    text = MISSION_PATH.read_text()
+    off = tmp_path / "off.yaml"
+    off.write_text(text.replace("warm_layer: true, rain_lens: true", "warm_layer: false, rain_lens: false"))
+    bare = tmp_path / "bare.yaml"
+    bare.write_text(text.replace("subgrid: {turbulence: true, gust_fronts: true, warm_layer: true, rain_lens: true, ocean_sde: true}", "subgrid: {}"))
+    for path, warm, lens in ((MISSION_PATH, True, True), (off, False, False), (bare, True, True)):
+        sl = ctx_for(tmp_path / path.stem, mission=path).env.subgrid
+        assert sl.warm_layer is warm and sl.cfg["rain_lens"]["enabled"] is lens, path.name
 
 
 # ---------------------------------------------------------------------------------------------------------------- stage 1 wrapper
@@ -698,9 +761,19 @@ def test_the_refit_uses_only_the_windows_that_passed_their_self_checks(tmp_path)
     assert u["used"] and u["drag"]["windows"] == 1 and u["drag"]["mean"] == pytest.approx(1.3) and u["drag"]["sigma"] == pytest.approx(0.05)
     assert u["drag"]["change_vs_hangar"] == pytest.approx(0.3)
     g = out["glider_eq"]
-    why = "no window passed its stage-3 self-checks; Stage 1 keeps the Hangar coefficients"
+    why = "no body window passed its stage-3 self-checks; Stage 1 keeps the Hangar coefficients"
     assert g == dict(used=False, reason=why, failed_checks=["mach_max", "wall_model"])
     assert out["uas"]["used"] is False and out["uas"]["failed_checks"] == [] and check_of(d, "refit_uses_only_windows_that_passed")["ok"]
+
+
+def test_a_usv_wing_is_pooled_apart_from_its_hull_and_never_scales_stage1(tmp_path):
+    rows = {"usv": [dict(stage3_row(cd=1.3), part="hull"), dict(stage3_row(cd=3.0), part="wing")]}
+    u = refit_run(tmp_path, rows)[0]["usv"]
+    assert u["used"] and u["part"] == "hull" and u["drag"]["windows"] == 1 and u["drag"]["mean"] == pytest.approx(1.3)
+    assert u["wing_not_used"]["drag"]["mean"] == pytest.approx(3.0) and "no multiplier" in u["wing_not_used"]["reason"]
+    rows = {"usv": [dict(stage3_row(cd=3.0), part="wing"), dict(stage3_row(ok=False), part="hull")]}
+    u = refit_run(tmp_path / "2", rows)[0]["usv"]
+    assert u["used"] is False and u["reason"].startswith("no hull window passed")                  # a passing wing cannot stand in for the hull
 
 
 def test_the_refit_multiplier_is_the_pooled_ratio_to_each_windows_own_hangar_value(tmp_path):
@@ -741,37 +814,194 @@ def test_stage1b_reruns_stage1_with_the_multipliers_of_the_vehicles_that_were_re
 
 # ---------------------------------------------------------------------------------------------------------------- emulator
 
-def synthetic_ctx(tmp_path, M):
-    run = tmp_path / "synthetic"
+def set_stage1_wall(run, wall_s):
+    p = run / "checkpoints" / "stage1" / "ledger.json"
+    d = json.loads(p.read_text())
+    p.write_text(json.dumps(dict(d, wall_s=wall_s)))
+
+
+def synthetic_ctx(tmp_path, M, name="synthetic", unused_refit=False, stage1_wall=0.0):
+    """The synthetic run of tests/fixtures/pm_run on the TEPEX mission with the analytic environment; `unused_refit`: no vehicle was refit;
+    `stage1_wall`: the seconds the stage-1 ledger says it took (0: unknown, so the planner's cost estimate is used)."""
+    run = tmp_path / name
     pm_run.make_run(run, M=M)
+    set_stage1_wall(run, stage1_wall)
+    if unused_refit:
+        ref = json.loads((run / "refit" / "refit.json").read_text())
+        (run / "refit" / "refit.json").write_text(json.dumps({k: dict(v, used=False) for k, v in ref.items()}))
     ctx = pipeline.Context(ROOT / "missions" / "tepex_c_demo.yaml", "quick", 0, run, quiet)
+    ctx._env = AnalyticEnv(wind=(4.0, 3.0), hs=1.5, current=(0.2, 0.0))
     return ctx
 
 
-def test_the_emulator_has_nothing_to_learn_from_a_handful_of_members_or_from_no_failures(tmp_path):
-    ctx = synthetic_ctx(tmp_path, 16)
+def cheap_plan(ctx, budget_s=100.0):
+    """One second per vehicle per mission day and nothing per member: a batch of the four vehicles costs 4 s x days; `days` = 1."""
+    ctx.plan.update(budget_s=budget_s, days=1.0, batch=16)
+    ctx.plan["member_cost"] = {v: dict(s_per_batch_day=1.0, s_per_member_day=0.0, source="test") for v in ctx.plan["member_cost"]}
+    return ctx
+
+
+@pytest.fixture
+def table(tmp_path, monkeypatch):
+    """The training table in a private CAFE_DATA, never the shared tree."""
+    d = tmp_path / "caf_data"
+    monkeypatch.setattr(pipeline, "DATA", d)
+    return d / "emulator" / "train.parquet"
+
+
+@pytest.fixture
+def fake_stage1(monkeypatch):
+    """stage1.run_batch replaced by the synthetic ensemble of tests/fixtures/pm_run; a vehicle the variant changed has no failures, so every
+    change 'fixes' it. -> the list of (vehicles run, members) it was called with."""
+    names = list(stage1.priors_for(config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml"))[1])
+    calls = []
+
+    def run_batch(mission, env, members, seed, pri, marg, scales=None):
+        calls.append(([v["id"] for v in mission["vehicles"]], list(members)))
+        b = pm_run._batch(np.random.default_rng(len(calls)), len(members), names, 0.4)
+        for v in mission["vehicles"]:
+            if v != next(x for x in pm_run.mission()["vehicles"] if x["id"] == v["id"]):
+                for f in b["vehicles"][v["id"]]["fail"].values():
+                    f[:] = False
+        return b
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    return calls
+
+
+def seed_table(path, n=140, bad=False, seed=0):
+    """Glider rows made by tests/test_whatif.storm_table (or pure noise when `bad`): test data, as the pipeline never trains on synthetic rows."""
+    from cafe.pm import whatif
+    from tests import test_whatif
+    df = test_whatif.storm_table(n, seed)
+    if bad:
+        df["p_fail"] = np.random.default_rng(3).uniform(0, 1, n)
+    whatif.add_rows(path, [dict(r, key=f"seed{i}", run_id="seed", mission="seed", variant="seed", n_members=512) for i, r in enumerate(df.to_dict("records"))])
+
+
+def test_every_run_appends_one_row_per_vehicle_and_a_rerun_replaces_them(tmp_path, table, fake_stage1):
+    from cafe.pm import whatif
+    a = synthetic_ctx(tmp_path, 48, "a")
+    cheap_plan(a, 10.0)                                                                                       # no budget for variants: the rows of the run only
+    run_stage(pipeline.s_emulator, a, "emulator")
+    df = whatif.read_table(table)
+    assert len(df) == 4 and sorted(df["vehicle"]) == ["glider_2n", "glider_eq", "uas", "usv"] and set(df["variant"]) == {"base"} and fake_stage1 == []
+    g = df[df["vehicle"] == "glider_eq"].iloc[0]
+    assert g["fidelity"] == 1 and g["n_members"] == 48 and g["mission"] == "tepex_c_demo" and g["git_sha"] and len(g["code_digest"]) == 64
+    assert df[df["vehicle"] == "usv"].iloc[0]["fidelity"] == 0                                                # only glider_eq was refit
+    run_stage(pipeline.s_emulator, a, "emulator")
+    assert len(whatif.read_table(table)) == 4                                                                  # same run: replaced, not doubled
+    b = synthetic_ctx(tmp_path, 48, "b")
+    cheap_plan(b, 10.0)
+    run_stage(pipeline.s_emulator, b, "emulator")
+    df = whatif.read_table(table)
+    assert len(df) == 8 and df["run_id"].nunique() == 2
+
+
+def test_the_variant_runs_stay_inside_the_emulator_share(tmp_path, table, fake_stage1):
+    """Share = 5 % of the budget plus stage 1b's 15 % when nothing was refit; 70 % of it for variants; a variant costs 4 s here."""
+    from cafe.pm import whatif
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)                                    # share 20 s -> 14 s -> 3 variants
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    est = budget.batch_cost_s(ctx.plan)
+    assert est == 4.0 and design["share_s"] == 20.0 and design["stage1b_free"] and len(design["variants"]) == 3
+    assert len(design["variants"]) * est <= whatif.TRAIN_FRAC * design["share_s"]
+    assert design["variant_s"] == est and design["variant_s_source"] == "the planner's estimate"
+    assert design["rows_added"] == 4 * 4 and design["table_rows"] == 16 and design["spent_s"] == pytest.approx(sum(v["wall_s"] for v in design["variants"]))
+    assert [c[1] for c in fake_stage1][:3] == [list(range(16))] * 3 and [c[0] for c in fake_stage1][:3] == [["glider_eq", "glider_2n", "usv", "uas"]] * 3
+    assert check_of(d, "emulator_variants_within_share")["ok"] and check_of(d, "emulator_rows_appended")["value"] == 16
+    assert any("3 variant run(s) of 4 s each (the planner's estimate)" in n for n in d["notes"]) and any("incl. stage 1b" in n for n in d["notes"])
+    refit = cheap_plan(synthetic_ctx(tmp_path, 48, "refit"), 100.0)                                            # glider_eq was refit: share 5 s -> none
+    run_stage(pipeline.s_emulator, refit, "emulator")
+    d2 = json.loads((refit.run_dir / "emulator" / "design.json").read_text())
+    assert d2["share_s"] == 5.0 and d2["variants"] == [] and not d2["stage1b_free"] and d2["rows_added"] == 4
+
+
+def test_the_variant_cost_is_the_measured_stage_1_wall_time_per_batch_when_there_is_one(tmp_path, table, fake_stage1):
+    """48 members in batches of 16: 3 batches. 24 s of stage 1 is 8 s a batch; the share is 20 s, 14 s of it for variants: one variant."""
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True, stage1_wall=24.0), 100.0)
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    assert design["variant_s"] == 8.0 and design["variant_s_source"] == "this run's stage-1 wall time per batch" and len(design["variants"]) == 1
+    assert any("1 variant run(s) of 8 s each (this run's stage-1 wall time per batch)" in n for n in d["notes"])
+    slow = cheap_plan(synthetic_ctx(tmp_path, 48, "slow", unused_refit=True, stage1_wall=96.0), 100.0)               # 32 s a batch: none fits
+    run_stage(pipeline.s_emulator, slow, "emulator")
+    assert json.loads((slow.run_dir / "emulator" / "design.json").read_text())["variants"] == []
+
+
+def test_variant_count_is_capped_by_the_budget_name_and_stops_when_the_wall_clock_runs_out(tmp_path, table, fake_stage1, monkeypatch):
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 10_000.0)
+    ctx.plan["budget"] = "ci"
     run_stage(pipeline.s_emulator, ctx, "emulator")
-    out = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())
-    res = pickle.loads((ctx.run_dir / "stage1b" / "res.pkl").read_bytes())
-    assert set(out) == set(res["vehicles"]) and all(not v["trained"] for v in out.values())
-    for vid, r in res["vehicles"].items():
-        assert out[vid]["reason"] == f"{2 * (16 // 2)} members, {int(stage1.failed(r).sum())} failures: nothing to learn"
+    assert len(json.loads((ctx.run_dir / "emulator" / "design.json").read_text())["variants"]) == budget.EMULATOR_VARIANTS["ci"] == 2
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, "slow", unused_refit=True), 100.0)
+    clock = iter([0.0, 0.0] + [100.0] * 400)                                                            # the ledger reads the clock first, then the stage
+    monkeypatch.setattr(pipeline.time, "time", lambda: next(clock))  # the first variant already took the whole share
+    run_stage(pipeline.s_emulator, ctx, "emulator")
+    assert json.loads((ctx.run_dir / "emulator" / "design.json").read_text())["variants"] == []
 
 
-def test_the_emulator_trains_on_the_vehicles_whose_members_both_fail_and_succeed(tmp_path):
-    ctx = synthetic_ctx(tmp_path, 48)
+def test_the_emulator_is_not_trained_on_a_few_rows_and_the_stage_still_passes(tmp_path, table, fake_stage1):
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     out = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())
-    res = pickle.loads((ctx.run_dir / "stage1b" / "res.pkl").read_bytes())
-    k = {vid: int(stage1.failed(r).sum()) for vid, r in res["vehicles"].items()}
-    assert d["inputs"][0]["ref"].endswith("stage1b/res.pkl") and d["inputs"][0]["sha256"]
-    for vid, n_fail in k.items():
-        if 0 < n_fail < 48:
-            assert out[vid]["trained"] and out[vid]["n_test"] == 10 and out[vid]["n_train"] > 20 and 0.0 <= out[vid]["rmse"]["p_fail"] <= 1.0
-            assert 0.0 <= out[vid]["coverage"]["p_fail"] <= 1.0
-        else:
-            assert out[vid] == dict(trained=False, reason=f"48 members, {n_fail} failures: nothing to learn")
-    assert any(v["trained"] for v in out.values()) and any(not v["trained"] for v in out.values())
+    assert set(out) == {"glider_eq", "glider_2n", "usv", "uas"} and all(not v["trained"] for v in out.values())
+    assert out["glider_eq"]["reason"].startswith("2 glider rows in the training table, 100 are needed") and out["glider_eq"]["rows"] == 2
+    assert out["usv"]["cls"] == "usv" and out["glider_eq"] == out["glider_2n"]
+    assert [c["name"] for c in d["checks"]] == ["emulator_rows_appended", "emulator_variants_within_share"] and all(c["ok"] for c in d["checks"])
+    assert any("not trained (trained: false)" in n and "glider" in n for n in d["notes"]) and len([n for n in d["notes"] if "not trained" in n]) == 3
+    flip = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]
+    assert set(flip) == {"usv", "uas"}                                                                         # the two vehicles that are not GO
+
+
+def test_the_flip_search_of_the_stage_falls_back_to_stage_1_and_finds_a_change(tmp_path, table, fake_stage1):
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    flip = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]
+    u = flip["uas"]
+    assert u["found"] and not u["emulator"] and u["best"]["method"] == "Stage 1" and u["best"]["verdict"] == "GO" and u["best"]["n"] == 16
+    assert u["verdict"] == "NO-GO"
+    assert [t["change"] for t in u["tried"] if t["method"] == "Stage 1"][0] == u["best"]["change"]
+    assert any("flip search: 2 of 2 non-GO vehicles flip" in n for n in d["notes"])
+    assert len(fake_stage1) >= 2
+
+
+def test_a_trained_emulator_is_scored_and_held_to_the_briefs_acceptance(tmp_path, table, fake_stage1, monkeypatch):
+    from cafe.pm import whatif
+    seed_table(table)
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))     # coverage on 28 test rows is too coarse to pin to +-5 %
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    out = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())
+    g = out["glider_eq"]
+    assert g["trained"] and g["cls"] == "glider" and g["rows"] == 142 and g["n_test"] == 28 and g["rmse"]["p_fail"] <= 0.05 and not out["usv"]["trained"]
+    assert out["glider_2n"] == g and g["acceptance"] == dict(rmse_ok=True, coverage_ok=True, query_ok=True)
+    assert [check_of(d, f"emulator_{k}_glider")["ok"] for k in ("rmse", "coverage", "query_ms")] == [True] * 3
+    assert check_of(d, "emulator_rmse_glider")["limit"] == 0.05 and "Monte-Carlo noise" in check_of(d, "emulator_rmse_glider")["note"]
+
+
+def test_a_trained_emulator_that_misses_the_acceptance_fails_the_stage(tmp_path, table, fake_stage1):
+    seed_table(table, bad=True)
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
+    with pytest.raises(ledger.StageFailed, match="emulator_rmse_glider"):
+        run_stage(pipeline.s_emulator, ctx, "emulator")
+    c = check_of(read_ledger(ctx.run_dir, "emulator"), "emulator_rmse_glider")
+    assert not c["ok"] and c["value"] > 0.2 and c["limit"] == 0.05
+
+
+def test_the_stage_learns_from_what_the_table_already_holds(tmp_path, table, fake_stage1, monkeypatch):
+    """With a trained glider emulator the glider candidates are answered by it (EMULATED) and Stage 1 is not run for them."""
+    from cafe.pm import whatif
+    seed_table(table)
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
+    summ = json.loads((ctx.run_dir / "stage1b" / "summary.json").read_text())
+    summ["summary"]["vehicles"]["glider_eq"]["verdict"] = dict(summ["summary"]["vehicles"]["glider_eq"]["verdict"], verdict="NO-GO", p_fail=0.9)
+    (ctx.run_dir / "stage1b" / "summary.json").write_text(json.dumps(summ))
+    run_stage(pipeline.s_emulator, ctx, "emulator")
+    g = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]["glider_eq"]
+    assert g["emulator"] and any(t["method"] == "EMULATED" for t in g["tried"])
+    assert all(t["method"] != "Stage 1" for t in g["tried"]) or not g["found"]
 
 
 # ---------------------------------------------------------------------------------------------------------------- report
@@ -840,7 +1070,7 @@ def snapshot(run):
         problems=audit.ledger_problems(run), refit=j("refit", "refit.json"), windows=j("windows", "windows.json"), holdout=j("emulator", "holdout.json"),
         summary1=j("stage1", "summary.json"), summary1b=j("stage1b", "summary.json"), res1=(run / "stage1" / "res.pkl").read_bytes(),
         res1b=(run / "stage1b" / "res.pkl").read_bytes(), ledger1b=read_ledger(run, "stage1b"), ledger1=read_ledger(run, "stage1"),
-        fitted=j("ingest", "priors_fitted.json"), ledger_report=read_ledger(run, "report"))
+        fitted=j("ingest", "priors_fitted.json"), ledger_report=read_ledger(run, "report"), ledger_emulator=read_ledger(run, "emulator"))
 
 
 @pytest.fixture(scope="module")
@@ -879,7 +1109,8 @@ def test_stage1_ran_with_the_tao_fitted_priors_and_one_stratified_batch(ci_runs)
     s = f.summary1
     assert s["n"] == 8 and s["certify"] is False and s["priors"]["wind_speed_bias"]["mean"] == pytest.approx(f.fitted["wind_speed_bias"]["mean"])
     assert s["priors"]["wind_speed_bias"]["sd"] == pytest.approx(f.fitted["wind_speed_bias"]["value"]) and s["priors"]["wind_speed_bias"]["sd"] < 2.0
-    assert s["names"] == stage1.FORCING + ["glider_speed_scale", "usv_vpp_bias", "battery_capacity_scale"] and set(s["summary"]["vehicles"]) == set(CLASSES)
+    assert s["names"] == stage1.FORCING + ["glider_speed_scale", "usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale"]
+    assert set(s["summary"]["vehicles"]) == set(CLASSES)
     assert len(s["summary"]["links"]) == 3
     assert any(i["ref"].endswith("ingest/priors_fitted.json") for i in f.ledger1["inputs"]) and f.ledger1["seeds"] == {"mission": 20230301}
     c = check_of(f.ledger1, "lhs_stratified_batch1")
@@ -892,7 +1123,7 @@ def test_stage1_results_carry_the_platform_antennas_the_classes_and_no_simulator
     # tail masts, the RF whip, the UAS whip
     assert {k: v["antenna_m"] for k, v in res["vehicles"].items()} == {"glider_eq": 0.5, "glider_1n": 0.3, "usv": 2.2, "uas": 0.1}
     assert {k: v["class"] for k, v in res["vehicles"].items()} == CLASSES and all("sim" not in v for v in res["vehicles"].values())
-    assert res["U"].shape == (8, 9) and set(res["X"]) == set(ci_runs.first.summary1["names"])
+    assert res["U"].shape == (8, 10) and set(res["X"]) == set(ci_runs.first.summary1["names"])
     assert res["vehicles"]["uas"]["fail"].keys() >= {"no_sortie_flown", "battery_reserve"} and "station_lost" in res["vehicles"]["glider_eq"]["fail"]
     assert "swept_off_track" in res["vehicles"]["usv"]["fail"]
     assert all(v["lon"].shape == v["lat"].shape and v["lon"].shape[1] == 8 for v in res["vehicles"].values())
@@ -915,16 +1146,23 @@ def test_no_passing_window_means_no_refit_and_stage1b_is_a_copy(ci_runs):
     assert ci_runs.rows.calls[0] == f.windows
     assert set(f.refit) == set(CLASSES)
     for r in f.refit.values():
-        assert r["used"] is False and r["reason"].startswith("no window passed") and r["failed_checks"] == ["mach_max"]
+        assert r["used"] is False and "window passed its stage-3" in r["reason"] and r["failed_checks"] == ["mach_max"]
     assert f.res1b == f.res1 and f.summary1b == f.summary1 and f.ledger1b["notes"] == ["no vehicle was refit: stage 1b is stage 1 (copied, not rerun)"]
     outs = {pathlib.Path(o["path"]).name: o["sha256"] for o in f.ledger1b["outputs"]}
     assert set(outs) == {"res.pkl", "summary.json"} and outs["res.pkl"] == hashlib.sha256(f.res1).hexdigest()
 
 
-def test_the_emulator_has_nothing_to_learn_from_eight_members(ci_runs):
+def test_the_emulator_stage_adds_rows_for_the_run_and_is_not_trained_yet(ci_runs):
+    from cafe.pm import whatif
     f = ci_runs.first
+    assert set(f.holdout) == set(CLASSES)
     for vid, h in f.holdout.items():
-        assert h == dict(trained=False, reason=f"8 members, {f.summary1['summary']['vehicles'][vid]['k_fail']} failures: nothing to learn")
+        assert h["trained"] is False and h["cls"] == CLASSES[vid]
+        assert h["reason"].endswith(f"{whatif.MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage)")
+    df = whatif.read_table(pipeline.DATA / "emulator" / "train.parquet")
+    assert set(df["vehicle"]) == set(CLASSES) and (df["n_members"] == 8).all() and set(df["mission"]) == {"ci_fixture"}
+    assert np.isfinite(df[whatif.BASE]).all().all()
+    assert any("not trained (trained: false)" in n for n in f.ledger_emulator["notes"]) and all(c["ok"] for c in f.ledger_emulator["checks"])
 
 
 def test_the_report_of_the_first_run_traces_to_its_ledgers(ci_runs):

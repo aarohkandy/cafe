@@ -155,7 +155,10 @@ def _correct_with_real(env, St, js, is_):
 
 
 class SurfaceLayer:
-    def __init__(self, cache):
+    """warm_layer / rain_lens: the mission's environment.subgrid switches. Off, the warm layer adds no dT to SST, density or the
+    surface_layer dT_warm and, since the diurnal jet proxy is scaled by that dT, no jet; the rain lens adds no dT or dS."""
+
+    def __init__(self, cache, warm_layer=True, rain_lens=True):
         import gsw
         import xarray as xr
         d = xr.open_zarr(pathlib.Path(cache) / "derived.zarr").load()
@@ -168,7 +171,10 @@ class SurfaceLayer:
         self.ts, self.las, self.los = Axis(d.time_u.values), Axis(d.lat_s.values), Axis(d.lon_s.values)
         self.S = (d.stokes_e.values, d.stokes_n.values)
         self.fit = json.loads(d.attrs.get("stokes_fit_check", "null"))
+        self.warm_layer = bool(warm_layer)
         self.cfg = subgrid.load_config()
+        if not rain_lens:
+            self.cfg = {**self.cfg, "rain_lens": {**self.cfg["rain_lens"], "enabled": False}}
         j = self.cfg["ocean"]["diurnal_jet"]
         self.jet_mid, self.jet_half = 0.5 * (j["u_min"] + j["u_max"]), 0.5 * (j["u_max"] - j["u_min"])
         self.jet_ref = subgrid.assumption("subgrid.diurnal_jet.dT_ref_K")
@@ -176,6 +182,9 @@ class SurfaceLayer:
 
     def _g(self, k, lon, lat, t):
         return interp(self.D[k], [self.t, self.la, self.lo], [t, lat, cv.wrap360(lon)])[0]
+
+    def _dT_warm(self, lon, lat, t):
+        return self._g("dT_warm", lon, lat, t) * (1.0 if self.warm_layer else 0.0)
 
     def coare_at(self, lon, lat, t):
         return dict(ustar=self._g("ustar", lon, lat, t), z0=np.exp(self._g("logz0", lon, lat, t)),
@@ -191,7 +200,7 @@ class SurfaceLayer:
         r = self.coare_at(lon, lat, t)
         return dict(ustar=Tagged(r["ustar"], "COARE 3.5 from WRF + UMWM (modelled)", None, "modelled"),
                     L=Tagged(r["L"], "COARE 3.5 Obukhov length (modelled)", None, "modelled"),
-                    dT_warm=Tagged(self._g("dT_warm", lon, lat, t), "COARE warm layer (Fairall 1996; modelled: WRF SST is frozen)", None, "modelled"))
+                    dT_warm=Tagged(self._dT_warm(lon, lat, t), "COARE warm layer (Fairall 1996; modelled: WRF SST is frozen)", None, "modelled"))
 
     def stokes_surface(self, env, out, lon, lat, t):
         e = interp(self.S[0], [self.ts, self.las, self.los], [t, lat, cv.wrap360(lon)])[0]
@@ -205,7 +214,7 @@ class SurfaceLayer:
                       e * np.abs(v), "modelled")
 
     def _warm(self, lon, lat, z, t):
-        dT, dz = self._g("dT_warm", lon, lat, t), self._g("dz_warm", lon, lat, t)
+        dT, dz = self._dT_warm(lon, lat, t), self._g("dz_warm", lon, lat, t)
         z = np.asarray(z, float)
         return dT * np.clip(1.0 + z / np.maximum(dz, 1e-3), 0.0, 1.0), dT    # linear from dT at 0 to 0 at -dz
 
@@ -232,5 +241,6 @@ class SurfaceLayer:
         return Tagged(v.value + drho, v.source + "; + warm layer and rain lens (TEOS-10 alpha/beta; modelled)", v.uncertainty, v.kind)
 
     def sst_extra(self, env, v, lon, lat, t):
-        dT = self._g("dT_warm", lon, lat, t)
-        return Tagged(v.value + dT, v.source + " + COARE warm layer dT (modelled)", v.uncertainty, "modelled")
+        if not self.warm_layer:
+            return v
+        return Tagged(v.value + self._dT_warm(lon, lat, t), v.source + " + COARE warm layer dT (modelled)", v.uncertainty, "modelled")

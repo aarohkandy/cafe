@@ -334,13 +334,13 @@ def channel_path() -> pathlib.Path:
 
 
 def stored_wall_error() -> float | None:
-    """Smallest relative error of the stored wall-model receipts (flat plate vs ITTC-57, channel vs Dean), None when none is stored.
-    windows.stage3_checks fails every window until this is within PLATE_TOL."""
-    errs = []
-    for f in (slow_path(), channel_path()):
-        if f.exists():
-            errs.append(float(json.loads(f.read_text())["err"]))
-    return min(errs) if errs else None
+    """Largest relative error of the stored wall-model receipts (flat plate vs ITTC-57, channel vs Dean), None unless both are stored.
+    The channel alone cannot clear a window: the plate is the external developing boundary layer a hull sees, so
+    windows.stage3_checks fails every window until both are within PLATE_TOL."""
+    fs = (slow_path(), channel_path())
+    if not all(f.exists() for f in fs):
+        return None
+    return max(float(json.loads(f.read_text())["err"]) for f in fs)
 
 
 def receipts(plate: dict | None = None, chan: dict | None = None) -> list:

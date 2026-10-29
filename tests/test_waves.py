@@ -544,3 +544,22 @@ def test_receipts_fail_when_second_order_coefficient_is_wrong(monkeypatch):
         return ii, jj, -cp, cm
     monkeypatch.setattr(W, "_sd_coeffs", bad)
     assert any("second-order crest" in c for c in failed(run_receipts()))
+
+
+# ---------------------------------------------------------------- the ages are assumptions.yaml entries
+
+def test_the_wind_sea_and_swell_ages_are_read_from_assumptions_yaml(monkeypatch):
+    from cafe.pm.config import assumptions
+    a = assumptions()
+    for k, v in (("waves.swell_age", 1.2), ("waves.wind_sea_age", 2.0)):
+        assert a[k]["value"] == v and a[k]["unit"] == "-" and len(a[k]["why"]) > 40 and len(a[k]["replace_with"]) > 20
+    base = swell(1.5, 10.0, 90.0, 0.02, 6.0)
+    given = W.spectrum_from_params(1.5, 10.0, 90.0, 0.02, 6.0, F, TH, swell_age=1.2, wind_sea_age=2.0)
+    assert np.array_equal(base, given)                                                                                        # the defaults are those values
+    table = {"waves.swell_age": 1.2, "waves.wind_sea_age": 5.0}
+    monkeypatch.setattr(W, "assumption", lambda k: table[k])
+    moved = swell(1.5, 10.0, 90.0, 0.02, 6.0)
+    assert not np.allclose(base, moved)  # a different assumption moves it
+    assert np.array_equal(moved, W.spectrum_from_params(1.5, 10.0, 90.0, 0.02, 6.0, F, TH, swell_age=1.2, wind_sea_age=5.0))
+    table["waves.swell_age"] = 30.0                                                                                           # a huge age: no swell
+    assert not np.allclose(moved, swell(1.5, 10.0, 90.0, 0.02, 6.0))

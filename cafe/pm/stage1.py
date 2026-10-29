@@ -22,6 +22,7 @@ from .stats import intervals, sampling, sensitivity, sequential
 FORCING = ["wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "hs_scale", "tp_bias"]
 ANTITHETIC = ("wind_speed_bias", "current_speed_scale")
 REC_S = 600.0                         # positions kept every 10 min for links, reports and windows
+DT_VEHICLE = 60.0                     # glider and USV step [s]; the ocean SDE's Euler-Maruyama step is the same
 
 
 def platform_kind(name):
@@ -46,11 +47,13 @@ def priors_for(mission, fitted=None):
         names.append("glider_speed_scale")
     if "usv" in cls:
         names.append("usv_vpp_bias")
+    if "uas" in cls:
+        names.append("bulk_stress_scale")          # scales the surface stress u*^2 behind the Mann turbulence (see _uas_forcing)
     names.append("battery_capacity_scale")
     return pri, sampling.to_marginals(pri, names)
 
 
-def _run_glider(v, P, env, M, X, t0, T, drag=1.0):
+def _run_glider(v, P, env, M, X, t0, T, drag=1.0, windage=None):
     task = v["task"]
     mis = dict(mode=task["mode"], dive_depth_m=task.get("dive_depth_m", P.get("mission_defaults", {}).get("dive_depth_m", 500.0)))
     if task["mode"] == "station":
@@ -60,9 +63,9 @@ def _run_glider(v, P, env, M, X, t0, T, drag=1.0):
     d = v["deploy"]
     sim = glider.GliderSim(P, M, env, d["lon"], d["lat"], t0, mis,
                            perturb=dict(speed_scale=X["glider_speed_scale"] * drag ** -0.5, battery_scale=X["battery_capacity_scale"],
-                                        density_bias=np.zeros(M)))
-    h = sim.run(T - t0, dt=60.0)
-    keep = slice(None, None, int(REC_S // 60))
+                                        density_bias=np.zeros(M), **({} if windage is None else dict(windage=windage))))
+    h = sim.run(T - t0, dt=DT_VEHICLE)
+    keep = slice(None, None, int(REC_S // DT_VEHICLE))
     return dict(t=h["t"][keep], lon=h["lon"][keep], lat=h["lat"][keep], depth=h["depth"][keep], surfaced=(h["phase"] == 3)[keep],
                 fail=h["fail"], first=h["first"], sim=sim, antenna_m=P["antenna_height_m"])
 
@@ -72,7 +75,7 @@ def _run_usv(v, P, env, M, X, t0, T, drag=1.0):
     task["waypoints"] = [tuple(p) for p in task.get("waypoints", [])]
     d = v["deploy"]
     sim = usv.USVSim(P, M, env, (d["lon"], d["lat"]), t0, task, perturb=dict(vpp_bias=(1 + X["usv_vpp_bias"]) * drag ** -0.5 - 1))
-    h = sim.run(T - t0, dt=60.0, record_s=REC_S)
+    h = sim.run(T - t0, dt=DT_VEHICLE, record_s=REC_S)
     return dict(t=h["t"], lon=h["lon"], lat=h["lat"], depth=np.zeros_like(h["lon"]), surfaced=np.ones_like(h["lon"], bool),
                 fail=sim.fail, first=sim.first, sim=sim, antenna_m=P["rf_antenna_height_m"])
 
@@ -98,13 +101,17 @@ def _fewest_boxes(args, M):
     return subgrid.turbulence_members(*args, n_boxes=M).value
 
 
-def _uas_forcing(env, mission, origin, ts, P, M, seed, members):
+def _uas_forcing(env, mission, origin, ts, P, M, seed, members, stress_scale=None):
     """Per-sortie Mann turbulence (M, n, 3) and one gust-front event set for the window, from the surface layer at the ship.
-    None where the mission switches them off or the environment has no surface layer (analytic test envs)."""
+    None where the mission switches them off or the environment has no surface layer (analytic test envs).
+    stress_scale (M,): the member's bulk-stress multiplier. sigma_u = 2.5 u* and u*^2 is the stress, so a member's series is
+    scaled by sqrt(stress_scale) (the Obukhov length and the mean wind profile are not recomputed: the wind priors perturb those).
+    The gust-front rate uses theta_e from the ship's T2, Q2 and PSFC (subgrid.theta_e), so the cold-pool rate factor works."""
     sw, sl = mission.get("environment", {}).get("subgrid", {}), getattr(env, "subgrid", None)
     lon, lat = origin
     so = P["sortie"]
     z = so["deck_height_m"] + float(np.mean(so["levels_m"]))
+    amp = 1.0 if stress_scale is None else np.sqrt(np.asarray(stress_scale, float))[:, None, None]
     turbs = [None] * len(ts)
     if sw.get("turbulence") and sl is not None:
         for i, t in enumerate(ts):
@@ -113,7 +120,7 @@ def _uas_forcing(env, mission, origin, ts, P, M, seed, members):
             U = float(np.hypot(w[:, 0], w[:, 1]).mean())                                           # Mann advection speed
             args = (sampling.member_seed(seed, members[0], f"uas/turb/{i}"), M, float(s["ustar"].value[0]), float(s["L"].value[0]), z,
                     max(U, 1.0), so["duration_s"] * so["hard_stop_factor"] + 60.0, uas.DT_ENV)
-            g = _fewest_boxes(args, M)
+            g = _fewest_boxes(args, M) * amp
             wdir = cv.to_deg(-np.asarray(env.u10(np.array([lon]), np.array([lat]), np.array([t])), float).reshape(2))   # wind FROM
             turbs[i] = subgrid.gust_enu(g, wdir)
     gust = None
@@ -122,12 +129,47 @@ def _uas_forcing(env, mission, origin, ts, P, M, seed, members):
         lo, la = np.full(hours.size, lon), np.full(hours.size, lat)
         rain = np.asarray(env._w("rain_mm_h", lo, la, hours), float)
         wto = cv.to_deg(np.asarray(env.u10(lo, la, hours), float))
-        ev = subgrid.gust_fronts(sampling.member_seed(seed, members[0], "uas/gust"), rain, hours, M, wind_to_deg=wto)
+        air = env.air(lo, la, hours)
+        te = subgrid.theta_e(air["T2"].value, air["q2"].value, air["psfc"].value)
+        ev = subgrid.gust_fronts(sampling.member_seed(seed, members[0], "uas/gust"), rain, hours, M, theta_e_K=te, wind_to_deg=wto)
 
         def gust(t):
             g = subgrid.gust_perturbation(ev, np.asarray(t, float))[0].value
             return np.concatenate([g, np.zeros(g.shape[:-1] + (1,))], -1)
     return turbs, gust
+
+
+def _uas_radio(P):
+    """The platform's RF radio as a comms.rf_margin radio dict: the first block of quad_uas.yaml `radio` with a transmit power
+    (rfd900x), its band centre, power and sensitivity, and antenna gains and losses from platforms/radios.yaml's entry of the same
+    name (rfd900x if there is none)."""
+    name = next(k for k, v in P["radio"].items() if isinstance(v, dict) and "tx_power_dbm" in v)
+    r = P["radio"][name]
+    base = comms._yaml("radios.yaml")["radios"]
+    return dict(base.get(name, base["rfd900x"]), center_mhz=float(np.mean(r["freq_mhz"])), tx_dbm=r["tx_power_dbm"], rx_sens_dbm=r["rx_sensitivity_dbm"])
+
+
+def _uas_links(env, mission, origin, ts, P, M):
+    """One `link(t, pos_rel (M, 3)) -> lost (M,)` hook per sortie for uas.fly_sortie: the UAS-to-ship RF budget
+    (comms.rf_margin: the platform's radio, the mission's ship antenna height, the UAS antenna at deck + altitude + its height above
+    the body, each member's Hs at the ship from `env`), lost where the margin is below 0 dB (or beyond the radio horizon). Hs is read
+    on a 30 s grid per sortie, once, and interpolated."""
+    so, ra = P["sortie"], P["radio"]
+    radio = _uas_radio(P)
+    hr = float(mission["ship"].get("antenna_height_m", ra["ship_antenna_height_m"]))
+    out = []
+    for t0 in ts:
+        tg = t0 + np.arange(0.0, so["duration_s"] * so["hard_stop_factor"] + 61.0, 30.0)
+        full = lambda v, n=tg.size: np.full((M, n), v)
+        hs = np.nan_to_num(np.asarray(env.waves(full(origin[0]), full(origin[1]), np.broadcast_to(tg, (M, tg.size)))["Hs"].value, float))
+
+        def link(t, rel, tg=tg, hs=hs):
+            j = int(np.clip(np.searchsorted(tg, t) - 1, 0, tg.size - 2))
+            w = float(np.clip((t - tg[j]) / (tg[j + 1] - tg[j]), 0.0, 1.0))
+            ht = so["deck_height_m"] + rel[:, 2] + ra["uas_antenna_height_above_body_m"]
+            return comms.rf_margin(np.hypot(rel[:, 0], rel[:, 1]), ht, hr, (1 - w) * hs[:, j] + w * hs[:, j + 1], radio) < 0.0
+        out.append(link)
+    return out
 
 
 def _run_uas(v, P, env, M, X, t0, T, mission, seed, members, drag=1.0):
@@ -141,10 +183,12 @@ def _run_uas(v, P, env, M, X, t0, T, mission, seed, members, drag=1.0):
     rename = {"max_mean_wind_ms": "max_mean_wind_ms", "no_gust_front_within_min": "gust_lookahead_min"}       # mission key -> platform key
     P["launch_rule"].update({rename[a]: float(x) for a, x in lr.items() if a in rename})
     ts = launch_times(v["sorties"], origin[0], t0, T, so["duration_s"] * so["hard_stop_factor"])
-    turbs, gust = _uas_forcing(env, mission, origin, ts, P, M, seed, members)
+    turbs, gust = _uas_forcing(env, mission, origin, ts, P, M, seed, members, X.get("bulk_stress_scale"))
+    links = _uas_links(env, mission, origin, ts, P, M)
     still = lambda t: np.zeros(2)
     sc = dict(battery=X["battery_capacity_scale"], drag=drag * np.ones(M))
-    sorties = [uas.fly_sortie(env, still, float(t), M=M, origin=origin, plat=P, turb=tb, gust=gust, scale=sc) for t, tb in zip(ts, turbs, strict=True)]
+    sorties = [uas.fly_sortie(env, still, float(t), M=M, origin=origin, plat=P, turb=tb, gust=gust, scale=sc, link=lk)
+               for t, tb, lk in zip(ts, turbs, links, strict=True)]
     t = np.arange(t0, T + 1, REC_S)
     east, north, alt = (np.zeros((len(t), M)) for _ in range(3))
     air = np.zeros((len(t), M), bool)
@@ -167,7 +211,8 @@ def _run_uas(v, P, env, M, X, t0, T, mission, seed, members, drag=1.0):
     fail["no_sortie_flown"] = n_flown == 0                                         # every launch scrubbed: no flux profiles at all
     first["no_sortie_flown"] = np.where(n_flown == 0, T, np.nan)
     return dict(t=t, lon=lon, lat=lat, alt=alt + so["deck_height_m"], depth=np.zeros_like(lon), airborne=air, surfaced=np.ones_like(air),
-                fail=fail, first=first, antenna_m=P["radio"]["uas_antenna_height_above_body_m"], scrubbed=np.sum([s["scrubbed"] for s in sorties], 0) if sorties else np.zeros(M, int),
+                fail=fail, first=first, antenna_m=P["radio"]["uas_antenna_height_above_body_m"],
+                scrubbed=np.sum([s["scrubbed"] for s in sorties], 0) if sorties else np.zeros(M, int),
                 sorties=[dict(t_launch=s["t_launch"], scrubbed=s["scrubbed"], wind_ms=s["launch"]["wind_ms"], energy_wh=s["energy_wh"],
                               soc_end=s["soc_end"], max_tilt_deg=s["max_tilt_deg"]) for s in sorties])
 
@@ -188,8 +233,9 @@ def run_batch(mission, env, members, seed, pri, marg, scales=None):
     refit multipliers per vehicle id (stage 1b)."""
     M = len(members)
     U, X = sampling.lhs(M, marg, np.random.SeedSequence([seed, members[0]]), antithetic=tuple(a for a in ANTITHETIC if a in marg))
-    penv = PerturbedEnv(env, {k: X[k] for k in FORCING if k in X}, members, seed, pri)
     t0, T = utc(mission["window"]["start"]).timestamp(), utc(mission["window"]["end"]).timestamp()
+    sde = dict(t0=t0, t1=T, dt=DT_VEHICLE) if subgrid.switch(mission.get("environment", {}), "ocean_sde") else None
+    penv = PerturbedEnv(env, {k: X[k] for k in FORCING if k in X}, members, seed, pri, sde=sde)
     cls = _classes(mission)
     out = {}
     for v in mission["vehicles"]:
@@ -197,7 +243,8 @@ def run_batch(mission, env, members, seed, pri, marg, scales=None):
         P = load_platform(v["platform"])
         if cls[v["id"]] == "glider":
             P = glider.load_platform(v["platform"])
-            out[v["id"]] = _run_glider(v, P, penv, M, X, utc(v["deploy"]["time"]).timestamp(), T, refit_drag(scales, v["id"], seed, members))
+            out[v["id"]] = _run_glider(v, P, penv, M, X, utc(v["deploy"]["time"]).timestamp(), T, refit_drag(scales, v["id"], seed, members),
+                                         windage=subgrid.windage_fraction(seed, members))
         elif cls[v["id"]] == "usv":
             P = usv.load_platform(v["platform"])
             out[v["id"]] = _run_usv(v, P, penv, M, X, utc(v["deploy"]["time"]).timestamp(), T, refit_drag(scales, v["id"], seed, members))

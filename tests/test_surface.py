@@ -207,3 +207,36 @@ def test_stokes_drift_is_aligned_with_the_wave_direction(ci_full):
     assert np.abs(diff).max() < 3.0                                                                # built on dwd; the correction turns it < 1 deg
     swapped = cv.to_deg(w["stokes0"].value[..., ::-1])                                             # east and north exchanged would not be aligned
     assert np.abs((swapped - w["dir_to"].value + 180.0) % 360.0 - 180.0).min() > 20.0
+
+
+# ------------------------------------------------------------------------------------------------------------ mission switches
+
+def switched(ci_env, ci_full, **kw):
+    return GriddedEnv(ci_env.cache, env_sigmas(), ocean=ci_full.ocean, subgrid=S.SurfaceLayer(ci_env.cache, **kw))
+
+
+def test_warm_layer_off_removes_the_warm_layer_from_sst_density_and_surface_layer_and_the_jet_with_it(ci_env, ci_full):
+    off = switched(ci_env, ci_full, warm_layer=False)
+    lon, lat = np.array([194.0, 194.5]), np.array([-1.0, -1.2])                                           # away from the rain in the north-east corner
+    t = ci_full.tw.x[DAY]
+    assert ci_full.air(lon, lat, t)["dT_warm"].value.min() > 0.1                                          # the afternoon warm layer exists with the switch on
+    assert np.all(off.air(lon, lat, t)["dT_warm"].value == 0.0)
+    s_on, s_off = ci_full.sst(lon, lat, t), off.sst(lon, lat, t)
+    assert np.allclose(s_on.value - s_off.value, ci_full.air(lon, lat, t)["dT_warm"].value) and s_off.kind == "data" and "warm layer" not in s_off.source
+    for z in (0.0, -2.0):
+        zz = np.full(2, z)
+        assert np.all(off.density(lon, lat, zz, t).value == off.ocean.density(lon, lat, zz, t).value)      # no lens here either: it did not rain there
+        assert np.abs(ci_full.density(lon, lat, zz, t).value - ci_full.ocean.density(lon, lat, zz, t).value).max() > 0
+    assert np.all(off.current(lon, lat, np.zeros(2), t).value == off.ocean.current(lon, lat, np.zeros(2), t).value)       # no jet without the warm layer
+    assert off.current(lon, lat, np.zeros(2), t).kind == off.ocean.current(lon, lat, np.zeros(2), t).kind
+
+
+def test_rain_lens_off_removes_the_lens_and_leaves_the_warm_layer(ci_env, ci_full):
+    off = switched(ci_env, ci_full, rain_lens=False)
+    lon, lat, zz = np.array([196.5]), np.array([1.5]), np.zeros(1)                                          # in the rain
+    rho0 = ci_full.ocean.density(lon, lat, zz, T_RAIN).value
+    warm = -rho0 * ci_full.subgrid.alpha * ci_full.subgrid._warm(lon, lat, zz, T_RAIN)[0]
+    assert np.allclose(off.density(lon, lat, zz, T_RAIN).value - rho0, warm, atol=1e-9)                     # only the warm layer
+    assert abs((ci_full.density(lon, lat, zz, T_RAIN).value - rho0 - warm)[0]) > 0.2                        # the lens is there with the switch on
+    assert np.array_equal(off.sst(lon, lat, T_RAIN).value, ci_full.sst(lon, lat, T_RAIN).value)
+    assert off.subgrid.warm_layer and not off.subgrid.cfg["rain_lens"]["enabled"] and ci_full.subgrid.cfg["rain_lens"]["enabled"]

@@ -433,6 +433,10 @@ def test_cli_plumbing(monkeypatch, tmp_path, capsys):
     assert "delta_te" in capsys.readouterr().out
     _stub_fast(monkeypatch)
     cr.OUT.clear()
+    assert lbm.main(["receipts", "--backend", "jax"]) == 1                                  # sphere rows are required and two are not stored
+    for tag in ("100", "1000"):
+        lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=1.0, ref=1.0, seconds=1.0, shape=[1], d=8)))
+    cr.OUT.clear()
     assert lbm.main(["receipts", "--backend", "jax"]) == 0
     _stub_fast(monkeypatch, taylor_green=dict(ratio=2.0))
     cr.OUT.clear()

@@ -198,7 +198,8 @@ def test_robustness_levels(tmp_path, data):
     b.mkdir()
     pm_run.make_run(b)                                              # the refit changed glider_eq's verdict
     r = factors(b)["robustness"]
-    assert r["evidence_level"] == 2 and "verdicts changed by the refit: ['glider_eq']" in r["missing"][0]
+    miss = r["missing"][0]                                          # which other verdicts change follows the fixture's random stream
+    assert r["evidence_level"] == 2 and miss.startswith("verdicts changed by the refit: [") and "'glider_eq'" in miss
     (b / "refit" / "refit.json").write_text("{}")
     edit(b / "stage1b" / "summary.json", lambda d: [e["sensitivity"].update(param=None) for e in d["summary"]["vehicles"].values()])
     edit(b / "stage1b" / "summary.json", lambda d: [e["sensitivity"].update(param=None) for e in d["summary"]["links"].values()])

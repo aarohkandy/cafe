@@ -224,7 +224,8 @@ def _temp_c(P: dict, sst_K: Arr, depth: Arr) -> Arr:
 class GliderSim:
     """M-member glider ensemble.  mission: dict(mode='station'|'section'|'drift', station=(lon,lat), waypoints=[(lon,lat)..],
     heading_to=deg, dive_depth_m, station_tol_m, lost_hours, wp_radius_m, unreach_hours, vbd_delta_cc); missing keys come from
-    the platform's mission_defaults.  perturb: arrays of shape (M,): speed_scale, battery_scale, density_bias [kg/m^3]."""
+    the platform's mission_defaults.  perturb: arrays of shape (M,): speed_scale, battery_scale, density_bias [kg/m^3], windage (fraction of the 10 m wind the
+    surfaced glider drifts with; default the platform's)."""
 
     def __init__(
         self,
@@ -258,6 +259,7 @@ class GliderSim:
         pt = perturb or {}
         one = lambda k: np.broadcast_to(np.asarray(pt.get(k, 1.0 if k != "density_bias" else 0.0), float), (M,)).copy()
         self.scale, self.bscale, self.rbias = one("speed_scale"), one("battery_scale"), one("density_bias")
+        self.windage = np.broadcast_to(np.asarray(pt.get("windage", params["windage"]), float), (M,)).copy()
         self.lon = np.broadcast_to(np.asarray(start_lon, float), (M,)).copy()
         self.lat = np.broadcast_to(np.asarray(start_lat, float), (M,)).copy()
         self.depth = np.zeros(M)
@@ -386,7 +388,7 @@ class GliderSim:
         fly = d0 | a0
         cur = env.current(self.lon, self.lat, -self.depth, self.t).value
         if s0.any():
-            cur = np.where(s0[:, None], cur + P["windage"] * env.wind(self.lon, self.lat, 10.0, self.t).value, cur)
+            cur = np.where(s0[:, None], cur + self.windage[:, None] * env.wind(self.lon, self.lat, 10.0, self.t).value, cur)
         dr_nom = np.zeros((self.M, 2))
         move = cur * dt
         if fly.any():

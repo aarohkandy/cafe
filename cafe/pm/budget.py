@@ -19,7 +19,8 @@ N_MIN = {"ci": 8, "quick": 32, "4h": 73, "overnight": 73}            # 73: small
 BATCH = {"ci": 16, "quick": 32, "4h": 64, "overnight": 128}         # cost is per environment call, not per member: big batches
 WINDOWS = {"ci": 1, "quick": 1, "4h": 3, "overnight": 3}             # worst windows per vehicle that get L3 LES + FEA
 SITL = {"ci": 0, "quick": 0, "4h": 4, "overnight": 8}                # ArduCopter SITL members (serial, run as parallel -I instances)
-SHARE = dict(stage1=0.45, stage3=0.30, stage1b=0.15)                 # stage 1b is a copy (free) when no window passes
+SHARE = dict(stage1=0.45, stage3=0.30, stage1b=0.15, emulator=0.05)   # stage 1b is a copy (free) when no window passes: its share goes to the emulator
+EMULATOR_VARIANTS = {"ci": 2, "quick": 6, "4h": 24, "overnight": 48}   # most mission variants (a batch of every vehicle each) the emulator stage adds per run
 FALLBACK_COST = {"glider": (8.0, 0.1), "usv": (11.0, 0.1), "uas": (20.0, 0.3)}   # (s per batch, s per member) per mission day without bench
 GPU_MEM_GUARD = 0.85
 
@@ -90,6 +91,19 @@ def plan(budget, gpus, mission, thr=None, gpu_mem_gb=None, vehicle_classes=None)
                 sitl_members=SITL[budget], member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1], source=s) for k, (c, s) in costs.items()},
                 les=les, refit_iterations=0 if budget == "ci" else 2, notes=notes,
                 certify_possible=n_max >= 73, shares=SHARE)
+
+
+def emulator_share_s(plan, stage1b_free=False):
+    """Seconds the emulator stage may spend: its own share of the budget, plus stage 1b's when no vehicle was refit (the rerun was a copy)."""
+    return plan["budget_s"] * (plan["shares"]["emulator"] + (plan["shares"]["stage1b"] if stage1b_free else 0.0))
+
+
+def batch_cost_s(plan, vids=None, days=None):
+    """Seconds one batch of plan["batch"] members costs for the named vehicles (default: all) over `days` (default: the mission length),
+    from the per-vehicle costs in the plan: what stage 1 charges per environment call plus per member."""
+    mc = plan["member_cost"]
+    d = plan["days"] if days is None else days
+    return sum(mc[v]["s_per_batch_day"] + plan["batch"] * mc[v]["s_per_member_day"] for v in (mc if vids is None else vids)) * d
 
 
 def memory_guard(cells, bytes_per_cell, gpu_mem_gb):

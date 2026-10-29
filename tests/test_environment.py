@@ -366,3 +366,22 @@ def test_sst_is_the_frozen_wrf_field(grid):
 def test_ocean_calls_without_an_ocean_say_so(grid):
     with pytest.raises(OutsideData, match="no ocean source loaded"):
         grid.current(195.0, 0.0, -10.0, grid.tw.x[0])
+
+
+def test_3d_winds_go_through_the_grid_to_earth_rotation_like_u10(grid, monkeypatch):
+    """U3/V3 are grid-relative like U10. Store the analytic earth wind as the components of a grid rotated alpha CCW from east: the
+    wind above the first mass level must come back earth-relative; without the rotation it would be turned by alpha."""
+    t = E.to_seconds("2023-03-02T01:30:00Z")
+    z = np.array([60.0, 100.0, 300.0])
+    lon, lat = np.full(3, 195.1), np.full(3, 0.3)
+    want = grid.wind(lon, lat, z, t).value
+    a = np.radians(30.0)
+    ue, ve = grid.w3["U"].copy(), grid.w3["V"].copy()
+    monkeypatch.setitem(grid.w3, "U", ue * np.cos(a) + ve * np.sin(a))
+    monkeypatch.setitem(grid.w3, "V", -ue * np.sin(a) + ve * np.cos(a))
+    for name, v in (("COSALPHA", np.cos(a)), ("SINALPHA", np.sin(a))):
+        monkeypatch.setitem(grid.Wstatic, name, np.full(grid.Wstatic[name].shape, v))
+    got = grid.wind(lon, lat, z, t)
+    assert "WRF 3-D U/V" in got.source and np.allclose(got.value, want, atol=1e-9)
+    monkeypatch.setattr(E.cv, "rotate_grid_to_earth", lambda u, v, c, s: (u, v))                                          # the old behaviour
+    assert not np.allclose(grid.wind(lon, lat, z, t).value, want, atol=1e-3)

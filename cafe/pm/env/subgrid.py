@@ -2,8 +2,8 @@
 read from a file, so every public output is a `Tagged(..., kind="modelled")` and is reproducible from integer seeds.
 
 Pieces: Mann turbulence boxes sampled at a point (`turbulence`, `turbulence_members`), cold-pool gust fronts tied to rain
-(`gust_fronts`, `gust_perturbation`), an Ito SDE for unresolved ocean eddy diffusion (`ocean_sde_step`), windage and the
-diurnal-jet proxy for surface vehicles (`windage`, `diurnal_jet`), and rain fresh lenses (`rain_lens`).
+(`gust_fronts`, `gust_perturbation`), an Ito SDE for unresolved ocean eddy diffusion (`ocean_sde_step`, `sde_diffusivity`), windage and the
+diurnal-jet proxy for surface vehicles (`windage_fraction`, `diurnal_jet`), and rain fresh lenses (`rain_lens`).
 
 Coefficients and citations: config/subgrid.json (sourced) and config/assumptions.yaml (unsourced, each with what replaces it).
 `config/subgrid.json["calibration"]` is what Stage-3 LES overwrites; `load_config()` returns it and every Tagged `source`
@@ -295,27 +295,48 @@ def okubo_K(scale_m):
     return o["a_cm2_s"] * (np.asarray(scale_m, float) * 100.0) ** o["p"] * 1e-4
 
 
-def ocean_sde_step(x, K, gradK, dt: float, rng: np.random.Generator, u=None):
+def ocean_sde_step(x, K, gradK, dt: float, rng: np.random.Generator | None, u=None, xi=None):
     """One Euler-Maruyama step of the Ito SDE  dx = (u + dK/dx) dt + sqrt(2K) dW  for a passive tracer in inhomogeneous
     diffusion (OceanParcels AdvectionDiffusionEM; the dK/dx term is what keeps a well-mixed tracer well mixed, Thomson 1987).
 
     x (..., 2) position [m]; K [m2/s] shape (...,) (isotropic) or (..., 2); gradK (..., 2) = (dKx/dx, dKy/dy) [m/s]; u optional
-    advecting velocity (..., 2) [m/s]. Returns the new x (plain array: positions are not an environment value)."""
+    advecting velocity (..., 2) [m/s]. `xi` (shape of x) are standard normals drawn by the caller (per-member streams, common
+    random numbers); without them they come from `rng`. Returns the new x (plain array: positions are not an environment value)."""
     x = np.asarray(x, float)
     K = np.asarray(K, float)
     K = K[..., None] if K.ndim == x.ndim - 1 else K
     drift = np.asarray(gradK, float) if u is None else np.asarray(gradK, float) + np.asarray(u, float)
-    return x + drift * dt + np.sqrt(2 * K * dt) * rng.standard_normal(x.shape)
+    if xi is None and rng is None:
+        raise ValueError("ocean_sde_step needs either rng or the noise xi")
+    noise = np.asarray(xi, float) if xi is not None else rng.standard_normal(x.shape)  # type: ignore[union-attr]
+    return x + drift * dt + np.sqrt(2 * K * dt) * noise
 
 
-def windage(seed: int, wind10, cfg: dict | None = None) -> Tagged:
-    """Leeway velocity [m/s] of a surface vehicle: fraction * 10 m wind vector. wind10 (M, ..., 2) east/north; the fraction is
-    drawn per member (axis 0) uniformly in [0.018, 0.023] (BRIEF 2.2; Breivik & Allen 2008, Rohrs et al. 2012 for the range)."""
-    cfg = cfg or load_config()
-    w = np.asarray(wind10, float)
-    a = cfg["ocean"]["windage"]
-    frac = np.random.default_rng(seed).uniform(a["fraction_min"], a["fraction_max"], (w.shape[0],) + (1,) * (w.ndim - 1))
-    return _tag(frac * w, "windage fraction * U10", cfg, 0.0015 * w)
+R_EARTH = 6.371e6
+
+
+def sde_diffusivity(lat):
+    """(K [m2/s], (dK/dx, dK/dy) [m/s]) of the ocean SDE at latitude `lat`: Okubo's K at the local cell size
+    l = cell R sqrt(cos lat) (assumptions.yaml subgrid.ocean_sde.cell_deg). K depends on latitude only, so dK/dx = 0 and
+    dK/dy = -p K tan(lat) / (2 R): the exact derivative of K(l(lat)), not a finite difference."""
+    phi = np.radians(np.asarray(lat, float))
+    K = okubo_K(np.radians(assumption("subgrid.ocean_sde.cell_deg")) * R_EARTH * np.sqrt(np.cos(phi)))
+    dKdy = -0.5 * load_config()["ocean"]["okubo"]["p"] * K * np.tan(phi) / R_EARTH
+    return K, np.stack([np.zeros_like(K), dKdy], -1)
+
+
+def switch(environment: dict, name: str) -> bool:
+    """Mission `environment.subgrid.<name>`. warm_layer, rain_lens and ocean_sde are on unless the mission says false (the brief
+    enables the warm layer by default); turbulence and gust_fronts are read as before, by stage1, and are off unless true."""
+    return bool(environment.get("subgrid", {}).get(name, True))
+
+
+def windage_fraction(base_seed: int, members, cfg: dict | None = None) -> np.ndarray:
+    """Leeway fraction of U10 per member, uniform in [0.018, 0.023] (BRIEF 2.2; Breivik & Allen 2008, Rohrs et al. 2012 for the
+    range). One stream per member (`member_rng`, stream "windage"), so a member has the same fraction in any batch."""
+    from ..stats.sampling import member_rng
+    a = (cfg or load_config())["ocean"]["windage"]
+    return np.array([member_rng(base_seed, int(m), "windage").uniform(a["fraction_min"], a["fraction_max"]) for m in members])
 
 
 def diurnal_jet(seed: int, dT_warm, wind10, cfg: dict | None = None) -> Tagged:
@@ -575,25 +596,9 @@ def _surface_receipts() -> None:
     g = "sub-grid"
     # windage & jet
     w10 = np.tile([[6.0, 8.0]], (500, 1))
-    wd = windage(4, w10).value
-    R.bracket(
-        g,
-        "windage / U10 (min over 500 members)",
-        float((np.hypot(wd[:, 0], wd[:, 1]) / 10).min()),
-        0.018,
-        0.023,
-        "-",
-        "BRIEF 2.2",
-    )
-    R.bracket(
-        g,
-        "windage / U10 (max over 500 members)",
-        float((np.hypot(wd[:, 0], wd[:, 1]) / 10).max()),
-        0.018,
-        0.023,
-        "-",
-        "BRIEF 2.2",
-    )
+    frac = windage_fraction(4, range(500))
+    R.bracket(g, "windage / U10 (min over 500 members)", float(frac.min()), 0.018, 0.023, "-", "BRIEF 2.2")
+    R.bracket(g, "windage / U10 (max over 500 members)", float(frac.max()), 0.018, 0.023, "-", "BRIEF 2.2")
     jet = diurnal_jet(5, np.full(500, 3.0), w10).value
     js = np.hypot(jet[:, 0], jet[:, 1])
     R.bracket(g, "diurnal jet at dT = 3 K, min", float(js.min()), 0.1, 0.3, "m/s", "BRIEF 2.2 (TEPEX-C hypothesis)")

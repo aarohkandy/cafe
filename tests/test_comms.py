@@ -2,6 +2,7 @@ import copy
 
 import numpy as np
 import pytest
+import yaml
 from hypothesis import given, settings, strategies as st
 
 from cafe.pm.physics import comms as c
@@ -343,3 +344,29 @@ def test_receipt_fails_on_iridium_errors(monkeypatch):
     one_shot = lambda n, rng, m, **k: (rng.random(m) < 0.95, real_sess(n, rng, m)[1])      # no retries
     monkeypatch.setattr(c, "iridium_session", one_shot)
     assert any("Iridium SBD success" in k for k in _failed(monkeypatch))
+
+
+# ---------------------------------------------------------------- assumed radio numbers are marked leaf by leaf
+
+def test_radios_yaml_marks_every_assumed_number_and_the_models_still_read_bare_numbers():
+    import pathlib
+    raw = yaml.safe_load((pathlib.Path(c.PLATFORMS) / "radios.yaml").read_text())
+    for r in ("rfd900x", "rfd900x_fast", "xbee_pro_24"):
+        for k in ("gt_dbi", "gr_dbi", "misc_loss_db"):
+            leaf = raw["radios"][r][k]
+            assert leaf["assumed"] is True and len(leaf["why"]) > 30 and "value" in leaf and "unit" in leaf, (r, k)
+    for svc in ("sbd", "rudics"):
+        for k in ("session_setup_median_s", "session_setup_sigma", "p_success", "max_attempts", "fail_cost_s"):
+            assert raw["iridium"][svc][k]["assumed"] is True and raw["iridium"][svc][k]["why"], (svc, k)
+    plain = c._yaml("radios.yaml")
+    assert plain["radios"]["rfd900x"]["gt_dbi"] == 2.0 and plain["radios"]["rfd900x"]["misc_loss_db"] == 3.0 and plain["iridium"]["sbd"]["max_attempts"] == 3
+    assert plain["radios"]["rfd900x"]["center_mhz"] == 915.0 and isinstance(plain["iridium"]["sbd"]["max_bytes"], dict)             # sourced numbers untouched
+    assert c._yaml("modems.yaml") == yaml.safe_load((pathlib.Path(c.PLATFORMS) / "modems.yaml").read_text())
+    assert np.isfinite(c.rf_margin(5000.0, 10.0, 15.0, 1.0, "rfd900x"))
+
+
+def test_the_credibility_report_counts_the_assumed_radio_numbers():
+    from cafe.pm import credibility
+    items = credibility.assumed_inputs()
+    ids = {i["id"] for i in items if i["kind"] == "assumed" and i["file"] == "platforms/radios.yaml"}
+    assert len(ids) == 19 and "radios.yaml:radios.rfd900x.misc_loss_db" in ids and "radios.yaml:iridium.sbd.p_success" in ids

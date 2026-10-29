@@ -33,7 +33,7 @@ params:
   bytes_per_dive: {value: 50000.0,    unit: B,        assumed: true, why: "data + engineering files sent per surfacing; depends on sampling and payload. The lab's telemetry plan replaces it"}
   comms_W:       {value: 3.5,         unit: W,        assumed: true, why: "Iridium modem + GPS while on the surface; a typical 9522-class transceiver draws a few W when transmitting"}
   gps_s:         {value: 120.0,       unit: s,        assumed: true, why: "GPS acquisition + Iridium registration before the file transfer"}
-  windage:       {value: 0.01,        unit: "-",      assumed: true, why: "surface drift = surface current + windage * 10 m wind. A surfaced glider rides low (tail antenna only); 1 % is the order used for low-windage drifters"}
+  windage:       {value: 0.01,        unit: "-",      assumed: true, why: "surface drift = surface current + windage * 10 m wind. A surfaced glider rides low (tail antenna only); 1 % is the order used for low-windage drifters. Stage 1 does not use this value: it draws the brief's 1.8-2.3 % per member (subgrid.windage_fraction); this is the default of an unperturbed GliderSim"}
   antenna_height_m: {value: 0.5,      unit: m,        assumed: true, why: "height of the Iridium/GPS antenna tip above the water when surfaced (tail mast); needed by the RF link model; the lab's CAD replaces it"}
   acoustic_modem: {value: benthos_atm960, unit: "-",  source: "platforms/modems.yaml (Teledyne Benthos ATM-960 series); BRIEF 2.8 asks for a Benthos ATM-9xx default"}
   seafloor_margin_m: {value: 50.0,    unit: m,        assumed: true, why: "pilot stand-off between the dive depth and the charted bottom; Seaglider also has a bottom-detect altimeter and a max-depth abort that this model does not simulate"}

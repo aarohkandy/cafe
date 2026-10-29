@@ -94,11 +94,26 @@ dtmb5415.u_nu_rel:
   unit: "-"
   why: Tank water assumed fresh at 20 C (998.2 kg/m3, 1.004e-6 m2/s); +-1 C changes nu by ~2.5 %, C_F by ~0.6 %.
   replace_with: The measured tank water temperature.
+waves.wind_sea_age:
+  value: 2.0
+  unit: "-"
+  why: U10/c_p of the short wind-sea component of the parametric spectrum (waves.spectrum_from_params), a developing sea; mid-range of Donelan, Hamilton & Hui 1985's 0.83 to 5. UMWM writes only integrated parameters, so the age of the short component is not in the files. It sets how much of the mean-square slope sits at which frequency, hence the Stokes surface drift of the fitted spectrum before the real-spectrum correction.
+  replace_with: The wind-sea age fitted to the 6-hourly UMWM restart spectra (the Stokes correction in surface.py already compares against them), or a directional wave buoy.
+waves.swell_age:
+  value: 1.2
+  unit: "-"
+  why: c_p/U10 above which the primary peak is treated as swell (JONSWAP shape) instead of DHH wind sea; a fully developed sea has U10/c_p = 0.83 (Pierson and Moskowitz 1964), i.e. c_p/U10 = 1.2, so a peak older than a fully developed sea is called swell. The cut is a convention, not a measured value.
+  replace_with: A swell/wind-sea partition of the real restart spectra (spectral partitioning), or the buoy-observed partition.
+subgrid.ocean_sde.cell_deg:
+  value: 0.08
+  unit: deg
+  why: Size of the unresolved eddies the ocean SDE stands for, taken as the HYCOM GLBy0.08 grid spacing (0.08 deg, about 8.9 km); Okubo's K is evaluated at the local cell size l = 0.08 deg R sqrt(cos lat) (geometric mean of the cell's width and height). It gives K about 7 m2/s.
+  replace_with: The scale of a drifter-pair or dye dispersion fit in the mission box, or the spacing of the store actually in use.
 env.sigma.t2_k:
   value: 1.0
   unit: K
-  why: 1-sigma error of WRF 2 m air temperature over the tropical ocean; the TAO comparison (cafe.pm.env.tao) overwrites it when the mission window has buoy data.
-  replace_with: TAO/TRITON AIRT residual against WRF T2 over the mission window.
+  why: 1-sigma error of WRF 2 m air temperature over the tropical ocean. The pipeline's ingest stage (pipeline._tao) replaces it with the RMSE of WRF T2 against the TAO/TRITON AIRT of the moorings in the box (ingest/env_sigmas_fitted.json) when any mooring reports AIRT in the window; this value stands only without such moorings.
+  replace_with: TAO/TRITON AIRT residual against WRF T2 over the mission window (done by the ingest stage whenever the data exist).
 env.sigma.q2_frac:
   value: 0.10
   unit: "-"
@@ -127,8 +142,8 @@ env.sigma.wave_dir_deg:
 env.sigma.sst_k:
   value: 0.5
   unit: K
-  why: WRF SST is frozen at 2023-03-01 (SST_UPDATE=0); 0.5 K is the order of 6-day SST change in the warm pool.
-  replace_with: TAO SST residual (cafe.pm.env.tao).
+  why: WRF SST is frozen at 2023-03-01 (SST_UPDATE=0); 0.5 K is the order of 6-day SST change in the warm pool. The pipeline's ingest stage (pipeline._tao) replaces it with the RMSE of WRF SST against the TAO/TRITON SST of the moorings in the box (ingest/env_sigmas_fitted.json) when any mooring reports SST in the window; this value stands only without such moorings.
+  replace_with: TAO SST residual (done by the ingest stage whenever the data exist).
 bathy.gebco_rel_sigma:
   value: 0.05
   unit: "-"
@@ -290,3 +305,23 @@ stage3.nu_lat_floor:
   unit: "lattice units"
   why: "Smallest lattice viscosity the float32 BGK/regularized kernel survives on coarse grids (tau - 1/2 = 3e-4; the throughput benchmark kernel uses the same); below it the CI quad window went NaN (nu_lat 3e-6). A window that needed the floor is reported failed with the reason."
   replace_with: "A finer dx (nu_lat grows as 1/dx), or a collision operator that is stable at tau -> 1/2 (entropic, cumulant)."
+reach.horizon_h:
+  value: 24.0
+  unit: h
+  why: "Time budget of the report's reach map (the fastest-route time to each cell, BRIEF 2.9); a day is what a lab plans a recovery or re-task around."
+  replace_with: "The recovery or re-tasking lead time the lab states for the mission."
+reach.speed_ms.glider:
+  value: 0.23
+  unit: m/s
+  why: "Through-water horizontal speed of a glider for the reach map. The platform files carry no single cruise speed; the Seaglider file's pitch and VBD notes give ~0.23 m/s (Eriksen 2001 typical 0.25 m/s at a 1:3 glide)."
+  replace_with: "The Stage-1 glider horizontal speed through water (glider.GliderSim) or the lab's flight table."
+reach.speed_ms.usv:
+  value: 1.4
+  unit: m/s
+  why: "Typical wing-sail USV speed for the reach map (Mazza, Zhang, Chiodi, Chen 2026 Part 1 as quoted in BRIEF 2.4: about 1.4 m/s); the real speed depends on the wind, which the map holds fixed."
+  replace_with: "The VPP speed at the forecast wind (usv.USVSim polar) along the track."
+reach.fluid_allowance_ms:
+  value: 1.0
+  unit: m/s
+  why: "The reach grid spans (speed + this) x horizon so a current of this size can carry a vehicle across it; currents above it are cut off at the grid edge."
+  replace_with: "The largest surface current in the box from the ocean source."

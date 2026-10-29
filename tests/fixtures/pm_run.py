@@ -121,8 +121,30 @@ def refit_rows(rows):
     return out                                                       # usv has stage-3 rows but no refit entry
 
 
+def flip_rows():
+    """What pipeline.s_emulator writes to emulator/flip.json for the two non-GO vehicles of this run: the quadrotor's flip is answered by the
+    emulator, the USV's by Stage 1 (no emulator is trained for it)."""
+    tried = [dict(change="launch the sorties 6 h later", mod=dict(shift_h=6.0), cost=1.0, method="EMULATED", reason="", p_fail=0.04, lo=0.01, hi=0.09,
+                  verdict="GO", distance=0.8, threshold=1.9),
+             dict(change="launch the sorties 6 h earlier", mod=dict(shift_h=-6.0), cost=1.0, method="not evaluated", reason="out of range"),
+             dict(change="move 1 deg east", mod=dict(dlon=1.0), cost=2.0, method="EMULATED", reason="", p_fail=0.5, lo=0.3, hi=0.7, verdict="NO-GO",
+                  distance=0.5, threshold=1.9)]
+    usv = [dict(change="deploy 6 h later", mod=dict(shift_h=6.0), cost=1.0, method="Stage 1", reason="", p_fail=0.0, lo=0.0, hi=0.14, verdict="GO", n=16),
+           dict(change="deploy 12 h later", mod=dict(shift_h=12.0), cost=2.0, method="not evaluated",
+                reason="out of range; Stage 1 not run: the emulator budget is spent")]
+    return dict(vehicles=dict(uas=dict(verdict="NO-GO", p_fail=0.7, target="GO or MARGINAL", found=True, best=tried[0], tried=tried, emulator=True),
+                              usv=dict(verdict="MARGINAL", p_fail=0.18, target="GO", found=True, best=usv[0], tried=usv, emulator=False)))
+
+
+def design_row():
+    return dict(share_s=120.0, variant_s=77.0, variant_s_source="the planner's estimate", variants=[dict(variant="v0", mods={}, wall_s=60.0)],
+                spent_s=60.0, flip_spent_s=3.0,
+                rows_added=8, table_rows=8,
+                table="/data/emulator/train.parquet", train_fraction=0.7, stage1b_free=True)
+
+
 def make_run(run, *, budget_name="quick", thr=None, git="abc1234", ledgers=True, res=True, stage3=True, refit=True, emulator=True, summary_only=False,
-             stage1b_differs=True, M=48):
+             stage1b_differs=True, M=48, flip=True):
     """Write a run directory. Flags remove parts to exercise the degraded paths. -> (mission, plan)."""
     run = pathlib.Path(run)
     m = mission()
@@ -152,6 +174,8 @@ def make_run(run, *, budget_name="quick", thr=None, git="abc1234", ledgers=True,
         h = dict(trained=True, n_test=10, nominal=0.9, rmse=dict(p_fail=0.04), coverage=dict(p_fail=0.9), n_train=38)
         untrained = dict(trained=False, reason="48 members, 0 failures: nothing to learn")
         out["emulator"] = [_write(run / "emulator" / "holdout.json", dict(glider_eq=h, usv=untrained))]
+        if flip:
+            out["emulator"] += [_write(run / "emulator" / "flip.json", flip_rows()), _write(run / "emulator" / "design.json", design_row())]
     out["hangar"] = [_write(run / "hangar" / "hangar.json", {})]
     out["ingest"] = [_write(run / "ingest" / "manifest.json", {})]
     if not ledgers:

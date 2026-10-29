@@ -268,9 +268,9 @@ def test_wall_model_receipts_pass_and_fail(monkeypatch, tmp_path):
     cr.OUT.clear()
     assert all(r["ok"] for r in wm.receipts(_stub_plate(cf=0.0042), _stub_channel()))
     wm.slow_path().write_text(json.dumps({k: v for k, v in _stub_plate(cf=0.0010, err=0.75).items() if k != "force"}))   # friction 4x too low
-    assert wm.stored_wall_error() == 0.75
+    assert wm.stored_wall_error() is None                                      # the plate alone is not enough
     wm.channel_path().write_text(json.dumps(_stub_channel(err=0.03)))
-    assert wm.stored_wall_error() == 0.03                                      # the best stored receipt counts
+    assert wm.stored_wall_error() == 0.75                                      # the worse stored receipt counts: a passing channel cannot hide the plate
     cr.OUT.clear()
     bad = wm.receipts()
     assert any(r["ok"] is False and "Flat plate" in r["claim"] for r in bad)
@@ -847,10 +847,15 @@ def test_run_all_classes_rows_have_everything_and_nothing_unvalidated_is_ok(no_w
     assert all("cd_hangar" in r for rows in out.values() for r in rows)
 
 
-def test_a_stored_passing_receipt_clears_only_the_wall_model_row(no_wall_receipt, monkeypatch):
+def test_both_stored_passing_receipts_clear_only_the_wall_model_row(no_wall_receipt, monkeypatch):
     cheap(monkeypatch)
     wm.channel_path().parent.mkdir(parents=True, exist_ok=True)
     wm.channel_path().write_text(json.dumps(dict(err=0.03)))
+    row = lambda: [c for c in pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())["q"][0]["checks"] if c["name"] == "wall_model_receipt_error"][0]
+    assert not row()["ok"]                                                     # the channel alone does not validate a hull
+    wm.slow_path().write_text(json.dumps(dict(err=0.165)))
+    assert not row()["ok"]                                                     # nor does it hide a failing plate
+    wm.slow_path().write_text(json.dumps(dict(err=0.05)))
     out = pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())
     r = out["q"][0]
     assert [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]["ok"]
@@ -1011,7 +1016,7 @@ def test_stage_share_and_reasons_for_every_check():
     for frag in ("resolution below the rule: 2.5 cells per boundary-layer", "mach number 0.12", "courant number 0.4",
                  "y+ at the matching point outside 30-300 at 80%", "no convergence: the force running mean moves 10.0%",
                  "200 of 1000 steps run (run cut: cut from 1000 to 200", "mass changes", "residual", "2 cells from the relaxation layer",
-                 "wall model unvalidated: no stored passing receipt", "check nest_shift_count failed"):
+                 "wall model unvalidated: the flat plate", "check nest_shift_count failed"):
         assert frag in text, frag
     assert len(reasons) == len(spec) + 1                                          # one sentence per failure plus the resolution rule
     fine = dict(dx=0.001, delta_te=0.05, y_plus_estimate=1)

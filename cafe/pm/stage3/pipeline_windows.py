@@ -340,7 +340,7 @@ def why_failed(checks: list, res: dict, wlog: dict, error: str | None = None) ->
             continue
         n, v, lim = c["name"], c["value"], c["limit"]
         if n == "wall_model_receipt_error":
-            out.append("wall model unvalidated: no stored passing receipt (flat plate vs ITTC-57 or channel vs Dean)" if math.isnan(v)
+            out.append("wall model unvalidated: the flat plate (vs ITTC-57) and channel (vs Dean) receipts are not both stored and passing" if math.isnan(v)
                        else f"wall model unvalidated: stored receipt error {v:.0%} > {lim:.0%}")
         elif n == "yplus_in_30_300_fraction":
             out.append(f"y+ at the matching point outside 30-300 at {1 - v:.0%} of the wall cells "

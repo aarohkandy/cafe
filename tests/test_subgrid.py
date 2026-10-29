@@ -258,12 +258,56 @@ def test_okubo_diffusivity():
     assert np.isclose(float(sg.okubo_K(100.0)), 0.0103 * 1e4**1.15 * 1e-4)
 
 
-def test_windage_magnitude_per_member_and_tag():
-    w = sg.windage(1, np.tile([[3.0, 4.0]], (300, 1))[:, None, :] * np.ones((1, 2, 1)))
-    assert isinstance(w, Tagged) and w.kind == "modelled" and w.value.shape == (300, 2, 2)
-    frac = np.hypot(w.value[..., 0], w.value[..., 1]) / 5.0
-    assert frac.min() >= 0.018 and frac.max() <= 0.023 and np.allclose(frac[:, 0], frac[:, 1])
-    assert np.allclose(w.value[..., 0] / w.value[..., 1], 0.75)                  # along the wind
+def test_windage_fraction_is_drawn_per_member_in_the_brief_range_and_does_not_depend_on_the_batch():
+    f = sg.windage_fraction(1, range(300))
+    assert f.shape == (300,) and f.min() >= 0.018 and f.max() <= 0.023 and f.std() > 0.001                      # BRIEF 2.2: 1.8-2.3 %, spread over the range
+    assert np.array_equal(sg.windage_fraction(1, [7, 3, 250]), f[[7, 3, 250]])                                    # member-keyed: the same in any batch
+    assert not np.array_equal(sg.windage_fraction(2, range(300)), f)                                              # and seed-keyed
+    narrow = broken(**{"ocean.windage.fraction_min": 0.5, "ocean.windage.fraction_max": 0.5001})
+    assert np.all(np.abs(sg.windage_fraction(1, range(5), cfg=narrow) - 0.5) < 2e-4)
+
+
+def test_sde_step_takes_the_callers_noise_instead_of_drawing_its_own():
+    x, xi = np.zeros((4, 2)), np.arange(8.0).reshape(4, 2)
+    out = sg.ocean_sde_step(x, np.full(4, 2.0), np.zeros((4, 2)), 10.0, None, xi=xi)
+    assert np.allclose(out, np.sqrt(2 * 2.0 * 10.0) * xi)
+    with pytest.raises(ValueError, match="needs either rng or the noise"):
+        sg.ocean_sde_step(x, np.full(4, 2.0), np.zeros((4, 2)), 10.0, None)
+    rng = np.random.default_rng(5)
+    assert np.allclose(sg.ocean_sde_step(x, np.full(4, 2.0), np.zeros((4, 2)), 10.0, np.random.default_rng(5)), np.sqrt(40.0) * rng.standard_normal((4, 2)))
+
+
+def test_sde_diffusivity_is_okubos_K_at_the_cell_size_with_its_exact_latitude_gradient():
+    K, g = sg.sde_diffusivity(np.array([0.0, 30.0, 60.0]))
+    l0 = np.radians(0.08) * sg.R_EARTH
+    assert np.isclose(K[0], float(sg.okubo_K(l0))) and 5.0 < K[0] < 10.0 and K[0] > K[1] > K[2]                    # K falls as the cells narrow poleward
+    assert g.shape == (3, 2) and np.all(g[:, 0] == 0.0) and g[0, 1] == 0.0 and np.all(g[1:, 1] < 0)
+    h = 1e-3
+    num = (sg.sde_diffusivity(30.0 + h)[0] - sg.sde_diffusivity(30.0 - h)[0]) / (2 * np.radians(h) * sg.R_EARTH)
+    assert np.isclose(g[1, 1], num, rtol=1e-5)
+
+
+def test_the_mission_switches_for_the_warm_layer_rain_lens_and_ocean_sde_default_on():
+    assert all(sg.switch({}, k) for k in ("warm_layer", "rain_lens", "ocean_sde")) and sg.switch({"subgrid": {}}, "ocean_sde")
+    env = {"subgrid": {"warm_layer": False, "rain_lens": True, "ocean_sde": False}}
+    assert [sg.switch(env, k) for k in ("warm_layer", "rain_lens", "ocean_sde")] == [False, True, False]
+
+
+def test_a_well_mixed_tracer_stays_well_mixed_in_a_K_gradient_only_with_the_dK_dx_drift():
+    """The OceanParcels test (Thomson 1987): particles uniform in [0, L], K rising 5x across it, reflecting walls. The Ito scheme
+    with the dK/dx drift keeps the two halves equally populated; without it they pile up on the low-K side."""
+    L, n, steps = 100.0, 8000, 4000
+    half = {}
+    for use in (True, False):
+        rng = np.random.default_rng(3)
+        xs = np.stack([rng.uniform(0, L, n), np.zeros(n)], -1)
+        for _ in range(steps):
+            gk = np.zeros_like(xs)
+            gk[:, 0] = 2.5 / L if use else 0.0
+            xs = sg.ocean_sde_step(xs, 0.5 + 2.5 * xs[:, 0] / L, gk, 1.0, rng)
+            xs[:, 0] = L - np.abs(L - np.abs(xs[:, 0]))
+        half[use] = np.mean(xs[:, 0] < L / 2) / np.mean(xs[:, 0] >= L / 2)
+    assert abs(half[True] - 1.0) < 4 * 2 / np.sqrt(n) and abs(half[False] - 1.0) > 0.15
 
 
 def test_diurnal_jet_scaling_and_direction():

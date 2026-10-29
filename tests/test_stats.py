@@ -191,7 +191,8 @@ def test_perturbations_yaml_is_complete_and_usable(tmp_path):
     cfg = S.load_perturbations()
     assert {"wind_speed_bias", "hs_scale", "usv_vpp_bias", "glider_speed_scale"} <= cfg.keys()
     for e in cfg.values():
-        assert {"value", "unit", "citation", "kind"} <= e.keys() and e["kind"] == "prior" and e["citation"]
+        assert {"value", "unit", "citation", "kind"} <= e.keys() and e["kind"] in ("prior", "assumed") and e["citation"]
+        assert e["kind"] == "prior" or e["citation"].startswith("ASSUMED")             # an assumed prior says so where the report reads it
     m = S.to_marginals(cfg)
     assert "current_correlation_length" not in m and m["wind_speed_bias"]["sd"] == 2.0
     _, x = S.lhs(128, m, seed=0)

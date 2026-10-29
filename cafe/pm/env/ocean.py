@@ -66,11 +66,12 @@ class Ocean:
         return self.bathy(lon, lat)
 
 
-def open_ocean(spec, cache, mission_name=None, box=None, fetch_bathy=True):
-    """The mission's Ocean, with bathymetry from GEBCO (cached under DATA/bathy), else the store's deepest level."""
+def open_ocean(spec, cache, mission_name=None, box=None, fetch_bathy=True, umwm=None, gebco_url=None):
+    """The mission's Ocean, with bathymetry from GEBCO (cached under DATA/bathy), else the store's deepest level, else `umwm`
+    (dict(lon, lat, depth) from the umwmout file, see bathy.from_umwm). gebco_url: where a missing GEBCO cut is fetched from."""
     path = store_path(spec, mission_name or pathlib.Path(cache).name)
     if not path.exists():
         return None
     ds = hycom.open_store(path)
     b = box or tuple(float(x) for x in (ds.lat.values[0], ds.lat.values[-1], ds.lon.values[0], ds.lon.values[-1]))
-    return Ocean(path, bathy.choose(b, DATA / "bathy", gofs=path, fetch=fetch_bathy))
+    return Ocean(path, bathy.choose(b, DATA / "bathy", gofs=path, umwm=umwm, fetch=fetch_bathy, url=gebco_url or bathy.GEBCO_URL))

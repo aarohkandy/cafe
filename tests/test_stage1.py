@@ -74,11 +74,11 @@ def test_vehicle_classes_follow_the_platform_and_the_base(tmp_path):
 
 def test_priors_follow_the_vehicle_classes_and_the_perturbation_file():
     pri, marg = stage1.priors_for(MISSION)
-    assert list(marg) == stage1.FORCING + ["glider_speed_scale", "usv_vpp_bias", "battery_capacity_scale"]
+    assert list(marg) == stage1.FORCING + ["glider_speed_scale", "usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale"]
     assert marg["wind_speed_bias"] == dict(dist="normal", mean=0.0, sd=pri["wind_speed_bias"]["value"])
     assert marg["current_speed_scale"]["dist"] == "lognormal"
     uas_only = {"vehicles": [{"id": "u", "platform": "quad_uas", "base": "ship"}]}
-    assert list(stage1.priors_for(uas_only)[1]) == stage1.FORCING + ["battery_capacity_scale"]
+    assert list(stage1.priors_for(uas_only)[1]) == stage1.FORCING + ["bulk_stress_scale", "battery_capacity_scale"]
     glider_only = {"vehicles": [{"id": "g", "platform": "seaglider"}]}
     assert list(stage1.priors_for(glider_only)[1]) == stage1.FORCING + ["glider_speed_scale", "battery_capacity_scale"]
 
@@ -225,8 +225,8 @@ def test_a_window_with_no_launch_is_a_failure_of_every_member():
 
 def sortie_stub(calls, t_first_att=300.0):
     """fly_sortie replacement: member 0 flies east at 10 m/s for 20 min; member 1 goes DONE after 600 s and is scrubbed on the second sortie."""
-    def fly_sortie(env, ship, t_launch, *, M, origin, plat, turb, gust, scale):
-        calls.append(dict(t_launch=t_launch, origin=origin, plat=plat, turb=turb, gust=gust, scale=scale, ship=ship(0.0)))
+    def fly_sortie(env, ship, t_launch, *, M, origin, plat, turb, gust, scale, link):
+        calls.append(dict(t_launch=t_launch, origin=origin, plat=plat, turb=turb, gust=gust, scale=scale, ship=ship(0.0), link=link))
         t = np.arange(0.0, 1201.0, 60.0)
         rel = np.zeros((M, t.size, 3))
         rel[:, :, 0] = 10.0 * t
@@ -251,6 +251,7 @@ def test_uas_sorties_are_gridded_every_10_minutes_while_airborne_and_flags_roll_
     assert [c["t_launch"] for c in calls] == [UTC("2023-03-02T01:00:00Z"), UTC("2023-03-03T01:00:00Z")]
     c = calls[0]
     assert c["origin"] == (-165.0, 0.0) and c["turb"] is None and c["gust"] is None and np.all(c["ship"] == 0.0)    # the ship sits still
+    assert all(callable(x["link"]) for x in calls)                                                      # every sortie is flown with the RF link hook
     assert c["plat"]["sortie"]["duration_s"] == 1200.0 and c["plat"]["sortie"]["levels_m"] == [10.0, 30.0, 60.0, 100.0]
     assert c["plat"]["launch_rule"]["max_mean_wind_ms"] == 12.0 and c["plat"]["launch_rule"]["gust_lookahead_min"] == 30.0   # no_gust_front_within_min
     assert uas_plat()["sortie"]["duration_s"] == 1200.0 and P["launch_rule"]["gust_lookahead_min"] == 15.0         # the caller's platform dict is untouched
@@ -352,11 +353,12 @@ def test_usv_waypoints_become_tuples_and_the_drag_scales_the_vpp(monkeypatch):
 def spy_vehicle_models(monkeypatch):
     seen = {}
 
-    def record(kind, v, env, M, X, t0, T, drag, rest=()):
-        seen[v["id"]] = dict(kind=kind, env=env, M=M, X=X, t0=t0, T=T, rest=rest, drag=drag)
+    def record(kind, v, env, M, X, t0, T, drag, rest=(), windage=None):
+        seen[v["id"]] = dict(kind=kind, env=env, M=M, X=X, t0=t0, T=T, rest=rest, drag=drag, windage=windage)
         z = np.zeros((3, M))
         return dict(lon=z, lat=z, depth=z, t=np.arange(3.0), fail={}, first={})
-    monkeypatch.setattr(stage1, "_run_glider", lambda v, P, env, M, X, t0, T, drag=1.0: record("glider", v, env, M, X, t0, T, drag))
+    monkeypatch.setattr(stage1, "_run_glider", lambda v, P, env, M, X, t0, T, drag=1.0, windage=None:
+                        record("glider", v, env, M, X, t0, T, drag, windage=windage))
     monkeypatch.setattr(stage1, "_run_usv", lambda v, P, env, M, X, t0, T, drag=1.0: record("usv", v, env, M, X, t0, T, drag))
 
     def run_uas(v, P, env, M, X, t0, T, mission, seed, members, drag=1.0):
@@ -796,3 +798,173 @@ def test_each_batch_gets_its_own_stratification_check(batches, tmp_path):
 def test_run_without_a_ledger_still_runs(batches):
     decided_all(batches)
     assert stage1.run(MISSION, None, dict(batch=8, n_max=8, n_min=8), log=lambda s: None)["n"] == 8
+
+
+# ------------------------------------------------------------------------------------------------------- SDE, windage, stress, theta_e, link
+
+def test_the_ocean_sde_is_on_for_the_whole_window_at_the_vehicle_step_unless_the_mission_switches_it_off(monkeypatch):
+    seen, _ = spy_vehicle_models(monkeypatch)
+    pri, marg = stage1.priors_for(MISSION)
+    stage1.run_batch(MISSION, AnalyticEnv(), [0, 1], 11, pri, marg)
+    sde = seen["usv"]["env"].sde
+    assert sde.dt == stage1.DT_VEHICLE == 60.0 and sde.t0 == T0 and sde.n * sde.dt >= T1 - T0 and sde.xi.shape[0] == 2
+    for env in ({"subgrid": {"ocean_sde": False}},):
+        off = stage1.run_batch(dict(MISSION, environment=dict(MISSION["environment"], **env)), AnalyticEnv(), [0, 1], 11, pri, marg)
+        assert seen["usv"]["env"].sde is None and off["U"].shape[0] == 2
+    absent = dict(MISSION["environment"], subgrid={})                                                      # a mission that does not say: on
+    stage1.run_batch(dict(MISSION, environment=absent), AnalyticEnv(), [0, 1], 11, pri, marg)
+    assert seen["usv"]["env"].sde is not None
+
+
+def test_gliders_get_the_brief_windage_per_member_and_the_usv_gets_none(monkeypatch):
+    seen, _ = spy_vehicle_models(monkeypatch)
+    pri, marg = stage1.priors_for(MISSION)
+    members = [4, 5, 6, 7]
+    stage1.run_batch(MISSION, AnalyticEnv(), members, 11, pri, marg)
+    w = seen["glider_eq"]["windage"]
+    assert np.array_equal(w, stage1.subgrid.windage_fraction(11, members)) and np.array_equal(seen["glider_1n"]["windage"], w)
+    assert w.min() >= 0.018 and w.max() <= 0.023 and seen["usv"]["windage"] is None                      # the VPP carries the USV's hull windage
+
+
+def test_glider_windage_reaches_the_simulator(monkeypatch):
+    monkeypatch.setattr(stage1.glider, "GliderSim", FakeSim)
+    v = next(x for x in MISSION["vehicles"] if x["id"] == "glider_eq")
+    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2)}
+    P = glider.load_platform("seaglider")
+    stage1._run_glider(v, P, "ENV", 2, X, 0.0, 600.0, windage=np.array([0.019, 0.022]))
+    assert np.array_equal(FakeSim.last[1]["perturb"]["windage"], [0.019, 0.022])
+    stage1._run_glider(v, P, "ENV", 2, X, 0.0, 600.0)
+    assert "windage" not in FakeSim.last[1]["perturb"]
+
+
+def test_the_bulk_stress_prior_is_sampled_only_when_a_uas_flies():
+    pri, marg = stage1.priors_for(MISSION)
+    assert marg["bulk_stress_scale"] == dict(dist="lognormal", median=1.0, sigma=0.30)                      # BRIEF 2.5: +-30 %
+    no_uas = dict(MISSION, vehicles=[v for v in MISSION["vehicles"] if "base" not in v], links=[])
+    assert "bulk_stress_scale" not in stage1.priors_for(no_uas)[1]
+
+
+def test_a_members_bulk_stress_scales_its_turbulence_by_the_square_root_since_sigma_u_is_2_5_ustar(ci_full):
+    P, M, origin = uas_plat(), 3, (-165.0, 0.0)
+    ts = np.array([UTC("2023-03-02T01:00:00Z")])
+    mission = dict(environment=dict(subgrid=dict(turbulence=True)))
+    plain, _ = stage1._uas_forcing(ci_full, mission, origin, ts, P, M, 5, [0, 1, 2])
+    scaled, _ = stage1._uas_forcing(ci_full, mission, origin, ts, P, M, 5, [0, 1, 2], stress_scale=np.array([1.0, 4.0, 0.25]))
+    ratio = np.sqrt((scaled[0] ** 2).mean((1, 2)) / (plain[0] ** 2).mean((1, 2)))
+    assert np.allclose(ratio, [1.0, 2.0, 0.5]) and np.allclose(scaled[0][0], plain[0][0])
+
+
+def test_run_uas_hands_the_members_stress_to_the_forcing(monkeypatch):
+    got = {}
+    monkeypatch.setattr(stage1, "_uas_forcing", lambda *a, **k: got.update(a=a, k=k) or ([None], None))
+    monkeypatch.setattr(stage1.uas, "fly_sortie", sortie_stub([]))
+    v, P, mission, t0, T, X = uas_inputs(window=("2023-03-01T18:00:00Z", "2023-03-02T12:00:00Z"))
+    X["bulk_stress_scale"] = np.array([0.8, 1.3])
+    stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    assert np.array_equal(got["a"][-1], [0.8, 1.3])
+    del X["bulk_stress_scale"]
+    stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    assert got["a"][-1] is None
+
+
+class Shifted:
+    """ci_full with the 2 m air temperature moved by dT."""
+
+    def __init__(self, env, dT):
+        self.env, self.dT = env, dT
+
+    def __getattr__(self, k):
+        return getattr(self.env, k)
+
+    def air(self, lon, lat, t):
+        a = dict(self.env.air(lon, lat, t))
+        a["T2"] = a["T2"]._replace(value=a["T2"].value + self.dT)
+        return a
+
+
+def gust_events(env, monkeypatch, M=300):
+    """The keyword arguments gust_fronts was called with and the events it returned, for one sortie at the ship."""
+    seen = []
+    orig = stage1.subgrid.gust_fronts
+
+    def spy(*a, **k):
+        seen.append((k, orig(*a, **k)))
+        return seen[-1][1]
+    monkeypatch.setattr(stage1.subgrid, "gust_fronts", spy)
+    stage1._uas_forcing(env, dict(environment=dict(subgrid=dict(gust_fronts=True))), (-165.0, 0.0), np.array([UTC("2023-03-02T01:00:00Z")]),
+                        uas_plat(), M, 5, list(range(M)))
+    return seen[0]
+
+
+def test_gust_fronts_get_theta_e_from_the_ships_T2_Q2_and_PSFC(ci_full, monkeypatch):
+    k, _ = gust_events(ci_full, monkeypatch, M=4)
+    hours = np.arange(np.floor(UTC("2023-03-02T01:00:00Z") / 3600) * 3600 - 3600, UTC("2023-03-02T01:00:00Z") + 7200, 3600.0)
+    a = ci_full.air(np.full(hours.size, -165.0), np.zeros(hours.size), hours)
+    assert np.allclose(k["theta_e_K"], stage1.subgrid.theta_e(a["T2"].value, a["q2"].value, a["psfc"].value)) and np.all(k["theta_e_K"] > 300.0)
+
+
+def test_a_higher_theta_e_gives_more_gust_fronts(ci_full, monkeypatch):
+    n = {}
+    for name, dT in (("cold", -20.0), ("warm", 0.0)):
+        k, ev = gust_events(Shifted(ci_full, dT), monkeypatch, M=400)
+        n[name] = (ev.member.size, float(np.mean(k["theta_e_K"])))
+    assert n["cold"][1] < 335.0 < n["warm"][1] and n["warm"][0] > 5 * n["cold"][0] > 0                      # below theta_e_lo only the background rate is left
+    lo, hi = (stage1.subgrid.gust_rate(2.0, th) for th in (330.0, 360.0))
+    assert hi > lo                                                                                          # the rate factor itself
+
+
+def test_the_uas_radio_is_the_platforms_with_the_antenna_terms_of_radios_yaml():
+    r = stage1._uas_radio(uas_plat())
+    assert r["center_mhz"] == 915.0 and r["tx_dbm"] == 30.0 and r["rx_sens_dbm"] == -121.0 and r["gt_dbi"] == 2.0 and r["misc_loss_db"] == 3.0
+    other = dict(uas_plat(), radio=dict(uas_plat()["radio"], link_2g4=dict(uas_plat()["radio"]["link_2g4"], tx_power_dbm=27.0)))
+    other["radio"] = {"link_2g4": other["radio"]["link_2g4"], **{k: v for k, v in other["radio"].items() if k != "rfd900x"}}
+    q = stage1._uas_radio(other)                                                                            # unknown to radios.yaml: rfd900x's antennas
+    assert q["center_mhz"] == pytest.approx(2441.75) and q["tx_dbm"] == 27.0 and q["gt_dbi"] == 2.0
+
+
+def link_hook(M=3, hs=1.0, ship_h=15.0):
+    mission = dict(MISSION, ship=dict(MISSION["ship"], antenna_height_m=ship_h))
+    ts = np.array([UTC("2023-03-02T01:00:00Z")])
+    return stage1._uas_links(AnalyticEnv(hs=hs), mission, (-165.0, 0.0), ts, uas_plat(), M)[0], ts[0]
+
+
+def test_the_uas_link_is_lost_beyond_the_radio_horizon_and_held_while_close():
+    hook, t = link_hook()
+    close = np.array([[300.0, 0.0, 30.0], [0.0, 1500.0, 100.0], [-3000.0, 1000.0, 60.0]])
+    far = np.array([[120e3, 0.0, 100.0], [0.0, -150e3, 50.0], [200e3, 100e3, 100.0]])
+    assert not hook(t + 100.0, close).any() and hook(t + 100.0, far).all()
+    mixed = np.vstack([close[:1], far[:1], close[2:]])
+    assert hook(t + 100.0, mixed).tolist() == [False, True, False]
+    assert hook(t + 1e5, close).shape == (3,) and not hook(t - 50.0, close).any()                          # outside the Hs grid: held at its ends
+
+
+def test_the_uas_link_budget_uses_the_ships_mast_the_uas_altitude_and_the_hs_at_the_ship(monkeypatch):
+    seen = []
+    orig = stage1.comms.rf_margin
+    monkeypatch.setattr(stage1.comms, "rf_margin", lambda *a: seen.append(a) or orig(*a))
+    hook, t = link_hook(M=2, hs=2.5, ship_h=22.0)
+    hook(t + 60.0, np.array([[400.0, 300.0, 40.0], [0.0, 0.0, 0.0]]))
+    d, ht, hr, hs, radio = seen[0]
+    P = uas_plat()
+    assert np.allclose(d, [500.0, 0.0]) and np.allclose(ht, P["sortie"]["deck_height_m"] + np.array([40.0, 0.0]) + 0.1) and hr == 22.0
+    assert np.allclose(hs, 2.5) and radio["tx_dbm"] == 30.0
+    hook2, t2 = link_hook(M=1)
+    hook2(t2, np.zeros((1, 3)))
+    assert seen[1][2] == 15.0                                                                              # the mission's ship antenna (15 m)
+
+
+def test_a_lost_link_sets_the_lost_link_flag_in_stage1(monkeypatch):
+    def fly(env, ship, t_launch, *, M, origin, plat, turb, gust, scale, link):
+        far = np.zeros((M, 3))
+        far[:, 0] = 150e3
+        lost = link(t_launch + 10.0, far)
+        flags = {k: np.zeros(M, bool) for k in uas.FLAGS}
+        flags["lost_link"] = lost
+        first = {k: np.full(M, np.nan) for k in uas.FLAGS}
+        t = np.arange(0.0, 601.0, 60.0)
+        return dict(t_launch=t_launch, track=dict(t=t, pos_rel=np.zeros((M, t.size, 3)), phase=np.zeros((M, t.size))), flags=flags, t_first=first,
+                    scrubbed=np.zeros(M, bool), launch=dict(wind_ms=np.zeros(M)), energy_wh=np.zeros(M), soc_end=np.ones(M), max_tilt_deg=np.zeros(M))
+    monkeypatch.setattr(stage1.uas, "fly_sortie", fly)
+    v, P, mission, t0, T, X = uas_inputs()
+    r = stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    assert r["fail"]["lost_link"].all()

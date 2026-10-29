@@ -21,6 +21,7 @@ import numpy as np
 from scipy.special import erfc
 
 from . import conventions as cv
+from .subgrid import assumption
 
 G = 9.81
 DEEP = 1e5                 # "infinite" depth [m]: kh > 390 at the lowest UMWM frequency, tanh = 1 to double precision
@@ -82,19 +83,22 @@ def _unit(f, theta, shape, D):
     return E / (16 * moment(E, f, theta))[:, None, None]
 
 
-def spectrum_from_params(hs, tp, dir_to_deg, mss, u10, f, theta_compass_to, *, swell_age=1.2, wind_sea_age=2.0):
+def spectrum_from_params(hs, tp, dir_to_deg, mss, u10, f, theta_compass_to, *, swell_age=None, wind_sea_age=None):
     """E(f, theta) from the integrated parameters UMWM writes (swh, dwp, dwd, mss) and the 10 m wind.
 
     Two components, each renormalised on the discrete bins to its own Hs, so 4 sqrt(m0) = hs exactly (the continuous
     shapes lose ~0.5 % on the 37 log bins; the renormalisation removes it, the receipt reports how large it was):
-      primary    peak at 1/tp. Swell (JONSWAP shape, narrow) when cp/U10 > swell_age (1.2: a fully developed
-                 wind sea has U10/cp = 0.83, DHH85 and Pierson-Moskowitz 1964), otherwise DHH85 wind sea.
+      primary    peak at 1/tp. Swell (JONSWAP shape, narrow) when cp/U10 > swell_age (a fully developed wind sea has
+                 U10/cp = 0.83, i.e. cp/U10 = 1.2; DHH85 and Pierson-Moskowitz 1964), otherwise DHH85 wind sea.
       short sea  DHH85 wind sea at U10/cp = wind_sea_age (a developing sea; an assumption, mid-range of DHH's 0.83-5),
                  same direction as the primary. Its share of the variance, w, is the closed-form solution of
                  mss = (hs^2 - w) a_primary + w a_short, clipped to [0, hs^2 / 2] so the primary stays the peak.
     `mss` is the scalar slope variance (UMWM sums F k^3 dk dtheta) and is blind to directional spreading, so it cannot
     fix s as the brief asks; it fixes how much short-wave energy there is. s comes from the Mitsuyasu/Hasselmann law.
+    swell_age and wind_sea_age are config/assumptions.yaml waves.swell_age (1.2) and waves.wind_sea_age (2.0) unless given.
     Inputs broadcast; output has their shape + (nf, ntheta)."""
+    swell_age = assumption("waves.swell_age") if swell_age is None else swell_age
+    wind_sea_age = assumption("waves.wind_sea_age") if wind_sea_age is None else wind_sea_age
     f, theta = np.asarray(f, float), np.asarray(theta_compass_to, float)
     hs, tp, dirs, mss, u10 = np.broadcast_arrays(*(np.asarray(v, float) for v in (hs, tp, dir_to_deg, mss, u10)))
     lead = hs.shape

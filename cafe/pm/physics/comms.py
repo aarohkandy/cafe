@@ -35,9 +35,18 @@ NO_LINK_DB = -200.0                  # margin returned when a link is physically
 THORP_ONLY_LABEL = "Thorp only, Bellhop unavailable"
 
 
+def _plain(node):
+    """radios.yaml marks assumed numbers as {value, unit, assumed: true, why} leaves (so the credibility report counts them);
+    the link models read the bare value."""
+    if isinstance(node, dict):
+        return node["value"] if "value" in node and "unit" in node else {k: _plain(v) for k, v in node.items()}
+    return node
+
+
 @functools.lru_cache(None)
 def _yaml(name: str) -> dict:
-    return yaml.safe_load((PLATFORMS / name).read_text())
+    d = yaml.safe_load((PLATFORMS / name).read_text())
+    return _plain(d) if name == "radios.yaml" else d
 
 
 # ---------------------------------------------------------------- RF

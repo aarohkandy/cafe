@@ -152,11 +152,16 @@ def from_umwm(lon: Any, lat: Any, depth: Any) -> Bathymetry:
     return Bathymetry(np.mod(np.asarray(lon, float), 360.0), lat, depth, "UMWM depth", 12_000.0, lambda d: ASSUMED["umwm_rel_sigma"] * d)
 
 
+def cache_path(box: Any, cache_dir: Any) -> pathlib.Path:
+    """Where `choose` keeps the GEBCO cut for `box`: cache_dir/gebco2026_<south>_<north>_<west>_<east>.npz."""
+    s, n, w, e = box360(box)
+    return pathlib.Path(cache_dir) / f"gebco2026_{s:g}_{n:g}_{w:g}_{e:g}.npz"
+
+
 def choose(box: Any, cache_dir: Any, gofs: Any = None, umwm: Any = None, fetch: bool = True, url: str = GEBCO_URL) -> Bathymetry:
     """First of GEBCO -> GOFS -> UMWM that works. cache_dir/gebco2026_<box>.npz is reused, else fetched when `fetch`; gofs: the
     Zarr path; umwm: dict(lon=, lat=, depth=). Raises LookupError listing every failure when none works."""
-    s, n, w, e = box360(box)
-    cache = pathlib.Path(cache_dir) / f"gebco2026_{s:g}_{n:g}_{w:g}_{e:g}.npz"
+    cache = cache_path(box, cache_dir)
     tried: list = []
     for name in ORDER:
         try:

@@ -127,6 +127,12 @@ def clock(monkeypatch):
     return slept
 
 
+@pytest.fixture(autouse=True)
+def offline(monkeypatch):
+    """CAFE_OFFLINE=1 for every test: the pipeline downloads nothing unless a test clears it (and then points the URLs at a local server)."""
+    monkeypatch.setenv("CAFE_OFFLINE", "1")
+
+
 @pytest.fixture
 def server(tmp_path):
     s = Server(tmp_path / "www")

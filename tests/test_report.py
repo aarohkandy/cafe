@@ -283,6 +283,187 @@ def test_same_inputs_same_report(full):
     assert (run / "report" / "report.json").read_bytes() == a
 
 
+# ---------------------------------------------------------------------------------------------------------- what would fix it, sensitivities, reach
+
+def test_what_would_fix_it_for_each_vehicle_that_is_not_go(full):
+    run, _, _, _, rep = full
+    u = rep["vehicles"]["uas"]["fix"]
+    assert u["available"] and u["needed"] and u["found"] and u["target"] == "GO or MARGINAL" and u["emulator_trained"] and u["verdict_before"] == "NO-GO"
+    b = u["best"]
+    assert b["change"] == "launch the sorties 6 h later" and b["method"] == "EMULATED" and b["verdict"] == "GO"
+    assert b["p_fail"]["value"] == 0.04 and b["p_fail"]["uncertainty"] == dict(kind="conformal 90 % interval (emulator)", lo=0.01, hi=0.09)
+    assert b["distance"]["value"] == 0.8 and b["threshold"]["value"] == 1.9 and b["n"] is None and b["cost"]["unit"] == "notches"
+    assert [t["method"] for t in u["tried"]] == ["EMULATED", "not evaluated", "EMULATED"] and u["tried"][1]["p_fail"] is None
+    assert u["tried"][1]["reason"] == "out of range"
+    v = rep["vehicles"]["usv"]["fix"]
+    assert v["best"]["method"] == "Stage 1" and v["best"]["n"]["value"] == 16 and v["best"]["p_fail"]["uncertainty"]["kind"] == "Wilson interval (Stage 1)"
+    assert v["best"]["distance"] is None and not v["emulator_trained"]
+    assert rep["vehicles"]["glider_eq"]["fix"] == dict(available=True, needed=False)
+    h = (run / "report" / "index.html").read_text()
+    assert "What would fix it (GO or MARGINAL): <b>launch the sorties 6 h later</b>" in h and "EMULATED, training-set distance" in h
+    assert "Stage 1, n = " in h and "What would fix it: nothing needed, the verdict is GO." in h and "All 3 candidates" in h
+    assert "out of range; Stage 1 not run" in h
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
+
+
+def test_what_would_fix_it_when_nothing_flips_the_verdict(run):
+    m, plan = pm_run.make_run(run)
+    f = json.loads((run / "emulator" / "flip.json").read_text())
+    f["vehicles"]["uas"].update(found=False, best=None)
+    f["vehicles"]["usv"].update(found=False, best=None)
+    (run / "emulator" / "flip.json").write_text(json.dumps(f))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    assert rep["vehicles"]["uas"]["fix"]["best"] is None and report.check_traceability(rep) == []
+    assert "no single change among the 3 candidates reaches GO or MARGINAL" in h and "the emulator answered those in its range." in h
+    assert "no single change among the 2 candidates reaches GO" in h and "no emulator is trained yet, so only a few were run in Stage 1." in h
+
+
+def test_what_would_fix_it_without_the_flip_file(run):
+    m, plan = pm_run.make_run(run, flip=False)
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    assert rep["vehicles"]["uas"]["fix"] == dict(available=False, reason="emulator/flip.json is not in the run directory")
+    assert "What would fix it: not available. emulator/flip.json is not in the run directory" in h
+    assert rep["emulator"]["design"] is None
+
+
+def test_top_three_sensitivities_by_sobol_first_order_index(full):
+    run, _, _, _, rep = full
+    top = json.loads((run / "stage1b" / "summary.json").read_text())["summary"]
+    for vid, d in {**rep["vehicles"], **rep["links"]}.items():
+        e = (top["vehicles"].get(vid) or top["links"][vid])["sensitivity"]["S1"]
+        want = sorted(e.items(), key=lambda kv: -kv[1])[:3]
+        assert [t["param"] for t in d["top3"]] == [k for k, _ in want] and [t["s1"]["value"] for t in d["top3"]] == [v for _, v in want]
+        assert all(t["s1"]["unit"] == "fraction of variance" and t["s1"]["stage"] == "stage1b" for t in d["top3"])
+    assert len(rep["vehicles"]["usv"]["top3"]) == 3 and rep["vehicles"]["glider_2n"]["top3"] == []
+    h = (run / "report" / "index.html").read_text()
+    assert "Top sensitivities (Sobol first-order, share of the variance of failure): <code>" in h and "Top sensitivities: none" in h
+
+
+def test_the_emulator_section_shows_acceptance_the_noise_floor_and_the_training_table(run):
+    m, plan = pm_run.make_run(run)
+    h = json.loads((run / "emulator" / "holdout.json").read_text())
+    h["glider_eq"].update(cls="glider", rows=140, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03,
+                          acceptance=dict(rmse_ok=False, coverage_ok=True, query_ok=True))
+    h["glider_eq"]["rmse"]["t_fail_h"], h["glider_eq"]["coverage"]["t_fail_h"] = 3.0, 0.88
+    h["usv"] = dict(trained=False, reason="2 usv rows in the training table, 100 are needed", rows=2)
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    rep, html_ = load(run), (run / "report" / "index.html").read_text()
+    e = rep["emulator"]
+    g = e["vehicles"]["glider_eq"]
+    assert g["acceptance"]["rmse_ok"] is False and g["acceptance"]["noise_floor_rmse"]["value"] == 0.07
+    assert g["acceptance"]["rmse_debiased"]["value"] == 0.03 and g["acceptance"]["limits"]["rmse"]["value"] == 0.05
+    assert g["acceptance"]["limits"]["query_ms"]["unit"] == "ms" and g["acceptance"]["rows"]["value"] == 140 and g["rmse"]["t_fail_h"]["unit"] == "h"
+    assert e["vehicles"]["usv"]["rows"]["value"] == 2 and e["design"]["variants"]["value"] == 1 and e["design"]["variant"]["value"] == 77.0
+    assert e["design"]["spent"]["value"] == 60.0
+    assert e["design"]["stage1b_free"]
+    assert "(glider emulator)" in html_ and "<b>MISSED</b>" in html_ and "Training table /data/emulator/train.parquet" in html_
+    assert "from the planner&#x27;s estimate" in html_
+    assert "including stage 1b" in html_
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, html_) == []
+
+
+def reach_report(run, env, **kw):
+    m, plan = pm_run.make_run(run, **kw)
+    report.write(run, m, plan, env=env)
+    return load(run), (run / "report" / "index.html").read_text()
+
+
+def test_the_reach_map_routes_through_the_currents_at_the_deploy_time(run):
+    rep, h = reach_report(run, AnalyticEnv(current=(0.3, 0.0)))
+    r = rep["reach"]
+    assert r["available"] and r["horizon"]["value"] == 24.0 and set(r["vehicles"]) == {"glider_eq", "glider_2n", "usv", "uas"}
+    g = r["vehicles"]["glider_eq"]
+    assert g["available"] and len(g["polygon"]["values"]) == 24 and g["speed"]["value"] == 0.23
+    assert 0.27 < g["flow_max"]["value"] < 0.3                                                         # the glider feels the 5-100 m mean
+    assert g["max_range_km"]["value"] == pytest.approx((0.23 + g["flow_max"]["value"]) * 86.4, abs=6.0)  # downstream: they add
+    lon0 = g["deploy"]["values"][0]
+    west = [p for p in g["polygon"]["values"] if p[0] < lon0 - 1e-9]
+    assert not west or max(lon0 - p[0] for p in west) < 0.1                                                  # it cannot stem a current stronger than itself
+    assert max(p[0] for p in g["polygon"]["values"]) > lon0 + 0.3
+    assert r["vehicles"]["usv"]["max_range_km"]["value"] > g["max_range_km"]["value"] * 2 and r["vehicles"]["usv"]["speed"]["value"] == 1.4
+    assert not r["vehicles"]["uas"]["available"] and "flies its sorties from the ship" in r["vehicles"]["uas"]["reason"]
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
+    assert h.count("<polygon") == 3 and "reach within 24 h of the deploy" in h and "Reach map: fastest routes within" in h and "outline" in h
+    assert g["polygon"]["receipt"].startswith("ingest:") and g["polygon"]["stage"].startswith("report (reach map")
+
+
+def test_the_reach_map_says_why_it_was_not_computed(run):
+    rep, h = reach_report(run, None)
+    assert rep["reach"] == dict(available=False, vehicles={}, reason="The report was not given an Environment, so there are no currents to route through.")
+    assert "Reach map not drawn: The report was not given an Environment" in h and "<polygon" not in h
+
+
+class Cur(AnalyticEnv):
+    """Currents from a function of (lon, lat); everything else analytic."""
+
+    def __init__(self, fn, **kw):
+        super().__init__(**kw)
+        self.fn = fn
+
+    def current(self, lon, lat, z, t):
+        from cafe.pm import Tagged
+        return Tagged(self.fn(np.asarray(lon, float), np.asarray(lat, float)), "test", 0.0, "assumed")
+
+
+def test_reach_explains_a_deploy_on_land_a_failing_environment_and_missing_currents(run):
+    rep, _ = reach_report(run, AnalyticEnv(depth=0.0))
+    assert all(r["reason"].endswith("the deploy point is on land or has no current data") for k, r in rep["reach"]["vehicles"].items() if k != "uas")
+    rep, h = reach_report(run, Cur(lambda lo, la: np.full(lo.shape + (2,), np.nan)))
+    assert not rep["reach"]["vehicles"]["usv"]["available"] and "no current data" in rep["reach"]["vehicles"]["usv"]["reason"]
+    assert "not drawn. ValueError" in h
+
+    class Broken(AnalyticEnv):
+        def current(self, lon, *a):
+            if np.size(lon) > 100:                                      # the reach grid; the environment section's 24 points still work
+                raise RuntimeError("ocean store unreadable")
+            return super().current(lon, *a)
+    rep, h = reach_report(run, Broken())
+    assert rep["reach"]["vehicles"]["glider_eq"]["reason"] == "RuntimeError: ocean store unreadable" and report.check_traceability(rep) == []
+
+
+def test_unknown_water_blocks_the_route_like_land(run):
+    """Currents are known only west of the deploy meridian: nothing east of it is reachable."""
+    def fn(lo, la):
+        v = np.zeros(lo.shape + (2,))
+        v[lo > -170.0 + 1e-9] = np.nan
+        return v
+    rep, _ = reach_report(run, Cur(fn))
+    g = rep["reach"]["vehicles"]["glider_eq"]                           # deployed on the meridian itself
+    lons = [p[0] for p in g["polygon"]["values"]]
+    assert max(lons) <= -170.0 + 1e-6 and min(lons) < -170.0 - 0.1
+
+
+def test_the_reach_grid_is_not_queried_outside_the_ingested_data(run):
+    """Like GriddedEnv, the environment answers `inside` and would raise outside its data: the route is cut at the edge instead."""
+    class Boxed(AnalyticEnv):
+        queried: list = []
+
+        def inside(self, lon, lat, t=None):
+            x = np.asarray(lon)
+            return (np.abs(x + 170.0) < 0.1) | (np.abs(x + 165.0) < 0.1)                  # data around the two meridians the vehicles sit on
+
+        def current(self, lon, lat, z, t):
+            self.queried.append(np.asarray(lon))
+            return super().current(lon, lat, z, t)
+    env = Boxed(current=(0.0, 0.0))
+    rep, _ = reach_report(run, env, emulator=False)
+    grid = [x for x in env.queried if x.size > 100]
+    assert grid and all(env.inside(x, 0.0).all() for x in grid)
+    g = rep["reach"]["vehicles"]["glider_eq"]
+    lons = [p[0] for p in g["polygon"]["values"]]
+    assert g["available"] and max(lons) <= -169.9 + 1e-6 and min(lons) >= -170.1 - 1e-6
+
+
+def test_the_reach_map_is_drawn_only_with_a_map(run):
+    m, plan = pm_run.make_run(run, res=False)
+    report.write(run, m, plan, env=AnalyticEnv(current=(0.3, 0.0)))
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    assert rep["map"]["available"] is False and rep["reach"]["available"] and "Map not drawn" in h and "<polygon" not in h
+
+
 # ---------------------------------------------------------------------------------------------------------- broken on purpose
 
 def test_traceability_catches_a_missing_receipt(full):

@@ -7,30 +7,30 @@ radios:
     center_mhz: 915.0
     tx_dbm: 30.0
     rx_sens_dbm: -121.0          # low air rate only. Datasheet V1.2 lists -111 dBm @ 12 kbps and ~-98 dBm @ 200 kbps: see rfd900x_fast
-    gt_dbi: 2.0                  # assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted.
-    gr_dbi: 2.0
+    gt_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted."}
+    gr_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted."}
     cable_loss_db: 0.0
-    misc_loss_db: 3.0            # assumed: polarisation mismatch of a heeling/pitching whip + connectors. Replace with a measured range test.
+    misc_loss_db: {value: 3.0, unit: dB, assumed: true, why: "assumed: polarisation mismatch of a heeling/pitching whip plus connectors. Replace with a measured range test."}
   rfd900x_fast:
     what: RFD900x at a higher air rate (what a video/high-rate MAVLink config would use)
     source: "retailer-quoted RFD900x table: -111 dBm @ 12 kbps, -105 dBm @ 64 kbps, -98 dBm @ 200 kbps (not the manufacturer datasheet; verify)"
     center_mhz: 915.0
     tx_dbm: 30.0
     rx_sens_dbm: -105.0          # the 64 kbps row
-    gt_dbi: 2.0
-    gr_dbi: 2.0
+    gt_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted."}
+    gr_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted."}
     cable_loss_db: 0.0
-    misc_loss_db: 3.0
+    misc_loss_db: {value: 3.0, unit: dB, assumed: true, why: "assumed: polarisation mismatch of a heeling/pitching whip plus connectors. Replace with a measured range test."}
   xbee_pro_24:
     what: Digi XBee-PRO 802.15.4 (original S1), a typical 2.4 GHz telemetry radio
     source: "Digi XBee/XBee-PRO RF Modules 802.15.4 manual v1.xEx: 63 mW (+18 dBm), RX sensitivity -100 dBm (1 % PER) at 250 kbps, outdoor LOS 'up to 1 mile'"
     center_mhz: 2440.0
     tx_dbm: 18.0
     rx_sens_dbm: -100.0
-    gt_dbi: 2.0                  # assumed: 2 dBi dipole
-    gr_dbi: 2.0
+    gt_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: 2 dBi dipole. Replace with the antenna actually fitted."}
+    gr_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: 2 dBi dipole. Replace with the antenna actually fitted."}
     cable_loss_db: 0.0
-    misc_loss_db: 3.0            # assumed, as above
+    misc_loss_db: {value: 3.0, unit: dB, assumed: true, why: "assumed: polarisation mismatch of a heeling/pitching whip plus connectors. Replace with a measured range test."}
 
 iridium:
   sbd:
@@ -39,17 +39,17 @@ iridium:
     max_bytes: {MO: 340, MT: 270}
     latency_short_s: 5.0         # published nominal, short message
     latency_full_s: 20.0         # published nominal, maximum-length message
-    session_setup_median_s: 10.0 # assumed: signal acquisition + registration before the burst. No published distribution found; log-normal because it is positive and skewed.
-    session_setup_sigma: 0.6     # assumed (log-space sigma)
-    p_success: 0.95              # assumed per-session success with a clear sky view. No published SBD success statistic found. Replace with MO status (SBDIX 0-4) counts from the lab's own gliders/USV.
-    max_attempts: 3              # assumed: firmware/host retries per message
-    fail_cost_s: 60.0            # assumed: time burnt by a session that ends in a GSS timeout
+    session_setup_median_s: {value: 10.0, unit: s, assumed: true, why: "assumed: signal acquisition + registration before the burst; no published distribution found. Log-normal because it is positive and skewed. Replace with SBDIX session timings from the lab's own gliders/USV."}
+    session_setup_sigma: {value: 0.6, unit: -, assumed: true, why: "assumed log-space sigma of the SBD session setup time. Replace with the spread of the lab's own session timings."}
+    p_success: {value: 0.95, unit: -, assumed: true, why: "assumed per-session success with a clear sky view; no published SBD success statistic found. Replace with MO status (SBDIX 0-4) counts from the lab's own gliders/USV."}
+    max_attempts: {value: 3, unit: -, assumed: true, why: "assumed firmware/host retries per SBD message. Replace with the modem configuration actually used."}
+    fail_cost_s: {value: 60.0, unit: s, assumed: true, why: "assumed: time burnt by a session that ends in a GSS timeout. Replace with measured failed-session durations."}
   rudics:
     what: Iridium RUDICS circuit-switched data call (2.4 kbps) as used for glider/float file transfer
     source: "Iridium RUDICS service: 2.4 kbps circuit-switched data over the Iridium network"
     rate_bps: 2400.0
-    session_setup_median_s: 30.0 # assumed: dial + connect + login
-    session_setup_sigma: 0.4     # assumed
-    p_success: 0.90              # assumed: a call is more fragile than an SBD burst; no published figure found
-    max_attempts: 3
-    fail_cost_s: 60.0
+    session_setup_median_s: {value: 30.0, unit: s, assumed: true, why: "assumed: dial + connect + login. Replace with the lab's RUDICS call logs."}
+    session_setup_sigma: {value: 0.4, unit: -, assumed: true, why: "assumed log-space sigma of the RUDICS call setup time. Replace with the lab's RUDICS call logs."}
+    p_success: {value: 0.90, unit: -, assumed: true, why: "assumed: a call is more fragile than an SBD burst; no published figure found. Replace with the lab's RUDICS call success counts."}
+    max_attempts: {value: 3, unit: -, assumed: true, why: "assumed retries per RUDICS call. Replace with the modem configuration actually used."}
+    fail_cost_s: {value: 60.0, unit: s, assumed: true, why: "assumed: time burnt by a failed RUDICS call. Replace with measured failed-call durations."}
