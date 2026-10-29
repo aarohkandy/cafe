@@ -26,9 +26,25 @@ Everything in `site/` is static: the quick check runs on the viewer's own machin
 
 | | How |
 |---|---|
-| **A drone** | Hangar → *Add a design*. Either a **simple shape** (torpedo AUV, buoyancy glider, cylinder pod, monohull, catamaran, quadcopter frame: a few dimensions in metres) or a **3-D model file** (STL/OBJ/PLY/glTF/3MF/STEP). Plus mass, propulsion or pump power, battery, electronics load, material and wall thickness. |
+| **A drone** | Hangar → *Add a design*. Either a **simple shape** (torpedo AUV, buoyancy glider, cylinder pod, monohull, catamaran, quadcopter frame: a few dimensions in metres) or a **3-D model file** (STL/OBJ/PLY/glTF/3MF/STEP; for a sub, also how it moves: propeller + fins, buoyancy glider, or six-thruster ROV). Plus mass (blank for a sub = neutrally buoyant), propulsion or pump power, battery, electronics load, material and wall thickness. |
 | **Where & when** | Plan → pick the time, add drones with a start point and legs (`goto`, `hold`, `follow` another drone). |
 | **Keep in range** | Plan → *Add a range requirement*: drones A and B within N metres (3-D or horizontal), for at least X % of the time, optionally only during a time window. |
+
+**Or all from one file:** put your CAD files in `lab/cad/`, fill in the numbers and the deployment in
+[`lab/fleet.json`](lab/fleet.json), then
+
+```bash
+python3 lab/check.py lab/fleet.json
+```
+
+It uploads each design, waits for it to be characterized, flies the deployment and prints every verdict
+with what would make it pass, plus a link to the replay on the map. Designs whose file and numbers haven't
+changed are re-used, so after the first run it goes straight to the deployment. As shipped, it runs a
+STEP-file AUV with the example boat overhead.
+
+CAD notes: a STEP made of several solids (hull, nose cone, tail as separate bodies) is fused into one on
+import, and so is a mesh export of overlapping closed parts. Leave fins and wings out of a sub's model
+(they're modelled as actuators); for a glider, give `wing_span`, `wing_chord` and `hull_d` instead.
 
 Each design is characterized once, and every plan reuses the result:
 

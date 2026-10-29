@@ -75,7 +75,7 @@ def _design_summary(d):
     st = _read(d / "status.json", {})
     res = _read(d / "result.json", {})
     perf = res.get("performance") or res.get("estimates") or {}
-    return dict(id=d.name, name=spec.get("name", d.name), kind=spec.get("kind"), sample=spec.get("sample", False), shape=spec.get("shape"),
+    return dict(id=d.name, name=spec.get("name", d.name), kind=spec.get("kind"), sample=spec.get("sample", False), shape=spec.get("shape"), layout=spec.get("layout"),
                 status=st.get("state"), step=st.get("step"), progress=st.get("progress", 0),
                 mass=spec.get("mass"), power_w=spec.get("power_w"), battery_wh=spec.get("battery_wh"),
                 cruise=perf.get("cruise"), vmax=perf.get("vmax"), errors=res.get("errors") or st.get("errors"),
@@ -97,7 +97,7 @@ def list_designs():
 
 SPEC_FIELDS = dict(mass=float, power_w=float, battery_wh=float, hotel_w=float, prop_d=float, wall_mm=float,
                    rotors=int, wheelbase=float, appendage_factor=float, cells=int, buoyancy_cc=float, dive_m=float,
-                   top_m=float, fin_area=float, rudder_area=float, mass_travel=float, pump_s=float, skeg_area=float)
+                   top_m=float, wing_span=float, wing_chord=float, hull_d=float, fin_area=float, rudder_area=float, mass_travel=float, pump_s=float, skeg_area=float)
 SPEC_CHOICES = dict(structure=("shell", "solid"), design_category=("A", "B", "C", "D"), layout=("torpedo", "glider", "vectored6"),
                     units=("auto", "mm", "cm", "m", "in"), forward=("+x", "-x", "+y", "-y", "+z", "-z"),
                     up=("+x", "-x", "+y", "-y", "+z", "-z"), kind=KINDS)
@@ -157,7 +157,7 @@ async def create_design(mesh: UploadFile = File(...), spec: str = Form(...)):
         raise HTTPException(400, f"spec must be plain JSON with finite numbers ({e})")
     if not isinstance(s, dict) or s.get("kind") not in KINDS:
         raise HTTPException(400, "kind must be one of uuv (under water), usv (on water), uav (over water)")
-    s = clean_spec(s, ("mass", "power_w", "battery_wh"))
+    s = clean_spec(s, ("power_w", "battery_wh") if s["kind"] == "uuv" else ("mass", "power_w", "battery_wh"))
     suffix = pathlib.Path(mesh.filename or "m.stl").suffix.lower()
     if suffix not in (".stl", ".obj", ".ply", ".off", ".glb", ".gltf", ".step", ".stp", ".iges", ".igs", ".3mf"):
         raise HTTPException(400, f"can't read {suffix} files; use STL, OBJ, PLY, glTF, 3MF or STEP")
@@ -171,6 +171,11 @@ async def create_design(mesh: UploadFile = File(...), spec: str = Form(...)):
     except Exception as e:
         shutil.rmtree(d)
         raise HTTPException(400, f"couldn't read the model: {e}")
+    if not s.get("mass"):                               # subs and gliders are trimmed neutral
+        if not m.is_watertight:
+            shutil.rmtree(d)
+            raise HTTPException(400, "mass is required: the model isn't a closed surface, so its displacement can't be worked out")
+        s["mass"] = round(geom.RHO_SEA * m.volume, 2)
     m.export(d / "mesh.stl")
     if m.metadata.get("units_assumed"):
         s["units_assumed"] = m.metadata["units_assumed"]

@@ -1,0 +1,40 @@
+{
+  "_how": "Fill in your drones under designs (a CAD file + numbers), then the deployment. Run: python3 lab/check.py lab/fleet.json. Keys starting with _ are notes and are ignored.",
+
+  "designs": {
+    "auv": {
+      "_what": "kind: uuv under water, usv on the water, uav over it. layout (uuv only): torpedo, glider or vectored6. Leave mass out for a sub to make it neutrally buoyant.",
+      "file": "cad/example_auv.step",
+      "kind": "uuv",
+      "layout": "torpedo",
+      "_units": "units: auto (guess), mm, cm, m or in. forward/up: which file axis is the nose and which is up.",
+      "units": "mm",
+      "forward": "+x",
+      "up": "+z",
+      "power_w": 150,
+      "battery_wh": 1000,
+      "hotel_w": 5,
+      "prop_d": 0.12,
+      "_structure": "material: al6061 ti6al4v ss316 cfrp gfrp abs pla petg hdpe pmma pom",
+      "material": "al6061",
+      "wall_mm": 6
+    }
+  },
+
+  "deployment": {
+    "_what": "design: a name from designs above, or an example (sample-petrel, sample-tern, sample-quad, sample-torpedo, sample-wigley). start: [lat, lon, depth or altitude in m].",
+    "name": "AUV survey with a boat overhead",
+    "t0": "2023-03-07T17:00",
+    "max_hours": 2,
+    "samples": 16,
+    "drones": [
+      {"id": "auv", "design": "auv", "start": [10.0, -95.0, 5],
+       "legs": [{"type": "goto", "to": [10.018, -95.0, 50]}, {"type": "goto", "to": "start"}]},
+      {"id": "boat", "design": "sample-tern", "start": [9.998, -95.0, 0],
+       "legs": [{"type": "follow", "target": "auv", "offset": [0, 0, 0], "minutes": 80, "tol_m": 300}]}
+    ],
+    "links": [
+      {"_what": "a and b must stay within max_m (horizontal or 3d) for at least need of the time", "a": "auv", "b": "boat", "max_m": 1000, "mode": "horizontal", "need": 0.9}
+    ]
+  }
+}

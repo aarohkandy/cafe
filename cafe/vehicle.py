@@ -203,7 +203,7 @@ def default_actuators(kind, m_frd, spec):
         # buoyancy glider (Slocum/Seaglider class): pump changes displacement, battery slides to pitch,
         # wings turn sinking into forward glide, small rudder for heading. No propeller.
         vb = spec.get("buoyancy_cc", 400) / 1e6
-        span, chord = spec.get("wing_span", 1.0), spec.get("wing_chord", 0.18)
+        span, chord = spec.get("wing_span", B), spec.get("wing_chord", 0.18)   # an uploaded glider's bbox width is its span
         hd = spec.get("hull_d", min(B, H))         # NOT the bbox: a glider's bounding box includes its wings
         half_area = max(span - hd, 0.05) * chord / 2
         ar = (span - hd) ** 2 / (2 * half_area)          # whole wing: span^2 / area

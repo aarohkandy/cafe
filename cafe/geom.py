@@ -19,13 +19,19 @@ def _read(path):
         out = pathlib.Path(tempfile.mkdtemp()) / "m.stl"   # CAD -> triangles via gmsh's OpenCASCADE
         subprocess.run(["python3", "-c", f"""
 import gmsh; gmsh.initialize(); gmsh.option.setNumber('General.Terminal',0)
-gmsh.model.occ.importShapes({str(p)!r}); gmsh.model.occ.synchronize()
+v = gmsh.model.occ.importShapes({str(p)!r})
+v = [e for e in v if e[0] == 3]
+if len(v) > 1: gmsh.model.occ.fuse(v[:1], v[1:])   # an assembly's parts -> one closed solid
+gmsh.model.occ.synchronize()
 gmsh.option.setNumber('Mesh.MeshSizeFromCurvature', 24); gmsh.model.mesh.generate(2); gmsh.write({str(out)!r})"""],
                        check=True, capture_output=True)
         p = out
     m = trimesh.load(p, force="mesh")
     if not isinstance(m, trimesh.Trimesh) or len(m.faces) == 0:
         raise ValueError(f"{path}: no triangles found")
+    bodies = m.split(only_watertight=False)
+    if len(bodies) > 1 and all(b.is_watertight for b in bodies):   # mesh export of an assembly: overlapping shells
+        m = trimesh.boolean.union(bodies, engine="manifold")
     return m
 
 

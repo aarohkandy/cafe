@@ -155,7 +155,7 @@ $("#add-drone").onclick = async () => {
 };
 const num = (v, on, attrs = {}) => el("input", { type: "number", value: v, step: "any", class: "inline", onchange: e => on(+e.target.value), ...attrs });
 const designOf = d => designs.find(x => x.id === d.design);
-const isGlider = d => designOf(d)?.shape === "glider";
+const isGlider = d => designOf(d)?.layout === "glider";
 
 function legRow(d, l, i) {
   let what;
@@ -530,8 +530,11 @@ function syncForm() {
   document.querySelectorAll(".only-shape").forEach(n => n.hidden = src !== "shape");
   document.querySelectorAll(".only-file").forEach(n => n.hidden = src !== "file");
   form.mesh.required = src === "file";
-  const kind = src === "shape" ? sd?.kind : form.kind.value, glider = src === "shape" && shape === "glider";
+  const kind = src === "shape" ? sd?.kind : form.kind.value;
+  const glider = src === "shape" ? shape === "glider" : kind === "uuv" && form.layout.value === "glider";
+  document.querySelectorAll(".k-sub").forEach(n => n.hidden = kind !== "uuv");
   document.querySelectorAll(".k-glider").forEach(n => n.hidden = !glider);
+  document.querySelectorAll(".k-glider-file").forEach(n => n.hidden = !glider || src !== "file");
   document.querySelectorAll(".k-prop").forEach(n => n.hidden = glider);
   form.mass.required = kind !== "uuv";
   form.mass.placeholder = kind === "uuv" ? "blank = neutrally buoyant" : "";
@@ -539,12 +542,12 @@ function syncForm() {
   if (src === "shape" && sd) $("#shape-dims").replaceChildren(...Object.entries(sd.params).map(([k, p]) =>
     el("label", {}, `${p.label} (m)`, el("input", { name: `dim_${k}`, type: "number", step: "any", value: p.default, min: p.min, max: p.max }))));
 }
-form.addEventListener("change", e => { if (["source", "shape", "kind"].includes(e.target.name)) syncForm(); });
+form.addEventListener("change", e => { if (["source", "shape", "kind", "layout"].includes(e.target.name)) syncForm(); });
 form.addEventListener("submit", async e => {
   if (e.submitter?.value !== "ok") return;
   e.preventDefault();
   const fd = new FormData(form), spec = {};
-  for (const [k, v] of fd) if (!["mesh", "source", "shape"].includes(k) && !k.startsWith("dim_") && v !== "") spec[k] = v;
+  for (const [k, v] of fd) if (!["mesh", "source", "shape"].includes(k) && !k.startsWith("dim_") && v !== "" && !form.querySelector(`[name="${k}"]`).closest("[hidden]")) spec[k] = v;   // hidden fields don't apply
   $("#design-submit").disabled = true; $("#design-error").textContent = "Working…"; $("#design-error").classList.remove("err");
   try {
     let d;

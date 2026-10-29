@@ -136,6 +136,10 @@
         <label><input type="radio" name="kind" value="usv"><span>On the water</span></label>
         <label><input type="radio" name="kind" value="uav"><span>Over the water</span></label>
       </fieldset>
+      <label class="k-sub">How it moves <select name="layout">
+        <option value="torpedo">Propeller + tail fins (torpedo AUV)</option>
+        <option value="glider">Buoyancy glider (pump + wings)</option>
+        <option value="vectored6">Six thrusters (ROV)</option></select></label>
       <label>Model file <input type="file" name="mesh" accept=".stl,.obj,.ply,.glb,.gltf,.3mf,.step,.stp,.iges,.igs"></label>
       <div class="row">
         <label>Units <select name="units"><option value="auto">Guess</option><option>mm</option><option>cm</option><option>m</option><option>in</option></select></label>
@@ -154,6 +158,11 @@
       <label>Electronics load (W) <input name="hotel_w" type="number" step="any" value="5"></label>
       <label class="k-prop">Prop diameter (m) <input name="prop_d" type="number" step="any" placeholder="0.10"></label>
       <label class="k-glider">Buoyancy engine (± cc) <input name="buoyancy_cc" type="number" step="any" value="400"></label>
+    </div>
+    <div class="row k-glider-file">
+      <label>Wing tip to tip (m) <input name="wing_span" type="number" step="any" placeholder="model width"></label>
+      <label>Wing chord (m) <input name="wing_chord" type="number" step="any" placeholder="0.18"></label>
+      <label>Hull diameter (m) <input name="hull_d" type="number" step="any" placeholder="from model"></label>
     </div>
     <div class="row">
       <label>Material <select name="material" id="material"></select></label>
