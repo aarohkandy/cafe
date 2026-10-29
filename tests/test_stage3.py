@@ -92,6 +92,16 @@ def test_wall_set_padding_and_errors():
     assert wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))), pad_to=n + 3).cell.shape[1] == n + 3
 
 
+def test_wall_set_near_list_padding_and_error():
+    solid, ws = _plate_ws()
+    ws0 = wm.WallSet(*(np.asarray(a) for a in ws))
+    m = ws0.near.shape[1]
+    p = wm.pad_wall_set(ws0, ws0.cell.shape[1], m + 5)
+    assert p.near.shape[1] == m + 5 and (p.near_damp[m:] == 0).all() and (p.near_damp[:m] > 0).all()
+    with pytest.raises(ValueError, match="near-wall"):
+        wm.pad_wall_set(ws0, ws0.cell.shape[1], m - 1)
+
+
 def test_wall_set_sphere_normals_are_radial_and_a_solid_stencil_falls_back_to_the_wall_cell():
     shape = (24, 24, 24)
     solid = nest._sphere(shape, (12, 12, 12), 4.0)
@@ -206,7 +216,7 @@ def test_flat_plate_ci_size_regression():
     f = on["force"]
     assert np.isfinite(f).all() and f[-3000:].mean() > 0                    # drag on the plate, steady sign
     off = wm.flat_plate(wall_model=False, **wm.PLATE_CI)
-    assert off["yfrac"] == 0 and off["utau"] == 0 and off["cf"] > 1.5 * on["cf"]    # plain no-slip + Smagorinsky: other physics
+    assert off["yfrac"] == 0 and off["utau"] == 0 and abs(off["cf"]) < 0.05 * on["cf"]    # specular walls without the stress BC: frictionless
 
 
 def test_inflow_turbulence_intensity_and_mean():
@@ -699,10 +709,18 @@ def no_wall_receipt(monkeypatch, tmp_path):
     return tmp_path
 
 
+def in_process_fea(cmd, **kw):
+    """Stands in for the child process: runs the same entry point in this process (the real subprocess is tested once, below)."""
+    import subprocess
+    rc = pw._fea_child(cmd[-2], cmd[-1])
+    return subprocess.CompletedProcess(cmd, rc, "", "")
+
+
 def cheap(monkeypatch, **over):
     base = pw.assumptions()
     base.update(fea_elements_along=6, **over)
     monkeypatch.setattr(pw, "assumptions", lambda: base)
+    monkeypatch.setattr(pw, "_spawn", in_process_fea)
 
 
 def test_assumptions_file_carries_every_key_the_adapter_reads():
@@ -834,13 +852,22 @@ def test_a_stored_passing_receipt_clears_only_the_wall_model_row(no_wall_receipt
     assert r["ok"] == all(c["ok"] for c in r["checks"])                         # ok is exactly "every check passed": nothing else decides it
 
 
+def r_ok(out):
+    return all("error" not in r for rs in out.values() for r in rs)
+
+
 def test_track_heading_from_res_pkl_and_cpu_fallback_label_off(no_wall_receipt, monkeypatch):
     cheap(monkeypatch)
     t = np.array([WIN["t"] - 3600, WIN["t"], WIN["t"] + 3600])
     res = dict(vehicles=dict(q=dict(t=t, lon=np.full((3, 2), -165.0) + 0.01 * np.arange(3)[:, None], lat=np.zeros((3, 2)))))
     (no_wall_receipt / "stage1").mkdir()
     (no_wall_receipt / "stage1" / "res.pkl").write_bytes(pickle.dumps(res))
-    out = pw.run(fake_ctx(no_wall_receipt, cpu=False), {"q": [WIN]}, FakeL())
+    ctx = fake_ctx(no_wall_receipt, cpu=False)
+    ctx.cache = no_wall_receipt / "cache"
+    import jax
+    out = pw.run(ctx, {"q": [WIN]}, FakeL())
+    jax.config.update("jax_compilation_cache_dir", None)
+    assert jax.config.jax_persistent_cache_min_compile_time_secs == 0.0 and r_ok(out)
     r = out["q"][0]
     assert r["heading_source"] == "stage-1 median track" and r["heading_deg"] == pytest.approx(90.0, abs=0.5) and r["label"] is None
 
@@ -882,14 +909,31 @@ def test_windows_that_cannot_run_become_error_rows_not_crashes(no_wall_receipt, 
     assert "cells need" in pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())["q"][0]["error"]
 
 
-def test_fea_failure_is_reported_with_its_reason(no_wall_receipt, monkeypatch):
+def test_fea_failure_timeout_and_the_real_child_process(no_wall_receipt, monkeypatch):
+    import subprocess
+    real_run = subprocess.run
     cheap(monkeypatch)
 
-    def boom(*a, **k):
-        raise RuntimeError("CalculiX failed: forced")
-    monkeypatch.setattr(W, "fea_window", boom)
+    def boom(cmd, **k):
+        return subprocess.CompletedProcess(cmd, 1, "", "Traceback ...\nRuntimeError: CalculiX failed: forced")
+
+    def slow(cmd, **k):
+        raise subprocess.TimeoutExpired(cmd, k["timeout"])
+    monkeypatch.setattr(pw, "_spawn", boom)
     r = pw.run(fake_ctx(no_wall_receipt), {"g": [WIN]}, FakeL())["g"][0]
-    assert not r["fea"]["run"] and "CalculiX failed: forced" in r["fea"]["reason"] and r["cd"] is not None
+    assert not r["fea"]["run"] and "FEA failed: RuntimeError: CalculiX failed: forced" in r["fea"]["reason"] and r["cd"] is not None
+    monkeypatch.setattr(pw, "_spawn", slow)
+    r = pw.run(fake_ctx(no_wall_receipt), {"g": [WIN]}, FakeL())["g"][0]
+    assert not r["fea"]["run"] and "killed after" in r["fea"]["reason"]
+    # the real thing, once: a thin sphere shell through `python -m cafe.pm.stage3.pipeline_windows --fea`
+    ball = W.Vehicle("ball", "water", 0.1, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.05, 0.05, 0.05))], material="al6061",
+                     thickness=0.002, depth=0.0, extra=dict(fea=True))
+    pts = _sphere_points(0.05, 200)
+    monkeypatch.setattr(pw, "_spawn", real_run)
+    out = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=300)
+    assert out["run"] and out["utilization"] > 0 and out["seconds"] > 0
+    out2 = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=0.05)
+    assert not out2["run"] and "killed after" in out2["reason"]                  # a hard stop at the slice, however far gmsh/ccx got
 
 
 def test_run_flags_a_row_that_claims_ok_with_a_failing_check(no_wall_receipt, monkeypatch):
@@ -966,13 +1010,15 @@ def test_stage_share_and_reasons_for_every_check():
         assert frag in text, frag
     assert len(reasons) == len(spec) + 1                                          # one sentence per failure plus the resolution rule
     fine = dict(dx=0.001, delta_te=0.05, y_plus_estimate=1)
+    fl = pw.why_failed([dict(name="viscosity_floor", value=1e-4, limit=3e-6, ok=False)], fine, {})
+    assert fl == ["viscosity raised to the stability floor (lattice 0.0001 instead of 3e-06): Reynolds number distorted at this dx"]
     assert "stored receipt error 70% > 20%" in pw.why_failed([dict(name="wall_model_receipt_error", value=0.7, limit=0.2, ok=False)], fine, {})[0]
     assert pw.why_failed([], res, wl, error="becalmed") == ["becalmed"]
     assert pw.why_failed([], fine, {}) == []                                       # fine grid, nothing failed: no reason
 
 
 def test_a_spent_budget_gives_reasoned_not_run_rows_and_a_tight_one_a_coarser_cut_row(no_wall_receipt, monkeypatch):
-    cheap(monkeypatch)
+    cheap(monkeypatch, fea_min_s=1e9)                                              # no slice is ever long enough for the FEA
     ctx = fake_ctx(no_wall_receipt)
     ctx.plan.update(shares=dict(stage3=0.35), budget_s=10.0)                       # 3.5 s for 5 windows: 0.7 s each, below min_window_s
     L = FakeL()
@@ -990,5 +1036,19 @@ def test_a_spent_budget_gives_reasoned_not_run_rows_and_a_tight_one_a_coarser_cu
     assert "error" not in r and r["resolution"]["planned_steps"] >= r["resolution"]["run_steps"] > 0 and r["wall_share_s"] == pytest.approx(40.0, rel=0.05)
     assert r["resolution"]["cells_per_s_planned"] is None or r["resolution"]["cells_per_s_measured"] is not None
     assert r["reasons"] and all(isinstance(x, str) and len(x) > 10 for x in r["reasons"]) and any("wall model unvalidated" in x for x in r["reasons"])
-    assert not r["fea"]["run"] or r["fea"]["utilization"] > 0
+    assert not r["fea"]["run"] and r["fea"]["reason"].startswith("skipped:")
     assert L2.checks["stage_held_its_wall_clock_share"][1] <= 1.1 * 40.0 + 5.0      # +5 s: one compile of slack at toy size on a loaded box
+
+
+def test_viscosity_floor_is_reported_by_the_window_and_fails_the_row(no_wall_receipt, monkeypatch):
+    air = W.Vehicle("probe", "air", 0.3, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.1, 0.04, 0.04))], ref_area=0.005)
+    sp = dict(velocity=(5.0, 0.0, 0.0), dx=0.01, steps=40, box=(2.0, 0.8, 0.8))
+    r0 = W.run_window(air, W.WindowSpec(**sp), _uniform([0, 0, 0]))
+    r1 = W.run_window(air, W.WindowSpec(nu_floor=1e-4, **sp), _uniform([0, 0, 0]))
+    assert not r0["resolution"]["nu_floored"] and r0["resolution"]["nu_lat"] == pytest.approx(r0["resolution"]["nu_lat_physical"])
+    assert r1["resolution"]["nu_floored"] and r1["resolution"]["nu_lat"] == 1e-4 and r1["resolution"]["nu_lat_physical"] < 1e-4
+    cheap(monkeypatch)
+    q = pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())["q"][0]
+    if q["resolution"]["nu_floored"]:
+        assert any(c["name"] == "viscosity_floor" and not c["ok"] for c in q["checks"]) and any("viscosity raised" in x for x in q["reasons"])
+    assert np.isfinite(q["cd"])                                                 # the floor keeps the coarse air window finite

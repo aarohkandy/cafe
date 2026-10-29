@@ -57,7 +57,8 @@ class Context:
         if self._env is None:
             from .env import surface
             from .env.environment import GriddedEnv
-            self._env = GriddedEnv(self.cache, env_sigmas(), ocean=ocean(self), subgrid=surface.SurfaceLayer(self.cache))
+            sub = surface.SurfaceLayer(self.cache) if (self.cache / "derived.zarr").exists() else None    # built by ingest
+            self._env = GriddedEnv(self.cache, env_sigmas(), ocean=ocean(self), subgrid=sub)
         return self._env
 
     def path(self, *parts):
@@ -104,6 +105,7 @@ def s_ingest(ctx, L):
     L.check("orca_hours_cover_window", d["hours"] >= want, value=d["hours"], limit=want)
     if not (ctx.cache / "derived.zarr").exists():
         surface.build(ctx.env, ctx.cache, log=ctx.log)
+        ctx._env = None                                                  # rebuild with the surface layer just written
     oc = ocean(ctx)
     L.check("ocean_source_covers_box", oc is not None, note=str(ctx.mission["environment"]["ocean"]))
     L.output(man)
@@ -131,6 +133,8 @@ def _tao(ctx, L, t0, t1):
     n = len([k for k in cmp if k != "ALL"])
     L.check("tao_moorings_compared", n > 0, value=n, limit=1, note="moorings with usable wind in the window")
     L.output(_dump(cmp, ctx.path("ingest", "tao_compare.json")))
+    if not n:
+        return                                                           # the failed check above stops the stage
     a = cmp["ALL"]
     cite = f"TAO/TRITON fit (BRIEF 5.4): WRF minus {n} moorings, hourly, {ctx.mission['window']['start']}..{ctx.mission['window']['end']}"
     fit = dict(wind_speed_bias=dict(dist="normal", mean=-a["speed_bias"], value=float(np.sqrt(max(a["speed_rmse"] ** 2 - a["speed_bias"] ** 2, 0.0))),
@@ -172,8 +176,15 @@ def s_hangar(ctx, L):
         except ValueError as e:
             err = str(e)
         L.check(f"provenance_{v['platform']}", not err, note=err)
-        rows[v["id"]] = dict(platform=v["platform"], cls=cls, file=str(p), assumed=p.read_text().count("assumed: true"))
+        rows[v["id"]] = dict(platform=v["platform"], cls=cls, file=str(p), assumed=_assumed(__import__("yaml").safe_load(p.read_text())))
     L.output(_dump(rows, ctx.path("hangar", "hangar.json")))
+
+
+def _assumed(node):
+    """Number of leaves marked assumed: true in a parsed platform yaml."""
+    if isinstance(node, dict):
+        return int(node.get("assumed") is True) + sum(_assumed(v) for v in node.values())
+    return sum(_assumed(v) for v in node) if isinstance(node, list) else 0
 
 
 def _stage1(ctx, L, name, scales=None):
@@ -212,6 +223,9 @@ def s_windows(ctx, L):
         lon, lat = np.asarray(r["lon"])[:, sel], np.asarray(r["lat"])[:, sel]
         tt = np.broadcast_to(t[:, None], lon.shape)
         ok = np.isfinite(lon)
+        if not ok.any():
+            out[vid] = []
+            continue
         stress = np.full(lon.shape, -np.inf)
         if r["class"] == "glider":
             c = ctx.env.current(lon[ok], lat[ok], np.zeros(ok.sum()), tt[ok])
@@ -254,7 +268,7 @@ def s_refit(ctx, L):
             out[vid] = dict(used=False, reason="no window passed its stage-3 self-checks; Stage 1 keeps the Hangar coefficients",
                             failed_checks=sorted({c["name"] for w in ws for c in w.get("checks", []) if not c["ok"]}))
         else:
-            out[vid] = dict(used=True, **refit.refit(good, dict(cd=good[0]["cd_hangar"], cl=good[0].get("cl_hangar"))))
+            out[vid] = dict(used=True, **refit.refit(good))                 # each window against its own cd_hangar
     L.check("refit_uses_only_windows_that_passed", all(not v["used"] or v.get("drag", {}).get("windows", 0) > 0 for v in out.values()))
     L.output(_dump(out, ctx.path("refit", "refit.json")))
 
@@ -317,13 +331,13 @@ def run(mission_path, budget_name, gpus, run_dir, resume=True, stop_after=None, 
     shutil.copy(ctx.mission_path, ctx.path("mission.yaml"))
     _dump(ctx.plan, ctx.path("plan.json"))
     log(budget.describe(ctx.plan))
-    prev = None
+    prev, redo = None, not resume
     for name in STAGES:
         lp = ctx.run_dir / "checkpoints" / name / "ledger.json"
-        if resume and ledger.done(ctx.run_dir, name, ctx.hash):
+        if not redo and ledger.done(ctx.run_dir, name, ctx.hash):
             log(f"{name}: up to date (ledger {lp})")
         else:
-            a = time.time()
+            a, redo = time.time(), True                                   # everything after a rerun stage reruns too
             with ledger.Ledger(ctx.run_dir, name, ctx.hash) as L:
                 if prev is not None:
                     L.input(prev)

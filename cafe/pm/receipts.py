@@ -13,9 +13,10 @@ stays a FAIL.
 
 Slow receipts. Stored slow runs (LBM sphere / wall-model JSONs under $CAFE_DATA/receipts, the DTMB runs under
 $CAFE_DATA/dtmb5415) are read from their files by default. `--slow` additionally runs the ArduCopter SITL and the 20 min
-sortie, the app's CalculiX FEA receipts (read from its stored $CAFE_APP_RUNS/receipts.json otherwise), the wall-model flat plate, and the native-kernel sphere Re = 100 (into a scratch directory, never over the stored
-file). The multi-hour GPU/CPU runs themselves (`python -m cafe.pm.stage3.lbm slow`, `python -m cafe.pm.dtmb5415 run`) stay
-their own commands; this one only reads what they stored.
+sortie, the app's CalculiX FEA receipts (read from its stored $CAFE_APP_RUNS/receipts.json otherwise), the emulator's (n = 500 kriging,
+about 30 min on 2 CPUs), the wall-model flat plate, and the native-kernel sphere Re = 100 (into a scratch directory,
+never over the stored file). The multi-hour GPU/CPU runs themselves (`python -m cafe.pm.stage3.lbm slow`,
+`python -m cafe.pm.dtmb5415 run`) stay their own commands; this one only reads what they stored.
 
 Broken configuration. `--broken tests/fixtures/broken/wave_direction.yaml` sets $CAFE_PM_OVERLAY to that yaml for this run
 (cafe.pm.env.conventions reads `waves.direction_convention` from it, so UMWM's angles are read with WW3's convention). The
@@ -279,13 +280,14 @@ def jobs(slow=False):
         ("pm.env.tao", _call(pm + "env.tao", out_dir=tao if tao.is_dir() else None)),
         ("pm.env.bathy", _call(pm + "env.bathy", cache=gebco if gebco.exists() else None)),
         ("pm.stats.intervals", _call(pm + "stats.intervals")),
-        ("pm.emulator", _call(pm + "emulator")),
+        *([("pm.emulator", _call(pm + "emulator"))] if slow else []),
         ("pm.dtmb5415", _call(pm + "dtmb5415")),
         ("pm.stage3.lbm", _call(pm + "stage3.lbm")),
         ("pm.stage3.nest", _nest_sphere if slow else _call(pm + "stage3.nest")),
         ("pm.stage3.wallmodel", _plate if slow else _call(pm + "stage3.wallmodel")),
     ]
-    skipped = "ArduCopter SITL members, the 20 min UAS sortie, the CalculiX FEA, the wall-model flat plate and the native sphere were not run"
+    skipped = ("ArduCopter SITL members, the 20 min UAS sortie, the CalculiX FEA, the emulator (n = 500 kriging, ~30 min), "
+               "the wall-model flat plate and the native sphere were not run")
     return out if slow else out + [("slow", _not_run(skipped))]
 
 

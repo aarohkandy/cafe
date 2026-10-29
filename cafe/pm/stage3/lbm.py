@@ -317,8 +317,8 @@ def ellipsoid_q(shape, center, radii) -> np.ndarray:
         a, b, cc = (c * c).sum(0), 2 * (p * c).sum(0), (p * p).sum(0) - 1
         disc = b * b - 4 * a * cc
         t = (-b - np.sqrt(np.maximum(disc, 0))) / (2 * a)
-        hit = (disc > 0) & (cc > 0) & (t > 0) & (t <= 1)                    # starts outside, enters within one link
-        q[k] = np.where(hit, t, 0.5)
+        hit = (disc >= -1e-12) & (cc > 0) & (t > 0) & (t <= 1 + 1e-9)            # starts outside, enters within one link (t = 1: on the node)
+        q[k] = np.where(hit, np.minimum(t, 1.0), 0.5)
     return q
 
 

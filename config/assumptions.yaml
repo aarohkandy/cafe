@@ -261,7 +261,7 @@ stage3.uas.arm_thickness_m:
   why: "Arm thickness."
   replace_with: "CAD."
 stage3.min_window_s:
-  value: 3.0
+  value: 6.0
   unit: "s"
   why: "Least wall-clock slice in which a window can compile its kernel and run two chunks; below it the window is reported as not run instead of overrunning the stage budget."
   replace_with: "Measured compile + two-chunk time on the lab's machine."
@@ -280,3 +280,13 @@ stage3.chunk_steps:
   unit: "steps"
   why: "Steps per jitted chunk: the wall-clock hook decides after each chunk; every other chunk length is another XLA compile."
   replace_with: "Larger on a GPU, where a chunk of 100 steps is milliseconds."
+stage3.compile_s_guess:
+  value: 10.0
+  unit: "s"
+  why: "XLA compile of one window's scan kernel on a 2-CPU box under load (measured 10 s in the CI run); planning subtracts it from a window's wall-clock slice before the first measurement replaces it."
+  replace_with: "The measured compile time of the machine, or a warm persistent cache (0 s)."
+stage3.nu_lat_floor:
+  value: 1.0e-4
+  unit: "lattice units"
+  why: "Smallest lattice viscosity the float32 BGK/regularized kernel survives on coarse grids (tau - 1/2 = 3e-4; the throughput benchmark kernel uses the same); below it the CI quad window went NaN (nu_lat 3e-6). A window that needed the floor is reported failed with the reason."
+  replace_with: "A finer dx (nu_lat grows as 1/dx), or a collision operator that is stable at tau -> 1/2 (entropic, cumulant)."

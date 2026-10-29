@@ -58,6 +58,7 @@ class NestSpec:
     wall_model: bool = True
     body_force: tuple = (0.0, 0.0, 0.0)      # lattice units per step, uniform (channel receipt)
     rans_layer: float | None = None          # cells: near-wall mixing-length layer; None = the matching height
+    nu_floor: float = 0.0                    # lattice viscosity floor: BGK at tau - 1/2 < ~1e-4 is NaN in float32 on coarse grids (Re distorted)
 
     @property
     def dt(self) -> float:
@@ -65,7 +66,7 @@ class NestSpec:
 
     @property
     def nu_lat(self) -> float:
-        return self.nu * self.dt / self.dx ** 2
+        return max(self.nu * self.dt / self.dx ** 2, self.nu_floor)
 
     @property
     def tau0(self) -> float:
@@ -416,7 +417,7 @@ def richardson(ds, cds) -> dict:
     o = np.argsort(d)
     d, c = d[o], c[o]
     p = 1.0
-    if len(d) >= 3:
+    if len(d) >= 3 and abs(c[-2] - c[-1]) > 1e-12:
         d3, c3 = d[-3:], c[-3:]
         f = lambda q: (c3[0] - c3[1]) / (c3[1] - c3[2]) - (d3[0] ** -q - d3[1] ** -q) / (d3[1] ** -q - d3[2] ** -q)     # noqa: E731
         lo, hi = 0.5, 3.0

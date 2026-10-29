@@ -34,6 +34,7 @@ class WindowSpec:
     """What one window is. velocity: vehicle velocity in the ground frame (m/s, body axes); duration: physical seconds;
     box: nest size in body lengths; cells_per_delta: 5-10 (BRIEF 2.6); u_lat: lattice speed of the reference U;
     steps overrides duration (tests); spinup: share of the run discarded as start-up.
+    nu_floor: lattice viscosity floor (stability on coarse grids); the result says when it was applied and what the physical value was.
     wall_s: wall-clock budget of the LES run (XLA compile included); the run is cut to fit it (see `wall_hook`).
     frame: "vehicle" (default) holds the grid on the vehicle and feeds the inflow relative to it (u_env - velocity): Galilean
     exact for constant velocity, no shifts. "ground" keeps the populations in the ground frame and shifts the nest by whole
@@ -53,6 +54,7 @@ class WindowSpec:
     storage: str = "fp32"
     frame: str = "vehicle"
     wall_s: float | None = None
+    nu_floor: float = 0.0
 
 
 @dataclass
@@ -211,7 +213,7 @@ def wall_hook(steps: int, chunk: int, wall_s: float | None, cells: int, log: dic
     largest multiple of `chunk` that still ends inside `wall_s`. `log` receives planned/run steps, cut_reason, cells_per_s, compile_s."""
     prev = [0, 0.0]                                                          # (steps done, elapsed) after the previous chunk
     first: list = []
-    log.update(planned_steps=steps, run_steps=steps, cut_reason=None, cells_per_s=None, compile_s=None)
+    log.update(planned_steps=steps, run_steps=steps, cut_reason=None, cells_per_s=None, compile_s=None, les_s=0.0)
 
     def hook(done: int, elapsed: float) -> int:
         if not first:
@@ -220,6 +222,7 @@ def wall_hook(steps: int, chunk: int, wall_s: float | None, cells: int, log: dic
             per = max((elapsed - prev[1]) / (done - prev[0]), 1e-9)
             log.update(cells_per_s=cells / per, compile_s=max(first[0] - per * chunk, 0.0))
         prev[:] = [done, elapsed]
+        log["les_s"] = elapsed
         if wall_s is None:
             return steps
         if done <= chunk:
@@ -243,7 +246,8 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: Callable, backend: st
     t_enter = time.perf_counter()
     res = window_resolution(vehicle, spec)
     dx, shape, steps = res["dx"], res["shape"], res["steps"]
-    ns = nest.NestSpec(shape, dx, res["u_rel"], NU[vehicle.fluid], u_lat=spec.u_lat, storage=spec.storage)
+    ns = nest.NestSpec(shape, dx, res["u_rel"], NU[vehicle.fluid], u_lat=spec.u_lat, storage=spec.storage, nu_floor=spec.nu_floor)
+    res.update(nu_lat=ns.nu_lat, nu_lat_physical=NU[vehicle.fluid] * res["dt"] / dx ** 2, nu_floored=ns.nu_lat > NU[vehicle.fluid] * res["dt"] / dx ** 2)
     lbm.check_memory(res["cells"], None, spec.storage, "native")
     anchor = np.array(shape) // 2
     solid = voxelize(vehicle, dx, shape, tuple(anchor))

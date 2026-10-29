@@ -290,14 +290,15 @@ def test_every_receipts_function_in_cafe_pm_is_registered():
     root = pr.ROOT / "cafe" / "pm"
     have = {"pm." + ".".join(p.relative_to(root).with_suffix("").parts) for p in root.rglob("*.py") if re.search(r"^def receipts\(", p.read_text(), re.M)}
     assert len(have) >= 15
-    names = [n for n, _ in pr.jobs()]
-    assert have <= set(names) and len(names) == len(set(names)) and names[0] == "app" and "pm.env.wave_direction" in names
+    names = [n for n, _ in pr.jobs(True)]
+    assert have <= set(names) and len(names) == len(set(names))
+    assert names[0] == "app" and "pm.env.wave_direction" in names
 
 
 def test_slow_replaces_the_not_run_marker(monkeypatch):
     monkeypatch.setattr(pr, "_call", lambda mod, fn="receipts", **kw: (mod, fn, kw))
     fast, slow = dict(pr.jobs(False)), dict(pr.jobs(True))
-    assert "slow" in fast and "slow" not in slow
+    assert "slow" in fast and "slow" not in slow and "pm.emulator" not in fast and "pm.emulator" in slow
     assert fast["pm.physics.uas"] == ("cafe.pm.physics.uas", "receipts", dict(sitl=False, sortie=False))
     assert slow["pm.physics.uas"] == ("cafe.pm.physics.uas", "receipts", dict(sitl=True, sortie=True))
     assert slow["pm.stage3.nest"] is pr._nest_sphere and slow["pm.stage3.wallmodel"] is pr._plate

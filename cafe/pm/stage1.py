@@ -90,14 +90,12 @@ def _fewest_boxes(args, M):
     """Mann series from the fewest boxes that hold M non-overlapping segments (a box costs ~2 s; members sharing one are
     separated by >= U x duration along it, uncorrelated per the subgrid receipts). The capacity check runs before any box
     is built, so trying 1, 2, 4, ... boxes costs nothing."""
-    nb = 1
-    while True:
+    for nb in range(1, M):
         try:
             return subgrid.turbulence_members(*args, n_boxes=nb).value
         except ValueError:
-            if nb >= M:
-                raise
-            nb = min(2 * nb, M)
+            pass
+    return subgrid.turbulence_members(*args, n_boxes=M).value
 
 
 def _uas_forcing(env, mission, origin, ts, P, M, seed, members):
@@ -181,7 +179,8 @@ def refit_drag(scales, vid, seed, members):
     if not r:
         return 1.0
     z = np.array([sampling.member_rng(seed, m, f"refit/{vid}").standard_normal() for m in members])
-    return r["mean"] * np.exp(z * r["sigma"] / r["mean"])
+    s = np.sqrt(np.log1p((r["sigma"] / r["mean"]) ** 2))                    # lognormal with the refit's mean and sigma
+    return r["mean"] * np.exp(s * z - 0.5 * s ** 2)
 
 
 def run_batch(mission, env, members, seed, pri, marg, scales=None):
@@ -254,14 +253,16 @@ def evaluate_link(lk, out, mission, env, M, seed, members):
         else:
             need = np.ones((len(t), M), bool)
         lonA, latA = A[0], A[1]
-        wind = np.hypot(*np.moveaxis(env.env.u10(lonA[:, 0], latA[:, 0], t), -1, 0))[:, None] * np.ones((1, M))
+        tt = np.broadcast_to(t[:, None], lonA.shape)                         # each member at its own position
+        wind = np.hypot(*np.moveaxis(np.asarray(env.env.u10(lonA, latA, tt), float), -1, 0))
         if lk["kind"] == "rf":
-            hs = env.env.waves(lonA[:, 0], latA[:, 0], t)["Hs"].value[:, None] * np.ones((1, M))
+            hs = np.asarray(env.waves(lonA.T, latA.T, tt.T)["Hs"].value, float).T     # the member's own Hs perturbation (members first)
             margin = comms.rf_margin(d, A[2], B[2], np.nan_to_num(hs), lk["radio"])
             method = f"two-ray + 4/3-earth horizon, {lk['radio']} (Ament sea roughness, modelled)"
         else:
-            modem, band = lk["modem"].rsplit("_", 1) if lk["modem"].rsplit("_", 1)[-1] in ("LF", "MF", "HF", "lf", "mf", "hf") else (lk["modem"], "MF")
-            res = comms.acoustic_link(d, modem, band.upper(), wind)
+            reg = comms._yaml("modems.yaml")["modems"]                        # "<modem>_<band>" as named in modems.yaml
+            modem, band = next(((k, bd) for k, v in reg.items() for bd in v["bands"] if lk["modem"].lower() == f"{k}_{bd}".lower()), (lk["modem"], "MF"))
+            res = comms.acoustic_link(d, modem, band, wind)
             margin = res["margin"].value
             method = res.get("label") or res.get("method")
             if not isinstance(method, str):

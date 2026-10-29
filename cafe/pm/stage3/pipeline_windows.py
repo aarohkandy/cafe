@@ -33,9 +33,14 @@ reaches Stage 1b.
 """
 from __future__ import annotations
 
+import dataclasses
+import json
 import math
 import pathlib
 import pickle
+import subprocess
+import sys
+import tempfile
 import time
 from typing import Any
 
@@ -270,14 +275,46 @@ def _load_res(ctx) -> dict | None:
     return pickle.loads(f.read_bytes()) if f.exists() else None
 
 
-def _fea(veh: W.Vehicle, r: dict, a: dict) -> dict:
+_spawn = subprocess.run                                                     # a seam: tests replace it without touching subprocess.run for ccx
+
+
+def _fea_child(job: str, out: str) -> int:
+    """Child process of `_fea`: job = .npz with the vehicle (JSON), wall points, pressure and mesh size; writes the FEA summary as JSON."""
+    z = np.load(job, allow_pickle=False)
+    veh = W.Vehicle(**json.loads(str(z["vehicle"])))
+    with tempfile.TemporaryDirectory() as wd:
+        r = W.fea_window(veh, z["points"], z["pressure"], workdir=wd, h=float(z["h"]))
+    pathlib.Path(out).write_text(json.dumps(r, default=float))
+    return 0
+
+
+def _fea(veh: W.Vehicle, r: dict, a: dict, timeout_s: float | None = None) -> dict:
+    """The FEA of the pressure hull in a child process that is killed at `timeout_s`: gmsh and ccx cannot be interrupted from inside,
+    and the stage's wall-clock share is not negotiable."""
     if veh.extra.get("fea") is None:
         return dict(run=False, reason=veh.extra["fea_reason"])
-    try:
-        h = veh.length / need(a, "fea_elements_along")
-        return dict(run=True, **W.fea_window(veh, r["wall_points"], r["wall_pressure"], h=h))
-    except (ValueError, RuntimeError) as e:
-        return dict(run=False, reason=f"FEA failed: {str(e)[:200]}")
+    t0 = time.perf_counter()
+    with tempfile.TemporaryDirectory() as wd:
+        job, out = pathlib.Path(wd) / "job.npz", pathlib.Path(wd) / "out.json"
+        np.savez(job, vehicle=json.dumps(dataclasses.asdict(veh), default=float), points=r["wall_points"], pressure=r["wall_pressure"],
+                 h=veh.length / need(a, "fea_elements_along"))
+        try:
+            p = _spawn([sys.executable, "-m", __name__, "--fea", str(job), str(out)], capture_output=True, text=True, timeout=timeout_s,
+                               cwd=str(pathlib.Path(__file__).resolve().parents[3]))
+        except subprocess.TimeoutExpired:
+            return dict(run=False, reason=f"killed after {time.perf_counter() - t0:.0f} s: the FEA did not fit the window's remaining wall-clock slice")
+        if p.returncode or not out.exists():
+            return dict(run=False, reason=f"FEA failed: {(p.stderr.strip().splitlines() or ['no message'])[-1][:200]}")
+        return dict(run=True, seconds=time.perf_counter() - t0, **json.loads(out.read_text()))
+
+
+def _jit_cache(ctx) -> None:
+    """Persistent XLA compilation cache under the mission cache: a rerun (or a window of the same shape) skips the compile."""
+    import jax
+    cache = getattr(ctx, "cache", None)
+    if cache is not None:
+        jax.config.update("jax_compilation_cache_dir", str(pathlib.Path(cache) / "jax"))
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
 
 
 def stage_share_s(ctx) -> float | None:
@@ -317,6 +354,8 @@ def why_failed(checks: list, res: dict, wlog: dict, error: str | None = None) ->
             out.append(f"mass changes {v:.2g} per step (limit {lim:g}): open-boundary imbalance")
         elif n == "interpolation_residual":
             out.append(f"coarse-to-fine residual {v:.3g} u_lat above {lim}")
+        elif n == "viscosity_floor":
+            out.append(f"viscosity raised to the stability floor (lattice {v:.2g} instead of {lim:.2g}): Reynolds number distorted at this dx")
         elif n == "sponge_clearance_cells":
             out.append(f"the body is {v:.0f} cells from the relaxation layer (need {lim:.0f}): box too small at this dx")
         else:
@@ -376,7 +415,7 @@ def _row(ctx, vid: str, cls: str, w: dict, part: str, platform: str, res: dict |
         chunk = int(need(a, "chunk_steps"))
         steps = -(-fit["steps"] // chunk) * chunk                           # whole chunks: another chunk length is another XLA compile
         spec = W.WindowSpec(velocity=tuple(float(x) for x in vb), dx=fit["dx"], steps=steps, box=fit["box"], cd_ref=case["cd_h"],
-                            spinup=need(a, "spinup"), chunk=chunk, wall_s=run_s)
+                            spinup=need(a, "spinup"), chunk=chunk, wall_s=run_s, nu_floor=need(a, "nu_lat_floor"))
         inflow = lambda x, y, z, t, _u=ub: jnp.stack([jnp.full_like(x, _u[0]), jnp.full_like(x, _u[1]), jnp.full_like(x, _u[2])])    # noqa: E731
         r = W.run_window(veh, spec, inflow)
     except (ValueError, RuntimeError) as e:                                 # memory guard, empty body, no flow ...
@@ -390,18 +429,25 @@ def _row(ctx, vid: str, cls: str, w: dict, part: str, platform: str, res: dict |
     if time_cs is not None and run_s is not None and time_cs < plan_cs:
         cuts.insert(0, f"coarsened: {time_cs:.3g} cell-steps afforded by {run_s:.0f} s at {meter['rate']:.3g} cells/s, plan {plan_cs:.3g}")
     left = None if win_s is None else win_s - (time.perf_counter() - t0)
+    fea_took = 0.0
     if veh.extra.get("fea") and left is not None and left < need(a, "fea_min_s"):
         fea = dict(run=False, reason=f"skipped: {max(left, 0):.1f} s of the stage-3 wall-clock budget left for this window "
                                      f"(FEA needs {need(a, 'fea_min_s')} s)")
     else:
-        fea = _fea(veh, r, a)
+        t_fea = time.perf_counter()
+        fea = _fea(veh, r, a, None if left is None else left)
+        fea_took = time.perf_counter() - t_fea
     resolution = dict(r["resolution"], cells=fit["cells"], cell_steps=fit["cell_steps"], budget_ok=fit["budget_ok"],
                       planned_steps=wl["planned_steps"], run_steps=wl["run_steps"], cut_reason="; ".join(cuts) or None,
                       cells_per_s_measured=wl["cells_per_s"], cells_per_s_planned=les.get("rate"), compile_s=wl["compile_s"],
                       cell_steps_budget_plan=plan_cs, cell_steps_budget_time=time_cs, setup_s=wl["setup_s"],
-                      cells_per_delta=r["resolution"]["delta_te"] / r["resolution"]["dx"])
-    ok = bool(r["ok"] and not any(not c["ok"] for c in r["checks"]))
-    return dict(base, resolution=resolution, checks=r["checks"], ok=ok, reasons=[] if ok else why_failed(r["checks"], r["resolution"], wl),
+                      cells_per_delta=r["resolution"]["delta_te"] / r["resolution"]["dx"], les_s=wl["les_s"], fea_s=fea_took)
+    checks = list(r["checks"])
+    if r["resolution"]["nu_floored"]:                                       # a stability floor changes the Reynolds number: a window that needed it fails
+        checks.append(dict(name="viscosity_floor", value=r["resolution"]["nu_lat"], limit=r["resolution"]["nu_lat_physical"], ok=False,
+                           note="lattice viscosity raised to the floor; the window is not at the physical Reynolds number"))
+    ok = bool(r["ok"] and not any(not c["ok"] for c in checks))
+    return dict(base, resolution=resolution, checks=checks, ok=ok, reasons=[] if ok else why_failed(checks, r["resolution"], wl),
                 cd=float(r["cd"]), cd_spread=float(r["cd_spread"]), cl=float(r["cl"]), cl_spread=float(r["cl_spread"]),
                 added_resistance=None if r["added_resistance"] is None else float(r["added_resistance"]), fea=fea,
                 ref_area=float(r["ref_area"]), source=r["source"], wall_s=time.perf_counter() - t0)
@@ -425,7 +471,8 @@ def run(ctx, wins: dict, L) -> dict:
     share = stage_share_s(ctx)
     t_stage = time.perf_counter()
     todo = [(vid, w, part) for vid, ws in wins.items() for w in ws for part in PARTS[ctx.classes[vid]]]
-    meter = dict(rate=float(ctx.plan["les"].get("rate") or 1e6), compile_s=float(a.get("compile_s_guess", 0.0)), n=0)
+    _jit_cache(ctx)
+    meter = dict(rate=float(ctx.plan["les"].get("rate") or 1e6), compile_s=float(need(a, "compile_s_guess")), n=0)
     rows: dict[str, list] = {vid: [] for vid in wins}
     for i, (vid, w, part) in enumerate(todo):
         win_s = None if share is None else (share - (time.perf_counter() - t_stage)) / (len(todo) - i)
@@ -444,3 +491,7 @@ def run(ctx, wins: dict, L) -> dict:
         L.check("stage_held_its_wall_clock_share", spent <= 1.1 * share, value=round(spent, 1), limit=round(1.1 * share, 1),
                 note="share = plan shares.stage3 x budget_s; a window cut by the budget is a coarser row, not an overrun")
     return rows
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(_fea_child(sys.argv[2], sys.argv[3]) if sys.argv[1:2] == ["--fea"] else 2)

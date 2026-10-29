@@ -54,7 +54,7 @@ def test_receipts_pass_and_are_recorded(monkeypatch, tmp_path):
     core = [x for x in out if x["group"] == "LBM nest"]
     assert len(core) == 5 and all(x["ok"] for x in core)
     sph = [x for x in out if x["group"] == "LBM native sphere"]
-    assert len(sph) == 3 and all(x["ok"] is None and "not stored" in x["claim"] for x in sph)      # no slow runs yet: context rows
+    assert len(sph) == 3 and all(x["ok"] is None and "stored" in x["claim"] for x in sph)      # no slow runs yet: context rows
 
 
 def _sphere_json(re, cd, **over):
@@ -372,3 +372,11 @@ def test_simulate_steps_hook_cuts_the_run_to_whole_chunks():
     assert len(ser["mass"]) == 150 and [d for d, _ in seen] == [50, 100, 150] and all(e >= 0 for _, e in seen)
     _, ser = nest.simulate(spec, _env_uniform([0.0, 0.0, 0.0]), geom, p0, params, 200, chunk=50, steps_hook=lambda d, e: 0)
     assert len(ser["mass"]) == 50                                             # a hook cannot un-run what is done
+
+
+def test_viscosity_floor_only_raises_the_lattice_viscosity():
+    base = dict(shape=(8, 8, 8), dx=0.01, U_ref=1.0, nu=1e-9)
+    assert nest.NestSpec(**base).nu_lat == pytest.approx(1e-9 * 0.04 * 0.01 / 1e-4)
+    assert nest.NestSpec(**base, nu_floor=1e-4).nu_lat == 1e-4 and nest.NestSpec(**base, nu_floor=1e-4).tau0 == pytest.approx(0.5003)
+    big = dict(base, nu=1.0)
+    assert nest.NestSpec(**big, nu_floor=1e-4).nu_lat == nest.NestSpec(**big).nu_lat
