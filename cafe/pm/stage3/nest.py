@@ -337,6 +337,9 @@ def sphere_drag(re: float, d: int = 8, domain=(12, 6, 6), steps: int | None = No
     over the last 20 % of the run. This is the native-kernel counterpart of lbm.sphere; `bouzidi` uses the exact sphere wall distance
     (curved-wall bounce-back), False the staircase halfway wall that XLB 0.3.1 has."""
     shape = tuple(int(round(a * d)) for a in domain)
+    need, have = float(np.prod(shape)) * NEST_BYTES_PER_CELL, lbm.device_memory_bytes()
+    if need > lbm.MEM_LIMIT * have:
+        raise lbm.MemoryGuardError(f"{np.prod(shape):.3g} cells need {need / 1e9:.1f} GB of {have / 1e9:.1f} GB: shrink the box or use d smaller")
     nu = u_lat * d / re
     steps = steps or int(30 * d / u_lat)                                       # 30 flow-throughs of a diameter: Cd flat to <0.2 % at Re=100
     cs = (0.0 if re < 500 else 0.17) if cs is None else cs
@@ -401,12 +404,28 @@ SLOW_DIR = pathlib.Path(os.environ.get("CAFE_DATA", "/data")) / "receipts"
 SPHERE_RUNS = (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4))
 
 
-def sphere_path(tag: str, d: int | None = None) -> pathlib.Path:
-    return SLOW_DIR / (f"nest_sphere_{tag}.json" if d is None else f"nest_sphere_{tag}_d{d}.json")
+def sphere_path(tag: str, d: int) -> pathlib.Path:
+    return SLOW_DIR / f"nest_sphere_{tag}_d{d}.json"
 
 
-def gpu_command(tag: str, d: int, domain=(9, 6, 6)) -> str:
-    return f"python -m cafe.pm.stage3.nest slow {tag} {d} {domain[0]} {domain[1]} {domain[2]} --lateral dirichlet"
+NEST_BYTES_PER_CELL = 300.0      # populations + double buffer + masks + Bouzidi q (182 B/cell measured for the bare kernel, + 38 masks + 76 q)
+DOMAIN = (12, 6, 6)              # diameters: length, width, height of the sphere runs
+PLAN = {"100": (16, "d = 16 (with the d = 8 and 12 runs for the extrapolation)"), "1000": (24, "d >= 24"), "1e4": (40, "d >= 40")}
+
+
+def run_plan(tag: str, d: int | None = None, domain=DOMAIN) -> dict:
+    """What a stored run costs: cells, steps (30 diameter flow-throughs at lattice speed 0.05), cell-updates, memory, the command."""
+    d = d or PLAN[tag][0]
+    cells = int(np.prod([round(a * d) for a in domain]))
+    steps = int(30 * d / lbm.U_LAT_SPHERE)
+    cmd = f"python -m cafe.pm.stage3.nest slow {tag} {d} {domain[0]} {domain[1]} {domain[2]} --lateral dirichlet"
+    gb = cells * NEST_BYTES_PER_CELL / 1e9
+    return dict(d=d, cells=cells, steps=steps, updates=float(cells) * steps, gb=gb, command=cmd,
+                eta=lbm.eta_text(float(cells) * steps) + f"; {gb:.1f} GB with --memory {max(2 * round(gb / 2) + 2, 4)}g")
+
+
+def gpu_command(tag: str, d: int, domain=DOMAIN) -> str:
+    return run_plan(tag, d, domain)["command"]
 
 
 def richardson(ds, cds) -> dict:
@@ -432,49 +451,51 @@ def richardson(ds, cds) -> dict:
 
 
 def sphere_receipts() -> list:
-    """Sphere Cd vs Morrison 2013 on the native kernel (curved-wall bounce-back). Re=100: the stored runs at several d
-    (nest_sphere_100_d*.json) give the finest-grid value (context) and the Richardson-extrapolated one, which is the receipt (10 %).
-    Re=1e3 and 1e4 are shown as context only: at the CPU-affordable resolution they are NOT met, and each row says what resolution it
-    would need and the command to run on a GPU box. Missing runs give a context row too."""
-    from cafe.receipts import context, receipt
+    """Sphere Cd vs Morrison 2013 at Re = 1e2, 1e3, 1e4 on the native kernel (curved-wall bounce-back), one pass/fail row each (10 %).
+    The row is the Richardson-extrapolated Cd from the stored grids (nest_sphere_<Re>_d*.json) when there are two or more, else the
+    single stored grid. Stored and within 10 %: pass; stored and outside: fail with the measured error; not stored or stored by
+    different code: fail, naming the command and its run time. Each stored grid also gets a context row (the resolution study)."""
+    from cafe.receipts import context
     g = "LBM native sphere"
-    runs = sorted((json.loads(f.read_text()) for f in SLOW_DIR.glob("nest_sphere_100_d*.json")), key=lambda r: r["d"])
-    ref100 = lbm.morrison(100.0)
-    if runs:
-        fine = runs[-1]
-        context(g, f"Sphere Cd at Re=100, finest stored grid d={fine['d']}", fine["cd"], ref100, "", f"Morrison 2013; {fine['shape']}; first-order error ~ 1/d")
-    if len(runs) >= 2:
-        rc = richardson([r["d"] for r in runs], [r["cd"] for r in runs])
-        receipt(g, f"Sphere Cd at Re=100, Richardson-extrapolated from d={rc['ds']} (order {rc['p']:.2f})", rc["cd_inf"], ref100, 0.10, "",
-                "Morrison 2013; Cd_inf = Cd(d) - b d^-p through the finest two grids")
-    else:
-        context(g, "Sphere Cd at Re=100: needs >= 2 stored grids for the extrapolated receipt", ref100, ref100, "", gpu_command("100", 16))
-    for tag, re in SPHERE_RUNS[1:]:
-        f = sphere_path(tag)
+    for tag, re in SPHERE_RUNS:
         ref = lbm.morrison(re)
-        if not f.exists():
-            context(g, f"Sphere Cd at Re={re:g}: slow run not stored", ref, ref, "", gpu_command(tag, 24))
-            continue
-        r = json.loads(f.read_text())
-        context(g, f"Sphere Cd at Re={re:g}: NOT MET at d={r['d']} (needs d >= {r.get('needs_d', '?')}; GPU: {gpu_command(tag, r.get('needs_d', 32))})",
-                r["cd"], ref, "", f"Morrison 2013; d={r['d']} cells, {r['shape']}, {r.get('seconds', 0) / 60:.0f} min on 4 CPUs")
+        runs = sorted((json.loads(f.read_text()) for f in SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")), key=lambda r: r["d"])
+        plan = run_plan(tag)
+        for r in runs:
+            context(g, f"  study: Re={re:g}, d={r['d']}", r["cd"], ref, "", f"{r['shape']}, {r.get('seconds', 0) / 60:.0f} min")
+        rec = None
+        if len(runs) >= 2:
+            rc = richardson([r["d"] for r in runs], [r["cd"] for r in runs])
+            shas = {r.get("code_sha") for r in runs} - {None}
+            stale = sorted(shas - {lbm.physics_sha()})
+            rec = dict(cd=rc["cd_inf"], ref=ref, code_sha=stale[0] if stale else None)
+            claim = f"Sphere Cd at Re={re:g}, Richardson-extrapolated from d={[int(x) for x in rc['ds']]} (order {rc['p']:.2f})"
+        elif runs:
+            rec = dict(runs[0], ref=ref)
+            claim = f"Sphere Cd at Re={re:g}, d={runs[0]['d']}"
+        else:
+            claim = f"Sphere Cd at Re={re:g}, native kernel with curved-wall bounce-back, {PLAN[tag][1]}"
+        lbm.result_row(g, claim, rec, "cd", "ref", 0.10, plan["command"], plan["eta"],
+                       "Morrison 2013; Bouzidi et al. 2001 curved wall; Dirichlet box 12 x 6 x 6 d")
     return [r for r in cr.OUT if r["group"] == g]
 
 
 def main(argv: list) -> int:
     """python -m cafe.pm.stage3.nest [receipts | slow RE D NX NY NZ [--lateral freeslip|dirichlet] [--needs-d N]]"""
     if argv[:1] == ["slow"]:
-        lat = argv[argv.index("--lateral") + 1] if "--lateral" in argv else "freeslip"
+        sha0 = lbm.physics_sha()
+        lat = argv[argv.index("--lateral") + 1] if "--lateral" in argv else "dirichlet"
         need = int(argv[argv.index("--needs-d") + 1]) if "--needs-d" in argv else None
         tag, d = argv[1], int(argv[2])
         dom = tuple(float(a) for a in argv[3:6])
         t0 = time.time()
         r = sphere_drag(float(tag), d, dom, lateral=lat)
-        r.update(seconds=time.time() - t0, re=float(tag), ref=lbm.morrison(float(tag)), lateral=lat, history=[float(x) for x in r["history"]])
+        r.update(seconds=time.time() - t0, re=float(tag), ref=lbm.morrison(float(tag)), lateral=lat, history=[float(x) for x in r["history"]],
+                 code_sha=sha0)
         if need:
             r["needs_d"] = need
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
-        sphere_path(tag, d if float(tag) < 500 else None).write_text(json.dumps(r, default=float))
+        sphere_path(tag, d).write_text(json.dumps(r, default=float))
         print(json.dumps({k: v for k, v in r.items() if k != "history"}, default=float))
         return 0
     receipts()

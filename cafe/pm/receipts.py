@@ -8,14 +8,17 @@ receipts defined here, and normalises each record `cafe.receipts` kept to one ro
 pass/fail rows have a boolean `ok`; context rows (shown for orientation, or "this input is absent here") have ok = null and
 never count as failures. A bracket receipt's reference is the middle of its interval and its tolerance the half width (the
 note says `bracket [lo, hi]`); a receipt's note says whether the tolerance is relative or absolute. A receipt function that
-raises becomes a failing row; a function that records nothing becomes a context row. Nothing is relabelled: a stored FAIL
-stays a FAIL.
+raises becomes a failing row, and so does one that records nothing (a required check that did not happen is not "fine"). Context rows
+are for orientation and for optional inputs that are absent here. Nothing is relabelled: a stored FAIL stays a FAIL.
 
-Slow receipts. Stored slow runs (LBM sphere / wall-model JSONs under $CAFE_DATA/receipts, the DTMB runs under
-$CAFE_DATA/dtmb5415) are read from their files by default. `--slow` additionally runs the ArduCopter SITL and the 20 min
-sortie, the app's CalculiX FEA receipts (read from its stored $CAFE_APP_RUNS/receipts.json otherwise), the emulator's (n = 500 kriging,
-about 30 min on 2 CPUs), the wall-model flat plate, and the native-kernel sphere Re = 100 (into a scratch directory,
-never over the stored file). The multi-hour GPU/CPU runs themselves (`python -m cafe.pm.stage3.lbm slow`,
+Slow receipts. Some receipts take tens of minutes (the emulator's n = 500 kriging, ArduCopter SITL and the 20 min sortie, the app's
+CalculiX FEA). `--slow` runs them and stores their rows in $CAFE_DATA/receipts/<group>.json with the git sha, a code digest, the date
+and the host. A default run reads them back (a stored FAIL stays a FAIL). A required group with no stored result, or one made by
+different code, is a FAIL row `<group>:not_run` whose note gives the command and the time it takes: "not run" is never reported as fine.
+The digest is pipeline.code_digest() (the whole cafe/pm tree + config + platforms) for pm groups and the hash of cafe/*.py for the app's;
+a finer per-group file list would miss a dependency, so any edit of the tree makes every stored result stale. Also under `--slow`: the
+wall-model flat plate and the native-kernel sphere Re = 100 are rerun (the sphere into a scratch directory, never over the stored
+file); their stored-file contracts belong to cafe.pm.stage3. The multi-hour GPU/CPU runs (`python -m cafe.pm.stage3.lbm slow`,
 `python -m cafe.pm.dtmb5415 run`) stay their own commands; this one only reads what they stored.
 
 Broken configuration. `--broken tests/fixtures/broken/wave_direction.yaml` sets $CAFE_PM_OVERLAY to that yaml for this run
@@ -23,7 +26,7 @@ Broken configuration. `--broken tests/fixtures/broken/wave_direction.yaml` sets 
 exit code is then inverted, because the point is that the receipts notice: 0 if at least one receipt failed, 1 if the broken
 configuration passed everything (what `make broken` and the CI job check). The table goes to runs/receipts_broken.json.
 """
-import contextlib, importlib, io, json, math, os, pathlib, re, tempfile, time
+import contextlib, datetime as dt, hashlib, importlib, io, json, math, os, pathlib, platform, re, tempfile, time
 
 import numpy as np
 
@@ -75,9 +78,9 @@ def _row(module, d, seen):
                 source=d.get("source", ""), note="; ".join(note))
 
 
-def _extra_row(module, name, failed, note, seen):
-    """A row for something that is not a cafe.receipts record: a receipt function that raised (fail) or recorded nothing (context)."""
-    return dict(id=_ident(module, name, seen), module=module, name=name, value=None, reference=None, tolerance=None, unit="",
+def _extra_row(module, name, failed, note, seen, ident=None):
+    """A row for something that is not a cafe.receipts record: a receipt function that raised or recorded nothing, or a slow group not run."""
+    return dict(id=ident or _ident(module, name, seen), module=module, name=name, value=None, reference=None, tolerance=None, unit="",
                 ok=False if failed else None, kind="fail" if failed else "context", source="cafe.pm.receipts", note=note)
 
 
@@ -206,38 +209,88 @@ def wave_direction_receipts():
 # ------------------------------------------------------------------ which receipts run
 
 
-def _stored_app(results, group):
-    """The existing app's rows of one group from its own stored run (`results`/receipts.json), exactly as recorded: a stored FAIL stays a FAIL."""
-    from cafe import receipts as R
-    f = results / "receipts.json"
-    rows = [d for d in json.loads(f.read_text()) if d["group"] == group] if f.exists() else []
-    if not rows:
-        R.context(group, f"{group} receipts: no stored run in {f}", 0.0, 0.0, "", "python -m cafe.pm receipts --slow")
-    R.OUT.extend(dict(d, source=f"{d.get('source', '')} [stored app run {f}]") for d in rows)
-
-
-def _app(results, slow=False):
-    """The existing app's receipts, in the order `python -m cafe.receipts` runs them. The FEA ones (CalculiX buckling, single-threaded,
-    many minutes) are read from the app's stored run unless `slow`."""
+def _app(results):
+    """The existing app's quick receipts, in the order `python -m cafe.receipts` runs them (its FEA ones are the slow group `app.fea`).
+    The CFD and SITL cross-check results it reads are optional inputs from earlier hangar runs: absent means a context row."""
     from cafe import receipts as R
     for f in (R.geometry_receipts, R.env_receipts, R.weather_receipts, R.dynamics_receipts, R.hull_lift_algebra_receipts, R.ocean_receipts,
-              R.bem_receipts):
+              R.bem_receipts, R.fleet_receipts):
         f()
-    R.fea_receipts() if slow else _stored_app(results, "FEA")
-    R.fleet_receipts()
-    R.cfd_receipts(results)
-    R.crosscheck_receipts(results)
+    for f, group, what in ((R.cfd_receipts, "CFD", "hangar CFD results"), (R.crosscheck_receipts, "Emulator", "the SITL cross-check")):
+        n0 = len(R.OUT)
+        f(results)
+        if not any(d["group"] == group for d in R.OUT[n0:]):
+            R.context(group, f"no stored {what} under {results}", 0.0, 0.0, "", "cafe/receipts.py reads them if they exist")
+
+
+# ------------------------------------------------------------------ slow groups: run with --slow, stored, read back by default
+
+
+class NotRun(Exception):
+    """A required slow group has no stored result made by this code."""
+
+
+def store_path(group):
+    return data_root() / "receipts" / f"{group}.json"
+
+
+SCOPES = {"pm": "pipeline.code_digest(): the whole cafe/pm tree + config + platforms",
+          "app": "hash of cafe/*.py: the app's own modules"}
+
+
+def code_digest(scope):
+    if scope == "app":
+        h = hashlib.sha256()
+        for p in sorted((ROOT / "cafe").glob("*.py")):
+            h.update(p.name.encode() + b"\0" + p.read_bytes())
+        return h.hexdigest()
+    from .pipeline import code_digest as whole_tree
+    return whole_tree()
+
+
+def _save(group, scope, rows, seconds):
+    from .ledger import git_sha
+    p = store_path(group)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rec = dict(group=group, scope=scope, code_digest=code_digest(scope), git_sha=git_sha(), date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+               host=platform.node(), seconds=round(seconds), rows=rows)
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rec, indent=1, default=str))
+    os.replace(tmp, p)
+
+
+def slow_group(group, minutes, scope, runner, slow, keep=None):
+    """The job for one slow group. slow: run `runner` (which records through cafe.receipts), keep the rows `keep` accepts, store them.
+    Otherwise: read the stored rows if they were made by this code, else raise NotRun."""
+    def job():
+        from cafe import receipts as R
+        if slow:
+            n0, t0 = len(R.OUT), time.time()
+            runner()
+            rows = [d for d in R.OUT[n0:] if keep is None or keep(d)]
+            R.OUT[n0:] = rows
+            _save(group, scope, rows, time.time() - t0)
+            return None
+        p = store_path(group)
+        why = f"no stored result at {p}"
+        if p.is_file():
+            rec = json.loads(p.read_text())
+            if rec["code_digest"] == code_digest(scope):
+                tag = f"[stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}]"
+                R.OUT.extend(dict(d, source=f"{d.get('source', '')} {tag}") for d in rec["rows"])
+                return None
+            why = f"the stored result ({rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}) was made by different code"
+        raise NotRun(f"not run on this code: `python -m cafe.pm receipts --slow --only {group}` (≈{minutes} min); {why}; digest = {SCOPES[scope]}")
+    return job
+
+
+def _fea():
+    from cafe import receipts as R
+    R.fea_receipts()
 
 
 def _call(mod, fn="receipts", **kw):
     return lambda: getattr(importlib.import_module(mod), fn)(**kw)
-
-
-def _not_run(why):
-    def f():
-        from cafe import receipts as R
-        R.context("Slow", why, 0.0, 0.0, "", "python -m cafe.pm receipts --slow")
-    return f
 
 
 def _plate():
@@ -266,12 +319,16 @@ def jobs(slow=False):
     d = data_root()
     gebco, tao = d / "bathy" / "gebco2026_tepex_c.npz", d / "tao"
     pm = "cafe.pm."
-    out = [
-        ("app", lambda: _app(pathlib.Path(os.environ.get("CAFE_APP_RUNS", "/work/runs")), slow)),
+    sitl_groups = ("UAS sortie", "UAS SITL vs our controller")
+    return [
+        ("app", lambda: _app(pathlib.Path(os.environ.get("CAFE_APP_RUNS", "/work/runs")))),
+        ("app.fea", slow_group("app.fea", 15, "app", _fea, slow)),
         ("pm.physics.comms", _call(pm + "physics.comms")),
         ("pm.physics.glider", _call(pm + "physics.glider")),
         ("pm.physics.usv", _call(pm + "physics.usv")),
-        ("pm.physics.uas", _call(pm + "physics.uas", sitl=slow, sortie=slow)),
+        ("pm.physics.uas", _call(pm + "physics.uas", sitl=False, sortie=False)),
+        ("pm.physics.uas.slow", slow_group("pm.physics.uas.slow", 10, "pm", _call(pm + "physics.uas", sitl=True, sortie=True), slow,
+                                           keep=lambda r: r["group"] in sitl_groups)),
         ("pm.env.coare", _call(pm + "env.coare")),
         ("pm.env.waves", _call(pm + "env.waves")),
         ("pm.env.wave_direction", wave_direction_receipts),
@@ -280,15 +337,12 @@ def jobs(slow=False):
         ("pm.env.tao", _call(pm + "env.tao", out_dir=tao if tao.is_dir() else None)),
         ("pm.env.bathy", _call(pm + "env.bathy", cache=gebco if gebco.exists() else None)),
         ("pm.stats.intervals", _call(pm + "stats.intervals")),
-        *([("pm.emulator", _call(pm + "emulator"))] if slow else []),
+        ("pm.emulator", slow_group("pm.emulator", 35, "pm", _call(pm + "emulator"), slow)),
         ("pm.dtmb5415", _call(pm + "dtmb5415")),
         ("pm.stage3.lbm", _call(pm + "stage3.lbm")),
         ("pm.stage3.nest", _nest_sphere if slow else _call(pm + "stage3.nest")),
         ("pm.stage3.wallmodel", _plate if slow else _call(pm + "stage3.wallmodel")),
     ]
-    skipped = ("ArduCopter SITL members, the 20 min UAS sortie, the CalculiX FEA, the emulator (n = 500 kriging, ~30 min), "
-               "the wall-model flat plate and the native sphere were not run")
-    return out if slow else out + [("slow", _not_run(skipped))]
 
 
 def collect(slow=False, only=None, log=_say):
@@ -304,13 +358,16 @@ def collect(slow=False, only=None, log=_say):
             with contextlib.redirect_stdout(io.StringIO()):
                 ret = fn()
             note = ret if isinstance(ret, str) else None
+        except NotRun as e:                                                     # required, and not established on this code: a failure
+            raised = True
+            rows.append(_extra_row(name, f"{name}: not run on this code", True, str(e), seen, ident=f"{name}:not_run"))
         except Exception as e:                                                  # a receipt that cannot run is a failed receipt
             raised = True
             rows.append(_extra_row(name, f"{name} raised {type(e).__name__}", True, str(e)[:400], seen))
         new = R.OUT[n0:]
         rows += [_row(name, d, seen) for d in new]
         if not new and not raised:
-            rows.append(_extra_row(name, note or f"{name} recorded no receipts", False, note or "the function returned without recording a receipt", seen))
+            rows.append(_extra_row(name, note or f"{name} recorded no receipts", True, note or "the function returned without recording a receipt", seen))
         log(f"  {name:28s} {len(new):4d} records  {time.time() - t0:6.1f} s")
     return rows
 

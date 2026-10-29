@@ -81,12 +81,17 @@ def test_ids_are_unique_slugs_even_for_repeated_claims():
     assert len(long) == len("m/") + 72
 
 
-def test_extra_rows_for_a_raised_exception_and_for_silence():
-    f, c = pr._extra_row("mod", "mod raised KeyError", True, "'x'", {}), pr._extra_row("mod", "mod recorded no receipts", False, "n", {})
-    assert (f["kind"], f["ok"]) == ("fail", False) and (c["kind"], c["ok"]) == ("context", None) and f["value"] is None and c["source"] == "cafe.pm.receipts"
+def test_extra_rows_fail_unless_they_are_context_and_may_carry_an_explicit_id():
+    f, c = pr._extra_row("mod", "mod raised KeyError", True, "'x'", {}), pr._extra_row("mod", "mod note", False, "n", {}, ident="mod:custom")
+    assert (f["kind"], f["ok"], f["id"]) == ("fail", False, "mod/mod-raised-keyerror") and (c["kind"], c["ok"], c["id"]) == ("context", None, "mod:custom")
+    assert f["value"] is None and c["source"] == "cafe.pm.receipts"
 
 
 # ------------------------------------------------------------------ collect, summary, run
+
+
+def orientation():
+    R.context("G", "for orientation", 1.0, 1.0)
 
 
 def raising():
@@ -109,11 +114,11 @@ def test_collect_normalises_failures_exceptions_and_silence_and_hides_nothing(mo
     by = {}
     for r in rows:
         by.setdefault(r["module"], []).append(r["kind"])
-    assert by == {"a": ["pass"], "b": ["fail"], "c": ["fail", "pass"], "d": ["context"], "e": ["context"]}
+    assert by == {"a": ["pass"], "b": ["fail"], "c": ["fail", "pass"], "d": ["fail"], "e": ["fail"]}          # a required check that records nothing fails
     boom = next(r for r in rows if r["kind"] == "fail" and r["module"] == "c")
     assert boom["name"] == "c raised KeyError" and boom["note"] == "'boom'" and boom["ok"] is False
     assert next(r for r in rows if r["module"] == "e")["name"].startswith("DTMB 5415: no hydro.json")
-    assert next(r for r in rows if r["module"] == "d")["name"] == "d recorded no receipts"
+    assert next(r for r in rows if r["module"] == "d")["name"] == "d recorded no receipts" and next(r for r in rows if r["module"] == "e")["ok"] is False
     assert logs[0] == "  a ..." and len(logs) == 10 and "records" in logs[1]
 
 
@@ -146,7 +151,7 @@ def test_run_exits_non_zero_on_any_failed_row_and_context_rows_do_not_count(tmp_
     monkeypatch.setattr(pr, "jobs", jobs_of(("a", passing), ("b", failing)))
     rows, code = pr.run(out=tmp_path / "r.json", log=lambda s: None)
     assert code == 1 and sorted(r["kind"] for r in rows) == ["fail", "pass"]
-    monkeypatch.setattr(pr, "jobs", jobs_of(("a", passing), ("d", silent)))
+    monkeypatch.setattr(pr, "jobs", jobs_of(("a", passing), ("d", orientation)))
     assert pr.run(out=tmp_path / "r.json", log=lambda s: None)[1] == 0
 
 
@@ -295,12 +300,11 @@ def test_every_receipts_function_in_cafe_pm_is_registered():
     assert names[0] == "app" and "pm.env.wave_direction" in names
 
 
-def test_slow_replaces_the_not_run_marker(monkeypatch):
+def test_slow_groups_are_always_listed_and_slow_swaps_in_the_reruns(monkeypatch):
     monkeypatch.setattr(pr, "_call", lambda mod, fn="receipts", **kw: (mod, fn, kw))
     fast, slow = dict(pr.jobs(False)), dict(pr.jobs(True))
-    assert "slow" in fast and "slow" not in slow and "pm.emulator" not in fast and "pm.emulator" in slow
-    assert fast["pm.physics.uas"] == ("cafe.pm.physics.uas", "receipts", dict(sitl=False, sortie=False))
-    assert slow["pm.physics.uas"] == ("cafe.pm.physics.uas", "receipts", dict(sitl=True, sortie=True))
+    assert list(fast) == list(slow) and {"app.fea", "pm.physics.uas.slow", "pm.emulator"} <= set(fast)
+    assert fast["pm.physics.uas"] == ("cafe.pm.physics.uas", "receipts", dict(sitl=False, sortie=False)) == slow["pm.physics.uas"]
     assert slow["pm.stage3.nest"] is pr._nest_sphere and slow["pm.stage3.wallmodel"] is pr._plate
     assert fast["pm.stage3.nest"][0] == "cafe.pm.stage3.nest" and fast["pm.stage3.wallmodel"][0] == "cafe.pm.stage3.wallmodel"
 
@@ -321,54 +325,45 @@ def test_call_resolves_the_module_function_lazily():
     assert pr._call("builtins", "dict", a=1)() == {"a": 1}
 
 
-def test_not_run_records_a_context_row():
-    pr._not_run("SITL was not run")()
-    assert (R.OUT[-1]["kind"], R.OUT[-1]["claim"]) == ("context", "SITL was not run")
-
-
-def stub_app(monkeypatch, order):
-    for n in ("geometry_receipts", "env_receipts", "weather_receipts", "dynamics_receipts", "hull_lift_algebra_receipts", "ocean_receipts", "bem_receipts",
-              "fea_receipts", "fleet_receipts"):
-        monkeypatch.setattr(R, n, lambda n=n: order.append(n))
-    monkeypatch.setattr(R, "cfd_receipts", lambda r: order.append("cfd"))
-    monkeypatch.setattr(R, "crosscheck_receipts", lambda r: order.append("cross"))
-
-
-def test_app_receipts_run_in_the_order_of_cafe_receipts_main_with_fea_stored_unless_slow(monkeypatch, tmp_path):
+def test_app_receipts_run_in_the_order_of_cafe_receipts_main_without_fea(monkeypatch, tmp_path):
     order = []
-    stub_app(monkeypatch, order)
-    monkeypatch.setattr(pr, "_stored_app", lambda r, g: order.append(("stored", g)))
+    for n in ("geometry_receipts", "env_receipts", "weather_receipts", "dynamics_receipts", "hull_lift_algebra_receipts", "ocean_receipts", "bem_receipts",
+              "fleet_receipts"):
+        monkeypatch.setattr(R, n, lambda n=n: order.append(n))
+    monkeypatch.setattr(R, "fea_receipts", lambda: order.append("fea"))
+    monkeypatch.setattr(R, "cfd_receipts", lambda r: order.append("cfd") or R.receipt("CFD", "stored", 1.0, 1.0, 0.1))
+    monkeypatch.setattr(R, "crosscheck_receipts", lambda r: order.append("cross"))
     pr._app(tmp_path)
     assert order == ["geometry_receipts", "env_receipts", "weather_receipts", "dynamics_receipts", "hull_lift_algebra_receipts", "ocean_receipts",
-                     "bem_receipts", ("stored", "FEA"), "fleet_receipts", "cfd", "cross"]
-    order.clear()
-    pr._app(tmp_path, slow=True)
-    assert order[7] == "fea_receipts" and len(order) == 11 and ("stored", "FEA") not in order
+                     "bem_receipts", "fleet_receipts", "cfd", "cross"]
+    assert R.OUT[0]["group"] == "CFD" and R.OUT[0].get("kind") != "context"
+    assert R.OUT[1]["group"] == "Emulator" and R.OUT[1]["kind"] == "context" and "the SITL cross-check" in R.OUT[1]["claim"]
 
 
-def test_stored_app_rows_are_kept_as_recorded_including_failures(tmp_path):
-    rows = [dict(group="FEA", claim="a", value=1.0, reference=1.0, unit="MPa", tol=0.1, rel=True, error=0.0, ok=True, source="s"),
-            dict(group="FEA", claim="b", value=9.0, reference=1.0, unit="MPa", tol=0.1, rel=True, error=8.0, ok=False, source=""),
-            dict(group="CFD", claim="c", value=1.0, reference=1.0, unit="", tol=0.1, rel=True, error=0.0, ok=True, source="")]
-    (tmp_path / "receipts.json").write_text(json.dumps(rows))
-    pr._stored_app(tmp_path, "FEA")
-    got = [pr._row("app", d, {}) for d in R.OUT]
-    assert [r["kind"] for r in got] == ["pass", "fail"] and got[0]["source"] == f"s [stored app run {tmp_path / 'receipts.json'}]" and got[1]["ok"] is False
-
-
-def test_stored_app_without_a_stored_run_is_a_context_row(tmp_path):
-    pr._stored_app(tmp_path, "FEA")
-    assert len(R.OUT) == 1 and R.OUT[0]["kind"] == "context" and "no stored run" in R.OUT[0]["claim"]
+def test_absent_optional_cfd_results_are_a_context_row_not_silence(monkeypatch, tmp_path):
+    for n in ("geometry_receipts", "env_receipts", "weather_receipts", "dynamics_receipts", "hull_lift_algebra_receipts", "ocean_receipts", "bem_receipts",
+              "fleet_receipts"):
+        monkeypatch.setattr(R, n, lambda: None)
+    monkeypatch.setattr(R, "cfd_receipts", lambda r: None)
+    monkeypatch.setattr(R, "crosscheck_receipts", lambda r: None)
+    pr._app(tmp_path)
+    assert [(d["group"], d["kind"]) for d in R.OUT] == [("CFD", "context"), ("Emulator", "context")]
 
 
 def test_the_app_job_reads_its_stored_runs_from_the_env_var(monkeypatch, tmp_path):
     seen = []
-    monkeypatch.setattr(pr, "_app", lambda r, slow: seen.append((r, slow)))
+    monkeypatch.setattr(pr, "_app", lambda r: seen.append(r))
     monkeypatch.setenv("CAFE_APP_RUNS", str(tmp_path))
     dict(pr.jobs())["app"]()
     monkeypatch.delenv("CAFE_APP_RUNS")
-    dict(pr.jobs(True))["app"]()
-    assert seen == [(tmp_path, False), (pathlib.Path("/work/runs"), True)]
+    dict(pr.jobs())["app"]()
+    assert seen == [tmp_path, pathlib.Path("/work/runs")]
+
+
+def test_fea_job_calls_the_apps_fea_receipts(monkeypatch):
+    monkeypatch.setattr(R, "fea_receipts", lambda: R.context("FEA", "called", 1.0, 1.0))
+    pr._fea()
+    assert R.OUT[0]["group"] == "FEA"
 
 
 def test_plate_job_pops_the_force_field_before_the_receipts_read_it(monkeypatch):
@@ -395,12 +390,111 @@ def test_nest_sphere_job_uses_a_scratch_directory_and_restores_the_stored_one(mo
     assert nest.SLOW_DIR == stored
 
 
+# ------------------------------------------------------------------ slow groups: stored, fresh, stale, missing
+
+
+CURRENT = "digest-of-this-code"
+
+
+@pytest.fixture
+def slowenv(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
+    monkeypatch.setattr(pr, "code_digest", lambda scope: f"{CURRENT}-{scope}")
+    return tmp_path
+
+
+def run_group(monkeypatch, group, slow, runner=passing, **kw):
+    monkeypatch.setattr(pr, "jobs", lambda s=False: [(group, pr.slow_group(group, 7, "pm", runner, slow, **kw))])
+    return pr.collect(log=lambda s: None)
+
+
+def test_a_slow_group_with_no_stored_result_is_a_fail_with_the_command(slowenv, monkeypatch):
+    rows = run_group(monkeypatch, "pm.emulator", slow=False)
+    assert len(rows) == 1 and rows[0]["id"] == "pm.emulator:not_run" and rows[0]["ok"] is False and rows[0]["kind"] == "fail"
+    assert rows[0]["note"].startswith("not run on this code: `python -m cafe.pm receipts --slow --only pm.emulator` (≈7 min)")
+    assert "no stored result at" in rows[0]["note"] and "pipeline.code_digest()" in rows[0]["note"] and R.OUT == []
+
+
+def test_slow_stores_the_rows_with_provenance_and_a_fresh_default_run_reads_them_back_as_a_pass(slowenv, monkeypatch):
+    rows = run_group(monkeypatch, "pm.emulator", slow=True)
+    assert [r["kind"] for r in rows] == ["pass"]
+    rec = json.loads((slowenv / "receipts" / "pm.emulator.json").read_text())
+    assert rec["group"] == "pm.emulator" and rec["code_digest"] == f"{CURRENT}-pm" and rec["scope"] == "pm" and rec["rows"][0]["claim"] == "close"
+    assert {"git_sha", "date", "host", "seconds"} <= set(rec) and rec["date"].endswith("+00:00") and not list((slowenv / "receipts").glob("*.tmp"))
+    R.OUT.clear()
+    back = run_group(monkeypatch, "pm.emulator", slow=False)
+    assert [r["kind"] for r in back] == ["pass"] and back[0]["ok"] is True and "[stored " in back[0]["source"] and rec["host"] in back[0]["source"]
+    assert back[0]["value"] == rows[0]["value"] and all(r["id"] != "pm.emulator:not_run" for r in back)
+
+
+def test_a_stored_result_from_different_code_is_a_fail(slowenv, monkeypatch):
+    run_group(monkeypatch, "pm.emulator", slow=True)
+    R.OUT.clear()
+    monkeypatch.setattr(pr, "code_digest", lambda scope: "somebody-edited-the-tree")
+    rows = run_group(monkeypatch, "pm.emulator", slow=False)
+    assert [(r["id"], r["kind"]) for r in rows] == [("pm.emulator:not_run", "fail")]
+    assert "was made by different code" in rows[0]["note"] and "(≈7 min)" in rows[0]["note"] and R.OUT == []
+
+
+def test_a_stored_fail_stays_a_fail(slowenv, monkeypatch):
+    rows = run_group(monkeypatch, "pm.emulator", slow=True, runner=failing)
+    assert [r["kind"] for r in rows] == ["fail"]
+    R.OUT.clear()
+    back = run_group(monkeypatch, "pm.emulator", slow=False)
+    assert [(r["kind"], r["ok"]) for r in back] == [("fail", False)] and back[0]["id"] != "pm.emulator:not_run"
+    assert pr.summary(back)[0]["fail"] == 1
+
+
+def test_slow_keeps_only_the_rows_the_group_owns(slowenv, monkeypatch):
+    def both():
+        passing()
+        R.receipt("Keep", "owned", 1.0, 1.0, 0.1)
+    rows = run_group(monkeypatch, "pm.physics.uas.slow", slow=True, runner=both, keep=lambda d: d["group"] == "Keep")
+    assert [r["name"] for r in rows] == ["Keep: owned"]
+    assert [d["claim"] for d in json.loads((slowenv / "receipts" / "pm.physics.uas.slow.json").read_text())["rows"]] == ["owned"]
+
+
+def test_a_failing_slow_run_stores_nothing(slowenv, monkeypatch):
+    rows = run_group(monkeypatch, "pm.emulator", slow=True, runner=raising)
+    assert any(r["name"] == "pm.emulator raised KeyError" and r["kind"] == "fail" for r in rows) and not (slowenv / "receipts").exists()
+
+
+def test_default_run_exits_non_zero_while_a_required_group_is_not_run(slowenv, monkeypatch):
+    def jobs_with(slow):
+        return lambda s=False: [("a", passing), ("g", pr.slow_group("g", 3, "pm", passing, slow))]
+    monkeypatch.setattr(pr, "jobs", jobs_with(False))
+    rows, code = pr.run(out=slowenv / "t.json", log=lambda s: None)
+    assert code == 1 and sorted(r["kind"] for r in rows) == ["fail", "pass"]
+    monkeypatch.setattr(pr, "jobs", jobs_with(True))
+    assert pr.run(slow=True, out=slowenv / "t.json", log=lambda s: None)[1] == 0
+    monkeypatch.setattr(pr, "jobs", jobs_with(False))
+    assert pr.run(out=slowenv / "t.json", log=lambda s: None)[1] == 0
+
+
+def test_the_digests_follow_the_files(tmp_path):
+    from cafe.pm import pipeline
+    assert pr.code_digest("pm") == pipeline.code_digest()
+    pr_root = pr.ROOT
+    try:
+        pr.ROOT = tmp_path
+        (tmp_path / "cafe" / "sub").mkdir(parents=True)
+        (tmp_path / "cafe" / "fea.py").write_text("a = 1\n")
+        (tmp_path / "cafe" / "sub" / "x.py").write_text("b = 1\n")
+        d1 = pr.code_digest("app")
+        (tmp_path / "cafe" / "sub" / "x.py").write_text("b = 2\n")
+        assert pr.code_digest("app") == d1                                       # only the app's top-level modules count
+        (tmp_path / "cafe" / "fea.py").write_text("a = 2\n")
+        assert pr.code_digest("app") != d1 and len(d1) == 64
+    finally:
+        pr.ROOT = pr_root
+
+
 # ------------------------------------------------------------------ end to end and the command line
 
 
 def test_make_broken_semantics_on_the_real_wave_receipts(tmp_path, monkeypatch):
-    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
     """The exit code `make broken` returns: 0 exactly when the wrong wave-direction convention fails a receipt through the real code."""
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
     only = ["pm.env.waves", "wave_direction"]
     rows, code = pr.run(only=only, out=tmp_path / "ok.json", log=lambda s: None)
     assert code == 0 and not [r for r in rows if r["kind"] == "fail"], [r["name"] for r in rows if r["kind"] == "fail"]

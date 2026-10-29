@@ -319,7 +319,9 @@ def wm_kappa() -> float:
 
 PLATE_SLOW: dict[str, Any] = dict(length=384, nu_lat=1.5e-5, half=48, span=8, nose=16, thick=1, steps=30000, tu=0.03)
 SLOW_DIR = pathlib.Path(os.environ.get("CAFE_DATA", "/data")) / "receipts"
-PLATE_TOL = 0.20
+PLATE_TOL = 0.10
+PLATE_COMMAND = "python -m cafe.pm.stage3.wallmodel slow"
+PLATE_ETA = "about 1.8 h on 2 CPUs (measured), ~1 GB"
 CHANNEL_CI: dict[str, Any] = dict(h=12, re_tau=1000.0, u_tau=0.0026, steps=150000, span=4)      # ~15 s
 
 
@@ -344,9 +346,10 @@ def stored_wall_error() -> float | None:
 def receipts(plate: dict | None = None, chan: dict | None = None) -> list:
     """Wall-model receipts. Channel (CI size, ~15 s): wall stress equals g h within 1 %, bulk C_f vs Dean 1978 within 10 %, the
     matching point in the log layer (y+ 30-300, y/h < 0.3), bounce-back tangential exchange < 1 % of the wall shear. Flat plate vs
-    ITTC-57 from `plate`, else the stored slow run (Re_L >= 1e6), else a context row. Log-law identity."""
+    ITTC-57 within 10 % from `plate`, else the stored slow run (Re_L >= 1e6): pass when within, fail with the measured error when
+    outside, fail naming the command and run time when none is stored or it was made by different code. Log-law identity."""
     import cafe.receipts as cr
-    from cafe.receipts import bracket, context, receipt
+    from cafe.receipts import bracket, receipt
     g = "LBM wall model"
     yp, ut, nu = 100.0, 2e-3, 2e-5
     y = yp * nu / ut
@@ -362,12 +365,12 @@ def receipts(plate: dict | None = None, chan: dict | None = None) -> list:
     f = slow_path()
     if plate is None and f.exists():
         plate = json.loads(f.read_text())
+    from cafe.pm.stage3 import lbm
+    ref = "ITTC-57: 0.075/(log10 Re - 2)^2, averaged over the same strip"
+    claim = "Flat plate C_f vs ITTC-57 at Re_L >= 1e6, wall-modelled with inflow turbulence"
+    lbm.result_row(g, claim + (f" (Re_L = {plate['re']:.3g})" if plate else ""), plate, "cf", "ittc", PLATE_TOL, PLATE_COMMAND, PLATE_ETA, ref)
     if plate:
-        receipt(g, f"Flat plate C_f at Re_L = {plate['re']:.3g}, wall-modelled (stored slow run)", plate["cf"], plate["ittc"], PLATE_TOL, "",
-                "ITTC-57: 0.075/(log10 Re - 2)^2, averaged over the same strip")
         bracket(g, "... share of wall cells with y+ at the matching point in 30-300", plate["yfrac"], 0.9, 1.0, "", "BRIEF 5.5 stage3 check")
-    else:   # ITTC-57 is a turbulent correlation: a CI-size plate (Re_L ~ 1e5, laminar nu_lat) is ill-posed, so only the slow run counts
-        context(g, "Flat plate C_f vs ITTC-57 at Re_L >= 1e6: slow run not stored", 0.0, 0.0, "", "python -m cafe.pm.stage3.wallmodel slow")
     return [r for r in cr.OUT if r["group"] == g]
 
 
@@ -381,10 +384,12 @@ def main(argv: list) -> int:
         print(json.dumps(r, default=float))
         return 0
     if argv[:1] == ["slow"]:
+        from cafe.pm.stage3 import lbm
+        sha0 = lbm.physics_sha()
         r = flat_plate(**PLATE_SLOW)
         r.pop("force")
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
-        slow_path().write_text(json.dumps(dict(r, params=PLATE_SLOW), default=float))
+        slow_path().write_text(json.dumps(dict(r, params=PLATE_SLOW, code_sha=sha0), default=float))
         print(json.dumps(r, default=float))
         return 0
     import cafe.receipts as cr

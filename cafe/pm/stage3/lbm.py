@@ -21,6 +21,8 @@ precision instead (FluidX3D's FP16S idea; Lehmann, Krauzig & Schmid, Phys. Rev. 
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import math
 import os
@@ -37,7 +39,7 @@ import jax.numpy as jnp
 
 from cafe.planner import boundary_layer
 import cafe.receipts as cr
-from cafe.receipts import receipt, bracket, context
+from cafe.receipts import receipt, bracket
 
 # ---------------------------------------------------------------------------------------------------- D3Q19 (native)
 _AX = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
@@ -49,6 +51,7 @@ OPP19 = np.array([int(np.where((C19 == -c).all(1))[0][0]) for c in C19])
 CS2 = 1.0 / 3.0
 XLB_CS_SCALE = (36.0 / (18.0 * math.sqrt(2.0))) ** 0.5                       # Cs_effective / Cs_coefficient in XLB
 MACH_MAX = 0.1
+U_LAT_SPHERE = 0.05                # lattice speed of the sphere runs (lbm.sphere, nest.sphere_drag)
 U_LAT = 0.04                       # reference lattice speed: 0.04 * sqrt(3) = Ma 0.069, leaves 44 % local overshoot before Ma 0.1
 
 # Memory per cell (BRIEF section 3, from FluidX3D's documented layout, Lehmann 2022).
@@ -591,14 +594,57 @@ def slow_path(name: str) -> pathlib.Path:
     return SLOW_DIR / f"lbm_{name}.json"
 
 
+PHYSICS_FILES = ("lbm.py", "nest.py", "wallmodel.py")
+NEST_RATE_LOADED = 1.4e6          # cell-updates/s the native nest delivered on homebase at load 20-30 (3 CPUs), measured 2026-10-29
+NEST_RATE_BENCH = 7.5e6           # bench/throughput.json jax-lbm-d3q19-cpu, all 8 cores unloaded
+
+
+def physics_sha() -> str:
+    """Hash of the executable source of the modules a stored slow result depends on: the AST without docstrings, so editing
+    a comment or a docstring does not stale a multi-hour result but changing a line of code does."""
+    h = hashlib.sha1()
+    for f in PHYSICS_FILES:
+        tree = ast.parse((pathlib.Path(__file__).parent / f).read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef, ast.AsyncFunctionDef)) and node.body:
+                first = node.body[0]
+                if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                    node.body = node.body[1:] or [ast.Pass()]
+        h.update(ast.dump(tree).encode())
+    return h.hexdigest()[:16]
+
+
+def eta_text(updates: float) -> str:
+    """Run time of `updates` cell-updates: at the loaded box's measured native rate and at the unloaded 8-core benchmark rate."""
+    f = lambda r: f"{updates / r / 3600:.1f} h" if updates / r > 1800 else f"{updates / r / 60:.0f} min"      # noqa: E731
+    return (f"{updates:.2g} cell-updates: ~{f(NEST_RATE_LOADED)} at the loaded-box rate {NEST_RATE_LOADED:.2g}/s, "
+            f"~{f(NEST_RATE_BENCH)} at the 8-core benchmark rate")
+
+
+def result_row(group: str, claim: str, rec: dict | None, value_key: str, ref_key: str, tol: float, command: str, eta: str, source: str) -> None:
+    """A required pass/fail row from a stored slow result. Stored and within `tol` of the reference: pass. Stored and outside: fail with
+    the measured error in the row. Not stored, or stored by different code (its `code_sha` differs from physics_sha()): FAIL,
+    with the command and its run time in the note. Never a context row."""
+    nan = float("nan")
+    if rec is None:
+        bracket(group, f"{claim} -- NOT STORED", nan, 0.0, 0.0, "", f"run: {command}   [{eta}]")
+        return
+    ref = rec[ref_key]
+    if rec.get("code_sha") not in (None, physics_sha()):
+        bracket(group, f"{claim} -- STORED BY DIFFERENT CODE", nan, ref * (1 - tol), ref * (1 + tol), "",
+                f"stored {rec['code_sha']} != current {physics_sha()}; rerun: {command}   [{eta}]")
+        return
+    receipt(group, claim, rec[value_key], ref, tol, "", source)
+
+
 SPHERE_RUNS = (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4))
 
 
 def receipts(backend: str = "jax") -> list:
-    """Poiseuille, cavity, Taylor-Green on `backend` (pass/fail). XLB's sphere drag is shown as context only: XLB 0.3.1 has
-    the staircase halfway bounce-back, which overpredicts a sphere's drag by ~25-30 % at the 8-12 cells per diameter a CPU
-    can afford (measured, `slow` runs stored under $CAFE_DATA/receipts); the sphere receipts that pass or fail are the native
-    kernel's, with curved-wall bounce-back (nest.receipts)."""
+    """Poiseuille, cavity, Taylor-Green and the sphere drag at Re = 1e2, 1e3, 1e4 on `backend`, all pass/fail. The sphere rows read the
+    stored slow runs (`python -m cafe.pm.stage3.lbm slow RE D NX NY NZ`, $CAFE_DATA/receipts); XLB 0.3.1 has only the staircase
+    halfway bounce-back, which overpredicts a sphere's drag ~1/d (+30 % at d = 8): those rows FAIL with the measured error until a run
+    at a d that reaches 10 % is stored. The native kernel's curved-wall rows are in nest.receipts."""
     g = f"LBM {backend}"
     p = poiseuille(backend)
     receipt(g, "Poiseuille: curvature of the steady profile g_eff/g", p["g_ratio"], 1.0, 0.01, "", "u = g/(2 nu) (y-y0)(y1-y)")
@@ -610,12 +656,12 @@ def receipts(backend: str = "jax") -> list:
     receipt(g, "Taylor-Green decay: fitted viscosity / analytic", t["ratio"], 1.0, 0.03, "", "exp(-4 nu k^2 t)")
     for tag, re in SPHERE_RUNS:
         f = slow_path(f"sphere_{tag}")
-        if f.exists():
-            r = json.loads(f.read_text())
-            context(g, f"Sphere Cd at Re={re:g}, XLB halfway bounce-back, d={r.get('d', '?')} cells (stored slow run)", r["cd"], r["ref"], "",
-                    f"Morrison 2013; domain {r['shape']}; staircase surface, see docstring")
-        else:
-            context(g, f"Sphere Cd at Re={re:g}: slow run not stored", morrison(re), morrison(re), "", f"python -m cafe.pm.stage3.lbm slow {tag}")
+        rec = json.loads(f.read_text()) if f.exists() else None
+        d = {"100": 8, "1000": 10, "1e4": 12}[tag]
+        updates = float(np.prod([a * d for a in (12, 6, 6)])) * 30 * d / U_LAT_SPHERE
+        result_row(g, f"Sphere Cd at Re={re:g}, XLB halfway bounce-back (staircase), d={rec.get('d', '?') if rec else d}", rec, "cd", "ref", 0.10,
+                   f"python -m cafe.pm.stage3.lbm slow {tag} {d} 12 6 6", eta_text(updates),
+                   f"Morrison 2013; domain {rec['shape'] if rec else '?'}; staircase surface overpredicts ~1/d, see docstring")
     return [r for r in cr.OUT if r["group"] == g]
 
 
@@ -627,11 +673,13 @@ def main(argv: list) -> int:
     st = storage_for("auto", fp32)
     cmd = argv[0] if argv else "receipts"
     if cmd == "slow":
+        sha0 = physics_sha()
         re = float(argv[1])
         d = int(argv[2]) if len(argv) > 2 else 16
         dom = tuple(float(a) for a in argv[3:6]) if len(argv) >= 6 else (14, 12, 12)
         r = sphere(backend, re, d=d, domain=dom, storage=st, progress=lambda t, c: print(f"t={t} cd={c:.4f}", flush=True))
         r.pop("history", None)
+        r["code_sha"] = sha0
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
         slow_path(f"sphere_{argv[1]}").write_text(json.dumps(r, default=float))
         print(json.dumps(r, default=float))

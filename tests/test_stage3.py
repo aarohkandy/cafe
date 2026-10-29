@@ -261,8 +261,10 @@ def test_wall_model_receipts_pass_and_fail(monkeypatch, tmp_path):
     monkeypatch.setattr(wm, "flat_plate", lambda **k: _stub_plate())
     monkeypatch.setattr(wm, "channel", lambda **k: _stub_channel())
     assert wm.stored_wall_error() is None
-    out = wm.receipts()                                                       # nothing stored: the channel decides, the plate is a context row
-    assert len(out) == 7 and all(r["ok"] in (True, None) for r in out) and [r.get("kind") for r in out].count("context") == 1
+    out = wm.receipts()                                                       # nothing stored: the plate row is required, so it fails with the command
+    plate_row = [r for r in out if "Flat plate" in r["claim"]]
+    assert len(out) == 7 and [r["ok"] for r in out].count(False) == 1 and plate_row[0]["ok"] is False
+    assert "NOT STORED" in plate_row[0]["claim"] and wm.PLATE_COMMAND in plate_row[0]["source"] and wm.PLATE_ETA in plate_row[0]["source"]
     cr.OUT.clear()
     assert all(r["ok"] for r in wm.receipts(_stub_plate(cf=0.0042), _stub_channel()))
     wm.slow_path().write_text(json.dumps({k: v for k, v in _stub_plate(cf=0.0010, err=0.75).items() if k != "force"}))   # friction 4x too low
@@ -272,6 +274,9 @@ def test_wall_model_receipts_pass_and_fail(monkeypatch, tmp_path):
     cr.OUT.clear()
     bad = wm.receipts()
     assert any(r["ok"] is False and "Flat plate" in r["claim"] for r in bad)
+    cr.OUT.clear()
+    wm.slow_path().write_text(json.dumps(dict({k: v for k, v in _stub_plate(cf=0.0040, err=0.09).items() if k != "force"}, code_sha="stale")))
+    assert any("DIFFERENT CODE" in r["claim"] for r in wm.receipts())
     for over, claim in ((dict(tau_w=1.1e-5), "wall stress"), (dict(cf=0.0070), "bulk C_f"), (dict(yplus_m=900.0), "y+"),
                         (dict(ym_over_h=0.6), "height"), (dict(bb_tangential_frac=0.2), "tangential")):
         cr.OUT.clear()
@@ -292,7 +297,7 @@ def test_wall_model_cli(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
     monkeypatch.setattr(wm, "flat_plate", lambda **k: _stub_plate())
     monkeypatch.setattr(wm, "channel", lambda **k: _stub_channel(profile=np.ones(3)))
-    assert wm.main(["slow"]) == 0 and json.loads(wm.slow_path().read_text())["cf"] == 0.004
+    assert wm.main(["slow"]) == 0 and json.loads(wm.slow_path().read_text())["cf"] == 0.004 and "code_sha" in json.loads(wm.slow_path().read_text())
     assert wm.main(["channel"]) == 0 and json.loads(wm.channel_path().read_text())["cf"] == 0.0051
     assert wm.main([]) == 0
     monkeypatch.setattr(wm, "flat_plate", lambda **k: _stub_plate(cf=0.001))

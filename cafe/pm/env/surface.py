@@ -29,6 +29,8 @@ from .grid import Axis, interp
 STRIDE = 3                                   # Stokes field on every 3rd UMWM node (36 km), same as the restart thinning
 
 
+LAYOUT_VERSION = 2                    # derived.zarr layout; 2 adds last_rain_mm_h (the lens persists after the rain stops)
+
 def _coare_grid(env, ti):
     """COARE 3.5 on the WRF grid at hour index ti."""
     W = env.W
@@ -65,8 +67,11 @@ def build(env, cache, log=print):
     since = np.zeros_like(rain)
     trig = subgrid.assumption("subgrid.rain_lens.trigger_mm_h")
     since[0] = np.where(rain[0] > trig, 0.0, 1e9)                       # no rain seen yet: effectively never; set before the loop uses it
+    last = np.where(rain > trig, rain, 0.0)                              # rate of the most recent rainy hour: the lens that rain formed
     for ti in range(1, nt):
-        since[ti] = np.where(rain[ti] > trig, 0.0, since[ti - 1] + (env.tw.x[ti] - env.tw.x[ti - 1]))
+        wet = rain[ti] > trig
+        since[ti] = np.where(wet, 0.0, since[ti - 1] + (env.tw.x[ti] - env.tw.x[ti - 1]))
+        last[ti] = np.where(wet, rain[ti], last[ti - 1])
     # Stokes surface drift from the parametric spectrum on a coarse UMWM grid
     js, is_ = np.arange(0, len(env.lau.x), STRIDE), np.arange(0, len(env.lou.x), STRIDE)
     th = waves.theta_compass(env.spec["th"]) if env.spec is not None else np.arange(5.625, 360, 11.25)
@@ -86,10 +91,12 @@ def build(env, cache, log=print):
     ds["dT_warm"] = (("time", "lat", "lon"), dT)
     ds["dz_warm"] = (("time", "lat", "lon"), dz)
     ds["since_rain_s"] = (("time", "lat", "lon"), since)
+    ds["last_rain_mm_h"] = (("time", "lat", "lon"), last)
     ds["stokes_e"] = (("time_u", "lat_s", "lon_s"), St[..., 0])
     ds["stokes_n"] = (("time_u", "lat_s", "lon_s"), St[..., 1])
     ds = ds.assign_coords(time_u=env.tu.x, lat_s=env.lau.x[js], lon_s=env.lou.x[is_])
     ds.attrs["stokes_fit_check"] = json.dumps(fit)
+    ds.attrs["layout_version"] = LAYOUT_VERSION
     ds.to_zarr(cache / "derived.zarr", mode="w")
     log(f"surface layer: COARE on {nt} hours, warm layer max dT {np.nanmax(dT):.2f} K, Stokes fit check {fit}")
     return fit
@@ -153,7 +160,10 @@ class SurfaceLayer:
         import xarray as xr
         d = xr.open_zarr(pathlib.Path(cache) / "derived.zarr").load()
         self.t, self.la, self.lo = Axis(d.time.values, "time"), Axis(d.lat.values, "lat"), Axis(d.lon.values, "lon")
-        self.D = {k: d[k].values for k in ("ustar", "z0", "L", "gf", "dT_warm", "dz_warm", "since_rain_s")}
+        if d.attrs.get("layout_version") != LAYOUT_VERSION:
+            raise ValueError(f"{cache}/derived.zarr has layout {d.attrs.get('layout_version')}, this code needs {LAYOUT_VERSION}: "
+                             "delete it and run `python -m cafe.pm fetch` to rebuild it (about a minute)")
+        self.D = {k: d[k].values for k in ("ustar", "z0", "L", "gf", "dT_warm", "dz_warm", "since_rain_s", "last_rain_mm_h")}
         self.D["logz0"], self.D["invL"] = np.log(self.D.pop("z0")), 1.0 / self.D.pop("L")
         self.ts, self.las, self.los = Axis(d.time_u.values), Axis(d.lat_s.values), Axis(d.lon_s.values)
         self.S = (d.stokes_e.values, d.stokes_n.values)
@@ -210,7 +220,7 @@ class SurfaceLayer:
                       v.uncertainty, "modelled" if np.any(frac > 0) else v.kind)
 
     def _lens(self, env, lon, lat, z, t):
-        rain = env._w("rain_mm_h", lon, lat, t)
+        rain = self._g("last_rain_mm_h", lon, lat, t)                     # the rain that formed the lens; it then decays with since_rain_s
         u10 = np.hypot(*np.moveaxis(env.u10(lon, lat, t), -1, 0))
         return subgrid.rain_lens(rain, u10, self._g("since_rain_s", lon, lat, t), np.minimum(np.asarray(z, float), 0.0), self.cfg)
 

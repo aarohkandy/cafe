@@ -150,6 +150,30 @@ def test_rain_lens_makes_the_surface_lighter_than_the_water_under_it(ci_full, sl
             assert abs(lens[0]) < 1e-6                                                             # 0.5 m thick: gone at 5 m
 
 
+def test_rain_lens_outlives_the_rain_and_decays_with_its_e_folding_time(ci_full, sl):
+    lon, lat, t = np.full(5, 196.5), np.full(5, 1.5), ci_full.tw.x[8:13]                          # last rainy hour, then 1..4 h after
+    assert (sl._g("last_rain_mm_h", lon, lat, t) == sl._g("last_rain_mm_h", lon[:1], lat[:1], t[:1])).all()   # the lens remembers its rain
+    dS = sl._lens(ci_full, lon, lat, np.zeros(5), t)["dS"].value
+    u10 = np.hypot(*np.moveaxis(ci_full.u10(lon, lat, t), -1, 0))
+    c = sl.cfg["rain_lens"]
+    w = np.clip((c["wind_absent_above_ms"] - u10) / (c["wind_absent_above_ms"] - c["wind_full_below_ms"]), 0, 1)
+    tau = 600.0 + (7200.0 - 600.0) * w
+    assert dS[0] > 0 and (np.diff(dS) < 0).all() and dS[-1] > 0                                    # still there 4 h on, smaller each hour
+    assert np.allclose(dS[1:] / dS[0] * w[0] / w[1:], np.exp(-np.arange(1, 5) * 3600.0 / tau[1:]), rtol=1e-6)
+
+
+def test_an_old_derived_store_is_refused_with_the_command_that_rebuilds_it(tmp_path, ci_env):
+    import xarray as xr
+    shutil.copytree(ci_env.cache / "derived.zarr", tmp_path / "derived.zarr")
+    d = xr.open_zarr(tmp_path / "derived.zarr")
+    d.attrs["layout_version"] = 1
+    d.to_zarr(tmp_path / "old.zarr")
+    (tmp_path / "derived.zarr").rename(tmp_path / "new.zarr")
+    (tmp_path / "old.zarr").rename(tmp_path / "derived.zarr")
+    with pytest.raises(ValueError, match="cafe.pm fetch"):
+        S.SurfaceLayer(tmp_path)
+
+
 def test_warm_layer_makes_the_afternoon_surface_lighter_not_the_water_below(ci_full, sl):
     lon, lat = np.array([193.5, 193.5]), np.array([-1.5, -1.5])
     z = np.array([0.0, -50.0])

@@ -57,7 +57,7 @@ class Context:
         if self._env is None:
             from .env import surface
             from .env.environment import GriddedEnv
-            sub = surface.SurfaceLayer(self.cache) if (self.cache / "derived.zarr").exists() else None    # built by ingest
+            sub = surface.SurfaceLayer(self.cache) if _derived_current(self.cache) else None              # built by ingest
             self._env = GriddedEnv(self.cache, env_sigmas(), ocean=ocean(self), subgrid=sub)
         return self._env
 
@@ -103,7 +103,9 @@ def s_ingest(ctx, L):
     want = int((t1 - t0).total_seconds() // 3600) + 1
     L.input(d["base"], sha=None, kind="remote", note="orca UWIN-CM run (byte-range reads; per-hour npz cache)")
     L.check("orca_hours_cover_window", d["hours"] >= want, value=d["hours"], limit=want)
-    if not (ctx.cache / "derived.zarr").exists():
+    if not _derived_current(ctx.cache):
+        shutil.rmtree(ctx.cache / "derived.zarr", ignore_errors=True)
+        ctx._env = None
         surface.build(ctx.env, ctx.cache, log=ctx.log)
         ctx._env = None                                                  # rebuild with the surface layer just written
     oc = ocean(ctx)
@@ -142,6 +144,13 @@ def _tao(ctx, L, t0, t1):
                wind_direction_bias=dict(dist="normal", mean=-a["dir_bias_deg"],
                                         value=float(np.sqrt(max(a["dir_rmse_deg"] ** 2 - a["dir_bias_deg"] ** 2, 0.0))), unit="deg", citation=cite, kind="data"))
     L.output(_dump(fit, ctx.path("ingest", "priors_fitted.json")))
+
+
+def _derived_current(cache):
+    """derived.zarr exists and has the layout this code reads (surface.LAYOUT_VERSION)."""
+    from .env import surface
+    p = cache / "derived.zarr" / "zarr.json"
+    return p.exists() and json.loads(p.read_text()).get("attributes", {}).get("layout_version") == surface.LAYOUT_VERSION
 
 
 def _covers(d, t0, t1):

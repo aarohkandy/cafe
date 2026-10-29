@@ -327,17 +327,36 @@ def _stub_fast(monkeypatch, **over):
         monkeypatch.setattr(lbm, k, lambda *a, _v=v, **kw: _v)
 
 
-def test_receipts_pass_and_sphere_rows_are_context_only(monkeypatch, tmp_path):
+def test_receipts_sphere_rows_are_required_pass_or_fail(monkeypatch, tmp_path):
     _stub_fast(monkeypatch)
     monkeypatch.setattr(lbm, "SLOW_DIR", tmp_path)
     out = lbm.receipts("jax")
-    assert [r.get("kind") for r in out].count("context") == 3 and all(r["ok"] in (True, None) for r in out)   # no stored sphere runs yet
+    sph = [r for r in out if "Sphere" in r["claim"]]
+    assert len(sph) == 3 and all(r["ok"] is False and "NOT STORED" in r["claim"] and "run:" in r["source"] for r in sph)   # nothing stored: fail
     for tag, re in lbm.SPHERE_RUNS:
         lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=lbm.morrison(re) * 1.3, ref=lbm.morrison(re), seconds=600, shape=[1, 2, 3], d=8)))
     cr.OUT.clear()
-    out = lbm.receipts("jax")
-    sph = [r for r in out if "Sphere" in r["claim"]]
-    assert len(sph) == 3 and all(r["ok"] is None and "stored" in r["claim"] for r in sph)      # shown, never counted as a pass
+    sph = [r for r in lbm.receipts("jax") if "Sphere" in r["claim"]]
+    assert len(sph) == 3 and all(r["ok"] is False and r["value"] == pytest.approx(r["reference"] * 1.3, rel=1e-3) for r in sph)    # stored, 30 % off: fail
+    for tag, re in lbm.SPHERE_RUNS:
+        lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=lbm.morrison(re) * 1.02, ref=lbm.morrison(re), seconds=600, shape=[1, 2, 3], d=48)))
+    cr.OUT.clear()
+    assert all(r["ok"] is True for r in lbm.receipts("jax") if "Sphere" in r["claim"])
+
+
+def test_result_row_branches_physics_sha_and_eta(monkeypatch):
+    cr.OUT.clear()
+    lbm.result_row("g", "claim", None, "cd", "ref", 0.1, "cmd", "2 h", "src")
+    assert cr.OUT[-1]["ok"] is False and "NOT STORED" in cr.OUT[-1]["claim"] and "cmd" in cr.OUT[-1]["source"] and "2 h" in cr.OUT[-1]["source"]
+    lbm.result_row("g", "claim", dict(cd=1.0, ref=1.0, code_sha="zzz"), "cd", "ref", 0.1, "cmd", "2 h", "src")
+    assert cr.OUT[-1]["ok"] is False and "DIFFERENT CODE" in cr.OUT[-1]["claim"]
+    lbm.result_row("g", "claim", dict(cd=1.05, ref=1.0, code_sha=lbm.physics_sha()), "cd", "ref", 0.1, "cmd", "2 h", "src")
+    assert cr.OUT[-1]["ok"] is True
+    lbm.result_row("g", "claim", dict(cd=1.2, ref=1.0), "cd", "ref", 0.1, "cmd", "2 h", "src")        # no sha: stored before the policy, judged on its number
+    assert cr.OUT[-1]["ok"] is False and cr.OUT[-1]["value"] == pytest.approx(1.2)
+    a = lbm.physics_sha()
+    assert a == lbm.physics_sha() and len(a) == 16
+    assert "h" in lbm.eta_text(8.6e10) and "loaded" in lbm.eta_text(8.6e10)
 
 
 @pytest.mark.parametrize("what", ["taylor_green", "poiseuille", "cavity"])

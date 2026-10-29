@@ -1,6 +1,5 @@
 """Moving nest: shifts, refill, sponge, zero spurious force, mass conservation, vmap over vehicles, coupling helpers."""
 import json
-import re
 
 import numpy as np
 import pytest
@@ -54,7 +53,8 @@ def test_receipts_pass_and_are_recorded(monkeypatch, tmp_path):
     core = [x for x in out if x["group"] == "LBM nest"]
     assert len(core) == 5 and all(x["ok"] for x in core)
     sph = [x for x in out if x["group"] == "LBM native sphere"]
-    assert len(sph) == 3 and all(x["ok"] is None and "stored" in x["claim"] for x in sph)      # no slow runs yet: context rows
+    assert len(sph) == 3 and all(x["ok"] is False and "NOT STORED" in x["claim"] and "python -m cafe.pm.stage3.nest slow" in x["source"]
+                                 for x in sph)                                                  # no slow runs yet: required rows, failing, with the command
 
 
 def _sphere_json(re, cd, **over):
@@ -75,39 +75,66 @@ def test_richardson_recovers_the_limit_and_the_order():
     assert flat["p"] == 1.0 and flat["cd_inf"] == pytest.approx(1.2)
 
 
-def test_sphere_receipts_pass_fail_and_never_pass_the_high_re_rows(monkeypatch, tmp_path):
+def _rows(out, re_, key):
+    return [x for x in out if f"Re={re_}" in x["claim"] and key in x["claim"]]
+
+
+def test_sphere_receipts_are_pass_or_fail_never_context(monkeypatch, tmp_path):
     monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(lbm, "physics_sha", lambda: "cur")
     ref = lbm.morrison(100.0)
-    nest.sphere_path("100", 8).write_text(_sphere_json(100.0, 1.305, d=8))
+    nest.sphere_path("100", 8).write_text(_sphere_json(100.0, 1.305, d=8))                         # one grid: the grid itself, 30 % off
     out = nest.sphere_receipts()
-    assert any("needs >= 2 stored grids" in x["claim"] for x in out) and any("finest stored grid d=8" in x["claim"] for x in out)
+    one = _rows(out, "100", "d=8")
+    assert one and one[-1]["ok"] is False and one[-1]["value"] == pytest.approx(1.305)
+    assert all(x["ok"] is not None for x in out if x["group"] == "LBM native sphere" and not x["claim"].lstrip().startswith("study"))
     cr.OUT.clear()
     nest.sphere_path("100", 12).write_text(_sphere_json(100.0, 1.2087, d=12))
-    nest.sphere_path("1000").write_text(_sphere_json(1000.0, lbm.morrison(1000.0) * 1.01))          # even an exact hit is context only
-    nest.sphere_path("1e4").write_text(_sphere_json(1e4, lbm.morrison(1e4) * 1.7))
+    nest.sphere_path("1000", 24).write_text(_sphere_json(1000.0, lbm.morrison(1000.0) * 1.01, d=24, code_sha="cur"))
+    nest.sphere_path("1e4", 40).write_text(_sphere_json(1e4, lbm.morrison(1e4) * 1.7, d=40, code_sha="old"))
     out = nest.sphere_receipts()
-    rich = [x for x in out if "Richardson" in x["claim"]][0]
+    rich = _rows(out, "100", "Richardson")[0]
     assert rich["ok"] is True and rich["value"] == pytest.approx(1.016, abs=0.01) and abs(rich["value"] / ref - 1) < 0.10
-    by = {re.search(r"Re=(\d+)", x["claim"]).group(1): x for x in out if "NOT MET" in x["claim"]}
-    assert by["1000"]["ok"] is None and by["10000"]["ok"] is None
-    assert "needs d >= 32" in by["10000"]["claim"] and "python -m cafe.pm.stage3.nest slow 1e4 32" in by["10000"]["claim"]
+    assert _rows(out, "1000", "d=24")[-1]["ok"] is True                                            # stored, within 10 %: pass
+    stale = _rows(out, "10000", "d=40")
+    assert stale[-1]["ok"] is False and "STORED BY DIFFERENT CODE" in stale[-1]["claim"] and "nest slow 1e4 40" in stale[-1]["source"]
+    assert any(x["kind"] == "context" for x in out if "study" in x["claim"])                       # the resolution study stays beside the rows
     cr.OUT.clear()
-    nest.sphere_path("100", 8).write_text(_sphere_json(100.0, 1.6, d=8))                          # a code that is 50 % off at both grids
-    nest.sphere_path("100", 12).write_text(_sphere_json(100.0, 1.55, d=12))
-    assert any(x["ok"] is False for x in nest.sphere_receipts())
-    assert nest.gpu_command("100", 16).startswith("python -m cafe.pm.stage3.nest slow 100 16 9 6 6")
+    nest.sphere_path("100", 8).write_text(_sphere_json(100.0, 1.6, d=8, code_sha="old"))           # one stale grid stales the extrapolation
+    out = nest.sphere_receipts()
+    assert _rows(out, "100", "Richardson")[0]["ok"] is False
+    cr.OUT.clear()
+    nest.sphere_path("100", 8).write_text(_sphere_json(100.0, 1.6, d=8, code_sha="cur"))           # outside 10 % at both grids: fails, error shown
+    nest.sphere_path("100", 12).write_text(_sphere_json(100.0, 1.55, d=12, code_sha="cur"))
+    bad = _rows(nest.sphere_receipts(), "100", "Richardson")[0]
+    assert bad["ok"] is False
+
+
+def test_run_plan_and_gpu_command_and_memory_guard(monkeypatch):
+    plan = nest.run_plan("1000")
+    assert plan["d"] == 24 and plan["cells"] == 288 * 144 * 144 and plan["steps"] == int(30 * 24 / lbm.U_LAT_SPHERE)
+    assert plan["command"] == "python -m cafe.pm.stage3.nest slow 1000 24 12 6 6 --lateral dirichlet" and "GB with --memory" in plan["eta"]
+    assert nest.gpu_command("1e4", 40).startswith("python -m cafe.pm.stage3.nest slow 1e4 40 12 6 6")
+    assert nest.run_plan("100", 8, (9, 6, 6))["cells"] == 72 * 48 * 48
+    monkeypatch.setattr(lbm, "device_memory_bytes", lambda: 1e6)
+    with pytest.raises(lbm.MemoryGuardError):
+        nest.sphere_drag(100.0, 8)
 
 
 def test_nest_cli(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(lbm, "physics_sha", lambda: "sha-now")
     monkeypatch.setattr(nest, "sphere_drag", lambda re, d, dom, lateral: dict(cd=1.1, d=d, shape=(1, 2, 3), history=np.ones(3), steps=3))
     assert nest.main(["slow", "100", "16", "14", "8", "8", "--lateral", "dirichlet", "--needs-d", "24"]) == 0
     saved = json.loads(nest.sphere_path("100", 16).read_text())
-    assert saved["lateral"] == "dirichlet" and saved["needs_d"] == 24 and saved["ref"] == pytest.approx(lbm.morrison(100.0))
-    assert nest.main(["slow", "1000", "16", "14", "8", "8"]) == 0 and json.loads(nest.sphere_path("1000").read_text())["lateral"] == "freeslip"
+    assert saved["lateral"] == "dirichlet" and saved["needs_d"] == 24 and saved["code_sha"] == "sha-now" and saved["ref"] == pytest.approx(lbm.morrison(100.0))
+    assert nest.main(["slow", "1000", "16", "14", "8", "8"]) == 0 and json.loads(nest.sphere_path("1000", 16).read_text())["lateral"] == "dirichlet"
     assert "cd" in capsys.readouterr().out
     monkeypatch.setattr(nest, "uniform_flow_force", lambda **k: dict(f_rel=0.0, shifts=20))
     monkeypatch.setattr(nest, "shear_layer_mass", lambda **k: dict(drift=0.0, shifts=20, res=0.0))
+    assert nest.main([]) == 1                                                       # the sphere rows are required and nothing is stored
+    cr.OUT.clear()
+    monkeypatch.setattr(nest, "sphere_receipts", lambda: [])
     assert nest.main([]) == 0
     monkeypatch.setattr(nest, "shear_layer_mass", lambda **k: dict(drift=0.5, shifts=20, res=0.0))
     cr.OUT.clear()
