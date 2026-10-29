@@ -17,7 +17,11 @@ What is modelled here (every value is Tagged kind="modelled"; none of it is in t
   6-hourly restart times the same integral over the REAL spectrum is the check on that fit (recorded by `build`).
 Seawater expansion/contraction coefficients are TEOS-10 (gsw.alpha, gsw.beta) at the box's mean surface state.
 """
+from __future__ import annotations
+
 import json, pathlib
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -26,12 +30,15 @@ from . import coare, subgrid, waves
 from . import conventions as cv
 from .grid import Axis, interp
 
+if TYPE_CHECKING:
+    from .environment import GriddedEnv
+
 STRIDE = 3                                   # Stokes field on every 3rd UMWM node (36 km), same as the restart thinning
 
 
 LAYOUT_VERSION = 2                    # derived.zarr layout; 2 adds last_rain_mm_h (the lens persists after the rain stops)
 
-def _coare_grid(env, ti):
+def _coare_grid(env: GriddedEnv, ti: int) -> dict[str, Any]:
     """COARE 3.5 on the WRF grid at hour index ti."""
     W = env.W
     u10 = np.hypot(W["U10"][ti], W["V10"][ti])
@@ -44,7 +51,7 @@ def _coare_grid(env, ti):
                          cp=cp, sigH=hs, rain=W["rain_mm_h"][ti])
 
 
-def build(env, cache, log=print):
+def build(env: GriddedEnv, cache: Any, log: Callable[[str], object] = print) -> dict[str, Any] | None:
     import xarray as xr
     cache = pathlib.Path(cache)
     nt = len(env.tw.x)
@@ -58,7 +65,10 @@ def build(env, cache, log=print):
     u10 = np.hypot(W["U10"], W["V10"])
     lon2 = np.broadcast_to(env.low.x[None, :], u10.shape[1:])
     lat2 = np.broadcast_to(env.law.x[:, None], u10.shape[1:])
-    mv = lambda a: np.moveaxis(a, 0, -1)
+
+    def mv(a: Any) -> Any:
+        return np.moveaxis(a, 0, -1)
+
     wl = coare.warm_layer(env.tw.x, mv(W["SWDOWN"]), mv(np.maximum(u10, 0.1)), mv(W["T2"]), mv(W["Q2"]),
                           mv(W["PSFC"]), mv(W["SST"]), mv(W["GLW"]), lat2, lon2,
                           zi=np.maximum(W["PBLH"], 100.0).mean(0), rain=mv(W["rain_mm_h"]))   # zi: per-cell mean PBLH (weak dependence)
@@ -78,7 +88,10 @@ def build(env, cache, log=print):
     f = env.spec["f"] if env.spec is not None else 0.0313 * 1.12246 ** np.arange(37)
     St = np.zeros((len(env.tu.x), len(js), len(is_), 2))
     for ti in range(len(env.tu.x)):
-        g = lambda k, ti=ti: env.U[k][ti][np.ix_(js, is_)]
+
+        def g(k: str, ti: int = ti) -> Any:
+            return env.U[k][ti][np.ix_(js, is_)]
+
         dto = cv.math_rad_to_compass_to(np.arctan2(g("dwd_n"), g("dwd_e")))
         ok = np.isfinite(g("swh")) & (g("swh") > 1e-3)
         E = waves.spectrum_from_params(np.where(ok, g("swh"), 0.1), np.where(ok, g("dwp"), 8.0), np.where(ok, dto, 0.0),
@@ -102,10 +115,11 @@ def build(env, cache, log=print):
     return fit
 
 
-def _real_stokes(env, it, js, is_):
+def _real_stokes(env: GriddedEnv, it: int, js: Any, is_: Any) -> Any:
     """Stokes surface drift from the REAL restart spectrum at restart time index `it`, on the (js, is_) coarse grid
     (the restart points were thinned on the same every-3rd-node lattice, so they land on it)."""
     S = env.spec
+    assert S is not None
     E = waves.spectrum_from_restart(S["F"][it], S["k"][it], S["f"], S["th"])
     s = waves.stokes_profile(E, S["f"], waves.theta_compass(S["th"]), 0.0)
     R = np.full((len(js), len(is_), 2), np.nan)
@@ -117,7 +131,7 @@ def _real_stokes(env, it, js, is_):
     return R
 
 
-def _correct_with_real(env, St, js, is_):
+def _correct_with_real(env: GriddedEnv, St: Any, js: Any, is_: Any) -> tuple[Any, dict[str, Any]]:
     """Bias-correct the hourly parametric Stokes field with the real 6-hourly spectra.
 
     At each restart time the complex ratio c = (real_e + i real_n) / (fit_e + i fit_n) per node carries the speed error
@@ -125,12 +139,19 @@ def _correct_with_real(env, St, js, is_):
     The honest error estimate is leave-one-out: each interior restart is predicted from the corrections at its
     neighbours (12 h apart, twice the interpolation span actually used) and compared with its real spectrum."""
     S = env.spec
+    assert S is not None
     T = [it for it, t in enumerate(S["t"]) if env.tu.x[0] <= t <= env.tu.x[-1]]
     hour = {it: int(np.argmin(np.abs(env.tu.x - S["t"][it]))) for it in T}
-    z = lambda a: a[..., 0] + 1j * a[..., 1]
+
+    def z(a: Any) -> Any:
+        return a[..., 0] + 1j * a[..., 1]
+
     real = {it: z(_real_stokes(env, it, js, is_)) for it in T}
     fitz = {it: z(St[hour[it]]) for it in T}
-    good = lambda a, b: np.isfinite(a) & np.isfinite(b) & (np.abs(b) > 1e-4)
+
+    def good(a: Any, b: Any) -> Any:
+        return np.isfinite(a) & np.isfinite(b) & (np.abs(b) > 1e-4)
+
     C = {it: np.where(good(real[it], fitz[it]), real[it] / np.where(good(real[it], fitz[it]), fitz[it], 1.0), np.nan) for it in T}
     raw = [np.nanmedian(np.abs(np.abs(fitz[it]) / np.abs(real[it]) - 1)) for it in T]
     loo, ang = [], []
@@ -146,9 +167,9 @@ def _correct_with_real(env, St, js, is_):
     for h, t in enumerate(env.tu.x):
         k = int(np.clip(np.searchsorted(tt, t) - 1, 0, len(tt) - 2))
         w = float(np.clip((t - tt[k]) / (tt[k + 1] - tt[k]), 0.0, 1.0))
-        c = (1 - w) * Ct[k] + w * Ct[k + 1]
-        c = np.where(np.isfinite(c), c, 1.0)                        # no real spectrum at this node: keep the fit
-        v = c * z(St[h])
+        cw = (1 - w) * Ct[k] + w * Ct[k + 1]
+        cw = np.where(np.isfinite(cw), cw, 1.0)                     # no real spectrum at this node: keep the fit
+        v = cw * z(St[h])
         out[h] = np.stack([v.real, v.imag], -1)
     return out, dict(n_restart_times=len(T), fit_only_median_speed_err=float(np.median(raw)),
                      corrected_loo_median_speed_err=float(np.median(loo)), corrected_loo_median_dir_err_deg=float(np.median(ang)))
@@ -158,7 +179,7 @@ class SurfaceLayer:
     """warm_layer / rain_lens: the mission's environment.subgrid switches. Off, the warm layer adds no dT to SST, density or the
     surface_layer dT_warm and, since the diurnal jet proxy is scaled by that dT, no jet; the rain lens adds no dT or dS."""
 
-    def __init__(self, cache, warm_layer=True, rain_lens=True):
+    def __init__(self, cache: Any, warm_layer: bool = True, rain_lens: bool = True):
         import gsw
         import xarray as xr
         d = xr.open_zarr(pathlib.Path(cache) / "derived.zarr").load()
@@ -180,29 +201,29 @@ class SurfaceLayer:
         self.jet_ref = subgrid.assumption("subgrid.diurnal_jet.dT_ref_K")
         self.alpha, self.beta = float(gsw.alpha(35.0, 28.0, 0.0)), float(gsw.beta(35.0, 28.0, 0.0))
 
-    def _g(self, k, lon, lat, t):
+    def _g(self, k: str, lon: Any, lat: Any, t: Any) -> Any:
         return interp(self.D[k], [self.t, self.la, self.lo], [t, lat, cv.wrap360(lon)])[0]
 
-    def _dT_warm(self, lon, lat, t):
+    def _dT_warm(self, lon: Any, lat: Any, t: Any) -> Any:
         return self._g("dT_warm", lon, lat, t) * (1.0 if self.warm_layer else 0.0)
 
-    def coare_at(self, lon, lat, t):
+    def coare_at(self, lon: Any, lat: Any, t: Any) -> dict[str, Any]:
         return dict(ustar=self._g("ustar", lon, lat, t), z0=np.exp(self._g("logz0", lon, lat, t)),
                     L=1.0 / np.where(np.abs(il := self._g("invL", lon, lat, t)) < 1e-9, 1e-9, il), gf=self._g("gf", lon, lat, t))
 
-    def profile_ratio(self, env, lon, lat, z, t):
+    def profile_ratio(self, env: GriddedEnv, lon: Any, lat: Any, z: Any, t: Any) -> tuple[Any, str]:
         r = self.coare_at(lon, lat, t)
         num = coare.profile(r, np.asarray(z, float))
         den = coare.profile(r, 10.0)
         return np.where(den > 1e-6, num / np.where(den > 1e-6, den, 1.0), 1.0), "COARE 3.5 stability-corrected profile (modelled)"
 
-    def surface_layer(self, env, lon, lat, t):
+    def surface_layer(self, env: GriddedEnv, lon: Any, lat: Any, t: Any) -> dict[str, Tagged]:
         r = self.coare_at(lon, lat, t)
         return dict(ustar=Tagged(r["ustar"], "COARE 3.5 from WRF + UMWM (modelled)", None, "modelled"),
                     L=Tagged(r["L"], "COARE 3.5 Obukhov length (modelled)", None, "modelled"),
                     dT_warm=Tagged(self._dT_warm(lon, lat, t), "COARE warm layer (Fairall 1996; modelled: WRF SST is frozen)", None, "modelled"))
 
-    def stokes_surface(self, env, out, lon, lat, t):
+    def stokes_surface(self, env: GriddedEnv, out: dict[str, Tagged], lon: Any, lat: Any, t: Any) -> Tagged:
         e = interp(self.S[0], [self.ts, self.las, self.los], [t, lat, cv.wrap360(lon)])[0]
         n = interp(self.S[1], [self.ts, self.las, self.los], [t, lat, cv.wrap360(lon)])[0]
         v = np.stack([e, n], -1)
@@ -213,12 +234,12 @@ class SurfaceLayer:
                          f"(leave-one-out median speed error {100 * e:.0f} %, fit alone {100 * self.fit['fit_only_median_speed_err']:.0f} %)",
                       e * np.abs(v), "modelled")
 
-    def _warm(self, lon, lat, z, t):
+    def _warm(self, lon: Any, lat: Any, z: Any, t: Any) -> tuple[Any, Any]:
         dT, dz = self._dT_warm(lon, lat, t), self._g("dz_warm", lon, lat, t)
         z = np.asarray(z, float)
         return dT * np.clip(1.0 + z / np.maximum(dz, 1e-3), 0.0, 1.0), dT    # linear from dT at 0 to 0 at -dz
 
-    def current_extra(self, env, v, lon, lat, z, t):
+    def current_extra(self, env: GriddedEnv, v: Tagged, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         dTz, dT0 = self._warm(lon, lat, z, t)
         w = env.u10(lon, lat, t)
         sp = np.hypot(w[..., 0], w[..., 1])[..., None]
@@ -228,19 +249,19 @@ class SurfaceLayer:
         return Tagged(v.value + jet, v.source + "; + diurnal surface jet proxy (TEPEX-C hypothesis, modelled)",
                       v.uncertainty, "modelled" if np.any(frac > 0) else v.kind)
 
-    def _lens(self, env, lon, lat, z, t):
+    def _lens(self, env: GriddedEnv, lon: Any, lat: Any, z: Any, t: Any) -> dict[str, Any]:
         rain = self._g("last_rain_mm_h", lon, lat, t)                     # the rain that formed the lens; it then decays with since_rain_s
         u10 = np.hypot(*np.moveaxis(env.u10(lon, lat, t), -1, 0))
         return subgrid.rain_lens(rain, u10, self._g("since_rain_s", lon, lat, t), np.minimum(np.asarray(z, float), 0.0), self.cfg)
 
-    def density_extra(self, env, v, lon, lat, z, t):
+    def density_extra(self, env: GriddedEnv, v: Tagged, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         dTz, _ = self._warm(lon, lat, z, t)
         lens = self._lens(env, lon, lat, z, t)
         # rain_lens dS is the freshening (+0.5 psu), so it lowers the density: less salt, lighter
         drho = v.value * (-self.alpha * (dTz + lens["dT"].value) - self.beta * lens["dS"].value)
         return Tagged(v.value + drho, v.source + "; + warm layer and rain lens (TEOS-10 alpha/beta; modelled)", v.uncertainty, v.kind)
 
-    def sst_extra(self, env, v, lon, lat, t):
+    def sst_extra(self, env: GriddedEnv, v: Tagged, lon: Any, lat: Any, t: Any) -> Tagged:
         if not self.warm_layer:
             return v
         return Tagged(v.value + self._dT_warm(lon, lat, t), v.source + " + COARE warm layer dT (modelled)", v.uncertainty, "modelled")

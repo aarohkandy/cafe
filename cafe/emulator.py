@@ -69,7 +69,7 @@ def pwm_to_cmd(kind, pwm, n):
     return np.clip(out, -1, 1)
 
 
-def free_instance(taken):
+def free_instance(taken: set[int]) -> int:
     """First SITL instance number whose ports (TCP 5760/5762/5763 + 10I, UDP 9002/9003 + 10I) are all free.
     A killed SITL leaves its listening sockets in TIME_WAIT for a while; never assume they're gone."""
     for I in range(0, 40):

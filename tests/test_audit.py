@@ -192,6 +192,16 @@ def test_main_runs_ruff_mypy_pytest_and_the_coverage_gates(tmp_path, monkeypatch
     assert audit.main([]) == 1 and "AUDIT FAIL: pytest:\npytest output" in capsys.readouterr().out
 
 
+def test_audit_mypy_step_reads_pyproject_and_fails_on_a_strict_only_error(tmp_path, monkeypatch):
+    """`_run(["mypy"])` picks up [tool.mypy] from the project root: an unannotated def passes plain mypy and fails strict."""
+    (tmp_path / "pyproject.toml").write_text((audit.ROOT / "pyproject.toml").read_text())
+    (tmp_path / "cafe" / "pm").mkdir(parents=True)
+    (tmp_path / "cafe" / "pm" / "bad.py").write_text("def f(x):\n    return x\n")
+    monkeypatch.setattr(audit, "ROOT", tmp_path)
+    rc, out = audit._run(["mypy"])
+    assert rc != 0 and "no-untyped-def" in out and "bad.py" in out
+
+
 def test_main_is_clean_when_everything_passes(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(audit, "banned", lambda: [])
     monkeypatch.setattr(audit, "_run", lambda cmd: (0, ""))

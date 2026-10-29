@@ -24,10 +24,12 @@ import datetime as dt
 import re
 import time
 import warnings
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from numpy.typing import NDArray
 from scipy.stats import qmc
 
 from . import budget, report, stage1
@@ -35,6 +37,7 @@ from .config import ConfigError, _in_box, utc
 from .emulator import Emulator, read_table, store_path, write_table
 from .stats import intervals
 
+Track = tuple[NDArray[Any], NDArray[Any], NDArray[Any]]                    # (t, lon, lat)
 BASE = ["deploy_h", "lon", "lat", "wind_mean", "wind_p90", "hs_mean", "hs_p90", "cur_mean", "cur_p90"]
 TASK = dict(glider=["dive_depth_m", "radius_km", "lost_after_h"], usv=["track_tolerance_km", "becalmed_after_h"],
             uas=["every_days", "duration_min", "max_mean_wind_ms"])
@@ -52,8 +55,8 @@ class Invalid(ConfigError):
 
 # ------------------------------------------------------------------------------------------------------ mission changes
 
-def vehicle(mission: dict, vid: str) -> dict:
-    v = next((v for v in mission["vehicles"] if v["id"] == vid), None)
+def vehicle(mission: dict[str, Any], vid: str) -> dict[str, Any]:
+    v: dict[str, Any] | None = next((v for v in mission["vehicles"] if v["id"] == vid), None)
     if v is None:
         raise Invalid(f"no vehicle {vid!r} in the mission ({[x['id'] for x in mission['vehicles']]})")
     return v
@@ -63,11 +66,11 @@ def _wrap(lon: Any) -> Any:
     return (np.asarray(lon, float) + 180.0) % 360.0 - 180.0
 
 
-def _window(m: dict) -> tuple[float, float]:
+def _window(m: dict[str, Any]) -> tuple[float, float]:
     return utc(m["window"]["start"]).timestamp(), utc(m["window"]["end"]).timestamp()
 
 
-def _points(v: dict, ship: dict | None) -> list[list[float]]:
+def _points(v: dict[str, Any], ship: dict[str, Any] | None) -> list[list[float]]:
     """Every [lon, lat] a vehicle's task refers to (deploy, station, waypoints; a UAS: the ship)."""
     if "base" in v:
         return [[ship["lon"], ship["lat"]]] if ship else []
@@ -75,7 +78,7 @@ def _points(v: dict, ship: dict | None) -> list[list[float]]:
     return [[v["deploy"]["lon"], v["deploy"]["lat"]]] + ([[t["lon"], t["lat"]]] if "lon" in t else []) + [list(p) for p in t.get("waypoints", [])]
 
 
-def apply(mission: dict, mods: dict | None = None, drop: tuple | list = ()) -> dict:
+def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Sequence[str] = ()) -> dict[str, Any]:
     """A copy of the mission with the changes `mods` = {vid: dict(shift_h, dlon, dlat, duty)} and the vehicles `drop` (with their links) removed."""
     m = copy.deepcopy(mission)
     t0, t1 = _window(m)
@@ -127,18 +130,18 @@ def _iso(t: float) -> str:
     return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def solo(mission: dict, vid: str) -> dict:
+def solo(mission: dict[str, Any], vid: str) -> dict[str, Any]:
     """The mission with only this vehicle and no links: vehicles do not interact in Stage 1, so its result is the same and it costs less."""
     m = copy.deepcopy(mission)
     m["vehicles"], m["links"] = [vehicle(m, vid)], []
     return m
 
 
-def describe(mod: dict, v: dict | None = None) -> str:
+def describe(mod: dict[str, Any], v: dict[str, Any] | None = None) -> str:
     """The change in words."""
     h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
     what = "launch the sorties" if v is not None and "base" in v else "deploy"
-    out = []
+    out: list[str] = []
     if h:
         out.append(f"{what} {abs(h):g} h {'later' if h > 0 else 'earlier'}")
     for d, pos, neg in ((dlon, "east", "west"), (dlat, "north", "south")):
@@ -155,7 +158,7 @@ def describe(mod: dict, v: dict | None = None) -> str:
 
 # ------------------------------------------------------------------------------------------------------ features and rows
 
-def uas_track(mission: dict, vid: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def uas_track(mission: dict[str, Any], vid: str) -> Track:
     """(t, lon, lat) for a UAS: the ship at the middle of each sortie of the window (the window's middle when none fits)."""
     v, s = vehicle(mission, vid), mission["ship"]
     t0, t1 = _window(mission)
@@ -165,7 +168,7 @@ def uas_track(mission: dict, vid: str) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return ts, np.full(len(ts), float(s["lon"])), np.full(len(ts), float(s["lat"]))
 
 
-def track_points(r: dict, mission: dict, n: int = 24) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def track_points(r: dict[str, Any], mission: dict[str, Any], n: int = 24) -> Track:
     """(t, lon, lat) of the ensemble-median track at up to n records, longitudes in [-180, 180)."""
     lon, lat = report._median_track(r, _centre(mission))
     ok = np.isfinite(lon) & np.isfinite(lat)
@@ -173,11 +176,11 @@ def track_points(r: dict, mission: dict, n: int = 24) -> tuple[np.ndarray, np.nd
     return np.asarray(r["t"], float)[i], _wrap(lon[i]), lat[i]
 
 
-def _centre(m: dict) -> float:
-    return m["box"]["lon_min"] + ((m["box"]["lon_max"] - m["box"]["lon_min"]) % 360.0) / 2
+def _centre(m: dict[str, Any]) -> float:
+    return float(m["box"]["lon_min"] + ((m["box"]["lon_max"] - m["box"]["lon_min"]) % 360.0) / 2)
 
 
-def shift_track(trk: tuple, mod: dict, mission: dict) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def shift_track(trk: Track, mod: dict[str, Any], mission: dict[str, Any]) -> Track:
     """The base median track under a change: later by shift_h and moved by dlon/dlat, cut at the window end (the last point is kept)."""
     t, lon, lat = trk
     t2 = t + 3600.0 * float(mod.get("shift_h", 0.0))
@@ -186,7 +189,7 @@ def shift_track(trk: tuple, mod: dict, mission: dict) -> tuple[np.ndarray, np.nd
     return t2[keep], _wrap(lon[keep] + float(mod.get("dlon", 0.0))), lat[keep] + float(mod.get("dlat", 0.0))
 
 
-def params(mission: dict, vid: str, cls: str) -> dict:
+def params(mission: dict[str, Any], vid: str, cls: str) -> dict[str, Any]:
     """The mission-parameter features of one vehicle (BASE[:3] and TASK[cls])."""
     v, (t0, t1) = vehicle(mission, vid), _window(mission)
     c = _centre(mission)
@@ -203,18 +206,18 @@ def params(mission: dict, vid: str, cls: str) -> dict:
     return d
 
 
-def env_stats(env: Any, t: np.ndarray, lon: np.ndarray, lat: np.ndarray) -> dict:
+def env_stats(env: Any, t: NDArray[Any], lon: NDArray[Any], lat: NDArray[Any]) -> dict[str, Any]:
     """Mean and 90th percentile of 10 m wind speed, Hs and surface current speed along a track (the report's queries)."""
     w = np.asarray(env.wind(lon, lat, 10.0, t).value, float)
     h = np.asarray(env.waves(lon, lat, t)["Hs"].value, float)
     c = np.asarray(env.current(lon, lat, 0.0, t).value, float)
-    out = {}
+    out: dict[str, float] = {}
     for name, a in (("wind", np.hypot(w[..., 0], w[..., 1])), ("hs", h), ("cur", np.hypot(c[..., 0], c[..., 1]))):
         out[f"{name}_mean"], out[f"{name}_p90"] = float(np.nanmean(a)), float(np.nanpercentile(a, 90))
     return out
 
 
-def targets(r: dict) -> dict:
+def targets(r: dict[str, Any]) -> dict[str, Any]:
     """p_fail, t_fail_h and the fraction of members failing in each mode, from a Stage-1 vehicle result."""
     f = stage1.failed(r)
     t = np.asarray(r["t"], float)
@@ -226,9 +229,10 @@ def targets(r: dict) -> dict:
     return dict(p_fail=float(f.mean()), t_fail_h=t_fail, **{f"mode_{k}": float(np.mean(v)) for k, v in r["fail"].items()})
 
 
-def vehicle_rows(mission: dict, res: dict, env: Any, fidelity: dict, meta: dict, variant: str = "base") -> list[dict]:
+def vehicle_rows(mission: dict[str, Any], res: dict[str, Any], env: Any, fidelity: dict[str, Any], meta: dict[str, Any],
+                 variant: str = "base") -> list[dict[str, Any]]:
     """One training row per vehicle of a Stage-1 result `res` (stage1.merge / run_batch output) of `mission`."""
-    rows = []
+    rows: list[dict[str, Any]] = []
     for vid, r in res["vehicles"].items():
         cls = r["class"]
         trk = uas_track(mission, vid) if cls == "uas" else track_points(r, mission)
@@ -237,7 +241,7 @@ def vehicle_rows(mission: dict, res: dict, env: Any, fidelity: dict, meta: dict,
     return rows
 
 
-def add_rows(path: Any, rows: list[dict]) -> tuple[pd.DataFrame, str]:
+def add_rows(path: Any, rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, str]:
     """Append rows to the training table (rows with a key already in it are replaced). -> (whole table, the file used)."""
     p, _ = store_path(path)
     new = pd.DataFrame(rows)
@@ -248,7 +252,7 @@ def add_rows(path: Any, rows: list[dict]) -> tuple[pd.DataFrame, str]:
 
 # ------------------------------------------------------------------------------------------------------ training design
 
-def _fits(mission: dict, vid: str, mod: dict) -> dict:
+def _fits(mission: dict[str, Any], vid: str, mod: dict[str, Any]) -> dict[str, Any]:
     """The change shrunk (halving shift and move) until it is valid; no change when nothing fits."""
     for k in range(5):
         s = 0.5 ** k
@@ -261,10 +265,10 @@ def _fits(mission: dict, vid: str, mod: dict) -> dict:
     return dict(shift_h=0.0, dlon=0.0, dlat=0.0, duty=1.0)
 
 
-def design(mission: dict, n: int, seed: int) -> list[dict]:
+def design(mission: dict[str, Any], n: int, seed: int) -> list[dict[str, Any]]:
     """n mission variants for training: per vehicle a Latin-hypercube point over shift, move and duty (each vehicle its own), so one
     Stage-1 run of the variant gives every vehicle a different row."""
-    out: list[dict] = [{} for _ in range(n)]
+    out: list[dict[str, Any]] = [{} for _ in range(n)]
     t0, t1 = _window(mission)
     for i, v in enumerate(mission["vehicles"]):
         u = qmc.LatinHypercube(d=4, seed=seed + i).random(n)
@@ -289,7 +293,7 @@ def _clean(df: pd.DataFrame, cls: str) -> pd.DataFrame:
     return d.dropna(subset=need).reset_index(drop=True)
 
 
-def fit_class(df: pd.DataFrame, cls: str, path: Any) -> tuple[Emulator | None, dict]:
+def fit_class(df: pd.DataFrame, cls: str, path: Any) -> tuple[Emulator | None, dict[str, Any]]:
     """Fit the emulator of one vehicle class on its rows and score it on a 20 % hold-out. -> (Emulator | None, info for holdout.json)."""
     d = _clean(df, cls)
     info: dict[str, Any] = dict(trained=False, cls=cls, rows=int(len(d)))
@@ -303,7 +307,7 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any) -> tuple[Emulator | None, d
     em.fit(d, holdout=0.2)
     x = d.iloc[0][em.features]
     em.query(x)
-    ts = []
+    ts: list[float] = []
     for _ in range(20):
         a = time.perf_counter()
         em.query(x)
@@ -320,7 +324,7 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any) -> tuple[Emulator | None, d
                     query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, acceptance=acc, threshold=em.threshold, multi_fidelity=em.multi_fidelity)
 
 
-def train(table: Any, classes: Any, path: Any = None) -> dict[str, tuple[Emulator | None, dict]]:
+def train(table: Any, classes: Any, path: Any = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
     """Fit the emulator of each class in `classes` from the stored table (all runs, all missions)."""
     p, _ = store_path(table)
     df = read_table(p) if p.exists() else pd.DataFrame(columns=["cls"] + BASE)
@@ -329,10 +333,10 @@ def train(table: Any, classes: Any, path: Any = None) -> dict[str, tuple[Emulato
 
 # ------------------------------------------------------------------------------------------------------ flip search
 
-def candidates(mission: dict, vid: str) -> list[dict]:
+def candidates(mission: dict[str, Any], vid: str) -> list[dict[str, Any]]:
     """Single changes in cost order: deploy +-6/12/24/48 h, +-0.5/1 degree in lon or lat, lower duty. Each: mod, cost (notches), change (words)."""
     v = vehicle(mission, vid)
-    out: list[dict] = [dict(mod=dict(shift_h=s * h), cost=h / 6.0) for h in SHIFTS for s in (1, -1)]
+    out: list[dict[str, Any]] = [dict(mod=dict(shift_h=s * h), cost=h / 6.0) for h in SHIFTS for s in (1, -1)]
     out += [dict(mod={ax: s * d}, cost=d / 0.5) for d in MOVES for ax in ("dlon", "dlat") for s in (1, -1)]
     if "base" in v or "dive_depth_m" in v["task"]:
         out += [dict(mod=dict(duty=f), cost=(1 - f) / 0.25) for f in DUTIES]
@@ -341,7 +345,7 @@ def candidates(mission: dict, vid: str) -> list[dict]:
     return sorted(out, key=lambda c: c["cost"])
 
 
-def predict(em: Emulator | None, mission: dict, vid: str, cls: str, trk: tuple | None, mod: dict, env: Any) -> dict:
+def predict(em: Emulator | None, mission: dict[str, Any], vid: str, cls: str, trk: Track | None, mod: dict[str, Any], env: Any) -> dict[str, Any]:
     """The emulator's answer for a changed mission without running it: the mission parameters of the change, and the environment along the base
     median track `trk` moved by the change (a UAS: at the ship at the changed sortie times). Status: ok | out_of_range | no_emulator | no_track."""
     if em is None:
@@ -355,7 +359,7 @@ def predict(em: Emulator | None, mission: dict, vid: str, cls: str, trk: tuple |
     return emulate(em, {**params(mission, vid, cls), **env_stats(env, *track)})
 
 
-def emulate(em: Emulator, feats: dict) -> dict:
+def emulate(em: Emulator, feats: dict[str, Any]) -> dict[str, Any]:
     """The emulator's answer for one feature dict, or why it cannot answer: status ok | out_of_range | no_track (a feature is missing)."""
     x = {k: feats.get(k, np.nan) for k in em.features}
     if not np.all(np.isfinite(list(x.values()))):
@@ -367,7 +371,8 @@ def emulate(em: Emulator, feats: dict) -> dict:
     return dict(status="ok", p_fail=p["value"], lo=p["lo"], hi=p["hi"], verdict=q["verdict"], distance=q["distance"], threshold=q["threshold"])
 
 
-def measure(mission: dict, vid: str, env: Any, plan: dict, pri: dict, marg: dict, scales: dict | None, seed: int, n: int | None = None) -> dict:
+def measure(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]],
+            scales: dict[str, Any] | None, seed: int, n: int | None = None) -> dict[str, Any]:
     """Stage 1 for one vehicle of the (changed) mission: one batch of the plan's size, the base run's members (common random numbers)."""
     members = list(range(n or plan["batch"]))
     r = stage1.run_batch(solo(mission, vid), env, members, seed, pri, marg, scales)["vehicles"][vid]
@@ -376,21 +381,24 @@ def measure(mission: dict, vid: str, env: Any, plan: dict, pri: dict, marg: dict
     return dict(p_fail=float(f.mean()), lo=v["fail_lo"], hi=v["fail_hi"], verdict=v["verdict"], n=int(len(f)))
 
 
-def flip_search(mission: dict, verdicts: dict, tracks: dict, env: Any, ems: dict, plan: dict, pri: dict, marg: dict, scales: dict | None,
-                seed: int, budget_s: float, log: Any = print) -> tuple[dict, float]:
+def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[str, Track], env: Any, ems: dict[str, tuple[Emulator | None, dict[str, Any]]],
+                plan: dict[str, Any], pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]], scales: dict[str, Any] | None, seed: int,
+                budget_s: float, log: Callable[[str], None] = print) -> tuple[dict[str, Any], float]:
     """For each vehicle whose verdict is not GO, the cheapest single change that makes it GO (a NO-GO: at least MARGINAL).
 
     Emulator first: every candidate within the emulator's training range is answered by it. Candidates it cannot answer (no emulator, no
     track, out of range) are run in Stage 1, nearest first, at most FALLBACK_K and only while `budget_s` lasts. The best candidate is the
     cheapest one in the target set among those answered. -> ({vid: result}, seconds of Stage 1 spent)."""
-    out, spent = {}, 0.0
+    out: dict[str, Any] = {}
+    spent = 0.0
     for vid, base in verdicts.items():
         if base["verdict"] == "GO":
             continue
         cls = stage1._classes(solo(mission, vid))[vid]
         want = ("GO",) if base["verdict"] == "MARGINAL" else ("GO", "MARGINAL")
         em = (ems.get(cls) or (None, {}))[0]
-        tried, left = [], []
+        tried: list[dict[str, Any]] = []
+        left: list[tuple[int, dict[str, Any]]] = []
         for c in candidates(mission, vid):
             e = dict(change=c["change"], mod=c["mod"], cost=c["cost"], method="not evaluated", reason="")
             try:
@@ -425,7 +433,7 @@ def flip_search(mission: dict, verdicts: dict, tracks: dict, env: Any, ems: dict
 
 # ------------------------------------------------------------------------------------------------------ the what-if command
 
-def _parse(text: str, pat: str, what: str, example: str) -> re.Match:
+def _parse(text: str, pat: str, what: str, example: str) -> re.Match[str]:
     m = re.fullmatch(pat, text.strip(), re.I)
     if not m:
         raise ConfigError(f"{what} {text!r}: expected {example}")
@@ -445,8 +453,9 @@ def parse_move(text: str) -> tuple[float, float]:
     return {"e": (d, 0.0), "w": (-d, 0.0), "n": (0.0, d), "s": (0.0, -d)}[k]
 
 
-def answer(mission: dict, ops: dict, base: dict, tracks: dict, env: Any, ems: dict, plan: dict, fitted: dict | None, scales: dict | None,
-           only: list | None = None) -> dict:
+def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], tracks: dict[str, Track], env: Any,
+           ems: dict[str, tuple[Emulator | None, dict[str, Any]]], plan: dict[str, Any], fitted: dict[str, Any] | None, scales: dict[str, Any] | None,
+           only: list[str] | None = None) -> dict[str, Any]:
     """The what-if: `ops` = dict(shift_h, dlon, dlat, drop=[ids]) applied to every vehicle (or to `only`). `base` = {vid: Stage-1 verdict dict}
     of the unchanged mission. Per changed vehicle: emulator-first, else Stage 1 at `plan`. Dropped vehicles need no run: Stage-1 vehicles do not
     interact, only the links through them go. -> dict(vehicles={vid: ...}, dropped, links_removed)."""
@@ -459,7 +468,7 @@ def answer(mission: dict, ops: dict, base: dict, tracks: dict, env: Any, ems: di
         vehicle(mission, vid)
     changed = {vid: mod for vid in live} if any(mod.values()) else {}
     m2 = apply(mission, changed, drop)
-    out = {}
+    out: dict[str, Any] = {}
     for vid in changed:
         cls = stage1._classes(solo(m2, vid))[vid]
         b = base.get(vid)
@@ -475,7 +484,8 @@ def answer(mission: dict, ops: dict, base: dict, tracks: dict, env: Any, ems: di
     return dict(vehicles=out, dropped=drop, links_removed=gone)
 
 
-def _stage1(mission: dict, vid: str, env: Any, plan: dict, fitted: dict | None, scales: dict | None) -> dict:
+def _stage1(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], fitted: dict[str, Any] | None,
+            scales: dict[str, Any] | None) -> dict[str, Any]:
     """Stage 1 at the plan's budget (the sequential run, n_min .. n_max members) for one vehicle."""
     r = stage1.run(solo(mission, vid), env, plan, None, lambda *_: None, scales, fitted)
     e = r["summary"]["vehicles"][vid]

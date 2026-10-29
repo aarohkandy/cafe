@@ -6,6 +6,7 @@ opposite body acceleration (inertia relief by hand) and held by a statically det
 constraint whose reactions should come out ~0 (checked and reported).
 """
 import pathlib, re, shutil, subprocess, tempfile
+from typing import Any
 import numpy as np
 import trimesh
 
@@ -141,8 +142,8 @@ def _mean_rigid_equations(r, mn, max_nodes=600):
     return out
 
 
-def solve(m, structure, material, thickness=None, pressure=None, point_loads=(), steps=("static",),
-          h=None, workdir=None, n_modes=10, fixed=None, body_accel=None, density=None):
+def solve(m: Any, structure: str, material: Any, thickness: Any = None, pressure: Any = None, point_loads: Any = (), steps: Any = ("static",),
+          h: Any = None, workdir: Any = None, n_modes: int = 10, fixed: Any = None, body_accel: Any = None, density: Any = None) -> Any:
     """
     m           trimesh in body frame, metres
     structure   "shell" (needs thickness [m]) or "solid"

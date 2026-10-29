@@ -30,9 +30,10 @@ import os
 import pathlib
 import time
 from dataclasses import dataclass
-from typing import Callable, NamedTuple
+from typing import Any, Callable, NamedTuple, cast
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 import jax
 import jax.numpy as jnp
 from jax.scipy.ndimage import map_coordinates
@@ -41,11 +42,14 @@ import cafe.receipts as cr
 from cafe.receipts import bracket
 from cafe.pm.stage3 import lbm, wallmodel as wm
 
+UEnv = Callable[[jax.Array, jax.Array, jax.Array, Any], jax.Array]       # coarse velocity u(x, y, z, t) -> (3, ...)
+Traj = Callable[[Any, Any], tuple[Any, Any]]                              # t, params -> (position, velocity)
+
 
 @dataclass(frozen=True)
 class NestSpec:
     """Static description of a nest. U_ref sets the time step: dt = u_lat dx / U_ref (lattice speed u_lat for U_ref)."""
-    shape: tuple
+    shape: tuple[int, ...]
     dx: float
     U_ref: float
     nu: float
@@ -54,9 +58,9 @@ class NestSpec:
     mode: str = "reg"
     storage: str = "fp32"
     sponge: int = 4
-    periodic: tuple = (False, False, False)
+    periodic: tuple[bool, ...] = (False, False, False)
     wall_model: bool = True
-    body_force: tuple = (0.0, 0.0, 0.0)      # lattice units per step, uniform (channel receipt)
+    body_force: tuple[float, ...] = (0.0, 0.0, 0.0)      # lattice units per step, uniform (channel receipt)
     rans_layer: float | None = None          # cells: near-wall mixing-length layer; None = the matching height
     nu_floor: float = 0.0                    # lattice viscosity floor: BGK at tau - 1/2 < ~1e-4 is NaN in float32 on coarse grids (Re distorted)
 
@@ -95,8 +99,8 @@ class State(NamedTuple):
     ix: jnp.ndarray           # (3,) int world offset of cell (0,0,0) in cells
 
 
-def make_geom(solid: np.ndarray, anchor, pad_walls: int | None = None, periodic=(False, False, False),
-              force_region: np.ndarray | None = None, qdist: np.ndarray | None = None, specular: bool = True,
+def make_geom(solid: NDArray[np.bool_], anchor: ArrayLike, pad_walls: int | None = None, periodic: tuple[bool, ...] = (False, False, False),
+              force_region: NDArray[np.bool_] | None = None, qdist: NDArray[np.float64] | None = None, specular: bool = True,
               rans_layer: float | None = None) -> Geom:
     """Geometry arrays for one body. The solid may only touch a face that is periodic (a plate spanning a periodic axis)."""
     solid = np.asarray(solid, bool)
@@ -106,13 +110,13 @@ def make_geom(solid: np.ndarray, anchor, pad_walls: int | None = None, periodic=
     link = np.asarray(lbm.links(jnp.asarray(solid)))
     ws = wm.wall_set(solid, link, pad_walls, rans_layer=rans_layer)
     ws = wm.WallSet(*[jnp.asarray(a) for a in ws])
-    ax, sg = lbm.flat_wall_cells(link) if specular else (np.full(solid.shape, -1, np.int8), np.zeros(solid.shape, np.int8))
+    fax, fsg = lbm.flat_wall_cells(link) if specular else (np.full(solid.shape, -1, np.int8), np.zeros(solid.shape, np.int8))
     fm = link if force_region is None else link & np.asarray(force_region, bool)[None]     # force_region: fluid cells that count
     return Geom(jnp.asarray(solid), jnp.asarray(link), ws, jnp.asarray(anchor, jnp.int32), jnp.asarray(fm),
-                None if qdist is None else jnp.asarray(qdist, jnp.float32), jnp.asarray(ax), jnp.asarray(sg))
+                None if qdist is None else jnp.asarray(qdist, jnp.float32), jnp.asarray(fax), jnp.asarray(fsg))
 
 
-def stack_geoms(geoms: list) -> Geom:
+def stack_geoms(geoms: list[Geom]) -> Geom:
     """Stack bodies for vmap; wall sets are padded to the longest."""
     n = max(g.ws.cell.shape[1] for g in geoms)
     m = max(g.ws.near.shape[1] for g in geoms)
@@ -120,10 +124,10 @@ def stack_geoms(geoms: list) -> Geom:
           for g in geoms]
     if any(g.qd is not None for g in gs):                                    # halfway bodies get q = 1/2 when stacked with curved ones
         gs = [g if g.qd is not None else g._replace(qd=jnp.full(g.link.shape, 0.5, jnp.float32)) for g in gs]
-    return jax.tree.map(lambda *a: jnp.stack(a), *gs)
+    return cast(Geom, jax.tree.map(lambda *a: jnp.stack(a), *gs))
 
 
-def _shell(spec: NestSpec):
+def _shell(spec: NestSpec) -> tuple[NDArray[np.int_], NDArray[np.int_], NDArray[np.float32], NDArray[np.int_]]:
     """Indices and relaxation weights of the refill layer (weight 1) and sponge layers (quadratic ramp) of the open faces."""
     nx, ny, nz = spec.shape
     g = np.stack(np.meshgrid(np.arange(nx), np.arange(ny), np.arange(nz), indexing="ij"))
@@ -144,12 +148,12 @@ def _shell(spec: NestSpec):
     return idx, inner, w.astype(np.float32), kk
 
 
-def linear_track(t, p):
+def linear_track(t: Any, p: Any) -> tuple[Any, Any]:
     """Straight-line vehicle: p = (position at t=0 (3,), velocity (3,)). Returns (position, velocity)."""
     return p[0] + p[1] * t, p[1]
 
 
-def init_state(spec: NestSpec, geom: Geom, u_env: Callable, p0, v0=(0.0, 0.0, 0.0)) -> State:
+def init_state(spec: NestSpec, geom: Geom, u_env: UEnv, p0: ArrayLike, v0: ArrayLike = (0.0, 0.0, 0.0)) -> State:
     """Populations at equilibrium of the coarse field (rho = 1); solid cells at the body's wall equilibrium."""
     p0 = np.asarray(p0, float)
     ix = jnp.asarray(np.floor(p0 / spec.dx).astype(np.int32)) - geom.anchor
@@ -162,8 +166,8 @@ def init_state(spec: NestSpec, geom: Geom, u_env: Callable, p0, v0=(0.0, 0.0, 0.
     return State(lbm.store(f, spec.storage), jnp.int32(0), ix)
 
 
-def make_step(spec: NestSpec, u_env: Callable, traj: Callable = linear_track, refill: bool = True, wall_vel: bool = True,
-              rho_override: float | None = None):
+def make_step(spec: NestSpec, u_env: UEnv, traj: Traj = linear_track, refill: bool = True, wall_vel: bool = True,
+              rho_override: float | None = None) -> Callable[[State, Geom, Any], tuple[State, dict[str, jax.Array]]]:
     """Returns step(state, geom, params) -> (state, series_row). Pure: scan it, jit it, vmap it over (state, geom, params).
     wall_vel=False drops the moving-wall term and rho_override replaces the refill density: test hooks that let the
     receipts' breaker tests show the checks can fail."""
@@ -173,14 +177,15 @@ def make_step(spec: NestSpec, u_env: Callable, traj: Callable = linear_track, re
     lay1 = jnp.asarray(kk == 1)
     sh, dx, dt = jnp.asarray(idx), spec.dx, spec.dt
 
-    def step(state: State, geom: Geom, params):
+    def step(state: State, geom: Geom, params: Any) -> tuple[State, dict[str, jax.Array]]:
         f, n, ix = state
         t = n * dt
         p, v = traj(t, params)
         uw = (v * (dt / dx)) if wall_vel else jnp.zeros(3)
         rho0, u0 = lbm.moments(f)
         usp = jnp.where(geom.solid, 0.0, jnp.sqrt((u0 ** 2).sum(0)))
-        uwall, st = uw, None
+        uwall = uw
+        st: dict[str, jax.Array] | None = None
         yfrac = utau = jnp.float32(0)
         if spec.wall_model:
             st = wm.wall_state(u0, geom.ws, spec.nu_lat, uw)
@@ -199,6 +204,7 @@ def make_step(spec: NestSpec, u_env: Callable, traj: Callable = linear_track, re
         flat = geom.sp_ax >= 0 if geom.sp_ax is not None else jnp.zeros(spec.shape, bool)
         fs, F = lbm.bounce_back(fp, fs, geom.link & ~flat[None], rho, uwall, geom.fmask & ~flat[None], 0.5 if geom.qd is None else geom.qd)
         if geom.sp_ax is not None:
+            assert geom.sp_sg is not None
             fs, Fs = lbm.specular(fp, fs, geom.link, geom.sp_ax, geom.sp_sg, geom.fmask, rho, uw)
             F = F + Fs
         fs = lbm.store(fs, spec.storage)
@@ -225,26 +231,27 @@ def make_step(spec: NestSpec, u_env: Callable, traj: Callable = linear_track, re
     return step
 
 
-def make_run(spec: NestSpec, u_env: Callable, steps: int, traj: Callable = linear_track, batched: bool = False, **kw):
+def make_run(spec: NestSpec, u_env: UEnv, steps: int, traj: Traj = linear_track, batched: bool = False, **kw: Any) -> Callable[..., Any]:
     """Jitted `run(state, geom, params) -> (state, series)` for `steps` steps (series stacked over steps). With
     batched=True the arguments carry a leading vehicle axis (vmap), series then has shape (vehicles, steps, ...)."""
     step = make_step(spec, u_env, traj, **kw)
 
-    def run(state, geom, params):
+    def run(state: State, geom: Geom, params: Any) -> tuple[State, dict[str, jax.Array]]:
         return jax.lax.scan(lambda s, _: step(s, geom, params), state, None, length=steps)
 
     return jax.jit(jax.vmap(run) if batched else run)
 
 
-def simulate(spec: NestSpec, u_env: Callable, geom: Geom, p0, params, steps: int, chunk: int = 200, v0=(0, 0, 0),
-             traj: Callable = linear_track, state: State | None = None, on_chunk: Callable | None = None,
-             steps_hook: Callable | None = None, **kw):
+def simulate(spec: NestSpec, u_env: UEnv, geom: Geom, p0: ArrayLike, params: Any, steps: int, chunk: int = 200, v0: ArrayLike = (0, 0, 0),
+             traj: Traj = linear_track, state: State | None = None, on_chunk: Callable[[State, int], None] | None = None,
+             steps_hook: Callable[[int, float], float] | None = None, **kw: Any) -> tuple[State, dict[str, NDArray[Any]]]:
     """Run `steps` steps in jitted chunks. Returns (state, series dict of NumPy arrays over steps).
     steps_hook(done, elapsed_s) -> total steps: called after every chunk with the wall time since the start (compile included); the
     run goes on to min(steps, what it returns). Return a multiple of `chunk` (another chunk length is another compile)."""
     state = state or init_state(spec, geom, u_env, p0, v0)
-    chunks, done, t_start = [], 0, time.perf_counter()
-    runs = {}
+    chunks: list[dict[str, NDArray[Any]]] = []
+    done, t_start = 0, time.perf_counter()
+    runs: dict[int, Callable[..., Any]] = {}
     while done < steps:
         k = min(chunk, steps - done)
         if k not in runs:
@@ -261,24 +268,24 @@ def simulate(spec: NestSpec, u_env: Callable, geom: Geom, p0, params, steps: int
 
 
 # ---------------------------------------------------------------------------------------------------- coupling helpers
-def grid_field(u_grid, origin, dx_c: float, t0: float = 0.0, u_grid1=None, t1: float = 1.0) -> Callable:
+def grid_field(u_grid: ArrayLike, origin: ArrayLike, dx_c: float, t0: float = 0.0, u_grid1: ArrayLike | None = None, t1: float = 1.0) -> UEnv:
     """Trilinear (and optionally linear-in-time) coarse field u(x, y, z, t) from a gridded snapshot u_grid (3, nx, ny, nz) m/s
     whose cell (0,0,0) centre is at `origin` and spacing dx_c. Outside the grid the edge value is held."""
     g0 = jnp.asarray(u_grid, jnp.float32)
     g1 = g0 if u_grid1 is None else jnp.asarray(u_grid1, jnp.float32)
     org = jnp.asarray(origin, jnp.float32).reshape(3, 1)
 
-    def sample(g, x, y, z):
+    def sample(g: jax.Array, x: jax.Array, y: jax.Array, z: jax.Array) -> jax.Array:
         c = (jnp.stack([x.ravel(), y.ravel(), z.ravel()]) - org) / dx_c
         return jnp.stack([map_coordinates(g[d], list(c), order=1, mode="nearest") for d in range(3)]).reshape((3,) + x.shape)
 
-    def u(x, y, z, t):
+    def u(x: jax.Array, y: jax.Array, z: jax.Array, t: Any) -> jax.Array:
         a = jnp.clip((t - t0) / (t1 - t0), 0.0, 1.0)
         return (1 - a) * sample(g0, x, y, z) + a * sample(g1, x, y, z)
     return u
 
 
-def restrict(u, r: int):
+def restrict(u: ArrayLike, r: int) -> NDArray[Any]:
     """Block-average a (3, nx, ny, nz) field by r in each direction (fine -> coarse)."""
     u = np.asarray(u)
     s = [(n // r) * r for n in u.shape[1:]]
@@ -286,7 +293,7 @@ def restrict(u, r: int):
     return u.reshape(3, s[0] // r, r, s[1] // r, r, s[2] // r, r).mean((2, 4, 6))
 
 
-def residual_forcing(spec: NestSpec, state: State, u_env: Callable, r: int = 2, t: float = 0.0):
+def residual_forcing(spec: NestSpec, state: State, u_env: UEnv, r: int = 2, t: float = 0.0) -> NDArray[Any]:
     """Fine-minus-coarse residual velocity (m/s) on the r-times coarser grid: what a two-way nest would feed back.
     Returned for diagnostics and sub-grid calibration only; nothing applies it (one-way nest)."""
     _, u = lbm.moments(state.f)
@@ -294,8 +301,9 @@ def residual_forcing(spec: NestSpec, state: State, u_env: Callable, r: int = 2, 
     ix = np.asarray(state.ix)
     g = np.stack(np.meshgrid(*[(ix[a] + np.arange(n) * r + (r - 1) / 2 + 0.5) * spec.dx for a, n in enumerate(uf.shape[1:])],
                              indexing="ij"))
-    uc = np.asarray(u_env(*[jnp.asarray(c, jnp.float32) for c in g], t))
-    return uf - uc
+    cx, cy, cz = (jnp.asarray(c, jnp.float32) for c in g)
+    res: NDArray[Any] = uf - np.asarray(u_env(cx, cy, cz, t))
+    return res
 
 
 def neq_ratio(tau_from: float, tau_to: float, r: int = 2) -> float:
@@ -305,7 +313,7 @@ def neq_ratio(tau_from: float, tau_to: float, r: int = 2) -> float:
 
 
 # ---------------------------------------------------------------------------------------------------- self-check helpers
-def running_mean_ok(x, tol: float = 0.02) -> tuple:
+def running_mean_ok(x: ArrayLike, tol: float = 0.02) -> tuple[bool, float]:
     """BRIEF 5.5: the running mean over the last third of a series stays within `tol` of the last-third mean.
     Returns (ok, max relative deviation)."""
     x = np.asarray(x, float)
@@ -316,7 +324,7 @@ def running_mean_ok(x, tol: float = 0.02) -> tuple:
     return dev <= tol, dev
 
 
-def mass_drift(series: dict) -> float:
+def mass_drift(series: dict[str, Any]) -> float:
     """Largest relative change of the total population sum between consecutive steps."""
     m = np.asarray(series["mass"], float)
     return float(np.abs(np.diff(m) / m[:-1]).max())
@@ -324,13 +332,14 @@ def mass_drift(series: dict) -> float:
 
 # ---------------------------------------------------------------------------------------------------- receipts
 RES_MAX = 0.005       # interpolation residual bound: 2x the clean run's 0.0024; the run without refill gives 0.0136
-def _sphere(shape, c, r):
+def _sphere(shape: tuple[int, ...], c: ArrayLike, r: float) -> NDArray[np.bool_]:
     g = np.stack(np.meshgrid(*[np.arange(n) for n in shape], indexing="ij"))
-    return ((g - np.asarray(c).reshape(3, 1, 1, 1)) ** 2).sum(0) <= r * r
+    m: NDArray[np.bool_] = ((g - np.asarray(c).reshape(3, 1, 1, 1)) ** 2).sum(0) <= r * r
+    return m
 
 
-def sphere_drag(re: float, d: int = 8, domain=(12, 6, 6), steps: int | None = None, lateral: str = "dirichlet", cs: float | None = None,
-                u_lat: float = 0.05, sponge: int = 4, bouzidi: bool = True) -> dict:
+def sphere_drag(re: float, d: int = 8, domain: tuple[float, ...] = (12, 6, 6), steps: int | None = None, lateral: str = "dirichlet",
+                cs: float | None = None, u_lat: float = 0.05, sponge: int = 4, bouzidi: bool = True) -> dict[str, Any]:
     """Sphere of d cells in a uniform stream through the nest machinery (stationary nest, no wall model: bounce-back no-slip):
     Dirichlet/sponge faces, `lateral="periodic"` in y and z (an array of spheres), or `lateral="freeslip"`: specular-reflection duct
     walls in y and z (the domain is `domain` diameters across between the walls). Cd from the momentum exchange averaged
@@ -369,7 +378,7 @@ def sphere_drag(re: float, d: int = 8, domain=(12, 6, 6), steps: int | None = No
                 cd_voxel_area=float(tail.mean() * (math.pi * d * d / 4) / area_vox), d_volume=float(d_vol), u_lat=u_lat)
 
 
-def uniform_flow_force(wall_vel: bool = True, steps: int = 400, shape=(40, 28, 28), r: float = 5.0) -> dict:
+def uniform_flow_force(wall_vel: bool = True, steps: int = 400, shape: tuple[int, ...] = (40, 28, 28), r: float = 5.0) -> dict[str, Any]:
     """A sphere carried by a uniform stream (flow velocity = vehicle velocity): no relative motion, so the force must be
     zero; the nest shifts every ~1/u_lat steps. Returns |F| relative to the force scale rho U^2 d^2 and the shift count."""
     ul = 0.04
@@ -385,7 +394,8 @@ def uniform_flow_force(wall_vel: bool = True, steps: int = 400, shape=(40, 28, 2
     return dict(f_rel=float(np.abs(ser["F"]).max() / fs), shifts=int(np.abs(ser["shift"]).sum()), series=ser)
 
 
-def shear_layer_mass(refill: bool = True, rho_override: float | None = None, steps: int = 600, shape=(32, 48, 16)) -> dict:
+def shear_layer_mass(refill: bool = True, rho_override: float | None = None, steps: int = 600,
+                    shape: tuple[int, ...] = (32, 48, 16)) -> dict[str, Any]:
     """The nest crosses a shear layer: world flow u_x(y) = U0 + dU tanh(y/delta) uniform in x, nest moving in +y at 0.8 U0.
     Interior stays steady; the per-step relative change of total population sum is the mass-conservation measure."""
     ul = 0.05
@@ -413,7 +423,7 @@ DOMAIN = (12, 6, 6)              # diameters: length, width, height of the spher
 PLAN = {"100": (16, "d = 16 (with the d = 8 and 12 runs for the extrapolation)"), "1000": (24, "d >= 24"), "1e4": (40, "d >= 40")}
 
 
-def run_plan(tag: str, d: int | None = None, domain=DOMAIN) -> dict:
+def run_plan(tag: str, d: int | None = None, domain: tuple[float, ...] = DOMAIN) -> dict[str, Any]:
     """What a stored run costs: cells, steps (30 diameter flow-throughs at lattice speed 0.05), cell-updates, memory, the command."""
     d = d or PLAN[tag][0]
     cells = int(np.prod([round(a * d) for a in domain]))
@@ -424,11 +434,11 @@ def run_plan(tag: str, d: int | None = None, domain=DOMAIN) -> dict:
                 eta=lbm.eta_text(float(cells) * steps) + f"; {gb:.1f} GB with --memory {max(2 * round(gb / 2) + 2, 4)}g")
 
 
-def gpu_command(tag: str, d: int, domain=DOMAIN) -> str:
-    return run_plan(tag, d, domain)["command"]
+def gpu_command(tag: str, d: int, domain: tuple[float, ...] = DOMAIN) -> str:
+    return str(run_plan(tag, d, domain)["command"])
 
 
-def richardson(ds, cds) -> dict:
+def richardson(ds: ArrayLike, cds: ArrayLike) -> dict[str, Any]:
     """Cd(d) = Cd_inf + b d^-p through the stored resolutions d (cells per diameter). Three or more: p from the finest three
     (Roache-style, solved by bisection) when it lies in [0.5, 3]; otherwise (or with two) first order, p = 1. Returns
     {cd_inf, p, ds}."""
@@ -438,7 +448,10 @@ def richardson(ds, cds) -> dict:
     p = 1.0
     if len(d) >= 3 and abs(c[-2] - c[-1]) > 1e-12:
         d3, c3 = d[-3:], c[-3:]
-        f = lambda q: (c3[0] - c3[1]) / (c3[1] - c3[2]) - (d3[0] ** -q - d3[1] ** -q) / (d3[1] ** -q - d3[2] ** -q)     # noqa: E731
+
+        def f(q: float) -> float:
+            return float((c3[0] - c3[1]) / (c3[1] - c3[2]) - (d3[0] ** -q - d3[1] ** -q) / (d3[1] ** -q - d3[2] ** -q))
+
         lo, hi = 0.5, 3.0
         if f(lo) * f(hi) < 0:
             for _ in range(60):
@@ -450,7 +463,7 @@ def richardson(ds, cds) -> dict:
     return dict(cd_inf=float(cc[1] - b * dd[1] ** -p), p=float(p), ds=[float(x) for x in d])
 
 
-def sphere_receipts() -> list:
+def sphere_receipts() -> list[dict[str, Any]]:
     """Sphere Cd vs Morrison 2013 at Re = 1e2, 1e3, 1e4 on the native kernel (curved-wall bounce-back), one pass/fail row each (10 %).
     The row is the Richardson-extrapolated Cd from the stored grids (nest_sphere_<Re>_d*.json) when there are two or more, else the
     single stored grid. Stored and within 10 %: pass; stored and outside: fail with the measured error; not stored or stored by
@@ -480,7 +493,7 @@ def sphere_receipts() -> list:
     return [r for r in cr.OUT if r["group"] == g]
 
 
-def main(argv: list) -> int:
+def main(argv: list[str]) -> int:
     """python -m cafe.pm.stage3.nest [receipts | slow RE D NX NY NZ [--lateral freeslip|dirichlet] [--needs-d N]]"""
     if argv[:1] == ["slow"]:
         sha0 = lbm.physics_sha()
@@ -502,7 +515,7 @@ def main(argv: list) -> int:
     return int(any(not r["ok"] for r in cr.OUT if r["ok"] is not None))
 
 
-def receipts() -> list:
+def receipts() -> list[dict[str, Any]]:
     g = "LBM nest"
     ok = uniform_flow_force()
     bracket(g, "Vehicle-following nest, uniform flow: |F| / (rho U^2 d^2) (zero expected)", ok["f_rel"], 0, 1e-4, "",

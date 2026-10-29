@@ -22,17 +22,24 @@ Everything else (density, sound speed, depth, SST, air) passes through unchanged
 
 Arrays passed to the methods must have a leading member axis of length M (or broadcast to it).
 """
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from .. import Tagged
 from ..stats.sampling import member_rng
 from . import subgrid
+from .protocol import Environment
 
 NFEAT = 32
 R_EARTH = 6.371e6
 
 
-def _rot(v, deg):
+def _rot(v: Any, deg: Any) -> Any:
     r = np.radians(deg)[..., None]
     c, s = np.cos(r), np.sin(r)
     e, n = v[..., 0:1], v[..., 1:2]
@@ -42,15 +49,16 @@ def _rot(v, deg):
 class Field:
     """Unit-variance Gaussian random field per member over lon/lat (km scale), correlation length `ell` metres."""
 
-    def __init__(self, base_seed, members, stream, ell):
-        k, ph = [], []
+    def __init__(self, base_seed: Any, members: Iterable[Any], stream: str, ell: float):
+        k: list[Any] = []
+        ph: list[Any] = []
         for m in members:
             r = member_rng(base_seed, int(m), stream)
             k.append(r.normal(0.0, 1.0 / ell, (NFEAT, 2)))
             ph.append(r.uniform(0, 2 * np.pi, NFEAT))
         self.k, self.ph = np.array(k), np.array(ph)          # (M, NFEAT, 2), (M, NFEAT)
 
-    def __call__(self, lon, lat):
+    def __call__(self, lon: ArrayLike, lat: ArrayLike) -> NDArray[np.float64]:
         lon, lat = np.broadcast_arrays(np.asarray(lon, float), np.asarray(lat, float))
         x = np.radians(lon) * R_EARTH * np.cos(np.radians(lat))
         y = np.radians(lat) * R_EARTH
@@ -60,17 +68,18 @@ class Field:
             raise ValueError(f"field queried with shape {sh}; the leading axis must be the {M} members")
         xx, yy = x.reshape(M, -1, 1), y.reshape(M, -1, 1)
         arg = xx * self.k[:, None, :, 0] + yy * self.k[:, None, :, 1] + self.ph[:, None, :]
-        return (np.sqrt(2.0 / NFEAT) * np.cos(arg).sum(-1)).reshape(sh)
+        out: NDArray[np.float64] = (np.sqrt(2.0 / NFEAT) * np.cos(arg).sum(-1)).reshape(sh)
+        return out
 
 
 class OceanSDE:
     """Per-member Brownian increments of the ocean SDE over [t0, t1] at step dt, and the velocity they imply (module docstring)."""
 
-    def __init__(self, base_seed, members, t0, t1, dt):
+    def __init__(self, base_seed: Any, members: Iterable[Any], t0: float, t1: float, dt: float):
         self.t0, self.dt, self.n = float(t0), float(dt), int(np.ceil((float(t1) - float(t0)) / float(dt))) + 2
         self.xi = np.stack([member_rng(base_seed, int(m), "ocean_sde").standard_normal((self.n, 2)) for m in members])    # (M, n, 2)
 
-    def velocity(self, lon, lat, t):
+    def velocity(self, lon: Any, lat: ArrayLike, t: ArrayLike) -> Any:
         """(M, ..., 2) m/s at member positions (leading axis = members) and time t: dK/dx + sqrt(2 K / dt) xi, from one
         `subgrid.ocean_sde_step` of length dt taken from the origin."""
         lat = np.asarray(lat, float)
@@ -83,7 +92,8 @@ class OceanSDE:
 
 
 class PerturbedEnv:
-    def __init__(self, env, X, members, base_seed, priors, sde=None):
+    def __init__(self, env: Environment, X: dict[str, ArrayLike], members: Any, base_seed: Any, priors: dict[str, Any],
+                 sde: dict[str, float] | None = None):
         """X: {param: (M,) array} from the LHS; priors: config/perturbations.yaml as loaded by stats.sampling; sde: None (off) or
         dict(t0, t1, dt) [s], the window and the vehicles' step, for the ocean SDE."""
         self.env, self.X, self.bounds = env, {k: np.asarray(v, float) for k, v in X.items()}, env.bounds
@@ -95,13 +105,13 @@ class PerturbedEnv:
         self.fd = Field(base_seed, members, "current_direction_field", ell)
         self.sde = None if sde is None else OceanSDE(base_seed, members, **sde)
 
-    def _m(self, k, shape):
+    def _m(self, k: str, shape: tuple[int, ...]) -> Any:
         v = self.X.get(k)
         if v is None:
             return None
         return v.reshape((self.M,) + (1,) * (len(shape) - 1))
 
-    def wind(self, lon, lat, z, t):
+    def wind(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         w = self.env.wind(lon, lat, z, t)
         v = w.value
         sp = np.hypot(v[..., 0], v[..., 1])
@@ -113,7 +123,7 @@ class PerturbedEnv:
             v = _rot(v, np.broadcast_to(d, sp.shape))
         return Tagged(v, w.source + "; member wind error applied", w.uncertainty, w.kind)
 
-    def current(self, lon, lat, z, t):
+    def current(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         c = self.env.current(lon, lat, z, t)
         v = c.value
         sh = v.shape[:-1]
@@ -129,7 +139,7 @@ class PerturbedEnv:
             src += "; + ocean Lagrangian SDE (Ito, Euler-Maruyama, dK/dx drift, Okubo K at the HYCOM cell size)"
         return Tagged(v, src, c.uncertainty, c.kind)
 
-    def waves(self, lon, lat, t):
+    def waves(self, lon: Any, lat: Any, t: Any) -> dict[str, Tagged]:
         w = dict(self.env.waves(lon, lat, t))
         sh = np.shape(w["Hs"].value)
         hs = self._m("hs_scale", sh)
@@ -143,5 +153,5 @@ class PerturbedEnv:
                 w[k] = w[k]._replace(value=np.maximum(w[k].value + tp, 1.0), source=w[k].source + " + member tp_bias")
         return w
 
-    def __getattr__(self, name):                             # density, sound_speed, depth, sst, air, inside, ...
+    def __getattr__(self, name: str) -> Any:                             # density, sound_speed, depth, sst, air, inside, ...
         return getattr(self.env, name)

@@ -10,14 +10,15 @@ coefficient, not only the error of the mean. Multipliers are relative to the Han
 from __future__ import annotations
 
 import math
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 MAX_ITER = 2
 
 
-def pool(means, ses) -> dict:
+def pool(means: ArrayLike, ses: ArrayLike) -> dict[str, float]:
     """Random-effects pooled mean, its standard error and the between-window variance tau^2 (DerSimonian-Laird)."""
     m, se = np.asarray(means, float), np.asarray(ses, float)
     if m.shape != se.shape or m.ndim != 1 or len(m) == 0:
@@ -35,12 +36,12 @@ def pool(means, ses) -> dict:
     return dict(mean=float(mean), se=float(math.sqrt(1 / ws.sum())), tau2=float(tau2), n=k, q=float(q))
 
 
-def _multiplier(ratios, ses, windows: int) -> dict:
+def _multiplier(ratios: ArrayLike, ses: ArrayLike, windows: int) -> dict[str, float]:
     p = pool(ratios, ses)
     return dict(mean=p["mean"], sigma=math.sqrt(p["se"] ** 2 + p["tau2"]), change_vs_hangar=p["mean"] - 1, tau=math.sqrt(p["tau2"]), windows=windows)
 
 
-def refit(windows: list, hangar: dict | None = None) -> dict:
+def refit(windows: list[dict[str, Any]], hangar: dict[str, Any] | None = None) -> dict[str, dict[str, float]]:
     """windows: pipeline_windows rows / run_window results (keys cd, cd_spread, cl, cl_spread, added_resistance and, with hangar=None,
     cd_hangar and cl_hangar of each window). Returns the Stage-1 perturbation distribution plus the coefficient change vs the
     Hangar and the spread, as the `refit` ledger entry records them.
@@ -50,7 +51,7 @@ def refit(windows: list, hangar: dict | None = None) -> dict:
     have a non-zero cl_hangar."""
     if not windows:
         raise ValueError("no windows to refit from")
-    out = {}
+    out: dict[str, dict[str, float]] = {}
     if hangar is None:
         out["drag"] = _multiplier([w["cd"] / w["cd_hangar"] for w in windows], [max(w["cd_spread"], 1e-12) / w["cd_hangar"] for w in windows],
                                   len(windows))
@@ -74,17 +75,18 @@ def refit(windows: list, hangar: dict | None = None) -> dict:
     return out
 
 
-def verdict_changes(before: dict, after: dict) -> list:
+def verdict_changes(before: dict[str, Any], after: dict[str, Any]) -> list[tuple[str, Any, Any]]:
     """Vehicles (keys) whose verdict differs between two Stage-1 runs, as (key, was, now)."""
     return [(k, before[k], after.get(k)) for k in before if after.get(k) != before[k]]
 
 
-def refit_loop(stage1: Callable, perturbation: Callable, max_iter: int = MAX_ITER) -> dict:
+def refit_loop(stage1: Callable[[Any], dict[str, Any]], perturbation: Callable[[int], Any], max_iter: int = MAX_ITER) -> dict[str, Any]:
     """stage1(perturbation | None) -> {vehicle: verdict}; perturbation(iteration) -> distribution from the windows (refit()).
     Runs stage1, then refits and reruns up to `max_iter` times, stopping early when no verdict changes.
     Returns the history, the verdict changes of each iteration and why it stopped ("converged" or "cap")."""
     hist = [stage1(None)]
-    changes, reason = [], "cap"
+    changes: list[list[tuple[str, Any, Any]]] = []
+    reason = "cap"
     for i in range(1, max_iter + 1):
         hist.append(stage1(perturbation(i)))
         ch = verdict_changes(hist[-2], hist[-1])

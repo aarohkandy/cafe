@@ -43,7 +43,7 @@ def grid_size(cell_volumes: Sequence[float], dim: int = 3) -> float:
     """Eq 1/2: representative cell size h = (mean cell volume)^(1/dim) (area, dim = 2, for 2-D meshes)."""
     if not cell_volumes or min(cell_volumes) <= 0:
         raise ValueError("cell volumes must be positive")
-    return (sum(cell_volumes) / len(cell_volumes)) ** (1.0 / dim)
+    return float((sum(cell_volumes) / len(cell_volumes)) ** (1.0 / dim))
 
 
 def refinement_ratio(n_fine: float, n_coarse: float, dim: int = 3) -> float:
@@ -52,7 +52,7 @@ def refinement_ratio(n_fine: float, n_coarse: float, dim: int = 3) -> float:
     largest per-direction ratio; Celik's h is defined this way, so this is the right number for the GCI."""
     if n_fine <= 0 or n_coarse <= 0:
         raise ValueError("cell counts must be positive")
-    return (n_fine / n_coarse) ** (1.0 / dim)
+    return float((n_fine / n_coarse) ** (1.0 / dim))
 
 
 def _fixed_point(base: float, s: float, r21: float, r32: float, tol: float, max_iter: int) -> float:
@@ -149,7 +149,7 @@ def celik_gci(phi1: float, phi2: float, phi3: float, r21: float, r32: float) -> 
 
 def gci_two_grid(fine: float, coarse: float, ratio: float = 2.0, p: float = 2.0, fs: float = FS_TWO_GRID) -> float:
     """Relative uncertainty of the fine-grid value from two grids and an assumed order (Roache). Same as cafe.cfd.gci."""
-    return fs * abs((coarse - fine) / fine) / (ratio ** p - 1)
+    return float(fs * abs((coarse - fine) / fine) / (ratio ** p - 1))
 
 
 class Vv20(NamedTuple):

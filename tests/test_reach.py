@@ -291,7 +291,6 @@ def test_one_cell_wall_of_land_blocks_the_search():
 
 def test_one_cell_diagonal_wall_blocks_corner_cuts():
     n = 41
-    c0 = n // 2
     land = np.zeros((n, n), bool)
     for k in range(n):                                   # anti-diagonal wall i + j = n + 3, east-south of the centre
         if 0 <= n + 3 - k < n:

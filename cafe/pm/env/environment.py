@@ -9,22 +9,30 @@ comes from U10 through the COARE 3.5 stability-corrected profile; above it, log-
 Each value is a `Tagged` carrying its source and its 1-sigma uncertainty from config/perturbations.yaml (priors until
 the TAO comparison overwrites the wind and SST ones, see cafe.pm.env.tao).
 """
+from __future__ import annotations
+
 import datetime as dt, pathlib
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from .. import Tagged
 from . import conventions as cv
 from .grid import Axis, interp
 
+if TYPE_CHECKING:
+    from .ocean import Ocean
+    from .surface import SurfaceLayer
+
 EPOCH = np.datetime64("1970-01-01T00:00:00", "s")
 
 
-def seconds(t64):
+def seconds(t64: ArrayLike) -> NDArray[np.float64]:
     return (np.asarray(t64, "datetime64[s]") - EPOCH).astype("int64").astype(float)
 
 
-def to_seconds(t):
+def to_seconds(t: dt.datetime | str) -> float:
     """datetime (aware or naive UTC) or ISO string -> float seconds since epoch."""
     if isinstance(t, str):
         t = dt.datetime.fromisoformat(t.replace("Z", "+00:00"))
@@ -38,7 +46,7 @@ class OutsideData(ValueError):
 
 
 class GriddedEnv:
-    def __init__(self, cache, sigmas, ocean=None, subgrid=None, strict=True):
+    def __init__(self, cache: Any, sigmas: dict[str, Any], ocean: Ocean | None = None, subgrid: SurfaceLayer | None = None, strict: bool = True):
         import xarray as xr
         cache = pathlib.Path(cache)
         self.cache, self.sig, self.strict = cache, sigmas, strict
@@ -60,13 +68,13 @@ class GriddedEnv:
         for k in ("dwd", "mwd", "wdir"):
             th = self.U.pop(k)
             self.U[k + "_e"], self.U[k + "_n"] = np.cos(th), np.sin(th)
-        self.w3 = None
+        self.w3: dict[str, Any] | None = None
         p3 = cache / "orca" / "wrf3d.zarr"
         if p3.exists():
             d3 = xr.open_zarr(p3).load()
             self.w3 = dict(t=seconds(d3.time.values), U=d3.U3.values.astype("f8"), V=d3.V3.values.astype("f8"),
                            Z=d3.Z3.values.astype("f8"))
-        self.spec = None
+        self.spec: dict[str, Any] | None = None
         ps = cache / "orca" / "umwmspec.zarr"
         if ps.exists():
             s = xr.open_zarr(ps).load()
@@ -80,7 +88,7 @@ class GriddedEnv:
 
     # ------------------------------------------------------------ helpers
 
-    def _check(self, inside, what, lon, lat, t):
+    def _check(self, inside: Any, what: str, lon: Any, lat: Any, t: Any) -> None:
         if self.strict and not np.all(inside):
             bad = ~np.broadcast_to(inside, np.broadcast(lon, lat, t).shape)
             i = np.flatnonzero(bad)[0]
@@ -91,17 +99,17 @@ class GriddedEnv:
                               f"{dt.datetime.fromtimestamp(self.bounds[5], dt.timezone.utc):%Y-%m-%d %H}Z); "
                               "re-run `cafe fetch` with a larger box or window")
 
-    def _w(self, k, lon, lat, t):
+    def _w(self, k: str, lon: Any, lat: Any, t: Any) -> Any:
         v, ins = interp(self.W[k], [self.tw, self.law, self.low], [t, lat, cv.wrap360(lon)])
         self._check(ins, f"WRF {k}", lon, lat, t)
         return v
 
-    def _u(self, k, lon, lat, t):
+    def _u(self, k: str, lon: Any, lat: Any, t: Any) -> Any:
         v, ins = interp(self.U[k], [self.tu, self.lau, self.lou], [t, lat, cv.wrap360(lon)])
         self._check(ins, f"UMWM {k}", lon, lat, t)
         return v
 
-    def inside(self, lon, lat, t=None):
+    def inside(self, lon: Any, lat: Any, t: Any = None) -> Any:
         x = cv.wrap360(np.asarray(lon, float))
         ok = (x >= self.low.x[0]) & (x <= self.low.x[-1]) & (np.asarray(lat) >= self.law.x[0]) & (np.asarray(lat) <= self.law.x[-1])
         if t is not None:
@@ -110,15 +118,18 @@ class GriddedEnv:
 
     # ------------------------------------------------------------ atmosphere
 
-    def u10(self, lon, lat, t):
+    def u10(self, lon: Any, lat: Any, t: Any) -> Any:
         ue, ve = cv.rotate_grid_to_earth(self._w("U10", lon, lat, t), self._w("V10", lon, lat, t),
                                          interp(self.Wstatic["COSALPHA"], [self.law, self.low], [lat, cv.wrap360(lon)])[0],
                                          interp(self.Wstatic["SINALPHA"], [self.law, self.low], [lat, cv.wrap360(lon)])[0])
         return np.stack([ue, ve], -1)
 
-    def air(self, lon, lat, t):
+    def air(self, lon: Any, lat: Any, t: Any) -> dict[str, Tagged]:
         s = self.sig
-        tag = lambda k, unit_sig=None: Tagged(self._w(k, lon, lat, t), f"{self.wrf_src} {k}", unit_sig)
+
+        def tag(k: str, unit_sig: Any = None) -> Tagged:
+            return Tagged(self._w(k, lon, lat, t), f"{self.wrf_src} {k}", unit_sig)
+
         a = dict(T2=tag("T2", s["t2_k"]), q2=tag("Q2", s["q2_frac"]), psfc=tag("PSFC", s["psfc_pa"]), swdown=tag("SWDOWN", s["swdown_frac"]),
                  glw=tag("GLW", s["glw_wm2"]), rain=Tagged(self._w("rain_mm_h", lon, lat, t), f"{self.wrf_src} d(RAINNC+RAINC)/dt", None),
                  ustar_wrf=tag("UST", None), pblh=tag("PBLH", None))
@@ -126,7 +137,7 @@ class GriddedEnv:
             a.update(self.subgrid.surface_layer(self, lon, lat, t))
         return a
 
-    def wind(self, lon, lat, z, t):
+    def wind(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         z = np.asarray(z, float)
         u10 = self.u10(lon, lat, t)
         src = f"{self.wrf_src} U10/V10 (earth-relative)"
@@ -144,9 +155,10 @@ class GriddedEnv:
                 src += "; above 21 m in sortie hours: WRF 3-D U/V log-linear in z"
         return Tagged(v, f"{src}; below the first level: {psrc}", self.sig["wind_ms"], "data")
 
-    def _wind3d(self, lon, lat, z, t):
+    def _wind3d(self, lon: Any, lat: Any, z: Any, t: Any) -> Any:
         """3-D WRF wind (east, north) where z is above the first mass level and t is within an ingested 3-D hour pair, else NaN. U3/V3 are
         grid-relative like U10, so they go through the same COSALPHA/SINALPHA rotation before the vertical interpolation."""
+        assert self.w3 is not None
         T, Z = self.w3["t"], self.w3["Z"]
         t = np.broadcast_to(np.asarray(t, float), np.broadcast(lon, lat, z, t).shape)
         i = np.searchsorted(T, t, side="right") - 1
@@ -179,9 +191,12 @@ class GriddedEnv:
 
     # ------------------------------------------------------------ waves
 
-    def waves(self, lon, lat, t):
+    def waves(self, lon: Any, lat: Any, t: Any) -> dict[str, Tagged]:
         s, src = self.sig, self.umwm_src
-        d = lambda k: cv.math_rad_to_compass_to(np.arctan2(self._u(k + "_n", lon, lat, t), self._u(k + "_e", lon, lat, t)))
+
+        def d(k: str) -> Any:
+            return cv.math_rad_to_compass_to(np.arctan2(self._u(k + "_n", lon, lat, t), self._u(k + "_e", lon, lat, t)))
+
         hs = self._u("swh", lon, lat, t)
         tm = self._u("mwp", lon, lat, t)
         out = dict(Hs=Tagged(hs, f"{src} swh", s["hs_frac"] * hs), Tp=Tagged(self._u("dwp", lon, lat, t), f"{src} dwp", s["tp_s"]),
@@ -196,7 +211,7 @@ class GriddedEnv:
             out["stokes0"] = Tagged(np.zeros(np.shape(hs) + (2,)), "Stokes drift off (subgrid disabled)", None, "assumed")
         return out
 
-    def restart_spectrum(self, lon, lat, t, max_km=40.0, max_h=3.0):
+    def restart_spectrum(self, lon: Any, lat: Any, t: Any, max_km: float = 40.0, max_h: float = 3.0) -> dict[str, Any] | None:
         """The nearest ingested real UMWM spectrum (F(k, theta) per sea point) or None if none within max_km / max_h."""
         if self.spec is None:
             return None
@@ -214,7 +229,7 @@ class GriddedEnv:
 
     # ------------------------------------------------------------ ocean
 
-    def current(self, lon, lat, z, t):
+    def current(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         if self.ocean is None:
             raise OutsideData("no ocean source loaded: run `cafe fetch` (GOFS 3.1 by default) or point ocean.source at the lab's HYCOM")
         v = self.ocean.current(lon, lat, z, t)
@@ -222,19 +237,21 @@ class GriddedEnv:
             v = self.subgrid.current_extra(self, v, lon, lat, z, t)
         return v
 
-    def density(self, lon, lat, z, t):
+    def density(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
+        assert self.ocean is not None
         v = self.ocean.density(lon, lat, z, t)
         return self.subgrid.density_extra(self, v, lon, lat, z, t) if self.subgrid is not None else v
 
-    def sound_speed(self, lon, lat, z, t):
+    def sound_speed(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
+        assert self.ocean is not None
         return self.ocean.sound_speed(lon, lat, z, t)
 
-    def depth(self, lon, lat):
+    def depth(self, lon: Any, lat: Any) -> Tagged:
         if self.ocean is not None and hasattr(self.ocean, "bathymetry"):
             return self.ocean.bathymetry(lon, lat)
         v, ins = interp(self.depth_umwm, [self.lau, self.lou], [lat, cv.wrap360(lon)])
         return Tagged(v, "UMWM depth (12 km)", None)
 
-    def sst(self, lon, lat, t):
+    def sst(self, lon: Any, lat: Any, t: Any) -> Tagged:
         v = Tagged(self._w("SST", lon, lat, t), f"{self.wrf_src} SST (frozen at 2023-03-01: SST_UPDATE=0)", self.sig["sst_k"])
         return self.subgrid.sst_extra(self, v, lon, lat, t) if self.subgrid is not None else v

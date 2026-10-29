@@ -73,7 +73,7 @@ import hashlib
 import itertools
 import json
 import pathlib
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import yaml
@@ -94,7 +94,7 @@ STRINGS = ("radio_900mhz", "radio_2g4", "iridium_link")
 
 # ------------------------------------------------------------------ parameters
 
-def load_platform(name: str = "saildrone_explorer") -> dict:
+def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
     """platforms/<name>.yaml (or a path) -> flat dict of values plus 'kind' and 'mission_defaults'.
     Refuses a leaf without value, unit and either a source or assumed: true with a why (same rule as glider.load_platform)."""
     path = pathlib.Path(name)
@@ -102,7 +102,7 @@ def load_platform(name: str = "saildrone_explorer") -> dict:
         path = PLATFORMS / f"{name}.yaml"
     raw = yaml.safe_load(path.read_text())
 
-    def flat(block: dict, where: str) -> dict:
+    def flat(block: dict[str, Any], where: str) -> dict[str, Any]:
         out = {}
         for k, leaf in block.items():
             if not (isinstance(leaf, dict) and "value" in leaf and "unit" in leaf):
@@ -120,14 +120,14 @@ def load_platform(name: str = "saildrone_explorer") -> dict:
     return P
 
 
-def _digest(P: dict) -> str:
+def _digest(P: dict[str, Any]) -> str:
     nums = {k: v for k, v in P.items() if isinstance(v, (int, float))}
     return hashlib.sha1(json.dumps(nums, sort_keys=True).encode()).hexdigest()[:16]
 
 
 # ------------------------------------------------------------------ small numerics
 
-def _lin(tab: Arr, axes: tuple, pts: tuple) -> Arr:
+def _lin(tab: Arr, axes: tuple[Arr, ...], pts: tuple[Arr, ...]) -> Arr:
     """n-linear interpolation of `tab` (shape n1..nd[, F]) on uniform axes at broadcast points `pts`; clamped at the ends."""
     pts = np.broadcast_arrays(*[np.asarray(x, float) for x in pts])
     idx, w = [], []
@@ -154,13 +154,13 @@ def helmbold(ar: Arr) -> Arr:
     return 2 * np.pi * ar / (2.0 + np.sqrt(4.0 + ar ** 2))
 
 
-def wing_slope(P: dict) -> float:
+def wing_slope(P: dict[str, Any]) -> float:
     """Finite-wing lift slope per radian from the section slope by lifting-line theory."""
     ar = P["wing_span_m"] ** 2 / P["wing_area_m2"]
-    return P["wing_cl_alpha_2d"] / (1.0 + P["wing_cl_alpha_2d"] / (np.pi * P["wing_oswald_e"] * ar))
+    return cast(float, P["wing_cl_alpha_2d"] / (1.0 + P["wing_cl_alpha_2d"] / (np.pi * P["wing_oswald_e"] * ar)))
 
 
-def wing_polar(P: dict, alpha_deg: Arr) -> tuple:
+def wing_polar(P: dict[str, Any], alpha_deg: Arr) -> tuple[Arr, Arr]:
     """(C_L, C_D) of the wing for |alpha| <= 90 deg (sign of C_L follows alpha): linear + induced drag to the stall angle, Viterna
     & Corrigan (1982) flat-plate model beyond it.  Continuous at the stall angle."""
     ar = P["wing_span_m"] ** 2 / P["wing_area_m2"]
@@ -181,7 +181,7 @@ def wing_polar(P: dict, alpha_deg: Arr) -> tuple:
     return np.sign(alpha_deg) * cl, cd
 
 
-def hull_resistance(P: dict, v: Arr, phi: Arr) -> Arr:
+def hull_resistance(P: dict[str, Any], v: Arr, phi: Arr) -> Arr:
     """Hull-body resistance [N] at speed v [m/s] and heel phi [rad]: ITTC-57 friction x (1 + k) + residuary, x (1 + c phi^2)."""
     v = np.maximum(v, 1e-3)
     re = v * P["lwl_m"] / P["nu_water"]
@@ -191,21 +191,21 @@ def hull_resistance(P: dict, v: Arr, phi: Arr) -> Arr:
     return r * (1.0 + P["heel_resist_c"] * phi ** 2)
 
 
-def _apparent(wx: Arr, wy: Arr, vx: Arr, vy: Arr) -> tuple:
+def _apparent(wx: Arr, wy: Arr, vx: Arr, vy: Arr) -> tuple[Arr, Arr]:
     """Air velocity relative to the boat: wind over the ground minus the boat's ground velocity (current included in vx, vy)."""
     return wx - vx, wy - vy
 
 
 # ------------------------------------------------------------------ the 4-DOF steady-state VPP
 
-def _foil(P: dict, pre: str) -> tuple:
+def _foil(P: dict[str, Any], pre: str) -> tuple[Arr, Arr, float, Arr, Arr]:
     """(area, aspect ratio with free-surface image, lift slope, t/c, chord) of the keel or rudder."""
     area, span = P[f"{pre}_area_m2"], P[f"{pre}_span_m"]
     ar = 2.0 * span ** 2 / area
     return area, ar, float(helmbold(ar)), P[f"{pre}_t_c"], area / span
 
 
-def _forces(P: dict, V: Arr, beta: Arr, phi: Arr, kd: Arr, Yr: Arr, wx: Arr, wy: Arr, cx: Arr, cy: Arr) -> dict:
+def _forces(P: dict[str, Any], V: Arr, beta: Arr, phi: Arr, kd: Arr, Yr: Arr, wx: Arr, wy: Arr, cx: Arr, cy: Arr) -> dict[str, Any]:
     """Surge force X, sway force Y and the pieces the iteration needs, at speed V, leeway beta (rad), heel phi (rad), wing
     depower kd and rudder side force Yr.  Arrays broadcast; mirrored frame (wind from starboard)."""
     rw, ra = P["rho_water"], P["rho_air"]
@@ -239,7 +239,7 @@ def _forces(P: dict, V: Arr, beta: Arr, phi: Arr, kd: Arr, Yr: Arr, wx: Arr, wy:
                 yaw=P["wing_ce_x_m"] * fy + P["keel_x_m"] * lk * np.cos(beta), yr=yr)
 
 
-def _solve(P: dict, wx: Arr, wy: Arr, cx: Arr, cy: Arr) -> dict:
+def _solve(P: dict[str, Any], wx: Arr, wy: Arr, cx: Arr, cy: Arr) -> dict[str, Any]:
     """Steady state in the mirrored frame.  wx, wy: wind over the ground (body axes); cx, cy: surface current (body axes); the
     wind relative to the water (wx - cx, wy - cy) must come from starboard (air velocity y <= 0).  Returns arrays of the broadcast
     shape: V, beta_deg (leeway magnitude), phi_deg, K = -dX/dV at the root [N s/m], aws, awa_deg, kd, resid (|Y|/force scale),
@@ -285,7 +285,7 @@ def _solve(P: dict, wx: Arr, wy: Arr, cx: Arr, cy: Arr) -> dict:
                 resid=at(np.abs(f["Y"]) / scale, frac), yaw_resid=at(nres, frac))
 
 
-def _body(wind_en: Arr, current_en: Arr, heading_to: Arr) -> tuple:
+def _body(wind_en: Arr, current_en: Arr, heading_to: Arr) -> tuple[Arr, Arr, Arr, Arr, Arr]:
     """(wx, wy, cx, cy) in body axes and the mirror sign m (+1: wind relative to the water comes from starboard)."""
     h = cv.vec_from_to(1.0, heading_to)
     s = np.stack([h[..., 1], -h[..., 0]], -1)                      # starboard unit vector
@@ -295,7 +295,7 @@ def _body(wind_en: Arr, current_en: Arr, heading_to: Arr) -> tuple:
     return wx, wy, cx, cy, np.where(wy - cy > 0.0, -1.0, 1.0)
 
 
-def through_water(P: dict, wind_en: Arr, current_en: Arr, heading_to: Arr) -> dict:
+def through_water(P: dict[str, Any], wind_en: Arr, current_en: Arr, heading_to: Arr) -> dict[str, Any]:
     """Current-coupled solve.  wind_en: wind over the ground at the anemometer height (east, north) m/s; current_en: surface
     current; heading_to: compass degrees.  Arrays broadcast (trailing axis 2 for the vectors).  Returns stw [m/s], track_to [deg]
     (direction of motion through the water = heading + signed leeway), leeway_deg (+ = toward starboard), heel_deg, aws, awa_deg,
@@ -320,7 +320,7 @@ class WaveTab(NamedTuple):
     g: Arr            # (nP, nC, nU): R_aw / Hs^2 [N/m^2]
 
 
-def _build_polar(P: dict) -> Polar:
+def _build_polar(P: dict[str, Any]) -> Polar:
     tws, twa = np.arange(0.0, 30.01, 1.0), np.arange(0.0, 180.01, 2.5)
     T, A = np.meshgrid(tws, twa, indexing="ij")
     g = np.radians(A)
@@ -328,7 +328,7 @@ def _build_polar(P: dict) -> Polar:
     return Polar(tws, twa, np.stack([s["V"], s["beta_deg"], s["phi_deg"], s["K"], s["aws"], s["awa_deg"], s["kd"]], -1))
 
 
-def through_water_table(P: dict, pol: Polar, wind_en: Arr, current_en: Arr, heading_to: Arr) -> dict:
+def through_water_table(P: dict[str, Any], pol: Polar, wind_en: Arr, current_en: Arr, heading_to: Arr) -> dict[str, Any]:
     """Same outputs as `through_water` (without resid) from the still-water polar evaluated at the wind relative to the water."""
     wr = np.asarray(wind_en, float) - np.asarray(current_en, float)
     gam = np.mod(cv.from_deg(wr) - np.asarray(heading_to) + 180.0, 360.0) - 180.0
@@ -341,7 +341,7 @@ def through_water_table(P: dict, pol: Polar, wind_en: Arr, current_en: Arr, head
 
 # ------------------------------------------------------------------ waves: strip theory + Gerritsma-Beukelman
 
-def _strip(P: dict, w: Arr, chi_deg: Arr, u: Arr) -> tuple:
+def _strip(P: dict[str, Any], w: Arr, chi_deg: Arr, u: Arr) -> tuple[Arr, Arr, Arr]:
     """(heave, pitch, R_aw / zeta_a^2) per unit wave amplitude at wave frequency w [rad/s], wave angle chi (180 = head seas) and
     speed u.  Complex heave [m/m] and pitch [rad/m] (pitch positive bow down, referred to the section reference at x = 0)."""
     L, B, M, rho = P["lwl_m"], P["beam_wl_m"], P["mass_kg"], P["rho_water"]
@@ -375,7 +375,7 @@ def _bretschneider(w: Arr, tp: Arr) -> Arr:
     return 5 / 16 * wp ** 4 * w ** -5 * np.exp(-1.25 * (wp / w) ** 4)
 
 
-def _build_waves(P: dict) -> WaveTab:
+def _build_waves(P: dict[str, Any]) -> WaveTab:
     tp, chi, u = np.linspace(3.0, 21.0, 19), np.linspace(0.0, 180.0, 13), np.linspace(0.0, 3.5, 8)
     w = np.geomspace(0.25, 6.0, 120)
     _, _, raw = _strip(P, w[:, None, None], chi[None, :, None], u[None, None, :])
@@ -384,10 +384,10 @@ def _build_waves(P: dict) -> WaveTab:
     return WaveTab(tp, chi, u, g)
 
 
-_CACHE: dict = {}
+_CACHE: dict[str, tuple[Polar, WaveTab]] = {}
 
 
-def tables(P: dict, cache_dir: str | pathlib.Path | None = None) -> tuple:
+def tables(P: dict[str, Any], cache_dir: str | pathlib.Path | None = None) -> tuple[Polar, WaveTab]:
     """(Polar, WaveTab) for the parameter set: in memory, and as .npz under `cache_dir` when given (keyed by a digest of P)."""
     key = _digest(P)
     if key in _CACHE:
@@ -405,13 +405,13 @@ def tables(P: dict, cache_dir: str | pathlib.Path | None = None) -> tuple:
     return out
 
 
-def added_resistance(P: dict, wt: WaveTab, hs: Arr, tp: Arr, chi_deg: Arr, speed: Arr) -> Arr:
+def added_resistance(P: dict[str, Any], wt: WaveTab, hs: Arr, tp: Arr, chi_deg: Arr, speed: Arr) -> Arr:
     """Mean added resistance in irregular waves [N]: Hs^2 G(Tp, |chi|, U), chi = angle between the wave direction and the
     heading (180 = head seas)."""
     return np.asarray(hs, float) ** 2 * _lin(wt.g, (wt.tp, wt.chi, wt.u), (tp, np.abs(chi_deg), speed))
 
 
-def roll_sigma_deg(P: dict, hs: Arr, tp: Arr, chi_deg: Arr) -> Arr:
+def roll_sigma_deg(P: dict[str, Any], hs: Arr, tp: Arr, chi_deg: Arr) -> Arr:
     """Standard deviation of roll [deg] from a 1-DOF roll response at the peak frequency to the wave slope k Hs/4 |sin chi|."""
     wn = np.sqrt(G * P["gm_m"]) / P["kxx_roll_m"]
     wp = 2 * np.pi / np.maximum(tp, 0.5)
@@ -422,7 +422,7 @@ def roll_sigma_deg(P: dict, hs: Arr, tp: Arr, chi_deg: Arr) -> Arr:
 
 # ------------------------------------------------------------------ Stage 1
 
-def draw_vpp_bias(P: dict, members: int, seed: int = 0) -> Arr:
+def draw_vpp_bias(P: dict[str, Any], members: int, seed: int = 0) -> Arr:
     """Fractional VPP speed change per member ~ N(vpp_bias_mean, vpp_bias_sd), clipped to [-0.9, 0.5] (factor = 1 + bias)."""
     return np.clip(np.random.default_rng(seed).normal(P["vpp_bias_mean"], P["vpp_bias_sd"], members), -0.9, 0.5)
 
@@ -434,7 +434,8 @@ class USVSim:
     stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change} (default draws N(vpp_bias_mean, vpp_bias_sd)).
     The wind is read at the anemometer height, the current at current_z_m; wind/current errors are the caller's environment's."""
 
-    def __init__(self, params: dict, members: int, env: Any, start: tuple, t0: float, mission: dict, perturb: dict | None = None):
+    def __init__(self, params: dict[str, Any], members: int, env: Any, start: tuple[Arr, Arr], t0: float, mission: dict[str, Any],
+                 perturb: dict[str, Any] | None = None):
         P, M = self.P, self.M = params, int(members)
         self.env, self.t = env, float(t0)
         md = self.md = {**P["mission_defaults"], **mission}
@@ -470,7 +471,7 @@ class USVSim:
         self.arrived = np.full(M, np.nan)
         self.t_plan = -np.inf
         self.t_rec = -np.inf
-        self._rec: dict = {k: [] for k in ("t", "lon", "lat", "stw", "sog", "heading", "soc_wh", "wp")}
+        self._rec: dict[str, Any] = {k: [] for k in ("t", "lon", "lat", "stw", "sog", "heading", "soc_wh", "wp")}
         self.pol, self.wt = tables(P)
         self.cand = np.arange(NH) * 360.0 / NH
 
@@ -481,7 +482,7 @@ class USVSim:
         dlon = (tlon - lon + 180.0) % 360.0 - 180.0
         return np.stack([np.radians(dlon) * np.cos(np.radians(0.5 * (lat + tlat))) * R_E, np.radians(tlat - lat) * R_E], -1)
 
-    def _geom(self) -> tuple:
+    def _geom(self) -> tuple[Arr, Arr, Arr, Arr]:
         """Distance to the active waypoint, unit vector to it, signed cross-track error (+ left of the leg; the distance itself in
         station mode) and the leg's left-normal."""
         k = self.idx % len(self.wps)
@@ -496,7 +497,7 @@ class USVSim:
         me = self._met(self.leg_lon, self.leg_lat, self.lon, self.lat)
         return dist, uhat, np.sum(me * nl, -1), nl
 
-    def _eval(self, hd: Arr, c: dict) -> dict:
+    def _eval(self, hd: Arr, c: dict[str, Any]) -> dict[str, Any]:
         """Speed, track and state for headings hd (M, H) [deg]: polar at the wind relative to the water, minus R_aw / K, times the
         VPP bias, capped at the hull speed."""
         gam = np.mod(c["wfrom"][:, None] - hd + 180.0, 360.0) - 180.0
@@ -578,7 +579,7 @@ class USVSim:
         self.soc_wh = np.clip(self.soc_wh + gain * dt / 3600.0, 0.0, P["battery_wh"])
         self._flag("battery", self.soc_wh <= 0.0)
 
-    def run(self, seconds: float, dt: float = 60.0, record_s: float = 3600.0) -> dict:
+    def run(self, seconds: float, dt: float = 60.0, record_s: float = 3600.0) -> dict[str, Any]:
         """Advance `seconds` in steps of dt, recording every `record_s`; returns `history()`."""
         for _ in range(int(round(seconds / dt))):
             self.step(dt)
@@ -589,24 +590,24 @@ class USVSim:
                     self._rec[k].append(np.copy(v))
         return self.history()
 
-    def history(self) -> dict:
+    def history(self) -> dict[str, Any]:
         """Arrays (records, M) for lon, lat, stw, sog [m/s], heading [deg], soc_wh, wp (active waypoint); t (records,);
         fail[name] (M,) bool; first[name] (M,) epoch seconds of the first occurrence, NaN if never; n_tacks (M,)."""
-        h: dict = {k: np.array(v) for k, v in self._rec.items()}
+        h: dict[str, Any] = {k: np.array(v) for k, v in self._rec.items()}
         h["fail"], h["first"], h["n_tacks"] = self.fail, self.first, self.n_tacks
         return h
 
 
 # ------------------------------------------------------------------ receipts
 
-def _wind_at_anemometer(P: dict, speed: float, from_deg: float) -> Arr:
+def _wind_at_anemometer(P: dict[str, Any], speed: float, from_deg: float) -> Arr:
     """u10 vector for AnalyticEnv whose log-profile wind at the anemometer height has `speed`."""
     from ..env.protocol import AnalyticEnv
     unit = AnalyticEnv(wind=(1.0, 0.0)).wind(0.0, 0.0, P["anemometer_m"], 0.0).value[0]
     return cv.vec_from_from(speed / unit, from_deg)
 
 
-def mean_sog(P: dict, speed: float, hours: float = 12.0, dt: float = 120.0, nb: int = 48, bias: float | None = None) -> float:
+def mean_sog(P: dict[str, Any], speed: float, hours: float = 12.0, dt: float = 120.0, nb: int = 48, bias: float | None = None) -> float:
     """Mean along-path SOG [m/s] of nb vehicles sailing to one station from 6 degrees away on bearings spread evenly round the
     compass in a uniform wind of `speed` at the anemometer height, no current, VPP bias fixed at `bias` (default: the prior)."""
     from ..env.protocol import AnalyticEnv
@@ -619,17 +620,20 @@ def mean_sog(P: dict, speed: float, hours: float = 12.0, dt: float = 120.0, nb: 
     return float(np.mean(sim.path_m) / (hours * 3600.0))
 
 
-def superposition_ratio(P: dict, wind: float, current: float, against: bool = False) -> tuple:
+def superposition_ratio(P: dict[str, Any], wind: float, current: float, against: bool = False) -> tuple[float, float]:
     """(speed-through-water ratio, SOG ratio) of 'still-water VPP + current' to the current-coupled solve, averaged over headings
     every 5 deg, for wind blowing toward the west at `wind` m/s and a current of `current` m/s along (or `against`) it."""
     hd = np.arange(0.0, 360.0, 5.0)
     w, c = np.array([-wind, 0.0]), np.array([current if against else -current, 0.0])
     still, cpl = through_water(P, w, np.zeros(2), hd), through_water(P, w, c, hd)
-    sog = lambda r: cv.speed(cv.vec_from_to(r["stw"], r["track_to"]) + c)
+
+    def sog(r: dict[str, Any]) -> Arr:
+        return cv.speed(cv.vec_from_to(r["stw"], r["track_to"]) + c)
+
     return float(np.mean(still["stw"]) / np.mean(cpl["stw"])), float(np.mean(sog(still)) / np.mean(sog(cpl)))
 
 
-def receipts(P: dict | None = None) -> None:
+def receipts(P: dict[str, Any] | None = None) -> None:
     """Reproduce what is published about this class of vehicle (see platforms/saildrone_explorer.yaml for the numbers)."""
     from cafe.receipts import bracket, context, receipt
     from ..env.protocol import AnalyticEnv
@@ -663,7 +667,10 @@ def receipts(P: dict | None = None) -> None:
     env = AnalyticEnv(wind=(-0.2, 0.0), current=(0.9, 0.0), hs=0.5)
     s = USVSim(P, 16, env, (-125.0, 10.0), 0.0, dict(mode="station", station=(-125.0, 10.0)))
     s.run(24 * hours, 300.0)
-    first_h = lambda k: float(s.first[k][~np.isnan(s.first[k])].min(initial=np.inf)) / hours      # inf when no member fails
+
+    def first_h(k: str) -> float:                                                                   # inf when no member fails
+        return float(s.first[k][~np.isnan(s.first[k])].min(initial=np.inf)) / hours
+
     zhang = "Zhang et al. 2019 (SPURS-2), as quoted in BRIEF 1.4/2.4: swept off track at 0.9 m/s current, 0.2 m/s wind"
     bracket(grp, "SPURS-2: swept_off_track first fires (h)", first_h("swept_off_track"), 1.0, 12.0, "h", zhang)
     bracket(grp, "SPURS-2: becalmed first fires (h)", first_h("becalmed"), s.md["becalmed_after_h"] - 1e-6, 12.0, "h",

@@ -9,7 +9,10 @@ loaded lazily, one variable at a time, as float32 (one variable over the TEPEX-C
 `grid.interp`: linear in time (3-hourly GOFS), depth, lat and lon; below-seafloor levels are NaN and dropped.
 Uncertainties are not set here: the Stage-1 priors (current speed/direction) perturb the current in env.perturb.
 """
+from __future__ import annotations
+
 import os, pathlib
+from typing import Any
 
 import numpy as np
 
@@ -20,7 +23,7 @@ from .grid import Axis, interp
 DATA = pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
 
 
-def store_path(spec, mission_name):
+def store_path(spec: dict[str, Any], mission_name: str | None) -> pathlib.Path:
     """Where the mission's ocean store is: the spec's `path` (lab HYCOM, already ingested) or DATA/ocean/gofs_<mission>.zarr."""
     if spec.get("path"):
         return pathlib.Path(spec["path"])
@@ -30,43 +33,45 @@ def store_path(spec, mission_name):
 
 
 class Ocean:
-    def __init__(self, path, bathymetry=None):
+    def __init__(self, path: Any, bathymetry: bathy.Bathymetry | None = None):
         self.path = pathlib.Path(path)
         self.ds = hycom.open_store(self.path)
         a = self.ds.attrs
         self.src = f"{a.get('source', 'HYCOM')} ({self.path.name}, manifest sha256 {str(a.get('manifest_sha256', '?'))[:12]})"
         self.axes = [Axis(self.ds.time.values, "time"), Axis(self.ds.depth.values, "depth"), Axis(self.ds.lat.values, "lat"),
                      Axis(self.ds.lon.values, "lon")]
-        self.f: dict = {}
+        self.f: dict[str, Any] = {}
         self.bathy = bathymetry
 
-    def _field(self, name):
+    def _field(self, name: str) -> Any:
         if name not in self.f:
             self.f[name] = self.ds[name].values.astype("f4")
         return self.f[name]
 
-    def _at(self, name, lon, lat, z, t):
+    def _at(self, name: str, lon: Any, lat: Any, z: Any, t: Any) -> Any:
         v, _ = interp(self._field(name), self.axes, [t, -np.asarray(z, float), lat, cv.wrap360(lon)])
         return v
 
-    def current(self, lon, lat, z, t):
+    def current(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         u, v = self._at("water_u", lon, lat, z, t), self._at("water_v", lon, lat, z, t)
         return Tagged(np.stack([u, v], -1), f"{self.src} total current (east, north)", None, "modelled")
 
-    def density(self, lon, lat, z, t):
+    def density(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         return Tagged(self._at("rho", lon, lat, z, t), f"{self.src} in-situ density, TEOS-10 from T/S", None, "modelled")
 
-    def sound_speed(self, lon, lat, z, t):
+    def sound_speed(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         return Tagged(self._at("c", lon, lat, z, t), f"{self.src} sound speed, TEOS-10 from T/S", None, "modelled")
 
-    def temperature(self, lon, lat, z, t):
+    def temperature(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         return Tagged(self._at("water_temp", lon, lat, z, t), f"{self.src} in-situ temperature [degC]", None, "modelled")
 
-    def bathymetry(self, lon, lat):
+    def bathymetry(self, lon: Any, lat: Any) -> Tagged:
+        assert self.bathy is not None
         return self.bathy(lon, lat)
 
 
-def open_ocean(spec, cache, mission_name=None, box=None, fetch_bathy=True, umwm=None, gebco_url=None):
+def open_ocean(spec: dict[str, Any], cache: Any, mission_name: str | None = None, box: tuple[float, ...] | None = None, fetch_bathy: bool = True,
+               umwm: dict[str, Any] | None = None, gebco_url: str | None = None) -> Ocean | None:
     """The mission's Ocean, with bathymetry from GEBCO (cached under DATA/bathy), else the store's deepest level, else `umwm`
     (dict(lon, lat, depth) from the umwmout file, see bathy.from_umwm). gebco_url: where a missing GEBCO cut is fetched from."""
     path = store_path(spec, mission_name or pathlib.Path(cache).name)

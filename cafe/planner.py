@@ -28,7 +28,7 @@ def solve(cost, budget, lo=1e-6, hi=1e5):
     return hi
 
 
-def boundary_layer(L, U, nu):
+def boundary_layer(L: float, U: float, nu: float) -> float:
     """Turbulent flat-plate thickness at the trailing edge, 0.37 L Re^-1/5: the shell kept at hull resolution."""
     return 0.37 * L * (U * L / nu) ** -0.2
 

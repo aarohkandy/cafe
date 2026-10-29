@@ -4,7 +4,10 @@
     load_platform(name_or_path) -> dict
     assumptions() -> dict        (config/assumptions.yaml: every number that is a prior, not a measurement)
 """
+from __future__ import annotations
+
 import datetime as dt, hashlib, json, pathlib
+from typing import Any
 
 import yaml
 
@@ -18,7 +21,7 @@ class ConfigError(ValueError):
     """A file the user wrote is wrong; the message says where and how to fix it."""
 
 
-def _yaml(path):
+def _yaml(path: str | pathlib.Path) -> Any:
     path = pathlib.Path(path)
     if not path.exists():
         raise ConfigError(f"{path}: file not found")
@@ -28,7 +31,7 @@ def _yaml(path):
         raise ConfigError(f"{path}: not valid YAML ({e})") from e
 
 
-def validate(doc, schema_name, where):
+def validate(doc: Any, schema_name: str, where: str) -> Any:
     import jsonschema
     schema = json.loads((SCHEMAS / schema_name).read_text())
     errs = sorted(jsonschema.Draft202012Validator(schema).iter_errors(doc), key=lambda e: list(e.absolute_path))
@@ -38,20 +41,20 @@ def validate(doc, schema_name, where):
     return doc
 
 
-def utc(s):
+def utc(s: str) -> dt.datetime:
     return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
 
 
-def _in_box(lon, lat, b):
+def _in_box(lon: float, lat: float, b: dict[str, float]) -> bool:
     lo, hi = b["lon_min"] % 360, b["lon_max"] % 360
     x = lon % 360
     inlon = lo <= x <= hi if lo <= hi else (x >= lo or x <= hi)
     return inlon and b["lat_min"] <= lat <= b["lat_max"]
 
 
-def load_mission(path):
+def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
     path = pathlib.Path(path)
-    m = validate(_yaml(path), "mission.json", str(path))
+    m: dict[str, Any] = validate(_yaml(path), "mission.json", str(path))
     t0, t1 = utc(m["window"]["start"]), utc(m["window"]["end"])
     if t1 <= t0:
         raise ConfigError(f"{path}: window.end {m['window']['end']} is not after window.start; swap them")
@@ -93,7 +96,7 @@ def load_mission(path):
     return m
 
 
-def load_platform(name):
+def load_platform(name: str | pathlib.Path) -> dict[str, Any]:
     p = pathlib.Path(name)
     path = p if p.suffix in (".yaml", ".yml") else PLATFORMS / f"{name}.yaml"
     if not path.exists():
@@ -105,12 +108,12 @@ def load_platform(name):
     return doc
 
 
-def assumptions():
+def assumptions() -> dict[str, Any]:
     p = CONFIG / "assumptions.yaml"
     return _yaml(p) if p.exists() else {}
 
 
-def env_sigmas():
+def env_sigmas() -> dict[str, Any]:
     """1-sigma uncertainties GriddedEnv tags its values with: wind, Hs and Tp from the Stage-1 priors (perturbations.yaml),
     the rest from assumptions.yaml (env.sigma.*) until the TAO comparison replaces them."""
     pri = _yaml(CONFIG / "perturbations.yaml")
@@ -120,5 +123,5 @@ def env_sigmas():
     return out
 
 
-def digest(obj):
+def digest(obj: Any) -> str:
     return hashlib.sha256(json.dumps(obj, sort_keys=True, default=str).encode()).hexdigest()

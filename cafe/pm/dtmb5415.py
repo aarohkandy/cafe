@@ -26,7 +26,7 @@ import shutil
 import sys
 import urllib.request
 import zipfile
-from typing import Any, Callable, Iterator, NamedTuple, Optional
+from typing import Any, Callable, Iterator, NamedTuple, Optional, cast
 
 import numpy as np
 import trimesh
@@ -133,7 +133,7 @@ def eval_patch(p: Patch, nu: int, nv: int) -> np.ndarray:
     v = np.linspace(p.span[2], p.span[3], nv)
     hom = np.concatenate([p.C * p.W[..., None], p.W[..., None]], -1)
     h = np.einsum("vj,ui,jik->uvk", BSpline(kv, np.eye(n2), m2)(v), BSpline(ku, np.eye(n1), m1)(u), hom)
-    return h[..., :3] / h[..., 3:]
+    return cast(np.ndarray, h[..., :3] / h[..., 3:])
 
 
 def _section(g: np.ndarray, x0: float) -> np.ndarray:
@@ -145,7 +145,7 @@ def _section(g: np.ndarray, x0: float) -> np.ndarray:
     i = hit.argmax(0)[ok]
     a, b = d[i, j], d[i + 1, j]
     f = np.where(a != b, a / np.where(a != b, a - b, 1.0), 0.0)[:, None]
-    return g[i, j] * (1 - f) + g[i + 1, j] * f
+    return cast(np.ndarray, g[i, j] * (1 - f) + g[i + 1, j] * f)
 
 
 def _resample(pts: np.ndarray, n: int, fallback: np.ndarray) -> np.ndarray:
@@ -208,7 +208,7 @@ def build_hull(patches: list[Patch], n_stations: int = 400, n_girth: int = 100, 
 def hydrostatics(mesh: trimesh.Trimesh, draft: float = DRAFT) -> dict[str, float]:
     """Displacement (m3), wetted area (m2, waterplane excluded), Lwl and Bwl (m) at the draft, by the divergence theorem on
     the part of the closed mesh below z = draft: V = integral (z - draft) n_z dS, exact for flat triangles."""
-    wet = trimesh.intersections.slice_mesh_plane(mesh, [0, 0, -1], [0, 0, draft], cap=False)
+    wet = trimesh.intersections.slice_mesh_plane(mesh, [0, 0, -1], [0, 0, draft], cap=False)  # type: ignore[no-untyped-call]  # trimesh ships no annotations for slice_mesh_plane
     vol = float(np.sum((wet.triangles_center[:, 2] - draft) * wet.face_normals[:, 2] * wet.area_faces))
     wl = mesh.section(plane_origin=[0, 0, draft], plane_normal=[0, 0, 1])
     if wl is None:

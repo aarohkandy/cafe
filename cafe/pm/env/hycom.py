@@ -25,14 +25,17 @@ thknss [Pa] / 9806 = m, srfhgt [m2/s2] / 9.806 = m; NERSC abfile.py (github.com/
 records; .a records padded to ((idm*jdm+4095)//4096)*4096 big-endian float32 words, values above 2**99 are land / no data;
 regional.grid.b lists `plon:  min,max = a b` lines in record order.
 """
-import concurrent.futures as cf, datetime as dt, itertools, json, os, pathlib, re, shutil, subprocess, sys, threading, time
+import concurrent.futures as cf, datetime as dt, functools, itertools, json, os, pathlib, re, shutil, subprocess, sys, threading, time
 import urllib.parse, urllib.request
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from . import conventions as cv, remote
 
+Box = tuple[float, float, float, float]
 NCSS = "https://ncss.hycom.org/thredds/ncss/grid/GLBy0.08/expt_93.0"
 DODS = "https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0"
 DATASETS = {"ts3z": ("water_temp", "salinity"), "uv3z": ("water_u", "water_v"), "ssh": ("surf_el",)}
@@ -61,7 +64,7 @@ def epoch(t: Any) -> float:
     return float(t)
 
 
-def box360(box: Any) -> tuple:
+def box360(box: Any) -> Box:
     """(south, north, west, east) with west in [0, 360) and east = west + span. Refuses a box across 0 E / 360 E, which
     one GLBy request cannot cover (split it in two)."""
     s, n, w, e = (float(x) for x in box)
@@ -74,7 +77,7 @@ def box360(box: Any) -> tuple:
     return s, n, w, w + span
 
 
-def padded(box: Any, pad: float = 2.0) -> tuple:
+def padded(box: Any, pad: float = 2.0) -> Box:
     """The box grown by `pad` degrees on every side (latitude clipped to GLBy's -80..90)."""
     s, n, w, e = box360(box)
     return max(s - pad, -80.0), min(n + pad, 90.0), w - pad, e + pad
@@ -90,7 +93,7 @@ def _iso(t: float) -> str:
     return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def ncss_url(dataset: str, names: tuple, box: tuple, ta: float, tb: float, base: str = NCSS) -> str:
+def ncss_url(dataset: str, names: tuple[str, ...], box: Box, ta: float, tb: float, base: str = NCSS) -> str:
     """THREDDS NetcdfSubset URL for `names` in the (0..360) box between epoch times ta and tb, all 40 depths."""
     s, n, w, e = box
     q = [("var", v) for v in names] + [("north", f"{n:.4f}"), ("south", f"{s:.4f}"), ("west", f"{w:.4f}"), ("east", f"{e:.4f}"),
@@ -108,10 +111,10 @@ def kind_of(kind: Any) -> str:
         raise ValueError(f"temperature_kind is {kind!r}; it must be 'in_situ' or 'potential' and is never guessed. Pass "
                          "temperature_kind=... (GOFS 3.1 GLBy writes in-situ; ask the lab what their HYCOM writes) or set the "
                          "'temperature_kind' attribute on the file/store.")
-    return kind
+    return str(kind)
 
 
-def teos10(sp: Any, t: Any, depth: Any, lat: Any, lon: Any, kind: Any) -> dict:
+def teos10(sp: Any, t: Any, depth: Any, lat: Any, lon: Any, kind: Any) -> dict[str, Any]:
     """-> dict(p [dbar], SA [g/kg], CT [degC], rho [kg/m3], c [m/s]). depth positive down [m]; broadcasts.
     in_situ: CT = gsw.CT_from_t(SA, t, p); potential (referenced to 0 dbar): CT = gsw.CT_from_pt(SA, t)."""
     import gsw
@@ -153,7 +156,7 @@ def _std(ds: Any) -> Any:
     return out
 
 
-def _append(zarr_path, ds, first, attrs):
+def _append(zarr_path: Any, ds: Any, first: bool, attrs: dict[str, Any]) -> None:
     chunks = (1, min(10, ds.sizes["depth"]), -(-ds.sizes["lat"] // 2), -(-ds.sizes["lon"] // 2))
     ds.attrs.update(attrs)                      # every append rewrites the group attributes, so every append carries them
     if first:
@@ -163,7 +166,7 @@ def _append(zarr_path, ds, first, attrs):
         ds.to_zarr(zarr_path, mode="a", append_dim="time", consolidated=False)
 
 
-def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict) -> pathlib.Path:
+def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> pathlib.Path:
     """steps: iterable of standardized one-time datasets (see _std). Adds rho/c, writes atomically (tmp dir, then rename)."""
     kind_of(kind)
     out = pathlib.Path(out_zarr)
@@ -197,7 +200,7 @@ class FetchError(RuntimeError):
     """Some parts could not be fetched from any server; the finished parts are kept, so rerunning resumes."""
 
 
-def _child(args, deadline):
+def _child(args: list[Any], deadline: float) -> None:
     """Run `python -m cafe.pm.env.hycom <args>` and kill it after `deadline` s (a hung HTTP/OPeNDAP read cannot be interrupted
     from inside the process; cafe/ocean.py learned this from tds.hycom.org, which accepts a connection and never answers).
     TimeoutError: no answer in time. RuntimeError: the child failed."""
@@ -210,7 +213,7 @@ def _child(args, deadline):
         raise RuntimeError((r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1][:300])
 
 
-def _child_ncss(url, out):
+def _child_ncss(url: str, out: str) -> None:
     req = urllib.request.Request(url, headers={"User-Agent": "cafe-premission"})
     part = out + ".part"
     with urllib.request.urlopen(req, context=remote.context(), timeout=SOCKET_S) as r, open(part, "wb") as f:
@@ -222,7 +225,7 @@ def _child_ncss(url, out):
     os.replace(part, out)
 
 
-def _child_dods(url, names, ta, tb, s, n, w, e, out):
+def _child_dods(url: str, names: str, ta: float | str, tb: float | str, s: float | str, n: float | str, w: float | str, e: float | str, out: str) -> None:
     """OPeNDAP read of the same box into a NetCDF part with the NCSS names (time in hours since 2000-01-01)."""
     import netCDF4
     ds = netCDF4.Dataset(url)
@@ -251,19 +254,20 @@ def _child_dods(url, names, ta, tb, s, n, w, e, out):
     os.replace(out + ".part", out)
 
 
-def _sha(path):
+def _sha(path: str | pathlib.Path) -> str:
     return remote.sha256(path)
 
 
-def _write_json(path, obj):
+def _write_json(path: Any, obj: Any) -> None:
     tmp = pathlib.Path(str(path) + ".tmp")
     tmp.write_text(json.dumps(obj, indent=1, sort_keys=True))
     os.replace(tmp, path)
 
 
-def _chunks(steps, n):
+def _chunks(steps: Iterable[float], n: int) -> list[list[float]]:
     """Lists of at most n consecutive steps that do not span a calendar year (each GLBy file is one year)."""
-    out, cur = [], []
+    out: list[list[float]] = []
+    cur: list[float] = []
     for t in steps:
         if cur and (len(cur) == n or dt.datetime.fromtimestamp(t, dt.timezone.utc).year != dt.datetime.fromtimestamp(cur[0], dt.timezone.utc).year):
             out.append(cur)
@@ -272,7 +276,7 @@ def _chunks(steps, n):
     return out + [cur] if cur else out
 
 
-def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1, deadline_s: float = 1500.0, servers: tuple = ("ncss", "opendap"),
+def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1, deadline_s: float = 1500.0, servers: tuple[str, ...] = ("ncss", "opendap"),
                workers: int = 3, tries: int = 2, ncss: str = NCSS, dods: str = DODS, name: str = "gofs_tepex_c", keep_parts: bool = True) -> pathlib.Path:
     """GOFS 3.1 GLBy0.08 expt_93.0 water_temp/salinity/water_u/water_v/surf_el for `box` (south, north, west, east; any lon
     convention, pad it yourself: see padded()) and t0..t1 (the 3-hourly steps inside) -> <out_dir>/<name>.zarr.
@@ -298,14 +302,14 @@ def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1
     lock = threading.Lock()
     jobs = [(d, c) for d in DATASETS for c in _chunks(steps, chunk_steps)]
 
-    def one(job):
+    def one(job: tuple[str, list[float]]) -> str | None:
         d, c = job
         fn = f"{d}_{_iso(c[0]).replace(':', '')}_{_iso(c[-1]).replace(':', '')}.nc"
         path = pdir / fn
         rec = man["parts"].get(fn)
         if rec and path.exists() and _sha(path) == rec["sha256"]:
             return None
-        errs = []
+        errs: list[str] = []
         for srv in servers:
             for _ in range(tries):
                 t = time.time()
@@ -405,15 +409,16 @@ Z_NAMES = ("depth", "Depth", "lev", "z")
 PA_UNITS = ("pa", "pascal")
 
 
-def describe(ds: Any) -> dict:
+def describe(ds: Any) -> dict[str, Any]:
     """The dict hycom_netcdf.json validates: dims, variables (dims, units), global attributes (strings only)."""
     return dict(dims={k: int(v) for k, v in ds.sizes.items()},
                 variables={k: dict(dims=list(v.dims), units=str(v.attrs.get("units", "")) or None) for k, v in {**ds.data_vars, **ds.coords}.items()},
                 attrs={k: str(v) for k, v in ds.attrs.items()})
 
 
-def _schema(name):
-    return json.loads((remote.ROOT / "cafe" / "schemas" / name).read_text())
+def _schema(name: str) -> dict[str, Any]:
+    d: dict[str, Any] = json.loads((remote.ROOT / "cafe" / "schemas" / name).read_text())
+    return d
 
 
 def validate_netcdf(ds: Any) -> None:
@@ -425,19 +430,19 @@ def validate_netcdf(ds: Any) -> None:
             f"  {'/'.join(map(str, e.path)) or '(file)'}: {e.message[:200]}" for e in errs))
 
 
-def _pick(ds, key):
+def _pick(ds: Any, key: str) -> str | None:
     for n in ALIASES[key]:
         if n in ds.variables:
             return n
     return None
 
 
-def _dim(v, key):
+def _dim(v: Any, key: str) -> str | None:
     ds = [d for d in v.dims if d in DIMS[key]]
     return ds[0] if ds else None
 
 
-def read_lab_netcdf(path: Any, temperature_kind: Any = None, depth: Any = None) -> tuple:
+def read_lab_netcdf(path: Any, temperature_kind: Any = None, depth: Any = None) -> tuple[Any, str]:
     """One per-snapshot lab HYCOM netCDF -> (standardized dataset, temperature_kind); cafe/schemas/hycom_netcdf.json says what is
     assumed. z-level files (a 1-D depth coordinate in metres, positive down) keep their own levels unless `depth` is given;
     layered files (a thickness variable thknss/dp in Pa or m) go to `depth` (default GOFS_DEPTHS) with layers_to_z.
@@ -478,7 +483,7 @@ def read_lab_netcdf(path: Any, temperature_kind: Any = None, depth: Any = None) 
     return res, kind
 
 
-def _to_levels(a, zc, depth):
+def _to_levels(a: NDArray[Any], zc: NDArray[Any], depth: NDArray[Any]) -> NDArray[Any]:
     """z-level profile (Z, ...) on depths zc -> `depth`: exact where the levels coincide, linear between, NaN outside."""
     flat = a.reshape(a.shape[0], -1)
     out = np.full((len(depth), flat.shape[1]), np.nan)
@@ -494,13 +499,15 @@ def _to_levels(a, zc, depth):
 # ------------------------------------------------------------------ lab reader (b): archv .a/.b
 
 
-def read_b(path: Any) -> dict:
+def read_b(path: Any) -> dict[str, Any]:
     """Parse a HYCOM .b file -> dict(header={name: number}, idm, jdm, fields=[{name, step, day, k, dens, min, max}]).
     Header lines look like `   17  'iversn' = hycom version number x10`; the field table follows the line starting
     `field` with one `name = step day k dens min max` line per record of the .a file, in file order. Validated against
     cafe/schemas/hycom_ab.json."""
     import jsonschema
-    header, fields, table = {}, [], False
+    header: dict[str, Any] = {}
+    fields: list[dict[str, Any]] = []
+    table = False
     for ln in pathlib.Path(path).read_text().splitlines():
         if table and "=" in ln:
             name, rest = ln.split("=", 1)
@@ -520,7 +527,7 @@ def read_b(path: Any) -> dict:
     return doc
 
 
-def read_a(path: Any, doc: dict, idx: int) -> np.ndarray:
+def read_a(path: Any, doc: dict[str, Any], idx: int) -> NDArray[Any]:
     """Record `idx` of the .a file as (jdm, idm) float32 with HYCOM's 2**100 'no data' as NaN. Each record is idm*jdm
     big-endian float32 words padded up to a multiple of 4096 words."""
     n = doc["idm"] * doc["jdm"]
@@ -532,7 +539,7 @@ def read_a(path: Any, doc: dict, idx: int) -> np.ndarray:
     return np.where(a > 0.5 * HUGE, np.nan, a)
 
 
-def read_grid(path: Any) -> dict:
+def read_grid(path: Any) -> dict[str, NDArray[Any]]:
     """regional.grid.a/.b -> dict(plon, plat, pang), each (jdm, idm). Record order is the order of the `name: min,max` lines.
     Refuses curvilinear grids (lon varying with j, or lat with i)."""
     b = pathlib.Path(str(path) + ".b").read_text().splitlines()
@@ -555,7 +562,7 @@ def model_day_to_epoch(day: float, yrflag: int) -> float:
     return (dt.datetime(1900, 12, 31, tzinfo=dt.timezone.utc) + dt.timedelta(days=float(day))).timestamp()
 
 
-def destagger(u: np.ndarray, v: np.ndarray) -> tuple:
+def destagger(u: NDArray[Any], v: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any]]:
     """C-grid u (west face) and v (south face) -> T-points, (jdm, idm): T(i) = (u(i) + u(i+1)) / 2; the last column / row
     has no neighbour and becomes NaN (as in xhycom)."""
     ut, vt = np.full_like(u, np.nan), np.full_like(v, np.nan)
@@ -564,7 +571,7 @@ def destagger(u: np.ndarray, v: np.ndarray) -> tuple:
     return ut, vt
 
 
-def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = None, box: Any = None, time: Any = None) -> tuple:
+def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = None, box: Any = None, time: Any = None) -> tuple[Any, str]:
     """One archv .a/.b (path = the stem) -> (standardized dataset with one time, temperature_kind) on `depth` (default
     GOFS_DEPTHS). `grid` = stem of regional.grid. Records are read one at a time and cut to `box` (lon/lat +-0.5 deg) at once.
     Total velocity = baroclinic `u-vel.` + barotropic `u_btrop` (HYCOM stores them separately), destaggered to T-points and
@@ -578,7 +585,7 @@ def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = 
         raise ValueError(f"{path} is {doc['idm']}x{doc['jdm']} but the grid is {g['plon'].shape[1]}x{g['plon'].shape[0]}")
     index = {(f["name"], f["k"]): i for i, f in enumerate(doc["fields"])}
 
-    def rec(name, k=0):
+    def rec(name: str, k: int = 0) -> NDArray[Any]:
         if (name, k) not in index:
             raise ValueError(f"{path}.b has no '{name}' record for layer {k}")
         return read_a(str(path) + ".a", doc, index[(name, k)])
@@ -593,7 +600,7 @@ def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = 
     sel, ang = np.ix_(jj, ii), np.radians(g["pang"])
     has_bt = ("u_btrop", 0) in index
     kdm = max(f["k"] for f in doc["fields"] if f["name"] == "thknss")
-    got: dict = {n: [] for n in ("temp", "salin", "u", "v", "dp")}
+    got: dict[str, list[Any]] = {n: [] for n in ("temp", "salin", "u", "v", "dp")}
     for k in range(1, kdm + 1):
         u, v = rec("u-vel.", k), rec("v-vel.", k)
         if has_bt:
@@ -615,7 +622,7 @@ def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = 
 # ------------------------------------------------------------------ ingest
 
 
-def _sub(ds, box):
+def _sub(ds: Any, box: Any) -> Any:
     """Cut a dataset to the box (lon taken mod 360, so across the dateline), padded by 0.1 deg."""
     s, n, w, e = box360(box)
     lon = np.mod(ds.lon.values, 360.0)
@@ -634,18 +641,19 @@ def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any =
     never guessed. When a real lab file arrives this is the whole step:
         python -c "from cafe.pm.env.hycom import ingest_lab_hycom as i; i('PATH', (-7, 7, 163, -163), 'lab.zarr', 'in_situ')"."""
     p = pathlib.Path(path)
+    reads: list[Callable[[], tuple[Any, str]]]
     files = (sorted(p.glob("*.nc")) or sorted(p.glob("archv*.b"))) if p.is_dir() else [p]
     if not files:
         raise ValueError(f"{p} holds no *.nc and no archv*.b files")
     if all(f.suffix == ".nc" for f in files):
-        reads = [lambda f=f: read_lab_netcdf(f, temperature_kind, depth) for f in files]
+        reads = [functools.partial(read_lab_netcdf, f, temperature_kind, depth) for f in files]
     else:
         stems = [f.with_suffix("") if f.suffix in (".a", ".b") else f for f in files]
         gstem = pathlib.Path(grid) if grid else stems[0].parent / "regional.grid"
-        reads = [lambda s=s: read_archv(s, gstem, temperature_kind, depth, box) for s in stems]
-    kinds = []
+        reads = [functools.partial(read_archv, s, gstem, temperature_kind, depth, box) for s in stems]
+    kinds: list[str] = []
 
-    def steps():
+    def steps() -> Iterator[Any]:
         for rd in reads:
             ds, kind = rd()
             kinds.append(kind)

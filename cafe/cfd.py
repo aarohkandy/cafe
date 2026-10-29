@@ -386,7 +386,7 @@ def characterize_incidence(stl, workdir, fluid, speed, alphas=(5.0, 10.0), plane
     return r
 
 
-def _shrink(case):
+def _shrink(case: pathlib.Path) -> None:
     """Delete mesh/fields, keep logs + postProcessing."""
     for p in list(case.glob("processor*")) + [case / "constant/polyMesh", case / "constant/triSurface"]:
         shutil.rmtree(p, ignore_errors=True)

@@ -10,26 +10,32 @@ USERTrust root in the system store). Verification is never turned off.
     cdf1_read(url, var, hdr)   one variable of a CDF-1 file, by range
     download(url, path, sha)   resumable (HTTP Range), verified against size and optional SHA-256
 """
+from __future__ import annotations
+
 import hashlib, http.client, io, os, pathlib, ssl, struct, time, urllib.error, urllib.request
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 EXTRA_CA = ROOT / "config" / "certs" / "incommon_rsa_server_ca2.pem"
 BLOCK = 4 << 20
+Header = tuple[dict[str, int], int, dict[str, dict[str, Any]]]
 
 
-def context():
+def context() -> ssl.SSLContext:
     ctx = ssl.create_default_context()
     if EXTRA_CA.exists():
         ctx.load_verify_locations(cafile=str(EXTRA_CA))
     return ctx
 
 
-_CTX = None
+_CTX: ssl.SSLContext | None = None
 
 
-def _open(url, start=None, end=None, timeout=60, tries=4):
+def _open(url: str, start: int | None = None, end: int | None = None, timeout: float = 60, tries: int = 4) -> http.client.HTTPResponse:
     global _CTX
     _CTX = _CTX or context()
     hdr = {"User-Agent": "cafe-premission"}
@@ -38,7 +44,8 @@ def _open(url, start=None, end=None, timeout=60, tries=4):
         hdr["Range"] = f"bytes={start}-{'' if end is None else end}"
     for k in range(tries):
         try:
-            return urllib.request.urlopen(urllib.request.Request(url, headers=hdr), context=_CTX, timeout=timeout)
+            r: http.client.HTTPResponse = urllib.request.urlopen(urllib.request.Request(url, headers=hdr), context=_CTX, timeout=timeout)
+            return r
         except urllib.error.HTTPError as e:
             if e.code in (403, 404, 416):
                 raise FileNotFoundError(f"{url}: HTTP {e.code}") from e
@@ -49,7 +56,7 @@ def _open(url, start=None, end=None, timeout=60, tries=4):
     raise ConnectionError(f"{url}: {err}")
 
 
-def _read(url, start, end, timeout=60, tries=3):
+def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tries: int = 3) -> bytes:
     """Body of a ranged GET. A connection cut mid-body (IncompleteRead, reset, timeout) is retried like a failed connect."""
     err: Exception = ConnectionError("no attempt made")
     for k in range(tries):
@@ -64,7 +71,7 @@ def _read(url, start, end, timeout=60, tries=3):
     raise ConnectionError(f"{url}: {err!r}")
 
 
-def size(url):
+def size(url: str) -> int:
     with _open(url, 0, 0) as r:
         cr = r.headers.get("Content-Range", "")
         if not cr.startswith("bytes"):
@@ -75,25 +82,25 @@ def size(url):
 class RemoteFile(io.RawIOBase):
     """Read-only, seekable view of a URL; fetches aligned 4 MB blocks on demand and keeps them (LRU, 64 blocks)."""
 
-    def __init__(self, url, block=BLOCK, keep=64):
+    def __init__(self, url: str, block: int = BLOCK, keep: int = 64) -> None:
         self.url, self.block, self.keep = url, block, keep
         self.n = size(url)
-        self.pos, self.cache, self.fetched = 0, {}, 0
+        self.pos, self.cache, self.fetched = 0, dict[int, bytes](), 0
 
-    def readable(self):
+    def readable(self) -> bool:
         return True
 
-    def seekable(self):
+    def seekable(self) -> bool:
         return True
 
-    def tell(self):
+    def tell(self) -> int:
         return self.pos
 
-    def seek(self, off, whence=0):
+    def seek(self, off: int, whence: int = 0) -> int:
         self.pos = {0: off, 1: self.pos + off, 2: self.n + off}[whence]
         return self.pos
 
-    def _blk(self, i):
+    def _blk(self, i: int) -> bytes:
         if i in self.cache:
             self.cache[i] = self.cache.pop(i)          # move to most-recent
             return self.cache[i]
@@ -108,7 +115,7 @@ class RemoteFile(io.RawIOBase):
             self.cache.pop(next(iter(self.cache)))
         return data
 
-    def readinto(self, buf):
+    def readinto(self, buf: Any) -> int:
         want = min(len(buf), max(self.n - self.pos, 0))
         got = 0
         while got < want:
@@ -120,7 +127,7 @@ class RemoteFile(io.RawIOBase):
         return got
 
 
-def sha256(path, chunk=8 << 20):
+def sha256(path: str | pathlib.Path, chunk: int = 8 << 20) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
         for b in iter(lambda: f.read(chunk), b""):
@@ -128,7 +135,7 @@ def sha256(path, chunk=8 << 20):
     return h.hexdigest()
 
 
-def download(url, path, sha=None):
+def download(url: str, path: str | pathlib.Path, sha: str | None = None) -> pathlib.Path:
     """Resumable download to `path` (a `.part` file grows until complete), verified by size and optional SHA-256."""
     path = pathlib.Path(path)
     if path.exists() and (sha is None or sha256(path) == sha):
@@ -161,10 +168,10 @@ _NC = {1: ("i1", 1), 2: ("S1", 1), 3: (">i2", 2), 4: (">i4", 4), 5: (">f4", 4), 
 
 
 class _Buf:
-    def __init__(self, fetch):
+    def __init__(self, fetch: Callable[[int, int], bytes]) -> None:
         self.fetch, self.data, self.p = fetch, b"", 0
 
-    def take(self, n):
+    def take(self, n: int) -> bytes:
         while self.p + n > len(self.data):
             more = self.fetch(len(self.data), max(65536, n))
             if not more:
@@ -174,18 +181,18 @@ class _Buf:
         self.p += n
         return b
 
-    def i4(self):
-        return struct.unpack(">i", self.take(4))[0]
+    def i4(self) -> int:
+        return int(struct.unpack(">i", self.take(4))[0])
 
-    def name(self):
+    def name(self) -> str:
         n = self.i4()
         s = self.take(n).decode()
         self.take(-n % 4)
         return s
 
-    def attrs(self):
+    def attrs(self) -> dict[str, Any]:
         tag, n = self.i4(), self.i4()
-        out = {}
+        out: dict[str, Any] = {}
         for _ in range(n if tag == 12 else 0):
             k, t, m = self.name(), self.i4(), self.i4()
             dt, w = _NC[t]
@@ -195,7 +202,7 @@ class _Buf:
         return out
 
 
-def parse_cdf1(fetch):
+def parse_cdf1(fetch: Callable[[int, int], bytes]) -> Header:
     """Parse a classic NetCDF header. fetch(offset, nbytes) -> bytes. Returns (dims, nrec, vars)."""
     b = _Buf(fetch)
     magic = b.take(4)
@@ -204,12 +211,12 @@ def parse_cdf1(fetch):
     off8 = magic[3] == 2
     nrec = b.i4()
     tag, n = b.i4(), b.i4()
-    dims = []
+    dims: list[tuple[str, int]] = []
     for _ in range(n if tag == 10 else 0):
         dims.append((b.name(), b.i4()))
     b.attrs()
     tag, n = b.i4(), b.i4()
-    out = {}
+    out: dict[str, dict[str, Any]] = {}
     for _ in range(n if tag == 11 else 0):
         name = b.name()
         ids = [b.i4() for _ in range(b.i4())]
@@ -229,7 +236,7 @@ def parse_cdf1(fetch):
     return dict(dims), nrec, out
 
 
-def cdf1_header(url_or_path):
+def cdf1_header(url_or_path: str | pathlib.Path) -> Header:
     p = str(url_or_path)
     if p.startswith("http"):
         return parse_cdf1(lambda o, n: _read(p, o, o + n - 1))
@@ -237,7 +244,7 @@ def cdf1_header(url_or_path):
         return parse_cdf1(lambda o, n: (f.seek(o), f.read(n))[1])
 
 
-def cdf1_read(url_or_path, var, header, rec=0, rows=None):
+def cdf1_read(url_or_path: str | pathlib.Path, var: str, header: Header, rec: int = 0, rows: tuple[int, int] | None = None) -> NDArray[Any]:
     """One variable (one record if it is a record variable), read by byte range or from a local file.
 
     rows=(a, b) reads only indices a..b-1 of the variable's first non-record axis (one contiguous range), e.g. the

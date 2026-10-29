@@ -38,7 +38,7 @@ The Environment has no T(z): T = t_deep + (SST - t_deep) exp(-z/h) (assumed, pla
 from __future__ import annotations
 
 import pathlib
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import gsw
 import numpy as np
@@ -62,7 +62,7 @@ class Steady(NamedTuple):
     ok: Arr  # False: no steady solution / stall / pitch opposes buoyancy
 
 
-def load_platform(name: str) -> dict:
+def load_platform(name: str) -> dict[str, Any]:
     """platforms/<name>.yaml (or a path) -> flat dict of values plus 'kind' and 'mission_defaults'.
     Refuses a leaf without value, unit and either a source or assumed: true with a why."""
     path = pathlib.Path(name)
@@ -70,7 +70,7 @@ def load_platform(name: str) -> dict:
         path = PLATFORMS / f"{name}.yaml"
     raw = yaml.safe_load(path.read_text())
 
-    def flat(block: dict, where: str) -> dict:
+    def flat(block: dict[str, Any], where: str) -> dict[str, Any]:
         out = {}
         for k, leaf in block.items():
             if not (isinstance(leaf, dict) and "value" in leaf and "unit" in leaf):
@@ -89,7 +89,7 @@ def load_platform(name: str) -> dict:
     return P
 
 
-def metres_per_deg(lat: Arr) -> tuple:
+def metres_per_deg(lat: Arr) -> tuple[Arr, Arr]:
     """(metres per degree of longitude, of latitude) at `lat` [deg]."""
     r = np.radians(np.asarray(lat, float))
     return (
@@ -98,11 +98,11 @@ def metres_per_deg(lat: Arr) -> tuple:
     )
 
 
-def _mass(P: dict) -> float:
-    return P["mass_kg"] if P["kind"] == "seaglider" else P["mg"]
+def _mass(P: dict[str, Any]) -> float:
+    return cast(float, P["mass_kg"] if P["kind"] == "seaglider" else P["mg"])
 
 
-def _volume(P: dict, p_dbar: Arr, T: Arr, vbd_cc: Arr) -> Arr:
+def _volume(P: dict[str, Any], p_dbar: Arr, T: Arr, vbd_cc: Arr) -> Arr:
     """Displaced volume [m^3] at pressure p [dbar], temperature T [degC], VBD setting [cc]."""
     if P["kind"] == "seaglider":
         return (
@@ -113,12 +113,12 @@ def _volume(P: dict, p_dbar: Arr, T: Arr, vbd_cc: Arr) -> Arr:
     return P["Vg"] * (1.0 - P["epsilon"] * p_dbar * 1e4) + vbd_cc * 1e-6
 
 
-def buoyancy(P: dict, rho: Arr, p_dbar: Arr, T: Arr, vbd_cc: Arr) -> Arr:
+def buoyancy(P: dict[str, Any], rho: Arr, p_dbar: Arr, T: Arr, vbd_cc: Arr) -> Arr:
     """Net buoyancy B = g (rho V - M) [N], + up."""
     return P["gravity"] * (rho * _volume(P, p_dbar, T, vbd_cc) - _mass(P))
 
 
-def neutral_vbd_cc(P: dict, rho: Arr, p_dbar: Arr, T: Arr) -> Arr:
+def neutral_vbd_cc(P: dict[str, Any], rho: Arr, p_dbar: Arr, T: Arr) -> Arr:
     """VBD setting [cc] giving B = 0 at (rho, p, T)."""
     if P["kind"] == "seaglider":
         return _mass(P) / rho / np.exp(-P["abs_compress"] * p_dbar + P["therm_expan"] * (T - P["temp_ref"])) * 1e6 - (
@@ -127,14 +127,14 @@ def neutral_vbd_cc(P: dict, rho: Arr, p_dbar: Arr, T: Arr) -> Arr:
     return (_mass(P) / rho - P["Vg"] * (1.0 - P["epsilon"] * p_dbar * 1e4)) * 1e6
 
 
-def seaglider_force_balance(P: dict, speed: Arr, glide_deg: Arr, alpha_deg: Arr, rho: Arr) -> tuple:
+def seaglider_force_balance(P: dict[str, Any], speed: Arr, glide_deg: Arr, alpha_deg: Arr, rho: Arr) -> tuple[Arr, Arr]:
     """Hydrodynamic (L, D) [N] at a flight state; lift is BS3's signed one, so a steady state has L = -B cos th, D = B sin th."""
     q = 0.5 * rho * np.asarray(speed) ** 2
     l2 = P["length_m"] ** 2
     return l2 * P["hd_a"] * q * alpha_deg, l2 * q * (P["hd_b"] * q ** P["hd_s"] + P["hd_c"] * np.asarray(alpha_deg) ** 2)
 
 
-def _sg_core(B: Arr, rho: Arr, pitch_deg: Arr, P: dict, iters: int = 200, tol: float = 1e-6) -> Steady:
+def _sg_core(B: Arr, rho: Arr, pitch_deg: Arr, P: dict[str, Any], iters: int = 200, tol: float = 1e-6) -> Steady:
     """BS3 hydro_model, vectorized: B [N] (+ up), in-situ rho, pitch [deg] -> Steady."""
     B, rho, pitch = np.broadcast_arrays(*(np.asarray(x, float) for x in (B, rho, pitch_deg)))
     a, b, c, s, l2 = P["hd_a"], P["hd_b"], P["hd_c"], P["hd_s"], P["length_m"] ** 2
@@ -165,13 +165,13 @@ def _sg_core(B: Arr, rho: Arr, pitch_deg: Arr, P: dict, iters: int = 200, tol: f
     return Steady(U, glide, U * np.sin(np.radians(glide)), np.where(ok, pitch - glide, 0.0), ok)
 
 
-def seaglider_steady(rho: Arr, p: Arr, T: Arr, vbd_cc: Arr, pitch_deg: Arr, params: dict) -> Steady:
+def seaglider_steady(rho: Arr, p: Arr, T: Arr, vbd_cc: Arr, pitch_deg: Arr, params: dict[str, Any]) -> Steady:
     """Steady Seaglider flight at in-situ density rho [kg/m^3], pressure p [dbar], temperature T [degC],
     VBD extension vbd_cc [cc above the retracted volume] and pitch [deg, + nose up]."""
     return _sg_core(buoyancy(params, rho, p, T, vbd_cc), rho, pitch_deg, params)
 
 
-def _alpha_gf(phi: Arr, P: dict) -> Arr:
+def _alpha_gf(phi: Arr, P: dict[str, Any]) -> Arr:
     """Root a in (0, pi/2 - phi) of (Cd0 + Cd1 a^2) = (aw + ah) a tan(a + phi): safeguarded Newton, vectorized."""
     k, c0, c1 = P["aw"] + P["ah"], P["Cd0"], P["Cd1"]
     lo, hi = np.zeros_like(phi), 0.5 * np.pi - phi
@@ -187,7 +187,7 @@ def _alpha_gf(phi: Arr, P: dict) -> Arr:
     return al
 
 
-def slocum_steady(rho: Arr, p: Arr, T: Arr, vbd_cc: Arr, pitch_deg: Arr, params: dict) -> Steady:
+def slocum_steady(rho: Arr, p: Arr, T: Arr, vbd_cc: Arr, pitch_deg: Arr, params: dict[str, Any]) -> Steady:
     """Steady Slocum flight (Merckelbach form, gliderflight oracle).  `T` is accepted for a common signature and unused."""
     del T
     P = params
@@ -207,7 +207,7 @@ def slocum_steady(rho: Arr, p: Arr, T: Arr, vbd_cc: Arr, pitch_deg: Arr, params:
     return Steady(U, glide, U * np.sin(np.radians(glide)), np.where(ok, -np.degrees(al), 0.0), ok)
 
 
-def flight(P: dict, rho: Arr, p: Arr, T: Arr, vbd_cc: Arr, pitch_deg: Arr) -> Steady:
+def flight(P: dict[str, Any], rho: Arr, p: Arr, T: Arr, vbd_cc: Arr, pitch_deg: Arr) -> Steady:
     """Dispatch on P['kind']."""
     return (seaglider_steady if P["kind"] == "seaglider" else slocum_steady)(rho, p, T, vbd_cc, pitch_deg, P)
 
@@ -217,7 +217,7 @@ def pump_energy_J(dV_cc: Arr, p_dbar: Arr, eta: float) -> Arr:
     return np.abs(dV_cc) * 1e-6 * (P_ATM + np.asarray(p_dbar) * 1e4) / eta
 
 
-def _temp_c(P: dict, sst_K: Arr, depth: Arr) -> Arr:
+def _temp_c(P: dict[str, Any], sst_K: Arr, depth: Arr) -> Arr:
     return P["t_deep_c"] + (sst_K - 273.15 - P["t_deep_c"]) * np.exp(-np.asarray(depth) / P["thermocline_scale_m"])
 
 
@@ -229,14 +229,14 @@ class GliderSim:
 
     def __init__(
         self,
-        params: dict,
+        params: dict[str, Any],
         members: int,
         env: Any,
         start_lon: Arr,
         start_lat: Arr,
         t0: float,
-        mission: dict,
-        perturb: dict | None = None,
+        mission: dict[str, Any],
+        perturb: dict[str, Any] | None = None,
     ):
         P, M = self.P, self.M = params, int(members)
         self.env, self.t = env, float(t0)
@@ -257,7 +257,10 @@ class GliderSim:
         self.md = md
         self.target_depth = min(md["dive_depth_m"], P["rating_m"])
         pt = perturb or {}
-        one = lambda k: np.broadcast_to(np.asarray(pt.get(k, 1.0 if k != "density_bias" else 0.0), float), (M,)).copy()
+
+        def one(k: str) -> Arr:
+            return np.broadcast_to(np.asarray(pt.get(k, 1.0 if k != "density_bias" else 0.0), float), (M,)).copy()
+
         self.scale, self.bscale, self.rbias = one("speed_scale"), one("battery_scale"), one("density_bias")
         self.windage = np.broadcast_to(np.asarray(pt.get("windage", params["windage"]), float), (M,)).copy()
         self.lon = np.broadcast_to(np.asarray(start_lon, float), (M,)).copy()
@@ -281,7 +284,7 @@ class GliderSim:
         self.out_s = np.zeros(M)
         self.fail = {k: np.zeros(M, bool) for k in FAILS}
         self.first = {k: np.full(M, np.nan) for k in FAILS}
-        self._rec: dict = {k: [] for k in ("t", "lon", "lat", "depth", "energy", "phase", "wp")}
+        self._rec: dict[str, Any] = {k: [] for k in ("t", "lon", "lat", "depth", "energy", "phase", "wp")}
         self.surf_s = P["gps_s"] + P["bytes_per_dive"] / P["iridium_Bps"] + P["pump_time_s"]
         self.comm_J = P["comms_W"] * (P["gps_s"] + P["bytes_per_dive"] / P["iridium_Bps"]) + P["attitude_J_per_dive"]
         self._trim()
@@ -292,7 +295,7 @@ class GliderSim:
         mx, my = metres_per_deg(lat)
         return np.stack([((tlon - lon + 180.0) % 360.0 - 180.0) * mx, (tlat - lat) * my], -1)
 
-    def _state(self, depth: Arr) -> tuple:
+    def _state(self, depth: Arr) -> tuple[Arr, Arr, Arr]:
         """(rho, p [dbar], T [degC]) at the members' positions for `depth` (M,) or (M, K); rho without the member bias."""
         z = -np.asarray(depth, float)
         lon, lat = (self.lon, self.lat) if z.ndim == 1 else (self.lon[:, None], self.lat[:, None])
@@ -331,7 +334,7 @@ class GliderSim:
         self.first[name][new] = self._tf
         self.fail[name] |= mask
 
-    def _target_vec(self) -> tuple:
+    def _target_vec(self) -> tuple[Arr, Arr]:
         """Metres to the active waypoint for every member, and the distance."""
         k = np.minimum(self.wp_idx, len(self.wps) - 1)
         v = self._met(self.lon, self.lat, self.wps[k, 0], self.wps[k, 1])
@@ -448,16 +451,16 @@ class GliderSim:
         ):
             self._rec[k].append(np.copy(v))
 
-    def run(self, seconds: float, dt: float = 60.0) -> dict:
+    def run(self, seconds: float, dt: float = 60.0) -> dict[str, Any]:
         for _ in range(int(round(seconds / dt))):
             self.step(dt)
         return self.history()
 
-    def history(self) -> dict:
+    def history(self) -> dict[str, Any]:
         """Arrays (steps, M) for lon, lat, depth, energy [J used], phase (0 descent, 1 apogee pump, 2 ascent, 3 surface), wp
         (active waypoint index); t (steps,) [s]; fail[name] (M,) bool; first[name] (M,) end of the first step in which it was
         true, NaN if never."""
-        h: dict = {k: np.array(v) for k, v in self._rec.items()}
+        h: dict[str, Any] = {k: np.array(v) for k, v in self._rec.items()}
         h["fail"], h["first"] = self.fail, self.first
         return h
 
@@ -466,14 +469,14 @@ class GliderSim:
 CANON_DELTA_CC = 150.0  # assumed nominal dive/climb buoyancy, +-1.5 N, for the steady-flight receipts only (not the simulator)
 
 
-def _canon(P: dict) -> tuple:
+def _canon(P: dict[str, Any]) -> tuple[float, float, float, Arr, Arr]:
     """Receipt reference state: rho 1026 kg/m^3, 251 dbar, 12 degC, VBD settings 150 cc either side of its ballast point."""
     rho, p, T = 1026.0, 251.0, 12.0
     n = neutral_vbd_cc(P, rho, p, T)
     return rho, p, T, n - CANON_DELTA_CC, n + CANON_DELTA_CC
 
 
-def _gliderflight_error(Q: dict, rng: Any) -> tuple:
+def _gliderflight_error(Q: dict[str, Any], rng: Any) -> tuple[float, float, float]:
     """Max relative difference of (U, w, alpha), slocum_steady vs gliderflight SteadyStateGliderModel, on 24 shared states."""
     import gliderflight as gf
 
@@ -487,11 +490,14 @@ def _gliderflight_error(Q: dict, rng: Any) -> tuple:
     )
     gm.solve(dict(time=np.arange(n) * 60.0, pressure=p / 10.0, pitch=np.radians(pitch), buoyancy_change=vbd, density=rho))
     r, mine = gm.modelresult, slocum_steady(rho, p, 10.0, vbd, pitch, Q)
-    rel = lambda a, b: float(np.max(np.abs(a - b) / np.abs(b)))
+
+    def rel(a: Arr, b: Arr) -> float:
+        return float(np.max(np.abs(a - b) / np.abs(b)))
+
     return rel(mine.speed, r.U), rel(mine.w, r.w), rel(mine.alpha_deg, -np.degrees(r.alpha))
 
 
-def _station_flags(P: dict, current: float, horizontal: float) -> float:
+def _station_flags(P: dict[str, Any], current: float, horizontal: float) -> float:
     """Fraction of 4 members that lose station in 7 days against a uniform eastward `current` [m/s] when the glider's
     horizontal through-water speed is scaled to `horizontal` [m/s]."""
     from ..env.protocol import AnalyticEnv
@@ -505,14 +511,14 @@ def _station_flags(P: dict, current: float, horizontal: float) -> float:
     return float(sim.run(7 * 86400.0, 60.0)["fail"]["station_lost"].mean())
 
 
-def receipts(params: dict | None = None) -> list:
+def receipts(params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Run every glider receipt; returns the entries added to cafe.receipts.OUT.  `params` replaces the Seaglider defaults
     (tests use it to break units).  Degenerate (broken) physics gives failed receipts, not floating-point warnings."""
     with np.errstate(all="ignore"):
         return _receipts(params)
 
 
-def _receipts(params: dict | None) -> list:
+def _receipts(params: dict[str, Any] | None) -> list[dict[str, Any]]:
     from cafe import receipts as rc
 
     n0 = len(rc.OUT)

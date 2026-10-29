@@ -49,7 +49,8 @@ boundaryField { inlet { type fixedValue; value uniform (2 0 0); } outlet { type 
     write(d, "0/p", """dimensions [0 2 -2 0 0 0 0]; internalField uniform 0;
 boundaryField { inlet { type zeroGradient; } outlet { type fixedValue; value uniform 0; } sides { type slip; } }""", "volScalarField")
     write(d, "0/nut", """dimensions [0 2 -1 0 0 0 0]; internalField uniform 0;
-boundaryField { inlet { type calculated; value uniform 0; } outlet { type calculated; value uniform 0; } sides { type calculated; value uniform 0; } }""", "volScalarField")
+boundaryField { inlet { type calculated; value uniform 0; } outlet { type calculated; value uniform 0; }
+sides { type calculated; value uniform 0; } }""", "volScalarField")
     return dt
 
 

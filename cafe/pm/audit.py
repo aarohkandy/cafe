@@ -10,6 +10,8 @@
 3. ruff, mypy, pytest with coverage gates (cafe/pm >= 90 %, cafe/pm/physics, stats, env = 100 %).
 Exit 0 only if all pass; prints every failure.
 """
+from __future__ import annotations
+
 import ast, json, pathlib, re, subprocess, sys
 
 from .env.remote import sha256
@@ -22,10 +24,10 @@ EXEMPT = ["tests/fixtures/broken/", "cafe/pm/audit.py", "tests/test_audit.py", "
 GATES = {"cafe/pm": 90.0, "cafe/pm/physics": 100.0, "cafe/pm/stats": 100.0, "cafe/pm/env": 100.0}
 
 
-def ledger_problems(run_dir):
+def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
     run_dir = pathlib.Path(run_dir)
-    out = []
-    prev = None
+    out: list[str] = []
+    prev: pathlib.Path | None = None
     for st in STAGES:
         p = run_dir / "checkpoints" / st / "ledger.json"
         if not p.exists():
@@ -54,7 +56,7 @@ def ledger_problems(run_dir):
     return out
 
 
-def _commented_code(line):
+def _commented_code(line: str) -> bool:
     s = line.strip()
     if not s.startswith("#") or s.startswith("#!") or s.startswith("# -*-"):
         return False
@@ -72,9 +74,9 @@ def _commented_code(line):
     return bool(tree.body) and not all(isinstance(n, ast.Expr) and isinstance(getattr(n, "value", None), ast.Name) for n in tree.body)
 
 
-def banned(root=ROOT):
-    hits = []
-    files = []
+def banned(root: pathlib.Path = ROOT) -> list[str]:
+    hits: list[str] = []
+    files: list[pathlib.Path] = []
     for s in SCAN:
         p = root / s
         files += [p] if p.is_file() else [f for f in p.rglob("*") if f.is_file() and f.suffix in (".py", ".yaml", ".yml", ".json", ".md", ".sh", "")]
@@ -94,14 +96,14 @@ def banned(root=ROOT):
     return hits
 
 
-def _run(cmd):
+def _run(cmd: list[str]) -> tuple[int, str]:
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
     return r.returncode, (r.stdout + r.stderr)[-4000:]
 
 
-def coverage_problems(cov_json):
+def coverage_problems(cov_json: str | pathlib.Path) -> list[str]:
     d = json.loads(pathlib.Path(cov_json).read_text())
-    out = []
+    out: list[str] = []
     for pref, gate in GATES.items():
         tot = cov = 0
         for f, v in d["files"].items():
@@ -114,10 +116,10 @@ def coverage_problems(cov_json):
     return out
 
 
-def main(argv):
+def main(argv: list[str]) -> int:
     code_only = "--code-only" in argv
     runs = [a for a in argv if not a.startswith("--")]
-    problems = []
+    problems: list[str] = []
     for r in runs:
         problems += ledger_problems(r)
     problems += banned()

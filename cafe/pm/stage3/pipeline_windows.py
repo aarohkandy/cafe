@@ -42,33 +42,38 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import jax.numpy as jnp
+from numpy.typing import NDArray
 
 from .. import config
 from ..physics import glider, uas, usv
 from . import lbm, windows as W
 
+if TYPE_CHECKING:
+    from ..ledger import Ledger
+    from ..pipeline import Context
+
 G = 9.81
 
 
 # ---------------------------------------------------------------------------------------------------- assumptions
-def assumptions(path=None) -> dict:
+def assumptions(path: str | None = None) -> dict[str, Any]:
     """config/assumptions.yaml keys `stage3.*` -> {short key: value}. A missing key is an error that names it."""
     raw = config.assumptions()
     return {k[len("stage3."):]: v["value"] for k, v in raw.items() if k.startswith("stage3.")}
 
 
-def need(a: dict, key: str) -> Any:
+def need(a: dict[str, Any], key: str) -> Any:
     if key not in a:
         raise KeyError(f"config/assumptions.yaml has no 'stage3.{key}' (value, unit, why, replace_with)")
     return a[key]
 
 
 # ---------------------------------------------------------------------------------------------------- frames
-def rotation(heading_to_deg: float, pitch_deg: float = 0.0) -> np.ndarray:
+def rotation(heading_to_deg: float, pitch_deg: float = 0.0) -> NDArray[np.float64]:
     """ENU -> body (x forward, y left, z up). Heading is compass degrees to which x points (horizontal part), pitch is + nose up."""
     h, p = math.radians(heading_to_deg), math.radians(pitch_deg)
     x = np.array([math.sin(h) * math.cos(p), math.cos(h) * math.cos(p), math.sin(p)])
@@ -80,7 +85,7 @@ def compass(e: float, n: float) -> float:
     return math.degrees(math.atan2(e, n)) % 360.0
 
 
-def track_heading(res: dict | None, vid: str, t: float) -> float | None:
+def track_heading(res: dict[str, Any] | None, vid: str, t: float) -> float | None:
     """Median stage-1 track heading around time t: central difference of the member-median position at the records either side."""
     if not res or vid not in res.get("vehicles", {}):
         return None
@@ -97,12 +102,12 @@ def track_heading(res: dict | None, vid: str, t: float) -> float | None:
     return None if math.hypot(de, dn) < 1e-9 else compass(de, dn)
 
 
-def _val(x) -> np.ndarray:
+def _val(x: Any) -> NDArray[np.float64]:
     return np.asarray(getattr(x, "value", x), float)
 
 
 # ---------------------------------------------------------------------------------------------------- geometry, per class
-def glider_vehicle(P: dict, a: dict, platform: str, depth: float) -> W.Vehicle:
+def glider_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, depth: float) -> W.Vehicle:
     """Hull (ellipsoid) + wings (flat plate). Seaglider: length from the yaml; Slocum has no length in its yaml (stage3.slocum.*)."""
     if P["kind"] == "seaglider":
         L, D = P["length_m"], need(a, "glider.hull_diameter_m")
@@ -117,7 +122,7 @@ def glider_vehicle(P: dict, a: dict, platform: str, depth: float) -> W.Vehicle:
                      thickness=need(a, "glider.hull_thickness_m"), depth=depth, hull=0, extra=dict(resolve_dim=D, part="body"))
 
 
-def usv_vehicle(P: dict, a: dict, platform: str, part: str) -> W.Vehicle:
+def usv_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, part: str) -> W.Vehicle:
     if part == "hull":
         draft = need(a, "usv.hull_draft_m")
         kc = P["keel_area_m2"] / P["keel_span_m"]
@@ -132,7 +137,7 @@ def usv_vehicle(P: dict, a: dict, platform: str, part: str) -> W.Vehicle:
                      extra=dict(resolve_dim=c, part="wing"))
 
 
-def uas_vehicle(P: dict, a: dict, platform: str) -> W.Vehicle:
+def uas_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str) -> W.Vehicle:
     bx, by, bz = need(a, "uas.body_radii_m")
     arm_l, arm_w, arm_t = need(a, "uas.arm_length_m"), need(a, "uas.arm_width_m"), need(a, "uas.arm_thickness_m")
     shapes = [dict(type="ellipsoid", center=(0.0, 0.0, 0.0), radii=(bx, by, bz)),
@@ -148,7 +153,7 @@ def _coef(force: float, rho: float, v: float, area: float | None) -> float:
     return float(force / (0.5 * rho * v * v * area))
 
 
-def glider_case(ctx, w: dict, P: dict, veh: W.Vehicle, a: dict, heading: float | None) -> dict:
+def glider_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle, a: dict[str, Any], heading: float | None) -> dict[str, Any]:
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
     z = -need(a, "glider.window_depth_m")
     cur = _val(env.current(lon, lat, z, t))[:2]
@@ -180,7 +185,8 @@ def glider_case(ctx, w: dict, P: dict, veh: W.Vehicle, a: dict, heading: float |
                 info=dict(through_water_ms=U, glide_deg=th, alpha_deg=al, pitch_deg=pitch))
 
 
-def usv_case(ctx, w: dict, P: dict, veh: W.Vehicle, a: dict, heading: float | None, part: str) -> dict:
+def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle, a: dict[str, Any], heading: float | None,
+             part: str) -> dict[str, Any]:
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
     wind = _val(env.wind(lon, lat, P["anemometer_m"], t))[:2]
     cur = _val(env.current(lon, lat, P["current_z_m"], t))[:2]
@@ -221,7 +227,7 @@ def usv_case(ctx, w: dict, P: dict, veh: W.Vehicle, a: dict, heading: float | No
                 info=dict(aws_ms=aws, alpha_deg=alpha))
 
 
-def uas_case(ctx, w: dict, P: dict, veh: W.Vehicle, a: dict, heading: float | None) -> dict:
+def uas_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle, a: dict[str, Any], heading: float | None) -> dict[str, Any]:
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
     wind = _val(env.wind(lon, lat, need(a, "uas.window_altitude_m"), t))[:2]
     air = env.air(lon, lat, t)
@@ -246,7 +252,7 @@ def uas_case(ctx, w: dict, P: dict, veh: W.Vehicle, a: dict, heading: float | No
 
 
 # ---------------------------------------------------------------------------------------------------- resolution
-def fit_window(veh: W.Vehicle, speed: float, budget: float, a: dict) -> dict:
+def fit_window(veh: W.Vehicle, speed: float, budget: float, a: dict[str, Any]) -> dict[str, Any]:
     """dx, steps and box so that cells x steps <= budget where the body allows. The shortest acceptable run is `min_flow_throughs`
     box transits; dx is the 10-cells-per-delta value coarsened by the fourth root of (cells x shortest run) / budget (cells ~ dx^-3,
     transit steps ~ dx^-1), then capped so the smallest body dimension keeps `min_cells_across` cells. The run then takes as many
@@ -269,7 +275,7 @@ def fit_window(veh: W.Vehicle, speed: float, budget: float, a: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------------------------------- the stage
-def _load_res(ctx) -> dict | None:
+def _load_res(ctx: Context) -> dict[str, Any] | None:
     f = pathlib.Path(ctx.run_dir) / "stage1" / "res.pkl"
     # res.pkl is this pipeline's own private checkpoint (the same file s_windows reads, a ledger input whose sha256 `make audit` checks)
     return pickle.loads(f.read_bytes()) if f.exists() else None
@@ -288,7 +294,7 @@ def _fea_child(job: str, out: str) -> int:
     return 0
 
 
-def _fea(veh: W.Vehicle, r: dict, a: dict, timeout_s: float | None = None) -> dict:
+def _fea(veh: W.Vehicle, r: dict[str, Any], a: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
     """The FEA of the pressure hull in a child process that is killed at `timeout_s`: gmsh and ccx cannot be interrupted from inside,
     and the stage's wall-clock share is not negotiable."""
     if veh.extra.get("fea") is None:
@@ -308,16 +314,16 @@ def _fea(veh: W.Vehicle, r: dict, a: dict, timeout_s: float | None = None) -> di
         return dict(run=True, seconds=time.perf_counter() - t0, **json.loads(out.read_text()))
 
 
-def _jit_cache(ctx) -> None:
+def _jit_cache(ctx: Context) -> None:
     """Persistent XLA compilation cache under the mission cache: a rerun (or a window of the same shape) skips the compile."""
     import jax
     cache = getattr(ctx, "cache", None)
     if cache is not None:
-        jax.config.update("jax_compilation_cache_dir", str(pathlib.Path(cache) / "jax"))
-        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)
+        jax.config.update("jax_compilation_cache_dir", str(pathlib.Path(cache) / "jax"))  # type: ignore[no-untyped-call]  # jax stub
+        jax.config.update("jax_persistent_cache_min_compile_time_secs", 0.0)  # type: ignore[no-untyped-call]  # jax stub
 
 
-def stage_share_s(ctx) -> float | None:
+def stage_share_s(ctx: Context) -> float | None:
     """The stage's wall-clock share, plan["shares"]["stage3"] * plan["budget_s"] (None when the plan has no wall-clock budget)."""
     plan = ctx.plan
     if "shares" not in plan or "budget_s" not in plan:
@@ -325,12 +331,12 @@ def stage_share_s(ctx) -> float | None:
     return float(plan["shares"]["stage3"] * plan["budget_s"])
 
 
-def why_failed(checks: list, res: dict, wlog: dict, error: str | None = None) -> list:
+def why_failed(checks: list[dict[str, Any]], res: dict[str, Any], wlog: dict[str, Any], error: str | None = None) -> list[str]:
     """One plain sentence per reason a window is not ok: resolution below the rule, y+ outside 30-300, wall model unvalidated, no
     convergence, ... Every failing check contributes; nothing fails without a sentence."""
     if error:
         return [error]
-    out = []
+    out: list[str] = []
     cpd = res["delta_te"] / res["dx"]
     if cpd < 5.0:
         out.append(f"resolution below the rule: {cpd:.1f} cells per boundary-layer thickness at dx = {res['dx']:.3g} m (BRIEF 2.6: 5-10)")
@@ -363,16 +369,16 @@ def why_failed(checks: list, res: dict, wlog: dict, error: str | None = None) ->
     return out
 
 
-def _row(ctx, vid: str, cls: str, w: dict, part: str, platform: str, res: dict | None, a: dict, n_parts: int, win_s: float | None,
-         meter: dict) -> dict:
+def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platform: str, res: dict[str, Any] | None, a: dict[str, Any], n_parts: int,
+         win_s: float | None, meter: dict[str, float]) -> dict[str, Any]:
     t0 = time.perf_counter()
     les = ctx.plan["les"]
-    base = dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, reasons=[],
+    base: dict[str, Any] = dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, reasons=[],
                 cd=None, cd_spread=None, cl=None, cl_spread=None, added_resistance=None, cd_hangar=None, cl_hangar=None,
                 cd_hangar_source=None, fea=dict(run=False, reason="the window did not run"), label=les["label"] if les["cpu_fallback"] else None,
                 wall_share_s=win_s)
 
-    def fail(msg: str) -> dict:
+    def fail(msg: str) -> dict[str, Any]:
         return dict(base, error=msg[:300], reasons=[msg[:300]], wall_s=time.perf_counter() - t0)
     if win_s is not None and win_s < need(a, "min_window_s"):
         return fail(f"the stage-3 wall-clock budget is spent: {win_s:.1f} s left for this window (least that can run: {need(a, 'min_window_s')} s)")
@@ -456,7 +462,7 @@ def _row(ctx, vid: str, cls: str, w: dict, part: str, platform: str, res: dict |
 PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}
 
 
-def run(ctx, wins: dict, L) -> dict:
+def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[str, list[dict[str, Any]]]:
     """The stage-3 call. Returns {vid: [row, ...]}; every window of every vehicle is attempted (a window that cannot run gives a row
     with `error` and ok False). Per-window self-checks live in the rows; L gets only 'the stage did what it promises'.
     Wall clock: the stage's share (stage_share_s) is split over the windows still to run, so time a window does not use passes to
@@ -473,7 +479,7 @@ def run(ctx, wins: dict, L) -> dict:
     todo = [(vid, w, part) for vid, ws in wins.items() for w in ws for part in PARTS[ctx.classes[vid]]]
     _jit_cache(ctx)
     meter = dict(rate=float(ctx.plan["les"].get("rate") or 1e6), compile_s=float(need(a, "compile_s_guess")), n=0)
-    rows: dict[str, list] = {vid: [] for vid in wins}
+    rows: dict[str, list[dict[str, Any]]] = {vid: [] for vid in wins}
     for i, (vid, w, part) in enumerate(todo):
         win_s = None if share is None else (share - (time.perf_counter() - t_stage)) / (len(todo) - i)
         r = _row(ctx, vid, ctx.classes[vid], w, part, plat[vid], res, a, len(PARTS[ctx.classes[vid]]), win_s, meter)

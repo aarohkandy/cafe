@@ -23,9 +23,11 @@ import functools
 import os
 import pathlib
 import shutil
+from typing import Any, cast
 
 import numpy as np
 import yaml
+from numpy.typing import ArrayLike, NDArray
 
 from .. import Tagged
 
@@ -33,9 +35,11 @@ PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
 C0 = 299792458.0
 NO_LINK_DB = -200.0                  # margin returned when a link is physically impossible (beyond the radio horizon)
 THORP_ONLY_LABEL = "Thorp only, Bellhop unavailable"
+F = NDArray[np.float64]
+FA = float | F
 
 
-def _plain(node):
+def _plain(node: Any) -> Any:
     """radios.yaml marks assumed numbers as {value, unit, assumed: true, why} leaves (so the credibility report counts them);
     the link models read the bare value."""
     if isinstance(node, dict):
@@ -44,23 +48,23 @@ def _plain(node):
 
 
 @functools.lru_cache(None)
-def _yaml(name: str) -> dict:
+def _yaml(name: str) -> dict[str, Any]:
     d = yaml.safe_load((PLATFORMS / name).read_text())
-    return _plain(d) if name == "radios.yaml" else d
+    return cast(dict[str, Any], _plain(d) if name == "radios.yaml" else d)
 
 
 # ---------------------------------------------------------------- RF
-def radio_horizon_km(ht, hr=0.0):
+def radio_horizon_km(ht: FA, hr: FA = 0.0) -> F:
     """4/3-earth radio horizon between antennas at heights ht, hr [m]: 4.12 (sqrt ht + sqrt hr) km (Skolnik; ITU-R P.834)."""
     return 4.12 * (np.sqrt(np.maximum(ht, 0.0)) + np.sqrt(np.maximum(hr, 0.0)))
 
 
-def ament_rho(hs, grazing, wavelength):
+def ament_rho(hs: FA, grazing: FA, wavelength: FA) -> F:
     """Specular reflection reduction rho_s = exp[-2 (2 pi sigma sin(psi)/lam)^2], sigma = Hs/4 (Ament 1953). MODELLED."""
     return np.exp(-2.0 * (2 * np.pi * (hs / 4.0) * np.sin(grazing) / wavelength) ** 2)
 
 
-def two_ray_loss_db(d, ht, hr, hs, f_hz):
+def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA) -> F:
     """Path loss [dB] over the sea at ground range d [m], antenna heights ht, hr [m] above the mean surface, significant
     wave height hs [m], frequency f_hz. Field = |1 - rho_s (r1/r2) exp(-j 2 pi (r2-r1)/lam)| x free space at the direct
     distance r1: reflection coefficient -1 (valid for grazing angles below ~1-2 deg, i.e. d >> 100 (ht+hr)/ lam-scale
@@ -72,14 +76,14 @@ def two_ray_loss_db(d, ht, hr, hs, f_hz):
     r1, r2 = np.hypot(d, ht - hr), np.hypot(d, ht + hr)
     rho = ament_rho(hs, (ht + hr) / r2, lam)
     field = np.abs(1.0 - rho * (r1 / r2) * np.exp(-2j * np.pi * (r2 - r1) / lam))
-    return 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(np.maximum(field, 1e-12))
+    return cast(F, 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(np.maximum(field, 1e-12)))
 
 
-def _radio(radio):
+def _radio(radio: str | dict[str, Any]) -> dict[str, Any]:
     return radio if isinstance(radio, dict) else _yaml("radios.yaml")["radios"][radio]
 
 
-def rf_margin(d, ht, hr, hs, radio="rfd900x"):
+def rf_margin(d: FA, ht: FA, hr: FA, hs: FA, radio: str | dict[str, Any] = "rfd900x") -> F:
     """Link margin [dB] = Pt + Gt + Gr - cable - misc - L(two-ray) - sensitivity; NO_LINK_DB beyond the radio horizon.
     d [m] ground range; ht, hr [m] antenna heights above the surface; hs [m] significant wave height (local WRF/UMWM swh)."""
     r = _radio(radio)
@@ -89,7 +93,7 @@ def rf_margin(d, ht, hr, hs, radio="rfd900x"):
 
 
 # ---------------------------------------------------------------- Iridium
-def iridium_session(n_bytes, rng, members, service="sbd", direction="MO"):
+def iridium_session(n_bytes: FA, rng: np.random.Generator, members: int, service: str = "sbd", direction: str = "MO") -> tuple[NDArray[np.bool_], F]:
     """One message of n_bytes (scalar or (members,)) through Iridium: -> (success (members,) bool, latency_s (members,)).
     SBD is split into ceil(n/340) MO (270 MT) sessions; RUDICS is one call at 2.4 kbps. Each session is retried up to
     max_attempts; a failed attempt costs fail_cost_s. Availability and latency only, no range (BRIEF 2.8). Latency
@@ -116,19 +120,19 @@ def iridium_session(n_bytes, rng, members, service="sbd", direction="MO"):
 
 
 # ---------------------------------------------------------------- acoustics
-def thorp_db_per_km(f_khz):
+def thorp_db_per_km(f_khz: FA) -> F:
     """Thorp absorption [dB/km], f in kHz: 0.11 f2/(1+f2) + 44 f2/(4100+f2) + 2.75e-4 f2 + 0.003."""
     f2 = np.square(f_khz)
-    return 0.11 * f2 / (1 + f2) + 44 * f2 / (4100 + f2) + 2.75e-4 * f2 + 0.003
+    return cast(F, 0.11 * f2 / (1 + f2) + 44 * f2 / (4100 + f2) + 2.75e-4 * f2 + 0.003)
 
 
-def acoustic_tl_db(r_m, f_khz, k=1.5):
+def acoustic_tl_db(r_m: FA, f_khz: FA, k: float = 1.5) -> F:
     """Stojanovic path loss 10 log A = k 10 log10(r/1 m) + r_km 10 log a(f) [dB]; k=1 cylindrical, 2 spherical."""
     r = np.maximum(r_m, 1.0)
     return 10 * k * np.log10(r) + thorp_db_per_km(f_khz) * r / 1e3
 
 
-def stojanovic_noise_db(f_khz, wind, shipping=0.5):
+def stojanovic_noise_db(f_khz: FA, wind: FA, shipping: float = 0.5) -> F:
     """Ambient noise PSD [dB re 1 uPa^2/Hz] at f_khz: turbulence + shipping (s in 0..1) + wind (w m/s) + thermal, power sum."""
     lf = np.log10(f_khz)
     turb = 17 - 30 * lf
@@ -138,19 +142,19 @@ def stojanovic_noise_db(f_khz, wind, shipping=0.5):
     return 10 * np.log10(sum(10 ** (x / 10) for x in (turb, ship, wnd, therm)))
 
 
-def band_noise_db(f_lo, f_hi, wind, shipping=0.5, n=33):
+def band_noise_db(f_lo: float, f_hi: float, wind: FA, shipping: float = 0.5, n: int = 33) -> F:
     """In-band noise level [dB re 1 uPa^2]: the PSD integrated over [f_lo, f_hi] kHz (trapezoid, power domain)."""
     f = np.linspace(f_lo, f_hi, n)
     psd = 10 ** (stojanovic_noise_db(f, np.asarray(wind, float)[..., None], shipping) / 10)
     return 10 * np.log10(np.trapezoid(psd, f * 1e3, axis=-1))
 
 
-def _band(modem, band):
-    return _yaml("modems.yaml")["modems"][modem]["bands"][band]
+def _band(modem: str, band: str) -> dict[str, Any]:
+    return cast(dict[str, Any], _yaml("modems.yaml")["modems"][modem]["bands"][band])
 
 
 @functools.lru_cache(None)
-def implementation_loss_db(modem, band, k=1.5):
+def implementation_loss_db(modem: str, band: str, k: float = 1.5) -> float:
     """Everything the budget does not model (multipath, platform noise, directivity, detector, true SL) in dB. Derived so
     the budget reproduces the vendor's published range at the reference conditions with anchor_margin_db to spare
     (modems.yaml defaults); bands with no published range copy another band's value (`implementation_loss_like`)."""
@@ -158,26 +162,29 @@ def implementation_loss_db(modem, band, k=1.5):
     if "implementation_loss_like" in b:
         return implementation_loss_db(*b["implementation_loss_like"], k)
     fc = np.mean(b["f_khz"])
-    nl = band_noise_db(*b["f_khz"], d["ref_wind_ms"], d["ref_shipping"])
+    f_lo, f_hi = b["f_khz"]
+    nl = band_noise_db(f_lo, f_hi, d["ref_wind_ms"], d["ref_shipping"])
     return float(b["sl_db"] - acoustic_tl_db(b["range_km"] * 1e3, fc, k) - nl - b["snr_req_db"] - d["anchor_margin_db"])
 
 
-def acoustic_margin(r, modem="benthos_atm960", band="MF", wind=5.0, shipping=0.5, k=1.5, tl_extra=0.0):
+def acoustic_margin(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: FA = 5.0, shipping: float = 0.5, k: float = 1.5,
+                    tl_extra: FA = 0.0) -> F:
     """Thorp-budget margin [dB] = SL - TL - NL(band, wind) - SNR_req - implementation loss (+ tl_extra dB of extra
     transmission loss, e.g. Bellhop excess). r [m] range, wind [m/s] the WRF 10 m wind at the receiver."""
     b = _band(modem, band)
     tl = acoustic_tl_db(r, np.mean(b["f_khz"]), k) + tl_extra
-    return b["sl_db"] - tl - band_noise_db(*b["f_khz"], wind, shipping) - b["snr_req_db"] - implementation_loss_db(modem, band, k)
+    f_lo, f_hi = b["f_khz"]
+    return cast(F, b["sl_db"] - tl - band_noise_db(f_lo, f_hi, wind, shipping) - b["snr_req_db"] - implementation_loss_db(modem, band, k))
 
 
-def sound_speed_profile(z, t, SA=None, SP=None, lon=0.0, lat=0.0):
+def sound_speed_profile(z: FA, t: FA, SA: FA | None = None, SP: FA | None = None, lon: float = 0.0, lat: float = 0.0) -> F:
     """TEOS-10 sound speed [m/s] on a column: z [m, up, <= 0], in-situ temperature t [degC], and either SA [g/kg] or SP
     (practical salinity; converted with gsw.SA_from_SP at lon, lat)."""
     import gsw
     z = np.asarray(z, float)
     p = gsw.p_from_z(z, lat)
     SA = gsw.SA_from_SP(SP, p, lon, lat) if SA is None else SA
-    return gsw.sound_speed(SA, gsw.CT_from_t(SA, t, p), p)
+    return cast(F, gsw.sound_speed(SA, gsw.CT_from_t(SA, t, p), p))
 
 
 # ---------------------------------------------------------------- Bellhop
@@ -193,7 +200,7 @@ def bellhop_available() -> bool:
     return _bellhop_dir() is not None
 
 
-def _run_bellhop(r_m, f_hz, z, c, tx_depth, rx_depth, water_depth):
+def _run_bellhop(r_m: ArrayLike, f_hz: float, z: ArrayLike, c: F, tx_depth: float, rx_depth: float, water_depth: float) -> F:
     """Incoherent TL [dB] (Bellhop 'T' option includes Thorp volume attenuation) at ranges r_m (increasing, > 0)."""
     import arlpy.uwapm as pm
     os.environ["PATH"] = f"{_bellhop_dir()}{os.pathsep}{os.environ['PATH']}"          # arlpy shells out to `bellhop.exe`
@@ -213,20 +220,22 @@ def _run_bellhop(r_m, f_hz, z, c, tx_depth, rx_depth, water_depth):
     p = pm.compute_transmission_loss(env, mode=pm.incoherent, model="bellhop")
     if p is None:
         raise RuntimeError("bellhop.exe ran but produced no field (see its .prt file)")
-    return -20 * np.log10(np.maximum(np.abs(np.asarray(p)[0]), 1e-30))
+    return cast(F, -20 * np.log10(np.maximum(np.abs(np.asarray(p)[0]), 1e-30)))
 
 
-def bellhop_tl(r_m, f_khz, z, c, tx_depth=1.0, rx_depth=5.0, water_depth=4000.0, n_grid=48):
+def bellhop_tl(r_m: ArrayLike, f_khz: float, z: ArrayLike, c: ArrayLike, tx_depth: float = 1.0, rx_depth: float = 5.0, water_depth: float = 4000.0,
+               n_grid: int = 48) -> F:
     """Bellhop incoherent TL [dB] for any shape of r_m: one run on an `n_grid`-point range grid spanning r_m, interpolated."""
     r = np.asarray(r_m, float)
     lo = max(r.min(), 100.0)
     grid = np.linspace(lo, max(r.max(), 1.02 * lo), n_grid)                           # Bellhop wants strictly increasing ranges
     tl = _run_bellhop(grid, f_khz * 1e3, z, np.asarray(c, float), tx_depth, rx_depth, water_depth)
-    return np.interp(r, grid, tl)
+    return cast(F, np.interp(r, grid, tl))
 
 
-def acoustic_link(r, modem="benthos_atm960", band="MF", wind=5.0, ssp=None, shipping=0.5, k=1.5,
-                  tx_depth=1.0, rx_depth=5.0, water_depth=4000.0, ambiguous_db=None):
+def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: FA = 5.0, ssp: tuple[FA, F] | None = None,
+                  shipping: float = 0.5, k: float = 1.5, tx_depth: float = 1.0, rx_depth: float = 5.0, water_depth: float = 4000.0,
+                  ambiguous_db: float | None = None) -> dict[str, Any]:
     """Margin for every range in r. The Thorp budget decides every link whose margin is outside +-ambiguous_db of 0; the
     ambiguous ones are re-done with Bellhop on ssp = (z, c) (z up, <=0), which is the high-fidelity path.
 
@@ -262,15 +271,15 @@ def acoustic_link(r, modem="benthos_atm960", band="MF", wind=5.0, ssp=None, ship
 
 
 # ---------------------------------------------------------------- receipts
-def receipts() -> list:
+def receipts() -> list[dict[str, Any]]:
     """Run every comms receipt through cafe.receipts and return the entries it recorded."""
     from cafe import receipts as R
     n0, g = len(R.OUT), "Comms"
 
-    def rc(claim, value, ref, tol, unit, src, rel=True):
+    def rc(claim: str, value: Any, ref: float, tol: float, unit: str, src: str, rel: bool = True) -> None:
         R.receipt(g, claim, float(value), ref, tol, unit, src, rel=rel)
 
-    def br(claim, value, lo, hi, unit, src):
+    def br(claim: str, value: Any, lo: float, hi: float, unit: str, src: str) -> None:
         R.bracket(g, claim, float(value), lo, hi, unit, src)
 
     f, lam = 915e6, C0 / 915e6

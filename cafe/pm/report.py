@@ -25,9 +25,11 @@ import pathlib
 import pickle
 import re
 import warnings
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from . import budget, credibility
 from .audit import STAGES
@@ -61,13 +63,13 @@ class Trace:
     def __init__(self, run: pathlib.Path):
         self.run = run
         self.led = {st: _jl(run / "checkpoints" / st / "ledger.json") for st in STAGES}
-        self.rows: dict[str, dict] = {}
+        self.rows: dict[str, dict[str, Any]] = {}
 
     def _row(self, stage: str, rid: str, kind: str, name: str, ok: bool, got: str = "", limit: str = "", sha: str = "") -> None:
         self.rows.setdefault(rid, dict(id=rid, stage=stage, ledger=f"checkpoints/{stage}/ledger.json", kind=kind, name=name, ok=ok,
                                        got=got, limit=limit, sha256=sha))
 
-    def ref(self, stage: str, check: str | None = None, output: str | None = None, label: str | None = None) -> dict:
+    def ref(self, stage: str, check: str | None = None, output: str | None = None, label: str | None = None) -> dict[str, Any]:
         """The receipt for a number from `stage`: the first ledger check named `check*`, else the hash of its `output` file,
         else the config hash of the stage's ledger; a missing ledger gives a receipt that check_traceability flags."""
         L = self.led.get(stage)
@@ -88,28 +90,28 @@ class Trace:
                 self._row(stage, rid, "config", "config_hash", True, sha=L["config_hash"])
         return dict(stage=label or stage, ledger=f"checkpoints/{stage}/ledger.json", receipt=rid)
 
-    def file_ref(self, path: pathlib.Path) -> dict:
+    def file_ref(self, path: pathlib.Path) -> dict[str, Any]:
         """A file the report stage itself writes: its hash now, its ledger when the stage closes."""
         rid = f"report:output:{path.name}"
         self._row("report", rid, "output", path.name, True, sha=sha256(path))
         return dict(stage="report", ledger="checkpoints/report/ledger.json", receipt=rid)
 
 
-def num(v: Any, unit: str, ref: dict, source: str, unc: Any = None, **extra: Any) -> dict:
+def num(v: Any, unit: str, ref: dict[str, Any], source: str, unc: Any = None, **extra: Any) -> dict[str, Any]:
     return dict(value=_f(v), unit=unit, stage=ref["stage"], source=source, uncertainty=credibility._clean(unc), receipt=ref["receipt"],
                 ledger=ref["ledger"], **extra)
 
 
-def vals(v: Any, unit: str, ref: dict, source: str, unc: Any = None, **extra: Any) -> dict:
+def vals(v: Any, unit: str, ref: dict[str, Any], source: str, unc: Any = None, **extra: Any) -> dict[str, Any]:
     return dict(values=credibility._clean(np.asarray(v, float).tolist()), unit=unit, stage=ref["stage"], source=source, uncertainty=credibility._clean(unc),
                 receipt=ref["receipt"], ledger=ref["ledger"], **extra)
 
 
-def tnum(t: float | None, ref: dict, source: str) -> dict | None:
+def tnum(t: float | None, ref: dict[str, Any], source: str) -> dict[str, Any] | None:
     return None if t is None else num(t, "s since 1970-01-01T00:00:00Z", ref, source, utc=_utc(t))
 
 
-def _walk(o: Any, path: str = ""):
+def _walk(o: Any, path: str = "") -> Iterator[tuple[str, str, Any]]:
     """Yield ("node", path, d) for every number node and ("bare", path, x) for a number outside one."""
     if isinstance(o, dict):
         if "values" in o or ("value" in o and (o["value"] is None or isinstance(o["value"], (int, float)))):
@@ -124,7 +126,7 @@ def _walk(o: Any, path: str = ""):
         yield "bare", path, o
 
 
-def check_traceability(report: dict) -> list[str]:
+def check_traceability(report: dict[str, Any]) -> list[str]:
     """Every number is a node with stage, source, uncertainty, unit, receipt and ledger, and its receipt is a passing row of the receipts table."""
     rows = {r["id"]: r for r in report.get("receipts", [])}
     bad = []
@@ -147,7 +149,7 @@ def check_traceability(report: dict) -> list[str]:
 
 # ------------------------------------------------------------------------------------------------------ builders
 
-def _stat(e: dict, ref: dict, src: str) -> dict:
+def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     """The verdict block shared by a vehicle and a link."""
     v = e["verdict"]
     unc = dict(kind=f"{v['method']} interval", conf=v["conf"], lo=v["fail_lo"], hi=v["fail_hi"])
@@ -159,18 +161,18 @@ def _stat(e: dict, ref: dict, src: str) -> dict:
     return d
 
 
-def _sens(e: dict, ref: dict, src: str) -> dict:
+def _sens(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     p = e["sensitivity"]["param"]
     return dict(param=p, s1=None if p is None else num(e["sensitivity"]["S1"][p], "fraction of variance", ref, src))
 
 
-def _top3(e: dict, ref: dict, src: str) -> list:
+def _top3(e: dict[str, Any], ref: dict[str, Any], src: str) -> list[Any]:
     """The three perturbation parameters with the largest Sobol first-order index (EASI estimate, stats.sensitivity), largest first."""
     s1 = e["sensitivity"]["S1"] or {}
     return [dict(param=p, s1=num(x, "fraction of variance", ref, f"{src}.sensitivity.S1.{p}")) for p, x in sorted(s1.items(), key=lambda kv: -kv[1])[:3]]
 
 
-def _fix(flip: dict | None, vid: str, tr: Trace) -> dict:
+def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
     """The "what would fix it" line of one vehicle from emulator/flip.json (BRIEF 2.5): the smallest change that flips the verdict, and what was tried."""
     if flip is None:
         return dict(available=False, reason=NOT_PRESENT.format("emulator/flip.json"))
@@ -179,7 +181,7 @@ def _fix(flip: dict | None, vid: str, tr: Trace) -> dict:
         return dict(available=True, needed=False)
     ref, src = tr.ref("emulator", output="flip.json"), f"emulator/flip.json vehicles.{vid}"
 
-    def one(t: dict, path: str) -> dict:
+    def one(t: dict[str, Any], path: str) -> dict[str, Any]:
         """A tried change: its P(fail) with the interval of its method, and how it was answered."""
         kind = "conformal 90 % interval (emulator)" if t["method"] == "EMULATED" else "Wilson interval (Stage 1)"
         d = dict(change=t["change"], method=t["method"], reason=t["reason"], verdict=t.get("verdict"),
@@ -194,7 +196,8 @@ def _fix(flip: dict | None, vid: str, tr: Trace) -> dict:
                 best=one(f["best"], ".best") if f["best"] else None, tried=[one(t, f".tried[{i}]") for i, t in enumerate(f["tried"])])
 
 
-def _vehicles(s1b: dict, s1: dict | None, mission: dict, cred: dict, tr: Trace, cred_ref: dict, flip: dict | None = None) -> dict:
+def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str, Any], cred: dict[str, Any], tr: Trace, cred_ref: dict[str, Any],
+              flip: dict[str, Any] | None = None) -> dict[str, Any]:
     ref = tr.ref("stage1b", check="lhs_stratified", output="summary.json")
     plat = {v["id"]: v["platform"] for v in mission["vehicles"]}
     out = {}
@@ -214,7 +217,7 @@ def _vehicles(s1b: dict, s1: dict | None, mission: dict, cred: dict, tr: Trace, 
     return out
 
 
-def _links(s1b: dict, tr: Trace) -> dict:
+def _links(s1b: dict[str, Any], tr: Trace) -> dict[str, Any]:
     ref = tr.ref("stage1b", check="lhs_stratified", output="summary.json")
     out = {}
     for lid, e in s1b["summary"]["links"].items():
@@ -226,7 +229,7 @@ def _links(s1b: dict, tr: Trace) -> dict:
     return out
 
 
-def _load_res(run: pathlib.Path, tr: Trace) -> tuple[dict | None, str]:
+def _load_res(run: pathlib.Path, tr: Trace) -> tuple[dict[str, Any] | None, str]:
     """res.pkl of stage 1b, unpickled only if its hash matches the ledger's record of it."""
     p = run / "stage1b" / "res.pkl"
     L = tr.led["stage1b"]
@@ -239,7 +242,7 @@ def _load_res(run: pathlib.Path, tr: Trace) -> tuple[dict | None, str]:
     return pickle.loads(p.read_bytes()), ""
 
 
-def _failed(r: dict) -> np.ndarray:
+def _failed(r: dict[str, Any]) -> np.ndarray:
     return np.logical_or.reduce([np.asarray(v, bool) for v in r["fail"].values()]) if r["fail"] else np.zeros(r["lon"].shape[1], bool)
 
 
@@ -247,7 +250,7 @@ def _unwrap(lon: np.ndarray, c: float) -> np.ndarray:
     return np.mod(np.asarray(lon, float) - c + 180.0, 360.0) - 180.0 + c
 
 
-def _pts(lon: np.ndarray, lat: np.ndarray, n: int = 120) -> list:
+def _pts(lon: np.ndarray, lat: np.ndarray, n: int = 120) -> list[Any]:
     """[lon, lat] pairs without NaN, at most n of them, longitudes in [-180, 180)."""
     ok = np.isfinite(lon) & np.isfinite(lat)
     lon, lat = lon[ok], lat[ok]
@@ -255,13 +258,13 @@ def _pts(lon: np.ndarray, lat: np.ndarray, n: int = 120) -> list:
     return [[float(np.mod(lon[j] + 180.0, 360.0) - 180.0), float(lat[j])] for j in i]
 
 
-def _median_track(r: dict, c: float) -> tuple[np.ndarray, np.ndarray]:
+def _median_track(r: dict[str, Any], c: float) -> tuple[np.ndarray, np.ndarray]:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         return np.nanmedian(_unwrap(r["lon"], c), 1), np.nanmedian(np.asarray(r["lat"], float), 1)
 
 
-def _map(mission: dict, res: dict | None, why: str, wins: dict | None, tr: Trace, cfg: dict) -> dict:
+def _map(mission: dict[str, Any], res: dict[str, Any] | None, why: str, wins: dict[str, Any] | None, tr: Trace, cfg: dict[str, Any]) -> dict[str, Any]:
     if res is None:
         return dict(available=False, reason=why)
     b = mission["box"]
@@ -291,7 +294,7 @@ def _map(mission: dict, res: dict | None, why: str, wins: dict | None, tr: Trace
     return out
 
 
-def _reach(mission: dict, env: Any, tr: Trace) -> dict:
+def _reach(mission: dict[str, Any], env: Any, tr: Trace) -> dict[str, Any]:
     """Where each drifting vehicle can get to within reach.horizon_h of its deploy, in the environment's currents at the deploy time: the fastest
     route over a 41 x 41 grid (cafe.reach: Zermelo speed made good, Dijkstra over 16 neighbours; land and water outside the ingested data blocked), drawn as the
     farthest reachable cell in each of 24 bearings. A UAS is not drawn: it flies sorties from the ship."""
@@ -317,7 +320,8 @@ def _reach(mission: dict, env: Any, tr: Trace) -> dict:
     return dict(available=True, vehicles=out, horizon=num(hours, "h", ref, "config/assumptions.yaml reach.horizon_h"))
 
 
-def _reach_one(legacy: Any, env: Any, v: dict, cls: str, speed: float, hours: float, allow: float, ref: dict, src: str, n: int = 41, nb: int = 24) -> dict:
+def _reach_one(legacy: Any, env: Any, v: dict[str, Any], cls: str, speed: float, hours: float, allow: float, ref: dict[str, Any], src: str, n: int = 41,
+               nb: int = 24) -> dict[str, Any]:
     d = v["deploy"]
     R = (speed + allow) * hours * 3600.0
     xs = np.linspace(-R, R, n)
@@ -358,7 +362,7 @@ def utc_s(s: str) -> float:
     return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc).timestamp()
 
 
-def _env(mission: dict, env: Any, res: dict | None, wins: dict | None, summ: dict, tr: Trace) -> dict:
+def _env(mission: dict[str, Any], env: Any, res: dict[str, Any] | None, wins: dict[str, Any] | None, summ: dict[str, Any], tr: Trace) -> dict[str, Any]:
     cls = {v: e["cls"] for v, e in summ["summary"]["vehicles"].items()}
     wref = tr.ref("windows", output="windows.json")
     forcing = {}
@@ -385,9 +389,11 @@ def _env(mission: dict, env: Any, res: dict | None, wins: dict | None, summ: dic
         i = np.flatnonzero(ok)[np.unique(np.linspace(0, max(n_ok - 1, 0), min(n_ok, 24)).astype(int))]
         t, lo, la = np.asarray(r["t"], float)[i], lon[i], lat[i]
         w, h, cur = env.wind(lo, la, 10.0, t), env.waves(lo, la, t)["Hs"], env.current(lo, la, 0.0, t)
-        speed = lambda a: np.hypot(*np.moveaxis(np.asarray(a.value, float), -1, 0))        # noqa: E731
 
-        def q(a: Any, v: np.ndarray, unit: str, what: str) -> dict:
+        def speed(a: Any) -> NDArray[np.float64]:
+            return np.asarray(np.hypot(*np.moveaxis(np.asarray(a.value, np.float64), -1, 0)), np.float64)
+
+        def q(a: Any, v: np.ndarray, unit: str, what: str) -> dict[str, Any]:
             return vals(v, unit, ref, f"{a.source} ({what} at the stage1b median track)", None if a.uncertainty is None else float(np.mean(a.uncertainty)))
         out["vehicles"][vid] = dict(t=vals(t, "s since 1970-01-01T00:00:00Z", ref, "stage1b/res.pkl vehicles.t"),
                                     wind10=q(w, speed(w), "m/s", "10 m wind speed"), hs=q(h, np.asarray(h.value, float), "m", "Hs"),
@@ -397,7 +403,8 @@ def _env(mission: dict, env: Any, res: dict | None, wins: dict | None, summ: dic
     return out
 
 
-def _stage3(plan: dict, wins: dict | None, st3: dict | None, refit: dict | None, tr: Trace, pref: dict) -> dict:
+def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, Any] | None, refit: dict[str, Any] | None, tr: Trace,
+            pref: dict[str, Any]) -> dict[str, Any]:
     les = plan["les"]
     out: dict[str, Any] = dict(label=les["label"], cpu_fallback=bool(les["cpu_fallback"]), backend=les["backend"], rate_source=les["rate_source"],
                                rate=num(les["rate"], "cell-updates/s", pref, "plan.json les.rate"), vehicles={}, refit={})
@@ -435,7 +442,7 @@ def _stage3(plan: dict, wins: dict | None, st3: dict | None, refit: dict | None,
     return dict(out, available=True)
 
 
-def _emulator(emu: dict | None, design: dict | None, tr: Trace) -> dict:
+def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Trace) -> dict[str, Any]:
     if emu is None:
         return dict(available=False, reason=NOT_PRESENT.format("emulator/holdout.json"), vehicles={})
     ref = tr.ref("emulator", output="holdout.json")
@@ -445,12 +452,18 @@ def _emulator(emu: dict | None, design: dict | None, tr: Trace) -> dict:
         if not e.get("trained"):
             out[vid] = dict(trained=False, reason=e.get("reason", "no reason recorded"), **({"rows": num(e["rows"], "rows", ref, s)} if "rows" in e else {}))
             continue
-        unit = lambda k: "h" if k == "t_fail_h" else "fraction"          # noqa: E731
+
+        def unit(k: str) -> str:
+            return "h" if k == "t_fail_h" else "fraction"
+
         d = dict(trained=True, n_train=num(e["n_train"], "members", ref, s), n_test=num(e["n_test"], "members", ref, s),
                  nominal=num(e["nominal"], "fraction", ref, s), rmse={k: num(x, unit(k), ref, s + ".rmse") for k, x in e["rmse"].items()},
                  coverage={k: num(x, "fraction", ref, s + ".coverage") for k, x in e["coverage"].items()}, cls=e.get("cls"), acceptance=None)
         if "acceptance" in e:
-            lim = lambda v, u: num(v, u, ref, "cafe/pm/whatif.py LIMITS (BRIEF 2.7 acceptance)")      # noqa: E731
+
+            def lim(v: Any, u: str) -> dict[str, Any]:
+                return num(v, u, ref, "cafe/pm/whatif.py LIMITS (BRIEF 2.7 acceptance)")
+
             ac = e["acceptance"]
             d["acceptance"] = dict(rmse_ok=bool(ac["rmse_ok"]), coverage_ok=bool(ac["coverage_ok"]), query_ok=bool(ac["query_ok"]),
                                    query_ms=num(e["query_ms"], "ms", ref, s + ".query_ms"),
@@ -469,7 +482,7 @@ def _emulator(emu: dict | None, design: dict | None, tr: Trace) -> dict:
     return dict(available=True, vehicles=out, design=dd)
 
 
-def _machine(plan: dict, tr: Trace, pref: dict) -> dict:
+def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
     live = {st: L for st, L in tr.led.items() if L}
     first = next(iter(live.values()), None)
     costs = {}
@@ -487,7 +500,7 @@ def _machine(plan: dict, tr: Trace, pref: dict) -> dict:
                 machine=None if first is None else dict(host=first["machine"]["host"], bench_id=first["machine"]["bench_id"], cpus=cpus))
 
 
-def _assumed(cred: dict, cred_ref: dict) -> dict:
+def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
     by: dict[str, int] = {}
     for i in cred["assumed_inputs"]:
         by[i["file"]] = by.get(i["file"], 0) + 1
@@ -498,7 +511,7 @@ def _assumed(cred: dict, cred_ref: dict) -> dict:
                 factors=[dict(name=f["name"], level=f"{f['level']} of 4") for f in cred["factors"]])
 
 
-def build(run: pathlib.Path, mission: dict, plan: dict, env: Any = None) -> dict:
+def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env: Any = None) -> dict[str, Any]:
     tr = Trace(run)
     cred = json.loads((run / "report" / "credibility.json").read_text())
     s1b = _jl(run / "stage1b" / "summary.json")
@@ -531,9 +544,9 @@ def build(run: pathlib.Path, mission: dict, plan: dict, env: Any = None) -> dict
 
 # ------------------------------------------------------------------------------------------------------ HTML (from the JSON only)
 
-def _txt(n: dict) -> str:
+def _txt(n: dict[str, Any]) -> str:
     if n.get("utc"):
-        return n["utc"]
+        return str(n["utc"])
     unit = f" {n['unit']}" if n["unit"] not in ("", "-", "fraction") else ""
     if "values" in n:
         return f"{len(n['values'])} values{unit}"
@@ -545,7 +558,7 @@ def _rid(receipt: str) -> str:
     return "r-" + re.sub(r"[^A-Za-z0-9]+", "-", receipt)
 
 
-def _n(n: dict | None) -> str:
+def _n(n: dict[str, Any] | None) -> str:
     """A number as text plus links to its ledger (L) and to its row of the receipts table (R)."""
     if n is None:
         return "n/a"
@@ -558,7 +571,7 @@ def _badge(v: str) -> str:
     return f'<span class="badge {v.lower().replace("-", "")}">{html.escape(v)}</span>'
 
 
-def _stat_html(d: dict) -> str:
+def _stat_html(d: dict[str, Any]) -> str:
     u = d["p_fail"]["uncertainty"]
     h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g}; "
          f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}).</p>")
@@ -567,27 +580,27 @@ def _stat_html(d: dict) -> str:
     return h + (f"<p class=muted>{html.escape(d['note'])}</p>" if d["note"] else "")
 
 
-def _sens_html(s: dict) -> str:
+def _sens_html(s: dict[str, Any]) -> str:
     if s["param"] is None:
         return "none (all-pass, all-fail, or fewer than 16 members)"
     return f"<code>{html.escape(s['param'])}</code> (S1 {_n(s['s1'])})"
 
 
-def _top3_html(top: list) -> str:
+def _top3_html(top: list[Any]) -> str:
     if not top:
         return "<p class=muted>Top sensitivities: none (all-pass, all-fail, or fewer than 16 members).</p>"
     items = "; ".join(f"<code>{html.escape(t['param'])}</code> {_n(t['s1'])}" for t in top)
     return f"<p>Top sensitivities (Sobol first-order, share of the variance of failure): {items}.</p>"
 
 
-def _tried_html(t: dict) -> str:
+def _tried_html(t: dict[str, Any]) -> str:
     e = html.escape
     how = ("n/a" if t["method"] == "not evaluated" else t["method"]) + (f", n = {_n(t['n'])}" if t["n"] else "") \
         + (f", distance {_n(t['distance'])} of {_n(t['threshold'])}" if t["distance"] else "")
     return (f"<tr><td>{e(t['change'])}<td>{_n(t['cost'])}<td>{e(how)}<td>{_n(t['p_fail'])}<td>{e(str(t['verdict'] or ''))}<td>{e(t['reason'])}</tr>")
 
 
-def _fix_html(f: dict) -> str:
+def _fix_html(f: dict[str, Any]) -> str:
     """The "what would fix it" line (BRIEF 2.5) and the candidates behind it."""
     e = html.escape
     if not f["available"]:
@@ -608,7 +621,7 @@ def _fix_html(f: dict) -> str:
             f"<tr><th>Change<th>Cost (notches)<th>Answered by<th>P(fail)<th>Verdict<th>Note</tr>{rows}</table></div></details>")
 
 
-def _vehicle_html(vid: str, v: dict) -> str:
+def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     e = html.escape
     modes = ", ".join(f"{e(k)}: {_n(n)}" for k, n in v["modes"].items()) or "none"
     ch = ""
@@ -621,20 +634,23 @@ def _vehicle_html(vid: str, v: dict) -> str:
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")
 
 
-def _link_html(lid: str, k: dict) -> str:
+def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
     return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}</h3>{_stat_html(k)}<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
             f"median margin {_n(k['margin_db_median'])}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>{_top3_html(k['top3'])}</div>")
 
 
-def _svg(m: dict, reach: dict) -> str:
+def _svg(m: dict[str, Any], reach: dict[str, Any]) -> str:
     if not m["available"]:
         return f"<p class=warn>Map not drawn: {html.escape(m['reason'])}</p>"
     e = html.escape
     box = m["box"]["values"]
     c = box[0] + ((box[1] - box[0]) % 360.0) / 2
-    rel = lambda x: (x - c + 180.0) % 360.0 - 180.0         # noqa: E731
+
+    def rel(x: float) -> float:
+        return float((x - c + 180.0) % 360.0 - 180.0)
+
     pts = [[box[0], box[2]], [box[1], box[3]]] + ([m["ship"]["values"]] if m["ship"] else [])
     for v in m["vehicles"].values():
         pts += v["median"]["values"] + [p for mem in v["members"] for p in mem["track"]["values"]] + ([v["deploy"]["values"]] if v["deploy"] else [])
@@ -647,8 +663,13 @@ def _svg(m: dict, reach: dict) -> str:
     x0, y0, y1 = min(xs), min(ys), max(ys)
     k = math.cos(math.radians((y0 + y1) / 2))
     s = min(720.0 / max((max(xs) - x0) * k, 1e-6), 520.0 / max(y1 - y0, 1e-6))
-    P = lambda lon, lat: (30 + (rel(lon) - x0) * k * s, 30 + (y1 - lat) * s)      # noqa: E731
-    line = lambda tr_: " ".join("%.1f,%.1f" % P(*p) for p in tr_)                  # noqa: E731
+
+    def P(lon: float, lat: float) -> tuple[float, float]:
+        return (30 + (rel(lon) - x0) * k * s, 30 + (y1 - lat) * s)
+
+    def line(tr_: Any) -> str:
+        return " ".join("%.1f,%.1f" % P(*p) for p in tr_)
+
     ax, ay = P(box[0], box[3])
     bx, by = P(box[1], box[2])
     g = [f'<rect class=box x="{ax:.1f}" y="{ay:.1f}" width="{bx - ax:.1f}" height="{by - ay:.1f}"><title>mission box</title></rect>']
@@ -680,7 +701,7 @@ def _svg(m: dict, reach: dict) -> str:
             "the horizon, in the currents at the deploy time).</p>")
 
 
-def _reach_html(r: dict) -> str:
+def _reach_html(r: dict[str, Any]) -> str:
     e = html.escape
     if not r["available"]:
         return f"<p class=warn>Reach map not drawn: {e(r['reason'])}</p>"
@@ -692,7 +713,7 @@ def _reach_html(r: dict) -> str:
     return h + "</ul>"
 
 
-def _map_html(m: dict, reach: dict) -> str:
+def _map_html(m: dict[str, Any], reach: dict[str, Any]) -> str:
     if not m["available"]:
         return _svg(m, reach)
     e = html.escape
@@ -702,7 +723,7 @@ def _map_html(m: dict, reach: dict) -> str:
     return f"{_svg(m, reach)}<ul>{tracks}</ul><p>Mission box {_n(m['box'])}; ship {_n(m['ship'])}.</p><ul>{wins}</ul>{_reach_html(reach)}"
 
 
-def _env_html(env: dict) -> str:
+def _env_html(env: dict[str, Any]) -> str:
     e = html.escape
     h = f"<p>{e(env['how'])}</p>" if "how" in env else ""
     for vid, d in env["vehicles"].items():
@@ -713,7 +734,7 @@ def _env_html(env: dict) -> str:
     return h
 
 
-def _window_html(w: dict) -> str:
+def _window_html(w: dict[str, Any]) -> str:
     e = html.escape
     ck = "".join(f"<tr><td>{e(c['name'])}<td>{'pass' if c['ok'] else '<b>FAIL</b>'}<td>{_n(c['value'])}<td>{_n(c['limit'])}<td>{e(c['note'])}</tr>"
                  for c in w["checks"])
@@ -724,7 +745,7 @@ def _window_html(w: dict) -> str:
             + f"<div class=scroll><table><tr><th>Check<th>Result<th>Value<th>Limit<th>Note</tr>{ck}</table></div></div>")
 
 
-def _stage3_html(s: dict) -> str:
+def _stage3_html(s: dict[str, Any]) -> str:
     e = html.escape
     h = f"<div class=warn><p class=big>{e(s['label'])}</p></div>" if s["cpu_fallback"] else f"<p class=big>{e(s['label'])}</p>"
     h += f"<p>Backend {e(s['backend'])} at {_n(s['rate'])} ({e(s['rate_source'])}).</p>"
@@ -741,7 +762,7 @@ def _stage3_html(s: dict) -> str:
     return h
 
 
-def _emulator_html(m: dict) -> str:
+def _emulator_html(m: dict[str, Any]) -> str:
     e = html.escape
     if not m["available"]:
         return f"<p class=warn>{e(m['reason'])}</p>"
@@ -755,7 +776,10 @@ def _emulator_html(m: dict) -> str:
         h += f"<p><b>{e(vid)}</b>{kind}: trained on {_n(v['n_train'])}, scored on {_n(v['n_test'])} held-out; {sc}.</p>"
         a = v["acceptance"]
         if a:
-            ok = lambda b: "met" if b else "<b>MISSED</b>"        # noqa: E731
+
+            def ok(b: Any) -> str:
+                return "met" if b else "<b>MISSED</b>"
+
             h += (f"<p class=muted>BRIEF 2.7 acceptance: P(fail) RMSE against the true P(fail) {_n(a['rmse_debiased'])} &le; "
                   f"{_n(a['limits']['rmse'])} {ok(a['rmse_ok'])} (the held-out RMSE against the member-count targets, less their own "
                   f"Monte-Carlo noise {_n(a['noise_floor_rmse'])} in quadrature); coverage within {_n(a['limits']['coverage'])} of nominal "
@@ -770,7 +794,7 @@ def _emulator_html(m: dict) -> str:
     return h
 
 
-def _machine_html(m: dict) -> str:
+def _machine_html(m: dict[str, Any]) -> str:
     e = html.escape
     cost = "".join(f"<tr><td>{e(v)}<td>{_n(c['s_per_batch_day'])} + {_n(c['s_per_member_day'])}"
                    f"<td>{'measured' if c['measured'] else '<b>NOT MEASURED</b>'}: {e(c['source'])}</tr>" for v, c in m["member_costs"].items())
@@ -785,7 +809,7 @@ def _machine_html(m: dict) -> str:
             f"<p>Code: git {e(', '.join(m['git_sha']))}. Machine: {where}.</p><p class=muted>{ver}</p>")
 
 
-def _assumed_html(a: dict) -> str:
+def _assumed_html(a: dict[str, Any]) -> str:
     e = html.escape
     rows = "".join(f"<tr><td>{e(f)}<td>{_n(n)}</tr>" for f, n in a["by_file"].items())
     fac = "".join(f"<tr><td>{e(f['name'])}<td>{e(f['level'])}</tr>" for f in a["factors"])
@@ -797,7 +821,7 @@ def _assumed_html(a: dict) -> str:
             f"<details><summary>All assumed inputs</summary><ul>{lst}</ul></details>")
 
 
-def _receipts_html(rows: list) -> str:
+def _receipts_html(rows: list[Any]) -> str:
     e = html.escape
     body = "".join(f"<tr id='{_rid(r['id'])}'><td><code>{e(r['id'])}</code><td>{e(r['kind'])}"
                    f"<td>{'ok' if r['ok'] else '<b>MISSING OR FAILED</b>'}<td>{e(r['got'])}<td>{e(r['limit'])}"
@@ -805,7 +829,7 @@ def _receipts_html(rows: list) -> str:
     return f"<div class=scroll><table><tr><th>Receipt<th>Kind<th>Status<th>Value<th>Limit<th>sha-256<th>Ledger</tr>{body}</table></div>"
 
 
-def render(rep: dict) -> str:
+def render(rep: dict[str, Any]) -> str:
     e = html.escape
     m = rep["mission"]
     rows = "".join(f"<tr><td><a href='#v-{e(i)}'>{e(i)}</a><td>{_badge(d['verdict'])}<td>{_n(d['p_fail'])}<td>{_n(d['n'])}</tr>"
@@ -829,12 +853,12 @@ def render(rep: dict) -> str:
     return credibility.page(f"{m['name']} report", body)
 
 
-def check_rendered(rep: dict, html_text: str) -> list[str]:
+def check_rendered(rep: dict[str, Any], html_text: str) -> list[str]:
     """Every number node's text is in the page (the HTML is rendered from the JSON; this catches a section that drops a number)."""
     return [f"{p}: {_txt(o)!r} is not in the HTML" for k, p, o in _walk(rep) if k == "node" and html.escape(_txt(o)) not in html_text]
 
 
-def write(run_dir: str | pathlib.Path, mission: dict, plan: dict, env: Any = None) -> list[pathlib.Path]:
+def write(run_dir: str | pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env: Any = None) -> list[pathlib.Path]:
     """Write credibility.{html,json}, then report.json and index.html. Returns every path written, for the report ledger."""
     run = pathlib.Path(run_dir)
     cred = credibility.write(run)

@@ -10,12 +10,16 @@ Coefficients and citations: config/subgrid.json (sourced) and config/assumptions
 names `calibration.source_run`.
 """
 
+from __future__ import annotations
+
 import functools
 import json
 import pathlib
-from typing import NamedTuple
+from collections.abc import Iterable
+from typing import Any, NamedTuple
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 import yaml
 
 from .. import Tagged
@@ -25,26 +29,28 @@ _CFG_DIR = pathlib.Path(__file__).resolve().parents[3] / "config"
 
 
 @functools.lru_cache(maxsize=None)
-def _load(path: str) -> dict:
-    return json.loads(pathlib.Path(path).read_text())
+def _load(path: str) -> dict[str, Any]:
+    cfg: dict[str, Any] = json.loads(pathlib.Path(path).read_text())
+    return cfg
 
 
-def load_config(path: str | None = None) -> dict:
+def load_config(path: str | None = None) -> dict[str, Any]:
     """config/subgrid.json (or `path`) as a dict. Do not mutate; copy first."""
     return _load(str(path or _CFG_DIR / "subgrid.json"))
 
 
 @functools.lru_cache(maxsize=None)
-def _assumptions() -> dict:
-    return yaml.safe_load((_CFG_DIR / "assumptions.yaml").read_text())
+def _assumptions() -> dict[str, Any]:
+    out: dict[str, Any] = yaml.safe_load((_CFG_DIR / "assumptions.yaml").read_text())
+    return out
 
 
-def assumption(key: str):
+def assumption(key: str) -> Any:
     """Value of an entry of config/assumptions.yaml."""
     return _assumptions()[key]["value"]
 
 
-def calibration_note(cfg: dict) -> str:
+def calibration_note(cfg: dict[str, Any]) -> str:
     """Which run produced the calibration the code is using."""
     run = cfg["calibration"]["source_run"]
     return (
@@ -52,14 +58,14 @@ def calibration_note(cfg: dict) -> str:
     )
 
 
-def _tag(value, what: str, cfg: dict, unc=None) -> Tagged:
+def _tag(value: Any, what: str, cfg: dict[str, Any], unc: Any = None) -> Tagged:
     return Tagged(value, f"cafe.pm.env.subgrid: {what}; {calibration_note(cfg)}", unc, "modelled")
 
 
 # ---------------------------------------------------------------- a. turbulence
 
 
-def mann_length(z, L_ob, cfg: dict | None = None):
+def mann_length(z: ArrayLike, L_ob: ArrayLike, cfg: dict[str, Any] | None = None) -> Any:
     """Mann length scale L [m] at height z [m] for Obukhov length L_ob [m] (inf or large = neutral).
 
     Neutral: L = 0.8 Lambda1, Lambda1 = min(0.7 z, 42 m) (IEC 61400-1 ed.3 Annex C; Mann 1994/1998). Stability: divided by
@@ -78,7 +84,7 @@ def mann_length(z, L_ob, cfg: dict | None = None):
 
 
 @functools.lru_cache(maxsize=4)
-def _unit_box(gamma: float, nx: int, ny: int, nz: int, dx: float, ly: float, lz: float):
+def _unit_box(gamma: float, nx: int, ny: int, nz: int, dx: float, ly: float, lz: float) -> tuple[Any, NDArray[np.float64]]:
     """Mann stencil in units of the length scale (L = 1, ae = 1) and the box standard deviations of (u, v, w).
 
     All lengths scale with L and all amplitudes with sqrt(ae) L^(1/3), so one stencil serves every z, z/L and u*. The
@@ -90,7 +96,7 @@ def _unit_box(gamma: float, nx: int, ny: int, nz: int, dx: float, ly: float, lz:
     return st, sig
 
 
-def _box_series(cfg: dict, seeds) -> tuple[np.ndarray, np.ndarray]:
+def _box_series(cfg: dict[str, Any], seeds: Iterable[Any]) -> tuple[np.ndarray, np.ndarray]:
     """Centre-node (u, v, w) series, shape (len(seeds), nx, 3), of unit boxes and the unit sigmas (3,)."""
     b = cfg["turbulence"]["box"]
     st, sig = _unit_box(cfg["turbulence"]["gamma"], b["nx"], b["ny"], b["nz"], b["dx_over_L"], b["ly_over_L"], b["lz_over_L"])
@@ -104,14 +110,14 @@ def _box_series(cfg: dict, seeds) -> tuple[np.ndarray, np.ndarray]:
 def turbulence_members(
     seed: int,
     n_members: int,
-    ustar,
-    L_ob,
-    z,
-    U,
+    ustar: ArrayLike,
+    L_ob: float,
+    z: float,
+    U: float,
     duration_s: float,
     dt: float,
     n_boxes: int | None = None,
-    cfg: dict | None = None,
+    cfg: dict[str, Any] | None = None,
 ) -> Tagged:
     """Gust time series (M, n, 3) = (along-wind u', cross-wind v', vertical w') [m/s] at a point advected through frozen Mann
     turbulence at the mean wind speed U [m/s] (Taylor's hypothesis, x = U t), t = 0, dt, ... , (n-1) dt.
@@ -161,14 +167,14 @@ def turbulence_members(
 
 
 def turbulence(
-    seed: int, ustar: float, L: float, z: float, U: float, duration_s: float, dt: float, cfg: dict | None = None
+    seed: int, ustar: float, L: float, z: float, U: float, duration_s: float, dt: float, cfg: dict[str, Any] | None = None
 ) -> Tagged:
     """One gust series (n, 3) = (along-wind, cross-wind, vertical) [m/s]; `L` is the Obukhov length. See `turbulence_members`."""
     t = turbulence_members(seed, 1, ustar, L, z, U, duration_s, dt, cfg=cfg)
     return Tagged(t.value[0], t.source, t.uncertainty[0], t.kind)
 
 
-def gust_enu(g, wind_from_deg):
+def gust_enu(g: ArrayLike, wind_from_deg: ArrayLike) -> NDArray[np.float64]:
     """Rotate along/cross/vertical gusts (..., 3) to (east, north, up) for a wind blowing FROM `wind_from_deg` (compass)."""
     g = np.asarray(g, float)
     a = cv.vec_from_from(1.0, wind_from_deg)  # unit vector the wind blows toward
@@ -180,7 +186,7 @@ def gust_enu(g, wind_from_deg):
 # ---------------------------------------------------------------- b. gust fronts
 
 
-def rain_rate_from_accum(rainnc_mm, times) -> np.ndarray:
+def rain_rate_from_accum(rainnc_mm: ArrayLike, times: ArrayLike) -> NDArray[np.float64]:
     """Rain rate [mm/h] at each time from accumulated RAINNC [mm] (last axis = time): backward difference, first value from the
     first interval. Negative differences (accumulator resets) are clipped to 0."""
     r = np.asarray(rainnc_mm, float)
@@ -189,7 +195,7 @@ def rain_rate_from_accum(rainnc_mm, times) -> np.ndarray:
     return np.concatenate([d[..., :1], d], axis=-1)
 
 
-def theta_e(T, q, p):
+def theta_e(T: ArrayLike, q: ArrayLike, p: ArrayLike) -> Any:
     """Equivalent potential temperature [K] (Bolton 1980, eqs. 21, 24, 43) from T [K], specific humidity q [kg/kg], p [Pa]."""
     T, q, ph = np.asarray(T, float), np.asarray(q, float), np.asarray(p, float) / 100.0
     r = q / (1 - q)
@@ -198,7 +204,7 @@ def theta_e(T, q, p):
     return T * (1000.0 / ph) ** (0.2854 * (1 - 0.28 * r)) * np.exp(r * (1 + 0.81 * r) * (3376.0 / tl - 2.54))
 
 
-def gust_rate(rain_rate_mm_h, theta_e_K=None):
+def gust_rate(rain_rate_mm_h: ArrayLike, theta_e_K: ArrayLike | None = None) -> Any:
     """Cold-pool event probability rate [1/h]: lambda_bg + lambda_max (1 - exp(-rain/scale)) * f(theta_e), with the CAPE-like
     factor f = clip((theta_e - lo)/span, 0, 1) from surface theta_e (T2, Q2, PSFC; `theta_e`), 1 if not given. Constants:
     assumptions.yaml (the structure follows Wills et al. 2021: cold pools sit under convection; the numbers are assumed)."""
@@ -231,7 +237,13 @@ class Events(NamedTuple):
 
 
 def gust_fronts(
-    seed: int, rain_rate_mm_h, times, n_members: int = 1, theta_e_K=None, wind_to_deg=None, cfg: dict | None = None
+    seed: int,
+    rain_rate_mm_h: ArrayLike,
+    times: ArrayLike,
+    n_members: int = 1,
+    theta_e_K: ArrayLike | None = None,
+    wind_to_deg: ArrayLike | None = None,
+    cfg: dict[str, Any] | None = None,
 ) -> Events:
     """Sample cold-pool gust fronts. `rain_rate_mm_h`, `theta_e_K`, `wind_to_deg` are hourly series on `times` [s] (shape (T,) or
     (M, T)); within each hour a member has Poisson(`gust_rate`) events at uniform start times. Each event: duration and peak
@@ -261,14 +273,14 @@ def gust_fronts(
     return Events(mem, start, dur, cv.vec_from_to(mag, ang), np.full(k, float(gs["dT"])), n_members)
 
 
-def _shape(tau, rise, dur):
+def _shape(tau: Any, rise: Any, dur: Any) -> Any:
     """Triangle: 0 -> 1 linearly over `rise` s, back to 0 at `dur`; 0 outside [0, dur]."""
     rise = np.minimum(rise, dur / 2)
     s = np.where(tau < rise, tau / rise, (dur - tau) / (dur - rise))
     return np.where((tau >= 0) & (tau <= dur), s, 0.0)
 
 
-def gust_perturbation(ev: Events, t, cfg: dict | None = None) -> tuple[Tagged, Tagged]:
+def gust_perturbation(ev: Events, t: ArrayLike, cfg: dict[str, Any] | None = None) -> tuple[Tagged, Tagged]:
     """Wind change (M, *t.shape, 2) [m/s] and air-temperature change (M, *t.shape) [K] at times `t` [s], summed over each
     member's events. Wind peaks `wind_rise_s` after onset, temperature `temp_rise_s` after onset (assumptions.yaml); both fall
     linearly to zero at the end of the event."""
@@ -289,13 +301,15 @@ def gust_perturbation(ev: Events, t, cfg: dict | None = None) -> tuple[Tagged, T
 # ---------------------------------------------------------------- c. ocean
 
 
-def okubo_K(scale_m):
+def okubo_K(scale_m: ArrayLike) -> Any:
     """Horizontal eddy diffusivity [m2/s] at length scale `scale_m` [m]: Okubo 1971, K = 0.0103 l^1.15 cm2/s (l in cm)."""
     o = load_config()["ocean"]["okubo"]
     return o["a_cm2_s"] * (np.asarray(scale_m, float) * 100.0) ** o["p"] * 1e-4
 
 
-def ocean_sde_step(x, K, gradK, dt: float, rng: np.random.Generator | None, u=None, xi=None):
+def ocean_sde_step(
+    x: ArrayLike, K: ArrayLike, gradK: ArrayLike, dt: float, rng: np.random.Generator | None, u: ArrayLike | None = None, xi: ArrayLike | None = None
+) -> Any:
     """One Euler-Maruyama step of the Ito SDE  dx = (u + dK/dx) dt + sqrt(2K) dW  for a passive tracer in inhomogeneous
     diffusion (OceanParcels AdvectionDiffusionEM; the dK/dx term is what keeps a well-mixed tracer well mixed, Thomson 1987).
 
@@ -315,7 +329,7 @@ def ocean_sde_step(x, K, gradK, dt: float, rng: np.random.Generator | None, u=No
 R_EARTH = 6.371e6
 
 
-def sde_diffusivity(lat):
+def sde_diffusivity(lat: ArrayLike) -> tuple[Any, Any]:
     """(K [m2/s], (dK/dx, dK/dy) [m/s]) of the ocean SDE at latitude `lat`: Okubo's K at the local cell size
     l = cell R sqrt(cos lat) (assumptions.yaml subgrid.ocean_sde.cell_deg). K depends on latitude only, so dK/dx = 0 and
     dK/dy = -p K tan(lat) / (2 R): the exact derivative of K(l(lat)), not a finite difference."""
@@ -325,13 +339,13 @@ def sde_diffusivity(lat):
     return K, np.stack([np.zeros_like(K), dKdy], -1)
 
 
-def switch(environment: dict, name: str) -> bool:
+def switch(environment: dict[str, Any], name: str) -> bool:
     """Mission `environment.subgrid.<name>`. warm_layer, rain_lens and ocean_sde are on unless the mission says false (the brief
     enables the warm layer by default); turbulence and gust_fronts are read as before, by stage1, and are off unless true."""
     return bool(environment.get("subgrid", {}).get(name, True))
 
 
-def windage_fraction(base_seed: int, members, cfg: dict | None = None) -> np.ndarray:
+def windage_fraction(base_seed: int, members: Iterable[Any], cfg: dict[str, Any] | None = None) -> np.ndarray:
     """Leeway fraction of U10 per member, uniform in [0.018, 0.023] (BRIEF 2.2; Breivik & Allen 2008, Rohrs et al. 2012 for the
     range). One stream per member (`member_rng`, stream "windage"), so a member has the same fraction in any batch."""
     from ..stats.sampling import member_rng
@@ -339,7 +353,7 @@ def windage_fraction(base_seed: int, members, cfg: dict | None = None) -> np.nda
     return np.array([member_rng(base_seed, int(m), "windage").uniform(a["fraction_min"], a["fraction_max"]) for m in members])
 
 
-def diurnal_jet(seed: int, dT_warm, wind10, cfg: dict | None = None) -> Tagged:
+def diurnal_jet(seed: int, dT_warm: ArrayLike, wind10: ArrayLike, cfg: dict[str, Any] | None = None) -> Tagged:
     """Surface-trapped diurnal jet proxy [m/s, (east, north)]: u_amp * min(dT_warm / dT_ref, 1) along the wind, u_amp uniform
     in [0.1, 0.3] per member (axis 0). TEPEX-C's own hypothesis (BRIEF 2.2), labelled modelled; dT_ref in assumptions.yaml."""
     cfg = cfg or load_config()
@@ -355,7 +369,7 @@ def diurnal_jet(seed: int, dT_warm, wind10, cfg: dict | None = None) -> Tagged:
 # ---------------------------------------------------------------- d. rain lens
 
 
-def rain_lens(rain_rate, u10, t_since_rain, z=0.0, cfg: dict | None = None) -> dict:
+def rain_lens(rain_rate: ArrayLike, u10: ArrayLike, t_since_rain: ArrayLike, z: ArrayLike = 0.0, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     """Fresh-water lens (Iyer & Drushka 2021): salinity change dS [psu] and temperature change dT [K] at depth z [m, <= 0],
     plus the lens size. Amplitude 0.5 psu * clip((rain - trigger)/(saturation - trigger), 0, 1), times a wind factor that is 1
     below 5 m/s and falls linearly to 0 at 8 m/s (absent above), times exp(-t_since_rain / tau) with tau from
@@ -384,7 +398,7 @@ def rain_lens(rain_rate, u10, t_since_rain, z=0.0, cfg: dict | None = None) -> d
 # ---------------------------------------------------------------- receipts
 
 
-def _psd_ratio(series: np.ndarray, dt: float, U: float, Lm: float, sig_scale: float, cfg: dict):
+def _psd_ratio(series: np.ndarray, dt: float, U: float, Lm: float, sig_scale: float, cfg: dict[str, Any]) -> tuple[Any, Any, Any]:
     """Mean PSD of u' (per rad/m) over members divided by the analytic Mann spectrum for the same scaling, by kL."""
     import mannrs
     from scipy.signal import welch
@@ -650,7 +664,7 @@ def _lens_receipts() -> None:
     )
 
 
-def receipts() -> list[dict]:
+def receipts() -> list[dict[str, Any]]:
     """Published-reference and self-consistency checks for this module; returns the receipt records it appended."""
     from cafe import receipts as R
 

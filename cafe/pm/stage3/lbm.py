@@ -30,9 +30,10 @@ import pathlib
 import sys
 import time
 from functools import partial
-from typing import Callable
+from typing import Any, Callable, TypeVar
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 import jax
 import jax.numpy as jnp
@@ -71,7 +72,7 @@ def pick_backend() -> str:
     try:
         import warp as wp
         wp.config.quiet = True
-        wp.init()
+        wp.init()  # type: ignore[no-untyped-call]  # warp stubs lack a return annotation on init
         if wp.get_cuda_device_count() > 0:
             return "warp"
     except Exception:                                                        # warp missing or broken: fall back
@@ -129,20 +130,24 @@ def check_memory(cells: float, device_bytes: float | None = None, storage: str =
 
 
 # ---------------------------------------------------------------------------------------------------- resolution rule
-def tau_from_nu(nu_lat):
+_F = TypeVar("_F", float, jax.Array)
+
+
+def tau_from_nu(nu_lat: _F) -> _F:
     """BGK relaxation time for lattice viscosity nu: nu = cs^2 (tau - 1/2) with cs^2 = 1/3, so tau = 1/2 + 3 nu."""
     return 0.5 + 3.0 * nu_lat
 
 
-def lattice_params(U: float, dx: float, nu: float, u_lat: float = U_LAT) -> dict:
+def lattice_params(U: float, dx: float, nu: float, u_lat: float = U_LAT) -> dict[str, float]:
     """Physical -> lattice: dt = u_lat dx / U, nu_lat = nu dt / dx^2, tau = 1/2 + 3 nu_lat."""
     dt = u_lat * dx / U
     nu_lat = nu * dt / dx ** 2
     return dict(dt=dt, nu_lat=nu_lat, tau=tau_from_nu(nu_lat), mach=u_lat * math.sqrt(3), u_lat=u_lat)
 
 
-def les_resolution(L: float, U: float, nu: float, cells_per_delta: tuple = (5, 10), box: tuple = (4.0, 1.0, 1.0),
-                   T: float = 10.0, u_lat: float = U_LAT, storage: str = "fp32", kappa: float = 0.41, B: float = 5.2) -> dict:
+def les_resolution(L: float, U: float, nu: float, cells_per_delta: tuple[float, ...] = (5, 10),
+                   box: tuple[float, ...] = (4.0, 1.0, 1.0), T: float = 10.0, u_lat: float = U_LAT, storage: str = "fp32",
+                   kappa: float = 0.41, B: float = 5.2) -> dict[str, Any]:
     """Wall-modelled LES resolution for a body of length L at relative speed U in a fluid of viscosity nu.
 
     delta_te = 0.37 L Re^-1/5 (turbulent flat plate, trailing edge, 1/5-power law: Schlichting & Gersten, Boundary-Layer Theory, ch. 18;
@@ -175,32 +180,33 @@ def les_resolution(L: float, U: float, nu: float, cells_per_delta: tuple = (5, 1
 Cj, Wj, OPPj = jnp.asarray(C19, jnp.float32), jnp.asarray(W19, jnp.float32), jnp.asarray(OPP19)
 
 
-def _wshape(x):
+def _wshape(x: jax.Array) -> jax.Array:
     return Wj.reshape((19,) + (1,) * (x.ndim - 1))
 
 
-def feq(rho, u):
+def feq(rho: jax.Array | float, u: jax.Array) -> jax.Array:
     """D3Q19 second-order equilibrium; rho (...), u (3, ...) -> (19, ...)."""
     cu = jnp.tensordot(Cj, u, axes=(1, 0))
     return _wshape(cu) * rho * (1 + 3 * cu + 4.5 * cu * cu - 1.5 * (u * u).sum(0))
 
 
-def moments(f):
+def moments(f: jax.Array) -> tuple[jax.Array, jax.Array]:
     rho = f.sum(0)
     return rho, jnp.tensordot(Cj.T, f, axes=(1, 0)) / rho
 
 
-def pi_neq(fn):
+def pi_neq(fn: jax.Array) -> jax.Array:
     """Second moment of the non-equilibrium part, shape (3, 3, ...)."""
     return jnp.einsum("qa,qb,q...->ab...", Cj, Cj, fn)
 
 
-def smagorinsky_tau(Q, rho, tau0, cs):
+def smagorinsky_tau(Q: jax.Array, rho: jax.Array, tau0: float, cs: float) -> jax.Array:
     """Hou et al. (1996, eq. 8): tau = (tau0 + sqrt(tau0^2 + 18 sqrt2 Cs^2 |Pi|/rho)) / 2, |Pi| the Frobenius norm."""
     return 0.5 * (tau0 + jnp.sqrt(tau0 ** 2 + 18 * math.sqrt(2.0) * cs ** 2 * Q / rho))
 
 
-def collide(f, tau0, cs=0.17, mode="reg", tau_hook=None):
+def collide(f: jax.Array, tau0: float, cs: float = 0.17, mode: str = "reg",
+            tau_hook: Callable[[jax.Array, jax.Array], jax.Array] | None = None) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array]:
     """BGK collision with Smagorinsky eddy viscosity. mode "reg": the non-equilibrium part is first projected onto
     its second moment (Latt & Chopard 2006, regularized LBM), which keeps tau near 1/2 stable; "bgk": plain.
     tau_hook(u, tau) -> tau lets the wall model raise the relaxation time near walls. Returns (f_post, rho, u, tau)."""
@@ -220,18 +226,19 @@ def collide(f, tau0, cs=0.17, mode="reg", tau_hook=None):
     return fe + (1 - 1 / tau) * fn, rho, u, tau
 
 
-def stream(f):
+def stream(f: jax.Array) -> jax.Array:
     """Periodic streaming by whole-cell rolls (NumPy shifts: they must be concrete under jit)."""
     return jnp.stack([jnp.roll(f[q], tuple(int(x) for x in C19[q]), axis=(0, 1, 2)) for q in range(19)])
 
 
-def links(solid):
+def links(solid: jax.Array) -> jax.Array:
     """link[q, x] = fluid cell x has a solid neighbour in direction q: where halfway bounce-back acts."""
     nb = jnp.stack([jnp.roll(solid, tuple(-int(x) for x in C19[q]), axis=(0, 1, 2)) for q in range(19)])
     return nb & ~solid[None]
 
 
-def bounce_back(f_post, f_streamed, link, rho, u_wall, fmask=None, qdist=0.5):
+def bounce_back(f_post: jax.Array, f_streamed: jax.Array, link: jax.Array, rho: jax.Array, u_wall: ArrayLike, fmask: jax.Array | None = None,
+                qdist: float | jax.Array = 0.5) -> tuple[jax.Array, jax.Array]:
     """Bounce-back with a moving wall (Ladd 1994): f_qbar(x) = f_q^+(x) - 6 w_q rho (c_q . u_w), wall halfway along the link.
     qdist: wall distance along each link as a fraction of the link, scalar 0.5 (halfway, staircase) or a (19, nx, ny, nz) array
     for a curved wall, then Bouzidi, Firdaouss & Lallemand (2001, Phys. Fluids 13, 3452) linear interpolation:
@@ -268,7 +275,7 @@ def _mirror_table() -> np.ndarray:
 MIR = _mirror_table()
 
 
-def flat_wall_cells(link) -> tuple:
+def flat_wall_cells(link: ArrayLike) -> tuple[NDArray[np.int8], NDArray[np.int8]]:
     """Fluid cells whose solid links are exactly those of one axis-aligned flat face: (axis (nx,ny,nz) int8, sign int8), axis = -1
     elsewhere. For a wall whose solid side is at -s along axis a the links are all q with c_q[a]*s < 0 (5 of them); the sign s is
     that of the outward (into-fluid) normal. Only these cells can use specular reflection exactly."""
@@ -284,7 +291,8 @@ def flat_wall_cells(link) -> tuple:
     return ax, sg
 
 
-def specular(f_post, f_new, link, ax, sg, fmask=None, rho=None, u_wall=None):
+def specular(f_post: jax.Array, f_new: jax.Array, link: jax.Array, ax: ArrayLike, sg: ArrayLike, fmask: jax.Array | None = None,
+             rho: jax.Array | None = None, u_wall: ArrayLike | None = None) -> tuple[jax.Array, jax.Array]:
     """Specular reflection at axis-aligned flat walls (free slip, exact): the population leaving toward the wall comes back with
     the wall-normal component reversed and the tangential component kept, f_new[t] = f_post[MIR[a][t]]. No tangential momentum is
     exchanged and the force on the wall is purely normal. A wall moving with velocity u_wall (the body velocity in the ground
@@ -308,7 +316,7 @@ def specular(f_post, f_new, link, ax, sg, fmask=None, rho=None, u_wall=None):
     return f_new, F
 
 
-def ellipsoid_q(shape, center, radii) -> np.ndarray:
+def ellipsoid_q(shape: tuple[int, ...], center: ArrayLike, radii: ArrayLike) -> NDArray[np.float64]:
     """Fractional wall distance q (19, nx, ny, nz) for an ellipsoid: for each fluid cell and lattice direction the smallest
     t in (0, 1] with x + t c on the surface, 0.5 where the link does not cross it. Cell centres are at integer coordinates."""
     g = np.stack(np.meshgrid(*[np.arange(n) for n in shape], indexing="ij")).astype(float)
@@ -325,7 +333,7 @@ def ellipsoid_q(shape, center, radii) -> np.ndarray:
     return q
 
 
-def store(f, storage):
+def store(f: jax.Array, storage: str) -> jax.Array:
     """Round-trip through the storage format. fp16 keeps f - w_i (FluidX3D FP16S idea), so the quantization error is
     relative to the fluctuation, not to f."""
     if storage == "fp32":
@@ -334,16 +342,15 @@ def store(f, storage):
 
 
 @partial(jax.jit, static_argnames=("steps", "cs", "mode", "storage"))
-def periodic_run(f, tau0, steps, cs=0.0, mode="reg", storage="fp32"):
+def periodic_run(f: jax.Array, tau0: float, steps: int, cs: float = 0.0, mode: str = "reg", storage: str = "fp32") -> jax.Array:
     """`steps` collide+stream steps in a fully periodic box (Taylor-Green and kernel tests)."""
-    def body(f, _):
-        fp, *_ = collide(f, tau0, cs, mode)
-        return store(stream(fp), storage), None
+    def body(f: jax.Array, _: None) -> tuple[jax.Array, None]:
+        return store(stream(collide(f, tau0, cs, mode)[0]), storage), None
     return jax.lax.scan(body, f, None, length=steps)[0]
 
 
 # ---------------------------------------------------------------------------------------------------- XLB bridge
-def _xlb_session(backend: str, d: int, storage: str = "fp32"):
+def _xlb_session(backend: str, d: int, storage: str = "fp32") -> tuple[Any, Any, Any, Any, Any]:
     """xlb.init with the right velocity set / precision policy; returns (xlb module bits, grid factory)."""
     import xlb
     from xlb.compute_backend import ComputeBackend
@@ -362,7 +369,8 @@ def _xlb_session(backend: str, d: int, storage: str = "fp32"):
 class XlbRun:
     """One XLB stepper on either backend. fields() returns (rho, u) as NumPy; force() the momentum-exchange force on `body`."""
 
-    def __init__(self, session, backend, shape, bcs, nu, rho0=None, u0=None, collision="BGK", force=None, body_bc=None):
+    def __init__(self, session: tuple[Any, ...], backend: str, shape: tuple[int, ...], bcs: list[Any], nu: float, rho0: NDArray[np.float64] | None = None,
+                 u0: NDArray[np.float64] | None = None, collision: str = "BGK", force: list[float] | None = None, body_bc: Any = None):
         d = len(shape)
         xlb, be, pp, vs, gf = session
         self.xlb, self.be, self.pp, self.vs, self.backend, self.shape, self.d = xlb, be, pp, vs, backend, shape, d
@@ -380,7 +388,7 @@ class XlbRun:
         self.t = 0
         self.body_bc = body_bc
 
-    def _field(self, a):
+    def _field(self, a: ArrayLike) -> Any:
         """NumPy (c, *shape) -> backend array."""
         if self.backend == "jax":
             return jnp.asarray(a, jnp.float32)
@@ -388,7 +396,7 @@ class XlbRun:
         a = np.asarray(a, np.float32)
         return wp.array(a.reshape(a.shape + (1,)) if self.d == 2 else a, dtype=wp.float32)
 
-    def _init_f(self, rho0, u0):
+    def _init_f(self, rho0: NDArray[np.float64] | None, u0: NDArray[np.float64] | None) -> Any:
         rho = self._field(np.ones((1,) + self.shape) if rho0 is None else rho0[None])
         u = self._field(np.zeros((self.d,) + self.shape) if u0 is None else u0)
         eq = self.xlb.operator.equilibrium.QuadraticEquilibrium()
@@ -403,7 +411,7 @@ class XlbRun:
             self.f0, self.f1 = self.f1, self.f0
             self.t += 1
 
-    def fields(self):
+    def fields(self) -> tuple[NDArray[np.float32], NDArray[np.float64]]:
         """(rho, u) from the populations in NumPy (moments done here: XLB's warp macroscopic op rejects half storage)."""
         f = (self.f0.numpy() if hasattr(self.f0, "numpy") else np.asarray(self.f0)).astype(np.float32)
         if self.d == 2 and f.ndim == 4:
@@ -417,24 +425,24 @@ class XlbRun:
         return np.asarray(mt(self.f0, self.f1, self.bc_mask, self.missing), float)
 
 
-def _idx(mask: np.ndarray) -> list:
+def _idx(mask: NDArray[np.bool_]) -> list[list[int]]:
     """Boolean mask -> XLB index lists (d lists)."""
     return [a.tolist() for a in np.nonzero(mask)]
 
 
-def _rim(shape, faces):
+def _rim(shape: tuple[int, ...], faces: list[str]) -> NDArray[np.bool_]:
     """Union of the named faces of a box as a boolean mask. faces: subset of {"x0","x1","y0","y1","z0","z1"}."""
     m = np.zeros(shape, bool)
     for fc in faces:
         ax, hi = "xyz".index(fc[0]), fc[1] == "1"
-        sl = [slice(None)] * len(shape)
+        sl: list[slice | int] = [slice(None)] * len(shape)
         sl[ax] = -1 if hi else 0
         m[tuple(sl)] = True
     return m
 
 
 # ---------------------------------------------------------------------------------------------------- reference cases
-def poiseuille(backend="jax", n=32, nu=1 / 6, g=1e-5, steps=None, storage="fp32") -> dict:
+def poiseuille(backend: str = "jax", n: int = 32, nu: float = 1 / 6, g: float = 1e-5, steps: int | None = None, storage: str = "fp32") -> dict[str, Any]:
     """Force-driven plane Poiseuille flow between bounce-back walls on the lattice rim, periodic along x.
     Fits u(y) = a (y - y0)(y1 - y) to the steady profile. Receipt quantities: a = g/(2 nu) (so g_eff/g = 2 nu a / g tests
     viscosity and forcing independently of where the wall is), the relative residual of the parabola fit, and the wall
@@ -468,7 +476,7 @@ GHIA_V = np.array([[1.0000, 0.00000], [0.9688, -0.05906], [0.9609, -0.07391], [0
                    [0.0625, 0.09233], [0.0000, 0.00000]])
 
 
-def cavity(backend="jax", n=96, re=100.0, u_lid=0.05, steps=None, storage="fp32") -> dict:
+def cavity(backend: str = "jax", n: int = 96, re: float = 100.0, u_lid: float = 0.05, steps: int | None = None, storage: str = "fp32") -> dict[str, Any]:
     """Lid-driven cavity vs Ghia et al. (1982). Walls and lid are on the lattice rim; XLB's bounce-back wall sits at the rim
     nodes, so the unit cavity maps to node coordinates i/(n-1). The lid is an equilibrium BC (first-order accurate but the
     only lid BC that runs on both XLB backends: its Regularized and ZouHe lids do nothing on warp 1.12). Returns the max
@@ -487,12 +495,15 @@ def cavity(backend="jax", n=96, re=100.0, u_lid=0.05, steps=None, storage="fp32"
     s = np.arange(n) / (n - 1)
     ug = np.interp(GHIA_U[:, 0], s, u[0, n // 2 - 1:n // 2 + 1].mean(0)) / u_lid
     vg = np.interp(GHIA_V[:, 0], s, u[1, :, n // 2 - 1:n // 2 + 1].mean(1)) / u_lid
-    inner = lambda t: (t[:, 0] > 0.02) & (t[:, 0] < 0.98)                    # the end points are the BC itself      # noqa: E731
+
+    def inner(t: NDArray[np.float64]) -> NDArray[np.bool_]:                  # the end points are the BC itself
+        return (t[:, 0] > 0.02) & (t[:, 0] < 0.98)
+
     eu, ev = np.abs(ug - GHIA_U[:, 1])[inner(GHIA_U)], np.abs(vg - GHIA_V[:, 1])[inner(GHIA_V)]
     return dict(err_u=float(eu.max()), err_v=float(ev.max()), ug=ug, vg=vg)
 
 
-def taylor_green(backend="jax", n=64, nu=0.02, u0=0.04, steps=None, storage="fp32") -> dict:
+def taylor_green(backend: str = "jax", n: int = 64, nu: float = 0.02, u0: float = 0.04, steps: int | None = None, storage: str = "fp32") -> dict[str, Any]:
     """Decaying 2-D Taylor-Green vortex, periodic. Kinetic energy decays as exp(-4 nu k^2 t), k = 2 pi / n. Returns the
     fitted viscosity (from the energy ratio) relative to the analytic one. backend "native" runs the 3-D kernel on a thin slab."""
     k = 2 * math.pi / n
@@ -511,8 +522,8 @@ def taylor_green(backend="jax", n=64, nu=0.02, u0=0.04, steps=None, storage="fp3
     else:
         run = XlbRun(_xlb_session(backend, 2, storage), backend, (n, n), [], nu, rho0=rho, u0=np.stack([ux, uy]))
         run.step(steps)
-        _, uu = run.fields()
-        e = float((uu ** 2).sum() / 2)
+        _, uf = run.fields()
+        e = float((uf ** 2).sum() / 2)
     e0 = float(((ux ** 2 + uy ** 2).sum()) / 2)
     nu_fit = -math.log(e / e0) / (4 * k * k * steps)
     return dict(nu_fit=nu_fit, ratio=nu_fit / nu, energy_ratio=e / e0, steps=steps)
@@ -520,12 +531,13 @@ def taylor_green(backend="jax", n=64, nu=0.02, u0=0.04, steps=None, storage="fp3
 
 def morrison(re: float) -> float:
     """Sphere drag coefficient, Morrison (2013) 'An Improved Correlation for the Drag of a Sphere' eq. (1), Re up to 1e6."""
-    return (24 / re + 2.6 * (re / 5) / (1 + (re / 5) ** 1.52) + 0.411 * (re / 263000) ** -7.94 / (1 + (re / 263000) ** -8)
-            + re ** 0.8 / 461000)
+    return float(24 / re + 2.6 * (re / 5) / (1 + (re / 5) ** 1.52) + 0.411 * (re / 263000) ** -7.94 / (1 + (re / 263000) ** -8)
+                 + re ** 0.8 / 461000)
 
 
-def sphere(backend="jax", re=100.0, d=16, domain=(14, 7, 7), u_in=0.05, steps=None, cs=0.17, storage="fp32",
-           progress: Callable[[int, float], None] | None = None, side: str = "eq", outlet_bc: str = "equilibrium") -> dict:
+def sphere(backend: str = "jax", re: float = 100.0, d: int = 16, domain: tuple[float, ...] = (14, 7, 7), u_in: float = 0.05, steps: int | None = None,
+           cs: float = 0.17, storage: str = "fp32", progress: Callable[[int, float], None] | None = None, side: str = "eq",
+           outlet_bc: str = "equilibrium") -> dict[str, Any]:
     """Flow past a voxel sphere of d cells: equilibrium inlet and freestream sides, extrapolation outflow, halfway bounce-back
     on the sphere, momentum-exchange drag, Smagorinsky LES (re >= 500). Cd averaged over the last 20 % of `steps`.
     outlet_bc "equilibrium" (default) runs identically on both XLB backends; "extrapolation" (XLB's ExtrapolationOutflowBC) is
@@ -616,12 +628,14 @@ def physics_sha() -> str:
 
 def eta_text(updates: float) -> str:
     """Run time of `updates` cell-updates: at the loaded box's measured native rate and at the unloaded 8-core benchmark rate."""
-    f = lambda r: f"{updates / r / 3600:.1f} h" if updates / r > 1800 else f"{updates / r / 60:.0f} min"      # noqa: E731
+    def f(r: float) -> str:
+        return f"{updates / r / 3600:.1f} h" if updates / r > 1800 else f"{updates / r / 60:.0f} min"
+
     return (f"{updates:.2g} cell-updates: ~{f(NEST_RATE_LOADED)} at the loaded-box rate {NEST_RATE_LOADED:.2g}/s, "
             f"~{f(NEST_RATE_BENCH)} at the 8-core benchmark rate")
 
 
-def result_row(group: str, claim: str, rec: dict | None, value_key: str, ref_key: str, tol: float, command: str, eta: str, source: str) -> None:
+def result_row(group: str, claim: str, rec: dict[str, Any] | None, value_key: str, ref_key: str, tol: float, command: str, eta: str, source: str) -> None:
     """A required pass/fail row from a stored slow result. Stored and within `tol` of the reference: pass. Stored and outside: fail with
     the measured error in the row. Not stored, or stored by different code (its `code_sha` differs from physics_sha()): FAIL,
     with the command and its run time in the note. Never a context row."""
@@ -640,7 +654,7 @@ def result_row(group: str, claim: str, rec: dict | None, value_key: str, ref_key
 SPHERE_RUNS = (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4))
 
 
-def receipts(backend: str = "jax") -> list:
+def receipts(backend: str = "jax") -> list[dict[str, Any]]:
     """Poiseuille, cavity, Taylor-Green and the sphere drag at Re = 1e2, 1e3, 1e4 on `backend`, all pass/fail. The sphere rows read the
     stored slow runs (`python -m cafe.pm.stage3.lbm slow RE D NX NY NZ`, $CAFE_DATA/receipts); XLB 0.3.1 has only the staircase
     halfway bounce-back, which overpredicts a sphere's drag ~1/d (+30 % at d = 8): those rows FAIL with the measured error until a run
@@ -665,7 +679,7 @@ def receipts(backend: str = "jax") -> list:
     return [r for r in cr.OUT if r["group"] == g]
 
 
-def main(argv: list) -> int:
+def main(argv: list[str]) -> int:
     """python -m cafe.pm.stage3.lbm [receipts|slow RE [D [NX NY NZ in diameters]]|memory] [--backend jax|warp] [--fp32-storage]"""
     fp32 = "--fp32-storage" in argv
     argv = [a for a in argv if a != "--fp32-storage"]

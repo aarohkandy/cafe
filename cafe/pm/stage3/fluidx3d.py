@@ -20,21 +20,24 @@ import math
 import os
 import pathlib
 import subprocess
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
+from numpy.typing import NDArray
 
-DEFAULTS = {"enabled": False, "binary": None, "timeout_s": 7200}
+DEFAULTS: dict[str, Any] = {"enabled": False, "binary": None, "timeout_s": 7200}
 
 
 class FluidX3DUnavailable(RuntimeError):
     """The FluidX3D backend is off, or its binary is missing."""
 
 
-def settings(config: dict | None) -> dict:
+def settings(config: dict[str, Any] | None) -> dict[str, Any]:
     return {**DEFAULTS, **((config or {}).get("fluidx3d") or {})}
 
 
-def available(config: dict | None) -> tuple:
+def available(config: dict[str, Any] | None) -> tuple[bool, str]:
     """(ok, reason). ok only when enabled in the config and the binary is an executable file."""
     s = settings(config)
     if not s["enabled"]:
@@ -50,9 +53,9 @@ def available(config: dict | None) -> tuple:
     return True, f"using {b}"
 
 
-def read_forces(path) -> tuple:
+def read_forces(path: str | os.PathLike[str]) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
     """forces.dat -> (time (n,), force (n, 3)). Rejects malformed rows, non-finite values and non-increasing time."""
-    rows = []
+    rows: list[list[float]] = []
     for ln, line in enumerate(pathlib.Path(path).read_text().splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -71,7 +74,7 @@ def read_forces(path) -> tuple:
     return a[:, 1], a[:, 2:5]
 
 
-def run_case(config: dict | None, case: dict, workdir) -> dict:
+def run_case(config: dict[str, Any] | None, case: dict[str, Any], workdir: str | os.PathLike[str]) -> dict[str, Any]:
     """Run the lab's FluidX3D build on `case`. Returns {t, force, source, binary_sha256, seconds}."""
     ok, why = available(config)
     if not ok:
@@ -94,8 +97,8 @@ def run_case(config: dict | None, case: dict, workdir) -> dict:
     return dict(t=t, force=f, source="fluidx3d", binary_sha256=sha, steps=int(case["steps"]))
 
 
-def case_dict(name: str, cells, dx: float, dt: float, nu: float, rho: float, velocity, steps: int,
-              stl: str | None = None, free_surface: bool = False, draft: float = 0.0) -> dict:
+def case_dict(name: str, cells: Sequence[int], dx: float, dt: float, nu: float, rho: float, velocity: Sequence[float], steps: int,
+              stl: str | None = None, free_surface: bool = False, draft: float = 0.0) -> dict[str, Any]:
     if not math.isfinite(dx * dt * nu * rho) or min(dx, dt, nu, rho) <= 0:
         raise ValueError("dx, dt, nu and rho must be positive and finite")
     return dict(name=name, cells=[int(c) for c in cells], dx=dx, dt=dt, nu=nu, rho=rho, velocity=[float(v) for v in velocity],

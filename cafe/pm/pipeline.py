@@ -19,9 +19,14 @@ outputs are unchanged. Stage products live next to the ledgers:
     $CAFE_DATA/emulator/train.parquet     the training table, one row per vehicle per Stage-1 run (cafe.pm.whatif); outside the run, so not a ledger input
     run_dir/report/index.html, report.json
 """
-import json, os, pathlib, pickle, shutil, time, zipfile
+from __future__ import annotations
+
+import datetime as dt, json, os, pathlib, pickle, shutil, time, zipfile
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from numpy.typing import NDArray
 
 from . import budget, ledger, stage1
 from .audit import STAGES
@@ -29,11 +34,15 @@ from .config import digest, env_sigmas, load_mission, utc
 from .env import bathy, hycom, ocean as ocean_mod, orca
 from .env.hycom import FetchError
 from .env.remote import sha256
+from .ledger import Ledger
+
+if TYPE_CHECKING:
+    from .env.environment import GriddedEnv
 
 DATA = pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
 
 
-def code_digest():
+def code_digest() -> str:
     """sha256 over the pipeline's code, config and platform files: a resumed stage is reused only if none changed."""
     import hashlib
     root = pathlib.Path(__file__).resolve().parents[2]
@@ -47,7 +56,8 @@ def code_digest():
 class Context:
     """What the stages share: the mission, the plan, where things live, and the environment (built once, lazily)."""
 
-    def __init__(self, mission_path, budget_name, gpus, run_dir, log=print):
+    def __init__(self, mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: str | pathlib.Path,
+                 log: Callable[[str], None] = print) -> None:
         self.mission_path = pathlib.Path(mission_path)
         self.mission = load_mission(mission_path)
         self.run_dir = pathlib.Path(run_dir)
@@ -56,10 +66,10 @@ class Context:
         self.classes = stage1._classes(self.mission)
         self.plan = budget.plan(budget_name, gpus, self.mission, vehicle_classes=self.classes)
         self.hash = digest(dict(mission=self.mission, budget=budget_name, gpus=gpus, code=code_digest()))
-        self._env = None
+        self._env: GriddedEnv | None = None
 
     @property
-    def env(self):
+    def env(self) -> GriddedEnv:
         """GriddedEnv over the cache. The surface layer honours the mission's warm_layer / rain_lens switches; the sigmas the values
         are tagged with are config/assumptions.yaml's, replaced by the TAO fit (ingest/env_sigmas_fitted.json) once ingest wrote it."""
         if self._env is None:
@@ -74,25 +84,25 @@ class Context:
             self._env = GriddedEnv(self.cache, sig, ocean=ocean(self), subgrid=sub)
         return self._env
 
-    def path(self, *parts):
+    def path(self, *parts: str) -> pathlib.Path:
         p = self.run_dir.joinpath(*parts)
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
 
 
-def _ocean_box(ctx):
+def _ocean_box(ctx: Context) -> tuple[float, float, float, float]:
     """(south, north, west, east) of the mission box plus its pad: what the ocean store, GEBCO and TAO are cut to."""
     b = ctx.mission["box"]
     pad = b.get("pad_deg", 0.0)
     return (b["lat_min"] - pad, b["lat_max"] + pad, b["lon_min"] - pad, b["lon_max"] + pad)
 
 
-def _offline():
+def _offline() -> bool:
     """CAFE_OFFLINE set (and not 0): nothing is ever downloaded."""
     return os.environ.get("CAFE_OFFLINE", "") not in ("", "0")
 
 
-def _umwm_depth(cache):
+def _umwm_depth(cache: str | pathlib.Path) -> dict[str, NDArray[np.float64]] | None:
     """UMWM's depth on its grid (0 on land) from the orca cache, for bathy.choose's last fallback; None before orca is ingested."""
     import xarray as xr
     p = pathlib.Path(cache) / "orca" / "umwm.zarr"
@@ -102,7 +112,7 @@ def _umwm_depth(cache):
     return dict(lon=u.lon.values, lat=u.lat.values, depth=np.where(u["seamask"].values > 0, u["depth"].values.astype("f8"), 0.0))
 
 
-def ocean(ctx):
+def ocean(ctx: Context) -> Any:
     """The ocean source the mission names (GOFS 3.1 or the lab's HYCOM), from the cache hycom.py writes. Bathymetry falls back
     GEBCO -> the store's floor -> UMWM's depth; a missing GEBCO cut is downloaded only when CAFE_OFFLINE is not set."""
     from .env.ocean import open_ocean
@@ -112,7 +122,7 @@ def ocean(ctx):
 
 # res.pkl is only ever read back by this pipeline from its own run directory, and every reader names it as a ledger input,
 # whose sha256 `make audit` re-checks: it is a private checkpoint format, never loaded from anywhere else.
-def _dump(obj, path):
+def _dump(obj: Any, path: pathlib.Path) -> pathlib.Path:
     path.write_text(json.dumps(obj, indent=1, default=ledger._jsonable))
     return path
 
@@ -122,7 +132,7 @@ def _dump(obj, path):
 GOFS_DEADLINE_S = 1500.0         # hycom.fetch_gofs kills a request that has not answered in this long (it measured 193-335 s per step)
 
 
-def _need(ctx, L, name, what, present, fetch, hint=None):
+def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], bool], fetch: Callable[[], Any], hint: str | None = None) -> bool:
     """The one place a download starts. `present()` says whether the input is cached and good (hash-checked); if not, `fetch()` downloads
     it (resumable, so a rerun continues), unless CAFE_OFFLINE is set, which fails the check `<name>_present` naming the command to run
     with network access (`hint` replaces that command for inputs `fetch` cannot make). A failed download is the same failed check, with
@@ -143,7 +153,7 @@ def _need(ctx, L, name, what, present, fetch, hint=None):
     return ok
 
 
-def _ocean_cached(path, box, steps):
+def _ocean_cached(path: pathlib.Path, box: tuple[float, float, float, float], steps: Any) -> bool:
     """The GOFS store at `path` has every 3-hourly step and spans `box` (to the 0.1 degree grid snap), and its recorded parts-manifest
     hash is the one on disk when the parts are still there (assemble_gofs hash-checks every part against that manifest)."""
     if not path.exists():
@@ -156,7 +166,7 @@ def _ocean_cached(path, box, steps):
     return ok and (not man.is_file() or ds.attrs.get("manifest_sha256") == sha256(man))
 
 
-def _tao_cached(tdir, box, t0, t1):
+def _tao_cached(tdir: pathlib.Path, box: tuple[float, float, float, float], t0: float, t1: float) -> bool:
     """TAO manifest covers the box and window and every file still hashes to it (tao.verify)."""
     from .env import tao
     mp = tdir / "manifest.json"
@@ -173,7 +183,7 @@ def _tao_cached(tdir, box, t0, t1):
     return True
 
 
-def _gebco_cached(path):
+def _gebco_cached(path: pathlib.Path) -> bool:
     """The GEBCO cut exists and its raster still has the SHA-256 recorded at download (bathy.from_gebco)."""
     try:
         bathy.from_gebco(path)
@@ -182,7 +192,7 @@ def _gebco_cached(path):
     return True
 
 
-def s_ingest(ctx, L):
+def s_ingest(ctx: Context, L: Ledger) -> None:
     """Everything the mission needs from outside, each fetched only if not cached and good: orca (WRF + UMWM), TAO/TRITON, GEBCO, and the
     GOFS 3.1 ocean store (about 2 h for the demo box). CAFE_OFFLINE downloads nothing and fails a check naming the command instead."""
     from .env import surface, tao
@@ -194,11 +204,14 @@ def s_ingest(ctx, L):
     sbox = _ocean_box(ctx)
     man = ctx.cache / "orca" / "manifest.json"
 
-    def fetch_orca():
+    def fetch_orca() -> None:
         uas_v = [v for v in m["vehicles"] if ctx.classes[v["id"]] == "uas"]
         h3 = sorted({h for v in uas_v for h in _sortie_hours(v, m["ship"]["lon"], t0, t1)})
         orca.ingest(t0.replace(tzinfo=None), t1.replace(tzinfo=None), box, ctx.cache / "orca", hours3d=h3, log=ctx.log)
-    orca_covers = lambda: man.exists() and _covers(json.loads(man.read_text()), t0, t1)
+
+    def orca_covers() -> bool:
+        return man.exists() and _covers(json.loads(man.read_text()), t0, t1)
+
     if orca_covers():
         ctx.log(f"ingest: orca cache {man.parent} covers the window")
     tdir, spec = DATA / "tao", m["environment"]["ocean"]
@@ -206,7 +219,7 @@ def s_ingest(ctx, L):
     store = ocean_mod.store_path(spec, m["name"])
     steps = hycom.gofs_steps(t0.timestamp(), t1.timestamp())
 
-    def fetch_ocean():
+    def fetch_ocean() -> None:
         if spec["source"] != "gofs31":
             raise ValueError(f"{store} is the lab's HYCOM, which this pipeline cannot download: write it with hycom.ingest_lab_hycom")
         hycom.fetch_gofs(sbox, t0.timestamp(), t1.timestamp(), store.parent, deadline_s=GOFS_DEADLINE_S, ncss=hycom.NCSS, dods=hycom.DODS,
@@ -238,7 +251,7 @@ def s_ingest(ctx, L):
     _tao(ctx, L, t0.timestamp(), t1.timestamp())
 
 
-def _tao(ctx, L, t0, t1):
+def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     """Data validation (BRIEF 5.4): WRF 10 m wind and SST against the TAO/TRITON moorings in the box, hourly, model minus
     mooring. The pooled wind speed and direction errors become the Stage-1 wind priors (ingest/priors_fitted.json);
     without moorings the perturbations.yaml priors stand and the ledger says so."""
@@ -281,47 +294,47 @@ def _tao(ctx, L, t0, t1):
     L.note(f"env sigmas fitted from the moorings: {sig or 'none (no SST or AIRT in the window); config/assumptions.yaml stands'}")
 
 
-def _t2_rmse(ctx, moor, hours):
+def _t2_rmse(ctx: Context, moor: dict[str, Any], hours: NDArray[np.float64]) -> float | None:
     """RMSE [K] of WRF T2 against the moorings' AIRT (+-30 min means, as tao.compare bins them) in the grid, pooled; None without any."""
     from .env import tao
-    d = []
+    resid = []
     for m in moor.values():
         if "airt" in m and ctx.env.inside(m["lon"], m["lat"]):
             lo, la = np.full(hours.size, float(m["lon"])), np.full(hours.size, float(m["lat"]))
-            r = np.asarray(ctx.env.air(lo, la, hours)["T2"].value, float) - tao._bin(m["airt"]["t"], m["airt"]["value"], hours)
-            d.append(r[np.isfinite(r)])
-    d = np.concatenate(d) if d else np.empty(0)
+            r = np.asarray(ctx.env.air(lo, la, hours)["T2"].value, np.float64) - tao._bin(m["airt"]["t"], m["airt"]["value"], hours)
+            resid.append(r[np.isfinite(r)])
+    d = np.concatenate(resid) if resid else np.empty(0)
     return float(np.sqrt(np.mean(d ** 2))) if d.size else None
 
 
-def _derived_current(cache):
+def _derived_current(cache: pathlib.Path) -> bool:
     """derived.zarr exists and has the layout this code reads (surface.LAYOUT_VERSION)."""
     from .env import surface
     p = cache / "derived.zarr" / "zarr.json"
     return p.exists() and json.loads(p.read_text()).get("attributes", {}).get("layout_version") == surface.LAYOUT_VERSION
 
 
-def _covers(d, t0, t1):
-    f = lambda s: utc(s.replace(" ", "T") + ("" if s.endswith("Z") else "Z"))
+def _covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime) -> bool:
+    def f(s: str) -> dt.datetime:
+        return utc(s.replace(" ", "T") + ("" if s.endswith("Z") else "Z"))
     return f(d["t0"]) <= t0 and f(d["t1"]) >= t1
 
 
-def _sortie_hours(v, lon, t0, t1):
-    import datetime as dt
+def _sortie_hours(v: dict[str, Any], lon: float, t0: dt.datetime, t1: dt.datetime) -> list[dt.datetime]:
     ts = stage1.launch_times(v["sorties"], lon, t0.timestamp(), t1.timestamp(), 60.0 * v["sorties"].get("duration_min", 20))
-    out = []
+    out: list[dt.datetime] = []
     for t in ts:
         h = dt.datetime.fromtimestamp(np.floor(t / 3600) * 3600, dt.timezone.utc).replace(tzinfo=None)
         out += [h, h + dt.timedelta(hours=1)]
     return out
 
 
-def s_hangar(ctx, L):
+def s_hangar(ctx: Context, L: Ledger) -> None:
     """The vehicle numbers every stage uses, with the files they came from: each platform yaml through its own model's
     loader, which refuses a number without a source or an assumed + why."""
     from .config import PLATFORMS
     from .physics import glider, uas, usv
-    loaders = dict(glider=glider.load_platform, usv=usv.load_platform, uas=uas.load_platform)
+    loaders: dict[str, Callable[[str], Any]] = dict(glider=glider.load_platform, usv=usv.load_platform, uas=uas.load_platform)
     rows = {}
     for v in ctx.mission["vehicles"]:
         p = PLATFORMS / f"{v['platform']}.yaml"
@@ -337,14 +350,14 @@ def s_hangar(ctx, L):
     L.output(_dump(rows, ctx.path("hangar", "hangar.json")))
 
 
-def _assumed(node):
+def _assumed(node: Any) -> int:
     """Number of leaves marked assumed: true in a parsed platform yaml."""
     if isinstance(node, dict):
         return int(node.get("assumed") is True) + sum(_assumed(v) for v in node.values())
     return sum(_assumed(v) for v in node) if isinstance(node, list) else 0
 
 
-def _stage1(ctx, L, name, scales=None):
+def _stage1(ctx: Context, L: Ledger, name: str, scales: dict[str, Any] | None = None) -> None:
     a = time.time()
     fp = ctx.run_dir / "ingest" / "priors_fitted.json"
     fitted = json.loads(fp.read_text()) if fp.is_file() else None
@@ -362,17 +375,17 @@ def _stage1(ctx, L, name, scales=None):
     L.output(_dump(r, ctx.path(name, "summary.json")))
 
 
-def s_stage1(ctx, L):
+def s_stage1(ctx: Context, L: Ledger) -> None:
     _stage1(ctx, L, "stage1")
 
 
-def s_windows(ctx, L):
+def s_windows(ctx: Context, L: Ledger) -> None:
     """Worst windows per vehicle: the record times where the members that failed (or, with none failing, all members)
     met the strongest forcing (10 m wind for surface/air vehicles, Hs for the USV hull, current speed for gliders)."""
     res = pickle.loads(ctx.path("stage1", "res.pkl").read_bytes())
     L.input(ctx.path("stage1", "res.pkl"))
     K = ctx.plan["les"]["windows_per_vehicle"]
-    out = {}
+    out: dict[str, list[dict[str, Any]]] = {}
     for vid, r in res["vehicles"].items():
         f = stage1.failed(r)
         sel = f if f.any() else np.ones_like(f)
@@ -386,13 +399,13 @@ def s_windows(ctx, L):
         stress = np.full(lon.shape, -np.inf)
         if r["class"] == "glider":
             c = ctx.env.current(lon[ok], lat[ok], np.zeros(ok.sum()), tt[ok])
-            stress[ok] = np.hypot(*np.moveaxis(np.asarray(c.value, float), -1, 0))
+            stress[ok] = np.hypot(*np.moveaxis(np.asarray(c.value, np.float64), -1, 0))
         elif r["class"] == "usv":
             stress[ok] = np.nan_to_num(ctx.env.waves(lon[ok], lat[ok], tt[ok])["Hs"].value)
         else:
-            stress[ok] = np.hypot(*np.moveaxis(np.asarray(ctx.env.u10(lon[ok], lat[ok], tt[ok]), float), -1, 0))
+            stress[ok] = np.hypot(*np.moveaxis(np.asarray(ctx.env.u10(lon[ok], lat[ok], tt[ok]), np.float64), -1, 0))
         worst = np.nanmax(stress, 1)
-        idx = []
+        idx: list[int] = []
         for i in np.argsort(-worst):                                     # K windows at least 6 h apart
             if np.isfinite(worst[i]) and all(abs(t[i] - t[j]) >= 6 * 3600 for j in idx):
                 idx.append(int(i))
@@ -404,7 +417,7 @@ def s_windows(ctx, L):
     L.output(_dump(out, ctx.path("windows", "windows.json")))
 
 
-def s_stage3(ctx, L):
+def s_stage3(ctx: Context, L: Ledger) -> None:
     from .stage3 import pipeline_windows
     wins = json.loads(ctx.path("windows", "windows.json").read_text())
     L.input(ctx.path("windows", "windows.json"))
@@ -412,11 +425,11 @@ def s_stage3(ctx, L):
     L.output(_dump(rows, ctx.path("stage3", "windows.json")))
 
 
-def s_refit(ctx, L):
+def s_refit(ctx: Context, L: Ledger) -> None:
     from .stage3 import refit
     rows = json.loads(ctx.path("stage3", "windows.json").read_text())
     L.input(ctx.path("stage3", "windows.json"))
-    out = {}
+    out: dict[str, dict[str, Any]] = {}
     for vid, ws in rows.items():
         # Stage 1 has one drag multiplier per vehicle and it scales the water-side (or, for a UAS, the body) drag; a USV's wing is
         # a different flow, so its windows are pooled separately and reported, never mixed into the hull's multiplier
@@ -437,7 +450,7 @@ def s_refit(ctx, L):
     L.output(_dump(out, ctx.path("refit", "refit.json")))
 
 
-def s_stage1b(ctx, L):
+def s_stage1b(ctx: Context, L: Ledger) -> None:
     ref = json.loads(ctx.path("refit", "refit.json").read_text())
     L.input(ctx.path("refit", "refit.json"))
     scales = {vid: r for vid, r in ref.items() if r["used"]}
@@ -450,7 +463,7 @@ def s_stage1b(ctx, L):
     _stage1(ctx, L, "stage1b", scales=scales)
 
 
-def _variant_cost(ctx, n_members):
+def _variant_cost(ctx: Context, n_members: int) -> tuple[float, str]:
     """Seconds one variant run (a batch of every vehicle) is expected to take: this run's measured stage-1 wall time per batch when its ledger
     has one, else the planner's estimate from the measured per-vehicle costs. -> (seconds, where it came from)."""
     p = ctx.run_dir / "checkpoints" / "stage1" / "ledger.json"
@@ -460,7 +473,7 @@ def _variant_cost(ctx, n_members):
     return budget.batch_cost_s(ctx.plan), "the planner's estimate"
 
 
-def s_emulator(ctx, L):
+def s_emulator(ctx: Context, L: Ledger) -> None:
     """The mission-level emulator (BRIEF 2.7): append this run's per-vehicle Stage-1 rows to $CAFE_DATA/emulator/train.parquet, grow the table
     with Stage-1 runs of a few mission variants (deploy shifts, small moves, lower duty) inside the stage's budget share, fit one emulator
     per vehicle class when the table is large enough, score it on a 20 % hold-out, and search for the smallest change that flips each
@@ -482,7 +495,8 @@ def s_emulator(ctx, L):
     share = budget.emulator_share_s(ctx.plan, stage1b_free=not scales)
     est, est_src = _variant_cost(ctx, len(res["U"]))
     n_var = min(budget.EMULATOR_VARIANTS[ctx.plan["budget"]], int(whatif.TRAIN_FRAC * share // est) if est > 0 else 0)
-    variants, t0 = [], time.time()
+    variants: list[dict[str, Any]] = []
+    t0 = time.time()
     for k, mods in enumerate(whatif.design(ctx.mission, n_var, seed)):
         if time.time() - t0 + est > whatif.TRAIN_FRAC * share:
             break
@@ -524,7 +538,7 @@ def s_emulator(ctx, L):
                         table=used, train_fraction=whatif.TRAIN_FRAC, stage1b_free=not scales), ctx.path("emulator", "design.json")))
 
 
-def s_report(ctx, L):
+def s_report(ctx: Context, L: Ledger) -> None:
     from . import report
     for st in ("stage1b", "refit", "stage3", "windows", "emulator"):
         for p in sorted(ctx.run_dir.joinpath(st).glob("*.json")):
@@ -544,7 +558,8 @@ FUNCS = dict(ingest=s_ingest, hangar=s_hangar, stage1=s_stage1, windows=s_window
 assert list(FUNCS) == STAGES
 
 
-def run(mission_path, budget_name, gpus, run_dir, resume=True, stop_after=None, log=print):
+def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: str | pathlib.Path, resume: bool = True, stop_after: str | None = None,
+        log: Callable[[str], None] = print) -> Context:
     ctx = Context(mission_path, budget_name, gpus, run_dir, log)
     shutil.copy(ctx.mission_path, ctx.path("mission.yaml"))
     _dump(ctx.plan, ctx.path("plan.json"))

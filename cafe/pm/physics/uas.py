@@ -25,16 +25,23 @@ import struct
 import subprocess
 import threading
 import time
-from typing import Any, Callable, NamedTuple, Optional
+from typing import Any, Callable, NamedTuple, Optional, cast
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import yaml
 from jax import lax
+from numpy.typing import NDArray
 
 from ..env import conventions as cv
 
+Arr = Any
+F = NDArray[np.float64]
+XY = tuple[float, float]
+Ship = Callable[[float], Arr]
+WindFn = Callable[[int, float, Arr], Arr]
+LinkFn = Callable[[float, Arr], Arr]
 
 PLATFORM = pathlib.Path(__file__).resolve().parents[3] / "platforms" / "quad_uas.yaml"
 DT_PHYS, DT_ENV = 0.0025, 0.05
@@ -55,7 +62,7 @@ class SitlUnavailable(RuntimeError):
 
 # ---------------------------------------------------------------------------------------------- platform file
 
-def check_provenance(node: Any, path: str = "") -> list:
+def check_provenance(node: Any, path: str = "") -> list[str]:
     """Paths of leaves that have neither `source` nor (`assumed: true` and a `why`) - must be empty."""
     if isinstance(node, dict) and "value" in node:
         ok = bool(node.get("source")) or (node.get("assumed") is True and bool(node.get("why")))
@@ -65,7 +72,7 @@ def check_provenance(node: Any, path: str = "") -> list:
     return [path]
 
 
-def load_platform(path: Optional[str] = None) -> dict:
+def load_platform(path: Optional[str] = None) -> dict[str, Any]:
     """quad_uas.yaml as nested dicts of plain values (provenance stripped after it is checked)."""
     p = pathlib.Path(path or PLATFORM)
     p = p if p.suffix in (".yaml", ".yml") else PLATFORM.parent / f"{p}.yaml"         # a platform name, like the other loaders take
@@ -74,19 +81,19 @@ def load_platform(path: Optional[str] = None) -> dict:
     if bad:
         raise ValueError(f"platform numbers without a source or an assumed+why: {bad}")
 
-    def strip(n):
+    def strip(n: Any) -> Any:
         return n["value"] if isinstance(n, dict) and "value" in n else {k: strip(v) for k, v in n.items()}
-    return strip(doc)
+    return cast(dict[str, Any], strip(doc))
 
 
 # ---------------------------------------------------------------------------------------------- constants -> arrays
 
-def air_density(psfc, t2, q2=0.0):
+def air_density(psfc: Arr, t2: Arr, q2: Arr = 0.0) -> Arr:
     """Moist-air density from surface pressure [Pa], 2 m temperature [K], specific humidity [kg/kg]."""
     return psfc / (287.05 * t2 * (1.0 + 0.608 * q2))
 
 
-def derive(P: dict, M: int, rho=1.2, scale: Optional[dict] = None, fault: Optional[str] = None) -> dict:
+def derive(P: dict[str, Any], M: int, rho: Arr = 1.2, scale: Optional[dict[str, Any]] = None, fault: Optional[str] = None) -> dict[str, Any]:
     """Per-member float64 arrays the jitted code reads. `scale` (each (M,) or scalar): mass, drag, thrust, eff, battery.
     `fault` deliberately breaks one piece of physics so receipts can be shown to fail (see receipts())."""
     af, ro, ae, ba, li, co, so, fa = (P[k] for k in ("airframe", "rotor", "aero", "battery", "limits", "controller", "sortie", "failure"))
@@ -97,7 +104,10 @@ def derive(P: dict, M: int, rho=1.2, scale: Optional[dict] = None, fault: Option
     kT = ro["thrust_max_n_each"] / om_max ** 2 * rho / ro["rho_ref_kgm3"] * sc["thrust"]
     kQ = kT ** 1.5 / (np.sqrt(2 * rho * area) * ro["figure_of_merit"]) * (1.6 if fault == "fm" else 1.0)
     cap = ba["energy_wh"] / (ba["cells"] * ba["v_nom_cell"]) * sc["battery"]
-    f = lambda x: np.broadcast_to(np.asarray(x, float), (M,)).copy()
+
+    def f(x: Arr) -> Arr:
+        return np.broadcast_to(np.asarray(x, float), (M,)).copy()
+
     prm = dict(
         m=af["mass_kg"] * sc["mass"], J=np.array(af["inertia_kgm2"])[:, None] * sc["mass"], arm=f(af["motor_radius_m"] / math.sqrt(2)),
         hotel=f(af["hotel_w"]), kT=kT, kQ=kQ, cq=kQ / kT, om_max=f(om_max), tau_m=f(ro["motor_time_const_s"]), eff=ro["esc_motor_eff"] * sc["eff"],
@@ -119,19 +129,19 @@ def derive(P: dict, M: int, rho=1.2, scale: Optional[dict] = None, fault: Option
 
 # ---------------------------------------------------------------------------------------------- vector helpers (3, M)
 
-def _dot(a, b):
+def _dot(a: Arr, b: Arr) -> Arr:
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 
 
-def _cross(a, b):
+def _cross(a: Arr, b: Arr) -> Arr:
     return jnp.stack([a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]])
 
 
-def _unit(a, eps=1e-9):
+def _unit(a: Arr, eps: float = 1e-9) -> Arr:
     return a / jnp.maximum(jnp.sqrt(_dot(a, a)), eps)
 
 
-def _axes(q):
+def _axes(q: Arr) -> tuple[Arr, Arr, Arr]:
     """Body x, y, z axes in the world frame (columns of R) from q = (w, x, y, z), body -> world."""
     w, x, y, z = q
     xb = jnp.stack([1 - 2 * (y * y + z * z), 2 * (x * y + w * z), 2 * (x * z - w * y)])
@@ -140,14 +150,14 @@ def _axes(q):
     return xb, yb, zb
 
 
-def _qmul(a, b):
+def _qmul(a: Arr, b: Arr) -> Arr:
     aw, ax, ay, az = a
     bw, bx, by, bz = b
     return jnp.stack([aw * bw - ax * bx - ay * by - az * bz, aw * bx + ax * bw + ay * bz - az * by,
                       aw * by - ax * bz + ay * bw + az * bx, aw * bz + ax * by - ay * bx + az * bw])
 
 
-def _sqrt_ctrl(err, kp, a_max):
+def _sqrt_ctrl(err: Arr, kp: Arr, a_max: Arr) -> Arr:
     """ArduPilot's sqrt_controller: linear near zero, constant-deceleration (sqrt) beyond."""
     lin = a_max / (kp * kp)
     ae = jnp.abs(err)
@@ -162,7 +172,8 @@ SY = jnp.array([-1.0, 1.0, 1.0, -1.0])[:, None]      #                          
 SP = jnp.array([1.0, 1.0, -1.0, -1.0])[:, None]      #                                                 spin: +1 = CCW seen from above
 
 
-def _dyn(prm, p, v, q, w, om, om_cmd, wind, deck_v, dt):
+def _dyn(prm: dict[str, Any], p: Arr, v: Arr, q: Arr, w: Arr, om: Arr, om_cmd: Arr, wind: Arr, deck_v: Arr,
+         dt: float) -> tuple[Arr, Arr, Arr, Arr, Arr, Arr, Arr, Arr]:
     """One rigid-body step. -> p, v, q, w, om, electrical power [W], specific force (world), z_B up-component."""
     xb, yb, zb = _axes(q)
     T = prm["kT"] * om * om
@@ -194,7 +205,7 @@ def _dyn(prm, p, v, q, w, om, om_cmd, wind, deck_v, dt):
     return p2, v2, q2, w2, om2, pe, sf, _axes(q2)[2][2]
 
 
-def _ctrl(prm, q, w, f_des, yawd, vscale):
+def _ctrl(prm: dict[str, Any], q: Arr, w: Arr, f_des: Arr, yawd: Arr, vscale: Arr) -> Arr:
     """Geometric attitude + rate loop and mixer (cafe/ctrl.py _multirotor, ArduCopter's order). -> rotor speed commands (4, M)."""
     xb, yb, zb = _axes(q)
     zd = _unit(f_des)
@@ -219,7 +230,7 @@ def _ctrl(prm, q, w, f_des, yawd, vscale):
 
 # ---------------------------------------------------------------------------------------------- battery (per 50 ms)
 
-def _batt(prm, soc, qah, ewh, pe, dt):
+def _batt(prm: dict[str, Any], soc: Arr, qah: Arr, ewh: Arr, pe: Arr, dt: Arr) -> tuple[Arr, Arr, Arr, Arr, Arr]:
     """Peukert drain with I*R sag: -> soc, charge drawn [Ah], energy [Wh], terminal voltage, current. Closed-form I from P = V I."""
     voc = prm["ncell"] * jnp.interp(soc, prm["ocv_x"], prm["ocv_y"])
     disc = voc * voc - 4 * prm["rint"] * pe
@@ -242,7 +253,7 @@ class St(NamedTuple):
     tilt_max: Any; dist_max: Any; t_end: Any; wind_max: Any
 
 
-def init_state(prm: dict, M: int, yaw0, active) -> St:
+def init_state(prm: dict[str, Any], M: int, yaw0: Arr, active: Arr) -> St:
     z3, f, nan = jnp.zeros((3, M)), jnp.zeros(M), jnp.full(M, jnp.nan)
     yaw0 = jnp.broadcast_to(jnp.asarray(yaw0, float), (M,))
     q = jnp.stack([jnp.cos(yaw0 / 2), f, f, jnp.sin(yaw0 / 2)])
@@ -253,7 +264,7 @@ def init_state(prm: dict, M: int, yaw0, active) -> St:
               b, b, b, nan, nan, nan, f, f, nan, f)
 
 
-def _block(prm, S: St, wp, ship_p, ship_v, wind, t, nsub: int, dt: float) -> St:
+def _block(prm: dict[str, Any], S: St, wp: Arr, ship_p: Arr, ship_v: Arr, wind: Arr, t: Arr, nsub: int, dt: float) -> St:
     """Guidance + velocity loop (once), `nsub` physics steps, battery, flags. `t` = time at the block start since launch."""
     M = S.soc.shape[0]
     z = jnp.zeros(M)
@@ -299,7 +310,7 @@ def _block(prm, S: St, wp, ship_p, ship_v, wind, t, nsub: int, dt: float) -> St:
     vscale = S.volt / prm["vref"]
     deck_v = ship_v
 
-    def step(_, c):
+    def step(_: Arr, c: Arr) -> Arr:
         p, v, q, w, om, esum, tmax = c
         om_cmd = _ctrl(prm, q, w, f_des, yawd, vscale)
         p, v, q, w, om, pe, _, zbz = _dyn(prm, p, v, q, w, om, om_cmd, wind, deck_v, dt)
@@ -320,7 +331,10 @@ def _block(prm, S: St, wp, ship_p, ship_v, wind, t, nsub: int, dt: float) -> St:
     closing = (eh - eh2) / DT_ENV
     nohead = flying & (phase <= RTL) & (eh > 5.0) & (ask > prm["stuck_cmd"]) & (closing < prm["stuck_v"])
     stuck = jnp.where(nohead, S.stuck + DT_ENV, 0.0)
-    new = lambda cond, flag: cond & ~flag
+
+    def new(cond: Arr, flag: Arr) -> Arr:
+        return cond & ~flag
+
     n_tilt = new(flying & (tilt > prm["tilt_exc"]), S.f_tilt)
     n_batt = new(flying & (soc < prm["reserve"]), S.f_batt)
     n_stuck = new(stuck >= prm["stuck_w"], S.f_stuck)
@@ -328,7 +342,10 @@ def _block(prm, S: St, wp, ship_p, ship_v, wind, t, nsub: int, dt: float) -> St:
     landed = (phase == LAND) & (p[2] <= 0.15) & flying
     phase2 = jnp.where(dead, DEAD, jnp.where(landed, DONE, phase))
     fin = flying & (dead | landed)
-    keep = lambda new_v, old_v: jnp.where(go, new_v, old_v)
+
+    def keep(new_v: Arr, old_v: Arr) -> Arr:
+        return jnp.where(go, new_v, old_v)
+
     wnd = jnp.hypot(wind[0], wind[1])
     return S._replace(
         p=keep(p, S.p), v=keep(v, S.v), q=keep(q, S.q), w=keep(w, S.w), om=keep(om, S.om), vint=keep(vint, S.vint), vd=keep(vdes, S.vd),
@@ -342,9 +359,9 @@ def _block(prm, S: St, wp, ship_p, ship_v, wind, t, nsub: int, dt: float) -> St:
         t_end=jnp.where(fin, tn, S.t_end), wind_max=jnp.where(flying, jnp.maximum(S.wind_max, wnd), S.wind_max))
 
 
-def _blocks(prm, S: St, wp, ship_p, ship_v, wind, t, nsub: int, dt: float) -> St:
+def _blocks(prm: dict[str, Any], S: St, wp: Arr, ship_p: Arr, ship_v: Arr, wind: Arr, t: Arr, nsub: int, dt: float) -> St:
     """K consecutive 50 ms blocks in one call (lax.scan): ship_p, ship_v (K, 2, M), wind (K, 3, M); t at the first block."""
-    def body(S, x):
+    def body(S: St, x: Arr) -> tuple[St, None]:
         sp, sv, w, tk = x
         return _block(prm, S, wp, sp, sv, w, tk, nsub, dt), None
     S, _ = lax.scan(body, S, (ship_p, ship_v, wind, t + DT_ENV * jnp.arange(wind.shape[0])))
@@ -356,31 +373,31 @@ _blocks_jit = jax.jit(_blocks, static_argnames=("nsub", "dt"))
 
 # ---------------------------------------------------------------------------------------------- environment glue
 
-def lonlat(origin, east, north):
+def lonlat(origin: XY, east: Arr, north: Arr) -> tuple[Arr, Arr]:
     """Local tangent-plane metres -> lon, lat [deg]; origin = (lon0, lat0). Fine over the ~3 km a sortie covers."""
     lon0, lat0 = origin
     lon = lon0 + np.asarray(east, float) / (M_PER_DEG * math.cos(math.radians(lat0)))
     return (lon + 180.0) % 360.0 - 180.0, lat0 + np.asarray(north, float) / M_PER_DEG
 
 
-def steaming(pos0=(0.0, 0.0), speed=0.0, to_deg=0.0) -> Callable:
+def steaming(pos0: Arr = (0.0, 0.0), speed: Arr = 0.0, to_deg: Arr = 0.0) -> Ship:
     """A ship on a straight course: ship(t) -> (2,) east, north [m] with t seconds on the caller's clock (zero at t = 0)."""
     vel = cv.vec_from_to(speed, to_deg)
     return lambda t: np.asarray(pos0, float) + vel * t
 
 
-def _ship_at(ship, t, M):
+def _ship_at(ship: Ship, t: float, M: int) -> F:
     return np.broadcast_to(np.asarray(ship(t), float), (M, 2)).T.copy()
 
 
-def make_wind(env, origin, deck_h, turb=None, gust=None, hold: int = 20) -> Callable:
+def make_wind(env: Any, origin: XY, deck_h: float, turb: Arr = None, gust: Optional[Ship] = None, hold: int = 20) -> WindFn:
     """wind_fn(k, t, pos(3,M)) -> (3,M): env.wind (east, north) at the vehicle, + turbulence time series row k (M,3) at the
     50 ms step (the last row is held if the sortie outlives it) + gust(t) -> (M,3) (gust front), both supplied by the caller.
     The mean wind is looked up every `hold` blocks (1 s) and held: the vehicle moves < 15 m in that time against a 12 km,
     hourly field, and a gridded lookup per 50 ms was most of a sortie's wall time; the fluctuations stay at 50 ms."""
-    mean: dict = {}
+    mean: dict[str, Arr] = {}
 
-    def fn(k, t, pos):
+    def fn(k: int, t: float, pos: Arr) -> Arr:
         if k % hold == 0 or "w" not in mean:
             lon, lat = lonlat(origin, pos[0], pos[1])
             mean["w"] = np.asarray(env.wind(lon, lat, deck_h + pos[2], t).value, float)
@@ -394,14 +411,14 @@ def make_wind(env, origin, deck_h, turb=None, gust=None, hold: int = 20) -> Call
     return fn
 
 
-def wind_ref(env, ship, origin, t, height, M) -> np.ndarray:
+def wind_ref(env: Any, ship: Ship, origin: XY, t: float, height: float, M: int) -> np.ndarray:
     """Mean wind (M, 2) [m/s] at the ship, `height` above the sea, at time t."""
     sp = _ship_at(ship, t, M)
     lon, lat = lonlat(origin, sp[0], sp[1])
     return np.broadcast_to(np.asarray(env.wind(lon, lat, height, t).value, float), (M, 2))
 
 
-def launch_check(env, ship, t_launch, P, M, origin=(0.0, 0.0), gust=None) -> dict:
+def launch_check(env: Any, ship: Ship, t_launch: float, P: dict[str, Any], M: int, origin: XY = (0.0, 0.0), gust: Optional[Ship] = None) -> dict[str, Any]:
     """Weather gate: scrub if the mean wind at flight height over the sortie exceeds the limit, or a gust front is active at
     the ship within `gust_lookahead_min` of launch. -> dict(ok (M,), wind_ms (M,), front (M,), wind_vec (M,2))."""
     lr, so = P["launch_rule"], P["sortie"]
@@ -419,12 +436,12 @@ def launch_check(env, ship, t_launch, P, M, origin=(0.0, 0.0), gust=None) -> dic
 
 # ---------------------------------------------------------------------------------------------- the flux-profile pattern
 
-def _climb(P, dh, up=True):
+def _climb(P: dict[str, Any], dh: float, up: bool = True) -> float:
     c, v = P["controller"], (P["controller"]["speed_up"] if up else P["controller"]["speed_dn"])
-    return dh / v + v / c["accel_z"]
+    return cast(float, dh / v + v / c["accel_z"])
 
 
-def leg_length_m(P: dict) -> float:
+def leg_length_m(P: dict[str, Any]) -> float:
     """Leg length that makes the still-air sortie last sortie.duration_s: climbs, turns at the corners, return, landing."""
     so, c = P["sortie"], P["controller"]
     lv, n, v = so["levels_m"], len(so["levels_m"]), so["leg_speed_ms"]
@@ -432,10 +449,10 @@ def leg_length_m(P: dict) -> float:
     fixed = _climb(P, lv[0]) + sum(_climb(P, b - a) for a, b in zip(lv, lv[1:], strict=False))
     fixed += _climb(P, abs(lv[-1] - so["rtl_height_m"]), lv[-1] < so["rtl_height_m"])
     fixed += so["rtl_height_m"] / so["land_speed_ms"] + 3.0 + nl * v / c["accel_wp"]
-    return max((so["duration_s"] - fixed) * v / nl, 100.0)
+    return cast(float, max((so["duration_s"] - fixed) * v / nl, 100.0))
 
 
-def flux_pattern(P: dict, heading_to_deg) -> np.ndarray:
+def flux_pattern(P: dict[str, Any], heading_to_deg: Arr) -> np.ndarray:
     """Stacked legs: out at level 0, climb at the far end, back at level 1, climb at the ship, ... -> (W, 3, M) metres east,
     north, up, relative to the ship. heading_to_deg (M,) is the compass direction of the outbound leg."""
     lv, L = P["sortie"]["levels_m"], leg_length_m(P)
@@ -449,8 +466,8 @@ def flux_pattern(P: dict, heading_to_deg) -> np.ndarray:
 
 # ---------------------------------------------------------------------------------------------- the simulation driver
 
-def simulate(prm: dict, wp, ship: Callable, wind_fn: Callable, *, M: int, t0: float, t_max: float, active=None, yaw0=0.0,
-             nsub: int = 20, dt: float = DT_PHYS, link: Optional[Callable] = None, rec_dt: float = 1.0) -> dict:
+def simulate(prm: dict[str, Any], wp: Arr, ship: Ship, wind_fn: WindFn, *, M: int, t0: float, t_max: float, active: Arr = None, yaw0: Arr = 0.0,
+             nsub: int = 20, dt: float = DT_PHYS, link: Optional[LinkFn] = None, rec_dt: float = 1.0) -> dict[str, Any]:
     """Fly M members from the ship's deck along waypoints wp (W, 3, M) [ship-relative], return, land. Stops when all are down."""
     assert abs(nsub * dt - DT_ENV) < 1e-12, "physics step must divide the 50 ms environment step"
     active = np.ones(M, bool) if active is None else np.asarray(active, bool)
@@ -458,7 +475,7 @@ def simulate(prm: dict, wp, ship: Callable, wind_fn: Callable, *, M: int, t0: fl
     sp = _ship_at(ship, t0, M)
     S = init_state(prm, M, yaw0, active)._replace(p=jnp.asarray(np.concatenate([sp, np.zeros((1, M))])))
     f_link, t_link = np.zeros(M, bool), np.full(M, np.nan)
-    tr: dict = dict(t=[], pos=[], soc=[], tilt=[], phase=[], ewh=[])
+    tr: dict[str, list[Any]] = dict(t=[], pos=[], soc=[], tilt=[], phase=[], ewh=[])
     every = max(int(round(rec_dt / DT_ENV)), 1)
     nblk = int(round(t_max / DT_ENV))
     # one jitted call per record interval (`every` blocks): the mean wind is held over it anyway (make_wind), and a Python
@@ -499,9 +516,9 @@ def simulate(prm: dict, wp, ship: Callable, wind_fn: Callable, *, M: int, t0: fl
                                                                          phase=np.stack(tr["phase"], 1), ewh=np.stack(tr["ewh"], 1)))
 
 
-def fly_sortie(env, ship: Callable, t_launch: float, *, M: int, origin=(0.0, 0.0), plat: Optional[dict] = None, turb=None,
-               gust: Optional[Callable] = None, link: Optional[Callable] = None, scale: Optional[dict] = None, fault: Optional[str] = None,
-               dt: float = DT_PHYS, wp=None, heading_deg=None) -> dict:
+def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0.0, 0.0), plat: Optional[dict[str, Any]] = None, turb: Arr = None,
+               gust: Optional[Ship] = None, link: Optional[LinkFn] = None, scale: Optional[dict[str, Any]] = None, fault: Optional[str] = None,
+               dt: float = DT_PHYS, wp: Arr = None, heading_deg: Arr = None) -> dict[str, Any]:
     """One sortie for M ensemble members, vectorized. `ship(t) -> (2,) or (M, 2)` east/north metres (see steaming), `t` on the
     same clock as t_launch and the env. turb (M, n, 3) at 50 ms and gust(t) -> (M, 3) are the caller's perturbations.
     link(t, pos_rel (M,3)) -> bool (M,) lost? is the caller's link model (None: lost_link is never set); scale: see derive.
@@ -520,7 +537,7 @@ def fly_sortie(env, ship: Callable, t_launch: float, *, M: int, origin=(0.0, 0.0
     hd = np.asarray(heading_deg if heading_deg is not None else (cv.to_deg(-gate["wind_vec"]) if so["leg_heading"] == "upwind" else so["leg_heading"]), float)
     pat = flux_pattern(P, np.broadcast_to(hd, (M,))) if wp is None else np.asarray(wp, float)
     yaw0 = np.radians(90.0 - np.broadcast_to(hd, (M,)))                                   # compass -> math angle
-    out: dict = {}
+    out: dict[str, Any] = {}
     if gate["ok"].any():
         out = simulate(prm, pat, ship, make_wind(env, origin, so["deck_height_m"], turb, gust), M=M, t0=t_launch,
                        t_max=so["duration_s"] * so["hard_stop_factor"], active=gate["ok"], yaw0=yaw0, dt=dt, nsub=int(round(DT_ENV / dt)), link=link)
@@ -536,7 +553,7 @@ def fly_sortie(env, ship: Callable, t_launch: float, *, M: int, origin=(0.0, 0.0
     return out
 
 
-def fly_mission(env, ship: Callable, launch_times, *, M: int, **kw) -> dict:
+def fly_mission(env: Any, ship: Ship, launch_times: Arr, *, M: int, **kw: Any) -> dict[str, Any]:
     """N sorties (each on a fresh pack: sortie.battery_swap) -> dict(sorties=[fly_sortie results], mission=per-member roll-up):
     n_scrubbed / n_flown / n_failed / n_landed, flags (any sortie), t_first (earliest absolute time per flag), failed,
     first_failure (time, mode index into FLAGS)."""
@@ -561,11 +578,11 @@ _QC = np.array([0.0, math.sqrt(0.5), math.sqrt(0.5), 0.0])      # ENU -> NED as 
 _QB = np.array([0.0, 1.0, 0.0, 0.0])                            # FLU -> FRD (180 deg about x)
 
 
-def _qm(a, b):
+def _qm(a: Arr, b: Arr) -> Arr:
     return np.asarray(_qmul(jnp.asarray(a)[:, None], jnp.asarray(b)[:, None]))[:, 0]
 
 
-def sitl_params(P: dict, rate_scale: float = 1.0, **extra) -> dict:
+def sitl_params(P: dict[str, Any], rate_scale: float = 1.0, **extra: Any) -> dict[str, Any]:
     """ArduCopter parameters that tell the firmware what it flies (emulator.py's firmware_params recipe, from this yaml).
     ArduCopter's default rate gains assume a ~1 kg frame; for a 0.77 kg racing frame (J = 0.0025) they put the rate loop
     far above the 33 ms motor pole and it goes unstable, so P is set from the airframe's control authority: ArduPilot's mixer
@@ -582,7 +599,7 @@ def sitl_params(P: dict, rate_scale: float = 1.0, **extra) -> dict:
     jx, jy, jz = af["inertia_kgm2"]
     rate = rate_scale * co["rate_p"]
     gain = dict(RLL=rate * jx / (4 * arm * 0.7071 * dtdu), PIT=rate * jy / (4 * arm * 0.7071 * dtdu), YAW=0.5 * rate * jz / (4 * cq * dtdu))
-    pid = {}
+    pid: dict[str, float] = {}
     for ax, pk in gain.items():
         yaw = ax == "YAW"                                   # ArduCopter defaults: I = P (yaw: 0.1 P), D = 0.027 P (yaw: none)
         pid.update({f"ATC_RAT_{ax}_P": round(pk, 5), f"ATC_RAT_{ax}_I": round(pk * (0.1 if yaw else 1.0), 5),
@@ -600,17 +617,18 @@ def sitl_params(P: dict, rate_scale: float = 1.0, **extra) -> dict:
 class _Sim1:
     """One member's physics answering ArduCopter's servo packets (lockstep: one 2.5 ms step per new frame)."""
 
-    def __init__(self, P, prm, wind_fn, home_en, link_motor_map):
+    def __init__(self, P: dict[str, Any], prm: dict[str, Any], wind_fn: WindFn, home_en: Arr, link_motor_map: Arr) -> None:
         self.P, self.prm, self.wind_fn, self.home, self.map = P, prm, wind_fn, home_en, list(link_motor_map)
         self.p, self.v, self.w = jnp.zeros((3, 1)), jnp.zeros((3, 1)), jnp.zeros((3, 1))
         self.q, self.om = jnp.array([[math.sqrt(0.5)], [0.0], [0.0], [math.sqrt(0.5)]]), jnp.zeros((4, 1))   # facing north
         self.soc, self.qah, self.ewh, self.volt = jnp.ones(1), jnp.zeros(1), jnp.zeros(1), prm["vref"]
         self.t, self.k, self.pe, self.sf, self.tilt, self.wind = 0.0, 0, jnp.zeros(1), jnp.array([[0.0], [0.0], [G0]]), 0.0, jnp.zeros((3, 1))
-        self.pe_acc, self.n_acc, self.tilt_max, self.rec = 0.0, 0, 0.0, []
+        self.pe_acc, self.n_acc, self.tilt_max = 0.0, 0, 0.0
+        self.rec: list[Any] = []
         self.pos_en = np.array(home_en, float)
-        self.hist: list = []                                             # (t, roll, pitch, yaw) of the attitude we sent, every 50 ms
+        self.hist: list[tuple[float, float, float, float]] = []                          # (t, roll, pitch, yaw) of the attitude we sent, every 50 ms
 
-    def step(self, pwm):
+    def step(self, pwm: Arr) -> None:
         u = jnp.asarray(np.clip((np.asarray(pwm[:4], float)[self.map][:, None] - 1000.0) / 1000.0, 0.0, 1.0))
         cmd = u * self.prm["om_max"] * jnp.minimum(self.volt / self.prm["vref"], 1.0)
         if self.n_acc == 0:                                              # 50 ms: environment lookup, then battery for the last block
@@ -628,7 +646,7 @@ class _Sim1:
             self.pe_acc, self.n_acc, self.k = 0.0, 0, self.k + 1
             self.hist.append((self.t,) + self.rpy())
 
-    def rpy(self):
+    def rpy(self) -> tuple[float, float, float]:
         """Roll, pitch, yaw [rad] of the NED/FRD attitude ArduPilot is told (what its ATTITUDE message should echo)."""
         w, x, y, z = _qm(_qm(_QC, np.asarray(self.q, float)[:, 0]), _QB)
         return (math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y)), math.asin(max(-1.0, min(1.0, 2 * (w * y - z * x)))),
@@ -645,10 +663,10 @@ class _Sim1:
                                 battery=dict(voltage=volt, current=float(self.pe[0]) / volt))) + "\n").encode()
 
 
-def fly_sitl(env, ship: Callable, t_launch: float, *, origin=(0.0, 0.0), plat: Optional[dict] = None, wp=None, turb=None,
-             gust: Optional[Callable] = None, member: int = 0, scale: Optional[dict] = None, max_s: Optional[float] = None,
-             instance: Optional[int] = None, motor_map=(0, 1, 2, 3), workdir: Optional[str] = None, land: bool = True, hold_s: float = 0.0,
-             firmware: Optional[dict] = None, boot_s: float = 20.0, patience_s: float = 60.0) -> dict:
+def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), plat: Optional[dict[str, Any]] = None, wp: Arr = None, turb: Arr = None,
+             gust: Optional[Ship] = None, member: int = 0, scale: Optional[dict[str, Any]] = None, max_s: Optional[float] = None,
+             instance: Optional[int] = None, motor_map: tuple[int, ...] = (0, 1, 2, 3), workdir: Optional[str] = None, land: bool = True, hold_s: float = 0.0,
+             firmware: Optional[dict[str, Any]] = None, boot_s: float = 20.0, patience_s: float = 60.0) -> dict[str, Any]:
     """Fly ONE member of the sortie with ArduCopter SITL (JSON external physics) at our 2.5 ms step: firmware controllers, our
     physics, wind/turbulence/gust from `env`/`turb`/`gust` (SIM_JSON ignores SIM_WIND_*). Lockstep on our timestamp, no SIM_SPEEDUP,
     so it runs in real time; run members in parallel with distinct `instance`. wp (W,3) ship-relative; default is the flux pattern.
@@ -690,12 +708,12 @@ def fly_sitl(env, ship: Callable, t_launch: float, *, origin=(0.0, 0.0), plat: O
     sim = _Sim1(P, prm, wfn, ship0, motor_map)
     cap = max_s if max_s is not None else so["duration_s"] * so["hard_stop_factor"]
     stop = threading.Event()
-    notes: list = []
-    att: list = []
-    tr: dict = dict(t=[], pos=[], soc=[], tilt=[], ewh=[])
-    box: dict = dict(armed=False, mode=None, err=None)
+    notes: list[str] = []
+    att: list[tuple[Any, ...]] = []
+    tr: dict[str, list[Any]] = dict(t=[], pos=[], soc=[], tilt=[], ewh=[])
+    box: dict[str, Any] = dict(armed=False, mode=None, err=None)
 
-    def commander():
+    def commander() -> None:
         try:
             m = None
             while m is None:                                              # SITL listens only once it has started; stop looking when told to
@@ -716,7 +734,7 @@ def fly_sitl(env, ship: Callable, t_launch: float, *, origin=(0.0, 0.0), plat: O
             mav = mavutil.mavlink
             m.mav.request_data_stream_send(m.target_system, m.target_component, mav.MAV_DATA_STREAM_ALL, 4, 1)
 
-            def drain():
+            def drain() -> None:
                 while (msg := m.recv_match(blocking=False)) is not None:
                     ty = msg.get_type()
                     if ty == "HEARTBEAT" and msg.get_srcSystem() == m.target_system:
@@ -727,13 +745,13 @@ def fly_sitl(env, ship: Callable, t_launch: float, *, origin=(0.0, 0.0), plat: O
                         i = max(int(np.searchsorted([h[0] for h in sim.hist], msg.time_boot_ms / 1000.0)) - 1, 0) if sim.hist else 0
                         att.append((msg.time_boot_ms / 1000.0, msg.roll, msg.pitch, msg.yaw) + (sim.hist[i][1:] if sim.hist else (0.0, 0.0, 0.0)))
 
-            def wait_sim(s):
+            def wait_sim(s: float) -> None:
                 t_end = sim.t + s
                 while sim.t < t_end and not stop.is_set():
                     time.sleep(0.02)
                     drain()
 
-            def until(cond, s, what, action):
+            def until(cond: Callable[[], Any], s: float, what: str, action: Callable[[], Any]) -> None:
                 t_end = sim.t + s
                 while not cond():
                     if sim.t > t_end:
@@ -741,7 +759,7 @@ def fly_sitl(env, ship: Callable, t_launch: float, *, origin=(0.0, 0.0), plat: O
                     action()
                     wait_sim(2)
 
-            def goto(rel, tol_h, tol_v, limit_s):
+            def goto(rel: Arr, tol_h: float, tol_v: float, limit_s: float) -> None:
                 t_end = sim.t + limit_s
                 while sim.t < t_end and not stop.is_set():
                     tgt = np.append(np.asarray(ship(t_launch + sim.t), float)[:2], 0.0) + rel
@@ -821,7 +839,9 @@ def fly_sitl(env, ship: Callable, t_launch: float, *, origin=(0.0, 0.0), plat: O
 
 # ---------------------------------------------------------------------------------------------- receipts
 
-def _scenario(P, M, wp, wind, *, fault=None, scale=None, v_leg=None, lock=None, yaw0=0.0, t_max=60.0, nsub=20, dt=DT_PHYS):
+def _scenario(P: dict[str, Any], M: int, wp: Arr, wind: Arr, *, fault: Optional[str] = None, scale: Optional[dict[str, Any]] = None,
+              v_leg: Arr = None, lock: Arr = None, yaw0: Arr = 0.0, t_max: float = 60.0, nsub: int = 20,
+              dt: float = DT_PHYS) -> tuple[dict[str, Any], dict[str, Any]]:
     """Fly M members on a fixed (3, M) wind and a fixed ship; -> (simulate() result, prm). For receipts."""
     prm = derive(P, M, 1.2, scale, fault)
     if v_leg is not None:
@@ -833,12 +853,13 @@ def _scenario(P, M, wp, wind, *, fault=None, scale=None, v_leg=None, lock=None, 
     return r, prm
 
 
-def _hold(h, M, x=0.0):
+def _hold(h: float, M: int, x: float = 0.0) -> np.ndarray:
     """A hover point repeated so the sortie never reaches 'last waypoint' during a receipt."""
     return np.broadcast_to(np.array([x, 0.0, h])[None, :, None], (4000, 3, M)).copy()
 
 
-def receipts(plat: Optional[dict] = None, fault: Optional[str] = None, sitl: bool = True, sortie: bool = True) -> list:
+def receipts(plat: Optional[dict[str, Any]] = None, fault: Optional[str] = None, sitl: bool = True,
+             sortie: bool = True) -> list[dict[str, Any]]:
     """Reproduce what the literature says about this model and say so through cafe.receipts (each one can fail).
     `fault` breaks one piece of the physics on purpose (wind_sign, no_drag, fm, peukert, dt_const, sitl_motor_order) so the
     tests can show the matching receipt then fails. sitl / sortie switch off the real-time ArduCopter run and the 20 min sortie
@@ -894,7 +915,10 @@ def receipts(plat: Optional[dict] = None, fault: Optional[str] = None, sitl: boo
         soc, qah, ew, _, _ = _batt_jit(pk, soc, qah, ew, (voc - cur * pk["rint"]) * cur, 2.0)
         t += 2.0
         t_dead = np.where((t_dead == 0) & (np.asarray(soc) <= 0), t, t_dead)
-    ref = lambda i: ba["peukert_hours"] * 3600.0 * (cap / (i * ba["peukert_hours"])) ** k
+
+    def ref(i: float) -> float:
+        return cast(float, ba["peukert_hours"] * 3600.0 * (cap / (i * ba["peukert_hours"])) ** k)
+
     receipt("UAS battery", "discharge time at 2 A vs Peukert t = H (C/(I H))^P", t_dead[0], ref(2.0), 0.01, "s",
             "Peukert 1897; P = 1.05 from docs/BRIEF.md 2.4")
     receipt("UAS battery", "discharge time ratio 2 A : 6 A vs (6/2)^P", t_dead[0] / t_dead[1], 3.0 ** k, 0.01, "-",
@@ -902,7 +926,7 @@ def receipts(plat: Optional[dict] = None, fault: Optional[str] = None, sitl: boo
 
     # 4. time-step convergence 2.5 ms vs 1.25 ms
     wp2 = np.stack([np.array([[0.0], [0.0], [10.0]]), np.array([[300.0], [0.0], [10.0]])])
-    e = []
+    e: list[tuple[float, Arr]] = []
     for nsub, dt in ((20, 0.0025), (40, 0.00125)):
         rr, _ = _scenario(P, 1, wp2, np.zeros(3), fault=fault, t_max=40.0, nsub=nsub, dt=dt)
         e.append((float(rr["energy_wh"][0]), np.asarray(rr["final"].p)[:, 0]))
@@ -924,7 +948,7 @@ def receipts(plat: Optional[dict] = None, fault: Optional[str] = None, sitl: boo
     return R.OUT[n0:]
 
 
-def _sitl_receipts(P, fault, R):
+def _sitl_receipts(P: dict[str, Any], fault: Optional[str], R: Any) -> None:
     """ArduCopter SITL vs our controller on the same hover + 60 m leg + return + landing, no wind."""
     from ..env.protocol import AnalyticEnv
     env = AnalyticEnv(wind=(0.0, 0.0))

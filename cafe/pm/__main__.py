@@ -11,13 +11,16 @@
     report    --run DIR [--open]             re-render the report from a finished run; --open shows it in a browser when there is a display
     receipts  [--broken YAML] [--slow] [--only NAME,..] [--json OUT]   every receipt (app + pre-mission) as one table; see cafe/pm/receipts.py
 """
+from __future__ import annotations
+
 import argparse, json, os, pathlib, sys, webbrowser
+from typing import Any
 
 from . import audit, budget, pipeline, report, stage1, whatif
 from .config import ConfigError, load_mission
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m cafe.pm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("run", "fetch", "validate", "plan"):
@@ -83,7 +86,7 @@ def main(argv=None):
     return 0
 
 
-def _report(run, open_it):
+def _report(run: pathlib.Path, open_it: bool) -> int:
     """Re-render a finished run's report; with the environment cache present the report also routes the reach map through its currents."""
     m = load_mission(run / "mission.yaml")
     plan = json.loads((run / "plan.json").read_text())
@@ -103,11 +106,11 @@ def _report(run, open_it):
     return 0
 
 
-def _has_display():
+def _has_display() -> bool:
     return sys.platform in ("darwin", "win32") or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
 
 
-def _hangar(name):
+def _hangar(name: str) -> int:
     """Provenance check of one platform file and the numbers Stage 1 takes from it (what the pipeline's hangar stage records)."""
     from .config import load_platform
     from .physics import glider, uas, usv
@@ -119,9 +122,9 @@ def _hangar(name):
     except ValueError as e:
         print(f"{name} ({cls}): provenance FAILED: {e}")
         return 1
-    leaves = []
+    leaves: list[tuple[str, dict[str, Any]]] = []
 
-    def walk(node, path):
+    def walk(node: Any, path: str) -> None:
         if isinstance(node, dict) and "value" in node:
             leaves.append((path, node))
         elif isinstance(node, dict):
@@ -135,7 +138,7 @@ def _hangar(name):
     return 0
 
 
-def _whatif(a):
+def _whatif(a: argparse.Namespace) -> int:
     m = load_mission(a.mission)
     if not (a.shift or a.move or a.drop):
         raise ConfigError("whatif needs at least one of --shift, --move, --drop")

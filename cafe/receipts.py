@@ -3,15 +3,19 @@
 `python -m cafe.receipts [results_dir]` runs them all and exits non-zero if any fail. The app shows
 the same list, so what the user sees is exactly what was tested.
 """
+from __future__ import annotations
+
 import json, os, pathlib, sys, time
+from typing import Any
+
 import numpy as np
 
 from cafe import geom, vehicle, dyn, env as envm
 
-OUT = []
+OUT: list[dict[str, Any]] = []
 
 
-def bracket(group, claim, value, lo, hi, unit="", source=""):
+def bracket(group: str, claim: str, value: float, lo: float, hi: float, unit: str = "", source: str = "") -> None:
     """Value must fall between two independent bounds."""
     ok = lo <= value <= hi
     OUT.append(dict(group=group, claim=claim, value=float(value), lo=float(lo), hi=float(hi), unit=unit, ok=bool(ok),
@@ -19,14 +23,14 @@ def bracket(group, claim, value, lo, hi, unit="", source=""):
     print(f"[{'PASS' if ok else 'FAIL'}] {group}: {claim}: {value:.4g} in [{lo:.4g}, {hi:.4g}] {unit}")
 
 
-def context(group, claim, value, reference, unit="", source=""):
+def context(group: str, claim: str, value: float, reference: float, unit: str = "", source: str = "") -> None:
     """Shown for orientation only; never counted as a pass."""
     OUT.append(dict(group=group, claim=claim, value=float(value), reference=float(reference), unit=unit,
                     source=source, kind="context", ok=None))
     print(f"[ -- ] {group}: {claim}: {value:.4g} (published {reference:.4g} {unit}) — {source}")
 
 
-def receipt(group, claim, value, reference, tol, unit="", source="", rel=True):
+def receipt(group: str, claim: str, value: float, reference: float, tol: float, unit: str = "", source: str = "", rel: bool = True) -> dict[str, Any]:
     err = abs(value / reference - 1) if rel else abs(value - reference)
     r = dict(group=group, claim=claim, value=float(value), reference=float(reference), unit=unit,
              tol=tol, rel=rel, error=float(err), ok=bool(err <= tol), source=source)
@@ -43,7 +47,7 @@ def _still(B, flow=(0, 0, 0)):
     return dict(flow_ned=np.broadcast_to(flow, (B, 3)).astype(float))
 
 
-def dynamics_receipts():
+def dynamics_receipts() -> None:
     # 1. Archimedes from panel pressure integration: REMUS 10 m deep, level, still water
     s = geom.SAMPLES["torpedo"]
     m = s["make"]()
@@ -122,7 +126,7 @@ def dynamics_receipts():
     receipt("6-DOF", "Wigley free roll period (small angle)", period, T_ref, 0.05, "s", "linear hydrostatics, GM from geometry")
 
 
-def ocean_receipts():
+def ocean_receipts() -> None:
     """The environment's 4-D current interpolation vs the raw HYCOM grid at a grid node (independent read)."""
     import datetime as dt, gsw
     from cafe import ocean
@@ -163,7 +167,7 @@ def ocean_receipts():
     bracket("Ocean", f"Water at {q['depth'][k]:.0f} m is denser than at the surface (stable column)", rho(k) - rho(0), 0.0, 10.0, "kg/m3")
 
 
-def env_receipts():
+def env_receipts() -> None:
     hs, tp = envm.pm_sea(10.0)
     receipt("Environment", "PM sea: Hs at U10=10 m/s", hs, 0.22 * 100 / 9.81, 0.01, "m", "Stewart eq. 16.30")
     wv = envm.Waves(hs, tp, 0.0, n=60, seed=1)
@@ -174,7 +178,7 @@ def env_receipts():
             1e-9, "", "MIL-F-8785C")
 
 
-def weather_receipts():
+def weather_receipts() -> None:
     """Hourly weather is interpolated in time (not frozen), against the raw file values; a lone snapshot is held."""
     import datetime as dt, netCDF4
     cat = envm.catalog()
@@ -203,7 +207,7 @@ def weather_receipts():
     os.environ["CAFE_OCEAN"] = "1"
 
 
-def geometry_receipts():
+def geometry_receipts() -> None:
     t = geom.sample_torpedo()
     receipt("Geometry", "REMUS hull wetted area", t.area, 0.709, 0.05, "m2", "Prestero 2001 Table 2.7")
     receipt("Geometry", "REMUS frontal area", geom.projected_area(t, 0), 0.0285, 0.03, "m2", "Prestero 2001 Table 2.7")
@@ -222,7 +226,7 @@ def geometry_receipts():
     receipt("Geometry", "Floating box: waterplane area", hb["waterplane_area"], Lb * Bb, 0.005, "m2", "L x B (exact)")
 
 
-def bem_receipts():
+def bem_receipts() -> None:
     """Capytaine on the bare REMUS hull vs slender-body strip theory on the SAME hull.
     (Prestero's published values include the fins/tail cruciform, so they are context, not a target.)"""
     from cafe import hangar
@@ -246,7 +250,7 @@ def bem_receipts():
             "Prestero 2001 strip theory includes fins, whose lever arm dominates pitch")
 
 
-def cfd_receipts(results):
+def cfd_receipts(results: Any) -> None:
     """Reads hangar CFD outputs if they exist (they take minutes-hours to produce)."""
     t = results / "t1" / "torpedo.external.json"
     if t.exists():
@@ -278,7 +282,7 @@ def cfd_receipts(results):
 RODDY_DRIFT = {4.07: (45.43, 429.81), 8.00: (155.58, 737.14), 12.03: (350.65, 977.97)}
 
 
-def hull_lift_algebra_receipts():
+def hull_lift_algebra_receipts() -> None:
     """Plant a known cross term at 5 and 10 deg (with the Munk moment RANS would contain) in synthetic incidence
     CFD, build the vehicle the normal way, and check the dynamics reproduce the planted force/moment at 7.5 deg,
     half way between the table points. Catches frame flips, the CoG transfer and Munk double counting."""
@@ -352,7 +356,7 @@ def suboff_receipts(c):
             "Roddy 1990 bare-hull towing, C_T ~3.1-3.2e-3 near 6 kn (Budak 2023 Table 5)")
 
 
-def fea_receipts():
+def fea_receipts() -> None:
     """CalculiX on a closed thin aluminium cylinder (R 0.1 m, t 3 mm, L 0.6 m) under 1 MPa external pressure."""
     import trimesh
     from cafe import fea
@@ -425,7 +429,7 @@ def fea_receipts():
             0.08, "mm", "Euler-Bernoulli cantilever, solid rectangular section")
 
 
-def fleet_receipts():
+def fleet_receipts() -> None:
     """Reachability (grid Zermelo) vs exact uniform-current times; link statistics vs exact geometry;
     glider speed and pump energy."""
     from types import SimpleNamespace as NS
@@ -520,7 +524,7 @@ def _t0():
     return tepex if not cat or any(t.isoformat() == tepex for t in cat) else next(iter(cat)).isoformat()
 
 
-def crosscheck_receipts(results):
+def crosscheck_receipts(results: Any) -> None:
     """Same mission, two independent autopilots on the same physics: ours (fast mode) and ArduPilot SITL.
     Reads the pair recorded in runs/crosscheck.json (SITL runs take minutes, so they aren't rerun here)."""
     f = results / "crosscheck.json"

@@ -39,7 +39,7 @@ def marginal(spec: dict[str, Any]) -> Any:
 
 def load_perturbations(path: str | pathlib.Path | None = None) -> dict[str, dict[str, Any]]:
     """Read config/perturbations.yaml; every entry must carry value, unit, citation and kind: prior (sourced) or assumed."""
-    cfg = yaml.safe_load(pathlib.Path(path or PERTURBATIONS).read_text())
+    cfg: dict[str, dict[str, Any]] = yaml.safe_load(pathlib.Path(path or PERTURBATIONS).read_text())
     for k, e in cfg.items():
         miss = {"value", "unit", "citation", "kind"} - e.keys()
         if miss or e["kind"] not in ("prior", "assumed"):              # assumed: no source, listed in the credibility report

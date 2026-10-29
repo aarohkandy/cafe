@@ -21,7 +21,7 @@ import importlib.util
 import itertools
 import pathlib
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -41,7 +41,7 @@ def _conformal_q(scores: np.ndarray, alpha: float) -> float:
 
 def _logit(p: np.ndarray, eps: float) -> np.ndarray:
     p = np.clip(p, eps, 1 - eps)
-    return np.log(p / (1 - p))
+    return cast(np.ndarray, np.log(p / (1 - p)))
 
 
 def _sigmoid(z: np.ndarray) -> np.ndarray:
@@ -114,12 +114,12 @@ class Emulator:
         d = x.shape[1]
         m: Any
         if levels:
-            m = MFK(print_global=False, theta0=[1.0] * d, n_start=3)
+            m = MFK(print_global=False, theta0=[1.0] * d, n_start=3)  # type: ignore[no-untyped-call]  # smt's surrogate classes are unannotated
             m.set_training_values(levels[0][0], levels[0][1], name=0)
             m.set_training_values(levels[1][0], levels[1][1])
         else:
             kw = dict(print_global=False, noise0=[self.noise], n_start=3, hyper_opt="Cobyla")
-            m = KPLS(n_comp=3, theta0=[1.0] * 3, **kw) if d > 10 else KRG(theta0=[1.0] * d, **kw)
+            m = KPLS(n_comp=3, theta0=[1.0] * 3, **kw) if d > 10 else KRG(theta0=[1.0] * d, **kw)  # type: ignore[no-untyped-call]  # smt's surrogate classes are unannotated
             m.set_training_values(x, y)
         m.train()
         return m
@@ -178,7 +178,7 @@ class Emulator:
         return out
 
     def _dist(self, xa: np.ndarray) -> np.ndarray:
-        return self._tree.query((xa - self.mu) / self.sd, k=1)[0]
+        return cast(np.ndarray, self._tree.query((xa - self.mu) / self.sd, k=1)[0])
 
     def distance(self, x: Any) -> float:
         """Nearest-neighbour distance from x to the training rows in z-scored feature space."""

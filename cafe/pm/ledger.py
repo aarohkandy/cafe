@@ -9,8 +9,11 @@
 
 `resume`: a stage whose ledger exists, has ok=true, and whose inputs/config hash still match is skipped.
 """
+from __future__ import annotations
+
 import datetime as dt, json, os, pathlib, platform, subprocess, sys, time
-from typing import Any
+from types import TracebackType
+from typing import Any, Literal
 
 from .env.remote import sha256
 
@@ -22,15 +25,15 @@ class StageFailed(RuntimeError):
     pass
 
 
-def git_sha():
+def git_sha() -> str:
     try:
         return subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10).stdout.strip() or "none"
     except (OSError, subprocess.SubprocessError):
         return os.environ.get("CAFE_GIT_SHA", "none")
 
 
-def versions():
-    out = {"python": sys.version.split()[0]}
+def versions() -> dict[str, str | None]:
+    out: dict[str, str | None] = {"python": sys.version.split()[0]}
     for m in LIBS:
         try:
             out[m] = getattr(__import__(m), "__version__", "?")
@@ -39,7 +42,7 @@ def versions():
     return out
 
 
-def machine():
+def machine() -> dict[str, Any]:
     """Which benchmarked machine this is: the `machine` block of config/throughput.json written by bench/, plus the host."""
     p = ROOT / "config" / "throughput.json"
     m = json.loads(p.read_text()).get("machine", {}) if p.exists() else {}
@@ -47,39 +50,39 @@ def machine():
 
 
 class Ledger:
-    def __init__(self, run_dir, stage, config_hash):
+    def __init__(self, run_dir: str | pathlib.Path, stage: str, config_hash: str) -> None:
         self.dir = pathlib.Path(run_dir) / "checkpoints" / stage
         self.path = self.dir / "ledger.json"
         self.d: dict[str, Any] = dict(stage=stage, config_hash=config_hash, git_sha=git_sha(), versions=versions(), machine=machine(),
                       started=dt.datetime.now(dt.timezone.utc).isoformat(), inputs=[], seeds={}, checks=[], outputs=[], notes=[])
         self._t = time.time()
 
-    def __enter__(self):
+    def __enter__(self) -> Ledger:
         self.dir.mkdir(parents=True, exist_ok=True)
         return self
 
-    def input(self, ref, sha=None, **meta):
+    def input(self, ref: Any, sha: str | None = None, **meta: Any) -> None:
         p = pathlib.Path(str(ref))
         self.d["inputs"].append(dict(ref=str(ref), sha256=sha or (sha256(p) if p.is_file() else None), **meta))
 
-    def seed(self, name, value):
+    def seed(self, name: str, value: Any) -> None:
         self.d["seeds"][name] = int(value)
 
-    def check(self, name, ok, value=None, limit=None, note=""):
+    def check(self, name: str, ok: Any, value: Any = None, limit: Any = None, note: str = "") -> bool:
         self.d["checks"].append(dict(name=name, ok=bool(ok), value=value, limit=limit, note=note))
         return bool(ok)
 
-    def note(self, s):
+    def note(self, s: str) -> None:
         self.d["notes"].append(s)
 
-    def output(self, path):
+    def output(self, path: str | pathlib.Path) -> None:
         self.d["outputs"].append(str(path))
 
     @property
-    def ok(self):
+    def ok(self) -> bool:
         return all(c["ok"] for c in self.d["checks"])
 
-    def __exit__(self, et, ev, tb):
+    def __exit__(self, et: type[BaseException] | None, ev: BaseException | None, tb: TracebackType | None) -> Literal[False]:
         self.d["wall_s"] = round(time.time() - self._t, 3)
         self.d["outputs"] = [dict(path=p, sha256=sha256(p)) for p in self.d["outputs"] if pathlib.Path(p).is_file()]
         self.d["error"] = None if et is None else f"{et.__name__}: {ev}"
@@ -93,7 +96,7 @@ class Ledger:
         return False
 
 
-def _jsonable(x):
+def _jsonable(x: Any) -> Any:
     if hasattr(x, "tolist"):
         return x.tolist()
     if hasattr(x, "isoformat"):
@@ -101,12 +104,12 @@ def _jsonable(x):
     return str(x)
 
 
-def done(run_dir, stage, config_hash):
+def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str, Any] | None:
     """The stage's ledger if it finished cleanly with this config and its outputs are unchanged on disk, else None."""
     p = pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json"
     if not p.exists():
         return None
-    d = json.loads(p.read_text())
+    d: dict[str, Any] = json.loads(p.read_text())
     if not d.get("ok") or d.get("config_hash") != config_hash:
         return None
     for o in d["outputs"]:

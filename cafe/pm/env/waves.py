@@ -17,7 +17,13 @@ Sources (equation numbers as known to the author; the two marked * were not re-r
         equals Longuet-Higgins & Phillips 1962 / Hasselmann 1962), on/off at eps = kp Hs / 2 = 0.05 (brief, Smit et al. 2017).
   Stokes drift: Kenyon 1969; Breivik, Bidlot & Janssen 2016, Ocean Modelling 100, 49-56, eqs 6, 19, 22, 23 (arXiv 1601.08092).
 """
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 from scipy.special import erfc
 
 from . import conventions as cv
@@ -27,49 +33,52 @@ G = 9.81
 DEEP = 1e5                 # "infinite" depth [m]: kh > 390 at the lowest UMWM frequency, tanh = 1 to double precision
 EPS_SECOND = 0.05          # steepness above which the second-order correction is applied (brief 2.3)
 S_MAX = 60.0               # cos^{2s} narrower than ~10 degrees is below the 11.25-degree bin width
+Arr = NDArray[np.floating[Any]]
 
 
 # ------------------------------------------------------------------ bins and moments
 
-def _dlog(x):
+def _dlog(x: Arr) -> Arr:
     return np.gradient(np.log(x))
 
 
-def _df(f):
+def _df(f: Arr) -> Arr:
     return f * _dlog(f)
 
 
-def _dth(theta):
+def _dth(theta: ArrayLike) -> float:
     return 2 * np.pi / np.size(theta)
 
 
-def moment(E, f, theta, n=0):
+def moment(E: Arr, f: Arr, theta: ArrayLike, n: int = 0) -> Arr:
     """int f^n E df dtheta  [m^2 Hz^n]."""
-    return np.einsum('...ft,f->...', E, f ** n * _df(f)) * _dth(theta)
+    m: Arr = np.einsum('...ft,f->...', E, f ** n * _df(f))
+    return m * _dth(theta)
 
 
-def hs_of(E, f, theta):
+def hs_of(E: Arr, f: Arr, theta: ArrayLike) -> Arr:
     return 4 * np.sqrt(moment(E, f, theta, 0))
 
 
-def mean_square_slope(E, f, theta):
+def mean_square_slope(E: Arr, f: Arr, theta: ArrayLike) -> Arr:
     """Slope variance int k^2 E df dtheta (deep water): UMWM's `mss`, a scalar, so independent of the spreading."""
     return (2 * np.pi) ** 4 / G ** 2 * moment(E, f, theta, 4)
 
 
 # ------------------------------------------------------------------ spectrum from integrated parameters
 
-def _wave_shape(f, fp, om, swell):
+def _wave_shape(f: Arr, fp: Arr, om: Arr, swell: NDArray[np.bool_]) -> Arr:
     """Unnormalised E(f). Wind sea: DHH85 (om = U10/cp clipped to 0.83-5). Swell: JONSWAP f^-5 shape, gamma 3.3,
     because DHH's sigma (0.64 at om = 0.83) is far too broad for swell and DHH is not defined for om < 0.83."""
     x = f / fp
     gam = np.where(swell, 3.3, np.where(om < 1, 1.7, 1.7 + 6 * np.log10(om)))
     sig = np.where(swell, np.where(f <= fp, 0.07, 0.09), 0.08 * (1 + 4 / om ** 3))
     base = np.where(swell, x ** -5 * np.exp(-1.25 * x ** -4), x ** -4 * np.exp(-x ** -4))
-    return base * gam ** np.exp(-(f - fp) ** 2 / (2 * sig ** 2 * fp ** 2))
+    shape: Arr = base * gam ** np.exp(-(f - fp) ** 2 / (2 * sig ** 2 * fp ** 2))
+    return shape
 
 
-def _spread(f, fp, sp, theta, dirs):
+def _spread(f: Arr, fp: Arr, sp: Arr, theta: Arr, dirs: Arr) -> Arr:
     """cos^{2s}(d/2) on the theta bins with s(f) = sp (f/fp)^5 or ^-2.5, normalised so sum D dtheta = 1."""
     s = np.clip(sp * np.where(f < fp, (f / fp) ** 5, (f / fp) ** -2.5), 1.0, S_MAX)
     d = (np.radians(theta) - np.radians(dirs)[:, None] + np.pi) % (2 * np.pi) - np.pi
@@ -77,13 +86,14 @@ def _spread(f, fp, sp, theta, dirs):
     return D / (D.sum(-1, keepdims=True) * _dth(theta))
 
 
-def _unit(f, theta, shape, D):
+def _unit(f: Arr, theta: Arr, shape: Arr, D: Arr) -> Arr:
     """E for Hs = 1 (m0 = 1/16) with the given frequency shape and spreading."""
     E = shape[:, :, None] * D
     return E / (16 * moment(E, f, theta))[:, None, None]
 
 
-def spectrum_from_params(hs, tp, dir_to_deg, mss, u10, f, theta_compass_to, *, swell_age=None, wind_sea_age=None):
+def spectrum_from_params(hs: ArrayLike, tp: ArrayLike, dir_to_deg: ArrayLike, mss: ArrayLike, u10: ArrayLike, f: ArrayLike, theta_compass_to: ArrayLike,
+                         *, swell_age: float | None = None, wind_sea_age: float | None = None) -> Arr:
     """E(f, theta) from the integrated parameters UMWM writes (swh, dwp, dwd, mss) and the 10 m wind.
 
     Two components, each renormalised on the discrete bins to its own Hs, so 4 sqrt(m0) = hs exactly (the continuous
@@ -119,12 +129,12 @@ def spectrum_from_params(hs, tp, dir_to_deg, mss, u10, f, theta_compass_to, *, s
 
 # ------------------------------------------------------------------ UMWM restart spectra
 
-def theta_compass(theta_umwm):
+def theta_compass(theta_umwm: ArrayLike) -> Arr:
     """Compass-toward degrees of UMWM's `theta` bins, ascending: the theta axis of spectrum_from_restart's output."""
     return np.sort(cv.math_rad_to_compass_to(np.asarray(theta_umwm, float)))
 
 
-def spectrum_from_restart(F, k, f, theta):
+def spectrum_from_restart(F: ArrayLike, k: ArrayLike, f: Arr, theta: ArrayLike) -> Arr:
     """UMWM restart F(..., th, f) [m^4 rad^-1, wavenumber plane] -> E(..., f, th) [m^2/Hz/rad], th sorted compass-toward.
     E df = F k dk, so E = F k dk/df with dk/df = (k / f) dln k / dln f from the file's own k(f) (exact in deep water,
     where it is 2k/f, and the finite-depth 2 pi / cg to O(dlnf^2)). The k factor is the Jacobian of the polar
@@ -135,7 +145,7 @@ def spectrum_from_restart(F, k, f, theta):
     return np.swapaxes((np.asarray(F, float) * k * dkdf)[..., order, :], -1, -2)
 
 
-def hs_from_restart(F, k, f, theta):
+def hs_from_restart(F: ArrayLike, k: ArrayLike, f: Arr, theta: ArrayLike) -> Arr:
     """4 sqrt(sum F k dk dtheta), UMWM's `swh` (umwm_domain_output.f90): dk = k dln k per log-f bin."""
     k = np.asarray(k, float)[..., None, :]
     return 4 * np.sqrt(np.sum(np.asarray(F, float) * k * k * np.gradient(np.log(k), axis=-1), axis=(-2, -1)) * _dth(theta))
@@ -143,12 +153,13 @@ def hs_from_restart(F, k, f, theta):
 
 # ------------------------------------------------------------------ Stokes drift
 
-def _dirspec(E, theta):
+def _dirspec(E: Arr, theta: ArrayLike) -> Arr:
     """int E d dtheta: (..., nf, 2) east/north components per frequency."""
-    return np.einsum('...ft,tc->...fc', E, cv.vec_from_to(1.0, np.asarray(theta, float))) * _dth(theta)
+    d: Arr = np.einsum('...ft,tc->...fc', E, cv.vec_from_to(1.0, np.asarray(theta, float)))
+    return d * _dth(theta)
 
 
-def stokes_profile(E, f, theta, z):
+def stokes_profile(E: Arr, f: ArrayLike, theta: ArrayLike, z: ArrayLike) -> Arr:
     """Stokes drift (east, north) at z <= 0 from the full spectrum, deep water (Kenyon 1969):
     u_s(z) = 2 int omega k e^{2kz} E d df dtheta. At z = 0 this is (16 pi^3 / g) int f^3 E d df dtheta, which is the
     brief's 2 m3 / g with m3 = int omega^3 E(omega) d omega (angular moment; E(omega) d omega = E(f) df).
@@ -156,17 +167,18 @@ def stokes_profile(E, f, theta, z):
     f, zz = np.asarray(f, float), np.atleast_1d(np.asarray(z, float))
     w = 2 * np.pi * f
     wt = 2 * w * w ** 2 / G * np.exp(2 * w ** 2 / G * zz[:, None]) * _df(f)
-    out = np.einsum('zf,...fc->...zc', wt, _dirspec(E, theta))
+    out: Arr = np.einsum('zf,...fc->...zc', wt, _dirspec(E, theta))
     return out[..., 0, :] if np.ndim(z) == 0 else out
 
 
-def stokes_transport(E, f, theta):
+def stokes_transport(E: Arr, f: ArrayLike, theta: ArrayLike) -> Arr:
     """int_{-inf}^0 u_s dz = int omega E d df dtheta (deep water): (..., 2)."""
     f = np.asarray(f, float)
-    return np.einsum('f,...fc->...c', 2 * np.pi * f * _df(f), _dirspec(E, theta))
+    out: Arr = np.einsum('f,...fc->...c', 2 * np.pi * f * _df(f), _dirspec(E, theta))
+    return out
 
 
-def stokes_breivik2016(us0, transport, z, beta=1.0):
+def stokes_breivik2016(us0: ArrayLike, transport: ArrayLike, z: ArrayLike, beta: float = 1.0) -> Arr:
     """Breivik et al. 2016 eq 19: u_s(z) = u0 [exp(2 k z) - beta sqrt(-2 pi k z) erfc(sqrt(-2 k z))], the exact Stokes
     profile of a Phillips spectrum (beta = 1) as a function of the surface drift u0 and the transport V (eq 22:
     V = u0 (1 - 2 beta / 3) / (2 k), solved for k, eq 23). Direction is that of `us0`, constant with depth.
@@ -177,22 +189,22 @@ def stokes_breivik2016(us0, transport, z, beta=1.0):
     zz = np.atleast_1d(np.asarray(z, float))
     q = np.sqrt(-2 * k[..., None] * zz)
     p = np.exp(2 * k[..., None] * zz) - beta * np.sqrt(np.pi) * q * erfc(q)
-    out = us0[..., None, :] * p[..., None]
+    out: Arr = us0[..., None, :] * p[..., None]
     return out[..., 0, :] if np.ndim(z) == 0 else out
 
 
 # ------------------------------------------------------------------ realization
 
-def _wavenumber(w, h):
+def _wavenumber(w: Arr, h: Arr | float) -> Arr:
     """Linear dispersion w^2 = g k tanh(k h) by Newton from the left of the root (the function is concave, so it is monotone)."""
-    k = np.maximum(w ** 2 / G, w / np.sqrt(G * h))
+    k: Arr = np.maximum(w ** 2 / G, w / np.sqrt(G * h))
     for _ in range(12):
         th = np.tanh(k * h)
         k = k - (G * k * th - w ** 2) / (G * (th + k * h * (1 - th ** 2)))
     return k
 
 
-def _sd_coeffs(a, w, dx, dy):
+def _sd_coeffs(a: Arr, w: Arr, dx: Arr, dy: Arr) -> tuple[NDArray[np.intp], NDArray[np.intp], Arr, Arr]:
     """Second-order elevation coefficients for the unordered pairs i <= j of the components (M, n2).
     eta2 = sum_ij [cp cos(psi_i + psi_j) + cm cos(psi_i - psi_j)], psi = k.x - w t + phase.
     Deep-water limit of Sharma & Dean 1979 (derived from the second-order Bernoulli and kinematic conditions;
@@ -228,7 +240,8 @@ class Realization:
 
     _budget = 4_000_000     # elements per intermediate array
 
-    def __init__(self, E, f, theta, depth=np.inf, seed=0, n_sub=4, n2=64, second_order=None, stretch=True):
+    def __init__(self, E: ArrayLike, f: ArrayLike, theta: ArrayLike, depth: ArrayLike = np.inf, seed: int = 0, n_sub: int = 4, n2: int = 64,
+                 second_order: bool | None = None, stretch: bool = True) -> None:
         E, f, theta = np.asarray(E, float), np.asarray(f, float), np.asarray(theta, float)
         self.lead, self.f, self.theta, self.stretch = E.shape[:-2], f, theta, stretch
         E2 = E.reshape((-1,) + E.shape[-2:])
@@ -262,17 +275,17 @@ class Realization:
         self.second_order_deep_ok = (kp * self.depth >= np.pi).reshape(self.lead)[()]
         n2 = min(n2, K)
         top = np.argsort(-self.a, axis=1)[:, :n2]
-        g = lambda v: np.take_along_axis(v, top, 1)
-        self._top = tuple(g(v) for v in (self.a, self.w, self.k, self.dx, self.dy, self.phi))
+        self._top = tuple(np.take_along_axis(v, top, 1) for v in (self.a, self.w, self.k, self.dx, self.dy, self.phi))
         self._pairs = _sd_coeffs(*self._top[:2], *self._top[3:5])
         self._step = max(1, self._budget // (M * max(K, len(self._pairs[0]))))
 
     # -- evaluation helpers; arrays are (M, n, K) for n points
-    def _phase(self, x, y, t):
-        return (self.k[:, None] * (self.dx[:, None] * x[None, :, None] + self.dy[:, None] * y[None, :, None])
-                - self.w[:, None] * t[None, :, None] + self.phi[:, None])
+    def _phase(self, x: Arr, y: Arr, t: Arr) -> Arr:
+        ph: Arr = (self.k[:, None] * (self.dx[:, None] * x[None, :, None] + self.dy[:, None] * y[None, :, None])
+                   - self.w[:, None] * t[None, :, None] + self.phi[:, None])
+        return ph
 
-    def _second(self, x, y, t):
+    def _second(self, x: Arr, y: Arr, t: Arr) -> tuple[Arr, Arr]:
         """(eta2 (M, n), grad (M, n, 2)) from the top-n2 components, zero where the switch is off."""
         if not self._on.any():
             return np.zeros((len(self._on), len(x))), np.zeros((len(self._on), len(x), 2))
@@ -289,33 +302,33 @@ class Realization:
         on = self._on[:, None]
         return np.where(on, eta, 0.0), np.where(on[..., None], np.stack(gr, -1), 0.0)
 
-    def _map(self, fn, nout, *args):
+    def _map(self, fn: Callable[..., Arr], nout: int, *args: ArrayLike) -> Arr:
         """Broadcast the point arrays, evaluate fn on chunks -> shape lead + broadcast shape + (nout,)."""
         args = np.broadcast_arrays(*(np.asarray(v, float) for v in args))
         flat = [v.ravel() for v in args]
         out = np.concatenate([fn(*(v[i:i + self._step] for v in flat)) for i in range(0, flat[0].size, self._step)], axis=1)
         return out.reshape(self.lead + args[0].shape + (nout,))
 
-    def _eta(self, x, y, t):
+    def _eta(self, x: Arr, y: Arr, t: Arr) -> Arr:
         e2 = self._second(x, y, t)[0]
         return (self.a[:, None] * np.cos(self._phase(x, y, t))).sum(-1) + e2
 
-    def eta(self, x, y, t):
+    def eta(self, x: ArrayLike, y: ArrayLike, t: ArrayLike) -> Arr:
         """Surface elevation [m] at east x, north y [m], time t [s]; shape lead + broadcast(x, y, t)."""
         return self._map(lambda x, y, t: self._eta(x, y, t)[..., None], 1, x, y, t)[..., 0]
 
-    def slope(self, x, y, t):
+    def slope(self, x: ArrayLike, y: ArrayLike, t: ArrayLike) -> Arr:
         """(d eta/dx, d eta/dy) = (east, north) surface slope, shape lead + broadcast + (2,)."""
-        def fn(x, y, t):
+        def fn(x: Arr, y: Arr, t: Arr) -> Arr:
             s = -self.a[:, None] * np.sin(self._phase(x, y, t))
             lin = np.stack([(s * (self.k * self.dx)[:, None]).sum(-1), (s * (self.k * self.dy)[:, None]).sum(-1)], -1)
             return lin + self._second(x, y, t)[1]
         return self._map(fn, 2, x, y, t)
 
-    def velocity(self, x, y, z, t):
+    def velocity(self, x: ArrayLike, y: ArrayLike, z: ArrayLike, t: ArrayLike) -> Arr:
         """Orbital velocity (east, north, up) [m/s] at height z [m] (z <= 0 below MSL), shape lead + broadcast + (3,).
         Above the instantaneous surface the value at the surface is returned."""
-        def fn(x, y, z, t):
+        def fn(x: Arr, y: Arr, z: Arr, t: Arr) -> Arr:
             ph, eta = self._phase(x, y, t), self._eta(x, y, t)
             h = self.depth[:, None]
             zs = h * (z[None] - eta) / (h + eta) if self.stretch else np.broadcast_to(z[None], eta.shape)
@@ -327,7 +340,7 @@ class Realization:
             return np.stack([(uh * self.dx[:, None]).sum(-1), (uh * self.dy[:, None]).sum(-1), wv.sum(-1)], -1)
         return self._map(fn, 3, x, y, z, t)
 
-    def encounter_spectrum(self, velocity_en, edges=None):
+    def encounter_spectrum(self, velocity_en: ArrayLike, edges: ArrayLike | None = None) -> tuple[Arr, Arr]:
         """Variance spectrum [m^2/Hz] seen by a vehicle moving at (east, north) velocity [m/s]: each component lands at
         |omega - k . V| / 2 pi (Doppler; folded, so following seas faster than the waves appear at |f_e|).
         Returns (bin centres [Hz], S shaped lead + (nbins,)). First-order variance only."""
@@ -343,21 +356,21 @@ class Realization:
 
 # ------------------------------------------------------------------ receipts
 
-def _max_autocorr(x, dt, lag_min, lag_max):
+def _max_autocorr(x: Arr, dt: float, lag_min: float, lag_max: float) -> float:
     """max |autocorrelation| of a record at lags lag_min..lag_max [s] (direct sums, mean removed)."""
     x = x - x.mean()
     lags = np.arange(int(lag_min / dt), int(lag_max / dt) + 1)
-    return max(abs(np.dot(x[:-m], x[m:])) / (len(x) - m) for m in lags) / x.var()
+    return float(max(abs(np.dot(x[:-m], x[m:])) / (len(x) - m) for m in lags) / x.var())
 
 
-def _grid():
+def _grid() -> tuple[Arr, Arr, Arr]:
     """UMWM's bins: f [Hz], theta [math rad, file order], theta [compass deg, ascending]."""
     f = 0.0313 * 1.1225 ** np.arange(37)
     th = (np.arange(32) + 0.5) * np.pi / 16 - np.pi
     return f, th, theta_compass(th)
 
 
-def _restart_from_E(E, f, theta_umwm):
+def _restart_from_E(E: Arr, f: Arr, theta_umwm: Arr) -> tuple[Arr, Arr]:
     """Inverse of spectrum_from_restart in deep water with the analytic dk = 2 k dlnf (so it shares no code with it):
     returns (F(th, f) in file order, k(f))."""
     k = (2 * np.pi * f) ** 2 / G
@@ -367,7 +380,7 @@ def _restart_from_E(E, f, theta_umwm):
     return Fu, k
 
 
-def _single(f, th, a=0.3):
+def _single(f: Arr, th: Arr, a: float = 0.3) -> tuple[Realization, int]:
     """Realization of one (f, theta) bin of amplitude a with one component, second order forced on; returns it and the
     index of its (only non-zero) component."""
     E1 = np.zeros((len(f), len(th)))
@@ -376,32 +389,32 @@ def _single(f, th, a=0.3):
     return r, int(np.argmax(r.a[0]))
 
 
-def _on_ray(r, i, s):
+def _on_ray(r: Realization, i: int, s: float) -> tuple[float, float]:
     """Point at distance s along the propagation direction of component i."""
     return s * r.dx[0, i], s * r.dy[0, i]
 
 
-def _fd_grad(r, x, y, t, h=1e-4):
+def _fd_grad(r: Realization, x: Arr | float, y: Arr | float, t: Arr | float, h: float = 1e-4) -> Arr:
     """Spatial gradient of eta by central differences of r.eta (independent of r.slope)."""
     gx = (r.eta(x + h, y, t) - r.eta(x - h, y, t)) / (2 * h)
     gy = (r.eta(x, y + h, t) - r.eta(x, y - h, t)) / (2 * h)
     return np.stack([gx, gy], -1)
 
 
-def _propagation(r, x, y, t, dt=0.05):
+def _propagation(r: Realization, x: Arr, y: Arr, t: Arr, dt: float = 0.05) -> Arr:
     """<-eta_t grad eta> = (1/2) sum a^2 k w d: a vector along the direction the waves travel toward (east, north)."""
     et = (r.eta(x, y, t + dt) - r.eta(x, y, t - dt)) / (2 * dt)
     return -(et[:, None] * _fd_grad(r, x, y, t)).mean(0)
 
 
-def _phase_speed(r, i):
+def _phase_speed(r: Realization, i: int) -> float:
     """c = -eta_t / (d . grad eta) by finite differences of eta alone, where the phase is pi/2 (steepest slope)."""
     x, y = _on_ray(r, i, (np.pi / 2 - r.phi[0, i]) / r.k[0, i])
     et = (r.eta(x, y, 0.01) - r.eta(x, y, -0.01)) / 0.02
     return float(-et / (_fd_grad(r, x, y, 0.0) @ [r.dx[0, i], r.dy[0, i]]))
 
 
-def receipts():
+def receipts() -> None:
     from cafe import receipts as R
     f, th_u, th = _grid()
     gp = "Waves"
@@ -416,7 +429,9 @@ def receipts():
     # m0 and m2 of the discrete shapes vs fine-grid quadrature of the same continuous shape
     ff = np.geomspace(f[0] / 1.06, f[-1] * 1.06, 200001)
     for name, sw, om in (("DHH wind sea", False, 1.5), ("swell", True, 0.4)):
-        sh = lambda x, om=om, sw=sw: _wave_shape(x, np.array([[0.1]]), np.array([[om]]), np.array([[sw]]))[0]
+        def sh(x: Arr, om: float = om, sw: bool = sw) -> Arr:
+            s: Arr = _wave_shape(x, np.array([[0.1]]), np.array([[om]]), np.array([[sw]]))[0]
+            return s
         for n in (0, 2):
             R.receipt(gp, f"m{n} (int f^{n} S df) of the {name} shape, 37 log bins vs quadrature",
                       float(np.sum(f ** n * sh(f) * _df(f))), float(np.trapezoid(ff ** n * sh(ff), ff)), 0.02, "",
@@ -470,8 +485,8 @@ def receipts():
         R.bracket(gp, f"second-order switch at Hs {hs} m, Tp 10 s (eps = {float(r.eps):.3f})", float(r.second_order), want, want,
                   "", "on iff eps = kp Hs / 2 > 0.05")
     r1, i = _single(f, th)
-    x, y = _on_ray(r1, i, -r1.phi[0, i] / r1.k[0, i])
-    R.receipt(gp, "second-order crest of one component vs Stokes a + k a^2 / 2", float(r1.eta(x, y, 0.0)),
+    cx, cy = _on_ray(r1, i, -r1.phi[0, i] / r1.k[0, i])
+    R.receipt(gp, "second-order crest of one component vs Stokes a + k a^2 / 2", float(r1.eta(cx, cy, 0.0)),
               0.3 + r1.k[0, i] * 0.3 ** 2 / 2, 0.01, "m", "Stokes 1847 / Sharma & Dean deep-water limit")
     R.receipt(gp, "phase speed -eta_t / (d . grad eta) of a component vs g / omega", _phase_speed(r1, i), float(G / r1.w[0, i]),
               0.01, "m/s", "deep-water dispersion; fails if the sign of k.x or of the direction flips")

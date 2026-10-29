@@ -20,6 +20,7 @@ The C-grid velocities are built so that the reader's destaggering ((u(i) + u(i+1
 GOFS T-point values exactly except in the last column / row, where HYCOM has no neighbour.
 """
 import datetime as dt, hashlib, json, pathlib, sys
+from typing import Any
 
 import numpy as np
 
@@ -209,7 +210,7 @@ def _write_archv(out, f, e):
     return d
 
 
-def make(out):
+def make(out: str | pathlib.Path) -> dict[str, Any]:
     """Write every fixture under `out` (must not exist yet or be empty) and return the paths."""
     out = pathlib.Path(out)
     out.mkdir(parents=True, exist_ok=True)

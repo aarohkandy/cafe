@@ -27,38 +27,43 @@ Broken configuration. `--broken tests/fixtures/broken/wave_direction.yaml` sets 
 exit code is then inverted, because the point is that the receipts notice: 0 if at least one receipt failed, 1 if the broken
 configuration passed everything (what `make broken` and the CI job check). The table goes to runs/receipts_broken.json.
 """
+from __future__ import annotations
+
 import contextlib, datetime as dt, hashlib, importlib, io, json, math, os, pathlib, platform, re, tempfile, time
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 SYNTH_MS, SYNTH_FROM_DEG = 7.0, 75.0          # the synthetic fixture: a 7 m/s trade wind from the east-north-east
 ALIGN_MAX_DEG, WDIR_MAX_DEG, STOKES_DIR_MAX_DEG, FIT_DIR_MAX_DEG = 25.0, 0.5, 1.0, 30.0
 
 
-def _say(s):
+def _say(s: str) -> None:
     print(s, flush=True)
 
 
-def data_root():
+def data_root() -> pathlib.Path:
     return pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
 
 
 # ------------------------------------------------------------------ normalising one record
 
 
-def _num(x):
+def _num(x: Any) -> float | None:
     """float, or None when it is not finite (JSON has no inf / nan)."""
     return float(x) if x is not None and math.isfinite(x) else None
 
 
-def _ident(module, text, seen):
+def _ident(module: str, text: str, seen: dict[str, int]) -> str:
     base = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:72]
     seen[base] = seen.get(base, 0) + 1
     return f"{module}/{base}" + (f"-{seen[base]}" if seen[base] > 1 else "")
 
 
-def _row(module, d, seen):
+def _row(module: str, d: dict[str, Any], seen: dict[str, int]) -> dict[str, Any]:
     """One cafe.receipts record -> the table row."""
     ctx = d.get("kind") == "context"
     note = []
@@ -79,7 +84,7 @@ def _row(module, d, seen):
                 source=d.get("source", ""), note="; ".join(note))
 
 
-def _extra_row(module, name, failed, note, seen, ident=None):
+def _extra_row(module: str, name: str, failed: bool, note: str, seen: dict[str, int], ident: str | None = None) -> dict[str, Any]:
     """A row for something that is not a cafe.receipts record: a receipt function that raised or recorded nothing, or a slow group not run."""
     return dict(id=ident or _ident(module, name, seen), module=module, name=name, value=None, reference=None, tolerance=None, unit="",
                 ok=False if failed else None, kind="fail" if failed else "context", source="cafe.pm.receipts", note=note)
@@ -88,7 +93,7 @@ def _extra_row(module, name, failed, note, seen, ident=None):
 # ------------------------------------------------------------------ the synthetic trade-wind fixture and the wave-direction receipts
 
 
-def synthetic_cache(root):
+def synthetic_cache(root: str | pathlib.Path) -> pathlib.Path:
     """A 3 x 4 point GriddedEnv cache (wrf.zarr, umwm.zarr, umwmspec.zarr) built from first principles: a steady 7 m/s trade wind from
     75 deg, UMWM `wdir` its direction (math radians toward), `mwd` 10 deg and `dwd` 20 deg counter-clockwise of it, and a restart spectrum
     that is one UMWM direction bin (the one nearest `dwd`) with E ~ f^-5. No cafe.pm.env.conventions call: the angles are cos/sin of
@@ -104,8 +109,13 @@ def synthetic_cache(root):
     a = np.radians(SYNTH_FROM_DEG)
     u, v = -SYNTH_MS * np.sin(a), -SYNTH_MS * np.cos(a)
     coords = dict(time=t, lat=lat, lon=lon)
-    full = lambda x: (("time", "lat", "lon"), np.full(shape, x))
-    static = lambda x: (("lat", "lon"), np.full(shape[1:], x))
+
+    def full(x: float) -> tuple[tuple[str, ...], NDArray[Any]]:
+        return (("time", "lat", "lon"), np.full(shape, x))
+
+    def static(x: float) -> tuple[tuple[str, ...], NDArray[Any]]:
+        return (("lat", "lon"), np.full(shape[1:], x))
+
     wdir = math.atan2(v, u)
     xr.Dataset(dict(U10=full(u), V10=full(v), RAINNC=full(0.0), RAINC=full(0.0), COSALPHA=static(1.0), SINALPHA=static(0.0)), coords=coords,
                attrs=dict(TITLE="synthetic trade wind", source="cafe.pm.receipts.synthetic_cache")).to_zarr(root / "wrf.zarr", mode="w")
@@ -127,12 +137,12 @@ def synthetic_cache(root):
     return pathlib.Path(root).parent
 
 
-def _dang(a, b):
+def _dang(a: ArrayLike, b: ArrayLike) -> NDArray[np.float64]:
     """Absolute angle between two compass directions, degrees in [0, 180]."""
-    return np.abs((np.asarray(a) - np.asarray(b) + 180.0) % 360.0 - 180.0)
+    return np.abs((np.asarray(a, np.float64) - np.asarray(b, np.float64) + 180.0) % 360.0 - 180.0)
 
 
-def _stokes_native(F, k, f, th):
+def _stokes_native(F: NDArray[np.float64], k: NDArray[np.float64], f: NDArray[np.float64], th: NDArray[np.float64]) -> NDArray[np.float64]:
     """UMWM's surface Stokes drift (east, north) straight from a restart spectrum F(th, f) [m^4 rad^-1]: sum 2 w k F k dk dth (cos th, sin th)
     in UMWM's own angles (radians counter-clockwise from east, toward). It does not use cafe.pm.env.conventions."""
     w = 2 * np.pi * f
@@ -141,7 +151,7 @@ def _stokes_native(F, k, f, th):
     return dth * np.array([np.einsum("tf,f,t->", F, wt, np.cos(th)), np.einsum("tf,f,t->", F, wt, np.sin(th))])
 
 
-def _direction_receipts(label, cache, max_points=800, n_spec=200):
+def _direction_receipts(label: str, cache: pathlib.Path, max_points: int = 800, n_spec: int = 200) -> None:
     """Wave-direction receipts on the GriddedEnv in `cache`; the same set runs on the synthetic fixture and on the real cache."""
     from cafe import receipts as R
     from . import config
@@ -149,6 +159,7 @@ def _direction_receipts(label, cache, max_points=800, n_spec=200):
     from .env.environment import GriddedEnv
     env = GriddedEnv(cache, config.env_sigmas())
     S = env.spec
+    assert S is not None
     g = f"Wave direction ({label})"
     ts = np.array([x for x in S["t"] if env.tu.x[0] <= x <= env.tu.x[-1]])
     ts = ts[:: max(1, len(ts) // 4)][:4]
@@ -171,6 +182,7 @@ def _direction_receipts(label, cache, max_points=800, n_spec=200):
     pick = slice(None, None, max(1, len(lon) // n_spec))
     for lo, la, tt in zip(lon[pick], lat[pick], t[pick], strict=True):
         r = env.restart_spectrum(lo, la, tt)
+        assert r is not None
         native = _stokes_native(r["F"], r["k"], r["f"], r["th"])
         thc = waves.theta_compass(r["th"])
         real = waves.stokes_profile(waves.spectrum_from_restart(r["F"], r["k"], r["f"], r["th"]), r["f"], thc, 0.0)
@@ -195,7 +207,7 @@ def _direction_receipts(label, cache, max_points=800, n_spec=200):
               "surface.build multiplies the parametric field by the real/parametric ratio at every restart time")
 
 
-def wave_direction_receipts():
+def wave_direction_receipts() -> None:
     """Direction receipts on the synthetic fixture always, and on the real mission cache when one is under $CAFE_DATA/cache."""
     from cafe import receipts as R
     with tempfile.TemporaryDirectory() as d:
@@ -210,16 +222,16 @@ def wave_direction_receipts():
 # ------------------------------------------------------------------ which receipts run
 
 
-def _app(results):
+def _app(results: pathlib.Path) -> None:
     """The existing app's quick receipts, in the order `python -m cafe.receipts` runs them (its FEA ones are the slow group `app.fea`).
     The CFD and SITL cross-check results it reads are optional inputs from earlier hangar runs: absent means a context row."""
     from cafe import receipts as R
     for f in (R.geometry_receipts, R.env_receipts, R.weather_receipts, R.dynamics_receipts, R.hull_lift_algebra_receipts, R.ocean_receipts,
               R.bem_receipts, R.fleet_receipts):
         f()
-    for f, group, what in ((R.cfd_receipts, "CFD", "hangar CFD results"), (R.crosscheck_receipts, "Emulator", "the SITL cross-check")):
+    for g, group, what in ((R.cfd_receipts, "CFD", "hangar CFD results"), (R.crosscheck_receipts, "Emulator", "the SITL cross-check")):
         n0 = len(R.OUT)
-        f(results)
+        g(results)
         if not any(d["group"] == group for d in R.OUT[n0:]):
             R.context(group, f"no stored {what} under {results}", 0.0, 0.0, "", "cafe/receipts.py reads them if they exist")
 
@@ -231,7 +243,7 @@ class NotRun(Exception):
     """A required slow group has no stored result made by this code."""
 
 
-def store_path(group):
+def store_path(group: str) -> pathlib.Path:
     return data_root() / "receipts" / f"{group}.json"
 
 
@@ -239,7 +251,7 @@ SCOPES = {"pm": "pipeline.code_digest(): the whole cafe/pm tree + config + platf
           "app": "hash of cafe/*.py: the app's own modules"}
 
 
-def code_digest(scope):
+def code_digest(scope: str) -> str:
     if scope == "app":
         h = hashlib.sha256()
         for p in sorted((ROOT / "cafe").glob("*.py")):
@@ -249,7 +261,7 @@ def code_digest(scope):
     return whole_tree()
 
 
-def _save(group, scope, rows, seconds):
+def _save(group: str, scope: str, rows: list[dict[str, Any]], seconds: float) -> None:
     from .ledger import git_sha
     p = store_path(group)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -260,10 +272,11 @@ def _save(group, scope, rows, seconds):
     os.replace(tmp, p)
 
 
-def slow_group(group, minutes, scope, runner, slow, keep=None):
+def slow_group(group: str, minutes: int, scope: str, runner: Callable[[], Any], slow: bool,
+               keep: Callable[[dict[str, Any]], bool] | None = None) -> Callable[[], None]:
     """The job for one slow group. slow: run `runner` (which records through cafe.receipts), keep the rows `keep` accepts, store them.
     Otherwise: read the stored rows if they were made by this code, else raise NotRun."""
-    def job():
+    def job() -> None:
         from cafe import receipts as R
         if slow:
             n0, t0 = len(R.OUT), time.time()
@@ -285,16 +298,16 @@ def slow_group(group, minutes, scope, runner, slow, keep=None):
     return job
 
 
-def _fea():
+def _fea() -> None:
     from cafe import receipts as R
     R.fea_receipts()
 
 
-def _call(mod, fn="receipts", **kw):
+def _call(mod: str, fn: str = "receipts", **kw: Any) -> Callable[[], Any]:
     return lambda: getattr(importlib.import_module(mod), fn)(**kw)
 
 
-def _plate():
+def _plate() -> Any:
     """The wall-model flat plate, rerun (not stored): wallmodel.receipts reads the fields main() writes."""
     from .stage3 import wallmodel
     r = wallmodel.flat_plate(**wallmodel.PLATE_SLOW)
@@ -302,7 +315,7 @@ def _plate():
     return wallmodel.receipts(plate=r)
 
 
-def _nest_sphere():
+def _nest_sphere() -> Any:
     """The native-kernel sphere at Re = 100, rerun into a scratch directory (the stored file is left alone), then nest.receipts."""
     from .stage3 import nest
     old = nest.SLOW_DIR
@@ -315,7 +328,7 @@ def _nest_sphere():
             nest.SLOW_DIR = old
 
 
-def jobs(slow=False):
+def jobs(slow: bool = False) -> list[tuple[str, Callable[[], Any]]]:
     """[(name, zero-argument function)]; each function records through cafe.receipts and returns anything (a str is kept as a note)."""
     d = data_root()
     gebco, tao = d / "bathy" / "gebco2026_tepex_c.npz", d / "tao"
@@ -346,10 +359,11 @@ def jobs(slow=False):
     ]
 
 
-def collect(slow=False, only=None, log=_say):
+def collect(slow: bool = False, only: list[str] | None = None, log: Callable[[str], None] = _say) -> list[dict[str, Any]]:
     """Run the jobs (all, or those whose name contains one of `only`) and return the normalised rows."""
     from cafe import receipts as R
-    rows, seen = [], {}
+    rows: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}
     for name, fn in jobs(slow):
         if only and not any(o in name for o in only):
             continue
@@ -373,7 +387,7 @@ def collect(slow=False, only=None, log=_say):
     return rows
 
 
-def summary(rows):
+def summary(rows: list[dict[str, Any]]) -> tuple[dict[str, int], str]:
     c = {k: sum(r["kind"] == k for r in rows) for k in ("pass", "fail", "context")}
     lines = [f"{c['pass']} pass, {c['fail']} fail, {c['context']} context ({len(rows)} rows)"]
     for r in rows:
@@ -382,7 +396,8 @@ def summary(rows):
     return c, "\n".join(lines)
 
 
-def run(slow=False, only=None, broken=None, out=None, log=_say):
+def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib.Path | None = None, out: str | pathlib.Path | None = None,
+        log: Callable[[str], None] = _say) -> tuple[list[dict[str, Any]], int]:
     """-> (rows, exit code). `broken`: the overlay yaml to apply for this run (exit code inverted, see the module docstring)."""
     from .env import conventions as cv
     old = os.environ.get(cv.OVERLAY_ENV)

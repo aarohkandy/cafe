@@ -11,9 +11,14 @@ the Zarr stores are assembled from those once every hour is present. Only the bo
 3-D WRF (U, V, PH, PHB, T, lowest NZ3 levels) is read only for the hours in `hours3d` (the UAS sorties): below the
 first mass level (~21 m) and at every other hour wind comes from U10 through the COARE profile.
 """
-import concurrent.futures as cf, datetime as dt, json, os, pathlib, time
+from __future__ import annotations
+
+import concurrent.futures as cf, datetime as dt, functools, json, os, pathlib, time
+from collections.abc import Callable, Iterable
+from typing import Any, TypeVar
 
 import numpy as np
+from numpy.typing import NDArray
 
 from . import remote
 
@@ -27,14 +32,17 @@ UMWM2D = ["swh", "mwp", "mwd", "dwp", "dwd", "mss", "wspd", "wdir", "ust", "cd",
 UMWMSTATIC = ["lon", "lat", "seamask", "depth"]
 SPEC_STRIDE = 3                            # keep every 3rd restart sea point in each direction (36 km)
 SCHEMAS = pathlib.Path(__file__).resolve().parents[2] / "schemas"
+Box = tuple[float, float, float, float]
+_N = TypeVar("_N", float, NDArray[np.float64])
 
 
-def schema(kind):
+def schema(kind: str) -> dict[str, Any]:
     """cafe/schemas/<kind>.json, or <kind>.json from the directory in $CAFE_SCHEMAS (tests with a small grid)."""
-    return json.loads((pathlib.Path(os.environ.get("CAFE_SCHEMAS") or SCHEMAS) / f"{kind}.json").read_text())
+    d: dict[str, Any] = json.loads((pathlib.Path(os.environ.get("CAFE_SCHEMAS") or SCHEMAS) / f"{kind}.json").read_text())
+    return d
 
 
-def schema_errors(kind, actual, url):
+def schema_errors(kind: str, actual: dict[str, dict[str, Any]], url: str) -> None:
     """Compare {var: dict(dims, dtype, units, shape)} read from a file against cafe/schemas/<kind>.json."""
     want = schema(kind)["variables"]
     errs = []
@@ -50,8 +58,8 @@ def schema_errors(kind, actual, url):
         raise ValueError(f"{url}: does not match cafe/schemas/{kind}.json (the reader would misread it):\n  " + "\n  ".join(errs))
 
 
-def _h5meta(f, names):
-    out = {}
+def _h5meta(f: Any, names: list[str]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
     for k in names:
         v = f[k]
         u = v.attrs.get("units", b"")
@@ -60,37 +68,38 @@ def _h5meta(f, names):
     return out
 
 
-def _cdfmeta(hdr, names):
+def _cdfmeta(hdr: remote.Header, names: list[str]) -> dict[str, dict[str, Any]]:
     return {k: dict(dims=hdr[2][k]["dims"], dtype=hdr[2][k]["dtype"].lstrip(">"), units=str(hdr[2][k]["attrs"].get("units", "")),
                     shape=hdr[2][k]["shape"]) for k in names}
 
 
-def stamp(t):
+def stamp(t: dt.datetime) -> str:
     return t.strftime("%Y-%m-%d_%H:00:00")
 
 
-def hours(t0, t1):
+def hours(t0: dt.datetime, t1: dt.datetime) -> list[dt.datetime]:
     n = int((t1 - t0).total_seconds() // 3600)
     return [t0 + dt.timedelta(hours=k) for k in range(n + 1)]
 
 
-def urls(t):
+def urls(t: dt.datetime) -> dict[str, str]:
     s = stamp(t)
     return dict(wrf=f"{BASE}/wrfout_d01_{s}", umwm=f"{BASE}/output/umwmout_{s}.nc", rst=f"{BASE}/restart/umwmrst_{s}.nc")
 
 
-def lon360(x):
-    return np.mod(x, 360.0)
+def lon360(x: _N) -> _N:
+    r: _N = np.mod(x, 360.0)
+    return r
 
 
-def _span(mask):
+def _span(mask: NDArray[np.bool_]) -> tuple[int, int]:
     idx = np.flatnonzero(mask)
     if not idx.size:
         raise ValueError("the mission box is outside the model domain")
     return int(idx[0]), int(idx[-1]) + 1
 
 
-def box_index(lat1d, lon1d, box):
+def box_index(lat1d: NDArray[Any], lon1d: NDArray[Any], box: Box) -> tuple[int, int, int, int]:
     """(j0, j1, i0, i1) covering box = (lon_min, lon_max, lat_min, lat_max) on separable 1-D axes; lon in any range."""
     lo, hi, la, lb = box
     lo, hi = lon360(lo), lon360(hi)
@@ -101,13 +110,13 @@ def box_index(lat1d, lon1d, box):
     return max(j0 - 1, 0), min(j1 + 1, len(lat1d)), max(i0 - 1, 0), min(i1 + 1, len(lon1d))
 
 
-def _wrf_attrs(f):
+def _wrf_attrs(f: Any) -> dict[str, Any]:
     a = {k: f.attrs[k] for k in ("MAP_PROJ", "CEN_LAT", "CEN_LON", "STAND_LON", "TRUELAT1", "DX", "DT", "SST_UPDATE",
                                  "SF_OCEAN_PHYSICS", "SIMULATION_START_DATE", "TITLE")}
     return {k: (v.decode() if isinstance(v, bytes) else v.item() if hasattr(v, "item") else v) for k, v in a.items()}
 
 
-def wrf_grid(t, box):
+def wrf_grid(t: dt.datetime, box: Box) -> dict[str, Any]:
     import h5py
     with h5py.File(remote.RemoteFile(urls(t)["wrf"]), "r") as f:
         schema_errors("wrfout", _h5meta(f, WRFSTATIC + WRF2D + WRF3D), urls(t)["wrf"])
@@ -122,7 +131,7 @@ def wrf_grid(t, box):
         return dict(j=(j0, j1), i=(i0, i1), attrs=_wrf_attrs(f), **out)
 
 
-def wrf_hour(t, g, three_d=False):
+def wrf_hour(t: dt.datetime, g: dict[str, Any], three_d: bool = False) -> dict[str, Any]:
     """One hour of WRF in the box: 2-D fields, and (three_d) destaggered U, V and mass-level heights, theta."""
     import h5py
     (j0, j1), (i0, i1) = g["j"], g["i"]
@@ -146,7 +155,7 @@ def wrf_hour(t, g, three_d=False):
     return out
 
 
-def umwm_grid(t, box, hdr=None):
+def umwm_grid(t: dt.datetime, box: Box, hdr: remote.Header | None = None) -> dict[str, Any]:
     u = urls(t)["umwm"]
     hdr = hdr or remote.cdf1_header(u)
     schema_errors("umwmout", _cdfmeta(hdr, UMWM2D + UMWMSTATIC), u)
@@ -157,7 +166,7 @@ def umwm_grid(t, box, hdr=None):
     return dict(j=(j0, j1), i=(i0, i1), hdr=hdr, **out)
 
 
-def umwm_hour(t, g):
+def umwm_hour(t: dt.datetime, g: dict[str, Any]) -> dict[str, NDArray[Any]]:
     u = urls(t)["umwm"]
     hdr = remote.cdf1_header(u)
     schema_errors("umwmout", _cdfmeta(hdr, UMWM2D), u)
@@ -165,7 +174,7 @@ def umwm_hour(t, g):
     return {k: remote.cdf1_read(u, k, hdr, rows=(j0, j1))[:, i0:i1] for k in UMWM2D}
 
 
-def spec_points(t, ug, stride=SPEC_STRIDE):
+def spec_points(t: dt.datetime, ug: dict[str, Any], stride: int = SPEC_STRIDE) -> dict[str, Any]:
     """Sea-point indices of the restart file inside the UMWM box `ug`, thinned to every `stride`-th grid row/column.
 
     Restart points carry their own lon/lat; each is matched to the nearest node of the output grid's 1-D axes."""
@@ -186,7 +195,7 @@ def spec_points(t, ug, stride=SPEC_STRIDE):
                 th=remote.cdf1_read(u, "theta", hdr))
 
 
-def runs(idx, gap=1):
+def runs(idx: NDArray[np.integer[Any]], gap: int = 1) -> list[tuple[int, int]]:
     """Cover sorted indices with (start, stop) spans, merging neighbours closer than `gap` (gap=1: exact runs)."""
     if not len(idx):
         return []
@@ -196,7 +205,7 @@ def runs(idx, gap=1):
     return list(zip(starts.tolist(), stops.tolist(), strict=True))
 
 
-def spec_hour(t, pts):
+def spec_hour(t: dt.datetime, pts: dict[str, Any]) -> dict[str, NDArray[Any]]:
     u = urls(t)["rst"]
     hdr = remote.cdf1_header(u)
     schema_errors("umwmrst", _cdfmeta(hdr, ["F", "wavenumber", "lon", "lat"]), u)
@@ -211,13 +220,14 @@ def spec_hour(t, pts):
     return dict(F=np.concatenate(F), k=np.concatenate(K))
 
 
-def _save(path, d):
+def _save(path: pathlib.Path, d: dict[str, Any]) -> None:
     tmp = path.with_name(path.name + ".tmp.npz")
     np.savez(tmp, **d)
     os.replace(tmp, path)
 
 
-def ingest(t0, t1, box, out, hours3d=(), threads=8, spectra=True, log=print):
+def ingest(t0: dt.datetime, t1: dt.datetime, box: Box, out: str | pathlib.Path, hours3d: Iterable[dt.datetime] = (), threads: int = 8,
+           spectra: bool = True, log: Callable[[str], None] = print) -> dict[str, Any]:
     """Fetch every hour t0..t1 for `box` into `out`. Returns the manifest (also written to out/manifest.json)."""
     out = pathlib.Path(out)
     (out / "hours").mkdir(parents=True, exist_ok=True)
@@ -227,18 +237,18 @@ def ingest(t0, t1, box, out, hours3d=(), threads=8, spectra=True, log=print):
     wg = wrf_grid(ts[0], box)
     ug = umwm_grid(ts[0], box)
     h3 = {stamp(t) for t in hours3d}
-    jobs = []
+    jobs: list[tuple[pathlib.Path, Callable[[], dict[str, Any]]]] = []
     for t in ts:
         s = stamp(t)
-        jobs.append((out / "hours" / f"wrf_{s}.npz", lambda t=t, s=s: wrf_hour(t, wg, s in h3)))
-        jobs.append((out / "hours" / f"umwm_{s}.npz", lambda t=t: umwm_hour(t, ug)))
+        jobs.append((out / "hours" / f"wrf_{s}.npz", functools.partial(wrf_hour, t, wg, s in h3)))
+        jobs.append((out / "hours" / f"umwm_{s}.npz", functools.partial(umwm_hour, t, ug)))
     pts = None
     if spectra:
         rst = [t for t in ts if t.hour % 6 == 0]
         if not rst:
             raise ValueError(f"no restart hour (00/06/12/18 Z) in {ts[0]} .. {ts[-1]}; spectra=False skips the spectra")
         pts = spec_points(rst[0], ug)
-        jobs += [(out / "hours" / f"spec_{stamp(t)}.npz", lambda t=t: spec_hour(t, pts)) for t in rst]
+        jobs += [(out / "hours" / f"spec_{stamp(t)}.npz", functools.partial(spec_hour, t, pts)) for t in rst]
     todo = [(p, f) for p, f in jobs if not p.exists()]
     log(f"ingest: {len(jobs)} parts, {len(jobs) - len(todo)} cached, fetching {len(todo)} with {threads} threads")
     t_start, done = time.time(), 0
@@ -252,7 +262,8 @@ def ingest(t0, t1, box, out, hours3d=(), threads=8, spectra=True, log=print):
     return assemble(out, ts, wg, ug, pts, sorted(h3))
 
 
-def assemble(out, ts, wg, ug, pts, h3):
+def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any], ug: dict[str, Any], pts: dict[str, Any] | None,
+             h3: list[str]) -> dict[str, Any]:
     import xarray as xr
     out = pathlib.Path(out)
     tt = np.array([np.datetime64(t.replace(tzinfo=None), "s") for t in ts])

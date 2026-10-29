@@ -8,7 +8,10 @@ Shares of the budget: ingest (measured bytes/s; zero once cached), stage 1 (memb
 member cost), stage 3 (LES windows: cells x steps / measured LBM rate; FEA and interFoam on CPU in parallel), stage 1'
 (the refit rerun), report. A plan that would not fit is shrunk (members, then windows, then nest resolution) and says so.
 """
+from __future__ import annotations
+
 import json, pathlib
+from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 THROUGHPUT = ROOT / "config" / "throughput.json"
@@ -29,11 +32,11 @@ class PlanError(ValueError):
     pass
 
 
-def throughput(path=THROUGHPUT):
+def throughput(path: str | pathlib.Path = THROUGHPUT) -> dict[str, Any]:
     return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).exists() else {}
 
 
-def member_cost(thr, cls):
+def member_cost(thr: dict[str, Any], cls: str) -> tuple[tuple[float, float], str]:
     """(s per batch, s per member) per mission day for a vehicle class, and where the numbers came from: bench/ or the
     labelled fallback (homebase, 2026-10-29, real TEPEX-C mission at load ~20)."""
     e = thr.get("stage1", {}).get(cls)
@@ -42,7 +45,7 @@ def member_cost(thr, cls):
     return FALLBACK_COST[cls], "NOT MEASURED on this machine (run `make bench`): planner fallback"
 
 
-def lbm_rate(thr, gpus):
+def lbm_rate(thr: dict[str, Any], gpus: int) -> tuple[float, str, str]:
     """(cell-updates/s, backend name, source)."""
     if gpus > 0:
         e = thr.get("xlb-warp-gpu")
@@ -55,7 +58,8 @@ def lbm_rate(thr, gpus):
     return 5e6, "xlb-jax-cpu", "NOT MEASURED (run `make bench`): planner fallback"
 
 
-def plan(budget, gpus, mission, thr=None, gpu_mem_gb=None, vehicle_classes=None):
+def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | None = None, gpu_mem_gb: float | None = None,
+         vehicle_classes: dict[str, str] | None = None) -> dict[str, Any]:
     if budget not in BUDGET_S:
         raise PlanError(f"--budget {budget!r}: choose one of {list(BUDGET_S)}")
     if gpus < 0:
@@ -93,20 +97,20 @@ def plan(budget, gpus, mission, thr=None, gpu_mem_gb=None, vehicle_classes=None)
                 certify_possible=n_max >= 73, shares=SHARE)
 
 
-def emulator_share_s(plan, stage1b_free=False):
+def emulator_share_s(plan: dict[str, Any], stage1b_free: bool = False) -> float:
     """Seconds the emulator stage may spend: its own share of the budget, plus stage 1b's when no vehicle was refit (the rerun was a copy)."""
-    return plan["budget_s"] * (plan["shares"]["emulator"] + (plan["shares"]["stage1b"] if stage1b_free else 0.0))
+    return float(plan["budget_s"] * (plan["shares"]["emulator"] + (plan["shares"]["stage1b"] if stage1b_free else 0.0)))
 
 
-def batch_cost_s(plan, vids=None, days=None):
+def batch_cost_s(plan: dict[str, Any], vids: Any = None, days: float | None = None) -> float:
     """Seconds one batch of plan["batch"] members costs for the named vehicles (default: all) over `days` (default: the mission length),
     from the per-vehicle costs in the plan: what stage 1 charges per environment call plus per member."""
     mc = plan["member_cost"]
     d = plan["days"] if days is None else days
-    return sum(mc[v]["s_per_batch_day"] + plan["batch"] * mc[v]["s_per_member_day"] for v in (mc if vids is None else vids)) * d
+    return float(sum(mc[v]["s_per_batch_day"] + plan["batch"] * mc[v]["s_per_member_day"] for v in (mc if vids is None else vids)) * d)
 
 
-def memory_guard(cells, bytes_per_cell, gpu_mem_gb):
+def memory_guard(cells: float, bytes_per_cell: float, gpu_mem_gb: float) -> float:
     """Refuse a nest that would exceed 85 % of device memory; say what to reduce."""
     need = cells * bytes_per_cell / 1e9
     if need > GPU_MEM_GUARD * gpu_mem_gb:
@@ -116,13 +120,13 @@ def memory_guard(cells, bytes_per_cell, gpu_mem_gb):
     return need
 
 
-def wall_estimate(p):
+def wall_estimate(p: dict[str, Any]) -> dict[str, float]:
     mc = p["member_cost"].values()
     return dict(stage1=(-(-p["n_max"] // p["batch"]) * sum(v["s_per_batch_day"] for v in mc) + p["n_max"] * sum(v["s_per_member_day"] for v in mc)) * p["days"],
                 stage3=p["les"]["cell_steps_per_window"] * p["les"]["windows_per_vehicle"] * max(len(p["member_cost"]), 1) / p["les"]["rate"])
 
 
-def describe(p):
+def describe(p: dict[str, Any]) -> str:
     lines = [f"budget {p['budget']} ({p['budget_s'] / 60:.0f} min), {p['gpus']} GPU(s), {p['days']:.2f} mission days",
              f"stage 1: {p['n_min']}..{p['n_max']} members in batches of {p['batch']} "
              f"({'can' if p['certify_possible'] else 'cannot'} certify P(fail) < 5 %)"]

@@ -38,13 +38,15 @@ class Bathymetry:
     (lon any convention, taken mod 360; the grid lies inside 0..360). `sigma` is a function of depth or an array like depth.
     Attributes: source, resolution_m, tried (sources that failed before this one), bounds (lon_min, lon_max, lat_min, lat_max)."""
 
-    def __init__(self, lon: Any, lat: Any, depth: Any, source: str, resolution_m: float, sigma: Any, tried: tuple = ()):
+    def __init__(self, lon: Any, lat: Any, depth: Any, source: str, resolution_m: float, sigma: Any, tried: tuple[str, ...] = ()):
         from scipy.interpolate import RegularGridInterpolator
         self.lon, self.lat = np.asarray(lon, float), np.asarray(lat, float)
         self.depth = np.clip(np.nan_to_num(np.asarray(depth, float), nan=0.0), 0.0, None)
         self.source, self.resolution_m, self.tried = source, float(resolution_m), tuple(tried)
         self.bounds = (float(self.lon[0]), float(self.lon[-1]), float(self.lat[0]), float(self.lat[-1]))
-        grid = lambda a: RegularGridInterpolator((self.lat, self.lon), a, bounds_error=False, fill_value=np.nan)
+
+        def grid(a: Any) -> Any:
+            return RegularGridInterpolator((self.lat, self.lon), a, bounds_error=False, fill_value=np.nan)
         self._depth = grid(self.depth)
         if callable(sigma) or np.ndim(sigma) == 0:                   # a function of depth, or one constant
             self._sigma = sigma if callable(sigma) else (lambda d, v=float(sigma): np.full_like(d, v))
@@ -64,11 +66,11 @@ class Bathymetry:
 # ------------------------------------------------------------------ 1. GEBCO by byte range
 
 
-def _rows(url: str, base: int, ncols: int, j, i0: int, i1: int, dtype, workers: int) -> np.ndarray:
+def _rows(url: str, base: int, ncols: int, j: Any, i0: int, i1: int, dtype: Any, workers: int) -> np.ndarray:
     """Rows j, columns i0..i1 (exclusive) of a contiguous raster of `dtype` at byte `base` of the file, one range request per row."""
     size = np.dtype(dtype).itemsize
 
-    def one(r):
+    def one(r: Any) -> np.ndarray:
         a = base + (int(r) * ncols + i0) * size
         with remote._open(url, a, a + (i1 - i0) * size - 1, timeout=120) as resp:
             raw = resp.read()
@@ -110,7 +112,10 @@ def fetch_gebco(box: Any, out_path: Any, url: str = GEBCO_URL, workers: int = 16
     lons, elev = np.concatenate(cols), np.concatenate(pieces, axis=1)
     o = np.argsort(lons)
     lons, elev = lons[o], np.ascontiguousarray(elev[:, o])
-    text = lambda v: v.decode() if isinstance(v, bytes) else str(v)
+
+    def text(v: Any) -> str:
+        return v.decode() if isinstance(v, bytes) else str(v)
+
     attrs = dict(url=url, remote_bytes=f.n, title=text(h.attrs.get("title", "")), doi=text(h.attrs.get("id", "")),
                  box=[s, n, w, e], resolution_deg=GEBCO_RES_DEG, sha256=hashlib.sha256(elev.tobytes()).hexdigest(), bytes_read=f.fetched + elev.nbytes)
     out = pathlib.Path(out_path)
@@ -162,7 +167,7 @@ def choose(box: Any, cache_dir: Any, gofs: Any = None, umwm: Any = None, fetch: 
     """First of GEBCO -> GOFS -> UMWM that works. cache_dir/gebco2026_<box>.npz is reused, else fetched when `fetch`; gofs: the
     Zarr path; umwm: dict(lon=, lat=, depth=). Raises LookupError listing every failure when none works."""
     cache = cache_path(box, cache_dir)
-    tried: list = []
+    tried: list[str] = []
     for name in ORDER:
         try:
             if name == "gebco":

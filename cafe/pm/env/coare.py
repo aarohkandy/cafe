@@ -27,7 +27,10 @@ from pycoare by up to ~5 % in u* (10 % in Cd) on the test grid. Tests pin our z0
 from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
+Arr = NDArray[np.floating[Any]]
+Num = Arr | float
 VON, BETA, FDG, TDK = 0.4, 1.2, 1.0, 273.16
 RGAS, CPA = 287.1, 1004.67
 BE, CPW, RHOW, VISW, TCW = 0.026, 4000.0, 1022.0, 1.0e-6, 0.6
@@ -35,30 +38,30 @@ A_WAVE, B_WAVE, A_SS, B_SS = 0.114, 0.622, 0.091, 2.0
 UMAX, CH1, CH2 = 19.0, 0.0017, -0.0050  # Charnock alpha = CH1*U10n + CH2, capped at U10n = UMAX
 
 
-def grav(lat):
+def grav(lat: ArrayLike) -> Arr:
     """WGS84 normal gravity [m/s2] at latitude `lat` [deg]."""
     s = np.sin(np.radians(lat)) ** 2
     return 9.7803253359 * (1 + 0.001931853 * s) / np.sqrt(1 - 0.00669437999013 * s)
 
 
-def qsat(tc, p):
+def qsat(tc: Num, p: Num) -> Num:
     """Saturation vapour pressure [mb] at tc [degC], p [mb] (Buck 1981, with the 1.0007 + 3.46e-6 p enhancement)."""
     return 6.1121 * np.exp(17.502 * tc / (240.97 + tc)) * (1.0007 + p * 3.46e-6)
 
 
-def qsea(tc, p):
+def qsea(tc: Num, p: Num) -> Num:
     """Saturation specific humidity [kg/kg] over sea water (salinity 35 lowers vapour pressure by 2 %)."""
     es = 0.98 * qsat(tc, p)
     return 0.622 * es / (p - 0.378 * es)
 
 
-def qair(tc, p, rh):
+def qair(tc: Num, p: Num, rh: Num) -> Num:
     """Specific humidity [kg/kg] from relative humidity rh [0..1]."""
     em = rh * qsat(tc, p)
     return 0.62197 * em / (p - 0.378 * em)
 
 
-def psit(z):
+def psit(z: ArrayLike) -> Arr:
     """Temperature/humidity stability function of zeta = z/L (BH91 stable, Grachev 2000 + Kansas unstable)."""
     z = np.asarray(z, float)
     zs, zu = np.maximum(z, 0.0), np.minimum(z, 0.0)
@@ -67,10 +70,11 @@ def psit(z):
     y = (1 - 34.15 * zu) ** (1 / 3)
     psic = 1.5 * np.log((y * y + y + 1) / 3) - np.sqrt(3) * np.arctan((2 * y + 1) / np.sqrt(3)) + np.pi / np.sqrt(3)
     f = zu * zu / (1 + zu * zu)
-    return np.where(z >= 0, stable, (1 - f) * 2 * np.log((1 + x) / 2) + f * psic)
+    out: Arr = np.where(z >= 0, stable, (1 - f) * 2 * np.log((1 + x) / 2) + f * psic)
+    return out
 
 
-def _psiu(z, a, c_k, c_c):
+def _psiu(z: ArrayLike, a: float, c_k: float, c_c: float) -> Arr:
     z = np.asarray(z, float)
     zs, zu = np.maximum(z, 0.0), np.minimum(z, 0.0)
     stable = -(a * zs + 0.75 * (zs - 5 / 0.35) * np.exp(-np.minimum(50.0, 0.35 * zs)) + 0.75 * 5 / 0.35)
@@ -79,20 +83,39 @@ def _psiu(z, a, c_k, c_c):
     y = (1 - c_c * zu) ** (1 / 3)
     psic = 1.5 * np.log((y * y + y + 1) / 3) - np.sqrt(3) * np.arctan((2 * y + 1) / np.sqrt(3)) + np.pi / np.sqrt(3)
     f = zu * zu / (1 + zu * zu)
-    return np.where(z >= 0, stable, (1 - f) * psik + f * psic)
+    out: Arr = np.where(z >= 0, stable, (1 - f) * psik + f * psic)
+    return out
 
 
-def psiu(z):
+def psiu(z: ArrayLike) -> Arr:
     """Wind stability function of zeta = z/L used in the COARE 3.5 bulk loop and profile (a = 0.7, 15, 10.15)."""
     return _psiu(z, 0.7, 15.0, 10.15)
 
 
-def psiu_setup(z):
+def psiu_setup(z: ArrayLike) -> Arr:
     """The variant COARE 3.5 uses only for its first guess (a = 1, 18, 10)."""
     return _psiu(z, 1.0, 18.0, 10.0)
 
 
-def coare35(u, zu, t, zt, q, zq, P, ts, Rs, Rl, lat, zi=600.0, cp=None, sigH=None, rain=None, jcool=1, nits=10) -> dict[str, Any]:
+def coare35(
+    u: ArrayLike,
+    zu: ArrayLike,
+    t: ArrayLike,
+    zt: ArrayLike,
+    q: ArrayLike,
+    zq: ArrayLike,
+    P: ArrayLike,
+    ts: ArrayLike,
+    Rs: ArrayLike,
+    Rl: ArrayLike,
+    lat: ArrayLike,
+    zi: ArrayLike = 600.0,
+    cp: ArrayLike | None = None,
+    sigH: ArrayLike | None = None,
+    rain: ArrayLike | None = None,
+    jcool: int = 1,
+    nits: int = 10,
+) -> dict[str, Any]:
     """COARE 3.5 fluxes. `u` is the wind speed at zu RELATIVE to the surface current [m/s]; `t` air temperature [K] at zt;
     `q` air specific humidity [kg/kg] at zq; `P` surface pressure [Pa]; `ts` sea temperature [K] (bulk if jcool=1, skin if 0);
     `Rs`, `Rl` downward shortwave and longwave [W/m2]; `zi` boundary-layer height [m]; `cp` dominant phase speed [m/s] and
@@ -129,7 +152,7 @@ def coare35(u, zu, t, zt, q, zq, P, ts, Rs, Rl, lat, zi=600.0, cp=None, sigH=Non
     du, dt, dq = u, tsc - tc - 0.0098 * zt, qs - q
     ta = tc + TDK
 
-    def stars(ut, zo, zot, zoq, L, dter, setup):  # u*, T*, q* from the log-law with stability
+    def stars(ut: Arr, zo: Arr, zot: Arr, zoq: Arr, L: Arr, dter: Arr, setup: bool) -> tuple[Arr, Arr, Arr]:  # u*, T*, q* from the log-law with stability
         fu = psiu_setup(zu / L) if setup else psiu(zu / L)
         return (
             ut * VON / (np.log(zu / zo) - fu),
@@ -155,7 +178,7 @@ def coare35(u, zu, t, zt, q, zq, P, ts, Rs, Rl, lat, zi=600.0, cp=None, sigH=Non
     usr, tsr, qsr = stars(ut, zo10, zot10, zot10, zu / zetu, dter, True)
     tkt = np.full(shape, 0.001)
 
-    def charnock(uu, ustar, first):
+    def charnock(uu: Arr, ustar: Arr, first: bool) -> Arr:
         cC = np.where(uu > UMAX, CH1 * UMAX + CH2, CH1 * uu + CH2)
         with np.errstate(all="ignore"):
             cW = A_WAVE * (ustar / cp) ** B_WAVE
@@ -242,7 +265,7 @@ def coare35(u, zu, t, zt, q, zq, P, ts, Rs, Rl, lat, zi=600.0, cp=None, sigH=Non
     )
 
 
-def profile(res: dict[str, Any], z) -> np.ndarray:
+def profile(res: dict[str, Any], z: ArrayLike) -> Arr:
     """Mean wind speed relative to the surface current at height z [m] (broadcast against the arrays in `res`; add an axis
     to z to get a profile per member): U(z) = u*/(kappa gf) [ln(z/z0) - psi_u(z/L)], 0 at and below z0.
 
@@ -252,31 +275,32 @@ def profile(res: dict[str, Any], z) -> np.ndarray:
     z = np.asarray(z, float)
     zz = np.maximum(z, res["z0"])
     with np.errstate(divide="ignore", invalid="ignore"):
-        return np.maximum(
+        out: Arr = np.maximum(
             res["ustar"] / (VON * res["gf"]) * (np.log(zz / res["z0"]) - (psiu(zz / res["L"]) - psiu(res["z0"] / res["L"]))), 0.0
         )
+    return out
 
 
 def warm_layer(
-    t,
-    swdown,
-    u,
-    tair,
-    q,
-    P,
-    sst,
-    glw,
-    lat,
-    lon,
-    zu=10.0,
-    zt=2.0,
-    zq=2.0,
-    zi=600.0,
-    rain=None,
-    sst_depth=None,
-    max_depth=19.0,
-    ri_c=0.65,
-) -> dict[str, np.ndarray]:
+    t: ArrayLike,
+    swdown: ArrayLike,
+    u: ArrayLike,
+    tair: ArrayLike,
+    q: ArrayLike,
+    P: ArrayLike,
+    sst: ArrayLike,
+    glw: ArrayLike,
+    lat: ArrayLike,
+    lon: ArrayLike,
+    zu: float = 10.0,
+    zt: float = 2.0,
+    zq: float = 2.0,
+    zi: float = 600.0,
+    rain: ArrayLike | None = None,
+    sst_depth: float | None = None,
+    max_depth: float = 19.0,
+    ri_c: float = 0.65,
+) -> dict[str, Arr]:
     """Diurnal warm layer (Fairall et al. 1996) and cool skin over a series; time is the LAST axis, everything else broadcasts.
 
     t [s since epoch, increasing, shape (T,)], swdown/glw [W/m2], u [m/s, wind relative to the current at zu], tair [K] at zt,
@@ -297,7 +321,7 @@ def warm_layer(
     lead = full[:-1]
     lat, lon = np.broadcast_to(np.asarray(lat, float), lead), np.broadcast_to(np.asarray(lon, float), lead)
     rn = None if rain is None else np.broadcast_to(np.asarray(rain, float), full)
-    out = {k: np.zeros(full) for k in ("dT_warm", "dz_warm", "dT_cool", "sst_skin", "ustar", "tau", "hsb", "hlb")}
+    out: dict[str, Arr] = {k: np.zeros(full) for k in ("dT_warm", "dz_warm", "dT_cool", "sst_skin", "ustar", "tau", "hsb", "hlb")}
     tau_ac = np.zeros(lead)
     qcol_ac = np.zeros(lead)
     dz = np.full(lead, max_depth)
@@ -307,7 +331,7 @@ def warm_layer(
     hours = np.mod(t / 3600.0 + lon[..., None] / 15.0, 24.0)
     ds = np.inf if sst_depth is None else sst_depth
 
-    def call(k, ts):
+    def call(k: int, ts: Arr) -> dict[str, Any]:
         return coare35(
             uu[..., k],
             zu,
@@ -378,12 +402,12 @@ def warm_layer(
     return out
 
 
-def _diurnal_forcing(hours, peak=1000.0):
+def _diurnal_forcing(hours: Arr, peak: float = 1000.0) -> Arr:
     """Clear-sky-ish tropical SW day: peak * sin(pi (h-6)/12) between 06 and 18 local, 0 at night."""
     return np.maximum(0.0, peak * np.sin(np.pi * (hours - 6.0) / 12.0))
 
 
-def receipts() -> list[dict]:
+def receipts() -> list[dict[str, Any]]:
     """Published-reference checks for this module; returns the receipt records it appended (each can fail)."""
     from cafe import receipts as R
     from pycoare import coare_35
@@ -396,9 +420,9 @@ def receipts() -> list[dict]:
 
     for uref in (5.0, 10.0, 15.0):
 
-        def f(us, uref=uref):
+        def f(us: float, uref: float = uref) -> float:
             z0 = (CH1 * min(uref, UMAX) + CH2) * us**2 / 9.81 + 0.11 * 1.5e-5 / us
-            return us - VON * uref / np.log(10 / z0)
+            return float(us - VON * uref / np.log(10 / z0))
 
         cd_ref = (brentq(f, 0.01, 3.0) / uref) ** 2
         ts = 300.0

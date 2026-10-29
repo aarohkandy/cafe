@@ -15,6 +15,7 @@ ignore = ["E731", "E701", "E702", "E741", "E401"]   # E401: `import a, b` is thi
 files = ["cafe/pm"]
 ignore_missing_imports = true
 explicit_package_bases = true
+strict = true
 
 [tool.coverage.run]
 source = ["cafe/pm"]

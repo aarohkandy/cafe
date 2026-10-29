@@ -28,6 +28,7 @@ import datetime as dt, importlib, json, os, pathlib, re, warnings
 import xml.etree.ElementTree as ET        # the catalogs come from NOAA over verified TLS; expat >= 2.4.1 is safe against entity expansion
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
 from typing import Any
 
@@ -48,6 +49,7 @@ GOOD = dict(D=(1, 2, 5), R=(1, 2))      # OceanSITES QC flags: 1 good, 2 probabl
 KAPPA, NU_AIR, G = 0.4, 1.5e-5, 9.80665
 CH1, CH2, UMAX = 0.0017, -0.0050, 19.0                  # Edson et al. 2013 Charnock slope/intercept and the wind above which alpha stops growing
 HALF_BIN_S, MIN_IN_BIN = 1800.0, 3
+Arr = NDArray[np.floating[Any]]
 
 
 def _get(url: str) -> bytes:
@@ -59,7 +61,7 @@ def _list(url: str) -> ET.Element:
     return ET.fromstring(_get(url))
 
 
-def mooring_position(name: str) -> tuple:
+def mooring_position(name: str) -> tuple[float, float]:
     """(lat, lon east in 0..360) from an OceanSITES TAO name such as T2S165E or T0N170W."""
     m = MOORING.match(name)
     if not m:
@@ -68,10 +70,10 @@ def mooring_position(name: str) -> tuple:
     return float(lat), float(lon if m[4] == "E" else (360 - lon) % 360)
 
 
-def moorings(box: Any, base: str = BASE) -> list:
+def moorings(box: Any, base: str = BASE) -> list[tuple[str, float, float]]:
     """The TAO/TRITON moorings of the catalog that lie inside the box: [(name, lat, lon)], sorted."""
     s, n, w, e = box360(box)
-    out = []
+    out: list[tuple[str, float, float]] = []
     for ref in _list(base + CATALOG + "catalog.xml").iter("{%s}catalogRef" % NS["c"]):
         name = ref.get("{%s}title" % NS["x"]) or ""
         if not MOORING.match(name):
@@ -83,9 +85,9 @@ def moorings(box: Any, base: str = BASE) -> list:
     return sorted(out)
 
 
-def _files(name: str, base: str) -> list:
+def _files(name: str, base: str) -> list[dict[str, Any]]:
     """Dataset entries of one mooring's catalog that parse as OceanSITES TAO files: dicts of the FILE groups + file/url."""
-    out = []
+    out: list[dict[str, Any]] = []
     for ds in _list(f"{base}{CATALOG}{name}/catalog.xml").iter("{%s}dataset" % NS["c"]):
         m = FILE.match(ds.get("name") or "")
         if m:
@@ -93,16 +95,19 @@ def _files(name: str, base: str) -> list:
     return out
 
 
-def _candidates(files: list, t0: float, t1: float) -> list:
+def _candidates(files: list[dict[str, Any]], t0: float, t1: float) -> list[dict[str, Any]]:
     """Files of the deployment in the water at t0 (latest start <= t0, and the ones within 10 days before it, which are its A/B
     twins) and every later deployment that starts before t1: the only ones that can overlap [t0, t1]."""
-    day = lambda f: dt.datetime.strptime(f["date"], "%Y%m%d").replace(tzinfo=dt.timezone.utc).timestamp()
+
+    def day(f: dict[str, Any]) -> float:
+        return dt.datetime.strptime(f["date"], "%Y%m%d").replace(tzinfo=dt.timezone.utc).timestamp()
+
     before = [day(f) for f in files if day(f) <= t0]
     lo = (max(before) - 10 * 86400) if before else -np.inf
     return [f for f in files if lo <= day(f) <= t1]
 
 
-def _coverage(path) -> tuple:
+def _coverage(path: Any) -> tuple[float, float]:
     """(first, last) TIME of a file as epoch seconds."""
     import xarray as xr
     with xr.open_dataset(path) as ds:
@@ -110,7 +115,7 @@ def _coverage(path) -> tuple:
     return float(t[0]), float(t[-1])
 
 
-def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variables: tuple = VARS, res: str = "10min") -> pathlib.Path:
+def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variables: tuple[str, ...] = VARS, res: str = "10min") -> pathlib.Path:
     """Download the `variables` files (resolution `res`) of every TAO/TRITON mooring in `box` whose deployment can overlap
     t0..t1 (epoch seconds, ISO strings or datetimes) into out_dir/<mooring>/, resumable (remote.download), hash every file,
     pick per mooring and variable the file with the most QC-good samples in the window (delayed-mode before real-time on a
@@ -121,13 +126,13 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
     out.mkdir(parents=True, exist_ok=True)
     mpath = out / "manifest.json"
     old = json.loads(mpath.read_text())["files"] if mpath.exists() else {}
-    man = dict(source=base + CATALOG, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={}, waves=dict(checked=0, matches=[]))
+    man: dict[str, Any] = dict(source=base + CATALOG, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={}, waves=dict(checked=0, matches=[]))
     for name, lat, lon in moorings(box, base):
         listing = _files(name, base)
         man["waves"]["checked"] += len(listing)
         man["waves"]["matches"] += [f["file"] for f in listing if f["var"] in WAVE_VARS]
         for var in variables:
-            best = None
+            best: tuple[tuple[int, bool], str] | None = None
             for f in (f for f in _candidates(listing, t0, t1) if f["var"] == var and f["res"] == res):
                 key = f"{name}/{f['file']}"
                 p = out / key
@@ -160,7 +165,7 @@ def verify(out_dir: Any) -> int:
     return len(man["files"])
 
 
-def _series(path, var: str, mode: str, t0: float, t1: float) -> dict:
+def _series(path: Any, var: str, mode: str, t0: float, t1: float) -> dict[str, Any]:
     """{t [epoch s], z [m], <NetCDF variable>: values} for the QC-good samples (GOOD[mode]) in [t0, t1]; var is the file code (NC)."""
     import xarray as xr
     names, qc_of = NC[var]
@@ -173,16 +178,16 @@ def _series(path, var: str, mode: str, t0: float, t1: float) -> dict:
     return dict(t=t[ok], z=z, **{n: v[ok] for n, v in vals.items()})
 
 
-def load_tao(out_dir: Any, t0: Any = None, t1: Any = None) -> dict:
+def load_tao(out_dir: Any, t0: Any = None, t1: Any = None) -> dict[str, dict[str, Any]]:
     """{mooring: dict(lat, lon, wind=dict(t, u, v, z), sst=dict(t, value [K], z), airt=dict(t, value [K], z), rh=dict(t, value [0..1], z))}
     from the files fetch_tao selected; verifies the SHA-256 of every file it reads. Variables a mooring lacks are absent."""
     out = pathlib.Path(out_dir)
     man = json.loads((out / "manifest.json").read_text())
     verify(out)
     a, b = (man["t0"] if t0 is None else t0), (man["t1"] if t1 is None else t1)
-    res = {}
+    res: dict[str, dict[str, Any]] = {}
     for name, sel in man["selected"].items():
-        r = dict(lat=man["positions"][name][0], lon=man["positions"][name][1])
+        r: dict[str, Any] = dict(lat=man["positions"][name][0], lon=man["positions"][name][1])
         for var, key in sel.items():
             s = _series(out / key, var, man["files"][key]["mode"], a, b)
             if var == "WIND":
@@ -207,7 +212,7 @@ def waves_available(out_dir: Any) -> bool:
 # ------------------------------------------------------------------ wind at 10 m
 
 
-def _z0(ust, u10n):
+def _z0(ust: Arr, u10n: Arr) -> Arr:
     """Roughness length [m] of the open sea: Charnock alpha(U10n) u*^2/g plus the smooth-flow term (Edson et al. 2013; Smith 1988)."""
     return np.maximum(CH1 * np.minimum(u10n, UMAX) + CH2, 0.0) * ust ** 2 / G + 0.11 * NU_AIR / np.maximum(ust, 1e-4)
 
@@ -221,7 +226,7 @@ def cd10n(u10n: Any) -> Any:
     return (KAPPA / np.log(10.0 / z0)) ** 2
 
 
-def wind_to_10m(speed: Any, z: Any, method: str = "log", air: dict | None = None):
+def wind_to_10m(speed: ArrayLike, z: ArrayLike, method: str = "log", air: dict[str, Any] | None = None) -> Arr:
     """Wind speed at 10 m from a speed at height z [m]: neutral log profile ('log', default) or COARE ('coare'; `air` =
     dict(t [K, air temperature at z], rh [0..1], sst [K], p [Pa], lat [deg]) broadcast against speed). See the module docstring."""
     speed, z = np.asarray(speed, float), np.asarray(z, float)
@@ -231,7 +236,8 @@ def wind_to_10m(speed: Any, z: Any, method: str = "log", air: dict | None = None
             ust = KAPPA * speed / np.log(z / z0)
             z0 = _z0(ust, ust / KAPPA * np.log(10.0 / z0))
         ust = KAPPA * speed / np.log(z / z0)
-        return ust / KAPPA * np.log(10.0 / z0)
+        log10: Arr = ust / KAPPA * np.log(10.0 / z0)
+        return log10
     if method != "coare":
         raise ValueError(f"method must be 'log' or 'coare', not {method!r}")
     if air is None:
@@ -239,13 +245,14 @@ def wind_to_10m(speed: Any, z: Any, method: str = "log", air: dict | None = None
     coare = importlib.import_module("cafe.pm.env.coare")
     q = coare.qair(air["t"] - 273.15, air["p"], air["rh"])
     res = coare.coare35(speed, z, air["t"], z, q, z, air["p"], air["sst"], 0.0, 370.0, air["lat"], jcool=0)
-    return coare.profile(res, 10.0)
+    prof: Arr = coare.profile(res, 10.0)
+    return prof
 
 
 # ------------------------------------------------------------------ mooring vs model
 
 
-def _bin(t, v, tt, half: float = HALF_BIN_S, need: int = MIN_IN_BIN):
+def _bin(t: ArrayLike, v: ArrayLike, tt: Arr, half: float = HALF_BIN_S, need: int = MIN_IN_BIN) -> Arr:
     """Mean of v over [tt - half, tt + half) for each tt; NaN when fewer than `need` valid samples fall in it."""
     t, v = np.asarray(t, float), np.asarray(v, float)
     o = np.argsort(t)
@@ -257,11 +264,11 @@ def _bin(t, v, tt, half: float = HALF_BIN_S, need: int = MIN_IN_BIN):
     return np.where(n >= need, (cs[hi] - cs[lo]) / np.maximum(n, 1), np.nan)
 
 
-def _wrap(d):
+def _wrap(d: ArrayLike) -> Arr:
     return (np.asarray(d, float) + 180.0) % 360.0 - 180.0
 
 
-def _stats(wv, tv, wsst=None, tsst=None, min_speed: float = 1.0) -> dict:
+def _stats(wv: Arr, tv: Arr, wsst: Arr | None = None, tsst: Arr | None = None, min_speed: float = 1.0) -> dict[str, Any]:
     """wv, tv: (n, 2) model and mooring (east, north) at 10 m; wsst, tsst [K]. Differences are model minus mooring."""
     ok = np.isfinite(wv).all(1) & np.isfinite(tv).all(1)
     ws, ts = cv.speed(wv[ok]), cv.speed(tv[ok])
@@ -281,7 +288,7 @@ def _stats(wv, tv, wsst=None, tsst=None, min_speed: float = 1.0) -> dict:
     return out
 
 
-def compare(wrf: dict, tao: dict, method: str = "auto") -> dict:
+def compare(wrf: dict[str, Any], tao: dict[str, Any], method: str = "auto") -> dict[str, dict[str, Any]]:
     """Model minus mooring, per mooring and pooled ('ALL'), for the moorings in both.
     wrf: {mooring: dict(t [epoch s], wind10 (n, 2) east/north at 10 m, sst [K] optional (n,))}; tao: load_tao output.
     The mooring winds are lifted to 10 m (wind_to_10m; 'coare' with the mooring's air temperature, humidity and SST at the wind
@@ -289,14 +296,14 @@ def compare(wrf: dict, tao: dict, method: str = "auto") -> dict:
     samples within +-30 min of each model time is taken (>= 3 samples).
     speed_bias/speed_rmse [m/s], vector_rmse [m/s] (RMS of |model - mooring| vectors), dir_bias_deg/dir_rmse_deg (meteorological
     direction FROM, model minus mooring, signed, wrapped to +-180; only where both speeds >= 1 m/s), sst_bias/sst_rmse [K]."""
-    res: dict = {}
-    pooled: dict = dict(w=[], t=[], ws=[], ts=[])
+    res: dict[str, dict[str, Any]] = {}
+    pooled: dict[str, list[Any]] = dict(w=[], t=[], ws=[], ts=[])
     for name in sorted(set(wrf) & set(tao)):
         m, w = tao[name], wrf[name]
         if "wind" not in m:
             continue
         t, sp = m["wind"]["t"], np.hypot(m["wind"]["u"], m["wind"]["v"])
-        air = None
+        air: dict[str, Any] | None = None
         use = method == "coare" or (method == "auto" and all(k in m for k in ("airt", "rh", "sst")))
         if use:
             air = {k: np.interp(t, m[v]["t"], m[v]["value"]) for k, v in (("t", "airt"), ("rh", "rh"), ("sst", "sst"))}
@@ -337,14 +344,18 @@ def receipts(out_dir: Any = None) -> bool:
     lift = float(wind_to_10m(6.0, 4.0)) / 6.0
     bracket(g, "wind lift 4 m -> 10 m at 6 m/s, neutral", lift, 1.05, 1.11, "", "ln(10/z0) / ln(4/z0) with z0 ~ 4e-5 m")
     q8 = coare.qair(28.0, 101000.0, 0.8)
-    one = lambda v: np.array([v])
+
+    def one(v: float) -> Arr:
+        return np.array([v])
+
     r8 = coare.coare35(one(6.0), one(4.0), one(301.15), one(4.0), q8, one(4.0), one(101000.0), one(301.15), 0.0, 370.0, 0.0, jcool=0)
     context(g, "wind lift 4 m -> 10 m at 6 m/s: COARE with 80 % humidity and no air-sea temperature difference (unstable) vs the neutral lift",
             float(coare.profile(r8, 10.0)[0] / coare.profile(r8, 4.0)[0]), lift, "", "cafe.pm.env.coare: stability makes the shear 2-3 % smaller")
     t = np.arange(0, 6 * 3600, 600.0)
     ang = np.radians(40.0 + 20.0 * np.sin(t / 5000.0))
     sp = 6.0 + 2.0 * np.cos(t / 4000.0)
-    series: dict = dict(lat=0.0, lon=180.0, wind=dict(t=t, u=-sp * np.sin(ang), v=-sp * np.cos(ang), z=10.0), sst=dict(t=t, value=301.0 + 0 * t, z=1.0))
+    series: dict[str, Any] = dict(lat=0.0, lon=180.0, wind=dict(t=t, u=-sp * np.sin(ang), v=-sp * np.cos(ang), z=10.0),
+                                  sst=dict(t=t, value=301.0 + 0 * t, z=1.0))
     tt = np.arange(3600.0, 5 * 3600, 3600.0)
     truth = np.column_stack([_bin(t, series["wind"]["u"], tt), _bin(t, series["wind"]["v"], tt)])
     rot = np.radians(10.0)

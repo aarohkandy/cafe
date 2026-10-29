@@ -32,11 +32,13 @@ import json
 import math
 import os
 import pathlib
-from typing import Any, NamedTuple
+from typing import Any, Callable, NamedTuple
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 from scipy import ndimage
 
+import jax
 import jax.numpy as jnp
 
 from cafe.pm.stage3 import lbm
@@ -63,7 +65,7 @@ class WallSet(NamedTuple):
     near_damp: Any  # (M,) float  (1 - y/layer) outside the default layer, else 1; 0 for padding
 
 
-def utau_loglaw(u, y, nu, kappa=KAPPA, B=B_LOG):
+def utau_loglaw(u: jax.Array, y: float, nu: float, kappa: float = KAPPA, B: float = B_LOG) -> jax.Array:
     """Friction velocity from the speed u at distance y: Newton on u = u_tau (ln(y u_tau / nu)/kappa + B), viscous law below
     y+ = 11.06. Works on arrays; all in consistent (lattice or SI) units."""
     ul = jnp.sqrt(nu * jnp.maximum(u, 0.0) / y)                              # viscous-sublayer value, also the start point
@@ -127,12 +129,15 @@ def pad_wall_set(ws: WallSet, n: int, m: int | None = None) -> WallSet:
     km = m - ws.near.shape[1]
     if km < 0:
         raise ValueError(f"wall set has {ws.near.shape[1]} near-wall cells, pad near to {m}")
-    z = lambda a, k_, v=0: np.concatenate([a, np.full(a.shape[:-1] + (k_,), v, a.dtype)], -1)       # noqa: E731
+
+    def z(a: NDArray[Any], k_: int, v: float = 0) -> NDArray[Any]:
+        return np.concatenate([a, np.full(a.shape[:-1] + (k_,), v, a.dtype)], -1)
+
     return WallSet(z(ws.cell, k), z(ws.sten, k), z(ws.wgt, k), z(ws.nrm, k), z(ws.phi, k, 1.0), z(ws.valid, k, False),
                    z(ws.near, km), z(ws.near_phi, km, 1.0), z(ws.near_src, km), z(ws.near_damp, km, 0.0))
 
 
-def wall_state(u, ws: WallSet, nu_lat, u_wall=(0.0, 0.0, 0.0), y_match: float = Y_MATCH):
+def wall_state(u: jax.Array, ws: WallSet, nu_lat: float, u_wall: ArrayLike = (0.0, 0.0, 0.0), y_match: float = Y_MATCH) -> dict[str, jax.Array]:
     """Per wall cell: friction velocity, y+ at the matching point, the wall velocity for the bounce-back, and the wall shear.
     The stress is applied as a force, not through the collision: bounce-back with the wall velocity set to the cell's own
     tangential velocity (u_w = u_body + u_1t) exchanges no tangential momentum -- a free-slip wall -- and the log-law stress
@@ -158,7 +163,7 @@ def wall_state(u, ws: WallSet, nu_lat, u_wall=(0.0, 0.0, 0.0), y_match: float = 
     return dict(utau=ut, yplus=y_match * ut / nu_lat, u_slip=uw + u1_t - fw, u1=u1_t, um=um_t, fw=fw)
 
 
-def near_wall_tau(tau, ws: WallSet, st, nu_lat):
+def near_wall_tau(tau: jax.Array, ws: WallSet, st: dict[str, jax.Array], nu_lat: float) -> jax.Array:
     """Mixing-length eddy viscosity nu_t = kappa u_tau y (times the damping of the near-wall layer) as a relaxation time, never
     below what Smagorinsky gave. Smagorinsky's length C_s*dx = 0.17 cells is 6x too short at y = 1 cell and 6x at 2.5 (the log law
     needs l = kappa y): the stress cannot be carried from the outer flow to the wall without it. NB the usual WMLES limiter
@@ -170,7 +175,7 @@ def near_wall_tau(tau, ws: WallSet, st, nu_lat):
     return tau.at[c].set(jnp.where(jnp.asarray(ws.near_damp) > 0, new, tau[c]))
 
 
-def wall_force(f_post, ws: WallSet, st, count=None):
+def wall_force(f_post: jax.Array, ws: WallSet, st: dict[str, jax.Array], count: jax.Array | None = None) -> tuple[jax.Array, jax.Array]:
     """Add the wall shear to the post-collision populations of the wall cells (momentum -fw per step, first-order forcing
     3 w_q c_q . dF) and return (f, shear force on the body). `count` (bool per wall cell) limits the reported force to the
     cells whose force is wanted (a strip of a plate); the fluid always receives the full stress."""
@@ -180,7 +185,7 @@ def wall_force(f_post, ws: WallSet, st, count=None):
     return f_post.at[cell].add(df), fw.sum(1)
 
 
-def wall_field(u_body, ws: WallSet, st, shape) -> "jnp.ndarray":
+def wall_field(u_body: ArrayLike, ws: WallSet, st: dict[str, jax.Array], shape: tuple[int, ...]) -> jax.Array:
     """Dense (3, nx, ny, nz) wall-velocity field for lbm.bounce_back: the body velocity everywhere, the free-slip velocity at the
     valid wall cells."""
     base = jnp.broadcast_to(jnp.asarray(u_body, jnp.float32).reshape(3, 1, 1, 1), (3,) + tuple(shape))
@@ -188,7 +193,7 @@ def wall_field(u_body, ws: WallSet, st, shape) -> "jnp.ndarray":
     return base.at[cell].set(jnp.where(jnp.asarray(ws.valid)[None], st["u_slip"], base[cell]))
 
 
-def yplus_fraction(yplus, valid, lo: float = YPLUS_OK[0], hi: float = YPLUS_OK[1]) -> float:
+def yplus_fraction(yplus: ArrayLike, valid: ArrayLike, lo: float = YPLUS_OK[0], hi: float = YPLUS_OK[1]) -> float:
     """Share of valid wall cells whose matching point is inside the log layer."""
     yp, v = np.asarray(yplus), np.asarray(valid)
     return float(((yp >= lo) & (yp <= hi) & v).sum() / max(v.sum(), 1))
@@ -199,7 +204,7 @@ def ittc57(re_: float) -> float:
     return 0.075 / (math.log10(re_) - 2) ** 2
 
 
-def plate_mask(shape, x0: int, length: int, yc: float, half: float, nose: int) -> np.ndarray:
+def plate_mask(shape: tuple[int, ...], x0: int, length: int, yc: float, half: float, nose: int) -> NDArray[np.bool_]:
     """Streamlined plate: semi-ellipse nose and tail of `nose` cells, half-thickness `half` cells, full span. A blunt voxel edge
     separates at these Reynolds numbers and the bubble, not the boundary layer, then sets the wall-model input."""
     x, y = np.meshgrid(np.arange(shape[0]) + 0.5, np.arange(shape[1]) + 0.5, indexing="ij")
@@ -215,7 +220,7 @@ def ittc57_mean(re_a: float, re_b: float) -> float:
     return (re_b * ittc57(re_b) - re_a * ittc57(re_a)) / (re_b - re_a)
 
 
-def inflow_turbulence(tu: float, modes: int = 16, seed: int = 0):
+def inflow_turbulence(tu: float, modes: int = 16, seed: int = 0) -> Callable[[jax.Array, jax.Array, jax.Array, Any], jax.Array]:
     """Uniform unit stream plus frozen random Fourier modes of intensity `tu` (wavelengths 6-24 cells, convected at U = 1 lattice
     unit scaled by the caller): stands in for the synthetic turbulence box of BRIEF 2.2 so the wall-modelled boundary layer has
     resolved turbulent transport. Lattice-coordinate function u(x, y, z, t) in units of the stream speed; dx = 1, U_ref = 1."""
@@ -226,7 +231,7 @@ def inflow_turbulence(tu: float, modes: int = 16, seed: int = 0):
     amp = rng.normal(size=(modes, 3))
     amp = amp * tu / np.sqrt((amp ** 2).sum(0).mean() / 2)                  # rms of each component = tu
 
-    def env(x, y, z, t):
+    def env(x: jax.Array, y: jax.Array, z: jax.Array, t: Any) -> jax.Array:
         arg = k[:, 0, None] * (x.ravel()[None] - t) + k[:, 1, None] * y.ravel()[None] + k[:, 2, None] * z.ravel()[None] + ph[:, None]
         up = jnp.einsum("md,mn->dn", jnp.asarray(amp, jnp.float32), jnp.cos(arg)).reshape((3,) + x.shape)
         return up + jnp.stack([jnp.ones_like(x), jnp.zeros_like(x), jnp.zeros_like(x)])
@@ -234,7 +239,7 @@ def inflow_turbulence(tu: float, modes: int = 16, seed: int = 0):
 
 
 def flat_plate(length: int = 192, nu_lat: float = 4e-5, half: int = 40, span: int = 8, steps: int = 20000,
-               wall_model: bool = True, nose: int = 16, thick: int = 3, tu: float = 0.0) -> dict:
+               wall_model: bool = True, nose: int = 16, thick: int = 3, tu: float = 0.0) -> dict[str, Any]:
     """Two-sided streamlined flat plate (2 `thick` cells thick) in a uniform stream, wall-modelled on both faces, periodic
     in the span. Friction is the momentum exchange on the links of the flat part (nose and tail excluded), averaged over the
     last 40 % of the run, C_f = F / (rho U^2 L_m W) over both sides, compared with the ITTC-57 line averaged over the same
@@ -266,11 +271,11 @@ def flat_plate(length: int = 192, nu_lat: float = 4e-5, half: int = 40, span: in
 
 def dean_cf(re_b: float) -> float:
     """Dean (1978) channel friction: C_f = tau_w / (rho U_b^2 / 2) = 0.073 Re_b^-0.25, Re_b = U_b 2h / nu (J. Fluids Eng. 100, 215)."""
-    return 0.073 * re_b ** -0.25
+    return float(0.073 * re_b ** -0.25)
 
 
 def channel(h: int = 12, re_tau: float = 1000.0, u_tau: float = 0.003, steps: int = 150000, span: int = 4, rans: bool = True,
-            wall_model: bool = True, chunk: int = 5000) -> dict:
+            wall_model: bool = True, chunk: int = 5000) -> dict[str, Any]:
     """Plane channel of half-height h cells between two walls, driven by a uniform body force g = u_tau^2 / h, periodic in x and z
     (span cells each: thin = effectively 1-D, `span` ~ 4 h would resolve turbulence). Walls: specular reflection + log-law stress
     at the 3rd cell. rans=True gives the whole channel the mixing-length eddy viscosity kappa u_tau y (1 - y/h) (a 1-D channel has no
@@ -290,7 +295,7 @@ def channel(h: int = 12, re_tau: float = 1000.0, u_tau: float = 0.003, steps: in
     solid[:, :2], solid[:, -2:] = True, True
     geom = nest.make_geom(solid, np.array(shape) // 2, periodic=spec.periodic, rans_layer=spec.rans_layer)
 
-    def env(x, y, z, t):                                                      # start from the log profile: converges in O(10^4) steps
+    def env(x: jax.Array, y: jax.Array, z: jax.Array, t: Any) -> jax.Array:  # start from the log profile: converges in O(10^4) steps
         phi = jnp.clip(jnp.minimum(y - 2.0, ny - 2.0 - y), 0.5, h)
         prof = u_tau * (jnp.log(jnp.maximum(phi * u_tau / nu_lat, 1.0)) / wm_kappa() + B_LOG)
         return jnp.stack([prof / ul, jnp.zeros_like(x), jnp.zeros_like(x)])
@@ -343,7 +348,7 @@ def stored_wall_error() -> float | None:
     return max(float(json.loads(f.read_text())["err"]) for f in fs)
 
 
-def receipts(plate: dict | None = None, chan: dict | None = None) -> list:
+def receipts(plate: dict[str, Any] | None = None, chan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Wall-model receipts. Channel (CI size, ~15 s): wall stress equals g h within 1 %, bulk C_f vs Dean 1978 within 10 %, the
     matching point in the log layer (y+ 30-300, y/h < 0.3), bounce-back tangential exchange < 1 % of the wall shear. Flat plate vs
     ITTC-57 within 10 % from `plate`, else the stored slow run (Re_L >= 1e6): pass when within, fail with the measured error when
@@ -374,7 +379,7 @@ def receipts(plate: dict | None = None, chan: dict | None = None) -> list:
     return [r for r in cr.OUT if r["group"] == g]
 
 
-def main(argv: list) -> int:
+def main(argv: list[str]) -> int:
     """python -m cafe.pm.stage3.wallmodel [slow|channel|receipts]"""
     if argv[:1] == ["channel"]:
         r = channel(**CHANNEL_CI)

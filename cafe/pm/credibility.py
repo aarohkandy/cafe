@@ -83,7 +83,7 @@ def _json(p: pathlib.Path) -> Any:
 
 # ------------------------------------------------------------------------------------------------------ assumed inputs
 
-def _prov(node: Any, path: str, file: str, out: list) -> None:
+def _prov(node: Any, path: str, file: str, out: list[dict[str, Any]]) -> None:
     """Every mapping with a `value`, `source` or `assumed` key is one provenance item; recurse into the rest."""
     if not isinstance(node, dict):
         return
@@ -97,14 +97,14 @@ def _prov(node: Any, path: str, file: str, out: list) -> None:
         _prov(v, f"{path}.{k}" if path else str(k), file, out)
 
 
-def platform_items(root: pathlib.Path = ROOT) -> list[dict]:
-    out: list[dict] = []
+def platform_items(root: pathlib.Path = ROOT) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
     for f in sorted((root / "platforms").glob("*.yaml")):
         _prov(yaml.safe_load(f.read_text()), "", f"platforms/{f.name}", out)
     return out
 
 
-def assumed_inputs(root: pathlib.Path = ROOT) -> list[dict]:
+def assumed_inputs(root: pathlib.Path = ROOT) -> list[dict[str, Any]]:
     """The full list: every assumptions.yaml key, every perturbation prior (kind prior or assumed), every platform leaf marked assumed."""
     items = []
     for k, e in (yaml.safe_load((root / "config" / "assumptions.yaml").read_text()) or {}).items():
@@ -125,7 +125,7 @@ def assumed_inputs(root: pathlib.Path = ROOT) -> list[dict]:
 
 # ------------------------------------------------------------------------------------------------------ V&V 20 rows
 
-def _row(rid: str, case: str, source: str, S: float | None, D: float | None, u: tuple | None, note: str) -> dict:
+def _row(rid: str, case: str, source: str, S: float | None, D: float | None, u: tuple[float, float, float] | None, note: str) -> dict[str, Any]:
     """One V&V 20 row. u = (u_num, u_input, u_D) or None when the run stored no uncertainty terms."""
     r: dict[str, Any] = dict(id=rid, case=case, source=source, status="run" if S is not None else "not run", S=S, D=D, E=None, u_num=None, u_input=None,
                              u_D=None, u_val=None, ratio=None, validated=None, note=note)
@@ -139,7 +139,7 @@ def _row(rid: str, case: str, source: str, S: float | None, D: float | None, u: 
     return r
 
 
-def _dtmb_rows(data: pathlib.Path) -> list[dict]:
+def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     try:
         from . import dtmb5415
     except ImportError as e:
@@ -159,7 +159,7 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict]:
     return out
 
 
-def _stored_rows(data: pathlib.Path) -> list[dict]:
+def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     """Slow-run receipts stored by cafe.pm.stage3: S and D only."""
     rec = data / "receipts"
     out = []
@@ -190,7 +190,7 @@ def _stored_rows(data: pathlib.Path) -> list[dict]:
     return out
 
 
-def vv20_rows(data: pathlib.Path | None = None) -> list[dict]:
+def vv20_rows(data: pathlib.Path | None = None) -> list[dict[str, Any]]:
     data = data or data_root()
     return _dtmb_rows(data) + _stored_rows(data)
 
@@ -216,13 +216,13 @@ class Facts:
         self.perts = yaml.safe_load((root / "config" / "perturbations.yaml").read_text()) or {}
         self.vv = vv20_rows(data)
 
-    def ev(self, what: str, f: str) -> dict:
+    def ev(self, what: str, f: str) -> dict[str, Any]:
         return dict(file=f, what=what)
 
     def lg(self, st: str) -> str:
         return f"run:checkpoints/{st}/ledger.json"
 
-    def ensembles(self) -> list[dict]:
+    def ensembles(self) -> list[dict[str, Any]]:
         s = (self.s1b or {}).get("summary", {})
         return list(s.get("vehicles", {}).values()) + list(s.get("links", {}).values())
 
@@ -230,7 +230,7 @@ class Facts:
         return [k for k, e in self.perts.items() if e.get("kind") == "assumed" or "ASSUMED" in str(e.get("citation", ""))]
 
 
-def _data_pedigree(f: Facts) -> tuple[int, list, list]:
+def _data_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     L = f.have.get("ingest")
     if not L or not L["inputs"]:
         return 0, [], ["no ingest ledger naming the WRF/UMWM inputs" if not L else "the ingest ledger lists no inputs"]
@@ -252,7 +252,7 @@ def _data_pedigree(f: Facts) -> tuple[int, list, list]:
     return lvl, ev, miss
 
 
-def _verification(f: Facts) -> tuple[int, list, list]:
+def _verification(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     if not f.have:
         return 0, [], ["no stage ledger in the run directory"]
     ev, miss, lvl = [f.ev(f"{len(f.have)} of {len(STAGES)} stage ledgers present", "run:checkpoints/")], [], 1
@@ -270,7 +270,7 @@ def _verification(f: Facts) -> tuple[int, list, list]:
     return lvl, ev, miss
 
 
-def _validation(f: Facts) -> tuple[int, list, list]:
+def _validation(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     ran = [r for r in f.vv if r["status"] == "run"]
     full = [r for r in ran if r["u_val"] is not None]
     miss = [f"not run: {r['case']}" for r in f.vv if r["status"] != "run"]
@@ -285,7 +285,7 @@ def _validation(f: Facts) -> tuple[int, list, list]:
     return 2, ev, ["fewer than four complete comparisons, or one with |E| > U_val"] + miss
 
 
-def _input_pedigree(f: Facts) -> tuple[int, list, list]:
+def _input_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     its = [i for i in f.items if pathlib.Path(i["file"]).stem in f.used and (i["assumed"] or i["sourced"])]
     if not its:
         return 0, [], ["no platform file with provenance fields is used by this mission (or mission.yaml is missing)"]
@@ -301,7 +301,7 @@ def _input_pedigree(f: Facts) -> tuple[int, list, list]:
     return lvl, ev, miss
 
 
-def _uncertainty(f: Facts) -> tuple[int, list, list]:
+def _uncertainty(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     ens = f.ensembles()
     if not ens:
         return 0, [], ["no stage-1b summary: no verdict intervals"]
@@ -321,7 +321,7 @@ def _uncertainty(f: Facts) -> tuple[int, list, list]:
     return lvl, ev, [m for m in miss if m]
 
 
-def _robustness(f: Facts) -> tuple[int, list, list]:
+def _robustness(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     ens = f.ensembles()
     if not ens:
         return 0, [], ["no stage-1b summary"]
@@ -347,14 +347,14 @@ def _robustness(f: Facts) -> tuple[int, list, list]:
     return lvl, ev, miss
 
 
-def _use_history(f: Facts) -> tuple[int, list, list]:
+def _use_history(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     p = f.root / "docs" / "USE_HISTORY.md"
     if p.is_file():
         return 1, [f.ev("a use-history record exists (content is not machine-checked)", "docs/USE_HISTORY.md")], []
     return 0, [], ["no record of a prediction of this tool compared with a real campaign outcome (docs/USE_HISTORY.md does not exist)"]
 
 
-def _ms_management(f: Facts) -> tuple[int, list, list]:
+def _ms_management(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     if not f.have:
         return 0, [], ["no stage ledger"]
     ev, miss, lvl = [f.ev(f"{len(f.have)} ledgers", "run:checkpoints/")], [], 1
@@ -373,7 +373,7 @@ def _ms_management(f: Facts) -> tuple[int, list, list]:
     return lvl, ev, [m for m in miss if m]
 
 
-def _people(f: Facts) -> tuple[int, list, list]:
+def _people(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     p = f.root / "docs" / "QUALIFICATIONS.md"
     if p.is_file():
         return 1, [f.ev("a qualifications record exists (content is not machine-checked)", "docs/QUALIFICATIONS.md")], []
@@ -384,7 +384,7 @@ SCORERS = dict(data_pedigree=_data_pedigree, verification=_verification, validat
                robustness=_robustness, use_history=_use_history, ms_management=_ms_management, people=_people)
 
 
-def factor_table(f: Facts) -> list[dict]:
+def factor_table(f: Facts) -> list[dict[str, Any]]:
     out = []
     for key, name in FACTORS:
         lvl, ev, miss = SCORERS[key](f)
@@ -436,7 +436,7 @@ def _g(x: Any) -> str:
     return "n/a" if x is None else f"{x:.4g}" if isinstance(x, float) else str(x)
 
 
-def _render(c: dict) -> str:
+def _render(c: dict[str, Any]) -> str:
     e = html.escape
     h = [f"<h1>Credibility report</h1><p class=muted>{e(c['note'])}</p><p><a href='index.html'>Back to the mission report</a></p>"]
     h.append("<h2 id=factors>NASA-STD-7009B credibility factors</h2><div class=scroll><table>"
@@ -473,7 +473,7 @@ def _render(c: dict) -> str:
 
 # ------------------------------------------------------------------------------------------------------ entry point
 
-def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.Path | None = None) -> dict:
+def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.Path | None = None) -> dict[str, Any]:
     f = Facts(pathlib.Path(run_dir), root, data or data_root())
     items = assumed_inputs(root)
     return dict(schema="cafe.pm.credibility/1", run=f.run.name,
