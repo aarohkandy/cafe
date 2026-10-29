@@ -389,17 +389,18 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         first = r["first"][dom] if dom else np.empty(0)
         t_first = float(np.nanmin(first)) if dom and np.any(np.isfinite(first)) else None
         t_med = float(np.nanmedian(first)) if dom and np.any(np.isfinite(first)) else None
-        sens: tuple[str | None, dict[str, float]] = sensitivity.dominant(names, U, f.astype(float)) if 0 < f.sum() < n and n >= 16 else (None, {})
+        sens: tuple[str | None, dict[str, float], float | None] = (sensitivity.dominant(names, U, f.astype(float)) if 0 < f.sum() < n and n >= 16
+                                                                  else (None, {}, None))
         out["vehicles"][vid] = dict(cls=r["class"], n=n, k_fail=int(f.sum()), verdict=v, modes=modes, dominant=dom,
-                                    first_fail_t=t_first, median_fail_t=t_med, sensitivity=dict(param=sens[0], S1=sens[1]))
+                                    first_fail_t=t_first, median_fail_t=t_med, sensitivity=dict(param=sens[0], S1=sens[1], noise_floor=sens[2]))
     for lid, r in res["links"].items():
         f = ~np.asarray(r["success"], bool)
         n = len(f)
-        sens = sensitivity.dominant(names, U, f.astype(float)) if 0 < f.sum() < n and n >= 16 else (None, {})
+        sens = sensitivity.dominant(names, U, f.astype(float)) if 0 < f.sum() < n and n >= 16 else (None, {}, None)
         out["links"][lid] = dict(n=n, k_fail=int(f.sum()), verdict=intervals.verdict(int(f.sum()), n), method=r["method"],
                                  frac_median=float(np.median(r["frac"])), frac_p10=float(np.percentile(r["frac"], 10)),
                                  margin_db_median=float(np.nanmedian(r["margin_db"])) if np.any(np.isfinite(r["margin_db"])) else None,
-                                 sensitivity=dict(param=sens[0], S1=sens[1]))
+                                 sensitivity=dict(param=sens[0], S1=sens[1], noise_floor=sens[2]))
     return out
 
 

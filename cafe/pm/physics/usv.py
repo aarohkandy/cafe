@@ -548,8 +548,10 @@ class USVSim:
         gv = cv.vec_from_to(self.stw, e1["trk"]) + cur + stokes
         self.sog = cv.speed(gv)
         self.path_m += self.sog * dt
-        self.lat = self.lat + np.degrees(gv[:, 1] * dt / R_E)
-        self.lon = np.mod(self.lon + np.degrees(gv[:, 0] * dt / (R_E * np.cos(np.radians(self.lat)))) + 180.0, 360.0) - 180.0
+        sde = getattr(self.env, "sde_displacement", None)                                    # unresolved eddies move the position only
+        dm = gv * dt if sde is None else gv * dt + sde(self.lon, self.lat, t)
+        self.lat = self.lat + np.degrees(dm[:, 1] / R_E)
+        self.lon = np.mod(self.lon + np.degrees(dm[:, 0] / (R_E * np.cos(np.radians(self.lat)))) + 180.0, 360.0) - 180.0
         self.t = t + dt
         # waypoints
         dist, _, xte, _ = self._geom()

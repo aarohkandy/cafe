@@ -10,7 +10,9 @@ import yaml
 from hypothesis import given, settings, strategies as st
 
 from cafe.pm import Tagged
+from cafe.pm.env import perturb, subgrid
 from cafe.pm.env.protocol import AnalyticEnv
+from cafe.pm.stats.sampling import load_perturbations
 from cafe.pm.physics import glider as g
 
 SG, SL = g.load_platform("seaglider"), g.load_platform("slocum")
@@ -268,6 +270,23 @@ def test_windage_moves_the_surface_phase_only():
     s = sim(e=shallow, lon=10.0)
     s.run(DAY)
     assert (s.lon[0] - 10.0) * g.metres_per_deg(0.0)[0] == pytest.approx(SG["windage"] * 10.0 * DAY, rel=0.05)
+
+
+def test_the_sde_moves_the_glider_position_by_a_random_walk_and_leaves_steering_and_the_dac_alone():
+    M, steps, dt = 300, 720, 60.0
+    pri = load_perturbations()
+    pri["current_speed_scale"]["value"] = pri["current_direction_bias"]["value"] = 0.0
+    base = env(0.1, 0.05)
+    on_env = perturb.PerturbedEnv(base, {}, list(range(M)), 5, pri, sde=dict(t0=0.0, t1=steps * dt, dt=dt))
+    off, on = sim(M=M, e=base), sim(M=M, e=on_env)
+    off.run(steps * dt, dt)
+    on.run(steps * dt, dt)
+    for k in ("heading", "depth", "dac", "gd", "dr", "phase", "E"):
+        assert np.allclose(getattr(off, k), getattr(on, k), rtol=1e-3, atol=1e-9), k      # state driven by the current never sees the SDE (gsw p(lat) differs)
+    mx, my = g.metres_per_deg(0.0)
+    d = np.stack([(on.lon - off.lon) * mx, (on.lat - off.lat) * my], -1)
+    var = 2 * float(subgrid.sde_diffusivity(0.0)[0]) * steps * dt
+    assert np.allclose(d.var(0), var, rtol=0.3) and np.all(np.abs(d.mean(0)) < 4 * np.sqrt(var / M))  # surface and subsurface both: a random walk of 2Kt
 
 
 def test_station_holds_and_loses_as_in_the_receipts():

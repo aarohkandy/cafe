@@ -365,11 +365,15 @@ U10, not the wind history.
 jet [m/s] = 0.2 (midpoint of config/subgrid.json [0.1, 0.3]) x min(dT_warm / 3 K, 1) x ( 1 + z/d_warm )_+ , along the 10 m wind, added to the HYCOM current; +-0.1 as the sigma
 ```
 
-TEPEX-C's own hypothesis (BRIEF 2.2), **modelled, not observed**; `dT_ref = 3 K` is assumed. Windage is **not** added to the current (the HYCOM top layer holds
-the Ekman drift; the USV VPP has its own windage; the glider adds 1 % at the surface). The Okubo (1971) diffusivity `K = 0.0103 l^1.15` cm^2/s (**typed from
-memory**) and the Ito/Euler-Maruyama step `dx = (u + dK/dx) dt + sqrt(2K) dW` (OceanParcels tutorial; well-mixed condition of Thomson 1987) exist as functions
-(`okubo_K`, `ocean_sde_step`) and are receipted, but **no pipeline stage calls them**; nor `subgrid.windage` or `subgrid.diurnal_jet`. The mission file's
-flags `warm_layer`, `rain_lens` and `ocean_sde` are validated by the schema and not read; only `turbulence` and `gust_fronts` are.
+TEPEX-C's own hypothesis (BRIEF 2.2), **modelled, not observed**; `dT_ref = 3 K` is assumed. It enters through `SurfaceLayer` (mission switch
+`warm_layer`: no warm layer, no jet). Windage is **not** added to the current, because the HYCOM top layer holds the Ekman drift and the USV VPP has its
+own windage. At the surface the glider drifts with a per-member leeway of 1.8-2.3 % of U10 (`subgrid.windage_fraction`).
+
+Ocean SDE (mission switch `ocean_sde`): the Okubo (1971) diffusivity `K = 0.0103 l^1.15` cm^2/s at the 0.08 deg HYCOM cell (**typed from memory**), and
+the Ito/Euler-Maruyama step `dx = (u + dK/dx) dt + sqrt(2K) dW` (OceanParcels tutorial; well-mixed condition of Thomson 1987). The vehicles take
+`u dt` from the current they read and add `dK/dx dt + sqrt(2K dt) xi` from `PerturbedEnv.sde_displacement` to their **position only**. Steering, the
+glider's dive-averaged current, and the USV's becalmed and wing-stall tests see the resolved, perturbed current, never the unresolved-eddy noise
+(DECISIONS row 100). The noise is one stream per member (`member_rng(seed, m, "ocean_sde")`), indexed by step number, and the same in any batch.
 
 ### 5.5 Receipts, job `pm.env.subgrid`, group `sub-grid`
 

@@ -410,6 +410,9 @@ class GliderSim:
         diving = ~s0
         self.gd += np.where(diving[:, None], move, 0.0)
         self.dr += dr_nom
+        sde = getattr(env, "sde_displacement", None)                                         # unresolved eddies move the position only
+        if sde is not None:
+            move = move + sde(self.lon, self.lat, self.t)
         mx, my = metres_per_deg(self.lat)
         self.lon = (self.lon + move[:, 0] / mx + 180.0) % 360.0 - 180.0
         self.lat = np.clip(self.lat + move[:, 1] / my, -90.0, 90.0)

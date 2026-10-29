@@ -25,13 +25,14 @@ change, not a code change. Each says what we do now and what changes if your ans
 4. **Which platforms TEPEX-C will fly** (Saildrone Explorer vs Voyager; Seaglider vs Slocum; which UAS), with mass,
    CG, geometry or CAD, propulsion and battery curves, speed polars or flight-model coefficients, comms hardware and
    antenna heights. *Default:* `platforms/seaglider.yaml`, `slocum.yaml`, `saildrone_explorer.yaml`,
-   `quad_uas.yaml`, each number cited or marked `assumed`. *If supplied:* edit those files (or add new ones); a
-   CAD file goes through `cafe hangar`. Verdicts then describe your vehicles instead of the class defaults.
+   `quad_uas.yaml`, each number cited or marked `assumed`. *If supplied:* edit those files (or add new ones) and
+   check each with `python -m cafe.pm hangar --platform <name>`, which lists every value still marked assumed.
+   Verdicts then describe your vehicles instead of the class defaults.
 
 5. **Mission definition.** Deployment windows, waypoints, station-keeping tolerance, surfacing schedule, which
    link pairs must hold and what outage is acceptable, and the go/no-go thresholds the PIs actually use.
    *Default:* `missions/tepex_c_demo.yaml` (brief section 6; GO at P(success) >= 0.9, NO-GO below 0.6).
-   *If different:* edit the mission file; `cafe validate` checks it before a run.
+   *If different:* edit the mission file; `python -m cafe.pm validate --mission <file>` checks it before a run.
 
 6. **The lab server.** GPU model(s) and VRAM, CPU cores, RAM, disk, OS, who administers it, and whether there is a
    user account with Docker. *Default:* designed for one 32–96 GB NVIDIA GPU + 32–64 cores; everything also runs

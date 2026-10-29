@@ -141,11 +141,12 @@ def sde_env(M=1500, steps=720, members=None, seed=3, **kw):
 
 
 def drift_particles(pe, M, steps, lat0=0.0):
-    """Passive particles from (0, lat0), moved each minute by the current the environment returns, as the vehicles do. -> positions [m]."""
+    """Passive particles from (0, lat0), moved each minute by the current the environment returns plus its SDE displacement, as the
+    vehicles do. -> positions [m]."""
     x = np.zeros((M, 2))
     for k in range(steps):
-        v = pe.current(x[:, 0] / M_PER_DEG, lat0 + x[:, 1] / M_PER_DEG, 0.0, k * 60.0).value
-        x += v * 60.0
+        lon, lat = x[:, 0] / M_PER_DEG, lat0 + x[:, 1] / M_PER_DEG
+        x += pe.current(lon, lat, 0.0, k * 60.0).value * 60.0 + pe.sde_displacement(lon, lat, k * 60.0)
     return x
 
 
@@ -160,41 +161,44 @@ def test_passive_particles_disperse_as_2Kt_in_both_directions_with_no_mean_drift
     assert np.allclose(short.var(0), var / 4, rtol=0.1)
 
 
-def test_without_the_sde_the_current_is_exactly_the_perturbed_current():
-    pe = sde_env()
-    off = P.PerturbedEnv(AnalyticEnv(current=(0.2, 0.1)), {}, list(range(1500)), 3, QUIET)
-    on = P.PerturbedEnv(AnalyticEnv(current=(0.2, 0.1)), {}, list(range(1500)), 3, QUIET, sde=dict(t0=0.0, t1=43200.0, dt=60.0))
-    a, b = off.current(np.zeros(1500), np.zeros(1500), 0.0, 120.0), on.current(np.zeros(1500), np.zeros(1500), 0.0, 120.0)
-    assert pe.sde is not None and off.sde is None and "Lagrangian SDE" in b.source and "Lagrangian SDE" not in a.source
-    assert not np.allclose(a.value, b.value) and abs((b.value - a.value).mean()) < 0.05            # noise of zero mean around the same current
+def test_the_sde_is_not_in_the_current_a_vehicle_senses_but_in_the_displacement():
+    off = P.PerturbedEnv(AnalyticEnv(current=(0.2, 0.1)), {}, list(range(1500)), 3, PRI)
+    on = P.PerturbedEnv(AnalyticEnv(current=(0.2, 0.1)), {}, list(range(1500)), 3, PRI, sde=dict(t0=0.0, t1=43200.0, dt=60.0))
+    z = np.zeros(1500)
+    a, b = off.current(z, z, 0.0, 120.0), on.current(z, z, 0.0, 120.0)
+    assert np.array_equal(a.value, b.value) and a.source == b.source and "SDE" not in b.source           # with the SDE on: exactly the sde-off current
+    assert np.array_equal(off.sde_displacement(z, z, 120.0), np.zeros((1500, 2))) and off.sde is None
+    d = on.sde_displacement(z, z, 120.0)
+    assert d.shape == (1500, 2) and abs(d.mean()) < 0.1 * d.std() and np.allclose(d.var(0), 2 * float(SG.sde_diffusivity(0.0)[0]) * 60.0, rtol=0.1)
+    assert np.array_equal(d, on.sde_displacement(0.0, z, 120.0))                                    # a scalar longitude broadcasts
 
 
 def test_the_sde_noise_is_seeded_per_member_and_is_the_same_in_any_batch_and_for_any_repeat_of_a_step():
     a, b = sde_env(members=[0, 1, 2], steps=60), sde_env(members=[2, 3], steps=60)
     lon = lat = np.zeros(3)
-    va = a.current(lon, lat, 0.0, 600.0).value
-    assert np.array_equal(va, a.current(lon, lat, 0.0, 600.0).value)                               # a step asked twice: one answer
-    assert np.array_equal(a.current(lon, lat, 0.0, 600.0 + 20.0).value, va)                         # within the same step too
-    assert np.array_equal(b.current(np.zeros(2), np.zeros(2), 0.0, 600.0).value[0], va[2])         # member 2 in another batch
-    assert not np.allclose(va[0], va[1]) and not np.allclose(sde_env(members=[0, 1, 2], steps=60, seed=4).current(lon, lat, 0.0, 600.0).value, va)
-    assert not np.allclose(a.current(lon, lat, 0.0, 660.0).value, va)                               # the next step is a new increment
+    va = a.sde_displacement(lon, lat, 600.0)
+    assert np.array_equal(va, a.sde_displacement(lon, lat, 600.0))                                  # a step asked twice: one answer
+    assert np.array_equal(a.sde_displacement(lon, lat, 600.0 + 20.0), va)                           # within the same step too
+    assert np.array_equal(b.sde_displacement(np.zeros(2), np.zeros(2), 600.0)[0], va[2])            # member 2 in another batch
+    assert not np.allclose(va[0], va[1]) and not np.allclose(sde_env(members=[0, 1, 2], steps=60, seed=4).sde_displacement(lon, lat, 600.0), va)
+    assert not np.allclose(a.sde_displacement(lon, lat, 660.0), va)                                 # the next step is a new increment
 
 
-def test_the_velocity_is_dK_dx_plus_sqrt_2K_over_dt_times_the_members_increment():
+def test_the_displacement_is_dK_dx_dt_plus_sqrt_2K_dt_times_the_members_increment():
     pe = sde_env(members=[0, 1], steps=60)
     lat = np.array([40.0, 40.0])
     K, g = SG.sde_diffusivity(lat)
     xi = pe.sde.xi[:, 10]
-    want = g + np.sqrt(2 * K[:, None] / 60.0) * xi
-    assert np.allclose(pe.sde.velocity(np.zeros(2), lat, 600.0), want) and g[0, 1] < 0
+    want = g * 60.0 + np.sqrt(2 * K[:, None] * 60.0) * xi
+    assert np.allclose(pe.sde_displacement(np.zeros(2), lat, 600.0), want) and g[0, 1] < 0
     pe.sde.xi[:] = 0.0
-    assert np.allclose(pe.sde.velocity(np.zeros(2), lat, 600.0), g)                                # no noise: the drift term alone
+    assert np.allclose(pe.sde_displacement(np.zeros(2), lat, 600.0), g * 60.0)                     # no noise: the drift term alone
 
 
 def test_the_sde_reads_shapes_with_trailing_axes_and_refuses_times_outside_its_window():
     pe = sde_env(members=[0, 1], steps=10)
-    v = pe.sde.velocity(np.zeros((2, 3)), np.zeros((2, 3)), np.array([0.0, 60.0, 120.0]))
+    v = pe.sde_displacement(np.zeros((2, 3)), np.zeros((2, 3)), np.array([0.0, 60.0, 120.0]))
     assert v.shape == (2, 3, 2) and not np.allclose(v[:, 0], v[:, 1])
     for t in (-300.0, 10 * 60.0 + 3 * 60.0):
         with pytest.raises(ValueError, match="outside its window"):
-            pe.sde.velocity(np.zeros(2), np.zeros(2), t)
+            pe.sde_displacement(np.zeros(2), np.zeros(2), t)

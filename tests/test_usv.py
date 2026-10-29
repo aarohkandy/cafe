@@ -10,7 +10,9 @@ from hypothesis import assume, given, settings, strategies as st
 from cafe import receipts as R
 from cafe.pm import Tagged
 from cafe.pm.env import conventions as cv
+from cafe.pm.env import perturb, subgrid
 from cafe.pm.env.protocol import AnalyticEnv
+from cafe.pm.stats.sampling import load_perturbations
 from cafe.pm.physics import usv
 
 P = usv.load_platform()
@@ -491,6 +493,41 @@ def test_becalmed_needs_n_hours_and_a_current():
     nocur = sim(AnalyticEnv(wind=(-0.5, 0.0)), m=3)
     nocur.run(12 * HR, 300.0)
     assert not nocur.fail["becalmed"].any()                                    # light air alone is not becalmed: nothing to stem
+
+
+def with_sde(env, m, seconds, dt):
+    """`env` under the ocean SDE only (no forcing error): m members, steps of dt over `seconds`."""
+    pri = load_perturbations()
+    pri["current_speed_scale"]["value"] = pri["current_direction_bias"]["value"] = 0.0
+    return perturb.PerturbedEnv(env, {}, list(range(m)), 5, pri, sde=dict(t0=0.0, t1=seconds, dt=dt))
+
+
+def test_spurs2_still_sweeps_and_becalms_with_the_ocean_sde_on():
+    """The SDE moves the position, not the current the USV senses: the noisy |current| must not reset the becalmed counter."""
+    env = with_sde(AnalyticEnv(wind=(-0.2, 0.0), current=(0.9, 0.0), hs=0.5), 16, 24 * HR, 300.0)
+    s = sim(env, m=16, mode="station", station=(-125.0, 10.0), start=(-125.0, 10.0))
+    s.run(24 * HR, 300.0)
+    assert np.all(s.fail["becalmed"]) and np.all(s.fail["swept_off_track"]) and 6.0 <= first_h(s, "becalmed") < 12.0
+
+
+def test_the_sde_moves_the_position_by_a_random_walk_and_leaves_every_steering_input_alone():
+    m, n, dt = 400, 200, 60.0
+    base = AnalyticEnv(wind=(-6.0, 0.0), hs=1.0)
+    off, on = sim(base, m=m), sim(with_sde(base, m, n * dt, dt), m=m)
+    d = on.env.sde_displacement(on.lon, on.lat, 0.0)
+    off.step(dt)
+    on.step(dt)
+    for k in ("hd", "stw", "sog", "vmax", "path_m"):
+        assert np.array_equal(getattr(off, k), getattr(on, k)), k                                    # steering, speeds and failure inputs: identical
+    assert all(np.array_equal(off.acc[k], on.acc[k]) for k in off.acc)
+    got = np.stack([np.radians(on.lon - off.lon) * np.cos(np.radians(on.lat)), np.radians(on.lat - off.lat)], -1) * usv.R_E
+    assert np.allclose(got, d, atol=1e-2) and d.std() > 10.0                                           # position differs by exactly the step's displacement
+    for _ in range(n - 1):
+        off.step(dt)
+        on.step(dt)
+    dx = (np.radians(on.lon - off.lon) * np.cos(np.radians(on.lat)) * usv.R_E)
+    var = 2 * float(subgrid.sde_diffusivity(-1.0)[0]) * n * dt
+    assert np.isclose(dx.var(), var, rtol=0.3) and abs(dx.mean()) < 4 * np.sqrt(var / m)             # a random walk of variance 2Kt, no mean drift
 
 
 def test_becalmed_counter_resets_when_the_wind_comes_back():

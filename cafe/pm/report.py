@@ -161,15 +161,23 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     return d
 
 
+def _floor(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any] | None:
+    f = e["sensitivity"].get("noise_floor")
+    return None if f is None else num(f, "fraction of variance", ref, f"{src}.sensitivity.noise_floor (stats.sensitivity.noise_floor)")
+
+
 def _sens(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     p = e["sensitivity"]["param"]
-    return dict(param=p, s1=None if p is None else num(e["sensitivity"]["S1"][p], "fraction of variance", ref, src))
+    return dict(param=p, s1=None if p is None else num(e["sensitivity"]["S1"][p], "fraction of variance", ref, src), noise_floor=_floor(e, ref, src),
+                computed=bool(e["sensitivity"]["S1"]))
 
 
 def _top3(e: dict[str, Any], ref: dict[str, Any], src: str) -> list[Any]:
-    """The three perturbation parameters with the largest Sobol first-order index (EASI estimate, stats.sensitivity), largest first."""
-    s1 = e["sensitivity"]["S1"] or {}
-    return [dict(param=p, s1=num(x, "fraction of variance", ref, f"{src}.sensitivity.S1.{p}")) for p, x in sorted(s1.items(), key=lambda kv: -kv[1])[:3]]
+    """The (up to) three perturbation parameters with the largest Sobol first-order index (EASI estimate, stats.sensitivity) that
+    clear the permutation noise floor, largest first."""
+    s1, f = e["sensitivity"]["S1"] or {}, e["sensitivity"].get("noise_floor") or 0.0
+    return [dict(param=p, s1=num(x, "fraction of variance", ref, f"{src}.sensitivity.S1.{p}"))
+            for p, x in sorted(s1.items(), key=lambda kv: -kv[1])[:3] if x > f]
 
 
 def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
@@ -582,15 +590,18 @@ def _stat_html(d: dict[str, Any]) -> str:
 
 def _sens_html(s: dict[str, Any]) -> str:
     if s["param"] is None:
+        if s.get("computed") and s.get("noise_floor"):
+            return f"no parameter clears the noise floor (S1 {_n(s['noise_floor'])}, the 95 % level of unrelated outcomes at this member count)"
         return "none (all-pass, all-fail, or fewer than 16 members)"
     return f"<code>{html.escape(s['param'])}</code> (S1 {_n(s['s1'])})"
 
 
-def _top3_html(top: list[Any]) -> str:
+def _top3_html(top: list[Any], floor: Any = None) -> str:
+    fl = f"; the noise floor at this member count is S1 {_n(floor)}" if floor else ""
     if not top:
-        return "<p class=muted>Top sensitivities: none (all-pass, all-fail, or fewer than 16 members).</p>"
+        return f"<p class=muted>Top sensitivities: none above the noise floor (or all-pass, all-fail, or fewer than 16 members){fl}.</p>"
     items = "; ".join(f"<code>{html.escape(t['param'])}</code> {_n(t['s1'])}" for t in top)
-    return f"<p>Top sensitivities (Sobol first-order, share of the variance of failure): {items}.</p>"
+    return f"<p>Top sensitivities (Sobol first-order, share of the variance of failure, above the permutation noise floor): {items}{fl}.</p>"
 
 
 def _tried_html(t: dict[str, Any]) -> str:
@@ -630,7 +641,8 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     return (f"<div class=card><h3>{e(vid)} {_badge(v['verdict'])} <span class=muted>{e(v['cls'])}, {e(str(v['platform']))}</span></h3>"
             f"{_stat_html(v)}{ch}<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
-            f"{_top3_html(v['top3'])}{_fix_html(v['fix'])}<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} assumed platform inputs, listed in the "
+            f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
+            f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} assumed platform inputs, listed in the "
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")
 
 
@@ -638,7 +650,8 @@ def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
     return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}</h3>{_stat_html(k)}<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
-            f"median margin {_n(k['margin_db_median'])}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>{_top3_html(k['top3'])}</div>")
+            f"median margin {_n(k['margin_db_median'])}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
+            f"{_top3_html(k['top3'], k['sensitivity']['noise_floor'])}</div>")
 
 
 def _svg(m: dict[str, Any], reach: dict[str, Any]) -> str:

@@ -11,8 +11,10 @@ so inter-vehicle range checks are consistent.
   1-sigma is the prior's.
 - Ocean SDE (`sde=dict(t0, t1, dt)`, mission switch ocean_sde): the unresolved eddies as a Lagrangian stochastic perturbation,
   the Ito SDE dx = u dt + dK/dx dt + sqrt(2K) dW of `subgrid.ocean_sde_step` (Euler-Maruyama, OceanParcels form), K = Okubo's
-  at the HYCOM cell size (`subgrid.sde_diffusivity`). A vehicle moves by current * dt each step, so the layer adds the velocity
-  whose displacement over one vehicle step IS the Euler-Maruyama increment: (dK/dx + sqrt(2K/dt) xi) with xi the member's
+  at the HYCOM cell size (`subgrid.sde_diffusivity`). It is the unresolved dispersion of a vehicle's POSITION, not a current the
+  vehicle can measure or steer against, so it is NOT in `current()` (becalmed, apparent wind, steering and every failure test
+  must not see it): `sde_displacement` returns the Euler-Maruyama increment dK/dx dt + sqrt(2K dt) xi in metres east/north for the
+  one vehicle step starting at t, and the glider and USV integrators add it to the position update only. xi is the member's
   Brownian increment for that step. Each member owns one stream (`member_rng(seed, m, "ocean_sde")`, keyed by member only, so
   every vehicle in a member sees the same increments, and a member has the same ones in any batch); the increments are drawn
   once for the whole window and read by step number round((t - t0) / dt), so the layer holds no state a vehicle could
@@ -73,14 +75,14 @@ class Field:
 
 
 class OceanSDE:
-    """Per-member Brownian increments of the ocean SDE over [t0, t1] at step dt, and the velocity they imply (module docstring)."""
+    """Per-member Brownian increments of the ocean SDE over [t0, t1] at step dt, and the displacement they imply (module docstring)."""
 
     def __init__(self, base_seed: Any, members: Iterable[Any], t0: float, t1: float, dt: float):
         self.t0, self.dt, self.n = float(t0), float(dt), int(np.ceil((float(t1) - float(t0)) / float(dt))) + 2
         self.xi = np.stack([member_rng(base_seed, int(m), "ocean_sde").standard_normal((self.n, 2)) for m in members])    # (M, n, 2)
 
-    def velocity(self, lon: Any, lat: ArrayLike, t: ArrayLike) -> Any:
-        """(M, ..., 2) m/s at member positions (leading axis = members) and time t: dK/dx + sqrt(2 K / dt) xi, from one
+    def displacement(self, lat: ArrayLike, t: ArrayLike) -> Any:
+        """(M, ..., 2) metres east, north at member latitudes (leading axis = members) and time t: dK/dx dt + sqrt(2 K dt) xi, one
         `subgrid.ocean_sde_step` of length dt taken from the origin."""
         lat = np.asarray(lat, float)
         k = np.broadcast_to(np.rint((np.asarray(t, float) - self.t0) / self.dt).astype(int), lat.shape)
@@ -88,7 +90,7 @@ class OceanSDE:
             raise ValueError(f"ocean SDE queried outside its window: step {int(k.min())}..{int(k.max())} of {self.n}")
         xi = self.xi[np.arange(len(self.xi)).reshape((-1,) + (1,) * (lat.ndim - 1)), k]
         K, gradK = subgrid.sde_diffusivity(lat)
-        return subgrid.ocean_sde_step(np.zeros(lat.shape + (2,)), K, gradK, self.dt, None, xi=xi) / self.dt
+        return subgrid.ocean_sde_step(np.zeros(lat.shape + (2,)), K, gradK, self.dt, None, xi=xi)
 
 
 class PerturbedEnv:
@@ -134,10 +136,13 @@ class PerturbedEnv:
         rot = (db / np.sqrt(2.0) if db is not None else 0.0) + self.cd / np.sqrt(2.0) * self.fd(lonb, latb)
         v = _rot(v * np.exp(logs)[..., None], np.broadcast_to(rot, sh))
         src = c.source + "; member current error applied (member-wide + 100 km random field)"
-        if self.sde is not None:
-            v = v + self.sde.velocity(lonb, latb, t)
-            src += "; + ocean Lagrangian SDE (Ito, Euler-Maruyama, dK/dx drift, Okubo K at the HYCOM cell size)"
         return Tagged(v, src, c.uncertainty, c.kind)
+
+    def sde_displacement(self, lon: Any, lat: Any, t: Any) -> Any:
+        """(M, ..., 2) metres east, north an unresolved eddy moves a vehicle at (lon, lat) over the one step starting at t (zeros with
+        the SDE off). The vehicle adds it to its position and nowhere else; `current` never contains it."""
+        lat = np.broadcast_to(np.asarray(lat, float), np.broadcast(lon, lat).shape)
+        return np.zeros(lat.shape + (2,)) if self.sde is None else self.sde.displacement(lat, t)
 
     def waves(self, lon: Any, lat: Any, t: Any) -> dict[str, Tagged]:
         w = dict(self.env.waves(lon, lat, t))

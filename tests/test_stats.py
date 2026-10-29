@@ -285,8 +285,25 @@ def test_ishigami_ranking_and_dominant():
     box = {k: dict(dist="uniform", lo=-np.pi, hi=np.pi) for k in "abc"}
     _, x = S.lhs(512, box, 0)
     X = np.c_[x["a"], x["b"], x["c"]]
-    name, s = SE.dominant(["a", "b", "c"], X, ishigami(X))
-    assert name == "b" and s["b"] > s["a"] > s["c"] and s["c"] < 0.05
+    name, s, floor = SE.dominant(["a", "b", "c"], X, ishigami(X))
+    assert name == "b" and s["b"] > s["a"] > s["c"] and s["c"] < 0.05 and s["a"] > floor > s["c"]
+
+
+def test_noise_floor_keeps_unrelated_parameters_out_at_stage1_sizes():
+    """32 members, 10 parameters, a failure indicator that depends on none of them: EASI's S1 for an unrelated column often
+    reaches ~0.3 at this size (the glider_eq / usv_vpp_bias case), so `dominant` must name none in at least 90 % of draws, while
+    a failure driven by one parameter (fail = u0 > 0.6) is still found."""
+    names = [f"p{i}" for i in range(10)]
+    hits, found = 0, 0
+    for seed in range(40):
+        u, _ = S.lhs(32, {k: dict(dist="uniform", lo=0, hi=1) for k in names}, seed)
+        y = (np.random.default_rng(seed + 100).random(32) < 0.25).astype(float)
+        hits += SE.dominant(names, u, y)[0] is not None
+        found += SE.dominant(names, u, (u[:, 0] > 0.6).astype(float))[0] == "p0"
+    assert hits <= 4 and found >= 36
+    floor = SE.noise_floor(u, y)
+    assert 0.1 < floor < 0.6 and floor == SE.noise_floor(u, y)                   # seeded: one answer
+    assert SE.noise_floor(np.r_[u, u, u, u], np.r_[y, y, y, y]) < floor           # more members, lower floor
 
 
 @pytest.mark.parametrize("n,tol", [(128, 0.12), (512, 0.05)])

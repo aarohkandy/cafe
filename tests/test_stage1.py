@@ -694,7 +694,7 @@ def test_summary_verdicts_dominant_mode_and_first_failure_time():
     assert u["modes"] == dict(mode_a=10, mode_b=24) and u["dominant"] == "mode_b" and u["first_fail_t"] == 500.0 and u["median_fail_t"] == pytest.approx(511.5)
     g = s["vehicles"]["uas"]
     assert g["k_fail"] == 0 and g["dominant"] is None and g["first_fail_t"] is None and g["median_fail_t"] is None
-    assert g["sensitivity"] == dict(param=None, S1={})
+    assert g["sensitivity"] == dict(param=None, S1={}, noise_floor=None)
     assert "73 members" in g["verdict"]["note"]                                                                              # 24 members cannot certify
     h = s["vehicles"]["glider_eq"]
     assert 0 < h["k_fail"] < 24 and h["sensitivity"]["param"] == names[0] and set(h["sensitivity"]["S1"]) == set(names)       # driven by U[:, 0]

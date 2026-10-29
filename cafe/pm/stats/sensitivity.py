@@ -30,7 +30,18 @@ def first_order(x: np.ndarray, y: np.ndarray, harmonics: int = 6, correct: bool 
     return np.clip(out, 0.0, 1.0)
 
 
-def dominant(names: list[str], x: np.ndarray, y: np.ndarray, **kw: float) -> tuple[str, dict[str, float]]:
-    """(name of the parameter with the largest S1, {name: S1}) for the verdict's "most sensitive to" field."""
-    s = first_order(x, y, **kw)                                  # type: ignore[arg-type]
-    return names[int(np.argmax(s))], dict(zip(names, map(float, s), strict=True))
+def noise_floor(x: np.ndarray, y: np.ndarray, perms: int = 200, level: float = 0.95, seed: int = 0, harmonics: int = 6) -> float:
+    """The largest S1 over all columns that y unrelated to x reaches with probability 1 - level: the `level` quantile of
+    max_i S1_i over `perms` random permutations of y (a family-wise permutation test). With 32 members it is ~0.3, so an S1
+    below it is no evidence that the parameter matters."""
+    rng = np.random.default_rng(seed)
+    null = [first_order(x, rng.permutation(np.asarray(y, float)), harmonics).max() for _ in range(perms)]
+    return float(np.quantile(null, level))
+
+
+def dominant(names: list[str], x: np.ndarray, y: np.ndarray, harmonics: int = 6) -> tuple[str | None, dict[str, float], float]:
+    """(name of the parameter with the largest S1, or None when no S1 clears the permutation noise floor; {name: S1}; the floor)
+    for the verdict's "most sensitive to" field."""
+    s = first_order(x, y, harmonics)
+    floor = noise_floor(x, y, harmonics=harmonics)
+    return (names[int(np.argmax(s))] if s.max() > floor else None), dict(zip(names, map(float, s), strict=True)), floor

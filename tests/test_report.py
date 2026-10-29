@@ -332,13 +332,16 @@ def test_top_three_sensitivities_by_sobol_first_order_index(full):
     run, _, _, _, rep = full
     top = json.loads((run / "stage1b" / "summary.json").read_text())["summary"]
     for vid, d in {**rep["vehicles"], **rep["links"]}.items():
-        e = (top["vehicles"].get(vid) or top["links"][vid])["sensitivity"]["S1"]
-        want = sorted(e.items(), key=lambda kv: -kv[1])[:3]
+        sens = (top["vehicles"].get(vid) or top["links"][vid])["sensitivity"]
+        want = [(k, v) for k, v in sorted(sens["S1"].items(), key=lambda kv: -kv[1])[:3] if v > (sens.get("noise_floor") or 0.0)]
         assert [t["param"] for t in d["top3"]] == [k for k, _ in want] and [t["s1"]["value"] for t in d["top3"]] == [v for _, v in want]
         assert all(t["s1"]["unit"] == "fraction of variance" and t["s1"]["stage"] == "stage1b" for t in d["top3"])
-    assert len(rep["vehicles"]["usv"]["top3"]) == 3 and rep["vehicles"]["glider_2n"]["top3"] == []
+        assert (d["sensitivity"]["param"] is None) == (not d["top3"])                # named only when it clears the noise floor
+    u = rep["vehicles"]["usv"]
+    assert u["top3"][0]["param"] == u["sensitivity"]["param"] and u["sensitivity"]["noise_floor"]["value"] > 0 and rep["vehicles"]["glider_2n"]["top3"] == []
     h = (run / "report" / "index.html").read_text()
-    assert "Top sensitivities (Sobol first-order, share of the variance of failure): <code>" in h and "Top sensitivities: none" in h
+    assert "Top sensitivities (Sobol first-order, share of the variance of failure, above the permutation noise floor): <code>" in h
+    assert "Top sensitivities: none above the noise floor" in h and "the noise floor at this member count is S1" in h
 
 
 def test_the_emulator_section_shows_acceptance_the_noise_floor_and_the_training_table(run):
