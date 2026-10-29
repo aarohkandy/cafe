@@ -81,7 +81,8 @@ class Dynamics:
         self.battery_scale = np.asarray(s.get("battery", np.ones(B)), float)
         self.Minv = np.linalg.inv(veh.M)
         self.A = veh.added_mass
-        self.rho = RHO[veh.fluid]
+        self.rho = RHO[veh.fluid]          # drag, lift, wave pressure; buoyancy uses the local density (step)
+        self.trim_kg = 0.0                 # ballast added at launch (mission.World trims gliders to the local water)
         acts = veh.actuators
         self.a_pos = np.array([a.pos for a in acts]).reshape(-1, 3)
         self.a_dir = np.array([a.dir for a in acts]).reshape(-1, 3)
@@ -204,7 +205,7 @@ class Dynamics:
     WAVE_EVERY = 0.15   # s between wave-field refreshes (>= ~10 per period of any wave that moves a hull);
                         # hydrostatics are exact every step
 
-    def panel_forces(self, st, R, waves, t):
+    def panel_forces(self, st, R, waves, t, rho_w=None):
         """Integrate instantaneous hydrostatic + wave pressure over the hull panels.
         Pressure: rho g (-z) + p_dyn below the mean surface, rho g (eta - z) between it and the crest
         (simple stretching), 0 above the local surface. The wave field (eta, p_dyn) is refreshed every
@@ -222,7 +223,8 @@ class Dynamics:
                 eta[:, live], pd[:, live] = waves.fields(xw[:, live, 0], xw[:, live, 1], z[:, live], t, self.rho)
             self._wave = cache = (t, waves, eta, pd)
         eta, pd = cache[2], cache[3]
-        p = np.where(z < 0, -self.rho * G * z + pd, self.rho * G * (eta - z))
+        rho_w = np.reshape(self.rho if rho_w is None else rho_w, (-1, 1))
+        p = np.where(z < 0, -rho_w * G * z + pd, rho_w * G * (eta - z))
         p = np.where(z < eta, p, 0.0)
         f = -(p * a)[..., None] * n                                              # body frame
         return f.sum(1), np.cross(c, f).sum(1), (p > 0).mean(1)
@@ -243,7 +245,9 @@ class Dynamics:
         v_r = st.v - uf
         nu_r = np.concatenate([v_r, st.w], 1)
         tau = np.zeros((B, 6))
-        tau[:, :3] += bmtv(R, np.broadcast_to([0, 0, veh.mass * G], (B, 3)))
+        tau[:, :3] += bmtv(R, np.broadcast_to([0, 0, (veh.mass + self.trim_kg) * G], (B, 3)))
+        rho_w = np.broadcast_to(np.asarray(env.get("rho_water", self.rho), float), (B,))     # in-situ, per sample
+        archimedes = np.column_stack([np.zeros(B), np.zeros(B), -rho_w * G * veh.volume])
         Fa, Ma, power = self.actuator_forces(st, v_r)
         tau[:, :3] += Fa; tau[:, 3:] += Ma
         Fd, Md = self.drag(v_r)
@@ -257,17 +261,17 @@ class Dynamics:
         if submerged:
             # fully under every trough: hydrostatics integrate exactly to Archimedes, and for waves much
             # longer than the hull the wave force is Froude-Krylov rho*V*a_fluid (added-mass part below)
-            Fb = bmtv(R, np.broadcast_to([0, 0, -self.rho * G * veh.volume], (B, 3)))
+            Fb = bmtv(R, archimedes)
             tau[:, :3] += Fb; tau[:, 3:] += np.cross(veh.cob, Fb)
             if "flow_acc_ned" in env:
                 Ffk = self.rho * veh.volume * bmtv(R, env["flow_acc_ned"])
                 tau[:, :3] += Ffk + bmtv(R, env["flow_acc_ned"]) @ self.A[:3, :3].T
         elif veh.panels is not None and waves is None:
             # deep: waves can't reach, panels would just integrate to Archimedes -> do it exactly
-            Fb = bmtv(R, np.broadcast_to([0, 0, -self.rho * G * veh.volume], (B, 3)))
+            Fb = bmtv(R, archimedes)
             tau[:, :3] += Fb; tau[:, 3:] += np.cross(veh.cob, Fb)
         elif veh.panels is not None:
-            Fp, Mp, wet = self.panel_forces(st, R, waves, st.t)
+            Fp, Mp, wet = self.panel_forces(st, R, waves, st.t, rho_w)
             tau[:, :3] += Fp; tau[:, 3:] += Mp
             if "flow_acc_ned" in env:   # diffraction/added-mass part of the wave force on the accelerating fluid
                 tau[:, :3] += bmtv(R, env["flow_acc_ned"]) @ self.A[:3, :3].T

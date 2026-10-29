@@ -20,7 +20,7 @@ from cafe.vehicle import RHO, G
 
 EARTH = 6371000.0
 TOL = dict(uav=3.0, usv=10.0, uuv=10.0)            # default arrive / hold tolerance (m)
-PHYS_DT = dict(uav=0.01, usv=0.02, uuv=0.02)
+PHYS_DT = dict(uav=0.0025, usv=0.02, uuv=0.02)   # quad at ArduCopter's 400 Hz rate loop (receipt: vs half the step)
 TICK = 0.02
 # Monte Carlo spreads (1 sigma). Weather-model errors are generic reanalysis-scale assumptions, stated in the UI.
 # When the weather files carry no ocean currents, a random current with current_unknown sigma per component is
@@ -194,6 +194,8 @@ class World:
                        np.arctan2(e["wind10_ne"][:, 1] + bw[:, 1], e["wind10_ne"][:, 0] + bw[:, 0]))
             d.waves = envm.Waves.stack([envm.Waves(hs[b], tp[b], heading[b], n=24, seed=int(rng.integers(1 << 30))) for b in range(B)])
             d.hs = hs
+            if d.glider:     # ballasted neutral for the water at its launch point (any offset from neutral is kept)
+                d.dyn.trim_kg = (float(np.atleast_1d(e["rho_water"])[0]) - RHO["water"]) * d.veh.volume
             if np.any(e["land"]):
                 raise ValueError(f"{d.id} starts on land")
             if d.veh.kind != "uav":
@@ -252,7 +254,8 @@ class World:
                 v_des, dist = d.ap.velocity_cmd(d.st.p, tgt, v_cap)
                 cmd = d.ap(d.st, v_des, flow, d.dt)
                 deep = k == "uuv" and d.st.p[:, 2].min() > d.deep_limit
-                envd = dict(flow_ned=flow, wind_ned=np.column_stack([e["wind_ne"], np.zeros(B)]), rho_air=e["rho_air"])
+                envd = dict(flow_ned=flow, wind_ned=np.column_stack([e["wind_ne"], np.zeros(B)]), rho_air=e["rho_air"],
+                            rho_water=e["rho_water"])
                 if acc is not None and not deep:
                     envd["flow_acc_ned"] = acc
                 parked = d.done

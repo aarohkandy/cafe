@@ -124,8 +124,20 @@ def dynamics_receipts():
 
 def ocean_receipts():
     """The environment's 4-D current interpolation vs the raw HYCOM grid at a grid node (independent read)."""
-    import datetime as dt
+    import datetime as dt, gsw
     from cafe import ocean
+    # seawater density through Env's own path (practical S, in-situ t -> TEOS-10) vs the EOS-80 check values
+    z = -gsw.z_from_p(10000.0, 0.0)
+    ts = dict(t_s=np.array([0.0]), depth=np.array([0.0, z]), lat=np.array([0.0, 0.1]), lon=np.array([0.0, 0.1]),
+              temp=np.full((1, 2, 2, 2), 25.0), salt=np.full((1, 2, 2, 2), 35.0))
+    ts["temp"][0, 1, 1, 1] = ts["salt"][0, 1, 1, 1] = np.nan                        # under the seafloor
+    f, _ = envm.Env._density(ts)
+    receipt("Ocean", "Seawater density, S 35, 25 C, surface", f([[0, 0, 0, 0]])[0], 1023.343, 0.01, "kg/m3",
+            "UNESCO 1981 (EOS-80) check value; TEOS-10 agrees to ~0.01", rel=False)
+    receipt("Ocean", "Seawater density, S 35, 25 C, 10000 dbar", f([[0, z, 0, 0]])[0], 1062.538, 0.05, "kg/m3",
+            "UNESCO 1981 (EOS-80) check value; TEOS-10 differs by a few 0.01 at this pressure", rel=False)
+    receipt("Ocean", "Density under the seafloor takes the wet cell above", f([[0, z, 0.1, 0.1]])[0], f([[0, 0, 0.1, 0.1]])[0], 1e-9,
+            "kg/m3", "fill rule", rel=False)
     t0 = dt.datetime(2023, 3, 7, 18)
     try:
         c = ocean.currents(t0, 3, (9.5, 10.5), (-95.5, -94.5))
@@ -138,6 +150,17 @@ def ocean_receipts():
             "raw HYCOM GOFS 3.1 value", rel=False)
     receipt("Ocean", f"Current at a HYCOM grid node ({c['depth'][k]:.0f} m), north", s["current_ne"][0, 0], c["v"][1, k, j, i], 1e-3, "m/s",
             "raw HYCOM GOFS 3.1 value", rel=False)
+    try:
+        q = ocean.temp_salt(t0, (9.5, 10.5), (-95.5, -94.5))
+    except Exception as e:
+        context("Ocean", "HYCOM T/S unreachable, density checks skipped", 0, 0, "", str(e)[:80]); return
+    lat, lon = q["lat"][j], q["lon"][i] - 360
+    rho = lambda kk: float(np.atleast_1d(E.at(np.array([lat]), np.array([lon]), np.array([q["t_s"][0]]), np.array([-q["depth"][kk]]))["rho_water"])[0])
+    p = gsw.p_from_z(-q["depth"][k], lat)
+    sa = gsw.SA_from_SP(q["salt"][0, k, j, i], p, lon, lat)
+    receipt("Ocean", f"Density at a HYCOM grid node ({q['depth'][k]:.0f} m)", rho(k), gsw.rho(sa, gsw.CT_from_t(sa, q["temp"][0, k, j, i], p), p),
+            1e-3, "kg/m3", "gsw on the raw HYCOM T/S at that node", rel=False)
+    bracket("Ocean", f"Water at {q['depth'][k]:.0f} m is denser than at the surface (stable column)", rho(k) - rho(0), 0.0, 10.0, "kg/m3")
 
 
 def env_receipts():
@@ -450,6 +473,22 @@ def fleet_receipts():
     # glider: a through-water performance check, so no real currents here
     import os
     os.environ["CAFE_OCEAN"] = "0"
+
+    # quad time step: the same goto + hold at PHYS_DT and at half of it must agree (gusts differ per run, so
+    # compare aggregates, not tracks). 2026-10-28 on the example quad: 10/5/2.5/1.25 ms all within this.
+    s = geom.SAMPLES["quad"]
+    vq, out = vehicle.build("uav", s["make"](), s["spec"]), {}
+    dt0 = mission.PHYS_DT["uav"]
+    for dt_ in (dt0, dt0 / 2):
+        mission.PHYS_DT["uav"] = dt_
+        out[dt_] = mission.run(dict(t0=_t0(), max_hours=0.12, samples=4, drones=[dict(id="q", vehicle=vq, start=[10.0, -95.0, 2],
+                               legs=[dict(type="goto", to=[10.0018, -95.0, 30]), dict(type="hold", minutes=3)])]))["drones"]["q"]
+    mission.PHYS_DT["uav"] = dt0
+    a, b = out[dt0], out[dt0 / 2]
+    receipt("Time step", f"Quad energy, goto 200 m + 3 min hold, {dt0 * 1e3:g} ms vs {dt0 * 500:g} ms step", a["energy_wh_p50"],
+            b["energy_wh_p50"], 0.02, "Wh", "same mission at half the step")
+    receipt("Time step", f"Quad hold error p95, {dt0 * 1e3:g} ms vs {dt0 * 500:g} ms step", a["legs"][1]["err95_m_p50"],
+            b["legs"][1]["err95_m_p50"], 0.1, "m", "same mission at half the step; absolute difference", rel=False)
     m, parts, hints = shapes.build("glider", shapes.defaults("glider"))
     spec = dict(name="g", mass=geom.RHO_SEA * m.volume, power_w=30, battery_wh=500, hotel_w=0.6, buoyancy_cc=400, **hints)
     vg = vehicle.build("uuv", m, spec)

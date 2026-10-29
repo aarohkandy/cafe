@@ -173,7 +173,8 @@ class Env:
             current="coupled ocean model (WRF coupler)" if self.has_current else "not in the weather files: assumed 0 with uncertainty",
             waves="wave model (UMWM) height" if self.has_waves else "estimated from local wind (fully developed sea)")
         # public ocean data when the weather run had no ocean (CAFE_OCEAN=0 turns this off)
-        self._hy = self._ww = None
+        self._hy = self._ww = self._rho = self._ts_box = None
+        self.sources["density"] = f"{RHO_SEA:g} kg/m3 everywhere"
         if os.environ.get("CAFE_OCEAN", "1") != "0":
             from cafe import ocean
             lat_r, lon_r = (float(self.lat.min()), float(self.lat.max())), (float(self.lon.min()), float(self.lon.max()))
@@ -190,6 +191,7 @@ class Env:
                     self.sources["current"] = "HYCOM GOFS 3.1 ocean analysis (3-D, 1/12 deg, 3-hourly)"
                 except Exception as e:
                     self.sources["current"] += f" (HYCOM unavailable: {type(e).__name__}: {str(e)[:90]})"
+            self._ts_box = (t0, lat_r, lon_r)          # density is fetched on the first underwater lookup (at)
             if not self.has_waves:
                 try:
                     w = ocean.waves(t0, hours, lat_r, lon_r)
@@ -209,6 +211,33 @@ class Env:
                                               bounds_error=False, fill_value=None) for k, v in data.items()}
         self._land = RegularGridInterpolator((self.lat, self.lon), self.land.astype(float), method="nearest",
                                              bounds_error=False, fill_value=1.0)
+
+    def _load_density(self):
+        from cafe import ocean
+        box, self._ts_box = self._ts_box, None
+        try:
+            self._rho, self._rho_dmax = self._density(ocean.temp_salt(*box))
+            self.sources["density"] = "TEOS-10 (gsw) in situ, from HYCOM temperature and salinity"
+        except Exception as e:
+            self.sources["density"] += f" (HYCOM T/S unavailable: {type(e).__name__}: {str(e)[:90]})"
+
+    @staticmethod
+    def _density(ts):
+        """In-situ seawater density [t, depth, lat, lon] from HYCOM in-situ temperature and practical salinity, by
+        TEOS-10. Cells under the seafloor take the deepest wet value above them, so interpolation near the bottom
+        doesn't mix in a hole; columns that are all land get RHO_SEA."""
+        import gsw
+        d, lat, lon = np.meshgrid(ts["depth"], ts["lat"], ts["lon"], indexing="ij")
+        p = gsw.p_from_z(-d, lat)
+        sa = gsw.SA_from_SP(ts["salt"], p, lon, lat)
+        rho = gsw.rho(sa, gsw.CT_from_t(sa, ts["temp"], p), p)
+        for k in range(1, rho.shape[1]):
+            rho[:, k] = np.where(np.isnan(rho[:, k]), rho[:, k - 1], rho[:, k])
+        rho = np.nan_to_num(rho, nan=RHO_SEA)
+        t = ts["t_s"] if len(ts["t_s"]) > 1 else np.r_[ts["t_s"], ts["t_s"] + 1e9]
+        rho = rho if len(ts["t_s"]) > 1 else np.concatenate([rho, rho])
+        return (RegularGridInterpolator((t, ts["depth"], ts["lat"], ts["lon"]), rho, bounds_error=False, fill_value=None),
+                float(ts["depth"][-1]))
 
     def wind_lag_h(self, t_s):
         """Hours from t_s (seconds after self.t0) to the nearest real weather: 0 for hourly data, the distance to
@@ -250,13 +279,18 @@ class Env:
             current *= np.exp(-np.maximum(-z, 0) / CURRENT_EFOLD_M)[..., None]
             floor = None
         rho_air = s["PSFC"] / (287.05 * s["T2"])
+        rho_water = RHO_SEA
+        if self._ts_box is not None and (z < 0).any():
+            self._load_density()
+        if self._rho is not None:
+            rho_water = self._rho(np.column_stack([pts[:, 0], np.clip(np.maximum(-z, 0), 0, self._rho_dmax), pts[:, 1], pts[:, 2]]))
         hs = tp = wdir = None
         if self._ww is not None:
             hs, tp = np.maximum(self._ww["hs"](pts), 0), np.maximum(self._ww["tp"](pts), 1.0)
             wdir = np.arctan2(-self._ww["de"](pts), -self._ww["dn"](pts))    # direction waves travel TOWARD
         elif self.has_waves:
             hs = np.nan_to_num(s["HS_UMWM"])
-        return dict(wind_ne=wind, current_ne=current, u10=u10, ust=ust, rho_air=rho_air, rho_water=RHO_SEA,
+        return dict(wind_ne=wind, current_ne=current, u10=u10, ust=ust, rho_air=rho_air, rho_water=rho_water,
                     land=s["land"], wind10_ne=np.column_stack([s["V10"], s["U10"]]), hs=hs, tp=tp, wave_to=wdir, floor=floor)
 
 

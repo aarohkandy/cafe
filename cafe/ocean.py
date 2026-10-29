@@ -33,13 +33,30 @@ def _key(*a):
 def currents(t0, hours, lat_range, lon_range, max_depth=250.0):
     """-> dict(t_s [seconds after t0], depth [m, positive down], lat, lon (0-360), u, v [t, depth, lat, lon] m/s,
     floor [lat, lon] approximate seafloor depth (nan = deeper than max_depth))."""
+    out = _hycom("uv3z", dict(u="water_u", v="water_v"), "hycom", t0, hours, lat_range, lon_range, max_depth)
+    # seafloor: first depth level that is missing everywhere in time
+    wet = ~np.isnan(out["u"]).all(0)                        # [depth, lat, lon]
+    out["floor"] = np.where(wet.all(0), np.nan, out["depth"][np.argmin(wet, axis=0)])
+    return out
+
+
+def temp_salt(t0, lat_range, lon_range, max_depth=250.0):
+    """-> dict(t_s, depth, lat, lon, temp [deg C, in situ], salt [psu, practical]) on the same HYCOM grid as currents,
+    at the one HYCOM time nearest t0. ponytail: density held for the mission (3-hourly HYCOM can't resolve the internal
+    waves that move it faster); a quarter of the download, which tds.hycom.org needed 330 s for at 4 times (2026-10)."""
+    return _hycom("ts3z", dict(temp="water_temp", salt="salinity"), "hycom_ts", t0, 0.0, lat_range, lon_range, max_depth, nearest=True)
+
+
+def _hycom(dataset, names, tag, t0, hours, lat_range, lon_range, max_depth, nearest=False):
+    """One HYCOM expt_93.0 dataset cut to the box/time window, cached. uv3z and ts3z share every axis (checked
+    2026-10-28 on GLBy), so the uv3z axes index both. names: {output key: HYCOM variable}."""
     lo0, lo1 = sorted(np.mod(lon_range, 360.0))
-    key = _key("hycom", t0.isoformat(), round(hours, 2), [round(x, 3) for x in lat_range], [round(lo0, 3), round(lo1, 3)], max_depth)
-    f = CACHE / f"hycom_{key}.npz"
+    key = _key(tag, t0.isoformat(), round(hours, 2), [round(x, 3) for x in lat_range], [round(lo0, 3), round(lo1, 3)], max_depth)
+    f = CACHE / f"{tag}_{key}.npz"
     if f.exists():
         z = np.load(f)
         return {k: z[k] for k in z.files}
-    down = CACHE / "hycom_down"
+    down = CACHE / f"{tag}_down"        # per dataset: a slow T/S read must not cost the next mission its currents
     if down.exists() and time.time() - down.stat().st_mtime < DOWN_S:
         raise TimeoutError(f"HYCOM did not answer {time.time() - down.stat().st_mtime:.0f} s ago; not retrying for {DOWN_S} s")
     want0 = (t0 - EPOCH).total_seconds() / 3600 - 3
@@ -51,6 +68,8 @@ def currents(t0, hours, lat_range, lon_range, max_depth=250.0):
             th = ax["time"]                                  # hours since 2000-01-01
             k = np.where((th >= want0) & (th <= want1))[0]
             if len(k):
+                if nearest:
+                    k = k[[np.argmin(np.abs(th[k] - want0 - 3))]]
                 break
             spans.append(f"{EPOCH + dt.timedelta(hours=float(th[0])):%Y-%m-%d} to {EPOCH + dt.timedelta(hours=float(th[-1])):%Y-%m-%d}")
         else:
@@ -62,21 +81,17 @@ def currents(t0, hours, lat_range, lon_range, max_depth=250.0):
         d = np.r_[d, d[-1] + 1] if d[-1] + 1 < len(dep) else d
         sl = [int(x) for x in (k[0], k[-1] + 1, d[0], d[-1] + 1, j[0], j[-1] + 1, i[0], i[-1] + 1)]
         tmp = f.with_name(f"{f.stem}.{os.getpid()}.part.npz")      # per process: two missions may fetch the same box
-        _child("_slice", url, json.dumps(sl), tmp, deadline=HYCOM_SLICE_S)
+        _child("_slice", url.rsplit("/", 1)[0] + "/" + dataset, json.dumps(sl), json.dumps(names), tmp, deadline=HYCOM_SLICE_S)
         z = np.load(tmp)
-        u, v = z["u"], z["v"]
+        got = {n: z[n] for n in names}
         tmp.unlink()
     except (TimeoutError, RuntimeError):
         CACHE.mkdir(parents=True, exist_ok=True)
         down.touch()
         raise
     down.unlink(missing_ok=True)
-    depth = np.asarray(dep[d], float)
-    # seafloor: first depth level that is missing everywhere in time
-    wet = ~np.isnan(u).all(0)                               # [depth, lat, lon]
-    floor = np.where(wet.all(0), np.nan, depth[np.argmin(wet, axis=0)])
-    out = dict(t_s=(np.asarray(th[k], float) - (t0 - EPOCH).total_seconds() / 3600) * 3600, depth=depth,
-               lat=np.asarray(lat[j], float), lon=np.asarray(lon[i], float), u=u, v=v, floor=floor)
+    out = dict(t_s=(np.asarray(th[k], float) - (t0 - EPOCH).total_seconds() / 3600) * 3600, depth=np.asarray(dep[d], float),
+               lat=np.asarray(lat[j], float), lon=np.asarray(lon[i], float), **got)
     CACHE.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(f, **out)
     return out
@@ -112,12 +127,12 @@ def _child_axes(url, out):
     os.replace(tmp, out)
 
 
-def _child_slice(url, sl, out):
+def _child_slice(url, sl, names, out):
     import netCDF4
     k0, k1, d0, d1, j0, j1, i0, i1 = json.loads(sl)
     ds = netCDF4.Dataset(url)
     s = (slice(k0, k1), slice(d0, d1), slice(j0, j1), slice(i0, i1))
-    np.savez(out, **{n: np.ma.filled(ds[f"water_{n}"][s].astype(float), np.nan) for n in ("u", "v")})
+    np.savez(out, **{n: np.ma.filled(ds[v][s].astype(float), np.nan) for n, v in json.loads(names).items()})
 
 
 def _get(url):
