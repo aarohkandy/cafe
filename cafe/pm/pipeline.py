@@ -110,9 +110,9 @@ class Context:
         return p
 
 
-def _ocean_box(ctx: Context) -> tuple[float, float, float, float]:
-    """(south, north, west, east) of the mission box plus its pad: what the ocean store, GEBCO and TAO are cut to."""
-    b = ctx.mission["box"]
+def ocean_box(m: dict[str, Any]) -> tuple[float, float, float, float]:
+    """(south, north, west, east) of mission m's box plus its pad: what the ocean store, GEBCO and TAO are cut to."""
+    b = m["box"]
     pad = b.get("pad_deg", 0.0)
     return (b["lat_min"] - pad, b["lat_max"] + pad, b["lon_min"] - pad, b["lon_max"] + pad)
 
@@ -136,7 +136,7 @@ def ocean(ctx: Context) -> Any:
     """The ocean source the mission names (GOFS 3.1 or the lab's HYCOM), from the cache hycom.py writes. Bathymetry falls back
     GEBCO -> the store's floor -> UMWM's depth; a missing GEBCO cut is downloaded only when CAFE_OFFLINE is not set."""
     from .env.ocean import open_ocean
-    return open_ocean(ctx.mission["environment"]["ocean"], ctx.cache, ctx.mission["name"], _ocean_box(ctx), fetch_bathy=not _offline(),
+    return open_ocean(ctx.mission["environment"]["ocean"], ctx.cache, ctx.mission["name"], ocean_box(ctx.mission), fetch_bathy=not _offline(),
                       umwm=_umwm_depth(ctx.cache))
 
 
@@ -221,7 +221,7 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     b = m["box"]
     pad = b.get("pad_deg", 0.0)
     box = (b["lon_min"] - pad, b["lon_max"] + pad, b["lat_min"] - pad, b["lat_max"] + pad)
-    sbox = _ocean_box(ctx)
+    sbox = ocean_box(ctx.mission)
     man = ctx.cache / "orca" / "manifest.json"
 
     def fetch_orca() -> None:
@@ -241,7 +241,8 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
 
     def fetch_ocean() -> None:
         if spec["source"] != "gofs31":
-            raise ValueError(f"{store} is the lab's HYCOM, which this pipeline cannot download: write it with hycom.ingest_lab_hycom")
+            raise ValueError(f"{store} is the lab's HYCOM, which this pipeline cannot download: write it with "
+                             "`python -m cafe.pm ingest-ocean --mission M --path DIR --temperature-kind K`")
         hycom.fetch_gofs(sbox, t0.timestamp(), t1.timestamp(), store.parent, deadline_s=GOFS_DEADLINE_S, ncss=hycom.NCSS, dods=hycom.DODS,
                          name=store.stem)
     got = [_need(ctx, L, "orca", "the orca WRF/UMWM cache for the window", orca_covers, fetch_orca),
@@ -250,7 +251,8 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
            _need(ctx, L, "gebco", "the GEBCO_2026 cut for the box", lambda: _gebco_cached(gebco),
                  lambda: bathy.fetch_gebco(sbox, gebco, bathy.GEBCO_URL)),
            _need(ctx, L, "ocean_store", f"the ocean store {store.name} for the box and window", lambda: _ocean_cached(store, sbox, steps), fetch_ocean,
-                 hint=None if spec["source"] == "gofs31" else "python -c 'from cafe.pm.env import hycom; hycom.ingest_lab_hycom(...)'")]
+                 hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {ctx.mission_path} --path <lab HYCOM dir> "
+                                                                  "--temperature-kind <in_situ|potential>")]
     if not all(got):
         return                                                           # the failed checks above stop the stage
     d = json.loads(man.read_text())

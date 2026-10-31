@@ -2,6 +2,8 @@
 
     run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--out DIR] [--fresh] [--seed S] [--emulator-table FILE]   the whole pipeline, resumable
     fetch     --mission M                    ingest only (orca + ocean into the cache)
+    ingest-ocean --mission M --path DIR [--temperature-kind {in_situ,potential}] [--grid STEM]
+                                             the lab's HYCOM (netCDF or archv .a/.b) -> the mission's ocean store (environment.ocean.path)
     validate  --mission M                    schema and cross-checks, nothing run
     plan      --mission M --budget B --gpus N   what the budget buys on this machine
     whatif    --mission M [--run DIR] [--budget B] (--shift 48h | --move "1deg W" | --drop ID)... [--vehicle ID]...
@@ -43,6 +45,12 @@ def main(argv: list[str] | None = None) -> int:
                                 "afterwards, so a run's emulator depends only on the table it started from. To make runs comparable (acceptance, a "
                                 "same-seed check), copy the table once and give every run its own copy of that file: runs that share a table "
                                 "see each other's rows")
+    p = sub.add_parser("ingest-ocean", help="the lab's HYCOM -> the ocean store the mission names (environment.ocean: {source: lab_hycom, path: ...})")
+    p.add_argument("--mission", required=True)
+    p.add_argument("--path", required=True, help="a per-snapshot .nc, a directory of them, an archv .a/.b file or stem, or a directory of archv files")
+    p.add_argument("--temperature-kind", default=None, choices=["in_situ", "potential"],
+                   help="what the files' temperature is; required unless the mission or every netCDF says it (never guessed)")
+    p.add_argument("--grid", default=None, help="archv only: the regional.grid stem (default: next to the files)")
     p = sub.add_parser("report")
     p.add_argument("--run", required=True)
     p.add_argument("--open", action="store_true", help="open the report in a browser when there is a display, else just print its path")
@@ -86,6 +94,8 @@ def main(argv: list[str] | None = None) -> int:
             return audit.main(a.runs + (["--code-only"] if a.code_only else []))
         if a.cmd == "hangar":
             return _hangar(a.platform)
+        if a.cmd == "ingest-ocean":
+            return _ingest_ocean(a)
         if a.cmd == "whatif":
             return _whatif(a)
         if a.cmd == "validate":
@@ -132,6 +142,19 @@ def _report(run: pathlib.Path, open_it: bool) -> int:
 
 def _has_display() -> bool:
     return sys.platform in ("darwin", "win32") or bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _ingest_ocean(a: argparse.Namespace) -> int:
+    """Write the lab's HYCOM into the store the mission names, cut to the mission's padded box."""
+    from .env import hycom
+    m = load_mission(a.mission)
+    spec = m["environment"]["ocean"]
+    if spec["source"] != "lab_hycom" or not spec.get("path"):
+        raise ConfigError(f"{a.mission}: environment.ocean is {spec}; set it to {{source: lab_hycom, path: <where the store goes, e.g. "
+                          f"/data/ocean/lab_{m['name']}.zarr>}} first")
+    out = hycom.ingest_lab_hycom(a.path, pipeline.ocean_box(m), spec["path"], a.temperature_kind or spec.get("temperature_kind"), a.grid)
+    print(f"ocean store: {out}")
+    return 0
 
 
 def _hangar(name: str) -> int:

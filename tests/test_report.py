@@ -655,3 +655,7 @@ def test_scalar_cleaning():
     assert report._unwrap(np.array([-170.0]), 180.0)[0] == 190.0
     assert report.tnum(None, {}, "") is None
     assert report._failed(dict(fail={}, lon=np.zeros((3, 5)))).shape == (5,)
+
+
+def test_the_sensitivity_line_says_why_no_parameter_is_named():
+    assert report._sens_html(dict(param=None, computed=False)) == "none (all-pass, all-fail, or fewer than 16 members)"

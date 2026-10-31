@@ -420,6 +420,12 @@ def test_settle_measures_drift_and_scatter_of_the_last_quarter():
     assert m == pytest.approx(100.0) and s == pytest.approx(3.0) and d == pytest.approx(0, abs=1e-12) and sc == pytest.approx(0.03)
 
 
+def test_part_drift_is_the_move_of_one_component_as_a_fraction_of_the_total():
+    rising = np.r_[np.full(300, 2.0), np.full(100, 3.0)]
+    assert dt.part_drift(rising, -10.0) == pytest.approx(0.1)                                   # (3 - 2) / |-10|
+    assert dt.part_drift(np.full(400, 3.0), 10.0) == 0.0
+
+
 def test_set_replaces_exactly_one_entry():
     assert dt._set("a 1;\nendTime 5;\n", "endTime", 9) == "a 1;\nendTime 9;\n"
     for text in ("a 1;\n", "endTime 1;\nendTime 2;\n"):
@@ -450,8 +456,8 @@ class Foam:
     """Stands in for cafe.cfd.sh: snappyHexMesh logs a layer table; interFoam writes force, moment and y+ files for the iterations its
     controlDict asks for (a restart continues after the last one), the x force at iteration i being series(i)."""
 
-    def __init__(self, series=lambda i: -100.0, y_plus=105.0, cover=88.0):
-        self.series, self.y_plus, self.cover = series, y_plus, cover
+    def __init__(self, series=lambda i: -100.0, y_plus=105.0, cover=88.0, pressure=lambda i: 0.7):
+        self.series, self.y_plus, self.cover, self.pressure = series, y_plus, cover, pressure
         self.calls, self.snappy, self.controls, self.at = [], "", [], 0
 
     def __call__(self, case, cmd, log):
@@ -463,12 +469,12 @@ class Foam:
         if log.startswith("interFoam"):
             ctl = (case / "system/controlDict").read_text()
             self.controls.append(ctl)
-            self.fv = (case / "system/fvSolution").read_text()
             start, end = (0 if "startFrom startTime;" in ctl else self.at), int(re.search(r"^endTime (\d+);", ctl, re.M)[1])
             d = case / "postProcessing/forces" / str(start)
             d.mkdir(parents=True)
             for kind in ("force", "moment"):
-                rows = "".join(f"{i} ({self.series(i)} 0 0) ({0.7 * self.series(i)} 0 0) ({0.3 * self.series(i)} 0 0)\n" for i in range(start + 1, end + 1))
+                rows = "".join(f"{i} ({self.series(i)} 0 0) ({self.pressure(i) * self.series(i)} 0 0) ({(1 - self.pressure(i)) * self.series(i)} 0 0)\n"
+                               for i in range(start + 1, end + 1))
                 (d / f"{kind}.dat").write_text("# header\n" + rows)
             if self.y_plus is not None:
                 for fo, name, row in (("yPlusWet", "surfaceFieldValue", f"{end} {self.y_plus}"), ("yPlus", "yPlus", f"{end} hull 2.0 700.0 {self.y_plus}")):
@@ -477,7 +483,6 @@ class Foam:
             self.at = end
 
 
-FV_SOLUTION = "PIMPLE\n{\n    momentumPredictor no;\n    maxCo 10; maxAlphaCo 5; rDeltaTSmoothingCoeff 0.05; rDeltaTDampingCoeff 0.5;\n}\n"
 ADD_LAYERS = "addLayersControls\n{\n    relativeSizes true;\n    layers { hull { nSurfaceLayers 2; } }\n    nLayerIter 50;\n}\nmeshQualityControls\n{\n}\n"
 
 
@@ -490,7 +495,6 @@ def fake_free_surface(foam, fail_levels=(), cells=100_000, calls=None, fail_log=
             calls.append((off, surf_level, cfd.FS_H0, cfd.FS_NZ, cfd.FLUIDS["water"]["nu"]))
         (case / "system").mkdir(parents=True, exist_ok=True)
         (case / "system/snappyHexMeshDict").write_text("castellatedMesh true;\n" + ADD_LAYERS)
-        (case / "system/fvSolution").write_text(FV_SOLUTION)
         if surf_level in fail_levels:
             (case / "log.snappyHexMesh").write_text(fail_log)
             raise RuntimeError("snappy failed")
@@ -524,11 +528,6 @@ def test_the_recipe_replaces_the_layers_scales_the_mesh_and_restores_everything(
     assert "nSurfaceLayers 7;" in foam.snappy and "firstLayerThickness 0.0025;" in foam.snappy and "relativeSizes false;" in foam.snappy
     assert f"expansionRatio {dt.GROWTH};" in foam.snappy and "nSurfaceLayers 2;" not in foam.snappy and foam.snappy.count("addLayersControls") == 1
     assert "meshQualityControls" in foam.snappy                                      # only the layer block was replaced
-    with pytest.raises(ValueError, match="no `maxCo"):
-        with dt.case_recipe(2.5e-3, 7, 1.0):
-            (tmp_path / "system/fvSolution").write_text("PIMPLE { maxCo 10; }\n")
-            cfd.sh(tmp_path, "interFoam", "interFoam.1")
-    assert cfd.sh is foam
     with pytest.raises(ValueError, match="no addLayersControls"):
         with dt.case_recipe(2.5e-3, 7, 1.0):
             (tmp_path / "system/snappyHexMeshDict").write_text("nothing here\n")
@@ -543,7 +542,6 @@ def test_interfoam_runs_in_chunks_until_the_history_settles(foam, tmp_path):
     assert [re.search(r"^endTime (\d+);", c, re.M)[1] for c in foam.controls] == ["250", "500", "750", "1000"]
     assert ["startFrom startTime;" in c for c in foam.controls] == [True, False, False, False] and all("startFrom latestTime;" in c for c in foam.controls[1:])
     assert all("writeInterval 250;" in c and "yPlusWet" in c and c.count("yPlus {") == 1 for c in foam.controls)
-    assert "maxCo 3.0; maxAlphaCo 1.5; rDeltaTSmoothingCoeff 0.05" in foam.fv and "maxCo 10" not in foam.fv
     assert sorted(d.name for d in (tmp_path / "postProcessing/forces").iterdir()) == ["00000000", "00000250", "00000500", "00000750"]
     assert seen["converged"] and seen["iters"] == 1000 and seen["mean"] == 100.0 and seen["std"] == 0.0 and seen["drift"] == 0.0
     assert seen["y_plus"] == 105.0 and (seen["y_plus_min"], seen["y_plus_max"]) == (2.0, 700.0) and seen["layer_cover"] == 88.0
@@ -561,6 +559,16 @@ def test_a_settling_history_stops_after_the_first_chunk_that_passes_not_before_m
     with dt.case_recipe(2.5e-3, 7, 1.0, 600) as short:
         fake_free_surface(steady)("h.stl", 0.248, tmp_path / "b", [1.5], 0, 3000, print, 2)
     assert short["iters"] == 750 and not short["converged"]          # max_iters 600 ends after the chunk that reaches it; below MIN_ITERS: unjudged
+
+
+def test_a_flat_total_whose_parts_drift_against_each_other_is_not_converged(monkeypatch, tmp_path):
+    """The first study's fine grid: the total was flat for 700 iterations while the pressure part rose and the viscous part fell."""
+    f = Foam(series=lambda i: -100.0, pressure=lambda i: 0.4 + 0.0001 * i)
+    monkeypatch.setattr(cfd, "sh", f)
+    with dt.case_recipe(2.5e-3, 7, 1.0, 1500) as seen:
+        fake_free_surface(f)("h.stl", 0.248, tmp_path, [1.5], 0, 3000, print, 2)
+    assert seen["drift"] == pytest.approx(0, abs=1e-12) and seen["scatter"] == 0.0           # what the total alone would have passed
+    assert seen["drift_parts"] > dt.DRIFT_TOL and seen["converged"] is False and seen["iters"] == 1500
 
 
 def test_a_history_that_never_settles_is_recorded_as_unconverged_at_max_iters(monkeypatch, tmp_path):
@@ -606,7 +614,7 @@ def test_run_grid_records_the_case_and_cleans_up(foam, tmp_path):
     assert c["R"] == 200.0 and c["R_std"] == 0.0 and c["ct"] == pytest.approx(200.0 / (0.5 * dt.TANK["rho"] * u ** 2 * 4.9))        # half domain: x2
     assert c["first_layer"] == dt.first_layer(u) and c["layers"] > 1
     assert c["layers"] == dt.layer_count(c["first_layer"], dt.hull_cell(5.7188, dt.GRIDS["coarse"]))
-    assert (c["y_plus"], c["layer_cover"], c["drift"], c["scatter"], c["converged"], c["iters"]) == (105.0, 88.0, 0.0, 0.0, True, 1000)
+    assert (c["y_plus"], c["layer_cover"], c["drift"], c["drift_parts"], c["scatter"], c["converged"], c["iters"]) == (105.0, 88.0, 0.0, 0.0, 0.0, True, 1000)
     assert c["ct_viscous"] == pytest.approx(0.3 * c["ct"])                                 # the fake puts 30 % of the force in the viscous column
     assert c["cells"] == 100_000 and c["surf_level"] == 2 and c["failed_checks"] == 0 and c["seconds"] == 1.0
     assert out["speeds"]["0.10"]["first_layer"] > c["first_layer"] and any("layers from" in m for m in logs) and any("y+ 105" in m for m in logs)
@@ -620,7 +628,7 @@ def test_a_solver_that_never_calls_openfoam_leaves_the_diagnostics_empty(tmp_pat
         return dict(mesh=dict(cells=5, failed_checks=1), half=False, speeds={u: one for u in speeds})
     c = dt.run_grid(prepared(tmp_path), "fine", 10, print, bare, frs=(0.41,))["speeds"]["0.41"]
     assert c["R"] == 3.0 and c["R_std"] == 0.2 and c["iters"] == 10 and c["failed_checks"] == 1
-    assert (c["y_plus"], c["y_plus_min"], c["drift"], c["scatter"], c["converged"], c["layer_cover"], c["ct_viscous"]) == (None,) * 7
+    assert (c["y_plus"], c["y_plus_min"], c["drift"], c["drift_parts"], c["scatter"], c["converged"], c["layer_cover"], c["ct_viscous"]) == (None,) * 8
 
 
 def test_run_grid_resumes_after_a_crash_and_refuses_files_of_another_recipe(foam, tmp_path):
@@ -716,8 +724,8 @@ def stored(root, ct_by_grid, cells=None, **case):
     cells = cells or CELLS
     for g, fn in ct_by_grid.items():
         speeds = {f"{fr:.2f}": dict(U=1.0, R=1.0, R_std=0.0, ct=fn(fr), ct_std=0.0, iters=1000, seconds=1.0, cells=cells[g], failed_checks=0, surf_level=2,
-                                    first_layer=2e-3, layers=9, layer_cover=90.0, y_plus=100.0, y_plus_min=5.0, y_plus_max=400.0, drift=0.001, scatter=0.005,
-                                    converged=True) | case for fr in dt.CT_REF}
+                                    first_layer=2e-3, layers=9, layer_cover=90.0, y_plus=100.0, y_plus_min=5.0, y_plus_max=400.0, drift=0.001,
+                                    drift_parts=0.002, scatter=0.005, converged=True) | case for fr in dt.CT_REF}
         (root / f"run_{g}.json").write_text(json.dumps(dict(grid=g, recipe=dt.RECIPE, S=4.9, speeds=speeds)))
     return root
 
@@ -774,7 +782,8 @@ def test_receipts_pass_for_a_good_study_and_name_each_requirement(tmp_path):
     assert len([x for x in out if "Lofted" in x["claim"]]) == 3 and failing(out) == []
     br = [x["claim"] for x in out if x.get("kind") == "bracket"]
     assert sum("|E| <= U_val" in c for c in br) == 4 and sum("U_val / D <= 0.1" in c for c in br) == 4
-    assert [sum(w in c for c in br) for w in ("y+ in the log layer", "last-quarter drift", "last-quarter scatter")] == [12, 12, 12]
+    words = ("y+ in the log layer", "last-quarter drift", "last-quarter scatter", "drift of the pressure and viscous parts")
+    assert [sum(w in c for c in br) for w in words] == [12, 12 + 12, 12, 12]               # the parts claim contains the total's words too
     ctx = [x for x in out if x.get("kind") == "context"]
     assert len(ctx) == 4 and all("E =" in x["claim"] and "U_val" in x["claim"] for x in ctx)
 
@@ -820,6 +829,9 @@ def test_receipts_fail_for_y_plus_outside_the_log_layer_and_for_unconverged_iter
     dt.receipts(stored(tmp_path / "drift", converging(), drift=0.03))
     assert len(failing(out)) == 12 and all("drift" in c for c in failing(out))
     out.clear()
+    dt.receipts(stored(tmp_path / "parts", converging(), drift_parts=0.03))
+    assert len(failing(out)) == 12 and all("pressure and viscous" in c for c in failing(out))
+    out.clear()
     dt.receipts(stored(tmp_path / "wave", converging(), scatter=0.06, converged=False))
     assert len(failing(out)) == 12 and all("scatter" in c for c in failing(out))
 
@@ -829,10 +841,10 @@ def test_a_case_that_recorded_no_diagnostics_fails_them(tmp_path):
     root = stored(tmp_path, converging())
     for g in ("fine", "medium", "coarse"):
         j = json.loads((root / f"run_{g}.json").read_text())
-        j["speeds"]["0.41"].update(y_plus=None, drift=None, scatter=None)
+        j["speeds"]["0.41"].update(y_plus=None, drift=None, drift_parts=None, scatter=None)
         (root / f"run_{g}.json").write_text(json.dumps(j))
     dt.receipts(root)
-    assert len(failing(out)) == 9 and all("Fr 0.41" in c for c in failing(out))        # y+, drift and scatter on three grids
+    assert len(failing(out)) == 12 and all("Fr 0.41" in c for c in failing(out))       # y+, drift, part drift and scatter on three grids
 
 
 def test_receipts_without_results_say_so_and_emit_nothing(tmp_path):

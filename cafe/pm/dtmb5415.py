@@ -21,8 +21,8 @@ Now: the first prism layer is sized per Froude number for y+ = 100 (`first_layer
 runs in CHUNK-iteration restarts until the last-quarter drift and scatter of the resistance history are inside DRIFT_TOL / SCATTER_TOL
 (`_converge`, `settle`) or MAX_ITERS; y+ (wetted-area mean), prism-layer coverage, drift, scatter and the viscous share of C_T are stored
 per case and receipted. U_num comes from Celik's three-grid GCI (observed order, Fs = 1.25) when it can, else from the two-grid Fs = 3
-estimate with a stated reason (`discretization`). The pseudo-time Courant limits are lowered to maxCo 3 / maxAlphaCo 1.5 (`LTS_CO`).
-All of this wraps cafe.cfd.free_surface without editing it (`case_recipe`).
+estimate with a stated reason (`discretization`). The pseudo-time march (cafe.cfd.FS_LTS) and the outlet boundary conditions
+(cafe.cfd.FS_FIELDS) are cafe.cfd's own; the rest wraps cafe.cfd.free_surface without editing it (`case_recipe`).
 
 Usage on homebase (see docs/BUILDERS.md):  ./pm.sh python -m cafe.pm.dtmb5415 prepare | run coarse|medium|fine [max_iters [fr,fr]] | report
 """
@@ -267,7 +267,7 @@ def tank_water() -> Iterator[None]:
 GRIDS = {"coarse": 1 / 1.42, "medium": 1.0, "fine": 1.35}
 GRID_ORDER = ("fine", "medium", "coarse")
 SURF_LEVEL = 2          # snappy surface level at the hull, the same on every grid (a grid that has to step down is flagged in tabulate)
-RECIPE = "layers-y100-co3-v3"     # stamped on run_<grid>.json; a file made by another recipe is refused, never extended
+RECIPE = "pout-lts01-parts-v4"     # stamped on run_<grid>.json; a file made by another recipe is refused, never extended
 ORDER = (0.20, 0.10, 0.28, 0.41)
 ITERS = 2000          # what cafe.pm.stage3.freesurface prices per production window; this study uses MIN_ITERS..MAX_ITERS below
 MIN_FREE_GB = 4.0      # do not start a case with less free disk than this ...
@@ -281,15 +281,12 @@ MAX_TREE_GB = 3.0      # keep the whole dtmb5415 tree under this
 # 3.4 mm x2, 1.3x the cell, 33 %), so the total is kept at or under the cell.
 Y_PLUS_AIM, Y_PLUS_BAND = 100.0, (30.0, 300.0)
 GROWTH, MAX_LAYERS = 2.0, 8
-# Iterative convergence, judged on the resistance history after every CHUNK pseudo-time steps once MIN_ITERS are done: the mean over the
-# last quarter of the run may differ from the mean over the quarter before it by DRIFT_TOL, and its standard deviation (the pseudo-time
-# oscillation of the free surface) stays within SCATTER_TOL of the mean. Not met by MAX_ITERS: the case is recorded as unconverged.
-# Coarse grid, Fr 0.20, 6000 steps with cafe.cfd.free_surface's pseudo-time limits (maxCo 10, maxAlphaCo 5): 500-step block means wandered between
-# 25.0 and 27.4 N throughout and the last-quarter scatter was 3-5 %: never converged. With maxCo 3 / maxAlphaCo 1.5 the same case settled after
-# ~2000 steps (block scatter 0.6 %, block means 24.6, 25.2, 25.4, 25.5 N); maxCo 1 / maxAlphaCo 0.5 was still decaying from the start-up at 4000.
-# cafe.cfd is not edited here, so `case_recipe` rewrites those two numbers in fvSolution before interFoam runs; production windows
-# (cafe.pm.stage3.freesurface) keep the old limits until cafe.cfd.free_surface takes the same change.
-LTS_CO = (3.0, 1.5)
+# Iterative convergence, judged after every CHUNK pseudo-time steps once MIN_ITERS are done on the resistance history and on its pressure and
+# viscous parts: the mean over the last quarter of the run may differ from the mean over the quarter before it by DRIFT_TOL (of the total, for
+# each of the three), and the standard deviation of the total (the pseudo-time oscillation of the free surface) stays within SCATTER_TOL of its
+# mean. Not met by MAX_ITERS: the case is recorded as unconverged. The parts are judged too because they drift against each other: the first
+# study's fine grid at Fr 0.28 was accepted at 1000 iterations with the total flat to 1 % since iteration 250, while the pressure part had
+# risen by 20 % and the viscous part fallen by 28 % in that time; the coarse and medium grids' parts went on moving for 5000 iterations.
 MIN_ITERS, MAX_ITERS, CHUNK = 1000, 8000, 250
 DRIFT_TOL, SCATTER_TOL = 0.005, 0.02
 INFORMATIVE = 0.10     # U_val / D at most: a validation whose uncertainty is a large part of the answer claims nothing
@@ -341,6 +338,12 @@ def settle(series: np.ndarray) -> tuple[float, float, float, float]:
     return mean, float(last.std()), abs(mean - float(prev.mean())) / abs(mean), float(last.std()) / abs(mean)
 
 
+def part_drift(series: np.ndarray, total: float) -> float:
+    """|mean over the last quarter - mean over the quarter before| of one force component, as a fraction of the total force `total`."""
+    w = len(series) // 4
+    return abs(float(series[-w:].mean()) - float(series[-2 * w:-w].mean())) / abs(total)
+
+
 def _set(text: str, key: str, value: object) -> str:
     out, n = re.subn(rf"^{key} .*;$", f"{key} {value};", text, flags=re.M)
     if n != 1:
@@ -376,12 +379,13 @@ def _converge(run: Callable[[Any, str, str], None], case: pathlib.Path, cmd: str
             d.rename(forces / f"{int(d.name):08d}")
         f = _cfd.read_forces(case)["force"]
         mean, std, drift, scatter = settle(-f["total"][:, 0])
-        ok = done >= MIN_ITERS and drift <= DRIFT_TOL and scatter <= SCATTER_TOL
+        parts = max(part_drift(-f[k][:, 0], mean) for k in ("pressure", "viscous"))
+        ok = done >= MIN_ITERS and max(drift, parts) <= DRIFT_TOL and scatter <= SCATTER_TOL
         if ok or done >= max_iters:
             break
         check_disk(case, ABORT_FREE_GB)
     wet, rng = _last_numbers(case, "yPlusWet/*/surfaceFieldValue.dat"), _last_numbers(case, "yPlus/*/yPlus.dat")
-    return dict(mean=mean, std=std, drift=drift, scatter=scatter, converged=bool(ok), iters=int(f["it"][-1]),
+    return dict(mean=mean, std=std, drift=drift, scatter=scatter, drift_parts=parts, converged=bool(ok), iters=int(f["it"][-1]),
                 viscous=-float(f["viscous"][-(len(f["it"]) // 4):, 0].mean()),
                 y_plus=wet[-1] if wet else None, y_plus_min=rng[1] if len(rng) > 3 else None, y_plus_max=rng[2] if len(rng) > 3 else None)
 
@@ -390,19 +394,13 @@ def _converge(run: Callable[[Any, str, str], None], case: pathlib.Path, cmd: str
 def case_recipe(first: float, layers: int, k: float, max_iters: int = MAX_ITERS) -> Iterator[dict[str, Any]]:
     """What this study does to cafe.cfd.free_surface without editing it, for one case: tank water; the background mesh scaled by k;
     `layers` hull prism layers (x GROWTH from `first` metres) in place of the dictionary the module wrote, set just before snappyHexMesh
-    runs; the pseudo-time Courant limits LTS_CO written into fvSolution and interFoam run by `_converge`, both just before it starts.
-    The yielded dict is filled with what was seen (convergence, y+, layer coverage)."""
+    runs; interFoam run by `_converge`. The yielded dict is filled with what was seen (convergence, y+, layer coverage)."""
     seen: dict[str, Any] = {}
     real, old = _cfd.sh, (_cfd.FS_H0, _cfd.FS_NZ)
 
     def sh(case: Any, cmd: str, log: str) -> None:
         case = pathlib.Path(case)
         if log == "interFoam" or log.startswith("interFoam."):
-            f = case / "system/fvSolution"
-            text, n = re.subn(r"maxCo [\d.]+; maxAlphaCo [\d.]+;", f"maxCo {LTS_CO[0]}; maxAlphaCo {LTS_CO[1]};", f.read_text())
-            if n != 1:
-                raise ValueError(f"{f}: no `maxCo ..; maxAlphaCo ..;` entry to replace")
-            f.write_text(text)
             seen.update(_converge(real, case, cmd, log, max_iters))
             return
         if log == "snappyHexMesh":
@@ -460,7 +458,8 @@ def _case(solver: Callable[..., dict[str, Any]], root: pathlib.Path, grid: str, 
                 cells=r["mesh"]["cells"], failed_checks=r["mesh"]["failed_checks"], surf_level=level, first_layer=first, layers=n,
                 ct_viscous=ct(k2 * seen["viscous"], u, area) if "viscous" in seen else None,
                 layer_cover=seen.get("layer_cover"), y_plus=seen.get("y_plus"), y_plus_min=seen.get("y_plus_min"),
-                y_plus_max=seen.get("y_plus_max"), drift=seen.get("drift"), scatter=seen.get("scatter"), converged=seen.get("converged"))
+                y_plus_max=seen.get("y_plus_max"), drift=seen.get("drift"), drift_parts=seen.get("drift_parts"), scatter=seen.get("scatter"),
+                converged=seen.get("converged"))
 
 
 def run_grid(root: pathlib.Path, grid: str, max_iters: int = MAX_ITERS, log: Callable[[str], None] = print,
@@ -552,10 +551,12 @@ def receipts(root: Optional[pathlib.Path] = None) -> str:
     for g in GRID_ORDER:
         if (root / f"run_{g}.json").exists():
             for key, c in json.loads((root / f"run_{g}.json").read_text())["speeds"].items():
-                v = {k: math.nan if c.get(k) is None else float(c[k]) for k in ("y_plus", "drift", "scatter")}
+                v = {k: math.nan if c.get(k) is None else float(c[k]) for k in ("y_plus", "drift", "drift_parts", "scatter")}
                 rc.bracket(grp, f"{g} Fr {key}: wetted-area mean y+ in the log layer", v["y_plus"], *Y_PLUS_BAND, "",
                            "Spalding wall function; first prism layer sized per Froude number (first_layer)")
                 rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter drift", v["drift"], 0.0, DRIFT_TOL, "", "resistance history, settle()")
+                rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter drift of the pressure and viscous parts", v["drift_parts"], 0.0,
+                           DRIFT_TOL, "", "pressure and viscous histories, part_drift()")
                 rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter scatter", v["scatter"], 0.0, SCATTER_TOL, "",
                            "resistance history, settle()")
                 n += 1

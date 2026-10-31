@@ -397,17 +397,17 @@ def _shrink(case: pathlib.Path) -> None:
 FS_FIELDS = {
     "U": ("volVectorField", "[0 1 -1 0 0 0 0]", "uniform (@mU@ 0 0)",
           "inlet { type fixedValue; value uniform (@mU@ 0 0); }\n"
-          "    outlet { type outletPhaseMeanVelocity; alpha alpha.water; Umean @U@; value uniform (@mU@ 0 0); }\n"
+          "    outlet { type zeroGradient; }\n"
           "    atmosphere { type pressureInletOutletVelocity; value uniform (0 0 0); }\n"
           "    hull { type movingWallVelocity; value uniform (0 0 0); }"),
     "p_rgh": ("volScalarField", "[1 -1 -2 0 0 0 0]", "uniform 0",
               "inlet { type fixedFluxPressure; value uniform 0; }\n"
-              "    outlet { type zeroGradient; }\n"
+              "    outlet { type fixedValue; value uniform 0; }\n"
               "    atmosphere { type totalPressure; p0 uniform 0; }\n"
               "    hull { type fixedFluxPressure; value uniform 0; }"),
     "alpha.water": ("volScalarField", "[0 0 0 0 0 0 0]", "uniform 0",
                     "inlet { type fixedValue; value uniform 0; }\n"
-                    "    outlet { type variableHeightFlowRate; lowerBound 0; upperBound 1; value uniform 0; }\n"
+                    "    outlet { type zeroGradient; }\n"
                     "    atmosphere { type inletOutlet; inletValue uniform 0; value uniform 0; }\n"
                     "    hull { type zeroGradient; }"),
     "k": ("volScalarField", "[0 2 -2 0 0 0 0]", "uniform @k@",
@@ -437,6 +437,12 @@ FS_NZ = (24, 14, 20, 16, 12)
 FS_GRADE = (0.05, 1, 1, 1, 6)
 FS_BOXES = ((-2.6, 1.3, 1.4, -0.6, 0.3), (-1.6, 0.95, 0.75, -0.4, 0.22), (-1.0, 0.75, 0.4, -0.3, 0.16), (-0.75, 0.62, 0.22, -0.25, 0.12))
 FS_ITERS = 3000
+# Local-time-stepping limits of the pseudo-time march. rDeltaTSmoothingCoeff is how far 1/dt may differ between neighbouring cells. At the
+# tutorial's 0.05 one bad cell (0.85 ms, in the air behind the DTMB 5415 transom at the symmetry plane; the median cell wants 0.3 s) pulled
+# the whole domain down to a median of 4 ms, so 1500 iterations were less than one hull flow-through and forces were still relaxing after 8000.
+# 0.25 is fast but the hull pressure scatters by +-40 %. The outlet is a pressure outlet: with a prescribed outlet velocity nothing held the
+# water level, which drifted up by 11-12 mm over the whole domain (a 5 % change of the 248 mm draft).
+FS_LTS = "maxCo 3; maxAlphaCo 1.5; rDeltaTSmoothingCoeff 0.1; rDeltaTDampingCoeff 0.5;"
 
 
 def free_surface(stl, draft, case, speeds, level_offset=0, cofr=(0, 0, 0), iters=FS_ITERS, log=print, surf_level=1):
@@ -549,12 +555,12 @@ solvers
 PIMPLE
 {
     momentumPredictor no; nOuterCorrectors 1; nCorrectors 2; nNonOrthogonalCorrectors 1;
-    maxCo 3; maxAlphaCo 1.5; rDeltaTSmoothingCoeff 0.05; rDeltaTDampingCoeff 0.5;
+    @lts@
     nAlphaSpreadIter 0; nAlphaSweepIter 0; maxDeltaT 1;
 }
 relaxationFactors { equations { ".*" 1; } }
 cache { grad(U); }
-""")
+""".replace("@lts@", FS_LTS))
     write(case, "constant/transportProperties", f"""phases (water air);
 water {{ transportModel Newtonian; nu {fl['nu']:.6g}; rho {fl['rho']:.6g}; }}
 air {{ transportModel Newtonian; nu 1.48e-05; rho 1; }}

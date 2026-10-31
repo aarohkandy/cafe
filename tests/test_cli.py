@@ -34,6 +34,23 @@ def calls(monkeypatch):
     return seen
 
 
+def test_ingest_ocean_writes_the_lab_hycom_into_the_store_the_mission_names_and_refuses_a_gofs_mission(monkeypatch, tmp_path, capsys):
+    import yaml
+    from cafe.pm.env import hycom
+    seen = []
+    monkeypatch.setattr(hycom, "ingest_lab_hycom", lambda *a: seen.append(a) or pathlib.Path(a[2]))
+    m = yaml.safe_load(pathlib.Path(MISSION).read_text())
+    m["environment"]["ocean"] = dict(source="lab_hycom", path=str(tmp_path / "lab.zarr"), temperature_kind="potential")
+    (tmp_path / "lab.yaml").write_text(yaml.safe_dump(m))
+    assert cli.main(["ingest-ocean", "--mission", str(tmp_path / "lab.yaml"), "--path", "/lab/hycom"]) == 0
+    assert seen == [("/lab/hycom", pipeline.ocean_box(m), str(tmp_path / "lab.zarr"), "potential", None)]          # the mission's kind when none is given
+    assert f"ocean store: {tmp_path / 'lab.zarr'}" in capsys.readouterr().out
+    assert cli.main(["ingest-ocean", "--mission", str(tmp_path / "lab.yaml"), "--path", "/x", "--temperature-kind", "in_situ", "--grid", "/g"]) == 0
+    assert seen[-1][3:] == ("in_situ", "/g")
+    assert cli.main(["ingest-ocean", "--mission", MISSION, "--path", "/lab/hycom"]) == 2                                # a GOFS mission: nothing written
+    assert "set it to {source: lab_hycom" in capsys.readouterr().err and len(seen) == 2
+
+
 def test_validate_reports_the_vehicles_and_links_of_a_valid_mission(capsys):
     assert cli.main(["validate", "--mission", MISSION]) == 0
     assert capsys.readouterr().out == f"{MISSION}: valid (4 vehicles, 3 links)\n"

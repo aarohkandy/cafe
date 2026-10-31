@@ -6,8 +6,9 @@ change, not a code change. Each says what we do now and what changes if your ans
 1. **HYCOM for `run_2023mar_waves_v4`.** Is there a HYCOM run (or a coupled companion) for this case, and is it
    `archv.*.a/.b` or per-snapshot netCDF? Does it write in-situ or potential temperature?
    *Default:* HYCOM GOFS 3.1 GLBy0.08 expt_93.0 (in-situ T, 3-hourly, 40 z-levels). *If yes:*
-   `cafe ingest --ocean lab_hycom --path <dir> --temperature-kind <in_situ|potential>`, then set
-   `environment.ocean: {source: lab_hycom, path: ...}` in the mission. The reader is already round-trip tested on
+   set `environment.ocean: {source: lab_hycom, path: /data/ocean/lab_tepex_c_demo.zarr}` in the mission, then
+   `python -m cafe.pm ingest-ocean --mission missions/tepex_c_demo.yaml --path <dir> --temperature-kind <in_situ|potential>`
+   (archv files also take `--grid <regional.grid stem>` when it is not next to them). The reader is already round-trip tested on
    synthetic `.a/.b` and netCDF files built from GOFS values. Currents then come from the same model as the waves'
    forcing, and the current prior (±30 %) can be narrowed.
 
@@ -46,8 +47,8 @@ change, not a code change. Each says what we do now and what changes if your ans
 
 8. **FluidX3D licence.** Is FluidX3D's licence (no commercial or military use; modifications must be published)
    acceptable for NOAA use? *Default:* the FluidX3D backend exists but ships disabled; free-surface windows use
-   interFoam on CPU. *If yes:* set `stage3.fluidx3d: true` in `config/premission.json` after reading
-   `docs/LICENSES.md`.
+   interFoam on CPU. *If yes:* after reading `docs/LICENSES.md`, build FluidX3D and set
+   `"fluidx3d": {"enabled": true, "binary": "/path/to/FluidX3D"}` in `config/premission.json`.
 
 9. **Campaign date, box and file layout.** Confirm spring 2028, 160°E–160°W, 5°S–5°N, and whether a 2028-season
    forecast run (not the 2023 hindcast) will be produced before deployment. *Default:* 2023 hindcast layout
