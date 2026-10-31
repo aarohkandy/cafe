@@ -12,6 +12,7 @@ import pytest
 
 from cafe.pm import Tagged, budget, config, stage1, whatif
 from cafe.pm.config import ConfigError
+from cafe.pm.env.environment import OutsideData
 from cafe.pm.env.protocol import AnalyticEnv
 from tests.fixtures import pm_run
 
@@ -453,10 +454,69 @@ def test_a_uas_flip_is_answered_without_a_median_track(tmp_path):
 def test_measure_is_one_batch_of_one_vehicle_on_the_base_members():
     pri, marg = stage1.priors_for(STORM)
     a = whatif.measure(STORM, GL, ENV, plan_for(STORM, 8), pri, marg, None, 5)
-    assert a["n"] == 8 and a["p_fail"] == 1.0 and a["verdict"] == "NO-GO" and a["lo"] > 0.5 and a["hi"] == 1.0
+    # 7 of 8 lose station: the eighth member draws the weakest current (0.69 x 0.6 m/s); the SDE moves position only, so it no longer adds speed
+    assert a["n"] == 8 and a["p_fail"] >= 0.75 and a["verdict"] == "NO-GO" and a["lo"] > 0.5
     assert whatif.measure(STORM, GL, ENV, plan_for(STORM, 8), pri, marg, None, 5, n=4)["n"] == 4
     later = whatif.measure(whatif.apply(STORM, {GL: dict(shift_h=24)}), GL, ENV, plan_for(STORM), pri, marg, None, 5)
     assert later["p_fail"] == 0.0 and later["verdict"] == "GO"                                                    # the planted flip, measured
+
+
+# ---------------------------------------------------------------------------------------------------------------- a change that leaves the environment data
+
+class EdgeEnv(StormEnv):
+    """The same storm in a box that ends at 165.3 W: a query east of it raises OutsideData, as GriddedEnv does outside its cache."""
+
+    def wind(self, lon, lat, z, t):
+        if np.any(np.asarray(lon) > -165.3):
+            raise OutsideData("wind: (-164.50, 0.00) at 2023-03-01 18:00Z is outside the cached data")
+        return super().wind(lon, lat, z, t)
+
+
+def test_a_change_whose_track_leaves_the_data_is_invalid_not_a_crash(storm_em):
+    em, _ = storm_em
+    m2 = whatif.apply(STORM, {GL: dict(dlon=0.4)})  # the deploy point itself is inside the mission box
+    with pytest.raises(whatif.Invalid, match=f"{GL}: the changed track leaves the environment data .*outside the cached data"):
+        whatif.predict(em, m2, GL, "glider", TRACK, dict(dlon=0.4), EdgeEnv(T0 + 20 * 3600.0))
+    assert whatif.predict(em, STORM, GL, "glider", TRACK, dict(shift_h=24.0), EdgeEnv(T0 + 20 * 3600.0))["status"] in ("ok", "out_of_range")
+
+
+def test_the_flip_search_marks_a_candidate_that_leaves_the_data_and_goes_on(storm_em):
+    em, _ = storm_em
+    pri, marg = stage1.priors_for(STORM)
+    flips, _ = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=0.9)}, {GL: TRACK}, EdgeEnv(T0 + 20 * 3600.0), {"glider": (em, {})},
+                                  plan_for(STORM), pri, marg, None, 5, 1e6, lambda *_: None)
+    f = flips[GL]
+    off = [t for t in f["tried"] if "leaves the environment data" in t["reason"]]
+    assert off and all(t["method"] == "not evaluated" and "p_fail" not in t for t in off) and any("east" in t["change"] for t in off)
+    assert f["found"] and f["best"]["method"] == "EMULATED"                                                       # the 24 h shift stays inside the data
+
+
+def test_stage_1_that_leaves_the_data_is_a_reason_on_the_candidate_and_costs_nothing(monkeypatch):
+    def refuse(*a, **k):
+        raise OutsideData("wind: (-171.20, 0.90) is outside the cached data")
+    monkeypatch.setattr(stage1, "run_batch", refuse)
+    pri, marg = stage1.priors_for(STORM)
+    with pytest.raises(whatif.Invalid, match="the changed mission leaves the environment data"):
+        whatif.measure(STORM, GL, ENV, plan_for(STORM, 8), pri, marg, None, 5)
+    base = {GL: dict(verdict="NO-GO", p_fail=1.0)}
+    flips, spent = whatif.flip_search(STORM, base, {GL: TRACK}, ENV, {}, plan_for(STORM), pri, marg, None, 5, 1e6, lambda *_: None)
+    t = flips[GL]["tried"]
+    assert spent == 0.0 and not flips[GL]["found"] and [x for x in t if "Stage 1 not run: " + GL in x["reason"]]
+    assert all(x["method"] == "not evaluated" for x in t)
+
+
+def test_the_flip_search_charges_each_stage_1_fallback_at_the_planners_cost_not_the_clock(monkeypatch):
+    plan = plan_for(STORM)
+    cost = budget.batch_cost_s(plan, [GL])
+    pri, marg = stage1.priors_for(STORM)
+    monkeypatch.setattr(whatif, "measure", lambda *a, **k: dict(p_fail=1.0, lo=0.9, hi=1.0, verdict="NO-GO", n=16))
+    clock = iter(range(0, 10 ** 6, 1000))                                                                          # a clock that jumps 1000 s per reading
+    monkeypatch.setattr(whatif.time, "time", lambda: next(clock))
+    base = {GL: dict(verdict="NO-GO", p_fail=1.0)}
+    flips, spent = whatif.flip_search(STORM, base, {GL: TRACK}, ENV, {}, plan, pri, marg, None, 5, 10 * cost, lambda *_: None)
+    assert spent == whatif.FALLBACK_K * cost and len([t for t in flips[GL]["tried"] if t["method"] == "Stage 1"]) == 3
+    flips, spent = whatif.flip_search(STORM, base, {GL: TRACK}, ENV, {}, plan, pri, marg, None, 5, 2.5 * cost, lambda *_: None)
+    assert spent == 2 * cost  # a third would pass the budget: the same on a slow machine
 
 
 # ---------------------------------------------------------------------------------------------------------------- the what-if answer
@@ -513,3 +573,23 @@ def test_a_change_can_be_limited_to_named_vehicles():
         ask(dict(shift_h=1.0), {}, only=["nope"])
     with pytest.raises(whatif.Invalid, match="outside the window"):
         ask(dict(shift_h=-6.0), {})
+
+
+# ---------------------------------------------------------------------------------------------------------------- the training table the pipeline fits on
+
+def test_with_rows_adds_replaces_by_key_and_copes_with_an_empty_side():
+    df = pd.DataFrame([dict(key="a", v=1), dict(key="b", v=2)])
+    assert whatif.with_rows(df, []) is df
+    out = whatif.with_rows(df, [dict(key="b", v=20), dict(key="c", v=3)])
+    assert out.to_dict("records") == [dict(key="a", v=1), dict(key="b", v=20), dict(key="c", v=3)]
+    assert whatif.with_rows(pd.DataFrame(columns=["key", "v"]), [dict(key="x", v=9)]).to_dict("records") == [dict(key="x", v=9)]
+    assert list(whatif.with_rows(pd.DataFrame([dict(v=1)]), [dict(key="x", v=9)])["v"]) == [1, 9]                                  # a table with no keys
+
+
+def test_snapshot_copies_the_table_without_the_runs_own_rows_and_an_absent_table_is_an_empty_one(tmp_path):
+    empty, out = whatif.snapshot(tmp_path / "none.parquet", tmp_path / "s" / "train_input", "r1")
+    assert len(empty) == 0 and out.exists() and len(whatif.read_table(out)) == 0
+    whatif.add_rows(tmp_path / "t.parquet", [dict(key="r1|a", run_id="r1", cls="glider"), dict(key="r2|a", run_id="r2", cls="glider")])
+    df, out = whatif.snapshot(tmp_path / "t.parquet", tmp_path / "s" / "train_input", "r1")
+    assert list(df["key"]) == ["r2|a"] and list(whatif.read_table(out)["key"]) == ["r2|a"]
+    assert len(whatif.read_table(tmp_path / "t.parquet")) == 2                                      # the shared table itself is not touched

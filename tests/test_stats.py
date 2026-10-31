@@ -100,6 +100,45 @@ def test_stopping_region_never_contradicts_verdict(kn_):
         assert I.verdict(k, n)["verdict"] == r
 
 
+def test_newcombe_method_10_reproduces_table_ii_of_newcombe_1998():
+    """Newcombe 1998 (Stat. Med. 17:873-890) Table II, 56/70 against 48/80: difference 0.2, method 10 interval 0.0524 to 0.3339."""
+    lo, hi = I.newcombe_diff(56, 70, 48, 80)
+    assert (round(lo, 4), round(hi, 4)) == (0.0524, 0.3339)
+
+
+@given(kn, kn, st.sampled_from([0.9, 0.95, 0.995]))
+def test_newcombe_difference_interval_properties(a, b, conf):
+    (k1, n1), (k2, n2) = a, b
+    lo, hi = I.newcombe_diff(k1, n1, k2, n2, conf)
+    d = k1 / n1 - k2 / n2
+    assert -1 - 1e-12 <= lo <= d <= hi <= 1 + 1e-12
+    rlo, rhi = I.newcombe_diff(k2, n2, k1, n1, conf)
+    assert math.isclose(rlo, -hi, abs_tol=1e-12) and math.isclose(rhi, -lo, abs_tol=1e-12)
+    wide = I.newcombe_diff(k1, n1, k2, n2, 0.999)
+    assert wide[0] <= lo + 1e-12 and hi <= wide[1] + 1e-12
+
+
+def test_newcombe_excludes_0_for_a_clear_gap_and_holds_it_for_equal_counts():
+    assert I.newcombe_diff(0, 32, 16, 32)[1] < 0 < I.newcombe_diff(16, 32, 0, 32)[0]
+    assert I.newcombe_diff(4, 32, 1, 32)[0] < 0 < I.newcombe_diff(4, 32, 1, 32)[1]
+    lo, hi = I.newcombe_diff(7, 50, 7, 50)
+    assert lo < 0 < hi and math.isclose(lo, -hi)
+
+
+def test_the_stopper_and_the_report_share_one_confidence():
+    import inspect
+    assert Q.STOP_CONF == 0.95 and inspect.signature(Q.ensemble_stop).parameters["conf"].default == Q.STOP_CONF
+
+
+def test_decided_region_adds_a_marginal_whose_whole_interval_is_between_the_thresholds():
+    assert I.decided_region(40, 200) == "MARGINAL" and I.interval_region(40, 200) is None    # Wilson 95 %: 0.150 to 0.261
+    assert I.decided_region(0, 100) == "GO" and I.decided_region(80, 100) == "NO-GO"
+    assert I.decided_region(4, 32) is None and I.decided_region(16, 32) is None               # span 0.10 / span 0.40
+    for k in range(201):                                                                      # a decided MARGINAL is always the MARGINAL verdict
+        if I.decided_region(k, 200) == "MARGINAL":
+            assert I.verdict(k, 200)["verdict"] == "MARGINAL"
+
+
 def test_interval_region_cases():
     assert I.interval_region(0, 100) == "GO" and I.interval_region(0, 10) is None
     assert I.interval_region(80, 100) == "NO-GO" and I.interval_region(20, 100) is None

@@ -5,20 +5,26 @@ Every run is a fresh `python -m cafe.pm run` in its own process and its own run 
 
     run_<name>        the run exits 0, writes report/report.json, and finishes within its budget (a run is killed at twice the limit)
     cpu_fallback      overnight on CPU: plan.json, report.json and index.html all say the LES windows are the CPU fallback (4h: they say the GPU path)
-    golden_diff       the quick run against the golden file (default tests/golden/tepex_c_demo_quick.json), see `summary`/`diff`
+    golden_diff       the quick run against the golden file (default tests/golden/tepex_c_demo_quick.json), see `summary`/`compare`
     same_seed         a second quick run with the same seed gives an identical report.json once the run-specific fields (see `normalize`) and
-                      the run directory's path are removed. Run-specific: the run name, wall times, git sha, host and versions, and the parts that
-                      measured runs showed to differ between identical runs because they are sized or limited by the wall clock or by state outside the
-                      run: the stage-3 LES windows' coefficients and checks (they run to a wall-clock share), the emulator section and each vehicle's
-                      "what would fix it" (variants and flip candidates are counted from measured stage-1 time, and the training table persists across
-                      runs), and the sha-256 of those stages' output files. Everything else (verdicts, P(fail), tracks, environment, plan) must be identical.
-    other_seed        a quick run with seed + 1: every verdict unchanged and every P(fail) inside the first run's interval
+                      the run directory's path are removed. Run-specific: the run name, wall times, git sha, host and versions, the emulator's measured
+                      query time (BRIEF 2.7 asks for it; it is the one measured value in a hashed file, emulator/holdout.json), and the run directory's
+                      name inside report/credibility.json. Every run starts from its own copy of the same emulator table, and every amount of work is
+                      sized at plan time, so everything else (verdicts, P(fail), tracks, stage 3, the emulator, the fixes, every other hash) must match.
+    other_seed        a quick run with seed + 1, compared with the first by the rules below
     broken_config     receipts.run(broken=tests/fixtures/broken/wave_direction.yaml) exits 0 (a receipt failed), and the failed receipt is one of the
                       wave-direction receipts, which pass without the broken configuration; other stored failures cannot satisfy it
 
 The golden keeps, per vehicle and link: verdict, k_fail, n, P(fail) and the interval's confidence, plus class and platform; and the mission name and
-seed. Tolerances: verdict, class, platform, n, the set of vehicles and links, the mission name and the seed must match exactly; a new P(fail) must
-lie inside the interval stats.intervals.interval(k_fail, n, conf) of the golden's (or, for other_seed, of the first run's) estimate. Timings, the
+seed. Two estimates from independent runs (the golden's, or the first run's, against the new one) are compared like this: the mission name, the seed
+(not for other_seed), class, platform, n and the set of vehicles and links must match exactly. A verdict must be identical wherever either run has it
+decided, that is wherever `stats.intervals.decided_region` at the stopper's confidence (`stats.sequential.STOP_CONF`) puts the whole P(fail) interval
+inside GO, MARGINAL (0.10 to 0.40) or NO-GO; a verdict that changes while undecided in both runs is allowed and named in the row's detail
+("uas: MARGINAL -> GO, undecided in both at n = 32"), because at a quick budget a vehicle near a threshold cannot be decided. P(fail) is judged
+by Newcombe's (1998, Stat. Med. 17:873, method 10) hybrid
+Wilson-score interval for the difference of the two proportions, `intervals.newcombe_diff`, which must contain 0 at a family-wise 95 %: Bonferroni over the
+vehicles and links compared, so each entry is judged at 1 - 0.05 / entries. (A new estimate inside the 90 % interval of an independent one fails about a
+quarter of the time even when nothing is wrong.) The same-seed check is exact equality and is unchanged. Timings, the
 git sha, dates, the host and paths are not in the golden. A missing golden is a FAIL that names the command writing it. `--update-golden` rewrites it
 from the quick run (with the git sha and code digest it came from) and that check then FAILs ("updated, not compared"), so a gate cannot be passed by
 overwriting its reference. `--skip-overnight` is for rehearsals: the overnight check FAILs with "overnight not run". Exit 0 only if every check passes.
@@ -26,24 +32,24 @@ DIR/acceptance.json and DIR/acceptance.txt hold the result.
 """
 from __future__ import annotations
 
-import argparse, datetime as dt, html, json, os, pathlib, shutil, subprocess, sys, time
+import argparse, datetime as dt, hashlib, html, json, os, pathlib, shutil, subprocess, sys, time
 from collections.abc import Callable, Iterator
 from typing import Any
 
 from . import budget, config, pipeline, receipts
 from .ledger import git_sha
-from .stats import intervals
+from .stats import intervals, sequential
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "tests" / "golden" / "tepex_c_demo_quick.json"
 BROKEN = ROOT / "tests" / "fixtures" / "broken" / "wave_direction.yaml"
 WAVE_MODULE = "pm.env.wave_direction"
 RUNS: dict[str, tuple[str, int]] = dict(quick=("quick", 0), overnight=("overnight", 0), gpu=("4h", 1))      # role -> (budget, gpus)
-# report.json paths that differ between identical runs, and the stages whose output files' sha-256 do
-VOLATILE = ("run", "emulator", "stage3.vehicles", "machine.wall_s", "machine.git_sha", "machine.versions", "machine.machine")
-WALL_STAGES = ("stage3", "emulator", "report")
+VOLATILE = ("run", "machine.wall_s", "machine.git_sha", "machine.versions", "machine.machine")   # report.json paths that differ between identical runs
+HOLDOUT, CREDIBILITY = "emulator:output:holdout.json", "report:output:credibility.json"            # receipts whose files hold a timing / the run's name
 KILL_AT = 2.0                                                                                          # a run is killed at this multiple of its limit
 EPS = 1e-9
+FAMILY_ALPHA = 0.05                                                                                    # family-wise error of the P(fail) comparisons
 
 
 def _execute(argv: list[str], env: dict[str, str], log: pathlib.Path, timeout: float) -> int:
@@ -55,13 +61,21 @@ def _execute(argv: list[str], env: dict[str, str], log: pathlib.Path, timeout: f
             return 124
 
 
-def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.Path, seed: int | None = None) -> dict[str, Any]:
-    """A fresh run in out/name: -> {name, budget, gpus, seed, dir, log, rc, wall_s, limit_s, report (report.json or None)}."""
+def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.Path, seed: int | None = None,
+            table: pathlib.Path | None = None) -> dict[str, Any]:
+    """A fresh run in out/name with its own emulator table out/name/emulator_table/train.parquet: a copy of `table` (the pristine shared table),
+    or none yet when `table` is None, so no run sees another's rows and none appends to the shared table.
+    -> {name, budget, gpus, seed, dir, log, rc, wall_s, limit_s, report (report.json or None)}."""
     d = out / name
     shutil.rmtree(d, ignore_errors=True)
     out.mkdir(parents=True, exist_ok=True)
     argv = ["run", "--mission", str(pathlib.Path(mission).resolve()), "--budget", budget_name, "--gpus", str(gpus), "--out", str(d.resolve()), "--fresh"]
     argv += [] if seed is None else ["--seed", str(seed)]
+    own = d / "emulator_table" / "train.parquet"
+    own.parent.mkdir(parents=True)
+    if table is not None:
+        shutil.copyfile(table, own)
+    argv += ["--emulator-table", str(own.resolve())]
     limit = budget.BUDGET_S[budget_name]
     t = time.monotonic()
     rc = _execute(argv, dict(os.environ), out / f"{name}.log", KILL_AT * limit)
@@ -114,22 +128,48 @@ def summary(rep: dict[str, Any]) -> dict[str, Any]:
                 links={k: stat(v) for k, v in rep["links"].items()})
 
 
-def diff(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> list[str]:
-    """Problems of `new` against `ref` (both from `summary`): exact fields must match, each new P(fail) must lie inside the interval of the reference's
-    k_fail out of n at its confidence. seed=False leaves the mission seed out (the other_seed check)."""
+def _entries(ref: dict[str, Any], new: dict[str, Any]) -> int:
+    """How many vehicles and links both summaries have: the family of P(fail) comparisons."""
+    return sum(len(ref[kind].keys() & new[kind].keys()) for kind in ("vehicles", "links"))
+
+
+def _decided(e: dict[str, Any]) -> bool:
+    return intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF) is not None
+
+
+def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tuple[list[str], list[str]]:
+    """(problems, notes) of `new` against `ref` (both from `summary`): the exact fields must match; a verdict must match wherever either run has it
+    decided (a change undecided in both is a note, not a problem); and Newcombe's interval for the difference of the two P(fail), at 1 - FAMILY_ALPHA / m
+    for the m entries compared (Bonferroni), must contain 0. seed=False leaves the mission seed out (the other_seed check)."""
     bad = [f"{f}: {ref[f]!r} in the reference, {new[f]!r} now" for f in ("mission", "seed") if ref[f] != new[f] and (seed or f != "seed")]
+    notes: list[str] = []
+    conf = 1 - FAMILY_ALPHA / max(_entries(ref, new), 1)
     for kind in ("vehicles", "links"):
         a, b = ref[kind], new[kind]
         if a.keys() != b.keys():
             bad.append(f"{kind}: {sorted(a)} in the reference, {sorted(b)} now")
         for k in sorted(a.keys() & b.keys()):
             g, r = a[k], b[k]
-            bad += [f"{kind} {k}: {f} {g.get(f)!r} in the reference, {r.get(f)!r} now" for f in ("verdict", "cls", "platform", "n") if g.get(f) != r.get(f)]
-            lo, hi = intervals.interval(g["k_fail"], g["n"], g["conf"])[:2]
-            if not lo - EPS <= r["p_fail"] <= hi + EPS:
-                bad.append(f"{kind} {k}: P(fail) {r['p_fail']:.4f} is outside {lo:.4f} to {hi:.4f}, "
-                           f"the {g['conf']:.0%} interval of {g['k_fail']} of {g['n']} ({g['p_fail']:.4f})")
-    return bad
+            bad += [f"{kind} {k}: {f} {g.get(f)!r} in the reference, {r.get(f)!r} now" for f in ("cls", "platform", "n") if g.get(f) != r.get(f)]
+            if g.get("verdict") != r.get("verdict"):
+                if _decided(g) or _decided(r):
+                    bad.append(f"{kind} {k}: verdict {g.get('verdict')!r} in the reference, {r.get('verdict')!r} now")
+                else:
+                    notes.append(f"{kind} {k}: {g['verdict']} -> {r['verdict']}, undecided in both at n = {g['n']}")
+            lo, hi = intervals.newcombe_diff(r["k_fail"], r["n"], g["k_fail"], g["n"], conf)
+            if not lo - EPS <= 0 <= hi + EPS:
+                bad.append(f"{kind} {k}: P(fail) {r['p_fail']:.4f} now against {g['p_fail']:.4f} in the reference ({r['k_fail']} of {r['n']} and "
+                           f"{g['k_fail']} of {g['n']}): the {conf:.2%} Newcombe interval for their difference, {lo:.4f} to {hi:.4f}, excludes 0")
+    return bad, notes
+
+
+def diff(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> list[str]:
+    """The problems of `compare`."""
+    return compare(ref, new, seed)[0]
+
+
+def _allowed(notes: list[str]) -> str:
+    return "; undecided in both, allowed to differ: " + "; ".join(notes) if notes else ""
 
 
 def _golden_record(r: dict[str, Any], mission: str) -> dict[str, Any]:
@@ -151,10 +191,11 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
     if not golden.is_file():
         return _row("golden_diff", False, f"no golden file at {golden}: write it from a quick run you have reviewed with `{cmd}`", missing=True)
     g = json.loads(golden.read_text())
-    bad = diff(g["summary"], summary(r["report"]))
+    bad, notes = compare(g["summary"], summary(r["report"]))
     n = len(g["summary"]["vehicles"]) + len(g["summary"]["links"])
-    return _row("golden_diff", not bad, "; ".join(bad[:6]) + (f" (+{len(bad) - 6} more)" if len(bad) > 6 else "") if bad else
-                f"{n} verdicts and P(fail) agree with {golden.name} (git {g['source']['git_sha'][:10]})", problems=bad, golden=str(golden))
+    return _row("golden_diff", not bad, ("; ".join(bad[:6]) + (f" (+{len(bad) - 6} more)" if len(bad) > 6 else "") if bad else
+                f"{n} verdicts and P(fail) agree with {golden.name} (git {g['source']['git_sha'][:10]})") + _allowed(notes),
+                problems=bad, notes=notes, golden=str(golden))
 
 
 def _drop(rep: dict[str, Any], path: str) -> None:
@@ -166,16 +207,24 @@ def _drop(rep: dict[str, Any], path: str) -> None:
 
 
 def normalize(rep: dict[str, Any], run_dir: pathlib.Path) -> dict[str, Any]:
-    """report.json without the fields that legitimately differ between two identical runs: VOLATILE, each vehicle's "fix", the output hashes of
-    WALL_STAGES, and the run directory's path."""
-    out: dict[str, Any] = json.loads(json.dumps(rep).replace(str(run_dir.resolve()), "<run>").replace(str(run_dir), "<run>"))
+    """report.json without the fields that legitimately differ between two identical runs: VOLATILE, each trained emulator's query time, the
+    sha-256 of holdout.json (it holds that time), and the run directory's path; credibility.json's sha-256 is replaced by that of the file without
+    the run directory (its path and its own "run" field), or dropped when the file is not there."""
+    def unrun(text: str) -> str:
+        return text.replace(str(run_dir.resolve()), "<run>").replace(str(run_dir), "<run>")
+    out: dict[str, Any] = json.loads(unrun(json.dumps(rep)))
     for p in VOLATILE:
         _drop(out, p)
-    for v in out.get("vehicles", {}).values():
-        v.pop("fix", None)
+    for e in out.get("emulator", {}).get("vehicles", {}).values():
+        e.get("acceptance", {}).pop("query_ms", None)
+    cred = run_dir / "report" / "credibility.json"
     for r in out.get("receipts", []):
-        if r.get("stage") in WALL_STAGES:
+        if r.get("id") == HOLDOUT or (r.get("id") == CREDIBILITY and not cred.is_file()):
             r.pop("sha256", None)
+        elif r.get("id") == CREDIBILITY:
+            c = json.loads(unrun(cred.read_text()))
+            c.pop("run", None)
+            r["sha256"] = hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
     return out
 
 
@@ -201,10 +250,11 @@ def check_same_seed(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
 def check_other_seed(a: dict[str, Any], c: dict[str, Any]) -> dict[str, Any]:
     if a["report"] is None or c["report"] is None:
         return _row("other_seed", False, "a quick run wrote no report to compare")
-    bad = diff(summary(a["report"]), summary(c["report"]), seed=False)
-    ok_text = f"seed {c['seed']}: every verdict unchanged, every P(fail) inside the seed {a['report']['mission']['seed']['value']} interval"
-    return _row("other_seed", not bad, "; ".join(bad[:4]) if bad else ok_text,
-                problems=bad)
+    ref = summary(a["report"])
+    bad, notes = compare(ref, summary(c["report"]), seed=False)
+    ok_text = (f"seed {c['seed']}: every decided verdict unchanged, every P(fail) consistent with the seed {ref['seed']} run "
+               f"(Newcombe, family-wise 95 % over {_entries(ref, summary(c['report']))} compared)")
+    return _row("other_seed", not bad, ("; ".join(bad[:4]) if bad else ok_text) + _allowed(notes), problems=bad, notes=notes)
 
 
 def check_broken(out: pathlib.Path) -> dict[str, Any]:
@@ -240,7 +290,11 @@ def run(mission: str, gpus: int, out: pathlib.Path, golden: pathlib.Path = GOLDE
     def fresh(name: str, role: str, s: int | None = None) -> dict[str, Any]:
         b, g = RUNS[role]
         log(f"run {name}: --budget {b} --gpus {g}" + (f" --seed {s}" if s is not None else "") + f", limit {budget.BUDGET_S[b] / 60:.0f} min")
-        return run_one(mission, name, b, g, out, s)
+        return run_one(mission, name, b, g, out, s, pristine)
+    shared, pristine = pipeline.emulator_table(), None
+    if shared.is_file():                                                                             # one copy, taken before any run
+        pristine = out / "emulator_table.parquet"
+        shutil.copyfile(shared, pristine)
     q = fresh("quick", "quick")
     step(check_run(q))
     step(check_golden(q, golden, mission, update_golden))

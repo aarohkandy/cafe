@@ -159,3 +159,75 @@ def test_batch_cost_is_per_environment_call_plus_per_member_for_the_named_vehicl
     assert budget.batch_cost_s(p, vids=["glider_eq"]) == pytest.approx(per_vehicle * 6)
     assert budget.batch_cost_s(p, vids=["usv", "uas"], days=1.5) == pytest.approx(2 * per_vehicle * 1.5)
     assert budget.batch_cost_s(p, vids=[]) == 0.0
+
+
+# ---------------------------------------------------------------------------------------------------------------- sizes that stage 3 and the emulator use
+
+def a3(**over):
+    """stage3 assumptions with the numbers the formulas below are checked against."""
+    a = budget.stage3_assumptions()
+    a.update(over)
+    return a
+
+
+def test_stage3_cell_steps_are_the_share_less_compile_and_fea_over_the_margin_at_the_plan_rate():
+    p = budget.plan("quick", 0, MISSION, thr=thr(1.0, 0.01), vehicle_classes=CLASSES)            # quick: 1200 s, stage-3 share 360 s
+    a = a3(compile_s_guess=10.0, fea_reserve_frac=0.25, les_margin=1.5, min_window_s=6.0, fea_min_s=8.0)
+    s = budget.stage3_plan(p, CLASSES, a)
+    share = 0.30 * 1200.0
+    parts = 1 + 2 + 1                                                                              # glider body, usv hull + wing, uas body (K = 1 each)
+    assert s["share_s"] == pytest.approx(share) and s["les_parts"] == parts and s["slice_s"] == pytest.approx(share / parts)
+    sl, rate = share / parts, p["les"]["rate"]
+    assert s["cell_steps_per_part"]["glider"] == pytest.approx(rate * (sl - 0.25 * sl - 10.0) / 1.5)         # only the glider carries the FEA reserve
+    assert s["cell_steps_per_part"]["usv"] == s["cell_steps_per_part"]["uas"] == pytest.approx(rate * (sl - 10.0) / 1.5)
+    assert s["runs"] and s["fea"]["runs"] and s["fea"]["reserve_s"] == pytest.approx(0.25 * sl)
+    assert s["fs"]["cases"] == 1 and s["fs"]["fit"] == int(min(1, share // s["fs"]["need_s"])) and s["fs"]["need_s"] == pytest.approx(
+        s["fs"]["estimate"]["total_s"] * a["fs.margin"])
+    # the answer is a function of the plan and the assumptions: the same twice, and a slower assumed compile only ever shrinks it
+    assert budget.stage3_plan(p, CLASSES, a) == s
+    slow = budget.stage3_plan(p, CLASSES, a3(compile_s_guess=20.0))
+    assert all(slow["cell_steps_per_part"][c] < s["cell_steps_per_part"][c] for c in s["cell_steps_per_part"])
+
+
+def test_stage3_plan_says_when_the_slice_is_too_small_to_run_and_when_the_fea_is_planned_out():
+    p = budget.plan("ci", 0, MISSION, thr=thr(1.0, 0.01), vehicle_classes=CLASSES)               # 180 s over 4 parts: 45 s each
+    assert budget.stage3_plan(p, CLASSES, a3(min_window_s=6.0))["runs"]
+    small = budget.stage3_plan(p, CLASSES, a3(min_window_s=60.0))
+    assert not small["runs"] and small["slice_s"] == pytest.approx(45.0)
+    assert budget.stage3_plan(p, CLASSES, a3(fea_reserve_frac=0.25, fea_min_s=8.0))["fea"]["runs"]                  # 11.25 s of reserve
+    assert not budget.stage3_plan(p, CLASSES, a3(fea_reserve_frac=0.25, fea_min_s=12.0))["fea"]["runs"]
+    tiny = budget.stage3_plan(p, CLASSES, a3(compile_s_guess=1e6))                               # the compile alone spends the slice: zero cell-steps
+    assert set(tiny["cell_steps_per_part"].values()) == {0.0}
+
+
+def test_stage3_plan_counts_free_surface_cases_that_fit_the_share_in_queue_order(monkeypatch):
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    a = a3()
+    need = budget.stage3_plan(budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES), CLASSES, a)["fs"]["need_s"]
+    p = budget.plan("quick", 0, MISSION, thr={}, vehicle_classes=CLASSES)
+    p["les"]["windows_per_vehicle"] = 3
+    for share, fit in ((0.99 * need, 0), (1.01 * need, 1), (2.5 * need, 2), (10 * need, 3)):         # three USV windows queue behind each other
+        p["shares"], p["budget_s"] = dict(p["shares"], stage3=1.0), share
+        assert budget.stage3_plan(p, CLASSES, a)["fs"]["fit"] == fit and budget.stage3_plan(p, CLASSES, a)["fs"]["cases"] == 3
+    assert budget.stage3_plan(p, dict(glider_eq="glider"), a)["fs"] is None                           # no USV, no free-surface case
+
+
+def test_a_plan_without_a_wall_clock_budget_shares_the_cell_steps_between_the_parts_of_a_vehicle():
+    p = dict(les=dict(cell_steps_per_window=8e6, windows_per_vehicle=1))
+    s = budget.stage3_plan(p, dict(g="glider", u="usv"), a3())
+    assert s["share_s"] is None and s["runs"] and s["fea"]["runs"] and s["cell_steps_per_part"] == dict(glider=8e6, usv=4e6)
+    assert s["fs"]["fit"] == 1 and s["fs"]["share_s"] is None
+
+
+def test_the_emulator_plan_is_variants_that_fit_the_train_fraction_of_the_share_at_the_planners_cost():
+    p = budget.plan("quick", 0, MISSION, thr=thr(20.0, 0.01), vehicle_classes=CLASSES)
+    e = budget.emulator_plan(p)
+    est = budget.batch_cost_s(p)
+    assert e["variant_s"] == pytest.approx(est) and "planner" in e["variant_s_source"] and e["train_fraction"] == budget.TRAIN_FRAC
+    assert e["share_s"] == dict(refit=budget.emulator_share_s(p), no_refit=budget.emulator_share_s(p, True))
+    assert e["variants_refit"] == min(budget.EMULATOR_VARIANTS["quick"], int(budget.TRAIN_FRAC * e["share_s"]["refit"] // est))
+    assert e["variants_no_refit"] >= e["variants_refit"] and e["max_variants"] == budget.EMULATOR_VARIANTS["quick"]
+    cheap = dict(p, member_cost={v: dict(c, s_per_batch_day=0.001, s_per_member_day=0.0) for v, c in p["member_cost"].items()})
+    assert budget.emulator_plan(cheap)["variants_refit"] == budget.EMULATOR_VARIANTS["quick"]                  # capped by the budget name
+    free = dict(p, member_cost={})
+    assert budget.emulator_plan(free)["variants_refit"] == 0 == budget.emulator_plan(free)["variants_no_refit"]    # nothing to price: none

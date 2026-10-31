@@ -2,6 +2,8 @@
 
 Intervals: Wilson (1927) score interval; Agresti & Coull (1998) "add z^2/2" interval; the switch between them follows
 Brown, Cai & DasGupta (2001, Statistical Science 16(2), Sec. 5 recommendations): Wilson for n <= 40, Agresti-Coull above.
+Difference of two proportions: Newcombe (1998, Statistics in Medicine 17:873-890, method 10), the hybrid score interval built from
+the two Wilson intervals (`newcombe_diff`).
 Rule of three: Hanley & Lippman-Hand (1983, JAMA 249): with 0 failures in n runs, P(fail) < 3/n at ~95 % one-sided.
 
 Verdict thresholds are those of cafe/mission.py `_verdict` (success rate p, Wilson lower bound lo, both on success):
@@ -38,6 +40,16 @@ def wilson(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
     c = (p + z * z / (2 * n)) / (1 + z * z / n)
     h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
     return (0.0 if k == 0 else max(0.0, c - h)), (1.0 if k == n else min(1.0, c + h))   # exact ends, no float dust
+
+
+def newcombe_diff(k1: int, n1: int, k2: int, n2: int, conf: float = 0.95) -> tuple[float, float]:
+    """Newcombe (1998, Stat. Med. 17:873, method 10) hybrid score interval for p1 - p2, from the Wilson intervals (l, u) of p1 and p2:
+    L = d - sqrt((p1 - l1)^2 + (u2 - p2)^2), U = d + sqrt((u1 - p1)^2 + (p2 - l2)^2), d = p1 - p2."""
+    p1, p2 = k1 / n1, k2 / n2
+    l1, u1 = wilson(k1, n1, conf)
+    l2, u2 = wilson(k2, n2, conf)
+    d = p1 - p2
+    return d - math.hypot(p1 - l1, u2 - p2), d + math.hypot(u1 - p1, p2 - l2)
 
 
 def agresti_coull(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
@@ -100,6 +112,13 @@ def interval_region(k_fail: int, n: int, conf: float = 0.95) -> str | None:
     """"GO" if the whole P(fail) interval is <= 0.10, "NO-GO" if it is all > 0.40, else None (undecided)."""
     lo, hi, _ = interval(k_fail, n, conf)
     return "GO" if hi <= P_FAIL_GO else "NO-GO" if lo > P_FAIL_NOGO else None
+
+
+def decided_region(k_fail: int, n: int, conf: float = 0.95) -> str | None:
+    """interval_region, plus "MARGINAL" when the whole P(fail) interval lies above 0.10 and at or below 0.40: a verdict more members would
+    not change either. None only when the interval spans a threshold. (The stopper keeps using interval_region: a MARGINAL is not a reason to stop.)"""
+    lo, hi, _ = interval(k_fail, n, conf)
+    return interval_region(k_fail, n, conf) or ("MARGINAL" if P_FAIL_GO < lo and hi <= P_FAIL_NOGO else None)
 
 
 def coverage(n: int, p_grid: np.ndarray, conf: float = 0.95, method: str = "wilson") -> np.ndarray:

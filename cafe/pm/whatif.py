@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import pathlib
 import re
 import time
 import warnings
@@ -35,6 +36,7 @@ from scipy.stats import qmc
 from . import budget, report, stage1
 from .config import ConfigError, _in_box, utc
 from .emulator import Emulator, read_table, store_path, write_table
+from .env.environment import OutsideData
 from .stats import intervals
 
 Track = tuple[NDArray[Any], NDArray[Any], NDArray[Any]]                    # (t, lon, lat)
@@ -46,7 +48,7 @@ MODES_MAX = 4                     # failure modes with their own GP (most variab
 LIMITS = dict(rmse=0.05, coverage=0.05, query_ms=10.0)          # BRIEF 2.7 acceptance
 SHIFTS, MOVES, DUTIES = (6.0, 12.0, 24.0, 48.0), (0.5, 1.0), (0.75, 0.5)
 FALLBACK_K = 3                    # Stage-1 candidates tried, nearest first, when the emulator cannot answer
-TRAIN_FRAC = 0.7                  # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
+TRAIN_FRAC = budget.TRAIN_FRAC    # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
 
 
 class Invalid(ConfigError):
@@ -241,6 +243,28 @@ def vehicle_rows(mission: dict[str, Any], res: dict[str, Any], env: Any, fidelit
     return rows
 
 
+def run_variant(mission: dict[str, Any], env: Any, members: list[int], seed: int, pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]],
+                scales: dict[str, Any] | None, fidelity: dict[str, Any], meta: dict[str, Any], variant: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Training rows of one mission variant: one Stage-1 batch of every vehicle. A variant that moves a vehicle past the environment data
+    (GriddedEnv refuses a point outside the cache) is not an error: the batch is rerun one vehicle at a time and each vehicle whose track
+    leaves the data is skipped with that reason; the others keep their rows. Skipped, not clipped: pulling a track back inside would make it a
+    different variant than the one the plan counted, and what a vehicle does near the edge is what the sample would have taught the emulator.
+    -> (rows, {vehicle id: why it has none})."""
+    try:
+        return vehicle_rows(mission, stage1.run_batch(mission, env, members, seed, pri, marg, scales), env, fidelity, meta, variant), {}
+    except OutsideData:
+        pass
+    rows: list[dict[str, Any]] = []
+    skipped: dict[str, str] = {}
+    for v in mission["vehicles"]:
+        one = solo(mission, v["id"])
+        try:
+            rows += vehicle_rows(one, stage1.run_batch(one, env, members, seed, pri, marg, scales), env, fidelity, meta, variant)
+        except OutsideData as e:
+            skipped[v["id"]] = f"the variant leaves the environment data: {e}"
+    return rows, skipped
+
+
 def add_rows(path: Any, rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, str]:
     """Append rows to the training table (rows with a key already in it are replaced). -> (whole table, the file used)."""
     p, _ = store_path(path)
@@ -324,11 +348,33 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any) -> tuple[Emulator | None, d
                     query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, acceptance=acc, threshold=em.threshold, multi_fidelity=em.multi_fidelity)
 
 
-def train(table: Any, classes: Any, path: Any = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
-    """Fit the emulator of each class in `classes` from the stored table (all runs, all missions)."""
+def train(table: Any, classes: Any, path: Any = None, df: pd.DataFrame | None = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
+    """Fit the emulator of each class in `classes` from the stored table (all runs, all missions), or from `df` when given (the pipeline
+    trains on a snapshot of the table, not on whatever the table holds by now)."""
     p, _ = store_path(table)
-    df = read_table(p) if p.exists() else pd.DataFrame(columns=["cls"] + BASE)
+    if df is None:
+        df = read_table(p) if p.exists() else pd.DataFrame(columns=["cls"] + BASE)
     return {c: fit_class(df, c, path or table) for c in sorted(set(classes))}
+
+
+def snapshot(table: Any, dest: Any, run_id: str) -> tuple[pd.DataFrame, pathlib.Path]:
+    """The training table as it is now, without the rows `run_id` wrote (its own earlier attempt), copied to `dest` (a path; its suffix is
+    replaced by what the table is stored as). The run trains on this copy and names its file as a ledger input, so the emulator is a function
+    of a hashed input that nothing else changes while the run goes. -> (the rows, the file)."""
+    p, _ = store_path(table)
+    df = read_table(p) if p.exists() else pd.DataFrame(columns=["cls", "key", "run_id"] + BASE)
+    df = df[df["run_id"] != run_id].reset_index(drop=True) if "run_id" in df else df
+    out, _ = store_path(pathlib.Path(dest).with_suffix(".parquet"))
+    write_table(df, out)
+    return df, out
+
+
+def with_rows(df: pd.DataFrame, rows: list[dict[str, Any]]) -> pd.DataFrame:
+    """`df` plus `rows`; a row whose key is already in `df` replaces it (what add_rows does to the stored table)."""
+    new = pd.DataFrame(rows)
+    if not len(new):
+        return df
+    return pd.concat([d for d in (df[~df["key"].isin(new["key"])] if "key" in df else df, new) if len(d)], ignore_index=True)
 
 
 # ------------------------------------------------------------------------------------------------------ flip search
@@ -356,7 +402,10 @@ def predict(em: Emulator | None, mission: dict[str, Any], vid: str, cls: str, tr
         return dict(status="no_track")
     else:
         track = shift_track(trk, mod, mission)
-    return emulate(em, {**params(mission, vid, cls), **env_stats(env, *track)})
+    try:
+        return emulate(em, {**params(mission, vid, cls), **env_stats(env, *track)})
+    except OutsideData as e:
+        raise Invalid(f"{vid}: the changed track leaves the environment data ({e})") from e
 
 
 def emulate(em: Emulator, feats: dict[str, Any]) -> dict[str, Any]:
@@ -375,7 +424,10 @@ def measure(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], p
             scales: dict[str, Any] | None, seed: int, n: int | None = None) -> dict[str, Any]:
     """Stage 1 for one vehicle of the (changed) mission: one batch of the plan's size, the base run's members (common random numbers)."""
     members = list(range(n or plan["batch"]))
-    r = stage1.run_batch(solo(mission, vid), env, members, seed, pri, marg, scales)["vehicles"][vid]
+    try:
+        r = stage1.run_batch(solo(mission, vid), env, members, seed, pri, marg, scales)["vehicles"][vid]
+    except OutsideData as e:
+        raise Invalid(f"{vid}: the changed mission leaves the environment data ({e})") from e
     f = stage1.failed(r)
     v = intervals.verdict(int(f.sum()), len(f))
     return dict(p_fail=float(f.mean()), lo=v["fail_lo"], hi=v["fail_hi"], verdict=v["verdict"], n=int(len(f)))
@@ -388,7 +440,8 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
 
     Emulator first: every candidate within the emulator's training range is answered by it. Candidates it cannot answer (no emulator, no
     track, out of range) are run in Stage 1, nearest first, at most FALLBACK_K and only while `budget_s` lasts. The best candidate is the
-    cheapest one in the target set among those answered. -> ({vid: result}, seconds of Stage 1 spent)."""
+    cheapest one in the target set among those answered. -> ({vid: result}, planned seconds of Stage 1 spent: each fallback is charged
+    `budget.batch_cost_s`, so the search does not depend on how fast the machine happens to be)."""
     out: dict[str, Any] = {}
     spent = 0.0
     for vid, base in verdicts.items():
@@ -403,10 +456,10 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
             e = dict(change=c["change"], mod=c["mod"], cost=c["cost"], method="not evaluated", reason="")
             try:
                 m2 = apply(mission, {vid: c["mod"]})
-            except Invalid as ex:
+                a = predict(em, m2, vid, cls, tracks.get(vid), c["mod"], env)
+            except Invalid as ex:                                           # off the window or the box, or its track leaves the environment data
                 tried.append(dict(e, reason=str(ex)))
                 continue
-            a = predict(em, m2, vid, cls, tracks.get(vid), c["mod"], env)
             if a["status"] == "ok":
                 tried.append(dict(e, method="EMULATED", **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")}))
             else:
@@ -418,9 +471,12 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
                 if spent + cost > budget_s:
                     tried[i]["reason"] += "; Stage 1 not run: the emulator budget is spent"
                     break
-                t0 = time.time()
-                tried[i].update(method="Stage 1", **measure(m2, vid, env, plan, pri, marg, scales, seed))
-                spent += time.time() - t0
+                try:
+                    tried[i].update(method="Stage 1", **measure(m2, vid, env, plan, pri, marg, scales, seed))
+                except Invalid as ex:                                       # the run left the environment data: no number, and the reason
+                    tried[i]["reason"] += f"; Stage 1 not run: {ex}"
+                    continue
+                spent += cost                                               # the planner's cost, never the clock: the same search on every run
                 if tried[i]["verdict"] in want:
                     break
         hit = [t for t in tried if t["method"] != "not evaluated" and t["verdict"] in want]

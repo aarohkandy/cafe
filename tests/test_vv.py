@@ -361,6 +361,12 @@ def default_assumptions(monkeypatch):
     monkeypatch.setattr(dt, "assumed", lambda name, config=None: dt.ASSUMED[name][0])
 
 
+@pytest.fixture(autouse=True)
+def roomy_disk(monkeypatch):
+    """The fake cases write kilobytes: the disk guard sees 100 GB free, not whatever the test machine has left (the guard's own tests override it)."""
+    monkeypatch.setattr(dt.shutil, "disk_usage", lambda p: NS(free=100e9))
+
+
 def test_assumed_reads_config_overrides(tmp_path):
     assert REAL_ASSUMED("u_D_rel", tmp_path / "missing.yaml") == dt.ASSUMED["u_D_rel"][0]
     f = tmp_path / "a.yaml"

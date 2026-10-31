@@ -35,6 +35,7 @@ from . import budget, credibility
 from .audit import STAGES
 from .stage1 import _classes
 from .env.remote import sha256
+from .stats import intervals, sequential
 
 SCHEMA = "cafe.pm.report/1"
 FORCING = {"glider": ("surface current speed", "m/s"), "usv": ("significant wave height", "m"), "uas": ("10 m wind speed", "m/s")}
@@ -149,12 +150,25 @@ def check_traceability(report: dict[str, Any]) -> list[str]:
 
 # ------------------------------------------------------------------------------------------------------ builders
 
+def _undecided(k: int, n: int) -> str:
+    """One sentence for a verdict whose interval on P(fail) is not wholly inside GO or NO-GO: which thresholds it spans, and that more members decide it."""
+    lo, hi, _ = intervals.interval(k, n, sequential.STOP_CONF)
+    cut = {"GO": intervals.P_FAIL_GO, "NO-GO": intervals.P_FAIL_NOGO}
+    span = [f"{name} threshold of {c:.2f}" for name, c in cut.items() if lo <= c < hi]          # never empty: an interval that spans nothing is decided
+    head = f"The {sequential.STOP_CONF:.0%} interval on P(fail), {lo:.3g} to {hi:.3g}, "
+    return head + f"spans the {' and the '.join(span)}, so more members (a larger --budget) would decide it."
+
+
 def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
-    """The verdict block shared by a vehicle and a link."""
+    """The verdict block shared by a vehicle and a link. `region` is "GO", "MARGINAL" or "NO-GO" when the whole P(fail) interval of the stopper's confidence
+    (`sequential.STOP_CONF`) lies inside that verdict's range, else None and the verdict is not `decided`."""
     v = e["verdict"]
     unc = dict(kind=f"{v['method']} interval", conf=v["conf"], lo=v["fail_lo"], hi=v["fail_hi"])
     d = dict(verdict=v["verdict"], p_fail=num(v["p_fail"], "fraction", ref, src, unc), n=num(e["n"], "members", ref, src),
              k_fail=num(e["k_fail"], "members", ref, src), n_certify=num(v["n_certify"], "members", ref, src), note=v["note"], certify_statement=None)
+    d["region"] = intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF)
+    d["decided"] = d["region"] is not None
+    d["undecided_statement"] = None if d["decided"] else _undecided(e["k_fail"], e["n"])
     if e["n"] < v["n_certify"]:
         d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members are needed "
                                   f"(with zero failures n members only show P(fail) < 3/n = {3 / e['n']:.3f}).")
@@ -579,10 +593,16 @@ def _badge(v: str) -> str:
     return f'<span class="badge {v.lower().replace("-", "")}">{html.escape(v)}</span>'
 
 
+def _undecided_badge(d: dict[str, Any]) -> str:
+    return "" if d["decided"] else f' <span class="badge undecided">undecided at n = {d["n"]["value"]}</span>'
+
+
 def _stat_html(d: dict[str, Any]) -> str:
     u = d["p_fail"]["uncertainty"]
     h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g}; "
          f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}).</p>")
+    if d["undecided_statement"]:
+        h += f"<p class=warn>{html.escape(d['undecided_statement'])}</p>"
     if d["certify_statement"]:
         h += f"<p class=warn>{html.escape(d['certify_statement'])}</p>"
     return h + (f"<p class=muted>{html.escape(d['note'])}</p>" if d["note"] else "")
@@ -638,7 +658,7 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     ch = ""
     if v["changed_by_refit"]:
         ch = f"<p class=warn>The verdict changed from {_badge(v['verdict_stage1'])} to {_badge(v['verdict'])} after the stage-3 refit.</p>"
-    return (f"<div class=card><h3>{e(vid)} {_badge(v['verdict'])} <span class=muted>{e(v['cls'])}, {e(str(v['platform']))}</span></h3>"
+    return (f"<div class=card><h3>{e(vid)} {_badge(v['verdict'])}{_undecided_badge(v)} <span class=muted>{e(v['cls'])}, {e(str(v['platform']))}</span></h3>"
             f"{_stat_html(v)}{ch}<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
             f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
@@ -648,7 +668,7 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
 
 def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
-    return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}</h3>{_stat_html(k)}<p>Method: {e(k['method'])}.<br>"
+    return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
             f"median margin {_n(k['margin_db_median'])}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
             f"{_top3_html(k['top3'], k['sensitivity']['noise_floor'])}</div>")
@@ -845,7 +865,7 @@ def _receipts_html(rows: list[Any]) -> str:
 def render(rep: dict[str, Any]) -> str:
     e = html.escape
     m = rep["mission"]
-    rows = "".join(f"<tr><td><a href='#v-{e(i)}'>{e(i)}</a><td>{_badge(d['verdict'])}<td>{_n(d['p_fail'])}<td>{_n(d['n'])}</tr>"
+    rows = "".join(f"<tr><td><a href='#v-{e(i)}'>{e(i)}</a><td>{_badge(d['verdict'])}{_undecided_badge(d)}<td>{_n(d['p_fail'])}<td>{_n(d['n'])}</tr>"
                    for i, d in {**rep["vehicles"], **rep["links"]}.items())
     bad = rep["traceability_problems"]
     tr = (f"<p class=warn>Traceability problems: {e('; '.join(bad))}</p>" if bad

@@ -26,8 +26,9 @@ def calls(monkeypatch):
     """pipeline.run replaced by a recorder that returns an object with a run_dir, as the real one does."""
     seen = []
 
-    def run(mission, budget, gpus, out, resume=True, stop_after=None, log=print, seed=None):
-        seen.append(dict(mission=mission, budget=budget, gpus=gpus, out=out, resume=resume, stop_after=stop_after, **({} if seed is None else dict(seed=seed))))
+    def run(mission, budget, gpus, out, resume=True, stop_after=None, log=print, seed=None, emulator_table=None):
+        seen.append(dict(mission=mission, budget=budget, gpus=gpus, out=out, resume=resume, stop_after=stop_after, **({} if seed is None else dict(seed=seed)),
+                         **({} if emulator_table is None else dict(emulator_table=emulator_table))))
         return type("Ctx", (), {"run_dir": out})()
     monkeypatch.setattr(pipeline, "run", run)
     return seen
@@ -84,6 +85,19 @@ def test_run_calls_the_pipeline_with_its_budget_gpus_and_default_directory(calls
     out = pathlib.Path("runs/ci_fixture/4h")
     assert calls == [dict(mission=MISSION, budget="4h", gpus=1, out=out, resume=True, stop_after=None)]
     assert capsys.readouterr().out == f"report: {out / 'report' / 'index.html'}\n"
+
+
+def test_run_passes_the_emulator_table_and_documents_what_it_is_for(calls, tmp_path, capsys):
+    assert cli.main(["run", "--mission", MISSION, "--out", str(tmp_path / "o"), "--emulator-table", str(tmp_path / "t.parquet")]) == 0
+    assert calls[0]["emulator_table"] == str(tmp_path / "t.parquet")
+    assert cli.main(["run", "--mission", MISSION, "--out", str(tmp_path / "o")]) == 0 and "emulator_table" not in calls[1]          # default: the shared table
+    with pytest.raises(SystemExit):
+        cli.main(["run", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "--emulator-table FILE" in out and "$CAFE_EMULATOR_TABLE" in out and "give every run its own copy of that file" in out
+    assert "depends only on the table it started from" in out
+    with pytest.raises(SystemExit):
+        cli.main(["fetch", "--mission", MISSION, "--emulator-table", "x"])                 # only `run` trains an emulator
 
 
 def test_run_defaults_to_the_quick_budget_and_fresh_ignores_the_checkpoints(calls, tmp_path, capsys):

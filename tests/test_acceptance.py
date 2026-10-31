@@ -97,14 +97,15 @@ def test_run_one_starts_clean_names_the_run_and_reads_its_report(monkeypatch, tm
 
     def execute(argv, env, log, timeout):
         seen.append((argv, log, timeout))
-        assert not (out / "quick").exists()
+        assert [p.name for p in (out / "quick").iterdir()] == ["emulator_table"]                   # the stale file is gone; its own table dir only
         (out / "quick" / "report").mkdir(parents=True)
         (out / "quick" / "report" / "report.json").write_text(json.dumps(report()))
         return 0
     monkeypatch.setattr(acc, "_execute", execute)
     r = acc.run_one(MISSION, "quick", "quick", 0, out, seed=5)
     argv, log, timeout = seen[0]
-    assert argv == ["run", "--mission", MISSION, "--budget", "quick", "--gpus", "0", "--out", str(out / "quick"), "--fresh", "--seed", "5"]
+    assert argv == ["run", "--mission", MISSION, "--budget", "quick", "--gpus", "0", "--out", str(out / "quick"), "--fresh", "--seed", "5",
+                    "--emulator-table", str(out / "quick" / "emulator_table" / "train.parquet")]
     assert log == out / "quick.log" and timeout == 2 * 1200 and r["report"] == report() and r["rc"] == 0 and r["seed"] == 5
     acc.run_one(MISSION, "quick", "4h", 1, out)
     assert "--seed" not in seen[1][0] and seen[1][0][3:7] == ["--budget", "4h", "--gpus", "1"] and seen[1][2] == 2 * 4 * 3600
@@ -157,7 +158,7 @@ def test_the_same_summary_has_no_differences_and_a_p_fail_inside_the_golden_inte
     g = acc.summary(report())
     assert acc.diff(g, copy.deepcopy(g)) == []
     new = copy.deepcopy(g)
-    new["links"]["rf"]["p_fail"] = 0.35                                              # the 90 % interval of 10 of 40 is about 0.15 to 0.39
+    new["links"]["rf"].update(k_fail=14, p_fail=0.35)                                # 14 of 40 against 10 of 40: Newcombe's interval holds 0
     assert acc.diff(g, new) == []
 
 
@@ -168,30 +169,97 @@ def test_a_changed_verdict_string_is_a_difference():
     assert acc.diff(g, new) == ["vehicles usv: verdict 'NO-GO' in the reference, 'MARGINAL' now"]
 
 
-def test_a_p_fail_outside_the_wilson_interval_of_the_golden_is_a_difference():
-    g = acc.summary(report())
+def moved(g, kind, k, k_fail):
+    """A deep copy of summary `g` with entry `k` at `k_fail` failures."""
     new = copy.deepcopy(g)
-    new["links"]["rf"]["p_fail"] = 0.45
-    (msg,) = acc.diff(g, new)
-    assert msg.startswith("links rf: P(fail) 0.4500 is outside 0.1") and "90% interval of 10 of 40" in msg
-    new["links"]["rf"]["p_fail"] = 0.0
-    assert len(acc.diff(g, new)) == 1
+    e = new[kind][k]
+    e.update(k_fail=k_fail, p_fail=k_fail / e["n"])
+    return new
 
 
-def test_the_interval_edge_is_inside_and_a_degenerate_interval_admits_only_its_point():
-    from cafe.pm.stats import intervals
+def test_a_p_fail_whose_difference_interval_excludes_0_is_a_difference():
     g = acc.summary(report())
-    lo, hi = intervals.interval(10, 40, 0.9)[:2]
-    for edge in (lo, hi):
-        new = copy.deepcopy(g)
-        new["links"]["rf"]["p_fail"] = edge
-        assert acc.diff(g, new) == []
-    zero = acc.summary(report(links={"rf": stat("GO", 0, 40)}))
-    new = copy.deepcopy(zero)
-    new["links"]["rf"]["p_fail"] = 0.0
-    assert acc.diff(zero, new) == []
-    new["links"]["rf"]["p_fail"] = 0.2
-    assert len(acc.diff(zero, new)) == 1
+    (msg,) = acc.diff(g, moved(g, "links", "rf", 30))
+    assert msg.startswith("links rf: P(fail) 0.7500 now against 0.2500 in the reference (30 of 40 and 10 of 40)") and "98.33% Newcombe interval" in msg
+    assert msg.endswith("excludes 0")
+    assert len(acc.diff(g, moved(g, "links", "rf", 0))) == 1
+
+
+def test_equal_counts_pass_and_the_extremes_all_pass_against_all_fail_do_not():
+    g = acc.summary(report(links={"rf": stat("GO", 0, 40)}))
+    assert acc.diff(g, copy.deepcopy(g)) == []
+    assert len(acc.diff(g, moved(g, "links", "rf", 40))) == 1
+    assert len(acc.diff(moved(g, "links", "rf", 40), g)) == 1
+
+
+def test_the_difference_is_judged_the_same_way_round_either_way():
+    g = acc.summary(report())
+    for k in range(0, 41):
+        assert bool(acc.diff(g, moved(g, "links", "rf", k))) == bool(acc.diff(moved(g, "links", "rf", k), g))
+
+
+def summ(entries, n=32):
+    """A summary with links only: {id: (verdict, k_fail)}."""
+    return dict(mission="m", seed=7, vehicles={}, links={i: dict(verdict=v, k_fail=k, n=n, p_fail=k / n, conf=0.9) for i, (v, k) in entries.items()})
+
+
+def test_4_of_32_against_1_of_32_is_consistent_and_0_of_32_against_16_of_32_is_not():
+    assert acc.diff(summ({"uas": ("MARGINAL", 4)}), summ({"uas": ("MARGINAL", 1)})) == []
+    (msg,) = acc.diff(summ({"uas": ("GO", 0)}), summ({"uas": ("MARGINAL", 16)}))
+    assert "links uas: P(fail) 0.5000 now against 0.0000 in the reference (16 of 32 and 0 of 32)" in msg and "95.00% Newcombe interval" in msg
+
+
+def uas_report(verdict, k, seed=7):
+    return report(seed=seed, links={}, vehicles={"uas": dict(stat(verdict, k, 32), cls="uas", platform="quad")})
+
+
+NAMED = "vehicles uas: MARGINAL -> GO, undecided in both at n = 32"
+
+
+def test_a_verdict_change_that_is_undecided_in_both_runs_passes_and_is_named(tmp_path):
+    r = acc.check_other_seed(run_dict(tmp_path, uas_report("MARGINAL", 4)), run_dict(tmp_path, uas_report("GO", 1, seed=8), name="c", seed=8))
+    assert r["ok"] and NAMED in r["detail"] and r["values"]["notes"] == [NAMED]
+    assert "seed 8" in r["detail"] and "family-wise 95 % over 1 compared" in r["detail"]
+
+
+def test_the_golden_diff_allows_and_names_the_same_change_and_still_checks_the_rest(tmp_path):
+    g = tmp_path / "g.json"
+    acc.check_golden(run_dict(tmp_path, uas_report("MARGINAL", 4)), g, MISSION, True)
+    ok = acc.check_golden(run_dict(tmp_path, uas_report("GO", 1)), g, MISSION, False)
+    assert ok["ok"] and NAMED in ok["detail"] and ok["values"]["notes"] == [NAMED] and ok["values"]["problems"] == []
+    bad = acc.check_golden(run_dict(tmp_path, uas_report("NO-GO", 30)), g, MISSION, False)
+    assert not bad["ok"] and "P(fail) 0.9375 now against 0.1250" in bad["detail"]
+
+
+def test_a_verdict_change_fails_when_either_run_has_it_decided():
+    decided_go, decided_nogo, undecided = ("GO", 0), ("NO-GO", 30), ("MARGINAL", 1)
+    for a, b in ((decided_go, ("MARGINAL", 0)), (("MARGINAL", 0), decided_go), (decided_nogo, ("MARGINAL", 30)), (("MARGINAL", 30), decided_nogo)):
+        bad = acc.diff(summ({"x": a}, n=40), summ({"x": b}, n=40))
+        assert bad == [f"links x: verdict {a[0]!r} in the reference, {b[0]!r} now"], (a, b)
+    assert acc.diff(summ({"x": undecided}, n=40), summ({"x": ("GO", 1)}, n=40)) == []
+    # a MARGINAL whose whole interval is between 0.10 and 0.40 (40 of 200) is decided too: it may not turn GO at 30 of 200 (a P(fail) Newcombe accepts)
+    (msg,) = acc.diff(summ({"x": ("MARGINAL", 40)}, n=200), summ({"x": ("GO", 30)}, n=200))
+    assert msg == "links x: verdict 'MARGINAL' in the reference, 'GO' now"
+    assert acc.compare(summ({"x": undecided}, n=40), summ({"x": ("GO", 1)}, n=40)) == ([], ["links x: MARGINAL -> GO, undecided in both at n = 40"])
+
+
+def test_the_help_text_states_the_comparison_rule(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["acceptance", "--help"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "Newcombe" in out and "family-wise 95 % (Bonferroni" in out and "undecided in both is allowed and named" in out
+
+
+def test_the_family_wise_level_is_split_over_the_entries_compared():
+    one, four = {"a": ("MARGINAL", 1)}, {k: ("MARGINAL", 1) for k in "abcd"}
+    # 8 of 32 against 1 of 32: the lower end of the difference is +0.046 at 95 %, -0.009 at 98.75 %
+    new_one, new_four = {"a": ("MARGINAL", 8)}, {k: ("MARGINAL", 8) for k in "abcd"}
+    (msg,) = acc.diff(summ(one), summ(new_one))
+    assert "95.00% Newcombe interval" in msg
+    assert acc.diff(summ(four), summ(new_four)) == []
+    assert acc.diff(summ(four), summ({**new_four, "a": ("MARGINAL", 16)})) != []                                   # a bigger move still fails among four
+    only_vehicles = acc.summary(report(links={}))
+    assert acc._entries(only_vehicles, only_vehicles) == 2 and acc._entries(summ(four), summ(one)) == 1
 
 
 def test_counts_of_members_vehicles_and_links_class_platform_and_mission_must_match_exactly():
@@ -235,12 +303,12 @@ def test_the_golden_it_wrote_passes_and_a_changed_verdict_or_p_fail_then_fails(t
     acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
     ok = acc.check_golden(run_dict(tmp_path, report(run="other", machine={})), g, MISSION, False)
     assert ok["ok"] and "3 verdicts and P(fail) agree with g.json" in ok["detail"]
-    flipped = report(vehicles={"gl": dict(stat("MARGINAL", 1, 40), cls="glider", platform="slocum"), "usv": report()["vehicles"]["usv"]})
+    flipped = report(vehicles={"gl": report()["vehicles"]["gl"], "usv": dict(stat("MARGINAL", 30, 40), cls="usv", platform="saildrone")})
     bad = acc.check_golden(run_dict(tmp_path, flipped), g, MISSION, False)
-    assert not bad["ok"] and "verdict 'GO' in the reference, 'MARGINAL' now" in bad["detail"]
-    moved = report(links={"rf": stat("MARGINAL", 20, 40)})
-    bad = acc.check_golden(run_dict(tmp_path, moved), g, MISSION, False)
-    assert not bad["ok"] and "links rf: P(fail) 0.5000 is outside" in bad["detail"]
+    assert not bad["ok"] and "verdict 'NO-GO' in the reference, 'MARGINAL' now" in bad["detail"]
+    shifted = report(links={"rf": stat("MARGINAL", 30, 40)})
+    bad = acc.check_golden(run_dict(tmp_path, shifted), g, MISSION, False)
+    assert not bad["ok"] and "links rf: P(fail) 0.7500 now against 0.2500" in bad["detail"]
 
 
 def test_many_golden_problems_are_listed_with_a_count_and_a_run_without_a_report_fails(tmp_path):
@@ -267,12 +335,41 @@ def test_normalize_removes_the_run_specific_fields_and_the_run_directory_path(tm
     assert "run" in ra and "wall_s" in ra["machine"]                                    # the input is not modified
 
 
-def test_normalize_drops_what_the_wall_clock_decides_and_keeps_what_the_verdicts_are_made_of(tmp_path):
-    n = acc.normalize(report(), tmp_path)
-    assert "emulator" not in n and "vehicles" not in n["stage3"] and "fix" not in n["vehicles"]["gl"] and n["stage3"]["refit"] == dict(gl=dict(used=False))
-    assert n["receipts"] == [dict(id="stage1b:output:res.pkl", stage="stage1b", sha256="aa"), dict(id="stage3:output:windows.json", stage="stage3")]
+def test_normalize_drops_only_the_query_time_and_the_run_directory_and_keeps_stage3_the_emulator_and_the_fixes(tmp_path):
+    rec = [dict(id="stage1b:output:res.pkl", stage="stage1b", sha256="aa"), dict(id=acc.HOLDOUT, stage="emulator", sha256="cc"),
+           dict(id=acc.CREDIBILITY, stage="report", sha256="dd")]
+    emu = dict(vehicles=dict(glider=dict(trained=True, acceptance=dict(query_ms=3.0, query_ok=True)), usv=dict(trained=False)))
+    n = acc.normalize(report(emulator=emu, receipts=rec), tmp_path)
+    assert n["stage3"]["vehicles"] == dict(gl=[dict(coefficients=dict(cd=1.0))]) and n["vehicles"]["gl"]["fix"] == dict(found=False)
+    assert n["emulator"]["vehicles"] == dict(glider=dict(trained=True, acceptance=dict(query_ok=True)), usv=dict(trained=False))
+    assert n["receipts"] == [rec[0], dict(id=acc.HOLDOUT, stage="emulator"), dict(id=acc.CREDIBILITY, stage="report")]      # no credibility.json here
     assert n["vehicles"]["gl"]["verdict"] == "GO" and n["vehicles"]["usv"]["p_fail"]["value"] == 0.75 and n["links"]["rf"]["verdict"] == "MARGINAL"
     assert acc.normalize(dict(mission={}), tmp_path) == dict(mission={})
+
+
+def test_normalize_hashes_credibility_json_without_its_run_directory(tmp_path):
+    rec = [dict(id=acc.CREDIBILITY, stage="report", sha256="dd")]
+    shas = []
+    for name, body in (("a", "x"), ("b", "x"), ("c", "y")):
+        d = tmp_path / name
+        (d / "report").mkdir(parents=True)
+        (d / "report" / "credibility.json").write_text(json.dumps(dict(run=name, evidence=f"{d}/ledger.json", text=body)))
+        shas.append(acc.normalize(report(receipts=rec), d)["receipts"][0]["sha256"])
+    assert shas[0] == shas[1] != shas[2] and len(shas[0]) == 64
+
+
+def test_every_run_gets_its_own_copy_of_the_pristine_emulator_table(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: seen.append(argv) or 1)
+    table = tmp_path / "pristine.parquet"
+    table.write_bytes(b"rows")
+    for name in ("quick", "quick_same"):
+        acc.run_one(MISSION, name, "quick", 0, tmp_path / "o", table=table)
+    own = [pathlib.Path(a[a.index("--emulator-table") + 1]) for a in seen]
+    assert own[0] != own[1] and all(p.name == "train.parquet" and p.read_bytes() == b"rows" for p in own)
+    acc.run_one(MISSION, "quick_seed", "quick", 0, tmp_path / "o")                       # no shared table yet: its own path, empty
+    fresh = pathlib.Path(seen[-1][seen[-1].index("--emulator-table") + 1])
+    assert fresh.parent.is_dir() and not fresh.exists() and fresh.parent.parent.name == "quick_seed"
 
 
 def test_identical_reports_pass_the_same_seed_check_and_a_changed_number_fails_it(tmp_path):
@@ -308,13 +405,13 @@ def test_a_different_seed_passes_when_verdicts_hold_and_p_fail_stays_in_the_firs
 
 def test_a_different_seed_fails_when_a_verdict_changes_or_p_fail_leaves_the_interval(tmp_path):
     a = run_dict(tmp_path, report(seed=7))
-    changed = {"gl": dict(stat("MARGINAL", 2, 40), cls="glider", platform="slocum"), "usv": report()["vehicles"]["usv"]}
+    changed = {"gl": report()["vehicles"]["gl"], "usv": dict(stat("MARGINAL", 30, 40), cls="usv", platform="saildrone")}
     flipped = run_dict(tmp_path, report(seed=8, vehicles=changed), name="c", seed=8)
     bad = acc.check_other_seed(a, flipped)
-    assert not bad["ok"] and "verdict 'GO' in the reference, 'MARGINAL' now" in bad["detail"]
-    far = run_dict(tmp_path, report(seed=8, links={"rf": stat("MARGINAL", 20, 40)}), name="d", seed=8)
+    assert not bad["ok"] and "verdict 'NO-GO' in the reference, 'MARGINAL' now" in bad["detail"]
+    far = run_dict(tmp_path, report(seed=8, links={"rf": stat("MARGINAL", 30, 40)}), name="d", seed=8)
     bad = acc.check_other_seed(a, far)
-    assert not bad["ok"] and "links rf: P(fail) 0.5000 is outside" in bad["detail"]
+    assert not bad["ok"] and "links rf: P(fail) 0.7500 now against 0.2500" in bad["detail"]
 
 
 # ---------------------------------------------------------------------------------------------------------------- the broken configuration
@@ -382,7 +479,7 @@ class Fake:
         monkeypatch.setattr(acc, "run_one", self.run_one)
         monkeypatch.setattr(receipts, "run", lambda *a, **k: ([row(acc.WAVE_MODULE)], 0) if k.get("broken") else ([], 0))
 
-    def run_one(self, mission, name, b, g, out, seed=None):
+    def run_one(self, mission, name, b, g, out, seed=None, table=None):
         self.calls.append((name, b, g, seed))
         gpu = g > 0
         label = "GPU LES windows" if gpu else "CPU fallback: XLB-JAX <coarse>"
@@ -514,7 +611,6 @@ def _ci(mp, ci_env, tmp_path_factory):
         mp.setattr(m, "DATA", ci_env.data)
     mp.setenv("CAFE_DATA", str(ci_env.data))
     mp.setattr(budget, "plan", small_budget(budget.plan))
-    mp.setitem(budget.EMULATOR_VARIANTS, "ci", 0)          # the synthetic box is small: a moved glider variant can leave it, which GriddedEnv refuses
     fake_module(mp, "cafe.pm.stage3.pipeline_windows", run=Rows().run)
     mp.setattr(acc, "RUNS", dict(quick=("ci", 0), overnight=("ci", 0), gpu=("ci", 1)))
     out = tmp_path_factory.mktemp("acc")
@@ -530,7 +626,7 @@ def _ci(mp, ci_env, tmp_path_factory):
         out = pathlib.Path(argv[argv.index("--out") + 1])
         key = (argv[argv.index("--gpus") + 1], argv[argv.index("--seed") + 1] if "--seed" in argv else None)
         if out.name == "overnight":                                                                      # same inputs as quick: not run twice
-            shutil.copytree(done[("0", None)], out)
+            shutil.copytree(done[("0", None)], out, dirs_exist_ok=True)                                 # run_one made its emulator_table dir
             return 0
         with open(log, "w") as f, contextlib.redirect_stdout(f):
             rc = cli.main(argv)
@@ -589,18 +685,21 @@ def test_the_golden_written_from_a_real_report_passes_and_a_changed_verdict_or_p
     assert not acc.check_golden(q, g, MISSION, True)["ok"]
     ok = acc.check_golden(q, g, MISSION, False)
     assert ok["ok"], ok
+    vid = next(iter(json.loads(g.read_text())["summary"]["vehicles"]))
+    sure = copy.deepcopy(q)                                                  # the CI fixture has too few members to decide anything: make one vehicle decided
+    e = sure["report"]["vehicles"][vid]
+    e.update(verdict="GO")
+    e["k_fail"]["value"], e["n"]["value"], e["p_fail"]["value"] = 0, 1000, 0.0
+    assert not acc.check_golden(sure, g, MISSION, True)["ok"] and acc.check_golden(sure, g, MISSION, False)["ok"]
     rec = json.loads(g.read_text())
-    vid = next(iter(rec["summary"]["vehicles"]))
-    v = rec["summary"]["vehicles"][vid]
     flipped = copy.deepcopy(rec)
-    flipped["summary"]["vehicles"][vid]["verdict"] = "NO-GO" if v["verdict"] != "NO-GO" else "GO"
+    flipped["summary"]["vehicles"][vid]["verdict"] = "NO-GO"
     g.write_text(json.dumps(flipped))
-    bad = acc.check_golden(q, g, MISSION, False)
+    bad = acc.check_golden(sure, g, MISSION, False)
     assert not bad["ok"] and f"vehicles {vid}: verdict" in bad["detail"]
-    zero = copy.deepcopy(rec)
-    zero["summary"]["vehicles"][vid].update(k_fail=0, p_fail=0.0)
-    g.write_text(json.dumps(zero))
-    q2 = copy.deepcopy(q)
-    q2["report"]["vehicles"][vid]["p_fail"]["value"] = 1.0
-    bad = acc.check_golden(q2, g, MISSION, False)
-    assert not bad["ok"] and f"vehicles {vid}: P(fail) 1.0000 is outside" in bad["detail"]
+    g.write_text(json.dumps(rec))
+    far = copy.deepcopy(sure)
+    far["report"]["vehicles"][vid]["p_fail"]["value"] = 1.0
+    far["report"]["vehicles"][vid]["k_fail"]["value"] = 1000
+    bad = acc.check_golden(far, g, MISSION, False)
+    assert not bad["ok"] and f"vehicles {vid}: P(fail) 1.0000 now against 0.0000" in bad["detail"]

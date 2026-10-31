@@ -1,6 +1,6 @@
 """python -m cafe.pm <command>  (bin/run_premission is `python -m cafe.pm run`)
 
-    run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--out DIR] [--fresh] [--seed S]   the whole pipeline, resumable
+    run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--out DIR] [--fresh] [--seed S] [--emulator-table FILE]   the whole pipeline, resumable
     fetch     --mission M                    ingest only (orca + ocean into the cache)
     validate  --mission M                    schema and cross-checks, nothing run
     plan      --mission M --budget B --gpus N   what the budget buys on this machine
@@ -12,6 +12,7 @@
     receipts  [--broken YAML] [--slow] [--only NAME,..] [--json OUT]   every receipt (app + pre-mission) as one table; see cafe/pm/receipts.py
     acceptance --mission M --gpus N --out DIR [--golden FILE] [--update-golden] [--skip-overnight]
                                              BRIEF 5.3: quick + overnight (+ 4h), golden diff, reproducibility, broken config; see cafe/pm/acceptance.py
+                                             (verdicts identical where decided; P(fail) by Newcombe's difference interval, Bonferroni 95 %)
 """
 from __future__ import annotations
 
@@ -36,6 +37,12 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--fresh", action="store_true", help="ignore existing checkpoints")
         if name == "run":
             p.add_argument("--seed", type=int, default=None, help="use this seed, not the mission's (kept in plan.json and mission.yaml; in the resume hash)")
+            p.add_argument("--emulator-table", default=None, metavar="FILE",
+                           help="the emulator's training table (default $CAFE_EMULATOR_TABLE, else $CAFE_DATA/emulator/train.parquet). The run trains on a "
+                                "copy of it taken when the emulator stage starts (named in that stage's ledger with its sha256) and appends its own rows "
+                                "afterwards, so a run's emulator depends only on the table it started from. To make runs comparable (acceptance, a "
+                                "same-seed check), copy the table once and give every run its own copy of that file: runs that share a table "
+                                "see each other's rows")
     p = sub.add_parser("report")
     p.add_argument("--run", required=True)
     p.add_argument("--open", action="store_true", help="open the report in a browser when there is a display, else just print its path")
@@ -58,7 +65,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--slow", action="store_true", help="also run the slow receipts instead of reading their stored results")
     p.add_argument("--only", default=None, help="comma-separated parts of receipt-group names to run")
     p.add_argument("--json", default=None, help="where to write the table (default runs/receipts.json, runs/receipts_broken.json with --broken)")
-    p = sub.add_parser("acceptance")
+    p = sub.add_parser("acceptance", description=(
+        "BRIEF 5.3 gates. Two independent runs agree when every verdict that is decided in either (its 95 % P(fail) interval wholly inside GO or "
+        "NO-GO) is identical, and Newcombe's interval for the P(fail) difference contains 0 at a family-wise 95 % (Bonferroni over the vehicles "
+        "and links). A verdict that changes while undecided in both is allowed and named. The same-seed check is exact equality."))
     p.add_argument("--mission", required=True)
     p.add_argument("--gpus", type=int, default=0)
     p.add_argument("--out", required=True, help="where the runs, receipts and acceptance.json go (each run in its own subdirectory, removed first)")
@@ -89,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
             bud = getattr(a, "budget", "quick")
             out = pathlib.Path(a.out or f"runs/{m['name']}/{bud}")
             ctx = pipeline.run(a.mission, bud, getattr(a, "gpus", 0), out, resume=not a.fresh, stop_after="ingest" if a.cmd == "fetch" else None,
-                               seed=getattr(a, "seed", None))
+                               seed=getattr(a, "seed", None), emulator_table=getattr(a, "emulator_table", None))
             if a.cmd == "run":
                 print(f"report: {ctx.run_dir / 'report' / 'index.html'}")
         else:
@@ -176,7 +186,7 @@ def _whatif(a: argparse.Namespace) -> int:
     else:
         print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {a.budget} budget")
     cls = set(stage1._classes(m).values())
-    ems = whatif.train(pipeline.DATA / "emulator" / "train.parquet", cls)
+    ems = whatif.train(pipeline.emulator_table(), cls)
     ans = whatif.answer(m, ops, base, tracks, ctx.env, ems, ctx.plan, fitted, scales, only=a.vehicle)
     what = [f"{ops['shift_h']:+g} h" if a.shift else "", f"{ops['dlon']:+g} deg lon, {ops['dlat']:+g} deg lat" if a.move else "",
             f"drop {', '.join(a.drop)}" if a.drop else ""]

@@ -114,11 +114,12 @@ class Emulator:
         d = x.shape[1]
         m: Any
         if levels:
-            m = MFK(print_global=False, theta0=[1.0] * d, n_start=3)  # type: ignore[no-untyped-call]  # smt's surrogate classes are unannotated
+            m = MFK(print_global=False, theta0=[1.0] * d, n_start=3, seed=self.seed)  # type: ignore[no-untyped-call]  # smt's surrogate classes are unannotated
             m.set_training_values(levels[0][0], levels[0][1], name=0)
             m.set_training_values(levels[1][0], levels[1][1])
         else:
-            kw = dict(print_global=False, noise0=[self.noise], n_start=3, hyper_opt="Cobyla")
+            # SMT draws its random starts from `seed`; left None, every fit is a different draw
+            kw = dict(print_global=False, noise0=[self.noise], n_start=3, hyper_opt="Cobyla", seed=self.seed)
             m = KPLS(n_comp=3, theta0=[1.0] * 3, **kw) if d > 10 else KRG(theta0=[1.0] * d, **kw)  # type: ignore[no-untyped-call]  # smt's surrogate classes are unannotated
             m.set_training_values(x, y)
         m.train()

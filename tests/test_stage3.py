@@ -17,6 +17,7 @@ from hypothesis import given, settings, strategies as st
 import jax.numpy as jnp
 
 import cafe.receipts as cr
+from cafe.pm import budget
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider as pg, uas, usv as pu
 from cafe.pm.stage3 import fluidx3d, freesurface as fs, lbm, nest, pipeline_windows as pw, refit, wallmodel as wm, windows as W
@@ -704,8 +705,10 @@ class FakeL:
         return bool(ok)
 
 
-def fake_ctx(tmp_path, budget=3e7, cpu=True, env=None, vehicles=VEHICLES, classes=CLASSES):
-    plan = dict(les=dict(cell_steps_per_window=budget, cpu_fallback=cpu, label="CPU fallback: toy", windows_per_vehicle=1))
+def fake_ctx(tmp_path, budget=3e7, cpu=True, env=None, vehicles=VEHICLES, classes=CLASSES, rate=1.0):
+    """A plan with no wall-clock budget (the windows get `budget` cell-steps per vehicle window, split between its parts); a test that gives it
+    shares and budget_s makes the windows' sizes the stage's share at `rate` cell-updates/s, which is tiny here so that they stay toy-sized."""
+    plan = dict(les=dict(cell_steps_per_window=budget, cpu_fallback=cpu, label="CPU fallback: toy", windows_per_vehicle=1, rate=rate))
     logs: list = []
     return SimpleNamespace(mission=dict(vehicles=vehicles), plan=plan, env=env or AnalyticEnv(wind=(6.0, 2.0), current=(0.3, 0.1)),
                            classes=classes, log=logs.append, run_dir=tmp_path, logs=logs)
@@ -855,9 +858,9 @@ def test_run_all_classes_rows_have_everything_and_nothing_unvalidated_is_ok(no_w
         for r in rows:
             assert "error" not in r, r.get("error")
             for k in ("t", "lon", "lat", "fluid", "resolution", "checks", "ok", "cd", "cd_spread", "cl", "cl_spread", "added_resistance", "cd_hangar",
-                      "cl_hangar", "cd_hangar_source", "fea", "label", "wall_s", "heading_source"):
+                      "cl_hangar", "cd_hangar_source", "fea", "label", "timing", "heading_source"):
                 assert k in r
-            assert np.isfinite(r["cd"]) and r["cd_hangar"] > 0 and r["wall_s"] > 0 and r["label"].startswith("CPU fallback")
+            assert np.isfinite(r["cd"]) and r["cd_hangar"] > 0 and r["timing"]["wall_s"] > 0 and r["label"].startswith("CPU fallback")
             if r["part"] != "hull_fs":                                          # interFoam has no wall-model receipt: its checks are the GCI's
                 assert r["resolution"]["dx"] > 0 and "budget_ok" in r["resolution"]
                 wall = [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]
@@ -960,7 +963,7 @@ def test_fea_failure_timeout_and_the_real_child_process(no_wall_receipt, monkeyp
     assert not r["fea"]["run"] and "FEA failed: RuntimeError: CalculiX failed: forced" in r["fea"]["reason"] and r["cd"] is not None
     monkeypatch.setattr(pw, "_spawn", slow)
     r = pw.run(fake_ctx(no_wall_receipt), {"g": [WIN]}, FakeL())["g"][0]
-    assert not r["fea"]["run"] and "killed after" in r["fea"]["reason"]
+    assert not r["fea"]["run"] and r["fea"]["reason"].startswith("killed: the FEA")
     # the real thing, once: a thin sphere shell through `python -m cafe.pm.stage3.pipeline_windows --fea`
     ball = W.Vehicle("ball", "water", 0.1, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.05, 0.05, 0.05))], material="al6061",
                      thickness=0.002, depth=0.0, extra=dict(fea=True))
@@ -969,7 +972,7 @@ def test_fea_failure_timeout_and_the_real_child_process(no_wall_receipt, monkeyp
     out = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=300)
     assert out["run"] and out["utilization"] > 0 and out["seconds"] > 0
     out2 = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=0.05)
-    assert not out2["run"] and "killed after" in out2["reason"]                  # a hard stop at the slice, however far gmsh/ccx got
+    assert not out2["run"] and out2["reason"].startswith("killed: the FEA")                  # a hard stop at the slice, however far gmsh/ccx got
 
 
 def test_run_flags_a_row_that_claims_ok_with_a_failing_check(no_wall_receipt, monkeypatch):
@@ -1000,31 +1003,33 @@ def test_refit_from_per_window_hangar_ratios():
 
 
 # ------------------------------------------------------------------ wall-clock budget and reasons
-def test_wall_hook_cuts_to_whole_chunks_from_the_measured_step_cost():
+def test_wall_hook_never_shortens_a_run_that_is_on_time_and_kills_one_that_overruns():
     log: dict = {}
     h = W.wall_hook(1000, 100, 20.0, 5000, log)
     assert h(100, 8.0) == 1000 and log["cut_reason"] is None and log["cells_per_s"] is None      # chunk 1 holds the compile: no rate yet
-    # chunk 2 took 2 s for 100 steps -> 0.02 s/step; 10 s left -> 500 more steps
-    assert h(200, 10.0) == 700 and log["run_steps"] == 700 and "projects past the 20 s" in log["cut_reason"]
+    # chunk 2 took 2 s for 100 steps: the rate is measured and reported, but 800 more steps would end at 26 s and that projection cuts nothing
+    assert h(200, 10.0) == 1000 and log["run_steps"] == 1000 and log["cut_reason"] is None and log["killed"] is False
     assert log["cells_per_s"] == pytest.approx(5000 / 0.02) and log["compile_s"] == pytest.approx(6.0)
-    assert h(300, 12.0) == 700                                                  # the box got no slower: the same end
-    assert h(400, 30.0) == 400 and log["run_steps"] == 400                      # a busy box: the budget is already spent, stop at once
-    fast = W.wall_hook(300, 100, 100.0, 1000, {})
-    fast(100, 1.0)
-    assert fast(200, 1.5) == 300                                                # room to spare: the planned run
+    assert h(300, 19.9) == 1000                                                 # 0.1 s inside the slice: on time
+    assert h(400, 20.0) == 400 and log["run_steps"] == 400 and log["killed"] and "killed after 400 of 1000 steps" in log["cut_reason"]
+    done = W.wall_hook(300, 100, 5.0, 10, {})
+    done(100, 1.0)
+    done(200, 2.0)
+    assert done(300, 9.0) == 300                                                # past the slice but finished: nothing to kill
     log2: dict = {}
-    assert W.wall_hook(1000, 100, 5.0, 10, log2)(100, 9.0) == 100 and "XLA compile 9 s" in log2["cut_reason"]
-    assert W.wall_hook(500, 100, None, 10, {})(100, 99.0) == 500                # no budget: never cut
+    assert W.wall_hook(1000, 100, 5.0, 10, log2)(100, 9.0) == 100 and log2["killed"] and "took 9 s" in log2["cut_reason"]     # the compile alone spent it
+    assert W.wall_hook(500, 100, None, 10, {})(100, 99.0) == 500                # no kill set: never cut
     odd = W.wall_hook(250, 100, 50.0, 10, {})
     odd(100, 3.0)
     odd(200, 4.0)
     assert odd(250, 6.0) == 250                                                 # a short last chunk (it recompiles) does not break the rate
 
 
-def test_run_window_under_a_wall_clock_budget_reports_what_it_cut():
+def test_run_window_under_a_wall_clock_kill_reports_what_it_stopped():
     sp = W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=1200, box=(2.0, 0.8, 0.8), chunk=100, wall_s=0.001)
     r = W.run_window(HULL, sp, _uniform([0, 0, 0]))
-    assert r["wall"]["run_steps"] == 100 == r["steps_run"] and r["wall"]["planned_steps"] == 1200 and "budget" in r["wall"]["cut_reason"]
+    assert r["wall"]["run_steps"] == 100 == r["steps_run"] and r["wall"]["planned_steps"] == 1200 and r["wall"]["killed"]
+    assert "killed after 100 of 1200 steps" in r["wall"]["cut_reason"]
     assert r["force"].shape == (100, 3) and r["wall"]["setup_s"] > 0 and not r["ok"]
 
 
@@ -1053,29 +1058,86 @@ def test_stage_share_and_reasons_for_every_check():
     assert pw.why_failed([], fine, {}) == []                                       # fine grid, nothing failed: no reason
 
 
-def test_a_spent_budget_gives_reasoned_not_run_rows_and_a_tight_one_a_coarser_cut_row(no_wall_receipt, monkeypatch):
-    cheap(monkeypatch, fea_min_s=1e9)                                              # no slice is ever long enough for the FEA
+def test_a_share_too_small_for_any_window_gives_reasoned_not_run_rows_decided_by_the_plan(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
     ctx = fake_ctx(no_wall_receipt)
     ctx.plan.update(shares=dict(stage3=0.35), budget_s=10.0)                       # 3.5 s for 5 windows: 0.7 s each, below min_window_s
     L = FakeL()
     out = pw.run(ctx, {v: [WIN] for v in CLASSES}, L)
     rows = [r for rs in out.values() for r in rs]
     assert len(rows) == 6 and all(not r["ok"] and r["cd"] is None and r["reasons"] for r in rows)
-    assert all("wall-clock budget is spent" in r["reasons"][0] for r in rows if r["part"] != "hull_fs")
+    assert all(r["reasons"][0].startswith("not run: the stage-3 share of this --budget is 4 s for 5 LES windows, 0.7 s each")
+               and "use a larger --budget" in r["reasons"][0] for r in rows if r["part"] != "hull_fs")
     assert [r for r in rows if r["part"] == "hull_fs"][0]["reasons"][0].startswith("free-surface window not run: estimated")     # priced, not started
     assert L.checks["every_failed_window_states_a_reason"][0] and L.checks["every_window_attempted"][0]
     assert L.checks["stage_held_its_wall_clock_share"][0]                           # nothing ran: no overrun
-    # a slice that fits one window: the row says what it cut, FEA is skipped when its time is gone, the share is held (+10 %)
-    ctx2 = fake_ctx(no_wall_receipt)
-    ctx2.plan.update(shares=dict(stage3=1.0), budget_s=40.0)
-    L2 = FakeL()
-    out2 = pw.run(ctx2, {"g": [WIN]}, L2)
-    r = out2["g"][0]
-    assert "error" not in r and r["resolution"]["planned_steps"] >= r["resolution"]["run_steps"] > 0 and r["wall_share_s"] == pytest.approx(40.0, rel=0.05)
-    assert r["resolution"]["cells_per_s_planned"] is None or r["resolution"]["cells_per_s_measured"] is not None
-    assert r["reasons"] and all(isinstance(x, str) and len(x) > 10 for x in r["reasons"]) and any("wall model unvalidated" in x for x in r["reasons"])
-    assert not r["fea"]["run"] and r["fea"]["reason"].startswith("skipped:")
-    assert L2.checks["stage_held_its_wall_clock_share"][1] <= 1.1 * 40.0 + 5.0      # +5 s: one compile of slack at toy size on a loaded box
+
+
+def slow_clock(monkeypatch, factor):
+    """Every module that times a window sees time pass `factor` times faster."""
+    real, t0 = time.perf_counter, time.perf_counter()
+    fake = SimpleNamespace(perf_counter=lambda: t0 + factor * (real() - t0), time=lambda: t0 + factor * (real() - t0), sleep=time.sleep)
+    for m in (pw, nest, W):
+        monkeypatch.setattr(m, "time", fake)
+
+
+def untimed(rows):
+    """The rows as stage 3 hashes them: without `timing`."""
+    return {v: [{k: x for k, x in r.items() if k != "timing"} for r in rs] for v, rs in rows.items()}
+
+
+def toy_g_ctx(tmp, share_s):
+    """One glider and a share of `share_s`: its window gets (share - FEA reserve - compile) / 1.5 seconds at 2000 cell-updates/s, a few 10^6 cells x steps."""
+    ctx = fake_ctx(tmp, vehicles=VEHICLES[:1], classes=dict(g="glider"), rate=2000.0)
+    ctx.plan.update(shares=dict(stage3=1.0), budget_s=share_s)
+    return ctx
+
+
+def test_the_sizes_of_a_window_come_from_the_plan_and_are_unchanged_when_the_clock_runs_ten_times_slower(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
+    ctx = toy_g_ctx(no_wall_receipt, 2000.0)
+    want = budget.stage3_plan(ctx.plan, ctx.classes, pw.assumptions())["cell_steps_per_part"]["glider"]
+    assert want == pytest.approx(2000.0 * (2000.0 - 0.25 * 2000.0 - 10.0) / 1.5)
+    fast = pw.run(ctx, {"g": [WIN]}, FakeL())
+    slow_clock(monkeypatch, 10.0)
+    slow = pw.run(toy_g_ctx(no_wall_receipt, 2000.0), {"g": [WIN]}, FakeL())
+    f, s = fast["g"][0], slow["g"][0]
+    assert "error" not in f and f["resolution"]["cell_steps_budget_plan"] == s["resolution"]["cell_steps_budget_plan"] == pytest.approx(want)
+    assert s["timing"]["wall_s"] > 5 * f["timing"]["wall_s"] / 2                       # the clock really was slower
+    assert f["resolution"]["cut_reason"] is None and s["resolution"]["cut_reason"] is None
+    assert untimed(fast) == untimed(slow)                                              # dx, cells, steps, coefficients, checks, FEA: all alike
+    assert f["fea"]["run"] and f["fea"]["utilization"] > 0
+
+
+def test_a_clock_so_slow_that_the_slice_is_spent_kills_the_window_and_the_row_says_so(no_wall_receipt, monkeypatch):
+    import subprocess
+    cheap(monkeypatch)
+
+    def spawn(cmd, **kw):  # the real child is killed at its timeout; the in-process stand-in is told to
+        if kw["timeout"] is not None and kw["timeout"] <= 0:
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+        return in_process_fea(cmd, **kw)
+    monkeypatch.setattr(pw, "_spawn", spawn)
+    ctx = toy_g_ctx(no_wall_receipt, 2000.0)
+    w2 = dict(WIN, t=WIN["t"] + 3600.0)
+    ok = pw.run(ctx, {"g": [WIN, w2]}, FakeL())["g"]
+    slow_clock(monkeypatch, 1e5)                                                       # one chunk of 100 steps takes longer than the whole share
+    ctx2 = toy_g_ctx(no_wall_receipt, 2000.0)
+    L = FakeL()
+    killed, never = pw.run(ctx2, {"g": [WIN, w2]}, L)["g"]
+    assert ok[0]["resolution"]["run_steps"] == ok[0]["resolution"]["planned_steps"]
+    assert not killed["ok"] and killed["reasons"][0].startswith("killed after 100 of ") and killed["resolution"]["run_steps"] == 100
+    assert killed["resolution"]["planned_steps"] == ok[0]["resolution"]["planned_steps"]    # it was sized exactly as before; only its end changed
+    assert not never["ok"] and never["cd"] is None and never["reasons"][0].startswith("killed before it started: the stage-3 wall-clock share was spent")
+    assert not killed["fea"]["run"] and killed["fea"]["reason"].startswith("killed: the FEA")
+    assert not L.checks["stage_held_its_wall_clock_share"][0]                          # the stage says it overran
+
+
+def test_a_small_slice_runs_the_plans_size_and_the_fea_is_planned_out_when_its_reserve_is_below_the_minimum(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch, fea_min_s=1e9)
+    ctx = toy_g_ctx(no_wall_receipt, 40.0)
+    r = pw.run(ctx, {"g": [WIN]}, FakeL())["g"][0]
+    assert not r["fea"]["run"] and r["fea"]["reason"].startswith("not planned: the FEA reserve is 10.0 s of a 40.0 s slice, below stage3.fea_min_s")
 
 
 def test_viscosity_floor_is_reported_by_the_window_and_fails_the_row(no_wall_receipt, monkeypatch):
@@ -1230,6 +1292,22 @@ def test_the_share_decides_whether_a_free_surface_case_runs_and_a_second_one_que
     assert 0.0 < float(FS["spawned"][0]["cmd"][-1]) <= 3.0 * need + 5.0                 # the child's own deadline lies inside the share
 
 
+def test_the_free_surface_go_no_go_is_the_plans_and_does_not_depend_on_the_clock(no_wall_receipt, monkeypatch):
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    a = pw.assumptions()
+    need = fs.estimate(6, a["fs.snappy_cell_factor"], a["fs.cost_factor"], a["fs.mesh_s_per_cell"])["total_s"] * a["fs.margin"]
+    for factor in (1.0, 200.0):                                                          # a second to spare: the old rule spent it on the clock
+        FS["spawned"].clear()
+        slow_clock(monkeypatch, factor)
+        r = fs_rows(no_wall_receipt, monkeypatch, ctx=plan_with(fake_ctx(no_wall_receipt, budget=2e6), need + 1.0))[-1]
+        assert r["ok"] and len(FS["spawned"]) == 1, factor
+    for factor in (1.0, 200.0):                                                          # a second short: no, whatever the clock
+        FS["spawned"].clear()
+        slow_clock(monkeypatch, factor)
+        r = fs_rows(no_wall_receipt, monkeypatch, ctx=plan_with(fake_ctx(no_wall_receipt, budget=2e6), need - 1.0))[-1]
+        assert not r["ok"] and r["reasons"][0].startswith("free-surface window not run: estimated") and FS["spawned"] == [], factor
+
+
 def test_the_named_budgets_quick_does_not_fit_a_free_surface_window_and_overnight_fits_one(no_wall_receipt, monkeypatch):
     from cafe.pm import budget
     monkeypatch.setenv("CAFE_NPROC", "6")
@@ -1248,12 +1326,12 @@ def test_the_named_budgets_quick_does_not_fit_a_free_surface_window_and_overnigh
 def test_the_hull_fs_row_failures_are_rows_with_reasons(no_wall_receipt, monkeypatch, tmp_path):
     import subprocess
     ctx, a, P, veh, case = fs_case(no_wall_receipt)
-    base = pw._base(ctx, WIN, "hull_fs", None)
+    base = pw._base(ctx, WIN, "hull_fs")
     geo = dict(draft=2.55, length=6.5, area=20.0, wetted_hull_m2=8.4)
     seen: list = []
 
     def out(cmd, R=1000.0, gci=0.05):
-        res = dict(speeds={"2.5": dict(resistance=R, gci=gci, lift=None, std=None)}, cells=3, coarse_cells=1, source="interfoam")
+        res = dict(speeds={"2.5": dict(resistance=R, gci=gci, lift=None, std=1.0)}, cells=3, coarse_cells=1, source="interfoam")  # std 0.1 % of R: converged
         pathlib.Path(cmd[-2]).write_text(json.dumps(res))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 

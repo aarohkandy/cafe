@@ -288,18 +288,23 @@ stage3.fea_reserve_frac:
 stage3.fea_min_s:
   value: 8.0
   unit: "s"
-  why: "Least slice left after the LES for the FEA of the pressure hull to start (gmsh + ccx on a coarse shell mesh)."
+  why: "Least FEA reserve (stage3.fea_reserve_frac of a slice) at which the FEA of the pressure hull is planned to run at all (gmsh + ccx on a coarse shell mesh)."
   replace_with: "Measured FEA time."
 stage3.chunk_steps:
   value: 100
   unit: "steps"
-  why: "Steps per jitted chunk: the wall-clock hook decides after each chunk; every other chunk length is another XLA compile."
+  why: "Steps per jitted chunk: the wall-clock safety kill is checked after each chunk; every other chunk length is another XLA compile."
   replace_with: "Larger on a GPU, where a chunk of 100 steps is milliseconds."
 stage3.compile_s_guess:
   value: 10.0
   unit: "s"
-  why: "XLA compile of one window's scan kernel on a 2-CPU box under load (measured 10 s in the CI run); planning subtracts it from a window's wall-clock slice before the first measurement replaces it."
+  why: "XLA compile of one window's scan kernel on a 2-CPU box under load (measured 10 s in the CI run); planning subtracts it from a window's wall-clock slice (budget.stage3_plan). It is a plan input, never replaced by a measurement, so two runs size their windows alike."
   replace_with: "The measured compile time of the machine, or a warm persistent cache (0 s)."
+stage3.les_margin:
+  value: 1.5
+  unit: "-"
+  why: "A window's cells x steps are planned to finish in 1/1.5 of its wall-clock slice (after the compile and the FEA reserve) at the benchmarked LBM rate. The wall clock is only a safety kill, so a box 1.5 times slower than the bench still finishes every window; a slower one has its window killed, and the row says so."
+  replace_with: "The spread of measured-to-benchmarked LBM rate over several windows on the lab machine."
 stage3.nu_lat_floor:
   value: 1.0e-4
   unit: "lattice units"

@@ -15,8 +15,11 @@ outputs are unchanged. Stage products live next to the ledgers:
     run_dir/stage1b/summary.json, res.pkl the rerun with the refit multipliers (a copy of stage 1 when nothing was refit)
     run_dir/emulator/holdout.json         per vehicle: its class's emulator hold-out scores and acceptance, or why it is not trained
     run_dir/emulator/flip.json            per non-GO vehicle: the smallest mission change that flips the verdict (emulator-first), what was tried
-    run_dir/emulator/design.json          the variant runs added to the training table and the budget they used
-    $CAFE_DATA/emulator/train.parquet     the training table, one row per vehicle per Stage-1 run (cafe.pm.whatif); outside the run, so not a ledger input
+    run_dir/emulator/design.json          the variant runs added to the training table (and those skipped, with why) and the budget they used
+    run_dir/emulator/train_input.parquet  the training table as the emulator stage found it, minus this run's own rows: what the emulator trains on
+                                          (plus this run's rows); a ledger input, so the emulator is a function of a hashed input
+    $CAFE_DATA/emulator/train.parquet     the shared training table, one row per vehicle per Stage-1 run (cafe.pm.whatif); this run appends to it
+                                          after training, so it never changes this run's emulator (`run --emulator-table` / $CAFE_EMULATOR_TABLE names another)
     run_dir/report/index.html, report.json
 """
 from __future__ import annotations
@@ -53,11 +56,16 @@ def code_digest() -> str:
     return h.hexdigest()
 
 
+def emulator_table(explicit: str | pathlib.Path | None = None) -> pathlib.Path:
+    """The emulator's training table: `explicit` (`run --emulator-table`), else $CAFE_EMULATOR_TABLE, else $CAFE_DATA/emulator/train.parquet."""
+    return pathlib.Path(explicit or os.environ.get("CAFE_EMULATOR_TABLE") or DATA / "emulator" / "train.parquet")
+
+
 class Context:
     """What the stages share: the mission, the plan, where things live, and the environment (built once, lazily)."""
 
     def __init__(self, mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: str | pathlib.Path,
-                 log: Callable[[str], None] = print, seed: int | None = None) -> None:
+                 log: Callable[[str], None] = print, seed: int | None = None, emulator_table: str | pathlib.Path | None = None) -> None:
         self.mission_path = pathlib.Path(mission_path)
         self.mission = load_mission(mission_path)
         if seed is not None:
@@ -69,6 +77,9 @@ class Context:
         self.plan = budget.plan(budget_name, gpus, self.mission, vehicle_classes=self.classes)
         if seed is not None:
             self.plan["seed_override"] = seed
+        self.plan["stage3"] = budget.stage3_plan(self.plan, self.classes, budget.stage3_assumptions())     # every size the stages use, so plan.json shows them
+        self.plan["emulator"] = budget.emulator_plan(self.plan)
+        self._table = emulator_table
         self.hash = digest(dict(mission=self.mission, budget=budget_name, gpus=gpus, code=code_digest()))
         self._env: GriddedEnv | None = None
 
@@ -87,6 +98,11 @@ class Context:
                 sig.update(json.loads(fit.read_text()))
             self._env = GriddedEnv(self.cache, sig, ocean=ocean(self), subgrid=sub)
         return self._env
+
+    @property
+    def table(self) -> pathlib.Path:
+        """The training table this run reads and appends to (see `emulator_table`)."""
+        return emulator_table(self._table)
 
     def path(self, *parts: str) -> pathlib.Path:
         p = self.run_dir.joinpath(*parts)
@@ -373,6 +389,7 @@ def _stage1(ctx: Context, L: Ledger, name: str, scales: dict[str, Any] | None = 
     res = r.pop("res")
     for v in res["vehicles"].values():
         v.pop("sim", None)
+        v.pop("wall_s", None)                                            # a timing: res.pkl is hashed (the report's receipts) and must not carry it
     with open(ctx.path(name, "res.pkl"), "wb") as f:
         pickle.dump(res, f)
     L.output(ctx.path(name, "res.pkl"))
@@ -426,6 +443,8 @@ def s_stage3(ctx: Context, L: Ledger) -> None:
     wins = json.loads(ctx.path("windows", "windows.json").read_text())
     L.input(ctx.path("windows", "windows.json"))
     rows = pipeline_windows.run(ctx, wins, L)
+    timing = {vid: [r.pop("timing", None) for r in rs] for vid, rs in rows.items()}      # seconds and measured rates: in the ledger, not in the hashed output
+    L.note("window timings (not part of the hashed output): " + json.dumps(timing, default=ledger._jsonable))
     L.output(_dump(rows, ctx.path("stage3", "windows.json")))
 
 
@@ -472,21 +491,14 @@ def s_stage1b(ctx: Context, L: Ledger) -> None:
     _stage1(ctx, L, "stage1b", scales=scales)
 
 
-def _variant_cost(ctx: Context, n_members: int) -> tuple[float, str]:
-    """Seconds one variant run (a batch of every vehicle) is expected to take: this run's measured stage-1 wall time per batch when its ledger
-    has one, else the planner's estimate from the measured per-vehicle costs. -> (seconds, where it came from)."""
-    p = ctx.run_dir / "checkpoints" / "stage1" / "ledger.json"
-    wall = json.loads(p.read_text()).get("wall_s") if p.is_file() else None
-    if wall:
-        return wall / max(-(-n_members // ctx.plan["batch"]), 1), "this run's stage-1 wall time per batch"
-    return budget.batch_cost_s(ctx.plan), "the planner's estimate"
-
-
 def s_emulator(ctx: Context, L: Ledger) -> None:
-    """The mission-level emulator (BRIEF 2.7): append this run's per-vehicle Stage-1 rows to $CAFE_DATA/emulator/train.parquet, grow the table
-    with Stage-1 runs of a few mission variants (deploy shifts, small moves, lower duty) inside the stage's budget share, fit one emulator
-    per vehicle class when the table is large enough, score it on a 20 % hold-out, and search for the smallest change that flips each
-    verdict that is not GO. Writes emulator/holdout.json, flip.json and design.json."""
+    """The mission-level emulator (BRIEF 2.7): train on the training table as this stage found it (copied into the run and named as a ledger
+    input, minus this run's own earlier rows) plus this run's per-vehicle Stage-1 rows and the rows of a few mission variants (deploy shifts,
+    small moves, lower duty), fit one emulator per vehicle class when that is enough rows, score it on a 20 % hold-out, and search for the
+    smallest change that flips each verdict that is not GO. Then append this run's rows to the shared table, after training, so that two
+    runs from the same table make the same emulator. The number of variants is the plan's (plan.json emulator); the clock is only a kill
+    that stops the variants at the stage's whole share. A variant that leaves the environment data is skipped, with the reason.
+    Writes emulator/train_input, holdout.json, flip.json and design.json."""
     from . import whatif
     res = pickle.loads(ctx.path("stage1b", "res.pkl").read_bytes())
     for p in (ctx.path("stage1b", "res.pkl"), ctx.path("stage1b", "summary.json"), ctx.path("refit", "refit.json")):
@@ -501,29 +513,44 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     fid = {vid: int(vid in scales) for vid in res["vehicles"]}
     meta = dict(run_id=digest(str(ctx.run_dir.resolve()))[:12], mission=ctx.mission["name"], git_sha=ledger.git_sha(), code_digest=code_digest())
     rows = whatif.vehicle_rows(ctx.mission, res, ctx.env, fid, meta)
+    train_in, snap = whatif.snapshot(ctx.table, ctx.path("emulator", "train_input"), meta["run_id"])
+    L.input(snap, kind="emulator training table at the start of this stage (minus this run's rows)", source=str(ctx.table), rows=len(train_in))
+    sizes = budget.emulator_plan(ctx.plan)
     share = budget.emulator_share_s(ctx.plan, stage1b_free=not scales)
-    est, est_src = _variant_cost(ctx, len(res["U"]))
-    n_var = min(budget.EMULATOR_VARIANTS[ctx.plan["budget"]], int(whatif.TRAIN_FRAC * share // est) if est > 0 else 0)
+    est = sizes["variant_s"]
+    n_var = sizes["variants_refit" if scales else "variants_no_refit"]
     variants: list[dict[str, Any]] = []
-    t0 = time.time()
+    skipped: list[dict[str, Any]] = []
+    killed: dict[str, Any] | None = None
+    walls: list[float] = []
+    t0 = time.perf_counter()
     for k, mods in enumerate(whatif.design(ctx.mission, n_var, seed)):
-        if time.time() - t0 + est > whatif.TRAIN_FRAC * share:
+        if time.perf_counter() - t0 > share:                              # the safety kill: the whole stage share is gone
+            killed = dict(at_variant=k, planned=n_var, reason=f"killed: the variant runs spent the emulator stage's whole wall-clock share ({share:.0f} s) "
+                                                              f"before variant v{k} of {n_var}")
             break
-        a = time.time()
+        a = time.perf_counter()
         mv = whatif.apply(ctx.mission, mods)
-        b = stage1.run_batch(mv, ctx.env, list(range(ctx.plan["batch"])), seed, pri, marg, scales)
-        rows += whatif.vehicle_rows(mv, b, ctx.env, fid, meta, variant=f"v{k}")
-        variants.append(dict(variant=f"v{k}", mods=mods, wall_s=time.time() - a))
-    table = DATA / "emulator" / "train.parquet"
-    df, used = whatif.add_rows(table, rows)
-    spent = sum(v["wall_s"] for v in variants)
-    L.note(f"training table {used}: {len(df)} rows ({len(rows)} added by this run: {len(res['vehicles'])} vehicles x {1 + len(variants)} missions)")
+        vrows, why = whatif.run_variant(mv, ctx.env, list(range(ctx.plan["batch"])), seed, pri, marg, scales, fid, meta, f"v{k}")
+        rows += vrows
+        variants.append(dict(variant=f"v{k}", mods=mods, vehicles=sorted({r["vehicle"] for r in vrows}), skipped=why))
+        skipped += [dict(variant=f"v{k}", vehicle=vid, reason=r) for vid, r in why.items()]
+        walls.append(time.perf_counter() - a)
+    spent = len(variants) * est                                           # charged at the planner's cost, as the flip search is
+    train_df = whatif.with_rows(train_in, rows)
+    df, used = whatif.add_rows(ctx.table, rows)                           # after the fit is decided: the table grows for the next run, not for this one
+    L.note(f"training table {used}: {len(df)} rows now; this run trained on {len(train_df)} ({len(train_in)} from {snap.name}, {len(rows)} added by this run: "
+           f"{len(res['vehicles'])} vehicles x {1 + len(variants)} missions less {len(skipped)} skipped)")
     L.note(f"emulator share {share:.0f} s ({'incl. stage 1b, which was a copy' if not scales else 'stage 1b reran'}): {len(variants)} variant run(s) of "
-           f"{est:.0f} s each ({est_src}), {spent:.0f} s measured")
-    want = len(res["vehicles"]) * (1 + len(variants))
+           f"{est:.0f} s each ({sizes['variant_s_source']}); measured {', '.join(f'{w:.0f}' for w in walls)} s (timings are not in the hashed output)")
+    for sk in skipped:
+        L.note(f"variant {sk['variant']} skipped for {sk['vehicle']}: {sk['reason']}")
+    want = len(res["vehicles"]) * (1 + len(variants)) - len(skipped)
     L.check("emulator_rows_appended", len(rows) == want, value=len(rows), limit=want)
     L.check("emulator_variants_within_share", len(variants) * est <= share, value=len(variants) * est, limit=share, note="planned cost of the variant runs")
-    ems = whatif.train(table, [r["class"] for r in res["vehicles"].values()])
+    if killed:
+        L.note(killed["reason"])
+    ems = whatif.train(ctx.table, [r["class"] for r in res["vehicles"].values()], df=train_df)
     out = {vid: ems[r["class"]][1] for vid, r in res["vehicles"].items()}
     for cls, (em, info) in ems.items():
         if em is None:
@@ -540,11 +567,12 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     tracks = {vid: whatif.track_points(r, ctx.mission) for vid, r in res["vehicles"].items() if r["class"] != "uas"}
     flips, fspent = whatif.flip_search(ctx.mission, {vid: summ[vid]["verdict"] for vid in summ}, tracks, ctx.env, ems, ctx.plan, pri, marg, scales, seed,
                                        share - spent, ctx.log)
-    L.note(f"flip search: {sum(f['found'] for f in flips.values())} of {len(flips)} non-GO vehicles flip; {fspent:.0f} s of Stage 1")
+    L.note(f"flip search: {sum(f['found'] for f in flips.values())} of {len(flips)} non-GO vehicles flip; {fspent:.0f} s of Stage 1 (planned cost)")
     L.output(_dump(dict(vehicles=flips), ctx.path("emulator", "flip.json")))
-    L.output(_dump(dict(share_s=share, variant_s=est, variant_s_source=est_src, variants=variants, spent_s=spent, flip_spent_s=fspent,
-                        rows_added=len(rows), table_rows=len(df),
-                        table=used, train_fraction=whatif.TRAIN_FRAC, stage1b_free=not scales), ctx.path("emulator", "design.json")))
+    L.output(_dump(dict(share_s=share, variant_s=est, variant_s_source=sizes["variant_s_source"], variants=variants, skipped=skipped, killed=killed,
+                        spent_s=spent, flip_spent_s=fspent, rows_added=len(rows), table_rows=len(train_df), table=pathlib.Path(used).name,
+                        train_input_rows=len(train_in),
+                        train_fraction=whatif.TRAIN_FRAC, planned_variants=n_var, stage1b_free=not scales), ctx.path("emulator", "design.json")))
 
 
 def s_report(ctx: Context, L: Ledger) -> None:
@@ -568,8 +596,8 @@ assert list(FUNCS) == STAGES
 
 
 def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: str | pathlib.Path, resume: bool = True, stop_after: str | None = None,
-        log: Callable[[str], None] = print, seed: int | None = None) -> Context:
-    ctx = Context(mission_path, budget_name, gpus, run_dir, log, seed)
+        log: Callable[[str], None] = print, seed: int | None = None, emulator_table: str | pathlib.Path | None = None) -> Context:
+    ctx = Context(mission_path, budget_name, gpus, run_dir, log, seed, emulator_table)
     shutil.copy(ctx.mission_path, ctx.path("mission.yaml"))
     if seed is not None:                                                  # the copy is what `report` and `whatif` reload: it must carry the seed that was run
         ctx.path("mission.yaml").write_text(re.sub(r"(?m)^seed:.*$", f"seed: {seed}", ctx.mission_path.read_text()))

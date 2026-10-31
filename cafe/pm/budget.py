@@ -4,6 +4,11 @@ The contract is wall-clock, not a fixed machine: the same mission and budget giv
 GPU and a large one on a GPU server, from that machine's measured rates. Every number the plan used is in the plan
 (and so in the report), with where it came from.
 
+Nothing here or in the stages is sized from elapsed time: every amount of work that affects a result (LES window cells and steps, the
+free-surface go/no-go, the number of emulator variants) comes from this plan, so two runs with the same seed on the same machine bench make
+the same report. `plan["stage3"]` and `plan["emulator"]` hold those sizes. The wall clock is only a safety kill that turns a late window
+into a row that says it was killed.
+
 Shares of the budget: ingest (measured bytes/s; zero once cached), stage 1 (members x vehicle-days x the measured
 member cost), stage 3 (LES windows: cells x steps / measured LBM rate; FEA and interFoam on CPU in parallel), stage 1'
 (the refit rerun), report. A plan that would not fit is shrunk (members, then windows, then nest resolution) and says so.
@@ -24,6 +29,10 @@ WINDOWS = {"ci": 1, "quick": 1, "4h": 3, "overnight": 3}             # worst win
 SITL = {"ci": 0, "quick": 0, "4h": 4, "overnight": 8}                # ArduCopter SITL members (serial, run as parallel -I instances)
 SHARE = dict(stage1=0.45, stage3=0.30, stage1b=0.15, emulator=0.05)   # stage 1b is a copy (free) when no window passes: its share goes to the emulator
 EMULATOR_VARIANTS = {"ci": 2, "quick": 6, "4h": 24, "overnight": 48}   # most mission variants (a batch of every vehicle each) the emulator stage adds per run
+TRAIN_FRAC = 0.7                  # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
+STAGE3_PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}     # the native-LBM parts of a window, one slice of the share each
+FS_PARTS = {"usv": "hull_fs"}                                                        # the free-surface part: a child process with its own queue
+FEA_CLASSES = ("glider",)                                                            # classes whose window carries an FEA of the pressure hull
 FALLBACK_COST = {"glider": (8.0, 0.1), "usv": (11.0, 0.1), "uas": (20.0, 0.3)}   # (s per batch, s per member) per mission day without bench
 GPU_MEM_GUARD = 0.85
 
@@ -95,6 +104,62 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
                 sitl_members=SITL[budget], member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1], source=s) for k, (c, s) in costs.items()},
                 les=les, refit_iterations=0 if budget == "ci" else 2, notes=notes,
                 certify_possible=n_max >= 73, shares=SHARE)
+
+
+def stage3_assumptions() -> dict[str, Any]:
+    """config/assumptions.yaml keys `stage3.*` -> {short key: value}."""
+    from .config import assumptions
+    return {k[len("stage3."):]: v["value"] for k, v in assumptions().items() if k.startswith("stage3.")}
+
+
+def stage3_plan(p: dict[str, Any], classes: dict[str, str], a: dict[str, Any]) -> dict[str, Any]:
+    """The sizes of stage 3, from the plan and the assumptions only (never from elapsed time).
+
+    The stage's share of the budget is split evenly over its LES parts (`STAGE3_PARTS` of each class, `windows_per_vehicle` windows each).
+    A part's run gets its slice less the FEA reserve (classes in FEA_CLASSES) and the XLA compile guess, divided by `stage3.les_margin`, at
+    the plan's LBM rate: `cell_steps_per_part[class]`, which `pipeline_windows.fit_window` turns into dx and steps. `runs` says whether the
+    slice reaches `stage3.min_window_s`; `fea.runs` whether the reserve reaches `stage3.fea_min_s`. `fs` prices the free-surface cases
+    (None without any, or when the FluidX3D plugin replaces interFoam): the first `fit` of `cases` fit the share, in queue order. A plan with no wall-clock
+    budget (`shares`/`budget_s` absent) uses `les.cell_steps_per_window` shared between the parts."""
+    les = p["les"]
+    K = les["windows_per_vehicle"]
+    cls = set(classes.values())
+    n_les = K * sum(len(STAGE3_PARTS[c]) for c in classes.values())
+    share = float(p["shares"]["stage3"] * p["budget_s"]) if "shares" in p and "budget_s" in p else None
+    slice_s = None if share is None else share / max(n_les, 1)
+    fea_s = 0.0 if slice_s is None else a["fea_reserve_frac"] * slice_s
+    per_part: dict[str, float] = {}
+    for c in sorted(cls):
+        if slice_s is None:
+            per_part[c] = float(les["cell_steps_per_window"] / len(STAGE3_PARTS[c]))
+        else:
+            per_part[c] = float(les["rate"] * max(slice_s - (fea_s if c in FEA_CLASSES else 0.0) - a["compile_s_guess"], 0.0) / a["les_margin"])
+    cases = K * sum(1 for c in classes.values() if c in FS_PARTS)
+    fs = None
+    if cases:
+        from .stage3 import fluidx3d, freesurface
+        if not fluidx3d.available(freesurface.fluidx3d_config())[0]:
+            est = freesurface.estimate(freesurface.nproc(), a["fs.snappy_cell_factor"], a["fs.cost_factor"], a["fs.mesh_s_per_cell"])
+            need = float(est["total_s"] * a["fs.margin"])
+            fs = dict(cases=cases, estimate=est, margin=a["fs.margin"], need_s=need, share_s=share,
+                      fit=cases if share is None else int(min(cases, share // need)))
+    return dict(share_s=share, windows_per_vehicle=K, les_parts=n_les, slice_s=slice_s, min_window_s=a["min_window_s"],
+                runs=slice_s is None or slice_s >= a["min_window_s"], compile_s=a["compile_s_guess"], les_margin=a["les_margin"],
+                fea=dict(reserve_frac=a["fea_reserve_frac"], reserve_s=fea_s, min_s=a["fea_min_s"], runs=slice_s is None or fea_s >= a["fea_min_s"]),
+                cell_steps_per_part=per_part, fs=fs)
+
+
+def emulator_plan(p: dict[str, Any]) -> dict[str, Any]:
+    """How many variant runs the emulator stage makes, from the plan only: a variant costs `batch_cost_s(plan)` (the planner's estimate from
+    the measured per-vehicle costs), the variants may use `TRAIN_FRAC` of the stage's share, and at most EMULATOR_VARIANTS[budget]. Two
+    answers because the share is bigger by stage 1b's when no vehicle was refit (the rerun was a copy): `variants_refit`, `variants_no_refit`."""
+    est = batch_cost_s(p)
+
+    def n(free: bool) -> int:
+        return min(EMULATOR_VARIANTS[p["budget"]], int(TRAIN_FRAC * emulator_share_s(p, free) // est)) if est > 0 else 0
+    return dict(variant_s=est, variant_s_source="the planner's estimate from the measured per-vehicle costs (plan.json member_cost)",
+                share_s=dict(refit=emulator_share_s(p, False), no_refit=emulator_share_s(p, True)), train_fraction=TRAIN_FRAC,
+                max_variants=EMULATOR_VARIANTS[p["budget"]], variants_refit=n(False), variants_no_refit=n(True))
 
 
 def emulator_share_s(plan: dict[str, Any], stage1b_free: bool = False) -> float:

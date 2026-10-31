@@ -36,7 +36,7 @@ class WindowSpec:
     box: nest size in body lengths; cells_per_delta: 5-10 (BRIEF 2.6); u_lat: lattice speed of the reference U;
     steps overrides duration (tests); spinup: share of the run discarded as start-up.
     nu_floor: lattice viscosity floor (stability on coarse grids); the result says when it was applied and what the physical value was.
-    wall_s: wall-clock budget of the LES run (XLA compile included); the run is cut to fit it (see `wall_hook`).
+    wall_s: wall-clock safety kill of the LES run (XLA compile included): a run still going when it is spent is stopped and says so (`wall_hook`).
     frame: "vehicle" (default) holds the grid on the vehicle and feeds the inflow relative to it (u_env - velocity): Galilean
     exact for constant velocity, no shifts. "ground" keeps the populations in the ground frame and shifts the nest by whole
     cells to follow the vehicle (nest.py): the wake stays where it was left, but each shift displaces the fluid by one cell
@@ -211,12 +211,13 @@ def stage3_checks(series: dict[str, NDArray[Any]], spec: nest.NestSpec, force_se
 
 
 def wall_hook(steps: int, chunk: int, wall_s: float | None, cells: int, log: dict[str, Any]) -> Callable[[int, float], int]:
-    """nest.simulate steps_hook that holds a wall-clock budget. Chunk 1 contains the XLA compile; from chunk 2 on the steady cost per
-    step is measured (last chunk, so a box that gets busier shortens the run further). After every chunk the run is cut to the
-    largest multiple of `chunk` that still ends inside `wall_s`. `log` receives planned/run steps, cut_reason, cells_per_s, compile_s."""
+    """nest.simulate steps_hook that holds a wall-clock safety kill. It never shortens a run that is on time: the number of steps is the
+    caller's (the plan's), whatever the measured speed. After every chunk, if the elapsed time (compile included) has reached `wall_s`
+    before the planned steps are done, the run is killed there and `log` says so (killed, cut_reason, run_steps). From chunk 2 on the
+    steady cost per step is measured and reported (cells_per_s, compile_s: diagnostics, not inputs to anything)."""
     prev: list[float] = [0, 0.0]                                                          # (steps done, elapsed) after the previous chunk
     first: list[float] = []
-    log.update(planned_steps=steps, run_steps=steps, cut_reason=None, cells_per_s=None, compile_s=None, les_s=0.0)
+    log.update(planned_steps=steps, run_steps=steps, cut_reason=None, killed=False, cells_per_s=None, compile_s=None, les_s=0.0)
 
     def hook(done: int, elapsed: float) -> int:
         if not first:
@@ -226,18 +227,11 @@ def wall_hook(steps: int, chunk: int, wall_s: float | None, cells: int, log: dic
             log.update(cells_per_s=cells / per, compile_s=max(first[0] - per * chunk, 0.0))
         prev[:] = [done, elapsed]
         log["les_s"] = elapsed
-        if wall_s is None:
-            return steps
-        if done <= chunk:
-            if elapsed >= wall_s:                                            # the compile alone spent it
-                log.update(run_steps=done, cut_reason=f"wall-clock budget {wall_s:.0f} s spent by the first chunk (XLA compile {elapsed:.0f} s)")
-                return done
-            return steps
-        allowed = done + int(max(wall_s - elapsed, 0.0) / per) // chunk * chunk
-        if allowed < steps:
-            log.update(run_steps=allowed, cut_reason=f"cut from {steps} to {allowed} steps: measured {cells / per:.3g} cells/s projects past the "
-                                                      f"{wall_s:.0f} s wall-clock budget")
-            return allowed
+        if wall_s is not None and elapsed >= wall_s and done < steps:
+            log.update(run_steps=done, killed=True,
+                       cut_reason=f"killed after {done} of {steps} steps: its wall-clock slice of {wall_s:.0f} s was spent (first chunk, with the XLA compile, "
+                                  f"took {first[0]:.0f} s)")
+            return done
         return steps
     return hook
 

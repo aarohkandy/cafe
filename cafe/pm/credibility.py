@@ -414,7 +414,7 @@ a{color:var(--accent)}.card{background:var(--card);border:1px solid var(--line);
 .scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{border-bottom:1px solid var(--line);
 padding:.3rem .5rem;text-align:left;vertical-align:top}
 .badge{display:inline-block;padding:0 .5rem;border-radius:4px;border:2px solid currentColor;font-weight:700}.go{color:var(--go)}
-.nogo{color:var(--nogo)}.marginal{color:var(--marg)}
+.nogo{color:var(--nogo)}.marginal{color:var(--marg)}.undecided{color:var(--muted)}
 .warn{background:var(--warn);color:var(--warnfg);border-radius:6px;padding:.5rem .75rem;margin:.5rem 0}.big{font-size:1.1rem;font-weight:700}
 .muted{color:var(--muted)}.lk{font-size:.7rem;vertical-align:super;margin-left:.15rem;text-decoration:none}code{word-break:break-all}
 svg{width:100%;height:auto;background:var(--card);border:1px solid var(--line);border-radius:8px}svg text{fill:var(--fg);font-size:11px}

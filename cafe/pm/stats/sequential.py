@@ -14,6 +14,8 @@ from typing import Any
 
 from . import intervals
 
+STOP_CONF = 0.95        # the confidence of the interval the stopper reads; the report's "decided" uses the same one
+
 
 def sprt_indifference(cut: float, delta: float) -> tuple[float, float]:
     """(p0, p1) = (cut - delta, cut + delta): the indifference region around a P(fail) cut-off."""
@@ -32,7 +34,7 @@ def sprt_decide(k: int, n: int, p0: float, p1: float, alpha: float = 0.05, beta:
     return "continue"
 
 
-def ensemble_stop(k_fail: int, n: int, conf: float = 0.95, n_min: int = 0, n_max: int | None = None) -> dict[str, Any]:
+def ensemble_stop(k_fail: int, n: int, conf: float = STOP_CONF, n_min: int = 0, n_max: int | None = None) -> dict[str, Any]:
     """Called by Stage 1 between batches. Stop when the Wilson/Agresti-Coull interval is wholly inside GO or NO-GO.
 
     `n_min` (73 outside --budget quick) stops it ending before the certifying size; `n_max` is the budget cap and ends

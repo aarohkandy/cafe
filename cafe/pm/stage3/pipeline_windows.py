@@ -25,11 +25,18 @@ area and density as the window's (cd = F / (rho/2 V^2 A_ref)), so the refit rati
 `cd_hangar_source`. The `hull` window has no free surface, so its hangar number leaves the residuary (wave) resistance out; the `hull_fs`
 window's hangar number is the VPP's whole hull resistance (usv.hull_resistance: friction x (1 + k) + residuary) plus the keel.
 
-Resolution. cells x steps is fitted to plan["les"]["cell_steps_per_window"] (shared between the parts of a USV window) with
+Resolution. cells x steps is fitted to plan["stage3"]["cell_steps_per_part"][class] (budget.stage3_plan: the stage's share split over
+its LES parts, less the compile guess and the FEA reserve, over `stage3.les_margin`, at the plan's LBM rate) with
 lbm.les_resolution: dx is the 10-cells-per-boundary-layer value (BRIEF 2.6) coarsened by the fourth root of the budget shortfall
 (cells ~ dx^-3, steps ~ dx^-1), but never so coarse that the smallest body dimension has fewer than `stage3.min_cells_across` cells,
 and the run is never shorter than `stage3.min_flow_throughs` box transits. `budget_ok` in the row says whether the budget held. With
-plan["les"]["cpu_fallback"] the row is still computed for real and carries the plan's label. A row's `ok` needs every stage-3 self-check
+plan["les"]["cpu_fallback"] the row is still computed for real and carries the plan's label.
+
+Determinism. Nothing here is sized from elapsed time: dx, steps, the FEA's go/no-go and the free-surface go/no-go are functions of the plan,
+the assumptions and the window's kinematics, so two same-seed runs size every window alike. The wall clock is only a safety kill (the LES
+run stops after the chunk that spends its slice, the FEA and free-surface children are killed at their deadline); a killed window is a
+row that says so (ok False, a reason beginning "killed"). Everything measured (seconds, rates) is in the row's `timing`, which the pipeline
+moves into the stage's ledger, so the hashed output carries no timing. A row's `ok` needs every stage-3 self-check
 to pass, including the wall-model receipt row (windows.stage3_checks): the refit uses only rows with ok, so no unvalidated coefficient
 reaches Stage 1b.
 """
@@ -52,7 +59,7 @@ import numpy as np
 import jax.numpy as jnp
 from numpy.typing import NDArray
 
-from .. import config
+from .. import budget, config
 from ..physics import glider, uas, usv
 from . import fluidx3d, freesurface, lbm, windows as W
 
@@ -65,9 +72,8 @@ G = 9.81
 
 # ---------------------------------------------------------------------------------------------------- assumptions
 def assumptions(path: str | None = None) -> dict[str, Any]:
-    """config/assumptions.yaml keys `stage3.*` -> {short key: value}. A missing key is an error that names it."""
-    raw = config.assumptions()
-    return {k[len("stage3."):]: v["value"] for k, v in raw.items() if k.startswith("stage3.")}
+    """config/assumptions.yaml keys `stage3.*` -> {short key: value}. A missing key is an error that names it (`need`)."""
+    return budget.stage3_assumptions()
 
 
 def need(a: dict[str, Any], key: str) -> Any:
@@ -309,8 +315,8 @@ def _fea_child(job: str, out: str) -> int:
 
 
 def _fea(veh: W.Vehicle, r: dict[str, Any], a: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
-    """The FEA of the pressure hull in a child process that is killed at `timeout_s`: gmsh and ccx cannot be interrupted from inside,
-    and the stage's wall-clock share is not negotiable."""
+    """The FEA of the pressure hull in a child process that is killed at `timeout_s` (a safety kill): gmsh and ccx cannot be interrupted
+    from inside, and the stage's wall-clock share is not negotiable. A killed FEA is `run` False with a reason that says so."""
     if veh.extra.get("fea") is None:
         return dict(run=False, reason=veh.extra["fea_reason"])
     t0 = time.perf_counter()
@@ -322,7 +328,7 @@ def _fea(veh: W.Vehicle, r: dict[str, Any], a: dict[str, Any], timeout_s: float 
             p = _spawn([sys.executable, "-m", __name__, "--fea", str(job), str(out)], capture_output=True, text=True, timeout=timeout_s,
                                cwd=str(pathlib.Path(__file__).resolve().parents[3]))
         except subprocess.TimeoutExpired:
-            return dict(run=False, reason=f"killed after {time.perf_counter() - t0:.0f} s: the FEA did not fit the window's remaining wall-clock slice")
+            return dict(run=False, reason="killed: the FEA did not finish inside the window's remaining wall-clock slice")
         if p.returncode or not out.exists():
             return dict(run=False, reason=f"FEA failed: {(p.stderr.strip().splitlines() or ['no message'])[-1][:200]}")
         return dict(run=True, seconds=time.perf_counter() - t0, **json.loads(out.read_text()))
@@ -383,13 +389,12 @@ def why_failed(checks: list[dict[str, Any]], res: dict[str, Any], wlog: dict[str
     return out
 
 
-def _base(ctx: Context, w: dict[str, Any], part: str, win_s: float | None) -> dict[str, Any]:
+def _base(ctx: Context, w: dict[str, Any], part: str) -> dict[str, Any]:
     """The row of a window that did not run: every field the refit and the report read, empty."""
     les = ctx.plan["les"]
     return dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, reasons=[],
                 cd=None, cd_spread=None, cl=None, cl_spread=None, added_resistance=None, cd_hangar=None, cl_hangar=None,
-                cd_hangar_source=None, fea=dict(run=False, reason="the window did not run"), label=les["label"] if les["cpu_fallback"] else None,
-                wall_share_s=win_s)
+                cd_hangar_source=None, fea=dict(run=False, reason="the window did not run"), label=les["label"] if les["cpu_fallback"] else None)
 
 
 def _describe(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], vb: NDArray[np.float64], heading: float | None) -> None:
@@ -399,16 +404,22 @@ def _describe(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], vb: ND
                 heading_source="stage-1 median track" if heading is not None else "relative-flow direction (no stage-1 track)")
 
 
-def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platform: str, res: dict[str, Any] | None, a: dict[str, Any], n_parts: int,
-         win_s: float | None, meter: dict[str, float]) -> dict[str, Any]:
+def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platform: str, res: dict[str, Any] | None, a: dict[str, Any],
+         sizes: dict[str, Any], win_s: float | None) -> dict[str, Any]:
+    """One LES window. `sizes` is budget.stage3_plan (what every size comes from); `win_s` is the wall-clock slice left for this window, used
+    only as the safety kill of the LES run, of the FEA, and of a window whose turn comes after the share is spent."""
     t0 = time.perf_counter()
     les = ctx.plan["les"]
-    base = _base(ctx, w, part, win_s)
+    base = _base(ctx, w, part)
 
     def fail(msg: str) -> dict[str, Any]:
-        return dict(base, error=msg[:300], reasons=[msg[:300]], wall_s=time.perf_counter() - t0)
+        return dict(base, error=msg[:300], reasons=[msg[:300]], timing=dict(wall_s=time.perf_counter() - t0, wall_share_s=win_s))
+    if not sizes["runs"]:
+        return fail(f"not run: the stage-3 share of this --budget is {sizes['share_s']:.0f} s for {sizes['les_parts']} LES windows, "
+                    f"{sizes['slice_s']:.1f} s each (least that can run: {sizes['min_window_s']} s): use a larger --budget")
     if win_s is not None and win_s < need(a, "min_window_s"):
-        return fail(f"the stage-3 wall-clock budget is spent: {win_s:.1f} s left for this window (least that can run: {need(a, 'min_window_s')} s)")
+        return fail(f"killed before it started: the stage-3 wall-clock share was spent ({win_s:.1f} s left for this window, least that can run: "
+                    f"{need(a, 'min_window_s')} s)")
     heading = track_heading(res, vid, w["t"])
     try:
         if cls == "glider":
@@ -436,13 +447,11 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     ub = np.zeros(3)
     speed = float(np.linalg.norm(vb))
     _describe(base, veh, case, vb, heading)
-    plan_cs = les["cell_steps_per_window"] / n_parts
+    plan_cs = sizes["cell_steps_per_part"][cls]
     fea_s = need(a, "fea_reserve_frac") * win_s if (win_s is not None and veh.extra.get("fea")) else 0.0
-    run_s = None if win_s is None else win_s - fea_s
-    time_cs = None if run_s is None else meter["rate"] * max(run_s - meter["compile_s"], 0.0)
-    budget_cs = plan_cs if time_cs is None else min(plan_cs, time_cs)
+    run_s = None if win_s is None else win_s - fea_s                      # the LES run's safety kill, not its size
     try:
-        fit = fit_window(veh, speed, budget_cs, a)
+        fit = fit_window(veh, speed, plan_cs, a)
         chunk = int(need(a, "chunk_steps"))
         steps = -(-fit["steps"] // chunk) * chunk                           # whole chunks: another chunk length is another XLA compile
         spec = W.WindowSpec(velocity=tuple(float(x) for x in vb), dx=fit["dx"], steps=steps, box=fit["box"], cd_ref=case["cd_h"],
@@ -450,53 +459,51 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
         inflow = lambda x, y, z, t, _u=ub: jnp.stack([jnp.full_like(x, _u[0]), jnp.full_like(x, _u[1]), jnp.full_like(x, _u[2])])    # noqa: E731
         r = W.run_window(veh, spec, inflow)
     except (ValueError, RuntimeError) as e:                                 # memory guard, empty body, no flow ...
-        return dict(base, error=str(e)[:300], reasons=[str(e)[:300]], wall_s=time.perf_counter() - t0)
+        return dict(base, error=str(e)[:300], reasons=[str(e)[:300]], timing=dict(wall_s=time.perf_counter() - t0, wall_share_s=win_s))
     wl = r["wall"]
-    if wl.get("cells_per_s"):                                               # later windows plan with what this box really delivers now
-        meter["rate"] = wl["cells_per_s"]
-        meter["compile_s"] = wl["compile_s"] if meter["n"] == 0 else 0.5 * (meter["compile_s"] + wl["compile_s"])
-        meter["n"] += 1
-    cuts = [wl["cut_reason"]] if wl.get("cut_reason") else []
-    if time_cs is not None and run_s is not None and time_cs < plan_cs:
-        cuts.insert(0, f"coarsened: {time_cs:.3g} cell-steps afforded by {run_s:.0f} s at {meter['rate']:.3g} cells/s, plan {plan_cs:.3g}")
     left = None if win_s is None else win_s - (time.perf_counter() - t0)
     fea_took = 0.0
-    if veh.extra.get("fea") and left is not None and left < need(a, "fea_min_s"):
-        fea = dict(run=False, reason=f"skipped: {max(left, 0):.1f} s of the stage-3 wall-clock budget left for this window "
-                                     f"(FEA needs {need(a, 'fea_min_s')} s)")
+    if veh.extra.get("fea") and not sizes["fea"]["runs"]:                    # planned out: the reserve is below stage3.fea_min_s
+        fea = dict(run=False, reason=f"not planned: the FEA reserve is {sizes['fea']['reserve_s']:.1f} s of a {sizes['slice_s']:.1f} s slice, below "
+                                     f"stage3.fea_min_s ({need(a, 'fea_min_s')} s): use a larger --budget")
     else:
         t_fea = time.perf_counter()
-        fea = _fea(veh, r, a, None if left is None else left)
+        fea = _fea(veh, r, a, None if left is None else max(left, 0.0))
         fea_took = time.perf_counter() - t_fea
+    timing = dict(wall_s=0.0, wall_share_s=win_s, setup_s=wl["setup_s"], compile_s=wl["compile_s"], les_s=wl["les_s"], fea_s=fea_took,
+                  fea_seconds=fea.pop("seconds", None), cells_per_s_measured=wl["cells_per_s"])
     resolution = dict(r["resolution"], cells=fit["cells"], cell_steps=fit["cell_steps"], budget_ok=fit["budget_ok"],
-                      planned_steps=wl["planned_steps"], run_steps=wl["run_steps"], cut_reason="; ".join(cuts) or None,
-                      cells_per_s_measured=wl["cells_per_s"], cells_per_s_planned=les.get("rate"), compile_s=wl["compile_s"],
-                      cell_steps_budget_plan=plan_cs, cell_steps_budget_time=time_cs, setup_s=wl["setup_s"],
-                      cells_per_delta=r["resolution"]["delta_te"] / r["resolution"]["dx"], les_s=wl["les_s"], fea_s=fea_took)
+                      planned_steps=wl["planned_steps"], run_steps=wl["run_steps"], cut_reason=wl.get("cut_reason"),
+                      cells_per_s_planned=les.get("rate"), cell_steps_budget_plan=plan_cs,
+                      cells_per_delta=r["resolution"]["delta_te"] / r["resolution"]["dx"])
     checks = list(r["checks"])
     if r["resolution"]["nu_floored"]:                                       # a stability floor changes the Reynolds number: a window that needed it fails
         checks.append(dict(name="viscosity_floor", value=r["resolution"]["nu_lat"], limit=r["resolution"]["nu_lat_physical"], ok=False,
                            note="lattice viscosity raised to the floor; the window is not at the physical Reynolds number"))
-    ok = bool(r["ok"] and not any(not c["ok"] for c in checks))
-    return dict(base, resolution=resolution, checks=checks, ok=ok, reasons=[] if ok else why_failed(checks, r["resolution"], wl),
+    killed = bool(wl.get("killed"))                                         # a run stopped by its safety kill is never ok, whatever its checks say
+    checks_ok = bool(r["ok"] and not any(not c["ok"] for c in checks))
+    ok = checks_ok and not killed
+    reasons = [] if ok else ([wl["cut_reason"]] if killed else []) + ([] if checks_ok else why_failed(checks, r["resolution"], wl))
+    timing["wall_s"] = time.perf_counter() - t0
+    return dict(base, resolution=resolution, checks=checks, ok=ok, reasons=reasons,
                 cd=float(r["cd"]), cd_spread=float(r["cd_spread"]), cl=float(r["cl"]), cl_spread=float(r["cl_spread"]),
                 added_resistance=None if r["added_resistance"] is None else float(r["added_resistance"]), fea=fea,
-                ref_area=float(r["ref_area"]), source=r["source"], wall_s=time.perf_counter() - t0)
+                ref_area=float(r["ref_area"]), source=r["source"], timing=timing)
 
 
 FS_GRACE_S = 30.0                                                           # how long past its own deadline the parent waits for a child to die
-PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}     # the native-LBM parts, one budget slice each
-FS_PARTS = {"usv": "hull_fs"}                                               # the free-surface part: child process, own budget
+PARTS = budget.STAGE3_PARTS                                                 # the native-LBM parts, one budget slice each
+FS_PARTS = budget.FS_PARTS                                                  # the free-surface part: child process, own budget
 
 
 def _fs_fail(base: dict[str, Any], msg: str, t0: float, **extra: Any) -> dict[str, Any]:
-    return dict(base, error=msg[:600], reasons=[msg[:600]], wall_s=time.perf_counter() - t0, **extra)
+    return dict(base, error=msg[:600], reasons=[msg[:600]], timing=dict(wall_s=time.perf_counter() - t0), **extra)
 
 
 def _fs_gate(est: dict[str, Any], a: dict[str, Any], plan: dict[str, Any], left_s: float, queued_s: float) -> tuple[bool, str, float]:
-    """(fits, reason, seconds the case holds in the queue). The estimate times `fs.margin` must fit the share left: minutes needed, minutes
-    available and the smallest `--budget` profile whose stage-3 share would hold it (and what is already queued) are in the sentence."""
-    from .. import budget
+    """(fits, reason, seconds the case holds in the queue). The estimate times `fs.margin` must fit the share left after the cases already
+    queued (a plan-time rule, the same as budget.stage3_plan's `fs.fit`, not the clock): minutes needed, minutes available and the smallest
+    `--budget` profile whose stage-3 share would hold it (and what is already queued) are in the sentence."""
     need_s = est["total_s"] * need(a, "fs.margin")
     if need_s <= left_s:
         return True, "", need_s
@@ -516,7 +523,7 @@ def _fs_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: 
         job, out = pathlib.Path(jobdir) / "job.json", pathlib.Path(jobdir) / "out.json"
         left = None if deadline is None else deadline - time.perf_counter()
         if left is not None and left <= 0.0:
-            return _fs_fail(base, "free-surface window not run: the stage-3 wall-clock share was spent before its turn came", t0)
+            return _fs_fail(base, "free-surface window killed before it started: the stage-3 wall-clock share was spent before its turn came", t0)
         job.write_text(json.dumps(dict(stl=str(pathlib.Path(jobdir) / "hull.stl"), draft=geo["draft"], speeds=[speed], config=cfg,
                                        vehicle=dataclasses.asdict(veh) if fluidx3d.available(cfg)[0] else None), default=float))
         try:
@@ -536,21 +543,20 @@ def _fs_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: 
     ok = all(c["ok"] for c in f["checks"])
     ratio = f["refinement_ratio"]
     res = dict(source=r["source"], cells_fine=r["cells"], cells_coarse=r["coarse_cells"], refinement_ratio=ratio, estimate=est,
-               speed_ms=speed, hull_wetted_m2_mesh=geo["wetted_hull_m2"], estimated_s=None if est is None else est["total_s"],
-               measured_s=time.perf_counter() - t0)
+               speed_ms=speed, hull_wetted_m2_mesh=geo["wetted_hull_m2"], estimated_s=None if est is None else est["total_s"])
     return dict(base, resolution=res, checks=f["checks"], ok=ok, reasons=[] if ok else freesurface.reasons(f["checks"], ratio, (r["cells"], r["coarse_cells"])),
                 cd=f["cd"], cd_spread=f["cd_spread"], cl=None, cl_spread=None, added_resistance=f["added_resistance"], gci=f["gci"],
                 refinement_ratio=ratio, resistance_n=f["resistance_n"], vertical_force_n=f["vertical_force_n"], ref_area=veh.ref_area, source=r["source"],
                 fea=dict(run=False, reason="no structural model: the platform yaml has no hull or wing structure (material, thickness) to build an FEA from"),
-                wall_s=time.perf_counter() - t0)
+                timing=dict(wall_s=time.perf_counter() - t0))
 
 
 def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, Any], platform: str, res: dict[str, Any] | None, a: dict[str, Any],
-               st: dict[str, Any]) -> Future[dict[str, Any]]:
+               st: dict[str, Any], sizes: dict[str, Any]) -> Future[dict[str, Any]]:
     """Prepares one USV window's free-surface case (kinematics, STL, price), decides whether the share left holds it and either queues
     it behind the earlier ones on `pool` (one at a time: they share the CPUs) or returns the finished not-run row."""
     t0 = time.perf_counter()
-    base = _base(ctx, w, "hull_fs", None)
+    base = _base(ctx, w, "hull_fs")
     done: Future[dict[str, Any]] = Future()
     jobdir = tempfile.mkdtemp(prefix="fs_job_")
     cfg = {"fluidx3d": freesurface.fluidx3d_config().get("fluidx3d")}
@@ -564,9 +570,8 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
         _describe(base, veh, case, vb, heading)
         geo = freesurface.write_stl(veh, pathlib.Path(jobdir) / "hull.stl")
         base.update(wetted_area_mesh_m2=geo["wetted_hull_m2"], wetted_area_platform_m2=P["wetted_area_m2"], ref_area=veh.ref_area)
-        est = None if fluidx3d.available(cfg)[0] else freesurface.estimate(
-            freesurface.nproc(), need(a, "fs.snappy_cell_factor"), need(a, "fs.cost_factor"), need(a, "fs.mesh_s_per_cell"))
-        left = None if st["share"] is None else st["share"] - (time.perf_counter() - st["t_stage"]) - st["queued"]
+        est = None if sizes["fs"] is None else sizes["fs"]["estimate"]       # priced once, in the plan (None: the FluidX3D plugin runs it)
+        left = None if st["share"] is None else st["share"] - st["queued"]
         if est is not None and left is not None:
             fits, why, held = _fs_gate(est, a, ctx.plan, left, st["queued"])
             if not fits:
@@ -590,38 +595,41 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
 def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[str, list[dict[str, Any]]]:
     """The stage-3 call. Returns {vid: [row, ...]}; every window of every vehicle is attempted (a window that cannot run gives a row
     with `error` and ok False). Per-window self-checks live in the rows; L gets only 'the stage did what it promises'.
-    Wall clock: the stage's share (stage_share_s) is split over the LBM windows still to run, so time a window does not use passes to
-    the next; each window's LES is cut to its slice (compile included), later windows are planned with the rate measured so far,
-    and the FEA runs only if the slice has time left. A window whose slice is below `stage3.min_window_s` is reported as not run.
-    A USV window also gets a `hull_fs` row: its free-surface case is priced (freesurface.estimate), queued only if the estimate times
-    `stage3.fs.margin` fits what is left of the share (after the cases already queued), and runs in a child process while the LBM windows
-    run; the rows follow the LBM rows of the vehicle. One that does not fit is a row with ok False and the minutes it needs."""
+    Sizes: every size comes from budget.stage3_plan(ctx.plan, ...) (the same function that fills plan.json), never from elapsed time: each
+    LES window is fitted to its class's cell-steps, the FEA runs if its planned reserve reaches `stage3.fea_min_s`, and a free-surface
+    case is queued if the estimate times `stage3.fs.margin` fits what is left of the share after the cases queued before it.
+    Wall clock: the stage's share (stage_share_s) is split over the LBM windows still to run, so time a window does not use passes to the
+    next; it is only a safety kill: the LES run stops after the chunk that spends its slice, the FEA gets what is left of the slice, a window
+    whose turn comes with less than `stage3.min_window_s` left is not started; each of these is a row that says "killed".
+    A USV window also gets a `hull_fs` row, run in a child process while the LBM windows run (killed at the stage deadline); the rows
+    follow the LBM rows of the vehicle. A case that does not fit is a row with ok False and the minutes it needs. Every row carries
+    `timing` (seconds, measured rates); pipeline.s_stage3 moves it out of the hashed output into the ledger."""
     a = assumptions()
     res = _load_res(ctx)
     for f in (pathlib.Path(ctx.run_dir) / "stage1" / "res.pkl", config.CONFIG / "assumptions.yaml"):      # what the rows depend on, for the ledger
         if f.exists():
             L.input(f)
     plat = {v["id"]: v["platform"] for v in ctx.mission["vehicles"]}
+    sizes = budget.stage3_plan(ctx.plan, ctx.classes, a)
     share = stage_share_s(ctx)
     t_stage = time.perf_counter()
     todo = [(vid, w, part) for vid, ws in wins.items() for w in ws for part in PARTS[ctx.classes[vid]]]
     _jit_cache(ctx)
-    meter = dict(rate=float(ctx.plan["les"].get("rate") or 1e6), compile_s=float(need(a, "compile_s_guess")), n=0)
     rows: dict[str, list[dict[str, Any]]] = {vid: [] for vid in wins}
     st = dict(share=share, t_stage=t_stage, queued=0.0, deadline=None if share is None else t_stage + share)
     with ThreadPoolExecutor(1) as pool:                                     # one free-surface case at a time: they share the CPUs
-        fs = [(vid, w, _fs_submit(pool, ctx, vid, w, plat[vid], res, a, st)) for vid, ws in wins.items() if ctx.classes[vid] in FS_PARTS for w in ws]
+        fs = [(vid, w, _fs_submit(pool, ctx, vid, w, plat[vid], res, a, st, sizes)) for vid, ws in wins.items() if ctx.classes[vid] in FS_PARTS for w in ws]
         for i, (vid, w, part) in enumerate(todo):
             win_s = None if share is None else (share - (time.perf_counter() - t_stage)) / (len(todo) - i)
-            r = _row(ctx, vid, ctx.classes[vid], w, part, plat[vid], res, a, len(PARTS[ctx.classes[vid]]), win_s, meter)
+            r = _row(ctx, vid, ctx.classes[vid], w, part, plat[vid], res, a, sizes, win_s)
             rows[vid].append(r)
             msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error')}"
-            ctx.log(f"stage3 {vid}/{part} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['wall_s']:.1f} s of {win_s if win_s is None else round(win_s, 1)}]")
+            ctx.log(f"stage3 {vid}/{part} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['timing']['wall_s']:.1f} s of {win_s if win_s is None else round(win_s, 1)}]")
         for vid, w, fut in fs:
             r = fut.result()
             rows[vid].append(r)
             msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error')}"
-            ctx.log(f"stage3 {vid}/{FS_PARTS[ctx.classes[vid]]} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['wall_s']:.1f} s]")
+            ctx.log(f"stage3 {vid}/{FS_PARTS[ctx.classes[vid]]} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['timing']['wall_s']:.1f} s]")
     want, got = len(todo) + len(fs), sum(len(r) for r in rows.values())
     L.check("every_window_attempted", got == want, value=got, limit=want)
     bad = [(v, i) for v, rs in rows.items() for i, r in enumerate(rs) if r["ok"] and any(not c["ok"] for c in r["checks"])]
@@ -631,7 +639,7 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     spent = time.perf_counter() - t_stage
     if share is not None:
         L.check("stage_held_its_wall_clock_share", spent <= 1.1 * share, value=round(spent, 1), limit=round(1.1 * share, 1),
-                note="share = plan shares.stage3 x budget_s; a window cut by the budget is a coarser row, not an overrun")
+                note="share = plan shares.stage3 x budget_s; a window cut by the budget is a killed row, not an overrun")
     return rows
 
 

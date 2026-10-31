@@ -114,6 +114,8 @@ def test_git_sha_real_and_when_git_is_missing(monkeypatch):
     monkeypatch.setenv("CAFE_GIT_SHA", "abc123")
     assert ledger.git_sha() == "abc123"
     monkeypatch.setattr(ledger.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 128, stdout="", stderr="not a repo"))
+    assert ledger.git_sha() == "abc123"                                            # a copy without .git: the sha it was synced from
+    monkeypatch.delenv("CAFE_GIT_SHA")
     assert ledger.git_sha() == "none"
 
 

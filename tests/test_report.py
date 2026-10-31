@@ -1,6 +1,7 @@
 """The report stage: traceability of every number, the verdict statements, the degraded paths, and that a broken report is caught."""
 import copy
 import datetime as dt
+import html
 import json
 import re
 
@@ -274,6 +275,59 @@ def test_html_is_static_and_agrees_with_the_json(full):
         assert f'href="../{n["ledger"]}"' in h
     broken = h.replace(report._txt(rep["vehicles"]["uas"]["p_fail"]), "0")
     assert any("vehicles.uas.p_fail" in p for p in report.check_rendered(rep, broken))
+
+
+def stat_block(k, n):
+    """report._stat on an ensemble of k failures in n members."""
+    ref = dict(stage="stage1b", receipt="r", ledger="l")
+    return report._stat(dict(n=n, k_fail=k, verdict=intervals.verdict(k, n)), ref, "src")
+
+
+@pytest.mark.parametrize("k, n, region", [(0, 40, "GO"), (30, 40, "NO-GO"), (0, 100, "GO"), (80, 100, "NO-GO"), (40, 200, "MARGINAL")])
+def test_a_verdict_whose_95_interval_is_inside_a_range_is_decided(k, n, region):
+    d = stat_block(k, n)
+    assert d["decided"] is True and d["region"] == region and d["undecided_statement"] is None
+    assert report._undecided_badge(d) == ""
+
+
+@pytest.mark.parametrize("k, n, words", [
+    (4, 32, "spans the GO threshold of 0.10, so more members (a larger --budget) would decide it"),
+    (0, 32, "spans the GO threshold of 0.10,"),
+    (16, 32, "spans the NO-GO threshold of 0.40, so more members (a larger --budget) would decide it"),
+    (1, 5, "spans the GO threshold of 0.10 and the NO-GO threshold of 0.40, so more members")])
+def test_an_undecided_verdict_says_which_threshold_its_interval_spans_and_that_more_members_decide_it(k, n, words):
+    d = stat_block(k, n)
+    lo, hi, _ = intervals.interval(k, n, 0.95)
+    assert d["decided"] is False and d["region"] is None and intervals.decided_region(k, n, 0.95) is None
+    assert d["undecided_statement"].startswith(f"The 95% interval on P(fail), {lo:.3g} to {hi:.3g}, ") and words in d["undecided_statement"]
+    assert f"undecided at n = {n}" in report._undecided_badge(d) and 'class="badge undecided"' in report._undecided_badge(d)
+
+
+def check_decided(rep, h):
+    """decided / region agree with intervals.decided_region at 95 %; an undecided verdict has its sentence and badge in the page, a decided one neither."""
+    both = {**rep["vehicles"], **rep["links"]}
+    for name, d in both.items():
+        region = intervals.decided_region(d["k_fail"]["value"], d["n"]["value"], 0.95)
+        assert d["region"] == region and d["decided"] is (region is not None), name
+        assert (d["undecided_statement"] is None) == d["decided"], name
+        assert d["decided"] or html.escape(d["undecided_statement"]) in h, name
+    n_undecided = sum(not d["decided"] for d in both.values())
+    assert h.count('class="badge undecided"') == 2 * n_undecided          # the card heading and the verdicts table
+    return n_undecided
+
+
+def test_decided_and_region_are_in_the_json_and_the_badge_is_in_the_html_for_exactly_the_undecided(full, tmp_path):
+    run, _, _, _, rep = full
+    assert check_decided(rep, (run / "report" / "index.html").read_text()) > 0
+    assert f'undecided at n = {rep["vehicles"]["uas"]["n"]["value"]}</span>' in (run / "report" / "index.html").read_text()
+
+
+def test_a_run_with_80_members_is_decided_where_the_interval_allows(run):
+    m, plan = pm_run.make_run(run, M=80)
+    report.write(run, m, plan)
+    rep = load(run)
+    check_decided(rep, (run / "report" / "index.html").read_text())
+    assert any(d["decided"] for d in {**rep["vehicles"], **rep["links"]}.values())
 
 
 def test_same_inputs_same_report(full):

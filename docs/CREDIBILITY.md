@@ -158,6 +158,7 @@ Provenance is also enforced at load: `glider.load_platform`, `usv.load_platform`
 
 - A level of 2 is the highest this build can show for five factors. It does not mean "moderate confidence in the verdicts"; it means the build's own checks pass and a named limitation remains.
 - A GO from a budget below 73 members says so in its note; the Uncertainty factor cannot reach 3 there.
+- A verdict is `decided` (report.json `decided`, `region` = GO or NO-GO) only when the whole 95 % interval on P(fail) lies inside GO (at most 0.10) or inside NO-GO (above 0.40), the interval the sequential stopper reads. Otherwise the report marks it "undecided at n = N" and says which threshold the interval spans: the printed verdict is the best estimate at that n, not a call, and a larger `--budget` is what decides it. MARGINAL is never decided by this reading.
 - A verdict that rests on an assumed input (the acoustic range, the USV speed bias, the UAS battery, the glider ballast, the wall-model coefficients) carries the badge; the list in section 6 says what would replace each.
 - A comparison with a reference that exists only as a context row in `python -m cafe.pm receipts` (the sub-grid ranges, the sea-state roughness against `pycoare`, the Sun et al. size) is not in the V&V table and does not raise any level.
 - The tool has no use history and no record of who ran or reviewed a run. Those two factors read 0 until the files exist.

@@ -18,6 +18,26 @@ def fitted(tmp_path_factory):
     return em, df
 
 
+def test_the_emulators_seed_reaches_smt_in_both_the_single_and_the_multi_fidelity_fit(tmp_path):
+    """SMT draws the random starts of its hyper-parameter search from its own `seed` option (None: a different draw every call, and on a table
+    where a start other than the first wins, a different fit): the Emulator's seed must reach it, or two same-seed runs of the pipeline can
+    disagree in every emulated number. Same seed twice gives the same predictions; the option is what makes that a guarantee."""
+    df = E.synthetic_table(160, 3)
+    ems = []
+    for name in ("a", "b"):
+        em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / f"{name}.parquet", seed=5)
+        em.fit(df, holdout=0.2)
+        ems.append(em)
+    a, b = ems
+    assert all(m.options["seed"] == 5 for m in a.models.values()) and a.holdout == b.holdout
+    x = df.iloc[:20][E.FEATURES]
+    pa, pb = a.predict(x), b.predict(x)
+    assert all(np.array_equal(pa[t][k], pb[t][k]) for t in E.TARGETS for k in ("value", "lo", "hi", "std"))
+    mf = E.Emulator(["a", "b"], ["p_fail"], path=tmp_path / "mf.parquet", seed=7)
+    mf.fit(_two_fidelity(8))
+    assert mf.multi_fidelity and mf.models["p_fail"].options["seed"] == 7
+
+
 # ---- acceptance (BRIEF 2.7) ----------------------------------------------------------------------------------------
 def test_holdout_rmse_and_coverage(fitted):
     em, df = fitted
@@ -231,7 +251,7 @@ def test_next_candidate_is_the_least_known(fitted):
 
 def test_flip_search_finds_the_cheapest_verdict_change(fitted):
     em, df = fitted
-    x = df.iloc[(em.predict(df[E.FEATURES])["p_fail"]["value"] - 0.30).argmin()][E.FEATURES].to_dict()
+    x = df.iloc[np.abs(em.predict(df[E.FEATURES])["p_fail"]["value"] - 0.30).argmin()][E.FEATURES].to_dict()  # the row nearest P = 0.30 (it was the lowest P)
     bounds = {"duty_cycle": (0.2, 1.0), "lon_shift_deg": (-1.0, 1.0), "deploy_shift_h": (-12.0, 12.0)}
     r = em.flip_search(x, bounds)
     assert r["found"] and r["verdict"] != r["base_verdict"]

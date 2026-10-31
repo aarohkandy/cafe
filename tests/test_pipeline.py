@@ -935,39 +935,52 @@ def test_the_variant_runs_stay_inside_the_emulator_share(tmp_path, table, fake_s
     est = budget.batch_cost_s(ctx.plan)
     assert est == 4.0 and design["share_s"] == 20.0 and design["stage1b_free"] and len(design["variants"]) == 3
     assert len(design["variants"]) * est <= whatif.TRAIN_FRAC * design["share_s"]
-    assert design["variant_s"] == est and design["variant_s_source"] == "the planner's estimate"
-    assert design["rows_added"] == 4 * 4 and design["table_rows"] == 16 and design["spent_s"] == pytest.approx(sum(v["wall_s"] for v in design["variants"]))
+    assert design["variant_s"] == est and design["variant_s_source"].startswith("the planner's estimate")
+    assert design["rows_added"] == 4 * 4 and design["table_rows"] == 16 and design["planned_variants"] == 3
+    assert design["spent_s"] == 3 * est                                                                        # charged at the plan's cost, not the clock
     assert [c[1] for c in fake_stage1][:3] == [list(range(16))] * 3 and [c[0] for c in fake_stage1][:3] == [["glider_eq", "glider_2n", "usv", "uas"]] * 3
     assert check_of(d, "emulator_variants_within_share")["ok"] and check_of(d, "emulator_rows_appended")["value"] == 16
-    assert any("3 variant run(s) of 4 s each (the planner's estimate)" in n for n in d["notes"]) and any("incl. stage 1b" in n for n in d["notes"])
+    assert any("3 variant run(s) of 4 s each (the planner's estimate" in n for n in d["notes"]) and any("incl. stage 1b" in n for n in d["notes"])
     refit = cheap_plan(synthetic_ctx(tmp_path, 48, "refit"), 100.0)                                            # glider_eq was refit: share 5 s -> none
     run_stage(pipeline.s_emulator, refit, "emulator")
     d2 = json.loads((refit.run_dir / "emulator" / "design.json").read_text())
     assert d2["share_s"] == 5.0 and d2["variants"] == [] and not d2["stage1b_free"] and d2["rows_added"] == 4
 
 
-def test_the_variant_cost_is_the_measured_stage_1_wall_time_per_batch_when_there_is_one(tmp_path, table, fake_stage1):
-    """48 members in batches of 16: 3 batches. 24 s of stage 1 is 8 s a batch; the share is 20 s, 14 s of it for variants: one variant."""
-    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True, stage1_wall=24.0), 100.0)
-    d = run_stage(pipeline.s_emulator, ctx, "emulator")
-    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
-    assert design["variant_s"] == 8.0 and design["variant_s_source"] == "this run's stage-1 wall time per batch" and len(design["variants"]) == 1
-    assert any("1 variant run(s) of 8 s each (this run's stage-1 wall time per batch)" in n for n in d["notes"])
-    slow = cheap_plan(synthetic_ctx(tmp_path, 48, "slow", unused_refit=True, stage1_wall=96.0), 100.0)               # 32 s a batch: none fits
-    run_stage(pipeline.s_emulator, slow, "emulator")
-    assert json.loads((slow.run_dir / "emulator" / "design.json").read_text())["variants"] == []
+def test_a_measured_stage_1_wall_time_does_not_size_the_variants(tmp_path, table, fake_stage1):
+    """Variants are priced by the planner (4 s a batch here), whatever stage 1 happened to take: 24 s or 96 s of it give the same three variants."""
+    designs = []
+    for name, wall in (("fast", 24.0), ("slow", 96.0)):
+        ctx = cheap_plan(synthetic_ctx(tmp_path, 48, name, unused_refit=True, stage1_wall=wall), 100.0)
+        run_stage(pipeline.s_emulator, ctx, "emulator")
+        designs.append(json.loads((ctx.run_dir / "emulator" / "design.json").read_text()))
+    assert [d["variant_s"] for d in designs] == [4.0, 4.0] and [len(d["variants"]) for d in designs] == [3, 3]
+    assert [v["mods"] for v in designs[0]["variants"]] == [v["mods"] for v in designs[1]["variants"]]
 
 
-def test_variant_count_is_capped_by_the_budget_name_and_stops_when_the_wall_clock_runs_out(tmp_path, table, fake_stage1, monkeypatch):
+def test_the_emulator_sizes_are_in_plan_json_before_any_stage_runs(tmp_path):
+    ctx = ctx_for(tmp_path / "r")
+    plan = json.loads(json.dumps(ctx.plan, default=ledger._jsonable))
+    assert plan["emulator"] == json.loads(json.dumps(budget.emulator_plan(ctx.plan))) and plan["emulator"]["max_variants"] == budget.EMULATOR_VARIANTS["ci"]
+    st = plan["stage3"]
+    assert st == json.loads(json.dumps(budget.stage3_plan(ctx.plan, ctx.classes, budget.stage3_assumptions()), default=ledger._jsonable))
+    assert set(st["cell_steps_per_part"]) == {"glider", "usv", "uas"} and st["share_s"] == pytest.approx(0.3 * 600) and st["fs"]["cases"] == 1
+
+
+def test_variant_count_is_capped_by_the_budget_name_and_the_clock_is_only_a_kill_at_the_whole_share(tmp_path, table, fake_stage1, monkeypatch):
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 10_000.0)
     ctx.plan["budget"] = "ci"
     run_stage(pipeline.s_emulator, ctx, "emulator")
-    assert len(json.loads((ctx.run_dir / "emulator" / "design.json").read_text())["variants"]) == budget.EMULATOR_VARIANTS["ci"] == 2
+    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    assert len(design["variants"]) == budget.EMULATOR_VARIANTS["ci"] == 2 and design["killed"] is None
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48, "slow", unused_refit=True), 100.0)
-    clock = iter([0.0, 0.0] + [100.0] * 400)                                                            # the ledger reads the clock first, then the stage
-    monkeypatch.setattr(pipeline.time, "time", lambda: next(clock))  # the first variant already took the whole share
-    run_stage(pipeline.s_emulator, ctx, "emulator")
-    assert json.loads((ctx.run_dir / "emulator" / "design.json").read_text())["variants"] == []
+    clock = iter([0.0] + [1e6] * 400)  # the stage starts its clock, then the whole share is gone
+    monkeypatch.setattr(pipeline.time, "perf_counter", lambda: next(clock))
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    assert design["variants"] == [] and design["planned_variants"] == 3 and design["killed"]["at_variant"] == 0
+    assert design["killed"]["reason"].startswith("killed: the variant runs spent the emulator stage's whole wall-clock share (20 s) before variant v0 of 3")
+    assert any(n.startswith("killed:") for n in d["notes"])
 
 
 def test_the_emulator_is_not_trained_on_a_few_rows_and_the_stage_still_passes(tmp_path, table, fake_stage1):
@@ -1016,6 +1029,124 @@ def test_a_trained_emulator_that_misses_the_acceptance_fails_the_stage(tmp_path,
         run_stage(pipeline.s_emulator, ctx, "emulator")
     c = check_of(read_ledger(ctx.run_dir, "emulator"), "emulator_rmse_glider")
     assert not c["ok"] and c["value"] > 0.2 and c["limit"] == 0.05
+
+
+def holdout_rows(ctx, vid="glider_eq"):
+    return json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())[vid]["rows"]
+
+
+def test_the_emulator_trains_on_the_table_as_the_stage_found_it_and_this_runs_rows_come_after(tmp_path, table, fake_stage1):
+    from cafe.pm import whatif
+    seed_table(table)
+    start = whatif.read_table(table)
+    a = cheap_plan(synthetic_ctx(tmp_path, 48, "a"), 10.0)  # no budget for variants: the two glider rows of the run
+    run_stage(pipeline.s_emulator, a, "emulator")
+    snap = whatif.read_table(a.run_dir / "emulator" / "train_input.parquet")
+    assert snap.equals(start) and holdout_rows(a) == 142                                                       # 140 from the table + glider_eq + glider_2n
+    assert len(whatif.read_table(table)) == 144                                                                # appended after the fit
+    run_stage(pipeline.s_emulator, a, "emulator")  # the same run again: its own rows are not training data
+    assert len(whatif.read_table(a.run_dir / "emulator" / "train_input.parquet")) == 140 and holdout_rows(a) == 142
+    assert len(whatif.read_table(table)) == 144                                                                # replaced, not doubled
+    b = cheap_plan(synthetic_ctx(tmp_path, 48, "b"), 10.0)                                                     # another run on the table as it is now
+    run_stage(pipeline.s_emulator, b, "emulator")
+    assert len(whatif.read_table(b.run_dir / "emulator" / "train_input.parquet")) == 144 and holdout_rows(b) == 144       # + a's four rows, two of them gliders
+
+
+def test_a_row_another_run_appends_while_the_stage_runs_does_not_reach_this_runs_emulator(tmp_path, table, fake_stage1, monkeypatch):
+    from cafe.pm import whatif
+    seed_table(table)
+    other = dict(whatif.read_table(table).iloc[0].to_dict(), key="other|glider|base", run_id="other")
+    real, seen = whatif.train, []
+
+    def train(tab, classes, path=None, df=None):
+        whatif.add_rows(table, [other])                                                                       # a concurrent run finishes right now
+        seen.append(len(df))
+        return real(tab, classes, path, df)
+    monkeypatch.setattr(whatif, "train", train)
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48), 10.0)
+    run_stage(pipeline.s_emulator, ctx, "emulator")
+    assert seen == [144] and "other|glider|base" in set(whatif.read_table(table)["key"]) and holdout_rows(ctx) == 142       # 140 + the run's four rows, not 145
+
+
+def test_the_emulator_table_is_the_option_then_the_environment_then_the_shared_data_tree(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "d")
+    monkeypatch.delenv("CAFE_EMULATOR_TABLE", raising=False)
+    shared = tmp_path / "d" / "emulator" / "train.parquet"
+    assert pipeline.emulator_table() == shared and ctx_for(tmp_path / "r").table == shared
+    monkeypatch.setenv("CAFE_EMULATOR_TABLE", str(tmp_path / "env.parquet"))
+    assert pipeline.emulator_table() == tmp_path / "env.parquet" and ctx_for(tmp_path / "r").table == tmp_path / "env.parquet"
+    ctx = pipeline.Context(MISSION_PATH, "ci", 0, tmp_path / "r", quiet, emulator_table=tmp_path / "opt.parquet")
+    assert ctx.table == tmp_path / "opt.parquet" and pipeline.emulator_table("x.parquet") == pathlib.Path("x.parquet")
+
+
+def test_a_variant_that_leaves_the_environment_is_skipped_with_its_reason_and_never_crashes_the_run(tmp_path, table, fake_stage1, monkeypatch):
+    from cafe.pm import whatif
+    from cafe.pm.env.environment import OutsideData
+    inner, base = stage1.run_batch, pm_run.mission()["vehicles"]
+
+    def run_batch(mission, *a, **k):
+        moved = [v["id"] for v in mission["vehicles"] if v != next(x for x in base if x["id"] == v["id"])]
+        if "glider_eq" in moved:
+            raise OutsideData("wind: (-171.20, 0.90) at 2023-03-02 06:00Z is outside the cached data")
+        b = inner(mission, *a, **k)
+        ids = {v["id"] for v in mission["vehicles"]}
+        return dict(b, vehicles={k: v for k, v in b["vehicles"].items() if k in ids})  # the real run_batch returns this mission's vehicles
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)                                    # three variants
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")                                                        # the same run used to raise
+    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    assert len(design["variants"]) == 3 and design["skipped"] and all(s["vehicle"] == "glider_eq" for s in design["skipped"])
+    assert all("leaves the environment data: wind: (-171.20, 0.90)" in s["reason"] for s in design["skipped"])
+    kept = [v for v in design["variants"] if v["skipped"]]
+    assert kept and all("glider_eq" not in v["vehicles"] and "usv" in v["vehicles"] for v in kept)  # the other vehicles of that variant kept their rows
+    df = whatif.read_table(table)
+    n_skipped = len(design["skipped"])
+    assert design["rows_added"] == 4 * 4 - n_skipped == len(df) and check_of(d, "emulator_rows_appended")["ok"]
+    assert sum(1 for n in d["notes"] if "skipped for glider_eq" in n) == n_skipped
+
+
+def test_the_flip_search_on_the_ci_mission_does_not_crash_when_a_moved_track_leaves_the_cache(tmp_path):
+    """The CI cache ends at 167 W. A glider track 0.2 degree inside it, moved 0.5 or 1 degree west, is outside: GriddedEnv refuses (strict), which used
+    to end the run in the flip search's emulator query. Now each such candidate is a reason; the others are answered."""
+    from cafe.pm import whatif
+    from cafe.pm.env.environment import OutsideData
+    from tests import test_whatif
+    ctx = ctx_for(tmp_path / "r")
+    em, _ = whatif.fit_class(test_whatif.storm_table(), "glider", tmp_path / "t.parquet")
+    trk = (np.linspace(T0, T1, 24), np.full(24, -166.8), np.zeros(24))
+    with pytest.raises(OutsideData):
+        whatif.env_stats(ctx.env, *whatif.shift_track(trk, dict(dlon=-0.5), ctx.mission))                      # what the flip search used to run into
+    pri, marg = stage1.priors_for(ctx.mission)
+    flips, _ = whatif.flip_search(ctx.mission, {"glider_eq": dict(verdict="NO-GO", p_fail=0.9)}, {"glider_eq": trk}, ctx.env, {"glider": (em, {})}, ctx.plan,
+                                  pri, marg, None, int(ctx.mission["seed"]), 1e6, quiet)
+    tried = flips["glider_eq"]["tried"]
+    west = [t for t in tried if "west" in t["change"] and "leaves the environment data" in t["reason"]]
+    assert {t["change"] for t in west} == {"move 0.5 deg west", "move 1 deg west"} and all(t["method"] == "not evaluated" for t in west)
+    assert any(t["method"] == "EMULATED" or t["reason"] for t in tried if t not in west)                       # the rest were still tried
+
+
+def test_a_variant_of_the_ci_mission_past_the_cache_edge_is_skipped_for_that_glider_only(tmp_path):
+    """The mission box is widened to 168 W and the glider deployed at 166.9 W, 0.1 degree inside the cache; a variant 0.5 degree west deploys it outside."""
+    from cafe.pm import whatif
+    from cafe.pm.env.environment import OutsideData
+    m = yaml.safe_load(MISSION_PATH.read_text())
+    m["box"]["lon_min"] = -168.0
+    m["vehicles"] = [v for v in m["vehicles"] if v["id"] != "uas"]
+    m["links"] = [lk for lk in m["links"] if "uas" not in (lk["a"], lk["b"])]
+    m["vehicles"][0]["deploy"]["lon"] = m["vehicles"][0]["task"]["lon"] = -166.9
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(m))
+    ctx = ctx_for(tmp_path / "r", mission=tmp_path / "m.yaml")
+    pri, marg = stage1.priors_for(ctx.mission)
+    members, seed = [0, 1, 2, 3], int(ctx.mission["seed"])
+    mv = whatif.apply(ctx.mission, {"glider_eq": dict(dlon=-0.5)})
+    with pytest.raises(OutsideData):
+        stage1.run_batch(mv, ctx.env, members, seed, pri, marg, None)                                         # what the emulator stage used to do
+    meta = dict(run_id="r", mission="ci", git_sha="x", code_digest="y")
+    rows, skipped = whatif.run_variant(mv, ctx.env, members, seed, pri, marg, None, {}, meta, "v0")
+    assert list(skipped) == ["glider_eq"] and skipped["glider_eq"].startswith("the variant leaves the environment data: ")
+    assert sorted(r["vehicle"] for r in rows) == ["glider_1n", "usv"] and {r["variant"] for r in rows} == {"v0"}
+    rows, skipped = whatif.run_variant(ctx.mission, ctx.env, members, seed, pri, marg, None, {}, meta, "base")        # the unmoved mission runs whole
+    assert skipped == {} and sorted(r["vehicle"] for r in rows) == ["glider_1n", "glider_eq", "usv"]
 
 
 def test_the_stage_learns_from_what_the_table_already_holds(tmp_path, table, fake_stage1, monkeypatch):
