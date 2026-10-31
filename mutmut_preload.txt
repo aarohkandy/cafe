@@ -1,0 +1,22 @@
+# Modules the mutmut fork server imports once, before it forks a worker per mutant. Anything that starts the jax backend (cafe.pm.physics.uas
+# does at import) must not be here: a worker forked from a process with live XLA threads hangs.
+numpy
+scipy.stats
+scipy.interpolate
+scipy.spatial.transform
+yaml
+pytest
+hypothesis
+gsw
+statsmodels.stats.proportion
+jax
+jax.numpy
+cafe.pm.stats.intervals
+cafe.pm.stats.sampling
+cafe.pm.stats.sensitivity
+cafe.pm.stats.sequential
+cafe.pm.stats.rare
+cafe.pm.physics.comms
+cafe.pm.physics.glider
+cafe.pm.physics.usv
+cafe.pm.physics.rigid

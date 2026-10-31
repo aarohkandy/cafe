@@ -21,5 +21,5 @@ pytest-cov==7.1.0
 hypothesis==6.170.13
 ruff==0.17.3
 mypy==2.4.1
-mutmut==3.8.1
+mutmut==3.8.1  # not in the built cafe-pm image: pip install --no-deps --target /data/pylib_mut mutmut==3.8.1, then PYTHONPATH=/app:/data/pylib_mut
 pyarrow==21.0.0

@@ -19,3 +19,28 @@ strict = true
 
 [tool.coverage.run]
 source = ["cafe/pm"]
+
+# Mutation testing (BRIEF 5.3: >= 85 % of mutants killed on cafe/pm/physics and cafe/pm/stats). `make mutation` runs it (hours, so
+# `make audit` only reads the stored docs/mutation.json). mutmut 3 copies source_paths and tests/ to mutants/ and puts that on sys.path, so the
+# whole cafe package is the source path (the rest of it must stay importable) and only the two trees below are mutated.
+[tool.mutmut]
+source_paths = ["cafe"]
+only_mutate = ["cafe/pm/physics/*", "cafe/pm/stats/*"]
+also_copy = ["config", "platforms", "missions", "docs", "bench"]
+# jax starts threads, which a plain fork copies in a deadlocked state (workers hang and score as timeouts), and a fork of a process that has
+# already traced a jitted function would reuse the unmutated trace: workers are forked from a clean server process instead
+process_isolation = "forkserver"
+forkserver_warmup = "import"
+preload_modules_file = "mutmut_preload.txt"
+# a mutant that loops forever is cut off after 2 x (the covering tests' own time + 10 s) (wall), mutmut's CPU limit is twice that; the default 15 x is hours
+timeout_multiplier = 2.0
+timeout_constant = 10.0
+# the fake-firmware tests bind sockets and wait on the wall clock: they fail on a loaded host, and fly_sitl (their only subject) is not mutated
+pytest_add_cli_args = ["-p", "no:cacheprovider", "-m", "not network",
+    "--deselect", "tests/test_uas.py::test_scrambled_motor_order_fails_the_sitl_receipts",
+    "--deselect", "tests/test_uas.py::test_lockstep_machinery_answers_every_frame_once",
+    "--deselect", "tests/test_uas.py::test_an_autopilot_that_never_arms_is_reported_and_fails_the_sitl_receipts",
+    "--deselect", "tests/test_uas.py::test_an_autopilot_that_never_speaks_mavlink_is_reported",
+    "--deselect", "tests/test_uas.py::test_a_firmware_that_dies_is_reported"]
+pytest_add_cli_args_test_selection = ["tests/test_stats.py", "tests/test_comms.py", "tests/test_glider.py", "tests/test_uas.py", "tests/test_usv.py", "tests/test_dyn.py", "tests/test_perturb.py",
+    "tests/test_stats_exact.py", "tests/test_comms_exact.py", "tests/test_uas_exact.py"]

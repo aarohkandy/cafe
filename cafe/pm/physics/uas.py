@@ -663,10 +663,12 @@ class _Sim1:
                                 battery=dict(voltage=volt, current=float(self.pe[0]) / volt))) + "\n").encode()
 
 
+# mutation: not mutated. The driver of the external ArduCopter firmware: only a real binary reaches it, and its tests run wall-clock sockets
+# that fail on a loaded host, so a mutant run would score the load, not the tests.
 def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), plat: Optional[dict[str, Any]] = None, wp: Arr = None, turb: Arr = None,
              gust: Optional[Ship] = None, member: int = 0, scale: Optional[dict[str, Any]] = None, max_s: Optional[float] = None,
              instance: Optional[int] = None, motor_map: tuple[int, ...] = (0, 1, 2, 3), workdir: Optional[str] = None, land: bool = True, hold_s: float = 0.0,
-             firmware: Optional[dict[str, Any]] = None, boot_s: float = 20.0, patience_s: float = 60.0) -> dict[str, Any]:
+             firmware: Optional[dict[str, Any]] = None, boot_s: float = 20.0, patience_s: float = 60.0) -> dict[str, Any]:  # pragma: no mutate block
     """Fly ONE member of the sortie with ArduCopter SITL (JSON external physics) at our 2.5 ms step: firmware controllers, our
     physics, wind/turbulence/gust from `env`/`turb`/`gust` (SIM_JSON ignores SIM_WIND_*). Lockstep on our timestamp, no SIM_SPEEDUP,
     so it runs in real time; run members in parallel with distinct `instance`. wp (W,3) ship-relative; default is the flux pattern.
@@ -858,8 +860,10 @@ def _hold(h: float, M: int, x: float = 0.0) -> np.ndarray:
     return np.broadcast_to(np.array([x, 0.0, h])[None, :, None], (4000, 3, M)).copy()
 
 
+# mutation: not mutated. A receipt generator is the audit instrument, not the model: make receipts and the broken-physics tests grade it, and
+# its mutants are label, unit and source strings and widened tolerances, each costing a full receipt run.
 def receipts(plat: Optional[dict[str, Any]] = None, fault: Optional[str] = None, sitl: bool = True,
-             sortie: bool = True) -> list[dict[str, Any]]:
+             sortie: bool = True) -> list[dict[str, Any]]:  # pragma: no mutate block
     """Reproduce what the literature says about this model and say so through cafe.receipts (each one can fail).
     `fault` breaks one piece of the physics on purpose (wind_sign, no_drag, fm, peukert, dt_const, sitl_motor_order) so the
     tests can show the matching receipt then fails. sitl / sortie switch off the real-time ArduCopter run and the 20 min sortie
@@ -948,7 +952,7 @@ def receipts(plat: Optional[dict[str, Any]] = None, fault: Optional[str] = None,
     return R.OUT[n0:]
 
 
-def _sitl_receipts(P: dict[str, Any], fault: Optional[str], R: Any) -> None:
+def _sitl_receipts(P: dict[str, Any], fault: Optional[str], R: Any) -> None:  # pragma: no mutate block
     """ArduCopter SITL vs our controller on the same hover + 60 m leg + return + landing, no wind."""
     from ..env.protocol import AnalyticEnv
     env = AnalyticEnv(wind=(0.0, 0.0))

@@ -271,7 +271,9 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
 
 
 # ---------------------------------------------------------------- receipts
-def receipts() -> list[dict[str, Any]]:
+# mutation: not mutated. A receipt generator is the audit instrument, not the model: make receipts and the broken-physics tests grade it, and
+# its mutants are label, unit and source strings and widened tolerances, each costing a full receipt run.
+def receipts() -> list[dict[str, Any]]:  # pragma: no mutate block
     """Run every comms receipt through cafe.receipts and return the entries it recorded."""
     from cafe import receipts as R
     n0, g = len(R.OUT), "Comms"

@@ -129,7 +129,9 @@ def coverage(n: int, p_grid: np.ndarray, conf: float = 0.95, method: str = "wils
     return np.array([binom.pmf(ks, n, p)[(lohi[:, 0] <= p) & (p <= lohi[:, 1])].sum() for p in p_grid])
 
 
-def receipts() -> list[dict[str, Any]]:
+# mutation: not mutated. A receipt generator is the audit instrument, not the model: make receipts and the broken-physics tests grade it, and
+# its mutants are label, unit and source strings and widened tolerances, each costing a full receipt run.
+def receipts() -> list[dict[str, Any]]:  # pragma: no mutate block
     """Reproduce published numbers; each can fail (a wrong kappa or a wrong formula breaks them)."""
     from statsmodels.stats.proportion import proportion_confint
 

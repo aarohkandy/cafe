@@ -4,8 +4,10 @@ MISSION ?= missions/tepex_c_demo.yaml
 GPUS    ?= 0
 RUNS    ?= runs
 PY      ?= python
+MUTMUT  ?= $(PY) -m mutmut
+MUT_CPUS ?= 3
 
-.PHONY: install bench fetch run quick overnight ci receipts audit acceptance broken report clean-runs
+.PHONY: install bench fetch run quick overnight ci receipts audit mutation acceptance broken report clean-runs
 
 install:            ## the pipeline image (docker) - the only supported install
 	docker build -t cafe . && docker build -f Dockerfile.pm -t cafe-pm .
@@ -34,7 +36,14 @@ receipts:           ## every receipt, existing app + pre-mission; non-zero exit 
 broken:             ## the deliberately broken configuration must FAIL a receipt (exit 0 = it failed as required)
 	$(PY) -m cafe.pm receipts --broken tests/fixtures/broken/wave_direction.yaml
 
-audit:
+# In docker add --ulimit core=0 (a crashed jax worker otherwise writes a core file of 1 GB or more to the host's shared disk).
+mutation:           ## mutmut on cafe/pm/physics + cafe/pm/stats; stores docs/mutation.json (hours: run it on homebase, ./pm.sh make mutation; MUT_KEEP=1 resumes in the same mutants/ dir, mutmut reruns only changed functions). `make audit` fails without a current one >= 85 %
+	$(if $(MUT_KEEP),,rm -rf mutants)
+	ulimit -c 0; $(MUTMUT) run --max-children $(MUT_CPUS)
+	$(MUTMUT) export-cicd-stats
+	$(PY) -m cafe.pm.audit --mutation-record
+
+audit:              ## ledgers, banned patterns, ruff, mypy, pytest + coverage, and the stored mutation result (see `make mutation`)
 	$(PY) -m cafe.pm.audit $(wildcard $(RUNS)/quick $(RUNS)/overnight $(RUNS)/4h)
 
 acceptance:         ## brief section 5.3: quick + overnight (+ 4h when GPUS>0), golden diff, reproducibility, broken config

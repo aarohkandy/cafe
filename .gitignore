@@ -10,3 +10,4 @@ coverage.json
 runs/
 checkpoints/
 emulator/train.*
+mutants/

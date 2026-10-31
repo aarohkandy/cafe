@@ -8,11 +8,18 @@
 2. Banned patterns outside tests/fixtures/broken/: TODO, FIXME, XXX, NotImplementedError, placeholder, pytest skip /
    xfail markers, and commented-out code (a comment line that parses as a Python statement).
 3. ruff, mypy, pytest with coverage gates (cafe/pm >= 90 %, cafe/pm/physics, stats, env = 100 %).
+4. Mutation testing (BRIEF 5.3: >= 85 % of mutants killed on cafe/pm/physics and cafe/pm/stats). It takes hours, so it is a slow
+   receipt: `make mutation` runs mutmut and stores docs/mutation.json (counts, score, a digest of the mutated code and of the tests
+   that kill the mutants, date, mutmut version). The audit only reads that file and fails if it is missing, was made by different
+   code or tests, or scores < 0.85, naming the command that refreshes it.
 Exit 0 only if all pass; prints every failure.
+
+    python -m cafe.pm.audit --mutation-record     (called by `make mutation`: writes docs/mutation.json from mutants/mutmut-cicd-stats.json)
 """
 from __future__ import annotations
 
-import ast, json, pathlib, re, subprocess, sys
+import ast, datetime as dt, hashlib, importlib.metadata, json, pathlib, re, subprocess, sys, tomllib
+from typing import Any
 
 from .env.remote import sha256
 
@@ -22,6 +29,11 @@ BANNED = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError)\b|\bplaceholder\b|p
 SCAN = ["cafe/pm", "tests", "bench", "platforms", "missions", "config", "docs/RUNBOOK.md", "Makefile"]
 EXEMPT = ["tests/fixtures/broken/", "cafe/pm/audit.py", "tests/test_audit.py", "docs/BRIEF.md", "review/"]
 GATES = {"cafe/pm": 90.0, "cafe/pm/physics": 100.0, "cafe/pm/stats": 100.0, "cafe/pm/env": 100.0}
+MUTATED = ["cafe/pm/physics", "cafe/pm/stats"]
+MUTATION_MIN = 0.85
+MUTATION_FILE = "docs/mutation.json"
+MUTATION_STATS = "mutants/mutmut-cicd-stats.json"
+MUTATION_CMD = "`make mutation` (hours; from a laptop `./pm.sh make mutation`, then `./pm.sh --pull docs/mutation.json`)"
 
 
 def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
@@ -116,13 +128,62 @@ def coverage_problems(cov_json: str | pathlib.Path) -> list[str]:
     return out
 
 
+def mutation_tests(root: pathlib.Path = ROOT) -> list[str]:
+    """The test files mutmut runs against each mutant: `pytest_add_cli_args_test_selection` of [tool.mutmut] in pyproject.toml."""
+    tests: list[str] = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["mutmut"]["pytest_add_cli_args_test_selection"]
+    return tests
+
+
+def mutation_digest(root: pathlib.Path = ROOT) -> str:
+    """sha256 over the mutated code (cafe/pm/physics, cafe/pm/stats) and the tests that kill its mutants (those files and tests/conftest.py)."""
+    files = [f for d in MUTATED for f in (root / d).rglob("*.py") if "__pycache__" not in f.parts]
+    files += [root / t for t in mutation_tests(root)] + [root / "tests" / "conftest.py"]
+    h = hashlib.sha256()
+    for f in sorted(set(files)):
+        h.update(str(f.relative_to(root)).encode() + b"\0" + f.read_bytes())
+    return h.hexdigest()
+
+
+def mutation_score(r: dict[str, int]) -> float:
+    """killed / total over every mutant mutmut generated. Survivors, timeouts, mutants no test reaches and suspicious ones all count against it."""
+    return r["killed"] / r["total"] if r["total"] else 0.0
+
+
+def mutation_record(root: pathlib.Path = ROOT) -> dict[str, Any]:
+    """The result `make mutation` stores, from the counts `mutmut export-cicd-stats` wrote to mutants/mutmut-cicd-stats.json."""
+    counts = json.loads((root / MUTATION_STATS).read_text())
+    rec: dict[str, Any] = {k: counts[k] for k in ("killed", "survived", "timeout", "no_tests", "suspicious", "skipped", "segfault", "total")}
+    rec.update(score=round(mutation_score(rec), 4), code_digest=mutation_digest(root), tests=mutation_tests(root), sources=MUTATED,
+               date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), mutmut=importlib.metadata.version("mutmut"))
+    return rec
+
+
+def mutation_problems(root: pathlib.Path = ROOT) -> list[str]:
+    """Missing, stale or too-low stored mutation result; each message names the command that refreshes it."""
+    path = root / MUTATION_FILE
+    if not path.is_file():
+        return [f"mutation: no stored result at {MUTATION_FILE}: run {MUTATION_CMD}"]
+    rec = json.loads(path.read_text())
+    if rec.get("code_digest") != mutation_digest(root):
+        return [f"mutation: the stored result ({rec.get('date')}) was made by different physics/stats code or tests: run {MUTATION_CMD}"]
+    score = mutation_score(rec)                        # recomputed from the counts: an edited `score` field proves nothing
+    if score + 1e-9 < MUTATION_MIN:
+        return [f"mutation: {rec['killed']}/{rec['total']} mutants killed = {score:.1%} < {MUTATION_MIN:.0%}: add tests, then {MUTATION_CMD}"]
+    return []
+
+
 def main(argv: list[str]) -> int:
+    if "--mutation-record" in argv:
+        (ROOT / MUTATION_FILE).write_text(json.dumps(mutation_record(ROOT), indent=1) + "\n")
+        print(f"wrote {MUTATION_FILE}")
+        return 0
     code_only = "--code-only" in argv
     runs = [a for a in argv if not a.startswith("--")]
     problems: list[str] = []
     for r in runs:
         problems += ledger_problems(r)
     problems += banned()
+    problems += mutation_problems(ROOT)
     if not code_only:
         rc, out = _run(["ruff", "check"])
         if rc:

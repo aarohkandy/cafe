@@ -514,14 +514,16 @@ def _station_flags(P: dict[str, Any], current: float, horizontal: float) -> floa
     return float(sim.run(7 * 86400.0, 60.0)["fail"]["station_lost"].mean())
 
 
-def receipts(params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+# mutation: not mutated. A receipt generator is the audit instrument, not the model: make receipts and the broken-physics tests grade it, and
+# its mutants are label, unit and source strings and widened tolerances, each costing a full receipt run.
+def receipts(params: dict[str, Any] | None = None) -> list[dict[str, Any]]:  # pragma: no mutate block
     """Run every glider receipt; returns the entries added to cafe.receipts.OUT.  `params` replaces the Seaglider defaults
     (tests use it to break units).  Degenerate (broken) physics gives failed receipts, not floating-point warnings."""
     with np.errstate(all="ignore"):
         return _receipts(params)
 
 
-def _receipts(params: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _receipts(params: dict[str, Any] | None) -> list[dict[str, Any]]:  # pragma: no mutate block
     from cafe import receipts as rc
 
     n0 = len(rc.OUT)

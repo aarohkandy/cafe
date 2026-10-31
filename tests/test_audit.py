@@ -167,6 +167,7 @@ def test_main_code_only_reports_ledger_and_banned_problems(tmp_path, monkeypatch
     run = make_run(tmp_path)
     ledger_path(run, "report").unlink()
     monkeypatch.setattr(audit, "banned", lambda: ["cafe/pm/x.py:1: banned pattern: TODO"])
+    monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
     monkeypatch.setattr(audit, "_run", lambda cmd: pytest.fail("--code-only must not run the tools"))
     assert audit.main([str(run), "--code-only"]) == 1
     out = capsys.readouterr().out
@@ -176,6 +177,7 @@ def test_main_code_only_reports_ledger_and_banned_problems(tmp_path, monkeypatch
 def test_main_runs_ruff_mypy_pytest_and_the_coverage_gates(tmp_path, monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(audit, "banned", lambda: [])
+    monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
     monkeypatch.setattr(audit, "ROOT", tmp_path)
 
     def fake(cmd):
@@ -204,9 +206,109 @@ def test_audit_mypy_step_reads_pyproject_and_fails_on_a_strict_only_error(tmp_pa
 
 def test_main_is_clean_when_everything_passes(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(audit, "banned", lambda: [])
+    monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
     monkeypatch.setattr(audit, "_run", lambda cmd: (0, ""))
     monkeypatch.setattr(audit, "ROOT", tmp_path)
     assert audit.main([str(make_run(tmp_path))]) == 0 and "audit: 0 problem(s)" in capsys.readouterr().out
+
+
+# ---- mutation: the stored result of `make mutation` ---------------------------------------------------------------------
+
+
+def mut_root(tmp_path, killed=90, total=100, **extra):
+    """A repo in miniature: one file each in physics and stats, a test, conftest, the [tool.mutmut] test selection, and mutmut's counts."""
+    root = tree(tmp_path, {
+        "pyproject.toml": '[tool.mutmut]\npytest_add_cli_args_test_selection = ["tests/test_a.py"]\n',
+        "cafe/pm/physics/a.py": "G = 9.81\n", "cafe/pm/stats/b.py": "Z = 1.96\n", "cafe/pm/other.py": "O = 1\n",
+        "cafe/pm/physics/__pycache__/a.pyc": "junk", "tests/test_a.py": "def test_a(): assert True\n", "tests/conftest.py": "",
+        "tests/test_unlisted.py": "",
+    })
+    counts = dict(killed=killed, survived=total - killed, timeout=0, no_tests=0, suspicious=0, skipped=0, segfault=0, total=total, **extra)
+    tree(tmp_path, {audit.MUTATION_STATS: json.dumps(counts)})
+    return root
+
+
+def store(root, monkeypatch):
+    monkeypatch.setattr(audit.importlib.metadata, "version", lambda name: "9.9.9")
+    (root / "docs").mkdir(exist_ok=True)
+    (root / audit.MUTATION_FILE).write_text(json.dumps(audit.mutation_record(root)))
+
+
+def test_mutation_result_missing_is_a_failure_naming_the_command(tmp_path):
+    probs = audit.mutation_problems(mut_root(tmp_path))
+    assert len(probs) == 1
+    assert f"no stored result at {audit.MUTATION_FILE}" in probs[0]
+    assert "`make mutation`" in probs[0]
+    assert "`./pm.sh make mutation`" in probs[0]
+
+
+def test_record_holds_counts_score_digest_tests_date_and_version(tmp_path, monkeypatch):
+    root = mut_root(tmp_path, killed=170, total=200)
+    store(root, monkeypatch)
+    rec = json.loads((root / audit.MUTATION_FILE).read_text())
+    assert (rec["killed"], rec["survived"], rec["timeout"], rec["total"], rec["score"]) == (170, 30, 0, 200, 0.85)
+    assert rec["code_digest"] == audit.mutation_digest(root) and rec["tests"] == ["tests/test_a.py"] and rec["sources"] == audit.MUTATED
+    assert rec["mutmut"] == "9.9.9" and rec["date"].endswith("+00:00") and len(rec["date"]) == 25
+    assert audit.mutation_problems(root) == []                       # exactly 85 % passes
+
+
+def test_score_below_85_percent_fails_and_the_stored_score_field_is_not_trusted(tmp_path, monkeypatch):
+    root = mut_root(tmp_path, killed=169, total=200)
+    store(root, monkeypatch)
+    probs = audit.mutation_problems(root)
+    assert len(probs) == 1 and "169/200 mutants killed = 84.5% < 85%" in probs[0] and "make mutation" in probs[0]
+    path = root / audit.MUTATION_FILE
+    path.write_text(json.dumps(dict(json.loads(path.read_text()), score=1.0)))
+    assert "84.5%" in audit.mutation_problems(root)[0]
+
+
+def test_survivors_timeouts_and_unreached_mutants_all_count_against_the_score():
+    assert audit.mutation_score(dict(killed=85, total=100, survived=5, timeout=5, no_tests=5)) == 0.85
+    assert audit.mutation_score(dict(killed=0, total=0)) == 0.0         # nothing mutated is not a pass
+
+
+@pytest.mark.parametrize("edit", ["cafe/pm/physics/a.py", "cafe/pm/stats/b.py", "tests/test_a.py", "tests/conftest.py"])
+def test_a_stale_result_fails_when_mutated_code_or_its_tests_change(tmp_path, monkeypatch, edit):
+    root = mut_root(tmp_path)
+    store(root, monkeypatch)
+    assert audit.mutation_problems(root) == []
+    with (root / edit).open("a") as f:
+        f.write("# changed\n")
+    probs = audit.mutation_problems(root)
+    assert len(probs) == 1 and "made by different physics/stats code or tests" in probs[0] and "make mutation" in probs[0]
+
+
+@pytest.mark.parametrize("edit", ["cafe/pm/other.py", "tests/test_unlisted.py", "cafe/pm/physics/__pycache__/a.pyc"])
+def test_a_result_survives_edits_outside_the_mutated_code_and_its_tests(tmp_path, monkeypatch, edit):
+    root = mut_root(tmp_path)
+    store(root, monkeypatch)
+    with (root / edit).open("a") as f:
+        f.write("changed\n")
+    assert audit.mutation_problems(root) == []
+
+
+def test_digest_depends_on_the_test_selection_in_pyproject(tmp_path):
+    root = mut_root(tmp_path)
+    d = audit.mutation_digest(root)
+    (root / "pyproject.toml").write_text('[tool.mutmut]\npytest_add_cli_args_test_selection = ["tests/test_a.py", "tests/test_unlisted.py"]\n')
+    assert audit.mutation_digest(root) != d and audit.mutation_tests(root) == ["tests/test_a.py", "tests/test_unlisted.py"]
+
+
+def test_the_repo_selection_names_existing_test_files_and_the_audit_reads_the_repo_result():
+    assert audit.mutation_tests() and all((audit.ROOT / t).is_file() for t in audit.mutation_tests())
+    assert all((audit.ROOT / d).is_dir() for d in audit.MUTATED)
+
+
+def test_main_reports_a_mutation_problem_and_record_flag_writes_the_file(tmp_path, monkeypatch, capsys):
+    root = mut_root(tmp_path)
+    monkeypatch.setattr(audit, "ROOT", root)
+    monkeypatch.setattr(audit, "banned", lambda: [])
+    monkeypatch.setattr(audit.importlib.metadata, "version", lambda name: "9.9.9")
+    assert audit.main(["--code-only"]) == 1 and f"AUDIT FAIL: mutation: no stored result at {audit.MUTATION_FILE}" in capsys.readouterr().out
+    (root / "docs").mkdir()
+    assert audit.main(["--mutation-record"]) == 0 and f"wrote {audit.MUTATION_FILE}" in capsys.readouterr().out
+    assert json.loads((root / audit.MUTATION_FILE).read_text())["killed"] == 90
+    assert audit.main(["--code-only"]) == 0 and "audit: 0 problem(s)" in capsys.readouterr().out
 
 
 def test_module_entry_point_exits_with_the_audit_status(monkeypatch):

@@ -635,7 +635,9 @@ def superposition_ratio(P: dict[str, Any], wind: float, current: float, against:
     return float(np.mean(still["stw"]) / np.mean(cpl["stw"])), float(np.mean(sog(still)) / np.mean(sog(cpl)))
 
 
-def receipts(P: dict[str, Any] | None = None) -> None:
+# mutation: not mutated. A receipt generator is the audit instrument, not the model: make receipts and the broken-physics tests grade it, and
+# its mutants are label, unit and source strings and widened tolerances, each costing a full receipt run.
+def receipts(P: dict[str, Any] | None = None) -> None:  # pragma: no mutate block
     """Reproduce what is published about this class of vehicle (see platforms/saildrone_explorer.yaml for the numbers)."""
     from cafe.receipts import bracket, context, receipt
     from ..env.protocol import AnalyticEnv
