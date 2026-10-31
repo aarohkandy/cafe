@@ -425,6 +425,47 @@ def test_ingest_resumes_from_cached_parts(orca_env, tmp_path):
     assert third["parts"] == first["parts"]
 
 
+def parts_of(out):
+    return {p.name: p.stat().st_mtime_ns for p in (out / "hours").glob("*.npz")}
+
+
+def test_the_manifest_records_the_box_and_a_changed_box_refetches_every_part(orca_env, tmp_path):
+    out = tmp_path / "out"
+    first, _ = ingest(orca_env, out, hours3d=[t(1)])
+    assert first["box"] == list(BOX) == json.loads((out / "manifest.json").read_text())["box"]
+    before = parts_of(out)
+    marked = out / "hours" / f"umwm_{mk.stamp(0)}.npz"
+    np.savez(marked, marker=np.arange(1))                                                       # stands in for a part cut to the old box
+    smaller = (176.0, 184.0, -2.0, 2.0)
+    lines = []
+    second = orca.ingest(t(0), t(2), smaller, out, hours3d=[t(1)], threads=4, log=lines.append)
+    assert lines[0] == "ingest: 7 parts, 0 cached, fetching 7 with 4 threads"                  # nothing cut to the old box is reused
+    assert second["box"] == list(smaller) and set(parts_of(out)) == set(before)
+    assert "marker" not in np.load(marked).files
+    again = []
+    orca.ingest(t(0), t(2), smaller, out, hours3d=[t(1)], threads=4, log=again.append)
+    assert again[0] == "ingest: 7 parts, 7 cached, fetching 0 with 4 threads"                   # the same box resumes from the cached parts
+
+
+def test_a_cache_with_no_cut_record_cannot_say_which_box_it_was_cut_to_and_is_refetched(orca_env, tmp_path):
+    out = tmp_path / "out"
+    ingest(orca_env, out)
+    (out / "cut.json").unlink()                                                                  # a cache written before the box was recorded
+    _, lines = ingest(orca_env, out)
+    assert lines[0] == "ingest: 7 parts, 0 cached, fetching 7 with 4 threads"
+
+
+def test_a_new_3d_hour_refetches_only_that_hours_wrf_part(orca_env, tmp_path):
+    out = tmp_path / "out"
+    ingest(orca_env, out, hours3d=[t(1)])
+    assert zarr(out, "wrf3d.zarr").time.size == 1
+    man, lines = ingest(orca_env, out, hours3d=[t(1), t(2)])
+    assert lines[0] == "ingest: 7 parts, 6 cached, fetching 1 with 4 threads"
+    assert man["hours3d"] == ["2023-03-05_01:00:00", "2023-03-05_02:00:00"] and zarr(out, "wrf3d.zarr").time.size == 2
+    man, lines = ingest(orca_env, out, hours3d=[t(1)])                                           # fewer 3-D hours: nothing to fetch
+    assert lines[0] == "ingest: 7 parts, 7 cached, fetching 0 with 4 threads" and man["hours3d"] == ["2023-03-05_01:00:00"]
+
+
 def test_ingest_without_spectra_or_3d(orca_env, tmp_path):
     out = tmp_path / "out"
     man, lines = ingest(orca_env, out, t0=1, t1=2, spectra=False)

@@ -36,6 +36,49 @@ MUTATION_STATS = "mutants/mutmut-cicd-stats.json"
 MUTATION_CMD = "`make mutation` (hours; from a laptop `./pm.sh make mutation`, then `./pm.sh --pull docs/mutation.json`)"
 
 
+def _resolve(ref: str, run_dir: pathlib.Path) -> pathlib.Path:
+    """Where a path a ledger recorded is now. A run that was moved or copied keeps its absolute paths from the machine it ran on, so a path
+    that goes through a directory named like the audited run is looked up under the audited run first, else where it was recorded."""
+    p = pathlib.Path(ref)
+    for i in range(len(p.parts) - 1, -1, -1):
+        if p.parts[i] == run_dir.name:
+            q = run_dir.joinpath(*p.parts[i + 1:])
+            if q.exists():
+                return q
+            break
+    return p
+
+
+def _store_attr(d: pathlib.Path, key: str) -> Any:
+    """A zarr store's group attribute (zarr 3 `zarr.json`, zarr 2 `.zattrs`), or None."""
+    for name, path in (("zarr.json", ("attributes",)), (".zattrs", ())):
+        f = d / name
+        if f.is_file():
+            node: Any = json.loads(f.read_text())
+            for k in path:
+                node = node.get(k, {})
+            return node.get(key)
+    return None
+
+
+def _dir_problems(run: str, st: str, f: pathlib.Path, recorded: str) -> list[str]:
+    """A directory input: a zarr store carries the sha256 of the parts manifest it was assembled from, which is what the ledger recorded."""
+    have = _store_attr(f, "manifest_sha256")
+    if have is not None and have != recorded:
+        return [f"{run}: stage {st}: input {f} changed since the stage ran (store manifest {str(have)[:12]}, ledger {recorded[:12]})"]
+    return []
+
+
+def _orca_problems(run: str, st: str, man: pathlib.Path) -> list[str]:
+    """The orca cache manifest names the sha256 of every per-hour part: re-hash the parts that are still there."""
+    out: list[str] = []
+    for name, sha in json.loads(man.read_text()).get("parts", {}).items():
+        part = man.parent / "hours" / name
+        if part.is_file() and sha256(part) != sha:
+            out.append(f"{run}: stage {st}: orca part {part} changed since the cache was assembled")
+    return out
+
+
 def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
     run_dir = pathlib.Path(run_dir)
     out: list[str] = []
@@ -53,16 +96,20 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
             if not c["ok"]:
                 out.append(f"{run_dir.name}: stage {st}: self-check {c['name']} failed (value {c.get('value')}, limit {c.get('limit')})")
         for i in d.get("inputs", []):
-            f = pathlib.Path(i["ref"])
-            if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
+            f = _resolve(i["ref"], run_dir)
+            if i.get("sha256") and f.is_dir():
+                out += _dir_problems(run_dir.name, st, f, i["sha256"])
+            elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
                 out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
+            if f.name == "manifest.json" and f.is_file() and "parts" in json.loads(f.read_text()):
+                out += _orca_problems(run_dir.name, st, f)
         for o in d.get("outputs", []):
-            f = pathlib.Path(o["path"])
+            f = _resolve(o["path"], run_dir)
             if not f.is_file():
                 out.append(f"{run_dir.name}: stage {st}: output {f} is missing")
             elif sha256(f) != o["sha256"]:
                 out.append(f"{run_dir.name}: stage {st}: output {f} changed since the stage ran")
-        if prev is not None and str(prev) not in {i["ref"] for i in d.get("inputs", [])}:
+        if prev is not None and prev.resolve() not in {_resolve(i["ref"], run_dir).resolve() for i in d.get("inputs", [])}:
             out.append(f"{run_dir.name}: stage {st}: does not record the {STAGES[STAGES.index(st) - 1]} ledger as an input (chain broken)")
         prev = p
     return out

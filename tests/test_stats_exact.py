@@ -53,13 +53,22 @@ def test_agresti_coull_clips_at_zero_and_one():
     assert I.agresti_coull(0, 5)[0] == 0.0 and I.agresti_coull(5, 5)[1] == 1.0
 
 
-def test_interval_picks_the_method_at_the_switch_and_forwards_conf_to_both():
-    assert I.SWITCH_N == 40
-    for conf in (0.8, 0.9, 0.95):
-        assert I.interval(3, 40, conf) == (*I.wilson(3, 40, conf), "wilson")
-        assert I.interval(3, 41, conf) == (*I.agresti_coull(3, 41, conf), "agresti-coull")
-    assert I.interval(3, 41)[:2] == I.agresti_coull(3, 41, 0.95) and I.interval(3, 40)[:2] == I.wilson(3, 40, 0.95)
+def test_interval_is_wilson_at_every_n_and_forwards_conf():
+    """M-5: one interval at every n, so the printed bound, interval_region, the stopper and n_certify cannot disagree."""
+    assert not hasattr(I, "SWITCH_N")
+    for n in (3, 40, 41, 73, 200):
+        for conf in (0.8, 0.9, 0.95):
+            assert I.interval(n // 4, n, conf) == (*I.wilson(n // 4, n, conf), "wilson")
     assert I.interval(3, 41, 0.9)[:2] != I.interval(3, 41)[:2]
+
+
+def test_zero_failure_bound_crosses_five_percent_exactly_at_n_certify():
+    """M-5: Agresti-Coull above 40 printed 0.0599 at n = 73 while n_certify() says 73 certifies 5 %."""
+    need = I.n_certify()
+    assert need == 73 and I.interval(0, 73)[1] < 0.05 <= I.interval(0, 72)[1]
+    assert all((I.interval(0, n)[1] < 0.05) == (n >= need) for n in range(1, 301))
+    assert all(I.interval_region(0, n) == "GO" for n in range(40, 80))         # was undecided from n = 41 (upper bound 0.1021)
+    assert Q.ensemble_stop(0, 41)["stop"] is True and Q.ensemble_stop(0, 73, n_min=73)["verdict"] == "GO"
 
 
 @pytest.mark.parametrize("k,n", [(0, 0), (-1, 5), (6, 5), (1, -3)])
@@ -89,10 +98,10 @@ def test_verdict_returns_every_field_with_its_value_zero_failures_below_the_cert
     assert list(v) == ["verdict", "n", "k_fail", "p_fail", "fail_lo", "fail_hi", "success_lo", "conf", "method", "n_certify", "note"]
 
 
-def test_verdict_with_failures_in_the_agresti_coull_range_has_no_note_and_its_own_confidence():
+def test_verdict_with_failures_above_forty_members_has_no_note_and_its_own_confidence():
     v = I.verdict(5, 100, conf=0.95)
-    lo, hi = I.agresti_coull(5, 100, 0.95)
-    assert v == dict(verdict="GO", n=100, k_fail=5, p_fail=0.05, fail_lo=lo, fail_hi=hi, success_lo=1 - hi, conf=0.95, method="agresti-coull",
+    lo, hi = I.wilson(5, 100, 0.95)
+    assert v == dict(verdict="GO", n=100, k_fail=5, p_fail=0.05, fail_lo=lo, fail_hi=hi, success_lo=1 - hi, conf=0.95, method="wilson",
                      n_certify=73, note="")
     assert I.verdict(0, 80)["note"] == "" and I.verdict(1, 30)["note"] == ""            # a note only for zero failures below the certifying n
     assert I.verdict(0, 72)["note"] != "" and I.verdict(0, 73)["note"] == ""
@@ -111,7 +120,7 @@ def test_verdict_rules_p_and_lower_success_bound():
 
 def test_interval_region_reads_the_whole_interval_at_the_given_confidence():
     assert I.interval_region(0, 100) == "GO" and I.interval_region(100, 100) == "NO-GO" and I.interval_region(10, 100) is None
-    assert I.interval_region(0, 100, conf=0.5) == "GO" and I.interval_region(0, 100, conf=0.999) is None          # conf reaches the interval
+    assert I.interval_region(0, 80, conf=0.5) == "GO" and I.interval_region(0, 80, conf=0.999) is None          # conf reaches the interval
     assert I.interval_region(45, 100, conf=0.5) == "NO-GO" and I.interval_region(45, 100) is None
     assert I.interval_region(55, 100) == "NO-GO" and I.interval_region(55, 100, conf=0.999) is None
     assert (I.interval(0, 29)[1] > 0.10) and I.interval_region(0, 29) is None and I.interval_region(0, 100) == "GO"        # hi must be <= 0.10
@@ -365,12 +374,12 @@ def test_first_order_matches_a_reimplementation_from_the_definition(m, correct):
 
 
 def test_first_order_defaults_clip_and_offset_invariance():
-    assert default(SE.first_order, "harmonics") == default(SE.noise_floor, "harmonics") == default(SE.dominant, "harmonics") == 6
+    assert default(SE.first_order, "harmonics") is default(SE.noise_floor, "harmonics") is default(SE.dominant, "harmonics") is None
     assert default(SE.first_order, "correct") is True and default(SE.noise_floor, "perms") == 200 and default(SE.noise_floor, "level") == 0.95
     assert default(SE.noise_floor, "seed") == 0
     x, y = sample()
     s = SE.first_order(x, y)
-    assert np.array_equal(s, SE.first_order(x, y, 6, True))
+    assert np.array_equal(s, SE.first_order(x, y, SE.default_harmonics(len(x)), True))
     assert s == pytest.approx(SE.first_order(x, y + 1000.0), abs=1e-9)
     assert s == pytest.approx(SE.first_order(x, 3 * y), abs=1e-9)
     assert s.min() >= 0 and s.max() <= 1 and s[0] > 0.5 > s[2]
@@ -542,3 +551,21 @@ def test_subset_simulation_gives_up_on_ties_and_on_too_few_levels():
     assert rare.subset_simulation(lambda u: u[:, 0], 1, 6.0, n=100, seed=1)["converged"] is True
     none = rare.subset_simulation(lambda u: u[:, 0], 1, 6.0, n=100, seed=1, max_levels=0)
     assert none == dict(p=0.0, cov=float("inf"), levels=[], n_evals=100, converged=False)
+
+
+def test_default_harmonics_scale_with_the_member_count():
+    """M-23: six harmonics at 32 members put the permutation floor at 0.53-0.60; the default is min(6, max(2, n // 16))."""
+    assert [SE.default_harmonics(n) for n in (8, 31, 32, 47, 48, 64, 95, 96, 1000)] == [2, 2, 2, 2, 3, 4, 5, 6, 6]
+    x, y = sample(32, 3, 4)
+    assert np.array_equal(SE.first_order(x, y), SE.first_order(x, y, 2))
+    assert SE.noise_floor(x, y, perms=30) == SE.noise_floor(x, y, perms=30, harmonics=2)
+
+
+def test_noise_floor_at_32_members_is_about_a_third_not_a_half():
+    """M-23, measured: x uniform (32, 10), y with 4, 8 or 16 ones. Six harmonics gave 0.595, 0.556, 0.535; the default gives about 0.30."""
+    rng = np.random.default_rng(0)
+    x = rng.random((32, 10))
+    for ones in (4, 8, 16):
+        y = np.r_[np.ones(ones), np.zeros(32 - ones)]
+        floor = SE.noise_floor(x, y, perms=200)
+        assert 0.2 < floor < 0.42 and SE.noise_floor(x, y, perms=200, harmonics=6) > 0.5

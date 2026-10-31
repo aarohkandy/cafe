@@ -34,7 +34,7 @@ from numpy.typing import NDArray
 from . import budget, ledger, stage1
 from .audit import STAGES
 from .config import digest, env_sigmas, load_mission, utc
-from .env import bathy, hycom, ocean as ocean_mod, orca
+from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca
 from .env.hycom import FetchError
 from .env.remote import sha256
 from .ledger import Ledger
@@ -45,14 +45,21 @@ if TYPE_CHECKING:
 DATA = pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
 
 
+HASHED_LIBS = ("jax", "numpy", "scipy")          # the numerical libraries whose version is part of the resume hash
+
+
 def code_digest() -> str:
-    """sha256 over the pipeline's code, config and platform files: a resumed stage is reused only if none changed."""
+    """sha256 over every `cafe/**/*.py` (the pipeline imports cafe.cfd, cafe.fea, cafe.emulator, cafe.reach, cafe.receipts from outside cafe/pm),
+    the config and platform files, and the installed versions of jax, numpy and scipy: a resumed stage is reused only if none changed."""
     import hashlib
     root = pathlib.Path(__file__).resolve().parents[2]
     h = hashlib.sha256()
-    for p in sorted([*root.joinpath("cafe", "pm").rglob("*.py"), *root.joinpath("config").rglob("*.*"), *root.joinpath("platforms").glob("*.yaml")]):
-        if "__pycache__" not in p.parts:
-            h.update(str(p.relative_to(root)).encode() + b"\0" + p.read_bytes())
+    for p in sorted([*root.joinpath("cafe").rglob("*.py"), *root.joinpath("config").rglob("*.*"), *root.joinpath("platforms").glob("*.yaml")]):
+        rel = p.relative_to(root)
+        if "__pycache__" not in rel.parts and "site" not in rel.parts:
+            h.update(str(rel).encode() + b"\0" + p.read_bytes())
+    v = ledger.versions()
+    h.update(json.dumps({k: v[k] for k in HASHED_LIBS}, sort_keys=True).encode())
     return h.hexdigest()
 
 
@@ -80,7 +87,8 @@ class Context:
         self.plan["stage3"] = budget.stage3_plan(self.plan, self.classes, budget.stage3_assumptions())     # every size the stages use, so plan.json shows them
         self.plan["emulator"] = budget.emulator_plan(self.plan)
         self._table = emulator_table
-        self.hash = digest(dict(mission=self.mission, budget=budget_name, gpus=gpus, code=code_digest()))
+        self.code_digest = code_digest()
+        self.hash = digest(dict(mission=self.mission, budget=budget_name, gpus=gpus, code=self.code_digest))
         self._env: GriddedEnv | None = None
 
     @property
@@ -224,16 +232,17 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     sbox = ocean_box(ctx.mission)
     man = ctx.cache / "orca" / "manifest.json"
 
+    uas_v = [v for v in m["vehicles"] if ctx.classes[v["id"]] == "uas"]
+    h3 = sorted({h for v in uas_v for h in _sortie_hours(v, m["ship"]["lon"], t0, t1)})
+
     def fetch_orca() -> None:
-        uas_v = [v for v in m["vehicles"] if ctx.classes[v["id"]] == "uas"]
-        h3 = sorted({h for v in uas_v for h in _sortie_hours(v, m["ship"]["lon"], t0, t1)})
         orca.ingest(t0.replace(tzinfo=None), t1.replace(tzinfo=None), box, ctx.cache / "orca", hours3d=h3, log=ctx.log)
 
     def orca_covers() -> bool:
-        return man.exists() and _covers(json.loads(man.read_text()), t0, t1)
+        return man.exists() and _orca_covers(json.loads(man.read_text()), t0, t1, box, h3)
 
     if orca_covers():
-        ctx.log(f"ingest: orca cache {man.parent} covers the window")
+        ctx.log(f"ingest: orca cache {man.parent} covers the window, the box and the 3-D hours")
     tdir, spec = DATA / "tao", m["environment"]["ocean"]
     gebco = bathy.cache_path(sbox, ocean_mod.DATA / "bathy")
     store = ocean_mod.store_path(spec, m["name"])
@@ -268,9 +277,148 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
         surface.build(ctx.env, ctx.cache, log=ctx.log)
         ctx._env = None                                                  # rebuild with the surface layer just written
     oc = ocean(ctx)
-    L.check("ocean_source_covers_box", oc is not None, note=str(ctx.mission["environment"]["ocean"]))
+    _ingest_checks(ctx, L, oc, sbox)
     L.output(man)
     _tao(ctx, L, t0.timestamp(), t1.timestamp())
+
+
+OCEAN_SNAP_DEG = 0.1             # the ocean store is cut to its 0.08-0.1 degree grid, so its edge may sit this far inside the requested box
+
+
+def mission_points(m: dict[str, Any]) -> list[tuple[str, float, float]]:
+    """(label, lon, lat) of every place the mission puts something: the ship, each vehicle's deploy point, task waypoints and station."""
+    pts: list[tuple[str, float, float]] = []
+    if m.get("ship"):
+        pts.append(("ship", m["ship"]["lon"], m["ship"]["lat"]))
+    for v in m["vehicles"]:
+        t = v.get("task", {})
+        if "deploy" in v:
+            pts.append((f"{v['id']} deploy", v["deploy"]["lon"], v["deploy"]["lat"]))
+        pts += [(f"{v['id']} waypoint {k}", p[0], p[1]) for k, p in enumerate(t.get("waypoints", []))]
+        if "lon" in t:
+            pts.append((f"{v['id']} station", t["lon"], t["lat"]))
+    return pts
+
+
+def ocean_margins(ds: Any, sbox: tuple[float, float, float, float], pts: list[tuple[str, float, float]]) -> list[tuple[str, float]]:
+    """How far inside the ocean store each requirement sits [deg, negative = outside]: the four edges of the (padded) mission box, and every
+    mission point against all four edges of the store."""
+    s, n, w, e = hycom.box360(sbox)
+    la, lo = ds.lat.values, ds.lon.values
+    out = [("box south edge", float(s - la.min())), ("box north edge", float(la.max() - n)), ("box west edge", float(w - lo.min())),
+           ("box east edge", float(lo.max() - e))]
+    for label, lon, lat in pts:
+        x = float(cv.wrap360(lon))
+        out.append((label, float(min(lat - la.min(), la.max() - lat, x - lo.min(), lo.max() - x))))
+    return out
+
+
+def _orca_covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime, box: tuple[float, float, float, float], hours3d: list[dt.datetime]) -> bool:
+    """The orca manifest covers the window, its recorded box contains `box` (lon_min, lon_max, lat_min, lat_max; a manifest with no box was
+    written before the box was recorded and cannot say) and it has every 3-D hour wanted."""
+    b = d.get("box")
+    return bool(_covers(d, t0, t1) and b is not None and b[0] <= box[0] and b[1] >= box[1] and b[2] <= box[2] and b[3] >= box[3]
+                and {orca.stamp(h) for h in hours3d} <= set(d.get("hours3d", [])))
+
+
+def _sea_sample(env: GriddedEnv, n: int = 300) -> tuple[NDArray[np.intp], NDArray[np.intp], list[int]]:
+    """About `n` UMWM sea nodes (lat index, lon index) and three time indices (first, middle, last hour) to test the cached fields on."""
+    jj, ii = np.nonzero(env.sea)
+    k = max(1, len(jj) // n)
+    nt = len(env.tu.x)
+    return jj[::k], ii[::k], sorted({0, nt // 2, nt - 1})
+
+
+def _swh_error(env: GriddedEnv) -> float:
+    """Largest |Hs of the spectrum synthesised from the file's integrated parameters - file swh| / file swh over the sample (BRIEF 5.5: <= 1 %)."""
+    from .env import waves
+    jj, ii, tis = _sea_sample(env)
+    th = waves.theta_compass(env.spec["th"]) if env.spec is not None else np.arange(5.625, 360, 11.25)
+    f = env.spec["f"] if env.spec is not None else 0.0313 * 1.12246 ** np.arange(37)
+    err = [0.0]
+    for ti in tis:
+        g = {key: env.U[key][ti][jj, ii] for key in ("swh", "dwp", "dwd_e", "dwd_n", "mss", "wspd")}
+        ok = np.isfinite(g["swh"]) & (g["swh"] > 1e-3)
+        if ok.any():
+            dto = cv.math_rad_to_compass_to(np.arctan2(g["dwd_n"], g["dwd_e"]))
+            E = waves.spectrum_from_params(g["swh"][ok], g["dwp"][ok], dto[ok], g["mss"][ok], g["wspd"][ok], f, th)
+            err.append(float(np.max(np.abs(waves.hs_of(E, f, th) - g["swh"][ok]) / g["swh"][ok])))
+        else:
+            err.append(np.nan)
+    return float(np.max(err))
+
+
+def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float]:
+    """COARE u* (the surface layer built at ingest) against UMWM's `ust` at the sample: (points, median |dif|/ust, fraction within 20 %)."""
+    sl = env.subgrid
+    assert sl is not None, "ingest builds the surface layer before this check"
+    jj, ii, tis = _sea_sample(env)
+    lon, lat = env.lou.x[ii], env.lau.x[jj]
+    rel: list[float] = []
+    for ti in tis:
+        t = np.full(lon.shape, env.tu.x[ti])
+        ins = env.inside(lon, lat, t)
+        a = np.asarray(sl.surface_layer(env, lon[ins], lat[ins], t[ins])["ustar"].value, np.float64)
+        b = np.asarray(env.waves(lon[ins], lat[ins], t[ins])["ustar_umwm"].value, np.float64)
+        good = np.isfinite(a) & np.isfinite(b) & (b > 1e-3)
+        rel += list(np.abs(a[good] - b[good]) / b[good])
+    r = np.asarray(rel)
+    return int(r.size), float(np.median(r)) if r.size else float("nan"), float(np.mean(r <= 0.2)) if r.size else float("nan")
+
+
+def _round_trip_errors(env: GriddedEnv, oc: Any) -> dict[str, float]:
+    """Direction conventions out and back on three cached fields: wind (u, v -> compass -> u, v), waves (compass toward -> math radians -> compass)
+    and the ocean current. Wind and current are m/s, waves degrees; each should be zero to rounding."""
+    jj, ii, tis = _sea_sample(env)
+    lon, lat = env.lou.x[ii], env.lau.x[jj]
+    t = np.full(lon.shape, env.tu.x[tis[len(tis) // 2]])
+    ins = env.inside(lon, lat, t)
+    lon, lat, t = lon[ins], lat[ins], t[ins]
+
+    def vec_err(v: Any) -> float:
+        v = np.asarray(v, np.float64)
+        v = v[np.isfinite(v).all(-1)]
+        return float(np.max(np.abs(cv.vec_from_to(cv.speed(v), cv.to_deg(v)) - v))) if v.size else float("nan")
+    d = np.asarray(env.waves(lon, lat, t)["dir_to"].value, np.float64)
+    d = d[np.isfinite(d)]
+    back = cv.math_rad_to_compass_to(cv.compass_to_to_math_rad(d))
+    wave = float(np.max(np.abs((back - d + 180.0) % 360.0 - 180.0))) if d.size else float("nan")
+    cur = vec_err(oc.current(lon, lat, np.zeros_like(lon), t).value) if oc is not None else float("nan")
+    return dict(wind_ms=vec_err(env.u10(lon, lat, t)), wave_deg=wave, current_ms=cur)
+
+
+def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, float, float]) -> None:
+    """The BRIEF 5.5 ingest self-checks that the cached data can answer: the ocean store covers the box and every mission point; the time axes
+    are hourly and gap-free; no NaN in sea cells; the spectrum synthesised from the file's parameters has the file's swh to 1 %; COARE u* against
+    UMWM `ust` (logged); the temperature kind flag; direction conventions round-trip; every mission point is inside the cached grids."""
+    m, env = ctx.mission, ctx.env
+    margins = ocean_margins(oc.ds, sbox, mission_points(m)) if oc is not None else []
+    worst = min(margins, key=lambda x: x[1]) if margins else None
+    tight = "no ocean store" if worst is None else f"tightest is {worst[0]} ({worst[1]:+.3f} deg inside the store; grid snap {OCEAN_SNAP_DEG} deg)"
+    L.check("ocean_source_covers_box", worst is not None and worst[1] >= -OCEAN_SNAP_DEG, value=None if worst is None else round(worst[1], 4),
+            limit=-OCEAN_SNAP_DEG, note=f"{m['environment']['ocean']}: {tight}")
+    pts = mission_points(m)
+    out = [lab for lab, lo, la in pts if not bool(env.inside(lo, la))]
+    L.check("mission_points_inside_cached_grids", not out, value=len(out), limit=0,
+            note=("outside the WRF/UMWM grids: " + ", ".join(out)) if out else f"{len(pts)} points")
+    gaps = np.concatenate([np.diff(a.x) for a in (env.tw, env.tu)])
+    gap = float(np.abs(gaps - 3600.0).max(initial=0.0))
+    L.check("time_axes_hourly_gap_free", gap < 1.0, value=gap, limit=1.0, note="largest departure of a WRF or UMWM time step from 3600 s")
+    nan = sum(int((np.isnan(a) & env.sea).sum()) for a in env.U.values()) + sum(int(np.isnan(a).sum()) for a in env.W.values())
+    L.check("no_nan_in_sea_cells", nan == 0, value=nan, limit=0, note="NaN values in UMWM sea nodes and in the WRF fields")
+    err = _swh_error(env)
+    L.check("swh_spectrum_vs_file", bool(err <= 0.01), value=None if np.isnan(err) else err, limit=0.01,
+            note="spectrum_from_params at sampled sea nodes, relative to file swh")
+    n, med, frac = _ustar_agreement(env)
+    L.check("coare_ustar_vs_umwm_ust", n > 0 and bool(np.isfinite(med)), value=None if not n else round(frac, 4),
+            note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within 20 %; BRIEF 5.5 asks that the agreement is logged")
+    kind = None if oc is None else oc.ds.attrs.get("temperature_kind")
+    gofs = m["environment"]["ocean"]["source"] == "gofs31"
+    L.check("ocean_temperature_kind_flag", kind in hycom.KINDS and (not gofs or kind == "in_situ"), value=kind,
+            note="the store's temperature_kind attribute (GOFS 3.1 GLBy writes in-situ); the values themselves are not tested against it")
+    rt = _round_trip_errors(env, oc)
+    L.check("direction_round_trip", all(bool(v <= 1e-6) for v in rt.values()), value=rt, limit=1e-6,
+            note="wind, wave and current directions out to compass and back at sampled points")
 
 
 def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
@@ -353,7 +501,9 @@ def _sortie_hours(v: dict[str, Any], lon: float, t0: dt.datetime, t1: dt.datetim
 
 def s_hangar(ctx: Context, L: Ledger) -> None:
     """The vehicle numbers every stage uses, with the files they came from: each platform yaml through its own model's
-    loader, which refuses a number without a source or an assumed + why."""
+    loader, which refuses a number without a source or an assumed + why. This stage runs no CFD, GCI or mesh study: no vehicle CAD exists here
+    (QUESTIONS_FOR_LAB), so the "baseline model coefficients" Stage 1 and the refit start from are the analytic ones of the platform models
+    (Seaglider force balance, `usv.hull_resistance`, the UAS drag area), not a RANS-with-GCI Hangar result."""
     from .config import PLATFORMS
     from .physics import glider, uas, usv
     loaders: dict[str, Callable[[str], Any]] = dict(glider=glider.load_platform, usv=usv.load_platform, uas=uas.load_platform)
@@ -369,6 +519,8 @@ def s_hangar(ctx: Context, L: Ledger) -> None:
             err = str(e)
         L.check(f"provenance_{v['platform']}", not err, note=err)
         rows[v["id"]] = dict(platform=v["platform"], cls=cls, file=str(p), assumed=_assumed(__import__("yaml").safe_load(p.read_text())))
+    L.note("no Hangar CFD run: the baseline model coefficients are analytic (no vehicle CAD, QUESTIONS_FOR_LAB); no GCI, observed order or mesh quality exists "
+           "to check; the cache key is each platform file's sha-256 (a ledger input)")
     L.output(_dump(rows, ctx.path("hangar", "hangar.json")))
 
 
@@ -388,6 +540,7 @@ def _stage1(ctx: Context, L: Ledger, name: str, scales: dict[str, Any] | None = 
     r = stage1.run(ctx.mission, ctx.env, ctx.plan, L, log=ctx.log, scales=scales, fitted=fitted)
     L.seed("mission", ctx.mission["seed"])
     L.note(f"{r['n']} members in {time.time() - a:.0f} s; certify possible: {r['certify']} (n_certify {r['n_certify']})")
+    _stage1_checks(ctx, L, r)
     res = r.pop("res")
     for v in res["vehicles"].values():
         v.pop("sim", None)
@@ -398,17 +551,75 @@ def _stage1(ctx: Context, L: Ledger, name: str, scales: dict[str, Any] | None = 
     L.output(_dump(r, ctx.path(name, "summary.json")))
 
 
+def _stage1_checks(ctx: Context, L: Ledger, r: dict[str, Any]) -> None:
+    """The BRIEF 5.5 stage-1 self-checks on the finished ensemble: size (>= 73 unless the budget cannot reach it, which the report then says),
+    sampled marginals against the intended ones, common random numbers (the draws are a function of the seed alone, so every vehicle sees the
+    same environment draws), the Wilson interval arithmetic against statsmodels, and which failure modes each vehicle recorded."""
+    from statsmodels.stats.proportion import proportion_confint
+    from .stats import intervals, sampling
+    res, n, seed = r["res"], r["n"], int(ctx.mission["seed"])
+    L.check("ensemble_size", r["certify"] or ctx.plan["n_max"] < r["n_certify"], value=n, limit=r["n_certify"],
+            note="below the certifying size only because the budget cannot reach it: the report says it cannot certify < 5 %")
+    batch = ctx.plan["batch"]
+    ks = sampling.marginal_report({k: res["X"][k] for k in r["priors"] if k in res["X"]}, r["priors"])
+    L.check("sampled_marginals_match_priors", max(ks.values(), default=0.0) <= 1.0 / batch + 1e-9, value=max(ks.values(), default=0.0), limit=1.0 / batch,
+            note="largest Kolmogorov-Smirnov distance of a sampled column from its prior; each batch is a Latin hypercube, so <= 1 / batch")
+    _, x0 = sampling.lhs(batch, r["priors"], np.random.SeedSequence([seed, 0]), antithetic=tuple(a for a in stage1.ANTITHETIC if a in r["priors"]))
+    same = all(np.array_equal(x0[k], res["X"][k][:batch]) for k in x0)
+    streams = ("uas/turb/0", "uas/gust", *(f"iridium/{lk['id']}" for lk in ctx.mission["links"]))
+    L.check("common_random_numbers", same and sampling.crn_check(seed, min(n, 8), streams, vehicles=max(2, len(ctx.mission["vehicles"]))),
+            value=same, note="the first batch's draws are regenerated from the seed, and every vehicle draws the same stream values per member")
+    kn = [(int(stage1.failed(v).sum()), len(stage1.failed(v))) for v in res["vehicles"].values()]
+    kn += [(int((~np.asarray(v["success"], bool)).sum()), len(v["success"])) for v in res["links"].values()]
+    kn += [(0, n), (n, n)]
+    diff = max(abs(a - b) for k, m in kn for c in (0.9, 0.95)
+               for a, b in zip(intervals.interval(k, m, c)[:2], proportion_confint(k, m, 1 - c, method="wilson"), strict=True))
+    L.check("wilson_matches_statsmodels", diff <= 1e-9, value=diff, limit=1e-9,
+            note=f"interval() against statsmodels' Wilson at 90 % and 95 %, for the {len(kn)} (k, n) of this run")
+    modes = {vid: {k: int(np.sum(x)) for k, x in v["fail"].items()} for vid, v in res["vehicles"].items()}
+    recorded = all(m and all(len(x) == n for x in v["fail"].values()) for m, v in zip(modes.values(), res["vehicles"].values(), strict=True))
+    L.check("failure_modes_recorded", recorded, value=sum(map(len, modes.values())), note="modes recorded per member; counts: " + json.dumps(modes))
+
+
 def s_stage1(ctx: Context, L: Ledger) -> None:
     _stage1(ctx, L, "stage1")
 
 
+CRITERION = dict(glider="surface current speed [m/s]", usv="significant wave height Hs [m]", uas="10 m wind speed [m/s]")
+MIN_SEPARATION_S = 6 * 3600.0
+
+
+def window_problems(t: NDArray[np.float64], worst: NDArray[np.float64], rows: list[dict[str, Any]], k: int) -> list[str]:
+    """BRIEF 5.5: the chosen windows are the argmax of the stated criterion. Row j must be the strongest record at least 6 h from rows 0..j-1,
+    must carry that record's stress, and fewer than `k` rows are allowed only when no such record is left."""
+    bad: list[str] = []
+    idx = [int(np.argmin(np.abs(t - w["t"]))) for w in rows]
+    for j, i in enumerate(idx):
+        free = np.isfinite(worst)
+        for m in idx[:j]:
+            free &= np.abs(t - t[m]) >= MIN_SEPARATION_S
+        if not free[i] or worst[i] < worst[free].max():
+            bad.append(f"window {j} at record {i} is not the strongest of the {int(free.sum())} records free of the earlier windows")
+        if rows[j]["stress"] != worst[i]:
+            bad.append(f"window {j}: stress {rows[j]['stress']} is not the record's {worst[i]}")
+    left = np.isfinite(worst)
+    for m in idx:
+        left &= np.abs(t - t[m]) >= MIN_SEPARATION_S
+    if len(rows) < k and left.any():
+        bad.append(f"only {len(rows)} of {k} windows chosen but {int(left.sum())} records are free")
+    return bad
+
+
 def s_windows(ctx: Context, L: Ledger) -> None:
     """Worst windows per vehicle: the record times where the members that failed (or, with none failing, all members)
-    met the strongest forcing (10 m wind for surface/air vehicles, Hs for the USV hull, current speed for gliders)."""
+    met the strongest forcing (10 m wind for surface/air vehicles, Hs for the USV hull, current speed for gliders). A UAS is only
+    in the air during its sorties and sits at the ship otherwise, so its windows are chosen among the records where a selected member is
+    airborne (all records, said so in the window and the ledger, when none is)."""
     res = pickle.loads(ctx.path("stage1", "res.pkl").read_bytes())
     L.input(ctx.path("stage1", "res.pkl"))
     K = ctx.plan["les"]["windows_per_vehicle"]
     out: dict[str, list[dict[str, Any]]] = {}
+    problems: list[str] = []
     for vid, r in res["vehicles"].items():
         f = stage1.failed(r)
         sel = f if f.any() else np.ones_like(f)
@@ -416,6 +627,15 @@ def s_windows(ctx: Context, L: Ledger) -> None:
         lon, lat = np.asarray(r["lon"])[:, sel], np.asarray(r["lat"])[:, sel]
         tt = np.broadcast_to(t[:, None], lon.shape)
         ok = np.isfinite(lon)
+        records = "all records"
+        if r["class"] == "uas" and "airborne" in r:
+            air = np.asarray(r["airborne"], bool)[:, sel]
+            if (ok & air).any():
+                ok &= air
+                records = "airborne records"
+            else:
+                records = "all records (no selected member is airborne at any record)"
+                L.note(f"{vid}: {records}")
         if not ok.any():
             out[vid] = []
             continue
@@ -430,13 +650,16 @@ def s_windows(ctx: Context, L: Ledger) -> None:
         worst = np.nanmax(stress, 1)
         idx: list[int] = []
         for i in np.argsort(-worst):                                     # K windows at least 6 h apart
-            if np.isfinite(worst[i]) and all(abs(t[i] - t[j]) >= 6 * 3600 for j in idx):
+            if np.isfinite(worst[i]) and all(abs(t[i] - t[j]) >= MIN_SEPARATION_S for j in idx):
                 idx.append(int(i))
             if len(idx) == K:
                 break
-        out[vid] = [dict(t=float(t[i]), stress=float(worst[i]), lon=float(np.nanmedian(lon[i])), lat=float(np.nanmedian(lat[i])),
-                         basis="failed members" if f.any() else "all members") for i in idx]
+        lon_ok, lat_ok = np.where(ok, lon, np.nan), np.where(ok, lat, np.nan)
+        out[vid] = [dict(t=float(t[i]), stress=float(worst[i]), lon=float(np.nanmedian(lon_ok[i])), lat=float(np.nanmedian(lat_ok[i])),
+                         basis="failed members" if f.any() else "all members", criterion=CRITERION[r["class"]], records=records) for i in idx]
+        problems += [f"{vid}: {p}" for p in window_problems(t, worst, out[vid], K)]
     L.check("every_vehicle_has_a_window", all(out.values()), value=sum(map(len, out.values())))
+    L.check("windows_are_the_argmax", not problems, value=len(problems), limit=0, note="; ".join(problems[:3]))
     L.output(_dump(out, ctx.path("windows", "windows.json")))
 
 
@@ -451,9 +674,12 @@ def s_stage3(ctx: Context, L: Ledger) -> None:
 
 
 def s_refit(ctx: Context, L: Ledger) -> None:
-    from .stage3 import refit
+    from .stage3 import nest, refit
     rows = json.loads(ctx.path("stage3", "windows.json").read_text())
     L.input(ctx.path("stage3", "windows.json"))
+    for tag, _ in nest.SPHERE_RUNS:                    # default_floor's discretisation floor reads these: a changed grid study reruns the refit
+        for f in sorted(nest.SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")):
+            L.input(f, kind="stored sphere grid study (the refit's discretisation floor)")
     out: dict[str, dict[str, Any]] = {}
     for vid, ws in rows.items():
         # Stage 1 has one drag multiplier per vehicle and it scales the water-side (or, for a UAS, the body) drag; a USV's wing is
@@ -466,7 +692,8 @@ def s_refit(ctx: Context, L: Ledger) -> None:
         if ctx.plan["refit_iterations"] == 0:
             out[vid] = dict(used=False, reason="budget ci: no refit")
         elif not good:
-            out[vid] = dict(used=False, reason=f"no {main} window passed its stage-3 self-checks; Stage 1 keeps the Hangar coefficients",
+            out[vid] = dict(used=False, reason=f"no {main} window passed its stage-3 self-checks; "
+                                               "Stage 1 keeps the baseline model coefficients (analytic; no Hangar CFD run)",
                             failed_checks=sorted({c["name"] for w in ws for c in w.get("checks", []) if not c["ok"]}))
         else:
             out[vid] = dict(used=True, part=main, **refit.refit(good))      # each window against its own cd_hangar
@@ -476,14 +703,40 @@ def s_refit(ctx: Context, L: Ledger) -> None:
             why = {"hull": "the hull_fs windows (total resistance with the free surface) set the multiplier; this part has no wave-making",
                    "hull_fs": "no hull_fs window passed its checks: the viscous hull windows set the multiplier"}
             out[vid][f"{part}_not_used"] = dict(reason=why.get(part, "Stage 1 has no multiplier for this part"), **(refit.refit(pw) if pw else {}))
+    L.check("refit_iterations_within_cap", ctx.plan["refit_iterations"] <= refit.MAX_ITER, value=ctx.plan["refit_iterations"], limit=refit.MAX_ITER,
+            note="the pipeline reruns Stage 1 once with the refit multipliers (stage 1b); it does not loop until the verdicts stop changing")
+    for vid, o in out.items():
+        if o["used"]:
+            d = o["drag"]
+            L.note(f"{vid}: drag multiplier {d['mean']:.3f} (change vs baseline model {d['change_vs_hangar']:+.1%}, "
+                   f"sigma {d['sigma']:.3f} of which statistical "
+                   f"{d['sigma_statistical']:.3f}) from {d['windows']} window(s)")
     L.check("refit_uses_only_windows_that_passed", all(not v["used"] or v.get("drag", {}).get("windows", 0) > 0 for v in out.values()))
     L.output(_dump(out, ctx.path("refit", "refit.json")))
+
+
+SENSITIVITY_MEMBERS = 32
+
+
+def _sensitivity_cases(ctx: Context, L: Ledger, scales: dict[str, Any]) -> None:
+    """The USV verdict again under the brief's literal VPP bias (stage1.BRIEF_PRIOR, DECISIONS 163), same seed and refit multipliers, written
+    to stage1b/sensitivity_cases.json for the report to show next to the calibrated verdict. Nothing is written for a mission without a USV."""
+    if not any(stage1._classes(ctx.mission)[v["id"]] == "usv" for v in ctx.mission["vehicles"]):
+        return
+    fp = ctx.run_dir / "ingest" / "priors_fitted.json"
+    cases = stage1.sensitivity_case(ctx.mission, ctx.env, stage1.BRIEF_PRIOR, SENSITIVITY_MEMBERS,
+                                    json.loads(fp.read_text()) if fp.is_file() else None, scales or None)
+    out = ctx.path("stage1b", "sensitivity_cases.json")
+    out.write_text(json.dumps(cases, indent=1, sort_keys=True))
+    L.output(out)
+    L.note("sensitivity case (brief VPP bias): " + "; ".join(f"{v} {c[0]['k_fail']} of {c[0]['n']} {c[0]['verdict']}" for v, c in cases.items()))
 
 
 def s_stage1b(ctx: Context, L: Ledger) -> None:
     ref = json.loads(ctx.path("refit", "refit.json").read_text())
     L.input(ctx.path("refit", "refit.json"))
     scales = {vid: r for vid, r in ref.items() if r["used"]}
+    _sensitivity_cases(ctx, L, scales)
     if not scales:
         L.note("no vehicle was refit: stage 1b is stage 1 (copied, not rerun)")
         for f in ("res.pkl", "summary.json"):
@@ -491,6 +744,12 @@ def s_stage1b(ctx: Context, L: Ledger) -> None:
             L.output(ctx.path("stage1b", f))
         return
     _stage1(ctx, L, "stage1b", scales=scales)
+    from .stage3 import refit as refit_mod
+    was, now = ({vid: v["verdict"] for vid, v in json.loads(ctx.path(st, "summary.json").read_text())["summary"]["vehicles"].items()}
+                for st in ("stage1", "stage1b"))
+    changes = refit_mod.verdict_changes(was, now)
+    L.check("stage1b_same_vehicles_as_stage1", set(was) == set(now), value=len(changes), note="verdict changes after the refit: " + (
+        "; ".join(f"{k}: {a} -> {b}" for k, a, b in changes) or "none (converged after one rerun)"))
 
 
 def s_emulator(ctx: Context, L: Ledger) -> None:
@@ -501,6 +760,8 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     runs from the same table make the same emulator. The number of variants is the plan's (plan.json emulator); the clock is only a kill
     that stops the variants at the stage's whole share. A variant that leaves the environment data is skipped, with the reason.
     Writes emulator/train_input, holdout.json, flip.json and design.json."""
+    import pandas as pd
+
     from . import whatif
     res = pickle.loads(ctx.path("stage1b", "res.pkl").read_bytes())
     for p in (ctx.path("stage1b", "res.pkl"), ctx.path("stage1b", "summary.json"), ctx.path("refit", "refit.json")):
@@ -513,7 +774,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     pri, marg = stage1.priors_for(ctx.mission, fitted)
     seed = int(ctx.mission["seed"])
     fid = {vid: int(vid in scales) for vid in res["vehicles"]}
-    meta = dict(run_id=digest(str(ctx.run_dir.resolve()))[:12], mission=ctx.mission["name"], git_sha=ledger.git_sha(), code_digest=code_digest())
+    meta = dict(run_id=digest(str(ctx.run_dir.resolve()))[:12], mission=ctx.mission["name"], git_sha=ledger.git_sha(), code_digest=ctx.code_digest)
     rows = whatif.vehicle_rows(ctx.mission, res, ctx.env, fid, meta)
     train_in, snap = whatif.snapshot(ctx.table, ctx.path("emulator", "train_input"), meta["run_id"])
     L.input(snap, kind="emulator training table at the start of this stage (minus this run's rows)", source=str(ctx.table), rows=len(train_in))
@@ -565,6 +826,14 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
         L.check(f"emulator_coverage_{cls}", a["coverage_ok"], value=info["coverage"]["p_fail"], limit=info["nominal"],
                 note=f"within +-{whatif.LIMITS['coverage']} of nominal")
         L.check(f"emulator_query_ms_{cls}", a["query_ok"], value=info["query_ms"], limit=whatif.LIMITS["query_ms"])
+        L.check(f"emulator_training_points_{cls}", info["points"] >= whatif.MIN_ROWS, value=info["points"], limit=whatif.MIN_ROWS,
+                note=f"distinct feature points the {cls} emulator trained on ({info['rows']} rows)")
+        row = next(r for r in rows if r["cls"] == cls)
+        x = pd.Series({k: float(row[k]) for k in em.features})
+        far = em.query(x + 1e6)
+        L.check(f"emulator_range_guard_{cls}", far["status"] == "out_of_range", value=em.distance(x), limit=em.threshold,
+                note="a mission 1e6 units from every training row is refused; value is this run's own baseline mission's nearest-neighbour "
+                     "distance, limit the calibrated threshold")
     L.output(_dump(out, ctx.path("emulator", "holdout.json")))
     tracks = {vid: whatif.track_points(r, ctx.mission) for vid, r in res["vehicles"].items() if r["class"] != "uas"}
     flips, fspent = whatif.flip_search(ctx.mission, {vid: summ[vid]["verdict"] for vid in summ}, tracks, ctx.env, ems, ctx.plan, pri, marg, scales, seed,
@@ -612,7 +881,7 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
             log(f"{name}: up to date (ledger {lp})")
         else:
             a, redo = time.time(), True                                   # everything after a rerun stage reruns too
-            with ledger.Ledger(ctx.run_dir, name, ctx.hash) as L:
+            with ledger.Ledger(ctx.run_dir, name, ctx.hash, ctx.code_digest) as L:
                 if prev is not None:
                     L.input(prev)
                 FUNCS[name](ctx, L)

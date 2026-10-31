@@ -15,8 +15,11 @@ so the flow relative to the body is R (u_env - v_vehicle):
           from glider.flight at the window's density, pressure and temperature, descending leg); body pitch = -|pitch_deg|;
   usv     hull: u_env = current, v = current + stw along the track (usv.through_water); wing: u_env = wind at the anemometer height,
           v = the same boat velocity, wing at its trim angle of attack to the apparent wind (the wing's lift axis is body z);
-  uas     u_env = wind at `uas.window_altitude_m`, v = leg speed along the heading; body tilted by atan(d_x |v_rel| / g) (Faessler et al.
-          2018 linear rotor drag), rotors are not modelled (no actuator disk).
+  uas     u_env = wind at `uas.window_altitude_m`, v = leg speed along the heading, slowed (to a hover) until the flow relative to the airframe is
+          inside the envelope (limits.max_airspeed_ms and the tilt limit); a wind beyond it at every speed is a refused window with the reason;
+          body tilted by atan(d_x |v_rel| / g) (Faessler et al. 2018 linear rotor drag), rotors are not modelled (no actuator disk). Its Hangar
+          reference is the TOTAL drag (rotor momentum drag included) and the window is the frame alone: the row carries a failed
+          `hangar_reference_comparable` check, so it is never ok and `usable_for_refit` is False.
 Heading is the median stage-1 track heading around the window (`stage1/res.pkl`, nanmedian over members, central difference of the
 two neighbouring records); without it, the relative-flow direction: gliders head with the current, the USV downwind, the UAS into the wind.
 
@@ -247,28 +250,53 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
                 info=dict(aws_ms=aws, alpha_deg=alpha))
 
 
+def uas_leg_speed(wind: NDArray[np.float64], heading_unit: NDArray[np.float64], leg: float, v_max: float) -> float | None:
+    """The largest ground speed s in [0, leg] along `heading_unit` for which the air relative to the airframe, |wind - s h|, stays within
+    `v_max`; None when no such speed exists (the wind alone, or the wind across the heading, is beyond the envelope). |w - s h|^2 <= v^2 is
+    (s - w.h)^2 <= v^2 - |w|^2 + (w.h)^2, an interval around w.h."""
+    wh = float(wind @ heading_unit)
+    d2 = v_max ** 2 - float(wind @ wind) + wh ** 2
+    if d2 < 0.0:
+        return None
+    lo, hi = max(wh - math.sqrt(d2), 0.0), min(wh + math.sqrt(d2), leg)
+    return None if lo > hi else hi
+
+
 def uas_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle, a: dict[str, Any], heading: float | None) -> dict[str, Any]:
+    """The UAS window's kinematics, always inside the airframe's envelope: the flow relative to the airframe is held to
+    min(limits.max_airspeed_ms, the speed at which d_x tilts the airframe to limits.max_tilt_deg), by slowing the leg (down to a hover).
+    A wind beyond that for any ground speed is a refused window with the reason: the UAS would not be airborne."""
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
     wind = _val(env.wind(lon, lat, need(a, "uas.window_altitude_m"), t))[:2]
     air = env.air(lon, lat, t)
     rho = float(uas.air_density(float(_val(air["psfc"])), float(_val(air["T2"])), float(_val(air["q2"]))))
     if heading is None:                                                     # into the wind: the relative flow is then along the body axis
         heading = (compass(-wind[0], -wind[1]) if np.hypot(*wind) > 1e-6 else 0.0)
-    leg = min(P["sortie"]["leg_speed_ms"], P["limits"]["max_airspeed_ms"])
+    dx = P["aero"]["d_x"]
+    v_max = min(P["limits"]["max_airspeed_ms"], G * math.tan(math.radians(P["limits"]["max_tilt_deg"])) / dx)
     hv = np.array([math.sin(math.radians(heading)), math.cos(math.radians(heading))])
+    nominal = P["sortie"]["leg_speed_ms"]
+    leg = uas_leg_speed(wind, hv, nominal, v_max)
+    if leg is None:
+        raise ValueError(f"outside the UAS flight envelope: wind {float(np.hypot(*wind)):.1f} m/s at {need(a, 'uas.window_altitude_m')} m leaves the air "
+                         f"more than {v_max:.1f} m/s (max_airspeed_ms {P['limits']['max_airspeed_ms']}, {P['limits']['max_tilt_deg']} deg tilt at "
+                         f"d_x = {dx} 1/s) relative to the airframe at every ground speed on heading {heading:.0f} deg: the UAS would not be airborne")
     v = np.array([leg * hv[0], leg * hv[1], 0.0])
     u_env = np.array([wind[0], wind[1], 0.0])
     vrel = float(np.linalg.norm(u_env - v))
     if vrel < 1e-3:
         raise ValueError("no relative flow: the UAS drifts with the wind")
-    dx = P["aero"]["d_x"]
     tilt = math.degrees(math.atan(dx * vrel / G))
     f_drag = P["airframe"]["mass_kg"] * dx * vrel                           # F = m d_x v: Faessler et al. 2018 linear rotor drag
     return dict(R=rotation(heading, -tilt), u_env=u_env, v=v, heading=heading, rho_h=rho, area=veh.ref_area,
                 cd_h=_coef(f_drag, rho, vrel, veh.ref_area), cl_h=None,
-                src=f"uas aero.d_x = {dx} 1/s linear drag, F = m d_x |v_rel| (Faessler, Franchi, Scaramuzza 2018); includes the rotor "
-                    "momentum drag, which the window (no rotors) does not; the ratio therefore reads as 'frame drag / total drag'",
-                info=dict(v_rel_ms=vrel, tilt_deg=tilt))
+                src=f"uas aero.d_x = {dx} 1/s linear drag, F = m d_x |v_rel| (Faessler, Franchi, Scaramuzza 2018); this is the TOTAL drag, "
+                    "rotor momentum drag included, which the frame-only window (no rotors) does not carry",
+                comparable=False,
+                not_comparable="the UAS window is the frame without rotors but its Hangar reference is the total drag including the rotor momentum "
+                               "drag (aero.d_x has no frame-only part): the ratio is frame drag / total drag, not a drag multiplier, so the window is not "
+                               "usable for the refit until the platform gives a frame-only reference",
+                info=dict(v_rel_ms=vrel, tilt_deg=tilt, leg_speed_ms=leg, leg_speed_nominal_ms=nominal, leg_clipped=leg < nominal, v_rel_limit_ms=v_max))
 
 
 # ---------------------------------------------------------------------------------------------------- resolution
@@ -368,6 +396,11 @@ def why_failed(checks: list[dict[str, Any]], res: dict[str, Any], wlog: dict[str
         if n == "wall_model_receipt_error":
             out.append("wall model unvalidated: the flat plate (vs ITTC-57) and channel (vs Dean) receipts are not both stored and passing" if math.isnan(v)
                        else f"wall model unvalidated: stored receipt error {v:.0%} > {lim:.0%}")
+        elif n == "yplus_in_30_300_fraction" and c.get("note") == W.YPLUS_RAISED_NOTE:
+            out.append(f"y+ fraction {v:.0%} was evaluated at the raised lattice viscosity, not the physical one (estimate at the physical "
+                       f"viscosity {res['y_plus_estimate']:.0f}): not a wall-model pass")
+        elif n == "hangar_reference_comparable":
+            out.append(c["note"])
         elif n == "yplus_in_30_300_fraction":
             out.append(f"y+ at the matching point outside 30-300 at {1 - v:.0%} of the wall cells "
                        f"(need {lim:.0%} inside; estimate {res['y_plus_estimate']:.0f})")
@@ -392,7 +425,7 @@ def why_failed(checks: list[dict[str, Any]], res: dict[str, Any], wlog: dict[str
 def _base(ctx: Context, w: dict[str, Any], part: str) -> dict[str, Any]:
     """The row of a window that did not run: every field the refit and the report read, empty."""
     les = ctx.plan["les"]
-    return dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, reasons=[],
+    return dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, usable_for_refit=False, reasons=[],
                 cd=None, cd_spread=None, cl=None, cl_spread=None, added_resistance=None, cd_hangar=None, cl_hangar=None,
                 cd_hangar_source=None, fea=dict(run=False, reason="the window did not run"), label=les["label"] if les["cpu_fallback"] else None)
 
@@ -477,6 +510,8 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
                       cells_per_s_planned=les.get("rate"), cell_steps_budget_plan=plan_cs,
                       cells_per_delta=r["resolution"]["delta_te"] / r["resolution"]["dx"])
     checks = list(r["checks"])
+    if not case.get("comparable", True):                                    # a coefficient that is not like-for-like with its Hangar reference must not refit
+        checks.append(dict(name="hangar_reference_comparable", value=math.nan, limit=math.nan, ok=False, note=case["not_comparable"]))
     if r["resolution"]["nu_floored"]:                                       # a stability floor changes the Reynolds number: a window that needed it fails
         checks.append(dict(name="viscosity_floor", value=r["resolution"]["nu_lat"], limit=r["resolution"]["nu_lat_physical"], ok=False,
                            note="lattice viscosity raised to the floor; the window is not at the physical Reynolds number"))
@@ -485,7 +520,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     ok = checks_ok and not killed
     reasons = [] if ok else ([wl["cut_reason"]] if killed else []) + ([] if checks_ok else why_failed(checks, r["resolution"], wl))
     timing["wall_s"] = time.perf_counter() - t0
-    return dict(base, resolution=resolution, checks=checks, ok=ok, reasons=reasons,
+    return dict(base, resolution=resolution, checks=checks, ok=ok, usable_for_refit=ok, reasons=reasons,
                 cd=float(r["cd"]), cd_spread=float(r["cd_spread"]), cl=float(r["cl"]), cl_spread=float(r["cl_spread"]),
                 added_resistance=None if r["added_resistance"] is None else float(r["added_resistance"]), fea=fea,
                 ref_area=float(r["ref_area"]), source=r["source"], timing=timing)
@@ -592,6 +627,33 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
     return pool.submit(work)
 
 
+def recalibrate_subgrid(ctx: Context, rows: dict[str, list[dict[str, Any]]], L: Ledger, path: str | pathlib.Path | None = None) -> dict[str, Any] | None:
+    """Stage 3's second job (BRIEF 2.2): recalibrate the sub-grid layer from the windows that passed their self-checks, and write
+    config/subgrid.json (or `path`). A passing row may carry `inflow_series` = dict(u, dt, U, ustar, z, L_ob, label): the along-wind velocity the
+    LES resolved in the free stream (subgrid.recalibrate says what is fitted). Nothing is ever written from a window that failed. The ledger
+    says why when nothing is written: no window passed (the CPU quick run), or windows passed but none resolved atmospheric turbulence (the
+    windows' own inflow is uniform, so there is nothing to compare with the Mann layer). Returns the calibration result, or None."""
+    from ..env import subgrid
+    passed = [r for rs in rows.values() for r in rs if r["ok"]]
+    series = [dict(r["inflow_series"], label=f"{vid} {r['part']} t={r['t']:.0f}") for vid, rs in rows.items() for r in rs if r["ok"] and r.get("inflow_series")]
+    cal = subgrid.recalibrate(series) if series else None
+    n_used = len(cal["windows"]) if cal else 0
+    why = ("no LES window passed its self-checks" if not passed else
+           f"{len(passed)} window(s) passed but none carries a resolved inflow-turbulence series (the window inflow is uniform: no atmospheric "
+           "turbulence is injected, so there is nothing to compare with the Mann layer)" if not series else
+           "no passed window's series is long enough: " + "; ".join(cal["skipped"] if cal else []))
+    if cal is None or not n_used:
+        L.note(f"sub-grid layer uncalibrated: {why}; config/subgrid.json was not written")
+    else:
+        subgrid.write_calibration(cal, pathlib.Path(ctx.run_dir).name, path)
+        c, u = cal["calibration"], cal["uncertainty"]
+        L.note(f"sub-grid layer recalibrated from {n_used} passed window(s): sigma_u/u* = {c['sigma_u_over_ustar']:.3g} +- "
+               f"{u['sigma_u_over_ustar']:.2g}, length_scale_factor = {c['length_scale_factor']:.3g} +- {u['length_scale_factor']:.2g}; "
+               f"written to config/subgrid.json (source_run {pathlib.Path(ctx.run_dir).name}); skipped: {cal['skipped'] or 'none'}")
+    L.check("subgrid_calibration_written_only_from_passed_windows", n_used <= len(series) <= len(passed), value=n_used, limit=len(passed))
+    return cal
+
+
 def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[str, list[dict[str, Any]]]:
     """The stage-3 call. Returns {vid: [row, ...]}; every window of every vehicle is attempted (a window that cannot run gives a row
     with `error` and ok False). Per-window self-checks live in the rows; L gets only 'the stage did what it promises'.
@@ -640,6 +702,7 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     if share is not None:
         L.check("stage_held_its_wall_clock_share", spent <= 1.1 * share, value=round(spent, 1), limit=round(1.1 * share, 1),
                 note="share = plan shares.stage3 x budget_s; a window cut by the budget is a killed row, not an overrun")
+    recalibrate_subgrid(ctx, rows, L)
     return rows
 
 

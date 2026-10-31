@@ -61,6 +61,13 @@ def priors_for(mission: dict[str, Any], fitted: dict[str, Any] | None = None) ->
     return pri, sampling.to_marginals(pri, names)
 
 
+def _record_grid(h: dict[str, Any], init: dict[str, Any]) -> dict[str, NDArray[Any]]:
+    """The records links, reports and windows read: the deploy state `init`, then the state after every REC_S / DT_VEHICLE-th step
+    of the one-per-step history `h`, so the grid is t0 + k REC_S for k = 0, 1, ... (the same alignment as the UAS and link grids)."""
+    n = int(REC_S // DT_VEHICLE)
+    return {k: np.concatenate([np.asarray(x)[None], np.asarray(h[k])[n - 1::n]]) for k, x in init.items()}
+
+
 def _run_glider(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], t0: float, T: float,
                 drag: float | NDArray[Any] = 1.0, windage: NDArray[Any] | None = None) -> dict[str, Any]:
     task = v["task"]
@@ -74,9 +81,9 @@ def _run_glider(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[
                            perturb=dict(speed_scale=X["glider_speed_scale"] * drag ** -0.5, battery_scale=X["battery_capacity_scale"],
                                         density_bias=np.zeros(M), **({} if windage is None else dict(windage=windage))))
     h = sim.run(T - t0, dt=DT_VEHICLE)
-    keep = slice(None, None, int(REC_S // DT_VEHICLE))
-    return dict(t=h["t"][keep], lon=h["lon"][keep], lat=h["lat"][keep], depth=h["depth"][keep], surfaced=(h["phase"] == 3)[keep],
-                fail=h["fail"], first=h["first"], sim=sim, antenna_m=P["antenna_height_m"])
+    start = dict(t=t0, lon=np.full(M, d["lon"]), lat=np.full(M, d["lat"]))
+    g = _record_grid(dict(h, surfaced=h["phase"] == 3), dict(start, depth=np.zeros(M), surfaced=np.ones(M, bool)))
+    return dict(**g, fail=h["fail"], first=h["first"], sim=sim, antenna_m=P["antenna_height_m"])
 
 
 def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], t0: float, T: float,
@@ -85,8 +92,9 @@ def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     task["waypoints"] = [tuple(p) for p in task.get("waypoints", [])]
     d = v["deploy"]
     sim = usv.USVSim(P, M, env, (d["lon"], d["lat"]), t0, task, perturb=dict(vpp_bias=(1 + X["usv_vpp_bias"]) * drag ** -0.5 - 1))
-    h = sim.run(T - t0, dt=DT_VEHICLE, record_s=REC_S)
-    return dict(t=h["t"], lon=h["lon"], lat=h["lat"], depth=np.zeros_like(h["lon"]), surfaced=np.ones_like(h["lon"], bool),
+    h = sim.run(T - t0, dt=DT_VEHICLE, record_s=DT_VEHICLE)
+    g = _record_grid(h, dict(t=t0, lon=np.full(M, d["lon"]), lat=np.full(M, d["lat"])))
+    return dict(**g, depth=np.zeros_like(g["lon"]), surfaced=np.ones_like(g["lon"], bool),
                 fail=sim.fail, first=sim.first, sim=sim, antenna_m=P["rf_antenna_height_m"])
 
 
@@ -95,7 +103,8 @@ def launch_times(sorties: dict[str, Any], lon: float, t0: float, T: float, durat
     hh, mm = (int(x) for x in sorties["local_solar_time"].split(":"))
     off = (hh + mm / 60 - lon / 15.0) * 3600.0
     day0 = np.floor(t0 / 86400.0) * 86400.0 - 86400.0
-    ts = day0 + off + 86400.0 * float(sorties.get("every_days", 1)) * np.arange(int((T - day0) / 86400.0) + 3)
+    every = 86400.0 * float(sorties.get("every_days", 1))                                    # seconds between launches
+    ts = day0 + off + every * np.arange(int((T - day0) / every) + 3)
     return np.asarray(ts[(ts >= t0) & (ts + duration_s <= T)], float)
 
 
@@ -302,18 +311,81 @@ def _dist(a: tuple[NDArray[Any], ...], b: tuple[NDArray[Any], ...]) -> NDArray[A
     return np.asarray(6.371e6 * np.hypot(x, (b[1] - a[1]) * k))
 
 
+SSP_DEPTHS_M = np.array([0.0, 10.0, 25.0, 50.0, 75.0, 100.0, 150.0, 200.0, 300.0, 400.0, 500.0, 700.0, 1000.0, 1500.0, 2000.0, 3000.0, 4000.0])
+
+
+def _mid(a: tuple[NDArray[Any], ...], b: tuple[NDArray[Any], ...], k: int, m: int) -> tuple[float, float]:
+    """(lon, lat) midway between the two ends of sample k of member m (longitude across the dateline the short way)."""
+    return float(a[0][k, m] + 0.5 * (np.mod(b[0][k, m] - a[0][k, m] + 180.0, 360.0) - 180.0)), float(0.5 * (a[1][k, m] + b[1][k, m]))
+
+
+def _bellhop_member(env: Any, modem: str, band: str, lon: float, lat: float, t: float, tx: float, rx: float, d: NDArray[Any], dz: NDArray[Any],
+                    wind: NDArray[Any]) -> NDArray[Any] | None:
+    """Bellhop-refined margins for one member's ambiguous samples `d` [m] (horizontal), on the sound-speed profile of `env` at the link midpoint
+    and the sample in the middle of them, in the water depth `env.depth` gives there (transducers clipped inside it). None where the
+    environment has no profile, no depth or no finite sound speed there: the caller keeps the Thorp margin and says so."""
+    if getattr(env, "ocean", True) is None:
+        return None
+    wd = float(np.ravel(np.asarray(env.depth(lon, lat).value, float))[0])
+    if not np.isfinite(wd) or wd < 10.0:
+        return None
+    z = -np.append(SSP_DEPTHS_M[SSP_DEPTHS_M < wd], wd)
+    c = np.ravel(np.asarray(env.sound_speed(np.full(z.size, lon), np.full(z.size, lat), z, np.full(z.size, t)).value, float))
+    if not np.all(np.isfinite(c)):
+        return None
+    out = comms.acoustic_link(d, modem, band, wind, ssp=(z, c), tx_depth=float(np.clip(tx, 1.0, wd - 1.0)), rx_depth=float(np.clip(rx, 1.0, wd - 1.0)),
+                              water_depth=wd, dz=dz)
+    return np.asarray(out["margin"].value, float)
+
+
+def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: NDArray[Any], need: NDArray[np.bool_], A: tuple[NDArray[Any], ...],
+              B: tuple[NDArray[Any], ...], t: NDArray[Any], env: Any) -> tuple[NDArray[Any], str]:
+    """Acoustic margin (n, M) on the slant path hypot(d, dz) and the method label. The Thorp budget decides every sample outside the
+    ambiguity band; the needed samples inside it (|margin| <= modems.yaml ambiguous_db) are re-done with Bellhop, member by member, on the
+    GOFS sound-speed profile at the midpoint of the member's middle ambiguous sample and that sample's transducer depths
+    (ponytail: one profile and depth pair per member and link, not per sample; per-sample runs cost ~0.2 s each, upgrade if a link's profile
+    changes along the track). Without Bellhop, or where the environment has no profile there, those samples keep the Thorp margin and the
+    label says so."""
+    res = comms.acoustic_link(d, modem, band, wind, dz=dz)
+    margin = np.array(res["margin"].value, float)
+    lab = res.get("label") or res.get("method")
+    label = lab if isinstance(lab, str) else str(np.unique(np.asarray(lab))[0])
+    amb = np.broadcast_to(np.asarray(res.get("ambiguous", False)), margin.shape) & need
+    if not amb.any():
+        return margin, label
+    if not comms.bellhop_available():
+        return margin, f"{comms.THORP_ONLY_LABEL} ({int(amb.sum())} ambiguous samples)"
+    done = 0
+    for m in map(int, np.flatnonzero(amb.any(0))):
+        i = np.flatnonzero(amb[:, m])
+        k = int(i[i.size // 2])
+        lon, lat = _mid(A, B, k, m)
+        r = _bellhop_member(env, modem, band, lon, lat, float(t[k]), float(A[3][k, m]), float(B[3][k, m]), d[i, m], dz[i, m], wind[i, m])
+        if r is not None:
+            margin[i, m], done = r, done + i.size
+    base = f"Thorp/Stojanovic budget on the slant range, Bellhop on {done} of {int(amb.sum())} ambiguous samples"
+    return margin, base + ("" if done == amb.sum() else "; the rest Thorp only (no sound-speed profile or depth there)")
+
+
 def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, Any], env: Any, M: int, seed: int, members: list[int]) -> dict[str, Any]:
-    """Per member: the fraction of the required moments the link worked, against required_fraction."""
+    """Per member: the fraction of the required moments the link worked, against required_fraction.
+
+    `margin_db` is NaN wherever it is not a link budget: not needed, an unknown position, beyond the radio horizon (RF: the NO_LINK_DB clip) or
+    beyond comms.valid_range_m (acoustic: Thorp extrapolated), and always for Iridium (a session success, not a margin). `n_invalid` counts the
+    needed samples that were beyond the horizon / out of range, per member, so a summary can say how often the geometry alone decided."""
     t0, T = utc(mission["window"]["start"]).timestamp(), utc(mission["window"]["end"]).timestamp()
     t = np.arange(t0, T + 1, REC_S)
     a, b = lk["a"], lk["b"]
+    invalid_kind: str | None = None
     if lk["kind"] == "iridium":
         n = len(t)
         rng = np.random.default_rng(sampling.member_seed(seed, members[0], f"iridium/{lk['id']}"))
         ok = np.stack([comms.iridium_session(340, rng, M)[0] for _ in range(n)])
         need = np.ones((n, M), bool)
         method = "Iridium SBD availability/latency model (no range dependence)"
-        margin = np.where(ok, 1.0, -1.0)
+        margin = np.full((n, M), np.nan)
+        valid = np.zeros((n, M), bool)
+        margin_kind = "none: Iridium reports a success fraction, not a margin"
     else:
         A, B = _pos(a, out, mission, t), _pos(b, out, mission, t)
         d = np.maximum(_dist(A, B), 1.0)
@@ -325,24 +397,28 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
             need = np.stack([np.interp(t, out[u]["t"], out[u]["airborne"][:, m].astype(float)) > 0.5 for m in range(M)], 1)
         else:
             need = np.ones((len(t), M), bool)
+        need &= np.isfinite(d)                                                  # an unknown position is not a moment the link was required
         lonA, latA = A[0], A[1]
         tt = np.broadcast_to(t[:, None], lonA.shape)                         # each member at its own position
         wind = np.hypot(*np.moveaxis(np.asarray(env.env.u10(lonA, latA, tt), float), -1, 0))
         if lk["kind"] == "rf":
             hs = np.asarray(env.waves(lonA.T, latA.T, tt.T)["Hs"].value, float).T     # the member's own Hs perturbation (members first)
             margin = comms.rf_margin(d, A[2], B[2], np.nan_to_num(hs), lk["radio"])
+            valid = margin != comms.NO_LINK_DB
             method = f"two-ray + 4/3-earth horizon, {lk['radio']} (Ament sea roughness, modelled)"
+            margin_kind, invalid_kind = "RF link margin, dB", "beyond_horizon"
         else:
             reg = comms._yaml("modems.yaml")["modems"]                        # "<modem>_<band>" as named in modems.yaml
             modem, band = next(((k, bd) for k, v in reg.items() for bd in v["bands"] if lk["modem"].lower() == f"{k}_{bd}".lower()), (lk["modem"], "MF"))
-            res = comms.acoustic_link(d, modem, band, wind)
-            margin = res["margin"].value
-            lab = res.get("label") or res.get("method")
-            method = lab if isinstance(lab, str) else str(np.unique(np.asarray(lab))[0])
+            dz = np.abs(A[3] - B[3])
+            margin, method = _acoustic(modem, band, d, dz, wind, need, A, B, t, env)
+            valid = np.hypot(d, dz) <= comms.valid_range_m(modem, band)
+            margin_kind, invalid_kind = "acoustic link margin, dB", "out_of_range"
         ok = margin > 0
     frac = np.where(need.sum(0) > 0, (ok & need).sum(0) / np.maximum(need.sum(0), 1), 1.0)
-    return dict(frac=frac, success=frac >= lk["required_fraction"], margin_db=np.where(need, margin, np.nan),
-                need_count=need.sum(0), method=method, t=t)
+    n_invalid = (need & ~valid).sum(0) if invalid_kind else np.zeros(M, int)
+    return dict(frac=frac, success=frac >= lk["required_fraction"], margin_db=np.where(need & valid, margin, np.nan), n_invalid=n_invalid,
+                need_count=need.sum(0), method=method, margin_kind=margin_kind, invalid_kind=invalid_kind, t=t)
 
 
 def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
@@ -369,6 +445,12 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         l0 = batches[0]["links"][lid]
         out["links"][lid] = dict(frac=cat([b["links"][lid]["frac"] for b in batches]), success=cat([b["links"][lid]["success"] for b in batches]),
                                  margin_db=cat([b["links"][lid]["margin_db"] for b in batches]), method=l0["method"], t=l0["t"])
+        for k in ("need_count", "n_invalid"):
+            if k in l0:
+                out["links"][lid][k] = cat([b["links"][lid][k] for b in batches])
+        for k in ("margin_kind", "invalid_kind"):
+            if k in l0:
+                out["links"][lid][k] = l0[k]
     return out
 
 
@@ -397,11 +479,61 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         f = ~np.asarray(r["success"], bool)
         n = len(f)
         sens = sensitivity.dominant(names, U, f.astype(float)) if 0 < f.sum() < n and n >= 16 else (None, {}, None)
+        kind, need = r.get("invalid_kind"), float(np.sum(r.get("need_count", 0)))
+        bad = float(np.sum(r["n_invalid"])) / need if kind and need else None          # of the needed samples, how many the geometry alone decided
         out["links"][lid] = dict(n=n, k_fail=int(f.sum()), verdict=intervals.verdict(int(f.sum()), n), method=r["method"],
                                  frac_median=float(np.median(r["frac"])), frac_p10=float(np.percentile(r["frac"], 10)),
                                  margin_db_median=float(np.nanmedian(r["margin_db"])) if np.any(np.isfinite(r["margin_db"])) else None,
+                                 margin_kind=r.get("margin_kind"), frac_beyond_horizon=bad if kind == "beyond_horizon" else None,
+                                 frac_out_of_range=bad if kind == "out_of_range" else None,
                                  sensitivity=dict(param=sens[0], S1=sens[1], noise_floor=sens[2]))
     return out
+
+
+BRIEF_PRIOR = "usv_vpp_bias_brief"
+
+
+def sensitivity_case(mission: dict[str, Any], env: Any, prior: str = BRIEF_PRIOR, n: int = 32, fitted: dict[str, Any] | None = None,
+                     scales: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
+    """The USV ensemble again with `usv_vpp_bias` drawn from perturbations.yaml's `prior` instead (default: the brief's literal -30 to -35 %,
+    which `priors_for` never samples). Same seed, members 0..n-1 as one batch, every other input drawn from the run's own hypercube columns,
+    the USV vehicles only; -> {vehicle id: [dict(case, k_fail, n, verdict, note)]}, the shape of report.SENSITIVITY."""
+    pri, marg = priors_for(mission, fitted)
+    marg["usv_vpp_bias"] = sampling.to_marginals(pri, [prior])[prior]
+    usvs = [v for v in mission["vehicles"] if _classes(mission)[v["id"]] == "usv"]
+    b = run_batch(dict(mission, vehicles=usvs, links=[]), env, list(range(n)), int(mission["seed"]), pri, marg, scales)
+    res = merge([b])
+    e = pri[prior]
+    case = f"usv_vpp_bias uniform [{e['lo']}, {e['hi']}] ({prior})"
+    return {vid: [dict(case=case, k_fail=int(failed(r).sum()), n=n, verdict=intervals.verdict(int(failed(r).sum()), n)["verdict"],
+                       note=str(e.get("note", e["citation"])))] for vid, r in res["vehicles"].items()}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """python -m cafe.pm.stage1 --mission M --run DIR [--prior usv_vpp_bias_brief] [--members 32]: store sensitivity_case's result in
+    DIR/stage1b/sensitivity_cases.json (replacing the entries of the same case), for the report to show next to the verdict. DIR is a finished
+    run of M (its ingest cache, fitted priors and refit multipliers are used)."""
+    import argparse, json, pathlib
+    from . import pipeline
+    ap = argparse.ArgumentParser(prog="python -m cafe.pm.stage1", description=main.__doc__)
+    ap.add_argument("--mission", required=True)
+    ap.add_argument("--run", required=True)
+    ap.add_argument("--prior", default=BRIEF_PRIOR)
+    ap.add_argument("--members", type=int, default=32)
+    a = ap.parse_args(argv)
+    rd = pathlib.Path(a.run)
+    ctx = pipeline.Context(a.mission, "quick", 0, rd)
+    fp, rp = rd / "ingest" / "priors_fitted.json", rd / "refit" / "refit.json"
+    scales = {k: v for k, v in json.loads(rp.read_text()).items() if v["used"]} if rp.is_file() else None
+    new = sensitivity_case(ctx.mission, ctx.env, a.prior, a.members, json.loads(fp.read_text()) if fp.is_file() else None, scales or None)
+    out = rd / "stage1b" / "sensitivity_cases.json"
+    old = json.loads(out.read_text()) if out.is_file() else {}
+    for vid, cases in new.items():
+        old[vid] = [c for c in old.get(vid, []) if c["case"] != cases[0]["case"]] + cases
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(old, indent=1, sort_keys=True))
+    print(f"{out}: " + ", ".join(f"{v} {c[0]['k_fail']} of {c[0]['n']} {c[0]['verdict']}" for v, c in new.items()))
+    return 0
 
 
 def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger | None = None, log: Callable[[str], None] = print,
@@ -436,3 +568,7 @@ def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger 
     return dict(res=res, summary=summ, names=names, priors={k: marg[k] for k in names}, n=len(res["U"]),
                 certify=len(res["U"]) >= intervals.n_certify(), n_certify=intervals.n_certify(),
                 t0=dt.datetime.fromtimestamp(utc(mission["window"]["start"]).timestamp(), dt.timezone.utc).isoformat())
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

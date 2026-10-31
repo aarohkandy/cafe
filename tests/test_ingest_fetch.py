@@ -180,7 +180,7 @@ def test_the_labs_hycom_cannot_be_downloaded_and_the_check_names_how_to_make_it(
         with pytest.raises(ledger.StageFailed, match="ocean_store_present"):
             run_stage(pipeline.s_ingest, ctx_for(tmp_path / f"r{offline}", mission=mission), "ingest")
         note = check_of(read_ledger(tmp_path / f"r{offline}", "ingest"), "ocean_store_present")["note"]
-        assert "ingest_lab_hycom" in note and ("lab's HYCOM, which this pipeline cannot download" in note or offline)
+        assert "cafe.pm ingest-ocean" in note and ("lab's HYCOM, which this pipeline cannot download" in note or offline)
 
 
 # ----------------------------------------------------------------------------------------------------------------- the download path, over HTTP

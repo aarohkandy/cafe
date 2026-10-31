@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from cafe.pm import __main__ as cli, audit, config, pipeline, whatif
+from cafe.pm import __main__ as cli, audit, budget, config, pipeline, whatif
 from cafe.pm.env import ocean as ocean_mod
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider
@@ -298,6 +298,8 @@ def wi(tmp_path, monkeypatch):
     (data / "cache" / "tepex_c_demo").mkdir(parents=True)
     monkeypatch.setattr(pipeline, "DATA", data)
     monkeypatch.setattr(pipeline.Context, "env", property(lambda self: AnalyticEnv()))
+    fast = {c: dict(s_per_batch_day=1.0, s_per_member_day=0.01, measured="test", host="test") for c in ("glider", "usv", "uas")}
+    monkeypatch.setattr(budget, "throughput", lambda path=budget.THROUGHPUT: dict(stage1=fast))   # the plan must not depend on the shipped throughput.json
     run = tmp_path / "run"
     pm_run.make_run(run)
     seen = {}

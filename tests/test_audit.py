@@ -1,11 +1,14 @@
 """cafe.pm.audit: broken ledgers, banned tokens and commented-out code are all caught; rulers and prose are not."""
 import json
+import pathlib
 import runpy
+import shutil
 import sys
 
 import pytest
 
 from cafe.pm import audit
+from cafe.pm.env.remote import sha256
 from cafe.pm.ledger import Ledger
 
 
@@ -74,6 +77,94 @@ def test_changed_input_changed_output_and_missing_output_are_reported(tmp_path):
     assert any("stage hangar: output" in p and "changed since the stage ran" in p for p in probs)
     assert any("stage stage1: output" in p and "is missing" in p for p in probs)
     assert not any("remote.nc" in p for p in probs)
+
+
+def test_a_moved_run_is_audited_where_it_is_now_not_where_it_was_made(tmp_path):
+    made = make_run(tmp_path / "a")
+    here = tmp_path / "b" / "run"
+    here.parent.mkdir()
+    shutil.move(str(made), str(here))                                   # every recorded path still names a/run/...
+    assert audit.ledger_problems(here) == []
+
+
+def test_a_copy_of_a_run_is_checked_against_its_own_files(tmp_path):
+    made = make_run(tmp_path / "a")
+    copy = tmp_path / "b" / "run"
+    shutil.copytree(made, copy)
+    (copy / "stage1.out").write_text("tampered in the copy")           # the original is intact and still exists at the recorded path
+    probs = audit.ledger_problems(copy)
+    assert any("stage stage1: output" in p and str(copy) in p and "changed since the stage ran" in p for p in probs)
+    assert audit.ledger_problems(made) == []
+
+
+def test_relative_ledger_paths_chain_when_the_run_is_audited_by_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    make_run(pathlib.Path("."))
+    assert json.loads(ledger_path(tmp_path / "run", "hangar").read_text())["inputs"][0]["ref"].startswith("run/")
+    assert audit.ledger_problems(tmp_path / "run") == []
+    assert audit.ledger_problems("run") == []
+
+
+def test_a_path_through_the_run_name_that_is_not_under_the_run_stays_where_it_was_recorded(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    assert audit._resolve("/elsewhere/run/gone.txt", run) == pathlib.Path("/elsewhere/run/gone.txt")
+    assert audit._resolve("/elsewhere/other/x", run) == pathlib.Path("/elsewhere/other/x")
+
+
+def zstore(path, attrs, name="zarr.json"):
+    path.mkdir(parents=True)
+    (path / name).write_text(json.dumps({"attributes": attrs} if name == "zarr.json" else attrs))
+    return path
+
+
+@pytest.mark.parametrize("name", ["zarr.json", ".zattrs"])
+def test_a_directory_input_is_checked_against_the_manifest_hash_the_store_carries(tmp_path, name):
+    run = make_run(tmp_path)
+    ocean = zstore(tmp_path / "gofs.zarr", {"manifest_sha256": "a" * 64}, name)
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(ocean, sha="a" * 64, kind="ocean store")
+        L.output(run / "report.out")
+    assert audit.ledger_problems(run) == []
+    (ocean / name).write_text(json.dumps({"attributes": {"manifest_sha256": "b" * 64}} if name == "zarr.json" else {"manifest_sha256": "b" * 64}))
+    assert any(f"input {ocean} changed since the stage ran (store manifest bbbbbbbbbbbb, ledger aaaaaaaaaaaa)" in p for p in audit.ledger_problems(run))
+
+
+def test_a_directory_input_without_a_manifest_attribute_cannot_be_checked_and_is_not_blamed(tmp_path):
+    run = make_run(tmp_path)
+    bare = tmp_path / "plain_dir"
+    bare.mkdir()
+    noattr = zstore(tmp_path / "noattr.zarr", {})
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(bare, sha="a" * 64)
+        L.input(noattr, sha="a" * 64)
+        L.output(run / "report.out")
+    assert audit.ledger_problems(run) == []
+
+
+def test_the_orca_cache_manifest_names_the_hash_of_every_hourly_part_and_the_parts_are_rehashed(tmp_path):
+    run = make_run(tmp_path)
+    orca_dir = tmp_path / "orca"
+    (orca_dir / "hours").mkdir(parents=True)
+    (orca_dir / "hours" / "wrf_a.npz").write_bytes(b"one")
+    (orca_dir / "hours" / "wrf_b.npz").write_bytes(b"two")
+    man = orca_dir / "manifest.json"
+    man.write_text(json.dumps({"parts": {"wrf_a.npz": sha256(orca_dir / "hours" / "wrf_a.npz"), "wrf_b.npz": sha256(orca_dir / "hours" / "wrf_b.npz"),
+                                         "wrf_gone.npz": "0" * 64}}))
+    other = tmp_path / "tao" / "manifest.json"
+    other.parent.mkdir()
+    other.write_text(json.dumps({"t0": 1}))                                # a manifest with no parts is not the orca cache
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(man)
+        L.input(other)
+        L.output(run / "report.out")
+    assert audit.ledger_problems(run) == []                                # a part that is no longer on disk is not blamed
+    (orca_dir / "hours" / "wrf_b.npz").write_bytes(b"TWO")
+    probs = audit.ledger_problems(run)
+    assert probs == [f"run: stage report: orca part {orca_dir / 'hours' / 'wrf_b.npz'} changed since the cache was assembled"]
 
 
 def test_a_rerun_stage_without_the_ones_after_it_breaks_the_chain(tmp_path):

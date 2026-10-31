@@ -62,6 +62,7 @@ class GriddedEnv:
         self.W["rain_mm_h"] = np.maximum(np.diff(rain, axis=0, prepend=rain[:1]) / np.diff(self.tw.x, prepend=self.tw.x[0] - 3600)[:, None, None] * 3600, 0.0)
         self.tu, self.lau, self.lou = Axis(seconds(u.time.values), "time"), Axis(u.lat.values, "lat"), Axis(u.lon.values, "lon")
         sea = u["seamask"].values > 0
+        self.sea = sea                                                    # UMWM sea nodes (lat, lon): ingest's NaN-in-sea-cells check reads it
         self.U = {k: np.where(sea, u[k].values.astype("f8"), np.nan) for k in u.data_vars if u[k].dims == ("time", "lat", "lon")}
         self.depth_umwm = np.where(sea, u["depth"].values.astype("f8"), 0.0)
         # UMWM angles are math radians toward: unwrap through unit vectors so interpolation never averages 350 and 10 deg

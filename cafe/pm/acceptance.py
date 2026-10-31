@@ -19,20 +19,26 @@ The golden keeps, per vehicle and link: verdict, k_fail, n, P(fail) and the inte
 seed. Two estimates from independent runs (the golden's, or the first run's, against the new one) are compared like this: the mission name, the seed
 (not for other_seed), class, platform, n and the set of vehicles and links must match exactly. A verdict must be identical wherever either run has it
 decided, that is wherever `stats.intervals.decided_region` at the stopper's confidence (`stats.sequential.STOP_CONF`) puts the whole P(fail) interval
-inside GO, MARGINAL (0.10 to 0.40) or NO-GO; a verdict that changes while undecided in both runs is allowed and named in the row's detail
-("uas: MARGINAL -> GO, undecided in both at n = 32"), because at a quick budget a vehicle near a threshold cannot be decided. P(fail) is judged
+inside GO, MARGINAL (0.10 to 0.40) or NO-GO. The rule for the verdicts that are undecided in both runs (a vehicle near a threshold at a quick budget
+cannot be decided): such a verdict may differ, but only within the interval logic. It is allowed when the two runs' P(fail) intervals at the stopper's
+confidence overlap, and then it is named in the row's detail ("uas: MARGINAL -> GO, undecided in both at n = 32"); when they do not overlap the two runs
+disagree about P(fail) itself and it is a problem, decided or not. A verdict decided in either run must be identical. P(fail) is judged
 by Newcombe's (1998, Stat. Med. 17:873, method 10) hybrid
 Wilson-score interval for the difference of the two proportions, `intervals.newcombe_diff`, which must contain 0 at a family-wise 95 %: Bonferroni over the
 vehicles and links compared, so each entry is judged at 1 - 0.05 / entries. (A new estimate inside the 90 % interval of an independent one fails about a
 quarter of the time even when nothing is wrong.) The same-seed check is exact equality and is unchanged. Timings, the
-git sha, dates, the host and paths are not in the golden. A missing golden is a FAIL that names the command writing it. `--update-golden` rewrites it
-from the quick run (with the git sha and code digest it came from) and that check then FAILs ("updated, not compared"), so a gate cannot be passed by
-overwriting its reference. `--skip-overnight` is for rehearsals: the overnight check FAILs with "overnight not run". Exit 0 only if every check passes.
+dates, the host and paths are not in the golden. The golden is a regression snapshot of this tool's own output from a quick run someone reviewed, not
+an independent expectation: it can say the tool still does what it did, never that what it did is right (docs/BRIEF.md section 6 holds the independent
+expectation, and the credibility report compares the run with it). Its `source` is its provenance: the git sha it was made from (a commit, from a
+checkout that was clean), the code digest, and the reviewed run (the run's name and the sha-256 of its report.json); a golden without that is a FAIL
+that names the command writing a new one. A missing golden is a FAIL that names the command writing it. `--update-golden` rewrites it
+from the quick run and that check then FAILs ("updated, not compared"), so a gate cannot be passed by overwriting its reference.
+`--skip-overnight` is for rehearsals: the overnight check FAILs with "overnight not run". Exit 0 only if every check passes.
 DIR/acceptance.json and DIR/acceptance.txt hold the result.
 """
 from __future__ import annotations
 
-import argparse, datetime as dt, hashlib, html, json, os, pathlib, shutil, subprocess, sys, time
+import argparse, datetime as dt, hashlib, html, json, os, pathlib, re, shutil, subprocess, sys, time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -137,9 +143,15 @@ def _decided(e: dict[str, Any]) -> bool:
     return intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF) is not None
 
 
+def _interval(e: dict[str, Any]) -> tuple[float, float]:
+    lo, hi, _ = intervals.interval(e["k_fail"], e["n"], sequential.STOP_CONF)
+    return lo, hi
+
+
 def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tuple[list[str], list[str]]:
     """(problems, notes) of `new` against `ref` (both from `summary`): the exact fields must match; a verdict must match wherever either run has it
-    decided (a change undecided in both is a note, not a problem); and Newcombe's interval for the difference of the two P(fail), at 1 - FAMILY_ALPHA / m
+    decided; a change undecided in both is a note when the two runs' STOP_CONF intervals on P(fail) overlap and a problem when they do not; and
+    Newcombe's interval for the difference of the two P(fail), at 1 - FAMILY_ALPHA / m
     for the m entries compared (Bonferroni), must contain 0. seed=False leaves the mission seed out (the other_seed check)."""
     bad = [f"{f}: {ref[f]!r} in the reference, {new[f]!r} now" for f in ("mission", "seed") if ref[f] != new[f] and (seed or f != "seed")]
     notes: list[str] = []
@@ -152,8 +164,13 @@ def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tupl
             g, r = a[k], b[k]
             bad += [f"{kind} {k}: {f} {g.get(f)!r} in the reference, {r.get(f)!r} now" for f in ("cls", "platform", "n") if g.get(f) != r.get(f)]
             if g.get("verdict") != r.get("verdict"):
+                (glo, ghi), (rlo, rhi) = _interval(g), _interval(r)
                 if _decided(g) or _decided(r):
                     bad.append(f"{kind} {k}: verdict {g.get('verdict')!r} in the reference, {r.get('verdict')!r} now")
+                elif glo > rhi or rlo > ghi:
+                    bad.append(f"{kind} {k}: verdict {g['verdict']!r} in the reference, {r['verdict']!r} now; "
+                               f"undecided in both, but the {sequential.STOP_CONF:.0%} "
+                               f"intervals on P(fail), {glo:.3f} to {ghi:.3f} and {rlo:.3f} to {rhi:.3f}, do not overlap")
                 else:
                     notes.append(f"{kind} {k}: {g['verdict']} -> {r['verdict']}, undecided in both at n = {g['n']}")
             lo, hi = intervals.newcombe_diff(r["k_fail"], r["n"], g["k_fail"], g["n"], conf)
@@ -172,10 +189,35 @@ def _allowed(notes: list[str]) -> str:
     return "; undecided in both, allowed to differ: " + "; ".join(notes) if notes else ""
 
 
+def _dirty() -> bool | None:
+    """Whether the checkout has changes its HEAD does not contain; None when that cannot be told (no git checkout, as in the container)."""
+    try:
+        p = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return bool(p.stdout.strip()) if p.returncode == 0 else None
+
+
+def provenance_problems(source: dict[str, Any]) -> list[str]:
+    """What a golden's `source` lacks to say where it came from: a commit, the code digest, a clean checkout (unknown is not dirty), the reviewed run."""
+    bad = []
+    if not re.fullmatch(r"[0-9a-f]{40}", str(source.get("git_sha", ""))):
+        bad.append(f"git_sha {source.get('git_sha')!r} is not a commit")
+    if not source.get("code_digest"):
+        bad.append("no code_digest")
+    if source.get("dirty") is True:
+        bad.append("made from a checkout with uncommitted changes, so its git sha does not describe the code")
+    run = source.get("reviewed_run") or {}
+    if not (run.get("name") and run.get("report_sha256")):
+        bad.append("no reviewed_run (the name of the run it was made from and the sha-256 of its report.json)")
+    return bad
+
+
 def _golden_record(r: dict[str, Any], mission: str) -> dict[str, Any]:
+    report = hashlib.sha256((r["dir"] / "report" / "report.json").read_bytes()).hexdigest()
     return dict(schema=1, command=f"python -m cafe.pm acceptance --mission {mission} --gpus {r['gpus']} --update-golden",
-                source=dict(git_sha=git_sha(), code_digest=pipeline.code_digest(), date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                            budget=r["budget"], gpus=r["gpus"]),
+                source=dict(git_sha=git_sha(), dirty=_dirty(), code_digest=pipeline.code_digest(), reviewed_run=dict(name=r["dir"].name, report_sha256=report),
+                            date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), budget=r["budget"], gpus=r["gpus"]),
                 summary=summary(r["report"]))
 
 
@@ -191,6 +233,10 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
     if not golden.is_file():
         return _row("golden_diff", False, f"no golden file at {golden}: write it from a quick run you have reviewed with `{cmd}`", missing=True)
     g = json.loads(golden.read_text())
+    prov = provenance_problems(g.get("source", {}))
+    if prov:
+        return _row("golden_diff", False, f"golden {golden.name} has no provenance ({'; '.join(prov)}): write a new one from a quick run you have reviewed, "
+                                          f"on a clean checkout, with `{cmd}`", provenance=prov, golden=str(golden))
     bad, notes = compare(g["summary"], summary(r["report"]))
     n = len(g["summary"]["vehicles"]) + len(g["summary"]["links"])
     return _row("golden_diff", not bad, ("; ".join(bad[:6]) + (f" (+{len(bad) - 6} more)" if len(bad) > 6 else "") if bad else

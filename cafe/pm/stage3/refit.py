@@ -6,6 +6,12 @@ combination (DerSimonian & Laird 1986, Controlled Clinical Trials 7, 177: tau^2 
 w_i* = 1/(se_i^2 + tau^2)). The distribution Stage 1 should sample a drag/lift/added-resistance multiplier from is
 Normal(mean = pooled / hangar value, sigma = sqrt(se_pooled^2 + tau^2) / hangar value): the spread of a *new* window's
 coefficient, not only the error of the mean. Multipliers are relative to the Hangar (RANS) coefficient Stage 1 used.
+
+A single window (the ci and quick budgets) has no between-window spread (tau^2 = 0) and its standard error is the batch-means error of one run, a
+few hundredths of a percent: not the uncertainty of a drag multiplier. So the sigma carries two floors, both stated in the output (`floor`):
+the between-window spread is at least `between_window_frac` of the pooled value when fewer than two windows exist, and the discretisation error
+(`discretisation_frac` of the pooled value, the finest stored sphere grid against its Richardson extrapolation, nest.sphere_discretisation, else
+the assumed default) is always added in quadrature. `refit(..., floor={})` pools without them.
 """
 from __future__ import annotations
 
@@ -14,6 +20,8 @@ from typing import Any, Callable
 
 import numpy as np
 from numpy.typing import ArrayLike
+
+from .. import budget
 
 MAX_ITER = 2
 
@@ -36,38 +44,64 @@ def pool(means: ArrayLike, ses: ArrayLike) -> dict[str, float]:
     return dict(mean=float(mean), se=float(math.sqrt(1 / ws.sum())), tau2=float(tau2), n=k, q=float(q))
 
 
-def _multiplier(ratios: ArrayLike, ses: ArrayLike, windows: int) -> dict[str, float]:
+def default_floor() -> dict[str, Any]:
+    """The sigma floors `refit` applies unless told otherwise: the assumed between-window fraction (config/assumptions.yaml `stage3.refit.*`)
+    and the discretisation fraction, from the stored sphere grid study when there is one."""
+    from .nest import sphere_discretisation
+    a = budget.stage3_assumptions()
+    disc = sphere_discretisation()
+    return dict(between_window_frac=float(a["refit.between_window_frac"]),
+                between_window_source="ASSUMED (config/assumptions.yaml stage3.refit.between_window_frac)",
+                discretisation_frac=float(a["refit.discretisation_frac"]) if disc is None else disc[0],
+                discretisation_source="ASSUMED: no stored sphere grid study (needs two grids of one Re)" if disc is None else disc[1])
+
+
+def _sigma(mean: float, se: float, tau: float, windows: float, floor: dict[str, Any]) -> dict[str, float]:
+    """Total sigma and its parts. `mean`, `se`, `tau` in the units of the quantity; the floors are fractions of |mean|."""
+    between = max(tau, floor["between_window_frac"] * abs(mean)) if windows < 2 and floor else tau
+    disc = floor["discretisation_frac"] * abs(mean) if floor else 0.0
+    return dict(sigma=math.sqrt(se ** 2 + between ** 2 + disc ** 2), sigma_statistical=math.sqrt(se ** 2 + tau ** 2), sigma_between=between,
+                sigma_discretisation=disc)
+
+
+def _multiplier(ratios: ArrayLike, ses: ArrayLike, windows: int, floor: dict[str, Any]) -> dict[str, float]:
     p = pool(ratios, ses)
-    return dict(mean=p["mean"], sigma=math.sqrt(p["se"] ** 2 + p["tau2"]), change_vs_hangar=p["mean"] - 1, tau=math.sqrt(p["tau2"]), windows=windows)
+    tau = math.sqrt(p["tau2"])
+    return dict(mean=p["mean"], **_sigma(p["mean"], p["se"], tau, windows, floor), change_vs_hangar=p["mean"] - 1, tau=tau, windows=windows)
 
 
-def refit(windows: list[dict[str, Any]], hangar: dict[str, Any] | None = None) -> dict[str, dict[str, float]]:
+def refit(windows: list[dict[str, Any]], hangar: dict[str, Any] | None = None, floor: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """windows: pipeline_windows rows / run_window results (keys cd, cd_spread, cl, cl_spread, added_resistance and, with hangar=None,
     cd_hangar and cl_hangar of each window). Returns the Stage-1 perturbation distribution plus the coefficient change vs the
     Hangar and the spread, as the `refit` ledger entry records them.
     hangar = {"cd": value, "cl": value (optional)}: one Hangar value for all windows (multiplier = pooled coefficient / hangar value).
     hangar = None: each window carries the coefficient its vehicle's Stage-1 model implies at that window's speed, and the pooled
     quantity is the per-window ratio cd / cd_hangar (its standard error cd_spread / cd_hangar); lift likewise over the windows that
-    have a non-zero cl_hangar."""
+    have a non-zero cl_hangar. `floor`: the sigma floors (default_floor(); {} for none), reported as out["floor"] when applied."""
     if not windows:
         raise ValueError("no windows to refit from")
-    out: dict[str, dict[str, float]] = {}
+    fl = default_floor() if floor is None else floor
+    out: dict[str, dict[str, Any]] = {}
     if hangar is None:
         out["drag"] = _multiplier([w["cd"] / w["cd_hangar"] for w in windows], [max(w["cd_spread"], 1e-12) / w["cd_hangar"] for w in windows],
-                                  len(windows))
+                                  len(windows), fl)
         lw = [w for w in windows if w.get("cl_hangar")]
         if lw:
-            out["lift"] = _multiplier([w["cl"] / w["cl_hangar"] for w in lw], [max(w["cl_spread"], 1e-12) / abs(w["cl_hangar"]) for w in lw], len(lw))
+            out["lift"] = _multiplier([w["cl"] / w["cl_hangar"] for w in lw], [max(w["cl_spread"], 1e-12) / abs(w["cl_hangar"]) for w in lw], len(lw), fl)
     else:
         cd = pool([w["cd"] for w in windows], [w["cd_spread"] for w in windows])
         h = hangar["cd"]
-        out["drag"] = dict(mean=cd["mean"] / h, sigma=math.sqrt(cd["se"] ** 2 + cd["tau2"]) / h, change_vs_hangar=cd["mean"] / h - 1,
-                           tau=math.sqrt(cd["tau2"]) / h, windows=cd["n"])
+        tau = math.sqrt(cd["tau2"]) / h
+        out["drag"] = dict(mean=cd["mean"] / h, **_sigma(cd["mean"] / h, cd["se"] / h, tau, cd["n"], fl), change_vs_hangar=cd["mean"] / h - 1, tau=tau,
+                           windows=cd["n"])
         if hangar.get("cl") not in (None, 0):
             cl = pool([w["cl"] for w in windows], [max(w["cl_spread"], 1e-12) for w in windows])
             hl = hangar["cl"]
-            out["lift"] = dict(mean=cl["mean"] / hl, sigma=math.sqrt(cl["se"] ** 2 + cl["tau2"]) / abs(hl), change_vs_hangar=cl["mean"] / hl - 1,
-                               tau=math.sqrt(cl["tau2"]) / abs(hl), windows=cl["n"])
+            tau = math.sqrt(cl["tau2"]) / abs(hl)
+            out["lift"] = dict(mean=cl["mean"] / hl, **_sigma(cl["mean"] / hl, cl["se"] / abs(hl), tau, cl["n"], fl), change_vs_hangar=cl["mean"] / hl - 1,
+                               tau=tau, windows=cl["n"])
+    if fl:
+        out["floor"] = dict(fl)
     ar = [w["added_resistance"] for w in windows if w.get("added_resistance") is not None]
     if ar:
         a = np.asarray(ar, float)

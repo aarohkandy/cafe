@@ -1,6 +1,6 @@
 # CREDIBILITY — how the credibility report is scored
 
-What `cafe/pm/credibility.py` computes, what evidence each level needs, and what the tool cannot show. Written against `bb68642` on 2026-10-29. If this file and
+What `cafe/pm/credibility.py` computes, what evidence each level needs, and what the tool cannot show. Written against `bb68642` on 2026-10-29; section 3 (`RULES`, `LEVELS`), the limitation table (`LIMITATIONS`) and sections 5 and 6 were checked against `credibility.py`, `wallmodel.py`, `subgrid.py`, `stage1.py` and the platform files on 2026-10-31 (review round 1, M-17). Section 4 (the ASME rows) was not rechecked. If this file and
 `credibility.py` disagree, the code is right; `LIMITATIONS`, `FACTORS`, `RULES` and `LEVELS` below are copied from it and must be kept the same.
 
 ## 1. What it is
@@ -59,7 +59,7 @@ How the details work:
 - **Verification 3** needs a V&V row with a numerical-uncertainty term, which only the DTMB 5415 rows have (`vv.gci_two_grid`: Roache, `Fs = 3`, assumed order 2, `r` from the cell counts).
 - **Validation 2** needs one row with all three terms; the stored sphere and wall-model rows never have them (section 4), so Validation 2 rests on the DTMB rows. **3 needs four complete rows and every one inside its `U_val`.**
 - **Input pedigree** counts a platform leaf as sourced when it has a `source` and is neither `assumed` nor "recalled" in its text. It reads only the `value / source / assumed` structure, so a bare number is not counted at all and a block that carries a `source`
-  string counts as one sourced item whatever its numbers are (section 5, `radios.yaml`).
+  string counts as one sourced item whatever its numbers are.
 - **Uncertainty 3** needs `n >= n_certify` (73) for every vehicle and link and no prior of kind `assumed`. Budget `quick` (at most 64 members) cannot reach it; `battery_capacity_scale` is of kind `assumed`,
   so no budget reaches it while that prior is assumed.
 - **Robustness 3** needs a vehicle to have been refit, which needs a stage-3 window that passed all its self-checks.
@@ -133,13 +133,10 @@ Copied from the code. "Bears on" lists the factors it caps at 2. Each was checke
 
 These were found while writing the docs. They are not in `LIMITATIONS`, so they do not cap anything; each is in `CHANGELOG.md` under Known issues.
 
-- Assumed numbers in `platforms/radios.yaml` (antenna gain 2 dBi, 3 dB miscellaneous loss, Iridium success 0.95, three attempts, set-up time) and `platforms/modems.yaml` `defaults` (3 dB anchor margin) are not marked leaf by leaf. The report lists each radio and Iridium block as **sourced**
-  and lists the two modem blocks as assumed as wholes, so Input pedigree is counted too high for a mission with RF or Iridium links.
 - `wind_sea_age` (2.0) and `swell_age` (1.2) in `cafe/pm/env/waves.py` are assumed and are not in `assumptions.yaml`, so they are not in the assumed-inputs list.
+- The "Hangar" coefficient that the refit and the stage-3 rows divide by is the vehicle's baseline model coefficient (analytic; no Hangar CFD run), so there is no Hangar GCI, observed order or mesh-quality evidence behind it (Verification, Validation).
 - The stage-1 UAS turbulence, gust-front and Iridium draws are keyed by batch, not by member (Uncertainty).
-- The stage-3 wall-model check takes the better of the stored flat-plate and channel errors (Validation, Robustness).
 - The emulator is scored only on a synthetic table; the real-spectrum correction takes a median error as a 1-sigma (Uncertainty).
-- Mission switches `warm_layer`, `rain_lens` and `ocean_sde` are not read; `bulk_stress_scale` is applied by nothing (Input pedigree: the report lists priors that do nothing).
 
 ## 6. The assumed-inputs list
 
@@ -149,8 +146,8 @@ These were found while writing the docs. They are not in `LIMITATIONS`, so they 
 2. every entry of `config/perturbations.yaml`, kind `prior` (the brief's number) or `assumed` (an entry of kind `assumed`, or one whose citation contains "ASSUMED");
 3. every mapping in `platforms/*.yaml` that carries `assumed: true` (the leaf with its why).
 
-On 2026-10-29 that is 220 items: 58 from `assumptions.yaml`; 11 from `perturbations.yaml` (10 priors, 1 assumed: `battery_capacity_scale`); 151 platform leaves marked assumed (`quad_uas` 44, `saildrone_explorer` 58, `slocum` 26, `seaglider` 21,
-`modems` 2). `radios.yaml` contributes none, for the reason in section 5. The mission report marks a verdict that depends on one of these with an "assumed" badge.
+On 2026-10-31, in the review-round-1 working tree, that is 253 items: 72 from `assumptions.yaml`; 12 from `perturbations.yaml` (11 priors, 1 assumed: `battery_capacity_scale`); 169 platform leaves marked assumed (`quad_uas` 44, `saildrone_explorer` 57, `slocum` 26, `seaglider` 21,
+`radios` 19, `modems` 2). The counts change whenever an input file does; recount with `pm python -c "from cafe.pm import credibility as C; print(len(C.assumed_inputs()))"`. The mission report marks a verdict that depends on one of these with an "assumed" badge.
 
 Provenance is also enforced at load: `glider.load_platform`, `usv.load_platform` and `uas.load_platform` refuse a leaf with neither a `source` nor `assumed: true` with a `why`, and the hangar stage fails a run on one.
 

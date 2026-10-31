@@ -308,7 +308,7 @@ def write_orca(out, m):
         if t.hour % 6 == 0:
             F, K = restart_fields(orca.lon360(pts["lon"]), pts["lat"], te)
             np.savez(out / "hours" / f"spec_{s}.npz", F=F, k=K)
-    man = orca.assemble(out, ts, wg, ug, pts, [orca.stamp(t) for t in h3])
+    man = orca.assemble(out, ts, wg, ug, pts, [orca.stamp(t) for t in h3], _mission_box(m))
     shutil.rmtree(out / "hours")                                    # per-hour parts are only the ingest's resume cache
     return man
 

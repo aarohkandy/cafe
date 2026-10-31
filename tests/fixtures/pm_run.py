@@ -114,7 +114,8 @@ def refit_rows(rows):
         if vid == "glider_eq":
             out[vid] = dict(used=True, **refit_mod.refit(good, dict(cd=good[0]["cd_hangar"], cl=None)))
         elif vid == "uas":
-            out[vid] = dict(used=False, reason="no window passed its stage-3 self-checks; Stage 1 keeps the Hangar coefficients",
+            out[vid] = dict(used=False, reason="no window passed its stage-3 self-checks; "
+                                       "Stage 1 keeps the baseline model coefficients (analytic; no Hangar CFD run)",
                             failed_checks=sorted({c["name"] for w in ws for c in w["checks"] if not c["ok"]}))
         elif vid == "glider_2n":
             out[vid] = dict(used=False, reason="budget ci: no refit")

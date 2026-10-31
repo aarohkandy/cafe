@@ -233,32 +233,44 @@ def test_targets_from_a_stage1_result():
 META = dict(run_id="r1", mission="demo", git_sha="abc", code_digest="def")
 
 
-def synthetic_rows(variant="base", fid=None):
+def synthetic_rows(variant="base", fid=None, meta=META):
     res, _ = pm_run.make_res(seed=1, fail_frac=0.4, M=48)
-    return whatif.vehicle_rows(DEMO, res, AnalyticEnv(wind=(3.0, 4.0), hs=2.0, current=(0.1, 0.0)), fid or {}, META, variant)
+    return whatif.vehicle_rows(DEMO, res, AnalyticEnv(wind=(3.0, 4.0), hs=2.0, current=(0.1, 0.0)), fid or {}, meta, variant)
 
 
 def test_one_row_per_vehicle_with_features_targets_and_metadata():
     rows = synthetic_rows(fid={"glider_eq": 1})
     assert [r["vehicle"] for r in rows] == ["glider_eq", "glider_2n", "usv", "uas"] and [r["cls"] for r in rows] == ["glider", "glider", "usv", "uas"]
     g, u = rows[0], rows[3]
-    assert g["fidelity"] == 1 and rows[1]["fidelity"] == 0 and g["n_members"] == 48 and g["key"] == "r1|glider_eq|base"
+    assert g["fidelity"] == 1 and rows[1]["fidelity"] == 0 and g["n_members"] == 48 and g["key"] == whatif.row_key(g)
     assert g["run_id"] == "r1" and g["mission"] == "demo" and g["git_sha"] == "abc" and g["code_digest"] == "def" and g["variant"] == "base"
     assert g["wind_mean"] == pytest.approx(5.0) and g["hs_p90"] == 2.0 and g["cur_mean"] == pytest.approx(0.1)
     assert g["dive_depth_m"] == 950.0 and u["every_days"] == 1.0 and "dive_depth_m" not in u
     assert 0.0 < g["p_fail"] < 1.0 and g["mode_station_lost"] == g["p_fail"]
 
 
-def test_rows_append_and_a_rerun_replaces_its_own_rows(tmp_path):
+def test_rows_append_and_a_rerun_of_the_same_mission_replaces_its_rows_whichever_directory_it_ran_in(tmp_path):
+    """M-8: the key held the run directory, so every rerun of one mission counted as new data with identical features."""
     path = tmp_path / "emulator" / "train.parquet"
     a, used = whatif.add_rows(path, synthetic_rows())
     assert used == str(path) and len(a) == 4 and path.is_file()
     b, _ = whatif.add_rows(path, synthetic_rows("v0"))
     assert len(b) == 8 and sorted(b["variant"].unique()) == ["base", "v0"]
-    other = [dict(r, run_id="r2", key=r["key"].replace("r1", "r2")) for r in synthetic_rows()]
-    assert len(whatif.add_rows(path, other)[0]) == 12                                                           # another run adds
-    again, _ = whatif.add_rows(path, synthetic_rows())
-    assert len(again) == 12 and again["run_id"].tolist().count("r1") == 8                                         # the same run replaces its rows
+    rerun = synthetic_rows(meta=dict(META, run_id="r2", git_sha="new", code_digest="newer"))
+    again, _ = whatif.add_rows(path, rerun)
+    assert len(again) == 8 and again[again["variant"] == "base"]["run_id"].tolist() == ["r2"] * 4
+    assert again[again["variant"] == "v0"]["run_id"].tolist() == ["r1"] * 4
+    other_mission, _ = whatif.add_rows(path, synthetic_rows(meta=dict(META, mission="other")))
+    assert len(other_mission) == 12
+
+
+def test_a_row_key_ignores_the_run_and_the_code_and_follows_the_mission_vehicle_variant_and_features():
+    r = synthetic_rows()[0]
+    key = whatif.row_key(r)
+    assert len(key) == 16 and int(key, 16) >= 0 and whatif.row_key(dict(r, run_id="r9", git_sha="z", code_digest="z", p_fail=0.123)) == key
+    assert whatif.row_key(dict(r, lon=r["lon"] + 1e-12)) == key                                           # 9 significant digits
+    for change in (dict(mission="other"), dict(vehicle="glider_2n"), dict(variant="v0"), dict(lon=r["lon"] + 1e-3), dict(dive_depth_m=r["dive_depth_m"] + 1)):
+        assert whatif.row_key(dict(r, **change)) != key, change
 
 
 def test_without_pyarrow_the_table_is_a_csv(tmp_path, monkeypatch):
@@ -341,9 +353,44 @@ def test_train_fits_each_class_from_the_stored_table(tmp_path):
     out = whatif.train(tmp_path / "none.parquet", ["glider", "usv", "glider"])
     assert set(out) == {"glider", "usv"} and all(e is None and not i["trained"] and "0 " in i["reason"] for e, i in out.values())
     path = tmp_path / "train.parquet"
-    whatif.add_rows(path, [dict(r, key=f"k{i}", run_id="r") for i, r in enumerate(storm_table(120).to_dict("records"))])
-    out = whatif.train(path, ["glider", "usv"])
+    whatif.add_rows(path, [dict(r, key=f"k{i}", run_id="r", code_digest="d1") for i, r in enumerate(storm_table(120).to_dict("records"))])
+    out = whatif.train(path, ["glider", "usv"], code_digest="d1")
     assert out["glider"][0] is not None and out["glider"][1]["trained"] and out["usv"][0] is None
+    out = whatif.train(path, ["glider"], code_digest="d2")
+    assert out["glider"][0] is None and out["glider"][1]["stale_rows"] == 120 and "; 120 rows made by other code are left out" in out["glider"][1]["reason"]
+
+
+def test_train_defaults_to_the_digest_of_this_checkouts_code(tmp_path):
+    from cafe.pm import pipeline
+    df = storm_table(120).assign(code_digest=pipeline.code_digest())
+    assert whatif.train(tmp_path / "none.parquet", ["glider"], df=df)["glider"][1]["trained"]
+    assert not whatif.train(tmp_path / "none.parquet", ["glider"], df=df.assign(code_digest="superseded"))["glider"][1]["trained"]
+
+
+def test_replicates_of_one_mission_do_not_reach_the_row_gate(tmp_path):
+    """M-8: 25 reruns of the demo reached 100 rows with one design point."""
+    df = pd.concat([storm_table(30)] * 5, ignore_index=True)
+    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    assert em is None and info["rows"] == 150 and info["points"] == 30
+    assert info["reason"] == ("150 glider rows in the training table, 100 are needed (a 20 % hold-out must score 90 % coverage); "
+                              "only 30 of them are distinct feature points")
+
+
+def test_rows_made_by_other_code_stay_in_the_table_but_are_not_trained_on(tmp_path):
+    """M-8: rows from superseded physics were trained on; the table keeps them, the fit leaves them out."""
+    df = storm_table(140).assign(code_digest="old")
+    df.loc[:119, "code_digest"] = "new"
+    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet", "new")
+    assert em is not None and info["trained"]
+    assert info["rows"] == 120 and info["stale_rows"] == 20 and info["points"] == 120
+    em, info = whatif.fit_class(df.iloc[:30], "glider", tmp_path / "t.parquet", "new")
+    assert em is None and info["reason"].startswith("30 glider rows in the training table, 100 are needed")
+    em, info = whatif.fit_class(df.iloc[120:], "glider", tmp_path / "t.parquet", "new")
+    assert em is None and info["rows"] == 0 and info["stale_rows"] == 20 and "; 20 rows made by other code are left out" in info["reason"]
+    em, info = whatif.fit_class(df.drop(columns="code_digest"), "glider", tmp_path / "t.parquet", "new")
+    assert em is None and info["rows"] == 0 and info["stale_rows"] == 140                             # no digest: not shown to be current
+    em, info = whatif.fit_class(df.drop(columns="code_digest"), "glider", tmp_path / "t.parquet")
+    assert info["rows"] == 140 and info["stale_rows"] == 0
 
 
 # ---------------------------------------------------------------------------------------------------------------- the flip search
@@ -503,6 +550,8 @@ def test_stage_1_that_leaves_the_data_is_a_reason_on_the_candidate_and_costs_not
     t = flips[GL]["tried"]
     assert spent == 0.0 and not flips[GL]["found"] and [x for x in t if "Stage 1 not run: " + GL in x["reason"]]
     assert all(x["method"] == "not evaluated" for x in t)
+    # past the data: it can never be evaluated
+    assert all(x["invalid"] for x in t if "Stage 1 not run: " + GL in x["reason"]) and flips[GL]["evaluated"] == 0
 
 
 def test_the_flip_search_charges_each_stage_1_fallback_at_the_planners_cost_not_the_clock(monkeypatch):
@@ -517,6 +566,59 @@ def test_the_flip_search_charges_each_stage_1_fallback_at_the_planners_cost_not_
     assert spent == whatif.FALLBACK_K * cost and len([t for t in flips[GL]["tried"] if t["method"] == "Stage 1"]) == 3
     flips, spent = whatif.flip_search(STORM, base, {GL: TRACK}, ENV, {}, plan, pri, marg, None, 5, 2.5 * cost, lambda *_: None)
     assert spent == 2 * cost  # a third would pass the budget: the same on a slow machine
+
+
+def two_glider_mission(hours=60):
+    m = copy.deepcopy(CI)
+    m["window"]["end"] = whatif._iso(T0 + 3600.0 * hours)
+    m["vehicles"] = [v for v in m["vehicles"] if v["id"] in ("glider_eq", "glider_1n")]
+    m["links"] = []
+    return m
+
+
+def test_the_stage_1_budget_is_split_over_the_vehicles_not_spent_on_the_first(monkeypatch):
+    """M-6: glider_eq spent the whole share, so the vehicles after it got no Stage-1 fallback and were reported as 'nothing flips it'."""
+    m = two_glider_mission()
+    plan = plan_for(m)
+    cost = budget.batch_cost_s(plan, ["glider_eq"])
+    assert budget.batch_cost_s(plan, ["glider_1n"]) == cost
+    pri, marg = stage1.priors_for(m)
+    monkeypatch.setattr(whatif, "measure", lambda *a, **k: dict(p_fail=1.0, lo=0.9, hi=1.0, verdict="NO-GO", n=16))
+    base = {v: dict(verdict="NO-GO", p_fail=1.0) for v in ("glider_eq", "glider_1n")}
+    log = []
+    flips, spent = whatif.flip_search(m, base, {}, ENV, {}, plan, pri, marg, None, 5, 2.5 * cost, log.append)
+    assert [flips[v]["evaluated"] for v in base] == [1, 1] and spent == 2 * cost
+    for v in base:
+        f = flips[v]
+        assert sum(t["method"] == "Stage 1" for t in f["tried"]) == 1
+        assert any("this vehicle's share of the emulator budget is spent" in t["reason"] for t in f["tried"])
+    assert log[-1] == f"flip search glider_1n: nothing flips it among the 1 evaluated of {flips['glider_1n']['candidates']} candidates"
+    flips, spent = whatif.flip_search(m, base, {}, ENV, {}, plan, pri, marg, None, 5, 0.9 * cost, lambda *_: None)
+    assert [flips[v]["evaluated"] for v in base] == [0, 0] and spent == 0.0                                 # neither gets what it cannot afford
+    only = {"glider_eq": base["glider_eq"], "glider_1n": dict(verdict="GO", p_fail=0.0)}
+    flips, spent = whatif.flip_search(m, only, {}, ENV, {}, plan, pri, marg, None, 5, 2.5 * cost, lambda *_: None)
+    assert list(flips) == ["glider_eq"] and flips["glider_eq"]["evaluated"] == 2 and spent == 2 * cost       # a GO vehicle takes no share
+
+
+def test_the_search_counts_what_was_evaluated_and_what_could_never_be(monkeypatch):
+    """M-6: the report counted every candidate, the 'earlier' ones that fall before the window included, and never said how many were run."""
+    pri, marg = stage1.priors_for(STORM)
+    plan = plan_for(STORM)
+    flips, _ = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=1.0)}, {GL: TRACK}, ENV, {}, plan, pri, marg, None, 5, 1e6, lambda *_: None)
+    f = flips[GL]
+    invalid = [t for t in f["tried"] if t["invalid"]]
+    assert f["evaluated"] == 3 and f["invalid"] == len(invalid) > 0 and f["candidates"] == len(f["tried"]) - len(invalid)
+    assert all(t["method"] == "not evaluated" and "outside the window" in t["reason"] for t in invalid)
+    assert not any(t["invalid"] for t in f["tried"] if t["method"] != "not evaluated")
+    assert f["evaluated"] <= f["candidates"]
+
+
+def test_a_search_with_nothing_run_says_so_in_its_log_line(monkeypatch):
+    pri, marg = stage1.priors_for(STORM)
+    log = []
+    flips, _ = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=1.0)}, {GL: TRACK}, ENV, {}, plan_for(STORM), pri, marg, None, 5, 0.0, log.append)
+    f = flips[GL]
+    assert f["evaluated"] == 0 and log == [f"flip search {GL}: nothing flips it among the 0 evaluated of {f['candidates']} candidates"]
 
 
 # ---------------------------------------------------------------------------------------------------------------- the what-if answer

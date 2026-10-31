@@ -18,6 +18,7 @@ import jax.numpy as jnp
 
 import cafe.receipts as cr
 from cafe.pm import budget
+from cafe.pm.env import subgrid as sg_mod
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider as pg, uas, usv as pu
 from cafe.pm.stage3 import fluidx3d, freesurface as fs, lbm, nest, pipeline_windows as pw, refit, wallmodel as wm, windows as W
@@ -417,6 +418,22 @@ def test_stage3_checks_each_one_can_fail():
     assert [c for c in W.stage3_checks(_series(yfrac=np.zeros(300)), wall_off, f, 10, 0.1) if c["name"].startswith("yplus")][0]["ok"]
 
 
+def test_the_yplus_row_is_not_a_wall_model_pass_when_it_was_evaluated_at_the_raised_lattice_viscosity():
+    raised = nest.NestSpec((20, 20, 20), 0.01, 1.0, 1e-6, nu_floor=1e-4)
+    assert raised.nu_lat == 1e-4 > 1e-6 * raised.dt / raised.dx ** 2
+    checks = lambda spec: W.stage3_checks(_series(yfrac=np.full(300, 0.97)), spec, np.ones(300), 10, 0.1)  # noqa: E731
+    row = lambda spec: [c for c in checks(spec) if c["name"] == "yplus_in_30_300_fraction"][0]  # noqa: E731
+    r = row(raised)
+    assert r["value"] == pytest.approx(0.97) and not r["ok"] and r["note"] == W.YPLUS_RAISED_NOTE            # 97 % inside, yet not a pass
+    assert row(nest.NestSpec((20, 20, 20), 0.01, 1.0, 1e-6))["ok"]                                         # the same series at the physical viscosity passes
+    assert row(nest.NestSpec((20, 20, 20), 0.01, 1.0, 1e-6, nu_floor=1e-12))["ok"]                         # a floor below the physical value changes nothing
+    off = nest.NestSpec((20, 20, 20), 0.01, 1.0, 1e-6, nu_floor=1e-4, wall_model=False)
+    assert row(off)["ok"]
+    res = dict(delta_te=0.1, dx=0.01, y_plus_estimate=1370.0)
+    why = pw.why_failed([r], res, {})
+    assert len(why) == 1 and "raised lattice viscosity" in why[0] and "1370" in why[0] and "not a wall-model pass" in why[0]
+
+
 # ------------------------------------------------------------------ one real LES window
 def _uniform(u):
     u = np.asarray(u, np.float32)
@@ -665,6 +682,48 @@ def test_refit_builds_the_stage1_multiplier_distribution():
         refit.refit([], {"cd": 0.3})
 
 
+ONE = [dict(cd=1.962, cd_spread=0.000345, cd_hangar=1.8, cl=0.0, cl_spread=1e-3, cl_hangar=None, added_resistance=None)]
+FLOOR = dict(between_window_frac=0.1, between_window_source="test", discretisation_frac=0.05, discretisation_source="test")
+
+
+def test_a_single_window_refit_sigma_is_floored_and_adds_the_discretisation_error():
+    bare = refit.refit(ONE, floor={})
+    assert bare["drag"]["sigma"] == pytest.approx(0.000345 / 1.8) and "floor" not in bare              # the batch-means error of one run: 0.02 %
+    r = refit.refit(ONE, floor=FLOOR)
+    m = 1.962 / 1.8
+    assert r["drag"]["sigma"] == pytest.approx(math.sqrt((0.000345 / 1.8) ** 2 + (0.1 * m) ** 2 + (0.05 * m) ** 2)) and r["drag"]["sigma"] > 0.1
+    assert r["drag"]["sigma_statistical"] == pytest.approx(0.000345 / 1.8) and r["drag"]["tau"] == 0.0 and r["floor"] == FLOOR
+    hangar = refit.refit(ONE, dict(cd=1.8), floor=FLOOR)["drag"]                                     # the one-reference form is floored alike
+    assert hangar["sigma"] == pytest.approx(r["drag"]["sigma"], rel=1e-6)
+    lift = [dict(ONE[0], cl=0.2, cl_spread=0.001, cl_hangar=0.25)]
+    assert refit.refit(lift, floor=FLOOR)["lift"]["sigma"] > 0.1 * 0.8
+    assert refit.refit(lift, dict(cd=1.8, cl=0.25), floor=FLOOR)["lift"]["sigma"] > 0.1 * 0.8
+
+
+def test_with_two_or_more_windows_the_between_window_floor_gives_way_to_the_estimated_spread_but_the_discretisation_stays():
+    two = [dict(ONE[0]), dict(ONE[0], cd=1.9)]
+    r = refit.refit(two, floor=FLOOR)["drag"]
+    m = r["mean"]
+    assert r["tau"] > 0.01 and r["sigma_between"] == pytest.approx(r["tau"]) and r["sigma_discretisation"] == pytest.approx(0.05 * m)
+    assert r["sigma"] == pytest.approx(math.sqrt(r["sigma_statistical"] ** 2 + (0.05 * m) ** 2))
+
+
+def test_the_default_floor_uses_the_stored_sphere_grid_study_else_says_it_is_assumed(tmp_path, monkeypatch):
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    assert nest.sphere_discretisation() is None
+    f = refit.default_floor()
+    assert f["discretisation_frac"] == budget.stage3_assumptions()["refit.discretisation_frac"] and f["discretisation_source"].startswith("ASSUMED")
+    assert f["between_window_frac"] == budget.stage3_assumptions()["refit.between_window_frac"] and refit.refit(ONE)["floor"] == f
+    for d in (8, 12, 16):                                                                       # Cd(d) = 1 + 0.4 / d: first order, Cd_inf = 1
+        (tmp_path / f"nest_sphere_100_d{d}.json").write_text(json.dumps(dict(d=d, cd=1 + 0.4 / d)))
+    (tmp_path / "nest_sphere_1000_d24.json").write_text(json.dumps(dict(d=24, cd=0.5)))         # one grid only: no estimate from it
+    e, src = nest.sphere_discretisation()
+    assert e == pytest.approx(0.4 / 16, rel=0.02) and "Re = 100" in src and "[8, 12, 16]" in src
+    f = refit.default_floor()
+    assert f["discretisation_frac"] == e and f["discretisation_source"] == src
+    assert refit.refit(ONE)["drag"]["sigma_discretisation"] == pytest.approx(e * 1.962 / 1.8)
+
+
 def test_verdict_changes_and_the_two_iteration_cap():
     assert refit.verdict_changes({"a": "GO", "b": "GO"}, {"a": "GO", "b": "NO-GO"}) == [("b", "GO", "NO-GO")]
     assert refit.verdict_changes({"a": "GO"}, {}) == [("a", "GO", None)]
@@ -696,6 +755,10 @@ class FakeL:
     def __init__(self):
         self.checks = {}
         self.inputs = []
+        self.notes = []
+
+    def note(self, s):
+        self.notes.append(s)
 
     def input(self, ref, sha=None, **meta):
         self.inputs.append(str(ref))
@@ -844,6 +907,118 @@ def test_hangar_numbers_are_the_vehicles_own_models(no_wall_receipt, monkeypatch
     assert cq["cl_h"] is None and cq["info"]["tilt_deg"] == pytest.approx(np.degrees(np.arctan(Pq["aero"]["d_x"] * vr / 9.81)))
     assert (cq["R"] @ (cq["v"] - cq["u_env"]))[0] != 0
 
+
+
+def uas_case_at(tmp_path, wind, heading=None):
+    ctx = fake_ctx(tmp_path, env=AnalyticEnv(wind=wind, current=(0.3, 0.1)))
+    a, P = pw.assumptions(), uas.load_platform()
+    return P, pw.uas_case(ctx, WIN, P, pw.uas_vehicle(P, a, "quad_uas"), a, heading)
+
+
+def test_a_uas_case_is_clipped_to_the_airframes_envelope_and_a_wind_beyond_it_is_refused(tmp_path):
+    P = uas.load_platform()
+    lim = min(P["limits"]["max_airspeed_ms"], 9.81 * np.tan(np.radians(P["limits"]["max_tilt_deg"])) / P["aero"]["d_x"])
+    _, c = uas_case_at(tmp_path, (3.0, 0.0))                                                    # light wind: the nominal leg, not clipped
+    assert c["info"]["leg_speed_ms"] == P["sortie"]["leg_speed_ms"] and not c["info"]["leg_clipped"] and c["info"]["v_rel_ms"] == pytest.approx(11.0)
+    _, c = uas_case_at(tmp_path, (8.0, 0.0))                                                    # 8 + 8 = 16 m/s relative: past 12, so the leg slows to 4
+    assert c["info"]["leg_clipped"] and c["info"]["leg_speed_ms"] == pytest.approx(4.0) and c["info"]["v_rel_ms"] == pytest.approx(lim)
+    assert c["info"]["tilt_deg"] <= P["limits"]["max_tilt_deg"] and c["info"]["v_rel_limit_ms"] == pytest.approx(lim)
+    with pytest.raises(ValueError, match=r"outside the UAS flight envelope: wind 14\.0 m/s .* would not be airborne"):
+        uas_case_at(tmp_path, (14.0, 0.0))                                                      # the wind alone is over the limit at every ground speed
+    _, c = uas_case_at(tmp_path, (14.0, 0.0), heading=90.0)                                     # flying downwind slows the relative flow into the envelope
+    assert c["info"]["v_rel_ms"] <= lim + 1e-9
+
+
+@settings(max_examples=60, deadline=None)
+@given(st.floats(-20, 20), st.floats(-20, 20), st.floats(0, 360))
+def test_a_uas_case_is_never_outside_the_envelope(wx, wy, heading):
+    ctx = fake_ctx(pathlib.Path("."), env=AnalyticEnv(wind=(wx, wy), current=(0.3, 0.1)))
+    a, P = pw.assumptions(), uas.load_platform()
+    try:
+        c = pw.uas_case(ctx, WIN, P, pw.uas_vehicle(P, a, "quad_uas"), a, heading)
+    except ValueError:
+        return
+    assert c["info"]["v_rel_ms"] <= c["info"]["v_rel_limit_ms"] + 1e-9 and c["info"]["tilt_deg"] <= P["limits"]["max_tilt_deg"] + 1e-9
+    assert 0.0 <= c["info"]["leg_speed_ms"] <= P["sortie"]["leg_speed_ms"]
+
+
+def test_a_window_the_uas_cannot_fly_is_a_reasoned_row_not_a_crash(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
+    r = pw.run(fake_ctx(no_wall_receipt, env=AnalyticEnv(wind=(14.0, 0.0), current=(0.3, 0.1))), {"q": [WIN]}, FakeL())["q"][0]
+    assert not r["ok"] and "outside the UAS flight envelope" in r["error"] and r["reasons"] == [r["error"]] and not r["usable_for_refit"]
+
+
+def test_a_uas_window_is_never_usable_for_the_refit_because_its_reference_includes_the_rotor_drag(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
+    wm.channel_path().parent.mkdir(parents=True, exist_ok=True)
+    wm.channel_path().write_text(json.dumps(dict(err=0.03)))
+    wm.slow_path().write_text(json.dumps(dict(err=0.05)))                                       # both receipts stored and passing: nothing else blocks the row
+    r = pw.run(fake_ctx(no_wall_receipt), {"q": [WIN], "g": [WIN]}, FakeL())
+    q = r["q"][0]
+    chk = [c for c in q["checks"] if c["name"] == "hangar_reference_comparable"]
+    assert len(chk) == 1 and not chk[0]["ok"] and "rotor momentum" in chk[0]["note"] and "frame" in chk[0]["note"]
+    assert not q["ok"] and not q["usable_for_refit"] and any("not usable for the refit" in x for x in q["reasons"])
+    assert not [c for c in r["g"][0]["checks"] if c["name"] == "hangar_reference_comparable"] and r["g"][0]["usable_for_refit"] == r["g"][0]["ok"]
+    assert "TOTAL drag" in q["cd_hangar_source"]
+
+
+def _row_ok(ok, series=None, part="body"):
+    r = dict(ok=ok, part=part, t=1.0e9)
+    if series is not None:
+        r["inflow_series"] = series
+    return r
+
+
+def test_no_passed_window_writes_no_calibration_and_the_ledger_says_so(tmp_path):
+    f = tmp_path / "subgrid.json"
+    f.write_text((sg_mod._CFG_DIR / "subgrid.json").read_text())
+    before = f.read_text()
+    series = dict(u=[0.0], dt=1.0, U=6.0, ustar=0.3, z=10.0)
+    L = FakeL()
+    assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [_row_ok(False, series)]}, L, f) is None            # a failed window's series is never used
+    assert f.read_text() == before and L.notes == ["sub-grid layer uncalibrated: no LES window passed its self-checks; config/subgrid.json was not written"]
+    assert L.checks["subgrid_calibration_written_only_from_passed_windows"] == (True, 0, 0)
+
+
+def test_passed_windows_that_resolved_no_turbulence_write_nothing_and_say_why(tmp_path):
+    f = tmp_path / "subgrid.json"
+    f.write_text((sg_mod._CFG_DIR / "subgrid.json").read_text())
+    before = f.read_text()
+    L = FakeL()
+    assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [_row_ok(True)]}, L, f) is None
+    assert f.read_text() == before and "1 window(s) passed but none carries a resolved inflow-turbulence series" in L.notes[0] and "uniform" in L.notes[0]
+
+
+def test_a_passed_window_with_a_series_is_written_with_its_run_and_uncertainty_and_a_failed_one_is_not_used(tmp_path, monkeypatch):
+    f = tmp_path / "subgrid.json"
+    f.write_text((sg_mod._CFG_DIR / "subgrid.json").read_text())
+    good, bad = dict(u=[1.0], dt=1.0, U=6.0, ustar=0.3, z=10.0), dict(u=[9.0], dt=1.0, U=6.0, ustar=0.3, z=10.0)
+    seen = []
+
+    def fake(windows):
+        seen.extend(windows)
+        cal = dict(sg_mod.load_config()["calibration"], sigma_u_over_ustar=2.9, length_scale_factor=1.2)
+        return dict(calibration=cal, uncertainty=dict(sigma_u_over_ustar=0.2, length_scale_factor=0.1), windows=[dict(label="x")], skipped=["w2: too short"])
+    monkeypatch.setattr(sg_mod, "recalibrate", fake)
+    L = FakeL()
+    ctx = fake_ctx(tmp_path / "run_7")
+    cal = pw.recalibrate_subgrid(ctx, {"g": [_row_ok(True, good), _row_ok(False, bad)]}, L, f)
+    assert cal is not None and [w["u"] for w in seen] == [[1.0]] and seen[0]["label"] == "g body t=1000000000"
+    new = sg_mod.load_config(f)["calibration"]
+    assert new["source_run"] == "run_7" and new["sigma_u_over_ustar"] == 2.9 and new["uncertainty"]["sigma_u_over_ustar"] == 0.2
+    assert "recalibrated from 1 passed window(s): sigma_u/u* = 2.9 +- 0.2, length_scale_factor = 1.2 +- 0.1" in L.notes[0] and "w2: too short" in L.notes[0]
+    assert L.checks["subgrid_calibration_written_only_from_passed_windows"][0]
+
+
+def test_the_stage_does_not_touch_the_shipped_subgrid_config_when_no_window_passed(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
+    shipped = sg_mod._CFG_DIR / "subgrid.json"
+    before = shipped.read_text()
+    L = FakeL()
+    out = pw.run(fake_ctx(no_wall_receipt), {"g": [WIN]}, L)
+    assert not any(r["ok"] for rs in out.values() for r in rs)                                       # no stored wall-model receipt: nothing may pass
+    assert shipped.read_text() == before and sg_mod.load_config()["calibration"]["source_run"] is None
+    assert L.notes[-1].startswith("sub-grid layer uncalibrated: no LES window passed") and L.checks["subgrid_calibration_written_only_from_passed_windows"][0]
 
 
 def test_run_all_classes_rows_have_everything_and_nothing_unvalidated_is_ok(no_wall_receipt, monkeypatch):

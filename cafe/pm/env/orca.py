@@ -237,6 +237,7 @@ def ingest(t0: dt.datetime, t1: dt.datetime, box: Box, out: str | pathlib.Path, 
     wg = wrf_grid(ts[0], box)
     ug = umwm_grid(ts[0], box)
     h3 = {stamp(t) for t in hours3d}
+    _drop_stale_parts(out, box, h3)
     jobs: list[tuple[pathlib.Path, Callable[[], dict[str, Any]]]] = []
     for t in ts:
         s = stamp(t)
@@ -259,11 +260,28 @@ def ingest(t0: dt.datetime, t1: dt.datetime, box: Box, out: str | pathlib.Path, 
             done += 1
             if done % 20 == 0 or done == len(todo):
                 log(f"  {done}/{len(todo)} parts, {time.time() - t_start:.0f} s")
-    return assemble(out, ts, wg, ug, pts, sorted(h3))
+    return assemble(out, ts, wg, ug, pts, sorted(h3), box)
+
+
+def _drop_stale_parts(out: pathlib.Path, box: Box, h3: set[str]) -> None:
+    """Per-hour parts are cut to the box and (wrf) to the 3-D hours they were fetched with, and are reused by name. `cut.json` records both for
+    the parts on disk (written before anything is fetched, so an interrupted ingest resumes): another box, or no record, drops every part; a 3-D
+    hour the parts did not have drops that hour's wrf part."""
+    cut = out / "cut.json"
+    old: dict[str, Any] = json.loads(cut.read_text()) if cut.is_file() else {}
+    have: set[str] = set()
+    if old.get("box") != list(box):
+        stale = list((out / "hours").glob("*.npz"))
+    else:
+        have = set(old["hours3d"])
+        stale = [out / "hours" / f"wrf_{s}.npz" for s in sorted(h3 - have)]
+    for p in stale:
+        p.unlink(missing_ok=True)
+    cut.write_text(json.dumps(dict(box=list(box), hours3d=sorted(have | h3))))
 
 
 def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any], ug: dict[str, Any], pts: dict[str, Any] | None,
-             h3: list[str]) -> dict[str, Any]:
+             h3: list[str], box: Box | None = None) -> dict[str, Any]:
     import xarray as xr
     out = pathlib.Path(out)
     tt = np.array([np.datetime64(t.replace(tzinfo=None), "s") for t in ts])
@@ -302,7 +320,7 @@ def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any],
         sp.attrs.update(source=BASE, units_F="m^4 rad^-1 (wavenumber spectrum)", stride=SPEC_STRIDE)
         sp.to_zarr(out / "umwmspec.zarr", mode="w")
     parts = sorted((out / "hours").glob("*.npz"))
-    man = dict(base=BASE, t0=str(ts[0]), t1=str(ts[-1]), hours=len(ts), hours3d=h3, wrf_index=dict(j=wg["j"], i=wg["i"]),
+    man = dict(base=BASE, t0=str(ts[0]), t1=str(ts[-1]), box=list(box) if box else None, hours=len(ts), hours3d=h3, wrf_index=dict(j=wg["j"], i=wg["i"]),
                umwm_index=dict(j=ug["j"], i=ug["i"]), wrf_attrs=wg["attrs"],
                parts={p.name: remote.sha256(p) for p in parts},
                bytes_fetched=int(sum(int(w["_bytes"]) for w in W)))

@@ -397,6 +397,13 @@ glider's dive-averaged current, and the USV's becalmed and wing-stall tests see 
 The windage, jet and gust-range rows check the code against the numbers written in `config/subgrid.json`; they are consistency checks of the configuration,
 not tests of the physics. The ranges themselves are the brief's (BRIEF 2.2) or assumed.
 
+### 5.x Recalibration from stage 3 (`subgrid.recalibrate`, `pipeline_windows.recalibrate_subgrid`)
+
+`config/subgrid.json` is rewritten only from passed stage-3 windows that resolved an inflow series. `calibration.source_run` stays null until a passed
+window supplies one. `recalibrate` fits sigma_u/u* = std(u)/u*. The length factor is the ratio of the window's Taylor-frozen integral scale to that of the
+configured Mann layer at the same z, U and u*. Gust statistics are never changed. The windows of this build use a uniform inflow, so no series is resolved,
+the layer stays uncalibrated, and the stage ledger says so (DECISIONS 162).
+
 ---
 
 ## 6. Ocean: GOFS / HYCOM, TEOS-10, bathymetry
@@ -529,7 +536,7 @@ Priors (`config/perturbations.yaml`; `kind: prior` = the brief's number, `assume
 | `tp_bias` | N(0, 1 s) | BRIEF 2.5 |
 | `bulk_stress_scale` | lognormal, sigma 0.30 | BRIEF 2.5; listed, not applied by any module in this build |
 | `glider_speed_scale` | lognormal, sigma 0.10 | BRIEF 2.5 |
-| `usv_vpp_bias` | uniform[-0.35, -0.30] | BRIEF 2.5 (VPPs overpredict USV SOG by 30 to 35 %) |
+| `usv_vpp_bias` | uniform[-0.2565, -0.2280] | calibrated to Chiodi et al. 2021 (centre -0.2422), spread from Sun et al.'s 30 to 35 % as a speed factor (1/1.35 to 1/1.30); the brief's uniform[-0.35, -0.30] is the sensitivity case `usv_vpp_bias_brief` (DECISIONS 163) |
 | `battery_capacity_scale` | lognormal, sigma 0.05 | **assumed** (kind `assumed`), listed in the credibility report |
 
 Other 1-sigma values attached to the Tagged environment values come from `assumptions.yaml` (`env.sigma.*`: T2 1 K, q2 10 %, PSFC 100 Pa, SWDOWN 20 %, GLW 10 W/m^2,
@@ -647,7 +654,7 @@ Stage 1 lowers the speed by R_aw/K, K = -dX/dV at the root (first order)
 
 Every `replan_s` the heading is chosen from 72 candidates to maximise velocity made good: `g = V(trk) + (current + Stokes drift)`; speed = `min( max(V_polar - R_aw/K, 0) (1 + bias), 3.3 m/s )`.
 A tack costs `V t_tack` of distance and is taken only if the VMG gain over `tack_horizon` repays it; on a section only headings that reduce the cross-track error are allowed outside the corridor.
-`bias` is the member's `usv_vpp_bias` draw (uniform on [-0.35, -0.30]); the platform's own N(-0.30, 0.03) default is used only when a caller passes none, and Stage 1 passes the perturbation draw.
+`bias` is the member's `usv_vpp_bias` draw (uniform on [-0.2565, -0.2280], the Chiodi-calibrated prior; the brief's [-0.35, -0.30] runs as the sensitivity case `usv_vpp_bias_brief`); the platform's own N(-0.30, 0.03) default is used only when a caller passes none, and Stage 1 passes the perturbation draw.
 Flags: `becalmed` (best through-water speed over all headings below the current speed for `becalmed_after_h`; the literal "SOG below current" cannot fire because a drifting boat's SOG equals the current),
 `swept_off_track`, `capsize_proxy`, `wing_stall` (apparent wind below the tail's authority or inside the bow stall cone for `stall_sustain_s`), `battery` (solar gain `eff x area x SWDOWN` minus hotel load).
 
@@ -657,7 +664,7 @@ Receipts, job `pm.physics.usv`, group `usv`:
 |---|---|---|
 | `ITTC-1957 C_F at Re = 1e7` | 1e-12 | closure |
 | `hull speed 1.34 sqrt(LOA ft) kn vs the 3.3 m/s cap` | 4 % | Mazza et al. 2026 Part 1, as quoted in the brief |
-| `mean SOG / U at 5.4 m/s (VMG routing, all bearings, prior bias)` | 25 % band (assumed) | 0.164 against Chiodi's 0.178, -7.6 % (lead's log) |
+| `mean SOG / U at 5.4 m/s (VMG routing, all bearings, prior bias)` | 25 % band (assumed) | 0.1778 against Chiodi's 0.1778, 0.0 % at the prior mean (bias -0.2422); bias 0 gives 0.2345 (+31.9 %), -0.30 gives 0.1643 (-7.6 %), -0.325 gives 0.1584 (-10.9 %), -0.35 gives 0.1525 (-14.2 %) |
 | `best-heading still-water speed at 12 m/s (CALIBRATED: appendage_cda_m2)` | 10 % | **fit**; 2.92 against 2.9 m/s |
 | `no (TWS, TWA) in the polar exceeds the hull-speed cap` | exact | |
 | `apparent wind speed = \|true wind - boat velocity\| (max relative error over 9 states)` | 0.01 | |
@@ -761,6 +768,10 @@ L_impl = SL - TL(r_vendor) - NL(ref wind 5 m/s) - SNR_req - 3 dB       derived s
   **excess**: TL on the sound-speed profile minus TL on an isovelocity column, added to the Thorp TL. An absolute Bellhop TL would double-count the spreading, because `L_impl` is anchored under k = 1.5 and deep isovelocity
   water is k = 2. Consequence: k = 1.5 is optimistic against Bellhop's deep isovelocity answer. When Bellhop is absent the link is labelled "Thorp only, Bellhop unavailable".
 - Sound speed from TEOS-10 via the ocean store.
+- **Slant range, valid range, Bellhop per member.** The Thorp budget uses the slant range hypot(r, dz), not the horizontal distance. `margin_db` is NaN wherever it is not a budget: beyond the radio horizon, beyond
+  `valid_range_m = valid_range_factor x` the vendor range (`valid_range_factor` is **assumed**, 10, in `modems.yaml`), at samples the link does not need, and for Iridium. Summaries report `margin_db_median` over the valid
+  samples, with `frac_beyond_horizon` and `frac_out_of_range`. Bellhop refines the needed acoustic samples inside the `ambiguous_db` band one member at a time, on the `env.sound_speed` profile (GOFS T/S, TEOS-10) at the
+  midpoint of the member's middle ambiguous sample, with the GEBCO depth there. One profile and depth pair per member and link is a stated simplification. Without Bellhop or a profile the label says "Thorp only".
 
 ### 12.3 Iridium
 
@@ -799,13 +810,14 @@ Code: `cafe/pm/stats/{intervals,sampling,sequential,sensitivity,rare}.py`, `cafe
 
 ```
 Wilson (1927):       centre = (p + z^2/2n)/(1 + z^2/n),  half = z sqrt( p(1-p)/n + z^2/4n^2 )/(1 + z^2/n);  ends exact at k = 0 and k = n
-Agresti & Coull 1998: p~ = (k + z^2/2)/(n + z^2),  half = z sqrt(p~(1-p~)/(n + z^2))
-interval(): Wilson for n <= 40, Agresti-Coull above (Brown, Cai & DasGupta 2001, Sec. 5)
-verdict (conf 0.90, as the existing app):  GO if success p >= 0.90 and the lower bound on success >= 0.75;  NO-GO if p < 0.60;  MARGINAL otherwise
+Agresti & Coull 1998: p~ = (k + z^2/2)/(n + z^2),  half = z sqrt(p~(1-p~)/(n + z^2))   (a function and a coverage receipt; not used by `interval`)
+interval(): Wilson at every n, the interval `n_certify` solves (Brown, Cai & DasGupta 2001 allow Wilson at any n)
+verdict (conf 0.90, as the existing app):  GO if success p >= go (0.90) and the lower bound on success >= min(0.75, go);  NO-GO if p < nogo (0.60);  MARGINAL otherwise
+                    go and nogo are the mission's `verdict` block (`intervals.set_thresholds`, called by `config.load_mission`)
 n_certify(level, conf) = floor( z^2 (1/level - 1) ) + 1 = 73 at 5 %, 95 %  (zero-failure Wilson upper bound below 5 %);   one-sided (1 - 0.05)^n <= 0.05 -> 59;   rule of three 3/n -> 60   (Hanley & Lippman-Hand 1983)
 ```
 
-The existing app's `_rate` is a Wilson interval at every n; the pre-mission verdict switches to Agresti-Coull above n = 40, so the two agree only up to 40 members (`tests/test_stats.py` checks that range).
+The existing app's `_rate` is a Wilson interval at every n, and so is the pre-mission verdict, so the two agree at every n (`tests/test_stats.py` checks it). The interval printed at n = 73 with no failure is the one `n_certify` solves: its upper bound is 0.0500.
 With zero failures and n below 73 the verdict carries the note that P(fail) < 3/n and 73 members are needed to certify 5 %. Budget `quick` (at most 64 members) cannot certify.
 
 ### 13.2 Latin hypercube, antithetic pairs, common random numbers (`sampling.py`)
@@ -906,9 +918,9 @@ a no-slip wall with a tuned viscosity (1.3 to 2.6x the log-law stress), a tuned 
 - Each window builds the vehicle from its platform yaml and `assumptions.yaml` `stage3.*` (box 3 x 1.6 x 1.6 body lengths, 10 cells per boundary-layer thickness, minimum 2 cells across, at least 3 box transits, 30 % spin-up
   discarded, **all assumed**), takes the inflow from the environment, and fits cells x steps to the plan's budget (coarsening by the fourth root of the shortfall). On CPU the row carries the plan's `CPU fallback` label.
 - Self-checks (`windows.stage3_checks`, each can fail; `ok` needs all): `mach_max` (at most 0.1), `courant_max` (0.3), `yplus_in_30_300_fraction` (0.9), `force_running_mean_dev` (0.02), `mass_drift_per_step` (1e-3), `interpolation_residual` (0.05),
-  `sponge_clearance_cells`, `wall_model_receipt_error` (the smaller of the stored flat-plate and channel errors, at most `PLATE_TOL`; fails when none is stored), and a window that needed the viscosity floor fails with the reason.
-- Refit (`refit.py`): per-window ratio `cd/cd_hangar` (the vehicle's own Stage-1 coefficient at the window's speed, same reference area and density), pooled by DerSimonian & Laird 1986,
-  `tau^2 = max(0, (Q - (k-1)) / (S1 - S2/S1))`, `w* = 1/(se^2 + tau^2)`; the multiplier Stage 1 samples is Normal(pooled, sqrt(se^2 + tau^2)) as a **lognormal with that mean** per member. Only rows with `ok` enter. Speed scales as `d^(-1/2)`
+  `sponge_clearance_cells`, `wall_model_receipt_error` (the larger of the stored flat-plate and channel errors, at most `PLATE_TOL`; fails when none is stored), and a window that needed the viscosity floor fails with the reason.
+- Refit (`refit.py`): per-window ratio `cd/cd_hangar` (`cd_hangar` is the vehicle's baseline model coefficient at the window's speed, same reference area and density: analytic, with no Hangar CFD run, so no Hangar GCI, observed order or mesh-quality check applies; DECISIONS 171), pooled by DerSimonian & Laird 1986,
+  `tau^2 = max(0, (Q - (k-1)) / (S1 - S2/S1))`, `w* = 1/(se^2 + tau^2)`; the multiplier Stage 1 samples is Normal(pooled, sigma) as a **lognormal with that mean** per member, with sigma = sqrt(se^2 + max(tau, f_w m)^2 + (f_d m)^2) for m = pooled value: the between-window term is floored at `f_w` = `stage3.refit.between_window_frac` (assumed 0.10) of m when fewer than two windows exist (tau^2 cannot be estimated from one), and the discretisation term `f_d` is the finest stored sphere grid against its Richardson extrapolation (`nest.sphere_discretisation`) or else `stage3.refit.discretisation_frac` (assumed 0.05). A single window's batch-means standard error alone (a few hundredths of a percent) is not the uncertainty of a drag multiplier; `refit.json` records `sigma_statistical`, `sigma_between`, `sigma_discretisation` and the sources. Only rows with `ok` enter. Speed scales as `d^(-1/2)`
   for the glider and USV (drag ~ v^2 at fixed propulsive force); the UAS takes d directly. Budget `ci` never refits.
 
 ### 14.5 Receipts

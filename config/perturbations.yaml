@@ -68,11 +68,20 @@ glider_speed_scale:
   kind: prior
 usv_vpp_bias:
   dist: uniform
+  lo: -0.2565
+  hi: -0.2280
+  value: 0.0
+  unit: dimensionless (fractional speed change)
+  citation: "CALIBRATED to Chiodi et al. 2021 (DECISIONS, review round 1 M-2). The VPP already solves the current inside the polar, so the brief's still-water factor (BRIEF 2.5: -30 to -35 %) is not applied on top. Centre -0.2422 is the bias at which usv.mean_sog reproduces Chiodi's mean SOG / wind = 0.96 / 5.4 = 0.1778 (the unbiased model gives 0.2345, i.e. 1.319 x observed). Half-width 0.0143 is Sun et al.'s stated 30-35 % overprediction (model / observed 1.30 to 1.35) as a speed factor: 1/1.35 - 1 = -0.2593 to 1/1.30 - 1 = -0.2308, width 0.0285. Chiodi quotes no spread on the mean."
+  kind: prior
+usv_vpp_bias_brief:
+  dist: uniform
   lo: -0.35
   hi: -0.30
   value: 0.0
   unit: dimensionless (fractional speed change)
-  citation: "BRIEF 2.5: still-water VPPs overpredict USV SOG by 30-35 % in trials; uniform on the stated range"
+  note: "the brief's still-water factor (-30 to -35 %) applied on top of a model that already solves the current"
+  citation: "SENSITIVITY CASE, not in the ensemble's priors (stage1.priors_for never names it): the brief's literal value, BRIEF 2.5 still-water VPPs overpredict USV SOG by 30-35 %, applied as a speed factor of 0.65-0.70 on top of the current-coupled model. Run it with python -m cafe.pm.stage1 (stage1.sensitivity_case); it reproduces Chiodi's SOG ratio to -10.9 % at its mean."
   kind: prior
 battery_capacity_scale:
   dist: lognormal

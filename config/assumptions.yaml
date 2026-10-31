@@ -280,6 +280,16 @@ stage3.min_window_s:
   unit: "s"
   why: "Least wall-clock slice in which a window can compile its kernel and run two chunks; below it the window is reported as not run instead of overrunning the stage budget."
   replace_with: "Measured compile + two-chunk time on the lab's machine."
+stage3.refit.between_window_frac:
+  value: 0.10
+  unit: "-"
+  why: "ASSUMED. Fraction of a pooled window coefficient by which separate windows (different wind, current, gusts) differ; the floor of the refit sigma when fewer than two windows exist, where DerSimonian-Laird cannot estimate the between-window variance (stage3/refit.py)."
+  replace_with: "tau / pooled coefficient from a run with three or more passed windows per vehicle."
+stage3.refit.discretisation_frac:
+  value: 0.05
+  unit: "-"
+  why: "ASSUMED. Relative discretisation error of a window coefficient, added to the refit sigma in quadrature; used only when no stored sphere grid study (two or more grids of one Re) gives |Cd(finest) - Cd_inf| / Cd_inf."
+  replace_with: "The sphere / DTMB grid-convergence error of the native kernel, from stored grids at the window's Reynolds number."
 stage3.fea_reserve_frac:
   value: 0.25
   unit: "fraction"

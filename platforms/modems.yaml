@@ -9,6 +9,7 @@ defaults:
   anchor_margin_db: 3.0    # assumed: the published range is a "range >= x" so the budget closes there with 3 dB (a normal design margin)
   spreading_k: 1.5         # Stojanovic 2007 practical spreading (1 cylindrical, 2 spherical)
   ambiguous_db: 6.0        # BRIEF 2.8: Bellhop runs when the Thorp margin is within +-6 dB of 0
+  valid_range_factor: 10.0 # assumed: the Thorp/Stojanovic budget is anchored to the vendor's published range; beyond this many times it, the margin is an extrapolation (a dB number that is not a link budget) and is reported as out of range, never as a margin
 
 modems:
   benthos_atm960:

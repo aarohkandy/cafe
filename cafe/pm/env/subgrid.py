@@ -395,6 +395,96 @@ def rain_lens(rain_rate: ArrayLike, u10: ArrayLike, t_since_rain: ArrayLike, z: 
     )
 
 
+# ---------------------------------------------------------------- e. recalibration from Stage-3 LES windows
+
+MIN_SCALES = 20.0   # a series must span at least this many integral time scales (L/U) for its variance and scale to mean anything
+N_BLOCKS = 5        # batch means for the within-run standard error (as stage3.windows.blocks)
+
+
+def integral_scale(u: ArrayLike, dt: float, U: float) -> float:
+    """Streamwise integral length scale [m] of a series by Taylor's hypothesis: U times the integral of the autocorrelation up to its first
+    zero crossing."""
+    x = np.asarray(u, float)
+    x = x - x.mean()
+    ac = np.fft.irfft(np.abs(np.fft.rfft(x, 2 * len(x))) ** 2)[: len(x)]
+    ac = ac / ac[0]
+    k = int(np.argmax(ac <= 0.0)) if (ac <= 0.0).any() else len(ac) - 1
+    return float(U * dt * (ac[: k + 1].sum() - 0.5 * (ac[0] + ac[k])))
+
+
+def _blocks_se(x: np.ndarray, f: Any) -> float:
+    """Standard error of f(x) from N_BLOCKS contiguous blocks (batch means): std of the block values / sqrt(blocks)."""
+    v = np.array([f(b) for b in np.array_split(x, N_BLOCKS)])
+    return float(v.std(ddof=1) / np.sqrt(N_BLOCKS))
+
+
+def _pool(values: list[float], ses: list[float]) -> tuple[float, float]:
+    """Mean over windows and its standard error: the spread between windows (their conditions differ) and the mean within-window error, in
+    quadrature; one window has only its within-run error."""
+    v, se = np.asarray(values, float), np.asarray(ses, float)
+    if len(v) < 2:
+        return float(v[0]), float(se[0])
+    return float(v.mean()), float(np.sqrt(v.var(ddof=1) / len(v) + (se**2).mean() / len(v)))
+
+
+def recalibrate(windows: Iterable[dict[str, Any]], cfg: dict[str, Any] | None = None, seed: int = 0, n_model: int = 12) -> dict[str, Any]:
+    """The calibration block the resolved turbulence of Stage-3 LES windows implies, with its uncertainty.
+
+    Each window is a dict(u, dt, U, ustar, z, L_ob=inf, label=...): the along-wind velocity series [m/s] the LES resolved at a point in the
+    free stream, its sampling step [s], the mean wind U [m/s], friction velocity u* [m/s], height z [m] and Obukhov length [m]. Per window:
+    sigma_u / u* = std(u) / u* (standard error: batch means over N_BLOCKS blocks), and the length-scale factor is the configured one times the
+    ratio of the window's integral scale (`integral_scale`) to the same estimator's mean over a set of Mann-layer series at that window's
+    z, U, u*, L_ob (`turbulence_members`, `n_model` members, with the configured calibration; error: batch means of the window, standard
+    error of the model mean,
+    in quadrature). Windows are pooled by `_pool`. A series that spans fewer than MIN_SCALES integral times is skipped, with the reason.
+    Gust statistics are not touched: a window resolves no cold-pool front, so the shipped ones stay.
+    Returns dict(calibration=<block without source_run>, uncertainty={key: standard error}, windows=[...per used window], skipped=[reason, ...])."""
+    cfg = cfg or load_config()
+    used: list[dict[str, Any]] = []
+    skipped: list[str] = []
+    for i, w in enumerate(windows):
+        u, dt, U, ustar, z = np.asarray(w["u"], float), float(w["dt"]), float(w["U"]), float(w["ustar"]), float(w["z"])
+        label = w.get("label", f"window {i}")
+        L_u = integral_scale(u, dt, U)
+        spans = len(u) * dt * U / L_u if L_u > 0 else 0.0
+        if spans < MIN_SCALES:
+            skipped.append(f"{label}: the series spans {spans:.1f} integral scales ({len(u) * dt:.0f} s at U = {U:.1f} m/s, L_u = {L_u:.1f} m); "
+                           f"at least {MIN_SCALES:g} are needed")
+            continue
+        ratio = float(u.std(ddof=1) / ustar)
+        se_ratio = _blocks_se(u, lambda b, ustar=ustar: float(b.std(ddof=1) / ustar))
+        m = turbulence_members(seed + i, n_model, ustar, float(w.get("L_ob", np.inf)), z, U, len(u) * dt, dt, n_boxes=max(n_model // 2, 1),
+                               cfg=cfg).value[..., 0]
+        L_m = np.array([integral_scale(x, dt, U) for x in m])
+        se_les = _blocks_se(u, lambda b, dt=dt, U=U: integral_scale(b, dt, U))
+        rel = float(np.hypot(se_les / L_u, L_m.std(ddof=1) / np.sqrt(n_model) / L_m.mean()))
+        factor = cfg["calibration"]["length_scale_factor"] * L_u / float(L_m.mean())
+        used.append(dict(label=label, sigma_u_over_ustar=ratio, se_sigma_u_over_ustar=se_ratio, length_scale_factor=factor,
+                         se_length_scale_factor=factor * rel, integral_scale_m=L_u, model_integral_scale_m=float(L_m.mean()), scales_spanned=spans))
+    if not used:
+        return dict(calibration=None, uncertainty=None, windows=[], skipped=skipped)
+    sig, se_sig = _pool([x["sigma_u_over_ustar"] for x in used], [x["se_sigma_u_over_ustar"] for x in used])
+    fac, se_fac = _pool([x["length_scale_factor"] for x in used], [x["se_length_scale_factor"] for x in used])
+    cal = dict(cfg["calibration"], sigma_u_over_ustar=sig, length_scale_factor=fac)
+    return dict(calibration=cal, uncertainty=dict(sigma_u_over_ustar=se_sig, length_scale_factor=se_fac), windows=used, skipped=skipped)
+
+
+def write_calibration(result: dict[str, Any], source_run: str, path: str | pathlib.Path | None = None) -> pathlib.Path:
+    """Write a `recalibrate` result as the calibration block of config/subgrid.json (or `path`), leaving every other line of the file as it is,
+    with `source_run`, the standard errors and the number of windows. Refuses a result with no window. Clears the config cache."""
+    if not result["windows"]:
+        raise ValueError("nothing to write: no window gave a calibration")
+    f = pathlib.Path(path or _CFG_DIR / "subgrid.json")
+    text = f.read_text()
+    head = text[: text.index('  "calibration": {')]
+    cal = dict(source_run=source_run, **{k: v for k, v in result["calibration"].items() if k != "source_run"},
+               uncertainty=result["uncertainty"], windows=len(result["windows"]))
+    body = json.dumps(cal, indent=2).replace("\n", "\n  ")
+    f.write_text(head + '  "calibration": ' + body + "\n}\n")
+    _load.cache_clear()
+    return f
+
+
 # ---------------------------------------------------------------- receipts
 
 

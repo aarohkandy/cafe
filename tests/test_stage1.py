@@ -38,6 +38,16 @@ def test_every_days_spaces_the_launches():
     assert np.allclose((ts / 3600.0 + 10.0 / 15.0) % 24.0, 9.0)
 
 
+@pytest.mark.parametrize("every", [0.5, 0.25, 0.1])
+def test_sub_daily_schedules_fill_the_whole_window(every):
+    """M-4: the slot count was in days and then multiplied by every_days, so 0.5 d launched only for 4.5 of the 6 days (last launch at 03-05 13:00)."""
+    t0, t1 = UTC("2023-03-01T12:00:00Z"), UTC("2023-03-07T12:00:00Z")
+    ts = stage1.launch_times({"local_solar_time": "14:00", "every_days": every}, -165.0, t0, t1, 1920.0)
+    period = 86400.0 * every
+    assert np.allclose(np.diff(ts), period) and ts[0] - t0 < period and t1 - 1920.0 - ts[-1] < period
+    assert len(ts) in (int(6 / every), int(6 / every) - 1)
+
+
 def test_a_launch_must_end_inside_the_window_and_may_touch_both_ends():
     t = UTC("2023-03-02T01:00:00Z")
     assert list(stage1.launch_times(SORT, -165.0, t, t + 600.0, 600.0)) == [t]                       # starts at t0, ends exactly at T
@@ -295,14 +305,14 @@ class FakeSim:
 
     def __init__(self, *a, **k):
         FakeSim.last = (a, k)
+        self.t0 = a[5] if len(a) == 7 else a[4]                 # GliderSim(P, M, env, lon, lat, t0, mis) / USVSim(P, M, env, start, t0, task)
         self.fail, self.first = {"mode": np.array([True, False])}, {"mode": np.array([42.0, np.nan])}
 
     def run(self, duration, dt, record_s=None):
+        """One record per step, the state after it (t0 + dt, t0 + 2 dt, ...), as the real simulators give."""
         FakeSim.last += ((duration, dt, record_s),)
-        n = int(duration // dt) + 1
-        t = np.arange(n) * dt
-        z = np.tile(t[:, None], (1, 2))
-        return dict(t=t, lon=z + 1, lat=z + 2, depth=z + 3, phase=np.where(z % 1200 == 0, 3, 1), fail=self.fail, first=self.first)
+        z = np.tile((np.arange(int(round(duration / dt))) + 1.0)[:, None] * dt, (1, 2))
+        return dict(t=self.t0 + z[:, 0], lon=z + 1, lat=z + 2, depth=z + 3, phase=np.where(z % 1200 == 0, 3, 1), fail=self.fail, first=self.first)
 
 
 def test_glider_station_task_reaches_the_sim_with_its_tolerances_and_the_refit_speed(monkeypatch):
@@ -316,9 +326,26 @@ def test_glider_station_task_reaches_the_sim_with_its_tolerances_and_the_refit_s
     # drag 4 halves the speed
     assert np.allclose(kw["perturb"]["speed_scale"], [0.5, 1.1]) and np.allclose(kw["perturb"]["battery_scale"], X["battery_capacity_scale"])
     assert np.all(kw["perturb"]["density_bias"] == 0.0) and run_args == (7200.0, 60.0, None)
-    assert r["t"].tolist() == list(np.arange(0.0, 7201.0, 600.0)) and r["lon"].shape == (13, 2)                      # kept every 10 minutes
+    assert r["t"].tolist() == list(1000.0 + np.arange(0.0, 7201.0, 600.0)) and r["lon"].shape == (13, 2)          # t0 + 600 k: deploy state, then every 10 min
+    assert r["lon"][:3, 0].tolist() == [-165.5, 601.0, 1201.0] and r["lat"][0].tolist() == [0.0, 0.0] and r["depth"][0].tolist() == [0.0, 0.0]
     assert r["surfaced"].dtype == bool and r["surfaced"][:3, 0].tolist() == [True, False, True]                    # phase 3 is surfaced
     assert r["antenna_m"] == P["antenna_height_m"] == 0.5 and r["first"]["mode"][0] == 42.0 and r["fail"]["mode"].tolist() == [True, False]
+
+
+def test_glider_and_usv_records_start_at_the_deploy_state_on_the_t0_plus_600_k_grid():
+    """M-28: the records were the state after each 60 s step, so t0 + 60 + 600 k, with the deploy state missing."""
+    t0, T = 1_000_000.0, 1_000_000.0 + 3600.0
+    env = AnalyticEnv(wind=(-5.0, 0.0))
+    g = next(x for x in MISSION["vehicles"] if x["id"] == "glider_eq")
+    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2), "usv_vpp_bias": np.full(2, -0.24)}
+    rg = stage1._run_glider(g, glider.load_platform("seaglider"), env, 2, X, t0, T)
+    u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
+    ru = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), env, 2, X, t0, T)
+    for r, d in ((rg, g["deploy"]), (ru, u["deploy"])):
+        assert r["t"].tolist() == (t0 + 600.0 * np.arange(7)).tolist()
+        assert r["lon"].shape == r["lat"].shape == r["depth"].shape == r["surfaced"].shape == (7, 2)
+        assert np.all(r["lon"][0] == d["lon"]) and np.all(r["lat"][0] == d["lat"]) and np.all(r["depth"][0] == 0.0) and r["surfaced"][0].all()
+        assert np.any(r["lon"][1] != r["lon"][0]) or np.any(r["lat"][1] != r["lat"][0])                    # and then it moves
 
 
 def test_glider_drift_task_has_no_station_and_takes_the_default_dive_depth(monkeypatch):
@@ -341,8 +368,9 @@ def test_usv_waypoints_become_tuples_and_the_drag_scales_the_vpp(monkeypatch):
     start, task = args[3], args[5]
     assert start == (-165.0, -1.0) and task["waypoints"] == [(-165.0, -1.0), (-165.0, 1.0)] and task["mode"] == "section"
     assert v["task"]["waypoints"] == [[-165.0, -1.0], [-165.0, 1.0]]
-    assert np.allclose(kw["perturb"]["vpp_bias"], [(1.1) * 0.5 - 1, -0.2]) and FakeSim.last[2] == (7200.0, 60.0, stage1.REC_S)
+    assert np.allclose(kw["perturb"]["vpp_bias"], [(1.1) * 0.5 - 1, -0.2]) and FakeSim.last[2] == (7200.0, 60.0, stage1.DT_VEHICLE)
     assert r["antenna_m"] == P["rf_antenna_height_m"] == 2.2 and r["surfaced"].all() and np.all(r["depth"] == 0.0) and r["fail"]["mode"][0]
+    assert r["t"].tolist() == list(np.arange(0.0, 7201.0, 600.0)) and r["lon"].shape == (13, 2) and r["lon"][:2, 0].tolist() == [-165.0, 601.0]
     task_less = dict(v, task=dict(mode="station"))
     stage1._run_usv(task_less, P, "ENV", 2, X, 0.0, 600.0)
     assert FakeSim.last[0][5]["waypoints"] == []
@@ -459,7 +487,8 @@ def test_iridium_has_no_range_dependence_and_works_for_a_fraction_of_every_momen
     r = stage1.evaluate_link(LK["usv-shore-iridium"], out, MISSION, flat_env(4), 4, 3, [0, 1, 2, 3])
     assert r["method"].startswith("Iridium SBD") and r["t"].tolist() == TGRID.tolist() and r["need_count"].tolist() == [TGRID.size] * 4
     assert r["frac"].shape == (4,) and np.all((r["frac"] > 0.9) & (r["frac"] <= 1.0))                      # 5 % per attempt, three attempts
-    assert set(np.unique(r["margin_db"])) <= {-1.0, 1.0} and np.array_equal(r["success"], r["frac"] >= 0.95)
+    assert np.isnan(r["margin_db"]).all() and r["n_invalid"].tolist() == [0] * 4 and r["invalid_kind"] is None          # M-19: a success flag is not a margin
+    assert "Iridium" in r["margin_kind"] and np.array_equal(r["success"], r["frac"] >= 0.95)
     far = {"usv": track(-100.0, 40.0, 4)}
     # position is not an input
     assert np.array_equal(stage1.evaluate_link(LK["usv-shore-iridium"], far, MISSION, flat_env(4), 4, 3, [0, 1, 2, 3])["frac"], r["frac"])
@@ -469,9 +498,9 @@ def test_iridium_draws_are_seeded_by_mission_seed_first_member_and_link(monkeypa
     monkeypatch.setattr(stage1.comms, "iridium_session", lambda n, rng, M: (rng.random(M) < 0.5, None))
     out = {"usv": track(-165.0, -1.0, 4)}
     lk = LK["usv-shore-iridium"]
-    ev = lambda lk=lk, seed=3, members=(0, 1, 2, 3): stage1.evaluate_link(lk, out, MISSION, flat_env(4), 4, seed, list(members))["margin_db"]
+    ev = lambda lk=lk, seed=3, members=(0, 1, 2, 3): stage1.evaluate_link(lk, out, MISSION, flat_env(4), 4, seed, list(members))["frac"]
     base = ev()
-    assert np.array_equal(base, ev()) and 0.3 < (base > 0).mean() < 0.7
+    assert np.array_equal(base, ev()) and 0.3 < base.mean() < 0.7
     assert not np.array_equal(base, ev(seed=4)) and not np.array_equal(base, ev(members=(8, 9, 10, 11)))
     assert not np.array_equal(base, ev(lk=dict(lk, id="other")))
     # only the first member keys the stream
@@ -495,10 +524,13 @@ def rf_scene(M=3, bad_samples=(0, 5, 6)):
 def test_rf_link_closes_in_range_fails_beyond_the_horizon_and_is_judged_only_while_the_uas_is_up():
     out, air = rf_scene()
     r = stage1.evaluate_link(LK["usv-uas-rf"], out, MISSION, flat_env(3), 3, 3, [0, 1, 2])
-    assert r["need_count"].tolist() == [100] * 3 and np.isnan(r["margin_db"][~air]).all() and np.isfinite(r["margin_db"][air]).all()
+    assert r["need_count"].tolist() == [100] * 3 and np.isnan(r["margin_db"][~air]).all()
+    assert np.isfinite(r["margin_db"][air]).sum(0).tolist() == [100, 95, 94]                                 # a margin only where there is a budget
     assert r["frac"].tolist() == [1.0, 0.95, 0.94]                                                          # 0, 5, 6 of 100 moments out of range
     assert r["success"].tolist() == [True, True, False]                                                     # required_fraction 0.95 is inclusive
-    assert (r["margin_db"][10, 0] > 20.0) and r["margin_db"][10, 1] == comms.NO_LINK_DB                      # 1 km closes with margin; 100 km is NO_LINK
+    assert (r["margin_db"][10, 0] > 20.0) and np.isnan(r["margin_db"][10, 1])                      # 1 km closes with margin; 100 km is no budget at all
+    assert r["n_invalid"].tolist() == [0, 5, 6] and r["invalid_kind"] == "beyond_horizon" and r["margin_kind"] == "RF link margin, dB"
+    assert np.nanmin(r["margin_db"]) > comms.NO_LINK_DB                                                      # M-19: the -200 dB clip is never a margin
     assert "two-ray" in r["method"] and "rfd900x" in r["method"]
     swapped = stage1.evaluate_link(dict(LK["usv-uas-rf"], a="uas", b="usv"), out, MISSION, flat_env(3), 3, 3, [0, 1, 2])
     assert swapped["need_count"].tolist() == [100] * 3 and swapped["frac"].tolist() == r["frac"].tolist()   # either end can be the UAS
@@ -547,7 +579,8 @@ def test_acoustic_link_is_judged_while_the_glider_is_surfaced_and_fails_out_of_r
     r = stage1.evaluate_link(lk, out, MISSION, flat_env(3), 3, 3, [0, 1, 2])
     assert r["need_count"].tolist() == [60] * 3 and np.isnan(r["margin_db"][~surf]).all()
     # 2 km closes, 60 km does not (ATM-960 MF reaches ~4 km)
-    assert r["margin_db"][50, 0] > 0 and r["margin_db"][0, 2] < 0 and r["margin_db"][59, 2] > 0
+    assert r["margin_db"][50, 0] > 0 and np.isnan(r["margin_db"][0, 2]) and r["margin_db"][59, 2] > 0         # 60 km is beyond the budget's valid range
+    assert r["n_invalid"].tolist() == [0, 0, 40] and r["invalid_kind"] == "out_of_range"
     assert r["frac"].tolist() == [1.0, 1.0, pytest.approx(20 / 60)] and r["success"].tolist() == [True, True, False]
     assert "Thorp" in r["method"]
     rev = stage1.evaluate_link(dict(lk, a="ship", b="glider_eq"), out, MISSION, flat_env(3), 3, 3, [0, 1, 2])
@@ -593,10 +626,102 @@ def test_a_modem_band_named_in_modems_yaml_can_be_chosen_by_a_link():
 def test_the_method_of_an_acoustic_link_is_a_string_even_when_comms_returns_one_per_element(monkeypatch):
     out, _ = acoustic_scene(M=1, far=(0,))
     per_element = np.array(["bellhop", "bellhop"], dtype=object)
-    res = lambda d, modem, band, wind: dict(margin=types.SimpleNamespace(value=np.full(np.shape(d), 5.0)), method=per_element, label="")
+    res = lambda d, modem, band, wind, dz: dict(margin=types.SimpleNamespace(value=np.full(np.shape(d), 5.0)), method=per_element, label="")
     monkeypatch.setattr(stage1.comms, "acoustic_link", res)
     r = stage1.evaluate_link(LK["glider_eq-ship-acoustic"], out, MISSION, flat_env(1), 1, 3, [0])
     assert isinstance(r["method"], str) and "bellhop" in r["method"] and r["success"].all()
+
+
+def test_a_nan_position_is_not_a_moment_the_link_was_required():
+    """M-19: rf_margin(d = nan) scored -200 (the horizon test is False for nan), so a vehicle with no position failed every link."""
+    out, _ = rf_scene(M=2, bad_samples=(0, 0))
+    out["usv"]["lat"][20:30, 1] = np.nan
+    r = stage1.evaluate_link(LK["usv-uas-rf"], out, MISSION, flat_env(2), 2, 3, [0, 1])
+    assert r["need_count"].tolist() == [100, 90] and r["frac"].tolist() == [1.0, 1.0] and r["n_invalid"].tolist() == [0, 0]
+    assert np.isnan(r["margin_db"][20:30, 1]).all()
+
+
+def test_the_link_summary_says_how_often_the_geometry_alone_decided_and_never_a_clip_value_as_a_margin():
+    out, _ = rf_scene()
+    res = stage1.merge([dict(U=np.zeros((3, 1)), X={"a": np.zeros(3)}, vehicles={}, links={
+        "usv-uas-rf": stage1.evaluate_link(LK["usv-uas-rf"], out, MISSION, flat_env(3), 3, 3, [0, 1, 2])})])
+    s = stage1.summarize(res, ["a"], MISSION, 73)["links"]["usv-uas-rf"]
+    assert s["frac_beyond_horizon"] == pytest.approx(11 / 300) and s["frac_out_of_range"] is None and s["margin_kind"] == "RF link margin, dB"
+    assert s["margin_db_median"] > 20.0                                                                    # of the samples that have a budget
+    out, _ = acoustic_scene()
+    ac = stage1.merge([dict(U=np.zeros((3, 1)), X={"a": np.zeros(3)}, vehicles={}, links={
+        "glider_eq-ship-acoustic": stage1.evaluate_link(LK["glider_eq-ship-acoustic"], out, MISSION, flat_env(3), 3, 3, [0, 1, 2])})])
+    a = stage1.summarize(ac, ["a"], MISSION, 73)["links"]["glider_eq-ship-acoustic"]
+    assert a["frac_out_of_range"] == pytest.approx(40 / 180) and a["frac_beyond_horizon"] is None and a["margin_db_median"] > 0
+    ir = stage1.merge([dict(U=np.zeros((4, 1)), X={"a": np.zeros(4)}, vehicles={}, links={
+        "usv-shore-iridium": stage1.evaluate_link(LK["usv-shore-iridium"], {"usv": track(-165.0, -1.0, 4)}, MISSION, flat_env(4), 4, 3, [0, 1, 2, 3])})])
+    i = stage1.summarize(ir, ["a"], MISSION, 73)["links"]["usv-shore-iridium"]
+    assert i["margin_db_median"] is None and i["frac_beyond_horizon"] is None and i["frac_out_of_range"] is None and i["frac_median"] > 0.9
+
+
+# ------------------------------------------------------------------------------------------------------------ M-13: Bellhop for the ambiguous acoustic links
+
+def bellhop_scene(monkeypatch, km=4.5, depth=300.0, available=True):
+    """A glider `depth` m down, `km` km from the ship, `always` judged, in a column whose sound speed rises with depth; Bellhop is a fake
+    that records what it was given and adds 7 dB over the isovelocity column. Returns (result, recorded calls, thorp margin of the same slant path)."""
+    calls = []
+
+    def fake(r, f, z, c, tx, rx, wd):
+        calls.append(dict(z=np.asarray(z), c=np.asarray(c), tx=tx, rx=rx, wd=wd))
+        return 20 * np.log10(r) + (7.0 if c[-1] != c[0] else 0.0)
+    monkeypatch.setattr(comms, "bellhop_available", lambda: available)
+    monkeypatch.setattr(comms, "_run_bellhop", fake)
+    out, _ = acoustic_scene(M=1, far=(0,))
+    out["glider_eq"]["lat"][:] = km_north(km)
+    out["glider_eq"]["depth"][:] = depth
+    env = flat_env(1)
+    env.env.sound_speed = lambda lon, lat, z, t: types.SimpleNamespace(value=1500.0 - 0.02 * np.asarray(z, float))
+    r = stage1.evaluate_link(link("glider_eq-ship-acoustic", when="always"), out, MISSION, env, 1, 3, [0])
+    thorp = comms.acoustic_margin(np.hypot(km * 1e3, depth - 5.0), wind=6.0)
+    return r, calls, float(thorp)
+
+
+def test_an_ambiguous_acoustic_link_is_refined_with_bellhop_on_the_gofs_profile_at_the_slant_range(monkeypatch):
+    r, calls, thorp = bellhop_scene(monkeypatch)
+    assert abs(thorp) <= 6.0                                                                              # engineered to sit in the ambiguity band
+    assert np.allclose(r["margin_db"], thorp - 7.0, atol=0.3)                                             # slant range + Bellhop excess, every sample
+    assert r["method"].startswith("Thorp/Stojanovic budget on the slant range, Bellhop on ") and "of" in r["method"] and "Thorp only" not in r["method"]
+    assert len(calls) == 2 and {(c["tx"], c["rx"], c["wd"]) for c in calls} == {(300.0, 5.0, 4000.0)}     # glider depth, ship transducer, the env's water depth
+    assert calls[0]["z"][0] == 0.0 and calls[0]["z"][-1] == -4000.0 and calls[0]["c"][-1] > calls[0]["c"][0]  # the profile reached Bellhop, to the sea floor
+
+
+def test_the_acoustic_range_includes_depth(monkeypatch):
+    shallow, _, t0 = bellhop_scene(monkeypatch, km=3.0, depth=5.0)
+    deep, _, t1 = bellhop_scene(monkeypatch, km=3.0, depth=2500.0)
+    assert t1 < t0 - 1.0 and np.nanmax(deep["margin_db"]) < np.nanmin(shallow["margin_db"])         # 2.5 km of water between the ends is path to cross
+
+
+def test_without_bellhop_or_a_profile_the_ambiguous_link_keeps_the_thorp_margin_and_says_so(monkeypatch):
+    r, calls, thorp = bellhop_scene(monkeypatch, available=False)
+    assert not calls and np.allclose(r["margin_db"], thorp, atol=0.3) and r["method"].startswith(comms.THORP_ONLY_LABEL)
+    out, _ = acoustic_scene(M=1, far=(0,))
+    out["glider_eq"]["lat"][:] = km_north(4.5)
+    out["glider_eq"]["depth"][:] = 300.0
+    monkeypatch.setattr(comms, "bellhop_available", lambda: True)
+    env = flat_env(1)
+    env.env.ocean = None                                                                    # a mission with no ocean store: no sound-speed profile
+    r = stage1.evaluate_link(link("glider_eq-ship-acoustic", when="always"), out, MISSION, env, 1, 3, [0])
+    thorp = comms.acoustic_margin(np.hypot(4500.0, 295.0), wind=6.0)
+    assert "Bellhop on 0 of" in r["method"] and "Thorp only" in r["method"] and np.allclose(r["margin_db"], thorp, atol=0.3)
+
+
+def test_a_clear_acoustic_link_never_reaches_bellhop(monkeypatch):
+    r, calls, thorp = bellhop_scene(monkeypatch, km=1.0, depth=5.0)
+    assert not calls and abs(thorp) > 6.0 and "Bellhop" not in r["method"]
+
+
+def test_where_the_environment_has_no_profile_or_depth_the_member_stays_thorp():
+    env = flat_env(1)
+    env.env.depth = lambda lon, lat: types.SimpleNamespace(value=np.array([np.nan]))
+    assert stage1._bellhop_member(env, "benthos_atm960", "MF", -165.0, 0.0, T0, 5.0, 5.0, np.array([4500.0]), np.zeros(1), np.array([6.0])) is None
+    env.env.depth = lambda lon, lat: types.SimpleNamespace(value=np.array([4000.0]))
+    env.env.sound_speed = lambda lon, lat, z, t: types.SimpleNamespace(value=np.full(np.shape(z), np.nan))
+    assert stage1._bellhop_member(env, "benthos_atm960", "MF", -165.0, 0.0, T0, 5.0, 5.0, np.array([4500.0]), np.zeros(1), np.array([6.0])) is None
 
 
 def test_always_links_are_judged_at_every_moment_and_a_link_never_needed_counts_as_working():
@@ -968,3 +1093,59 @@ def test_a_lost_link_sets_the_lost_link_flag_in_stage1(monkeypatch):
     v, P, mission, t0, T, X = uas_inputs()
     r = stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
     assert r["fail"]["lost_link"].all()
+
+
+# ------------------------------------------------------------------------------------------------------------ M-2: the brief's USV prior as a stored sensitivit
+
+def test_the_brief_prior_is_a_named_case_that_the_ensemble_never_samples():
+    pri, marg = stage1.priors_for(MISSION)
+    assert stage1.BRIEF_PRIOR in pri and stage1.BRIEF_PRIOR not in marg
+    assert (marg["usv_vpp_bias"]["lo"], marg["usv_vpp_bias"]["hi"]) == (pri["usv_vpp_bias"]["lo"], pri["usv_vpp_bias"]["hi"])
+    assert marg["usv_vpp_bias"]["hi"] < -0.2
+    assert (pri[stage1.BRIEF_PRIOR]["lo"], pri[stage1.BRIEF_PRIOR]["hi"]) == (-0.35, -0.30)
+
+
+def test_the_sensitivity_case_reruns_only_the_usv_with_the_brief_prior_and_everything_else_as_drawn(monkeypatch):
+    seen = {}
+
+    def run_batch(mission, env, members, seed, pri, marg, scales=None):
+        seen.update(vehicles=[v["id"] for v in mission["vehicles"]], links=mission["links"], members=members, seed=seed, marg=marg, scales=scales)
+        f = np.arange(len(members)) < 31
+        return dict(U=np.zeros((len(members), 1)), X={}, links={}, vehicles={"usv": dict(
+            t=np.zeros(1), lon=np.zeros((1, len(members))), lat=np.zeros((1, len(members))), depth=np.zeros((1, len(members))), fail={"becalmed": f},
+            first={"becalmed": np.where(f, 1.0, np.nan)}, **{"class": "usv", "antenna_m": 1.0})})
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    out = stage1.sensitivity_case(MISSION, "ENV", scales={"usv": {"drag": 1}})
+    own = stage1.priors_for(MISSION)[1]
+    assert seen["vehicles"] == ["usv"] and seen["links"] == [] and seen["members"] == list(range(32)) and seen["seed"] == MISSION["seed"]
+    assert seen["scales"] == {"usv": {"drag": 1}}
+    assert seen["marg"]["usv_vpp_bias"] == dict(dist="uniform", lo=-0.35, hi=-0.30) and {k: v for k, v in seen["marg"].items() if k != "usv_vpp_bias"} == \
+        {k: v for k, v in own.items() if k != "usv_vpp_bias"}
+    (c,) = out["usv"]
+    assert (c["k_fail"], c["n"], c["verdict"]) == (31, 32, "NO-GO") and c["case"] == "usv_vpp_bias uniform [-0.35, -0.3] (usv_vpp_bias_brief)"
+    assert c["note"].startswith("the brief's still-water factor")
+
+
+def test_the_sensitivity_command_stores_the_case_where_the_report_reads_it(tmp_path, monkeypatch):
+    import json
+    from cafe.pm import pipeline
+    monkeypatch.setattr(pipeline, "Context", lambda mission, budget, gpus, run: types.SimpleNamespace(mission=MISSION, env="ENV"))
+    got = {}
+
+    def case(mission, env, prior, n, fitted, scales):
+        got.update(prior=prior, n=n, fitted=fitted, scales=scales)
+        return {"usv": [dict(case="c", k_fail=1, n=n, verdict="MARGINAL", note="")]}
+    monkeypatch.setattr(stage1, "sensitivity_case", case)
+    (tmp_path / "stage1b").mkdir()
+    old = [dict(case="c", k_fail=9, n=9, verdict="x", note=""), dict(case="other", k_fail=0, n=1, verdict="GO", note="")]
+    (tmp_path / "stage1b" / "sensitivity_cases.json").write_text(json.dumps({"usv": old}))
+    (tmp_path / "ingest").mkdir()
+    (tmp_path / "ingest" / "priors_fitted.json").write_text(json.dumps({"p": 1}))
+    (tmp_path / "refit").mkdir()
+    (tmp_path / "refit" / "refit.json").write_text(json.dumps({"usv": dict(used=True, drag=3), "g": dict(used=False)}))
+    assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path)]) == 0
+    assert got == dict(prior=stage1.BRIEF_PRIOR, n=32, fitted={"p": 1}, scales={"usv": dict(used=True, drag=3)})
+    stored = json.loads((tmp_path / "stage1b" / "sensitivity_cases.json").read_text())
+    assert [c["case"] for c in stored["usv"]] == ["other", "c"] and stored["usv"][1]["k_fail"] == 1             # the same case is replaced, others kept
+    assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path / "new"), "--members", "8"]) == 0
+    assert got["n"] == 8 and got["fitted"] is None and got["scales"] is None

@@ -12,14 +12,20 @@ from __future__ import annotations
 import numpy as np
 
 
-def first_order(x: np.ndarray, y: np.ndarray, harmonics: int = 6, correct: bool = True) -> np.ndarray:
-    """S1 for each column of x (n, d) against y (n,). Values are clipped to [0, 1]. Constant y gives zeros."""
+def default_harmonics(n: int) -> int:
+    """M = min(6, max(2, n // 16)): the permutation-null floor of max S1 grows with M/N (lam = 2M/N); six harmonics at 32 members put it at
+    0.53 to 0.60, so no index could clear it. Two harmonics at 32 members give about 0.30."""
+    return min(6, max(2, n // 16))
+
+
+def first_order(x: np.ndarray, y: np.ndarray, harmonics: int | None = None, correct: bool = True) -> np.ndarray:
+    """S1 for each column of x (n, d) against y (n,). Values are clipped to [0, 1]. Constant y gives zeros. `harmonics` defaults to `default_harmonics(n)`."""
     n, d = x.shape
     y = np.asarray(y, float) - np.mean(y)
     out = np.zeros(d)
     if not np.any(y):
         return out
-    m = harmonics
+    m = default_harmonics(n) if harmonics is None else harmonics
     lam = 2 * m / n
     for i in range(d):
         order = np.argsort(x[:, i], kind="stable")
@@ -30,16 +36,16 @@ def first_order(x: np.ndarray, y: np.ndarray, harmonics: int = 6, correct: bool 
     return np.clip(out, 0.0, 1.0)
 
 
-def noise_floor(x: np.ndarray, y: np.ndarray, perms: int = 200, level: float = 0.95, seed: int = 0, harmonics: int = 6) -> float:
+def noise_floor(x: np.ndarray, y: np.ndarray, perms: int = 200, level: float = 0.95, seed: int = 0, harmonics: int | None = None) -> float:
     """The largest S1 over all columns that y unrelated to x reaches with probability 1 - level: the `level` quantile of
-    max_i S1_i over `perms` random permutations of y (a family-wise permutation test). With 32 members it is ~0.3, so an S1
-    below it is no evidence that the parameter matters."""
+    max_i S1_i over `perms` random permutations of y (a family-wise permutation test). With 32 members and the default two harmonics it is
+    about 0.30 (measured, tests/test_stats.py); with six harmonics it would be 0.53 to 0.60. An S1 below it is no evidence that the parameter matters."""
     rng = np.random.default_rng(seed)
     null = [first_order(x, rng.permutation(np.asarray(y, float)), harmonics).max() for _ in range(perms)]
     return float(np.quantile(null, level))
 
 
-def dominant(names: list[str], x: np.ndarray, y: np.ndarray, harmonics: int = 6) -> tuple[str | None, dict[str, float], float]:
+def dominant(names: list[str], x: np.ndarray, y: np.ndarray, harmonics: int | None = None) -> tuple[str | None, dict[str, float], float]:
     """(name of the parameter with the largest S1, or None when no S1 clears the permutation noise floor; {name: S1}; the floor)
     for the verdict's "most sensitive to" field."""
     s = first_order(x, y, harmonics)

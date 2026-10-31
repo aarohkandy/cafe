@@ -76,7 +76,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("acceptance", description=(
         "BRIEF 5.3 gates. Two independent runs agree when every verdict that is decided in either (its 95 % P(fail) interval wholly inside GO or "
         "NO-GO) is identical, and Newcombe's interval for the P(fail) difference contains 0 at a family-wise 95 % (Bonferroni over the vehicles "
-        "and links). A verdict that changes while undecided in both is allowed and named. The same-seed check is exact equality."))
+        "and links). A verdict that changes while undecided in both is allowed and named only while the two runs' 95 % P(fail) "
+        "intervals overlap. The same-seed check is exact equality."))
     p.add_argument("--mission", required=True)
     p.add_argument("--gpus", type=int, default=0)
     p.add_argument("--out", required=True, help="where the runs, receipts and acceptance.json go (each run in its own subdirectory, removed first)")

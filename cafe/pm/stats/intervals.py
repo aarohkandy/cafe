@@ -1,17 +1,21 @@
 """Binomial intervals and the GO / MARGINAL / NO-GO verdict for an ensemble of pass/fail members.
 
-Intervals: Wilson (1927) score interval; Agresti & Coull (1998) "add z^2/2" interval; the switch between them follows
-Brown, Cai & DasGupta (2001, Statistical Science 16(2), Sec. 5 recommendations): Wilson for n <= 40, Agresti-Coull above.
+Intervals: Wilson (1927) score interval at every n; Agresti & Coull (1998) "add z^2/2" interval is kept as a function (coverage receipt, tests).
+Brown, Cai & DasGupta (2001, Statistical Science 16(2)) recommend Wilson for n <= 40 and allow Agresti-Coull above; this module uses Wilson
+throughout so that `interval`, `interval_region`, `verdict`, `sequential.ensemble_stop` and `n_certify` (a Wilson zero-failure solve) are one
+interval: with Agresti-Coull above 40 a run of 73 members and no failure printed an upper bound of 0.0599 while 73 is the n that certifies 5 %.
 Difference of two proportions: Newcombe (1998, Statistics in Medicine 17:873-890, method 10), the hybrid score interval built from
 the two Wilson intervals (`newcombe_diff`).
 Rule of three: Hanley & Lippman-Hand (1983, JAMA 249): with 0 failures in n runs, P(fail) < 3/n at ~95 % one-sided.
 
-Verdict thresholds are those of cafe/mission.py `_verdict` (success rate p, Wilson lower bound lo, both on success):
+Verdict thresholds default to those of cafe/mission.py `_verdict` (success rate p, Wilson lower bound lo, both on success):
   GO       p >= 0.90 and lo >= 0.75     (lo is the 90 % two-sided Wilson bound, z = 1.645, as `_rate`)
   NO-GO    p <  0.60
   MARGINAL otherwise.
+The mission's `verdict: {go, nogo}` replaces 0.90 and 0.60 through `set_thresholds`, which `config.load_mission` calls (P_FAIL_GO = 1 - go,
+P_FAIL_NOGO = 1 - nogo; the lower-bound rule is min(0.75, go) so a go below 0.75 can still be reached).
 `interval_region` is the stricter, interval-only reading the sequential stopper uses (BRIEF 2.5): the whole interval on
-P(fail) sits at or below 0.10 (GO) or above 0.40 (NO-GO). Interval inside GO implies `verdict` GO, inside NO-GO
+P(fail) sits at or below P_FAIL_GO (GO) or above P_FAIL_NOGO (NO-GO). Interval inside GO implies `verdict` GO, inside NO-GO
 implies NO-GO (tested), so stopping never contradicts the final verdict.
 """
 from __future__ import annotations
@@ -25,7 +29,15 @@ from scipy.stats import binom, norm
 P_FAIL_GO = 0.10        # GO needs success >= 0.9 (mission.py _verdict)
 P_FAIL_NOGO = 0.40      # NO-GO is success < 0.6
 LO_SUCCESS_GO = 0.75    # GO also needs the Wilson lower bound on success >= 0.75
-SWITCH_N = 40           # Brown, Cai & DasGupta 2001: Wilson for n <= 40
+
+
+def set_thresholds(go: float, nogo: float) -> None:
+    """Use the mission's P(success) cut-offs: GO at p >= go, NO-GO at p < nogo (0 < nogo < go <= 1). The demo's 0.9 / 0.6 give back 0.10 / 0.40.
+    Module state, set by `config.load_mission` (one mission per process)."""
+    global P_FAIL_GO, P_FAIL_NOGO, LO_SUCCESS_GO
+    if not 0 < nogo < go <= 1:
+        raise ValueError(f"need 0 < nogo < go <= 1, got go={go}, nogo={nogo}")
+    P_FAIL_GO, P_FAIL_NOGO, LO_SUCCESS_GO = round(1 - go, 12), round(1 - nogo, 12), min(0.75, go)
 
 
 def _kappa(conf: float) -> float:
@@ -62,12 +74,10 @@ def agresti_coull(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
 
 
 def interval(k: int, n: int, conf: float = 0.95) -> tuple[float, float, str]:
-    """Wilson for n <= 40, Agresti-Coull above (Brown, Cai & DasGupta 2001). Returns (lo, hi, method)."""
+    """Wilson at every n (the one `n_certify` solves). Returns (lo, hi, method)."""
     if n < 1 or not 0 <= k <= n:
         raise ValueError(f"need 0 <= k <= n and n >= 1, got k={k}, n={n}")
-    if n <= SWITCH_N:
-        return (*wilson(k, n, conf), "wilson")
-    return (*agresti_coull(k, n, conf), "agresti-coull")
+    return (*wilson(k, n, conf), "wilson")
 
 
 def rule_of_three(n: int) -> float:

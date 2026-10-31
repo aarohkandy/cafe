@@ -27,8 +27,8 @@ def test_wilson_and_ac_match_statsmodels(kn_, conf):
 def test_interval_properties(kn_):
     k, n = kn_
     lo, hi, method = I.interval(k, n)
-    assert 0 <= lo <= k / n <= hi <= 1 or (method == "agresti-coull" and 0 <= lo <= hi <= 1)
-    assert method == ("wilson" if n <= 40 else "agresti-coull")
+    assert 0 <= lo <= k / n <= hi <= 1
+    assert method == "wilson"
     if k < n:                                       # more failures -> interval moves up
         lo2, hi2, _ = I.interval(k + 1, n)
         assert lo2 >= lo and hi2 >= hi
@@ -236,7 +236,7 @@ def test_perturbations_yaml_is_complete_and_usable(tmp_path):
     assert "current_correlation_length" not in m and m["wind_speed_bias"]["sd"] == 2.0
     _, x = S.lhs(128, m, seed=0)
     assert 0.9 < np.std(np.log(x["hs_scale"])) / 0.15 < 1.1
-    assert -0.35 <= x["usv_vpp_bias"].min() and x["usv_vpp_bias"].max() <= -0.30
+    assert -0.2565 <= x["usv_vpp_bias"].min() and x["usv_vpp_bias"].max() <= -0.2280          # the Chiodi-calibrated prior of review M-2 (batch B)
     with pytest.raises(ValueError):
         S.to_marginals(cfg, ["current_correlation_length"])
     bad = tmp_path / "p.yaml"

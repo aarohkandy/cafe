@@ -11,7 +11,9 @@ into a row that says it was killed.
 
 Shares of the budget: ingest (measured bytes/s; zero once cached), stage 1 (members x vehicle-days x the measured
 member cost), stage 3 (LES windows: cells x steps / measured LBM rate; FEA and interFoam on CPU in parallel), stage 1'
-(the refit rerun), report. A plan that would not fit is shrunk (members, then windows, then nest resolution) and says so.
+(the refit rerun), report. A plan that would not fit is shrunk (members, then windows, then nest resolution) and says so. Stage 1 never
+overruns its share: when a batch of the profile's size does not fit it is halved down to `MIN_BATCH` members, and when even that does not fit `plan` refuses
+(`PlanError`) with the shortfall in seconds.
 """
 from __future__ import annotations
 
@@ -35,6 +37,8 @@ FS_PARTS = {"usv": "hull_fs"}                                                   
 FEA_CLASSES = ("glider",)                                                            # classes whose window carries an FEA of the pressure hull
 FALLBACK_COST = {"glider": (8.0, 0.1), "usv": (11.0, 0.1), "uas": (20.0, 0.3)}   # (s per batch, s per member) per mission day without bench
 GPU_MEM_GUARD = 0.85
+MIN_BATCH = 4                     # members: the smallest stage-1 batch the planner will shrink to (below it an ensemble has no spread worth reporting)
+LOAD_WARN_FRAC = 0.25             # x cpus: a rate measured with more 1-min load than this (2 on 8 CPUs) was contended by other work
 
 
 class PlanError(ValueError):
@@ -61,10 +65,28 @@ def lbm_rate(thr: dict[str, Any], gpus: int) -> tuple[float, str, str]:
         if e:
             return e["per_device"] * gpus, "xlb-warp", f"measured ({e['measured']}, {e['device']})"
         return 0.95 * 20.8e9 * gpus, "xlb-warp", "projected from published benchmarks (FluidX3D RTX PRO 6000 20.8 GLUPS x 0.95 for XLB-Warp)"
-    e = thr.get("xlb-jax-cpu") or thr.get("jax-lbm-d3q19-cpu")
+    e = thr.get("jax-lbm-d3q19-cpu")
     if e:
-        return e["per_device"], "xlb-jax-cpu", f"measured ({e['measured']}, {e.get('device', 'cpu')})"
-    return 5e6, "xlb-jax-cpu", "NOT MEASURED (run `make bench`): planner fallback"
+        return e["per_device"], "native-jax-cpu", f"measured ({e['measured']}, {e.get('device', 'cpu')})"
+    return 5e6, "native-jax-cpu", "NOT MEASURED (run `make bench`): planner fallback"
+
+
+def measurement_warnings(thr: dict[str, Any], classes: dict[str, str], mission: dict[str, Any]) -> list[str]:
+    """Why the stage-1 costs in `thr` may not describe this run: measured with other work on the machine (1-min load above
+    LOAD_WARN_FRAC x cpus) or on another mission. The costs are still used; the plan says so."""
+    out: set[str] = set()
+    for cls in set(classes.values()):
+        e = thr.get("stage1", {}).get(cls)
+        if not e:
+            continue
+        load, cpus = e.get("load_1min"), e.get("cpus")
+        if load is not None and cpus and load > LOAD_WARN_FRAC * cpus:
+            out.add(f"stage-1 costs were measured at load {load:.1f} on {cpus} CPUs (above {LOAD_WARN_FRAC * cpus:g}): contended, so the plan is "
+                    "pessimistic; re-run `python bench/throughput.py stage1` on a quiet machine")
+        on = e.get("mission_name") or pathlib.Path(e.get("mission", "")).stem
+        if on and mission.get("name") and on != mission["name"]:
+            out.add(f"stage-1 costs were measured on mission {on!r}, not {mission['name']!r}: re-run `python bench/throughput.py stage1 <mission>`")
+    return sorted(out)
 
 
 def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | None = None, gpu_mem_gb: float | None = None,
@@ -81,10 +103,21 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     costs = {vid: member_cost(thr, c) for vid, c in classes.items()}
     per_batch = sum(c[0] for c, _ in costs.values()) * days
     per_member = sum(c[1] for c, _ in costs.values()) * days
+    share1 = SHARE["stage1"] * B
     bs = BATCH[budget]
-    n_batches = int(SHARE["stage1"] * B // max(per_batch + bs * per_member, 1e-9))
-    n_max = min(N_MAX[budget], max(n_batches, 1) * bs)
-    notes = []
+    while bs >= MIN_BATCH and per_batch + bs * per_member > share1:       # the batch must fit the share: halve it until it does
+        bs //= 2
+    if bs < MIN_BATCH:
+        need = per_batch + MIN_BATCH * per_member
+        raise PlanError(f"--budget {budget}: stage 1 needs {need:.0f} s for even one batch of {MIN_BATCH} members ({per_batch:.0f} s per environment "
+                        f"call over {days:.2f} mission days + {per_member:.2f} s per member) but its share of the {B} s budget is {share1:.0f} s: "
+                        f"short by {need - share1:.0f} s. Use a longer --budget, a shorter mission window or fewer vehicles")
+    n_batches = int(share1 // max(per_batch + bs * per_member, 1e-9))
+    n_max = min(N_MAX[budget], n_batches * bs)
+    notes = measurement_warnings(thr, classes, mission)
+    if bs < BATCH[budget]:
+        notes.append(f"stage-1 batch shrunk from {BATCH[budget]} to {bs} members: a batch of {BATCH[budget]} costs "
+                     f"{per_batch + BATCH[budget] * per_member:.0f} s against a stage-1 share of {share1:.0f} s")
     if n_max < N_MAX[budget]:
         notes.append(f"ensemble capped at {n_max} members by the stage-1 share of the budget ({per_batch:.0f} s per batch of {bs} "
                      f"+ {per_member:.2f} s per member)")
@@ -95,15 +128,19 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     cells_steps = SHARE["stage3"] * B * rate / max(n_win, 1)
     les = dict(backend=backend, rate=rate, rate_source=rate_src, windows_per_vehicle=K, cell_steps_per_window=cells_steps,
                cpu_fallback=gpus == 0,
-               label=("CPU fallback: XLB-JAX at the resolution this budget affords on CPU; coefficients blended with the "
-                      "published/Hangar values and their spread widened" if gpus == 0 else "GPU LES windows"))
+               label=("CPU fallback: native JAX lattice kernel at the resolution this budget affords on CPU; coefficients are the pooled "
+                      "window coefficient over the vehicle's Hangar-model value" if gpus == 0 else "GPU LES windows"))
     if gpus > 0 and gpu_mem_gb:
         les["gpu_mem_gb"] = gpu_mem_gb
         les["max_cells"] = int(GPU_MEM_GUARD * gpu_mem_gb * 1e9 / 55.0)    # 55 B/cell FP16S storage (Lehmann et al. 2022)
-    return dict(budget=budget, budget_s=B, gpus=gpus, days=days, n_max=n_max, n_min=n_min, batch=min(BATCH[budget], n_max),
-                sitl_members=SITL[budget], member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1], source=s) for k, (c, s) in costs.items()},
-                les=les, refit_iterations=0 if budget == "ci" else 2, notes=notes,
-                certify_possible=n_max >= 73, shares=SHARE)
+    p: dict[str, Any] = dict(budget=budget, budget_s=B, gpus=gpus, days=days, n_max=n_max, n_min=n_min, batch=min(bs, n_max),
+             stage1_s=-(-n_max // min(bs, n_max)) * per_batch + n_max * per_member, stage1_share_s=share1,
+             sitl_members=SITL[budget], member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1], source=s) for k, (c, s) in costs.items()},
+             les=les, refit_iterations=0 if budget == "ci" else 2, notes=notes, certify_possible=n_max >= 73, shares=SHARE)
+    em = emulator_plan(p)
+    if not em["trains"]:
+        p["notes"].append(em["note"])
+    return p
 
 
 def stage3_assumptions() -> dict[str, Any]:
@@ -156,10 +193,13 @@ def emulator_plan(p: dict[str, Any]) -> dict[str, Any]:
     est = batch_cost_s(p)
 
     def n(free: bool) -> int:
-        return min(EMULATOR_VARIANTS[p["budget"]], int(TRAIN_FRAC * emulator_share_s(p, free) // est)) if est > 0 else 0
+        return int(min(EMULATOR_VARIANTS[p["budget"]], TRAIN_FRAC * emulator_share_s(p, free) // est)) if est > 0 else 0       # (a denormal est: // is inf)
+    refit, no_refit = n(False), n(True)
     return dict(variant_s=est, variant_s_source="the planner's estimate from the measured per-vehicle costs (plan.json member_cost)",
                 share_s=dict(refit=emulator_share_s(p, False), no_refit=emulator_share_s(p, True)), train_fraction=TRAIN_FRAC,
-                max_variants=EMULATOR_VARIANTS[p["budget"]], variants_refit=n(False), variants_no_refit=n(True))
+                max_variants=EMULATOR_VARIANTS[p["budget"]], variants_refit=refit, variants_no_refit=no_refit, trains=max(refit, no_refit) > 0,
+                note=(f"the emulator cannot train at this budget: one mission variant costs {est:.0f} s of stage 1 and the variants may use "
+                      f"{TRAIN_FRAC:.0%} of a {emulator_share_s(p, True):.0f} s emulator share, so 0 of {EMULATOR_VARIANTS[p['budget']]} variants run"))
 
 
 def emulator_share_s(plan: dict[str, Any], stage1b_free: bool = False) -> float:

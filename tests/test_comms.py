@@ -370,3 +370,27 @@ def test_the_credibility_report_counts_the_assumed_radio_numbers():
     items = credibility.assumed_inputs()
     ids = {i["id"] for i in items if i["kind"] == "assumed" and i["file"] == "platforms/radios.yaml"}
     assert len(ids) == 19 and "radios.yaml:radios.rfd900x.misc_loss_db" in ids and "radios.yaml:iridium.sbd.p_success" in ids
+
+
+# ---------------------------------------------------------------- M-13: the slant range, and where the budget stops being a budget
+def test_acoustic_link_budget_uses_the_slant_range_but_bellhop_the_horizontal_one(monkeypatch):
+    seen = []
+
+    def fake(r, f, z, cc, *a):
+        seen.append(np.asarray(r))
+        return 20 * np.log10(r)
+    monkeypatch.setattr(c, "bellhop_available", lambda: True)
+    monkeypatch.setattr(c, "_run_bellhop", fake)
+    flat = c.acoustic_link(np.array([4.5e3]))["thorp_margin"]
+    deep = c.acoustic_link(np.array([4.5e3]), dz=np.array([2.0e3]))
+    assert deep["thorp_margin"][0] == pytest.approx(c.acoustic_margin(np.hypot(4.5e3, 2.0e3))) and deep["thorp_margin"][0] < flat[0] - 2.0
+    assert c.acoustic_link(np.array([4.5e3]), dz=0.0)["thorp_margin"] == pytest.approx(flat)
+    out = c.acoustic_link(np.array([4.5e3]), ssp=(Z, C), dz=3.0e3, ambiguous_db=60.0)
+    assert out["method"][0] == "bellhop" and seen[0].max() == pytest.approx(1.02 * 4.5e3)  # the range grid is built on 4.5 km, not the 5.4 km slant
+    assert out["margin"].value[0] == pytest.approx(c.acoustic_margin(np.hypot(4.5e3, 3.0e3)), abs=0.01)   # the fake adds no excess: slant-range Thorp margin
+
+
+def test_valid_range_is_a_factor_times_the_vendor_range_and_follows_like_bands():
+    f = c._yaml("modems.yaml")["defaults"]["valid_range_factor"]
+    assert f == 10.0 and c.valid_range_m("benthos_atm960", "MF") == pytest.approx(f * 4e3) and c.valid_range_m("benthos_atm960", "LF") == pytest.approx(f * 6e3)
+    assert c.valid_range_m("whoi_micromodem", "long_10k") == c.valid_range_m("benthos_atm960", "MF")

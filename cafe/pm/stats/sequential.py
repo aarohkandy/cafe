@@ -5,7 +5,7 @@ LLR = k ln(p1/p0) + (n-k) ln((1-p1)/(1-p0)); accept H1 at LLR >= ln((1-beta)/alp
 The indifference region (p0, p1) around a cut-off is Younes & Simmons (2006, Information and Computation 204):
 true P(fail) inside it may go either way; outside it the error rates are alpha (wrongly says no-go) and beta.
 "accept_go" means H0 (P(fail) low); "accept_nogo" means H1 (P(fail) high). Test one cut-off at a time: GO cut 0.10,
-NO-GO cut 0.40 (see intervals.py), e.g. `sprt_indifference(0.10, 0.05)` -> (0.05, 0.15).
+NO-GO cut 0.40 (the defaults; `intervals.set_thresholds` takes them from the mission, see intervals.py), e.g. `sprt_indifference(0.10, 0.05)` -> (0.05, 0.15).
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def sprt_decide(k: int, n: int, p0: float, p1: float, alpha: float = 0.05, beta:
 
 
 def ensemble_stop(k_fail: int, n: int, conf: float = STOP_CONF, n_min: int = 0, n_max: int | None = None) -> dict[str, Any]:
-    """Called by Stage 1 between batches. Stop when the Wilson/Agresti-Coull interval is wholly inside GO or NO-GO.
+    """Called by Stage 1 between batches. Stop when the Wilson interval is wholly inside GO or NO-GO.
 
     `n_min` (73 outside --budget quick) stops it ending before the certifying size; `n_max` is the budget cap and ends
     the ensemble with whatever `intervals.verdict` says. Repeated looks at a fixed-sample interval inflate its error

@@ -1,4 +1,5 @@
 import copy
+import functools
 
 import numpy as np
 import pytest
@@ -339,3 +340,69 @@ def test_rain_lens_wind_rain_time_and_depth_dependence():
 def test_rain_lens_switch():
     off = sg.rain_lens(10.0, 2.0, 0.0, cfg=broken(**{"rain_lens.enabled": False}))
     assert float(off["dS"].value) == 0 and float(off["dT"].value) == 0
+
+
+# ---------------------------------------------------------------- recalibration from Stage-3 LES windows
+
+@functools.lru_cache(maxsize=None)
+def _window(sigma_over_ustar=2.5, factor=1.0, seed=3, duration=1800.0, label="w"):
+    """A resolved-turbulence series 'from an LES': the Mann layer itself with the given calibration, so the true answer is known."""
+    ust, z, U, dt = 0.3, 10.0, 6.0, 0.5
+    cfg = broken(**{"calibration.sigma_u_over_ustar": sigma_over_ustar, "calibration.length_scale_factor": factor})
+    u = sg.turbulence(seed, ust, -500.0, z, U, duration, dt, cfg=cfg).value[:, 0]
+    return dict(u=u, dt=dt, U=U, ustar=ust, z=z, L_ob=-500.0, label=label)
+
+
+N = dict(n_model=6)                                                                       # model members per window: 3 Mann boxes (seconds each on one CPU)
+
+
+def test_recalibrate_recovers_a_known_amplitude_and_length_scale_with_its_uncertainty():
+    r = sg.recalibrate([_window(3.0, 1.5)], **N)
+    c, se = r["calibration"], r["uncertainty"]
+    assert c["sigma_u_over_ustar"] == pytest.approx(3.0, rel=0.15) and c["length_scale_factor"] == pytest.approx(1.5, rel=0.3)
+    assert 0 < se["sigma_u_over_ustar"] < 0.5 and 0 < se["length_scale_factor"] < 1.0                      # honest, not zero, not absurd
+    assert c["gust_stats"] == CFG["calibration"]["gust_stats"] and len(r["windows"]) == 1 and r["skipped"] == []
+    assert r["windows"][0]["scales_spanned"] > sg.MIN_SCALES
+    same = sg.recalibrate([_window()], **N)["calibration"]                                                 # the shipped layer measured against itself
+    assert same["sigma_u_over_ustar"] == pytest.approx(2.5, rel=0.15) and same["length_scale_factor"] == pytest.approx(1.0, rel=0.3)
+
+
+def test_recalibrate_pools_windows_with_the_spread_between_them_and_skips_a_series_that_is_too_short():
+    two = sg.recalibrate([_window(2.0, seed=1), _window(3.0, seed=2), _window(duration=30.0)], **N)
+    a, b = (w["sigma_u_over_ustar"] for w in two["windows"])
+    assert two["calibration"]["sigma_u_over_ustar"] == pytest.approx(0.5 * (a + b)) and a < 2.5 < b
+    assert two["uncertainty"]["sigma_u_over_ustar"] > 0.3                                                 # 2.0 vs 3.0: the between-window spread is the error
+    assert len(two["windows"]) == 2 and len(two["skipped"]) == 1
+    assert two["skipped"][0].startswith("w: the series spans") and "at least 20 are needed" in two["skipped"][0]
+    none = sg.recalibrate([_window(duration=30.0)], **N)
+    assert none == dict(calibration=None, uncertainty=None, windows=[], skipped=none["skipped"]) and len(none["skipped"]) == 1
+
+
+def test_integral_scale_of_an_exponentially_correlated_series():
+    rng = np.random.default_rng(0)
+    dt, T = 0.1, 2.0                                                                                      # AR(1) with correlation time T: integral scale U T
+    a = np.exp(-dt / T)
+    x = np.zeros(200000)
+    e = rng.standard_normal(len(x))
+    for i in range(1, len(x)):
+        x[i] = a * x[i - 1] + np.sqrt(1 - a * a) * e[i]
+    assert sg.integral_scale(x, dt, 5.0) == pytest.approx(5.0 * T, rel=0.1)
+
+
+def test_write_calibration_replaces_only_the_calibration_block_and_the_config_reads_it_back(tmp_path):
+    f = tmp_path / "subgrid.json"
+    f.write_text((sg._CFG_DIR / "subgrid.json").read_text())
+    r = sg.recalibrate([_window(3.0, 1.5)], **N)
+    assert sg.write_calibration(r, "run_x", f) == f
+    new = sg.load_config(f)
+    assert new["calibration"]["source_run"] == "run_x" and new["calibration"]["sigma_u_over_ustar"] == r["calibration"]["sigma_u_over_ustar"]
+    assert new["calibration"]["uncertainty"] == r["uncertainty"] and new["calibration"]["windows"] == 1
+    assert new["calibration"]["gust_stats"] == CFG["calibration"]["gust_stats"]
+    old = (sg._CFG_DIR / "subgrid.json").read_text()
+    cut = old.index('  "calibration": {')
+    assert f.read_text()[:cut] == old[:cut] and "Stage-3 run run_x" in sg.calibration_note(new)
+    again = sg.recalibrate([_window(3.0, 1.5)], cfg=new, **N)                                                   # the file is a valid input for the next run
+    assert again["calibration"]["length_scale_factor"] == pytest.approx(new["calibration"]["length_scale_factor"], rel=0.3)
+    with pytest.raises(ValueError, match="nothing to write"):
+        sg.write_calibration(dict(calibration=None, uncertainty=None, windows=[], skipped=["x"]), "run_y", f)
+    assert sg.load_config(f)["calibration"]["source_run"] == "run_x"

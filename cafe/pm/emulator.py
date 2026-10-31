@@ -206,12 +206,18 @@ class Emulator:
                     coverage={t: float(np.mean((p[t]["lo"] <= y[t]) & (y[t] <= p[t]["hi"]))) for t in self.targets})
 
     def holdout_report(self, df: pd.DataFrame, frac: float = 0.2, alpha: float = 0.1) -> dict[str, Any]:
-        """Fit a fresh emulator on the other (1 - frac) of the rows, score on the held-out frac."""
-        perm = np.random.default_rng(self.seed + 1).permutation(len(df))
-        k = int(round(frac * len(df)))
+        """Fit a fresh emulator on the other (1 - frac) of the feature points, score on the held-out frac. The split is by distinct feature
+        point: rows that share a feature vector (replicates of one mission) are all on one side, so a point the model trained on is never
+        scored. `n_train` and `n_test` count rows."""
+        point = df[self.features].round(9).groupby(self.features, sort=False, dropna=False).ngroup().to_numpy()
+        pts = np.unique(point)
+        if len(pts) < 2:
+            raise ValueError(f"a hold-out needs at least two distinct feature points, the table has {len(pts)}")
+        k = min(max(int(round(frac * len(pts))), 1), len(pts) - 1)
+        test = np.isin(point, np.random.default_rng(self.seed + 1).permutation(pts)[:k])
         fresh = Emulator(self.features, self.targets, self.path, self.prob, self.eps, self.noise, self.seed)
-        fresh.fit(df.iloc[perm[k:]])
-        return dict(fresh.score(df.iloc[perm[:k]], alpha), n_train=fresh.n_train + fresh.n_cal)
+        fresh.fit(df[~test])
+        return dict(fresh.score(df[test], alpha), n_train=fresh.n_train + fresh.n_cal)
 
     def ledger(self, x: Any) -> dict[str, Any]:
         """The `emulator` stage ledger entry (BRIEF 5.5): size, held-out RMSE and coverage, distance of the queried mission."""

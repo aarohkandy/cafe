@@ -11,11 +11,11 @@ box: {lon_min: 165.0, lon_max: -165.0, lat_min: -5.0, lat_max: 5.0, pad_deg: 2.0
 
 environment:
   atmosphere: {source: orca_uwincm}
-  waves: {source: orca_umwm, restart_spectra: true}
+  waves: {source: orca_umwm}
   ocean: {source: gofs31}                 # or {source: lab_hycom, path: /data/lab_hycom/...}
   subgrid: {turbulence: true, gust_fronts: true, warm_layer: true, rain_lens: true, ocean_sde: true}
 
-ship: {id: ship, lon: -165.0, lat: 0.0, antenna_height_m: 15.0, modem: benthos_atm960_mf, transducer_depth_m: 5.0}
+ship: {id: ship, lon: -165.0, lat: 0.0, antenna_height_m: 15.0, transducer_depth_m: 5.0}
 shore: {id: shore}
 
 vehicles:

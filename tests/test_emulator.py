@@ -278,3 +278,35 @@ def test_ledger_entry(fitted):
     L = em.ledger(df.iloc[0][E.FEATURES])
     assert L["n_train"] == 500 and L["holdout"]["rmse"]["p_fail"] <= 0.05 and not L["out_of_range"]
     assert L["store_format"] in ("parquet", "csv (pyarrow not installed)")
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 1 (M-8)
+
+def test_the_holdout_splits_by_feature_point_so_replicates_never_straddle_it(tmp_path, monkeypatch):
+    """M-8: a random row split put copies of one point on both sides of the hold-out, so RMSE and coverage were scored on points the model had trained on."""
+    base = E.synthetic_table(40, 1)
+    df = pd.concat([base.assign(p_fail=np.clip(base.p_fail + d, 0, 1)) for d in (0.0, 0.01, -0.01)], ignore_index=True)       # three replicates of each point
+    em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "t.parquet", seed=1)
+    seen = {}
+    real_fit, real_score = E.Emulator.fit, E.Emulator.score
+    monkeypatch.setattr(E.Emulator, "fit", lambda self, d, *a, **k: (seen.setdefault("train", d), real_fit(self, d, *a, **k))[1])
+    monkeypatch.setattr(E.Emulator, "score", lambda self, d, *a, **k: (seen.setdefault("test", d), real_score(self, d, *a, **k))[1])
+    h = em.holdout_report(df)
+
+    def points(d):
+        return set(map(tuple, d[E.FEATURES].round(9).to_numpy()))
+    assert not points(seen["train"]) & points(seen["test"]) and len(points(seen["test"])) == 8 and len(seen["test"]) == 24
+    assert h["n_test"] == 24 and len(seen["train"]) == 96 and h["n_train"] == 96 and len(points(seen["train"])) == 32
+
+
+def test_a_holdout_of_one_feature_point_is_refused(tmp_path):
+    em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "t.parquet")
+    with pytest.raises(ValueError, match="at least two distinct feature points, the table has 1"):
+        em.holdout_report(pd.concat([E.synthetic_table(1, 1)] * 5, ignore_index=True))
+
+
+def test_the_holdout_split_is_reproducible(tmp_path):
+    df = E.synthetic_table(60, 2)
+    a = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "a.parquet", seed=4).holdout_report(df)
+    b = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "b.parquet", seed=4).holdout_report(df)
+    assert a == b and a["n_test"] == 12

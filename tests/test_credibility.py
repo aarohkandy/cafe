@@ -374,3 +374,135 @@ def test_the_page_shows_vv_rows_with_and_without_uncertainty(run, data):
     cr.write(run)
     h = (run / "report" / "credibility.html").read_text()
     assert "not assessable (U_val not stored)" in h and "<td>yes<td>" in h
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 1, batch D
+
+PERTS = {"n": dict(dist="normal", mean=1.5, value=2.0, unit="m/s", citation="c", kind="prior"),
+         "l": dict(dist="lognormal", median=1.0, value=0.3, unit="x", citation="c", kind="prior"),
+         "u": dict(dist="uniform", lo=-0.35, hi=-0.3, value=0.0, unit="x", citation="c", kind="prior"),
+         "f": dict(dist="fixed", mean=100000.0, value=0.0, unit="m", citation="c", kind="prior"),
+         "w": dict(dist="weird", mean=3, value=4, unit="x", citation="ASSUMED guess", kind="assumed")}
+
+
+def perturbation_items(root, run=None):
+    return {i["id"].split(":", 1)[1]: i for i in cr.assumed_inputs(root, run) if i["file"] == "config/perturbations.yaml"}
+
+
+def test_each_prior_is_printed_as_the_distribution_that_is_drawn_not_as_its_spread_field(tmp_path):
+    """M-24: current_correlation_length printed 0.0 (its mean is 1e5) and usv_vpp_bias 0.0 (it is uniform on [-0.35, -0.30]): `value` is the spread."""
+    r = fake_root(tmp_path)
+    (r / "config" / "perturbations.yaml").write_text(yaml.safe_dump(PERTS))
+    it = perturbation_items(r)
+    assert it["n"]["value"] == "normal(mean 1.5, sigma 2.0)" and it["l"]["value"] == "lognormal(median 1.0, sigma 0.3)"
+    assert it["u"]["value"] == "uniform [-0.35, -0.3]" and it["f"]["value"] == "fixed at 100000.0 (a setting, not sampled)"
+    assert it["w"]["value"] == "{'dist': 'weird', 'mean': 3, 'value': 4}" and it["w"]["kind"] == "assumed" and it["n"]["kind"] == "prior"
+
+
+def test_the_real_priors_print_their_distribution(run):
+    it = perturbation_items(REAL, run)
+    spec = yaml.safe_load((REAL / "config" / "perturbations.yaml").read_text())
+    assert it["current_correlation_length"]["value"] == "fixed at 100000.0 (a setting, not sampled)"
+    for k, e in spec.items():
+        assert it[k]["value"] == cr.dist_text(e) and it[k]["value"] != "0.0", k
+    assert "drew" not in it["wind_speed_bias"]["value"]                                                    # the synthetic run drew the yaml's own prior
+
+
+def test_a_fitted_prior_shows_what_the_run_drew_and_an_unchanged_one_does_not(run, tmp_path):
+    r = fake_root(tmp_path)
+    (r / "config" / "perturbations.yaml").write_text(yaml.safe_dump(PERTS))
+    same = {"l": dict(dist="lognormal", median=1.0, sigma=0.3), "u": dict(dist="uniform", lo=-0.35, hi=-0.3)}
+    edit(run / "stage1b" / "summary.json", lambda d: d.update(priors=dict(same, n=dict(dist="normal", mean=-0.616, sd=1.328))))
+    it = perturbation_items(r, run)
+    assert it["n"]["value"] == "normal(mean 1.5, sigma 2.0); this run drew normal(mean -0.616, sigma 1.328) (fitted)"
+    assert it["l"]["value"] == "lognormal(median 1.0, sigma 0.3)" and it["u"]["value"] == "uniform [-0.35, -0.3]" and it["f"]["value"].startswith("fixed at")
+    moved = dict(u=dict(dist="uniform", lo=-0.1, hi=0.0), l=dict(dist="lognormal", median=2.0, sigma=0.3))
+    edit(run / "stage1b" / "summary.json", lambda d: d.update(priors=moved))
+    it = perturbation_items(r, run)
+    assert it["u"]["value"].endswith("; this run drew uniform [-0.1, 0.0] (fitted)")
+    assert it["l"]["value"].endswith("; this run drew lognormal(median 2.0, sigma 0.3) (fitted)")
+    assert cr._used(dict(dist="other", x=1)) == "{'dist': 'other', 'x': 1}"
+
+
+def test_the_priors_come_from_stage_1b_else_stage_1_else_none(run, tmp_path):
+    assert cr.run_priors(None) == {} and cr.run_priors(tmp_path / "empty") == {}
+    s1b = json.loads((run / "stage1b" / "summary.json").read_text())["priors"]
+    assert cr.run_priors(run) == s1b and "wind_speed_bias" in s1b
+    (run / "stage1b" / "summary.json").unlink()
+    assert cr.run_priors(run) == json.loads((run / "stage1" / "summary.json").read_text())["priors"]
+
+
+def test_the_credibility_json_lists_the_priors_the_run_drew(run, data):
+    edit(run / "stage1b" / "summary.json", lambda d: d["priors"].update(wind_speed_bias=dict(dist="normal", mean=-0.616, sd=1.328)))
+    c = cr.build(run, REAL, data)
+    wsb = next(i for i in c["assumed_inputs"] if i["id"] == "perturbations.yaml:wind_speed_bias")
+    assert wsb["value"].endswith("; this run drew normal(mean -0.616, sigma 1.328) (fitted)")
+
+
+def test_the_sanity_block_compares_each_verdict_with_the_briefs_expected_outcome(run, data):
+    """M-30: the credibility report had no row comparing the outcome with BRIEF section 6."""
+    c = cr.build(run, REAL, data)
+    sn = c["sanity"]
+    rows = {r["id"]: r for r in sn["rows"]}
+    assert sn["mission"] == "tepex_c_demo" and "It applies to that mission only" in sn["note"] and "sanity check and not as a target" in sn["note"]
+    # glider_2n's acoustic link is in the table but not in this run, so it has no row
+    assert set(rows) == {"glider_eq", "glider_2n", "usv", "uas", "usv-uas-rf", "usv-shore-iridium", "glider_eq-ship-acoustic"}
+    s = json.loads((run / "stage1b" / "summary.json").read_text())["summary"]
+    for k, r in rows.items():
+        e = (s["vehicles"] | s["links"])[k]
+        assert r["observed"] == e["verdict"]["verdict"] and (r["k_fail"], r["n"]) == (e["k_fail"], e["n"]), k
+    assert rows["glider_eq"]["observed"] == "GO" and rows["glider_eq"]["agrees"] is False                  # the brief expects MARGINAL or NO-GO at a station
+    assert rows["glider_2n"]["agrees"] is True and rows["usv"]["agrees"] == (rows["usv"]["observed"] in ("MARGINAL", "GO"))
+    assert rows["uas"]["agrees"] is None and rows["uas"]["allowed"] is None and rows["glider_eq-ship-acoustic"]["agrees"] is None
+    assert rows["usv-uas-rf"]["agrees"] is True
+
+
+def test_another_mission_gets_no_sanity_block_and_the_page_shows_it_only_for_the_demo(run, data):
+    cr.write(run)
+    h = (run / "report" / "credibility.html").read_text()
+    assert "Sanity check against the brief (tepex_c_demo only)" in h and "cannot be checked from the verdict" in h and "<b>NO</b>" in h
+    (run / "mission.yaml").write_text((run / "mission.yaml").read_text().replace("name: tepex_c_demo", "name: other"))
+    assert cr.build(run, REAL, data)["sanity"] is None
+    cr.write(run)
+    assert "Sanity check" not in (run / "report" / "credibility.html").read_text()
+    (run / "mission.yaml").unlink()
+    assert cr.build(run, REAL, data)["sanity"] is None
+
+
+def test_without_a_stage_1b_summary_there_is_nothing_to_compare(tmp_path, data):
+    run = tmp_path / "bare"
+    run.mkdir()
+    shutil_copy = (REAL / "missions" / "tepex_c_demo.yaml").read_text()
+    (run / "mission.yaml").write_text(shutil_copy)
+    assert cr.build(run, REAL, data)["sanity"] is None
+
+
+def subgrid_root(tmp_path, source_run):
+    r = tmp_path / "sg"
+    (r / "config").mkdir(parents=True)
+    (r / "config" / "subgrid.json").write_text(json.dumps(dict(calibration=dict(source_run=source_run))))
+    return r
+
+
+def test_the_sub_grid_layer_is_uncalibrated_when_the_stage_3_ledger_says_so_or_the_config_has_no_source_run(run, tmp_path):
+    none, calibrated = subgrid_root(tmp_path / "a", None), subgrid_root(tmp_path / "b", "run_x")
+    assert cr.subgrid_uncalibrated(run, calibrated) is None
+    why = cr.subgrid_uncalibrated(run, none)
+    assert why.startswith("sub-grid layer uncalibrated: config/subgrid.json calibration.source_run is null") and "defaults" in why
+    edit(run / "checkpoints" / "stage3" / "ledger.json", lambda d: d.update(notes=["other", "sub-grid layer uncalibrated: no LES window passed"]))
+    assert cr.subgrid_uncalibrated(run, calibrated) == "sub-grid layer uncalibrated: no LES window passed"      # the ledger's own reason wins
+    assert cr.subgrid_uncalibrated(run, none) == "sub-grid layer uncalibrated: no LES window passed"
+    assert cr.subgrid_uncalibrated(run, tmp_path / "missing") == "sub-grid layer uncalibrated: no LES window passed"
+    assert "source_run is null" in cr.subgrid_uncalibrated(run / "nope", tmp_path / "missing")                 # no ledger and no config: nothing calibrated it
+
+
+def test_an_uncalibrated_sub_grid_layer_is_a_limitation_that_caps_validation_and_uncertainty(run, data, monkeypatch):
+    why = "sub-grid layer uncalibrated: no LES window passed"
+    monkeypatch.setattr(cr, "subgrid_uncalibrated", lambda *a, **k: why)
+    c = cr.build(run, REAL, data)
+    assert c["limitations"][-1] == dict(cr.SUBGRID_LIMITATION, text=why) and len(c["limitations"]) == len(cr.LIMITATIONS) + 1
+    f = {x["factor"]: x for x in c["factors"]}
+    assert "L13" in f["validation"]["limitations"] and "L13" in f["uncertainty"]["limitations"] and "L13" not in f["people"]["limitations"]
+    assert why in cr._render(c)
+    monkeypatch.setattr(cr, "subgrid_uncalibrated", lambda *a, **k: None)
+    assert cr.build(run, REAL, data)["limitations"] == cr.LIMITATIONS

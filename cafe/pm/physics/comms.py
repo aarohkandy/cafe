@@ -167,6 +167,15 @@ def implementation_loss_db(modem: str, band: str, k: float = 1.5) -> float:
     return float(b["sl_db"] - acoustic_tl_db(b["range_km"] * 1e3, fc, k) - nl - b["snr_req_db"] - d["anchor_margin_db"])
 
 
+def valid_range_m(modem: str, band: str) -> float:
+    """Slant range [m] beyond which the Thorp budget of this band is an extrapolation: `valid_range_factor` (modems.yaml defaults, assumed) times
+    the vendor's published range the budget is anchored to (a band with `implementation_loss_like` takes that band's range)."""
+    b = _band(modem, band)
+    if "implementation_loss_like" in b:
+        return valid_range_m(*b["implementation_loss_like"])
+    return float(_yaml("modems.yaml")["defaults"]["valid_range_factor"] * b["range_km"] * 1e3)
+
+
 def acoustic_margin(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: FA = 5.0, shipping: float = 0.5, k: float = 1.5,
                     tl_extra: FA = 0.0) -> F:
     """Thorp-budget margin [dB] = SL - TL - NL(band, wind) - SNR_req - implementation loss (+ tl_extra dB of extra
@@ -235,9 +244,11 @@ def bellhop_tl(r_m: ArrayLike, f_khz: float, z: ArrayLike, c: ArrayLike, tx_dept
 
 def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: FA = 5.0, ssp: tuple[FA, F] | None = None,
                   shipping: float = 0.5, k: float = 1.5, tx_depth: float = 1.0, rx_depth: float = 5.0, water_depth: float = 4000.0,
-                  ambiguous_db: float | None = None) -> dict[str, Any]:
-    """Margin for every range in r. The Thorp budget decides every link whose margin is outside +-ambiguous_db of 0; the
-    ambiguous ones are re-done with Bellhop on ssp = (z, c) (z up, <=0), which is the high-fidelity path.
+                  ambiguous_db: float | None = None, dz: FA = 0.0) -> dict[str, Any]:
+    """Margin for every horizontal range r [m]. The path the Thorp budget sees is the slant range hypot(r, dz), dz [m] the vertical
+    separation of the two ends (0: both at the same depth). The Thorp budget decides every link whose margin is outside +-ambiguous_db
+    of 0; the ambiguous ones are re-done with Bellhop on ssp = (z, c) (z up, <=0), which is the high-fidelity path (Bellhop takes the
+    horizontal range and the depths).
 
     Bellhop enters as an EXCESS: its TL on ssp minus its TL on an isovelocity column (c at the surface), added to the Thorp
     TL. The implementation loss is anchored to the vendor range under Thorp k=1.5 spreading, so an absolute Bellhop TL
@@ -246,9 +257,10 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
 
     Returns dict: margin (Tagged), thorp_margin, ambiguous (bool), method (str per element), label (str; THORP_ONLY_LABEL
     when an ambiguous link could not be refined), tl_bellhop_db / tl_bellhop_iso_db (NaN where Bellhop did not run)."""
-    r, w = np.broadcast_arrays(np.asarray(r, float), np.asarray(wind, float))
+    r, w, dz = np.broadcast_arrays(np.asarray(r, float), np.asarray(wind, float), np.asarray(dz, float))
+    slant = np.hypot(r, dz)
     amb_db = _yaml("modems.yaml")["defaults"]["ambiguous_db"] if ambiguous_db is None else ambiguous_db
-    m_t = acoustic_margin(r, modem, band, w, shipping, k)
+    m_t = acoustic_margin(slant, modem, band, w, shipping, k)
     amb = np.abs(m_t) <= amb_db
     tl_b, tl_i = np.full(m_t.shape, np.nan), np.full(m_t.shape, np.nan)
     method = np.full(m_t.shape, "thorp", dtype=object)
@@ -259,7 +271,7 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
             f = float(np.mean(_band(modem, band)["f_khz"]))
             tl_b[amb] = bellhop_tl(r[amb], f, z, c, tx_depth, rx_depth, water_depth)
             tl_i[amb] = bellhop_tl(r[amb], f, z, np.full(len(np.atleast_1d(z)), c[0]), tx_depth, rx_depth, water_depth)
-            margin[amb] = acoustic_margin(r[amb], modem, band, w[amb], shipping, k, tl_extra=tl_b[amb] - tl_i[amb])
+            margin[amb] = acoustic_margin(slant[amb], modem, band, w[amb], shipping, k, tl_extra=tl_b[amb] - tl_i[amb])
             method[amb] = "bellhop"
             label = "Bellhop refined the ambiguous links"
         else:

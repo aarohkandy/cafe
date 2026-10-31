@@ -181,6 +181,10 @@ def coefficients(force: NDArray[np.float64], rel_velocity: ArrayLike, rho: float
                 added_resistance=added, flow_dir=e_d)
 
 
+YPLUS_RAISED_NOTE = ("evaluated at the raised lattice viscosity, not the physical one: the window is not at the physical Reynolds number, "
+                     "so this is not a wall-model pass")
+
+
 def check_row(name: str, value: float, limit: float, ok: bool, **kw: Any) -> dict[str, Any]:
     return dict(name=name, value=float(value), limit=limit, ok=bool(ok), **kw)
 
@@ -191,13 +195,15 @@ def stage3_checks(series: dict[str, NDArray[Any]], spec: nest.NestSpec, force_se
     ma = float(series["umax"].max() * math.sqrt(3))
     cfl = float(series["umax"].max())
     yf = float(series["yfrac"][len(series["yfrac"]) // 3:].mean()) if spec.wall_model else 1.0
+    raised = spec.wall_model and spec.nu_lat > spec.nu * spec.dt / spec.dx ** 2            # the lattice viscosity is the floor's, not the fluid's
     conv_ok, conv = nest.running_mean_ok(force_series)
     md = nest.mass_drift(series)
     res = float(np.mean(series["res"]) / spec.u_lat)
     shifts = int(np.abs(series["shift"]).sum())
     return [check_row("mach_max", ma, lbm.MACH_MAX, ma <= lbm.MACH_MAX),
             check_row("courant_max", cfl, 0.3, cfl <= 0.3, note="max lattice speed per step (1 cell/step is the stability limit)"),
-            check_row("yplus_in_30_300_fraction", yf, 0.9, yf >= 0.9),
+            check_row("yplus_in_30_300_fraction", yf, 0.9, yf >= 0.9 and not raised,
+                      **(dict(note=YPLUS_RAISED_NOTE) if raised else {})),
             check_row("force_running_mean_dev", conv, 0.02, conv_ok),
             check_row("mass_drift_per_step", md, 1e-3, md <= 1e-3),
             check_row("nest_shift_count", shifts, math.inf, True, note="whole-cell shifts"),

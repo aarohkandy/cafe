@@ -29,7 +29,7 @@ wrapper once per shell (pick any data directory with the space above):
 
 ```bash
 export CAFE_HOST_DATA=$HOME/cafe-data && mkdir -p $CAFE_HOST_DATA
-pm() { docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
+pm() { docker run --rm --ulimit core=0 -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
        -v $PWD:/app -v $CAFE_HOST_DATA:/data -w /app cafe-pm "$@"; }
 ```
 
@@ -54,6 +54,16 @@ It writes `config/throughput.json`: OpenFOAM and LBM cell-update rates per core 
 The budgets are wall-clock: every stage is sized from these numbers, so a stale or loaded measurement makes the plan wrong
 (`python -m cafe.pm plan` prints what the budget buys and where each rate came from, with the load it was measured at).
 
+To re-measure only the stage-1 cost per vehicle class, on a quiet machine (one-minute load below 2 on 8 cores; the tool refuses to write on a busy one,
+records the load before and after, and measures on the demo mission unless you name another):
+
+```bash
+pm python bench/throughput.py stage1            # on homebase: PM_CPUS=8 ./pm.sh python bench/throughput.py stage1
+```
+
+Use this, not `make bench`, for that: `make bench` also runs OpenFOAM. The planner never overruns stage 1: it halves the batch down to 4 members, else
+refuses with the shortfall. `--budget ci` on the demo mission is refused by design; `ci` is for `missions/ci_fixture.yaml`.
+
 ## 4. Fetch the mission's data (once, ~2.5 h; resumable)
 
 ```bash
@@ -73,7 +83,7 @@ pm bin/run_premission --mission missions/tepex_c_demo.yaml --budget quick --gpus
 ```
 
 * `--budget quick` = 20 min, `overnight` = 10 h, `4h` = 4 h (meant for a GPU). `--gpus 0` runs the LES windows on the
-  XLB-JAX CPU path, labelled "CPU fallback" everywhere it appears.
+  native JAX lattice kernel on CPU, labelled "CPU fallback" everywhere it appears.
 * The run is resumable: rerunning the same command skips every stage whose ledger and outputs are intact. `--fresh` ignores
   the checkpoints. `--seed S` replaces the mission's seed (same seed + same machine bench = the same `report.json`).
 * You should see one line per stage and finally `report: runs/quick/report/index.html`, exit code 0.
@@ -96,15 +106,37 @@ The code path exists (XLB with the Warp backend, `--gpus N`), but every run so f
 ## 7. Check it
 
 ```bash
-pm make receipts          # every receipt; exit 0 only if none failed (slow ones are read from their stored result for this code)
+pm make receipts          # every receipt; exit 0 only if none failed. Read "Receipts on a clean machine" below before expecting 0
 pm make broken            # the deliberately broken wave-direction config must FAIL a receipt: exit 0 means it did
 pm make audit             # ledgers re-hashed, banned tokens, ruff, mypy --strict, coverage, mutation score
 pm make acceptance        # brief 5.3: quick + overnight (+ 4h with GPUS=1), golden diff, same seed, other seed, broken config (~11 h)
 ```
 
-Each writes its table (`runs/receipts.json`, `runs/acceptance.json` and `.txt`). `make acceptance` refuses to pass if the golden
-(`tests/golden/tepex_c_demo_quick.json`) is missing; `--update-golden` rewrites it from a reviewed quick run and then fails
-that one check until it is rerun without the flag.
+Each writes its table (`runs/receipts.json`, `runs/acceptance.json` and `.txt`).
+
+**Receipts on a clean machine.** `make receipts` exits 0 only when no row failed, and that is not what a clean machine shows, for two reasons.
+
+1. *The slow receipts are not stored yet.* Three groups are read from a result stored under `$CAFE_DATA/receipts/` for this exact code (a digest of the
+   whole `cafe/pm` tree, `config/` and `platforms/`; any edit makes every stored result stale). Without it the row is a failure named
+   `<group>:not_run` (`app.fea`, `pm.physics.uas.slow`, `pm.emulator`). The command that stores them is
+   `pm python -m cafe.pm receipts --slow` (or `--slow --only <group>` for one). It takes about 100 minutes on 2 CPUs by the groups' own estimates
+   (`app.fea` 60, `pm.emulator` 35, `pm.physics.uas.slow` 5) plus the two reruns under `--slow`: the wall-model flat plate (30 000 steps; the
+   stored run took 1.8 h) and the native-kernel sphere at Re = 100, so plan for about 4 hours. Run it again after any edit to the tree.
+2. *Some receipts fail by design, because the limitation is open.* They are not a broken install: the XLB sphere drag rows (`pm.stage3.lbm`, L08),
+   the native-kernel sphere rows (`pm.stage3.nest`, L08), and the wall-model flat plate against ITTC-57 and its y+ share (`pm.stage3.wallmodel`, L09). The limitation
+   ids are those of `docs/CREDIBILITY.md` section 5. A failing row whose id is not on that list, or any `<group>:not_run` after `--slow`, means a broken
+   install or stale code: read its note.
+
+So the honest expectation is: after `receipts --slow` the table fails only on the rows above, and `make receipts` still exits non-zero until those
+limitations are retired.
+
+**The golden is a regression snapshot, not an independent expectation.** `tests/golden/tepex_c_demo_quick.json` is this tool's own output from a
+reviewed quick run, so it catches a change, not an error. `make acceptance` refuses to pass if it is missing, and `golden_diff` FAILs until it records a
+commit sha, a clean tree, the code digest and the reviewed run's report hash. Rewrite it from a reviewed quick run on a clean, committed checkout:
+`./pm.sh python -m cafe.pm acceptance ... --update-golden`; that run then fails the one check until it is rerun without the flag.
+
+**Model receipts in the report.** A report with no `runs/receipts.json` says "Model receipts: not run" and its verdicts cite no receipt group. Run
+`python -m cafe.pm receipts` first.
 
 ## Troubleshooting
 
@@ -113,6 +145,6 @@ that one check until it is rerun without the flag.
 | `CAFE_OFFLINE ... run python -m cafe.pm fetch` | an input is not cached | step 4 |
 | `ensemble capped at 32 members by the stage-1 share` | the budget buys only one batch on this machine | expected at `quick` on 8 CPUs; `overnight` runs more |
 | a stage-3 row `ok=False ... killed` | the window ran past its wall-clock slice (a busy machine) | rerun on a quiet machine, or raise `stage3.les_margin` in `config/assumptions.yaml` |
-| `free-surface window not run: estimated ... it would fit --budget overnight` | the interFoam hull case does not fit this budget | expected at `quick`; the report says the hull refit was not used |
+| `free-surface window not run: estimated ... it would fit --budget overnight` | the interFoam hull case does not fit this budget | expected at `quick`; the report shows "W3 did not run; not used in the refit: free-surface window not run: ..." and the hull refit was not used |
 | `only N GB free under ...; a DTMB 5415 case needs 4.0 GB` | disk | free space; the DTMB receipts are slow and stored |
 | exit code 2 and `error: ...` | the mission file or a config is invalid | the message names the field |

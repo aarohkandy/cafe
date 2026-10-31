@@ -361,12 +361,12 @@ def test_construction_errors_and_defaults():
     s = usv.USVSim(P, 3, env, (0.0, 0.0), 0.0, dict(mode="section", waypoints=[(1.0, 1.0)]))
     assert s.mode == "station" and s.md["becalmed_after_h"] == 6.0 and s.md["track_tolerance_km"] == 20.0
     assert s.lon.shape == (3,) and set(s.fail) == set(usv.FAILS)
-    assert np.all(s.fac < 0.8) and np.all(s.fac > 0.55)                        # the prior: about -30 %
+    assert np.all(s.fac < 0.8) and np.all(s.fac > 0.7)                         # the calibrated prior: about -24 %
 
 
 def test_vpp_bias_draw():
     b = usv.draw_vpp_bias(P, 20000, seed=1)
-    assert np.isclose(b.mean(), -0.30, atol=0.002) and np.isclose(b.std(), 0.03, atol=0.002)
+    assert np.isclose(b.mean(), -0.2422, atol=0.001) and np.isclose(b.std(), 0.0082, atol=0.001)
     assert np.array_equal(usv.draw_vpp_bias(P, 5, seed=3), usv.draw_vpp_bias(P, 5, seed=3))
     assert not np.array_equal(usv.draw_vpp_bias(P, 5, seed=3), usv.draw_vpp_bias(P, 5, seed=4))
     a = usv.USVSim(P, 4, AnalyticEnv(), (0.0, 0.0), 0.0, dict(mode="station", station=(0.0, 1.0), seed=7))
@@ -719,3 +719,28 @@ def test_receipt_fails_for_a_wrong_spectrum(fresh_tables, monkeypatch):
 def test_receipt_fails_for_a_wrong_table(fresh_tables, monkeypatch):
     monkeypatch.setattr(usv, "through_water_table", lambda p, pl, w, c, h: usv.through_water(p, w, 0.0 * np.asarray(c), h))
     assert "Stage-1 table == direct current-coupled solve (max |dV|)" in failed(run_receipts())
+
+
+# ------------------------------------------------------------------ M-2: the VPP bias prior is calibrated to Chiodi, not the brief's still-water factor
+
+def prior(name="usv_vpp_bias"):
+    from cafe.pm.stats import sampling
+    return sampling.load_perturbations()[name]
+
+
+def test_the_prior_mean_reproduces_chiodis_sog_ratio_and_the_brief_value_does_not():
+    """The VPP solves the current inside the polar, so the still-water -30..-35 % double counts: its mean gives 0.158 against Chiodi's 0.1778 (-10.9 %)."""
+    u, want = P["chiodi_mean_wind_ms"], P["chiodi_mean_sog_ms"] / P["chiodi_mean_wind_ms"]
+    e = prior()
+    assert abs(usv.mean_sog(P, u, bias=0.5 * (e["lo"] + e["hi"])) / u / want - 1.0) < 0.01
+    assert abs(usv.mean_sog(P, u) / u / want - 1.0) < 0.01                                       # the platform's own default draw mean too
+    b = prior("usv_vpp_bias_brief")
+    assert usv.mean_sog(P, u, bias=0.5 * (b["lo"] + b["hi"])) / u / want - 1.0 < -0.10          # kept as a sensitivity case, and it does not reproduce it
+
+
+def test_the_prior_spread_is_suns_30_to_35_percent_as_a_speed_factor():
+    e = prior()
+    assert e["dist"] == "uniform" and 0.5 * (e["lo"] + e["hi"]) == pytest.approx(-0.2422, abs=1e-4)           # centred on the calibrated bias
+    assert e["hi"] - e["lo"] == pytest.approx(1 / 1.30 - 1 / 1.35, abs=1e-4)                              # width of Sun's range as a speed factor
+    assert P["vpp_bias_sd"] == pytest.approx((e["hi"] - e["lo"]) / np.sqrt(12.0), abs=2e-4)
+    assert prior("usv_vpp_bias_brief")["dist"] == "uniform" and (prior("usv_vpp_bias_brief")["lo"], prior("usv_vpp_bias_brief")["hi"]) == (-0.35, -0.30)

@@ -7,11 +7,13 @@ One row per vehicle per Stage-1 run is appended to `$CAFE_DATA/emulator/train.pa
                current along the ensemble-median track (a UAS: at the ship at its sortie times)
     targets    p_fail, t_fail_h (median hours from start to the first failure among failed members; the exposure length when none
                failed, i.e. right-censored), mode_<name> (fraction of members that failed in that mode)
-    metadata   cls, vehicle, mission, variant, key (run_id|vehicle|variant: a rerun of the same run replaces its rows), run_id, n_members,
-               fidelity (0 = Stage 1, 1 = Stage-1b rerun with the stage-3 refit), git_sha, code_digest
+    metadata   cls, vehicle, mission, variant, key (a hash of mission, class, vehicle, variant and the features: a rerun of the same mission
+               replaces its rows, whichever directory it ran in), run_id, n_members, fidelity (0 = Stage 1, 1 = Stage-1b rerun with the stage-3
+               refit), git_sha, code_digest
 
 Vehicles of different classes have different features and failure modes, so there is one emulator (cafe.pm.emulator.Emulator, GP plus split
-conformal) per class, fitted on all rows of that class. It is trained only from `MIN_ROWS` rows; below that `trained` is False and says why.
+conformal) per class, fitted on the rows of that class made by the current code (`code_digest`; older rows stay in the table). It is trained
+only from `MIN_ROWS` distinct feature points; below that `trained` is False and says why.
 
 A "mission change" is a dict per vehicle: shift_h (deploy later; a UAS: its daily sorties later in the day), dlon/dlat in degrees (a UAS
 moves with its ship) and duty (<= 1: glider dive depth x duty, UAS every_days / duty). `apply` makes the changed mission or raises Invalid.
@@ -21,6 +23,8 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import hashlib
+import json
 import pathlib
 import re
 import time
@@ -43,7 +47,7 @@ Track = tuple[NDArray[Any], NDArray[Any], NDArray[Any]]                    # (t,
 BASE = ["deploy_h", "lon", "lat", "wind_mean", "wind_p90", "hs_mean", "hs_p90", "cur_mean", "cur_p90"]
 TASK = dict(glider=["dive_depth_m", "radius_km", "lost_after_h"], usv=["track_tolerance_km", "becalmed_after_h"],
             uas=["every_days", "duration_min", "max_mean_wind_ms"])
-MIN_ROWS = 100                    # per class: with a 20 % hold-out that is 20 test rows, the least that can say anything about 90 % coverage
+MIN_ROWS = 100                    # distinct feature points per class: with a 20 % hold-out that is 20 test points, enough to say anything of 90 % coverage
 MODES_MAX = 4                     # failure modes with their own GP (most variable first); the others stay in the table
 LIMITS = dict(rmse=0.05, coverage=0.05, query_ms=10.0)          # BRIEF 2.7 acceptance
 SHIFTS, MOVES, DUTIES = (6.0, 12.0, 24.0, 48.0), (0.5, 1.0), (0.75, 0.5)
@@ -231,6 +235,14 @@ def targets(r: dict[str, Any]) -> dict[str, Any]:
     return dict(p_fail=float(f.mean()), t_fail_h=t_fail, **{f"mode_{k}": float(np.mean(v)) for k, v in r["fail"].items()})
 
 
+def row_key(row: dict[str, Any]) -> str:
+    """The identity of a training row: mission, class, vehicle, variant and the features, to 9 significant digits. A rerun of the same mission
+    gives the same key whichever directory it ran in, so it replaces its predecessor instead of counting as new data."""
+    feats = {k: float(f"{row[k]:.9g}") for k in BASE + TASK[row["cls"]]}
+    ident = [row.get("mission", ""), row["cls"], row["vehicle"], row["variant"], feats]
+    return hashlib.sha256(json.dumps(ident, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def vehicle_rows(mission: dict[str, Any], res: dict[str, Any], env: Any, fidelity: dict[str, Any], meta: dict[str, Any],
                  variant: str = "base") -> list[dict[str, Any]]:
     """One training row per vehicle of a Stage-1 result `res` (stage1.merge / run_batch output) of `mission`."""
@@ -238,8 +250,9 @@ def vehicle_rows(mission: dict[str, Any], res: dict[str, Any], env: Any, fidelit
     for vid, r in res["vehicles"].items():
         cls = r["class"]
         trk = uas_track(mission, vid) if cls == "uas" else track_points(r, mission)
-        rows.append(dict(**params(mission, vid, cls), **env_stats(env, *trk), **targets(r), cls=cls, vehicle=vid, variant=variant,
-                         key=f"{meta['run_id']}|{vid}|{variant}", n_members=int(len(stage1.failed(r))), fidelity=int(fidelity.get(vid, 0)), **meta))
+        row = dict(**params(mission, vid, cls), **env_stats(env, *trk), **targets(r), cls=cls, vehicle=vid, variant=variant,
+                   n_members=int(len(stage1.failed(r))), fidelity=int(fidelity.get(vid, 0)), **meta)
+        rows.append(dict(row, key=row_key(row)))
     return rows
 
 
@@ -266,7 +279,7 @@ def run_variant(mission: dict[str, Any], env: Any, members: list[int], seed: int
 
 
 def add_rows(path: Any, rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, str]:
-    """Append rows to the training table (rows with a key already in it are replaced). -> (whole table, the file used)."""
+    """Append rows to the training table (rows with a key already in it are replaced; see `row_key`). -> (whole table, the file used)."""
     p, _ = store_path(path)
     new = pd.DataFrame(rows)
     df = pd.concat([read_table(p)[lambda d: ~d["key"].isin(new["key"])], new], ignore_index=True) if p.exists() else new
@@ -317,12 +330,23 @@ def _clean(df: pd.DataFrame, cls: str) -> pd.DataFrame:
     return d.dropna(subset=need).reset_index(drop=True)
 
 
-def fit_class(df: pd.DataFrame, cls: str, path: Any) -> tuple[Emulator | None, dict[str, Any]]:
-    """Fit the emulator of one vehicle class on its rows and score it on a 20 % hold-out. -> (Emulator | None, info for holdout.json)."""
+def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = None) -> tuple[Emulator | None, dict[str, Any]]:
+    """Fit the emulator of one vehicle class on its rows and score it on a 20 % hold-out (split by distinct feature point, see
+    `Emulator.holdout_report`). With `code_digest`, rows made by other code (or by code of unknown digest) stay in the table but are not trained on.
+    The `MIN_ROWS` gate counts distinct feature points, so reruns of one mission cannot reach it. -> (Emulator | None, info for holdout.json)."""
     d = _clean(df, cls)
-    info: dict[str, Any] = dict(trained=False, cls=cls, rows=int(len(d)))
-    if len(d) < MIN_ROWS:
-        return None, dict(info, reason=f"{len(d)} {cls} rows in the training table, {MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage)")
+    stale = 0
+    if code_digest is not None:
+        keep = (d["code_digest"] == code_digest).to_numpy() if "code_digest" in d else np.zeros(len(d), bool)
+        stale = int((~keep).sum())
+        d = d[keep].reset_index(drop=True)
+    points = int(len(d[BASE + TASK[cls]].round(9).drop_duplicates()))
+    info: dict[str, Any] = dict(trained=False, cls=cls, rows=int(len(d)), points=points, stale_rows=stale)
+    if points < MIN_ROWS:
+        more = f"; only {points} of them are distinct feature points" if points < len(d) else ""
+        old = f"; {stale} rows made by other code are left out" if stale else ""
+        return None, dict(info, reason=f"{len(d)} {cls} rows in the training table, {MIN_ROWS} are needed "
+                                       f"(a 20 % hold-out must score 90 % coverage){more}{old}")
     if np.ptp(d["p_fail"]) == 0:
         return None, dict(info, reason=f"P(fail) is {d['p_fail'].iloc[0]:.3f} in all {len(d)} {cls} rows: nothing to learn")
     modes = [c for c in d.columns if c.startswith("mode_") and d[c].std() > 0]
@@ -348,13 +372,17 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any) -> tuple[Emulator | None, d
                     query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, acceptance=acc, threshold=em.threshold, multi_fidelity=em.multi_fidelity)
 
 
-def train(table: Any, classes: Any, path: Any = None, df: pd.DataFrame | None = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
+def train(table: Any, classes: Any, path: Any = None, df: pd.DataFrame | None = None,
+          code_digest: str | None = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
     """Fit the emulator of each class in `classes` from the stored table (all runs, all missions), or from `df` when given (the pipeline
-    trains on a snapshot of the table, not on whatever the table holds by now)."""
+    trains on a snapshot of the table, not on whatever the table holds by now). Only rows made by the current code are trained on:
+    `code_digest` (default: this checkout's, `pipeline.code_digest`); superseded rows stay in the file."""
+    from . import pipeline
     p, _ = store_path(table)
     if df is None:
         df = read_table(p) if p.exists() else pd.DataFrame(columns=["cls"] + BASE)
-    return {c: fit_class(df, c, path or table) for c in sorted(set(classes))}
+    cd = code_digest or pipeline.code_digest()
+    return {c: fit_class(df, c, path or table, cd) for c in sorted(set(classes))}
 
 
 def snapshot(table: Any, dest: Any, run_id: str) -> tuple[pd.DataFrame, pathlib.Path]:
@@ -439,26 +467,32 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
     """For each vehicle whose verdict is not GO, the cheapest single change that makes it GO (a NO-GO: at least MARGINAL).
 
     Emulator first: every candidate within the emulator's training range is answered by it. Candidates it cannot answer (no emulator, no
-    track, out of range) are run in Stage 1, nearest first, at most FALLBACK_K and only while `budget_s` lasts. The best candidate is the
-    cheapest one in the target set among those answered. -> ({vid: result}, planned seconds of Stage 1 spent: each fallback is charged
-    `budget.batch_cost_s`, so the search does not depend on how fast the machine happens to be)."""
+    track, out of range) are run in Stage 1, nearest first, at most FALLBACK_K and only while the vehicle's share of `budget_s` lasts: the
+    budget left is split equally over the vehicles still to search, so one vehicle cannot use the whole of it and a share one vehicle does not
+    need goes to the next. The best candidate is the cheapest one in the target set among those answered. Each result says how many
+    candidates were `evaluated`, how many are `invalid` (off the window or the box, or past the environment data: they can never be evaluated)
+    and how many are `candidates` (the rest), so "nothing flips it" is never read as more than what was tried.
+    -> ({vid: result}, planned seconds of Stage 1 spent: each fallback is charged `budget.batch_cost_s`, so the search does not depend on how
+    fast the machine happens to be)."""
     out: dict[str, Any] = {}
     spent = 0.0
-    for vid, base in verdicts.items():
-        if base["verdict"] == "GO":
-            continue
+    todo = [vid for vid, base in verdicts.items() if base["verdict"] != "GO"]
+    for i, vid in enumerate(todo):
+        base = verdicts[vid]
+        share = (budget_s - spent) / (len(todo) - i)
+        used = 0.0
         cls = stage1._classes(solo(mission, vid))[vid]
         want = ("GO",) if base["verdict"] == "MARGINAL" else ("GO", "MARGINAL")
         em = (ems.get(cls) or (None, {}))[0]
         tried: list[dict[str, Any]] = []
         left: list[tuple[int, dict[str, Any]]] = []
         for c in candidates(mission, vid):
-            e = dict(change=c["change"], mod=c["mod"], cost=c["cost"], method="not evaluated", reason="")
+            e = dict(change=c["change"], mod=c["mod"], cost=c["cost"], method="not evaluated", reason="", invalid=False)
             try:
                 m2 = apply(mission, {vid: c["mod"]})
                 a = predict(em, m2, vid, cls, tracks.get(vid), c["mod"], env)
             except Invalid as ex:                                           # off the window or the box, or its track leaves the environment data
-                tried.append(dict(e, reason=str(ex)))
+                tried.append(dict(e, reason=str(ex), invalid=True))
                 continue
             if a["status"] == "ok":
                 tried.append(dict(e, method="EMULATED", **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")}))
@@ -466,24 +500,27 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
                 tried.append(dict(e, reason=a["status"].replace("_", " ")))
                 left.append((len(tried) - 1, m2))
         if not any(t["method"] == "EMULATED" and t["verdict"] in want for t in tried):
-            for i, m2 in left[:FALLBACK_K]:
+            for j, m2 in left[:FALLBACK_K]:
                 cost = budget.batch_cost_s(plan, [vid])
-                if spent + cost > budget_s:
-                    tried[i]["reason"] += "; Stage 1 not run: the emulator budget is spent"
+                if used + cost > share:
+                    tried[j]["reason"] += "; Stage 1 not run: this vehicle's share of the emulator budget is spent"
                     break
                 try:
-                    tried[i].update(method="Stage 1", **measure(m2, vid, env, plan, pri, marg, scales, seed))
+                    tried[j].update(method="Stage 1", **measure(m2, vid, env, plan, pri, marg, scales, seed))
                 except Invalid as ex:                                       # the run left the environment data: no number, and the reason
-                    tried[i]["reason"] += f"; Stage 1 not run: {ex}"
+                    tried[j].update(reason=tried[j]["reason"] + f"; Stage 1 not run: {ex}", invalid=True)
                     continue
-                spent += cost                                               # the planner's cost, never the clock: the same search on every run
-                if tried[i]["verdict"] in want:
+                used += cost                                                # the planner's cost, never the clock: the same search on every run
+                if tried[j]["verdict"] in want:
                     break
+        spent += used
         hit = [t for t in tried if t["method"] != "not evaluated" and t["verdict"] in want]
         best = min(hit, key=lambda t: t["cost"]) if hit else None
+        evaluated, invalid = sum(t["method"] != "not evaluated" for t in tried), sum(t["invalid"] for t in tried)
         out[vid] = dict(verdict=base["verdict"], p_fail=base["p_fail"], target=" or ".join(want), found=best is not None, best=best, tried=tried,
-                        emulator=em is not None)
-        log(f"flip search {vid}: {best['change'] + ' (' + best['method'] + ')' if best else 'nothing in ' + str(len(tried)) + ' candidates flips it'}")
+                        emulator=em is not None, evaluated=evaluated, invalid=invalid, candidates=len(tried) - invalid)
+        log(f"flip search {vid}: " + (f"{best['change']} ({best['method']})" if best else
+                                      f"nothing flips it among the {evaluated} evaluated of {len(tried) - invalid} candidates"))
     return out, spent
 
 

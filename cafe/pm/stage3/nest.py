@@ -463,6 +463,22 @@ def richardson(ds: ArrayLike, cds: ArrayLike) -> dict[str, Any]:
     return dict(cd_inf=float(cc[1] - b * dd[1] ** -p), p=float(p), ds=[float(x) for x in d])
 
 
+def sphere_discretisation() -> tuple[float, str] | None:
+    """The discretisation error of the native kernel on the stored sphere grid study: |Cd(finest grid) - Cd_inf| / |Cd_inf| with Cd_inf the
+    Richardson extrapolation (`richardson`), the largest over the Reynolds numbers that have two or more stored grids. None when none has;
+    the second item names the grids it came from."""
+    worst: tuple[float, str] | None = None
+    for tag, re in SPHERE_RUNS:
+        runs = sorted((json.loads(f.read_text()) for f in SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")), key=lambda r: r["d"])
+        if len(runs) < 2:
+            continue
+        rc = richardson([r["d"] for r in runs], [r["cd"] for r in runs])
+        e = abs(runs[-1]["cd"] - rc["cd_inf"]) / abs(rc["cd_inf"])
+        if worst is None or e > worst[0]:
+            worst = (float(e), f"stored sphere grid study, Re = {re:g}, d = {[int(r['d']) for r in runs]} cells per diameter (finest grid vs Richardson)")
+    return worst
+
+
 def sphere_receipts() -> list[dict[str, Any]]:
     """Sphere Cd vs Morrison 2013 at Re = 1e2, 1e3, 1e4 on the native kernel (curved-wall bounce-back), one pass/fail row each (10 %).
     The row is the Richardson-extrapolated Cd from the stored grids (nest_sphere_<Re>_d*.json) when there are two or more, else the

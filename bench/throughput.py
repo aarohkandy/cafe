@@ -2,6 +2,7 @@
 
     ./run.sh python bench/throughput.py foam   # OpenFOAM pimpleFoam LES, 1/2/4/8 cores (the cafe image)
     python bench/throughput.py lbm [gpu]       # JAX D3Q19 lattice-Boltzmann LES kernel (needs jax)
+    python bench/throughput.py stage1 [mission]   # stage-1 cost per vehicle class on the demo mission (default) or missions/ci_fixture.yaml; quiet machine only
 
 One cell-update = one cell advanced one time step (a pimpleFoam step includes its pressure correctors).
 The first steps (startup, JIT) are excluded from every timing.
@@ -122,20 +123,40 @@ def lbm(device="cpu", n=128, steps=60, warm=10):
 
 
 # ------------------------------------------------------------------ Stage-1 ensemble
-def stage1(sizes=(8, 32)):
-    """Stage-1 wall time per vehicle class on this machine: one batch of each size on the CI fixture mission, fitted as
-    s = a + b*M and divided by the mission days. Batch cost is mostly per environment call (a), not per member (b), so the
-    planner needs both (cafe.pm.budget)."""
+DEMO = "missions/tepex_c_demo.yaml"
+
+
+def stage1(sizes=(8, 32), mission=DEMO):
+    """Stage-1 wall time per vehicle class on this machine: one batch of each size on `mission`, fitted as s = a + b*M and divided by the
+    mission days. Batch cost is mostly per environment call (a), not per member (b), so the planner needs both (cafe.pm.budget).
+
+    The default is the demo mission on the real environment cache ($CAFE_DATA/cache/<name>, from `fetch`): the rates scale with the vehicles and
+    the data the planner will actually plan for. `missions/ci_fixture.yaml` is measured on the synthetic tree (tests/fixtures/ci_env). Refuses to
+    write when the machine was busy before the run (1-min load above budget.LOAD_WARN_FRAC x cpus): such a rate is the other work's, not the
+    pipeline's. The load recorded (`load_1min`) is the one before the run; `load_1min_after` includes the run itself."""
     import os, tempfile
     root = pathlib.Path(__file__).resolve().parents[1]
-    d = tempfile.mkdtemp(prefix="cafe_bench_")
-    from tests.fixtures.ci_env.make import make
-    make(d)
+    sys.path.insert(0, str(root))
+    from cafe.pm import budget
+    cpus = os.cpu_count() or 1
+    load = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
+    if load is not None and load > budget.LOAD_WARN_FRAC * cpus:
+        raise SystemExit(f"stage1 bench refused: 1-min load {load:.1f} on {cpus} CPUs is above {budget.LOAD_WARN_FRAC * cpus:g}; a rate measured "
+                         "now would be the other jobs' (the planner warns on exactly this). Run it on a quiet machine.")
+    path = root / mission
+    ci = path.name == "ci_fixture.yaml"
+    d = tempfile.mkdtemp(prefix="cafe_bench_") if ci else os.environ.get("CAFE_DATA", "/data")
+    if ci:
+        from tests.fixtures.ci_env.make import make
+        make(d)
     os.environ["CAFE_DATA"] = d
     from cafe.pm import pipeline, stage1 as s1
     from cafe.pm.config import utc
     pipeline.DATA = pathlib.Path(d)
-    ctx = pipeline.Context(root / "missions" / "ci_fixture.yaml", "ci", 0, pathlib.Path(d) / "run")
+    # the overnight profile only so that Context can plan whatever the stale throughput.json says: the bench uses its mission, classes and environment
+    ctx = pipeline.Context(path, "overnight", 0, pathlib.Path(tempfile.mkdtemp(prefix="cafe_bench_run_")))
+    if not ci and not ctx.cache.is_dir():
+        raise SystemExit(f"stage1 bench: no environment cache at {ctx.cache}; run `python -m cafe.pm fetch --mission {mission}` first")
     m = ctx.mission
     days = (utc(m["window"]["end"]) - utc(m["window"]["start"])).total_seconds() / 86400
     pri, marg = s1.priors_for(m)
@@ -149,10 +170,10 @@ def stage1(sizes=(8, 32)):
         e = out.setdefault(cls, dict(s_per_batch_day=0.0, s_per_member_day=0.0))
         e["s_per_batch_day"] = max(e["s_per_batch_day"], a / days)              # the costlier vehicle of a class
         e["s_per_member_day"] = max(e["s_per_member_day"], b / days)
-    load = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
+    after = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
     for e in out.values():
-        e.update(measured=time.strftime("%Y-%m-%d"), host=platform.node(), cpus=os.cpu_count(), load_1min=load, sizes=list(sizes),
-                 mission="missions/ci_fixture.yaml", note="wall time of stage1.run_batch per vehicle; a + b*M per mission day")
+        e.update(measured=time.strftime("%Y-%m-%d"), host=platform.node(), cpus=os.cpu_count(), load_1min=load, load_1min_after=after, sizes=list(sizes),
+                 mission=mission, mission_name=m["name"], mission_days=days, note="wall time of stage1.run_batch per vehicle; a + b*M per mission day")
     data = json.loads(OUT.read_text()) if OUT.exists() else {}
     data["stage1"] = out
     data["machine"] = dict(id=platform.node(), cpu=_cpu(), cpus=os.cpu_count(), measured=time.strftime("%Y-%m-%d"))
@@ -168,6 +189,6 @@ def _cpu():
 
 
 if __name__ == "__main__":
-    jobs = {"foam": lambda: foam(), "lbm": lambda: lbm(*(sys.argv[2:3] or ["cpu"])), "stage1": lambda: stage1()}
+    jobs = {"foam": lambda: foam(), "lbm": lambda: lbm(*(sys.argv[2:3] or ["cpu"])), "stage1": lambda: stage1(mission=(sys.argv[2:3] or [DEMO])[0])}
     for name in (list(jobs) if sys.argv[1] == "all" else [sys.argv[1]]):
         jobs[name]()

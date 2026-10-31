@@ -26,6 +26,14 @@ from tests.test_pipeline import Rows, small_budget
 
 ROOT = config.ROOT
 MISSION = str(ROOT / "missions" / "ci_fixture.yaml")
+SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+@pytest.fixture(autouse=True)
+def committed_clean_checkout(monkeypatch):
+    """A golden written here records a commit and a clean tree, as one written from a clean checkout does."""
+    monkeypatch.setattr(acc, "git_sha", lambda: SHA)
+    monkeypatch.setattr(acc, "_dirty", lambda: False)
 
 
 # ---------------------------------------------------------------------------------------------------------------- synthetic reports
@@ -57,6 +65,8 @@ def run_dict(tmp_path, rep, name="quick", rc=0, wall_s=60.0, limit_s=1200.0, gpu
     cpu = gpus == 0 if plan_cpu is None else plan_cpu
     (d / "plan.json").write_text(json.dumps(dict(les=dict(cpu_fallback=cpu))))
     (d / "report" / "index.html").write_text("<p>CPU fallback: XLB-JAX &lt;coarse&gt;</p>" if label_in_page else "<p>nothing</p>")
+    if rep is not None:
+        (d / "report" / "report.json").write_text(json.dumps(rep))
     return dict(name=name, budget="quick", gpus=gpus, seed=seed, dir=d, log=tmp_path / f"{name}.log", rc=rc, wall_s=wall_s, limit_s=limit_s, report=rep)
 
 
@@ -205,8 +215,9 @@ def summ(entries, n=32):
 
 def test_4_of_32_against_1_of_32_is_consistent_and_0_of_32_against_16_of_32_is_not():
     assert acc.diff(summ({"uas": ("MARGINAL", 4)}), summ({"uas": ("MARGINAL", 1)})) == []
-    (msg,) = acc.diff(summ({"uas": ("GO", 0)}), summ({"uas": ("MARGINAL", 16)}))
+    verdict, msg = acc.diff(summ({"uas": ("GO", 0)}), summ({"uas": ("MARGINAL", 16)}))
     assert "links uas: P(fail) 0.5000 now against 0.0000 in the reference (16 of 32 and 0 of 32)" in msg and "95.00% Newcombe interval" in msg
+    assert "undecided in both, but the 95% intervals on P(fail)" in verdict and "do not overlap" in verdict
 
 
 def uas_report(verdict, k, seed=7):
@@ -703,3 +714,81 @@ def test_the_golden_written_from_a_real_report_passes_and_a_changed_verdict_or_p
     far["report"]["vehicles"][vid]["k_fail"]["value"] = 1000
     bad = acc.check_golden(far, g, MISSION, False)
     assert not bad["ok"] and f"vehicles {vid}: P(fail) 1.0000 now against 0.0000" in bad["detail"]
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 1 (M-33)
+
+def test_undecided_verdicts_may_move_only_while_their_intervals_overlap():
+    """M-33: a verdict undecided in both runs could change however far apart the two P(fail) were; now their stopper-level intervals must overlap."""
+    near = acc.compare(summ({"x": ("MARGINAL", 4)}), summ({"x": ("GO", 1)}))                  # 0.125 and 0.031 at n = 32
+    assert near == ([], ["links x: MARGINAL -> GO, undecided in both at n = 32"])
+    lo, hi, _ = acc.intervals.interval(3, 32, acc.sequential.STOP_CONF)
+    lo2, hi2, _ = acc.intervals.interval(15, 32, acc.sequential.STOP_CONF)
+    assert hi < lo2 and acc._decided(dict(k_fail=3, n=32)) is False and acc._decided(dict(k_fail=15, n=32)) is False       # undecided both, and apart
+    bad, notes = acc.compare(summ({"x": ("GO", 3)}), summ({"x": ("MARGINAL", 15)}))
+    assert notes == [] and any("verdict 'GO' in the reference, 'MARGINAL' now; undecided in both, but the 95% intervals on P(fail), "
+                               f"{lo:.3f} to {hi:.3f} and {lo2:.3f} to {hi2:.3f}, do not overlap" in b for b in bad)
+
+
+def test_the_overlap_rule_is_symmetric():
+    a, b = summ({"x": ("GO", 3)}), summ({"x": ("MARGINAL", 15)})
+    assert len(acc.diff(a, b)) == len(acc.diff(b, a)) == 2                                    # the verdict and the P(fail) difference
+    assert acc.compare(a, a) == ([], [])
+
+
+GOOD = dict(git_sha=SHA, dirty=False, code_digest="d" * 64, reviewed_run=dict(name="quick", report_sha256="e" * 64))
+
+
+@pytest.mark.parametrize("change, words", [
+    (dict(git_sha="none"), "git_sha 'none' is not a commit"),
+    (dict(git_sha="abc123"), "git_sha 'abc123' is not a commit"),
+    (dict(code_digest=""), "no code_digest"),
+    (dict(dirty=True), "made from a checkout with uncommitted changes"),
+    (dict(reviewed_run={}), "no reviewed_run"),
+    (dict(reviewed_run=dict(name="quick")), "no reviewed_run")])
+def test_a_golden_without_provenance_says_what_is_missing(change, words):
+    assert acc.provenance_problems(GOOD) == [] and acc.provenance_problems(dict(GOOD, dirty=None)) == []                          # unknown is not dirty
+    assert any(words in p for p in acc.provenance_problems(dict(GOOD, **change)))
+
+
+def test_an_unprovenanced_golden_fails_and_names_the_command_that_writes_a_new_one(tmp_path):
+    g = tmp_path / "g.json"
+    acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
+    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["ok"]
+    rec = json.loads(g.read_text())
+    rec["source"].update(git_sha="none")
+    del rec["source"]["reviewed_run"]
+    g.write_text(json.dumps(rec))
+    r = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
+    assert not r["ok"] and "has no provenance (git_sha 'none' is not a commit; no reviewed_run" in r["detail"] and "on a clean checkout" in r["detail"]
+    assert f"python -m cafe.pm acceptance --mission {MISSION} --gpus 0 --update-golden" in r["detail"] and len(r["values"]["provenance"]) == 2
+    del rec["source"]
+    g.write_text(json.dumps(rec))
+    assert "git_sha None is not a commit" in acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["detail"]
+
+
+def test_a_golden_records_its_commit_and_the_reviewed_run_by_hash(tmp_path):
+    g = tmp_path / "g.json"
+    rd = run_dict(tmp_path, report(), name="quick_rev")
+    acc.check_golden(rd, g, MISSION, True)
+    src = json.loads(g.read_text())["source"]
+    assert src["git_sha"] == SHA and src["dirty"] is False and src["reviewed_run"] == dict(name="quick_rev", report_sha256=acc.hashlib.sha256(
+        (rd["dir"] / "report" / "report.json").read_bytes()).hexdigest())
+    assert acc.provenance_problems(src) == []
+
+
+def test_dirty_is_true_false_or_unknown(monkeypatch, tmp_path):
+    monkeypatch.undo()
+    calls = iter([subprocess.CompletedProcess([], rc, out, "") for rc, out in ((0, " M x.py\n"), (0, ""), (128, ""))])
+    monkeypatch.setattr(acc.subprocess, "run", lambda *a, **k: next(calls))
+    assert (acc._dirty(), acc._dirty(), acc._dirty()) == (True, False, None)
+
+    def boom(*a, **k):
+        raise OSError("no git")
+    monkeypatch.setattr(acc.subprocess, "run", boom)
+    assert acc._dirty() is None
+
+
+def test_the_golden_in_the_repo_has_the_shape_the_comparison_reads():
+    g = json.loads(acc.GOLDEN.read_text())
+    assert g["schema"] == 1 and "source" in g and acc.compare(g["summary"], g["summary"]) == ([], [])

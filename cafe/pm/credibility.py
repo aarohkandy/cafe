@@ -26,6 +26,7 @@ import yaml
 
 from . import config
 from .audit import STAGES, ledger_problems
+from .stats import sampling
 
 ROOT = config.ROOT
 LEVELS = {0: "none: no evidence", 1: "weak: evidence exists, nothing checked it", 2: "moderate: checked by this tool's own self-checks",
@@ -50,6 +51,9 @@ LIMITATIONS = [
          where=["cafe/pm/vv.py", "cafe/pm/dtmb5415.py"]),
 ]
 
+SUBGRID = "sub-grid layer uncalibrated"
+SUBGRID_LIMITATION = dict(id="L13", factors=["validation", "uncertainty"], where=["config/subgrid.json", "cafe/pm/stage3/pipeline_windows.py"])
+
 FACTORS = [("data_pedigree", "Data pedigree"), ("verification", "Verification"), ("validation", "Validation"), ("input_pedigree", "Input pedigree"),
            ("uncertainty", "Uncertainty characterization"), ("robustness", "Results robustness"), ("use_history", "Use history"),
            ("ms_management", "M&S management"), ("people", "People qualifications")]
@@ -71,6 +75,37 @@ RULES = {
                      "3 and the ledger chain audits clean, docs/BUILDERS.md exists and ruff is configured.",
     "people": "1 only if docs/QUALIFICATIONS.md records who ran and reviewed this; otherwise 0.",
 }
+
+# What BRIEF section 6 says a correct tool should report for the demo mission: a sanity check, not a target. allowed: the verdicts that agree with the
+# sentence, None where the sentence depends on something the verdict alone does not show (a gust-front window, the glider-ship distance).
+EXPECTED: dict[str, dict[str, dict[str, Any]]] = {"tepex_c_demo": {
+    "glider_eq": dict(allowed=["MARGINAL", "NO-GO"], text="gliders MARGINAL or NO-GO for station-keeping against the jet"),
+    "glider_2n": dict(allowed=["GO"], text="gliders GO for a drift section"),
+    "usv": dict(allowed=["MARGINAL", "GO"],
+                text="USV MARGINAL in the low-wind/high-current window of 7-8 March, GO otherwise (the demo window ends 7 March 12Z)"),
+    "uas": dict(allowed=None, text="UAS NO-GO in any gust-front window (needs the gust-front windows, which the verdict does not show)"),
+    "usv-uas-rf": dict(allowed=["GO"], text="links GO except glider acoustic at more than 3 km"),
+    "usv-shore-iridium": dict(allowed=["GO"], text="links GO except glider acoustic at more than 3 km"),
+    "glider_eq-ship-acoustic": dict(allowed=None, text="glider acoustic link GO within 3 km of the ship (the distance is not in the verdict)"),
+    "glider_2n-ship-acoustic": dict(allowed=None, text="glider acoustic link GO within 3 km of the ship (the distance is not in the verdict)"),
+}}
+SANITY_NOTE = ("BRIEF section 6, 'Expected outcome': what a correct tool should say about the demo mission, used as a sanity check and not as a "
+               "target. It applies to that mission only, so no other mission has a sanity block. A disagreement is not a verdict on the model: it "
+               "can be model bias, a threshold choice or the expectation itself.")
+
+
+def subgrid_uncalibrated(run: pathlib.Path, root: pathlib.Path = ROOT) -> str | None:
+    """"sub-grid layer uncalibrated: <reason>" when the stage-3 ledger says so (its own reason) or config/subgrid.json has no source_run (no passed
+    LES window has recalibrated it: the turbulence and gust statistics are the defaults); None when the layer was calibrated."""
+    led = _json(run / "checkpoints" / "stage3" / "ledger.json") or {}
+    note = next((n for n in led.get("notes", []) if str(n).startswith(SUBGRID)), None)
+    if note:
+        return str(note)
+    cfg = _json(root / "config" / "subgrid.json") or {}
+    if (cfg.get("calibration") or {}).get("source_run") is None:
+        return (f"{SUBGRID}: config/subgrid.json calibration.source_run is null, so no passed LES window has recalibrated it; "
+                "the turbulence and gust statistics are the defaults")
+    return None
 
 
 def data_root() -> pathlib.Path:
@@ -104,16 +139,58 @@ def platform_items(root: pathlib.Path = ROOT) -> list[dict[str, Any]]:
     return out
 
 
-def assumed_inputs(root: pathlib.Path = ROOT) -> list[dict[str, Any]]:
-    """The full list: every assumptions.yaml key, every perturbation prior (kind prior or assumed), every platform leaf marked assumed."""
+def dist_text(e: dict[str, Any]) -> str:
+    """A perturbation prior as the distribution that is drawn: normal(mean, sigma), lognormal(median, sigma), uniform [lo, hi], or a fixed setting.
+    (`value` in perturbations.yaml is the spread, and is unused for a uniform or a fixed one, so it is never printed as the setting.)"""
+    d = e.get("dist")
+    if d == "normal":
+        return f"normal(mean {e.get('mean', 0.0)!r}, sigma {e['value']!r})"
+    if d == "lognormal":
+        return f"lognormal(median {e.get('median', 1.0)!r}, sigma {e['value']!r})"
+    if d == "uniform":
+        return f"uniform [{e['lo']!r}, {e['hi']!r}]"
+    if d == "fixed":
+        return f"fixed at {e.get('mean')!r} (a setting, not sampled)"
+    return repr({k: e[k] for k in ("dist", "mean", "median", "value", "lo", "hi") if k in e})
+
+
+def _used(spec: dict[str, Any]) -> str:
+    """A marginal as the Stage-1 run recorded it (summary.json priors: normal mean/sd, lognormal median/sigma, uniform lo/hi)."""
+    d = spec.get("dist")
+    if d == "normal":
+        return f"normal(mean {spec['mean']!r}, sigma {spec['sd']!r})"
+    if d == "lognormal":
+        return f"lognormal(median {spec['median']!r}, sigma {spec['sigma']!r})"
+    if d == "uniform":
+        return f"uniform [{spec['lo']!r}, {spec['hi']!r}]"
+    return repr(spec)
+
+
+def run_priors(run: pathlib.Path | None) -> dict[str, Any]:
+    """The priors the run's ensemble used (stage1b/summary.json `priors`, else stage1's): the yaml entries with the TAO-fitted ones in place."""
+    for st in ("stage1b", "stage1"):
+        d = _json(run / st / "summary.json") if run else None
+        if d and d.get("priors"):
+            return dict(d["priors"])
+    return {}
+
+
+def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None) -> list[dict[str, Any]]:
+    """The full list: every assumptions.yaml key, every perturbation prior (kind prior or assumed) as its distribution, with what this run drew
+    when that differs (a TAO-fitted prior), every platform leaf marked assumed."""
     items = []
+    used = run_priors(run)
     for k, e in (yaml.safe_load((root / "config" / "assumptions.yaml").read_text()) or {}).items():
         items.append(dict(id=f"assumptions.yaml:{k}", file="config/assumptions.yaml", kind="assumed", value=repr(e.get("value")), unit=str(e.get("unit", "")),
                           why=str(e.get("why", "")), replace_with=str(e.get("replace_with", ""))))
     for k, e in (yaml.safe_load((root / "config" / "perturbations.yaml").read_text()) or {}).items():
         assumed = e.get("kind") == "assumed" or "ASSUMED" in str(e.get("citation", ""))
+        txt = dist_text(e)
+        sampled = e.get("dist") in ("normal", "lognormal", "uniform")           # a fixed setting is not in the ensemble's priors
+        if k in used and sampled and sampling.to_marginals({k: e}, [k])[k] != used[k]:
+            txt += f"; this run drew {_used(used[k])} (fitted)"
         items.append(dict(id=f"perturbations.yaml:{k}", file="config/perturbations.yaml", kind="assumed" if assumed else "prior",
-                          value=repr(e.get("value")), unit=str(e.get("unit", "")), why=str(e.get("citation", "")), replace_with=""))
+                          value=txt, unit=str(e.get("unit", "")), why=str(e.get("citation", "")), replace_with=""))
     for it in platform_items(root):
         if it["assumed"]:
             items.append(dict(id=f"{it['file'].split('/')[-1]}:{it['path']}", file=it["file"], kind="assumed", value=it["value"], unit=it["unit"],
@@ -215,6 +292,8 @@ class Facts:
         self.items = platform_items(root)
         self.perts = yaml.safe_load((root / "config" / "perturbations.yaml").read_text()) or {}
         self.vv = vv20_rows(data)
+        why = subgrid_uncalibrated(run, root)
+        self.limitations = LIMITATIONS + ([] if why is None else [dict(SUBGRID_LIMITATION, text=why)])
 
     def ev(self, what: str, f: str) -> dict[str, Any]:
         return dict(file=f, what=what)
@@ -388,11 +467,23 @@ def factor_table(f: Facts) -> list[dict[str, Any]]:
     out = []
     for key, name in FACTORS:
         lvl, ev, miss = SCORERS[key](f)
-        lim = [x["id"] for x in LIMITATIONS if key in x["factors"]]
+        lim = [x["id"] for x in f.limitations if key in x["factors"]]
         capped = min(lvl, 2) if lim else lvl
         out.append(dict(factor=key, name=name, level=capped, evidence_level=lvl, capped_by=lim if capped < lvl else [], limitations=lim, rule=RULES[key],
                         evidence=ev, missing=miss))
     return out
+
+
+def sanity(f: Facts) -> dict[str, Any] | None:
+    """The verdicts of the run against what BRIEF section 6 expects of the demo mission, or None for any other mission."""
+    name = (f.mission or {}).get("name", "")
+    exp = EXPECTED.get(name)
+    if exp is None or not f.s1b:
+        return None
+    ens = {**f.s1b["summary"]["vehicles"], **f.s1b["summary"]["links"]}
+    rows = [dict(id=k, expected=x["text"], allowed=x["allowed"], observed=ens[k]["verdict"]["verdict"], k_fail=ens[k]["k_fail"], n=ens[k]["n"],
+                 agrees=None if x["allowed"] is None else ens[k]["verdict"]["verdict"] in x["allowed"]) for k, x in exp.items() if k in ens]
+    return dict(mission=name, note=SANITY_NOTE, rows=rows)
 
 
 # ------------------------------------------------------------------------------------------------------ HTML
@@ -458,7 +549,16 @@ def _render(c: dict[str, Any]) -> str:
     for x in c["limitations"]:
         h.append(f"<li id='{x['id']}'><b>{x['id']}</b> {e(x['text'])} <span class=muted>bears on: {e(', '.join(x['factors']))}; see "
                  f"{', '.join('<code>' + e(w) + '</code>' for w in x['where'])}</span>")
-    h.append("</ul><h2 id=assumed>Assumed inputs and priors</h2><p class=muted>Every assumptions.yaml key, every perturbation prior, "
+    h.append("</ul>")
+    if c.get("sanity"):
+        sn = c["sanity"]
+        h.append(f"<h2 id=sanity>Sanity check against the brief ({e(sn['mission'])} only)</h2><p class=muted>{e(sn['note'])}</p><div class=scroll><table>"
+                 "<tr><th>Vehicle or link<th>Brief expects<th>This run<th>Failed<th>Agrees</tr>")
+        for r in sn["rows"]:
+            ag = "cannot be checked from the verdict" if r["agrees"] is None else "yes" if r["agrees"] else "<b>NO</b>"
+            h.append(f"<tr><td>{e(r['id'])}<td>{e(r['expected'])}<td>{e(r['observed'])}<td>{r['k_fail']} of {r['n']}<td>{ag}</tr>")
+        h.append("</table></div>")
+    h.append("<h2 id=assumed>Assumed inputs and priors</h2><p class=muted>Every assumptions.yaml key, every perturbation prior, "
              "every platform input marked assumed. "
              "A verdict that depends on one carries the assumed badge in the mission report.</p>")
     for file in sorted({i["file"] for i in c["assumed_inputs"]}):
@@ -475,11 +575,11 @@ def _render(c: dict[str, Any]) -> str:
 
 def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.Path | None = None) -> dict[str, Any]:
     f = Facts(pathlib.Path(run_dir), root, data or data_root())
-    items = assumed_inputs(root)
+    items = assumed_inputs(root, f.run)
     return dict(schema="cafe.pm.credibility/1", run=f.run.name,
                 note="Levels run 0-4 (BRIEF 5.4). The rule behind each level is this tool's reading of the factor, not the text of NASA-STD-7009B, "
                      "which was not re-read. Level 4 is never awarded automatically.",
-                levels=LEVELS, factors=factor_table(f), vv20=f.vv, limitations=LIMITATIONS, assumed_inputs=items,
+                levels=LEVELS, factors=factor_table(f), vv20=f.vv, limitations=f.limitations, sanity=sanity(f), assumed_inputs=items,
                 platform_assumed_counts={s: sum(1 for i in items if i["file"] == f"platforms/{s}.yaml" and i["kind"] == "assumed")
                                          for s in sorted(p.stem for p in (root / "platforms").glob("*.yaml"))})
 

@@ -8,9 +8,13 @@ report.json is the source of truth; index.html is rendered from it and nothing e
 {value | values, unit, stage, source, uncertainty, receipt, ledger}: `stage` produced it, `source` is the file and field it was
 read from, `uncertainty` is its 1-sigma or interval (None when exact), `receipt` is the id of a row of the report's `receipts`
 table (a ledger check by name, else the sha-256 of the stage output the number was read from, else the stage's config hash) and
-`ledger` is the run-relative path of that stage's ledger.json. A number outside a node, or a receipt that is missing or whose
-check failed, is what check_traceability reports. Verdicts are those of the final ensemble, stage1b (a copy of stage 1 when
-nothing was refit). res.pkl is unpickled only after its sha-256 matches the ledger's record of it.
+`ledger` is the run-relative path of that stage's ledger.json (for a model-receipt group: runs/receipts.json). A number outside a node, a
+receipt that is missing, or a ledger check that failed, is what check_traceability reports. A link is provenance, not a pass: an `output`
+receipt carries the output's own quality bit (windows.json of stage 3 is ok only if some window passed its self-checks) and each verdict
+cites the model-receipt group of its vehicle class or link (`physics:<group>`: pass and fail counts from runs/receipts.json, "not run" when
+that table is not there). A receipt with ok False is shown, never hidden, and does not by itself make the traceability check fail. Verdicts
+are those of the final ensemble, stage1b (a copy of stage 1 when nothing was refit). res.pkl is unpickled only after its sha-256 matches the
+ledger's record of it.
 
 The environment along the tracks is queried only when the caller passes `env` (an Environment, cafe.pm.env.protocol); res.pkl
 holds positions and flags, not wind, waves or current, and the report says so when it cannot query them.
@@ -38,6 +42,10 @@ from .env.remote import sha256
 from .stats import intervals, sequential
 
 SCHEMA = "cafe.pm.report/1"
+RECEIPTS_NAME = "runs/receipts.json"                                          # the model receipts (python -m cafe.pm receipts), relative to the repo
+RECEIPTS = credibility.ROOT / RECEIPTS_NAME
+PHYSICS = dict(glider="pm.physics.glider", usv="pm.physics.usv", uas="pm.physics.uas", link="pm.physics.comms")     # vehicle class or link -> group
+SENSITIVITY = "sensitivity_cases.json"             # stage1b/: {vid: [{case, k_fail, n, verdict, note}]}, written by whoever runs a case
 FORCING = {"glider": ("surface current speed", "m/s"), "usv": ("significant wave height", "m"), "uas": ("10 m wind speed", "m/s")}
 NOT_PRESENT = "{} is not in the run directory"
 
@@ -65,10 +73,44 @@ class Trace:
         self.run = run
         self.led = {st: _jl(run / "checkpoints" / st / "ledger.json") for st in STAGES}
         self.rows: dict[str, dict[str, Any]] = {}
+        self.table = self._table()
 
-    def _row(self, stage: str, rid: str, kind: str, name: str, ok: bool, got: str = "", limit: str = "", sha: str = "") -> None:
-        self.rows.setdefault(rid, dict(id=rid, stage=stage, ledger=f"checkpoints/{stage}/ledger.json", kind=kind, name=name, ok=ok,
+    def _table(self) -> tuple[list[dict[str, Any]], str] | str:
+        """The model-receipts table (rows, sha-256), or the reason there is none."""
+        if not RECEIPTS.is_file():
+            return f"{RECEIPTS_NAME} is not there: run `python -m cafe.pm receipts` and rerun the report"
+        try:
+            return json.loads(RECEIPTS.read_text()), sha256(RECEIPTS)
+        except ValueError as e:
+            return f"{RECEIPTS_NAME} is not valid JSON ({e})"
+
+    def _row(self, stage: str, rid: str, kind: str, name: str, ok: bool, got: str = "", limit: str = "", sha: str = "", ledger: str | None = None) -> None:
+        self.rows.setdefault(rid, dict(id=rid, stage=stage, ledger=ledger or f"checkpoints/{stage}/ledger.json", kind=kind, name=name, ok=ok,
                                        got=got, limit=limit, sha256=sha))
+
+    def quality(self, stage: str, output: str) -> tuple[bool, str]:
+        """The output's own quality bit: stage 3's windows.json is ok only if some window passed its self-checks (the other outputs have none)."""
+        if (stage, output) != ("stage3", "windows.json"):
+            return True, ""
+        ws = [w for v in (_jl(self.run / "stage3" / "windows.json") or {}).values() for w in v]
+        n = sum(bool(w.get("ok")) for w in ws)
+        return n > 0, f"{n} of {len(ws)} windows passed their self-checks"
+
+    def physics(self, key: str) -> dict[str, Any]:
+        """The model receipts of a vehicle class or `link`: the pass and fail counts of its group in runs/receipts.json, as nodes behind the row
+        `physics:<group>` (ok only when none failed), or status "not run" with the reason. Context rows are not counted."""
+        group = PHYSICS[key]
+        if isinstance(self.table, str):
+            return dict(group=group, status="not run", reason=self.table, failures=[])
+        rows = [r for r in self.table[0] if (r["module"] == group or r["module"].startswith(group + ".")) and r.get("kind") in ("pass", "fail")]
+        if not rows:
+            return dict(group=group, status="not run", reason=f"no receipt of group {group} in {RECEIPTS_NAME}", failures=[])
+        bad = [r["name"] for r in rows if not r["ok"]]
+        rid, name = f"physics:{group}", RECEIPTS_NAME
+        self._row("model receipts", rid, "physics", group, not bad, f"{len(rows) - len(bad)} pass, {len(bad)} fail", sha=self.table[1], ledger=name)
+        ref = dict(stage="model receipts", ledger=name, receipt=rid)
+        return dict(group=group, status="FAILED" if bad else "ok", reason=None, failures=bad,
+                    passed=num(len(rows) - len(bad), "receipts", ref, f"{name} group {group}"), failed=num(len(bad), "receipts", ref, f"{name} group {group}"))
 
     def ref(self, stage: str, check: str | None = None, output: str | None = None, label: str | None = None) -> dict[str, Any]:
         """The receipt for a number from `stage`: the first ledger check named `check*`, else the hash of its `output` file,
@@ -85,7 +127,8 @@ class Trace:
                 self._row(stage, rid, "check", c["name"], c["ok"], repr(c["value"]), repr(c["limit"]))
             elif o:
                 rid = f"{stage}:output:{output}"
-                self._row(stage, rid, "output", output or "", True, sha=o["sha256"])
+                ok, got = self.quality(stage, output or "")
+                self._row(stage, rid, "output", output or "", ok, got, sha=o["sha256"])
             else:
                 rid = f"{stage}:config:{L['config_hash'][:12]}"
                 self._row(stage, rid, "config", "config_hash", True, sha=L["config_hash"])
@@ -128,7 +171,8 @@ def _walk(o: Any, path: str = "") -> Iterator[tuple[str, str, Any]]:
 
 
 def check_traceability(report: dict[str, Any]) -> list[str]:
-    """Every number is a node with stage, source, uncertainty, unit, receipt and ledger, and its receipt is a passing row of the receipts table."""
+    """Every number is a node with stage, source, uncertainty, unit, receipt and ledger, and its receipt is a row of the receipts table whose ledger
+    it names. A missing ledger or a failed ledger check is a problem; an output or model-receipt row with ok False is a result, shown as FAILED."""
     rows = {r["id"]: r for r in report.get("receipts", [])}
     bad = []
     for kind, path, o in _walk(report):
@@ -143,35 +187,49 @@ def check_traceability(report: dict[str, Any]) -> list[str]:
             bad.append(f"{path}: receipt {o['receipt']!r} is not a row of the receipts table")
         elif r["ledger"] != o["ledger"]:
             bad.append(f"{path}: ledger {o['ledger']!r} is not the ledger of receipt {r['id']!r}")
-        elif not r["ok"]:
+        elif not r["ok"] and r["kind"] in ("missing", "check"):
             bad.append(f"{path}: receipt {r['id']!r} is missing or its check failed")
     return bad
 
 
 # ------------------------------------------------------------------------------------------------------ builders
 
-def _undecided(k: int, n: int) -> str:
-    """One sentence for a verdict whose interval on P(fail) is not wholly inside GO or NO-GO: which thresholds it spans, and that more members decide it."""
-    lo, hi, _ = intervals.interval(k, n, sequential.STOP_CONF)
+def _g(x: float) -> str:
+    """A number as the report prints it (the same `.4g` as a node's text)."""
+    return f"{x:.4g}"
+
+
+def _undecided(lo: float, hi: float) -> str:
+    """One sentence for a verdict whose interval on P(fail) is not wholly inside GO or NO-GO: the level that interval is at (the stopper's,
+    which differs from the verdict's own), which thresholds it spans, and that more members decide it. lo and hi are the `stop_interval` nodes."""
     cut = {"GO": intervals.P_FAIL_GO, "NO-GO": intervals.P_FAIL_NOGO}
-    span = [f"{name} threshold of {c:.2f}" for name, c in cut.items() if lo <= c < hi]          # never empty: an interval that spans nothing is decided
-    head = f"The {sequential.STOP_CONF:.0%} interval on P(fail), {lo:.3g} to {hi:.3g}, "
+    span = [f"{name} threshold of {_g(c)}" for name, c in cut.items() if lo <= c < hi]          # never empty: an interval that spans nothing is decided
+    head = (f"At the {sequential.STOP_CONF:.0%} level the stopper uses to decide whether more members are needed, "
+            f"the interval on P(fail), {_g(lo)} to {_g(hi)}, ")
     return head + f"spans the {' and the '.join(span)}, so more members (a larger --budget) would decide it."
 
 
 def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     """The verdict block shared by a vehicle and a link. `region` is "GO", "MARGINAL" or "NO-GO" when the whole P(fail) interval of the stopper's confidence
-    (`sequential.STOP_CONF`) lies inside that verdict's range, else None and the verdict is not `decided`."""
+    (`sequential.STOP_CONF`) lies inside that verdict's range, else None and the verdict is not `decided`. `p_fail` carries the verdict's own interval
+    (its `conf`); `stop_interval` is the stopper's, and `thresholds` the verdict cut-offs, each a traced node the sentences only restate."""
     v = e["verdict"]
     unc = dict(kind=f"{v['method']} interval", conf=v["conf"], lo=v["fail_lo"], hi=v["fail_hi"])
-    d = dict(verdict=v["verdict"], p_fail=num(v["p_fail"], "fraction", ref, src, unc), n=num(e["n"], "members", ref, src),
-             k_fail=num(e["k_fail"], "members", ref, src), n_certify=num(v["n_certify"], "members", ref, src), note=v["note"], certify_statement=None)
+    d: dict[str, Any] = dict(verdict=v["verdict"], p_fail=num(v["p_fail"], "fraction", ref, src, unc), n=num(e["n"], "members", ref, src),
+                             k_fail=num(e["k_fail"], "members", ref, src), n_certify=num(v["n_certify"], "members", ref, src), note=v["note"],
+                             certify_statement=None)
+    lo, hi, method = intervals.interval(e["k_fail"], e["n"], sequential.STOP_CONF)
+    sunc = dict(kind=f"{method} interval bound", conf=sequential.STOP_CONF)
+    where = src + " (stats.intervals.interval at stats.sequential.STOP_CONF)"
+    d["stop_interval"] = dict(lo=num(lo, "fraction", ref, where, sunc), hi=num(hi, "fraction", ref, where, sunc))
+    d["thresholds"] = dict(go=num(intervals.P_FAIL_GO, "fraction", ref, "stats/intervals.py P_FAIL_GO"),
+                           nogo=num(intervals.P_FAIL_NOGO, "fraction", ref, "stats/intervals.py P_FAIL_NOGO"))
     d["region"] = intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF)
     d["decided"] = d["region"] is not None
-    d["undecided_statement"] = None if d["decided"] else _undecided(e["k_fail"], e["n"])
+    d["undecided_statement"] = None if d["decided"] else _undecided(d["stop_interval"]["lo"]["value"], d["stop_interval"]["hi"]["value"])
     if e["n"] < v["n_certify"]:
         d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members are needed "
-                                  f"(with zero failures n members only show P(fail) < 3/n = {3 / e['n']:.3f}).")
+                                  f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}).")
     return d
 
 
@@ -213,13 +271,49 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
         d["threshold"] = num(t["threshold"], "z-scored", ref, src + path + ".threshold") if "threshold" in t else None
         d["n"] = num(t["n"], "members", ref, src + path + ".n") if "n" in t else None
         return d
+    n_ev = sum(t["method"] != "not evaluated" for t in f["tried"])
+    n_inv = sum(bool(t.get("invalid")) for t in f["tried"])
+    counted = src + ".tried (counted by the report)"
     return dict(available=True, needed=True, found=bool(f["found"]), target=f["target"], emulator_trained=bool(f["emulator"]),
+                evaluated=num(n_ev, "candidates", ref, counted), invalid=num(n_inv, "candidates", ref, counted),
+                candidates=num(len(f["tried"]) - n_inv, "candidates", ref, counted),
                 verdict_before=f["verdict"], p_fail_before=num(f["p_fail"], "fraction", ref, src + ".p_fail"),
                 best=one(f["best"], ".best") if f["best"] else None, tried=[one(t, f".tried[{i}]") for i, t in enumerate(f["tried"])])
 
 
+def _first_mode(r: dict[str, Any]) -> str | None:
+    """The failure mode of the earliest failure of any member (the constraint that was active first), or None when nobody failed."""
+    best: tuple[str, float] | None = None
+    for k, v in r["first"].items():
+        a = np.asarray(v, float)
+        if np.isfinite(a).any() and (best is None or float(np.nanmin(a)) < best[1]):
+            best = (k, float(np.nanmin(a)))
+    return None if best is None else best[0]
+
+
+def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[str, Any], src: str) -> dict[str, Any]:
+    """What drives a vehicle's failures: the mode of the first failure (from res.pkl, None without it) and each mode's share of the failed members."""
+    k = e["k_fail"]
+    shares = {m: num(n / k, "fraction of the failed members", ref, f"{src}.modes / k_fail") for m, n in e["modes"].items()} if k else {}
+    r = ((res or {}).get("vehicles") or {}).get(vid)
+    return dict(first_fail_mode=None if r is None else _first_mode(r), mode_shares=shares)
+
+
+def _cases(tr: Trace, vid: str) -> list[dict[str, Any]]:
+    """Stored sensitivity cases of a vehicle (stage1b/sensitivity_cases.json): the same ensemble under another setting of one input, to be read
+    next to the verdict. Nothing is computed here; an absent file is an empty list."""
+    stored = (_jl(tr.run / "stage1b" / SENSITIVITY) or {}).get(vid, [])
+    ref = tr.ref("stage1b", output=SENSITIVITY) if stored else {}
+    out = []
+    for i, c in enumerate(stored):
+        src = f"stage1b/{SENSITIVITY} {vid}[{i}]"
+        out.append(dict(case=c["case"], verdict=c["verdict"], note=c.get("note", ""), k_fail=num(c["k_fail"], "members", ref, src),
+                        n=num(c["n"], "members", ref, src), p_fail=num(c["k_fail"] / c["n"], "fraction", ref, src + " (k_fail / n)")))
+    return out
+
+
 def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str, Any], cred: dict[str, Any], tr: Trace, cred_ref: dict[str, Any],
-              flip: dict[str, Any] | None = None) -> dict[str, Any]:
+              flip: dict[str, Any] | None = None, res: dict[str, Any] | None = None) -> dict[str, Any]:
     ref = tr.ref("stage1b", check="lhs_stratified", output="summary.json")
     plat = {v["id"]: v["platform"] for v in mission["vehicles"]}
     out = {}
@@ -231,12 +325,17 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         dominant_mode=e["dominant"], modes={k: num(n, "members", ref, f"{src}.modes") for k, n in e["modes"].items()},
                         first_fail=tnum(e["first_fail_t"], ref, f"{src}.first_fail_t"), median_fail=tnum(e["median_fail_t"], ref, f"{src}.median_fail_t"),
                         sensitivity=_sens(e, ref, f"{src}.sensitivity (stats.sensitivity, EASI first-order)"), top3=_top3(e, ref, src),
-                        fix=_fix(flip, vid, tr),
+                        fix=_fix(flip, vid, tr), physics=tr.physics(e["cls"]), cases=_cases(tr, vid), **_drivers(e, res, vid, ref, src),
                         verdict_stage1=before["verdict"]["verdict"] if before else None,
                         changed_by_refit=bool(before and before["verdict"]["verdict"] != e["verdict"]["verdict"]),
                         assumed_platform_inputs=num(cred["platform_assumed_counts"].get(p, 0), "inputs", cred_ref, "credibility.json platform_assumed_counts"),
                         assumed_anchor=f"credibility.html#plat-{p}")
     return out
+
+
+def _opt(x: Any, unit: str, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
+    """A node for a value a summary may not carry (None: not applicable to this link kind, or an older summary)."""
+    return None if x is None else num(x, unit, ref, src)
 
 
 def _links(s1b: dict[str, Any], tr: Trace) -> dict[str, Any]:
@@ -245,9 +344,12 @@ def _links(s1b: dict[str, Any], tr: Trace) -> dict[str, Any]:
     for lid, e in s1b["summary"]["links"].items():
         src = f"stage1b/summary.json summary.links.{lid}"
         out[lid] = dict(**_stat(e, ref, src + ".verdict (stats.intervals.verdict)"), method=e["method"], sensitivity=_sens(e, ref, src + ".sensitivity"),
-                        top3=_top3(e, ref, src),
+                        top3=_top3(e, ref, src), physics=tr.physics("link"),
                         frac_median=num(e["frac_median"], "fraction", ref, src), frac_p10=num(e["frac_p10"], "fraction", ref, src),
-                        margin_db_median=None if e["margin_db_median"] is None else num(e["margin_db_median"], "dB", ref, src))
+                        margin_db_median=None if e["margin_db_median"] is None else num(e["margin_db_median"], "dB", ref, src),
+                        margin_kind=e.get("margin_kind"),
+                        frac_beyond_horizon=_opt(e.get("frac_beyond_horizon"), "fraction of the needed samples", ref, src),
+                        frac_out_of_range=_opt(e.get("frac_out_of_range"), "fraction of the needed samples", ref, src))
     return out
 
 
@@ -443,14 +545,15 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             if used:
                 why = None
             elif not w.get("ok"):
-                why = "failed self-checks: " + ", ".join(failed)
+                parts = ["failed self-checks: " + ", ".join(failed)] if failed else []
+                why = "; ".join(parts + ([w["error"]] if w.get("error") else [])) or "no check or error recorded"
             elif rv is not None:
                 why = rv.get("reason") or "the refit did not use this vehicle"
             else:
                 why = NOT_PRESENT.format("refit/refit.json") if refit is None else "no refit entry for this vehicle"
             at = (wins or {}).get(vid, [])
             rows.append(dict(
-                label=f"W{i + 1}", ok=bool(w.get("ok")), used_in_refit=used, not_used_because=why,
+                label=f"W{i + 1}", ok=bool(w.get("ok")), error=w.get("error"), used_in_refit=used, not_used_because=why,
                 t=tnum(at[i]["t"], wref, "windows/windows.json") if i < len(at) else None,
                 checks=[dict(name=c["name"], ok=bool(c["ok"]), value=num(c["value"], "", r3, src + ".checks"), limit=num(c["limit"], "", r3, src + ".checks"),
                              note=c.get("note", "")) for c in w.get("checks", [])],
@@ -497,7 +600,8 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
     dd = None
     if design is not None:
         dref, s = tr.ref("emulator", output="design.json"), "emulator/design.json"
-        dd = dict(share=num(design["share_s"], "s", dref, s), variant=num(design["variant_s"], "s", dref, s), variant_source=design["variant_s_source"],
+        dd = dict(train_budget=num(design["share_s"] * design["train_fraction"], "s", dref, s + " share_s x train_fraction"),
+                  share=num(design["share_s"], "s", dref, s), variant=num(design["variant_s"], "s", dref, s), variant_source=design["variant_s_source"],
                   variants=num(len(design["variants"]), "runs", dref, s), spent=num(design["spent_s"], "s", dref, s),
                   flip_spent=num(design["flip_spent_s"], "s", dref, s), rows_added=num(design["rows_added"], "rows", dref, s),
                   table_rows=num(design["table_rows"], "rows", dref, s), table=design["table"], stage1b_free=bool(design["stage1b_free"]))
@@ -533,6 +637,16 @@ def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
                 factors=[dict(name=f["name"], level=f"{f['level']} of 4") for f in cred["factors"]])
 
 
+def _sanity(cred: dict[str, Any], vehicles: dict[str, Any], links: dict[str, Any]) -> dict[str, Any]:
+    """BRIEF section 6's expected outcome for the demo mission against this run's verdicts (the table is credibility.EXPECTED)."""
+    sn = cred.get("sanity")
+    if sn is None:
+        return dict(applies=False, reason="BRIEF section 6 states an expected outcome for the demo mission only; this mission has none.")
+    both = {**vehicles, **links}
+    return dict(applies=True, mission=sn["mission"], note=sn["note"],
+                rows=[dict(id=r["id"], expected=r["expected"], observed=r["observed"], agrees=r["agrees"], p_fail=both[r["id"]]["p_fail"]) for r in sn["rows"]])
+
+
 def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env: Any = None) -> dict[str, Any]:
     tr = Trace(run)
     cred = json.loads((run / "report" / "credibility.json").read_text())
@@ -555,10 +669,13 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
                      data_consumed=dict(inputs=[dict(ref=i["ref"], sha256=i.get("sha256"), note=i.get("note", "")) for i in ing["inputs"]],
                                         variables="cafe/schemas/wrfout.json and cafe/schemas/umwmout.json (read per hour over the mission window)")),
         verdict_source="stage1b (stage 1 rerun with the stage-3 refit multipliers; a copy of stage 1 when nothing was refit)",
-        vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip), links=_links(s1b, tr),
+        vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res), links=_links(s1b, tr),
         map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr), environment=_env(mission, env, res, wins, s1b, tr),
         stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr), machine=_machine(plan, tr, pref),
         assumed_inputs=_assumed(cred, cred_ref))
+    rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"])
+    rep["subgrid"] = dict(calibrated=not any(x["id"] == credibility.SUBGRID_LIMITATION["id"] for x in cred["limitations"]),
+                          statement=next((x["text"] for x in cred["limitations"] if x["id"] == credibility.SUBGRID_LIMITATION["id"]), None))
     rep["receipts"] = sorted(tr.rows.values(), key=lambda r: r["id"])
     rep["traceability_problems"] = check_traceability(rep)
     return rep
@@ -585,7 +702,8 @@ def _n(n: dict[str, Any] | None) -> str:
     if n is None:
         return "n/a"
     tip = f"{n['stage']}: {n['source']}" + ("" if n["uncertainty"] is None else f"; uncertainty {json.dumps(n['uncertainty'])}")
-    return (f'<span class=n>{html.escape(_txt(n))}<a class=lk href="../{html.escape(n["ledger"])}" title="{html.escape(tip)}">L</a>'
+    href = f' href="../{html.escape(n["ledger"])}"' if n["ledger"].startswith("checkpoints/") else ""          # a model-receipt table is not in the run
+    return (f'<span class=n>{html.escape(_txt(n))}<a class=lk{href} title="{html.escape(tip)}">L</a>'
             f'<a class=lk href="#{_rid(n["receipt"])}" title="{html.escape(n["receipt"])}">R</a></span>')
 
 
@@ -599,8 +717,11 @@ def _undecided_badge(d: dict[str, Any]) -> str:
 
 def _stat_html(d: dict[str, Any]) -> str:
     u = d["p_fail"]["uncertainty"]
-    h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g}; "
-         f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}).</p>")
+    si, th = d["stop_interval"], d["thresholds"]
+    h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g} (the verdict's own level); "
+         f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}).</p>"
+         f"<p class=muted>Stopping rule: the {si['lo']['uncertainty']['conf']:.0%} {html.escape(si['lo']['uncertainty']['kind'].replace(' bound', ''))} "
+         f"on P(fail) is {_n(si['lo'])} to {_n(si['hi'])}; verdict thresholds: GO below {_n(th['go'])}, NO-GO from {_n(th['nogo'])}.</p>")
     if d["undecided_statement"]:
         h += f"<p class=warn>{html.escape(d['undecided_statement'])}</p>"
     if d["certify_statement"]:
@@ -626,9 +747,9 @@ def _top3_html(top: list[Any], floor: Any = None) -> str:
 
 def _tried_html(t: dict[str, Any]) -> str:
     e = html.escape
-    how = ("n/a" if t["method"] == "not evaluated" else t["method"]) + (f", n = {_n(t['n'])}" if t["n"] else "") \
+    how = e("n/a" if t["method"] == "not evaluated" else t["method"]) + (f", n = {_n(t['n'])}" if t["n"] else "") \
         + (f", distance {_n(t['distance'])} of {_n(t['threshold'])}" if t["distance"] else "")
-    return (f"<tr><td>{e(t['change'])}<td>{_n(t['cost'])}<td>{e(how)}<td>{_n(t['p_fail'])}<td>{e(str(t['verdict'] or ''))}<td>{e(t['reason'])}</tr>")
+    return (f"<tr><td>{e(t['change'])}<td>{_n(t['cost'])}<td>{how}<td>{_n(t['p_fail'])}<td>{e(str(t['verdict'] or ''))}<td>{e(t['reason'])}</tr>")
 
 
 def _fix_html(f: dict[str, Any]) -> str:
@@ -644,12 +765,48 @@ def _fix_html(f: dict[str, Any]) -> str:
         how = (f"EMULATED, training-set distance {_n(b['distance'])} of {_n(b['threshold'])}" if b["method"] == "EMULATED" else f"Stage 1, n = {_n(b['n'])}")
         line = (f"<b>{e(b['change'])}</b>: P(fail) {_n(f['p_fail_before'])} becomes {_n(b['p_fail'])} ({u['lo']:.3g} to {u['hi']:.3g}, {e(u['kind'])}), "
                 f"{_badge(f['verdict_before'])} to {_badge(b['verdict'])} ({how}).")
+    elif f["evaluated"]["value"] == 0:
+        line = (f"<b>not searched</b>: none of the {_n(f['candidates'])} could be evaluated (no emulator answer in range, and this vehicle's share "
+                f"of the Stage-1 budget did not cover a run), so this is not a finding that nothing helps (P(fail) now {_n(f['p_fail_before'])}).")
     else:
-        line = (f"no single change among the {len(f['tried'])} candidates reaches {e(f['target'])} (P(fail) now {_n(f['p_fail_before'])}); "
-                + ("the emulator answered those in its range." if f["emulator_trained"] else "no emulator is trained yet, so only a few were run in Stage 1."))
+        line = (f"none of the {_n(f['evaluated'])} evaluated (of {_n(f['candidates'])}) reaches {e(f['target'])} "
+                f"(P(fail) now {_n(f['p_fail_before'])}); "
+                + ("the emulator answered those in its range." if f["emulator_trained"]
+                   else "no emulator is trained yet, so only the nearest few were run in Stage 1."))
     rows = "".join(_tried_html(t) for t in f["tried"])
-    return (f"<p>What would fix it ({e(f['target'])}): {line}</p><details><summary>All {len(f['tried'])} candidates</summary><div class=scroll><table>"
+    return (f"<p>What would fix it ({e(f['target'])}): {line}</p><details><summary>All {len(f['tried'])} candidates: {_n(f['evaluated'])} evaluated of "
+            f"{_n(f['candidates'])} that can be evaluated, {_n(f['invalid'])} that cannot (off the window, the box or the data)</summary>"
+            "<div class=scroll><table>"
             f"<tr><th>Change<th>Cost (notches)<th>Answered by<th>P(fail)<th>Verdict<th>Note</tr>{rows}</table></div></details>")
+
+
+def _physics_html(p: dict[str, Any]) -> str:
+    """The model receipts behind a verdict: pass and fail counts of its group, the failing ones named; "not run" is never shown as a pass."""
+    e = html.escape
+    if p["status"] == "not run":
+        return f"<p class=warn>Model receipts (<code>{e(p['group'])}</code>): not run. {e(p['reason'])}</p>"
+    bad = f" Failing: {e('; '.join(p['failures']))}." if p["failures"] else ""
+    return (f"<p class={'warn' if p['failures'] else 'muted'}>Model receipts (<code>{e(p['group'])}</code>): {_n(p['passed'])} pass, {_n(p['failed'])} fail."
+            f"{bad} They check the model that produced this verdict against references; they are not a check of the verdict.</p>")
+
+
+def _drivers_html(v: dict[str, Any]) -> str:
+    e = html.escape
+    shares = ", ".join(f"{e(m)} {_n(x)}" for m, x in v["mode_shares"].items())
+    first = (f"the first failure was by <b>{e(v['first_fail_mode'])}</b>" if v["first_fail_mode"]
+             else "which mode failed first is not known (res.pkl is not available)")
+    more = f"; share of the failed members by mode (a member can fail in several): {shares}" if shares else ""
+    return f"<p>What drives the failures: {first}{more}.</p>"
+
+
+def _cases_html(cases: list[dict[str, Any]]) -> str:
+    e = html.escape
+    rows = "".join(f"<tr><td>{e(c['case'])}<td>{_badge(c['verdict'])}<td>{_n(c['p_fail'])}<td>{_n(c['k_fail'])} of {_n(c['n'])}<td>{e(c['note'])}</tr>"
+                   for c in cases)
+    if not cases:
+        return ""
+    return ("<p>Sensitivity cases (the same ensemble under another setting of one input):</p><div class=scroll><table>"
+            f"<tr><th>Case<th>Verdict<th>P(fail)<th>Failed<th>Note</tr>{rows}</table></div>")
 
 
 def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
@@ -659,18 +816,30 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     if v["changed_by_refit"]:
         ch = f"<p class=warn>The verdict changed from {_badge(v['verdict_stage1'])} to {_badge(v['verdict'])} after the stage-3 refit.</p>"
     return (f"<div class=card><h3>{e(vid)} {_badge(v['verdict'])}{_undecided_badge(v)} <span class=muted>{e(v['cls'])}, {e(str(v['platform']))}</span></h3>"
-            f"{_stat_html(v)}{ch}<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
+            f"{_stat_html(v)}{_physics_html(v['physics'])}{ch}<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
-            f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
+            f"{_drivers_html(v)}{_cases_html(v['cases'])}{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
             f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} assumed platform inputs, listed in the "
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")
 
 
+def _margin_html(k: dict[str, Any]) -> str:
+    """What the margin is, and the share of the needed moments the geometry alone decided (beyond the radio horizon, out of acoustic range)."""
+    e = html.escape
+    out = f" ({e(k['margin_kind'])})" if k["margin_kind"] else ""
+    if k["frac_beyond_horizon"]:
+        out += f"; beyond the radio horizon at {_n(k['frac_beyond_horizon'])}, where no margin is computed"
+    if k["frac_out_of_range"]:
+        out += f"; out of the acoustic model's range at {_n(k['frac_out_of_range'])}, where no margin is computed"
+    return out
+
+
 def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
-    return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}<p>Method: {e(k['method'])}.<br>"
+    return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
+            f"<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
-            f"median margin {_n(k['margin_db_median'])}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
+            f"median margin {_n(k['margin_db_median'])}{_margin_html(k)}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
             f"{_top3_html(k['top3'], k['sensitivity']['noise_floor'])}</div>")
 
 
@@ -773,7 +942,10 @@ def _window_html(w: dict[str, Any]) -> str:
                  for c in w["checks"])
     co = ", ".join(f"{e(k)} {_n(x)}" for k, x in w["coefficients"].items())
     use = "used in the refit" if w["used_in_refit"] else f"not used in the refit: {e(str(w['not_used_because']))}"
-    return (f"<div class=card><b>{w['label']}</b> {'passed' if w['ok'] else 'failed'} its self-checks; {use}"
+    state = ("passed its self-checks" if w["ok"] else "failed its self-checks" if w["checks"] else "did not run" if w["error"]
+             else "failed with no check recorded")
+    return (f"<div class=card><b>{w['label']}</b> {state}; {use}"
+            + (f". Reason: {e(str(w['error']))}" if w["error"] else "")
             + (f". At {_n(w['t'])}" if w["t"] else "") + (f". Coefficients: {co}" if co else "")
             + f"<div class=scroll><table><tr><th>Check<th>Result<th>Value<th>Limit<th>Note</tr>{ck}</table></div></div>")
 
@@ -820,10 +992,16 @@ def _emulator_html(m: dict[str, Any]) -> str:
                   f"&le; {_n(a['limits']['query_ms'])} {ok(a['query_ok'])}; {_n(a['rows'])} rows of this class.</p>")
     d = m["design"]
     if d:
-        h += (f"<p>Training table {e(d['table'])}: {_n(d['table_rows'])} rows, {_n(d['rows_added'])} added by this run. "
-              f"{_n(d['variants'])} variant run(s) of the mission "
-              f"({_n(d['variant'])} each, from {e(d['variant_source'])}) used {_n(d['spent'])} of the emulator share {_n(d['share'])}"
-              f"{' (including stage 1b, which was a copy)' if d['stage1b_free'] else ''}; the flip search ran {_n(d['flip_spent'])} of Stage 1.</p>")
+        h += (f"<p>Training table {e(d['table'])}: {_n(d['table_rows'])}, {_n(d['rows_added'])} added by this run. "
+              f"Variant runs of the mission: {_n(d['variants'])} "
+              f"({_n(d['variant'])} each, from {e(d['variant_source'])}) were charged {_n(d['spent'])} of planned cost against the emulator share "
+              f"{_n(d['share'])}, of which {_n(d['train_budget'])} is for them"
+              f"{' (including stage 1b, which was a copy)' if d['stage1b_free'] else ''}; the flip search was charged {_n(d['flip_spent'])} of planned "
+              "Stage-1 cost (a planned charge, not a measurement: each stage's measured time is under Machine and budget).</p>")
+        if d["variants"]["value"] == 0:
+            h += (f"<p class=warn>No variant run fitted: one costs {_n(d['variant'])}, more than the {_n(d['train_budget'])} they may use, so this run "
+                  "added only its own rows to the table and no emulator can be trained from it at this budget; a class is trained only from rows the "
+                  "table already holds. Every EMULATED answer comes from a trained emulator, so none is shown unless one was trained.</p>")
     return h
 
 
@@ -857,28 +1035,45 @@ def _assumed_html(a: dict[str, Any]) -> str:
 def _receipts_html(rows: list[Any]) -> str:
     e = html.escape
     body = "".join(f"<tr id='{_rid(r['id'])}'><td><code>{e(r['id'])}</code><td>{e(r['kind'])}"
-                   f"<td>{'ok' if r['ok'] else '<b>MISSING OR FAILED</b>'}<td>{e(r['got'])}<td>{e(r['limit'])}"
+                   f"<td>{'ok' if r['ok'] else '<b>FAILED OR MISSING</b>'}<td>{e(r['got'])}<td>{e(r['limit'])}"
                    f"<td><code>{e(r['sha256'][:16])}</code><td><a href='../{e(r['ledger'])}'>ledger</a></tr>" for r in rows)
     return f"<div class=scroll><table><tr><th>Receipt<th>Kind<th>Status<th>Value<th>Limit<th>sha-256<th>Ledger</tr>{body}</table></div>"
+
+
+def _sanity_html(sn: dict[str, Any]) -> str:
+    e = html.escape
+    if not sn["applies"]:
+        return f"<h2>Sanity check against the brief</h2><p class=muted>{e(sn['reason'])}</p>"
+    rows = "".join(f"<tr><td>{e(r['id'])}<td>{e(r['expected'])}<td>{_badge(r['observed'])} {_n(r['p_fail'])}"
+                   f"<td>{'cannot be checked from the verdict' if r['agrees'] is None else 'yes' if r['agrees'] else '<b>NO</b>'}</tr>" for r in sn["rows"])
+    return (f"<h2>Sanity check against the brief</h2><p class=muted>{e(sn['note'])}</p><div class=scroll><table>"
+            f"<tr><th>Vehicle or link<th>Brief expects<th>This run<th>Agrees</tr>{rows}</table></div>")
 
 
 def render(rep: dict[str, Any]) -> str:
     e = html.escape
     m = rep["mission"]
-    rows = "".join(f"<tr><td><a href='#v-{e(i)}'>{e(i)}</a><td>{_badge(d['verdict'])}{_undecided_badge(d)}<td>{_n(d['p_fail'])}<td>{_n(d['n'])}</tr>"
-                   for i, d in {**rep["vehicles"], **rep["links"]}.items())
+    rows = "".join(f"<tr><td><a href='#v-{e(i)}'>{e(i)}</a><td>{_badge(d['verdict'])}{_undecided_badge(d)}<td>{_n(d['p_fail'])}<td>{_n(d['n'])}"
+                   f"<td>{_n(d.get('frac_beyond_horizon') or d.get('frac_out_of_range'))}</tr>" for i, d in {**rep["vehicles"], **rep["links"]}.items())
     bad = rep["traceability_problems"]
+    failing = [r["id"] for r in rep["receipts"] if not r["ok"]]
     tr = (f"<p class=warn>Traceability problems: {e('; '.join(bad))}</p>" if bad
-          else "<p class=muted>Traceability check: every number links to a passing ledger receipt.</p>")
+          else "<p class=muted>Traceability check: every number links to a receipt, which is a hashed ledger output, a ledger check, "
+               "or a group of model receipts. A link is provenance, not a pass.</p>")
+    tr += f"<p class=warn>{e(rep['subgrid']['statement'])}</p>" if rep["subgrid"]["statement"] else ""
+    tr += (f"<p class=warn>{len(failing)} of {len(rep['receipts'])} receipts below record a failed result and are marked FAILED OR MISSING: "
+           f"{e('; '.join(failing))}.</p>" if failing else "")
     inputs = e("; ".join(i["ref"] for i in m["data_consumed"]["inputs"]) or "none recorded")
     body = (f"<h1>{e(m['name'])}: pre-mission report</h1><p>{e(m['description'])}</p>"
             f"<p class=muted>Window {e(m['window']['start'])} to {e(m['window']['end'])}; seed {_n(m['seed'])}; verdicts from {e(rep['verdict_source'])}. "
             "In the text, <b>L</b> opens the ledger of the stage that produced a number and <b>R</b> its row in the receipts table. "
             f"Inputs read: {inputs} ({e(m['data_consumed']['variables'])}).</p>{tr}"
             "<p><a href='credibility.html'>Credibility report</a> | <a href='report.json'>report.json</a></p>"
-            f"<h2>Verdicts</h2><div class=scroll><table><tr><th>Vehicle or link<th>Verdict<th>P(fail)<th>Members</tr>{rows}</table></div>"
+            "<h2>Verdicts</h2><div class=scroll><table><tr><th>Vehicle or link<th>Verdict<th>P(fail)<th>Members"
+            f"<th>Beyond radio horizon or out of acoustic range</tr>{rows}</table></div>"
             + "".join(f"<div id='v-{e(i)}'>{_vehicle_html(i, d)}</div>" for i, d in rep["vehicles"].items())
             + "".join(f"<div id='v-{e(i)}'>{_link_html(i, d)}</div>" for i, d in rep["links"].items())
+            + _sanity_html(rep["sanity"])
             + f"<h2>Map</h2>{_map_html(rep['map'], rep['reach'])}<h2>Environment along the tracks</h2>{_env_html(rep['environment'])}"
             f"<h2>Stage 3 and refit</h2>{_stage3_html(rep['stage3'])}<h2>Emulator</h2>{_emulator_html(rep['emulator'])}"
             f"<h2>Machine and budget</h2>{_machine_html(rep['machine'])}<h2>Assumed inputs</h2>{_assumed_html(rep['assumed_inputs'])}"
@@ -886,9 +1081,14 @@ def render(rep: dict[str, Any]) -> str:
     return credibility.page(f"{m['name']} report", body)
 
 
+def _token(text: str) -> re.Pattern[str]:
+    """`text` as a whole token: not the tail of a longer number or word before it ("0 members" is not in "10 members"), nor the head of one after."""
+    return re.compile(r"(?<![\w.\-])" + re.escape(html.escape(text)) + r"(?!\w|\.\d)")
+
+
 def check_rendered(rep: dict[str, Any], html_text: str) -> list[str]:
-    """Every number node's text is in the page (the HTML is rendered from the JSON; this catches a section that drops a number)."""
-    return [f"{p}: {_txt(o)!r} is not in the HTML" for k, p, o in _walk(rep) if k == "node" and html.escape(_txt(o)) not in html_text]
+    """Every number node's text is in the page as a whole token (the HTML is rendered from the JSON; this catches a section that drops a number)."""
+    return [f"{p}: {_txt(o)!r} is not in the HTML" for k, p, o in _walk(rep) if k == "node" and not _token(_txt(o)).search(html_text)]
 
 
 def write(run_dir: str | pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env: Any = None) -> list[pathlib.Path]:

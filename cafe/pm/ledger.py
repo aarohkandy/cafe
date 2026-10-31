@@ -11,13 +11,14 @@
 """
 from __future__ import annotations
 
-import datetime as dt, json, os, pathlib, platform, subprocess, sys, time
+import datetime as dt, importlib.metadata, json, os, pathlib, platform, subprocess, sys, time
 from types import TracebackType
 from typing import Any, Literal
 
 from .env.remote import sha256
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+DIST = {"sklearn": "scikit-learn"}                      # import name -> distribution name, where they differ (for libraries with no __version__)
 LIBS = ["numpy", "scipy", "xarray", "zarr", "h5py", "jax", "xlb", "gsw", "pycoare", "mannrs", "sklearn", "smt", "statsmodels"]
 
 
@@ -34,11 +35,36 @@ def git_sha() -> str:
     return sha or os.environ.get("CAFE_GIT_SHA", "none")
 
 
+def git_dirty() -> bool | None:
+    """Whether the checkout has uncommitted changes (`git status --porcelain` is not empty); for a copy synced without .git, $CAFE_GIT_DIRTY
+    ("1" or "0", which pm.sh sets from the laptop's checkout); None when neither can say."""
+    try:
+        r = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        r = None
+    if r is not None and r.returncode == 0:
+        return bool(r.stdout.strip())
+    flag = os.environ.get("CAFE_GIT_DIRTY")
+    return None if flag not in ("0", "1") else flag == "1"
+
+
+def _version(m: str) -> str:
+    """The module's `__version__`, else the installed distribution's version (pycoare and mannrs have no `__version__`), else "?"."""
+    mod = __import__(m)
+    v = getattr(mod, "__version__", None)
+    if v is not None:
+        return str(v)
+    try:
+        return importlib.metadata.version(DIST.get(m, m))
+    except importlib.metadata.PackageNotFoundError:
+        return "?"
+
+
 def versions() -> dict[str, str | None]:
     out: dict[str, str | None] = {"python": sys.version.split()[0]}
     for m in LIBS:
         try:
-            out[m] = getattr(__import__(m), "__version__", "?")
+            out[m] = _version(m)
         except ImportError:
             out[m] = None
     return out
@@ -52,10 +78,11 @@ def machine() -> dict[str, Any]:
 
 
 class Ledger:
-    def __init__(self, run_dir: str | pathlib.Path, stage: str, config_hash: str) -> None:
+    def __init__(self, run_dir: str | pathlib.Path, stage: str, config_hash: str, code_digest: str | None = None) -> None:
         self.dir = pathlib.Path(run_dir) / "checkpoints" / stage
         self.path = self.dir / "ledger.json"
-        self.d: dict[str, Any] = dict(stage=stage, config_hash=config_hash, git_sha=git_sha(), versions=versions(), machine=machine(),
+        self.d: dict[str, Any] = dict(stage=stage, config_hash=config_hash, git_sha=git_sha(), git_dirty=git_dirty(), code_digest=code_digest,
+                      versions=versions(), machine=machine(),
                       started=dt.datetime.now(dt.timezone.utc).isoformat(), inputs=[], seeds={}, checks=[], outputs=[], notes=[])
         self._t = time.time()
 
@@ -86,12 +113,18 @@ class Ledger:
 
     def __exit__(self, et: type[BaseException] | None, ev: BaseException | None, tb: TracebackType | None) -> Literal[False]:
         self.d["wall_s"] = round(time.time() - self._t, 3)
-        self.d["outputs"] = [dict(path=p, sha256=sha256(p)) for p in self.d["outputs"] if pathlib.Path(p).is_file()]
+        outs = [(p, pathlib.Path(p).is_file()) for p in self.d["outputs"]]
+        missing = [p for p, here in outs if not here]
+        self.d["outputs"] = [dict(path=p, sha256=sha256(p) if here else None) for p, here in outs]
         self.d["error"] = None if et is None else f"{et.__name__}: {ev}"
-        self.d["ok"] = et is None and self.ok
+        if missing and et is None:
+            self.d["error"] = f"outputs never written: {missing}"
+        self.d["ok"] = et is None and not missing and self.ok
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(json.dumps(self.d, indent=1, default=_jsonable))
         os.replace(tmp, self.path)
+        if missing and et is None:
+            raise StageFailed(f"stage {self.d['stage']}: registered outputs were never written: {missing} (see {self.path})")
         if et is None and not self.ok:
             bad = [c["name"] for c in self.d["checks"] if not c["ok"]]
             raise StageFailed(f"stage {self.d['stage']}: self-checks failed: {bad} (see {self.path})")
@@ -107,7 +140,7 @@ def _jsonable(x: Any) -> Any:
 
 
 def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str, Any] | None:
-    """The stage's ledger if it finished cleanly with this config and its outputs are unchanged on disk, else None."""
+    """The stage's ledger if it finished cleanly with this config and its outputs and file inputs are unchanged on disk, else None."""
     p = pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json"
     if not p.exists():
         return None
@@ -116,6 +149,10 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
         return None
     for o in d["outputs"]:
         if not pathlib.Path(o["path"]).is_file() or sha256(o["path"]) != o["sha256"]:
+            return None
+    for i in d["inputs"]:
+        f = pathlib.Path(i["ref"])
+        if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
             return None
     return d
 

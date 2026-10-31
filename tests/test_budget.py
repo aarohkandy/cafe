@@ -2,6 +2,7 @@
 import json
 
 import pytest
+from hypothesis import given, settings, strategies as st
 
 from cafe.pm import budget
 from cafe.pm.budget import PlanError
@@ -46,11 +47,61 @@ def test_the_member_cost_matters_too_but_far_less_than_the_batch_cost():
     assert batches_dear < base and members_dear < base
 
 
-def test_the_ensemble_never_falls_below_one_batch_and_batch_never_exceeds_it():
-    p = budget.plan("4h", 0, MISSION, thr=thr(1e6, 1e3), vehicle_classes=CLASSES)
-    assert p["n_max"] == budget.BATCH["4h"] and p["batch"] == budget.BATCH["4h"] and p["n_min"] == p["n_max"]     # n_min is capped at what fits
-    absurd = budget.plan("ci", 0, MISSION, thr=thr(1e4, 1e4), vehicle_classes=CLASSES)
-    assert absurd["n_max"] == budget.BATCH["ci"] == 16 and absurd["n_min"] == min(budget.N_MIN["ci"], 16) and absurd["refit_iterations"] == 0
+def test_a_batch_that_does_not_fit_the_share_is_halved_to_the_largest_that_does_and_the_plan_says_so():
+    p = budget.plan("quick", 0, MISSION, thr=thr(27.0, 0.1), vehicle_classes=CLASSES)             # 486 s per batch + 1.8 s per member; share 540 s
+    assert 486.0 + 32 * 1.8 > p["stage1_share_s"] == 540.0 and 486.0 + 16 * 1.8 <= 540.0
+    assert p["batch"] == p["n_max"] == 16 and p["stage1_s"] == pytest.approx(486.0 + 16 * 1.8) and p["stage1_s"] <= p["stage1_share_s"]
+    assert any("batch shrunk from 32 to 16 members" in n and "540 s" in n for n in p["notes"])
+    assert p["n_min"] == 16 and p["certify_possible"] is False
+
+
+def test_when_not_even_the_smallest_batch_fits_the_plan_refuses_and_names_the_shortfall():
+    with pytest.raises(PlanError, match=r"--budget 4h: stage 1 needs 18072000 s for even one batch of 4 members .* share of the 14400 s budget is 6480 s: "
+                                        r"short by 18065520 s"):
+        budget.plan("4h", 0, MISSION, thr=thr(1e6, 1e3), vehicle_classes=CLASSES)
+    with pytest.raises(PlanError, match="short by"):
+        budget.plan("ci", 0, MISSION, thr=thr(1e4, 1e4), vehicle_classes=CLASSES)
+
+
+@settings(max_examples=60, deadline=None)
+@given(st.sampled_from(list(budget.BUDGET_S)), st.floats(0.0, 5e3), st.floats(0.0, 50.0))
+def test_the_plan_never_predicts_more_stage_1_time_than_its_share(name, batch_day, member_day):
+    try:
+        p = budget.plan(name, 0, MISSION, thr=thr(batch_day, member_day), vehicle_classes=CLASSES)
+    except PlanError:
+        return
+    assert p["stage1_s"] <= p["stage1_share_s"] * (1 + 1e-9) and p["n_max"] % p["batch"] == 0 and p["batch"] >= budget.MIN_BATCH
+
+
+def test_a_stage_1_rate_measured_under_load_or_on_another_mission_is_warned_about_in_the_plan():
+    t = thr(1.0, 0.05)
+    for e in t["stage1"].values():
+        e.update(cpus=8, load_1min=32.85, mission="missions/ci_fixture.yaml")
+    named = dict(MISSION, name="tepex_c_demo")
+    notes = budget.plan("quick", 0, named, thr=t, vehicle_classes=CLASSES)["notes"]
+    assert any("measured at load 32.9 on 8 CPUs (above 2)" in n for n in notes)
+    assert any("measured on mission 'ci_fixture', not 'tepex_c_demo'" in n for n in notes)
+    assert len([n for n in notes if "load" in n]) == 1                                         # one line for the three classes
+    for e in t["stage1"].values():
+        e.update(load_1min=1.5, mission_name="tepex_c_demo")
+    assert not [n for n in budget.plan("quick", 0, named, thr=t, vehicle_classes=CLASSES)["notes"] if "measured" in n]
+    for e in t["stage1"].values():
+        e.update(load_1min=2.5)
+    assert any("load 2.5" in n for n in budget.plan("quick", 0, named, thr=t, vehicle_classes=CLASSES)["notes"])
+
+
+def test_the_shipped_stage_1_measurement_is_flagged_as_contended():
+    notes = budget.plan("quick", 0, dict(MISSION, name="tepex_c_demo"), vehicle_classes=CLASSES)["notes"]
+    assert any("measured at load" in n for n in notes)
+
+
+def test_the_plan_says_when_the_emulator_cannot_train_at_this_budget():
+    dear = budget.plan("quick", 0, MISSION, thr=thr(26.0, 0.1), vehicle_classes=CLASSES)
+    em = budget.emulator_plan(dear)
+    assert not em["trains"] and em["variants_refit"] == em["variants_no_refit"] == 0 and em["note"] in dear["notes"]
+    assert "cannot train at this budget" in em["note"] and "0 of 6 variants" in em["note"]
+    cheap = budget.plan("quick", 0, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)
+    assert budget.emulator_plan(cheap)["trains"] and not any("emulator" in n for n in cheap["notes"])
 
 
 def test_unmeasured_classes_use_the_labelled_fallback():
@@ -72,12 +123,10 @@ def test_bad_arguments_are_refused():
 
 
 def test_lbm_rate_cpu_gpu_measured_and_projected():
-    r, backend, src = budget.lbm_rate({"xlb-jax-cpu": dict(per_device=3e6, measured="d", device="cpu")}, 0)
-    assert (r, backend) == (3e6, "xlb-jax-cpu") and src.startswith("measured")
-    r, _, src = budget.lbm_rate({"jax-lbm-d3q19-cpu": dict(per_device=2e6, measured="d")}, 0)
-    assert r == 2e6 and "cpu" in src
+    r, backend, src = budget.lbm_rate({"jax-lbm-d3q19-cpu": dict(per_device=3e6, measured="d", device="cpu")}, 0)
+    assert (r, backend) == (3e6, "native-jax-cpu") and src.startswith("measured")
     r, backend, src = budget.lbm_rate({}, 0)
-    assert (r, backend) == (5e6, "xlb-jax-cpu") and "NOT MEASURED" in src
+    assert (r, backend) == (5e6, "native-jax-cpu") and "NOT MEASURED" in src
     r, backend, src = budget.lbm_rate({"xlb-warp-gpu": dict(per_device=1e10, measured="d", device="H100")}, 2)
     assert (r, backend) == (2e10, "xlb-warp") and "H100" in src
     r, _, src = budget.lbm_rate({}, 1)
@@ -87,6 +136,8 @@ def test_lbm_rate_cpu_gpu_measured_and_projected():
 def test_cpu_plan_is_labelled_as_the_fallback_and_gpu_plan_sizes_the_nest_cap():
     cpu = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
     assert cpu["les"]["cpu_fallback"] is True and cpu["les"]["label"].startswith("CPU fallback") and "max_cells" not in cpu["les"]
+    assert cpu["les"]["backend"] == "native-jax-cpu" and "XLB" not in cpu["les"]["label"] and "blended" not in cpu["les"]["label"]
+    assert "pooled window coefficient over the vehicle's Hangar-model value" in cpu["les"]["label"]
     gpu = budget.plan("4h", 1, MISSION, thr={}, gpu_mem_gb=48.0, vehicle_classes=CLASSES)
     assert gpu["les"]["cpu_fallback"] is False and gpu["les"]["label"] == "GPU LES windows" and gpu["les"]["gpu_mem_gb"] == 48.0
     assert gpu["les"]["max_cells"] == int(0.85 * 48e9 / 55.0)
@@ -104,7 +155,8 @@ def test_default_throughput_is_the_repo_file_and_a_missing_file_is_empty(tmp_pat
     f = tmp_path / "t.json"
     f.write_text(json.dumps({"stage1": {}}))
     assert budget.throughput(f) == {"stage1": {}}
-    assert budget.plan("ci", 0, MISSION, vehicle_classes=CLASSES)["budget_s"] == 600
+    day_and_a_half = dict(window=dict(start="2023-03-01T12:00:00Z", end="2023-03-03T00:00:00Z"))
+    assert budget.plan("ci", 0, day_and_a_half, vehicle_classes=CLASSES)["budget_s"] == 600
 
 
 def test_memory_guard_passes_a_fitting_nest_and_refuses_an_oversized_one_with_advice():
@@ -137,7 +189,7 @@ def test_wall_estimate_and_describe():
     assert budget.wall_estimate(big)["stage1"] <= budget.SHARE["stage1"] * budget.BUDGET_S["4h"]
     text = budget.describe(p)
     assert "budget quick (20 min), 0 GPU(s), 6.00 mission days" in text and "cannot certify" in text
-    assert "ensemble capped at 32 members" in text and "stage 3: 1 window(s)/vehicle on xlb-jax-cpu" in text
+    assert "ensemble capped at 32 members" in text and "stage 3: 1 window(s)/vehicle on native-jax-cpu" in text
     assert "glider_eq: 20 s/batch/day + 0.01 s/member/day, measured" in text
     assert "can certify" in budget.describe(budget.plan("overnight", 0, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES))
     assert budget.wall_estimate(budget.plan("ci", 0, MISSION, thr={}))["stage1"] == 0.0
@@ -231,3 +283,12 @@ def test_the_emulator_plan_is_variants_that_fit_the_train_fraction_of_the_share_
     assert budget.emulator_plan(cheap)["variants_refit"] == budget.EMULATOR_VARIANTS["quick"]                  # capped by the budget name
     free = dict(p, member_cost={})
     assert budget.emulator_plan(free)["variants_refit"] == 0 == budget.emulator_plan(free)["variants_no_refit"]    # nothing to price: none
+
+
+def test_stage3_assumptions_carry_the_assumed_refit_floors_from_the_yaml_only():
+    a = budget.stage3_assumptions()
+    assert a["refit.between_window_frac"] == 0.10 and a["refit.discretisation_frac"] == 0.05 and not hasattr(budget, "STAGE3_DEFAULTS")
+    from cafe.pm.config import assumptions
+    for k in ("stage3.refit.between_window_frac", "stage3.refit.discretisation_frac"):
+        e = assumptions()[k]
+        assert e["why"].startswith("ASSUMED") and e["replace_with"] and e["unit"] == "-"
