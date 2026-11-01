@@ -403,3 +403,15 @@ def test_gamma_edge():
     assert rare._gamma(np.zeros((5, 4), bool)) == 0.0
     chain = np.tile(np.array([[True, False, True, False]]), (6, 1))     # each chain stays where it started
     assert rare._gamma(chain) > 0                                        # perfectly repeated chains are correlated
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 3, M-2
+
+def test_extreme_ranks_gives_the_hypercube_ranks_of_the_few_members_for_the_most_extreme_parameters():
+    x = np.array([[0.9, 0.5, 0.1, 0.30], [0.1, 0.2, 0.8, 0.31], [0.5, 0.9, 0.5, 0.32], [0.3, 0.1, 0.9, 0.33], [0.7, 0.7, 0.2, 0.34]])
+    # ranks of the five rows in each column (0 = lowest): a [4 0 2 1 3], b [2 1 4 0 3], c [0 3 2 4 1], d [0 1 2 3 4]; the few are rows 0 and 3
+    few = np.array([True, False, False, True, False])
+    # mean rank of the few against the middle rank 2: a 2.5, b 1, c 2, d 1.5 -> distances 0.5, 1, 0, 0.5; ties keep the column order
+    assert SE.extreme_ranks(["a", "b", "c", "d"], x, few) == [("b", [0, 2]), ("a", [1, 4]), ("d", [0, 3])]
+    assert SE.extreme_ranks(["a", "b", "c", "d"], x, few, top=1) == [("b", [0, 2])]
+    assert SE.extreme_ranks(["a", "b", "c", "d"], x, np.array([False, True, False, False, False]), top=2) == [("a", [0]), ("b", [1])]

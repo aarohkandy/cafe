@@ -970,28 +970,29 @@ def _row_ok(ok, series=None, part="body"):
 
 
 def test_no_passed_window_writes_no_calibration_and_the_ledger_says_so(tmp_path):
-    f = tmp_path / "subgrid.json"
-    f.write_text((sg_mod._CFG_DIR / "subgrid.json").read_text())
-    before = f.read_text()
+    out = tmp_path / "stage3" / "subgrid_calibration.json"
+    out.parent.mkdir()
+    out.write_text('{"source_run": "an earlier attempt"}')
     series = dict(u=[0.0], dt=1.0, U=6.0, ustar=0.3, z=10.0)
     L = FakeL()
-    assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [_row_ok(False, series)]}, L, f) is None            # a failed window's series is never used
-    assert f.read_text() == before and L.notes == ["sub-grid layer uncalibrated: no LES window passed its self-checks; config/subgrid.json was not written"]
+    assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [_row_ok(False, series)]}, L) is None            # a failed window's series is never used
+    assert not out.exists()                                         # and a file left by an earlier attempt is not this attempt's
+    assert L.notes == ["sub-grid layer uncalibrated: no LES window passed its self-checks; stage3/subgrid_calibration.json was not written"]
     assert L.checks["subgrid_calibration_written_only_from_passed_windows"] == (True, 0, 0)
 
 
 def test_passed_windows_that_resolved_no_turbulence_write_nothing_and_say_why(tmp_path):
-    f = tmp_path / "subgrid.json"
-    f.write_text((sg_mod._CFG_DIR / "subgrid.json").read_text())
-    before = f.read_text()
     L = FakeL()
-    assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [_row_ok(True)]}, L, f) is None
-    assert f.read_text() == before and "1 window(s) passed but none carries a resolved inflow-turbulence series" in L.notes[0] and "uniform" in L.notes[0]
+    assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [_row_ok(True)]}, L) is None
+    assert not (tmp_path / "stage3" / "subgrid_calibration.json").exists()
+    assert "1 window(s) passed but none carries a resolved inflow-turbulence series" in L.notes[0] and "uniform" in L.notes[0]
 
 
-def test_a_passed_window_with_a_series_is_written_with_its_run_and_uncertainty_and_a_failed_one_is_not_used(tmp_path, monkeypatch):
-    f = tmp_path / "subgrid.json"
-    f.write_text((sg_mod._CFG_DIR / "subgrid.json").read_text())
+def test_a_passed_window_with_a_series_is_written_to_the_run_not_to_the_tracked_config(tmp_path, monkeypatch):
+    """Round 3 M-23: stage 3 rewrote config/subgrid.json, which code_digest hashes, so a run that calibrated invalidated its own checkpoints and left the
+    tree dirty. Its calibration is now stage3/subgrid_calibration.json of the run, and the tracked file is byte-identical afterwards."""
+    shipped = sg_mod._CFG_DIR / "subgrid.json"
+    before = shipped.read_bytes()
     good, bad = dict(u=[1.0], dt=1.0, U=6.0, ustar=0.3, z=10.0), dict(u=[9.0], dt=1.0, U=6.0, ustar=0.3, z=10.0)
     seen = []
 
@@ -1002,11 +1003,14 @@ def test_a_passed_window_with_a_series_is_written_with_its_run_and_uncertainty_a
     monkeypatch.setattr(sg_mod, "recalibrate", fake)
     L = FakeL()
     ctx = fake_ctx(tmp_path / "run_7")
-    cal = pw.recalibrate_subgrid(ctx, {"g": [_row_ok(True, good), _row_ok(False, bad)]}, L, f)
+    cal = pw.recalibrate_subgrid(ctx, {"g": [_row_ok(True, good), _row_ok(False, bad)]}, L)
     assert cal is not None and [w["u"] for w in seen] == [[1.0]] and seen[0]["label"] == "g body t=1000000000"
-    new = sg_mod.load_config(f)["calibration"]
-    assert new["source_run"] == "run_7" and new["sigma_u_over_ustar"] == 2.9 and new["uncertainty"]["sigma_u_over_ustar"] == 0.2
+    new = json.loads((tmp_path / "run_7" / "stage3" / "subgrid_calibration.json").read_text())
+    assert new["source_run"] == "stage 3 of this run (stage3/subgrid_calibration.json)" and new["sigma_u_over_ustar"] == 2.9
+    assert new["uncertainty"]["sigma_u_over_ustar"] == 0.2 and new["windows"] == 1
+    assert shipped.read_bytes() == before and sg_mod.load_config()["calibration"]["source_run"] is None
     assert "recalibrated from 1 passed window(s): sigma_u/u* = 2.9 +- 0.2, length_scale_factor = 1.2 +- 0.1" in L.notes[0] and "w2: too short" in L.notes[0]
+    assert "stage3/subgrid_calibration.json" in L.notes[0] and "config/subgrid.json" not in L.notes[0]
     assert L.checks["subgrid_calibration_written_only_from_passed_windows"][0]
 
 

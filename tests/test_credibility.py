@@ -344,7 +344,9 @@ def test_validation_with_a_failing_row_stays_at_two(run, data):
 def test_stored_stage3_receipts_have_e_but_no_u_val(data):
     rec = data / "receipts"
     rec.mkdir(parents=True)
-    (rec / "nest_sphere_100.json").write_text(json.dumps(dict(cd=1.2, d=16, shape=[14, 8, 8])))
+    (rec / "nest_sphere_100_d8.json").write_text(json.dumps(dict(cd=1.6, d=8, shape=[7, 4, 4])))
+    (rec / "nest_sphere_100_d16.json").write_text(json.dumps(dict(cd=1.2, d=16, shape=[14, 8, 8])))               # stage 3 stores one file per resolution
+    (rec / "nest_sphere_100_d12.json").write_text(json.dumps(dict(cd=1.4, d=12, shape=[10, 6, 6])))
     (rec / "lbm_sphere_100.json").write_text(json.dumps(dict(cd=1.5, ref=1.087, d=12)))
     (rec / "lbm_sphere_1000.json").write_text(json.dumps(dict(cd=0.6, ref=0.47)))
     (rec / "wm_flat_plate.json").write_text(json.dumps(dict(cf=0.0035, ittc=0.0030, re=1e6, err=0.17)))
@@ -352,13 +354,18 @@ def test_stored_stage3_receipts_have_e_but_no_u_val(data):
     rows = {r["id"]: r for r in cr.vv20_rows(data)}
     from cafe.pm.stage3 import lbm
     n = rows["nest_sphere:Re100"]
-    assert n["D"] == pytest.approx(lbm.morrison(100.0)) and n["E"] == pytest.approx(1.2 - lbm.morrison(100.0)) and "d = 16 cells" in n["note"]
+    assert n["D"] == pytest.approx(lbm.morrison(100.0)) and n["E"] == pytest.approx(1.2 - lbm.morrison(100.0))
+    assert "d = 16 cells (d = 8 and 12 also stored)" in n["note"]
+    # round 3 M-11: the row used to read "nest_sphere_100.json is not stored"
+    assert n["source"].endswith("nest_sphere_100_d16.json")
     assert rows["lbm_sphere:Re100"]["D"] == 1.087 and rows["lbm_sphere:Re100"]["E"] == pytest.approx(1.5 - 1.087)
     assert rows["wallmodel:wm_flat_plate"]["E"] == pytest.approx(0.0005) and rows["wallmodel:wm_channel"]["D"] == 0.0062
     for k in ("nest_sphere:Re100", "lbm_sphere:Re1000", "wallmodel:wm_channel"):
         assert rows[k]["status"] == "run" and rows[k]["u_val"] is None and rows[k]["validated"] is None
     for k in ("nest_sphere:Re1000", "nest_sphere:Re1e4", "lbm_sphere:Re1e4"):
         assert rows[k]["status"] == "not run" and rows[k]["note"].startswith("not run:")
+    assert rows["nest_sphere:Re1000"]["note"] == f"not run: no nest_sphere_1000_d*.json under {rec}"
+    assert rows["lbm_sphere:Re1e4"]["note"] == "not run: lbm_sphere_1e4.json is not stored"
 
 
 def test_only_stored_rows_without_uncertainty_give_validation_level_one(run, data):
@@ -524,6 +531,23 @@ def test_the_priors_come_from_stage_1b_else_stage_1_else_none(run, tmp_path):
     assert cr.run_priors(run) == json.loads((run / "stage1" / "summary.json").read_text())["priors"]
 
 
+def test_a_fitted_sigma_is_listed_as_fitted_with_both_values_and_is_not_an_assumed_input(run, data):
+    """Round 3 M-12: the TAO fit replaces env.sigma.sst_k and t2_k (Context.env), but the page listed 0.5 K and 1.0 K as this run's assumed inputs."""
+    def sig(c):
+        return {i["id"].split(":")[1]: i for i in c["assumed_inputs"] if i["id"].startswith("assumptions.yaml:env.sigma.")}
+    base = cr.build(run, REAL, data)
+    assert {i["kind"] for i in sig(base).values()} == {"assumed"} and sig(base)["env.sigma.sst_k"]["value"] == "0.5"
+    (run / "ingest").mkdir(exist_ok=True)
+    (run / "ingest" / "env_sigmas_fitted.json").write_text(json.dumps(dict(sst_k=0.2592, t2_k=1.1908)))
+    c = cr.build(run, REAL, data)
+    s = sig(c)
+    assert s["env.sigma.sst_k"]["kind"] == "fitted" and s["env.sigma.sst_k"]["value"] == "this run used 0.259 (fitted from the TAO comparison); assumed 0.5"
+    assert s["env.sigma.t2_k"]["kind"] == "fitted" and "this run used 1.19" in s["env.sigma.t2_k"]["value"] and "assumed 1.0" in s["env.sigma.t2_k"]["value"]
+    assert s["env.sigma.q2_frac"]["kind"] == "assumed" and len(c["assumed_inputs"]) == len(base["assumed_inputs"])         # only the two are re-labelled
+    n = lambda cc: sum(i["kind"] == "assumed" for i in cc["assumed_inputs"])
+    assert n(c) == n(base) - 2
+
+
 def test_the_credibility_json_lists_the_priors_the_run_drew(run, data):
     edit(run / "stage1b" / "summary.json", lambda d: d["priors"].update(wind_speed_bias=dict(dist="normal", mean=-0.616, sd=1.328)))
     c = cr.build(run, REAL, data)
@@ -544,7 +568,9 @@ def test_the_sanity_block_compares_each_verdict_with_the_briefs_expected_outcome
         e = (s["vehicles"] | s["links"])[k]
         assert r["observed"] == e["verdict"]["verdict"] and (r["k_fail"], r["n"]) == (e["k_fail"], e["n"]), k
     assert rows["glider_eq"]["observed"] == "GO" and rows["glider_eq"]["agrees"] is False                  # the brief expects MARGINAL or NO-GO at a station
-    assert rows["glider_2n"]["agrees"] is True and rows["usv"]["agrees"] == (rows["usv"]["observed"] in ("MARGINAL", "GO"))
+    # round 3 M-1: glider_2n is a drift glider on a fixed heading; its GO is not agreement with anything the mission asks
+    assert rows["glider_2n"]["observed"] == "GO" and rows["glider_2n"]["agrees"] is None and "no mission criterion" in rows["glider_2n"]["detail"]
+    assert rows["usv"]["agrees"] == (rows["usv"]["observed"] in ("MARGINAL", "GO"))
     assert rows["uas"]["agrees"] is None and rows["uas"]["allowed"] is None and rows["glider_eq-ship-acoustic"]["agrees"] is None
     assert rows["usv-uas-rf"]["agrees"] is True
 
@@ -567,6 +593,15 @@ def test_the_acoustic_sanity_row_reads_the_runs_ship_distance(run, data, verdict
     edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["glider_eq-ship-acoustic"]["verdict"].update(verdict=verdict))
     row = next(r for r in cr.build(run, REAL, data)["sanity"]["rows"] if r["id"] == "glider_eq-ship-acoustic")
     assert row["agrees"] is agrees and words in row["detail"] and "NO-GO beyond it" in row["expected"]
+
+
+def test_a_station_glider_still_has_a_checked_sanity_row_and_only_a_drift_one_is_exempt(run, data):
+    """Round 3 M-1: the exemption follows task.mode in the run's mission, not the vehicle id."""
+    assert next(r for r in cr.build(run, REAL, data)["sanity"]["rows"] if r["id"] == "glider_eq")["agrees"] is False
+    m = (run / "mission.yaml").read_text()
+    assert m.count("mode: drift") == 1
+    (run / "mission.yaml").write_text(m.replace("mode: drift", "mode: station"))                         # no longer a drift glider: back to being compared
+    assert next(r for r in cr.build(run, REAL, data)["sanity"]["rows"] if r["id"] == "glider_2n")["agrees"] is True
 
 
 def test_the_usv_sanity_row_prints_the_speed_ratio_beside_chiodis(run, data):
@@ -617,6 +652,16 @@ def test_the_sub_grid_layer_is_uncalibrated_when_the_stage_3_ledger_says_so_or_t
     assert cr.subgrid_uncalibrated(run, none) == "sub-grid layer uncalibrated: no LES window passed"
     assert cr.subgrid_uncalibrated(run, tmp_path / "missing") == "sub-grid layer uncalibrated: no LES window passed"
     assert "source_run is null" in cr.subgrid_uncalibrated(run / "nope", tmp_path / "missing")                 # no ledger and no config: nothing calibrated it
+
+
+def test_a_run_that_wrote_its_own_calibration_is_calibrated_even_though_the_tracked_config_is_not(run, tmp_path):
+    """Round 3 M-23: stage 3 no longer writes config/subgrid.json; its calibration is stage3/subgrid_calibration.json."""
+    none = subgrid_root(tmp_path / "a", None)
+    assert "source_run is null" in cr.subgrid_uncalibrated(run, none)
+    (run / "stage3" / "subgrid_calibration.json").write_text(json.dumps(dict(source_run="stage 3 of this run", sigma_u_over_ustar=2.5)))
+    assert cr.subgrid_uncalibrated(run, none) is None
+    (run / "stage3" / "subgrid_calibration.json").write_text(json.dumps(dict(source_run=None)))
+    assert "source_run is null" in cr.subgrid_uncalibrated(run, none)
 
 
 def test_an_uncalibrated_sub_grid_layer_is_a_limitation_that_caps_validation_and_uncertainty(run, data, monkeypatch):

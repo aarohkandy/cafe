@@ -13,6 +13,7 @@ import numpy as np
 
 from cafe.pm import budget, config, ledger, stage1
 from cafe.pm.audit import STAGES
+from cafe.pm.pipeline import BASIS
 from cafe.pm.stage3 import refit as refit_mod
 from cafe.pm.stats import intervals
 
@@ -163,7 +164,8 @@ def make_run(run, *, budget_name="quick", thr=None, git="abc1234", ledgers=True,
     out = {"stage1": _dump_stage1(run, "stage1", r1, top1)}
     out["stage1b"] = _dump_stage1(run, "stage1b", r1b, top1b)
     vids = list(top1["summary"]["vehicles"])
-    wins = {vid: [dict(t=T0 + 3600.0 * (10 + 8 * i), stress=8.0 + i, lon=-170.0 + i, lat=0.5 * i, basis="failed members" if i == 0 else "all members")
+    wins = {vid: [dict(t=T0 + 3600.0 * (10 + 8 * i), stress=8.0 + i, lon=-170.0 + i, lat=0.5 * i, basis=BASIS[i == 0],
+                       failed_at=[T0 + 3600.0 * 14] if i == 0 else [])
                   for i in range(2 if vid == "glider_eq" else 1)] for vid in vids}
     out["windows"] = [_write(run / "windows" / "windows.json", wins)]
     rows = stage3_rows(vids)

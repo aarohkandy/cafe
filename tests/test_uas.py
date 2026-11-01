@@ -615,3 +615,21 @@ def test_a_gust_series_that_demands_more_than_the_clamp_shows_in_the_diagnostics
     gust[1, :, 0] = 9.0                                              # member 1 flies in a 9 m/s mean error the launch gate never saw
     r = fly(plat=plat, M=2, turb=gust, heading_deg=[270.0, 270.0])   # legs run west, into the 9 m/s that blows toward the east
     assert r["sat_s"][0] < 10.0 and r["demand_ratio_max"][0] < 1.6 and r["sat_s"][1] > 100.0 and r["demand_ratio_max"][1] > 3.0
+
+
+# ------------------------------------------------------------------------------------------------ review round 3
+
+def test_first_failure_times_are_float64_so_they_survive_the_sum_with_a_launch_time_in_epoch_seconds():
+    """M-6: t_first came back float32 from JAX; added to a 2023 epoch time (1.7e9 s) the sum has 128 s resolution, so the first and the median failure
+    of a run printed the same second."""
+    t_launch = 1677892992.0 + 37.3                                                               # not a multiple of 128 s
+    r = fly(scale=dict(battery=[1.0, 0.2]), t=t_launch)
+    for k, v in r["t_first"].items():
+        assert v.dtype == np.float64, k
+    t1 = r["t_first"]["battery_reserve"][1]
+    assert 30.0 < t1 <= r["t_end"][1]
+    assert (t1 + t_launch) - t_launch == pytest.approx(t1, abs=1e-6)                             # float32 would be off by up to 64 s
+    assert (t1 + t_launch) % 128.0 != 0.0
+    m = uas.fly_mission(AnalyticEnv(wind=(0.0, 0.0)), uas.steaming(), [t_launch], M=2, origin=ORIGIN, plat=fast_plat(),
+                        scale=dict(battery=[1.0, 0.2]))["mission"]
+    assert m["t_first"]["battery_reserve"][1] == pytest.approx(t_launch + t1, abs=1e-6)

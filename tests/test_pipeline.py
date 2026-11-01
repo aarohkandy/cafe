@@ -142,16 +142,36 @@ def test_code_digest_sees_added_and_renamed_files_but_not_files_outside_its_scop
     assert pipeline.code_digest() not in (base, added)                                                       # same bytes, other name
 
 
-def test_code_digest_covers_the_versions_of_jax_numpy_and_scipy_and_no_other_library(tmp_path, monkeypatch):
+def test_code_digest_covers_every_installed_library_version_and_the_python_minor_but_not_its_patch(tmp_path, monkeypatch):
+    """Round 3 M-22: a new gsw, smt, xlb or statsmodels left every ledger "up to date"; the digest named only jax, numpy and scipy."""
     code_tree(tmp_path)
     monkeypatch.setattr(pipeline, "__file__", str(tmp_path / "cafe" / "pm" / "pipeline.py"))
-    v = ledger.versions()
+    v = dict(ledger.versions(), python="3.12.4")
+    monkeypatch.setattr(ledger, "versions", lambda: dict(v))
     base = pipeline.code_digest()
-    for lib in pipeline.HASHED_LIBS:
+    for lib in ledger.LIBS:
         monkeypatch.setattr(ledger, "versions", lambda lib=lib: dict(v, **{lib: "0.0.1"}))
         assert pipeline.code_digest() != base, lib
-    monkeypatch.setattr(ledger, "versions", lambda: dict(v, xarray="0.0.1", python="2.7"))
+    monkeypatch.setattr(ledger, "versions", lambda: dict(v, python="3.12.9"))
+    assert pipeline.code_digest() == base                                                                    # the patch level is not part of it
+    monkeypatch.setattr(ledger, "versions", lambda: dict(v, python="3.13.0"))
+    assert pipeline.code_digest() != base
+    monkeypatch.setattr(ledger, "versions", lambda: dict(v, xlb=None))                                       # a library that is not installed is left out
+    assert pipeline.code_digest() != base
+    monkeypatch.setattr(ledger, "versions", lambda: dict(v, newlib=None))
     assert pipeline.code_digest() == base
+
+
+def test_the_resume_hash_does_not_depend_on_how_the_mission_path_is_spelled(tmp_path):
+    """Round 3 M-21: the mission dict carried `_path` as typed, so ./m.yaml, an absolute path and a path through .. hashed differently."""
+    d = tmp_path / "sub"
+    d.mkdir()
+    m = d / "m.yaml"
+    m.write_text(MISSION_PATH.read_text())
+    a = ctx_for(tmp_path / "r", mission=m)
+    b = ctx_for(tmp_path / "r", mission=d / ".." / "sub" / "m.yaml")
+    c = ctx_for(tmp_path / "r", mission=str(m))
+    assert a.mission["_path"] != b.mission["_path"] and a.hash == b.hash == c.hash
 
 
 def test_a_changed_cafe_module_outside_cafe_pm_reruns_the_stages(tmp_path, monkeypatch):
@@ -396,10 +416,10 @@ def test_hangar_fails_on_a_platform_number_without_provenance(tmp_path, monkeypa
     leaf = "antenna_height_m: {value: 0.3,      unit: m,        assumed: "
     f.write_text(f.read_text().replace(leaf + "true", leaf + "false"))
     assert "assumed: false" in f.read_text()
+    ctx = ctx_for(tmp_path / "r")        # load_mission loads each platform at validation: the mission is read before the file is broken
     for mod in (config, glider, usv):
         monkeypatch.setattr(mod, "PLATFORMS", plat)
     monkeypatch.setattr(uas, "PLATFORM", plat / "quad_uas.yaml")
-    ctx = ctx_for(tmp_path / "r")
     with pytest.raises(ledger.StageFailed, match="provenance_slocum"):
         run_stage(pipeline.s_hangar, ctx, "hangar")
     d = read_ledger(tmp_path / "r", "hangar")
@@ -852,7 +872,8 @@ def track_res(t, M, tracks, fail, cls):
     for m, k in fail.items():
         lon[k:, m] = np.nan
         lat[k:, m] = np.nan
-    return {"class": cls, "t": t, "lon": lon, "lat": lat, "fail": {"mode": np.array([m in fail for m in range(M)])}}
+    first = np.array([t[fail[m]] if m in fail else np.nan for m in range(M)])
+    return {"class": cls, "t": t, "lon": lon, "lat": lat, "fail": {"mode": np.array([m in fail for m in range(M)])}, "first": {"mode": first}}
 
 
 def stress_of(env, cls, lon, lat, t):
@@ -883,7 +904,7 @@ def test_windows_pick_the_strongest_forcing_per_class_at_least_6_h_apart(tmp_pat
     for vid, cls in (("g", "glider"), ("s", "usv"), ("u", "uas")):
         ws, env = wins[vid], ctx.env
         ref = stress_of(env, cls, np.full(t.size, -165.0), np.full(t.size, 0.0), t)
-        assert len(ws) == 3 and all(w["basis"] == "all members" and w["lon"] == -165.0 and w["lat"] == 0.0 for w in ws)
+        assert len(ws) == 3 and all(w["basis"] == pipeline.BASIS[False] and w["failed_at"] == [] and w["lon"] == -165.0 and w["lat"] == 0.0 for w in ws)
         assert ws[0]["t"] == t[int(np.argmax(ref))] and ws[0]["stress"] == pytest.approx(ref.max())
         assert [w["stress"] for w in ws] == sorted((w["stress"] for w in ws), reverse=True)
         assert all(w["stress"] == pytest.approx(ref[int(round((w["t"] - T0) / 600.0))]) for w in ws)
@@ -905,7 +926,10 @@ def test_windows_of_a_vehicle_that_failed_come_from_the_members_that_failed(tmp_
     ctx = window_ctx(tmp_path, {"clean": ok, "failed": failed})
     run_stage(pipeline.s_windows, ctx, "windows")
     wins = json.loads((ctx.run_dir / "windows" / "windows.json").read_text())
-    assert {w["basis"] for w in wins["clean"]} == {"all members"} and {w["basis"] for w in wins["failed"]} == {"failed members"}
+    assert {w["basis"] for w in wins["clean"]} == {pipeline.BASIS[False]} and {w["basis"] for w in wins["failed"]} == {pipeline.BASIS[True]}
+    # round 3 M-10: the numbers are the analysis field at the failed members' tracks, and the page must not say they are what the failed members met
+    assert "analysis-field" in pipeline.BASIS[True] and "before the member perturbations" in pipeline.BASIS[True]
+    assert all(w["failed_at"] == [float(t[120]), float(t[120])] for w in wins["failed"]) and all(w["failed_at"] == [] for w in wins["clean"])
     assert all(w["t"] < t[120] for w in wins["failed"]) and all(w["lon"] == -164.0 and w["lat"] == 1.0 for w in wins["failed"])
     ref = stress_of(ctx.env, "uas", np.full(121, -164.0), np.full(121, 1.0), t[:121])
     assert wins["failed"][0]["stress"] == pytest.approx(ref.max()) and wins["failed"][0]["t"] == t[int(np.argmax(ref))]
@@ -951,6 +975,45 @@ def test_stage3_hands_the_windows_to_the_adapter_and_stores_its_rows(tmp_path, m
     assert json.loads((ctx.run_dir / "stage3" / "windows.json").read_text()) == {"usv": [stage3_row()]}
     assert d["inputs"][0]["ref"].endswith("windows/windows.json") and d["inputs"][0]["sha256"]
     assert [pathlib.Path(o["path"]).name for o in d["outputs"]] == ["windows.json"]
+
+
+def test_a_calibrating_run_leaves_the_tracked_config_alone_and_later_stages_read_its_own_file(tmp_path, monkeypatch):
+    """Round 3 M-23: stage 3 rewrote config/subgrid.json, which code_digest hashes: the next `run` found every stage out of date, stage 1 reran with the new
+    calibration and the tree was left dirty. The calibration is now stage3/subgrid_calibration.json (a hashed output); stages after stage 3 read it."""
+    from cafe.pm.env import subgrid
+    from cafe.pm.stage3 import pipeline_windows as pw
+    shipped = subgrid._CFG_DIR / "subgrid.json"
+    before, digest = shipped.read_bytes(), pipeline.code_digest()
+    ctx = ctx_for(tmp_path / "r")
+    ctx.path("windows", "windows.json").write_text(json.dumps({"usv": [dict(t=1.0, stress=2.0, lon=-165.0, lat=0.0, basis="b")]}))
+    cal = dict(subgrid.load_config()["calibration"], sigma_u_over_ustar=2.9)
+    monkeypatch.setattr(subgrid, "recalibrate", lambda series: dict(calibration=cal, uncertainty=dict(sigma_u_over_ustar=0.2, length_scale_factor=0.1),
+                                                                    windows=[dict(label="w")], skipped=[]))
+
+    def run(c, w, L):
+        pw.recalibrate_subgrid(c, {"usv": [dict(stage3_row(), part="hull", t=1.0, inflow_series=dict(u=[1.0], dt=1.0, U=6.0, ustar=0.3, z=10.0))]}, L)
+        return {"usv": [stage3_row()]}
+    fake_module(monkeypatch, "cafe.pm.stage3.pipeline_windows", run=run, recalibrate_subgrid=pw.recalibrate_subgrid)
+    d = run_stage(pipeline.s_stage3, ctx, "stage3")
+    assert [pathlib.Path(o["path"]).name for o in d["outputs"]] == ["windows.json", "subgrid_calibration.json"]
+    assert shipped.read_bytes() == before and pipeline.code_digest() == digest and ledger.done(ctx.run_dir, "stage3", ctx.hash)      # resume: up to date
+    # stage 3 itself ran on the shipped one
+    assert subgrid.load_config()["calibration"]["source_run"] is None
+    with ledger.Ledger(ctx.run_dir, "refit", ctx.hash) as L:
+        pipeline.use_run_calibration(ctx, L)
+    assert subgrid.load_config()["calibration"]["sigma_u_over_ustar"] == 2.9 and L.d["inputs"][0]["ref"].endswith("stage3/subgrid_calibration.json")
+    # a new Context starts from the shipped one
+    ctx2 = ctx_for(tmp_path / "r")
+    assert subgrid.load_config()["calibration"]["source_run"] is None and ctx2.hash == ctx.hash
+
+
+def test_without_a_calibration_file_the_stages_after_stage_3_use_the_shipped_one(tmp_path):
+    from cafe.pm.env import subgrid
+    ctx = ctx_for(tmp_path / "r")
+    subgrid.use_calibration(dict(source_run="leftover"))
+    with ledger.Ledger(ctx.run_dir, "refit", ctx.hash) as L:
+        pipeline.use_run_calibration(ctx, L)
+    assert subgrid.load_config()["calibration"]["source_run"] is None and L.d["inputs"] == []
 
 
 def refit_run(tmp_path, rows, refit_iterations=2):
@@ -1273,7 +1336,9 @@ def test_the_variant_runs_stay_inside_the_emulator_share(tmp_path, table, fake_s
     assert design["variant_s"] == est and design["variant_s_source"].startswith("the planner's estimate")
     assert design["rows_added"] == 4 * 4 and design["table_rows"] == 16 and design["planned_variants"] == 3
     assert design["spent_s"] == 3 * est                                                                        # charged at the plan's cost, not the clock
-    assert [c[1] for c in fake_stage1][:3] == [list(range(16))] * 3 and [c[0] for c in fake_stage1][:3] == [["glider_eq", "glider_2n", "usv", "uas"]] * 3
+    # round 3 M-4: variant k runs its own members (k + 1) x batch .. (k + 2) x batch - 1, not the baseline's 0..batch-1 that every variant used to share
+    assert [c[1] for c in fake_stage1][:3] == [list(range(16 * (k + 1), 16 * (k + 2))) for k in range(3)]
+    assert [c[0] for c in fake_stage1][:3] == [["glider_eq", "glider_2n", "usv", "uas"]] * 3
     assert check_of(d, "emulator_variants_within_share")["ok"] and check_of(d, "emulator_rows_appended")["value"] == 16
     assert any("3 variant run(s) of 4 s each (the planner's estimate" in n for n in d["notes"]) and any("incl. stage 1b" in n for n in d["notes"])
     refit = cheap_plan(synthetic_ctx(tmp_path, 48, "refit"), 100.0)                                            # glider_eq was refit: share 5 s -> none
@@ -1396,10 +1461,10 @@ def test_a_row_another_run_appends_while_the_stage_runs_does_not_reach_this_runs
     other = dict(whatif.read_table(table).iloc[0].to_dict(), key="other|glider|base", run_id="other")
     real, seen = whatif.train, []
 
-    def train(tab, classes, path=None, df=None):
+    def train(tab, classes, path=None, df=None, **kw):
         whatif.add_rows(table, [other])                                                                       # a concurrent run finishes right now
         seen.append(len(df))
-        return real(tab, classes, path, df)
+        return real(tab, classes, path, df, **kw)
     monkeypatch.setattr(whatif, "train", train)
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48), 10.0)
     run_stage(pipeline.s_emulator, ctx, "emulator")
@@ -1532,6 +1597,29 @@ def test_the_stage_learns_from_what_the_table_already_holds(tmp_path, table, fak
     g = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]["glider_eq"]
     assert g["emulator"] and any(t["method"] == "EMULATED" for t in g["tried"])
     assert all(t["method"] != "Stage 1" for t in g["tried"]) or not g["found"]
+
+
+def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, table, fake_stage1, monkeypatch):
+    """Round 3 M-4: variant k runs members (k + 1) x batch.., the baseline 0..batch-1, and the hold-out's fresh-draw check runs blocks after the variants'."""
+    from cafe.pm import whatif
+    seed_table(table, n=100)                                         # 100 rows + this run's glider rows: just enough distinct points to train
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)                  # share 20 s: three variants
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    n_var = len(design["variants"])
+    h = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())["glider_eq"]
+    assert h["trained"] and "its own members" in h["draws"] and n_var >= 1
+    runs = [c[1] for c in fake_stage1]
+    variants, later = runs[:n_var], runs[n_var:]
+    assert variants == [list(range(16 * (k + 1), 16 * (k + 2))) for k in range(n_var)]
+    fresh_blocks = [m for m in later if m[0] >= 16 * (n_var + 2)]
+    assert len(fresh_blocks) == h["fresh_points"] and len({m[0] for m in fresh_blocks}) == len(fresh_blocks)         # each fresh draw its own unused block
+    assert h["fresh_points"] == 0 or (h["rmse_gate"] >= h["rmse_debiased"] and h["rmse_gate"] >= h["rmse_fresh_debiased"])
+    note = check_of(d, "emulator_rmse_glider")["note"]
+    assert ("point(s) re-run on fresh members:" in note) == bool(h["fresh_points"])
+    assert ("only the in-sample score is judged" in note) == (not h["fresh_points"])
+    assert h["fresh_points"] >= 1, "no variant row landed in the hold-out: the fresh-draw wiring is not exercised"
 
 
 # ---------------------------------------------------------------------------------------------------------------- report
@@ -1687,9 +1775,12 @@ def test_stage1_results_carry_the_platform_antennas_the_classes_and_no_simulator
 def test_windows_name_the_members_they_came_from(ci_runs):
     f = ci_runs.first
     for vid, ws in f.windows.items():
-        assert len(ws) == 1 and ws[0]["basis"] == ("failed members" if f.summary1["summary"]["vehicles"][vid]["k_fail"] else "all members")
-        assert T0 <= ws[0]["t"] <= T1 and set(ws[0]) == {"t", "stress", "lon", "lat", "basis", "criterion", "records"} and np.isfinite(ws[0]["stress"])
-    assert any(w[0]["basis"] == "failed members" for w in f.windows.values())                                           # the USV fails in this mission
+        assert len(ws) == 1 and ws[0]["basis"] == pipeline.BASIS[bool(f.summary1["summary"]["vehicles"][vid]["k_fail"])]
+        assert T0 <= ws[0]["t"] <= T1 and np.isfinite(ws[0]["stress"])
+        assert set(ws[0]) == {"t", "stress", "lon", "lat", "basis", "criterion", "records", "failed_at"}
+        k = f.summary1["summary"]["vehicles"][vid]["k_fail"]
+        assert (len(ws[0]["failed_at"]) == k or vid == "uas") and ws[0]["failed_at"] == sorted(ws[0]["failed_at"])
+    assert any(w[0]["basis"] == pipeline.BASIS[True] for w in f.windows.values())                                           # the USV fails in this mission
 
 
 def test_no_passing_window_means_no_refit_and_stage1b_is_a_copy(ci_runs):
@@ -2033,7 +2124,7 @@ def test_a_uas_window_is_chosen_only_among_the_records_where_a_selected_member_i
     w = json.loads((ctx.run_dir / "windows" / "windows.json").read_text())["u"][0]
     inside = np.flatnonzero(air.any(1))
     assert w["records"] == "airborne records" and w["t"] != t[best] and int(round((w["t"] - T0) / 600.0)) in inside
-    assert w["stress"] == pytest.approx(ref[inside].max()) and w["criterion"] == "10 m wind speed [m/s]"
+    assert w["stress"] == pytest.approx(ref[inside].max()) and w["criterion"] == pipeline.CRITERION["uas"] == "10 m wind speed [m/s] of the analysis field"
     assert check_of(d, "windows_are_the_argmax")["ok"]
 
 
@@ -2058,7 +2149,7 @@ def test_the_airborne_mask_follows_the_selected_members_and_leaves_other_classes
     run_stage(pipeline.s_windows, ctx, "windows")
     wins = json.loads((ctx.run_dir / "windows" / "windows.json").read_text())
     assert wins["failed"][0]["records"].startswith("all records (no selected member") and wins["g"][0]["records"] == "all records"
-    assert wins["g"][0]["criterion"] == "surface current speed [m/s]"
+    assert wins["g"][0]["criterion"] == pipeline.CRITERION["glider"] == "surface current speed [m/s] of the analysis field"
 
 
 def test_the_position_of_an_airborne_window_is_the_median_of_the_airborne_members_only(tmp_path, data):

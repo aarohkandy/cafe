@@ -21,6 +21,7 @@ import json
 import math
 import os
 import pathlib
+import re
 from typing import Any
 
 import yaml
@@ -112,18 +113,22 @@ EXPECTED: dict[str, dict[str, dict[str, Any]]] = {"tepex_c_demo": {
     "glider_eq-ship-acoustic": dict(allowed=None, distance=True, text="glider acoustic link GO within 3 km of the ship, NO-GO beyond it"),
     "glider_2n-ship-acoustic": dict(allowed=None, distance=True, text="glider acoustic link GO within 3 km of the ship, NO-GO beyond it"),
 }}
+DRIFT_DETAIL = "a drift glider has no mission criterion; GO means the battery and depth limits held on its fixed heading"
 SANITY_NOTE = ("BRIEF section 6, 'Expected outcome': what a correct tool should say about the demo mission, used as a sanity check and not as a "
                "target. It applies to that mission only, so no other mission has a sanity block. A disagreement is not a verdict on the model: it "
                "can be model bias, a threshold choice or the expectation itself.")
 
 
 def subgrid_uncalibrated(run: pathlib.Path, root: pathlib.Path = ROOT) -> str | None:
-    """"sub-grid layer uncalibrated: <reason>" when the stage-3 ledger says so (its own reason) or config/subgrid.json has no source_run (no passed
-    LES window has recalibrated it: the turbulence and gust statistics are the defaults); None when the layer was calibrated."""
+    """"sub-grid layer uncalibrated: <reason>" when the stage-3 ledger says so (its own reason) or neither the run's stage3/subgrid_calibration.json nor
+    config/subgrid.json has a source_run (no passed LES window has recalibrated it: the turbulence and gust statistics are the defaults); None when the
+    layer was calibrated."""
     led = _json(run / "checkpoints" / "stage3" / "ledger.json") or {}
     note = next((n for n in led.get("notes", []) if str(n).startswith(SUBGRID)), None)
     if note:
         return str(note)
+    if (_json(run / "stage3" / "subgrid_calibration.json") or {}).get("source_run"):          # this run's own calibration (round 3 M-23)
+        return None
     cfg = _json(root / "config" / "subgrid.json") or {}
     if (cfg.get("calibration") or {}).get("source_run") is None:
         return (f"{SUBGRID}: config/subgrid.json calibration.source_run is null, so no passed LES window has recalibrated it; "
@@ -203,9 +208,13 @@ def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None) -
     when that differs (a TAO-fitted prior), every platform leaf marked assumed."""
     items = []
     used = run_priors(run)
+    fit = (_json(run / "ingest" / "env_sigmas_fitted.json") if run else None) or {}               # the TAO fit Context.env feeds back as the tagged sigmas
     for k, e in (yaml.safe_load((root / "config" / "assumptions.yaml").read_text()) or {}).items():
-        items.append(dict(id=f"assumptions.yaml:{k}", file="config/assumptions.yaml", kind="assumed", value=repr(e.get("value")), unit=str(e.get("unit", "")),
-                          why=str(e.get("why", "")), replace_with=str(e.get("replace_with", ""))))
+        got = fit.get(k.removeprefix("env.sigma.")) if k.startswith("env.sigma.") else None
+        items.append(dict(id=f"assumptions.yaml:{k}", file="config/assumptions.yaml", kind="assumed" if got is None else "fitted",
+                          value=repr(e.get("value")) if got is None else f"this run used {got:.3g} (fitted from the TAO comparison); "
+                                                                         f"assumed {e.get('value')!r}",
+                          unit=str(e.get("unit", "")), why=str(e.get("why", "")), replace_with=str(e.get("replace_with", ""))))
     for k, e in (yaml.safe_load((root / "config" / "perturbations.yaml").read_text()) or {}).items():
         assumed = e.get("kind") == "assumed" or "ASSUMED" in str(e.get("citation", ""))
         txt = dist_text(e)
@@ -269,20 +278,27 @@ def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     out = []
     morrison = None
     for kind, label in (("nest_sphere", "native LBM sphere Cd"), ("lbm_sphere", "XLB sphere Cd")):
-        for tag, re in (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4)):
-            f = rec / f"{kind}_{tag}.json"
-            rid, case = f"{kind}:Re{tag}", f"{label} at Re = {re:g} vs Morrison 2013"
-            d = _json(f)
+        for tag, re_ in (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4)):
+            rid, case = f"{kind}:Re{tag}", f"{label} at Re = {re_:g} vs Morrison 2013"
+            if kind == "nest_sphere":                         # one file per resolution, nest_sphere_<tag>_d<cells>.json: the finest is the row
+                found = sorted(((int(m.group(1)), q) for q in rec.glob(f"nest_sphere_{tag}_d*.json") if (m := re.search(r"_d(\d+)\.json$", q.name))))
+                f, others = (found[-1][1], [str(d) for d, _ in found[:-1]]) if found else (rec / f"nest_sphere_{tag}_d*.json", [])
+                missing = f"not run: no nest_sphere_{tag}_d*.json under {rec}"
+            else:
+                f, others = rec / f"{kind}_{tag}.json", []
+                missing = f"not run: {f.name} is not stored"
+            d = _json(f) if f.is_file() else None
             if d is None:
-                out.append(_row(rid, case, f"{f}", None, None, None, f"not run: {f.name} is not stored"))
+                out.append(_row(rid, case, f"{f}", None, None, None, missing))
                 continue
             if "ref" in d:
                 ref = float(d["ref"])
             else:
                 from .stage3 import lbm
                 morrison = morrison or lbm.morrison
-                ref = float(morrison(re))
-            out.append(_row(rid, case, f"{f}", float(d["cd"]), ref, None, f"d = {d.get('d', '?')} cells; the run stores no U_num, U_input or U_D"))
+                ref = float(morrison(re_))
+            also = f" (d = {' and '.join(others)} also stored)" if others else ""
+            out.append(_row(rid, case, f"{f}", float(d["cd"]), ref, None, f"d = {d.get('d', '?')} cells{also}; the run stores no U_num, U_input or U_D"))
     plates = (("wm_flat_plate", "wall-modelled flat plate C_f vs ITTC-57", "ittc"), ("wm_channel", "wall-modelled channel C_f vs Dean 1978", "cf_dean"))
     for name, case, dk in plates:
         f = rec / f"{name}.json"
@@ -544,13 +560,16 @@ def sanity(f: Facts) -> dict[str, Any] | None:
         far = _far(e) if x.get("distance") else None
         agrees = v in x["allowed"] if x["allowed"] is not None else None if far is None else v == ("NO-GO" if far else "GO")
         detail = ""
+        if next((u.get("task", {}).get("mode") for u in (f.mission or {}).get("vehicles", []) if u["id"] == k), None) == "drift":
+            agrees, detail = None, DRIFT_DETAIL                      # a drift glider swims a fixed heading: its GO is not agreement with the expectation
         if x.get("distance"):
             d = e.get("distance_km_median")
             detail = ("the run holds no ship distance for this link" if far is None else
                       f"median distance to the ship {d:.0f} km" if d is not None else "most needed samples are out of the modem's range"
                       ) + (f", beyond {ACOUSTIC_NEAR_KM:g} km" if far else f", within {ACOUSTIC_NEAR_KM:g} km" if far is False else "")
         if k == "usv" and (e.get("speed") or {}).get("ratio_median") is not None:
-            detail = (f"speed over ground / mean 10 m wind along the track {e['speed']['ratio_median']:.3f} (median over members) against Chiodi et al.'s "
+            detail = (f"speed over ground / mean 10 m wind along the track {e['speed']['ratio_median']:.3f} (median of the per-member ratios) "
+                      f"against Chiodi et al.'s "
                       f"{USV_CHIODI_RATIO}: the calibration scenario differs from the mission (no current, uniform wind, sailing to a station); the westward "
                       f"current lowers the mission ratio and the calibration may already include part of that effect, a possible double penalty that is "
                       "not established")

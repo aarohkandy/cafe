@@ -509,8 +509,8 @@ def simulate(prm: dict[str, Any], wp: Arr, ship: Ship, wind_fn: WindFn, *, M: in
     ph = np.asarray(S.phase)
     flags = dict(battery_reserve=np.asarray(S.f_batt), wind_exceeds_airspeed=np.asarray(S.f_stuck),
                  attitude_exceedance=np.asarray(S.f_tilt), lost_link=f_link)
-    t_first = dict(battery_reserve=np.asarray(S.t_batt), wind_exceeds_airspeed=np.asarray(S.t_stuck),
-                   attitude_exceedance=np.asarray(S.t_tilt), lost_link=t_link)
+    t_first = dict(battery_reserve=np.asarray(S.t_batt, float), wind_exceeds_airspeed=np.asarray(S.t_stuck, float),  # float64: they are added to epoch seconds
+                   attitude_exceedance=np.asarray(S.t_tilt, float), lost_link=t_link)
     return dict(flags=flags, t_first=t_first, landed=(ph == DONE) & active, ditched=ph == DEAD, airborne=(ph < DONE),
                 t_end=np.where(np.isnan(np.asarray(S.t_end)), t + DT_ENV, np.asarray(S.t_end)), energy_wh=np.asarray(S.ewh),
                 soc_end=np.asarray(S.soc), max_tilt_deg=np.degrees(np.asarray(S.tilt_max)), max_dist_m=np.asarray(S.dist_max),

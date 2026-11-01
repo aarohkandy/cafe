@@ -63,9 +63,10 @@ V * t_tack of distance and is made only if the VMG gain over tack_horizon pays i
 during the manoeuvre; on a section only headings that reduce the cross-track error are allowed outside the corridor.
 Failure flags (first occurrence in `first[name]`, epoch seconds): becalmed = the best through-water speed over all headings is
 below the current speed for becalmed_after_h (DECISION: the BRIEF's 'SOG < current' read as speed through water, because a
-drifting boat's SOG equals the current); swept_off_track; capsize_proxy; wing_stall = apparent wind below the tail's authority or
-inside
-the stall cone of the bow for stall_sustain_s; battery.
+drifting boat's SOG equals the current; `<=`, so a boat that cannot move in a zero current is becalmed too); swept_off_track;
+capsize_proxy; wing_stall_calm = apparent wind speed below the tail's authority (trim_min_aws_ms) for calm_sustain_s; wing_stall_angle =
+apparent wind angle inside the bow cone (min_awa_deg, not the wing's stall angle of attack wing_stall_deg, which only the polar uses) for
+stall_sustain_s; battery.
 """
 from __future__ import annotations
 
@@ -86,7 +87,7 @@ R_E = 6371008.8
 DV = 0.05                 # m/s, speed grid of the root search
 N_IT = 24                 # fixed-point iterations for (beta, phi, depower, rudder)
 NH = 72                   # candidate headings
-FAILS = ("becalmed", "swept_off_track", "capsize_proxy", "wing_stall", "battery")
+FAILS = ("becalmed", "swept_off_track", "capsize_proxy", "wing_stall_calm", "wing_stall_angle", "battery")
 MODES = ("section", "station")
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
 STRINGS = ("radio_900mhz", "radio_2g4", "iridium_link")
@@ -431,7 +432,7 @@ class USVSim:
     """M-member wing-sail USV ensemble.  `env` is a cafe.pm.env Environment, `start` = (lon, lat) scalars or (M,) arrays,
     `t0` epoch seconds.  mission: dict(mode='section'|'station', waypoints=[(lon, lat), ...] or station=(lon, lat), repeat=False,
     seed=0, plus any mission_defaults key: becalmed_after_h, track_tolerance_km, corridor_km, wp_radius_m, roll_limit_deg,
-    stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change} (default draws N(vpp_bias_mean, vpp_bias_sd)).
+    calm_sustain_s, stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change} (default draws N(vpp_bias_mean, vpp_bias_sd)).
     The wind is read at the anemometer height, the current at current_z_m; wind/current errors are the caller's environment's."""
 
     def __init__(self, params: dict[str, Any], members: int, env: Any, start: tuple[Arr, Arr], t0: float, mission: dict[str, Any],
@@ -464,8 +465,9 @@ class USVSim:
         self.n_tacks = np.zeros(M, int)
         self.stw, self.sog, self.vmax = np.zeros(M), np.zeros(M), np.zeros(M)
         self.path_m = np.zeros(M)
+        self.xte_max = np.zeros(M)                                                      # largest |cross-track error| (station: distance from it) [m]
         self.soc_wh = P["soc0"] * P["battery_wh"] * np.ones(M)
-        self.acc = {"becalmed": np.zeros(M), "wing_stall": np.zeros(M)}
+        self.acc = {"becalmed": np.zeros(M), "wing_stall_calm": np.zeros(M), "wing_stall_angle": np.zeros(M)}
         self.fail = {k: np.zeros(M, bool) for k in FAILS}
         self.first = {k: np.full(M, np.nan) for k in FAILS}
         self.arrived = np.full(M, np.nan)
@@ -568,14 +570,16 @@ class USVSim:
             done = dist < md["wp_radius_m"]
         self.arrived = np.where(done & np.isnan(self.arrived), self.t, self.arrived)
         # failures
-        self.acc["becalmed"] = np.where(self.vmax < cv.speed(cur), self.acc["becalmed"] + dt, 0.0)
+        self.acc["becalmed"] = np.where(self.vmax <= cv.speed(cur), self.acc["becalmed"] + dt, 0.0)
         self._flag("becalmed", self.acc["becalmed"] >= md["becalmed_after_h"] * 3600.0)
+        self.xte_max = np.maximum(self.xte_max, np.abs(xte))
         self._flag("swept_off_track", np.abs(xte) > md["track_tolerance_km"] * 1e3)
         peak = e1["phi"] + np.sqrt(2.0 * np.log(md["cap_cycles"])) * roll_sigma_deg(P, c["hs"], c["tp"], e1["chi"])
         self._flag("capsize_proxy", peak > md["roll_limit_deg"])
-        stalled = (e1["aws"] < P["trim_min_aws_ms"]) | (e1["awa"] < P["wing_stall_deg"])
-        self.acc["wing_stall"] = np.where(stalled, self.acc["wing_stall"] + dt, 0.0)
-        self._flag("wing_stall", self.acc["wing_stall"] >= md["stall_sustain_s"])
+        for name, stalled, hold in (("wing_stall_calm", e1["aws"] < P["trim_min_aws_ms"], "calm_sustain_s"),
+                                    ("wing_stall_angle", e1["awa"] < P["min_awa_deg"], "stall_sustain_s")):
+            self.acc[name] = np.where(stalled, self.acc[name] + dt, 0.0)
+            self._flag(name, self.acc[name] >= md[hold])
         sw = self.env.air(self.lon, self.lat, t)["swdown"].value
         gain = P["solar_eff"] * P["solar_area_m2"] * sw - P["hotel_w"]
         self.soc_wh = np.clip(self.soc_wh + gain * dt / 3600.0, 0.0, P["battery_wh"])
@@ -610,16 +614,19 @@ def _wind_at_anemometer(P: dict[str, Any], speed: float, from_deg: float) -> Arr
 
 
 def mean_sog(P: dict[str, Any], speed: float, hours: float = 12.0, dt: float = 120.0, nb: int = 48, bias: float | None = None) -> float:
-    """Mean along-path SOG [m/s] of nb vehicles sailing to one station from 6 degrees away on bearings spread evenly round the
-    compass in a uniform wind of `speed` at the anemometer height, no current, VPP bias fixed at `bias` (default: the prior)."""
+    """Mean SOG [m/s] of nb vehicles sailing to one station from 6 degrees away on bearings spread evenly round the compass in a uniform wind
+    of `speed` at the anemometer height, no current, VPP bias fixed at `bias` (default: the prior). Measured as the mission's is: `stage1.path_speed`
+    over the 10-min records from the start, so the calibration and the mission compare like with like."""
     from ..env.protocol import AnalyticEnv
+    from ..stage1 import _record_grid, path_speed
     b = np.arange(nb) * 2 * np.pi / nb
     f = P["vpp_bias_mean"] if bias is None else bias
     env = AnalyticEnv(wind=_wind_at_anemometer(P, speed, 0.0), hs=0.0)
     sim = USVSim(P, nb, env, (-165.0 + 6 * np.sin(b), 6 * np.cos(b)), 0.0, dict(mode="station", station=(-165.0, 0.0)),
                  perturb=dict(vpp_bias=np.full(nb, f)))
-    sim.run(hours * 3600.0, dt)
-    return float(np.mean(sim.path_m) / (hours * 3600.0))
+    start = dict(t=0.0, lon=sim.lon.copy(), lat=sim.lat.copy())
+    g = _record_grid(sim.run(hours * 3600.0, dt, record_s=dt), start, dt)
+    return float(np.mean(path_speed(g["lon"], g["lat"], g["t"])))
 
 
 def superposition_ratio(P: dict[str, Any], wind: float, current: float, against: bool = False) -> tuple[float, float]:

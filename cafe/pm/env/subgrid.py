@@ -6,8 +6,9 @@ Pieces: Mann turbulence boxes sampled at a point (`turbulence`, `turbulence_memb
 diurnal-jet proxy for surface vehicles (`windage_fraction`, `diurnal_jet`), and rain fresh lenses (`rain_lens`).
 
 Coefficients and citations: config/subgrid.json (sourced) and config/assumptions.yaml (unsourced, each with what replaces it).
-`config/subgrid.json["calibration"]` is what Stage-3 LES overwrites; `load_config()` returns it and every Tagged `source`
-names `calibration.source_run`.
+`config/subgrid.json["calibration"]` is the shipped calibration; a run's Stage-3 LES writes its own stage3/subgrid_calibration.json
+(`use_calibration` makes `load_config()` return it for the stages after stage 3) and only `promote_calibration` changes the tracked file.
+Every Tagged `source` names `calibration.source_run`.
 """
 
 from __future__ import annotations
@@ -34,9 +35,21 @@ def _load(path: str) -> dict[str, Any]:
     return cfg
 
 
+_RUN_CAL: dict[str, Any] | None = None
+
+
+def use_calibration(cal: dict[str, Any] | None) -> None:
+    """Make `load_config()` (no path) return `cal` as its calibration block instead of the shipped one; None goes back to the shipped one. The pipeline sets
+    it from the run's own stage3/subgrid_calibration.json for the stages after stage 3, so that a run never writes into the tracked config/subgrid.json."""
+    global _RUN_CAL
+    _RUN_CAL = cal
+
+
 def load_config(path: str | None = None) -> dict[str, Any]:
-    """config/subgrid.json (or `path`) as a dict. Do not mutate; copy first."""
-    return _load(str(path or _CFG_DIR / "subgrid.json"))
+    """config/subgrid.json (or `path`) as a dict, with the run's calibration block (`use_calibration`) in place of the shipped one when no `path` is
+    given. Do not mutate; copy first."""
+    cfg = _load(str(path or _CFG_DIR / "subgrid.json"))
+    return cfg if path or _RUN_CAL is None else dict(cfg, calibration=_RUN_CAL)
 
 
 @functools.lru_cache(maxsize=None)
@@ -469,20 +482,41 @@ def recalibrate(windows: Iterable[dict[str, Any]], cfg: dict[str, Any] | None = 
     return dict(calibration=cal, uncertainty=dict(sigma_u_over_ustar=se_sig, length_scale_factor=se_fac), windows=used, skipped=skipped)
 
 
-def write_calibration(result: dict[str, Any], source_run: str, path: str | pathlib.Path | None = None) -> pathlib.Path:
-    """Write a `recalibrate` result as the calibration block of config/subgrid.json (or `path`), leaving every other line of the file as it is,
-    with `source_run`, the standard errors and the number of windows. Refuses a result with no window. Clears the config cache."""
+def calibration_block(result: dict[str, Any], source_run: str) -> dict[str, Any]:
+    """The calibration block of a `recalibrate` result: `source_run`, the calibrated values, their standard errors and the number of windows.
+    Refuses a result with no window."""
     if not result["windows"]:
         raise ValueError("nothing to write: no window gave a calibration")
+    return dict(source_run=source_run, **{k: v for k, v in result["calibration"].items() if k != "source_run"},
+                uncertainty=result["uncertainty"], windows=len(result["windows"]))
+
+
+def write_calibration(cal: dict[str, Any], path: str | pathlib.Path | None = None) -> pathlib.Path:
+    """Write the calibration block `cal` into config/subgrid.json (or `path`), leaving every other line of the file as it is. Stage 3 does not call this
+    (it writes its own stage3/subgrid_calibration.json); only `promote_calibration` does. Clears the config cache."""
     f = pathlib.Path(path or _CFG_DIR / "subgrid.json")
     text = f.read_text()
     head = text[: text.index('  "calibration": {')]
-    cal = dict(source_run=source_run, **{k: v for k, v in result["calibration"].items() if k != "source_run"},
-               uncertainty=result["uncertainty"], windows=len(result["windows"]))
     body = json.dumps(cal, indent=2).replace("\n", "\n  ")
     f.write_text(head + '  "calibration": ' + body + "\n}\n")
     _load.cache_clear()
     return f
+
+
+def promote_calibration(run: str | pathlib.Path, path: str | pathlib.Path | None = None) -> dict[str, Any]:
+    """`python -m cafe.pm promote-calibration --run DIR`: copy the run's stage3/subgrid_calibration.json into config/subgrid.json (or `path`) with a
+    `source_run` that names the run's full path, the date and the first 12 hex digits of the sha-256 of its stage-3 ledger. A deliberate, committed
+    act: nothing else ever changes the tracked file. Returns the block written."""
+    import datetime as dt
+    import hashlib
+    run = pathlib.Path(run).resolve()
+    src, led = run / "stage3" / "subgrid_calibration.json", run / "checkpoints" / "stage3" / "ledger.json"
+    if not src.is_file() or not led.is_file():
+        raise ValueError(f"{run}: no stage3/subgrid_calibration.json (or no stage-3 ledger): that run did not calibrate the sub-grid layer")
+    cal = dict(json.loads(src.read_text()),
+               source_run=f"{run} (promoted {dt.date.today().isoformat()}, stage-3 ledger sha256 {hashlib.sha256(led.read_bytes()).hexdigest()[:12]})")
+    write_calibration(cal, path)
+    return cal
 
 
 # ---------------------------------------------------------------- receipts

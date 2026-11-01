@@ -38,7 +38,7 @@ from numpy.typing import NDArray
 
 from . import budget, credibility
 from .audit import STAGES
-from .stage1 import _classes
+from .stage1 import _classes, path_speed as _member_speeds
 from .env.remote import sha256
 from .stats import intervals, sequential
 
@@ -108,17 +108,26 @@ class Trace:
                     "(the receipts below describe other code and are not counted as a pass)")
         return None
 
-    def _row(self, stage: str, rid: str, kind: str, name: str, ok: bool, got: str = "", limit: str = "", sha: str = "", ledger: str | None = None) -> None:
+    def _row(self, stage: str, rid: str, kind: str, name: str, ok: bool, got: str = "", limit: str = "", sha: str = "", ledger: str | None = None,
+             state: str | None = None) -> None:
+        """`ok` is the boolean the traceability count uses; `state` says why a row is not ok: fail (a check failed), stale (made by other code), not_run."""
         self.rows.setdefault(rid, dict(id=rid, stage=stage, ledger=ledger or f"checkpoints/{stage}/ledger.json", kind=kind, name=name, ok=ok,
-                                       got=got, limit=limit, sha256=sha))
+                                       state=state or ("pass" if ok else "fail"), got=got, limit=limit, sha256=sha))
 
-    def quality(self, stage: str, output: str) -> tuple[bool, str]:
-        """The output's own quality bit: stage 3's windows.json is ok only if some window passed its self-checks (the other outputs have none)."""
+    def quality(self, stage: str, output: str) -> tuple[bool, str, str]:
+        """The output's own quality bit and state: stage 3's windows.json is ok only if some window passed its self-checks (the other outputs have none).
+        When none passed it is `fail` only if a window ran (has checks, or was cut) and failed; if every window was skipped with a reason (the planner's
+        "not run: ..." rows, a becalmed USV, a killed window) it is `not_run`, which is not a failure."""
         if (stage, output) != ("stage3", "windows.json"):
-            return True, ""
+            return True, "", "pass"
         ws = [w for v in (_jl(self.run / "stage3" / "windows.json") or {}).values() for w in v]
         n = sum(bool(w.get("ok")) for w in ws)
-        return n > 0, f"{n} of {len(ws)} windows passed their self-checks"
+        ran = sum(bool(w.get("checks")) or bool(w.get("cut")) for w in ws)
+        if n:
+            return True, f"{n} of {len(ws)} windows passed their self-checks", "pass"
+        if not ran:
+            return False, f"0 of {len(ws)} windows ran: each was skipped with a stated reason", "not_run"
+        return False, f"0 of {len(ws)} windows passed their self-checks ({ran} ran and failed)", "fail"
 
     def physics(self, key: str) -> dict[str, Any]:
         """The model receipts of a vehicle class or `link`: the pass and fail counts of its group in runs/receipts.json, as nodes behind the row
@@ -132,7 +141,7 @@ class Trace:
         bad = [r["name"] for r in rows if not r["ok"]]
         rid, name = f"physics:{group}", RECEIPTS_NAME
         if self.stale:
-            self._row("model receipts", rid, "physics", group, False, STALE, sha=self.table[1], ledger=name)
+            self._row("model receipts", rid, "physics", group, False, STALE, sha=self.table[1], ledger=name, state="stale")
             return dict(group=group, status=STALE, reason=self.stale, failures=[])
         self._row("model receipts", rid, "physics", group, not bad, f"{len(rows) - len(bad)} pass, {len(bad)} fail", sha=self.table[1], ledger=name)
         ref = dict(stage="model receipts", ledger=name, receipt=rid)
@@ -145,7 +154,7 @@ class Trace:
         L = self.led.get(stage)
         if not L:
             rid = f"{stage}:missing-ledger"
-            self._row(stage, rid, "missing", "no ledger", False)
+            self._row(stage, rid, "missing", "no ledger", False, state="not_run")
         else:
             c = next((c for c in L["checks"] if check and c["name"].startswith(check)), None)
             o = next((o for o in L["outputs"] if output and o["path"].endswith("/" + (output or ""))), None)
@@ -154,8 +163,8 @@ class Trace:
                 self._row(stage, rid, "check", c["name"], c["ok"], repr(c["value"]), repr(c["limit"]))
             elif o:
                 rid = f"{stage}:output:{output}"
-                ok, got = self.quality(stage, output or "")
-                self._row(stage, rid, "output", output or "", ok, got, sha=o["sha256"])
+                ok, got, state = self.quality(stage, output or "")
+                self._row(stage, rid, "output", output or "", ok, got, sha=o["sha256"], state=state)
             else:
                 rid = f"{stage}:config:{L['config_hash'][:12]}"
                 self._row(stage, rid, "config", "config_hash", True, sha=L["config_hash"])
@@ -268,7 +277,7 @@ def _floor(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any] |
 def _sens(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     p = e["sensitivity"]["param"]
     return dict(param=p, s1=None if p is None else num(e["sensitivity"]["S1"][p], "fraction of variance", ref, src), noise_floor=_floor(e, ref, src),
-                computed=bool(e["sensitivity"]["S1"]))
+                computed=bool(e["sensitivity"]["S1"]), text=e["sensitivity"].get("text"), case=e["sensitivity"].get("case"))
 
 
 def _top3(e: dict[str, Any], ref: dict[str, Any], src: str) -> list[Any]:
@@ -352,6 +361,8 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
               flip: dict[str, Any] | None = None, res: dict[str, Any] | None = None) -> dict[str, Any]:
     ref = tr.ref("stage1b", check="lhs_stratified", output="summary.json")
     plat = {v["id"]: v["platform"] for v in mission["vehicles"]}
+    task = {v["id"]: v.get("task", {}) for v in mission["vehicles"]}
+    mref = tr.ref("ingest", label="mission")
     out = {}
     for vid, e in s1b["summary"]["vehicles"].items():
         src = f"stage1b/summary.json summary.vehicles.{vid}"
@@ -365,11 +376,41 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         speed_ratio=_speed_ratio(e, ref, src),
                         wind3d=_opt(e.get("wind3d_fraction"), "fraction of the sortie records", ref, src + ".wind3d_fraction"),
                         authority=_authority(e.get("authority"), ref, src + ".authority"),
+                        drift=_drift(task.get(vid, {}), e["cls"], mref, f"mission.yaml vehicles.{vid}.task.heading_to"),
+                        usv_modes=_usv_modes(p, e["modes"], tr) if e["cls"] == "usv" else None,
                         verdict_stage1=before["verdict"]["verdict"] if before else None,
                         changed_by_refit=bool(before and before["verdict"]["verdict"] != e["verdict"]["verdict"]),
                         assumed_platform_inputs=num(cred["platform_assumed_counts"].get(p, 0), "inputs", cred_ref, "credibility.json platform_assumed_counts"),
                         assumed_anchor=f"credibility.html#plat-{p}")
     return out
+
+
+DRIFT_MODES = "battery, seafloor, overdepth, no flight, left data"
+
+
+def _drift(task: dict[str, Any], cls: str, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
+    """A drift glider swims one compass heading for the whole window (GliderSim's `drift` mode): its verdict is about that heading, and only the battery,
+    the seafloor, the depth limit, a dive that cannot fly and leaving the data can fail it; nothing in the mission is a criterion for it (round 3 M-1)."""
+    if cls != "glider" or task.get("mode") != "drift":
+        return None
+    return dict(heading_to=num(task.get("heading_to", 0.0), "deg", ref, src), modes=DRIFT_MODES)
+
+
+def _usv_modes(platform: str | None, modes: dict[str, Any], tr: Trace) -> dict[str, Any] | None:
+    """The two clocks behind a USV's calm-weather failures, from the platform file: `wing_stall_calm` after the apparent wind has been below the trim
+    minimum for calm_sustain_s, `becalmed` after becalmed_after_h unable to stem the current. None for a platform without them or a run with neither mode."""
+    if not {"wing_stall_calm", "becalmed"} & set(modes):
+        return None
+    try:
+        from .config import load_platform
+        pl = load_platform(platform or "")
+        v = {k: pl[g][k]["value"] for g, k in (("mission_defaults", "calm_sustain_s"), ("mission_defaults", "becalmed_after_h"), ("params", "trim_min_aws_ms"))}
+    except (KeyError, TypeError, ValueError):
+        return None
+    ref, src = tr.ref("ingest", label="platform"), f"platforms/{platform}.yaml"
+    return dict(trim_min_aws=num(v["trim_min_aws_ms"], "m/s", ref, src + " trim_min_aws_ms"),
+                calm_sustain=num(v["calm_sustain_s"] / 60.0, "min", ref, src + " calm_sustain_s"),
+                becalmed_after=num(v["becalmed_after_h"], "h", ref, src + " becalmed_after_h"))
 
 
 def _opt(x: Any, unit: str, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
@@ -378,8 +419,8 @@ def _opt(x: Any, unit: str, ref: dict[str, Any], src: str) -> dict[str, Any] | N
 
 
 def _speed_ratio(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any] | None:
-    """A USV's speed over ground against the mean 10 m wind along its track (median over members), next to Chiodi et al.'s 0.178 that the speed prior
-    is calibrated to; None when the summary has no `speed` block (stage 1 writes it for a USV)."""
+    """A USV's speed over ground (stage1.path_speed) against the mean 10 m wind along its track (median of the per-member ratios), next to Chiodi et al.'s 0.178
+    that the speed prior is calibrated to; None when the summary has no `speed` block (stage 1 writes it for a USV)."""
     sp = e.get("speed")
     if not sp or sp.get("ratio_median") is None:
         return None
@@ -399,8 +440,9 @@ def _authority(a: dict[str, Any] | None, ref: dict[str, Any], src: str) -> dict[
                 demand_ratio_max=num(a["demand_ratio_max"], "-", ref, src + ".demand_ratio_max"))
 
 
-def _links(s1b: dict[str, Any], tr: Trace) -> dict[str, Any]:
+def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str, Any]:
     ref = tr.ref("stage1b", check="lhs_stratified", output="summary.json")
+    need = {lk["id"]: lk["required_fraction"] for lk in mission["links"]}
     out = {}
     for lid, e in s1b["summary"]["links"].items():
         src = f"stage1b/summary.json summary.links.{lid}"
@@ -410,8 +452,21 @@ def _links(s1b: dict[str, Any], tr: Trace) -> dict[str, Any]:
                         margin_db_median=None if e["margin_db_median"] is None else num(e["margin_db_median"], "dB", ref, src),
                         margin_kind=e.get("margin_kind"),
                         frac_beyond_horizon=_opt(e.get("frac_beyond_horizon"), "fraction of the needed samples", ref, src),
-                        frac_out_of_range=_opt(e.get("frac_out_of_range"), "fraction of the needed samples", ref, src))
+                        frac_out_of_range=_opt(e.get("frac_out_of_range"), "fraction of the needed samples", ref, src),
+                        granularity=_granularity(e, need.get(lid), ref, src))
     return out
+
+
+def _granularity(e: dict[str, Any], required: float | None, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
+    """How many required samples decide a member's link (stage 1's `need_count_median`), and whether one missed sample is within what the mission allows
+    (`granularity_ok`: 1 / need_count <= 1 - required_fraction). None for a summary without them (older runs). A link that is not ok is "undecided:
+    granularity": its pass fraction cannot tell 0.95 from 1 (round 3 M-5)."""
+    if e.get("need_count_median") is None:
+        return None
+    n = e["need_count_median"]
+    return dict(need_count=num(n, "samples", ref, src + ".need_count_median"), ok=bool(e.get("granularity_ok", True)),
+                one_sample=num(1.0 / n, "fraction", ref, src + ".need_count_median (1 / need_count)") if n else None,
+                allowed_miss=None if required is None else num(1.0 - required, "fraction", ref, "mission.yaml links.required_fraction (1 - required_fraction)"))
 
 
 def _load_res(run: pathlib.Path, tr: Trace) -> tuple[dict[str, Any] | None, str]:
@@ -480,18 +535,10 @@ def _map(mission: dict[str, Any], res: dict[str, Any] | None, why: str, wins: di
 
 
 def path_speed(r: dict[str, Any]) -> float | None:
-    """The median over members of a vehicle's mean path speed over ground in the Stage-1 result: the length of the track (sum of the displacements
-    between records) over the time it was reported; None when no member moved."""
-    lon, lat = np.asarray(r["lon"], float), np.asarray(r["lat"], float)
-    t = np.asarray(r["t"], float)
-    dy = np.diff(lat, axis=0) * 111.2e3
-    dx = np.diff(lon, axis=0) * 111.2e3 * np.cos(np.radians(0.5 * (lat[1:] + lat[:-1])))
-    dx = (dx + 180.0 * 111.2e3) % (360.0 * 111.2e3) - 180.0 * 111.2e3                     # across the dateline
-    step, dt_ = np.hypot(dx, dy), np.diff(t)[:, None]
-    ok = np.isfinite(step)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", RuntimeWarning)
-        v = np.where(ok, step, 0.0).sum(0) / np.where(ok, dt_, 0.0).sum(0)
+    """The median over members of a vehicle's speed over ground in the Stage-1 result, by `stage1.path_speed` (the one definition: the sum of the
+    displacements between the stored records over the time they span, which the summary's speed block and the calibration also use); None when no
+    member moved."""
+    v = _member_speeds(r["lon"], r["lat"], r["t"])
     v = v[np.isfinite(v) & (v > 0)]
     return float(np.median(v)) if v.size else None
 
@@ -578,7 +625,8 @@ def _env(mission: dict[str, Any], env: Any, res: dict[str, Any] | None, wins: di
         src = f"windows/windows.json {vid}"
         forcing[vid] = dict(quantity=name, windows=[
             dict(t=tnum(w["t"], wref, f"{src}[{i}].t"),
-                 forcing=num(w["stress"], unit, wref, f"{src}[{i}].stress (queried by the windows stage)", basis=w["basis"]))
+                 forcing=num(w["stress"], unit, wref, f"{src}[{i}].stress (queried by the windows stage)", basis=w["basis"]),
+                 failed_at=[tnum(x, wref, f"{src}[{i}].failed_at") for x in w.get("failed_at", [])])
             for i, w in enumerate(ws)])
     out: dict[str, Any] = dict(forcing_at_windows=forcing if wins else {}, vehicles={})
     if env is None or res is None:
@@ -669,6 +717,18 @@ def _les_reach(plan: dict[str, Any]) -> dict[str, Any]:
                                                for k, w in sorted((les.get("windows") or {}).items())])
 
 
+def _fresh(e: dict[str, Any], ref: dict[str, Any], s: str) -> dict[str, Any] | None:
+    """The hold-out's fresh-draw check (whatif.fit_class): held-out points of this run re-estimated on members no training row used, and the emulator's
+    RMSE against them, as observed and less their own noise. None when the hold-out had none (or an older holdout.json)."""
+    if not e.get("fresh_points"):
+        return None
+    return dict(points=num(e["fresh_points"], "held-out points", ref, s + ".fresh_points"),
+                n_members=num(e["fresh_n_members"], "members", ref, s + ".fresh_n_members"),
+                rmse=num(e["rmse_fresh"], "fraction", ref, s + ".rmse_fresh"),
+                noise_floor=num(e["noise_floor_fresh"], "fraction", ref, s + ".noise_floor_fresh"),
+                rmse_debiased=num(e["rmse_fresh_debiased"], "fraction", ref, s + ".rmse_fresh_debiased"))
+
+
 def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Trace, plan: dict[str, Any] | None = None) -> dict[str, Any]:
     ep = budget.emulator_plan(plan) if plan else {}
     note = None if ep.get("trains", True) else str(ep["note"])                # the planner's "this budget gives N points per class, 100 are needed"
@@ -698,6 +758,7 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
                                    query_ms=num(e["query_ms"], "ms", ref, s + ".query_ms"),
                                    noise_floor_rmse=num(e["noise_floor_rmse"], "fraction", ref, s + ".noise_floor_rmse"),
                                    rmse_debiased=num(e["rmse_debiased"], "fraction", ref, s + ".rmse_debiased"),
+                                   fresh=_fresh(e, ref, s), draws=e.get("draws"),
                                    rows=num(e["rows"], "rows", ref, s + ".rows"),
                                    limits=dict(rmse=lim(0.05, "fraction"), coverage=lim(0.05, "fraction"), query_ms=lim(10.0, "ms")))
         out[vid] = d
@@ -713,7 +774,8 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
 
 
 def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
-    live = {st: L for st, L in tr.led.items() if L}
+    # the report's own ledger is not written until the report is: any on disk is an earlier attempt's
+    live = {st: L for st, L in tr.led.items() if L and st != "report"}
     first = next(iter(live.values()), None)
     costs = {}
     for vid, c in plan["member_cost"].items():
@@ -727,14 +789,16 @@ def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str,
                 plan={k: num(plan[k], u, pref, f"plan.json {k}") for k, u in units.items()},
                 wall_s={st: num(L["wall_s"], "s", tr.ref(st), f"checkpoints/{st}/ledger.json wall_s") for st, L in live.items()},
                 git_sha=sorted({L["git_sha"] for L in live.values()}), versions=(first or {}).get("versions", {}),
+                report_stage="report stage: written after this table, so its wall time and code are not in it",
                 machine=None if first is None else dict(host=first["machine"]["host"], bench_id=first["machine"]["bench_id"], cpus=cpus))
 
 
 def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
     by: dict[str, int] = {}
     for i in cred["assumed_inputs"]:
-        by[i["file"]] = by.get(i["file"], 0) + 1
-    return dict(page="credibility.html", total=num(len(cred["assumed_inputs"]), "inputs", cred_ref, "credibility.json assumed_inputs"),
+        if i["kind"] != "fitted":                                          # a value this run fitted from data is listed, but not counted as assumed
+            by[i["file"]] = by.get(i["file"], 0) + 1
+    return dict(page="credibility.html", total=num(sum(by.values()), "inputs", cred_ref, "credibility.json assumed_inputs (kind other than fitted)"),
                 by_file={f: num(n, "inputs", cred_ref, "credibility.json assumed_inputs") for f, n in sorted(by.items())},
                 items=[dict(id=i["id"], kind=i["kind"], value=i["value"], unit=i["unit"], why=i["why"], href=f"credibility.html#{i['anchor']}")
                        for i in cred["assumed_inputs"]],
@@ -774,12 +838,15 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
                      data_consumed=dict(inputs=[dict(ref=i["ref"], sha256=i.get("sha256"), note=i.get("note", "")) for i in ing["inputs"]],
                                         variables="cafe/schemas/wrfout.json and cafe/schemas/umwmout.json (read per hour over the mission window)")),
         verdict_source="stage1b (stage 1 rerun with the stage-3 refit multipliers; a copy of stage 1 when nothing was refit)",
-        vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res), links=_links(s1b, tr),
+        vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res), links=_links(s1b, tr, mission),
         map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res), environment=_env(mission, env, res, wins, s1b, tr),
         stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref),
         assumed_inputs=_assumed(cred, cred_ref))
     rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"])
-    rep["subgrid"] = dict(calibrated=not any(x["id"] == credibility.SUBGRID_LIMITATION["id"] for x in cred["limitations"]),
+    own = _jl(run / "stage3" / "subgrid_calibration.json")
+    rep["subgrid"] = dict(source=("this run's stage3/subgrid_calibration.json" if own
+                                  else "the shipped config/subgrid.json (no passed LES window in this run)"),
+                          calibrated=not any(x["id"] == credibility.SUBGRID_LIMITATION["id"] for x in cred["limitations"]),
                           statement=next((x["text"] for x in cred["limitations"] if x["id"] == credibility.SUBGRID_LIMITATION["id"]), None))
     rep["receipts"] = sorted(tr.rows.values(), key=lambda r: r["id"])
     rep["traceability_problems"] = check_traceability(rep)
@@ -835,6 +902,10 @@ def _stat_html(d: dict[str, Any]) -> str:
 
 
 def _sens_html(s: dict[str, Any]) -> str:
+    """The sentence stage 1 wrote for the case that applies (what was ranked, or which of "too few failures", "nothing above the floor", "all pass or all
+    fail" it is); a summary without one (older runs) gets the old wording."""
+    if s.get("text"):
+        return html.escape(s["text"].rstrip(".")) + (f" (exact S1 {_n(s['s1'])})" if s["param"] is not None else "")
     if s["param"] is None:
         if s.get("computed") and s.get("noise_floor"):
             return f"no parameter clears the noise floor (S1 {_n(s['noise_floor'])}, the 95 % level of unrelated outcomes at this member count)"
@@ -929,8 +1000,9 @@ def _speed_html(v: dict[str, Any]) -> str:
     sr, w3, au = v["speed_ratio"], v["wind3d"], v["authority"]
     out = ""
     if sr:
-        out += (f"<p class=muted>Speed over ground / mean 10 m wind along the track: {_n(sr['ratio'])} (median over members"
-                + (f"; {_n(sr['sog'])} over {_n(sr['u10'])}" if sr["sog"] and sr["u10"] else "") + f"); the speed prior is calibrated to Chiodi et al.'s "
+        out += (f"<p class=muted>Speed over ground / mean 10 m wind along the track: median of the per-member ratios {_n(sr['ratio'])}"
+                + (f"; median speed over ground {_n(sr['sog'])} over median wind {_n(sr['u10'])} (the quotient of two medians is not the median ratio)"
+                   if sr["sog"] and sr["u10"] else "") + f"; the speed prior is calibrated to Chiodi et al.'s "
                 f"{_n(sr['chiodi'])}, a scenario that differs from the mission (no current, uniform wind, sailing to a station). {USV_RATIO_NOTE}</p>")
     if v["cls"] == "uas":
         out += f"<p class=muted>{UAS_ATTITUDE_NOTE}"
@@ -943,6 +1015,20 @@ def _speed_html(v: dict[str, Any]) -> str:
     return out
 
 
+def _task_html(v: dict[str, Any]) -> str:
+    """The drift glider's task and what can fail it, and the clocks behind a USV's calm-weather modes."""
+    out, d, u = "", v["drift"], v["usv_modes"]
+    if d:
+        out += (f"<p>Task: drift on a fixed heading of {_n(d['heading_to'])}; failure modes that can occur: {html.escape(d['modes'])}. The mission has no "
+                "criterion for a drift glider (no station, no waypoint): GO means only that the battery and depth limits held on that heading.</p>")
+    if u:
+        out += (f"<p class=muted>Calm-weather modes: <code>wing_stall_calm</code> fires when the apparent wind stays below {_n(u['trim_min_aws'])} for "
+                f"{_n(u['calm_sustain'])} (a calm leaves the wing untrimmed and the vehicle without drive); <code>becalmed</code> only after "
+                f"{_n(u['becalmed_after'])} of being unable to stem the current. The two clocks differ on purpose. "
+                "<code>wing_stall_angle</code> is the apparent wind inside the bow cone.</p>")
+    return out
+
+
 def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     e = html.escape
     modes = ", ".join(f"{e(k)}: {_n(n)}" for k, n in v["modes"].items()) or "none"
@@ -952,7 +1038,8 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     return (f"<div class=card><h3>{e(vid)} {_badge(v['verdict'])}{_undecided_badge(v)} <span class=muted>{e(v['cls'])}, {e(str(v['platform']))}</span></h3>"
             f"{_stat_html(v)}{_physics_html(v['physics'])}{ch}<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
-            f"{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
+            f"{_task_html(v)}{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}"
+            f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
             f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} assumed platform inputs, listed in the "
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")
 
@@ -968,9 +1055,21 @@ def _margin_html(k: dict[str, Any]) -> str:
     return out
 
 
+def _granularity_html(g: dict[str, Any] | None) -> str:
+    if g is None:
+        return ""
+    miss = f"; one missed sample is {_n(g['one_sample'])} of them and the mission allows {_n(g['allowed_miss'])} to be missed"
+    return (f"<p class={'muted' if g['ok'] else 'warn'}>Each member's pass fraction is decided on {_n(g['need_count'])} "
+            f"(the median number of required samples per member){miss}"
+            + ("." if g["ok"] else ", so this verdict is undecided: granularity (too few samples to tell the required fraction from every sample).") + "</p>")
+
+
 def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
-    return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
+    g = k["granularity"]
+    gran = "" if g is None or g["ok"] else ' <span class="badge undecided">undecided: granularity</span>'
+    return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}{gran}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
+            f"{_granularity_html(g)}"
             f"<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
             f"median margin {_n(k['margin_db_median'])}{_margin_html(k)}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
@@ -1065,8 +1164,10 @@ def _env_html(env: dict[str, Any]) -> str:
     for vid, d in env["vehicles"].items():
         h += f"<p><b>{e(vid)}</b>: 10 m wind {_n(d['wind10'])}; Hs {_n(d['hs'])}; surface current {_n(d['current'])}; at times {_n(d['t'])}.</p>"
     for vid, d in env["forcing_at_windows"].items():
-        rows = "; ".join(f"{_n(w['t'])}: {_n(w['forcing'])} ({e(w['forcing']['basis'])})" for w in d["windows"])
-        h += f"<p><b>{e(vid)}</b>, {e(d['quantity'])} at the worst windows: {rows}.</p>"
+        rows = "; ".join(f"{_n(w['t'])}: {_n(w['forcing'])} ({e(w['forcing']['basis'])})"
+                         + (f"; those members failed at {', '.join(_n(x) for x in w['failed_at'])}" if w["failed_at"] else "") for w in d["windows"])
+        h += (f"<p><b>{e(vid)}</b>, {e(d['quantity'])} at the worst windows (each window is the record of the strongest analysis-field forcing; "
+              f"it is not the instant a member failed): {rows}.</p>")
     return h
 
 
@@ -1130,11 +1231,18 @@ def _emulator_html(m: dict[str, Any]) -> str:
             def ok(b: Any) -> str:
                 return "met" if b else "<b>MISSED</b>"
 
-            h += (f"<p class=muted>BRIEF 2.7 acceptance: P(fail) RMSE against the true P(fail) {_n(a['rmse_debiased'])} &le; "
-                  f"{_n(a['limits']['rmse'])} {ok(a['rmse_ok'])} (the held-out RMSE against the member-count targets, less their own "
+            fr = a["fresh"]
+            h += (f"<p class=muted>BRIEF 2.7 acceptance: P(fail) RMSE against the true P(fail) {_n(a['rmse_debiased'])} in sample &le; "
+                  f"{_n(a['limits']['rmse'])} {ok(a['rmse_ok'])}{' (on the larger of this and the fresh-draw figure below)' if fr else ''} "
+                  f"(the held-out RMSE against the member-count targets, less their own "
                   f"Monte-Carlo noise {_n(a['noise_floor_rmse'])} in quadrature); coverage within {_n(a['limits']['coverage'])} of nominal "
                   f"{ok(a['coverage_ok'])}; query {_n(a['query_ms'])} "
                   f"&le; {_n(a['limits']['query_ms'])} {ok(a['query_ok'])}; {_n(a['rows'])} rows of this class.</p>")
+            h += ("<p class=muted>Fresh-draw check: " + (
+                f"{_n(fr['points'])} re-run on {_n(fr['n_members'])} that no training row used; the emulator's RMSE against them "
+                f"{_n(fr['rmse'])}, {_n(fr['rmse_debiased'])} less their own noise {_n(fr['noise_floor'])}; the RMSE limit is judged on the larger of this "
+                "and the in-sample figure." if fr else "no held-out point of this run's variants could be re-run, so the RMSE limit is judged on the in-sample "
+                "figure alone.") + (f" {e(a['draws'])}" if a["draws"] else "") + "</p>")
     d = m["design"]
     if d:
         h += (f"<p>Training table {e(d['table'])}: {_n(d['table_rows'])}, {_n(d['rows_added'])} added by this run. "
@@ -1163,7 +1271,7 @@ def _machine_html(m: dict[str, Any]) -> str:
            "RUNBOOK 4, whose duration depends on the link).</p>") if "ingest" in m["wall_s"] else ""
     return (f"<pre>{e(m['describe'])}</pre><div class=scroll><table><tr><th>Vehicle<th>Cost per mission day (s per batch + s per member)"
             f"<th>Source</tr>{cost}</table></div>"
-            f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div>{ing}<p>Plan: {plan}.</p>"
+            f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div><p class=muted>{e(m['report_stage'])}.</p>{ing}<p>Plan: {plan}.</p>"
             f"<p>Code: git {e(', '.join(m['git_sha']))}. Machine: {where}.</p><p class=muted>{ver}</p>")
 
 
@@ -1182,7 +1290,7 @@ def _assumed_html(a: dict[str, Any]) -> str:
 def _receipts_html(rows: list[Any]) -> str:
     e = html.escape
     body = "".join(f"<tr id='{_rid(r['id'])}'><td><code>{e(r['id'])}</code><td>{e(r['kind'])}"
-                   f"<td>{'ok' if r['ok'] else '<b>FAILED OR MISSING</b>'}<td>{e(r['got'])}<td>{e(r['limit'])}"
+                   f"<td>{'ok' if r['ok'] else {'stale': 'stale', 'not_run': 'not run'}.get(r['state'], '<b>FAILED</b>')}<td>{e(r['got'])}<td>{e(r['limit'])}"
                    f"<td><code>{e(r['sha256'][:16])}</code><td><a href='../{e(r['ledger'])}'>ledger</a></tr>" for r in rows)
     return f"<div class=scroll><table><tr><th>Receipt<th>Kind<th>Status<th>Value<th>Limit<th>sha-256<th>Ledger</tr>{body}</table></div>"
 
@@ -1204,13 +1312,17 @@ def render(rep: dict[str, Any]) -> str:
     rows = "".join(f"<tr><td><a href='#v-{e(i)}'>{e(i)}</a><td>{_badge(d['verdict'])}{_undecided_badge(d)}<td>{_n(d['p_fail'])}<td>{_n(d['n'])}"
                    f"<td>{_n(d.get('frac_beyond_horizon') or d.get('frac_out_of_range'))}</tr>" for i, d in {**rep["vehicles"], **rep["links"]}.items())
     bad = rep["traceability_problems"]
-    failing = [r["id"] for r in rep["receipts"] if not r["ok"]]
+    by = {st: [r["id"] for r in rep["receipts"] if r["state"] == st] for st in ("fail", "stale", "not_run")}
     tr = (f"<p class=warn>Traceability problems: {e('; '.join(bad))}</p>" if bad
           else "<p class=muted>Traceability check: every number links to a receipt, which is a hashed ledger output, a ledger check, "
                "or a group of model receipts. A link is provenance, not a pass.</p>")
     tr += f"<p class=warn>{e(rep['subgrid']['statement'])}</p>" if rep["subgrid"]["statement"] else ""
-    tr += (f"<p class=warn>{len(failing)} of {len(rep['receipts'])} receipts below record a failed result and are marked FAILED OR MISSING: "
-           f"{e('; '.join(failing))}.</p>" if failing else "")
+    tr += f"<p class=muted>Sub-grid calibration used by the stages after stage 3: {e(rep['subgrid']['source'])}.</p>"
+    n = len(rep["receipts"])
+    tr += (f"<p class=warn>{len(by['fail'])} of {n} receipts below failed a check and are marked FAILED: {e('; '.join(by['fail']))}.</p>" if by["fail"] else "")
+    tr += (f"<p class=warn>{len(by['stale'])} of {n} are stale (made by other code; rerun <code>python -m cafe.pm receipts</code>): "
+           f"{e('; '.join(by['stale']))}.</p>" if by["stale"] else "")
+    tr += (f"<p class=warn>{len(by['not_run'])} of {n} were not run: {e('; '.join(by['not_run']))}.</p>" if by["not_run"] else "")
     inputs = e("; ".join(i["ref"] for i in m["data_consumed"]["inputs"]) or "none recorded")
     body = (f"<h1>{e(m['name'])}: pre-mission report</h1><p>{e(m['description'])}</p>"
             f"<p class=muted>Window {e(m['window']['start'])} to {e(m['window']['end'])}; seed {_n(m['seed'])}; verdicts from {e(rep['verdict_source'])}. "

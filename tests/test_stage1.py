@@ -21,6 +21,7 @@ T0, T1 = UTC(MISSION["window"]["start"]), UTC(MISSION["window"]["end"])
 SORT = {"local_solar_time": "14:00", "every_days": 1}
 TGRID = np.arange(T0, T1 + 1, stage1.REC_S)
 LK = {lk["id"]: lk for lk in MISSION["links"]}
+P_USV = usv.load_platform("saildrone_explorer")
 
 
 # ---------------------------------------------------------------------------------------------------------------- launch times
@@ -74,12 +75,17 @@ def test_launch_times_are_complete_and_exactly_at_local_solar_time(hh, mm, lon, 
 
 def test_vehicle_classes_follow_the_platform_and_the_base(tmp_path):
     assert stage1._classes(MISSION) == {"glider_eq": "glider", "glider_1n": "glider", "usv": "usv", "uas": "uas"}
-    assert stage1.platform_kind("saildrone_explorer") == "wing_sail_usv" and stage1.platform_kind("seaglider") == "seaglider"
     odd = {"vehicles": [{"id": "a", "platform": "quad_uas", "base": "ship"}, {"id": "b", "platform": "quad_uas"}]}
     assert stage1._classes(odd) == {"a": "uas", "b": "glider"}                                       # `base` decides, not the platform
     nokind = tmp_path / "bare.yaml"
     nokind.write_text("params: {}\n")
-    assert stage1.platform_kind(str(nokind)) == str(nokind)                                          # no `kind` key: the name stands in
+    assert stage1._classes({"vehicles": [{"id": "c", "platform": str(nokind)}]}) == {"c": "glider"}      # no `kind` key: the name stands in
+
+
+def test_the_class_rule_is_the_one_in_config(monkeypatch):
+    """Review round 3, M-17: stage 1 had its own copy of the rule that config.platform_class now holds once."""
+    monkeypatch.setattr(stage1, "platform_class", lambda v: "usv" if v["id"] == "b" else "uas")
+    assert stage1._classes({"vehicles": [{"id": "a", "platform": "seaglider"}, {"id": "b", "platform": "seaglider"}]}) == {"a": "uas", "b": "usv"}
 
 
 def test_priors_follow_the_vehicle_classes_and_the_perturbation_file():
@@ -309,6 +315,8 @@ class FakeSim:
         self.t0 = a[5] if len(a) == 7 else a[4]                 # GliderSim(P, M, env, lon, lat, t0, mis) / USVSim(P, M, env, start, t0, task)
         self.fail, self.first = {"mode": np.array([True, False])}, {"mode": np.array([42.0, np.nan])}
         self.path_m = np.array([3600.0, 7200.0])
+        # glider energy; USV cross-track
+        self.E, self.cap, self.xte_max, self.mode = np.array([1e5, 2e5]), np.array([4e5, 4e5]), np.array([1e3, 2e3]), "section"
 
     def run(self, duration, dt, record_s=None):
         """One record per step, the state after it (t0 + dt, t0 + 2 dt, ...), as the real simulators give."""
@@ -332,6 +340,8 @@ def test_glider_station_task_reaches_the_sim_with_its_tolerances_and_the_refit_s
     assert r["lon"][:3, 0].tolist() == [-165.5, 601.0, 1201.0] and r["lat"][0].tolist() == [0.0, 0.0] and r["depth"][0].tolist() == [0.0, 0.0]
     assert r["surfaced"].dtype == bool and r["surfaced"][:3, 0].tolist() == [True, False, True]                    # phase 3 is surfaced
     assert r["antenna_m"] == P["antenna_height_m"] == 0.5 and r["first"]["mode"][0] == 42.0 and r["fail"]["mode"].tolist() == [True, False]
+    far = stage1._dist((r["lon"], r["lat"]), (np.full_like(r["lon"], -165.5), np.full_like(r["lat"], 0.0))).max(0) / 1e3
+    assert r["margin_name"] == "maximum distance from the station" and np.allclose(r["margin"], far) and far.min() > 1000.0  # M-2: a station glider's margin
 
 
 def test_glider_and_usv_records_start_at_the_deploy_state_on_the_t0_plus_600_k_grid():
@@ -359,6 +369,9 @@ def test_glider_drift_task_has_no_station_and_takes_the_default_dive_depth(monke
     mis = FakeSim.last[0][6]
     assert mis == dict(mode="drift", dive_depth_m=P["mission_defaults"].get("dive_depth_m", 500.0), waypoints=[(-165.0, 1.0), (-164.0, 1.0)])
     assert np.allclose(FakeSim.last[1]["perturb"]["speed_scale"], 1.0) and r["antenna_m"] == P["antenna_height_m"] == 0.3
+    assert r["margin_name"] == "battery energy margin" and np.allclose(r["margin"], 1.0 - np.array([1e5, 2e5]) / (4e5 * (1.0 - P["reserve_frac"])))      # M-2
+    stage1._run_glider(dict(v, task=dict(v["task"], heading_to=270.0)), P, None, 2, X, 0.0, 3600.0)
+    assert FakeSim.last[0][6]["heading_to"] == 270.0                                                         # M-1: the task's heading reaches the simulator
 
 
 def test_usv_waypoints_become_tuples_and_the_drag_scales_the_vpp(monkeypatch):
@@ -373,7 +386,8 @@ def test_usv_waypoints_become_tuples_and_the_drag_scales_the_vpp(monkeypatch):
     assert np.allclose(kw["perturb"]["vpp_bias"], [(1.1) * 0.5 - 1, -0.2]) and FakeSim.last[2] == (7200.0, 60.0, stage1.DT_VEHICLE)
     assert r["antenna_m"] == P["rf_antenna_height_m"] == 2.2 and r["surfaced"].all() and np.all(r["depth"] == 0.0) and r["fail"]["mode"][0]
     assert r["t"].tolist() == list(np.arange(0.0, 7201.0, 600.0)) and r["lon"].shape == (13, 2) and r["lon"][:2, 0].tolist() == [-165.0, 601.0]
-    task_less = dict(v, task=dict(mode="station"))
+    assert r["margin_name"] == "maximum cross-track error" and r["margin"].tolist() == [1.0, 2.0]               # M-2: the sim's largest |xte|, in km
+    task_less = dict(v, task=dict(mode="station", lon=-165.0, lat=0.0))
     stage1._run_usv(task_less, P, AnalyticEnv(), 2, X, 0.0, 600.0)
     assert FakeSim.last[0][5]["waypoints"] == []
 
@@ -823,10 +837,12 @@ def test_summary_verdicts_dominant_mode_and_first_failure_time():
     assert u["first_fail_t"] == 100.0                      # M-23: mode_a's members fail earlier than mode_b's 500; the first failure is over all failed members
     g = s["vehicles"]["uas"]
     assert g["k_fail"] == 0 and g["dominant"] is None and g["first_fail_t"] is None and g["median_fail_t"] is None
-    assert g["sensitivity"] == dict(param=None, S1={}, noise_floor=None)
+    assert g["sensitivity"] == dict(param=None, S1={}, noise_floor=None, case="all_pass", quantity="failure indicator",
+                                    text="No member failed, so there is no failure to attribute to a parameter.")
     assert "73 members" in g["verdict"]["note"]                                                                              # 24 members cannot certify
     h = s["vehicles"]["glider_eq"]
-    assert 0 < h["k_fail"] < 24 and h["sensitivity"]["param"] == names[0] and set(h["sensitivity"]["S1"]) == set(names)       # driven by U[:, 0]
+    # driven by U[:, 0]
+    assert 0 < h["k_fail"] < 24 and h["sensitivity"]["param"] == names[0] and set(h["sensitivity"]["S1"]) == set(stage1.FORCING) | set(stage1.ACTS["glider"])
 
 
 def test_first_and_median_failure_are_over_every_failed_member_not_the_dominant_modes_members():
@@ -1169,18 +1185,31 @@ def test_the_sensitivity_command_stores_the_case_where_the_report_reads_it(tmp_p
 # ------------------------------------------------------------------------------------------------------------ review round 2 (batch B)
 
 def test_usv_speed_over_ground_and_wind_along_the_track_are_stored_per_member_and_summarised(monkeypatch):
-    """M-2: path length / time since deploy, the mean 10 m and anemometer-height wind along the track, their ratios and Chiodi's calibration ratio."""
+    """M-2: speed over ground, the mean 10 m and anemometer-height wind along the track, their ratios and Chiodi's calibration ratio. Review round 3,
+    M-7: the speed is the displacement of the stored records (path_speed), not the simulator's path_m, which leaves out the ocean SDE's steps."""
     v = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
     P = usv.load_platform("saildrone_explorer")
-    monkeypatch.setattr(stage1.usv, "USVSim", FakeSim)
+
+    class Walker(FakeSim):
+        """Member 0 walks north at 0.5 m/s, member 1 at 1.0 m/s, every step recorded; path_m is deliberately wrong (the SDE-blind number)."""
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.path_m, self.start = np.array([9e9, 9e9]), a[3]
+
+        def run(self, duration, dt, record_s=None):
+            n = int(round(duration / dt))
+            lat = self.start[1] + np.degrees(np.outer(np.arange(1, n + 1) * dt, [0.5, 1.0]) / usv.R_E)
+            return dict(t=self.t0 + dt * np.arange(1, n + 1), lon=np.full((n, 2), self.start[0]), lat=lat, fail=self.fail, first=self.first)
+    monkeypatch.setattr(stage1.usv, "USVSim", Walker)
     r = stage1._run_usv(v, P, AnalyticEnv(wind=(-5.0, 0.0)), 2, {"usv_vpp_bias": np.zeros(2)}, 0.0, 7200.0)
-    assert np.allclose(r["sog_ms"], [0.5, 1.0]) and np.allclose(r["u10_ms"], 5.0)
+    assert np.allclose(r["sog_ms"], [0.5, 1.0]) and np.allclose(r["u10_ms"], 5.0)                                  # not path_m / T (9e9 here)
     assert np.allclose(r["wind_anem_ms"], 5.0 * np.log(P["anemometer_m"] / 2e-4) / np.log(10.0 / 2e-4))
     res = stage1.merge([dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"usv": dict(r, **{"class": "usv"})})] * 2)
-    assert res["vehicles"]["usv"]["sog_ms"].tolist() == [0.5, 1.0, 0.5, 1.0]
+    assert res["vehicles"]["usv"]["sog_ms"].tolist() == pytest.approx([0.5, 1.0, 0.5, 1.0])
     sp = stage1.summarize(res, ["a"], MISSION, 73)["vehicles"]["usv"]["speed"]
-    assert sp["sog_ms"] == [0.5, 1.0, 0.5, 1.0] and sp["ratio"] == pytest.approx([0.1, 0.2, 0.1, 0.2]) and sp["ratio_median"] == pytest.approx(0.15)
-    assert sp["sog_ms_median"] == 0.75 and sp["u10_ms_median"] == 5.0 and sp["calibration_ratio"] == pytest.approx(0.96 / 5.4)
+    assert sp["sog_ms"] == pytest.approx([0.5, 1.0, 0.5, 1.0]) and sp["ratio"] == pytest.approx([0.1, 0.2, 0.1, 0.2])
+    assert sp["ratio_median"] == pytest.approx(0.15)
+    assert sp["sog_ms_median"] == pytest.approx(0.75) and sp["u10_ms_median"] == 5.0 and sp["calibration_ratio"] == pytest.approx(0.96 / 5.4)
     assert sp["ratio_anem_median"] == pytest.approx(0.75 / r["wind_anem_ms"][0])
 
 
@@ -1382,3 +1411,267 @@ def test_a_period_over_one_day_starts_at_the_first_daily_slot_not_where_the_epoc
     t0, t1 = UTC("2023-03-01T12:00:00Z"), UTC("2023-03-12T12:00:00Z")
     ts = stage1.launch_times({"local_solar_time": "14:00", "every_days": every}, -165.0, t0, t1, 1920.0)
     assert ts[0] == UTC(f"{first_day}T01:00:00Z") and np.allclose(np.diff(ts), 86400.0 * every)
+
+
+# ------------------------------------------------------------------------------------------------------------ review round 3 (batch S)
+
+def test_a_drift_glider_swims_on_the_heading_of_its_task():
+    """M-1: _run_glider never passed the task's heading_to, so every drift glider swam due north."""
+    from tests.test_glider import env as strat_env
+    P = glider.load_platform("slocum")
+    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2)}
+
+    def go(heading):
+        v = dict(id="g", platform="slocum", deploy=dict(time="2023-03-01T18:00:00Z", lon=-165.0, lat=1.0),
+                 task=dict(mode="drift", heading_to=heading, dive_depth_m=200.0))
+        return stage1._run_glider(v, P, strat_env(), 2, X, 0.0, 4 * 3600.0)
+    east, north = go(90.0), go(0.0)
+    de = np.median(east["lon"][-1] + 165.0) * 111.195 * np.cos(np.radians(1.0))
+    dn = np.median(north["lat"][-1] - 1.0) * 111.195
+    assert de > 1.0 and abs(np.median(east["lat"][-1] - 1.0) * 111.195) < 0.2 * de                      # east: kilometres of longitude, hardly any latitude
+    assert dn > 1.0 and abs(np.median(north["lon"][-1] + 165.0) * 111.195) < 0.2 * dn
+
+
+def test_a_usv_station_task_runs_and_is_swept_off_at_its_radius():
+    """M-3 (1): a USV `task.mode: station` died in USVSim with KeyError 'station'; radius_km is the swept-off-track distance."""
+    def go(radius):
+        v = dict(id="u", platform="saildrone_explorer", deploy=dict(time="2023-03-01T18:00:00Z", lon=-165.0, lat=0.0),
+                 task=dict(mode="station", lon=-165.0, lat=0.0, radius_km=radius))
+        env = AnalyticEnv(wind=(-0.2, 0.0), current=(0.9, 0.0), hs=0.5)                                  # SPURS-2: a light wind against a strong current
+        return stage1._run_usv(v, usv.load_platform("saildrone_explorer"), env, 4, {"usv_vpp_bias": np.full(4, -0.24)}, 0.0, 6 * 3600.0)
+    tight, wide = go(1.0), go(100.0)
+    assert tight["fail"]["swept_off_track"].all() and not wide["fail"]["swept_off_track"].any()
+    assert wide["margin_name"] == "maximum distance from the station" and 10.0 < wide["margin"].min() and wide["margin"].max() < 25.0  # 0.9 m/s for 6 h = 19 km
+    assert tight["first"]["swept_off_track"].max() < 3 * 3600.0
+
+
+def test_a_run_too_short_for_a_step_has_one_record_the_deploy_state():
+    """M-18: T - t0 = 30 s runs no step; the empty 1-D history crashed the concatenation (ValueError: arrays must have the same number of dimensions)."""
+    from tests.test_glider import env as strat_env
+    t0 = UTC("2023-03-01T18:00:00Z")
+    v = next(x for x in MISSION["vehicles"] if x["id"] == "glider_eq")
+    gx = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2)}
+    rg = stage1._run_glider(v, glider.load_platform("seaglider"), strat_env(), 2, gx, t0, t0 + 30.0)
+    u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
+    ru = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), AnalyticEnv(wind=(-5.0, 0.0)), 2, {"usv_vpp_bias": np.full(2, -0.24)}, t0, t0 + 30.0)
+    for r, d in ((rg, v["deploy"]), (ru, u["deploy"])):
+        assert r["t"].tolist() == [t0] and r["lon"].shape == r["lat"].shape == r["depth"].shape == r["surfaced"].shape == (1, 2)
+        assert np.all(r["lon"] == d["lon"]) and np.all(r["lat"] == d["lat"]) and r["surfaced"].all() and not any(x.any() for x in r["fail"].values())
+    assert np.isnan(ru["sog_ms"]).all()                                                                  # no segment, no speed
+
+
+def test_path_speed_is_the_sum_of_the_segments_over_the_time_they_span():
+    """M-7: one definition of speed over ground: member 0 walks north, 1 zigzags (the path counts, the displacement does not), 2 has a lost record,
+    3 crosses the dateline, 4 never moves."""
+    k = np.radians(1.0) * usv.R_E / 600.0                                                               # m/s for 1 degree of latitude per 600 s record
+    lat = np.zeros((5, 5))
+    lat[:, 0] = 0.01 * np.arange(5)
+    lat[:, 1] = 0.01 * (np.arange(5) % 2)
+    lat[:, 2] = 0.01 * np.arange(5)
+    lon = np.zeros((5, 5))
+    lon[:, 3] = 179.98 + 0.01 * np.arange(5)
+    lon[:, 3] = (lon[:, 3] + 180.0) % 360.0 - 180.0
+    lat[2, 2] = np.nan
+    v = stage1.path_speed(lon, lat, 600.0 * np.arange(5))
+    assert v[:2] == pytest.approx([0.01 * k] * 2) and v[2] == pytest.approx(0.01 * k) and v[3] == pytest.approx(0.01 * k) and v[4] == 0.0
+    assert np.isnan(stage1.path_speed(lon[:1], lat[:1], np.zeros(1))).all()                             # one record: no segment, no speed
+    assert stage1.path_speed(lon, lat, 600.0 * np.arange(5)).shape == (5,)
+
+
+def test_the_calibration_run_measures_speed_the_way_the_mission_does(monkeypatch):
+    """M-7: usv.mean_sog read path_m (blind to the ocean SDE's steps, which the stored records contain); it now takes path_speed of the 10-min records."""
+    from cafe.pm.env import protocol
+
+    class Stirred(AnalyticEnv):
+        def sde_displacement(self, lon, lat, t):
+            return np.tile([100.0, 0.0], (np.size(lon), 1))  # 100 m east per step, on top of the ~120 m the boat sails
+
+    plain = usv.mean_sog(P_USV, 5.4, hours=3.0, nb=8)
+    monkeypatch.setattr(protocol, "AnalyticEnv", Stirred)
+    assert usv.mean_sog(P_USV, 5.4, hours=3.0, nb=8) > 1.08 * plain
+
+
+def acting_names(cls="glider"):
+    return [n for n in stage1.priors_for(MISSION)[1] if n in set(stage1.FORCING) | set(stage1.ACTS[cls])]
+
+
+def draw(n=32, seed=0):
+    names = list(stage1.priors_for(MISSION)[1])
+    return names, np.random.default_rng(seed).random((n, len(names)))
+
+
+@pytest.mark.parametrize("k", [1, 2, 3])
+def test_a_parameter_that_drives_the_margin_is_found_whatever_few_members_failed(k):
+    """M-2: EASI on the 0/1 failure indicator saturated at its own permutation floor for 3 failures or fewer (a perfectly known driver was not
+    detected: 0, 0 and 16 of 20 draws at k = 1, 2, 3); on the continuous margin the driver is found in at least 18 of 20."""
+    hit = 0
+    for seed in range(20):
+        names, U = draw(32, seed)
+        margin = U[:, names.index("battery_capacity_scale")] + 0.02 * np.random.default_rng(100 + seed).standard_normal(32)
+        f = np.argsort(margin)[:k]
+        e = stage1._sensitivity(names, U, np.isin(np.arange(32), f), set(names), margin, "battery energy margin")
+        hit += e["param"] == "battery_capacity_scale"
+    assert hit >= 18
+
+
+def test_sensitivity_says_which_of_five_cases_applies_and_what_was_ranked():
+    names, U = draw(32, 3)
+    j = names.index("hs_scale")
+    margin = U[:, j]
+    act = set(names)
+    e = stage1._sensitivity(names, U, U[:, j] < 0.3, act, margin, "maximum cross-track error")
+    assert (e["case"], e["param"], e["quantity"]) == ("ranked", "hs_scale", "maximum cross-track error")
+    assert e["text"].startswith("hs_scale has the largest first-order index (S1 ") and "maximum cross-track error" in e["text"]
+    assert e["text"].endswith("member count.")
+    assert e["noise_floor"] > 0 and e["S1"]["hs_scale"] > e["noise_floor"]
+    # nothing clears the floor: an unrelated margin
+    e = stage1._sensitivity(names, U, U[:, 0] < 0.3, act, np.random.default_rng(1).random(32), "battery energy margin")
+    assert (e["case"], e["param"]) == ("nothing_above_floor", None) and "No parameter clears the noise floor for the battery energy margin" in e["text"]
+    assert e["S1"] and "not the same as none mattering" in e["text"]
+    # no failure / no success / too few members
+    assert stage1._sensitivity(names, U, np.zeros(32, bool), act, margin, "q")["case"] == "all_pass"
+    e = stage1._sensitivity(names, U, np.ones(32, bool), act, margin, "q")
+    assert e["case"] == "all_fail" and e["param"] is None and e["S1"] == {} and e["noise_floor"] is None and e["text"].startswith("Every member failed")
+    e = stage1._sensitivity(names, U[:8], np.arange(8) < 3, act, None, "q")
+    assert e["case"] == "too_few" and "Only 8 members" in e["text"] and "16" in e["text"]
+
+
+def test_with_no_margin_the_indicator_is_ranked_and_three_failures_or_fewer_give_the_hypercube_ranks():
+    """M-2: the indicator is the fallback; with fewer than 3 failures (or successes) the entry says so and prints the ranks of the minority
+    members for the three most extreme parameters instead of 'no parameter clears the floor'."""
+    names, U = draw(32, 5)
+    j = names.index("battery_capacity_scale")
+    low = np.argsort(U[:, j])[:2]
+    e = stage1._sensitivity(names, U, np.isin(np.arange(32), low), set(names), None, "battery reserve margin")
+    assert e["case"] == "too_few" and e["quantity"] == "failure indicator" and e["param"] is None and e["S1"] == {}
+    assert e["text"].startswith("Only 2 of 32 members failed, too few to rank the parameters; "
+                                "their ranks among the 32 draws (0 is the lowest value) are battery_capacity_scale 0, 1;")
+    survivors = stage1._sensitivity(names, U, ~np.isin(np.arange(32), low), set(names), None, "x")
+    assert survivors["case"] == "too_few" and survivors["text"].startswith("Only 2 of 32 members passed")
+    f = U[:, j] < 0.25
+    e = stage1._sensitivity(names, U, f, set(names), None, "x")
+    assert e["case"] == "ranked" and e["param"] == "battery_capacity_scale" and e["quantity"] == "failure indicator"
+    margin = np.where(np.arange(32) < 12, np.nan, U[:, j])                                  # members without a margin (no flown sortie) leave the ranking
+    e = stage1._sensitivity(names, U, f, set(names), margin, "battery reserve margin")
+    assert e["case"] == "ranked" and e["quantity"] == "battery reserve margin"
+    e = stage1._sensitivity(names, U, f, set(names), np.where(np.arange(32) < 20, np.nan, 1.0), "battery reserve margin")  # 12 finite: too few for an index
+    assert e["quantity"] == "failure indicator"
+
+
+def test_a_column_that_cannot_act_on_the_class_is_not_ranked_and_does_not_set_the_floor():
+    """M-2: glider_speed_scale cannot act on a UAS (its S1 was equal to the real driver's and to the floor); the indices come from the acting columns only."""
+    names, U = draw(32, 7)
+    margin = U[:, names.index("battery_capacity_scale")]
+    f = margin < 0.2
+    uas_e = stage1._sensitivity(names, U, f, set(stage1.FORCING) | set(stage1.ACTS["uas"]), margin, "battery reserve margin")
+    assert set(uas_e["S1"]) == set(stage1.FORCING) | set(stage1.ACTS["uas"]) and "glider_speed_scale" not in uas_e["S1"] and "usv_vpp_bias" not in uas_e["S1"]
+    assert set(stage1.ACTS) == {"glider", "usv", "uas"} and "battery_capacity_scale" not in stage1.ACTS["usv"]
+    wide = stage1._sensitivity(names, U, f, set(names), margin, "x")
+    assert wide["noise_floor"] >= uas_e["noise_floor"]                                                   # more columns, no lower family-wise floor
+
+
+def test_the_summary_ranks_the_margin_the_simulator_stored_and_only_the_columns_of_the_class():
+    names = list(stage1.priors_for(MISSION)[1])
+    res = merged({"glider_eq": 0.25, "usv": 0.25}, {"usv-uas-rf": 0.25, "glider_eq-ship-acoustic": 0.25})
+    for vid, q in (("glider_eq", "maximum distance from the station"), ("usv", "maximum cross-track error")):
+        r = res["vehicles"][vid]
+        r["margin"], r["margin_name"] = -res["U"][:, 0].copy(), q
+    s = stage1.summarize(res, names, MISSION, 73)
+    g, u = s["vehicles"]["glider_eq"]["sensitivity"], s["vehicles"]["usv"]["sensitivity"]
+    assert g["quantity"] == "maximum distance from the station" and g["param"] == names[0] and "usv_vpp_bias" not in g["S1"] and "glider_speed_scale" in g["S1"]
+    assert u["quantity"] == "maximum cross-track error" and "glider_speed_scale" not in u["S1"] and "usv_vpp_bias" in u["S1"]
+    assert "battery_capacity_scale" not in u["S1"]
+    assert s["vehicles"]["uas"]["sensitivity"]["case"] == "all_pass" and s["vehicles"]["uas"]["sensitivity"]["quantity"] == "failure indicator"
+    rf = s["links"]["usv-uas-rf"]["sensitivity"]                                                         # the ends are a USV and a UAS
+    assert rf["quantity"] == "fraction of the required moments the link worked" and rf["param"] == names[0]
+    assert {"usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale"} <= set(rf["S1"]) and "glider_speed_scale" not in rf["S1"]
+    ac = s["links"]["glider_eq-ship-acoustic"]["sensitivity"]                                           # a glider and the ship
+    assert "glider_speed_scale" in ac["S1"] and "usv_vpp_bias" not in ac["S1"] and "bulk_stress_scale" not in ac["S1"]
+    assert s["links"]["usv-shore-iridium"]["sensitivity"]["case"] == "all_pass"
+
+
+def test_margins_and_the_30_s_sortie_grid_join_along_the_members():
+    a, b = synth_batch(list(range(0, 8))), synth_batch(list(range(8, 16)))
+    for batch in (a, b):
+        r = batch["vehicles"]["uas"]
+        r["margin"], r["margin_name"] = np.arange(8.0), "battery reserve margin"
+        r["fine"] = dict(t=np.arange(3.0), lon=np.zeros((3, 8)), lat=np.ones((3, 8)), alt=np.zeros((3, 8)), depth=np.zeros((3, 8)),
+                         airborne=np.ones((3, 8), bool))
+    r = stage1.merge([a, b])["vehicles"]["uas"]
+    assert r["margin"].shape == (16,) and r["margin_name"] == "battery reserve margin" and "margin" not in stage1.merge([a, b])["vehicles"]["usv"]
+    assert r["fine"]["t"].tolist() == [0.0, 1.0, 2.0] and all(r["fine"][k].shape == (3, 16) for k in ("lon", "lat", "alt", "depth", "airborne"))
+
+
+def test_the_sorties_are_also_kept_on_a_30_s_grid_over_each_launch_window_and_the_margin_is_the_lowest_charge_over_the_reserve(monkeypatch):
+    """M-5 / M-2: a 20 min sortie is only 1 to 2 of the 10 min records; `fine` holds the same sortie every 30 s for the links to be judged on."""
+    calls = []
+    monkeypatch.setattr(stage1.uas, "fly_sortie", sortie_stub(calls))
+    v, P, mission, t0, T, X = uas_inputs(window=("2023-03-01T18:00:00Z", "2023-03-03T06:00:00Z"))
+    r = stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    dur = 60.0 * v["sorties"]["duration_min"] * P["sortie"]["hard_stop_factor"]
+    f = r["fine"]
+    want = np.concatenate([UTC(x) + np.arange(0.0, dur + 1.0, stage1.FINE_S) for x in ("2023-03-02T01:00:00Z", "2023-03-03T01:00:00Z")])
+    assert f["t"].tolist() == want.tolist() and f["lon"].shape == f["airborne"].shape == (want.size, 2)
+    k = int(np.flatnonzero(f["t"] == UTC("2023-03-02T01:00:00Z") + 600.0)[0])
+    nw = want.size // 2                                                                                  # samples per launch window (hard_stop_factor x 20 min)
+    assert f["airborne"][:41, 0].all() and not f["airborne"][41:nw, 0].any() and f["airborne"][nw:nw + 41, 0].all()  # the stub flies 1200 s: 41 samples of 30 s
+    assert np.allclose(f["alt"][k, 0], 25.0 + P["sortie"]["deck_height_m"]) and f["lon"][k, 0] > f["lon"][0, 0]
+    assert r["airborne"].sum(0)[0] == 2 * 3 and r["margin_name"] == "battery reserve margin"             # the 10-min records are as before: 3 per sortie
+    reserve = P["battery"]["reserve_frac"]
+    assert r["margin"].tolist() == pytest.approx([0.5 - reserve, 0.6 - reserve])  # member 1 is scrubbed on the second sortie: its first counts
+    v, P, mission, t0, T, X = uas_inputs(window=("2023-03-01T18:00:00Z", "2023-03-01T19:00:00Z"))
+    none = stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    assert none["fine"] is None and np.isnan(none["margin"]).all()
+
+
+def test_a_sortie_failure_time_is_epoch_seconds_in_double_precision(monkeypatch):
+    """M-6: float32 epoch seconds are 128 s apart (the q3 report printed one instant for the first and the median failure)."""
+    base = sortie_stub([])
+
+    def fly(*a, **k):
+        r = base(*a, **k)
+        r["t_first"] = {n: x.astype(np.float32) for n, x in r["t_first"].items()}
+        return r
+    monkeypatch.setattr(stage1.uas, "fly_sortie", fly)
+    v, P, mission, t0, T, X = uas_inputs()
+    r = stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    t_launch = UTC("2023-03-02T01:00:00Z")
+    got = r["first"]["attitude_exceedance"]
+    # (a float32 compares equal to the rounded sum, hence the dtype and float())
+    assert t_launch % 128 != 0 and got.dtype == np.float64 and float(got[1]) == t_launch + 300.0
+
+
+def test_a_uas_link_is_judged_every_30_s_in_flight_so_one_bad_sample_passes_at_95_percent():
+    """M-5: 6 to 12 samples per member made 0.95 mean 'every sample'; a 20 min sortie on the 30 s grid is 41 samples and one lost sample (2.4 %) is allowed."""
+    out, _ = rf_scene(M=2, bad_samples=(0, 0))
+    tf = T0 + 6 * 3600.0 + np.arange(0.0, 1201.0, 30.0)
+    lat = np.zeros((tf.size, 2))
+    lat[10, 1] = km_north(100.0)  # member 1: the UAS is beyond the horizon at one sample only
+    zero = np.zeros_like(lat)
+    out["uas"]["fine"] = dict(t=tf, lon=zero - 165.0, lat=lat, alt=zero + 40.0, depth=zero, airborne=np.ones(lat.shape, bool))
+    r = stage1.evaluate_link(LK["usv-uas-rf"], out, MISSION, flat_env(2), 2, 3, [0, 1])
+    assert r["need_count"].tolist() == [41, 41] and r["t"].size == TGRID.size + 41 - 3  # the sortie's 3 samples on the 10 min grid are the same instants
+    assert r["frac"].tolist() == [1.0, 40 / 41] and r["success"].tolist() == [True, True] and r["n_invalid"].tolist() == [0, 1]
+    two = {**out, "uas": dict(out["uas"], fine=dict(out["uas"]["fine"], lat=lat + np.where(np.arange(tf.size) % 5 == 0, km_north(100.0), 0.0)[:, None]))}
+    assert not stage1.evaluate_link(LK["usv-uas-rf"], two, MISSION, flat_env(2), 2, 3, [0, 1])["success"].any()
+
+
+def test_the_link_summary_gives_the_required_samples_and_whether_the_fraction_can_be_resolved_on_them():
+    """M-5: need_count_median (int) and granularity_ok = 1 / need_count_median <= 1 - required_fraction; a link needed at no sample is not decided either."""
+    names = list(stage1.priors_for(MISSION)[1])
+    rf = LK["usv-uas-rf"]["required_fraction"]
+    assert rf == 0.95
+    res = merged({}, {})
+    out = {}
+    for n, rfrac in ((9, None), (20, None), (21, None), (0, None), (20, 1.0)):
+        res["links"]["usv-uas-rf"]["need_count"] = np.full(24, n)
+        m = MISSION if rfrac is None else dict(MISSION, links=[dict(lk, required_fraction=rfrac) if lk["id"] == "usv-uas-rf" else lk
+                                                               for lk in MISSION["links"]])
+        out[(n, rfrac)] = stage1.summarize(res, names, m, 73)["links"]["usv-uas-rf"]
+    assert [(e["need_count_median"], e["granularity_ok"]) for e in out.values()] == [(9, False), (20, True), (21, True), (0, False), (20, True)]
+    assert isinstance(out[(9, None)]["need_count_median"], int) and out[(9, None)]["granularity_ok"] is False
+    odd = merged({}, {})
+    odd["links"]["usv-uas-rf"]["need_count"] = np.arange(24) % 2 * 10 + 10                                # median 15: 1/15 > 0.05
+    assert stage1.summarize(odd, names, MISSION, 73)["links"]["usv-uas-rf"]["need_count_median"] == 15
+    assert stage1.summarize(odd, names, MISSION, 73)["links"]["usv-uas-rf"]["granularity_ok"] is False
+    assert stage1.summarize(merged({}, {}), names, MISSION, 73)["links"]["usv-uas-rf"]["need_count_median"] is None        # a batch without the counts says so

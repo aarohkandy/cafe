@@ -170,7 +170,7 @@ def test_environment_without_env(full):
     q = {v: d["quantity"] for v, d in env["forcing_at_windows"].items()}
     assert q["glider_eq"] == "surface current speed" and q["usv"] == "significant wave height" and q["uas"] == "10 m wind speed"
     w = env["forcing_at_windows"]["glider_eq"]["windows"][0]["forcing"]
-    assert w["value"] == 8.0 and w["unit"] == "m/s" and w["basis"] == "failed members"
+    assert w["value"] == 8.0 and w["unit"] == "m/s" and w["basis"] == pm_run.BASIS[True]
 
 
 def test_environment_queried_with_env(run):
@@ -614,7 +614,8 @@ def test_a_run_without_ledgers_is_flagged_not_hidden(run):
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
     assert rep["traceability_problems"] and all("missing or its check failed" in p for p in rep["traceability_problems"])
-    assert "Traceability problems" in h and "FAILED OR MISSING" in h
+    assert "Traceability problems" in h and "were not run: " in h and "FAILED OR MISSING" not in h             # a stage with no ledger was not run
+    assert {r["state"] for r in rep["receipts"] if not r["ok"]} == {"not_run"}
     assert rep["map"] == {"available": False, "reason": "stage1b/res.pkl does not match the sha-256 in the stage1b ledger, so it was not loaded"}
     assert rep["machine"]["machine"] is None and rep["machine"]["git_sha"] == [] and "unknown" in h
 
@@ -778,16 +779,16 @@ def test_the_stage3_output_receipt_is_ok_only_if_some_window_passed(run):
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
     r = {r["id"]: r for r in rep["receipts"]}["stage3:output:windows.json"]
-    assert r["ok"] is False and r["got"] == "0 of 6 windows passed their self-checks"
+    assert r["ok"] is False and r["state"] == "fail" and r["got"] == "0 of 6 windows passed their self-checks (6 ran and failed)"
     assert {r["id"]: r for r in rep["receipts"]}["windows:output:windows.json"]["ok"] is True      # the windows stage's own output has no quality bit
-    assert rep["traceability_problems"] == [] and "FAILED OR MISSING" in h
-    assert "record a failed result" in h and "stage3:output:windows.json" in plain(h)
+    assert rep["traceability_problems"] == [] and "receipts below failed a check and are marked FAILED" in h
+    assert "stage3:output:windows.json" in plain(h) and "were not run" not in h
 
 
 def test_the_banner_says_provenance_not_pass(full):
     run, _, _, _, rep = full
     h = (run / "report" / "index.html").read_text()
-    assert "A link is provenance, not a pass." in h and "passing ledger receipt" not in h and "record a failed result" not in h
+    assert "A link is provenance, not a pass." in h and "passing ledger receipt" not in h and "failed a check" not in h
 
 
 def test_a_failed_ledger_check_is_still_a_traceability_problem_but_a_failed_output_is_not(full):
@@ -928,7 +929,8 @@ def test_the_sanity_block_compares_the_demo_missions_verdicts_with_the_brief(ful
     sn = rep["sanity"]
     rows = {r["id"]: r for r in sn["rows"]}
     assert sn["applies"] and sn["mission"] == "tepex_c_demo" and "It applies to that mission only" in sn["note"]
-    assert rows["glider_eq"]["observed"] == "GO" and rows["glider_eq"]["agrees"] is False and rows["glider_2n"]["agrees"] is True
+    # round 3 M-1: a drift glider has no criterion to agree with
+    assert rows["glider_eq"]["observed"] == "GO" and rows["glider_eq"]["agrees"] is False and rows["glider_2n"]["agrees"] is None
     assert rows["uas"]["agrees"] is None and rows["usv-uas-rf"]["agrees"] is True and rows["glider_eq-ship-acoustic"]["agrees"] is None
     assert rows["usv"]["p_fail"]["value"] == rep["vehicles"]["usv"]["p_fail"]["value"] and rep["traceability_problems"] == []
     h = (run / "report" / "index.html").read_text()
@@ -966,17 +968,17 @@ def test_a_stored_sensitivity_case_is_shown_next_to_the_verdict_and_nothing_is_c
 def test_the_report_says_when_the_sub_grid_layer_is_uncalibrated_and_why(run, monkeypatch):
     """Batch E: the sub-grid layer stays at its defaults until a passed LES window recalibrates it; the report says so, with the reason."""
     m, plan = pm_run.make_run(run)
-    why = "sub-grid layer uncalibrated: no LES window passed its self-checks; config/subgrid.json was not written"
+    why = "sub-grid layer uncalibrated: no LES window passed its self-checks; stage3/subgrid_calibration.json was not written"
     monkeypatch.setattr(credibility_mod, "subgrid_uncalibrated", lambda *a, **k: why)
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
-    assert rep["subgrid"] == dict(calibrated=False, statement=why) and f"<p class=warn>{html.escape(why)}</p>" in h
+    assert {k: v for k, v in rep["subgrid"].items() if k != "source"} == dict(calibrated=False, statement=why) and f"<p class=warn>{html.escape(why)}</p>" in h
     assert json.loads((run / "report" / "credibility.json").read_text())["limitations"][12] == dict(
         credibility_mod.SUBGRID_LIMITATION, text=why)
     monkeypatch.setattr(credibility_mod, "subgrid_uncalibrated", lambda *a, **k: None)
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
-    assert rep["subgrid"] == dict(calibrated=True, statement=None) and "sub-grid layer uncalibrated" not in h
+    assert {k: v for k, v in rep["subgrid"].items() if k != "source"} == dict(calibrated=True, statement=None) and "sub-grid layer uncalibrated" not in h
 
 
 def test_a_link_without_a_margin_prints_n_a_never_a_number(full):
@@ -1242,7 +1244,8 @@ def test_the_usv_block_prints_its_speed_ratio_next_to_chiodis_and_the_sanity_row
     rep, t = load(run), plain((run / "report" / "index.html").read_text())
     s = rep["vehicles"]["usv"]["speed_ratio"]
     assert (s["ratio"]["value"], s["sog"]["value"], s["u10"]["value"]) == (0.107, 0.55, 5.1) and s["chiodi"]["value"] == pytest.approx(0.96 / 5.4)
-    assert "Speed over ground / mean 10 m wind along the track: 0.107 (median over members; 0.55 m/s over 5.1 m/s)" in t
+    assert ("Speed over ground / mean 10 m wind along the track: median of the per-member ratios 0.107; median speed over ground 0.55 m/s over median wind "
+            "5.1 m/s (the quotient of two medians is not the median ratio)") in t
     assert "a scenario that differs from the mission (no current, uniform wind, sailing to a station)" in t
     assert report.USV_RATIO_NOTE in t and "a possible double penalty that is not established" in t       # B's M-2 finding, stated beside the numbers
     assert rep["vehicles"]["glider_eq"]["speed_ratio"] is None
@@ -1329,3 +1332,223 @@ def test_the_reach_map_keeps_the_assumed_usv_speed_without_a_stage_1_track(run):
     assert (u["speed"]["value"] == 1.4
             and u["speed_from"] == "assumed, config/assumptions.yaml reach.speed_ms.usv"
             and u["speed"]["receipt"].startswith("ingest:"))
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 3, batch P
+
+def warn_paragraphs(h):
+    return re.findall(r"<p class=warn>(.*?)</p>", h, re.S)
+
+
+def test_a_table_with_only_stale_rows_gives_a_banner_without_the_word_failed(run):
+    """Round 3 M-9: four stale physics receipts (made by other code, no result read) were announced as 'record a failed result'."""
+    write_receipts(report.RECEIPTS, MODEL_ROWS, digest="e" * 64)
+    m, plan = pm_run.make_run(run, code_digest=DIGEST)
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    st = {r["id"]: r for r in rep["receipts"]}
+    assert {st[k]["state"] for k in st if k.startswith("physics:")} == {"stale"} and all(st[k]["ok"] is False for k in st if k.startswith("physics:"))
+    assert {r["state"] for r in rep["receipts"] if not r["ok"]} == {"stale"}
+    ban = [p for p in warn_paragraphs(h) if "are stale" in p]
+    assert len(ban) == 1 and "failed" not in ban[0] and "rerun <code>python -m cafe.pm receipts</code>" in ban[0] and "physics:pm.physics.usv" in ban[0]
+    assert "failed a check" not in h and "marked FAILED" not in h and "were not run" not in h
+    assert "<td>stale<td>" in h and rep["traceability_problems"] == []
+
+
+def test_windows_that_were_all_skipped_with_a_reason_are_not_run_and_a_window_that_ran_and_failed_is_failed(run):
+    """Round 3 M-9: stage3:output:windows.json read '0 of 6 windows passed their self-checks' for six planned skips."""
+    m, plan = pm_run.make_run(run)
+
+    def skip(d):
+        for ws in d.values():
+            for w in ws:
+                why = "not run: the physical lattice viscosity needs 3e12 cell-updates"
+                w.update(ok=False, checks=[], cut=False, error=why, reasons=[why])
+    edit_json(run / "stage3" / "windows.json", skip)
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    r = {r["id"]: r for r in rep["receipts"]}["stage3:output:windows.json"]
+    assert (r["ok"], r["state"], r["got"]) == (False, "not_run", "0 of 6 windows ran: each was skipped with a stated reason")
+    ban = [p for p in warn_paragraphs(h) if "were not run" in p]
+    assert len(ban) == 1 and "stage3:output:windows.json" in ban[0] and "failed" not in ban[0] and "failed a check" not in h
+    # one window that ran (it has checks) and failed one makes it a failure again
+    edit_json(run / "stage3" / "windows.json", lambda d: d["usv"][0].update(checks=[dict(name="mach_max", value=0.4, limit=0.1, ok=False)]))
+    report.write(run, m, plan)
+    r = {r["id"]: r for r in load(run)["receipts"]}["stage3:output:windows.json"]
+    assert (r["state"], r["got"]) == ("fail", "0 of 6 windows passed their self-checks (1 ran and failed)")
+
+
+def test_the_report_of_a_resumed_run_ignores_an_earlier_attempts_report_ledger(run):
+    """Round 3 M-13: machine.wall_s.report and a second git sha came from the report ledger an earlier attempt had left on disk."""
+    m, plan = pm_run.make_run(run, git="aaa1111")
+    led = json.loads((run / "checkpoints" / "ingest" / "ledger.json").read_text())
+    (run / "checkpoints" / "report").mkdir()
+    (run / "checkpoints" / "report" / "ledger.json").write_text(json.dumps(dict(led, git_sha="bbb2222", wall_s=4.238)))
+    report.write(run, m, plan)
+    mach, h = load(run)["machine"], (run / "report" / "index.html").read_text()
+    assert mach["git_sha"] == ["aaa1111"] and "report" not in mach["wall_s"]
+    assert set(mach["wall_s"]) == {"ingest", "hangar", "stage1", "windows", "stage3", "refit", "stage1b", "emulator"}
+    assert "report stage: written after this table" in h and "bbb2222" not in h and "4.238" not in h
+    run2 = run.parent / "fresh"
+    run2.mkdir()
+    m2, plan2 = pm_run.make_run(run2, git="aaa1111")
+    report.write(run2, m2, plan2)
+    # identical inputs, identical block
+    assert load(run2)["machine"]["git_sha"] == mach["git_sha"] and load(run2)["machine"]["wall_s"].keys() == mach["wall_s"].keys()
+
+
+def test_the_reach_map_speed_is_the_speed_block_speed(run):
+    """Round 3 M-7: the page printed a 0.633 m/s speed over ground in the speed block and 0.661 m/s two lines later for the same ensemble."""
+    m, plan = pm_run.make_run(run)
+    res = pickle.loads((run / "stage1b" / "res.pkl").read_bytes())["vehicles"]["usv"]
+    sog = stage1.path_speed(res["lon"], res["lat"], res["t"])
+    sog = sog[np.isfinite(sog) & (sog > 0)]
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(
+        speed=dict(ratio_median=0.12, sog_ms_median=float(np.median(sog)), u10_ms_median=5.3, calibration_ratio=0.178)))
+    report.write(run, m, plan, env=AnalyticEnv(current=(0.1, 0.0)))
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    assert rep["reach"]["vehicles"]["usv"]["speed"]["value"] == pytest.approx(rep["vehicles"]["usv"]["speed_ratio"]["sog"]["value"], rel=1e-12)
+    assert report.path_speed(res) == pytest.approx(float(np.median(sog)), rel=1e-12)
+    assert "median of the per-member ratios 0.12; median speed over ground" in t and "(the quotient of two medians is not the median ratio)" in t
+
+
+def test_a_drift_glider_prints_its_heading_and_the_modes_that_can_fail_it_and_its_sanity_row_is_not_an_agreement(run):
+    """Round 3 M-1: glider_2n swam due north on a hard-wired heading and the sanity table counted its GO as agreeing with the brief."""
+    m, plan = pm_run.make_run(run)
+    m["vehicles"][next(i for i, v in enumerate(m["vehicles"]) if v["id"] == "glider_2n")]["task"]["heading_to"] = 270.0
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    d = rep["vehicles"]["glider_2n"]["drift"]
+    assert d["heading_to"]["value"] == 270.0 and d["heading_to"]["unit"] == "deg" and d["modes"] == "battery, seafloor, overdepth, no flight, left data"
+    assert "Task: drift on a fixed heading of 270 deg; failure modes that can occur: battery, seafloor, overdepth, no flight, left data." in t
+    assert "GO means only that the battery and depth limits held on that heading" in t
+    assert rep["vehicles"]["glider_eq"]["drift"] is None and rep["vehicles"]["usv"]["drift"] is None
+    row = next(r for r in rep["sanity"]["rows"] if r["id"] == "glider_2n")
+    assert row["agrees"] is None and "no mission criterion" in row["detail"] and "battery and depth limits held" in row["detail"]
+    assert "cannot be checked from the verdict" in t
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+
+
+def test_the_sensitivity_line_prints_the_sentence_stage_1_wrote_for_the_case_that_applies(run):
+    """Round 3 M-2: 'no parameter clears the noise floor' was printed for a vehicle with 3 failures, which a reader takes for 'no parameter matters'."""
+    m, plan = pm_run.make_run(run)
+    txt = ("Only 3 of 32 members failed, too few to rank the parameters; their ranks among the 32 draws (0 is the lowest value) are "
+           "battery_capacity_scale 5, 0, 1")
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"]["sensitivity"].update(param=None, text=txt, case="too_few"))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    assert rep["vehicles"]["uas"]["sensitivity"]["text"] == txt and rep["vehicles"]["uas"]["sensitivity"]["case"] == "too_few"
+    assert f"Most sensitive to: {txt}.What drives" in plain(h) or f"Most sensitive to: {txt}." in plain(h)
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"]["sensitivity"].update(text="the margin ranks vpp."))
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert re.search(r"Most sensitive to: the margin ranks vpp \(exact S1 [0-9.]+ fraction of variance\)\.", t)      # a named parameter keeps its exact index
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["glider_2n"]["sensitivity"].pop("text"))
+    report.write(run, m, plan)
+    # an older summary: the old wording
+    assert "Most sensitive to: none (all-pass, all-fail, or fewer than 16 members)." in plain((run / "report" / "index.html").read_text())
+    assert report.check_rendered(load(run), (run / "report" / "index.html").read_text()) == []
+
+
+def test_a_link_decided_on_too_few_samples_is_undecided_granularity_and_the_others_print_their_sample_count(run):
+    """Round 3 M-5: a 20 min sortie gave 6 to 12 samples per member, so required_fraction 0.95 meant every sample."""
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "stage1b" / "summary.json", lambda d: (d["summary"]["links"]["usv-uas-rf"].update(need_count_median=12, granularity_ok=False),
+                                                           d["summary"]["links"]["glider_eq-ship-acoustic"].update(need_count_median=40, granularity_ok=True)))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    g, ok = rep["links"]["usv-uas-rf"]["granularity"], rep["links"]["glider_eq-ship-acoustic"]["granularity"]
+    assert (g["need_count"]["value"], g["ok"], g["one_sample"]["value"]) == (12, False, pytest.approx(1 / 12))
+    assert g["allowed_miss"]["value"] == pytest.approx(0.05)
+    assert ok["ok"] is True and ok["need_count"]["value"] == 40 and rep["links"]["usv-shore-iridium"]["granularity"] is None
+    t = plain(h)
+    assert ("decided on 12 samples (the median number of required samples per member); one missed sample is 0.08333 of them and the mission allows "
+            "0.05 to be missed, so this verdict is undecided: granularity") in t
+    assert "decided on 40 samples (the median number of required samples per member); one missed sample is 0.025 of them" in t
+    assert h.count("undecided: granularity") >= 2
+    assert h.count('badge undecided">undecided: granularity') == 1 and report.check_rendered(rep, h) == []
+
+
+def test_the_worst_window_forcing_is_labelled_as_the_analysis_field_and_names_when_the_members_failed(run):
+    """Round 3 M-10: 'surface current speed ... (failed members)' was the unperturbed analysis field at their tracks, read as what the members met."""
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "windows" / "windows.json",
+              lambda d: d["glider_eq"][0].update(basis=pm_run.BASIS[True], failed_at=[pm_run.T0 + 7200.0, pm_run.T0 + 3600.0 * 30]))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    w = rep["environment"]["forcing_at_windows"]["glider_eq"]["windows"]
+    assert [x["utc"] for x in w[0]["failed_at"]] == ["2023-03-01 14:00:00Z", "2023-03-02 18:00:00Z"] and w[1]["failed_at"] == []
+    assert "(analysis-field forcing at the failed members' tracks, before the member perturbations); those members failed at 2023-03-01 14:00:00Z" in t
+    assert "each window is the record of the strongest analysis-field forcing; it is not the instant a member failed" in t
+    assert "(failed members)" not in t and report.check_traceability(rep) == []
+    assert report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+
+
+def test_the_usv_block_states_the_two_calm_clocks_when_either_calm_mode_occurred(run):
+    """Round 3 M-8: wing_stall_calm (30 min) and becalmed (6 h) differ on purpose; the page named neither."""
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(modes=dict(wing_stall_calm=9, wing_stall_angle=4, becalmed=2)))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    u = rep["vehicles"]["usv"]["usv_modes"]
+    assert (u["trim_min_aws"]["value"], u["calm_sustain"]["value"], u["becalmed_after"]["value"]) == (1.5, 30.0, 6.0)
+    assert "wing_stall_calm fires when the apparent wind stays below 1.5 m/s for 30 min" in t
+    assert "becalmed only after 6 h of being unable to stem the current" in t
+    assert "wing_stall_calm: 9" in t and "wing_stall_angle: 4" in t and rep["vehicles"]["glider_eq"]["usv_modes"] is None
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(modes=dict(swept_off_track=5)))
+    report.write(run, m, plan)
+    assert load(run)["vehicles"]["usv"]["usv_modes"] is None
+    assert report.check_rendered(load(run), (run / "report" / "index.html").read_text()) == []
+
+
+def test_the_emulator_section_prints_the_fresh_draw_check_and_the_draws_statement(run):
+    """Round 3 M-4: the hold-out was scored against targets that shared the training points' draws; the larger of the two RMSEs is what is judged."""
+    m, plan = pm_run.make_run(run)
+    h = json.loads((run / "emulator" / "holdout.json").read_text())
+    h["glider_eq"].update(cls="glider", rows=140, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03,
+                          draws="Each variant of a run is run on its own members.",
+                          fresh_points=3, fresh_n_members=16, rmse_fresh=0.12, noise_floor_fresh=0.09, rmse_fresh_debiased=0.08,
+                          acceptance=dict(rmse_ok=False, coverage_ok=True, query_ok=True))
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    rep, html_ = load(run), (run / "report" / "index.html").read_text()
+    f = rep["emulator"]["vehicles"]["glider_eq"]["acceptance"]["fresh"]
+    got = (f["points"]["value"], f["n_members"]["value"], f["rmse"]["value"], f["rmse_debiased"]["value"], f["noise_floor"]["value"])
+    assert got == (3, 16, 0.12, 0.08, 0.09)
+    t = plain(html_)
+    assert ("Fresh-draw check: 3 held-out points re-run on 16 members that no training row used; the emulator's RMSE against them 0.12, "
+            "0.08 less their own noise 0.09") in t
+    assert "judged on the larger of this and the in-sample figure. Each variant of a run is run on its own members." in t
+    h["glider_eq"].update(fresh_points=0)
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    assert load(run)["emulator"]["vehicles"]["glider_eq"]["acceptance"]["fresh"] is None
+    assert "no held-out point of this run's variants could be re-run" in plain((run / "report" / "index.html").read_text())
+    assert report.check_traceability(load(run)) == [] and report.check_rendered(load(run), (run / "report" / "index.html").read_text()) == []
+
+
+def test_a_fitted_sigma_is_not_counted_as_an_assumed_input_in_the_report(run):
+    """Round 3 M-12: the page counted the TAO-fitted sst_k and t2_k among the inputs assumed for this run."""
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)
+    base = load(run)["assumed_inputs"]
+    (run / "ingest").mkdir(exist_ok=True)
+    (run / "ingest" / "env_sigmas_fitted.json").write_text(json.dumps(dict(sst_k=0.2592, t2_k=1.1908)))
+    report.write(run, m, plan)
+    a = load(run)["assumed_inputs"]
+    assert a["total"]["value"] == base["total"]["value"] - 2
+    assert a["by_file"]["config/assumptions.yaml"]["value"] == base["by_file"]["config/assumptions.yaml"]["value"] - 2
+    assert sum(i["kind"] == "fitted" for i in a["items"]) == 2 and len(a["items"]) == len(base["items"])
+    t = plain((run / "report" / "index.html").read_text())
+    assert "(fitted) this run used 0.259 (fitted from the TAO comparison); assumed 0.5" in t
+
+
+def test_the_report_says_which_sub_grid_calibration_it_used(run):
+    """Round 3 M-23: the calibration is the run's own stage3/subgrid_calibration.json when stage 3 wrote one, else the shipped file."""
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)
+    assert load(run)["subgrid"]["source"].startswith("the shipped config/subgrid.json")
+    assert "Sub-grid calibration used by the stages after stage 3: the shipped config/subgrid.json" in plain((run / "report" / "index.html").read_text())
+    (run / "stage3" / "subgrid_calibration.json").write_text(json.dumps(dict(source_run="stage 3 of this run", sigma_u_over_ustar=2.9)))
+    report.write(run, m, plan)
+    assert load(run)["subgrid"]["source"] == "this run's stage3/subgrid_calibration.json" and load(run)["subgrid"]["calibrated"] is True

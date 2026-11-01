@@ -42,7 +42,7 @@ from scipy.stats import qmc
 
 from . import budget, report, stage1
 from .config import ConfigError, _in_box, utc
-from .emulator import Emulator, read_table, store_path, write_table
+from .emulator import Emulator, FreshDraw, read_table, store_path, write_table
 from .env.environment import OutsideData
 from .stats import intervals
 
@@ -368,9 +368,17 @@ def _clean(df: pd.DataFrame, cls: str) -> pd.DataFrame:
     return d.dropna(subset=need).reset_index(drop=True)
 
 
-def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = None) -> tuple[Emulator | None, dict[str, Any]]:
+DRAWS = ("Each variant of a run is run on its own members (variant k: members (k + 1) x batch up to (k + 2) x batch - 1, the baseline row: members 0 up to "
+         "batch - 1), so its hypercube and noise streams are independent of every other training row of the run; rows of other runs were made with their "
+         "own seeds. The hold-out is therefore not scored against targets that share draws with the training points, and the `fresh` check "
+         "re-estimates up to 3 held-out points of this run on members used nowhere else.")
+
+
+def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = None, fresh: FreshDraw | None = None) -> tuple[Emulator | None, dict[str, Any]]:
     """Fit the emulator of one vehicle class on its rows and score it on a 20 % hold-out (split by distinct feature point, see
     `Emulator.holdout_report`). With `code_digest`, rows made by other code (or by code of unknown digest) stay in the table but are not trained on.
+    With `fresh` (see `Emulator.holdout_report`) the hold-out also scores the emulator against P(fail) re-estimated on fresh members, and the RMSE
+    gate uses the larger of the two debiased RMSEs.
     The `MIN_ROWS` gate counts distinct feature points, so reruns of one mission cannot reach it. -> (Emulator | None, info for holdout.json)."""
     d = _clean(df, cls)
     stale = 0
@@ -390,7 +398,7 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = N
     modes = [c for c in d.columns if c.startswith("mode_") and d[c].std() > 0]
     modes = sorted(modes, key=lambda c: -d[c].std())[:MODES_MAX]
     em = Emulator(BASE + TASK[cls], ["p_fail", "t_fail_h"] + modes, path)
-    em.fit(d, holdout=0.2)
+    em.fit(d, holdout=0.2, fresh=fresh)
     x = d.iloc[0][em.features]
     em.query(x)
     ts: list[float] = []
@@ -404,14 +412,23 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = N
     deb = float(np.sqrt(max(h["rmse"]["p_fail"] ** 2 - floor ** 2, 0.0)))             # the part of the RMSE that is not the targets' own Monte-Carlo noise
     # the RMSE limit is on the error against the true P(fail): the held-out targets are themselves n-member estimates, whose binomial
     # noise (up to ~0.1 at n = 16) would otherwise fail any emulator, a perfect one included
-    acc = dict(rmse_ok=bool(deb <= LIMITS["rmse"]), coverage_ok=bool(abs(h["coverage"]["p_fail"] - h["nominal"]) <= LIMITS["coverage"]),
+    fr = h.get("fresh")
+    fresh_info: dict[str, Any] = dict(fresh_points=0)
+    if fr:                                                                             # the same debiasing: the fresh targets are n-member estimates too
+        pf = np.array(fr["p_fresh"])
+        ffloor = float(np.sqrt(np.mean(pf * (1 - pf) / fr["n_members"])))
+        fresh_info = dict(fresh_points=fr["points"], fresh_n_members=fr["n_members"], rmse_fresh=fr["rmse"], noise_floor_fresh=ffloor,
+                          rmse_fresh_debiased=float(np.sqrt(max(fr["rmse"] ** 2 - ffloor ** 2, 0.0))))
+    gate = max(deb, fresh_info.get("rmse_fresh_debiased", 0.0))
+    acc = dict(rmse_ok=bool(gate <= LIMITS["rmse"]), coverage_ok=bool(abs(h["coverage"]["p_fail"] - h["nominal"]) <= LIMITS["coverage"]),
                query_ok=bool(q <= LIMITS["query_ms"]))
     return em, dict(info, trained=True, n_train=h["n_train"], n_test=h["n_test"], nominal=h["nominal"], rmse=h["rmse"], coverage=h["coverage"],
-                    query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, acceptance=acc, threshold=em.threshold, multi_fidelity=em.multi_fidelity)
+                    query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, rmse_gate=gate, **fresh_info, draws=DRAWS, acceptance=acc,
+                    threshold=em.threshold, multi_fidelity=em.multi_fidelity)
 
 
-def train(table: Any, classes: Any, path: Any = None, df: pd.DataFrame | None = None,
-          code_digest: str | None = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
+def train(table: Any, classes: Any, path: Any = None, df: pd.DataFrame | None = None, code_digest: str | None = None,
+          fresh: FreshDraw | None = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
     """Fit the emulator of each class in `classes` from the stored table (all runs, all missions), or from `df` when given (the pipeline
     trains on a snapshot of the table, not on whatever the table holds by now). Only rows made by the current code are trained on:
     `code_digest` (default: this checkout's, `pipeline.code_digest`); superseded rows stay in the file."""
@@ -420,7 +437,7 @@ def train(table: Any, classes: Any, path: Any = None, df: pd.DataFrame | None = 
     if df is None:
         df = read_table(p) if p.exists() else pd.DataFrame(columns=["cls"] + BASE)
     cd = code_digest or pipeline.code_digest()
-    return {c: fit_class(df, c, path or table, cd) for c in sorted(set(classes))}
+    return {c: fit_class(df, c, path or table, cd, fresh) for c in sorted(set(classes))}
 
 
 def snapshot(table: Any, dest: Any, run_id: str) -> tuple[pd.DataFrame, pathlib.Path]:
@@ -488,9 +505,10 @@ def emulate(em: Emulator, feats: dict[str, Any]) -> dict[str, Any]:
 
 
 def measure(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]],
-            scales: dict[str, Any] | None, seed: int, n: int | None = None) -> dict[str, Any]:
-    """Stage 1 for one vehicle of the (changed) mission: one batch of the plan's size, the base run's members (common random numbers)."""
-    members = list(range(n or plan["batch"]))
+            scales: dict[str, Any] | None, seed: int, n: int | None = None, members: list[int] | None = None) -> dict[str, Any]:
+    """Stage 1 for one vehicle of the (changed) mission: one batch of the plan's size, the base run's members (common random numbers) unless `members`
+    names others (the emulator's fresh-draw check)."""
+    members = members or list(range(n or plan["batch"]))
     one = solo(mission, vid)
     try:
         with wind_2d(env, stage1._classes(one)[vid]):

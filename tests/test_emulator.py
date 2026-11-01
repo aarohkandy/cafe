@@ -310,3 +310,23 @@ def test_the_holdout_split_is_reproducible(tmp_path):
     a = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "a.parquet", seed=4).holdout_report(df)
     b = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "b.parquet", seed=4).holdout_report(df)
     assert a == b and a["n_test"] == 12
+
+
+def test_holdout_report_scores_the_held_out_points_against_fresh_draws_and_stops_at_three(tmp_path):
+    """Round 3 M-4: `fresh(row)` re-estimates P(fail) at a held-out row on members no training row used; the emulator trained without that point is scored
+    against it. A row `fresh` cannot re-run (None) is skipped, and at most FRESH_POINTS are used."""
+    df = E.synthetic_table(160, 3)
+    asked = []
+
+    def fresh(row):
+        asked.append(row["wind_mean"])
+        return None if len(asked) == 1 else (0.5, 64)
+    em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "a.parquet", seed=3)
+    h = em.holdout_report(df, fresh=fresh)
+    f = h["fresh"]
+    assert f["points"] == E.FRESH_POINTS == 3 and len(asked) == 4 and len(set(asked)) == 4 and f["n_members"] == 64 and f["p_fresh"] == [0.5] * 3
+    assert len(f["p_emulated"]) == 3 and f["rmse"] == pytest.approx(float(np.sqrt(np.mean((np.array(f["p_emulated"]) - 0.5) ** 2))))
+    assert "fresh" not in em.holdout_report(df)                                                  # no callback, no key: the old report
+    assert "fresh" not in em.holdout_report(df, fresh=lambda row: None)                          # nothing could be re-run
+    em.fit(df, holdout=0.2, fresh=fresh)
+    assert em.holdout is not None and em.holdout["fresh"]["points"] == 3                         # fit keeps it for the ledger

@@ -567,13 +567,44 @@ def test_capsize_proxy_needs_wind_and_steep_beam_seas():
     assert not calm.fail["capsize_proxy"].any()
 
 
-def test_wing_stall_sustained_in_light_air_only():
+def test_wing_stall_calm_sustained_in_light_air_only():
     s = sim(AnalyticEnv(wind=(-1.0, 0.0)), m=2)
     s.run(2 * HR, 60.0)
-    assert 0.5 <= first_h(s, "wing_stall") < 0.6                               # stall_sustain_s = 30 min
+    assert 0.5 <= first_h(s, "wing_stall_calm") < 0.6                          # calm_sustain_s = 30 min
     brisk = sim(AnalyticEnv(wind=(-6.0, 0.0)), m=2)
     brisk.run(2 * HR, 60.0)
-    assert not brisk.fail["wing_stall"].any()
+    assert not brisk.fail["wing_stall_calm"].any()
+    longer = sim(AnalyticEnv(wind=(-1.0, 0.0)), m=2, calm_sustain_s=3 * HR)    # the calm clause has its own clock
+    longer.run(2 * HR, 60.0)
+    assert not longer.fail["wing_stall_calm"].any()
+
+
+def test_the_bow_cone_clause_has_its_own_angle_and_mode():
+    """Review round 3, M-8: the cone clause used wing_stall_deg, the wing's stall angle of attack; it has min_awa_deg now, and fires as wing_stall_angle."""
+    tight = usv.USVSim(dict(P, min_awa_deg=180.0), 2, AnalyticEnv(wind=(-6.0, 0.0)), (-165.0, -1.0), 0.0,
+                       dict(mode="section", waypoints=[(-165.0, -1.0), (-165.0, 1.0)]), perturb=dict(vpp_bias=np.full(2, -0.3)))
+    tight.run(2 * HR, 60.0)
+    assert tight.fail["wing_stall_angle"].all() and not tight.fail["wing_stall_calm"].any() and 0.5 <= first_h(tight, "wing_stall_angle") < 0.6
+    off = usv.USVSim(dict(P, min_awa_deg=0.0), 2, AnalyticEnv(wind=(-6.0, 0.0)), (-165.0, -1.0), 0.0,
+                     dict(mode="section", waypoints=[(-165.0, -1.0), (-165.0, 1.0)]), perturb=dict(vpp_bias=np.full(2, -0.3)))
+    off.run(2 * HR, 60.0)
+    assert not off.fail["wing_stall_angle"].any()
+    assert "wing_stall" not in usv.FAILS and {"wing_stall_calm", "wing_stall_angle"} <= set(usv.FAILS)
+    assert P["min_awa_deg"] == 15.0 and P["wing_stall_deg"] == 15.0 and 0.0 < usv.load_platform()["mission_defaults"]["calm_sustain_s"] == 1800.0
+
+
+def test_a_boat_that_cannot_move_in_still_water_is_becalmed_in_a_zero_current():
+    """Review round 3, M-8: `vmax < speed(current)` was `0 < 0` with no wind and no current, so the dead calm was a wing stall and never becalmed."""
+    dead = sim(AnalyticEnv(wind=(0.0, 0.0), current=(0.0, 0.0)), m=2)
+    dead.run(24 * HR, 600.0)
+    assert dead.fail["becalmed"].all() and dead.fail["wing_stall_calm"].all()
+    assert first_h(dead, "becalmed") == pytest.approx(P["mission_defaults"]["becalmed_after_h"], abs=0.2)
+    drifting = sim(AnalyticEnv(wind=(0.0, 0.0), current=(0.01, 0.0)), m=2)
+    drifting.run(24 * HR, 600.0)
+    assert drifting.fail["becalmed"].all()
+    brisk = sim(AnalyticEnv(wind=(-6.0, 0.0), current=(0.0, 0.0)), m=2)
+    brisk.run(24 * HR, 600.0)
+    assert not brisk.fail["becalmed"].any()
 
 
 def test_battery_drains_at_night_and_charges_by_day():

@@ -652,7 +652,9 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
 
 def recalibrate_subgrid(ctx: Context, rows: dict[str, list[dict[str, Any]]], L: Ledger, path: str | pathlib.Path | None = None) -> dict[str, Any] | None:
     """Stage 3's second job (BRIEF 2.2): recalibrate the sub-grid layer from the windows that passed their self-checks, and write
-    config/subgrid.json (or `path`). A passing row may carry `inflow_series` = dict(u, dt, U, ustar, z, L_ob, label): the along-wind velocity the
+    run_dir/stage3/subgrid_calibration.json (or `path`): the calibration block, a hashed output of the stage that the stages after it read
+    (pipeline.use_run_calibration). The tracked config/subgrid.json is never written here; `python -m cafe.pm promote-calibration` does that
+    (round 3 M-23). A passing row may carry `inflow_series` = dict(u, dt, U, ustar, z, L_ob, label): the along-wind velocity the
     LES resolved in the free stream (subgrid.recalibrate says what is fitted). Nothing is ever written from a window that failed. The ledger
     says why when nothing is written: no window passed (the CPU quick run), or windows passed but none resolved atmospheric turbulence (the
     windows' own inflow is uniform, so there is nothing to compare with the Mann layer). Returns the calibration result, or None."""
@@ -665,14 +667,17 @@ def recalibrate_subgrid(ctx: Context, rows: dict[str, list[dict[str, Any]]], L: 
            f"{len(passed)} window(s) passed but none carries a resolved inflow-turbulence series (the window inflow is uniform: no atmospheric "
            "turbulence is injected, so there is nothing to compare with the Mann layer)" if not series else
            "no passed window's series is long enough: " + "; ".join(cal["skipped"] if cal else []))
+    out = pathlib.Path(path or pathlib.Path(ctx.run_dir) / "stage3" / "subgrid_calibration.json")
+    out.unlink(missing_ok=True)                                               # a file left by an earlier attempt of this stage is not this attempt's
     if cal is None or not n_used:
-        L.note(f"sub-grid layer uncalibrated: {why}; config/subgrid.json was not written")
+        L.note(f"sub-grid layer uncalibrated: {why}; stage3/subgrid_calibration.json was not written")
     else:
-        subgrid.write_calibration(cal, pathlib.Path(ctx.run_dir).name, path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(subgrid.calibration_block(cal, "stage 3 of this run (stage3/subgrid_calibration.json)"), indent=1))
         c, u = cal["calibration"], cal["uncertainty"]
         L.note(f"sub-grid layer recalibrated from {n_used} passed window(s): sigma_u/u* = {c['sigma_u_over_ustar']:.3g} +- "
                f"{u['sigma_u_over_ustar']:.2g}, length_scale_factor = {c['length_scale_factor']:.3g} +- {u['length_scale_factor']:.2g}; "
-               f"written to config/subgrid.json (source_run {pathlib.Path(ctx.run_dir).name}); skipped: {cal['skipped'] or 'none'}")
+               f"written to stage3/subgrid_calibration.json; skipped: {cal['skipped'] or 'none'}")
     L.check("subgrid_calibration_written_only_from_passed_windows", n_used <= len(series) <= len(passed), value=n_used, limit=len(passed))
     return cal
 

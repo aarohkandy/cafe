@@ -24,7 +24,7 @@ outputs are unchanged. Stage products live next to the ledgers:
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, json, os, pathlib, pickle, re, shutil, time, zipfile
+import contextlib, datetime as dt, json, os, pathlib, pickle, re, shutil, time, warnings, zipfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +34,7 @@ from numpy.typing import NDArray
 from . import budget, ledger, stage1
 from .audit import STAGES
 from .config import digest, env_sigmas, load_mission, utc
-from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca
+from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.hycom import FetchError
 from .env.remote import sha256
 from .ledger import Ledger
@@ -45,13 +45,10 @@ if TYPE_CHECKING:
 DATA = pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
 
 
-HASHED_LIBS = ("jax", "numpy", "scipy")          # the numerical libraries whose version is part of the resume hash
-
-
 def code_digest() -> str:
     """sha256 over every `cafe/**/*.py` (the pipeline imports cafe.cfd, cafe.fea, cafe.emulator, cafe.reach, cafe.receipts from outside cafe/pm),
-    the schemas (`cafe/schemas/*.json`, the contract ingest and `load_mission` read), the config and platform files, and the installed versions of
-    jax, numpy and scipy: a resumed stage is reused only if none changed."""
+    the schemas (`cafe/schemas/*.json`, the contract ingest and `load_mission` read), the config and platform files, and the installed version of every
+    library `ledger.versions()` lists that is installed (Python as major.minor): a resumed stage is reused only if none changed."""
     import hashlib
     root = pathlib.Path(__file__).resolve().parents[2]
     h = hashlib.sha256()
@@ -60,8 +57,9 @@ def code_digest() -> str:
         rel = p.relative_to(root)
         if "__pycache__" not in rel.parts and "site" not in rel.parts:
             h.update(str(rel).encode() + b"\0" + p.read_bytes())
-    v = ledger.versions()
-    h.update(json.dumps({k: v[k] for k in HASHED_LIBS}, sort_keys=True).encode())
+    v = {k: x for k, x in ledger.versions().items() if x is not None}
+    v["python"] = ".".join(v["python"].split(".")[:2])
+    h.update(json.dumps(v, sort_keys=True).encode())
     return h.hexdigest()
 
 
@@ -73,6 +71,12 @@ def gpu_memory_gb() -> float | None:
         return float(out.stdout.split()[0]) / 1024.0 if out.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return None
+
+
+def gpu_visible() -> bool:
+    """A CUDA device that warp can see, or nvidia-smi on the path: whether `--gpus N` has anything to run on here (`run` refuses N > 0 without it)."""
+    from .stage3 import lbm
+    return lbm.pick_backend() == "warp" or shutil.which("nvidia-smi") is not None
 
 
 def emulator_table(explicit: str | pathlib.Path | None = None) -> pathlib.Path:
@@ -106,8 +110,10 @@ class Context:
             self.plan["stage3"] = budget.stage3_plan(self.plan, self.classes, budget.stage3_assumptions())      # every size stage 3 uses
             self.plan["emulator"] = budget.emulator_plan(self.plan)
         self._table = emulator_table
+        subgrid.use_calibration(None)                                    # the shipped sub-grid calibration until a stage after stage 3 loads the run's own
         self.code_digest = code_digest()
-        self.hash = digest(dict(mission=self.mission, budget=budget_name or hash_budget, gpus=gpus, code=self.code_digest))
+        mission = {k: v for k, v in self.mission.items() if k != "_path"}                                 # not the spelling of the path it was read from
+        self.hash = digest(dict(mission=mission, budget=budget_name or hash_budget, gpus=gpus, code=self.code_digest))
         self._env: GriddedEnv | None = None
 
     @property
@@ -115,7 +121,7 @@ class Context:
         """GriddedEnv over the cache. The surface layer honours the mission's warm_layer / rain_lens switches; the sigmas the values
         are tagged with are config/assumptions.yaml's, replaced by the TAO fit (ingest/env_sigmas_fitted.json) once ingest wrote it."""
         if self._env is None:
-            from .env import subgrid, surface
+            from .env import surface
             from .env.environment import GriddedEnv
             e = self.mission["environment"]
             sub = (surface.SurfaceLayer(self.cache, warm_layer=subgrid.switch(e, "warm_layer"), rain_lens=subgrid.switch(e, "rain_lens"))
@@ -137,7 +143,7 @@ class Context:
         return p
 
 
-DRIFT_MS = 0.5                   # the drift speed `padding` sizes a pad from: about the fastest sustained surface current (demo: 6 d x 0.5 m/s = 2.3 deg)
+DRIFT_MS = 0.5                   # the drift speed `padding` sizes a pad from: about the fastest sustained surface current (6 d: 2.3, padded 2.5 deg)
 MAX_PAD_DEG = 10.0               # config/schemas mission.json: box.pad_deg <= 10
 
 
@@ -792,7 +798,10 @@ def s_stage1(ctx: Context, L: Ledger) -> None:
     _stage1(ctx, L, "stage1")
 
 
-CRITERION = dict(glider="surface current speed [m/s]", usv="significant wave height Hs [m]", uas="10 m wind speed [m/s]")
+CRITERION = dict(glider="surface current speed [m/s] of the analysis field", usv="significant wave height Hs [m] of the analysis field",
+                 uas="10 m wind speed [m/s] of the analysis field")
+BASIS = {True: "analysis-field forcing at the failed members' tracks, before the member perturbations",
+         False: "analysis-field forcing at all members' tracks, before the member perturbations"}
 MIN_SEPARATION_S = 6 * 3600.0
 
 
@@ -862,12 +871,26 @@ def s_windows(ctx: Context, L: Ledger) -> None:
             if len(idx) == K:
                 break
         lon_ok, lat_ok = np.where(ok, lon, np.nan), np.where(ok, lat, np.nan)
+        first = np.array([np.asarray(x, float) for x in r["first"].values()])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            # the failure instants of the selected members
+            failed_at = sorted(float(x) for x in np.nanmin(first, 0)[f] if np.isfinite(x)) if f.any() else []
         out[vid] = [dict(t=float(t[i]), stress=float(worst[i]), lon=float(np.nanmedian(lon_ok[i])), lat=float(np.nanmedian(lat_ok[i])),
-                         basis="failed members" if f.any() else "all members", criterion=CRITERION[r["class"]], records=records) for i in idx]
+                         basis=BASIS[bool(f.any())], criterion=CRITERION[r["class"]], records=records, failed_at=failed_at) for i in idx]
         problems += [f"{vid}: {p}" for p in window_problems(t, worst, out[vid], K)]
     L.check("every_vehicle_has_a_window", all(out.values()), value=sum(map(len, out.values())))
     L.check("windows_are_the_argmax", not problems, value=len(problems), limit=0, note="; ".join(problems[:3]))
     L.output(_dump(out, ctx.path("windows", "windows.json")))
+
+
+def use_run_calibration(ctx: Context, L: Ledger) -> None:
+    """For the stages after stage 3: the sub-grid calibration is the run's own stage3/subgrid_calibration.json when stage 3 wrote one (a ledger input, so
+    a resume sees it), else the shipped config/subgrid.json. The tracked file is never changed by a run (round 3 M-23)."""
+    f = ctx.run_dir / "stage3" / "subgrid_calibration.json"
+    if f.is_file():
+        L.input(f)
+    subgrid.use_calibration(json.loads(f.read_text()) if f.is_file() else None)
 
 
 def s_stage3(ctx: Context, L: Ledger) -> None:
@@ -878,6 +901,8 @@ def s_stage3(ctx: Context, L: Ledger) -> None:
     timing = {vid: [r.pop("timing", None) for r in rs] for vid, rs in rows.items()}      # seconds and measured rates: in the ledger, not in the hashed output
     L.note("window timings (not part of the hashed output): " + json.dumps(timing, default=ledger._jsonable))
     L.output(_dump(rows, ctx.path("stage3", "windows.json")))
+    if ctx.run_dir.joinpath("stage3", "subgrid_calibration.json").is_file():
+        L.output(ctx.run_dir / "stage3" / "subgrid_calibration.json")
 
 
 def s_refit(ctx: Context, L: Ledger) -> None:
@@ -947,19 +972,21 @@ def s_stage1b(ctx: Context, L: Ledger) -> None:
     L.input(ctx.path("refit", "refit.json"))
     L.input(ctx.path("stage1", "res.pkl"))
     scales = {vid: r for vid, r in ref.items() if r["used"]}
+    use_run_calibration(ctx, L)
+    recal = (ctx.run_dir / "stage3" / "subgrid_calibration.json").is_file()
     _sensitivity_cases(ctx, L, scales)
     done = int(bool(scales))
     cap = min(ctx.plan["refit_iterations"], refit_mod.MAX_ITER)
     L.check("refit_iterations_within_cap", done <= cap, value=done, limit=cap,
             note="refit passes performed (a single pass: stage 1 reran once with the multipliers, no loop to convergence); "
                  f"the plan allows {ctx.plan['refit_iterations']}, the refit module caps it at {refit_mod.MAX_ITER}")
-    if not scales:
+    if not scales and not recal:
         L.note("no vehicle was refit: stage 1b is stage 1 (copied, not rerun)")
         shutil.copy(ctx.path("stage1", "res.pkl"), ctx.path("stage1b", "res.pkl"))
         L.output(ctx.path("stage1b", "res.pkl"))
         L.output(_dump(dict(json.loads(ctx.path("stage1", "summary.json").read_text()), refit_iterations_performed=0), ctx.path("stage1b", "summary.json")))
         return
-    _stage1(ctx, L, "stage1b", scales=scales, extra=dict(refit_iterations_performed=1))
+    _stage1(ctx, L, "stage1b", scales=scales, extra=dict(refit_iterations_performed=done))      # a calibrated sub-grid layer reruns stage 1 even with no refit
     was, now = ({vid: v["verdict"] for vid, v in json.loads(ctx.path(st, "summary.json").read_text())["summary"]["vehicles"].items()}
                 for st in ("stage1", "stage1b"))
     changes = refit_mod.verdict_changes(was, now)
@@ -981,6 +1008,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     res = pickle.loads(ctx.path("stage1b", "res.pkl").read_bytes())
     for p in (ctx.path("stage1b", "res.pkl"), ctx.path("stage1b", "summary.json"), ctx.path("refit", "refit.json")):
         L.input(p)
+    use_run_calibration(ctx, L)
     summ = json.loads(ctx.path("stage1b", "summary.json").read_text())["summary"]["vehicles"]
     refit = json.loads(ctx.path("refit", "refit.json").read_text())
     scales = {vid: r for vid, r in refit.items() if r["used"]}
@@ -994,13 +1022,16 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     train_in, snap = whatif.snapshot(ctx.table, ctx.path("emulator", "train_input"), meta["run_id"])
     L.input(snap, kind="emulator training table at the start of this stage (minus this run's rows)", source=str(ctx.table), rows=len(train_in))
     sizes = budget.emulator_plan(ctx.plan)
-    share = budget.emulator_share_s(ctx.plan, stage1b_free=not scales)
+    free = not scales and not ctx.run_dir.joinpath("stage3", "subgrid_calibration.json").is_file()      # stage 1b was a copy of stage 1
+    share = budget.emulator_share_s(ctx.plan, stage1b_free=free)
     est = sizes["variant_s"]
     n_var = sizes["variants_refit" if scales else "variants_no_refit"]
     variants: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     killed: dict[str, Any] | None = None
     walls: list[float] = []
+    mvs: dict[str, dict[str, Any]] = {}                                   # variant name -> its mission, for the fresh-draw check
+    batch = ctx.plan["batch"]
     t0 = time.perf_counter()
     for k, mods in enumerate(whatif.design(ctx.mission, n_var, seed)):
         if time.perf_counter() - t0 > share:                              # the safety kill: the whole stage share is gone
@@ -1008,8 +1039,9 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
                                                               f"before variant v{k} of {n_var}")
             break
         a = time.perf_counter()
-        mv = whatif.apply(ctx.mission, mods)
-        vrows, why = whatif.run_variant(mv, ctx.env, list(range(ctx.plan["batch"])), seed, pri, marg, scales, fid, meta, f"v{k}")
+        mv = mvs[f"v{k}"] = whatif.apply(ctx.mission, mods)
+        # its own members, not the baseline's 0..batch-1: the same members would give every training row the same hypercube and noise streams (round 3 M-4)
+        vrows, why = whatif.run_variant(mv, ctx.env, list(range((k + 1) * batch, (k + 2) * batch)), seed, pri, marg, scales, fid, meta, f"v{k}")
         rows += vrows
         variants.append(dict(variant=f"v{k}", mods=mods, vehicles=sorted({r["vehicle"] for r in vrows}), skipped=why))
         skipped += [dict(variant=f"v{k}", vehicle=vid, reason=r) for vid, r in why.items()]
@@ -1019,7 +1051,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     df, used = whatif.add_rows(ctx.table, rows)                           # after the fit is decided: the table grows for the next run, not for this one
     L.note(f"training table {used}: {len(df)} rows now; this run trained on {len(train_df)} ({len(train_in)} from {snap.name}, {len(rows)} added by this run: "
            f"{len(res['vehicles'])} vehicles x {1 + len(variants)} missions less {len(skipped)} skipped)")
-    L.note(f"emulator share {share:.0f} s ({'incl. stage 1b, which was a copy' if not scales else 'stage 1b reran'}): {len(variants)} variant run(s) of "
+    L.note(f"emulator share {share:.0f} s ({'incl. stage 1b, which was a copy' if free else 'stage 1b reran'}): {len(variants)} variant run(s) of "
            f"{est:.0f} s each ({sizes['variant_s_source']}); measured {', '.join(f'{w:.0f}' for w in walls)} s (timings are not in the hashed output)")
     for sk in skipped:
         L.note(f"variant {sk['variant']} skipped for {sk['vehicle']}: {sk['reason']}")
@@ -1028,16 +1060,38 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     L.check("emulator_variants_within_share", len(variants) * est <= share, value=len(variants) * est, limit=share, note="planned cost of the variant runs")
     if killed:
         L.note(killed["reason"])
-    ems = whatif.train(ctx.table, [r["class"] for r in res["vehicles"].values()], df=train_df)
+    by_key = {r["key"]: r for r in rows if r["variant"] != "base"}        # the base rows are 3-D-wind UAS rows, the variants' are not: not comparable
+    n_fresh: list[float] = []
+
+    def fresh(row: Any) -> tuple[float, int] | None:
+        """P(fail) of one held-out variant row again, on members no training row used (blocks after the variants'): the independent estimate."""
+        r = by_key.get(row["key"])
+        if r is None:                                                     # a row of another run: its mission is not here
+            return None
+        a = time.perf_counter()
+        j = len(variants) + 2 + len(n_fresh)
+        try:
+            m = whatif.measure(mvs[r["variant"]], r["vehicle"], ctx.env, ctx.plan, pri, marg, scales, seed, members=list(range(j * batch, (j + 1) * batch)))
+        except whatif.Invalid:
+            return None
+        n_fresh.append(time.perf_counter() - a)
+        return m["p_fail"], m["n"]
+    ems = whatif.train(ctx.table, [r["class"] for r in res["vehicles"].values()], df=train_df, fresh=fresh)
+    if n_fresh:
+        L.note(f"fresh-draw hold-out check: {len(n_fresh)} held-out variant point(s) re-run on members used nowhere else, "
+               f"{sum(n_fresh):.0f} s (not part of the hashed output)")
     out = {vid: ems[r["class"]][1] for vid, r in res["vehicles"].items()}
     for cls, (em, info) in ems.items():
         if em is None:
             L.note(f"emulator for {cls} not trained (trained: false): {info['reason']}")
             continue
         a, h = info["acceptance"], info["rmse"]["p_fail"]
-        L.check(f"emulator_rmse_{cls}", a["rmse_ok"], value=info["rmse_debiased"], limit=whatif.LIMITS["rmse"],
+        fr = (f"; against {info['fresh_points']} held-out point(s) re-run on fresh members: {info['rmse_fresh']:.3f} as observed, "
+              f"{info['rmse_fresh_debiased']:.3f} less their noise {info['noise_floor_fresh']:.3f}; the larger is judged" if info["fresh_points"] else
+              "; no held-out point could be re-run on fresh members (none of this run's variants is among them), so only the in-sample score is judged")
+        L.check(f"emulator_rmse_{cls}", a["rmse_ok"], value=info["rmse_gate"], limit=whatif.LIMITS["rmse"],
                 note=f"held-out RMSE of P(fail) against the true P(fail): {h:.3f} as observed, less the targets' own Monte-Carlo "
-                     f"noise {info['noise_floor_rmse']:.3f} in quadrature")
+                     f"noise {info['noise_floor_rmse']:.3f} in quadrature{fr}")
         L.check(f"emulator_coverage_{cls}", a["coverage_ok"], value=info["coverage"]["p_fail"], limit=info["nominal"],
                 note=f"within +-{whatif.LIMITS['coverage']} of nominal")
         L.check(f"emulator_query_ms_{cls}", a["query_ok"], value=info["query_ms"], limit=whatif.LIMITS["query_ms"])
@@ -1058,7 +1112,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     L.output(_dump(dict(share_s=share, variant_s=est, variant_s_source=sizes["variant_s_source"], variants=variants, skipped=skipped, killed=killed,
                         spent_s=spent, flip_spent_s=fspent, rows_added=len(rows), table_rows=len(train_df), table=pathlib.Path(used).name,
                         train_input_rows=len(train_in),
-                        train_fraction=whatif.TRAIN_FRAC, planned_variants=n_var, stage1b_free=not scales), ctx.path("emulator", "design.json")))
+                        train_fraction=whatif.TRAIN_FRAC, planned_variants=n_var, stage1b_free=free), ctx.path("emulator", "design.json")))
 
 
 def s_report(ctx: Context, L: Ledger) -> None:

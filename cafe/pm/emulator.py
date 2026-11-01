@@ -21,6 +21,7 @@ import importlib.util
 import itertools
 import pathlib
 import time
+from collections.abc import Callable
 from typing import Any, cast
 
 import numpy as np
@@ -30,6 +31,8 @@ from scipy.spatial import cKDTree
 from .stats import intervals
 
 NN_QUANTILE = 0.99
+FRESH_POINTS = 3                       # held-out points re-estimated on fresh member draws (round 3 M-4)
+FreshDraw = Callable[[pd.Series], "tuple[float, int] | None"]
 
 
 def _conformal_q(scores: np.ndarray, alpha: float) -> float:
@@ -125,14 +128,14 @@ class Emulator:
         m.train()
         return m
 
-    def fit(self, df: pd.DataFrame | None = None, cal_frac: float = 0.2, holdout: float = 0.0) -> None:
+    def fit(self, df: pd.DataFrame | None = None, cal_frac: float = 0.2, holdout: float = 0.0, fresh: FreshDraw | None = None) -> None:
         """Train on `df` (default: the stored table). Co-kriging is used only with >= 3 rows of fidelity 1 and >= 1 of 0.
 
-        `holdout` > 0 first runs `holdout_report` on that fraction and keeps it in `self.holdout` for the ledger.
+        `holdout` > 0 first runs `holdout_report` on that fraction (with the `fresh` draw check, if given) and keeps it in `self.holdout` for the ledger.
         """
         df = self.table() if df is None else df
         if holdout:
-            self.holdout = self.holdout_report(df, holdout)
+            self.holdout = self.holdout_report(df, holdout, fresh=fresh)
         x_all = self._x(df[self.features])
         fid = df["fidelity"].to_numpy() if "fidelity" in df else np.ones(len(df))
         self.multi_fidelity = bool((fid == 1).sum() >= 3 and (fid == 0).sum() >= 1)
@@ -205,19 +208,38 @@ class Emulator:
                     rmse={t: float(np.sqrt(np.mean((p[t]["value"] - y[t]) ** 2))) for t in self.targets},
                     coverage={t: float(np.mean((p[t]["lo"] <= y[t]) & (y[t] <= p[t]["hi"]))) for t in self.targets})
 
-    def holdout_report(self, df: pd.DataFrame, frac: float = 0.2, alpha: float = 0.1) -> dict[str, Any]:
+    def holdout_report(self, df: pd.DataFrame, frac: float = 0.2, alpha: float = 0.1, fresh: FreshDraw | None = None) -> dict[str, Any]:
         """Fit a fresh emulator on the other (1 - frac) of the feature points, score on the held-out frac. The split is by distinct feature
         point: rows that share a feature vector (replicates of one mission) are all on one side, so a point the model trained on is never
-        scored. `n_train` and `n_test` count rows."""
+        scored. `n_train` and `n_test` count rows.
+
+        The table's targets are estimates from member draws that the training rows may share with the held-out ones (the same hypercube and noise
+        streams), so the in-sample score can under-read the error against the true P(fail). `fresh(row)` re-estimates P(fail) at one held-out row
+        on members used nowhere else and returns (p, n_members), or None when it cannot; for up to FRESH_POINTS held-out points the emulator
+        trained without them is scored against that independent estimate, in `["fresh"]`: points, p_fresh, p_emulated, rmse, n_members."""
         point = df[self.features].round(9).groupby(self.features, sort=False, dropna=False).ngroup().to_numpy()
         pts = np.unique(point)
         if len(pts) < 2:
             raise ValueError(f"a hold-out needs at least two distinct feature points, the table has {len(pts)}")
         k = min(max(int(round(frac * len(pts))), 1), len(pts) - 1)
         test = np.isin(point, np.random.default_rng(self.seed + 1).permutation(pts)[:k])
-        fresh = Emulator(self.features, self.targets, self.path, self.prob, self.eps, self.noise, self.seed)
-        fresh.fit(df[~test])
-        return dict(fresh.score(df[test], alpha), n_train=fresh.n_train + fresh.n_cal)
+        sub = Emulator(self.features, self.targets, self.path, self.prob, self.eps, self.noise, self.seed)
+        sub.fit(df[~test])
+        out = dict(sub.score(df[test], alpha), n_train=sub.n_train + sub.n_cal)
+        if fresh is not None:
+            got: list[tuple[pd.Series, float, int]] = []
+            for _, row in df[test].drop_duplicates(self.features).iterrows():
+                r = fresh(row)
+                if r is not None:
+                    got.append((row, *r))
+                if len(got) == FRESH_POINTS:
+                    break
+            if got:
+                pe = sub.predict(pd.DataFrame([g[0] for g in got]))["p_fail"]["value"]
+                pf = np.array([g[1] for g in got])
+                out["fresh"] = dict(points=len(got), p_fresh=pf.tolist(), p_emulated=pe.tolist(), n_members=int(got[0][2]),
+                                    rmse=float(np.sqrt(np.mean((pe - pf) ** 2))))
+        return out
 
     def ledger(self, x: Any) -> dict[str, Any]:
         """The `emulator` stage ledger entry (BRIEF 5.5): size, held-out RMSE and coverage, distance of the queried mission."""

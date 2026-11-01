@@ -1,16 +1,17 @@
 """python -m cafe.pm <command>  (bin/run_premission is `python -m cafe.pm run`)
 
-    run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--gpu-mem-gb G] [--out DIR] [--fresh] [--seed S] [--emulator-table FILE]
-                                             the whole pipeline, resumable
+    run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--gpu-mem-gb G] [--assume-gpu] [--out DIR] [--fresh] [--seed S] [--emulator-table FILE]
+                                             the whole pipeline, resumable; --gpus N > 0 is refused when no GPU is visible (unless --assume-gpu)
     fetch     --mission M                    ingest only (orca + ocean into the cache); plans nothing, so it takes no --budget and works for any mission
     ingest-ocean --mission M --path DIR [--temperature-kind {in_situ,potential}] [--grid STEM]
                                              the lab's HYCOM (netCDF or archv .a/.b) -> the mission's ocean store (environment.ocean.path)
     validate  --mission M                    schema and cross-checks, nothing run
-    plan      --mission M --budget B --gpus N [--gpu-mem-gb G]   what the budget buys on this machine
+    plan      --mission M --budget B --gpus N [--gpu-mem-gb G] [--assume-gpu]   what the budget buys on this machine (a GPU that is not here is said so)
     whatif    --mission M [--run DIR] [--budget B] (--shift 48h | --move "1deg W" | --drop ID)... [--vehicle ID]...
                                              what if: emulator-first, Stage 1 at the budget (default quick) when it cannot answer
     hangar    --platform NAME                provenance check and the Stage-1 coefficients the platform implies
     audit     [RUN ...] [--code-only]        the ledger/code/test audit (cafe.pm.audit)
+    promote-calibration --run DIR            copy that run's stage3/subgrid_calibration.json into the tracked config/subgrid.json (a deliberate, committed act)
     report    --run DIR [--open]             re-render the report from a finished run; --open shows it in a browser when there is a display
     receipts  [--broken YAML] [--slow] [--only NAME,..] [--json OUT]   every receipt (app + pre-mission) as one table; see cafe/pm/receipts.py
     acceptance --mission M --gpus N --out DIR [--golden FILE] [--update-golden] [--skip-overnight]
@@ -48,6 +49,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--gpus", type=int, default=0)
             p.add_argument("--gpu-mem-gb", type=float, default=None, help="device memory the planner sizes nests against (refuses over 85 %%); "
                            "default: nvidia-smi when --gpus > 0")
+            p.add_argument("--assume-gpu", action="store_true", help="plan (or run) for --gpus N although no GPU is visible on this machine: the plan is a "
+                           "projection from published benchmarks, and a run would execute its LES windows on the CPU")
         if name in ("run", "fetch"):
             p.add_argument("--out", default=None, help="run directory (default runs/<mission>/<budget>)")
             p.add_argument("--fresh", action="store_true", help="ignore existing checkpoints")
@@ -65,6 +68,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--temperature-kind", default=None, choices=["in_situ", "potential"],
                    help="what the files' temperature is; required unless the mission or every netCDF says it (never guessed)")
     p.add_argument("--grid", default=None, help="archv only: the regional.grid stem (default: next to the files)")
+    p = sub.add_parser("promote-calibration", help="copy a run's sub-grid calibration into config/subgrid.json, "
+                       "recording the run's path, the date and its ledger digest")
+    p.add_argument("--run", required=True)
     p = sub.add_parser("report")
     p.add_argument("--run", required=True)
     p.add_argument("--open", action="store_true", help="open the report in a browser when there is a display, else just print its path")
@@ -109,6 +115,14 @@ def main(argv: list[str] | None = None) -> int:
             return audit.main(a.runs + (["--code-only"] if a.code_only else []))
         if a.cmd == "hangar":
             return _hangar(a.platform)
+        if a.cmd == "promote-calibration":
+            from .env import subgrid
+            try:
+                cal = subgrid.promote_calibration(a.run)
+            except ValueError as e:
+                raise ConfigError(str(e)) from e
+            print(f"config/subgrid.json calibration.source_run: {cal['source_run']}; review the diff and commit it")
+            return 0
         if a.cmd == "ingest-ocean":
             return _ingest_ocean(a)
         if a.cmd == "whatif":
@@ -118,9 +132,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{a.mission}: valid ({len(m['vehicles'])} vehicles, {len(m['links'])} links)")
         elif a.cmd == "plan":
             m = load_mission(a.mission)
+            if a.gpus > 0 and not a.assume_gpu and not pipeline.gpu_visible():
+                print(f"no GPU found on this machine: the {a.gpus} GPU(s) below are projected from published benchmarks, not measured")
             print(budget.describe(budget.plan(a.budget, a.gpus, m, gpu_mem_gb=_gpu_mem(a), vehicle_classes=stage1._classes(m))))
         elif a.cmd in ("run", "fetch"):
             m = load_mission(a.mission)
+            if getattr(a, "gpus", 0) > 0 and not a.assume_gpu and not pipeline.gpu_visible():
+                raise ConfigError(f"--gpus {a.gpus} but no GPU is visible (did the docker run get --gpus all?); use --gpus 0 or pass --assume-gpu "
+                                  "to plan for one that will be there")
             bud = getattr(a, "budget", "quick")
             out = pathlib.Path(a.out or f"runs/{m['name']}/{bud}")
             ctx = pipeline.run(a.mission, bud, getattr(a, "gpus", 0), out, resume=not a.fresh, stop_after="ingest" if a.cmd == "fetch" else None,

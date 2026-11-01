@@ -394,3 +394,19 @@ def test_valid_range_is_a_factor_times_the_vendor_range_and_follows_like_bands()
     f = c._yaml("modems.yaml")["defaults"]["valid_range_factor"]
     assert f == 10.0 and c.valid_range_m("benthos_atm960", "MF") == pytest.approx(f * 4e3) and c.valid_range_m("benthos_atm960", "LF") == pytest.approx(f * 6e3)
     assert c.valid_range_m("whoi_micromodem", "long_10k") == c.valid_range_m("benthos_atm960", "MF")
+
+
+# ------------------------------------------------------------------------------------------------ review round 3
+
+def test_the_two_ray_loss_gives_ament_the_grazing_angle_not_its_sine():
+    """M-14: (ht + hr) / r2 is sin(psi); ament_rho sines its argument, so the call sined twice (exponent 16 % low at d = 20 m, ht = hr = 10 m)."""
+    d, ht, hr, hs, f = 20.0, 10.0, 10.0, 0.2, F915
+    lam = c.C0 / f
+    r1, r2 = np.hypot(d, ht - hr), np.hypot(d, ht + hr)
+
+    def loss(grazing):
+        rho = np.exp(-2.0 * (2 * np.pi * (hs / 4.0) * np.sin(grazing) / lam) ** 2)
+        return 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(abs(1.0 - rho * (r1 / r2) * np.exp(-2j * np.pi * (r2 - r1) / lam)))
+    want = loss(np.arcsin((ht + hr) / r2))                                                       # psi = 45 degrees: sin(psi) = 0.7071
+    assert c.two_ray_loss_db(d, ht, hr, hs, f) == pytest.approx(want, abs=1e-9)
+    assert abs(loss((ht + hr) / r2) - want) > 0.05                                               # sined twice: the test can tell, by more than 0.05 dB

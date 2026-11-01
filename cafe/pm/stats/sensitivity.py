@@ -51,3 +51,13 @@ def dominant(names: list[str], x: np.ndarray, y: np.ndarray, harmonics: int | No
     s = first_order(x, y, harmonics)
     floor = noise_floor(x, y, harmonics=harmonics)
     return (names[int(np.argmax(s))] if s.max() > floor else None), dict(zip(names, map(float, s), strict=True)), floor
+
+
+def extreme_ranks(names: list[str], x: np.ndarray, members: np.ndarray, top: int = 3) -> list[tuple[str, list[int]]]:
+    """For a few members (boolean mask over the rows of x): each parameter's rank of those members among all rows of x (0 = lowest value), for the `top`
+    parameters whose members sit farthest from the middle rank on average, most extreme first. What can be said when too few members failed (or
+    survived) for an index: a perfectly known driver shows as ranks all near 0 or all near n - 1."""
+    n = len(x)
+    rank = np.argsort(np.argsort(x, axis=0, kind="stable"), axis=0, kind="stable")
+    far = np.abs(rank[members].mean(0) - (n - 1) / 2.0)
+    return [(names[i], sorted(map(int, rank[members, i]))) for i in np.argsort(-far, kind="stable")[:top]]

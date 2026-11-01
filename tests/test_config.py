@@ -349,3 +349,78 @@ def test_a_sortie_period_just_above_the_overlap_limit_and_an_iridium_link_to_the
     assert vehicle(m, "uas")["sorties"]["every_days"] == 0.023
     load_mission(edit(tmp_path, lambda d: vehicle(d, "uas")["sorties"].pop("every_days")))                       # the default period is one day
     assert any(lk["kind"] == "iridium" and "shore" in (lk["a"], lk["b"]) for lk in load_mission(DEMO)["links"])
+
+
+# Review round 3 (M-1, M-3, M-15..M-18, M-20)
+def _cli(tmp_path, fn, capsys):
+    from cafe.pm import __main__ as cli
+    rc = cli.main(["validate", "--mission", str(edit(tmp_path, fn))])
+    return rc, capsys.readouterr().err
+
+
+ROUND3 = [
+    ("M-1 drift without heading_to", lambda d: vehicle(d, "glider_2n")["task"].pop("heading_to"),
+     r"vehicles/glider_2n/task: drift needs heading_to, the compass heading the glider swims on"),
+    ("M-1 heading_to out of range", lambda d: vehicle(d, "glider_2n")["task"].update(heading_to=361), r"heading_to"),
+    ("M-3 usv drift", lambda d: vehicle(d, "usv")["task"].update(mode="drift", heading_to=0.0),
+     r"vehicles/usv/task/mode: 'drift' is not a mode a usv flies; use one of \['station', 'section'\]"),
+    ("M-3 uas with a task", lambda d: vehicle(d, "uas").update(task=dict(mode="station")), r"vehicles/uas/task: a UAS flies sorties and takes no task"),
+    ("M-15 feb 30", lambda d: d["window"].update(end="2023-02-30T12:00:00Z"), r"window/end: '2023-02-30T12:00:00Z' is not a calendar time"),
+    ("M-15 hour 24", lambda d: d["window"].update(end="2023-03-07T24:00:00Z"), r"window/end: .*not a calendar time"),
+    ("M-15 month 13", lambda d: vehicle(d, "glider_eq")["deploy"].update(time="2023-13-01T12:00:00Z"),
+     r"vehicles/glider_eq/deploy/time: .*not a calendar time"),
+    ("M-16 radius_kms", lambda d: vehicle(d, "glider_eq")["task"].update(radius_kms=3), r"vehicles/\d/task: .*radius_kms"),
+    ("M-16 every_day", lambda d: vehicle(d, "uas")["sorties"].update(every_day=2), r"vehicles/\d/sorties: .*every_day"),
+    ("M-16 launch_rules typo", lambda d: vehicle(d, "uas")["launch_rules"].update(max_wind=3), r"vehicles/\d/launch_rules: .*max_wind"),
+    ("M-16 shore typo", lambda d: d["shore"].update(lon=1), r"^error: .*\n\s+shore: .*lon"),
+    ("M-16 sorties on a glider", lambda d: vehicle(d, "glider_eq").update(sorties=dict(local_solar_time="14:00", duration_min=20)),
+     r"vehicles/glider_eq/sorties: only a UAS"),
+    ("M-17 glider platform on a UAS", lambda d: vehicle(d, "uas").update(platform="seaglider"),
+     r"vehicles/uas/platform: 'seaglider' is a glider platform file, but the vehicle has `base`.*quad_uas"),
+    ("M-17 uas platform on a glider", lambda d: vehicle(d, "glider_eq").update(platform="quad_uas"),
+     r"vehicles/glider_eq/platform: 'quad_uas' is a uas platform file, but the vehicle has no `base`"),
+    ("M-17 acoustic with a UAS", lambda d: d["links"][1].update(a="uas", when="always"),
+     r"links/glider_eq-ship-acoustic: an acoustic link cannot end at a UAS"),
+    ("M-18 deploy 30 s before the end", lambda d: vehicle(d, "usv")["deploy"].update(time="2023-03-07T11:59:30Z"),
+     r"vehicles/usv/deploy/time: .*less than 10 min before window.end.*by 2023-03-07T11:50:00Z"),
+]
+
+
+@pytest.mark.parametrize("what,fn,msg", ROUND3, ids=[c[0] for c in ROUND3])
+def test_round3_refusals_name_the_field_and_exit_2_through_validate(tmp_path, capsys, what, fn, msg):
+    rc, err = _cli(tmp_path, fn, capsys)
+    assert rc == 2 and err.startswith("error: ") and re.search(msg, err, re.S), err
+
+
+def test_round3_good_variants_load(tmp_path):
+    load_mission(edit(tmp_path, lambda d: vehicle(d, "glider_2n")["task"].update(heading_to=360)))
+    load_mission(edit(tmp_path, lambda d: vehicle(d, "usv")["task"].update(mode="station", lon=-165.0, lat=0.0, radius_km=5.0)))
+    load_mission(edit(tmp_path, lambda d: vehicle(d, "usv")["deploy"].update(time="2023-03-07T11:50:00Z")))                # exactly one record before the end
+    assert vehicle(load_mission(DEMO), "glider_2n")["task"]["heading_to"] == 0.0
+
+
+def test_platform_class_is_the_one_rule():
+    vs = [dict(platform="seaglider"), dict(platform="slocum"), dict(platform="saildrone_explorer"), dict(platform="quad_uas", base="s")]
+    assert [config.platform_class(v) for v in vs] == ["glider", "glider", "usv", "uas"]
+    assert config.MODES == {"glider": ("station", "section", "drift"), "usv": ("station", "section"), "uas": ()}
+
+
+def test_a_platform_that_does_not_load_with_its_class_loader_is_a_config_error(tmp_path):
+    bad = tmp_path / "odd_usv.yaml"
+    bad.write_text("kind: wing_sail_usv\nsomething: {value: 1}\n")
+    with pytest.raises(ConfigError, match=r"vehicles/usv/platform: .* does not load as a usv platform"):
+        load_mission(edit(tmp_path, lambda d: vehicle(d, "usv").update(platform=str(bad))))
+
+
+def test_the_schema_has_no_default_that_the_code_ignores():
+    import json
+
+    from cafe.pm import pipeline
+    text = (config.SCHEMAS / "mission.json").read_text()
+    assert '"default"' not in text
+    assert json.loads(text)["properties"]["box"]["properties"]["pad_deg"]["maximum"] == pipeline.MAX_PAD_DEG
+
+
+def test_every_shipped_mission_and_fixture_still_loads():
+    for f in sorted((config.ROOT / "missions").glob("*.yaml")):
+        load_mission(f)

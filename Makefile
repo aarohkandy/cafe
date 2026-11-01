@@ -20,9 +20,10 @@ fetch:              ## data for the mission box + window (resumable, hash-checke
 
 ci: MISSION := missions/ci_fixture.yaml
 ci: CI_DATA ?= /tmp/cafe_ci_data
-ci:                 ## every stage at toy resolution on CPU, < 10 min, from the synthetic environment (tests/fixtures/ci_env), no network
+ci:                 ## every stage at toy resolution on CPU, < 10 min, from the synthetic environment (tests/fixtures/ci_env), no network; then audits the ledgers of the run it made
 	$(PY) -m tests.fixtures.ci_env.make $(CI_DATA) $(MISSION)
 	CAFE_DATA=$(CI_DATA) CAFE_OFFLINE=1 $(PY) -m cafe.pm run --mission $(MISSION) --budget ci --gpus 0 --out $(RUNS)/ci
+	$(PY) -m cafe.pm.audit --ledgers-only $(RUNS)/ci
 
 quick:
 	$(PY) -m cafe.pm run --mission $(MISSION) --budget quick --gpus $(GPUS) --out $(RUNS)/quick

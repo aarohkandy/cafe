@@ -71,7 +71,7 @@ def test_a_mission_that_fails_validation_exits_2_with_the_reason_on_stderr(tmp_p
 
 
 def test_plan_prints_what_the_budget_buys(capsys):
-    assert cli.main(["plan", "--mission", MISSION, "--budget", "4h", "--gpus", "2"]) == 0
+    assert cli.main(["plan", "--mission", MISSION, "--budget", "4h", "--gpus", "2", "--assume-gpu"]) == 0
     out = capsys.readouterr().out
     assert out.startswith("budget 4h (240 min), 2 GPU(s), 1.50 mission days") and "stage 1: 73..256 members in batches of 64" in out
     assert "xlb-warp" in out and all(f"  {v}: " in out for v in ("glider_eq", "glider_1n", "usv", "uas"))
@@ -80,6 +80,62 @@ def test_plan_prints_what_the_budget_buys(capsys):
 def test_plan_defaults_to_the_quick_budget_on_no_gpu(capsys):
     assert cli.main(["plan", "--mission", MISSION]) == 0
     assert capsys.readouterr().out.startswith("budget quick (20 min), 0 GPU(s)")
+
+
+def test_a_gpu_that_is_not_there_is_refused_by_run_and_labelled_by_plan(calls, tmp_path, monkeypatch, capsys):
+    """Round 3 M-19: `plan --gpus 1` on a machine with no nvidia-smi exited 0 and halved stage 1 for a GPU that was not there, and a `run` would have run the
+    LES windows on the CPU. Now `run` refuses it (exit 2, naming the flag), `plan` says first that the numbers are projected, and --assume-gpu is
+    the way out."""
+    monkeypatch.setattr(pipeline, "gpu_visible", lambda: False)
+    assert cli.main(["run", "--mission", MISSION, "--out", str(tmp_path / "o"), "--gpus", "1"]) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and calls == [] and err.startswith("error: --gpus 1 but no GPU is visible")
+    assert "--gpus all" in err and "--gpus 0" in err and "--assume-gpu" in err
+    assert cli.main(["plan", "--mission", MISSION, "--gpus", "1"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("no GPU found on this machine: the 1 GPU(s) below are projected from published benchmarks")
+    assert "budget quick (20 min), 1 GPU(s)" in out
+    assert cli.main(["plan", "--mission", MISSION, "--gpus", "1", "--assume-gpu"]) == 0
+    assert capsys.readouterr().out.startswith("budget quick (20 min), 1 GPU(s)")                              # today's behaviour
+    assert cli.main(["run", "--mission", MISSION, "--out", str(tmp_path / "o"), "--gpus", "1", "--assume-gpu"]) == 0 and calls[-1]["gpus"] == 1
+    capsys.readouterr()
+    # no GPU asked, none looked for
+    assert cli.main(["plan", "--mission", MISSION]) == 0 and capsys.readouterr().out.startswith("budget quick (20 min), 0 GPU(s)")
+    assert cli.main(["run", "--mission", MISSION, "--out", str(tmp_path / "o")]) == 0 and calls[-1]["gpus"] == 0
+    capsys.readouterr()
+    monkeypatch.setattr(pipeline, "gpu_visible", lambda: True)                                                 # a visible GPU: no label, no refusal
+    assert cli.main(["plan", "--mission", MISSION, "--gpus", "1"]) == 0 and capsys.readouterr().out.startswith("budget quick (20 min), 1 GPU(s)")
+    monkeypatch.setattr(pipeline, "gpu_memory_gb", lambda: None)
+    assert cli.main(["run", "--mission", MISSION, "--out", str(tmp_path / "o"), "--gpus", "1"]) == 0 and calls[-1]["gpus"] == 1
+
+
+def test_gpu_visible_needs_a_cuda_device_or_nvidia_smi(monkeypatch):
+    import shutil
+    from cafe.pm.stage3 import lbm
+    monkeypatch.setattr(lbm, "pick_backend", lambda: "jax")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert pipeline.gpu_visible() is False
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/nvidia-smi" if name == "nvidia-smi" else None)
+    assert pipeline.gpu_visible() is True
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr(lbm, "pick_backend", lambda: "warp")
+    assert pipeline.gpu_visible() is True
+
+
+def test_promote_calibration_copies_a_runs_calibration_into_the_tracked_config(tmp_path, monkeypatch, capsys):
+    from cafe.pm.env import subgrid
+    cfg = tmp_path / "subgrid.json"
+    cfg.write_text((subgrid._CFG_DIR / "subgrid.json").read_text())
+    monkeypatch.setattr(subgrid, "_CFG_DIR", tmp_path)
+    run = tmp_path / "quick"
+    (run / "stage3").mkdir(parents=True)
+    (run / "checkpoints" / "stage3").mkdir(parents=True)
+    (run / "checkpoints" / "stage3" / "ledger.json").write_text("{}")
+    (run / "stage3" / "subgrid_calibration.json").write_text(json.dumps(dict(subgrid.load_config(cfg)["calibration"], source_run="x", sigma_u_over_ustar=2.9)))
+    assert cli.main(["promote-calibration", "--run", str(run)]) == 0
+    assert f"{run.resolve()} (promoted" in capsys.readouterr().out and json.loads(cfg.read_text())["calibration"]["sigma_u_over_ustar"] == 2.9
+    assert cli.main(["promote-calibration", "--run", str(tmp_path / "none")]) == 2
+    assert "did not calibrate the sub-grid layer" in capsys.readouterr().err
 
 
 BAD_ARGS = [["plan", "--mission", MISSION, "--budget", "weekend"], ["fetch", "--mission", MISSION, "--budget", "ci"], ["run"], ["report"], []]
@@ -100,7 +156,7 @@ def test_a_plan_for_an_invalid_mission_exits_2(tmp_path, capsys):
 def test_run_calls_the_pipeline_with_its_budget_gpus_and_default_directory(calls, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(pipeline, "gpu_memory_gb", lambda: None)                                                      # no nvidia-smi answer: nothing to guard
-    assert cli.main(["run", "--mission", MISSION, "--budget", "4h", "--gpus", "1"]) == 0
+    assert cli.main(["run", "--mission", MISSION, "--budget", "4h", "--gpus", "1", "--assume-gpu"]) == 0
     out = pathlib.Path("runs/ci_fixture/4h")
     assert calls == [dict(mission=MISSION, budget="4h", gpus=1, out=out, resume=True, stop_after=None)]
     assert capsys.readouterr().out == f"report: {out / 'report' / 'index.html'}\n"
@@ -469,13 +525,14 @@ def test_a_zero_seed_is_a_seed(calls, tmp_path):
 def test_gpu_memory_is_passed_to_the_planner_given_or_asked_from_nvidia_smi(calls, tmp_path, monkeypatch, capsys):
     out = str(tmp_path / "o")
     monkeypatch.setattr(pipeline, "gpu_memory_gb", lambda: 24.0)
-    assert cli.main(["run", "--mission", MISSION, "--out", out, "--gpus", "1"]) == 0 and calls[-1]["gpu_mem_gb"] == 24.0           # asked
-    assert cli.main(["run", "--mission", MISSION, "--out", out, "--gpus", "1", "--gpu-mem-gb", "16"]) == 0 and calls[-1]["gpu_mem_gb"] == 16.0   # given wins
+    assert cli.main(["run", "--mission", MISSION, "--out", out, "--gpus", "1", "--assume-gpu"]) == 0 and calls[-1]["gpu_mem_gb"] == 24.0           # asked
+    # given wins
+    assert cli.main(["run", "--mission", MISSION, "--out", out, "--gpus", "1", "--gpu-mem-gb", "16", "--assume-gpu"]) == 0 and calls[-1]["gpu_mem_gb"] == 16.0
     assert cli.main(["run", "--mission", MISSION, "--out", out]) == 0 and "gpu_mem_gb" not in calls[-1]                              # no GPU: nothing to guard
     seen = []
     real = budget.plan
     monkeypatch.setattr(budget, "plan", lambda *a, **k: seen.append(k.get("gpu_mem_gb")) or real(*a, **k))
-    assert cli.main(["plan", "--mission", MISSION, "--gpus", "1", "--gpu-mem-gb", "40"]) == 0 and seen == [40.0]
+    assert cli.main(["plan", "--mission", MISSION, "--gpus", "1", "--gpu-mem-gb", "40", "--assume-gpu"]) == 0 and seen == [40.0]
     assert "max_cells" not in capsys.readouterr().err
 
 

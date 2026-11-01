@@ -17,10 +17,15 @@ every vehicle (glider, Saildrone-class boat, quadcopter, and the radio, acoustic
 data, uncertainty and receipt behind every number. It is its own pipeline, not the app above; the app's web UI and the static demo do not read its `report.json`.
 
 ```bash
-make install                                    # once: builds the cafe and cafe-pm docker images
-make fetch                                      # once: downloads the mission's data (resumable)
-bin/run_premission --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out runs/quick     # then open runs/quick/report/index.html
+make install                                    # once: builds the cafe and cafe-pm docker images (the only step that runs on the host as it is)
+export CAFE_HOST_DATA=$HOME/cafe-data && mkdir -p $CAFE_HOST_DATA
+pm() { docker run --rm --ulimit core=0 -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
+       -v $PWD:/app -v $CAFE_HOST_DATA:/data -w /app cafe-pm "$@"; }                                  # every other command runs inside the cafe-pm image
+pm python -m cafe.pm fetch --mission missions/tepex_c_demo.yaml                                        # once: downloads the mission's data (resumable, ~2.5 h)
+pm bin/run_premission --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out runs/quick   # then open runs/quick/report/index.html
 ```
+
+Run from the repository root. On homebase use `./pm.sh <command>` instead of `pm <command>`. The numpy, jax, xlb and gsw the pipeline needs are in the image, not on the host.
 
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md) takes it from a clean machine to a report and says which verdicts to trust; [`STATUS.md`](STATUS.md) says what is missing and why (no GPU,
 the lab's HYCOM run, the lab server, platform datasheets); [`QUESTIONS_FOR_LAB.md`](QUESTIONS_FOR_LAB.md) lists what the lab can answer to close the gaps; `docs/CREDIBILITY.md`

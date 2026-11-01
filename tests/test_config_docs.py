@@ -65,3 +65,29 @@ def test_credibility_doc_quotes_the_rules_verbatim():
     doc = text("docs", "CREDIBILITY.md").replace("\\|", "|")
     for k, v in credibility.RULES.items():
         assert v in doc, k
+
+
+# ---- review round 3 (M-24, M-25, M-26)
+
+def test_readme_quick_start_runs_every_python_command_inside_the_image_with_the_runbook_wrapper():
+    """M-26: `make install` only builds the images; the fetch and the run need numpy, jax, xlb, gsw, so they go through pm()."""
+    block = re.search(r"```bash\n(make install.*?)```", text("README.md"), re.S).group(1)
+    wrapper = lambda t: re.search(r"pm\(\) \{ docker run.*?\"\$@\"; \}", t, re.S).group(0)  # noqa: E731
+    assert wrapper(block) == wrapper(text("docs", "RUNBOOK.md"))
+    cmds = [ln.split("#")[0].strip() for ln in block.splitlines() if ln and not ln.startswith(("export", "pm()", "       -v"))]
+    assert cmds[0] == "make install" and all(c.startswith("pm ") for c in cmds[1:]) and len(cmds) == 3
+    assert "pm python -m cafe.pm fetch --mission missions/tepex_c_demo.yaml" in cmds and "make fetch" not in block
+    mk = text("Makefile")
+    assert re.search(r"^install:", mk, re.M) and (ROOT / "bin" / "run_premission").is_file()
+
+
+def test_the_brief_and_decisions_33_do_not_claim_an_unconditional_mss_match():
+    """M-25: the run's ledger (`spectrum_mss_vs_file`) says 35 % at the 90th percentile with 31 % of the points clipped."""
+    for t in (text("docs", "BRIEF.md").split("| 2.3 |")[1].split("\n")[0], row(33)):
+        assert "0.0 % where the short-wave share is not clipped" in t and "35 %" in t and "31 %" in t and "spectrum_mss_vs_file" in t
+
+
+def test_runbook_says_which_run_directories_make_audit_checks_and_what_make_ci_ends_with():
+    """M-24."""
+    rb = text("docs", "RUNBOOK.md")
+    assert "ledgers of runs/quick, runs/overnight and runs/4h (those that exist)" in rb and "audit --ledgers-only runs/ci" in rb

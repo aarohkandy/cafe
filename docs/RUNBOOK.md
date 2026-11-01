@@ -79,6 +79,13 @@ only missing parts are fetched). `fetch` needs no `--budget` and plans none, so 
 `environment.ocean: {source: lab_hycom, path: /data/ocean/lab_tepex_c_demo.zarr}` in the mission and run
 `pm python -m cafe.pm ingest-ocean --mission missions/tepex_c_demo.yaml --path /data/<lab dir> --temperature-kind <in_situ|potential>`.
 
+What `validate` enforces about vehicles (it exits 2 with `error: ...` naming the field, so a wrong file is found here and not hours into a run). A vehicle with `base` is a UAS: it takes `sorties`
+and `launch_rules` and no `task`. A vehicle without `base` takes a `task` and no `sorties`: a glider flies `station`, `section` or `drift`, a USV `station` or `section`. A `station` task
+names the station (`lon`, `lat`, `radius_km`); for a USV `radius_km` is the distance from the station at which it counts as swept off track. A glider `drift` task needs `heading_to`, the compass heading in degrees
+(0 to 360) it swims on: a drift glider has no pass/fail criterion, so its GO means only that the battery and depth limits held on that heading. The platform file must be of the
+vehicle's class (a Seaglider or Slocum for a glider, `saildrone_explorer` for a USV, `quad_uas` for a UAS), an acoustic link cannot end at a UAS, every time must be a real calendar time,
+every vehicle must be deployed at least 10 min before `window.end`, and a key that is not in the schema (a typo in `task`, `sorties`, `launch_rules`, `shore`) is refused.
+
 ## 5. Run the mission
 
 ```bash
@@ -120,17 +127,24 @@ The code path exists (XLB with the Warp backend, `--gpus N`), but every run so f
 `--gpus all` to the `docker run` in `pm()`, make sure the image has CUDA builds of `jax` and `warp-lang`, measure the GPU with
 `pm python bench/throughput.py lbm gpu`, then `pm bin/run_premission --mission missions/tepex_c_demo.yaml --budget 4h --gpus 1
 --out runs/4h`. The plan and the report then say "GPU path" instead of "CPU fallback"; `make acceptance GPUS=1` adds the 4 h run.
+`run --gpus N` stops with `error: --gpus N but no GPU is visible` when the container cannot see a GPU (usually a forgotten `--gpus all`); `plan --gpus N` then
+begins with "no GPU found on this machine" and prints a projection from published benchmarks, not a measurement. Pass `--assume-gpu` only to plan for a GPU that will be there.
+
+After a GPU run whose LES windows passed, the run's sub-grid calibration is in `runs/<mission>/<budget>/stage3/subgrid_calibration.json` and the stages after stage 3 already used it.
+To keep it for later runs, `pm python -m cafe.pm promote-calibration --run runs/<mission>/<budget>` copies it into `config/subgrid.json`, recording the run's full path, the date and the digest of its
+stage-3 ledger in `calibration.source_run`; review the diff and commit it. Nothing else changes that file, and stage 1 always uses the tracked calibration.
 
 ## 7. Check it
 
 ```bash
 pm make receipts          # every receipt; exit 0 only if none failed. Read "Receipts on a clean machine" below before expecting 0
 pm make broken            # the deliberately broken wave-direction config must FAIL a receipt: exit 0 means it did
-pm make audit             # ledgers re-hashed, banned tokens, ruff, mypy --strict, coverage, mutation score
+pm make audit             # ledgers of runs/quick, runs/overnight and runs/4h (those that exist) re-hashed, banned tokens, ruff, mypy --strict, coverage, mutation score
 pm make acceptance        # brief 5.3: quick + overnight (+ 4h with GPUS=1), golden diff, same seed, other seed, broken config (~11 h)
 ```
 
-Each writes its table (`runs/receipts.json`, `runs/acceptance.json` and `.txt`).
+Each writes its table (`runs/receipts.json`, `runs/acceptance.json` and `.txt`). With none of those run directories `make audit` re-hashes no ledger; `make ci` (step 2) ends with
+`python -m cafe.pm.audit --ledgers-only runs/ci`, which re-hashes every ledger of the run it just made and checks the chain.
 
 **Receipts on a clean machine.** `make receipts` exits 0 only when no row failed, and that is not what a clean machine shows, for two reasons.
 

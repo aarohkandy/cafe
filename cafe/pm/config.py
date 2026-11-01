@@ -44,8 +44,12 @@ def validate(doc: Any, schema_name: str, where: str) -> Any:
     return doc
 
 
-def utc(s: str) -> dt.datetime:
-    return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+def utc(s: str, where: str = "") -> dt.datetime:
+    """A YYYY-MM-DDTHH:MM:SSZ string as an aware UTC time. A calendar-invalid one (the schema checks digits only) is a ConfigError naming `where`."""
+    try:
+        return dt.datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=dt.timezone.utc)
+    except ValueError as e:
+        raise ConfigError(f"{where + ': ' if where else ''}{s!r} is not a calendar time ({e}); use YYYY-MM-DDTHH:MM:SSZ") from e
 
 
 def _in_box(lon: float, lat: float, b: dict[str, float]) -> bool:
@@ -84,14 +88,51 @@ def _modem_names() -> set[str]:
     return {n.lower() for k, v in _registry("modems.yaml", "modems").items() for n in (k, *(f"{k}_{b}" for b in v["bands"]))}
 
 
-def _klass(v: dict[str, Any]) -> str:
-    """uas / usv / glider, decided as stage1._classes does."""
-    kind = str(load_platform(v["platform"]).get("kind") or v["platform"]).lower()
-    return "uas" if "base" in v else ("usv" if "sail" in kind or "usv" in kind else "glider")
+MODES = {"glider": ("station", "section", "drift"), "usv": ("station", "section"), "uas": ()}      # task.mode each vehicle class can fly
+MIN_DEPLOY_BEFORE_END_S = 600.0       # stage 1's record interval (stage1.REC_S): a vehicle deployed later than this before window.end gets no record
+
+
+def _kind_class(kind: str) -> str:
+    return "usv" if "sail" in kind or "usv" in kind else "glider"
+
+
+def platform_class(v: dict[str, Any]) -> str:
+    """The one rule: "uas" if the vehicle has `base`; else "usv" if its platform's kind (the file name if none) contains sail or usv; else "glider"."""
+    if "base" in v:
+        return "uas"
+    return _kind_class(str(load_platform(v["platform"]).get("kind") or v["platform"]).lower())
+
+
+def _file_class(plat: dict[str, Any]) -> str:
+    """What the platform file itself is: a file with no `kind` is the UAS file."""
+    return _kind_class(str(plat["kind"]).lower()) if plat.get("kind") else "uas"
+
+
+def _platforms_of(cls: str) -> list[str]:
+    out = []
+    for f in sorted(PLATFORMS.glob("*.yaml")):
+        d = _yaml(f)
+        if isinstance(d, dict) and (("airframe" in d) if cls == "uas" else bool(d.get("kind")) and _kind_class(str(d["kind"]).lower()) == cls):
+            out.append(f.stem)
+    return out
+
+
+def _check_platform(v: dict[str, Any], where: str) -> str:
+    """The vehicle's class, after its platform file has been loaded with that class's loader (so stage 1 never meets a wrong-class file)."""
+    cls, plat = platform_class(v), load_platform(v["platform"])
+    if _file_class(plat) != cls:
+        why = "has `base`, so it is a UAS" if cls == "uas" else "has no `base`, so it is not a UAS" if _file_class(plat) == "uas" else f"is a {cls}"
+        raise ConfigError(f"{where}/platform: '{v['platform']}' is a {_file_class(plat)} platform file, but the vehicle {why}; use one of {_platforms_of(cls)}")
+    from .physics import glider, uas, usv
+    try:
+        {"uas": uas, "usv": usv, "glider": glider}[cls].load_platform(v["platform"])
+    except (ValueError, KeyError) as e:
+        raise ConfigError(f"{where}/platform: '{v['platform']}' does not load as a {cls} platform ({type(e).__name__}: {e})") from e
+    return cls
 
 
 def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None:
-    cls = {v["id"]: _klass(v) for v in m["vehicles"]}
+    cls = {v["id"]: platform_class(v) for v in m["vehicles"]}
     lids = [lk["id"] for lk in m["links"]]
     if dupl := sorted({i for i in lids if lids.count(i) > 1}):
         raise ConfigError(f"{path}: link ids {dupl} appear more than once; give each link its own id (results are keyed by link id)")
@@ -114,6 +155,8 @@ def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None
         if "modem" in lk and lk["modem"].lower() not in modems:
             raise ConfigError(f"{where}/modem: '{lk['modem']}' is not in platforms/modems.yaml; use a key or <key>_<band>, e.g. {sorted(modems)[:3]}")
         ends = {cls.get(lk["a"]), cls.get(lk["b"])}
+        if lk["kind"] == "acoustic" and "uas" in ends:
+            raise ConfigError(f"{where}: an acoustic link cannot end at a UAS (it flies, depth 0); use an rf link, or move that end")
         if lk["kind"] == "iridium":
             if lk.get("when", "always") != "always":
                 raise ConfigError(f"{where}/when: an iridium link is checked at every record, not '{lk['when']}'; use always or leave it out")
@@ -130,7 +173,7 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
     doc = _yaml(path)
     _unread_keys(doc, path)
     m: dict[str, Any] = validate(doc, "mission.json", str(path))
-    t0, t1 = utc(m["window"]["start"]), utc(m["window"]["end"])
+    t0, t1 = utc(m["window"]["start"], f"{path}: window/start"), utc(m["window"]["end"], f"{path}: window/end")
     if t1 <= t0:
         raise ConfigError(f"{path}: window.end {m['window']['end']} is not after window.start; swap them")
     ids = [v["id"] for v in m["vehicles"]]
@@ -148,21 +191,35 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
             raise ConfigError(f"{where}/base: '{v['base']}' is not the ship's id; add a ship block with that id or fix the base")
         if "deploy" in v:
             d = v["deploy"]
-            if not t0 <= utc(d["time"]) < t1:
+            td = utc(d["time"], f"{where}/deploy/time")
+            if not t0 <= td < t1:
                 raise ConfigError(f"{where}/deploy/time: {d['time']} is outside the window {m['window']['start']} .. {m['window']['end']}")
+            if (t1 - td).total_seconds() < MIN_DEPLOY_BEFORE_END_S:
+                mn, last = MIN_DEPLOY_BEFORE_END_S / 60, t1 - dt.timedelta(seconds=MIN_DEPLOY_BEFORE_END_S)
+                raise ConfigError(f"{where}/deploy/time: {d['time']} is less than {mn:g} min before window.end; "
+                                  f"deploy at least {mn:g} min before the end, by {last:%Y-%m-%dT%H:%M:%SZ}")
             pts = [(d["lon"], d["lat"])] + [tuple(p) for p in v.get("task", {}).get("waypoints", [])]
             if "lon" in v.get("task", {}):
                 pts.append((v["task"]["lon"], v["task"]["lat"]))
             for lon, lat in pts:
                 if not _in_box(lon, lat, m["box"]):
                     raise ConfigError(f"{where}: point ({lon}, {lat}) is outside the mission box {m['box']}; widen the box or move the point")
-        plat = load_platform(v["platform"])
+        plat, cls = load_platform(v["platform"]), _check_platform(v, where)
+        if "sorties" in v and cls != "uas":
+            raise ConfigError(f"{where}/sorties: only a UAS (a vehicle with `base`) flies sorties; remove sorties, or add base: <the ship's id>")
         so = v.get("sorties", {})
         hard = so.get("duration_min", 0) * float(plat.get("sortie", {}).get("hard_stop_factor", {}).get("value", 1.0))
         if so and so.get("every_days", 1) * 1440 < hard:
             raise ConfigError(f"{where}/sorties/every_days: {so.get('every_days', 1)} d is shorter than duration_min x the platform's hard_stop_factor "
                               f"({hard:g} min), so sorties would overlap; raise every_days to at least {hard / 1440:.3g} or shorten duration_min")
         task = v.get("task", {})
+        if "task" in v and cls == "uas":
+            raise ConfigError(f"{where}/task: a UAS flies sorties and takes no task; remove task")
+        if task and task["mode"] not in MODES[cls]:
+            raise ConfigError(f"{where}/task/mode: '{task['mode']}' is not a mode a {cls} flies; use one of {list(MODES[cls])}")
+        if task.get("mode") == "drift" and "heading_to" not in task:
+            raise ConfigError(f"{where}/task: drift needs heading_to, the compass heading the glider swims on; "
+                              f"there is no pass/fail criterion other than battery, depth and seafloor")
         if task.get("mode") == "station" and "lon" not in task:
             raise ConfigError(f"{where}/task: mode 'station' needs lon, lat and radius_km of the station")
         if task.get("mode") == "section" and len(task.get("waypoints", [])) < 2:

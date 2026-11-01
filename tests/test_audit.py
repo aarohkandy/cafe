@@ -202,6 +202,7 @@ def tree(tmp_path, files):
     ("# TODO later", "TODO"), ("x = 1  # FIXME", "FIXME"), ("# XXX", "XXX"), ("raise NotImplementedError", "NotImplementedError"),
     ("pass  # placeholder", "placeholder"), ("pytest.skip('x')", "pytest.skip"), ("@pytest.mark.skip", "mark.skip"),
     ("@pytest.mark.skipif(True)", "skipif"), ("@pytest.mark.xfail", "xfail"),
+    ("items.skip(1)", "skip("),
 ])
 def test_each_banned_token_is_caught_with_file_and_line(tmp_path, line, word):
     root = tree(tmp_path, {"cafe/pm/a.py": f"x = 1\n{line}\n"})
@@ -443,7 +444,7 @@ def test_those_modules_are_linted_where_they_pass_ruff():
 def test_a_banned_token_in_an_imported_older_module_is_caught(tmp_path):
     for s in audit.SCAN:
         p = tmp_path / s
-        if s.endswith((".py", ".md")) or s == "Makefile":
+        if s.endswith((".py", ".md", ".js")) or s == "Makefile":
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("x = 1\n")
         else:
@@ -455,3 +456,29 @@ def test_a_banned_token_in_an_imported_older_module_is_caught(tmp_path):
 def test_the_older_modules_the_scan_names_are_clean_today():
     older = tuple(audit.IMPORTED)
     assert len(older) == 15 and not [h for h in audit.banned() if h.startswith(older)]
+
+
+# ---- review round 3, M-24 and M-27
+
+def test_ledgers_only_audits_the_run_dirs_given_and_nothing_else(tmp_path, monkeypatch, capsys):
+    """`make ci` ends with --ledgers-only on the run it made: a corrupted output hash fails it; no repo scan, no mutation record."""
+    monkeypatch.setattr(audit, "banned", lambda: pytest.fail("--ledgers-only must not scan the repo"))
+    monkeypatch.setattr(audit, "mutation_problems", lambda root: pytest.fail("--ledgers-only must not read the mutation record"))
+    monkeypatch.setattr(audit, "_run", lambda cmd: pytest.fail("--ledgers-only must not run the tools"))
+    run = make_run(tmp_path)
+    assert audit.main([str(run), "--ledgers-only"]) == 0
+    (run / "ingest.out").write_text("tampered")
+    assert audit.main([str(run), "--ledgers-only"]) == 1
+    assert "AUDIT FAIL: run: stage ingest" in capsys.readouterr().out
+
+
+def test_make_ci_ends_with_the_ledger_audit_of_the_run_it_made():
+    import subprocess
+    out = subprocess.run(["make", "-n", "ci"], cwd=audit.ROOT, capture_output=True, text=True, check=True).stdout.strip().splitlines()
+    assert out[-1] == "python -m cafe.pm.audit --ledgers-only runs/ci" and "--out runs/ci" in out[-2]
+
+
+def test_the_static_app_script_is_scanned_the_vendored_libraries_and_the_html_are_not(tmp_path):
+    root = tree(tmp_path, {"cafe/static/app.js": "let a = 1;\n// TODO fix\nf.mass.placeholder = 'x';\nq.skip(2);\n",
+                           "cafe/static/vendor/three.js": "// TODO\n", "cafe/static/index.html": '<input placeholder="x">\n'})
+    assert audit.banned(root) == ["cafe/static/app.js:2: banned pattern: // TODO fix", "cafe/static/app.js:4: banned pattern: q.skip(2);"]

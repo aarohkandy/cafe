@@ -12,6 +12,7 @@ jax[cpu]==0.12.0.1
 xlb==0.3.1
 warp-lang==1.12.1  # xlb 0.3.1 imports warp.utils.ScopedTimer, gone after 1.12
 pycoare==0.4.3
+gsw==3.6.22  # TEOS-10; came in only as a dependency, pinned since the code digest covers every installed version (review round 3, M-22)
 gliderflight==1.2.1
 mannrs==2.0.0
 pyconturb==2.7.4

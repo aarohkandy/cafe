@@ -1,18 +1,22 @@
 """`make audit`: the run proves itself and the repo carries no unfinished work.
 
-    python -m cafe.pm.audit [run_dir ...] [--code-only]
+    python -m cafe.pm.audit [run_dir ...] [--code-only | --ledgers-only]
 
 1. Ledgers: every stage of every run dir has checkpoints/<stage>/ledger.json with ok=true and zero failed checks; every
    input and output still hashes to what the ledger recorded; each stage's inputs include the previous stage's
    ledger (the chain), so a rerun of one stage without the ones after it is caught.
 2. Banned patterns outside tests/fixtures/broken/: TODO, FIXME, XXX, NotImplementedError, placeholder, pytest skip /
    xfail markers, and commented-out code (a comment line that parses as a Python statement).
+   The scan covers code and config (see `SCAN` for the exact list); the static app's HTML and vendored libraries and the prose documents
+   are outside it, DECISIONS 205.
 3. ruff, mypy, pytest with coverage gates (cafe/pm >= 90 %, cafe/pm/physics, stats, env = 100 %).
 4. Mutation testing (BRIEF 5.3: >= 85 % of mutants killed on cafe/pm/physics and cafe/pm/stats). It takes hours, so it is a slow
    receipt: `make mutation` runs mutmut and stores docs/mutation.json (counts, score, a digest of the mutated code and of the tests
    that kill the mutants, date, mutmut version). The audit only reads that file and fails if it is missing, was made by different
    code or tests, or scores < 0.85, naming the command that refreshes it.
-Exit 0 only if all pass; prints every failure.
+Exit 0 only if all pass; prints every failure. `--code-only` skips ruff, mypy and pytest; `--ledgers-only` checks only the ledgers of the run dirs
+given (what `make ci` ends with, on the run it just made: the mutation record and the banned-token scan are the business of `make audit`,
+and a clean checkout has no docs/mutation.json yet).
 
     python -m cafe.pm.audit --mutation-record     (called by `make mutation`: writes docs/mutation.json from mutants/mutmut-cicd-stats.json)
 """
@@ -25,13 +29,17 @@ from .env.remote import sha256
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STAGES = ["ingest", "hangar", "stage1", "windows", "stage3", "refit", "stage1b", "emulator", "report"]
-BANNED = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError)\b|\bplaceholder\b|pytest\.skip|mark\.skip|skipif|xfail")
+BANNED = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError)\b|\bplaceholder\b|pytest\.skip|mark\.skip|skipif|xfail|\bskip\(")
 # The older `cafe/` modules the pipeline imports, directly (cfd, fea, emulator, reach, receipts, planner) or through them. Their banned-token scan is
 # cheap and covers all of them; ruff covers the five that pass it (`planner` has 14 loop-closure findings in numerical code that this round does not
 # touch). mypy --strict and the coverage gates are not asked of them: they are pre-mission app code, run through the pipeline and their own receipts.
 IMPORTED = [f"cafe/{m}.py" for m in ("cfd", "ctrl", "dyn", "emulator", "env", "fea", "geom", "hangar", "mission", "ocean", "planner", "reach", "receipts",
                                      "shapes", "vehicle")]
-SCAN = ["cafe/pm", *IMPORTED, "tests", "bench", "platforms", "missions", "config", "docs/RUNBOOK.md", "Makefile"]
+# Scope (DECISIONS 205): BRIEF 5.5's `cafe/` is read as code and config. Outside the scan: cafe/static/index.html (its `placeholder="..."` form-field
+# attributes), cafe/static/vendor/ (third-party three.js, Leaflet), the app's own modules the pipeline does not import, lab/, report/, and the prose
+# documents other than RUNBOOK. cafe/static/app.js is scanned, with the DOM property `.placeholder` removed from a line before matching (JS_DOM_PLACEHOLDER).
+SCAN = ["cafe/pm", *IMPORTED, "cafe/static/app.js", "tests", "bench", "platforms", "missions", "config", "docs/RUNBOOK.md", "Makefile"]
+JS_DOM_PLACEHOLDER = re.compile(r"\.placeholder\b")
 EXEMPT = ["tests/fixtures/broken/", "cafe/pm/audit.py", "tests/test_audit.py", "docs/BRIEF.md", "review/"]
 GATES = {"cafe/pm": 90.0, "cafe/pm/physics": 100.0, "cafe/pm/stats": 100.0, "cafe/pm/env": 100.0}
 MUTATED = ["cafe/pm/physics", "cafe/pm/stats"]
@@ -153,7 +161,7 @@ def banned(root: pathlib.Path = ROOT) -> list[str]:
         except UnicodeDecodeError:
             continue
         for n, line in enumerate(lines, 1):
-            if BANNED.search(line):
+            if BANNED.search(JS_DOM_PLACEHOLDER.sub("", line) if f.suffix == ".js" else line):
                 hits.append(f"{rel}:{n}: banned pattern: {line.strip()[:100]}")
             elif f.suffix == ".py" and _commented_code(line):
                 hits.append(f"{rel}:{n}: commented-out code: {line.strip()[:100]}")
@@ -229,13 +237,15 @@ def main(argv: list[str]) -> int:
         (ROOT / MUTATION_FILE).write_text(json.dumps(mutation_record(ROOT), indent=1) + "\n")
         print(f"wrote {MUTATION_FILE}")
         return 0
-    code_only = "--code-only" in argv
+    ledgers_only = "--ledgers-only" in argv
+    code_only = "--code-only" in argv or ledgers_only
     runs = [a for a in argv if not a.startswith("--")]
     problems: list[str] = []
     for r in runs:
         problems += ledger_problems(r)
-    problems += banned()
-    problems += mutation_problems(ROOT)
+    if not ledgers_only:
+        problems += banned()
+        problems += mutation_problems(ROOT)
     if not code_only:
         rc, out = _run(["ruff", "check"])
         if rc:

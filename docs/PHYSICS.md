@@ -303,7 +303,7 @@ The correction of 4.4 is checked by the `Wave direction` rows of section 0 (dire
 
 Code: `cafe/pm/env/subgrid.py`; configuration `config/subgrid.json` (sourced) and `config/assumptions.yaml` (`subgrid.*`, each with why and
 what replaces it); coupling to the environment in `surface.py`. Every output is `Tagged(..., kind="modelled")`. `config/subgrid.json["calibration"]`
-is what Stage-3 LES is meant to overwrite; `calibration.source_run` is `null`, so the shipped defaults run. Tests: `tests/test_subgrid.py`,
+is the shipped calibration (a run's Stage-3 LES writes its own, section 5.x); `calibration.source_run` is `null`, so the shipped defaults run. Tests: `tests/test_subgrid.py`,
 `tests/test_surface.py`.
 
 ### 5.1 Mann turbulence
@@ -399,8 +399,7 @@ not tests of the physics. The ranges themselves are the brief's (BRIEF 2.2) or a
 
 ### 5.x Recalibration from stage 3 (`subgrid.recalibrate`, `pipeline_windows.recalibrate_subgrid`)
 
-`config/subgrid.json` is rewritten only from passed stage-3 windows that resolved an inflow series. `calibration.source_run` stays null until a passed
-window supplies one. `recalibrate` fits sigma_u/u* = std(u)/u*. The length factor is the ratio of the window's Taylor-frozen integral scale to that of the
+A run's Stage-3 LES recalibration, made only from passed stage-3 windows that resolved an inflow series, is written to `stage3/subgrid_calibration.json` of that run and is read by the stages after stage 3 (stage 1b is rerun with it even when no vehicle was refit). The tracked `config/subgrid.json` is changed only by `python -m cafe.pm promote-calibration --run DIR`, which records the run's full path, the date and the digest of its stage-3 ledger in `calibration.source_run` (review round 3, M-23); stage 1 always uses the tracked calibration. `calibration.source_run` of the tracked file stays null until a calibration is promoted. `recalibrate` fits sigma_u/u* = std(u)/u*. The length factor is the ratio of the window's Taylor-frozen integral scale to that of the
 configured Mann layer at the same z, U and u*. Gust statistics are never changed. The windows of this build use a uniform inflow, so no series is resolved,
 the layer stays uncalibrated, and the stage ledger says so (DECISIONS 162).
 
@@ -481,23 +480,26 @@ Fit on the real window (2023-03-01..07, lead's log): 11 moorings, 1492 hourly pa
 | wind direction (FROM) | -7.2 deg | 24.8 deg |
 | SST | -0.11 K | 0.26 K |
 
-Fitted Stage-1 priors (`pipeline._tao`, written to `ingest/priors_fitted.json`, read by `stage1.priors_for`):
+Fitted Stage-1 priors (`pipeline._tao`, written to `ingest/priors_fitted.json`, read by `stage1.priors_for`). The mean is the correction that removes the model bias (sign flipped). Superseded first form, the
+round-1 prior (the whole residual sd as a member-wide bias): `N(-0.62, 1.33) m/s` and `N(+7.2, 23.7) deg`. The current fit (DECISIONS 182, 209) on the real window (the demo's `priors_fitted.json`):
 
 ```
-wind_speed_bias     ~ N( -bias_speed,  sqrt(rmse_speed^2 - bias_speed^2) )   = N(-0.62, 1.33) m/s      (sign: the correction that removes the model bias)
-wind_direction_bias ~ N( -bias_dir,    sqrt(rmse_dir^2   - bias_dir^2)   )   = N(+7.2, 23.7) deg
+wind_speed_bias      ~ N(-0.616, 0.113) m/s      persistent part only
+wind_direction_bias  ~ N(+7.21,  2.63)  deg
+wind_speed_noise     sd 1.283 m/s,  tau 6.43 h   per-member stationary AR(1) about each mooring's own mean
+wind_direction_noise sd 22.2 deg,   tau 11.1 h
 ```
 
-Review round 2 (M-1, DECISIONS 182) found this wide, not conservative: the whole residual sd, hourly scatter included, became a member-wide persistent bias held for six days,
+Review round 2 (M-1, DECISIONS 182) found the round-1 prior wide, not conservative: the whole residual sd, hourly scatter included, became a member-wide persistent bias held for six days,
 because `PerturbedEnv` had no time-varying wind error term, and the data support a persistent part about three times smaller (the 11 per-mooring time-mean speed biases have mean
 0.595 and sd 0.375 m/s, direction sd 8.7 deg; an estimate of the order, not a measurement, because six-day means of a synoptic WRF error are still correlated within the run). The fit
 therefore takes the persistent part from the between-mooring dispersion of the time-mean error minus the mean sampling variance of those means (floored at 0), plus the variance of the fitted mean (var(means) / k for k moorings; a random-effects prediction for the mission site, so it is never 0 while the moorings disagree), and fits the remainder,
 the hourly residual about each mooring's own mean, as `wind_speed_noise` and `wind_direction_noise` (an sd and an e-folding time from the lag-1 autocorrelation) in `priors_fitted.json`;
 `PerturbedEnv.wind` adds that remainder as a per-member stationary AR(1) series on an hourly grid over the window, drawn from `member_rng(seed, m, "wind_speed_noise" | "wind_direction_noise")` and read only when
 the fitted priors hold the noise keys (20 to 40 microseconds per query); it is spatially uniform, so one value applies to every point of the box at a time. With fewer than two moorings the split is not defined and the whole hourly misfit stays
-the persistent sd (no noise keys). Limitation L14 says the split is an estimate of the order. Only the two wind priors are fed back: the SST bias and RMSE, and every other
-residual, are recorded in `ingest/tao_compare.json` and not used; `env.sigma.sst_k` and `env.sigma.t2_k` stay at their assumed values (0.5 K, 1.0 K) although the
-text of `assumptions.yaml` says the TAO comparison overwrites `t2_k`. A mission with no TAO download keeps the `perturbations.yaml` priors and the ledger says so.
+the persistent sd (no noise keys). Limitation L14 says the split is an estimate of the order. Four things are fed back: the two wind priors (with their noise terms) and the two tagged environment sigmas, `env.sigma.sst_k` and `env.sigma.t2_k`, which the
+fit writes to `ingest/env_sigmas_fitted.json` (the demo run: 0.259 K and 1.191 K, against the assumed 0.5 K and 1.0 K) and `Context.env` applies over `assumptions.yaml` when the file exists. Every other residual (the SST bias, the vector RMSE, the rest) is
+recorded in `ingest/tao_compare.json` and not used. A mission with no TAO download keeps the `perturbations.yaml` priors and the ledger says so.
 
 Receipts, job `pm.env.tao`, group `TAO / TRITON moorings`:
 
@@ -591,6 +593,7 @@ buoyancy  B = g ( rho V - M ),   V = ( V_hull + dV_vbd ) exp( -gamma p + alpha_T
 - Temperature: the environment holds no T(z), so `T = t_deep + (SST - t_deep) exp(-z/h)` with t_deep 4 degC and h = 150 m (**assumed**); it enters only through `alpha_T`. Credibility limitation L06.
 - Energy: hotel 0.5 W (**assumed**) + pump work `p dV/eta` with eta 0.40 (**assumed**; bracketed by NOC 65 W for 2 min and Copernicus os-2019-36) + surface comms + attitude motors (414 J per dive, sourced).
 - Failure flags: `station_lost` (outside the tolerance for `lost_hours`), `battery`, `seafloor`, `overdepth`, `no_flight`, `waypoint_unreachable`. Phase changes are evaluated at step ends, late by at most one step.
+- **Drift mode** (review round 3, M-1). A glider in `drift` mode flies its dive cycle on one fixed compass heading, `task.heading_to` (required, 0 to 360; the demo writes 0.0), and surfaces at the end of every dive. It has no waypoint or station, so it cannot fail `station_lost` or `waypoint_unreachable`; the failure modes left are battery, seafloor, overdepth, no flight and left data. A GO for a drift glider therefore says only that its battery and depth limits held along that heading, not that it did something the mission asked; the report prints the heading and those modes, and its sanity row is "cannot be checked".
 - Metres per degree: WGS84 series (NGA length-of-a-degree table), tested against the ellipsoid.
 
 Uncertainty: per member `speed_scale` (lognormal, sigma 0.10, divided by `sqrt(drag multiplier)` after a Stage-3 refit) and `battery_scale` (lognormal, sigma 0.05, assumed); `density_bias` is zero in Stage 1.
@@ -662,9 +665,11 @@ Stage 1 lowers the speed by R_aw/K, K = -dX/dV at the root (first order)
 Every `replan_s` the heading is chosen from 72 candidates to maximise velocity made good: `g = V(trk) + (current + Stokes drift)`; speed = `min( max(V_polar - R_aw/K, 0) (1 + bias), 3.3 m/s )`.
 A tack costs `V t_tack` of distance and is taken only if the VMG gain over `tack_horizon` repays it; on a section only headings that reduce the cross-track error are allowed outside the corridor.
 `bias` is the member's `usv_vpp_bias` draw (uniform on [-0.2565, -0.2280], the Chiodi-calibrated prior; the brief's [-0.35, -0.30] runs as the sensitivity case `usv_vpp_bias_brief`); the platform's own N(-0.2422, 0.0082) default (`vpp_bias_mean`, `vpp_bias_sd` in `platforms/saildrone_explorer.yaml`) is used only when a caller passes none, and Stage 1 passes the perturbation draw.
-Mission speed against wind (review round 2, M-2): per member Stage 1 stores the mean speed over ground (path length / time since deploy), the mean 10 m wind along the track and at the anemometer height, and their ratios (`vehicles[usv].speed`: `sog_ms`, `u10_ms`, `wind_anem_ms`, `ratio`, `ratio_anem`, their medians and `calibration_ratio` = Chiodi's 0.96 / 5.4 = 0.178). The demo mission's nominal ratio is 0.120 (0.125 at the anemometer height), against the 0.178 the bias is calibrated to in a scenario without current, in uniform wind, sailing to a station. Adding the mission's effects one at a time: wind field alone 0.186, plus waves 0.180, plus current 0.150, all together 0.120. The current costs a third of the speed, all of it from the westward South Equatorial Current (mean |c| 0.33 m/s): the course changes from a beam reach with a leeward set to close-hauled (true wind angle 85 to 45 deg) and the speed through the water falls from 1.1 to 0.72 m/s. Track holding costs little (0.127 opened against 0.120). The current is counted once. No model fault was found and the prior was not retuned. Whether Chiodi's 0.178 was itself observed in real currents is not known; if it was, the current is penalised twice (limitation L18, QUESTIONS_FOR_LAB 14).
-Flags: `becalmed` (best through-water speed over all headings below the current speed for `becalmed_after_h`; the literal "SOG below current" cannot fire because a drifting boat's SOG equals the current),
-`swept_off_track`, `capsize_proxy`, `wing_stall` (apparent wind below the tail's authority or inside the bow stall cone for `stall_sustain_s`), `battery` (solar gain `eff x area x SWDOWN` minus hotel load).
+Mission speed against wind (review round 2, M-2): per member Stage 1 stores the mean speed over ground (`stage1.path_speed`, review round 3, M-7: the sum of the segment lengths of the stored 10 min records over the time they span, on the sphere of radius `usv.R_E`; it is the one definition, also used by the reach map and by the calibration run `usv.mean_sog`, and it includes the ocean SDE's steps that the simulator's `path_m` leaves out; the ratio line of the report is the median of the per-member ratios and is printed beside the median speed over the median wind, since the quotient of two medians is not the median ratio), the mean 10 m wind along the track and at the anemometer height, and their ratios (`vehicles[usv].speed`: `sog_ms`, `u10_ms`, `wind_anem_ms`, `ratio`, `ratio_anem`, their medians and `calibration_ratio` = Chiodi's 0.96 / 5.4 = 0.178). The demo mission's nominal ratio is 0.120 (0.125 at the anemometer height), against the 0.178 the bias is calibrated to in a scenario without current, in uniform wind, sailing to a station. Adding the mission's effects one at a time: wind field alone 0.186, plus waves 0.180, plus current 0.150, all together 0.120. The current costs a third of the speed, all of it from the westward South Equatorial Current (mean |c| 0.33 m/s): the course changes from a beam reach with a leeward set to close-hauled (true wind angle 85 to 45 deg) and the speed through the water falls from 1.1 to 0.72 m/s. Track holding costs little (0.127 opened against 0.120). The current is counted once. No model fault was found and the prior was not retuned. Whether Chiodi's 0.178 was itself observed in real currents is not known; if it was, the current is penalised twice (limitation L18, QUESTIONS_FOR_LAB 14).
+Flags: `becalmed` (the best through-water speed over all headings is at most the current speed (`<=`, so a boat that cannot move in a zero current is becalmed) for `becalmed_after_h`; the literal "SOG below current" cannot fire because a drifting boat's SOG equals the current),
+`swept_off_track`, `capsize_proxy`, `wing_stall_calm` (apparent wind speed below the tail's authority, `trim_min_aws_ms`, for `calm_sustain_s`), `wing_stall_angle` (apparent wind angle inside the bow cone, `min_awa_deg`, for `stall_sustain_s`; this is not the wing's stall angle of attack `wing_stall_deg`, which only the polar uses), `battery` (solar gain `eff x area x SWDOWN` minus hotel load).
+The two calm clocks differ on purpose (review round 3, M-8): `wing_stall_calm` fires after 30 min (`calm_sustain_s` 1800 s, assumed) below 1.5 m/s of apparent wind, when the wing is untrimmed and the vehicle has no drive; `becalmed` is about drifting with the current and needs 6 h (`becalmed_after_h`, assumed). `min_awa_deg` (15 deg, assumed, no source) is the bow cone; the polar still gives positive speed inside it (0.545 m/s at TWS 6 m/s, TWA 15 deg). The report states the clocks when either calm mode occurred.
+In `station` mode a USV's `task.radius_km` is its swept-off-track distance (`track_tolerance_km`, unless the task also gives that key): a member farther than that from `(lon, lat)` fails `swept_off_track`.
 
 Receipts, job `pm.physics.usv`, group `usv`:
 
@@ -760,7 +765,7 @@ margin = P_t + G_t + G_r - cable - misc - L - sensitivity;     -200 dB beyond th
 ```
 
 Specular only: diffuse scatter is neglected, so null filling is underestimated; antenna motion with the waves is not modelled (the roughness term stands in). Antenna gain 2 dBi and 3 dB misc loss
-are **assumed**; the 900 MHz sensitivity is the datasheet's lowest-rate value. The member's own Hs (perturbed) feeds the roughness. The antenna height of an aircraft is deck + flight altitude + 0.1 m.
+are **assumed**; the 900 MHz sensitivity is the datasheet's lowest-rate value. `two_ray_loss_db` gives the roughness factor the grazing angle `arctan2(ht + hr, d)`, whose sine is the `sin(psi)` above (review round 3, M-14: it used to pass `sin(psi)` to a function that sines its argument). The member's own Hs (perturbed) feeds the roughness. The antenna height of an aircraft is deck + flight altitude + 0.1 m.
 
 ### 12.2 Acoustic: Thorp and Stojanovic, Bellhop for the ambiguous links
 
@@ -855,8 +860,9 @@ Wald's SPRT (1945) with an indifference region (Younes & Simmons 2006), `sprt_de
 ### 13.4 Sensitivity (`sensitivity.py`)
 
 EASI, Plischke (2010): sort by X_i, reorder to a periodic sequence (even ranks ascending, odd descending), `S_i` = share of the output's spectral power in the first M harmonics, M = `default_harmonics(n)` = min(6, max(2, n // 16)) (2 at 32 to 47 members, 6 from 96; DECISIONS 156); small-sample bias removed with
-`S~ = S - lam/(1 - lam)(1 - S)`, lam = 2M/N (Plischke, Borgonovo & Smith 2012). Applied to the 0/1 failure indicator, only where at least one member failed, one passed, and n >= 16. It names the "most
-sensitive to" parameter; it is a ranking from one sample, not a variance decomposition with a confidence interval.
+`S~ = S - lam/(1 - lam)(1 - S)`, lam = 2M/N (Plischke, Borgonovo & Smith 2012). It names the "most sensitive to" parameter; it is a ranking from one sample, not a variance decomposition with a confidence interval.
+
+**Sensitivity in the report** (review round 3, M-2, DECISIONS 211). For each vehicle and link the report names the parameter with the largest first-order index of one continuous outcome per member: the UAS's lowest battery reserve margin over its sorties, a station glider's or station USV's largest distance from the station, a section USV's largest cross-track error, a section or drift glider's battery energy margin, a link's fraction of required moments that worked. Only the columns that can act on the vehicle are used (a glider's speed scale cannot act on a UAS), so they do not raise the permutation noise floor. A parameter is named only when its index clears that floor (the 95 % level of unrelated outcomes at the member count: about 0.30 at 32 members with two harmonics). This ranks one outcome, not the verdict: a UAS can fail by wind or attitude while the ranked margin is the battery. With no margin (or fewer than 16 finite ones) the 0/1 failure indicator is ranked instead, and with fewer than three failures (or passes) no index is computed, because EASI on a 0/1 vector with k ones saturates at its own floor; the hypercube ranks of the few members among all draws are printed instead. Each entry says which of five cases applies (ranked, nothing above the floor, too few, all pass, all fail) and what was ranked.
 
 ### 13.5 Subset simulation (`rare.py`)
 
@@ -869,6 +875,8 @@ SMT Kriging per target (KPLS above 10 features); probabilities on the logit scal
 normalised split-conformal intervals (Lei et al. 2018): score `|y - mu|/sigma_GP` on a 20 % calibration set, `q` = the ceil((n+1)(1-alpha))-th smallest, interval `mu +- q sigma`; **range guard**: the nearest-neighbour distance in z-scored feature space
 against the 99th percentile of leave-one-out nearest-neighbour distances, beyond which `query` returns `out_of_range` and no number. The pipeline trains it on the Stage-1 members of vehicles that both fail and pass and stores its hold-out scores;
 what-if queries are not part of a run.
+
+Hold-out and training draws (review round 3, M-4, DECISIONS 213). Each training variant of a run is run on its own members (variant k: members (k + 1) x batch up to (k + 2) x batch - 1; the baseline row keeps members 0 up to batch - 1), so its hypercube and noise streams are independent of the other training rows of the run. The hold-out is also scored against P(fail) re-estimated on members used nowhere else, for up to three held-out points of the run's own variants, and the RMSE limit is judged on the larger of the two debiased figures (each less its own binomial noise). Held-out rows of other runs cannot be re-run, so a hold-out made only of them is judged in sample and says so.
 
 Receipts: `pm.stats.intervals`, group `pm.stats.intervals`:
 
@@ -926,7 +934,7 @@ a no-slip wall with a tuned viscosity (1.3 to 2.6x the log-law stress), a tuned 
 ### 14.4 Windows and the refit
 
 - Windows (`pipeline.s_windows`): the K record times (K = 1, 1, 3, 3 by budget) of the strongest forcing per vehicle (10 m wind for UAS and the USV wing, Hs for the USV hull, current speed for gliders), at least 6 h apart, taken from the
-  members that failed, else from all.
+  members that failed, else from all. The forcing printed at a worst window is the analysis field (WRF, UMWM, the ocean store) at those members' tracks, before the member perturbations; the window is the record of the strongest such forcing, not the instant a member failed (`failed_at` lists those, review round 3, M-10).
 - Each window builds the vehicle from its platform yaml and `assumptions.yaml` `stage3.*` (box 3 x 1.6 x 1.6 body lengths, 10 cells per boundary-layer thickness, minimum 2 cells across, at least 3 box transits, 30 % spin-up
   discarded, **all assumed**), takes the inflow from the environment, and fits cells x steps to the plan's budget (coarsening by the fourth root of the shortfall). On CPU the row carries the plan's `CPU fallback` label.
 - Self-checks (`windows.stage3_checks`, each can fail; `ok` needs all): `mach_max` (at most 0.1), `courant_max` (0.3), `yplus_in_30_300_fraction` (0.9), `force_running_mean_dev` (0.02), `mass_drift_per_step` (1e-3), `interpolation_residual` (0.05),

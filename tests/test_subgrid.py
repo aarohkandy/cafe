@@ -1,5 +1,6 @@
 import copy
 import functools
+import json
 
 import numpy as np
 import pytest
@@ -393,7 +394,8 @@ def test_write_calibration_replaces_only_the_calibration_block_and_the_config_re
     f = tmp_path / "subgrid.json"
     f.write_text((sg._CFG_DIR / "subgrid.json").read_text())
     r = sg.recalibrate([_window(3.0, 1.5)], **N)
-    assert sg.write_calibration(r, "run_x", f) == f
+    cal = sg.calibration_block(r, "run_x")
+    assert sg.write_calibration(cal, f) == f
     new = sg.load_config(f)
     assert new["calibration"]["source_run"] == "run_x" and new["calibration"]["sigma_u_over_ustar"] == r["calibration"]["sigma_u_over_ustar"]
     assert new["calibration"]["uncertainty"] == r["uncertainty"] and new["calibration"]["windows"] == 1
@@ -404,5 +406,37 @@ def test_write_calibration_replaces_only_the_calibration_block_and_the_config_re
     again = sg.recalibrate([_window(3.0, 1.5)], cfg=new, **N)                                                   # the file is a valid input for the next run
     assert again["calibration"]["length_scale_factor"] == pytest.approx(new["calibration"]["length_scale_factor"], rel=0.3)
     with pytest.raises(ValueError, match="nothing to write"):
-        sg.write_calibration(dict(calibration=None, uncertainty=None, windows=[], skipped=["x"]), "run_y", f)
+        sg.calibration_block(dict(calibration=None, uncertainty=None, windows=[], skipped=["x"]), "run_y")
     assert sg.load_config(f)["calibration"]["source_run"] == "run_x"
+
+
+def test_use_calibration_replaces_the_calibration_block_of_the_default_config_only():
+    shipped = sg.load_config()
+    own = dict(shipped["calibration"], source_run="stage 3 of this run", sigma_u_over_ustar=9.9)
+    try:
+        sg.use_calibration(own)
+        assert sg.load_config()["calibration"] == own and sg.load_config()["turbulence"] == shipped["turbulence"]
+        assert sg.load_config(sg._CFG_DIR / "subgrid.json")["calibration"]["source_run"] is None                # an explicit path is never replaced
+        assert "Stage-3 run stage 3 of this run" in sg.calibration_note(sg.load_config())
+    finally:
+        sg.use_calibration(None)
+    assert sg.load_config()["calibration"]["source_run"] is None
+
+
+def test_promote_calibration_records_the_runs_full_path_the_date_and_its_ledger_digest(tmp_path):
+    import datetime, hashlib
+    f = tmp_path / "subgrid.json"
+    f.write_text((sg._CFG_DIR / "subgrid.json").read_text())
+    run = tmp_path / "quick"
+    (run / "stage3").mkdir(parents=True)
+    (run / "checkpoints" / "stage3").mkdir(parents=True)
+    (run / "checkpoints" / "stage3" / "ledger.json").write_text('{"stage": "stage3"}')
+    r = sg.recalibrate([_window(3.0, 1.5)], **N)
+    (run / "stage3" / "subgrid_calibration.json").write_text(json.dumps(sg.calibration_block(r, "stage 3 of this run")))
+    cal = sg.promote_calibration(run, f)
+    digest = hashlib.sha256(b'{"stage": "stage3"}').hexdigest()[:12]
+    assert cal["source_run"] == f"{run.resolve()} (promoted {datetime.date.today().isoformat()}, stage-3 ledger sha256 {digest})"
+    assert sg.load_config(f)["calibration"]["source_run"] == cal["source_run"] and "quick" in cal["source_run"] and "/" in cal["source_run"]
+    assert sg.load_config(f)["calibration"]["sigma_u_over_ustar"] == r["calibration"]["sigma_u_over_ustar"]
+    with pytest.raises(ValueError, match="did not calibrate"):
+        sg.promote_calibration(tmp_path / "empty", f)

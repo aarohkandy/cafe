@@ -849,3 +849,77 @@ def test_a_variant_that_leaves_the_data_is_rerun_one_vehicle_at_a_time_and_the_o
     assert {r["vehicle"] for r in rows} == {v["id"] for v in CI["vehicles"]} - {"usv"} and list(skipped) == ["usv"]
     assert "the variant leaves the environment data" in skipped["usv"] and env.use_3d is True
     assert env.seen[0] is False and False in env.seen and True in env.seen          # the UAS alone ran without the 3-D wind, the glider with it
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 3: M-4
+
+FEATS = whatif.BASE + whatif.TASK["glider"]
+
+
+def known_p_table(n=140, seed=0, members=16, shift=None):
+    """Glider rows whose true P(fail) is the storm rule of `storm_table` (noise-free), observed as Binomial(members, p) / members with a fresh draw per row.
+    `shift(df)` adds a smooth, deterministic function of the features to the observed value: what a draw shared by every training point looks like, since
+    the same members give the same error at the same mission. -> (observed table, {feature key: true p})."""
+    truth = storm_table(n, seed, noise=0.0)
+    p = truth["p_fail"].to_numpy()
+    rng = np.random.default_rng(100 + seed)
+    obs = truth.assign(p_fail=rng.binomial(members, p) / members, n_members=members)
+    if shift is not None:
+        obs["p_fail"] = np.clip(obs["p_fail"] + shift(obs), 0.0, 1.0)
+    return obs, {tuple(np.round(r, 9)): q for r, q in zip(truth[FEATS].to_numpy(), p, strict=True)}
+
+
+def fresh_binomial(truth, members=16, seed=7):
+    """A `fresh` draw: P(fail) of the same mission again on members nobody used, i.e. an independent Binomial(members, p_true) / members."""
+    rng = np.random.default_rng(seed)
+    return lambda row: (float(rng.binomial(members, truth[tuple(np.round(row[FEATS].to_numpy(float), 9))]) / members), members)
+
+
+def test_with_independent_noise_the_debiased_rmse_is_the_error_against_the_truth_and_the_fresh_check_agrees(tmp_path):
+    obs, truth = known_p_table()
+    em, info = whatif.fit_class(obs, "glider", tmp_path / "t.parquet", fresh=fresh_binomial(truth))
+    assert em is not None and info["fresh_points"] == 3 and info["fresh_n_members"] == 16
+    new = storm_table(300, 99, noise=0.0)                                               # the error against the true P(fail) on missions the emulator never saw
+    err = float(np.sqrt(np.mean((em.predict(new[em.features])["p_fail"]["value"] - new["p_fail"].to_numpy()) ** 2)))
+    assert info["rmse_debiased"] == pytest.approx(err, abs=0.02)
+    assert abs(info["rmse_fresh_debiased"] - info["rmse_debiased"]) < 0.08 and info["rmse_gate"] == max(info["rmse_debiased"], info["rmse_fresh_debiased"])
+    assert info["acceptance"]["rmse_ok"] == bool(info["rmse_gate"] <= whatif.LIMITS["rmse"]) and "its own members" in info["draws"]
+
+
+def test_when_the_training_targets_share_their_draws_the_fresh_check_reads_larger_than_the_in_sample_score(tmp_path):
+    """Round 3 M-4: every variant ran members 0..batch-1, so the targets carry the same error at the same mission: smooth in the features, which the
+    emulator learns, so the in-sample hold-out under-reads the error against the true P(fail). A re-draw on fresh members shows it."""
+    shared = lambda d: 0.25 * (d["deploy_h"] / 45.0 - 0.5)                               # the error the shared members make, a smooth function of the mission
+    # many members, so the targets' own noise is small beside the shared error
+    obs, truth = known_p_table(members=256, shift=shared)
+    em, info = whatif.fit_class(obs, "glider", tmp_path / "t.parquet", fresh=fresh_binomial(truth, members=256))
+    assert info["fresh_points"] == 3
+    assert info["rmse_fresh_debiased"] > info["rmse_debiased"] + 0.04, (info["rmse_fresh_debiased"], info["rmse_debiased"])
+    assert info["rmse_gate"] == info["rmse_fresh_debiased"]
+    ok = whatif.fit_class(obs, "glider", tmp_path / "t2.parquet")[1]
+    # without the check, only the in-sample score is judged
+    assert ok["fresh_points"] == 0 and "rmse_fresh_debiased" not in ok and ok["rmse_gate"] == ok["rmse_debiased"]
+
+
+def test_the_fresh_check_skips_rows_it_cannot_re_run_and_stops_at_three(tmp_path):
+    obs, truth = known_p_table()
+    seen = []
+
+    def fresh(row):
+        seen.append(row["deploy_h"])
+        return None if len(seen) % 2 else (0.5, 16)                                         # every other held-out point is a row of another run
+    _, info = whatif.fit_class(obs, "glider", tmp_path / "t.parquet", fresh=fresh)
+    assert info["fresh_points"] == 3 and len(seen) == 6 and len(set(seen)) == 6              # one call per distinct held-out point, the rest never asked
+    _, none = whatif.fit_class(obs, "glider", tmp_path / "t.parquet", fresh=lambda row: None)
+    assert none["fresh_points"] == 0 and none["rmse_gate"] == none["rmse_debiased"]
+
+
+def test_measure_runs_the_members_it_is_given(monkeypatch):
+    got = []
+    monkeypatch.setattr(stage1, "run_batch", lambda m, e, members, *a: got.append(list(members)) or (_ for _ in ()).throw(OutsideData("x")))
+    plan = plan_for(STORM, 16)
+    with pytest.raises(whatif.Invalid):
+        whatif.measure(STORM, GL, ENV, plan, *PRI, None, 7, members=list(range(48, 64)))
+    with pytest.raises(whatif.Invalid):
+        whatif.measure(STORM, GL, ENV, plan, *PRI, None, 7)
+    assert got == [list(range(48, 64)), list(range(16))]                                  # the base run's members when none are named

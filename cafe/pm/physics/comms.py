@@ -74,7 +74,7 @@ def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA) -> F:
     lam = C0 / f_hz
     d = np.maximum(d, 1.0)
     r1, r2 = np.hypot(d, ht - hr), np.hypot(d, ht + hr)
-    rho = ament_rho(hs, (ht + hr) / r2, lam)
+    rho = ament_rho(hs, np.arctan2(ht + hr, d), lam)  # the grazing angle psi: sin(psi) = (ht + hr) / r2 (ament_rho takes the sine itself)
     field = np.abs(1.0 - rho * (r1 / r2) * np.exp(-2j * np.pi * (r2 - r1) / lam))
     return cast(F, 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(np.maximum(field, 1e-12)))
 
