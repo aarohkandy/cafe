@@ -35,52 +35,64 @@
   },
   "stage1": {
     "glider": {
-      "s_per_batch_day": 7.666411717732747,
-      "s_per_member_day": 0.15658835570017496,
-      "measured": "2026-10-29",
+      "s_per_batch_day": 2.309950033823649,
+      "s_per_member_day": 0.027171214421590168,
+      "slope_resolved": true,
+      "measured": "2026-11-01",
       "host": "homebase",
       "cpus": 8,
-      "load_1min": 32.8525390625,
+      "load_1min": 1.40283203125,
+      "load_1min_after": 1.19580078125,
       "sizes": [
         8,
         32
       ],
-      "mission": "missions/ci_fixture.yaml",
-      "note": "wall time of stage1.run_batch per vehicle; a + b*M per mission day"
+      "mission": "missions/tepex_c_demo.yaml",
+      "mission_name": "tepex_c_demo",
+      "mission_days": 6.0,
+      "note": "wall time of stage1.run_batch per vehicle, after a warm-up batch, faster of two; a + b*M per mission day"
     },
     "usv": {
-      "s_per_batch_day": 12.60449504852295,
-      "s_per_member_day": 0.0,
-      "measured": "2026-10-29",
+      "s_per_batch_day": 3.8814203341801963,
+      "s_per_member_day": 0.01590605576833089,
+      "slope_resolved": true,
+      "measured": "2026-11-01",
       "host": "homebase",
       "cpus": 8,
-      "load_1min": 32.8525390625,
+      "load_1min": 1.40283203125,
+      "load_1min_after": 1.19580078125,
       "sizes": [
         8,
         32
       ],
-      "mission": "missions/ci_fixture.yaml",
-      "note": "wall time of stage1.run_batch per vehicle; a + b*M per mission day"
+      "mission": "missions/tepex_c_demo.yaml",
+      "mission_name": "tepex_c_demo",
+      "mission_days": 6.0,
+      "note": "wall time of stage1.run_batch per vehicle, after a warm-up batch, faster of two; a + b*M per mission day"
     },
     "uas": {
-      "s_per_batch_day": 55.678655783335365,
-      "s_per_member_day": 0.0,
-      "measured": "2026-10-29",
+      "s_per_batch_day": 4.622928275002374,
+      "s_per_member_day": 0.04203906489743126,
+      "slope_resolved": true,
+      "measured": "2026-11-01",
       "host": "homebase",
       "cpus": 8,
-      "load_1min": 32.8525390625,
+      "load_1min": 1.40283203125,
+      "load_1min_after": 1.19580078125,
       "sizes": [
         8,
         32
       ],
-      "mission": "missions/ci_fixture.yaml",
-      "note": "wall time of stage1.run_batch per vehicle; a + b*M per mission day"
+      "mission": "missions/tepex_c_demo.yaml",
+      "mission_name": "tepex_c_demo",
+      "mission_days": 6.0,
+      "note": "wall time of stage1.run_batch per vehicle, after a warm-up batch, faster of two; a + b*M per mission day"
     }
   },
   "machine": {
     "id": "homebase",
     "cpu": "AMD EPYC 9V45 96-Core Processor",
     "cpus": 8,
-    "measured": "2026-10-29"
+    "measured": "2026-11-01"
   }
 }

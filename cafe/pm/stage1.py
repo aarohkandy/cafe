@@ -815,11 +815,12 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _tasks(mission: dict[str, Any]) -> int:
-    """The tasks one batch of `mission` makes: one per glider and USV, one per UAS sortie."""
+def task_counts(mission: dict[str, Any]) -> dict[str, int]:
+    """{vehicle id: the tasks one batch makes of it}: 1 for a glider or USV, one per sortie for a UAS (at least 1: its setup still runs)."""
     t0, T = utc(mission["window"]["start"]).timestamp(), utc(mission["window"]["end"]).timestamp()
     cls = _classes(mission)
-    return sum(len(_uas_setup(v, uas.load_platform(v["platform"]), mission, t0, T)[2]) if cls[v["id"]] == "uas" else 1 for v in mission["vehicles"])
+    return {v["id"]: max(1, len(_uas_setup(v, uas.load_platform(v["platform"]), mission, t0, T)[2])) if cls[v["id"]] == "uas" else 1
+            for v in mission["vehicles"]}
 
 
 def wave(n: int, batch: int, n_min: int, n_max: int, width: int, tasks: int) -> int:
@@ -842,7 +843,7 @@ def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger 
     def go(members: list[int]) -> dict[str, Any]:
         return run_batch(mission, env, members, seed, pri, marg, scales)
     with par.Pool(par.workers()), cf.ThreadPoolExecutor(par.width()) as threads:
-        tasks = _tasks(mission)
+        tasks = sum(task_counts(mission).values())
         while not done:
             k = wave(n, batch, n_min, n_max, par.width(), tasks)
             blocks = [list(range(n + j * batch, n + (j + 1) * batch)) for j in range(k)]

@@ -161,7 +161,9 @@ def fs_plan(classes: dict[str, str], K: int, a: dict[str, Any], share: float | N
 
 
 def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | None = None, gpu_mem_gb: float | None = None,
-         vehicle_classes: dict[str, str] | None = None) -> dict[str, Any]:
+         vehicle_classes: dict[str, str] | None = None, workers: int | None = None) -> dict[str, Any]:
+    """`workers`: the stage-1 worker processes the run will have (default `par.workers()`, this machine's CPUs): a batch costs its longest
+    task or its tasks spread over the workers, whichever is longer, and several batches run at once when one does not fill them."""
     if budget not in BUDGET_S:
         raise PlanError(f"--budget {budget!r}: choose one of {list(BUDGET_S)}")
     if gpus < 0:
@@ -172,6 +174,11 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     days = (utc(mission["window"]["end"]) - utc(mission["window"]["start"])).total_seconds() / 86400
     classes = vehicle_classes or {}
     costs = {vid: member_cost(thr, c) for vid, c in classes.items()}
+    from . import par, stage1
+    W = par.workers() if workers is None else max(1, int(workers))
+    counts = stage1.task_counts(mission) if W > 1 else {}                  # one worker runs a batch's tasks in a row: their count does not matter
+    tasks = {vid: counts.get(vid, 1) for vid in classes}
+    timing = dict(workers=W, tasks=tasks, days=days, member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1]) for k, (c, _) in costs.items()})
     per_batch = sum(c[0] for c, _ in costs.values()) * days
     per_member = sum(c[1] for c, _ in costs.values()) * days
     rate, backend, rate_src = lbm_rate(thr, gpus)
@@ -188,14 +195,16 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         shares.update(stage3=kept / B, stage1=SHARE["stage1"] + skipped_s / B)
     share1 = shares["stage1"] * B
     bs = BATCH[budget]
-    while bs >= MIN_BATCH and per_batch + bs * per_member > share1:       # the batch must fit the share: halve it until it does
+    while bs >= MIN_BATCH and batch_cost_s(dict(timing, batch=bs)) > share1:     # the batch must fit the share: halve it until it does
         bs //= 2
     if bs < MIN_BATCH:
         need = per_batch + MIN_BATCH * per_member
         raise PlanError(f"--budget {budget}: stage 1 needs {need:.0f} s for even one batch of {MIN_BATCH} members ({per_batch:.0f} s per environment "
                         f"call over {days:.2f} mission days + {per_member:.2f} s per member) but its share of the {B} s budget is {share1:.0f} s: "
                         f"short by {need - share1:.0f} s. Use a longer --budget, a shorter mission window or fewer vehicles")
-    n_batches = int(share1 // max(per_batch + bs * per_member, 1e-9))
+    n_batches = 1
+    while n_batches * bs < N_MAX[budget] and stage1_wall_s(dict(timing, batch=bs), (n_batches + 1) * bs) <= share1:
+        n_batches += 1
     n_max = min(N_MAX[budget], n_batches * bs)
     notes = measurement_warnings(thr, classes, mission)
     if bs < BATCH[budget]:
@@ -225,7 +234,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         les["gpu_mem_gb"] = gpu_mem_gb
         les["max_cells"] = int(GPU_MEM_GUARD * gpu_mem_gb * 1e9 / LES_BYTES_PER_CELL)
     p: dict[str, Any] = dict(budget=budget, budget_s=B, gpus=gpus, days=days, n_max=n_max, n_min=n_min, batch=min(bs, n_max),
-             stage1_s=-(-n_max // min(bs, n_max)) * per_batch + n_max * per_member, stage1_share_s=share1,
+             stage1_s=stage1_wall_s(dict(timing, batch=min(bs, n_max)), n_max), stage1_share_s=share1, workers=W, tasks=tasks,
              sitl_members=SITL[budget], member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1], source=s) for k, (c, s) in costs.items()},
              les=les, refit_iterations=0 if budget == "ci" else 2, notes=notes, certify_possible=n_max >= 73, shares=shares, vehicle_classes=dict(classes))
     em = emulator_plan(p)
@@ -314,12 +323,34 @@ def emulator_share_s(plan: dict[str, Any], stage1b_free: bool = False) -> float:
     return float(plan["budget_s"] * (plan["shares"]["emulator"] + (plan["shares"]["stage1b"] if stage1b_free else 0.0)))
 
 
-def batch_cost_s(plan: dict[str, Any], vids: Any = None, days: float | None = None) -> float:
-    """Seconds one batch of plan["batch"] members costs for the named vehicles (default: all) over `days` (default: the mission length),
-    from the per-vehicle costs in the plan: what stage 1 charges per environment call plus per member."""
-    mc = plan["member_cost"]
+def _batch(plan: dict[str, Any], vids: Any = None, days: float | None = None) -> tuple[float, float]:
+    """(seconds of work in one batch of plan["batch"] members of the named vehicles (default: all) over `days` (default: the mission length),
+    from the per-vehicle costs in the plan; seconds of its longest task: a glider or USV whole, a UAS one sortie of it (plan["tasks"]))."""
+    mc, tasks = plan["member_cost"], plan.get("tasks", {})
     d = plan["days"] if days is None else days
-    return float(sum(mc[v]["s_per_batch_day"] + plan["batch"] * mc[v]["s_per_member_day"] for v in (mc if vids is None else vids)) * d)
+    cost = {v: (mc[v]["s_per_batch_day"] + plan["batch"] * mc[v]["s_per_member_day"]) * d for v in (mc if vids is None else vids)}
+    return float(sum(cost.values())), max((c / tasks.get(v, 1) for v, c in cost.items()), default=0.0)
+
+
+def batch_cost_s(plan: dict[str, Any], vids: Any = None, days: float | None = None) -> float:
+    """Wall seconds one batch of plan["batch"] members takes for the named vehicles (default: all) over `days` (default: the mission length):
+    its work on one worker, else its longest task or its work spread over plan["workers"], whichever is longer.
+    ponytail: no packing model; a greedy schedule finishes within one longest task of this."""
+    work, longest = _batch(plan, vids, days)
+    W = plan.get("workers", 1)
+    return work if W <= 1 else max(longest, work / W)
+
+
+def stage1_wall_s(plan: dict[str, Any], n: int) -> float:
+    """Wall seconds stage 1 takes for n members: ceil(n / batch) batches, their environment calls per batch and members per member, on one
+    worker in a row; on more, in waves of as many batches as fill the workers (stage1.wave), each wave at least one longest task."""
+    mc, d, b, W = plan["member_cost"].values(), plan["days"], plan["batch"], plan.get("workers", 1)
+    nb = -(-n // b)
+    work = (nb * sum(v["s_per_batch_day"] for v in mc) + n * sum(v["s_per_member_day"] for v in mc)) * d
+    if W <= 1:
+        return float(work)
+    k = max(1, W // max(sum(plan.get("tasks", {}).values()), 1))
+    return float(max(-(-nb // k) * _batch(plan)[1], work / W))
 
 
 def memory_guard(cells: float, bytes_per_cell: float, gpu_mem_gb: float) -> float:
@@ -333,15 +364,14 @@ def memory_guard(cells: float, bytes_per_cell: float, gpu_mem_gb: float) -> floa
 
 
 def wall_estimate(p: dict[str, Any]) -> dict[str, float]:
-    mc = p["member_cost"].values()
-    return dict(stage1=(-(-p["n_max"] // p["batch"]) * sum(v["s_per_batch_day"] for v in mc) + p["n_max"] * sum(v["s_per_member_day"] for v in mc)) * p["days"],
+    return dict(stage1=stage1_wall_s(p, p["n_max"]),
                 stage3=p["les"]["cell_steps_per_window"] * p["les"]["windows_per_vehicle"] * max(len(p["member_cost"]), 1) / p["les"]["rate"])
 
 
 def describe(p: dict[str, Any]) -> str:
     lines = [f"budget {p['budget']} ({p['budget_s'] / 60:.0f} min), {p['gpus']} GPU(s), {p['days']:.2f} mission days",
              f"stage 1: {p['n_min']}..{p['n_max']} members in batches of {p['batch']} "
-             f"({'can' if p['certify_possible'] else 'cannot'} certify P(fail) < 5 %)"]
+             f"({'can' if p['certify_possible'] else 'cannot'} certify P(fail) < 5 %), about {p['stage1_s']:.0f} s on {p.get('workers', 1)} worker(s)"]
     for k, v in p["member_cost"].items():
         lines.append(f"  {k}: {v['s_per_batch_day']:.3g} s/batch/day + {v['s_per_member_day']:.3g} s/member/day, {v['source']}")
     L = p["les"]

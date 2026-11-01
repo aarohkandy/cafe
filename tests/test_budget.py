@@ -5,7 +5,7 @@ import math
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from cafe.pm import budget
+from cafe.pm import budget, config, stage1
 from cafe.pm.budget import PlanError
 
 MISSION = dict(window=dict(start="2023-03-01T12:00:00Z", end="2023-03-07T12:00:00Z"))          # 6 days
@@ -408,3 +408,17 @@ def test_stage3_assumptions_carry_the_assumed_refit_floors_from_the_yaml_only():
     for k in ("stage3.refit.between_window_frac", "stage3.refit.discretisation_frac"):
         e = assumptions()[k]
         assert e["why"].startswith("ASSUMED") and e["replace_with"] and e["unit"] == "-"
+
+
+def test_workers_cost_a_batch_its_longest_task_and_fit_more_batches_in_the_share():
+    """With 8 workers a batch of the demo mission is its longest task (a whole glider; the UAS splits into its 6 sorties), so the quick share
+    holds the full 64 members where one worker fits one batch of 32; one worker plans exactly as before (the sum of the vehicles)."""
+    m = config.load_mission(config.ROOT / "missions" / "tepex_c_demo.yaml")
+    cls = stage1._classes(m)
+    one = budget.plan("quick", 0, m, thr=thr(20.0, 0.01), vehicle_classes=cls, workers=1)
+    eight = budget.plan("quick", 0, m, thr=thr(20.0, 0.01), vehicle_classes=cls, workers=8)
+    v = (20.0 + 32 * 0.01) * 6                                              # one vehicle's batch of 32 over the 6 days
+    assert budget.batch_cost_s(one) == pytest.approx(len(cls) * v) and one["n_max"] == 32 and one["workers"] == 1
+    assert eight["tasks"] == {"glider_eq": 1, "glider_2n": 1, "usv": 1, "uas": 6}
+    assert budget.batch_cost_s(eight) == pytest.approx(v) and budget.batch_cost_s(eight, ["uas"]) == pytest.approx(v / 6)
+    assert eight["n_max"] == 64 and eight["stage1_s"] == pytest.approx(2 * v) and eight["stage1_s"] < 2 * one["stage1_s"]
