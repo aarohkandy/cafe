@@ -11,7 +11,7 @@ You are reviewer {A|B} of the TEPEX-C pre-mission simulator in `/Users/aaroh/Dow
 Material:
 - The brief: `docs/BRIEF.md`. Its §5.6 lists the lanes, and you cover all of them: physics, numerics, statistics, data, performance, reproducibility, robustness, documentation, honesty.
 - The repo; `cafe/pm/` is the pipeline. Also read `DECISIONS.md`, `QUESTIONS_FOR_LAB.md`, `docs/RUNBOOK.md`, `docs/PHYSICS.md` and `docs/CREDIBILITY.md`.
-- A real quick run of `missions/tepex_c_demo.yaml` (`--budget quick --gpus 0`) at commit `COMMIT`, which holds the round-1 and round-2 fixes and DECISIONS 208 and 209 (found by earlier attempts at this run). Its report, credibility report, `report.json` and every stage's ledger are in `{RUN}`. Large binary outputs (parquet, zarr, pkl) were left out of that copy; they are on homebase at `~/work/cafe/pmdata/runs/q3/`.
+- A real quick run of `missions/tepex_c_demo.yaml` (`--budget quick --gpus 0`) at commit `73bf4c7`, which holds the round-1 and round-2 fixes and DECISIONS 208 and 209 (found by earlier attempts at this run). Its report, credibility report, `report.json` and every stage's ledger are in `{RUN}`. Large binary outputs (parquet, zarr, pkl) were left out of that copy; they are on homebase at `~/work/cafe/pmdata/runs/q3/`.
 
 Rules:
 - Do not edit anything in the repo. Write your findings only to `{OUT}`.
