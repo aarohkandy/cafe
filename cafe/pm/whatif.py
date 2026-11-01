@@ -22,6 +22,7 @@ Candidate changes for the flip search are single changes, ranked by `cost` in un
 """
 from __future__ import annotations
 
+import concurrent.futures as cf
 import contextlib
 import copy
 import datetime as dt
@@ -40,7 +41,7 @@ import pandas as pd
 from numpy.typing import NDArray
 from scipy.stats import binom, qmc
 
-from . import budget, report, stage1
+from . import budget, par, report, stage1
 from .config import ConfigError, _in_box, utc
 from .emulator import Emulator, FreshDraw, read_table, store_path, write_table
 from .env.environment import OutsideData
@@ -301,15 +302,21 @@ def run_variant(mission: dict[str, Any], env: Any, members: list[int], seed: int
             return vehicle_rows(mission, stage1.run_batch(mission, env, members, seed, pri, marg, scales), env, fidelity, meta, variant), {}
     except OutsideData:
         pass
-    rows: list[dict[str, Any]] = []
-    skipped: dict[str, str] = {}
-    for v in mission["vehicles"]:
+    def alone(v: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
         one = solo(mission, v["id"])
         try:
             with wind_2d(env, stage1._classes(one)[v["id"]]):
-                rows += vehicle_rows(one, stage1.run_batch(one, env, members, seed, pri, marg, scales), env, fidelity, meta, variant)
+                return vehicle_rows(one, stage1.run_batch(one, env, members, seed, pri, marg, scales), env, fidelity, meta, variant), None
         except OutsideData as e:
-            skipped[v["id"]] = f"the variant leaves the environment data: {e}"
+            return [], f"the variant leaves the environment data: {e}"
+    cls = stage1._classes(mission)
+    first = [v for v in mission["vehicles"] if cls[v["id"]] == "uas"]               # alone: wind_2d switches the shared environment's 3-D wind off
+    rest = [v for v in mission["vehicles"] if cls[v["id"]] != "uas"]
+    got = {v["id"]: alone(v) for v in first}
+    with cf.ThreadPoolExecutor(par.width()) as threads:                               # the others at once, their tasks in the stage-1 workers
+        got.update(zip((v["id"] for v in rest), threads.map(alone, rest) if par.width() > 1 else map(alone, rest), strict=True))
+    rows = [r for v in mission["vehicles"] for r in got[v["id"]][0]]
+    skipped = {v["id"]: why for v in mission["vehicles"] if (why := got[v["id"]][1]) is not None}
     return rows, skipped
 
 

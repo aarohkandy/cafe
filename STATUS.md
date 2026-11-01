@@ -63,6 +63,25 @@ Tests: <TESTS> (round-4 tree; the lead's full run on homebase fills this in). Th
 
 DTMB 5415 v4 study (recipe `pout-lts01-parts-v4`, three grids at Fr 0.10, 0.20, 0.28, 0.41): done and installed in `/data/dtmb5415`; |E| <= U_val at all four (E x1e3 = +0.865, +0.722, +0.842, -0.040 against U_val x1e3 = 1.882, 1.085, 2.653, 1.993), but U_val / D is 0.27 to 0.63 against 0.1, so it validates little, and iterative convergence fails at Fr 0.28 and 0.41 on every grid (drift 0.03 to 0.07 against 0.005).
 
+**Every CPU (DECISIONS 264 to 272).** Stage 1, stage 1b, the emulator variants and the fresh draws run on every CPU the run may use
+(`--cpus`; `CAFE_WORKERS=N` overrides): each glider, USV and UAS sortie of a batch is a task in a spawned worker, the workers read one
+shared-memory copy of the environment (`--shm-size 16g`, which `pm.sh` passes), batches run several at a time when one does not fill
+the workers, and the planner counts the workers. The result does not depend on the worker count: one q4 batch is the same bits on 1, 2, 4
+and 8 workers, the ci run gives the same `res.pkl` sha-256 and normalized `report.json` on 1 and 2, and the quick demo the same
+`stage1/res.pkl` and `stage1b/res.pkl` sha-256 on 1 and 8. Measured on homebase (quiet, 2026-11-01):
+
+| | 1 worker | 2 | 4 | 8 |
+|---|---|---|---|---|
+| one q4 batch of 32 (cold workers) | 107.2 s | 77.0 s | 60.6 s | 63.9 s |
+| the same batch, workers warm (as inside a run) | | | | 39.1 s |
+| quick demo, stage 1 (64 members) | 217 s | | | 97 s |
+| quick demo, emulator variants in the share | 1 | | | 6 |
+
+A batch's floor is its longest task (the USV, about 27 s), so beyond about 4 workers more CPUs buy more batches at once rather than a
+faster batch: more members and more emulator variants in the same budget. The same code is also faster on one CPU (the q4 batch took
+225.7 s before at load 11; `env.grid.interp` 74 to 54 us per call, the 3-D wind one call for every level) and holds the ocean once (a
+2-worker batch peaks at 12.5 GB for the whole container, about 25 GB before).
+
 ## 2. Pending at code freeze (pending, not done)
 
 The round-3 tree passed the full test suite, ruff and mypy --strict (2026-11-01); the round-4 tree's full run is the lead's and is not recorded here yet. A later review round may change code again, so the steps below have not been run on the final tree. Each is a step for an idle box after the last code change.

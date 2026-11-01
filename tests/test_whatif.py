@@ -6,12 +6,14 @@ Stage 1 runs for real on a fake environment where the answer is known (a storm c
 import copy
 import math
 import re
+import threading
+import time
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from cafe.pm import Tagged, budget, config, stage1, whatif
+from cafe.pm import Tagged, budget, config, par, stage1, whatif
 from cafe.pm.config import ConfigError
 from cafe.pm.env.environment import OutsideData
 from cafe.pm.env.protocol import AnalyticEnv
@@ -878,6 +880,29 @@ def test_a_variant_that_leaves_the_data_is_rerun_one_vehicle_at_a_time_and_the_o
     assert {r["vehicle"] for r in rows} == {v["id"] for v in CI["vehicles"]} - {"usv"} and list(skipped) == ["usv"]
     assert "the variant leaves the environment data" in skipped["usv"] and env.use_3d is True
     assert env.seen[0] is False and False in env.seen and True in env.seen          # the UAS alone ran without the 3-D wind, the glider with it
+
+
+def test_a_variant_rerun_one_vehicle_at_a_time_runs_the_others_at_once_on_workers_in_mission_order(monkeypatch):
+    """On 8 workers the quick demo's two variants that left the data took 102 s each, one solo batch after another; the solo batches of the
+    vehicles other than the UAS are independent and now run at once (the UAS first and alone: wind_2d switches the shared environment)."""
+    env, lock, live, peak = Env3D(), threading.Lock(), [0], [0]
+
+    def run_batch(mission, e, members, seed, pri, marg, scales):
+        if len(mission["vehicles"]) > 1:
+            raise OutsideData("wind: outside the cached data")
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        time.sleep(0.2)
+        with lock:
+            live[0] -= 1
+        return dict(vehicles={mission["vehicles"][0]["id"]: None})
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    monkeypatch.setattr(whatif, "vehicle_rows", lambda m, res, *a: [dict(vehicle=v) for v in res["vehicles"]])
+    pri, marg = stage1.priors_for(CI)
+    with par.Pool(2):
+        rows, skipped = whatif.run_variant(CI, env, [0, 1], 5, pri, marg, None, {}, {}, "v0")
+    assert [r["vehicle"] for r in rows] == [v["id"] for v in CI["vehicles"]] and not skipped and peak[0] == 2 and env.use_3d is True
 
 
 # ---------------------------------------------------------------------------------------------------------------- review round 3: M-4
