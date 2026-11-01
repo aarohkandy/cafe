@@ -208,4 +208,6 @@ class PerturbedEnv:
         return w
 
     def __getattr__(self, name: str) -> Any:                             # density, sound_speed, depth, sst, air, inside, ...
+        if name == "env":                                                 # not set yet: unpickling (a stage-1 worker) asks before __dict__ is filled
+            raise AttributeError(name)
         return getattr(self.env, name)

@@ -1,3 +1,5 @@
+import pickle
+
 import numpy as np
 import pytest
 
@@ -192,3 +194,12 @@ def test_m9_a_perturbed_env_over_a_box_across_the_date_line_reads_one_field_over
     a, b = (pe.current(np.full(M, lon), z, 0.0, 0.0).value for lon in (179.99, -179.99))
     assert np.abs(np.log(np.hypot(*a.T) / np.hypot(*b.T))).max() < 0.05                                          # several sigma before
     assert PerturbedEnv(AnalyticEnv(), {}, [0], 3, PRI).fs.lon0 == 0.0                                           # a whole-circle box keeps the old origin
+
+
+def test_a_perturbed_environment_pickles_into_a_worker():
+    """cafe.pm.par sends it to stage-1 workers; unpickling looked `env` up through __getattr__ before it existed and recursed forever."""
+    e = PerturbedEnv(AnalyticEnv(), {"wind_speed_bias": np.array([1.0, -1.0])}, [0, 1], 7, PRI)
+    f = pickle.loads(pickle.dumps(e))
+    lon = lat = np.zeros((2, 1))
+    assert np.array_equal(f.wind(lon, lat, 10.0, np.zeros((2, 1))).value, e.wind(lon, lat, 10.0, np.zeros((2, 1))).value)
+

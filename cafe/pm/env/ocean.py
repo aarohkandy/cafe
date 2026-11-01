@@ -43,6 +43,14 @@ class Ocean:
         self.f: dict[str, Any] = {}
         self.bathy = bathymetry
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Every field read first: a pickle (a stage-1 worker, cafe.pm.par) then carries them as arrays the workers share, where each worker would
+        otherwise read and hold its own copy of every field it touches, again for every task."""
+        for name in ("water_u", "water_v", "water_temp", "rho", "c"):
+            if name in self.ds:
+                self._field(name)
+        return self.__dict__
+
     def _field(self, name: str) -> Any:
         if name not in self.f:
             self.f[name] = self.ds[name].values.astype("f4")

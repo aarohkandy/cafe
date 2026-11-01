@@ -7,17 +7,22 @@ each batch the stopping rule (`stats.sequential.ensemble_stop`) is asked about e
 stops when all are decided or the planner's n_max is reached. Below 73 members (budget quick) nothing can certify
 P(fail) < 5 % and the verdict says so.
 
+Every core of the machine is used (`cafe.pm.par`): inside a batch each glider and USV is a task and each UAS sortie is one, and when one batch
+does not fill the workers several batches run at once. The batches are still merged and judged by the stopping rule in member order, so a
+run gives the same members and the same bits on any number of workers.
+
     run(mission, env, plan, ledger) -> dict(vehicles={id: result}, links={id: result}, tracks, X, U, members)
 """
 from __future__ import annotations
 
-import datetime as dt, time
+import concurrent.futures as cf, datetime as dt, time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 
+from . import par
 from .config import load_platform, platform_class, utc
 from .env import conventions as cv, subgrid
 from .env.environment import OutsideData
@@ -164,13 +169,14 @@ def _fewest_boxes(args: tuple[int, int, float, float, float, float, float, float
 
 def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float], ts: NDArray[Any], P: dict[str, Any], M: int, seed: int, members: list[int],
                  stress_scale: NDArray[Any] | None = None,
-                 used: dict[str, int] | None = None) -> tuple[list[NDArray[Any] | None], Callable[[Any], NDArray[Any]] | None]:
+                 used: dict[str, int] | None = None, only: int | None = None) -> tuple[list[NDArray[Any] | None], Callable[[Any], NDArray[Any]] | None]:
     """Per-sortie Mann turbulence (M, n, 3) and one gust-front event set for the window, from the surface layer at the ship.
     None where the mission switches them off or the environment has no surface layer (analytic test envs).
     stress_scale (M,): the member's bulk-stress multiplier. sigma_u = 2.5 u* and u*^2 is the stress, so a member's series is
     scaled by sqrt(stress_scale) (the Obukhov length and the mean wind profile are not recomputed: the wind priors perturb those).
     The gust-front rate uses theta_e from the ship's T2, Q2 and PSFC (subgrid.theta_e), so the cold-pool rate factor works.
-    used: filled with {stream: seed} of every random stream drawn here (keyed by the batch's first member, so they depend on the batch size)."""
+    used: filled with {stream: seed} of every random stream drawn here (keyed by the batch's first member, so they depend on the batch size).
+    only: the turbulence of sortie `only` alone (the others None), for a task that flies that one; the gust fronts still span every launch."""
     sw, sl = mission.get("environment", {}).get("subgrid", {}), getattr(env, "subgrid", None)
     lon, lat = origin
     so = P["sortie"]
@@ -184,6 +190,8 @@ def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float],
     turbs: list[NDArray[Any] | None] = [None] * len(ts)
     if sw.get("turbulence") and sl is not None:
         for i, t in enumerate(ts):
+            if only is not None and i != only:
+                continue
             s = sl.surface_layer(env, np.array([lon]), np.array([lat]), np.array([t]))
             w = np.asarray(env.wind(np.full(M, lon), np.full(M, lat), z, t).value, float)          # (M, 2): one point per member
             U = float(np.hypot(w[:, 0], w[:, 1]).mean())                                           # Mann advection speed
@@ -266,9 +274,8 @@ def _uas_links(env: Any, mission: dict[str, Any], origin: tuple[float, float], t
     return out
 
 
-def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], t0: float, T: float, mission: dict[str, Any], seed: int,
-             members: list[int], drag: float | NDArray[Any] = 1.0, used: dict[str, int] | None = None) -> dict[str, Any]:
-    """Daily flux-profile sorties from the ship (on station): fly_mission per sortie, then the 10-min grid the links read."""
+def _uas_setup(v: dict[str, Any], P: dict[str, Any], mission: dict[str, Any], t0: float, T: float) -> tuple[dict[str, Any], tuple[float, float], NDArray[Any]]:
+    """The platform with the mission's sortie and launch rules applied, the ship's position and the launch times."""
     ship = mission["ship"]
     origin = (float(ship["lon"]), float(ship["lat"]))
     P = dict(P, sortie=dict(P["sortie"]), launch_rule=dict(P["launch_rule"]))
@@ -277,17 +284,42 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     so["levels_m"] = [float(a) for a in v["sorties"].get("altitudes_m", so["levels_m"])]
     rename = {"max_mean_wind_ms": "max_mean_wind_ms", "no_gust_front_within_min": "gust_lookahead_min"}       # mission key -> platform key
     P["launch_rule"].update({rename[a]: float(x) for a, x in lr.items() if a in rename})
-    ts = launch_times(v["sorties"], origin[0], t0, T, so["duration_s"] * so["hard_stop_factor"])
-    turbs, gust = _uas_forcing(env, mission, origin, ts, P, M, seed, members, X.get("bulk_stress_scale"), used)
-    hs_filled: list[int] = []
-    links = _uas_links(env, mission, origin, ts, P, M, hs_filled)
-    still = lambda t: np.zeros(2)
-    sc = dict(battery=X["battery_capacity_scale"], drag=drag * np.ones(M))
-    base = getattr(env, "env", env)                                                       # the gridded environment counts the wind points it answers from 3-D
+    return P, origin, launch_times(v["sorties"], origin[0], t0, T, so["duration_s"] * so["hard_stop_factor"])
+
+
+def _uas_sortie(i: int, v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], t0: float, T: float, mission: dict[str, Any],
+                seed: int, members: list[int], drag: float | NDArray[Any]) -> tuple[dict[str, Any], dict[str, int], int, tuple[int, int] | None]:
+    """Sortie i of `_run_uas`, a task: -> (fly_sortie's result, {stream: seed} it drew, wave heights fill_hs replaced, (wind points answered
+    from 3-D, wind points asked) while it flew, None for an environment that does not count them)."""
+    P, origin, ts = _uas_setup(v, P, mission, t0, T)
+    used: dict[str, int] = {}
+    turbs, gust = _uas_forcing(env, mission, origin, ts, P, M, seed, members, X.get("bulk_stress_scale"), used, only=i)
+    filled: list[int] = []
+    link = _uas_links(env, mission, origin, ts[i:i + 1], P, M, filled)[0]
+    base = getattr(env, "env", env)
     asked, from3d = getattr(base, "wind_points", None), getattr(base, "wind3d_points", 0)
-    sorties = [uas.fly_sortie(env, still, float(t), M=M, origin=origin, plat=P, turb=tb, gust=gust, scale=sc, link=lk)
-               for t, tb, lk in zip(ts, turbs, links, strict=True)]
-    wind3d = None if asked is None else (int(base.wind3d_points - from3d), int(base.wind_points - asked))
+    s = uas.fly_sortie(env, lambda t: np.zeros(2), float(ts[i]), M=M, origin=origin, plat=P, turb=turbs[i], gust=gust,
+                       scale=dict(battery=X["battery_capacity_scale"], drag=drag * np.ones(M)), link=link)
+    return s, used, sum(filled), None if asked is None else (int(base.wind3d_points - from3d), int(base.wind_points - asked))
+
+
+def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], t0: float, T: float, mission: dict[str, Any], seed: int,
+             members: list[int], drag: float | NDArray[Any] = 1.0, used: dict[str, int] | None = None) -> dict[str, Any]:
+    """Daily flux-profile sorties from the ship (on station): fly_mission per sortie, each a task of its own (`_uas_sortie`), then the 10-min
+    grid the links read."""
+    Q, origin, ts = _uas_setup(v, P, mission, t0, T)
+    futs = [par.submit(_uas_sortie, i, v, P, env, M, X, t0, T, mission, seed, members, drag) for i in range(len(ts))]
+    P, so = Q, Q["sortie"]
+    done = [f.result() for f in futs]
+    sorties = [d[0] for d in done]
+    got: dict[str, int] = {}
+    for d in done:
+        got.update(d[1])
+    if used is not None:                                                                   # the streams in the order one process draws them
+        used.update(sorted(got.items(), key=lambda kv: kv[0] == "uas/gust"))
+    hs_filled = sum(d[2] for d in done)
+    base = getattr(env, "env", env)                                                       # the gridded environment counts the wind points it answers from 3-D
+    wind3d = None if getattr(base, "wind_points", None) is None else (sum(d[3][0] for d in done), sum(d[3][1] for d in done))
     def on_grid(tt: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any], NDArray[np.bool_]]:
         """(east, north, altitude above the deck, airborne), each (len(tt), M), from the sorties' own tracks; on the ground where not flying."""
         east, north, alt = (np.zeros((len(tt), M)) for _ in range(3))
@@ -330,7 +362,7 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
                               soc_end=s["soc_end"], max_tilt_deg=s["max_tilt_deg"], sat_s=s["sat_s"], demand_ratio_max=s["demand_ratio_max"],
                               **({"wp_done": s["wp_done"]} if "wp_done" in s else {}))              # the waypoints reached; an older sortie result has none
                          for s in sorties],
-                **({"n_wp": int(sorties[0]["n_wp"])} if sorties and "n_wp" in sorties[0] else {}), hs_filled=sum(hs_filled))
+                **({"n_wp": int(sorties[0]["n_wp"])} if sorties and "n_wp" in sorties[0] else {}), hs_filled=hs_filled)
 
 
 def refit_drag(scales: dict[str, Any] | None, vid: str, seed: int, members: list[int]) -> float | NDArray[np.float64]:
@@ -342,6 +374,20 @@ def refit_drag(scales: dict[str, Any] | None, vid: str, seed: int, members: list
     z = np.array([sampling.member_rng(seed, m, f"refit/{vid}").standard_normal() for m in members])
     s = np.sqrt(np.log1p((r["sigma"] / r["mean"]) ** 2))                    # lognormal with the refit's mean and sigma
     return np.asarray(r["mean"] * np.exp(s * z - 0.5 * s ** 2), float)
+
+
+def _vehicle(kind: str, v: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], T: float, drag: float | NDArray[Any], seed: int,
+             members: list[int]) -> tuple[dict[str, Any], float]:
+    """One glider or USV of a batch, a task: -> (its result, less the simulator, which holds the environment; its wall time [s])."""
+    a = time.time()
+    load_platform(v["platform"])
+    start = utc(v["deploy"]["time"]).timestamp()
+    if kind == "glider":
+        r = _run_glider(v, glider.load_platform(v["platform"]), env, M, X, start, T, drag, windage=subgrid.windage_fraction(seed, members))
+    else:
+        r = _run_usv(v, usv.load_platform(v["platform"]), env, M, X, start, T, drag)
+    r.pop("sim", None)
+    return r, time.time() - a
 
 
 def run_batch(mission: dict[str, Any], env: Any, members: list[int], seed: int, pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]],
@@ -365,22 +411,19 @@ def run_batch(mission: dict[str, Any], env: Any, members: list[int], seed: int, 
     cls = _classes(mission)
     used: dict[str, int] = {}
     out: dict[str, dict[str, Any]] = {}
+    futs = {v["id"]: par.submit(_vehicle, cls[v["id"]], v, penv, M, X, T, refit_drag(scales, v["id"], seed, members), seed, members)
+            for v in mission["vehicles"] if cls[v["id"]] != "uas"}                # submitted first: _run_uas waits for its sorties
     for v in mission["vehicles"]:
-        a = time.time()
-        P = load_platform(v["platform"])
-        if cls[v["id"]] == "glider":
-            P = glider.load_platform(v["platform"])
-            out[v["id"]] = _run_glider(v, P, penv, M, X, utc(v["deploy"]["time"]).timestamp(), T, refit_drag(scales, v["id"], seed, members),
-                                         windage=subgrid.windage_fraction(seed, members))
-        elif cls[v["id"]] == "usv":
-            P = usv.load_platform(v["platform"])
-            out[v["id"]] = _run_usv(v, P, penv, M, X, utc(v["deploy"]["time"]).timestamp(), T, refit_drag(scales, v["id"], seed, members))
+        if cls[v["id"]] == "uas":
+            a = time.time()
+            r = _run_uas(v, uas.load_platform(v["platform"]), penv, M, X, t0, T, mission, seed, members, refit_drag(scales, v["id"], seed, members), used)
+            wall = time.time() - a
         else:
-            P = uas.load_platform(v["platform"])
-            out[v["id"]] = _run_uas(v, P, penv, M, X, t0, T, mission, seed, members, refit_drag(scales, v["id"], seed, members), used)
-        out[v["id"]]["class"] = cls[v["id"]]
-        out[v["id"]]["wall_s"] = time.time() - a
-        _left_data(out[v["id"]], env)
+            r, wall = futs[v["id"]].result()
+        out[v["id"]] = r
+        r["class"] = cls[v["id"]]
+        r["wall_s"] = wall
+        _left_data(r, env)
     links = {lk["id"]: evaluate_link(lk, out, mission, penv, M, seed, members, used) for lk in mission["links"]}
     return dict(U=U, X=X, vehicles=out, links=links, seeds={vid: dict(used) for vid in out})
 
@@ -772,6 +815,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _tasks(mission: dict[str, Any]) -> int:
+    """The tasks one batch of `mission` makes: one per glider and USV, one per UAS sortie."""
+    t0, T = utc(mission["window"]["start"]).timestamp(), utc(mission["window"]["end"]).timestamp()
+    cls = _classes(mission)
+    return sum(len(_uas_setup(v, uas.load_platform(v["platform"]), mission, t0, T)[2]) if cls[v["id"]] == "uas" else 1 for v in mission["vehicles"])
+
+
+def wave(n: int, batch: int, n_min: int, n_max: int, width: int, tasks: int) -> int:
+    """How many batches to run at once with n members done: those n_min still needs (the stopping rule cannot stop before it), or as many as
+    keep `width` workers busy at `tasks` tasks a batch, never past n_max and at least one."""
+    left = -(-(n_max - n) // batch)
+    return max(1, min(left, max(-(-(n_min - n) // batch), width // max(tasks, 1))))
+
+
 def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger | None = None, log: Callable[[str], None] = print,
         scales: dict[str, Any] | None = None, fitted: dict[str, Any] | None = None) -> dict[str, Any]:
     pri, marg = priors_for(mission, fitted)
@@ -780,26 +837,33 @@ def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger 
     batch, n_max, n_min = plan["batch"], plan["n_max"], plan["n_min"]
     batches: list[dict[str, Any]] = []
     done = False
-    next_member = 0
-    while not done:
-        members = list(range(next_member, next_member + batch))
-        next_member += batch
-        b = run_batch(mission, env, members, seed, pri, marg, scales)
-        batches.append(b)
-        if ledger is not None:
-            rep = sampling.stratification_report(b["U"])
-            ledger.check(f"lhs_stratified_batch{len(batches)}", rep["ok"], value=rep["ks_d_max"], limit=rep["ks_bound"],
-                         note="each batch is its own Latin hypercube")
-        res = merge(batches)
-        n = len(res["U"])
-        stops: list[bool] = []
-        for r in res["vehicles"].values():
-            stops.append(sequential.ensemble_stop(int(failed(r).sum()), n, n_min=n_min, n_max=n_max)["stop"])
-        for r in res["links"].values():
-            stops.append(sequential.ensemble_stop(int((~np.asarray(r["success"], bool)).sum()), n, n_min=n_min, n_max=n_max)["stop"])
-        done = all(stops) or n >= n_max
-        log(f"stage1: {n} members, {sum(stops)}/{len(stops)} decided; batch wall per vehicle: "
-            + ", ".join(f"{k} {r['wall_s']:.0f} s" for k, r in b["vehicles"].items()))
+    n = 0
+
+    def go(members: list[int]) -> dict[str, Any]:
+        return run_batch(mission, env, members, seed, pri, marg, scales)
+    with par.Pool(par.workers()), cf.ThreadPoolExecutor(par.width()) as threads:
+        tasks = _tasks(mission)
+        while not done:
+            k = wave(n, batch, n_min, n_max, par.width(), tasks)
+            blocks = [list(range(n + j * batch, n + (j + 1) * batch)) for j in range(k)]
+            for b in (threads.map(go, blocks) if par.width() > 1 else map(go, blocks)):   # in member order; one worker: one batch at a time
+                batches.append(b)
+                if ledger is not None:
+                    rep = sampling.stratification_report(b["U"])
+                    ledger.check(f"lhs_stratified_batch{len(batches)}", rep["ok"], value=rep["ks_d_max"], limit=rep["ks_bound"],
+                                 note="each batch is its own Latin hypercube")
+                res = merge(batches)
+                n = len(res["U"])
+                stops: list[bool] = []
+                for r in res["vehicles"].values():
+                    stops.append(sequential.ensemble_stop(int(failed(r).sum()), n, n_min=n_min, n_max=n_max)["stop"])
+                for r in res["links"].values():
+                    stops.append(sequential.ensemble_stop(int((~np.asarray(r["success"], bool)).sum()), n, n_min=n_min, n_max=n_max)["stop"])
+                done = all(stops) or n >= n_max
+                log(f"stage1: {n} members, {sum(stops)}/{len(stops)} decided; batch wall per vehicle: "
+                    + ", ".join(f"{k} {r['wall_s']:.0f} s" for k, r in b["vehicles"].items()))
+                if done:                                                          # a batch run ahead of the stop is dropped, as if never run
+                    break
     n_fill = sum(r.get("hs_filled", 0) for r in (*res["vehicles"].values(), *res["links"].values()))
     if ledger is not None and n_fill:
         ledger.note(f"{n_fill} non-finite wave-height samples (UMWM sea mask) on the UAS and RF link tracks were replaced by the same member's last finite Hs "

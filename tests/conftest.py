@@ -129,8 +129,10 @@ def clock(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
-    """CAFE_OFFLINE=1 for every test: the pipeline downloads nothing unless a test clears it (and then points the URLs at a local server)."""
+    """CAFE_OFFLINE=1 for every test: the pipeline downloads nothing unless a test clears it (and then points the URLs at a local server).
+    CAFE_WORKERS=1 too: stage 1 runs in this process unless a test asks for workers (tests/test_par.py)."""
     monkeypatch.setenv("CAFE_OFFLINE", "1")
+    monkeypatch.setenv("CAFE_WORKERS", "1")
 
 
 @pytest.fixture

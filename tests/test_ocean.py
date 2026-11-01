@@ -3,6 +3,7 @@ tests/fixtures/ci_env: westward surface current, eastward undercurrent near 100 
 the seafloor, and the depth-sign convention (z positive up in the query, positive down in the store)."""
 import hashlib
 import pathlib
+import pickle
 
 import gsw
 import numpy as np
@@ -43,6 +44,15 @@ def test_store_path_follows_the_spec(data):
     assert O.store_path({"source": "gofs31", "path": "/x/other.zarr"}, "m") == pathlib.Path("/x/other.zarr")
     with pytest.raises(ValueError, match="needs a `path`"):
         O.store_path({"source": "lab_hycom"}, "m")
+
+
+def test_an_ocean_pickles_with_every_field_read(data):
+    """cafe.pm.par sends the environment to stage-1 workers; an Ocean that had read nothing yet made every worker read and hold every field again."""
+    o = O.Ocean(data.ocean_store)
+    w = pickle.loads(pickle.dumps(o))
+    assert {"water_u", "water_v", "water_temp"} <= set(w.f) and not o.f.keys() - w.f.keys()
+    assert np.array_equal(w.f["water_u"], o.ds["water_u"].values.astype("f4"), equal_nan=True)
+    assert np.array_equal(w.current(-165.0, 0.0, 10.0, w.axes[0].x[0]).value, o.current(-165.0, 0.0, 10.0, o.axes[0].x[0]).value)
 
 
 def test_open_ocean_finds_the_store_and_the_gebco_format_cache(data):

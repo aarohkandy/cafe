@@ -32,10 +32,13 @@ wrapper once per shell (pick any data directory with the space above):
 
 ```bash
 export CAFE_HOST_DATA=$HOME/cafe-data && mkdir -p $CAFE_HOST_DATA
-pm() { docker run --rm --ulimit core=0 -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
+pm() { docker run --rm --ulimit core=0 --shm-size 16g -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
        -e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain)" ]; then echo 1; else echo 0; fi) \
        -v $PWD:/app -v $CAFE_HOST_DATA:/data -w /app cafe-pm "$@"; }
 ```
+
+Stage 1 uses every CPU the container may use (`--cpus`; `CAFE_WORKERS=N` overrides), and its workers read the environment from
+files in `/dev/shm`, which Docker caps at 64 MB unless `--shm-size` raises it: without it they fall back to the temporary directory, on disk.
 
 (On homebase this is `./pm.sh <command>`, which also syncs the checkout there and sets the same two variables; data is `~/work/cafe/pmdata`.) The image has no `git`, so the ledgers learn the commit and whether the tree was clean only from `CAFE_GIT_SHA` and `CAFE_GIT_DIRTY`; without the second one a ledger says `"git_dirty": null` and the golden of step 7 cannot be minted or passed (review round 4, M-24, DECISIONS 260). Run `pm` from the repository root, in a git checkout where `git status` works.
 

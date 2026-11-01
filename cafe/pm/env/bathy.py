@@ -16,7 +16,7 @@ The 1-sigma uncertainties in ASSUMED are not published numbers; they are read fr
 unit, why, what replaces it): GEBCO deep-ocean depth from satellite-predicted bathymetry is good to a few percent, GOFS is
 the grid-level quantization (a uniform distribution over the level spacing, computed, not assumed), UMWM unknown.
 """
-import concurrent.futures as cf, hashlib, json, os, pathlib
+import concurrent.futures as cf, functools, hashlib, json, os, pathlib
 from typing import Any
 
 import numpy as np
@@ -31,6 +31,15 @@ GEBCO_RES_DEG = 1.0 / 240.0                          # 15 arc-seconds
 ASSUMED = {k: _assumptions()[f"bathy.{k}"]["value"] for k in ("gebco_rel_sigma", "umwm_rel_sigma")}   # unsourced: config/assumptions.yaml
 ORDER = ("gebco", "gofs", "umwm")
 M_PER_DEG = 111_195.0                               # mean Earth radius 6371.0088 km (IUGG)
+
+
+def _constant(v: float, d: Any) -> Any:
+    return np.full_like(d, v)
+
+
+def _relative(key: str, d: Any) -> Any:
+    """sigma = ASSUMED[key] x depth; a partial of this, not a lambda, so an environment pickles into a stage-1 worker (cafe.pm.par)."""
+    return ASSUMED[key] * d
 
 
 class Bathymetry:
@@ -49,7 +58,7 @@ class Bathymetry:
             return RegularGridInterpolator((self.lat, self.lon), a, bounds_error=False, fill_value=np.nan)
         self._depth = grid(self.depth)
         if callable(sigma) or np.ndim(sigma) == 0:                   # a function of depth, or one constant
-            self._sigma = sigma if callable(sigma) else (lambda d, v=float(sigma): np.full_like(d, v))
+            self._sigma = sigma if callable(sigma) else functools.partial(_constant, float(sigma))
         else:                                                        # a grid of its own
             self._sigma = grid(np.asarray(sigma, float))
 
@@ -133,7 +142,7 @@ def from_gebco(path: Any) -> Bathymetry:
     if hashlib.sha256(np.ascontiguousarray(z["elevation"]).tobytes()).hexdigest() != attrs["sha256"]:
         raise ValueError(f"{path}: raster SHA-256 differs from the one recorded at download; delete it and refetch")
     return Bathymetry(z["lon"], z["lat"], -z["elevation"].astype(float), f"GEBCO_2026 15 arc-second ({attrs['doi'] or 'doi n/a'})",
-                      GEBCO_RES_DEG * M_PER_DEG, lambda d: ASSUMED["gebco_rel_sigma"] * d)
+                      GEBCO_RES_DEG * M_PER_DEG, functools.partial(_relative, "gebco_rel_sigma"))
 
 
 # ------------------------------------------------------------------ 2. GOFS floor, 3. UMWM
@@ -154,7 +163,7 @@ def from_gofs(store: Any) -> Bathymetry:
 
 def from_umwm(lon: Any, lat: Any, depth: Any) -> Bathymetry:
     """UMWM `depth` [m] on a regular lon/lat grid: lon (nx,), lat (ny,), depth (ny, nx), ascending, inside 0..360 after mod; 12 km."""
-    return Bathymetry(np.mod(np.asarray(lon, float), 360.0), lat, depth, "UMWM depth", 12_000.0, lambda d: ASSUMED["umwm_rel_sigma"] * d)
+    return Bathymetry(np.mod(np.asarray(lon, float), 360.0), lat, depth, "UMWM depth", 12_000.0, functools.partial(_relative, "umwm_rel_sigma"))
 
 
 def cache_path(box: Any, cache_dir: Any) -> pathlib.Path:

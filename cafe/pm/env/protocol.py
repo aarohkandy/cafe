@@ -38,6 +38,11 @@ class Environment(Protocol):
     def air(self, lon: ArrayLike, lat: ArrayLike, t: ArrayLike) -> dict[str, Tagged]: ...
 
 
+def _profile(z: Any) -> Any:
+    """AnalyticEnv's default current profile: full strength at the surface, falling linearly to 0 at 1000 m (a function, so the env pickles)."""
+    return np.clip(1.0 + np.minimum(np.asarray(z, float), 0) / 1000.0, 0, 1)
+
+
 class AnalyticEnv:
     """Uniform (or simply varying) fields for unit tests: every value is a constructor argument.
 
@@ -51,7 +56,7 @@ class AnalyticEnv:
         self.u10, self.cur = np.asarray(wind, float), np.asarray(current, float)
         self.hs, self.tp, self.wave_to, self.h = hs, tp, wave_to, depth
         self.rho, self.c, self.T, self.rain, self.sw = rho, c, sst, rain, swdown
-        self.profile = current_profile or (lambda z: np.clip(1.0 + np.minimum(np.asarray(z, float), 0) / 1000.0, 0, 1))
+        self.profile = current_profile or _profile
         self.bounds = bounds
 
     @staticmethod

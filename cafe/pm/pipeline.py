@@ -24,14 +24,14 @@ outputs are unchanged. Stage products live next to the ledgers:
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, json, os, pathlib, pickle, re, shutil, time, warnings, zipfile
+import contextlib, datetime as dt, io, json, os, pathlib, pickle, re, shutil, time, warnings, zipfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
 
-from . import budget, ledger, stage1
+from . import budget, ledger, par, stage1
 from .audit import STAGES
 from .config import ConfigError, digest, env_sigmas, load_mission, utc
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
@@ -133,7 +133,7 @@ class Context:
             sig, fit = env_sigmas(), self.run_dir / "ingest" / "env_sigmas_fitted.json"
             if fit.is_file():
                 sig.update(json.loads(fit.read_text()))
-            self._env = GriddedEnv(self.cache, sig, ocean=ocean(self), subgrid=sub)
+            self._env = par.adopt(GriddedEnv(self.cache, sig, ocean=ocean(self), subgrid=sub))     # one copy, shared with the stage-1 workers
         return self._env
 
     def window_s(self) -> tuple[float, float]:
@@ -740,6 +740,16 @@ def _lenient(env: Any) -> Any:
     return env.lenient() if hasattr(env, "lenient") else contextlib.nullcontext()
 
 
+def res_bytes(res: Any) -> bytes:
+    """`res` pickled without the memo: the bytes follow the values alone, never which equal objects happen to be one object (a vehicle run in a
+    stage-1 worker comes back with its own copies of the key strings a one-process run shares), so res.pkl hashes the same on any number of workers."""
+    f = io.BytesIO()
+    p = pickle.Pickler(f, protocol=pickle.HIGHEST_PROTOCOL)
+    p.fast = True
+    p.dump(res)
+    return f.getvalue()
+
+
 def _stage1(ctx: Context, L: Ledger, name: str, scales: dict[str, Any] | None = None, extra: dict[str, Any] | None = None) -> None:
     """`extra`: fields added to the stage's summary.json (stage 1b records `refit_iterations_performed`)."""
     a = time.time()
@@ -757,8 +767,7 @@ def _stage1(ctx: Context, L: Ledger, name: str, scales: dict[str, Any] | None = 
     for v in res["vehicles"].values():
         v.pop("sim", None)
         v.pop("wall_s", None)                                            # a timing: res.pkl is hashed (the report's receipts) and must not carry it
-    with open(ctx.path(name, "res.pkl"), "wb") as f:
-        pickle.dump(res, f)
+    ctx.path(name, "res.pkl").write_bytes(res_bytes(res))
     L.output(ctx.path(name, "res.pkl"))
     L.output(_dump(r, ctx.path(name, "summary.json")))
 
@@ -1215,18 +1224,20 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
         _dump(ctx.plan, ctx.path("plan.json"))
         log(budget.describe(ctx.plan))
     prev, redo = None, not resume
-    for name in STAGES:
-        lp = ctx.run_dir / "checkpoints" / name / "ledger.json"
-        if not redo and ledger.done(ctx.run_dir, name, ctx.hash):
-            log(f"{name}: up to date (ledger {lp})")
-        else:
-            a, redo = time.time(), True                                   # everything after a rerun stage reruns too
-            with ledger.Ledger(ctx.run_dir, name, ctx.hash, ctx.code_digest) as L:
-                if prev is not None:
-                    L.input(prev)
-                FUNCS[name](ctx, L)
-            log(f"{name}: done in {time.time() - a:.0f} s")
-        prev = lp
-        if name == stop_after:
-            break
+    log(f"workers: {par.workers()} (the CPUs this run may use; CAFE_WORKERS=N overrides)")
+    with par.Pool(par.workers()):                                       # one pool for every stage: each worker starts and compiles once
+        for name in STAGES:
+            lp = ctx.run_dir / "checkpoints" / name / "ledger.json"
+            if not redo and ledger.done(ctx.run_dir, name, ctx.hash):
+                log(f"{name}: up to date (ledger {lp})")
+            else:
+                a, redo = time.time(), True                                   # everything after a rerun stage reruns too
+                with ledger.Ledger(ctx.run_dir, name, ctx.hash, ctx.code_digest) as L:
+                    if prev is not None:
+                        L.input(prev)
+                    FUNCS[name](ctx, L)
+                log(f"{name}: done in {time.time() - a:.0f} s")
+            prev = lp
+            if name == stop_after:
+                break
     return ctx
