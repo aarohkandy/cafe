@@ -128,7 +128,15 @@ class GriddedEnv:
         ok = (x >= self.low.x[0]) & (x <= self.low.x[-1]) & (np.asarray(lat) >= self.law.x[0]) & (np.asarray(lat) <= self.law.x[-1])
         if t is not None:
             ok &= (np.asarray(t) >= self.tw.x[0]) & (np.asarray(t) <= self.tw.x[-1])
+        b = self._bathy_bounds()
+        if b is not None:                                            # the bathymetry grid can be smaller than the WRF box
+            ok &= (x >= b[0]) & (x <= b[1]) & (np.asarray(lat) >= b[2]) & (np.asarray(lat) <= b[3])
         return ok
+
+    def _bathy_bounds(self) -> tuple[float, float, float, float] | None:
+        """(lon0, lon1 in 0..360, lat0, lat1) of the ocean's bathymetry grid, or None without one."""
+        bathy = getattr(self.ocean, "bathy", None)
+        return getattr(bathy, "bounds", None)
 
     # ------------------------------------------------------------ atmosphere
 
@@ -270,6 +278,9 @@ class GriddedEnv:
 
     def depth(self, lon: Any, lat: Any) -> Tagged:
         if self.ocean is not None and hasattr(self.ocean, "bathymetry"):
+            b = self._bathy_bounds()
+            if b is not None and not self.strict:                    # lenient: hold the edge depth; `inside` records the member as left_data
+                lon, lat = np.clip(cv.wrap360(np.asarray(lon, float)), b[0], b[1]), np.clip(np.asarray(lat, float), b[2], b[3])
             return self.ocean.bathymetry(lon, lat)
         v, ins = interp(self.depth_umwm, [self.lau, self.lou], [lat, cv.wrap360(lon)])
         return Tagged(v, "UMWM depth (12 km)", None)

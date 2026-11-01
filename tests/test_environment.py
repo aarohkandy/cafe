@@ -432,3 +432,20 @@ def test_lenient_returns_edge_values_inside_the_block_and_restores_strictness(gr
         with grid.lenient():
             raise RuntimeError("x")
     assert grid.strict                                                                                # restored even when the block raises
+
+
+def test_lenient_holds_the_edge_depth_off_the_bathymetry_grid_and_inside_says_so(grid):
+    # q3 at afe0218: a glider past lat 7.002 hit GEBCO's own bounds check and the whole run crashed instead of failing as left_data
+    import types
+    from cafe.pm.env.bathy import Bathymetry
+    b = Bathymetry(np.array([194.0, 196.0]), np.array([-0.5, 0.5]), np.array([[100.0, 200.0], [300.0, 400.0]]), "toy", 1000.0, 1.0)
+    env = GriddedEnv.__new__(GriddedEnv)
+    env.__dict__.update(grid.__dict__)
+    env.ocean = types.SimpleNamespace(bathy=b, bathymetry=b)
+    t = grid.tw.x[5]
+    assert grid.inside(195.0, 0.9, t) and not env.inside(195.0, 0.9, t)                              # inside WRF, outside the bathymetry grid
+    with pytest.raises(ValueError, match="outside the toy grid"):
+        env.depth(195.0, 0.9)                                                                         # strict: still raises
+    with env.lenient():
+        assert np.allclose(env.depth(195.0, 0.9).value, env.depth(195.0, 0.5).value)                 # lenient: the edge depth
+        assert np.allclose(env.depth(-165.0, 0.0).value, b(195.0, 0.0).value)                        # a -180..180 longitude is wrapped first
