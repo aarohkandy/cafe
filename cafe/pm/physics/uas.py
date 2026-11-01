@@ -47,7 +47,7 @@ PLATFORM = pathlib.Path(__file__).resolve().parents[3] / "platforms" / "quad_uas
 DT_PHYS, DT_ENV = 0.0025, 0.05
 G0 = 9.80665
 FLY, RTL, LAND, DONE, DEAD = 0, 1, 2, 3, 4
-FLAGS = ("battery_reserve", "wind_exceeds_airspeed", "attitude_exceedance", "lost_link")
+FLAGS = ("battery_reserve", "wind_exceeds_airspeed", "attitude_exceedance", "lost_link", "profile_incomplete")
 M_PER_DEG = 6371008.8 * math.pi / 180.0
 SITL_HOME = (149.1652374, -35.3632621)     # (lon, lat) the firmware is told it is at (ArduPilot's own SITL home): its compass/EKF
 #                                            misbehaves at the equator; only metres from home matter to us, the env uses `origin`
@@ -470,14 +470,17 @@ def flux_pattern(P: dict[str, Any], heading_to_deg: Arr) -> np.ndarray:
 # ---------------------------------------------------------------------------------------------- the simulation driver
 
 def simulate(prm: dict[str, Any], wp: Arr, ship: Ship, wind_fn: WindFn, *, M: int, t0: float, t_max: float, active: Arr = None, yaw0: Arr = 0.0,
-             nsub: int = 20, dt: float = DT_PHYS, link: Optional[LinkFn] = None, rec_dt: float = 1.0) -> dict[str, Any]:
-    """Fly M members from the ship's deck along waypoints wp (W, 3, M) [ship-relative], return, land. Stops when all are down."""
+             nsub: int = 20, dt: float = DT_PHYS, link: Optional[LinkFn] = None, rec_dt: float = 1.0, link_hold_s: float = 0.0) -> dict[str, Any]:
+    """Fly M members from the ship's deck along waypoints wp (W, 3, M) [ship-relative], return, land. Stops when all are down.
+    The link is judged once per record interval; `lost_link` is set when it has been lost on consecutive samples for `link_hold_s` seconds
+    (0: on the first lost sample), `t_first` is where that run began. -> also wp_done (M,): the waypoint index at the end (S.wpi)."""
     assert abs(nsub * dt - DT_ENV) < 1e-12, "physics step must divide the 50 ms environment step"
     active = np.ones(M, bool) if active is None else np.asarray(active, bool)
     wp_j = jnp.asarray(wp)
     sp = _ship_at(ship, t0, M)
     S = init_state(prm, M, yaw0, active)._replace(p=jnp.asarray(np.concatenate([sp, np.zeros((1, M))])))
     f_link, t_link = np.zeros(M, bool), np.full(M, np.nan)
+    run_s, run_t0 = np.zeros(M), np.full(M, np.nan)                                       # the current run of lost samples: seconds so far, its first sample
     tr: dict[str, list[Any]] = dict(t=[], pos=[], soc=[], tilt=[], phase=[], ewh=[])
     every = max(int(round(rec_dt / DT_ENV)), 1)
     nblk = int(round(t_max / DT_ENV))
@@ -496,8 +499,11 @@ def simulate(prm: dict[str, Any], wp: Arr, ship: Ship, wind_fn: WindFn, *, M: in
         rel = (np.asarray(S.p) - np.concatenate([sp, np.zeros((1, M))])).T
         if link is not None:
             lost = np.asarray(link(t0 + t + DT_ENV, rel), bool) & (phase < DONE)
-            t_link = np.where(lost & ~f_link, t + DT_ENV, t_link)
-            f_link |= lost
+            run_t0 = np.where(lost & (run_s == 0.0), t + DT_ENV, run_t0)
+            run_s = np.where(lost, run_s + len(ks) * DT_ENV, 0.0)
+            hit = (run_s >= link_hold_s) & lost & ~f_link
+            t_link = np.where(hit, run_t0, t_link)
+            f_link |= hit
         tr["t"].append(t + DT_ENV)
         tr["pos"].append(rel)
         tr["soc"].append(np.asarray(S.soc))
@@ -512,7 +518,7 @@ def simulate(prm: dict[str, Any], wp: Arr, ship: Ship, wind_fn: WindFn, *, M: in
     t_first = dict(battery_reserve=np.asarray(S.t_batt, float), wind_exceeds_airspeed=np.asarray(S.t_stuck, float),  # float64: they are added to epoch seconds
                    attitude_exceedance=np.asarray(S.t_tilt, float), lost_link=t_link)
     return dict(flags=flags, t_first=t_first, landed=(ph == DONE) & active, ditched=ph == DEAD, airborne=(ph < DONE),
-                t_end=np.where(np.isnan(np.asarray(S.t_end)), t + DT_ENV, np.asarray(S.t_end)), energy_wh=np.asarray(S.ewh),
+                t_end=np.where(np.isnan(np.asarray(S.t_end)), t + DT_ENV, np.asarray(S.t_end)), energy_wh=np.asarray(S.ewh), wp_done=np.asarray(S.wpi),
                 soc_end=np.asarray(S.soc), max_tilt_deg=np.degrees(np.asarray(S.tilt_max)), max_dist_m=np.asarray(S.dist_max),
                 sat_s=np.asarray(S.sat_s), demand_ratio_max=1.0 / np.asarray(S.k_min),
                 max_wind_ms=np.asarray(S.wind_max), final=S, track=dict(t=np.array(tr["t"]), pos_rel=np.stack(tr["pos"], 1),
@@ -528,7 +534,8 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
     link(t, pos_rel (M,3)) -> bool (M,) lost? is the caller's link model (None: lost_link is never set); scale: see derive.
     -> dict: flags / t_first (s after launch) per FLAGS, scrubbed, failed, landed, ditched, energy_wh, soc_end, max_tilt_deg,
     max_dist_m, sat_s (seconds the horizontal-force demand was beyond the lean-angle clamp), demand_ratio_max (the largest demand / clamp), track
-    (1 Hz positions relative to the ship: use them for links), launch (the weather gate's numbers)."""
+    (1 Hz positions relative to the ship: use them for links), launch (the weather gate's numbers), wp_done (M,) and n_wp: the waypoints reached
+    of the n_wp in the pattern (flag `profile_incomplete`: a flown sortie below sortie.min_profile_fraction of them, first at its end)."""
     P = plat or load_platform()
     so = P["sortie"]
     if turb is not None and turb.shape[1] * DT_ENV < so["duration_s"] + 60.0:
@@ -545,7 +552,10 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
     out: dict[str, Any] = {}
     if gate["ok"].any():
         out = simulate(prm, pat, ship, make_wind(env, origin, so["deck_height_m"], turb, gust), M=M, t0=t_launch,
-                       t_max=so["duration_s"] * so["hard_stop_factor"], active=gate["ok"], yaw0=yaw0, dt=dt, nsub=int(round(DT_ENV / dt)), link=link)
+                       t_max=so["duration_s"] * so["hard_stop_factor"], active=gate["ok"], yaw0=yaw0, dt=dt, nsub=int(round(DT_ENV / dt)), link=link,
+                       link_hold_s=P["radio"]["link_loss_hold_s"])
+        short = out["wp_done"] / pat.shape[0] < so["min_profile_fraction"]                 # the share of the pattern reached, below the minimum
+        out["flags"]["profile_incomplete"], out["t_first"]["profile_incomplete"] = short, np.asarray(out["t_end"], float)
         out["flags"] = {k: v & gate["ok"] for k, v in out["flags"].items()}
         out["t_first"] = {k: np.where(out["flags"][k], v, np.nan) for k, v in out["t_first"].items()}
         out["sat_s"], out["demand_ratio_max"] = np.where(gate["ok"], out["sat_s"], 0.0), np.where(gate["ok"], out["demand_ratio_max"], 1.0)
@@ -553,10 +563,10 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
         z, zb = np.zeros(M), np.zeros(M, bool)
         out = dict(flags={k: zb.copy() for k in FLAGS}, t_first={k: np.full(M, np.nan) for k in FLAGS}, landed=zb.copy(), ditched=zb.copy(),
                    airborne=zb.copy(), t_end=z, energy_wh=z, soc_end=np.ones(M), max_tilt_deg=z, max_dist_m=z, max_wind_ms=z,
-                   sat_s=z, demand_ratio_max=np.ones(M),
+                   sat_s=z, demand_ratio_max=np.ones(M), wp_done=np.zeros(M, int),
                    track=dict(t=np.zeros(0), pos_rel=np.zeros((M, 0, 3)), **{k: np.zeros((M, 0)) for k in ("soc", "tilt_deg", "phase", "ewh")}))
     out.pop("final", None)
-    out.update(t_launch=t_launch, scrubbed=~gate["ok"], launch=gate, failed=np.any([out["flags"][k] for k in FLAGS], 0))
+    out.update(t_launch=t_launch, scrubbed=~gate["ok"], launch=gate, n_wp=int(pat.shape[0]), failed=np.any([out["flags"][k] for k in FLAGS], 0))
     return out
 
 

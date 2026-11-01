@@ -74,7 +74,9 @@ FACTORS = [("data_pedigree", "Data pedigree"), ("verification", "Verification"),
            ("uncertainty", "Uncertainty characterization"), ("robustness", "Results robustness"), ("use_history", "Use history"),
            ("ms_management", "M&S management"), ("people", "People qualifications")]
 
-LEVEL_TEXT = {"data_pedigree": {3: "strong: compared with moorings (the comparison also sets the wind priors)"}}      # replaces LEVELS[3] for that factor
+LEVEL_TEXT = {"data_pedigree": {3: "strong: compared with moorings (the comparison also sets the wind priors)"},
+              "ms_management": {3: "strong: ledger chain, house rules and lint checked by the tool's own audit (no independent reviewer)"}}
+# (LEVEL_TEXT replaces LEVELS[3] for the factor it names)
 WIND_RMSE_LIMIT = (2.0, 15.0)     # pooled speed (m/s) and direction (deg) RMSE above which the mooring comparison does not earn level 3: BRIEF 5.4's prior sd
 UVAL_MAX_FRAC = 0.5               # a V&V 20 row counts toward Validation level 3 only when U_val is below this fraction of the reference (DECISIONS row)
 USV_CHIODI_RATIO = 0.178          # Chiodi et al. (2021) mean SOG / mean wind, 0.96 / 5.4 (platforms/saildrone_explorer.yaml)

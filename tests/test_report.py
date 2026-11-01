@@ -124,6 +124,9 @@ def test_not_certifiable_below_n_certify(full):
         assert d["n"]["value"] == 48 < d["n_certify"]["value"] == 73
         assert "cannot be certified at n = 48" in d["certify_statement"] and "73 members" in d["certify_statement"]
     assert "3/n" in rep["vehicles"]["glider_2n"]["note"]
+    d = rep["vehicles"]["glider_2n"]                                           # M-18: each sentence names the rule its number belongs to
+    assert "one-sided" in d["note"] and "two-sided" in d["note"] and "60 members" in d["note"] and "(two-sided 95 % Wilson bound)" in d["certify_statement"]
+    assert "certifying P(fail) < 5 % needs 73 members, two-sided 95 % Wilson bound)" in plain((full[0] / "report" / "index.html").read_text())
 
 
 def test_certifiable_at_large_n(run):
@@ -429,11 +432,31 @@ def test_top_three_sensitivities_by_sobol_first_order_index(full):
     assert "Top sensitivities: none above the noise floor" in h and "the noise floor at this member count is S1" in h
 
 
+def test_an_emulator_that_was_not_used_for_answers_says_so_and_an_older_holdout_keeps_the_old_text(run):
+    """Follow-up to round 4 M-3: `used: false` in holdout.json adds the line that Stage 1 answered instead, with the reason; no key, no line."""
+    m, plan = pm_run.make_run(run)
+    h = json.loads((run / "emulator" / "holdout.json").read_text())
+    why = "the glider emulator missed BRIEF 2.7 acceptance (coverage), so Stage 1 answers"
+    h["glider_eq"].update(cls="glider", rows=140, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03, used=False, unused_reason=why,
+                          acceptance=dict(rmse_ok=True, coverage_ok=False, query_ok=True), coverage_chance_fail=0.357)
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    rep, html_ = load(run), (run / "report" / "index.html").read_text()
+    g = rep["emulator"]["vehicles"]["glider_eq"]
+    assert g["used"] is False and g["unused_reason"] == why
+    assert f"<b>Not used for answers: Stage 1 answered instead.</b> {why}" in html_ and "<b>MISSED</b>" in html_
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, html_) == []
+    h["glider_eq"].pop("used"), h["glider_eq"].pop("unused_reason")
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    assert "Not used for answers" not in (run / "report" / "index.html").read_text()
+
+
 def test_the_emulator_section_shows_acceptance_the_noise_floor_and_the_training_table(run):
     m, plan = pm_run.make_run(run)
     h = json.loads((run / "emulator" / "holdout.json").read_text())
     h["glider_eq"].update(cls="glider", rows=140, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03,
-                          acceptance=dict(rmse_ok=False, coverage_ok=True, query_ok=True))
+                          acceptance=dict(rmse_ok=False, coverage_ok=True, query_ok=True), coverage_chance_fail=0.42)
     h["glider_eq"]["rmse"]["t_fail_h"], h["glider_eq"]["coverage"]["t_fail_h"] = 3.0, 0.88
     h["usv"] = dict(trained=False, reason="2 usv rows in the training table, 100 are needed", rows=2)
     (run / "emulator" / "holdout.json").write_text(json.dumps(h))
@@ -448,6 +471,8 @@ def test_the_emulator_section_shows_acceptance_the_noise_floor_and_the_training_
     assert e["design"]["spent"]["value"] == 60.0
     assert e["design"]["stage1b_free"]
     assert "(glider emulator)" in html_ and "<b>MISSED</b>" in html_ and "Training table /data/emulator/train.parquet" in html_
+    assert g["acceptance"]["coverage_chance_fail"]["value"] == 0.42
+    assert "a calibrated emulator misses it by chance with probability <span class=n>0.42<a" in html_
     assert "from the planner&#x27;s estimate" in html_
     assert "including stage 1b" in html_
     assert report.check_traceability(rep) == [] and report.check_rendered(rep, html_) == []
@@ -460,17 +485,19 @@ def reach_report(run, env, **kw):
 
 
 def test_the_reach_map_routes_through_the_currents_at_the_deploy_time(run):
-    rep, h = reach_report(run, AnalyticEnv(current=(0.3, 0.0)))
+    env = AnalyticEnv(current=(0.3, 0.0))
+    rep, h = reach_report(run, env)
     r = rep["reach"]
     assert r["available"] and r["horizon"]["value"] == 24.0 and set(r["vehicles"]) == {"glider_eq", "glider_2n", "usv", "uas"}
     g = r["vehicles"]["glider_eq"]
     assert g["available"] and len(g["polygon"]["values"]) == 24 and g["speed"]["value"] == 0.23
-    assert 0.27 < g["flow_max"]["value"] < 0.3                                                         # the glider feels the 5-100 m mean
+    band = 0.3 * float(np.mean(env.profile(np.linspace(-5.0, -950.0, 6))))                # the glider feels the 5 m to dive_depth_m (950 m) mean
+    assert 0.1 < band < 0.2 and g["flow_max"]["value"] == pytest.approx(band)
     assert g["max_range_km"]["value"] == pytest.approx((0.23 + g["flow_max"]["value"]) * 86.4, abs=6.0)  # downstream: they add
     lon0 = g["deploy"]["values"][0]
     west = [p for p in g["polygon"]["values"] if p[0] < lon0 - 1e-9]
     assert not west or max(lon0 - p[0] for p in west) < 0.1                                                  # it cannot stem a current stronger than itself
-    assert max(p[0] for p in g["polygon"]["values"]) > lon0 + 0.3
+    assert max(p[0] for p in g["polygon"]["values"]) > lon0 + 0.2          # (0.23 + 0.157) m/s downstream for 24 h is 0.30 degrees, less the grid step
     u = r["vehicles"]["usv"]                                    # M-19: the USV is routed at the Stage-1 ensemble's median path speed, not the assumed 1.4 m/s
     res = pickle.loads((run / "stage1b" / "res.pkl").read_bytes())["vehicles"]["usv"]
     assert u["speed"]["value"] == report.path_speed(res) and u["speed"]["value"] != 1.4 and "Stage-1 ensemble" in u["speed_from"]
@@ -1359,12 +1386,12 @@ def test_windows_that_were_all_skipped_with_a_reason_are_not_run_and_a_window_th
     """Round 3 M-9: stage3:output:windows.json read '0 of 6 windows passed their self-checks' for six planned skips."""
     m, plan = pm_run.make_run(run)
 
-    def skip(d):
+    def mark_skipped(d):
         for ws in d.values():
             for w in ws:
                 why = "not run: the physical lattice viscosity needs 3e12 cell-updates"
                 w.update(ok=False, checks=[], cut=False, error=why, reasons=[why])
-    edit_json(run / "stage3" / "windows.json", skip)
+    edit_json(run / "stage3" / "windows.json", mark_skipped)
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
     r = {r["id"]: r for r in rep["receipts"]}["stage3:output:windows.json"]
@@ -1407,7 +1434,8 @@ def test_the_reach_map_speed_is_the_speed_block_speed(run):
         speed=dict(ratio_median=0.12, sog_ms_median=float(np.median(sog)), u10_ms_median=5.3, calibration_ratio=0.178)))
     report.write(run, m, plan, env=AnalyticEnv(current=(0.1, 0.0)))
     rep, t = load(run), plain((run / "report" / "index.html").read_text())
-    assert rep["reach"]["vehicles"]["usv"]["speed"]["value"] == pytest.approx(rep["vehicles"]["usv"]["speed_ratio"]["sog"]["value"], rel=1e-12)
+    assert rep["reach"]["vehicles"]["usv"]["speed"]["value"] == pytest.approx(rep["vehicles"]["usv"]["speed_ratio"]["sog"]["value"], rel=1e-12)   # no stw
+    assert rep["reach"]["vehicles"]["usv"]["speed_kind"] == "over ground"
     assert report.path_speed(res) == pytest.approx(float(np.median(sog)), rel=1e-12)
     assert "median of the per-member ratios 0.12; median speed over ground" in t and "(the quotient of two medians is not the median ratio)" in t
 
@@ -1552,3 +1580,141 @@ def test_the_report_says_which_sub_grid_calibration_it_used(run):
     (run / "stage3" / "subgrid_calibration.json").write_text(json.dumps(dict(source_run="stage 3 of this run", sigma_u_over_ustar=2.9)))
     report.write(run, m, plan)
     assert load(run)["subgrid"]["source"] == "this run's stage3/subgrid_calibration.json" and load(run)["subgrid"]["calibrated"] is True
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 4
+
+def test_the_sensitivity_paragraph_says_which_errors_the_indices_cannot_see(run):
+    """Round 4 M-17: the indices rank the sampled columns; the larger per-member random streams are not columns."""
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)
+    t0 = plain((run / "report" / "index.html").read_text())
+    sc = load(run)["sensitivity_scope"]
+    assert "These indices rank only the sampled columns" in t0 and "per-member random streams" in t0 and sc["wind_sd"] is None and "sd " not in sc["text"]
+    fit = {k: dict(dist="normal", value=v, unit=u) for k, v, u in (("wind_speed_bias", 0.113, "m/s"), ("wind_speed_noise", 1.283, "m/s"),
+                                                                  ("wind_direction_bias", 2.63, "deg"), ("wind_direction_noise", 22.2, "deg"))}
+    (run / "ingest").mkdir(exist_ok=True)
+    (run / "ingest" / "priors_fitted.json").write_text(json.dumps(fit))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    t = plain(h)
+    assert "the hourly wind error (sd 1.283 m/s and 22.2 deg, against 0.113 m/s and 2.63 deg for the wind-speed and direction columns)" in t
+    assert "per-member random streams" in t and rep["sensitivity_scope"]["wind_sd"]["wind_speed_noise"]["value"] == 1.283
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
+    (run / "ingest" / "priors_fitted.json").write_text(json.dumps({"wind_speed_bias": fit["wind_speed_bias"]}))          # a partial file: no numbers claimed
+    report.write(run, m, plan)
+    assert load(run)["sensitivity_scope"]["wind_sd"] is None
+
+
+def test_a_vehicle_with_no_failure_is_not_blamed_on_a_missing_res_pkl(full):
+    """Round 4 M-19: 'which mode failed first is not known (res.pkl is not available)' was printed for a vehicle none of whose members failed."""
+    run, _, _, _, rep = full
+    g = rep["vehicles"]["glider_2n"]
+    assert g["k_fail"]["value"] == 0 and g["res_available"] is True and rep["vehicles"]["uas"]["res_available"] is True
+    h = (run / "report" / "index.html").read_text()
+    card = h.split("id='v-glider_2n'")[1].split("id='v-")[0]
+    assert "no member failed" in plain(card) and "res.pkl" not in card
+    d = rep["vehicles"]["usv"]
+    assert d["res_available"] and d["k_fail"]["value"] > 0 and "no member failed" not in plain(h.split("id='v-usv'")[1].split("id='v-")[0])
+
+
+def test_without_res_pkl_a_vehicle_with_no_failure_still_says_res_pkl_is_missing(run):
+    m, plan = pm_run.make_run(run, res=False)
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    assert rep["vehicles"]["glider_2n"]["res_available"] is False
+    assert "which mode failed first is not known (res.pkl is not available)" in plain(h.split("id='v-glider_2n'")[1].split("id='v-")[0])
+
+
+def test_the_uas_block_prints_the_waypoints_flown_and_the_new_attitude_wording(run):
+    """Round 4 M-1: a timer that ends the profile at 7 of 8 waypoints was invisible; the page prints it and names the profile_incomplete mode."""
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].update(
+        profile=dict(wp_done_median=7.0, n_wp=8, complete_share=0.25), modes=dict(profile_incomplete=30, battery=2)))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    p = rep["vehicles"]["uas"]["profile"]
+    assert (p["wp_done_median"]["value"], p["n_wp"]["value"], p["complete_share"]["value"]) == (7.0, 8, 0.25)
+    assert "Median waypoints flown per sortie: 7 of 8; share of the flown sorties that reached every waypoint: 0.25" in t
+    assert "so the UAS verdict rests on the battery and on finishing the profile inside the time limit." in t and "battery alone" not in t
+    assert "profile_incomplete: 30" in t and "returned (time limit or battery reserve) before its last pattern waypoint" in t
+    assert rep["vehicles"]["glider_eq"]["profile"] is None and rep["traceability_problems"] == []
+    assert report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].pop("profile"))        # a summary from before the profile was counted
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert load(run)["vehicles"]["uas"]["profile"] is None and "rests on battery alone below about 12 m/s of wind" in t and "waypoints flown" not in t
+
+
+def test_no_current_data_is_a_named_failure_mode_on_the_page(run):
+    """Round 4 M-5: a missing current is a labelled failure like the glider's no_flight; the mode table says what it is."""
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(modes=dict(no_current_data=4)))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    assert rep["vehicles"]["usv"]["mode_notes"] == dict(no_current_data=report.MODE_TEXT["no_current_data"]) and rep["vehicles"]["uas"]["mode_notes"] == {}
+    assert "no_current_data: 4" in t and "the ocean current was not a number at the vehicle's position" in t
+
+
+def test_the_emulator_section_prints_both_coverage_numbers_with_their_scales(run):
+    """Round 4 M-3: the gate reads the calibration-scale coverage; the raw-P number is printed beside it, with why it is lower."""
+    m, plan = pm_run.make_run(run)
+    h = json.loads((run / "emulator" / "holdout.json").read_text())
+    h["glider_eq"].update(coverage=dict(p_fail=0.93), coverage_raw_p=dict(p_fail=0.78))
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    g = rep["emulator"]["vehicles"]["glider_eq"]
+    assert g["coverage"]["p_fail"]["value"] == 0.93 and g["coverage_raw_p"]["p_fail"]["value"] == 0.78 and rep["traceability_problems"] == []
+    assert ("coverage on the calibration scale (clipped logit) 0.93; on the raw P scale 0.78, where a target of exactly 0 or 1 cannot be inside the interval "
+            "(nominal 0.9)") in t
+    assert report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+    h["glider_eq"].pop("coverage_raw_p")                                          # an older hold-out file: the old wording
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    assert load(run)["emulator"]["vehicles"]["glider_eq"]["coverage_raw_p"] is None
+    assert "p_fail RMSE 0.04, coverage 0.93 (nominal 0.9)" in plain((run / "report" / "index.html").read_text())
+
+
+def _usv_reach_run(run, stw):
+    m, plan = pm_run.make_run(run)
+    res = pickle.loads((run / "stage1b" / "res.pkl").read_bytes())["vehicles"]["usv"]
+    sog = stage1.path_speed(res["lon"], res["lat"], res["t"])
+    sog = float(np.median(sog[np.isfinite(sog) & (sog > 0)]))
+    sp = dict(ratio_median=0.12, sog_ms_median=sog, u10_ms_median=5.3, calibration_ratio=0.178)
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(speed=dict(sp, stw_ms_median=stw) if stw else sp))
+    report.write(run, m, plan, env=AnalyticEnv(current=(0.1, 0.0)))
+    return load(run), plain((run / "report" / "index.html").read_text()), sog
+
+
+def test_the_usv_reach_map_swims_at_the_speed_through_the_water_and_says_so(run):
+    """Round 4 M-7: the router adds the current, so it must be given the speed through the water, not the speed over ground, and the label must be true."""
+    rep, t, sog = _usv_reach_run(run, 0.72)
+    u = rep["reach"]["vehicles"]["usv"]
+    assert u["speed"]["value"] == 0.72 != sog and u["speed_kind"] == "through the water" and u["speed"]["stage"].startswith("report (reach map speed")
+    assert "median over members of the mean speed through the water of the Stage-1 tracks; the current is added by the router" in u["speed_from"]
+    assert "at 0.72 m/s through the water (median over members" in t and rep["traceability_problems"] == []
+    assert rep["vehicles"]["usv"]["speed_ratio"]["sog"]["value"] == sog                                      # the speed block keeps speed over ground
+    rep, t, sog = _usv_reach_run(run.parent / "old", None)                                                   # an older summary: over ground, said so
+    u = rep["reach"]["vehicles"]["usv"]
+    assert u["speed"]["value"] == pytest.approx(sog) and u["speed_kind"] == "over ground" and "adds the current a second time" in u["speed_from"]
+    assert f"{sog:.4g} m/s over ground" in t and f"{sog:.4g} m/s through the water" not in t
+
+
+def test_the_glider_reach_current_band_ends_at_the_depth_its_task_dives_to(run):
+    """Round 4 M-7: the glider's current was the mean over 5 to 100 m whatever the dive; the band is 5 m to the task's dive_depth_m."""
+    seen = []
+
+    class Deep(AnalyticEnv):
+        def current(self, lon, lat, z, t):
+            if np.size(lon) > 100:
+                seen.append(float(z))
+            return super().current(lon, lat, z, t)
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan, env=Deep(current=(0.1, 0.0)))
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    depth = {v["id"]: v["task"]["dive_depth_m"] for v in m["vehicles"] if v["id"].startswith("glider")}
+    g = rep["reach"]["vehicles"]
+    assert depth == {"glider_eq": 950.0, "glider_2n": 500.0}
+    assert g["glider_eq"]["current_band"] == "mean current from 5 m to 950 m" and g["glider_2n"]["current_band"] == "mean current from 5 m to 500 m"
+    assert min(seen) == -950.0 and -500.0 in seen and "mean current from 5 m to 950 m" in t and g["usv"]["current_band"] == "current at the surface"

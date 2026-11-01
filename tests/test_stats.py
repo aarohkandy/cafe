@@ -87,8 +87,43 @@ def test_verdict_cut_offs():
 def test_verdict_note_only_for_zero_failures_below_certifying_n():
     v = I.verdict(0, 30)
     assert "P(fail) < 3/n" in v["note"] and "73" in v["note"] and "0.100" in v["note"]
+    assert "one-sided" in v["note"] and "60 members" in v["note"] and "two-sided" in v["note"] and I.n_certify() == 73     # M-18: one rule per side
     assert I.verdict(0, 73)["note"] == "" and I.verdict(0, 72)["note"] != "" and I.verdict(1, 30)["note"] == ""
     assert I.verdict(0, 59, level=0.05, cert_conf=0.90)["note"] == "" and I.verdict(2, 50)["fail_hi"] > 0.04
+
+
+def test_ties_at_the_thresholds_fall_on_the_inclusive_side_whatever_the_float_dust():       # M-12
+    from fractions import Fraction as F
+    go0, nogo0 = I.P_FAIL_GO, I.P_FAIL_NOGO
+    try:
+        for g in (0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.99):
+            for ng in (0.1, 0.2, 0.3, 0.35, 0.4, 0.45):
+                if ng >= g:
+                    continue
+                I.set_thresholds(g, ng)
+                fg, fn = F(str(g)), F(str(ng))
+                for n in range(1, 41):
+                    for k in range(n + 1):
+                        pf = F(k, n)                  # exact fractions: GO at success >= go, NO-GO strictly below nogo
+                        want = "GO" if 1 - pf >= fg else "NO-GO" if 1 - pf < fn else "MARGINAL"
+                        assert I.verdict_from_p(k / n) == want, (g, ng, k, n)
+                        v = I.verdict(k, n)["verdict"]
+                        assert (v == "NO-GO") == (want == "NO-GO") and (v != "GO" or want == "GO"), (g, ng, k, n, v)
+        I.set_thresholds(0.9, 0.3)
+        assert I.verdict(7, 10)["verdict"] == "MARGINAL" == I.verdict_from_p(0.7)
+        I.set_thresholds(0.9, 0.1)
+        assert I.verdict(10, 100)["verdict"] == "GO" and I.verdict_from_p(0.1) == "GO"
+        lo, hi, _ = I.interval(3, 10, 0.95)           # a bound a hair (5e-13) past a threshold is on it, not past it
+        I.P_FAIL_GO, I.P_FAIL_NOGO = hi - 5e-13, 0.9
+        assert I.interval_region(3, 10) == "GO"
+        I.P_FAIL_GO, I.P_FAIL_NOGO = 0.0, lo - 5e-13
+        assert I.interval_region(3, 10) is None
+        I.P_FAIL_GO, I.P_FAIL_NOGO = lo - 1e-9, hi - 5e-13
+        assert I.decided_region(3, 10) == "MARGINAL"
+        I.P_FAIL_GO = lo - 5e-13
+        assert I.decided_region(3, 10) is None
+    finally:
+        I.P_FAIL_GO, I.P_FAIL_NOGO, I.LO_SUCCESS_GO = go0, nogo0, 0.75
 
 
 @given(kn)

@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse, json, os, pathlib, sys, webbrowser
 from typing import Any
 
-from . import acceptance, audit, budget, pipeline, report, stage1, whatif
+from . import acceptance, audit, budget, ledger, pipeline, report, stage1, whatif
 from .config import ConfigError, load_mission
 
 
@@ -151,6 +151,9 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, budget.PlanError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
+    except ledger.StageFailed as e:                                      # a stage's self-check failed: the message names it and the ledger has the detail
+        print(f"error: {e}", file=sys.stderr)
+        return 1
     return 0
 
 

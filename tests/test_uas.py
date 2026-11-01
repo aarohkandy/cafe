@@ -633,3 +633,74 @@ def test_first_failure_times_are_float64_so_they_survive_the_sum_with_a_launch_t
     m = uas.fly_mission(AnalyticEnv(wind=(0.0, 0.0)), uas.steaming(), [t_launch], M=2, origin=ORIGIN, plat=fast_plat(),
                         scale=dict(battery=[1.0, 0.2]))["mission"]
     assert m["t_first"]["battery_reserve"][1] == pytest.approx(t_launch + t1, abs=1e-6)
+
+
+# ------------------------------------------------------------------------------------------------------------ review round 4
+
+def test_the_fast_sortie_reaches_every_waypoint_and_reports_how_many():
+    """M-1: fly_sortie returns wp_done (the waypoint index at the end) and n_wp; a sortie that flies the whole pattern is not profile_incomplete."""
+    r = fly(M=2)
+    assert r["n_wp"] == 4 and r["wp_done"].tolist() == [4, 4] and not r["flags"]["profile_incomplete"].any() and not r["failed"].any()
+    assert "profile_incomplete" in uas.FLAGS and set(r["flags"]) == set(uas.FLAGS) == set(r["t_first"])
+
+
+def test_a_sortie_cut_short_by_the_timer_is_profile_incomplete_and_the_minimum_fraction_sets_the_bar():
+    """M-1: the 1200 s return-to-ship timer ended the 20 min pattern at 7 of 8 waypoints in the demo's mean wind and nothing recorded it. Here the same cut
+    on the fast sortie: the timer at 60 % of the sortie (time_limit_factor 0.6) returns it after 2 or 3 of 4 waypoints."""
+    plat = fast_plat()
+    plat["sortie"]["time_limit_factor"] = 0.6
+    r = fly(plat=plat, M=2)
+    n = int(r["wp_done"][0])
+    assert r["n_wp"] == 4 and 1 <= n < 4 and r["wp_done"].tolist() == [n, n] and r["landed"].all()
+    assert r["flags"]["profile_incomplete"].all() and r["failed"].all() and not r["flags"]["battery_reserve"].any()          # nothing else failed
+    assert np.allclose(r["t_first"]["profile_incomplete"], r["t_end"]) and (r["t_first"]["profile_incomplete"] > 0).all()   # first at the end of the sortie
+    ok = copy.deepcopy(plat)
+    ok["sortie"]["min_profile_fraction"] = n / 4                                          # exactly the share flown: enough
+    assert not fly(plat=ok, M=2)["flags"]["profile_incomplete"].any()
+    ok["sortie"]["min_profile_fraction"] = (n + 0.5) / 4
+    assert fly(plat=ok, M=2)["flags"]["profile_incomplete"].all()
+
+
+def test_a_scrubbed_sortie_is_not_profile_incomplete_and_still_reports_its_pattern():
+    plat = fast_plat()
+    plat["launch_rule"]["max_mean_wind_ms"] = 1.0
+    r = fly(wind=(-5.0, 0.0), plat=plat, M=2)
+    assert r["scrubbed"].all() and r["wp_done"].tolist() == [0, 0] and r["n_wp"] == 4
+    assert not r["flags"]["profile_incomplete"].any() and np.isnan(r["t_first"]["profile_incomplete"]).all()
+
+
+def test_the_demo_sortie_in_a_6_m_s_wind_returns_at_7_of_8_waypoints_and_in_still_air_flies_all_8():
+    """M-1: real platform, legs upwind, AnalyticEnv's log wind profile (10 m value given). Measured on homebase for 2 .. 9 m/s: 8 of 8 up to 5.0 m/s, 7 of 8 for
+    5.5 .. 6.5, 6 at 7.0, 5 from 7.5 to 9 (the reviewer's uniform-wind table has 7 of 8 at 5.3, about 0.3 m/s lower for the same cut)."""
+    calm, windy = (uas.fly_sortie(AnalyticEnv(wind=w), uas.steaming(), 0.0, M=1, origin=ORIGIN, plat=P) for w in ((0.0, 0.0), (-6.0, 0.0)))
+    assert calm["n_wp"] == windy["n_wp"] == 8 and calm["wp_done"].tolist() == [8] and windy["wp_done"].tolist() == [7]
+    assert not calm["flags"]["profile_incomplete"].any() and windy["flags"]["profile_incomplete"].all()
+    assert not windy["flags"]["battery_reserve"].any() and windy["landed"].all()                       # before the fix this was a pass
+
+
+def test_a_one_sample_fade_is_ridden_through_and_a_long_one_sets_lost_link_at_the_start_of_the_run():
+    """M-10: lost_link latched on one lost sample of the link model (a smooth-sea two-ray null); it now needs radio.link_loss_hold_s (5 s) of consecutive lost
+    samples, and t_first is where that run began."""
+    assert P["radio"]["link_loss_hold_s"] == 5.0
+
+    def lost_in(lo, hi):
+        return lambda t, pos: np.full(len(pos), lo < t < hi)
+    one = fly(link=lost_in(9.5, 10.5), M=2)                                                    # one 1 s sample at t = 10 s
+    assert not one["flags"]["lost_link"].any() and np.isnan(one["t_first"]["lost_link"]).all() and not one["failed"].any()
+    four = fly(link=lost_in(19.5, 23.5), M=2)                                                  # samples 20 .. 23: 4 s
+    assert not four["flags"]["lost_link"].any()
+    six = fly(link=lost_in(19.5, 25.5), M=2)                                                   # samples 20 .. 25: 6 s
+    assert six["flags"]["lost_link"].all() and six["failed"].all() and np.allclose(six["t_first"]["lost_link"], 20.0)
+    two_runs = fly(link=lambda t, pos: np.full(len(pos), (19.5 < t < 22.5) or (24.5 < t < 27.5)), M=2)       # 3 s, a break, 3 s: not 5 s in a row
+    assert not two_runs["flags"]["lost_link"].any()
+    plat = fast_plat()
+    plat["radio"]["link_loss_hold_s"] = 0.0                                                    # hold 0: the first lost sample counts, as before
+    assert fly(link=lost_in(9.5, 10.5), plat=plat, M=2)["flags"]["lost_link"].all()
+    assert np.allclose(fly(link=lost_in(9.5, 10.5), plat=plat, M=2)["t_first"]["lost_link"], 10.0)
+
+
+def test_the_hold_counts_each_member_on_its_own_run():
+    def link(t, pos):                                                                          # member 0: 6 s lost; member 1: 3 s, a break, 3 s
+        return np.array([19.5 < t < 25.5, (19.5 < t < 22.5) or (24.5 < t < 27.5)])
+    r = fly(link=link, M=2)
+    assert r["flags"]["lost_link"].tolist() == [True, False] and r["t_first"]["lost_link"][0] == pytest.approx(20.0) and np.isnan(r["t_first"]["lost_link"][1])

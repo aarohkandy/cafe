@@ -124,10 +124,11 @@ class Ledger:
         tmp.write_text(json.dumps(clean(self.d), indent=1, allow_nan=False))
         os.replace(tmp, self.path)
         if missing and et is None:
-            raise StageFailed(f"stage {self.d['stage']}: registered outputs were never written: {missing} (see {self.path})")
+            raise StageFailed(f"stage {self.d['stage']}: registered outputs were never written: {missing} (ledger: {self.path})")
         if et is None and not self.ok:
-            bad = [c["name"] for c in self.d["checks"] if not c["ok"]]
-            raise StageFailed(f"stage {self.d['stage']}: self-checks failed: {bad} (see {self.path})")
+            bad = [f"{c['name']}: {c['note']}" if c["note"] else c["name"] for c in self.d["checks"] if not c["ok"]]
+            more = f" and {len(bad) - 3} more" if len(bad) > 3 else ""
+            raise StageFailed(f"stage {self.d['stage']}: self-checks failed: {'; '.join(bad[:3])}{more} (ledger: {self.path})")
         return False
 
 

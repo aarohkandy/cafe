@@ -94,7 +94,8 @@ def test_verdict_returns_every_field_with_its_value_zero_failures_below_the_cert
     v = I.verdict(0, 30)
     hi = I.wilson(0, 30, 0.90)[1]
     assert v == dict(verdict="GO", n=30, k_fail=0, p_fail=0.0, fail_lo=0.0, fail_hi=hi, success_lo=1 - hi, conf=0.90, method="wilson", n_certify=73,
-                     note="P(fail) < 3/n = 0.100 (n = 30; 73 members are needed to certify P(fail) < 5% at 95% confidence)")
+                     note="P(fail) < 3/n = 0.100 at 95% confidence, one-sided (n = 30); 60 members would be needed for that bound to reach 5%. "
+                          "The report's certification count, 73, is for the two-sided 95% Wilson upper bound.")
     assert list(v) == ["verdict", "n", "k_fail", "p_fail", "fail_lo", "fail_hi", "success_lo", "conf", "method", "n_certify", "note"]
 
 
@@ -106,7 +107,7 @@ def test_verdict_with_failures_above_forty_members_has_no_note_and_its_own_confi
     assert I.verdict(0, 80)["note"] == "" and I.verdict(1, 30)["note"] == ""            # a note only for zero failures below the certifying n
     assert I.verdict(0, 72)["note"] != "" and I.verdict(0, 73)["note"] == ""
     w = I.verdict(0, 20, level=0.1, cert_conf=0.9)
-    assert w["n_certify"] == I.n_certify(0.1, 0.9) and "10% at 90% confidence" in w["note"]
+    assert w["n_certify"] == I.n_certify(0.1, 0.9) and "reach 10%" in w["note"] and "two-sided 90% Wilson" in w["note"] and "30 members" in w["note"]
 
 
 def test_verdict_rules_p_and_lower_success_bound():

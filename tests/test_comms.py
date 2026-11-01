@@ -3,7 +3,7 @@ import copy
 import numpy as np
 import pytest
 import yaml
-from hypothesis import given, settings, strategies as st
+from hypothesis import assume, given, settings, strategies as st
 
 from cafe.pm.physics import comms as c
 
@@ -25,11 +25,14 @@ def test_two_ray_beats_free_space_penalty_far_out_and_has_null():
     assert 0.99 * 2 * 2 * 5 / LAM < d[np.argmax(c.two_ray_loss_db(d, 2.0, 5.0, 0.0, F915))] < 1.01 * 2 * 2 * 5 / LAM
 
 
-@given(st.floats(1, 10), st.floats(1, 10), st.floats(0, 3), st.floats(1, 4), st.floats(1.01, 20))
+@given(st.floats(1, 10), st.floats(1, 10), st.floats(0, 3), st.floats(1, 4), st.floats(0, 1))
 @settings(deadline=None)
-def test_loss_grows_with_range_past_last_null(ht, hr, hs, mult, grow):
-    d1 = 4 * mult * ht * hr / LAM + 100
-    assert c.two_ray_loss_db(d1 * grow, ht, hr, hs, F915) > c.two_ray_loss_db(d1, ht, hr, hs, F915)
+def test_loss_grows_with_range_past_last_null(ht, hr, hs, mult, u):
+    """Past the last null and out to 40 % of the radio horizon (review round 4, M-8: on a 4/3 earth the divergence factor lets the loss fall again
+    toward the horizon, so the law no longer holds all the way out)."""
+    d1, dmax = 4 * mult * ht * hr / LAM + 100, 400.0 * c.radio_horizon_km(ht, hr)
+    assume(d1 * 1.02 < dmax)
+    assert c.two_ray_loss_db(d1 * 1.02 + u * (dmax - d1 * 1.02), ht, hr, hs, F915) > c.two_ray_loss_db(d1, ht, hr, hs, F915)
 
 
 def test_ament_roughness_limits_and_direction():
@@ -284,7 +287,7 @@ def test_receipts_fall_back_to_a_labelled_context_without_bellhop(monkeypatch):
 
 def test_receipt_fails_on_wrong_log_base(monkeypatch):
     def ten_log(orig):
-        return lambda d, ht, hr, hs, f: orig(d, ht, hr, hs, f) / 2.0            # 10 log10 where 20 log10 belongs
+        return lambda d, ht, hr, hs, f, **kw: orig(d, ht, hr, hs, f, **kw) / 2.0            # 10 log10 where 20 log10 belongs
     bad = _failed(monkeypatch, ("two_ray_loss_db", ten_log))
     assert any("loss rise per decade" in k for k in bad) and any("free space" in k for k in bad)
 
@@ -296,7 +299,7 @@ def test_receipt_fails_on_hz_instead_of_khz(monkeypatch):
 
 def test_receipt_fails_on_reflection_sign(monkeypatch):
     def plus_one(orig):                                                          # reflection coefficient +1 instead of -1
-        def f(d, ht, hr, hs, fr):
+        def f(d, ht, hr, hs, fr, **kw):
             lam, r1, r2 = c.C0 / fr, np.hypot(d, ht - hr), np.hypot(d, ht + hr)
             return 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(np.abs(1 + np.exp(-2j * np.pi * (r2 - r1) / lam)))
         return f
@@ -408,5 +411,98 @@ def test_the_two_ray_loss_gives_ament_the_grazing_angle_not_its_sine():
         rho = np.exp(-2.0 * (2 * np.pi * (hs / 4.0) * np.sin(grazing) / lam) ** 2)
         return 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(abs(1.0 - rho * (r1 / r2) * np.exp(-2j * np.pi * (r2 - r1) / lam)))
     want = loss(np.arcsin((ht + hr) / r2))                                                       # psi = 45 degrees: sin(psi) = 0.7071
-    assert c.two_ray_loss_db(d, ht, hr, hs, f) == pytest.approx(want, abs=1e-9)
+    assert c.two_ray_loss_db(d, ht, hr, hs, f) == pytest.approx(want, abs=1e-3)                  # flat to 1e-3 dB at 20 m (the 4/3 earth's bulge is 6e-6 m)
     assert abs(loss((ht + hr) / r2) - want) > 0.05                                               # sined twice: the test can tell, by more than 0.05 dB
+
+
+# ------------------------------------------------------------------------------------------------ review round 4
+
+def _flat(d, ht, hr, f=F915):
+    """The old plane-earth closed form, hs = 0."""
+    lam, r1, r2 = c.C0 / f, np.hypot(d, ht - hr), np.hypot(d, ht + hr)
+    return 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(abs(1.0 - (r1 / r2) * np.exp(-2j * np.pi * (r2 - r1) / lam)))
+
+
+def test_the_kerr_specular_point_solves_the_cubic_and_obeys_the_law_of_reflection():
+    """M-8: R1 is the root of 2x^3 - 3dx^2 + (d^2 - 2a(ht+hr))x + 2a ht d = 0 in (0, d); the grazing angle is the same at both antennas."""
+    a = c.A_EFF
+    for d, ht, hr in ((5e3, 15.0, 3.0), (20e3, 15.0, 3.0), (12e3, 3.0, 15.0), (9e3, 8.0, 8.0)):
+        r1, r2, h1, h2 = c.kerr_reflection(d, ht, hr)
+        roots = np.roots([2.0, -3.0 * d, d * d - 2.0 * a * (ht + hr), 2.0 * a * ht * d])
+        want = roots[(abs(roots.imag) < 1e-6) & (roots.real > 0) & (roots.real < d)].real
+        assert want.size == 1 and r1 == pytest.approx(want[0], abs=1e-3) and r1 + r2 == pytest.approx(d)
+        assert h1 == pytest.approx(ht - r1 ** 2 / (2 * a)) and h2 == pytest.approx(hr - r2 ** 2 / (2 * a))
+        assert h1 / r1 == pytest.approx(h2 / r2, rel=1e-6)                                  # equal grazing angles at the two ends
+        s = c.kerr_reflection(d, hr, ht)                                                     # the other way round
+        assert s[0] == pytest.approx(r2) and s[2] == pytest.approx(h2)
+    assert c.kerr_reflection(1e3, 5.0, 5.0)[0] == pytest.approx(500.0)                      # equal heights: the middle
+    flat = c.kerr_reflection(4e3, 2.0, 6.0, a=1e12)                                          # a flat earth: the image-source point d ht / (ht + hr)
+    assert flat[0] == pytest.approx(1e3, abs=1e-2) and flat[2] == pytest.approx(2.0) and flat[3] == pytest.approx(6.0)
+
+
+def test_the_two_ray_loss_without_divergence_is_the_kerr_curved_earth_table():
+    """M-8: ship mast 15 m, antenna 3 m, 915 MHz, Hs 0: the curved-earth loss (reflection coefficient -1, no divergence) at 5 .. 22 km, against the
+    flat plane-earth loss, which the radio horizon (23.09 km) cut off only after it was 0.7 to 40 dB too low."""
+    d = np.array([5e3, 10e3, 15e3, 18e3, 20e3, 22e3])
+    flat = np.array([114.9, 126.9, 134.0, 137.1, 139.0, 140.6])
+    curved = np.array([115.7, 130.2, 142.7, 152.4, 161.9, 180.6])
+    assert c.radio_horizon_km(15.0, 3.0) == pytest.approx(23.09, abs=0.01)
+    assert np.allclose(_flat(d, 15.0, 3.0), flat, atol=0.1)
+    assert np.allclose(c.two_ray_curved_db(d, 15.0, 3.0, 0.0, F915, divergence=False), curved, atol=0.5)
+    assert np.allclose(c.two_ray_curved_db(d, 15.0, 3.0, 0.0, F915, divergence=False, a_eff=c.FLAT_A), flat, atol=0.1)  # a_eff -> infinity: flat
+
+
+def test_the_divergence_factor_is_in_zero_one_and_falls_toward_the_horizon():
+    d = np.linspace(1e3, 22.5e3, 40)
+    r1, r2, h1, h2 = c.kerr_reflection(d, 15.0, 3.0)
+    D = c.divergence_factor(d, r1, r2, np.arctan2(h1 + h2, d))
+    assert np.all((D > 0) & (D <= 1)) and np.all(np.diff(D) < 0) and D[0] > 0.97 and D[-1] < 0.3
+    assert c.divergence_factor(100.0, 50.0, 50.0, np.arctan2(15.0, 100.0)) == pytest.approx(1.0, abs=1e-4)       # 100 m: flat
+    assert c.divergence_factor(1e3, 500.0, 500.0, 0.0) == pytest.approx(0.0, abs=1e-2)                          # grazing angle 0: no reflected beam
+
+
+def test_within_2_km_the_curved_loss_is_the_flat_loss():
+    """M-8: the 4/3 earth's bulge is 0.04 m at 2 km: the old and new loss agree to 0.05 dB at 1 km (0.03 dB measured) and 0.15 dB at 2 km."""
+    assert c.two_ray_loss_db(1e3, 15.0, 3.0, 0.0, F915) == pytest.approx(_flat(1e3, 15.0, 3.0), abs=0.05)
+    assert c.two_ray_loss_db(2e3, 15.0, 3.0, 0.0, F915) == pytest.approx(_flat(2e3, 15.0, 3.0), abs=0.15)
+
+
+def test_the_curved_loss_is_unchanged_above_the_critical_grazing_angle_and_the_larger_of_it_and_the_flat_loss_below_it():
+    """M-8 (lead's rule): inside psi_critical the curved loss with D stands; from there to the radio horizon the loss is max(curved with D, flat), so it
+    cannot fall toward free space as D -> 0 (geometric optics fails there; diffraction is not modelled). Beyond the horizon the curved loss, unchanged."""
+    ht, hr = 15.0, 3.0
+    psi_c = c.psi_critical(LAM)
+    assert psi_c == pytest.approx((LAM / (np.pi * c.A_EFF)) ** (1 / 3)) and 2.2e-3 < psi_c < 2.4e-3
+    d = np.linspace(500.0, 22.9e3, 400)
+    r1, r2, h1, h2 = c.kerr_reflection(d, ht, hr)
+    inside = np.arctan2(h1 + h2, d) >= psi_c
+    curved, flat = c.two_ray_curved_db(d, ht, hr, 0.0, F915), c.two_ray_curved_db(d, ht, hr, 0.0, F915, False, c.FLAT_A)
+    got, fs = c.two_ray_loss_db(d, ht, hr, 0.0, F915), 20 * np.log10(4 * np.pi * d / LAM)
+    assert 0.2 < inside.mean() < 0.5 and inside[:50].all() and not inside[-50:].any()                   # the limit is at about 7 km of the 23.1 km horizon
+    assert np.array_equal(got[inside], curved[inside])                                                  # inside the limit: the curved loss
+    assert np.array_equal(got[~inside], np.maximum(curved, flat)[~inside]) and np.all(got[~inside] >= curved[~inside]) and np.all(got >= fs - 6.1)
+    assert np.all(got[~inside] >= flat[~inside]) and (got[~inside] > curved[~inside]).any()            # the rule changes something
+    far = np.array([30e3, 60e3])                                                                       # beyond the horizon: the curved loss, as before
+    assert np.array_equal(c.two_ray_loss_db(far, ht, hr, 0.0, F915), c.two_ray_curved_db(far, ht, hr, 0.0, F915))
+    assert c.two_ray_loss_db(2e3, ht, hr, 0.0, F915) == c.two_ray_curved_db(2e3, ht, hr, 0.0, F915)
+    assert np.isfinite(c.two_ray_loss_db(far, ht, hr, 0.5, F915)).all()
+
+
+@pytest.mark.parametrize("ht,hr,hs", [(15.0, 3.0, 0.0), (15.0, 3.0, 1.5), (2.0, 5.0, 0.5), (10.0, 10.0, 0.0), (30.0, 1.0, 0.0)])
+def test_the_margin_never_rises_over_the_last_30_percent_of_the_horizon(ht, hr, hs):
+    """M-8: with D alone the margin rose again toward the horizon (34.6 dB at 14 km against 26.8 at 5 km for 2 m / 5 m masts); with the rule it is monotone
+    non-increasing on a fine grid over the last 30 % of the horizon distance."""
+    d = np.linspace(0.7, 0.9999, 3000) * 1e3 * c.radio_horizon_km(ht, hr)
+    m = c.rf_margin(d, ht, hr, hs)
+    assert np.all(m != c.NO_LINK_DB) and np.all(np.diff(m) <= 1e-9)
+
+
+def test_the_finding_case_20_km_is_in_the_transition_zone_and_gets_the_flat_loss():
+    """M-8: 15 m / 3 m, Hs 0 at 20 km (horizon 23.09 km): the grazing angle there (0.2 mrad) is below psi_critical (2.3 mrad, reached at about 7 km), so the
+    loss is the larger of curved-with-D (122.4 dB) and flat (139.0 dB): 139.0, and the margin 13.0 dB (29.6 dB with the curved loss alone)."""
+    r = c._yaml("radios.yaml")["radios"]["rfd900x"]
+    budget = r["tx_dbm"] + r["gt_dbi"] + r["gr_dbi"] - r["cable_loss_db"] - r["misc_loss_db"] - r["rx_sens_dbm"]
+    assert c.two_ray_loss_db(20e3, 15.0, 3.0, 0.0, F915) == pytest.approx(c.two_ray_curved_db(20e3, 15.0, 3.0, 0.0, F915, False, c.FLAT_A))
+    assert c.two_ray_curved_db(20e3, 15.0, 3.0, 0.0, F915) == pytest.approx(122.4, abs=0.1) and _flat(20e3, 15.0, 3.0) == pytest.approx(139.0, abs=0.1)
+    assert c.rf_margin(20e3, 15.0, 3.0, 0.0) == pytest.approx(budget - 139.0, abs=0.1) and c.rf_margin(20e3, 15.0, 3.0, 0.0) == pytest.approx(13.0, abs=0.2)
+    assert c.rf_margin(24e3, 15.0, 3.0, 0.0) == c.NO_LINK_DB                                              # beyond the horizon: none

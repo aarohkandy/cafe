@@ -46,6 +46,14 @@ class OutsideData(ValueError):
     pass
 
 
+def rain_rate_nodes(accum: Any, t: Any) -> Any:
+    """Rain rate [mm/h] at each hourly node from the accumulation (time first): the mean of the rates of the two intervals the node joins (the first
+    and the last node take the one interval they touch), floored at 0. Linear interpolation between the nodes then integrates to the accumulation
+    and puts an hour of rain at the middle of that hour; a backward difference stored at the end of the hour would centre it half an hour late."""
+    r = np.maximum(np.diff(accum, axis=0) / np.diff(t)[:, None, None] * 3600.0, 0.0)               # mm/h over each interval (k, k+1)
+    return np.concatenate([r[:1], 0.5 * (r[:-1] + r[1:]), r[-1:]]) if len(r) else np.zeros_like(accum)
+
+
 class GriddedEnv:
     def __init__(self, cache: Any, sigmas: dict[str, Any], ocean: Ocean | None = None, subgrid: SurfaceLayer | None = None, strict: bool = True):
         import xarray as xr
@@ -62,7 +70,7 @@ class GriddedEnv:
         self.W = {k: w[k].values.astype("f8") for k in w.data_vars if w[k].dims == ("time", "lat", "lon")}
         self.Wstatic = {k: w[k].values.astype("f8") for k in w.data_vars if w[k].dims == ("lat", "lon")}
         rain = self.W["RAINNC"] + self.W["RAINC"]
-        self.W["rain_mm_h"] = np.maximum(np.diff(rain, axis=0, prepend=rain[:1]) / np.diff(self.tw.x, prepend=self.tw.x[0] - 3600)[:, None, None] * 3600, 0.0)
+        self.W["rain_mm_h"] = rain_rate_nodes(rain, self.tw.x)
         self.tu, self.lau, self.lou = Axis(seconds(u.time.values), "time"), Axis(u.lat.values, "lat"), Axis(u.lon.values, "lon")
         sea = u["seamask"].values > 0
         self.sea = sea                                                    # UMWM sea nodes (lat, lon): ingest's NaN-in-sea-cells check reads it
@@ -186,7 +194,7 @@ class GriddedEnv:
         return Tagged(v, f"{src}; below the first level: {psrc}", self.sig["wind_ms"], "data")
 
     def _wind3d(self, lon: Any, lat: Any, z: Any, t: Any) -> Any:
-        """3-D WRF wind (east, north) where z is above the first mass level and t is within an ingested 3-D hour pair, else NaN. U3/V3 are
+        """3-D WRF wind (east, north) where z is between the first and the top stored mass level and t is within an ingested 3-D hour pair, else NaN. U3/V3 are
         grid-relative like U10, so they go through the same COSALPHA/SINALPHA rotation before the vertical interpolation."""
         assert self.w3 is not None
         T, Z = self.w3["t"], self.w3["Z"]
@@ -212,9 +220,11 @@ class GriddedEnv:
                 q = np.log(np.maximum(zq[m], 1.0))
                 j = np.clip(np.sum(lz < q[:, None], axis=1) - 1, 0, lz.shape[1] - 2)
                 r = np.arange(len(j))
-                a = np.clip((q - lz[r, j]) / (lz[r, j + 1] - lz[r, j]), 0, 1)
+                a = (q - lz[r, j]) / (lz[r, j + 1] - lz[r, j])
+                above = a > 1.0 + 1e-9                                   # higher than the top stored level: not known, not extrapolated
+                a = np.clip(a, 0, 1)
                 vals.append(ww[:, None] * np.stack([uc[r, j] + a * (uc[r, j + 1] - uc[r, j]), vc[r, j] + a * (vc[r, j + 1] - vc[r, j])], -1))
-                below = zq[m] < zc[:, 0]
+                below = (zq[m] < zc[:, 0]) | above
                 vals[-1][below] = np.nan
             out[m] = vals[0] + vals[1]
         return out

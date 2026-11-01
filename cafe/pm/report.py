@@ -51,7 +51,16 @@ USV_RATIO_NOTE = ("The mission ratio is lowered by the westward current (in the 
                   "through the water falls); the calibration may already include part of the current effect, a possible double penalty that is not "
                   "established.")
 UAS_ATTITUDE_NOTE = ("Attitude exceedance cannot fire in this controller model (the tilt clamp, 35 deg, is below the 42 deg exceedance), so the UAS verdict "
-                     "rests on battery alone below about 12 m/s of wind.")
+                     "rests on the battery and on finishing the profile inside the time limit.")
+UAS_ATTITUDE_NOTE_NO_PROFILE = ("Attitude exceedance cannot fire in this controller model (the tilt clamp, 35 deg, is below the 42 deg exceedance), so the UAS "
+                                "verdict rests on battery alone below about 12 m/s of wind.")      # a summary from before the profile was counted
+MODE_TEXT = dict(profile_incomplete="a flown sortie returned (time limit or battery reserve) before its last pattern waypoint, so it did not deliver "
+                                    "the full profile",
+                 no_current_data="the ocean current was not a number at the vehicle's position (a land block or a hole in the store), so its drift could "
+                                 "not be computed")
+SENS_SCOPE = ("These indices rank only the sampled columns (the member-wide biases and scales of the forcing and of the vehicle). The larger errors are "
+              "per-member random streams that are not columns and are not ranked: the hourly wind error{wind}, half of the current error (the 100 km random "
+              "field), the ocean SDE, the UAS turbulence and gusts, and the Iridium draws.")
 CHIODI_RATIO = 0.96 / 5.4                                                     # platforms/saildrone_explorer.yaml chiodi_mean_sog_ms / chiodi_mean_wind_ms
 PHYSICS = dict(glider="pm.physics.glider", usv="pm.physics.usv", uas="pm.physics.uas", link="pm.physics.comms")     # vehicle class or link -> group
 SENSITIVITY = "sensitivity_cases.json"             # stage1b/: {vid: [{case, k_fail, n, verdict, note}]}, written by whoever runs a case
@@ -264,8 +273,8 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     d["decided"] = d["region"] is not None
     d["undecided_statement"] = None if d["decided"] else _undecided(d["stop_interval"]["lo"]["value"], d["stop_interval"]["hi"]["value"])
     if e["n"] < v["n_certify"]:
-        d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members are needed "
-                                  f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}).")
+        d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members (two-sided 95 % Wilson bound) are needed "
+                                  f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, one-sided 95 %).")
     return d
 
 
@@ -286,6 +295,21 @@ def _top3(e: dict[str, Any], ref: dict[str, Any], src: str) -> list[Any]:
     s1, f = e["sensitivity"]["S1"] or {}, e["sensitivity"].get("noise_floor") or 0.0
     return [dict(param=p, s1=num(x, "fraction of variance", ref, f"{src}.sensitivity.S1.{p}"))
             for p, x in sorted(s1.items(), key=lambda kv: -kv[1])[:3] if x > f]
+
+
+def _sens_scope(tr: Trace) -> dict[str, Any]:
+    """What the sensitivity indices cannot see (M-17). With the fitted wind priors (ingest/priors_fitted.json) the sentence carries the hourly wind error's sd
+    next to the sd of the wind-speed and direction columns; without them the sentence stands without the numbers."""
+    f = _jl(tr.run / "ingest" / "priors_fitted.json") or {}
+    keys = ("wind_speed_noise", "wind_direction_noise", "wind_speed_bias", "wind_direction_bias")
+    if not all(isinstance(f.get(k), dict) and isinstance(f[k].get("value"), (int, float)) for k in keys):
+        return dict(text=SENS_SCOPE.format(wind=""), wind_sd=None)
+    ref, src = tr.ref("ingest", output="priors_fitted.json"), "ingest/priors_fitted.json"
+    nodes = {k: num(f[k]["value"], f[k].get("unit", ""), ref, f"{src} {k}.value") for k in keys}
+    g = {k: _txt(n) for k, n in nodes.items()}
+    wind = (f" (sd {g['wind_speed_noise']} and {g['wind_direction_noise']}, against {g['wind_speed_bias']} and {g['wind_direction_bias']} for the "
+            "wind-speed and direction columns)")
+    return dict(text=SENS_SCOPE.format(wind=wind), wind_sd=nodes)
 
 
 def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
@@ -340,7 +364,8 @@ def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[
         members=num(n_left, "members", ref, f"{src}.modes.left_data"),
         first=None if t_left is None or not np.isfinite(t_left).any()
         else tnum(float(np.nanmin(t_left)), ref, f"stage1b/res.pkl vehicles.{vid}.first.left_data"))
-    return dict(first_fail_mode=None if r is None else _first_mode(r), mode_shares=shares, left_data=left)
+    return dict(first_fail_mode=None if r is None else _first_mode(r), res_available=r is not None, mode_shares=shares, left_data=left,
+                mode_notes={m: MODE_TEXT[m] for m in e["modes"] if m in MODE_TEXT})
 
 
 def _cases(tr: Trace, vid: str, n: int) -> list[dict[str, Any]]:
@@ -376,6 +401,7 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         speed_ratio=_speed_ratio(e, ref, src),
                         wind3d=_opt(e.get("wind3d_fraction"), "fraction of the sortie records", ref, src + ".wind3d_fraction"),
                         authority=_authority(e.get("authority"), ref, src + ".authority"),
+                        profile=_profile(e.get("profile"), ref, src + ".profile"),
                         drift=_drift(task.get(vid, {}), e["cls"], mref, f"mission.yaml vehicles.{vid}.task.heading_to"),
                         usv_modes=_usv_modes(p, e["modes"], tr) if e["cls"] == "usv" else None,
                         verdict_stage1=before["verdict"]["verdict"] if before else None,
@@ -428,6 +454,15 @@ def _speed_ratio(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, 
     return dict(ratio=num(sp["ratio_median"], "-", ref, src + ".ratio_median"), sog=_opt(sp.get("sog_ms_median"), "m/s", ref, src + ".sog_ms_median"),
                 u10=_opt(sp.get("u10_ms_median"), "m/s", ref, src + ".u10_ms_median"),
                 chiodi=num(sp.get("calibration_ratio", CHIODI_RATIO), "-", ref, src + ".calibration_ratio"))
+
+
+def _profile(p: dict[str, Any] | None, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
+    """A UAS's flux-profile progress from the summary (`profile`: median waypoints flown per sortie, the pattern length, the share of the flown sorties that
+    reached every waypoint), or None for a summary from before the profile was counted (M-1)."""
+    if not p:
+        return None
+    return dict(wp_done_median=num(p["wp_done_median"], "", ref, src + ".wp_done_median"), n_wp=num(p["n_wp"], "", ref, src + ".n_wp"),
+                complete_share=num(p["complete_share"], "fraction", ref, src + ".complete_share"))
 
 
 def _authority(a: dict[str, Any] | None, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
@@ -543,10 +578,24 @@ def path_speed(r: dict[str, Any]) -> float | None:
     return float(np.median(v)) if v.size else None
 
 
-def _reach(mission: dict[str, Any], env: Any, tr: Trace, res: dict[str, Any] | None = None) -> dict[str, Any]:
+def _dive_depth(v: dict[str, Any]) -> float:
+    """The depth a glider's task dives to (m): the task's dive_depth_m, else the platform's default, else 500 (as stage 1 reads it)."""
+    d = (v.get("task") or {}).get("dive_depth_m")
+    if d is None:
+        try:
+            from .config import load_platform
+            d = load_platform(v["platform"])["mission_defaults"]["dive_depth_m"]["value"]
+        except (KeyError, TypeError, ValueError):
+            d = 500.0
+    return max(float(d), 5.0)
+
+
+def _reach(mission: dict[str, Any], env: Any, tr: Trace, res: dict[str, Any] | None = None, s1b: dict[str, Any] | None = None) -> dict[str, Any]:
     """Where each drifting vehicle can get to within reach.horizon_h of its deploy, in the environment's currents at the deploy time: the fastest
     route over a 41 x 41 grid (cafe.reach: Zermelo speed made good, Dijkstra over 16 neighbours; land and water outside the ingested data blocked), drawn as the
-    farthest reachable cell in each of 24 bearings. A UAS is not drawn: it flies sorties from the ship."""
+    farthest reachable cell in each of 24 bearings. A UAS is not drawn: it flies sorties from the ship. The router adds the current to a speed through the
+    water: a USV is swum at the Stage-1 median speed through the water (`speed.stw_ms_median` of the summary; a summary without it falls back to the speed over
+    ground of the tracks, labelled so), a glider at the assumed speed, in the mean current from 5 m to the depth its task dives to."""
     from cafe import reach as legacy
     from .config import assumptions
     if env is None:
@@ -561,21 +610,26 @@ def _reach(mission: dict[str, Any], env: Any, tr: Trace, res: dict[str, Any] | N
             out[vid] = dict(available=False, reason="A UAS flies its sorties from the ship; how far it gets is a battery and wind question "
                                                     "(physics.uas), not a drift route.")
             continue
-        speed, how = a[f"reach.speed_ms.{cls[vid]}"]["value"], f"assumed, config/assumptions.yaml reach.speed_ms.{cls[vid]}"
-        sref, run_speed = ref, path_speed(res["vehicles"][vid]) if cls[vid] == "usv" and res is not None and vid in res["vehicles"] else None
-        if run_speed is not None:
-            speed, how = run_speed, "median mean path speed over ground of the Stage-1 ensemble, which already includes the drift in the currents"
+        speed, how, kind = a[f"reach.speed_ms.{cls[vid]}"]["value"], f"assumed, config/assumptions.yaml reach.speed_ms.{cls[vid]}", "through the water"
+        sref, stw = ref, ((((s1b or {}).get("summary") or {}).get("vehicles") or {}).get(vid) or {}).get("speed", {}).get("stw_ms_median")
+        run_speed = path_speed(res["vehicles"][vid]) if cls[vid] == "usv" and stw is None and res is not None and vid in res["vehicles"] else None
+        if cls[vid] == "usv" and stw is not None:
+            speed, how = stw, ("median over members of the mean speed through the water of the Stage-1 tracks; the current is added by the router")
+            sref = tr.ref("stage1b", check="lhs_stratified", output="summary.json", label="report (reach map speed from the stage1b summary)")
+        elif run_speed is not None:
+            speed, how, kind = run_speed, ("median mean path speed over ground of the Stage-1 ensemble, which already includes the drift in the currents "
+                                           "(this run's summary has no speed through the water, so the router adds the current a second time)"), "over ground"
             sref = tr.ref("stage1b", output="res.pkl", label="report (reach map speed from the stage1b tracks)")
         src = f"cafe.reach._dijkstra over env.current at the deploy time; speed: {how}"
         try:
-            out[vid] = _reach_one(legacy, env, v, cls[vid], speed, hours, allow, ref, src, how, sref)
+            out[vid] = _reach_one(legacy, env, v, cls[vid], speed, hours, allow, ref, src, how, sref, kind, _dive_depth(v))
         except Exception as ex:                                           # noqa: BLE001  any failure of the environment is reported, not hidden
             out[vid] = dict(available=False, reason=f"{type(ex).__name__}: {ex}")
     return dict(available=True, vehicles=out, horizon=num(hours, "h", ref, "config/assumptions.yaml reach.horizon_h"))
 
 
 def _reach_one(legacy: Any, env: Any, v: dict[str, Any], cls: str, speed: float, hours: float, allow: float, ref: dict[str, Any], src: str, how: str,
-               sref: dict[str, Any], n: int = 41, nb: int = 24) -> dict[str, Any]:
+               sref: dict[str, Any], kind: str = "through the water", dive_m: float = 100.0, n: int = 41, nb: int = 24) -> dict[str, Any]:
     d = v["deploy"]
     R = (speed + allow) * hours * 3600.0
     xs = np.linspace(-R, R, n)
@@ -584,7 +638,8 @@ def _reach_one(legacy: Any, env: Any, v: dict[str, Any], cls: str, speed: float,
     lon = ((d["lon"] + np.degrees(EE.ravel() / (6.371e6 * math.cos(math.radians(d["lat"])))) + 180.0) % 360.0) - 180.0
     t = np.full(lat.size, utc_s(d["time"]))
     ins = np.asarray(env.inside(lon, lat, t), bool) if hasattr(env, "inside") else np.ones(lat.size, bool)    # outside the ingested data: unknown water
-    zs = np.linspace(-5.0, -100.0, 6) if cls == "glider" else [0.0]                 # a glider feels the current over its dive band
+    zs = np.linspace(-5.0, -dive_m, 6) if cls == "glider" else [0.0]                # a glider feels the current over the band it dives through
+    band = f"mean current from 5 m to {dive_m:g} m" if cls == "glider" else "current at the surface"
     cur = np.full((lat.size, 2), np.nan)
     cur[ins] = np.mean([np.asarray(env.current(lon[ins], lat[ins], z, t[ins]).value, float) for z in zs], 0)
     flow = cur[:, ::-1].reshape(n, n, 2)                                              # (east, north) -> (north, east)
@@ -607,7 +662,7 @@ def _reach_one(legacy: Any, env: Any, v: dict[str, Any], cls: str, speed: float,
     pl = [[float(((d["lon"] + math.degrees(r * math.sin(a) / (6.371e6 * math.cos(math.radians(d["lat"])))) + 180.0) % 360.0) - 180.0),
            float(d["lat"] + math.degrees(r * math.cos(a) / 6.371e6))] for r, a in zip(far, th, strict=True)]
     return dict(available=True, polygon=vals(pl, "deg", ref, src + " (farthest reachable cell per bearing, [lon, lat])"),
-                max_range_km=num(far.max() / 1e3, "km", ref, src), speed=num(speed, "m/s", sref, how), speed_from=how,
+                max_range_km=num(far.max() / 1e3, "km", ref, src), speed=num(speed, "m/s", sref, how), speed_from=how, speed_kind=kind, current_band=band,
                 flow_max=num(float(np.nanmax(np.hypot(flow[..., 0], flow[..., 1]))), "m/s", ref, src + " (largest current on the grid)"),
                 deploy=vals([d["lon"], d["lat"]], "deg", ref, "mission.yaml deploy (lon, lat)"))
 
@@ -747,7 +802,8 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
 
         d = dict(trained=True, n_train=num(e["n_train"], "members", ref, s), n_test=num(e["n_test"], "members", ref, s),
                  nominal=num(e["nominal"], "fraction", ref, s), rmse={k: num(x, unit(k), ref, s + ".rmse") for k, x in e["rmse"].items()},
-                 coverage={k: num(x, "fraction", ref, s + ".coverage") for k, x in e["coverage"].items()}, cls=e.get("cls"), acceptance=None)
+                 coverage={k: num(x, "fraction", ref, s + ".coverage") for k, x in e["coverage"].items()}, cls=e.get("cls"), acceptance=None,
+                 coverage_raw_p={k: num(x, "fraction", ref, s + ".coverage_raw_p") for k, x in (e.get("coverage_raw_p") or {}).items()} or None)
         if "acceptance" in e:
 
             def lim(v: Any, u: str) -> dict[str, Any]:
@@ -760,7 +816,9 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
                                    rmse_debiased=num(e["rmse_debiased"], "fraction", ref, s + ".rmse_debiased"),
                                    fresh=_fresh(e, ref, s), draws=e.get("draws"),
                                    rows=num(e["rows"], "rows", ref, s + ".rows"),
+                                   coverage_chance_fail=_opt(e.get("coverage_chance_fail"), "fraction", ref, s + ".coverage_chance_fail"),
                                    limits=dict(rmse=lim(0.05, "fraction"), coverage=lim(0.05, "fraction"), query_ms=lim(10.0, "ms")))
+        d["used"], d["unused_reason"] = e.get("used"), e.get("unused_reason")
         out[vid] = d
     dd = None
     if design is not None:
@@ -839,9 +897,9 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
                                         variables="cafe/schemas/wrfout.json and cafe/schemas/umwmout.json (read per hour over the mission window)")),
         verdict_source="stage1b (stage 1 rerun with the stage-3 refit multipliers; a copy of stage 1 when nothing was refit)",
         vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res), links=_links(s1b, tr, mission),
-        map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res), environment=_env(mission, env, res, wins, s1b, tr),
+        map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res, s1b), environment=_env(mission, env, res, wins, s1b, tr),
         stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref),
-        assumed_inputs=_assumed(cred, cred_ref))
+        assumed_inputs=_assumed(cred, cred_ref), sensitivity_scope=_sens_scope(tr))
     rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"])
     own = _jl(run / "stage3" / "subgrid_calibration.json")
     rep["subgrid"] = dict(source=("this run's stage3/subgrid_calibration.json" if own
@@ -891,7 +949,7 @@ def _stat_html(d: dict[str, Any]) -> str:
     u = d["p_fail"]["uncertainty"]
     si, th = d["stop_interval"], d["thresholds"]
     h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g} (the verdict's own level); "
-         f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}).</p>"
+         f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}, two-sided 95 % Wilson bound).</p>"
          f"<p class=muted>Stopping rule: the {si['lo']['uncertainty']['conf']:.0%} {html.escape(si['lo']['uncertainty']['kind'].replace(' bound', ''))} "
          f"on P(fail) is {_n(si['lo'])} to {_n(si['hi'])}; verdict thresholds: GO below {_n(th['go'])}, NO-GO from {_n(th['nogo'])}.</p>")
     if d["undecided_statement"]:
@@ -973,12 +1031,14 @@ def _drivers_html(v: dict[str, Any]) -> str:
     e = html.escape
     shares = ", ".join(f"{e(m)} {_n(x)}" for m, x in v["mode_shares"].items())
     first = (f"the first failure was by <b>{e(v['first_fail_mode'])}</b>" if v["first_fail_mode"]
+             else ("no member failed" if not shares else "res.pkl records no first-failure time for the failed members") if v.get("res_available", False)
              else "which mode failed first is not known (res.pkl is not available)")
     more = f"; share of the failed members by mode (a member can fail in several): {shares}" if shares else ""
     ld = v["left_data"]
     left = (f"<p class=warn>{_n(ld['members'])} members left the downloaded data" + (f" at about {_n(ld['first'])}" if ld["first"] else "")
             + " (counted as failed): widen <code>box</code> or <code>pad_deg</code> and rerun.</p>") if ld else ""
-    return f"<p>What drives the failures: {first}{more}.</p>{left}"
+    notes = "".join(f"<p class=muted><code>{e(m)}</code>: {e(t)}.</p>" for m, t in v.get("mode_notes", {}).items())
+    return f"<p>What drives the failures: {first}{more}.</p>{left}{notes}"
 
 
 def _cases_html(cases: list[dict[str, Any]]) -> str:
@@ -1005,7 +1065,12 @@ def _speed_html(v: dict[str, Any]) -> str:
                    if sr["sog"] and sr["u10"] else "") + f"; the speed prior is calibrated to Chiodi et al.'s "
                 f"{_n(sr['chiodi'])}, a scenario that differs from the mission (no current, uniform wind, sailing to a station). {USV_RATIO_NOTE}</p>")
     if v["cls"] == "uas":
-        out += f"<p class=muted>{UAS_ATTITUDE_NOTE}"
+        pr = v.get("profile")
+        if pr:
+            out += (f"<p>Median waypoints flown per sortie: {_n(pr['wp_done_median'])} of {_n(pr['n_wp'])}; share of the flown sorties that "
+                    f"reached every waypoint: {_n(pr['complete_share'])} (a sortie that returns earlier did not deliver the full profile and fails as "
+                    "<code>profile_incomplete</code>).</p>")
+        out += f"<p class=muted>{UAS_ATTITUDE_NOTE if pr else UAS_ATTITUDE_NOTE_NO_PROFILE}"
         if au:
             out += (f" Horizontal-force demand beyond the lean-angle clamp: {_n(au['clamp_s_median'])} per sortie (median; largest {_n(au['clamp_s_max'])}), "
                     f"demand / clamp {_n(au['demand_ratio_median'])} (median), {_n(au['demand_ratio_max'])} (largest).")
@@ -1142,8 +1207,9 @@ def _reach_html(r: dict[str, Any]) -> str:
         return f"<p class=warn>Reach map not drawn: {e(r['reason'])}</p>"
     h = f"<p>Reach map: fastest routes within {_n(r['horizon'])} of the deploy, through the environment's currents at the deploy time.</p><ul>"
     for vid, d in r["vehicles"].items():
-        h += (f"<li>{e(vid)}: " + (f"farthest reachable cell {_n(d['max_range_km'])} from {_n(d['deploy'])} at {_n(d['speed'])} through the water "
-                                    f"({e(d['speed_from'])}), largest current on the grid {_n(d['flow_max'])}, outline {_n(d['polygon'])}"
+        h += (f"<li>{e(vid)}: " + (f"farthest reachable cell {_n(d['max_range_km'])} from {_n(d['deploy'])} at {_n(d['speed'])} {e(d['speed_kind'])} "
+                                    f"({e(d['speed_from'])}; {e(d['current_band'])}), largest current on the grid {_n(d['flow_max'])}, "
+                                    f"outline {_n(d['polygon'])}"
                                     if d["available"] else f"not drawn. {e(d['reason'])}"))
     return h + "</ul>"
 
@@ -1212,6 +1278,11 @@ def _stage3_html(s: dict[str, Any]) -> str:
     return h
 
 
+def _chance(c: Any) -> str:
+    """How often a calibrated emulator misses the coverage gate by chance on this many held-out points; empty for older runs."""
+    return "" if c is None else f" (a calibrated emulator misses it by chance with probability {_n(c)} on this many held-out points)"
+
+
 def _emulator_html(m: dict[str, Any]) -> str:
     e = html.escape
     note = f"<p class=warn>{e(m['plan_note'])}</p>" if m["plan_note"] else ""
@@ -1222,7 +1293,11 @@ def _emulator_html(m: dict[str, Any]) -> str:
         if not v["trained"]:
             h += f"<p><b>{e(vid)}</b>: not trained. {e(v['reason'])}" + (f" ({_n(v['rows'])} of this class.)" if "rows" in v else "") + "</p>"
             continue
-        sc = "; ".join(f"{e(k)} RMSE {_n(x)}, coverage {_n(v['coverage'][k])} (nominal {_n(v['nominal'])})" for k, x in v["rmse"].items())
+        raw = v["coverage_raw_p"] or {}
+        sc = "; ".join(f"{e(k)} RMSE {_n(x)}, "
+                       + (f"coverage on the calibration scale (clipped logit) {_n(v['coverage'][k])}; on the raw P scale {_n(raw[k])}, where a target of "
+                          "exactly 0 or 1 cannot be inside the interval" if k in raw else f"coverage {_n(v['coverage'][k])}")
+                       + f" (nominal {_n(v['nominal'])})" for k, x in v["rmse"].items())
         kind = f" ({e(v['cls'])} emulator)" if v["cls"] else ""
         h += f"<p><b>{e(vid)}</b>{kind}: trained on {_n(v['n_train'])}, scored on {_n(v['n_test'])} held-out; {sc}.</p>"
         a = v["acceptance"]
@@ -1236,8 +1311,10 @@ def _emulator_html(m: dict[str, Any]) -> str:
                   f"{_n(a['limits']['rmse'])} {ok(a['rmse_ok'])}{' (on the larger of this and the fresh-draw figure below)' if fr else ''} "
                   f"(the held-out RMSE against the member-count targets, less their own "
                   f"Monte-Carlo noise {_n(a['noise_floor_rmse'])} in quadrature); coverage within {_n(a['limits']['coverage'])} of nominal "
-                  f"{ok(a['coverage_ok'])}; query {_n(a['query_ms'])} "
+                  f"{ok(a['coverage_ok'])}{_chance(a.get('coverage_chance_fail'))}; query {_n(a['query_ms'])} "
                   f"&le; {_n(a['limits']['query_ms'])} {ok(a['query_ok'])}; {_n(a['rows'])} rows of this class.</p>")
+            if v["used"] is False:
+                h += f"<p class=warn><b>Not used for answers: Stage 1 answered instead.</b> {e(v['unused_reason'] or '')}</p>"
             h += ("<p class=muted>Fresh-draw check: " + (
                 f"{_n(fr['points'])} re-run on {_n(fr['n_members'])} that no training row used; the emulator's RMSE against them "
                 f"{_n(fr['rmse'])}, {_n(fr['rmse_debiased'])} less their own noise {_n(fr['noise_floor'])}; the RMSE limit is judged on the larger of this "
@@ -1331,6 +1408,7 @@ def render(rep: dict[str, Any]) -> str:
             "<p><a href='credibility.html'>Credibility report</a> | <a href='report.json'>report.json</a></p>"
             "<h2>Verdicts</h2><div class=scroll><table><tr><th>Vehicle or link<th>Verdict<th>P(fail)<th>Members"
             f"<th>Beyond radio horizon or out of acoustic range</tr>{rows}</table></div>"
+            f"<p class=muted>{e(rep['sensitivity_scope']['text'])}</p>"
             + "".join(f"<div id='v-{e(i)}'>{_vehicle_html(i, d)}</div>" for i, d in rep["vehicles"].items())
             + "".join(f"<div id='v-{e(i)}'>{_link_html(i, d)}</div>" for i, d in rep["links"].items())
             + _sanity_html(rep["sanity"])

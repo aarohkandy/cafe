@@ -53,12 +53,12 @@
         "sorties": {"type": "object", "required": ["local_solar_time", "duration_min"], "additionalProperties": false, "properties": {
           "local_solar_time": {"type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$", "description": "HH:MM, 00:00 to 23:59"}, "duration_min": {"type": "number", "exclusiveMinimum": 0, "maximum": 120},
           "every_days": {"type": "number", "minimum": 0.01, "description": "days between launches; load_mission also refuses a period under duration_min x hard_stop_factor"}, "pattern": {"enum": ["flux_profile"]},
-          "altitudes_m": {"type": "array", "minItems": 1, "items": {"type": "number", "minimum": 2, "maximum": 1000}}}},
+          "altitudes_m": {"type": "array", "minItems": 1, "items": {"type": "number", "minimum": 2, "maximum": 1000}, "description": "metres; load_mission refuses any above 400 (the top of the stored WRF levels, orca.WIND3D_TOP_M)"}}},
         "launch_rules": {"type": "object", "additionalProperties": false, "properties": {"max_mean_wind_ms": {"type": "number"}, "no_gust_front_within_min": {"type": "number"}}}},
       "allOf": [{"if": {"required": ["base"]}, "then": {"required": ["sorties"]}, "else": {"required": ["deploy", "task"]}}]}},
     "links": {"type": "array", "items": {"type": "object", "required": ["id", "a", "b", "kind", "required_fraction"], "additionalProperties": false,
       "properties": {"id": {"type": "string"}, "a": {"type": "string"}, "b": {"type": "string"}, "kind": {"enum": ["rf", "acoustic", "iridium"]},
-                     "radio": {"type": "string"}, "modem": {"type": "string"}, "when": {"enum": ["always", "surfacing", "uas_airborne"]},
+                     "radio": {"type": "string"}, "modem": {"type": "string"}, "when": {"enum": ["always", "surfacing", "uas_airborne"], "description": "an rf or iridium link with a glider at one end must say surfacing (load_mission refuses the rest); an iridium link otherwise takes always"},
                      "required_fraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}}}},
     "verdict": {"type": "object", "required": ["go", "nogo"], "additionalProperties": false, "properties": {
       "go": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "description": "GO needs P(success) >= go"},

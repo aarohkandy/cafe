@@ -126,6 +126,18 @@ def test_a_long_budget_sizes_the_variants_to_reach_the_minimum_points_when_the_s
     assert budget.emulator_plan(dict(big, member_cost={}))["trains"] is False                         # nothing priced: no variants, one point
 
 
+def test_an_unresolved_slope_is_said_in_the_source_and_costs_a_batch_the_same_whatever_its_size():
+    """Round 4 M-26: the bench stores `slope_resolved: false` with a 0 slope; the planner then charges per batch only, and its source line says so."""
+    thr = {"stage1": {"usv": dict(s_per_batch_day=12.0, s_per_member_day=0.0, slope_resolved=False, measured="2026-11-01", host="h", load_1min=0.5),
+                      "uas": dict(s_per_batch_day=12.0, s_per_member_day=0.1, slope_resolved=True, measured="2026-11-01", host="h", load_1min=0.5),
+                      "glider": dict(s_per_batch_day=12.0, s_per_member_day=0.0, measured="2026-10-29", host="h", load_1min=0.5)}}
+    (b, m), src = budget.member_cost(thr, "usv")
+    assert (b, m) == (12.0, 0.0) and src.endswith("a batch costs the same whatever its size") and "did not resolve a per-member slope" in src
+    assert "slope" not in budget.member_cost(thr, "uas")[1] and "slope" not in budget.member_cost(thr, "glider")[1]  # resolved, or an older file
+    plan = dict(batch=8, days=2.0, member_cost={"usv": dict(s_per_batch_day=12.0, s_per_member_day=0.0, source=src)})
+    assert budget.batch_cost_s(plan) == 24.0 == budget.batch_cost_s(dict(plan, batch=64))
+
+
 def test_unmeasured_classes_use_the_labelled_fallback():
     assert budget.member_cost({}, "uas") == (budget.FALLBACK_COST["uas"], "NOT MEASURED on this machine (run `make bench`): planner fallback")
     (b, m), src = budget.member_cost(thr(7.0, 0.2), "usv")

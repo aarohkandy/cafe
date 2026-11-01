@@ -801,3 +801,53 @@ def test_the_calibration_ratio_holds_on_a_section_without_current_and_a_westward
     assert abs(none / calib - 1.0) < P["chiodi_band"]
     assert west < 0.92 * none
     assert north > none
+
+
+# ------------------------------------------------------------------------------------------------------------ review round 4, M-5
+
+class HoleEnv(AnalyticEnv):
+    """A land block in the ocean store: no finite wind or current for the members in `holes`."""
+
+    def __init__(self, holes=(), field="current", **kw):
+        super().__init__(**kw)
+        self.holes, self.field = list(holes), field
+
+    def _hole(self, v):
+        v = np.array(v, float)
+        v[self.holes] = np.nan
+        return Tagged(v, "test", 0.0, "assumed")
+
+    def current(self, lon, lat, z, t):
+        v = super().current(lon, lat, z, t)
+        return self._hole(v.value) if self.field == "current" else v
+
+    def wind(self, lon, lat, z, t):
+        v = super().wind(lon, lat, z, t)
+        return self._hole(v.value) if self.field == "wind" else v
+
+
+def test_a_non_finite_current_is_a_labelled_failure_for_that_member_and_the_run_goes_on():
+    """M-5: a NaN current (a cell of the ocean store that is all land) raised IndexError (np.floor(NaN).astype(int)) in the table lookup and killed Stage 1;
+    now the member fails with `no_current_data` at the first step, the step uses a zero vector for it, and the others are exactly as without the hole."""
+    clean = sim(HoleEnv(wind=(-6.0, 0.0), current=(0.1, 0.0)), m=4)
+    holed = sim(HoleEnv(holes=[1], wind=(-6.0, 0.0), current=(0.1, 0.0)), m=4)
+    hc, hh, hz = clean.run(3 * HR, 60.0), holed.run(3 * HR, 60.0), sim(HoleEnv(wind=(-6.0, 0.0)), m=4).run(3 * HR, 60.0)
+    assert hh["fail"]["no_current_data"].tolist() == [False, True, False, False] and hh["first"]["no_current_data"][1] == 0.0
+    assert np.isnan(hh["first"]["no_current_data"][[0, 2, 3]]).all() and not hc["fail"]["no_current_data"].any()
+    assert np.isfinite(hh["lon"]).all() and np.isfinite(hh["lat"]).all()
+    assert all(np.array_equal(hh["fail"][k][[0, 2, 3]], hc["fail"][k][[0, 2, 3]]) for k in usv.FAILS if k != "no_current_data")      # no other mode
+    assert np.array_equal(hh["lon"][:, [0, 2, 3]], hc["lon"][:, [0, 2, 3]]) and np.array_equal(hh["lat"][:, [0, 2, 3]], hc["lat"][:, [0, 2, 3]])
+    assert np.array_equal(hh["lon"][:, 1], hz["lon"][:, 1]) and not np.array_equal(hh["lon"][:, 1], hc["lon"][:, 1])         # it ran on a zero current
+
+
+def test_a_current_that_is_nan_everywhere_fails_every_member_the_way_the_gliders_no_flight_does():
+    s = sim(AnalyticEnv(wind=(-6.0, 0.0), current=(np.nan, 0.0)), m=4)
+    h = s.run(HR, 60.0)                                                           # IndexError before the fix
+    assert h["fail"]["no_current_data"].all() and np.all(h["first"]["no_current_data"] == 0.0) and np.isfinite(h["lon"]).all()
+    zero = sim(AnalyticEnv(wind=(-6.0, 0.0)), m=4).run(HR, 60.0)                  # the step runs on a zero current: the same track and the same other modes
+    assert np.array_equal(h["lon"], zero["lon"]) and all(np.array_equal(h["fail"][k], zero["fail"][k]) for k in usv.FAILS if k != "no_current_data")
+
+
+def test_a_non_finite_wind_vector_is_the_same_labelled_failure():
+    h = sim(HoleEnv(holes=[0, 3], field="wind", wind=(-6.0, 0.0)), m=4).run(HR, 60.0)
+    assert h["fail"]["no_current_data"].tolist() == [True, False, False, True] and np.isfinite(h["lat"]).all()

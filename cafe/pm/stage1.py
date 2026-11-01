@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 
 from .config import load_platform, platform_class, utc
 from .env import conventions as cv, subgrid
+from .env.environment import OutsideData
 from .env.perturb import PerturbedEnv
 from .physics import comms, glider, uas, usv
 from .stats import intervals, sampling, sensitivity, sequential
@@ -129,7 +130,8 @@ def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
             for name, z in (("u10", 10.0), ("anem", P["anemometer_m"]))}
     return dict(**g, depth=np.zeros_like(g["lon"]), surfaced=np.ones_like(g["lon"], bool),
                 fail=sim.fail, first=sim.first, sim=sim, antenna_m=P["rf_antenna_height_m"],
-                sog_ms=path_speed(g["lon"], g["lat"], g["t"]), u10_ms=wind["u10"], wind_anem_ms=wind["anem"],
+                sog_ms=path_speed(g["lon"], g["lat"], g["t"]), stw_ms=np.mean(h["stw"], 0) if len(h["stw"]) else np.full(M, np.nan),
+                u10_ms=wind["u10"], wind_anem_ms=wind["anem"],
                 margin=sim.xte_max / 1e3, margin_name="maximum distance from the station" if sim.mode == "station" else "maximum cross-track error")
 
 
@@ -207,6 +209,23 @@ def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float],
     return turbs, gust
 
 
+def fill_hs(hs: NDArray[Any], lon: NDArray[Any], lat: NDArray[Any], what: str) -> tuple[NDArray[np.float64], int]:
+    """Wave heights (M, n) with every non-finite one (UMWM's sea mask) replaced by the same member's last finite Hs along time, else the next one:
+    a masked cell is not a glass-calm sea (Hs 0 is the deepest two-ray null). -> (filled, number replaced). A member with no finite Hs at all has
+    no sea to read: OutsideData naming its position (lon, lat (M,))."""
+    hs = np.asarray(hs, float)
+    ok = np.isfinite(hs)
+    if ok.all():
+        return hs, 0
+    if not ok.any(1).all():
+        m = int(np.flatnonzero(~ok.any(1))[0])
+        raise OutsideData(f"{what}: member {m} has no wave height (Hs non-finite on the whole track, e.g. the UMWM sea mask) at ({lon[m]:.3f}, {lat[m]:.3f})")
+    k = np.arange(hs.shape[1])
+    fw = np.maximum.accumulate(np.where(ok, k, -1), axis=1)
+    bw = np.minimum.accumulate(np.where(ok, k, hs.shape[1])[:, ::-1], axis=1)[:, ::-1]
+    return np.take_along_axis(hs, np.where(fw >= 0, fw, bw), 1), int((~ok).sum())
+
+
 def _uas_radio(P: dict[str, Any]) -> dict[str, Any]:
     """The platform's RF radio as a comms.rf_margin radio dict: the first block of quad_uas.yaml `radio` with a transmit power
     (rfd900x), its band centre, power and sensitivity, and antenna gains and losses from platforms/radios.yaml's entry of the same
@@ -218,11 +237,11 @@ def _uas_radio(P: dict[str, Any]) -> dict[str, Any]:
 
 
 def _uas_links(env: Any, mission: dict[str, Any], origin: tuple[float, float], ts: NDArray[Any], P: dict[str, Any],
-               M: int) -> list[Callable[[float, NDArray[Any]], NDArray[np.bool_]]]:
+               M: int, filled: list[int] | None = None) -> list[Callable[[float, NDArray[Any]], NDArray[np.bool_]]]:
     """One `link(t, pos_rel (M, 3)) -> lost (M,)` hook per sortie for uas.fly_sortie: the UAS-to-ship RF budget
     (comms.rf_margin: the platform's radio, the mission's ship antenna height, the UAS antenna at deck + altitude + its height above
     the body, each member's Hs at the ship from `env`), lost where the margin is below 0 dB (or beyond the radio horizon). Hs is read
-    on a 30 s grid per sortie, once, and interpolated."""
+    on a 30 s grid per sortie, once, and interpolated; a non-finite Hs is the member's last finite one (fill_hs), and `filled` gets the count per sortie."""
     so, ra = P["sortie"], P["radio"]
     radio = _uas_radio(P)
     hr = float(mission["ship"].get("antenna_height_m", ra["ship_antenna_height_m"]))
@@ -233,7 +252,10 @@ def _uas_links(env: Any, mission: dict[str, Any], origin: tuple[float, float], t
         def full(v: float, n: int = tg.size) -> NDArray[Any]:
             return np.full((M, n), v)
 
-        hs = np.nan_to_num(np.asarray(env.waves(full(origin[0]), full(origin[1]), np.broadcast_to(tg, (M, tg.size)))["Hs"].value, float))
+        hs, n_fill = fill_hs(env.waves(full(origin[0]), full(origin[1]), np.broadcast_to(tg, (M, tg.size)))["Hs"].value, full(origin[0])[:, 0],
+                             full(origin[1])[:, 0], f"UAS link at the ship, sortie {t0:.0f}")
+        if filled is not None:
+            filled.append(n_fill)
 
         def link(t: float, rel: NDArray[Any], tg: NDArray[Any] = tg, hs: NDArray[Any] = hs) -> NDArray[np.bool_]:
             j = int(np.clip(np.searchsorted(tg, t) - 1, 0, tg.size - 2))
@@ -257,7 +279,8 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     P["launch_rule"].update({rename[a]: float(x) for a, x in lr.items() if a in rename})
     ts = launch_times(v["sorties"], origin[0], t0, T, so["duration_s"] * so["hard_stop_factor"])
     turbs, gust = _uas_forcing(env, mission, origin, ts, P, M, seed, members, X.get("bulk_stress_scale"), used)
-    links = _uas_links(env, mission, origin, ts, P, M)
+    hs_filled: list[int] = []
+    links = _uas_links(env, mission, origin, ts, P, M, hs_filled)
     still = lambda t: np.zeros(2)
     sc = dict(battery=X["battery_capacity_scale"], drag=drag * np.ones(M))
     base = getattr(env, "env", env)                                                       # the gridded environment counts the wind points it answers from 3-D
@@ -304,8 +327,10 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
                 margin=np.where(np.isfinite(soc), soc - P["battery"]["reserve_frac"], np.nan), margin_name="battery reserve margin",
                 scrubbed=np.sum([s["scrubbed"] for s in sorties], 0) if sorties else np.zeros(M, int), wind3d=wind3d,
                 sorties=[dict(t_launch=s["t_launch"], scrubbed=s["scrubbed"], wind_ms=s["launch"]["wind_ms"], energy_wh=s["energy_wh"],
-                              soc_end=s["soc_end"], max_tilt_deg=s["max_tilt_deg"], sat_s=s["sat_s"], demand_ratio_max=s["demand_ratio_max"])
-                         for s in sorties])
+                              soc_end=s["soc_end"], max_tilt_deg=s["max_tilt_deg"], sat_s=s["sat_s"], demand_ratio_max=s["demand_ratio_max"],
+                              **({"wp_done": s["wp_done"]} if "wp_done" in s else {}))              # the waypoints reached; an older sortie result has none
+                         for s in sorties],
+                **({"n_wp": int(sorties[0]["n_wp"])} if sorties and "n_wp" in sorties[0] else {}), hs_filled=sum(hs_filled))
 
 
 def refit_drag(scales: dict[str, Any] | None, vid: str, seed: int, members: list[int]) -> float | NDArray[np.float64]:
@@ -453,10 +478,17 @@ def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: ND
     return margin, base + ("" if done == amb.sum() else "; the rest Thorp only (no sound-speed profile or depth there)")
 
 
+def _surfaced(out: dict[str, Any], a: str, b: str, t: NDArray[Any]) -> NDArray[np.bool_]:
+    """(len(t), M): the glider end of a link (a, else b) is on the surface at t (its record interpolated, more than half surfaced)."""
+    g = a if out.get(a, {}).get("class") == "glider" else b
+    return np.stack([np.interp(t, out[g]["t"], out[g]["surfaced"][:, m].astype(float)) > 0.5 for m in range(out[g]["surfaced"].shape[1])], 1)
+
+
 def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, Any], env: Any, M: int, seed: int, members: list[int],
                   used: dict[str, int] | None = None) -> dict[str, Any]:
     """Per member: the fraction of the required moments the link worked, against required_fraction. A moment before an end vehicle's deploy time
-    is not required. `when: surfacing` follows the glider end and `uas_airborne` the UAS end, whichever way round the link names them.
+    is not required. `when: surfacing` follows the glider end (RF, acoustic and Iridium alike: an antenna on a glider works at the surface only) and
+    `uas_airborne` the UAS end, whichever way round the link names them.
     `used`: filled with the seed of the Iridium stream.
 
     `margin_db` is NaN wherever it is not a link budget: not needed, an unknown position, beyond the radio horizon (RF: the NO_LINK_DB clip) or
@@ -474,6 +506,7 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         if x in out:
             live &= (t >= out[x]["t"][0])[:, None]
     invalid_kind: str | None = None
+    hs_filled = 0
     if lk["kind"] == "iridium":
         n = len(t)
         stream = f"iridium/{lk['id']}"
@@ -481,7 +514,7 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
             used[stream] = sampling.member_seed(seed, members[0], stream)
         rng = np.random.default_rng(sampling.member_seed(seed, members[0], stream))
         ok = np.stack([comms.iridium_session(340, rng, M)[0] for _ in range(n)])
-        need = live.copy()
+        need = live & _surfaced(out, a, b, t) if lk["when"] == "surfacing" else live.copy()                  # an antenna on a glider works only at the surface
         method = "Iridium SBD availability/latency model (no range dependence)"
         margin = np.full((n, M), np.nan)
         valid = np.zeros((n, M), bool)
@@ -490,8 +523,7 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         A, B = _pos(a, out, mission, t), _pos(b, out, mission, t)
         d = np.maximum(_dist(A, B), 1.0)
         if lk["when"] == "surfacing":
-            g = a if out.get(a, {}).get("class") == "glider" else b
-            need = np.stack([np.interp(t, out[g]["t"], out[g]["surfaced"][:, m].astype(float)) > 0.5 for m in range(M)], 1)
+            need = _surfaced(out, a, b, t)
         elif lk["when"] == "uas_airborne":
             if fine is not None:  # sample and hold: a flag is the latest sample's, for FINE_S after it; no sortie, no flight
                 i = np.searchsorted(fine["t"], t, side="right") - 1
@@ -505,10 +537,12 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         lonA, latA = A[0], A[1]
         tt = np.broadcast_to(t[:, None], lonA.shape)                         # each member at its own position
         if lk["kind"] == "rf":
-            hs = np.asarray(env.waves(lonA.T, latA.T, tt.T)["Hs"].value, float).T     # the member's own Hs perturbation (members first)
-            margin = comms.rf_margin(d, A[2], B[2], np.nan_to_num(hs), lk["radio"])
+            hs = np.asarray(env.waves(lonA.T, latA.T, tt.T)["Hs"].value, float)         # the member's own Hs perturbation (members first)
+            hs = np.where(np.isfinite(lonA.T) & np.isfinite(latA.T), hs, 0.0)           # an unknown position is no moment the link was required
+            hs, hs_filled = fill_hs(hs, lonA[0], latA[0], f"link {lk['id']}")
+            margin = comms.rf_margin(d, A[2], B[2], hs.T, lk["radio"])
             valid = margin != comms.NO_LINK_DB
-            method = f"two-ray + 4/3-earth horizon, {lk['radio']} (Ament sea roughness, modelled)"
+            method = f"two-ray over a 4/3-radius earth with divergence (Kerr), {lk['radio']} (Ament sea roughness, modelled)"
             margin_kind, invalid_kind = "RF link margin, dB", "beyond_horizon"
         else:
             reg = comms._yaml("modems.yaml")["modems"]                        # "<modem>_<band>" as named in modems.yaml
@@ -523,7 +557,7 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
     frac = np.where(need.sum(0) > 0, (ok & need).sum(0) / np.maximum(need.sum(0), 1), 1.0)
     n_invalid = (need & ~valid).sum(0) if invalid_kind else np.zeros(M, int)
     return dict(frac=frac, success=frac >= lk["required_fraction"], margin_db=np.where(need & valid, margin, np.nan), n_invalid=n_invalid,
-                need_count=need.sum(0), dist_m=dist, method=method, margin_kind=margin_kind, invalid_kind=invalid_kind, t=t)
+                need_count=need.sum(0), dist_m=dist, method=method, margin_kind=margin_kind, invalid_kind=invalid_kind, t=t, hs_filled=hs_filled)
 
 
 def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
@@ -536,7 +570,7 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         r0 = batches[0]["vehicles"][vid]
         r: dict[str, Any] = {k: cat([b["vehicles"][vid][k] for b in batches]) for k in ("lon", "lat", "depth")}
         r["t"] = r0["t"]
-        for k in ("alt", "airborne", "surfaced", "sog_ms", "u10_ms", "wind_anem_ms", "margin"):
+        for k in ("alt", "airborne", "surfaced", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin"):
             if k in r0:
                 r[k] = cat([b["vehicles"][vid][k] for b in batches])
         if "margin_name" in r0:
@@ -552,6 +586,9 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
             r["sorties"] = [dict(t_launch=so["t_launch"],
                                  **{k: np.concatenate([b["vehicles"][vid]["sorties"][i][k] for b in batches]) for k in so if k != "t_launch"})
                             for i, so in enumerate(r0["sorties"])]
+        for k in ("n_wp", "hs_filled"):                       # the pattern length is the same in every batch; the filled Hs samples add up
+            if k in r0:
+                r[k] = r0[k] if k == "n_wp" else sum(b["vehicles"][vid][k] for b in batches)
         if r0.get("wind3d") is not None:
             r["wind3d"] = tuple(int(sum(b["vehicles"][vid]["wind3d"][i] for b in batches)) for i in (0, 1))
         out["vehicles"][vid] = r
@@ -565,6 +602,7 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         for k in ("margin_kind", "invalid_kind"):
             if k in l0:
                 out["links"][lid][k] = l0[k]
+        out["links"][lid]["hs_filled"] = sum(b["links"][lid].get("hs_filled", 0) for b in batches)
     if "seeds" in batches[0]:
         out["seeds"] = {vid: {st: [b["seeds"][vid][st] for b in batches] for st in sd} for vid, sd in batches[0]["seeds"].items()}
     return out
@@ -637,6 +675,10 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
             if sat.size:
                 out["vehicles"][vid]["authority"] = dict(clamp_s_median=float(np.median(sat)), clamp_s_max=float(sat.max()),
                                                          demand_ratio_median=float(np.median(ratio)), demand_ratio_max=float(ratio.max()))
+        if r.get("n_wp") and r.get("sorties") and "wp_done" in r["sorties"][0]:       # the flux profile each flown sortie delivered
+            wp = np.concatenate([np.asarray(so["wp_done"], float)[~np.asarray(so["scrubbed"], bool)] for so in r["sorties"]])
+            if wp.size:
+                out["vehicles"][vid]["profile"] = dict(wp_done_median=float(np.median(wp)), n_wp=int(r["n_wp"]), complete_share=float(np.mean(wp >= r["n_wp"])))
         if r.get("wind3d") and r["wind3d"][1]:
             out["vehicles"][vid]["wind3d_fraction"] = r["wind3d"][0] / r["wind3d"][1]      # the share of the sorties' wind points the 3-D fields answered
     lk_ends = {lk["id"]: lk for lk in mission["links"]}
@@ -672,7 +714,8 @@ def _speed(r: dict[str, Any], platform: str) -> dict[str, Any]:
     calibrated to, in a scenario without current, in uniform wind, sailing to a station (usv.mean_sog), which the mission is not."""
     sog, u10, wa = (np.asarray(r[k], float) for k in ("sog_ms", "u10_ms", "wind_anem_ms"))
     P = usv.load_platform(platform)
-    return dict(sog_ms=sog.tolist(), u10_ms=u10.tolist(), wind_anem_ms=wa.tolist(), ratio=(sog / u10).tolist(), ratio_anem=(sog / wa).tolist(),
+    stw = {} if "stw_ms" not in r else dict(stw_ms=np.asarray(r["stw_ms"], float).tolist(), stw_ms_median=float(np.median(r["stw_ms"])))   # an old run: none
+    return dict(**stw, sog_ms=sog.tolist(), u10_ms=u10.tolist(), wind_anem_ms=wa.tolist(), ratio=(sog / u10).tolist(), ratio_anem=(sog / wa).tolist(),
                 sog_ms_median=float(np.median(sog)), u10_ms_median=float(np.median(u10)), ratio_median=float(np.median(sog / u10)),
                 ratio_anem_median=float(np.median(sog / wa)), calibration_ratio=float(P["chiodi_mean_sog_ms"] / P["chiodi_mean_wind_ms"]))
 
@@ -757,6 +800,10 @@ def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger 
         done = all(stops) or n >= n_max
         log(f"stage1: {n} members, {sum(stops)}/{len(stops)} decided; batch wall per vehicle: "
             + ", ".join(f"{k} {r['wall_s']:.0f} s" for k, r in b["vehicles"].items()))
+    n_fill = sum(r.get("hs_filled", 0) for r in (*res["vehicles"].values(), *res["links"].values()))
+    if ledger is not None and n_fill:
+        ledger.note(f"{n_fill} non-finite wave-height samples (UMWM sea mask) on the UAS and RF link tracks were replaced by the same member's last finite Hs "
+                    "(next one at the start); Hs 0 would be a glass-calm sea, the deepest two-ray null")
     summ = summarize(res, names, mission, intervals.n_certify())
     return dict(res=res, summary=summ, names=names, priors={k: marg[k] for k in names}, n=len(res["U"]),
                 certify=len(res["U"]) >= intervals.n_certify(), n_certify=intervals.n_certify(),

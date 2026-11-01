@@ -63,8 +63,14 @@ def quiet(_):
     return None
 
 
-def ctx_for(run_dir, budget_name="ci", mission=MISSION_PATH, gpus=0, log=quiet):
-    return pipeline.Context(mission, budget_name, gpus, run_dir, log)
+def ctx_for(run_dir, budget_name="ci", mission=MISSION_PATH, gpus=0, log=quiet, record=True):
+    """A Context, with the record ingest leaves of the surface layer it reads (ingest/derived.digest.json) when the cache has one, so that a test of a
+    later stage does not have to run ingest first. A test of the check itself writes the record with a real ingest instead."""
+    ctx = pipeline.Context(mission, budget_name, gpus, run_dir, log)
+    store = ctx.cache / "derived.zarr"
+    if record and store.is_dir() and not (ctx.run_dir / "ingest" / surface.DIGEST).exists():
+        ctx.path("ingest", surface.DIGEST).write_text(json.dumps(dict(built_from=None, store_sha256=surface.store_sha256(store))))
+    return ctx
 
 
 def run_stage(fn, ctx, name, *args):
@@ -186,7 +192,7 @@ def test_a_changed_cafe_module_outside_cafe_pm_reruns_the_stages(tmp_path, monke
 # ---------------------------------------------------------------------------------------------------------------- context
 
 def test_context_plans_the_budget_for_the_vehicle_classes(tmp_path, data):
-    ctx = ctx_for(tmp_path / "r")
+    ctx = ctx_for(tmp_path / "r", record=False)
     assert ctx.classes == CLASSES and ctx.mission["name"] == "ci_fixture" and ctx.run_dir == tmp_path / "r" and ctx.mission_path == MISSION_PATH
     assert ctx.plan["budget"] == "ci" and (ctx.plan["n_max"], ctx.plan["n_min"], ctx.plan["batch"]) == (16, 8, 16)
     assert set(ctx.plan["member_cost"]) == set(CLASSES)
@@ -207,7 +213,7 @@ def test_context_hash_covers_mission_budget_gpus_and_code(tmp_path, monkeypatch)
 
 
 def test_context_path_creates_the_parents_and_nothing_else(tmp_path):
-    ctx = ctx_for(tmp_path / "r")
+    ctx = ctx_for(tmp_path / "r", record=False)
     p = ctx.path("x", "y", "z.json")
     assert p == tmp_path / "r" / "x" / "y" / "z.json" and p.parent.is_dir() and not p.exists()
 
@@ -274,6 +280,22 @@ def test_a_fresh_run_writes_the_plan_the_mission_and_one_chained_ledger_per_stag
         assert [pathlib.Path(o["path"]).name for o in d["outputs"]] == ["out.txt"]
         prev = run / "checkpoints" / st / "ledger.json"
     assert audit.ledger_problems(run) == []
+
+
+def test_a_corrupt_training_table_stops_the_run_before_the_first_stage_and_fetch_does_not_read_it(tmp_path, monkeypatch):
+    """Round 4 M-23: the emulator stage read the shared table after stages 1 to 3 and 1b; the run now reads it once at the start."""
+    calls = []
+    stub_stages(monkeypatch, calls)
+    t = tmp_path / "train.parquet"
+    t.write_bytes(b"not parquet")
+    with pytest.raises(config.ConfigError, match=f"training table {t} cannot be read"):
+        go(tmp_path / "run", emulator_table=t)
+    assert calls == [] and not (tmp_path / "run" / "checkpoints").exists()
+    go(tmp_path / "f", stop_after="ingest", emulator_table=t)                                           # fetch needs no table
+    assert calls == ["ingest"]
+    t.unlink()
+    go(tmp_path / "run2", emulator_table=t)                                                             # an absent table is a new one
+    assert calls[1:] == STAGES
 
 
 def test_resume_skips_every_clean_stage(tmp_path, monkeypatch):
@@ -356,7 +378,7 @@ def test_a_change_of_code_budget_gpus_or_mission_reruns_every_stage(tmp_path, mo
 def test_a_failed_self_check_stops_the_run_and_the_stage_is_redone_on_resume(tmp_path, monkeypatch):
     calls, log = [], []
     stub_stages(monkeypatch, calls, fail="stage1")
-    with pytest.raises(ledger.StageFailed, match="stage stage1: self-checks failed: \\['boom'\\]"):
+    with pytest.raises(ledger.StageFailed, match=r"stage stage1: self-checks failed: boom \(ledger: "):
         go(tmp_path / "run")
     assert calls == ["ingest", "hangar", "stage1"] and read_ledger(tmp_path / "run", "stage1")["ok"] is False
     assert not (tmp_path / "run" / "checkpoints" / "windows").exists()
@@ -436,6 +458,7 @@ def boom(*a, **k):
 
 
 def test_ingest_uses_a_cache_that_covers_the_window_then_validates_against_the_moorings(tmp_path, data, monkeypatch):
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "warm"), "ingest")  # the fixture's surface layer was built without a key: this ingest rebuilds it once
     monkeypatch.setattr(orca, "ingest", boom)
     monkeypatch.setattr(surface, "build", boom)
     log = []
@@ -448,8 +471,29 @@ def test_ingest_uses_a_cache_that_covers_the_window_then_validates_against_the_m
     first = d["inputs"][0]
     assert first["ref"].startswith("https://orca.") and first["sha256"] is None and first["kind"] == "remote"
     outs = {pathlib.Path(o["path"]).name: o["sha256"] for o in d["outputs"]}
-    assert set(outs) == {"manifest.json", "tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json"} and outs["manifest.json"] == ledger.sha256(man)
+    assert set(outs) == {"manifest.json", "tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json", "derived.digest.json"}
+    assert outs["manifest.json"] == ledger.sha256(man)
+    store = next(i for i in d["inputs"] if i["ref"].endswith("derived.zarr"))
+    recorded = json.loads((tmp_path / "r" / "ingest" / surface.DIGEST).read_text())["store_sha256"]
+    assert store["sha256"] == surface.store_sha256(data.cache / "derived.zarr") == recorded
     assert not [n for n in d["notes"] if n.startswith("cold fetch") or "pad_deg" in n]  # warm cache and a pad the mission sets: nothing to say
+
+
+def test_the_offline_note_says_to_unset_the_variable_unless_another_command_is_named(tmp_path, data_copy):
+    """Round 4 M-22: the note named `fetch` as the command to run, which for `fetch` is the command that was just run."""
+    shutil.rmtree(data_copy / "cache" / "ci_fixture" / "orca")
+    shutil.rmtree(data_copy / "ocean")
+    with pytest.raises(ledger.StageFailed) as e:
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    notes = {c["name"]: c["note"] for c in read_ledger(tmp_path / "r", "ingest")["checks"] if not c["ok"]}
+    again = f"unset CAFE_OFFLINE and run `python -m cafe.pm fetch --mission {MISSION_PATH}`"
+    assert f"CAFE_OFFLINE is set, so nothing is downloaded: {again}" in notes["orca_present"]
+    assert "orca_present: the orca WRF/UMWM cache for the window is not cached" in str(e.value)
+    ctx = ctx_for(tmp_path / "h")
+    with ledger.Ledger(ctx.run_dir, "ingest", ctx.hash) as L:
+        pipeline._need(ctx, L, "x", "the thing", lambda: False, boom, hint="python -m cafe.pm ingest-ocean --mission M")
+        assert L.d["checks"][0]["note"].endswith("so nothing is downloaded: run `python -m cafe.pm ingest-ocean --mission M`")
+        L.d["checks"].clear()
 
 
 def test_ingest_fetches_when_the_manifest_is_missing_or_does_not_cover_the_window(tmp_path, data_copy, monkeypatch):
@@ -522,6 +566,87 @@ def test_the_box_pad_is_the_missions_or_sized_from_the_window_and_the_ledger_say
         run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r", mission=tmp_path / "m.yaml"), "ingest")
     notes = read_ledger(tmp_path / "r", "ingest")["notes"]
     assert notes[0].startswith("box.pad_deg is not set by the mission: sized 1 deg from the window (1.5 d) x 0.5 m/s") and "set pad_deg" in notes[0]
+
+
+def test_ingest_keeps_the_derived_layer_it_built_and_rebuilds_it_when_the_cache_or_the_code_changes(tmp_path, data_copy, monkeypatch):
+    """Round 4 M-2: the layer was rebuilt only when its layout number changed, so an edited orca cache or code kept the old one (18 h to 2.4 d older than
+    the cache beside it in the demo). It is built from a key over the cache files and the code, and a second ingest of the same inputs keeps it."""
+    store = data_copy / "cache" / "ci_fixture" / "derived.zarr"
+    attrs = lambda: json.loads((store / "zarr.json").read_text())["attributes"]                       # noqa: E731
+    (store.parent / surface.DIGEST).unlink(missing_ok=True)  # an earlier test may have left the copied layer current
+    logs = []
+
+    def ingest(name):
+        c = ctx_for(tmp_path / name, log=logs.append)
+        run_stage(pipeline.s_ingest, c, "ingest")
+        return c, (store / "zarr.json").stat().st_mtime_ns, attrs()["built_from"]
+    c, t1, key1 = ingest("a")
+    assert key1 and json.loads((c.cache / surface.DIGEST).read_text()) == dict(built_from=key1, store_sha256=surface.store_sha256(store))
+    assert any(m.startswith("surface layer: COARE on 37 hours") for m in logs)
+    logs.clear()
+    _, t2, key2 = ingest("b")
+    assert (t2, key2) == (t1, key1) and not any(m.startswith("surface layer:") for m in logs)           # same inputs, same code: not rebuilt
+    real_digest = pipeline.code_digest
+    monkeypatch.setattr(pipeline, "code_digest", lambda: "an edited module")
+    _, t3, key3 = ingest("c")
+    assert t3 > t2 and key3 != key1 and any(m.startswith("surface layer: COARE") for m in logs)         # a code edit rebuilds it
+    monkeypatch.setattr(pipeline, "code_digest", real_digest)
+    man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
+    man.write_text(man.read_text().replace('"hours": 37', '"hours": 37, "refetched": true'))
+    _, t4, key4 = ingest("d")
+    assert t4 > t3 and key4 not in (key1, key3)                                                          # so does a changed cache file
+
+
+def test_a_store_edited_after_ingest_fails_the_stage_that_reads_it_and_the_next_ingest_rebuilds_it(tmp_path, data_copy, monkeypatch):
+    """Round 4 M-2, the reviewer's tamper run: u* x 3 in the stored layer left the ledger ok and the check list clean (the layer was in no hash)."""
+    import zarr
+    store = data_copy / "cache" / "ci_fixture" / "derived.zarr"
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    good = surface.store_sha256(store)
+    clean = zarr.open_group(store, mode="r")["ustar"][:].mean()
+    g = zarr.open_group(store, mode="r+")
+    g["ustar"][:] = 3.0 * g["ustar"][:]
+    monkeypatch.setattr(stage1, "run", fake_run({}))
+    ctx = pipeline.Context(MISSION_PATH, "ci", 0, tmp_path / "r", quiet)                                  # the record is the one ingest wrote
+    ctx._env = types.SimpleNamespace(subgrid=object())                                                   # an environment that reads the layer
+    with pytest.raises(ledger.StageFailed, match="derived_unchanged"):
+        run_stage(pipeline.s_stage1, ctx, "stage1")
+    c = check_of(read_ledger(tmp_path / "r", "stage1"), "derived_unchanged")
+    assert not c["ok"] and c["limit"] == good and c["value"] == surface.store_sha256(store) != good and "rerun" in c["note"]
+    c = ctx_for(tmp_path / "n")                                                                         # a rerun of ingest finds it changed and rebuilds it
+    run_stage(pipeline.s_ingest, c, "ingest")
+    assert surface.store_sha256(store) == json.loads((c.cache / surface.DIGEST).read_text())["store_sha256"]
+    assert zarr.open_group(store, mode="r")["ustar"][:].mean() == pytest.approx(clean)
+
+
+def test_without_ingests_record_the_stage_that_reads_the_surface_layer_fails_its_check(tmp_path, monkeypatch):
+    """Without ingest's record there is nothing to compare the store with, which is a failed check, not a pass; an environment with no layer has none."""
+    monkeypatch.setattr(stage1, "run", fake_run({}))
+    ctx = pipeline.Context(MISSION_PATH, "ci", 0, tmp_path / "r", quiet)
+    ctx._env = types.SimpleNamespace(subgrid=object())
+    with pytest.raises(ledger.StageFailed, match="derived_unchanged: .*derived.digest.json is missing"):
+        run_stage(pipeline.s_stage1, ctx, "stage1")
+    ctx._env = "ENV"  # an environment with no layer (the analytic ones) has no check
+    L = ledger.Ledger(tmp_path / "y", "s", "h")
+    pipeline._derived_unchanged(ctx, L)
+    assert L.d["checks"] == [] and L.d["inputs"] == []
+
+
+def test_a_derived_store_that_does_not_span_the_window_is_refused_not_clipped(tmp_path, data_copy):
+    """Round 4 M-2 (3): `Axis.locate` clips a query outside the axis to its edge, so a window edited past the stored hours was served the last stored hour."""
+    ctx = ctx_for(tmp_path / "ok")
+    assert pipeline._derived_span_problem(ctx.cache, ctx.window_s()) is None and ctx.env.subgrid is not None
+    t0, t1 = ctx.window_s()
+    assert pipeline._derived_span_problem(ctx.cache, (t0, t1 + 3600.0)) is None                           # one hour is the step of the fields
+    early = pipeline._derived_span_problem(ctx.cache, (t0 - 7200.0, t1))
+    assert early.startswith("its hours span 2023-03-01 18:00 to 2023-03-03 06:00 UTC, the mission window is 2023-03-01 16:00")
+    raw = yaml.safe_load(MISSION_PATH.read_text())
+    raw["window"]["end"] = "2023-03-04T06:00:00Z"
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(raw))
+    longer = ctx_for(tmp_path / "long", mission=tmp_path / "m.yaml")
+    with pytest.raises(config.ConfigError, match=r"/derived\.zarr: its hours span 2023-03-01 18:00 to 2023-03-03 06:00 UTC, the mission window is "
+                                                 r"2023-03-01 18:00 to 2023-03-04 06:00 UTC; rerun `python -m cafe.pm fetch --mission .*m\.yaml` to rebuild"):
+        assert longer.env is None
 
 
 def test_ingest_builds_the_derived_surface_layer_when_it_is_missing(tmp_path, data_copy):
@@ -633,7 +758,7 @@ def test_the_fitted_wind_prior_removes_the_model_bias_and_stage1_accepts_it(tmp_
 
 def test_without_a_tao_download_the_default_priors_stand_and_the_ledger_says_so(tmp_path, data_copy):
     shutil.rmtree(data_copy / "tao")
-    ctx = ctx_for(tmp_path / "r")
+    ctx = ctx_for(tmp_path / "r", record=False)
     d = tao_stage(ctx, ctx.env.tw.x[0], ctx.env.tw.x[-1])
     assert d["notes"] == [f"no TAO/TRITON download at {data_copy / 'tao'}: wind priors stay the perturbations.yaml defaults (run `make fetch`)"]
     assert d["checks"] == [] and d["outputs"] == [] and d["inputs"] == [] and not (ctx.run_dir / "ingest").exists()
@@ -1420,17 +1545,47 @@ def test_a_trained_emulator_is_scored_and_held_to_the_briefs_acceptance(tmp_path
     g = out["glider_eq"]
     assert g["trained"] and g["cls"] == "glider" and g["rows"] == 142 and g["n_test"] == 28 and g["rmse"]["p_fail"] <= 0.05 and not out["usv"]["trained"]
     assert out["glider_2n"] == g and g["acceptance"] == dict(rmse_ok=True, coverage_ok=True, query_ok=True)
-    assert [check_of(d, f"emulator_{k}_glider")["ok"] for k in ("rmse", "coverage", "query_ms")] == [True] * 3
-    assert check_of(d, "emulator_rmse_glider")["limit"] == 0.05 and "Monte-Carlo noise" in check_of(d, "emulator_rmse_glider")["note"]
+    assert g["used"] is True and g["unused_reason"] is None
+    assert not [c for c in d["checks"] if c["name"].startswith(("emulator_rmse", "emulator_coverage", "emulator_query"))]
+    notes = [n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7")]
+    assert [n.split(":")[1].strip() for n in notes] == ["BRIEF 2.7 RMSE met", "BRIEF 2.7 coverage met", "BRIEF 2.7 query time met"]
+    assert "Monte-Carlo noise" in notes[0]
 
 
-def test_a_trained_emulator_that_misses_the_acceptance_fails_the_stage(tmp_path, table, fake_stage1):
-    seed_table(table, bad=True)
+def test_a_trained_emulator_that_misses_the_acceptance_is_noted_not_used_and_does_not_fail_the_stage(tmp_path, table, fake_stage1):
+    """Follow-up to round 4 M-3: the BRIEF 2.7 gates are a statistical draw on 28 held-out points; a miss used to abort the run after stages 1 to 3."""
+    seed_table(table, bad=True)                                                                          # pure noise: the RMSE gate is missed by a wide margin
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
-    with pytest.raises(ledger.StageFailed, match="emulator_rmse_glider"):
-        run_stage(pipeline.s_emulator, ctx, "emulator")
-    c = check_of(read_ledger(ctx.run_dir, "emulator"), "emulator_rmse_glider")
-    assert not c["ok"] and c["value"] > 0.2 and c["limit"] == 0.05
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")                                                  # no StageFailed
+    assert not [c for c in d["checks"] if c["name"].startswith(("emulator_rmse", "emulator_coverage", "emulator_query"))]
+    assert all(c["ok"] for c in d["checks"]) and {"emulator_training_points_glider", "emulator_range_guard_glider"} <= {c["name"] for c in d["checks"]}
+    rm = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 RMSE"))
+    assert rm.startswith("emulator glider: BRIEF 2.7 RMSE MISSED: 0.") and "against the limit 0.05" in rm
+    cov = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 coverage "))
+    assert "misses this by chance with probability" in cov and "held-out points" in cov
+    why = "the glider emulator missed BRIEF 2.7 acceptance (RMSE"
+    assert any(n.startswith(f"emulator glider not used for answers: {why}") and n.endswith("so Stage 1 answers") for n in d["notes"])
+    g = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())["glider_eq"]
+    assert g["trained"] and g["used"] is False and g["unused_reason"].startswith(why) and g["acceptance"]["rmse_ok"] is False
+    flip = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]
+    assert flip and all(not f["emulator"] for f in flip.values())                                          # Stage 1 answered the flip search
+    hold = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())
+    assert all(t["reason"].startswith(hold[vid]["unused_reason"]) for vid, f in flip.items() for t in f["tried"] if not t["invalid"])  # holdout.json's reason
+    assert len(fake_stage1) >= 2
+
+
+def test_a_missed_coverage_gate_alone_completes_the_run_with_a_note_that_gives_the_chance_of_missing_it(tmp_path, table, fake_stage1, monkeypatch):
+    from cafe.pm import whatif
+    seed_table(table)
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.5, coverage=0.0, query_ms=10.0))     # coverage must be exactly nominal: missed by any hold-out
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    assert not [c for c in d["checks"] if c["name"].startswith("emulator_coverage")]
+    n = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 coverage MISSED: "))
+    assert re.fullmatch(r"emulator glider: BRIEF 2\.7 coverage MISSED: 0\.\d{3} against 0\.90 \+- 0\.0; a calibrated emulator misses this by chance with "
+                        r"probability 1\.000 on 28 held-out points", n), n
+    g = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())["glider_eq"]
+    assert g["used"] is False and "(coverage)" in g["unused_reason"]
 
 
 def holdout_rows(ctx, vid="glider_eq"):
@@ -1616,7 +1771,7 @@ def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, tab
     fresh_blocks = [m for m in later if m[0] >= 16 * (n_var + 2)]
     assert len(fresh_blocks) == h["fresh_points"] and len({m[0] for m in fresh_blocks}) == len(fresh_blocks)         # each fresh draw its own unused block
     assert h["fresh_points"] == 0 or (h["rmse_gate"] >= h["rmse_debiased"] and h["rmse_gate"] >= h["rmse_fresh_debiased"])
-    note = check_of(d, "emulator_rmse_glider")["note"]
+    note = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 RMSE"))
     assert ("point(s) re-run on fresh members:" in note) == bool(h["fresh_points"])
     assert ("only the in-sample score is judged" in note) == (not h["fresh_points"])
     assert h["fresh_points"] >= 1, "no variant row landed in the hold-out: the fresh-draw wiring is not exercised"
@@ -1722,6 +1877,17 @@ def test_the_first_run_makes_a_clean_chain_of_nine_ledgers(ci_runs):
     assert ci_runs.log1[0].startswith("budget ci (10 min), 0 GPU(s), 1.50 mission days") and "stage 1: 8..8 members in batches of 8" in ci_runs.log1[0]
 
 
+def test_every_stage_that_reads_the_surface_layer_recorded_that_it_was_unchanged_since_ingest(ci_runs):
+    """Round 4 M-2, on the real run: windows, stage 1, 1b and the emulator each compare the store with ingest's record and list that record as an input."""
+    rec = ci_runs.run / "ingest" / surface.DIGEST
+    for st in ("stage1", "windows", "stage1b", "emulator"):
+        d = read_ledger(ci_runs.run, st)
+        c = check_of(d, "derived_unchanged")
+        assert c["ok"] and c["value"] == c["limit"] == json.loads(rec.read_text())["store_sha256"], st
+        assert any(i["ref"] == str(rec) for i in d["inputs"]), st
+    assert audit.ledger_problems(ci_runs.run) == []
+
+
 def test_stage1_ran_with_the_tao_fitted_priors_and_one_stratified_batch(ci_runs):
     f = ci_runs.first
     s = f.summary1
@@ -1733,7 +1899,8 @@ def test_stage1_ran_with_the_tao_fitted_priors_and_one_stratified_batch(ci_runs)
     assert any(i["ref"].endswith("ingest/priors_fitted.json") for i in f.ledger1["inputs"]) and f.ledger1["seeds"] == {"mission": 20230301}
     c = check_of(f.ledger1, "lhs_stratified_batch1")
     assert c["ok"] and c["limit"] == pytest.approx(1 / 8)
-    assert [x["name"] for x in f.ledger1["checks"]] == ["lhs_stratified_batch1", "ensemble_size", "sampled_marginals_match_priors", "common_random_numbers",
+    assert [x["name"] for x in f.ledger1["checks"]] == ["derived_unchanged", "lhs_stratified_batch1", "ensemble_size", "sampled_marginals_match_priors",
+                                                         "common_random_numbers",
                                                          "members_inside_data", "wilson_matches_statsmodels", "failure_modes_recorded"]
     assert any("8 members in" in n for n in f.ledger1["notes"])
 

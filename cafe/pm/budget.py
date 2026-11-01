@@ -65,7 +65,8 @@ def member_cost(thr: dict[str, Any], cls: str) -> tuple[tuple[float, float], str
     labelled fallback (homebase, 2026-10-29, real TEPEX-C mission at load ~20)."""
     e = thr.get("stage1", {}).get(cls)
     if e:
-        return (e["s_per_batch_day"], e["s_per_member_day"]), f"measured ({e['measured']}, {e['host']}, load {e.get('load_1min')})"
+        flat = "; the bench did not resolve a per-member slope, so a batch costs the same whatever its size" if e.get("slope_resolved") is False else ""
+        return (e["s_per_batch_day"], e["s_per_member_day"]), f"measured ({e['measured']}, {e['host']}, load {e.get('load_1min')}){flat}"
     return FALLBACK_COST[cls], "NOT MEASURED on this machine (run `make bench`): planner fallback"
 
 

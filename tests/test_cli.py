@@ -511,6 +511,30 @@ def test_fetch_of_a_mission_no_budget_can_run_still_reaches_ingest(tmp_path, mon
         pipeline.run(tmp_path / "long.yaml", "quick", 0, tmp_path / "r", stop_after="ingest", log=lambda _: None)
 
 
+def test_a_failed_stage_self_check_prints_an_error_line_with_the_note_and_exits_1_without_a_traceback(tmp_path, monkeypatch, capsys):
+    """Round 4 M-22: a stage whose self-check fails used to end in a Python traceback; the one thing to do (the offline note) was only in the ledger,
+    and for `fetch` the note named `fetch` itself."""
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "data")
+    monkeypatch.setattr(ocean_mod, "DATA", tmp_path / "data")
+    monkeypatch.setenv("CAFE_OFFLINE", "1")
+    assert cli.main(["fetch", "--mission", MISSION, "--out", str(tmp_path / "r")]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("error: stage ingest: self-checks failed: orca_present: the orca WRF/UMWM cache for the window is not cached and CAFE_OFFLINE is set")
+    assert f"unset CAFE_OFFLINE and run `python -m cafe.pm fetch --mission {MISSION}`" in err and "and 1 more (ledger: " in err and "Traceback" not in err
+    assert err.count("\n") == 1 and (tmp_path / "r" / "checkpoints" / "ingest" / "ledger.json").is_file()
+
+
+def test_a_corrupt_training_table_stops_the_run_before_any_stage_with_exit_2(tmp_path, monkeypatch, capsys):
+    """Round 4 M-23: the emulator stage used to read the table after stages 1 to 3 and 1b, and die with ArrowInvalid."""
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "data")
+    monkeypatch.setattr(ocean_mod, "DATA", tmp_path / "data")
+    t = tmp_path / "train.parquet"
+    t.write_bytes(b"")
+    assert cli.main(["run", "--mission", MISSION, "--budget", "ci", "--out", str(tmp_path / "r"), "--emulator-table", str(t)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"error: training table {t} cannot be read") and not (tmp_path / "r" / "checkpoints").exists()
+
+
 @pytest.mark.parametrize("bad", ["-5", "x", "1.5"])
 def test_a_seed_that_numpy_would_refuse_is_refused_by_argparse(bad, capsys):
     with pytest.raises(SystemExit) as e:

@@ -24,8 +24,9 @@ file); their stored-file contracts belong to cafe.pm.stage3. The multi-hour GPU/
 
 Broken configuration. `--broken tests/fixtures/broken/wave_direction.yaml` sets $CAFE_PM_OVERLAY to that yaml for this run
 (cafe.pm.env.conventions reads `waves.direction_convention` from it, so UMWM's angles are read with WW3's convention). The
-exit code is then inverted, because the point is that the receipts notice: 0 if at least one receipt failed, 1 if the broken
-configuration passed everything (what `make broken` and the CI job check). The table goes to runs/receipts_broken.json.
+exit code is then inverted, because the point is that the receipts notice: the same receipts are first run without the overlay, and
+the exit code is 0 if at least one receipt that passes there fails with it, 1 if none does (a receipt that fails either way, or is not run
+on this machine, proves nothing about the overlay; what `make broken` and the CI job check). The table goes to runs/receipts_broken.json.
 """
 from __future__ import annotations
 
@@ -413,15 +414,21 @@ def write_meta(table: pathlib.Path, slow: bool = False, only: list[str] | None =
 
 def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib.Path | None = None, out: str | pathlib.Path | None = None,
         log: Callable[[str], None] = _say) -> tuple[list[dict[str, Any]], int]:
-    """-> (rows, exit code). `broken`: the overlay yaml to apply for this run (exit code inverted, see the module docstring)."""
+    """-> (rows, exit code). `broken`: the overlay yaml to apply for this run (exit code inverted, see the module docstring). The same receipts are
+    first run without the overlay: the broken run counts only receipts that pass in that baseline and fail with the overlay."""
     from .env import conventions as cv
     old = os.environ.get(cv.OVERLAY_ENV)
+    base: dict[str, str] = {}
     if broken:
         if not pathlib.Path(broken).is_file():
             raise FileNotFoundError(f"broken configuration {broken}: no such file")
-        os.environ[cv.OVERLAY_ENV] = str(pathlib.Path(broken).resolve())
-        log(f"broken configuration {broken}: waves.direction_convention = {cv.wave_direction_convention()}")
     try:
+        if broken:
+            os.environ.pop(cv.OVERLAY_ENV, None)
+            log("baseline, without the overlay:")
+            base = {r["id"]: r["kind"] for r in collect(slow, only, log)}
+            os.environ[cv.OVERLAY_ENV] = str(pathlib.Path(broken).resolve())
+            log(f"broken configuration {broken}: waves.direction_convention = {cv.wave_direction_convention()}")
         rows = collect(slow, only, log)
     finally:
         if old is None:
@@ -435,9 +442,9 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
     counts, text = summary(rows)
     log(text)
     log(f"table: {out}")
-    failed = counts["fail"] > 0
     if broken:
-        log("the broken configuration failed "
-            + (f"{counts['fail']} receipts, as required" if failed else "NO receipt: the receipts cannot see a wrong wave-direction convention"))
-        return rows, 0 if failed else 1
-    return rows, 1 if failed else 0
+        caught = [r["id"] for r in rows if r["kind"] == "fail" and base.get(r["id"]) == "pass"]
+        log(f"the broken configuration failed {len(caught)} receipt(s) that pass without it: {', '.join(caught[:3])}" if caught else
+            "NO receipt that passes without the overlay fails with it: the receipts cannot see this configuration")
+        return rows, 0 if caught else 1
+    return rows, 1 if counts["fail"] > 0 else 0

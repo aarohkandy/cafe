@@ -74,7 +74,7 @@ def test_readme_quick_start_runs_every_python_command_inside_the_image_with_the_
     block = re.search(r"```bash\n(make install.*?)```", text("README.md"), re.S).group(1)
     wrapper = lambda t: re.search(r"pm\(\) \{ docker run.*?\"\$@\"; \}", t, re.S).group(0)  # noqa: E731
     assert wrapper(block) == wrapper(text("docs", "RUNBOOK.md"))
-    cmds = [ln.split("#")[0].strip() for ln in block.splitlines() if ln and not ln.startswith(("export", "pm()", "       -v"))]
+    cmds = [ln.split("#")[0].strip() for ln in block.splitlines() if ln and not ln.startswith(("export", "pm()", "       -"))]
     assert cmds[0] == "make install" and all(c.startswith("pm ") for c in cmds[1:]) and len(cmds) == 3
     assert "pm python -m cafe.pm fetch --mission missions/tepex_c_demo.yaml" in cmds and "make fetch" not in block
     mk = text("Makefile")
@@ -91,3 +91,16 @@ def test_runbook_says_which_run_directories_make_audit_checks_and_what_make_ci_e
     """M-24."""
     rb = text("docs", "RUNBOOK.md")
     assert "ledgers of runs/quick, runs/overnight and runs/4h (those that exist)" in rb and "audit --ledgers-only runs/ci" in rb
+
+
+# ---- review round 4 (M-24)
+
+def test_the_runbook_and_readme_wrappers_pass_the_commit_and_the_clean_tree_flag_because_the_image_has_no_git():
+    """M-24: `ledger.git_dirty` falls back to $CAFE_GIT_DIRTY, which only pm.sh set, so a lab user's golden always had `dirty: null`."""
+    flag = 'CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain)" ]; then echo 1; else echo 0; fi)'
+    for t in (text("docs", "RUNBOOK.md"), text("README.md")):
+        wrapper = re.search(r"pm\(\) \{ docker run.*?\"\$@\"; \}", t, re.S).group(0)
+        assert "CAFE_GIT_SHA=" in wrapper and flag in wrapper
+    assert "CAFE_GIT_DIRTY" in text("pm.sh") and "git" not in text("Dockerfile.pm").lower().replace("github", "")
+    rb = text("docs", "RUNBOOK.md")
+    assert "dirty: null" in rb and "git status --porcelain" in rb

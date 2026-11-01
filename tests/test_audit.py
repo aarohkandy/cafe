@@ -131,6 +131,28 @@ def test_a_directory_input_is_checked_against_the_manifest_hash_the_store_carrie
     assert any(f"input {ocean} changed since the stage ran (store manifest bbbbbbbbbbbb, ledger aaaaaaaaaaaa)" in p for p in audit.ledger_problems(run))
 
 
+def test_the_derived_surface_layer_is_rehashed_over_every_file_of_the_store(tmp_path):
+    """Round 4 M-2: derived.zarr was in no ledger, so a store edited after ingest left the audit clean. Its input hash is over the path and bytes of every
+    file (surface.store_sha256), and a changed byte, an added file or a removed one are all caught."""
+    from cafe.pm.env.surface import store_sha256
+    run = make_run(tmp_path)
+    store = zstore(tmp_path / "cache" / "derived.zarr", {"layout_version": 2})
+    (store / "ustar" / "c").mkdir(parents=True)
+    (store / "ustar" / "c" / "0.0").write_bytes(b"\x00\x01\x02")
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(store, sha=store_sha256(store), kind="derived surface layer")
+        L.output(run / "report.out")
+    assert audit.ledger_problems(run) == []
+    for change in (lambda: (store / "ustar" / "c" / "0.0").write_bytes(b"\x00\x01\x03"), lambda: (store / "extra").write_text("x"),
+                   lambda: (store / "ustar" / "c" / "0.0").unlink()):
+        change()
+        assert any(f"input {store} (the derived surface layer) changed since the stage ran" in p for p in audit.ledger_problems(run))
+        (store / "extra").unlink(missing_ok=True)
+        (store / "ustar" / "c" / "0.0").write_bytes(b"\x00\x01\x02")
+        assert audit.ledger_problems(run) == []
+
+
 def test_a_directory_input_without_a_manifest_attribute_cannot_be_checked_and_is_not_blamed(tmp_path):
     run = make_run(tmp_path)
     bare = tmp_path / "plain_dir"

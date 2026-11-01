@@ -5,8 +5,11 @@
 Parameters live in platforms/radios.yaml and platforms/modems.yaml (each with its source and its assumptions).
 
 References
-- Two-ray: L = -20 log10[(lam/4 pi d) 2 sin(2 pi ht hr / lam d)] (BRIEF 2.8), here with exact path lengths, reflection
-  coefficient -1 (grazing, smooth sea) and the Ament roughness factor on the reflected ray.
+- Two-ray: L = -20 log10[(lam/4 pi d) 2 sin(2 pi ht hr / lam d)] (BRIEF 2.8), here over a 4/3-radius earth: the reflection point from
+  Kerr's cubic, the antenna heights above the tangent plane there, exact path lengths, reflection coefficient -1 (grazing, smooth sea),
+  the divergence factor of the curved surface and the Ament roughness factor on the reflected ray.
+- Kerr, D.E. (ed.) (1951), Propagation of Short Radio Waves, MIT Rad. Lab. Series 13, ch. 2 (reflection point on a spherical earth,
+  divergence factor); Blake, L.V. (1980), Radar Range-Performance Analysis, ch. 5.
 - Ament, W.S. (1953), "Toward a theory of reflection by a rough surface", Proc. IRE 41(1), 142-146; Beckmann & Spizzichino
   (1963), The Scattering of EM Waves from Rough Surfaces, ch. 5: rho_s = exp[-2 (2 pi sigma_h sin(psi)/lam)^2], sigma_h = Hs/4.
 - Radio horizon: d = 4.12 (sqrt(ht) + sqrt(hr)) km, h in m, effective earth radius 4/3 x 6371 km
@@ -64,19 +67,72 @@ def ament_rho(hs: FA, grazing: FA, wavelength: FA) -> F:
     return np.exp(-2.0 * (2 * np.pi * (hs / 4.0) * np.sin(grazing) / wavelength) ** 2)
 
 
-def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA) -> F:
-    """Path loss [dB] over the sea at ground range d [m], antenna heights ht, hr [m] above the mean surface, significant
-    wave height hs [m], frequency f_hz. Field = |1 - rho_s (r1/r2) exp(-j 2 pi (r2-r1)/lam)| x free space at the direct
-    distance r1: reflection coefficient -1 (valid for grazing angles below ~1-2 deg, i.e. d >> 100 (ht+hr)/ lam-scale
-    geometry; closer in it is a smooth-sea idealisation). Specular only: diffuse scatter is neglected, so null filling is
-    underestimated. Antenna height changing with wave elevation on small craft is NOT modelled (the roughness term stands
-    in for it statistically)."""
+A_EFF = 4.0 / 3.0 * 6371e3           # effective earth radius [m] (k = 4/3), the one the radio horizon uses
+
+
+def kerr_reflection(d: FA, ht: FA, hr: FA, a: float = A_EFF) -> tuple[F, F, F, F]:
+    """Specular point of a smooth sphere of radius a (default A_EFF; 1e12 is flat to 1e-6 relative) between antennas ht, hr [m] at ground range
+    d [m] (Kerr 1951; Blake 1980 ch. 5):
+    the root of the cubic 2x^3 - 3dx^2 + (d^2 - 2a(ht+hr))x + 2a ht d = 0 for the ground range x = R1 from the ht antenna, by its trigonometric form.
+    -> R1, R2 = d - R1, and the antenna heights above the tangent plane at that point, h1 = ht - R1^2/2a, h2 = hr - R2^2/2a (zero at the horizon, clipped
+    there: beyond it the reflection point is below the line of sight and the function stays finite)."""
+    p = 2.0 / np.sqrt(3.0) * np.sqrt(a * (ht + hr) + (d / 2.0) ** 2)
+    phi = np.arccos(np.clip(2.0 * a * (hr - ht) * d / p ** 3, -1.0, 1.0))
+    r1 = d / 2.0 - p * np.cos((phi + np.pi) / 3.0)
+    r2 = d - r1
+    return r1, r2, np.maximum(ht - r1 ** 2 / (2 * a), 0.0), np.maximum(hr - r2 ** 2 / (2 * a), 0.0)
+
+
+def divergence_factor(d: FA, r1: FA, r2: FA, psi: FA, a: float = A_EFF) -> F:
+    """Divergence of the reflected beam off the convex sphere, in (0, 1]: D = [1 + 2 R1 R2 / (a d sin psi)]^-1/2 x [1 + 2 R1 R2 sin psi / (a d)]^-1/2
+    (the two principal planes of a spherical mirror, focal lengths a sin(psi)/2 in the plane of incidence and a/(2 sin psi) across it; Kerr 1951;
+    Blake 1980). psi [rad] is the grazing angle at the specular point; D falls to 0 as psi does, i.e. toward the horizon."""
+    s = np.maximum(np.sin(psi), 1e-9)
+    q = 2.0 * r1 * r2 / (a * d)
+    return ((1.0 + q / s) * (1.0 + q * s)) ** -0.5
+
+
+FLAT_A = 1e12                        # earth radius [m] that stands for a plane earth (flat to 1e-6 relative)
+
+
+def psi_critical(lam: FA, a: float = A_EFF) -> FA:
+    """Grazing angle [rad] below which the geometric-optics two-ray solution is not trusted: psi_c = (lam / (pi a))^(1/3), 2.3 mrad at 915 MHz over the
+    4/3 earth. ASSUMED: the interference region of the Kerr / Blake treatment is said to end at about this angle, recalled and not re-read (Blake 1980
+    ch. 5); replace with the re-read value, or with a smooth-earth diffraction field (ITU-R P.526), which this model does not have."""
+    return (lam / (np.pi * a)) ** (1.0 / 3.0)
+
+
+def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool = True, a_eff: float = A_EFF) -> F:
+    """The geometric-optics two-ray loss [dB] over the sea at ground range d [m], antenna heights ht, hr [m] above the mean surface, significant
+    wave height hs [m], frequency f_hz, over a sphere of radius a_eff (default the 4/3 earth; FLAT_A is the plane earth). Field = |1 - rho_s D (r1/r2)
+    exp(-j 2 pi (r2-r1)/lam)| x free space at the direct distance r1: r1, r2 are the direct and reflected path lengths between the antenna heights
+    above the tangent plane at the specular point (kerr_reflection), D the divergence factor (divergence_factor; `divergence=False` leaves it out),
+    reflection coefficient -1 (valid for grazing angles below ~1-2 deg, i.e. d >> 100 (ht+hr)/ lam-scale geometry; closer in it is a smooth-sea
+    idealisation). Specular only: diffuse scatter is neglected, so null filling is underestimated. Antenna height changing with wave elevation on
+    small craft is NOT modelled (the roughness term stands in for it statistically). Fades out toward the horizon (D -> 0): use two_ray_loss_db."""
     lam = C0 / f_hz
     d = np.maximum(d, 1.0)
-    r1, r2 = np.hypot(d, ht - hr), np.hypot(d, ht + hr)
-    rho = ament_rho(hs, np.arctan2(ht + hr, d), lam)  # the grazing angle psi: sin(psi) = (ht + hr) / r2 (ament_rho takes the sine itself)
+    q1, q2, h1, h2 = kerr_reflection(d, ht, hr, a_eff)
+    r1, r2 = np.hypot(d, h1 - h2), np.hypot(d, h1 + h2)
+    psi = np.arctan2(h1 + h2, d)                      # the grazing angle: tan(psi) = h1 / R1 = h2 / R2 (ament_rho takes the sine itself)
+    rho = ament_rho(hs, psi, lam) * (divergence_factor(d, q1, q2, psi, a_eff) if divergence else 1.0)
     field = np.abs(1.0 - rho * (r1 / r2) * np.exp(-2j * np.pi * (r2 - r1) / lam))
     return cast(F, 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(np.maximum(field, 1e-12)))
+
+
+def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, a_eff: float = A_EFF) -> F:
+    """Path loss [dB] over the sea: the curved-earth two-ray loss with divergence (two_ray_curved_db) while the grazing angle at the specular point
+    is above psi_critical; between that limit and the radio horizon the larger of it and the plane-earth loss (FLAT_A), so the loss cannot fall
+    toward free space as D -> 0 where the geometric optics no longer holds; beyond the horizon the curved loss, unchanged (rf_margin gives no link
+    there). Within 2 km it is the plane-earth result to 0.15 dB.
+    ponytail: no smooth-earth diffraction (ITU-R P.526) in the transition zone, the plane-earth loss stands in for it and is conservative by
+    construction; upgrade path is the P.526 field between psi_critical and the horizon."""
+    d = np.maximum(d, 1.0)
+    curved = two_ray_curved_db(d, ht, hr, hs, f_hz, True, a_eff)
+    _, _, h1, h2 = kerr_reflection(d, ht, hr, a_eff)
+    horizon = np.sqrt(2.0 * a_eff) * (np.sqrt(np.maximum(ht, 0.0)) + np.sqrt(np.maximum(hr, 0.0)))
+    transition = (np.arctan2(h1 + h2, d) < psi_critical(C0 / f_hz, a_eff)) & (d <= horizon)
+    return cast(F, np.where(transition, np.maximum(curved, two_ray_curved_db(d, ht, hr, hs, f_hz, False, FLAT_A)), curved)[()])
 
 
 def _radio(radio: str | dict[str, Any]) -> dict[str, Any]:
@@ -298,9 +354,9 @@ def receipts() -> list[dict[str, Any]]:  # pragma: no mutate block
 
     f, lam = 915e6, C0 / 915e6
     # two-ray: 4th-power law far out (-40 dB/decade, independent of frequency) and the last null at d = 2 ht hr / lam
-    L = two_ray_loss_db(np.array([5e3, 5e4]), 2.0, 5.0, 0.0, f)
+    L = two_ray_loss_db(np.array([5e3, 5e4]), 2.0, 5.0, 0.0, f, a_eff=FLAT_A)   # the law is the plane-earth one: a 4/3 earth bends it off at the horizon
     rc("Two-ray far field: loss rise per decade of range", L[1] - L[0], 40.0, 0.05, "dB",
-       "d^-4 law (Rappaport, Wireless Communications 2e, sec 4.6)", rel=False)
+       "d^-4 law (Rappaport, Wireless Communications 2e, sec 4.6), plane earth", rel=False)
     dg = np.linspace(30, 120, 90001)
     rc("Two-ray last null for ht=2 m, hr=5 m at 915 MHz", dg[np.argmax(two_ray_loss_db(dg, 2.0, 5.0, 0.0, f))],
        2 * 2.0 * 5.0 / lam, 0.01, "m", "2 pi ht hr/(lam d) = pi (BRIEF 2.8)")

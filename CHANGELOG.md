@@ -8,6 +8,8 @@ Choices and numbers are in `DECISIONS.md`; the equations are in `docs/PHYSICS.md
 
 ### Added
 
+- `CLAUDE.md`, notes for agents (where the truth lives, how to run on homebase, the bar for a change, the Azure money rule, working beside the lead session), and `bin/pmx.sh`, the private-directory runner (`PMX=pm_<you> bin/pmx.sh <cmd>`, `TM=` for tmux) the review rounds used.
+
 Pipeline and tools
 
 - `python -m cafe.pm` (`cafe/pm/__main__.py`) with `run`, `fetch`, `validate`, `plan`, `report` and `receipts`; `pm.sh` runs it on homebase in the `cafe-pm` image (`Dockerfile.pm`, `requirements-pm.txt`).
@@ -27,7 +29,7 @@ Pipeline and tools
 - `python -m cafe.pm ingest-ocean` writes the lab's HYCOM (netCDF or archv `.a/.b`) into the store the mission names; `QUESTIONS_FOR_LAB.md` Q1 and Q8 give the commands and keys; `docs/RUNBOOK.md`, first draft (`d7a618b`).
 - `mypy --strict` reports 0 errors in `cafe/pm`; `pyproject.toml` sets `strict = true` and the audit's mypy step reads it. `type: ignore` is used only on third-party calls (warp, trimesh, jax.config, smt), each with its code and reason (`84db079`, DECISIONS 115).
 - `ledger.git_sha` falls back to `CAFE_GIT_SHA` in a copy without `.git` (`f48fde3`).
-- 1,822 `def test_` (2,122 collected cases, all passing) in 49 test files under `tests/` after round 3 (1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
+- <TESTS> in `tests/` after round 4 (1,822 `def test_`, 2,122 collected cases, all passing, in 49 test files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
 
 Environment
 
@@ -211,6 +213,40 @@ Round 3 read the q3 quick run (`runs/q3` on homebase) and the code at `73bf4c7`.
 - Pipeline and CLI (M-19, M-21, M-22, M-23; DECISIONS 228, 230 to 232): `run --gpus N` is refused when no GPU is visible and `plan` labels a projected GPU (`--assume-gpu` overrides); the resume hash no longer depends on how the mission path is spelled; the code digest covers every installed library version (`gsw` is pinned); stage 3 no longer rewrites `config/subgrid.json` (it writes `stage3/subgrid_calibration.json`, which the later stages read) and `python -m cafe.pm promote-calibration --run DIR` is the deliberate way to adopt a run's calibration.
 - Gates and documents (M-12, M-24 to M-28; DECISIONS 221, 233 to 236): `make ci` ends with a ledger audit of the run it made (`audit --ledgers-only runs/ci`) and RUNBOOK 7 says which run directories `make audit` checks; BRIEF correction 2.3 and DECISIONS 33 state the synthesised mean-square slope match conditionally (35 % at the 90th percentile, 31 % of points clipped, in the demo); the README quick start runs fetch and run through the `pm()` wrapper; the banned-token scan adds `skip(` and `cafe/static/app.js`, with its scope in DECISIONS 205; `docs/PHYSICS.md` shows the current wind prior and says the TAO-fitted `sst_k` and `t2_k` are fed back; `docs/CREDIBILITY.md` and `QUESTIONS_FOR_LAB.md` (items 4 and 5) follow the code; the STATUS test statistics say what was added since the tested tree.
 - DTMB 5415 v4 study (recipe `pout-lts01-parts-v4`; three grids at Fr 0.10, 0.20, 0.28 and 0.41) is done and installed. |E| <= U_val at all four Froude numbers (E x1e3 = +0.865, +0.722, +0.842, -0.040 against U_val x1e3 = 1.882, 1.085, 2.653, 1.993). U_val / D is 0.27 to 0.63 (0.468, 0.275, 0.627, 0.299), above 0.1, so the validation is too uncertain to say much. Iterative convergence fails at Fr 0.28 and 0.41 on all three grids (last-quarter drift 0.03 to 0.07 against 0.005), and at Fr 0.20 on the fine grid (0.0075); Fr 0.10 passes everywhere.
+
+Review round 4 (`review/round_4/merged.md`: 26 findings, 0 critical, 5 major, 21 minor; DECISIONS 237 to 263)
+
+Round 4 read the q4 quick run (`runs/q4` on homebase) and the code at `23e9a95`. Four batches fixed disjoint files (vehicles and Stage 1, mission config and environment, pipeline and emulator and receipts, report and statistics and credibility) and one pass wrote the documents; each code fix has a regression test that failed on the old code. Every stored resume is invalidated again (the code digest changes), and the derived surface layer is rebuilt on the next ingest (about a minute). What the demo's verdicts do now is not yet known: the q5 re-run measures it, and the UAS verdict will probably move (M-1).
+
+- Vehicles and Stage 1 (M-1, M-5, M-7 part, M-8, M-10, M-11 part; DECISIONS 237, 241, 243, 244, 246, 247):
+  - M-1: the 1200 s return-to-ship timer ended the UAS flux profile early (7 of 8 waypoints in a 5.5 to 6.5 m/s wind, 4 of 8 at 10 m/s), invisibly and as a pass. A sortie that returns before its last waypoint is now a failure, `profile_incomplete` (`sortie.min_profile_fraction` 1.0, assumed); `fly_sortie` returns `wp_done` and `n_wp`, the summary has `vehicles[uas].profile` (median waypoints flown, pattern length, share of sorties complete), and the report prints them. In a uniform 10 m wind the pattern is complete up to about 5.2 m/s.
+  - M-5: a non-finite current (or wind) at a USV raised IndexError and ended Stage 1; the member now fails with the new mode `no_current_data`.
+  - M-7 part: Stage 1 keeps each USV member's mean speed through the water (`stw_ms`) and the summary lists its median next to the speed over ground.
+  - M-8 (status partly: the finding's direction was wrong): the two-ray RF link is a 4/3-radius earth (Kerr's specular point, tangent-plane heights, divergence factor) up to a critical grazing angle (assumed) and the larger of that and the plane-earth loss from there to the radio horizon; no change within 2 km, so no demo number moves.
+  - M-10: a UAS lost its link at one sample of a smooth-sea two-ray null (5 of 8 members at Hs 0); it now needs 5 s of consecutive lost samples (`radio.link_loss_hold_s`, assumed). A non-finite wave height on a UAS or RF link track took Hs 0, the deepest null; it takes the member's neighbouring Hs, counted in the ledger, and a member with none raises `OutsideData`.
+  - M-11: an Iridium link to a glider with `when: surfacing` is required only while the glider is on the surface.
+- Mission config and environment (M-6, M-9, M-11 part, M-13 to M-16; DECISIONS 242, 245, 247, 249 to 252):
+  - M-6: the perturbed environment cut every current by 2 % (a `- cs^2/4` term made the realised median 0.978); the speed factor has median 1 as documented.
+  - M-9: the member current-error field jumped at 180 degrees; it now measures longitude from the centre of the data box.
+  - M-11: a radio or Iridium link to a glider must say `when: surfacing`; an Iridium link accepts it.
+  - M-13, M-14: `validate` refuses a UAS with no launch inside the window (it answered NO-GO `no_sortie_flown`) and an id shared by a vehicle, the ship or the shore (the ship silently moved the vehicle).
+  - M-15: UAS altitudes above the stored WRF levels (400 m) are refused, and the wind above the top stored level is no longer held constant and counted as 3-D.
+  - M-16: the rain rate is the mean of the two neighbouring interval rates, so rain events are centred on their hours (they were half an hour late and twice as wide).
+- Pipeline, emulator, receipts and bench (M-2 to M-4, M-22, M-23, M-26; DECISIONS 238 to 240, 258, 259, 262, 263):
+  - M-2: the derived surface layer (`derived.zarr`) is in the ledger chain: built from a key over the cache files and the code (rebuilt when either changes), hashed into ingest's ledger, re-checked by windows, stage 1, 1b and the emulator (check `derived_unchanged`) and by the audit; a store that does not span the window is refused instead of clipped.
+  - M-3: emulator hold-out coverage of probability targets is scored on the clipped-logit scale the conformal intervals are built on (gate and `holdout.json` `coverage`); the raw-P number is kept as `coverage_raw_p`. A calibrated emulator no longer reads 0.78 against 0.90 because of exact 0 and 1 targets. The gate stays BRIEF 2.7's two-sided 0.90 +-0.05; `whatif.fit_class` also records `coverage_chance_fail` (0.357 at 28 hold-out points) and the report prints it beside the gate, since a missed gate on 20 to 30 points is weak evidence of miscalibration (row 263). The two pipeline tests that train the emulator use `seed_table(seed=4)`.
+  - M-4: `make broken` (`receipts --broken`) passes only when a receipt that passes without the overlay fails with it; before, any failing row, including not-run slow groups in CI, was enough.
+  - M-22: a failed stage self-check prints `error: stage X: self-checks failed: name: note ...` with the ledger path and exits 1 instead of a Python traceback; the offline note tells you to unset `CAFE_OFFLINE`.
+  - M-23: a corrupt or zero-byte emulator training table is reported as an error naming the file, before the run starts, instead of a pyarrow traceback at the emulator stage.
+  - M-26: `bench/throughput.py stage1` warms up once and keeps the faster of two timings per batch size; an unresolved per-member slope is stored as 0 with `slope_resolved: false` and said in the plan.
+- Report, statistics and credibility (M-12, M-17 to M-20, report parts of M-1, M-3, M-5, M-7; DECISIONS 237, 239, 241, 243, 248, 253 to 256):
+  - M-12: a verdict tie at P(success) = nogo fell on the wrong side for thresholds such as (0.9, 0.3); one tolerance helper now serves every threshold test of `verdict`, `verdict_from_p`, `interval_region` and `decided_region`.
+  - M-17: the report says what the sensitivity indices cannot see: the per-member random error streams that are not sampled columns (the hourly wind error is 1.28 m/s against 0.11 m/s for the column).
+  - M-18: the certification note and the report lines say which confidence each number belongs to: 3/n is one-sided (60 members to reach 5 %), 73 is the two-sided 95 % Wilson count.
+  - M-19: the failure-driver line no longer blames a missing `res.pkl` for a vehicle that had no failure.
+  - M-20: M&S management level 3 no longer reads "checked against an independent reference".
+  - Report parts: the UAS block prints the waypoints flown and names `profile_incomplete`, the report names `no_current_data`, the emulator section prints both coverage numbers with their scales, and the USV reach map uses the speed through the water and says so (the glider reach map's current band runs from 5 m to the task's dive depth and is named).
+- Documents (M-21, M-24, M-25; DECISIONS 257, 260, 261): PHYSICS states the glider's surface windage once and correctly (0.01 for a bare `GliderSim`, 1.8 to 2.3 % per member in Stage 1); the RUNBOOK and README `pm()` wrapper pass `CAFE_GIT_DIRTY` (the image has no `git`, so a lab user could never mint or pass the acceptance golden) and RUNBOOK 7 says what minting needs; RUNBOOK says a repeated run with the same mission and seed adds no emulator training point (use another `--seed`, mission or budget). `docs/PHYSICS.md`, `docs/CREDIBILITY.md` (263 assumed inputs, two of them new), `docs/RUNBOOK.md`, `QUESTIONS_FOR_LAB.md` (items 4 and 5) and `STATUS.md` are updated for the rows above.
 
 ### Known issues
 

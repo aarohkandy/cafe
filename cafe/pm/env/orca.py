@@ -28,6 +28,7 @@ WRF2D = ["U10", "V10", "T2", "Q2", "PSFC", "SST", "TSK", "HFX", "LH", "QFX", "RA
 WRFSTATIC = ["XLAT", "XLONG", "LANDMASK", "HGT", "COSALPHA", "SINALPHA"]
 WRF3D = ["U", "V", "PH", "PHB", "T"]
 NZ3 = 8                                    # mass levels kept: ~21 to ~400 m
+WIND3D_TOP_M = 400.0                       # their top: config refuses UAS altitudes above it, the 3-D wind is NaN above it
 UMWM2D = ["swh", "mwp", "mwd", "dwp", "dwd", "mss", "wspd", "wdir", "ust", "cd", "dcp", "dcg", "mwl", "dwl"]
 UMWMSTATIC = ["lon", "lat", "seamask", "depth"]
 SPEC_STRIDE = 3                            # keep every 3rd restart sea point in each direction (36 km)

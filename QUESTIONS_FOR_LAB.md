@@ -30,6 +30,8 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    `quad_uas.yaml`, each number cited or marked `assumed`. *If supplied:* edit those files (or add new ones) and
    check each with `python -m cafe.pm hangar --platform <name>`, which lists every value still marked assumed.
    Verdicts then describe your vehicles instead of the class defaults.
+   One number of the UAS file is asked for by name (review round 4, M-10): what is the radio failsafe timeout, i.e. how long may the telemetry link be down before the aircraft returns?
+   *Default:* `radio.link_loss_hold_s` = 5 s, assumed from ArduCopter's GCS failsafe default (`FS_GCS_TIMEOUT`, recalled, not re-read); a shorter fade is ridden through. *If supplied:* edit it in `platforms/quad_uas.yaml`.
    Two numbers of the Saildrone file are asked for by name (review round 3, M-8): is there a minimum apparent wind angle below which the vehicle cannot hold a tack, and what is it?
    *Default:* `min_awa_deg` = 15 deg, assumed with no source (the polar still gives positive speed inside it). *If supplied:* edit `params.min_awa_deg` in `platforms/saildrone_explorer.yaml`.
 
@@ -43,6 +45,9 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    *If you give one:* use `mode: station` or `section` where the glider has a station or waypoints, or set `heading_to` to the intended heading; a success criterion for a drift glider needs a code change.
    (b) How long may a calm last before it counts as a USV failure? *Default:* `wing_stall_calm` after 30 min of apparent wind below 1.5 m/s (`calm_sustain_s` 1800 s) and `becalmed` after 6 h of being unable to stem
    the current (`becalmed_after_h` 6 h), both assumed and different on purpose. *If your threshold differs:* edit those two `mission_defaults` in `platforms/saildrone_explorer.yaml` (the first is the platform's, the second can also be set in the mission's `task`).
+   (c) How long may a UAS sortie take, and what is the shortest acceptable flux profile (how many of the stacked levels must be flown)? (review round 4, M-1) *Default:* the demo asks for 20 min and four levels (a pattern of 8 waypoints);
+   the return-to-ship timer ends a sortie at `duration_min` x `sortie.time_limit_factor` (1.0, assumed) = 1200 s, and a sortie that returns before its last waypoint is the failure `profile_incomplete` (`sortie.min_profile_fraction` 1.0, assumed).
+   The nominal pattern takes 1127 s of flight, so it is complete only up to about 5.2 m/s of 10 m wind. *If your answer differs:* edit those two keys in `platforms/quad_uas.yaml`, and `sorties.duration_min` in the mission.
 
 6. **The lab server.** GPU model(s) and VRAM, CPU cores, RAM, disk, OS, who administers it, and whether there is a
    user account with Docker. *Default:* designed for one 32–96 GB NVIDIA GPU + 32–64 cores; everything also runs

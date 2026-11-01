@@ -424,3 +424,46 @@ def test_the_schema_has_no_default_that_the_code_ignores():
 def test_every_shipped_mission_and_fixture_still_loads():
     for f in sorted((config.ROOT / "missions").glob("*.yaml")):
         load_mission(f)
+
+
+# Review round 4 (M-11, M-13, M-14, M-15)
+def _glider_link(d, kind, when, **kw):
+    d["links"].append(dict(id="gl-x", a="glider_eq", b="shore" if kind == "iridium" else "usv", kind=kind, required_fraction=0.9, **kw))
+    if when:
+        d["links"][-1]["when"] = when
+
+
+GLIDER_RADIO = r"links/gl-x/when: a glider's radio and Iridium antenna work only at the surface"
+ROUND4 = [
+    ("M-11 glider iridium always", lambda d: _glider_link(d, "iridium", "always"),
+     r"links/gl-x/when: a glider's radio and Iridium antenna work only at the surface: use when: surfacing"),
+    ("M-11 glider iridium no when", lambda d: _glider_link(d, "iridium", None), GLIDER_RADIO),
+    ("M-11 glider rf always", lambda d: _glider_link(d, "rf", "always", radio="rfd900x"), GLIDER_RADIO),
+    ("M-11 uas-glider rf airborne",
+     lambda d: d["links"].append(dict(id="gl-x", a="uas", b="glider_eq", kind="rf", radio="rfd900x", when="uas_airborne", required_fraction=0.9)),
+     GLIDER_RADIO),
+    ("M-13 no launch fits", lambda d: d["window"].update(end="2023-03-01T13:00:00Z"),
+     r"vehicles/uas/sorties: no launch fits in the window \(local_solar_time 14:00 at lon -165 is 01:00Z, a launch needs 32 min before window.end\)"),
+    ("M-14 ship = vehicle", lambda d: d["ship"].update(id="usv"),
+     r"ids must be unique across vehicles, ship and shore; 'usv' is used by vehicles/usv and ship"),
+    ("M-14 shore = vehicle", lambda d: d["shore"].update(id="glider_eq"), r"'glider_eq' is used by vehicles/glider_eq and shore"),
+    ("M-14 shore = ship", lambda d: d["shore"].update(id="ship"), r"'ship' is used by ship and shore"),
+    ("M-15 1000 m", lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[10, 1000]),
+     r"sorties/altitudes_m: 1000: the stored WRF levels end at about 400 m; the wind above that is not known"),
+]
+
+
+@pytest.mark.parametrize("what,fn,msg", ROUND4, ids=[c[0] for c in ROUND4])
+def test_round4_refusals_name_the_field_and_the_fix(tmp_path, what, fn, msg):
+    with pytest.raises(ConfigError, match=msg):
+        load_mission(edit(tmp_path, fn))
+
+
+def test_round4_good_variants_load(tmp_path):
+    for kind, kw in (("iridium", {}), ("rf", dict(radio="rfd900x"))):                          # a glider's radio and Iridium work when it surfaces
+        m = load_mission(edit(tmp_path, lambda d, kind=kind, kw=kw: _glider_link(d, kind, "surfacing", **kw)))
+        assert m["links"][-1]["when"] == "surfacing"
+    load_mission(edit(tmp_path, lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[10, 400])))             # the top stored level itself is allowed
+    load_mission(edit(tmp_path, lambda d: d["window"].update(end="2023-03-02T02:00:00Z")))                         # the 01:00Z launch (and 32 min) fits
+    with pytest.raises(ConfigError, match=r"links/usv-shore-iridium/when: an iridium link"):                       # surfacing needs a glider at one end
+        load_mission(edit(tmp_path, lambda d: d["links"][3].update(when="surfacing")))

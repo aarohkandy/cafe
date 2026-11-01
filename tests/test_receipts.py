@@ -30,6 +30,11 @@ def failing():
     R.receipt("G", "far", 2.0, 1.0, 0.01, "m", "src")
 
 
+def sees_overlay():
+    """One receipt, the same claim in both runs, that passes unless the broken wave-direction overlay is on."""
+    R.receipt("G", "direction", 2.0 if cv.wave_direction_convention() == "compass_from" else 1.001, 1.0, 0.01, "m", "src")
+
+
 def jobs_of(*fns):
     return lambda slow=False: list(fns)
 
@@ -167,17 +172,44 @@ def test_broken_run_applies_the_overlay_only_while_running_and_inverts_the_exit_
     seen = []
 
     def probe():
-        seen.append((cv.wave_direction_convention(), cv.math_rad_to_compass_to(0.0)))
-        failing()
+        seen.append(cv.wave_direction_convention())
+        sees_overlay()
     monkeypatch.setattr(pr, "jobs", jobs_of(("a", probe)))
     logs = []
     _, code = pr.run(broken=BROKEN, out=tmp_path / "b.json", log=logs.append)
-    assert code == 0 and seen == [("compass_from", 180.0)] and cv.OVERLAY_ENV not in __import__("os").environ
-    assert any("waves.direction_convention = compass_from" in s for s in logs) and any("failed 1 receipts, as required" in s for s in logs)
+    assert code == 0 and seen == ["umwm", "compass_from"] and cv.OVERLAY_ENV not in __import__("os").environ      # baseline first, then the overlay
+    assert any("waves.direction_convention = compass_from" in s for s in logs)
+    assert any("failed 1 receipt(s) that pass without it: a/" in s for s in logs)
     monkeypatch.setattr(pr, "jobs", jobs_of(("a", passing)))
     logs.clear()
     _, code = pr.run(broken=BROKEN, out=tmp_path / "b.json", log=logs.append)
-    assert code == 1 and any("NO receipt" in s for s in logs)
+    assert code == 1 and any("NO receipt that passes without the overlay fails with it" in s for s in logs)
+
+
+def test_a_receipt_that_fails_with_or_without_the_overlay_does_not_count_as_catching_it(tmp_path, monkeypatch):
+    """Round 4 M-4: `make broken` used to pass whenever any receipt failed, and in CI the slow groups are `not_run` failures whatever the overlay says."""
+    monkeypatch.setattr(pr, "jobs", jobs_of(("a", passing), ("b", failing)))
+    logs = []
+    _, code = pr.run(broken=BROKEN, out=tmp_path / "b.json", log=logs.append)
+    assert code == 1 and any("NO receipt that passes without the overlay" in s for s in logs)  # b fails in both runs, a passes in both
+    monkeypatch.setattr(pr, "jobs", jobs_of(("a", passing), ("b", failing), ("c", sees_overlay)))
+    _, code = pr.run(broken=BROKEN, out=tmp_path / "b.json", log=logs.append)
+    assert code == 0 and "failed 1 receipt(s) that pass without it: c/" in logs[-1]
+
+
+def test_the_neutral_overlay_is_not_caught_and_the_wave_direction_one_is(tmp_path, monkeypatch):
+    """The real wave receipts: an overlay that sets the default convention changes nothing (exit 1); the shipped broken one is caught by wave-direction ids."""
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
+    neutral = tmp_path / "neutral.yaml"
+    neutral.write_text("waves: {direction_convention: umwm}\n")
+    only = ["pm.env.waves", "wave_direction"]
+    logs = []
+    _, code = pr.run(only=only, broken=neutral, out=tmp_path / "n.json", log=logs.append)
+    assert code == 1 and any("NO receipt that passes without the overlay" in s for s in logs)
+    R.OUT.clear()
+    logs.clear()
+    _, code = pr.run(only=only, broken=BROKEN, out=tmp_path / "b.json", log=logs.append)
+    assert code == 0 and any("pm.env.wave_direction/" in s or "pm.env.waves/" in s for s in logs if "pass without it" in s)
 
 
 def test_broken_run_restores_a_previous_overlay_and_a_missing_file_is_an_error(tmp_path, monkeypatch):

@@ -11,7 +11,8 @@ so inter-vehicle range checks are consistent.
   drawn from `member_rng(seed, m, "wind_speed_noise" | "wind_direction_noise")`. Without those keys nothing changes.
 - Current: speed x scale, rotated by a direction bias. Half of each prior's variance is member-wide (the LHS draw,
   so Sobol indices see it); half is a smooth random field with the configured correlation length (100 km), built
-  from random Fourier features (Rahimi & Recht 2007) with a Gaussian covariance, seeded per member. The total
+  from random Fourier features (Rahimi & Recht 2007) with a Gaussian covariance, seeded per member, with longitudes measured from the
+  centre of the data box on the circle (no seam at 180). The log of the speed factor has mean 0, so its median is 1. The total
   1-sigma is the prior's.
 - Ocean SDE (`sde=dict(t0, t1, dt)`, mission switch ocean_sde): the unresolved eddies as a Lagrangian stochastic perturbation,
   the Ito SDE dx = u dt + dK/dx dt + sqrt(2K) dW of `subgrid.ocean_sde_step` (Euler-Maruyama, OceanParcels form), K = Okubo's
@@ -57,7 +58,8 @@ def _rot(v: Any, deg: Any) -> Any:
 class Field:
     """Unit-variance Gaussian random field per member over lon/lat (km scale), correlation length `ell` metres."""
 
-    def __init__(self, base_seed: Any, members: Iterable[Any], stream: str, ell: float):
+    def __init__(self, base_seed: Any, members: Iterable[Any], stream: str, ell: float, lon0: float = 0.0):
+        self.lon0 = float(lon0)                                       # longitudes are measured from here on the circle: no seam at 180
         k: list[Any] = []
         ph: list[Any] = []
         for m in members:
@@ -68,7 +70,7 @@ class Field:
 
     def __call__(self, lon: ArrayLike, lat: ArrayLike) -> NDArray[np.float64]:
         lon, lat = np.broadcast_arrays(np.asarray(lon, float), np.asarray(lat, float))
-        x = np.radians(lon) * R_EARTH * np.cos(np.radians(lat))
+        x = np.radians((lon - self.lon0 + 180.0) % 360.0 - 180.0) * R_EARTH * np.cos(np.radians(lat))
         y = np.radians(lat) * R_EARTH
         M = self.k.shape[0]
         sh = lon.shape
@@ -134,8 +136,11 @@ class PerturbedEnv:
         ell = float(priors["current_correlation_length"]["mean"])
         self.cs = float(priors["current_speed_scale"]["value"])
         self.cd = float(priors["current_direction_bias"]["value"])
-        self.fs = Field(base_seed, members, "current_speed_field", ell)
-        self.fd = Field(base_seed, members, "current_direction_field", ell)
+        lon_min, lon_max = env.bounds[0], env.bounds[1]
+        width = (lon_max - lon_min) % 360.0
+        lon0 = lon_min + width / 2.0 if width else 0.0                # box centre on the circle (across 180: lon_min > lon_max); a full circle keeps 0
+        self.fs = Field(base_seed, members, "current_speed_field", ell, lon0)
+        self.fd = Field(base_seed, members, "current_direction_field", ell, lon0)
         self.sde = None if sde is None else OceanSDE(base_seed, members, **sde)
         win = window or ((sde["t0"], sde["t1"]) if sde else None)
         keys = [k for k in ("wind_speed_noise", "wind_direction_noise") if k in priors]
@@ -171,7 +176,7 @@ class PerturbedEnv:
         sh = v.shape[:-1]
         lonb, latb = (np.broadcast_to(np.asarray(a, float), sh) for a in (lon, lat))
         a = self._m("current_speed_scale", sh)
-        logs = (np.log(a) / np.sqrt(2.0) if a is not None else 0.0) + self.cs / np.sqrt(2.0) * self.fs(lonb, latb) - self.cs ** 2 / 4
+        logs = (np.log(a) / np.sqrt(2.0) if a is not None else 0.0) + self.cs / np.sqrt(2.0) * self.fs(lonb, latb)
         db = self._m("current_direction_bias", sh)
         rot = (db / np.sqrt(2.0) if db is not None else 0.0) + self.cd / np.sqrt(2.0) * self.fd(lonb, latb)
         v = _rot(v * np.exp(logs)[..., None], np.broadcast_to(rot, sh))

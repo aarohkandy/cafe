@@ -51,7 +51,29 @@ def _coare_grid(env: GriddedEnv, ti: int) -> dict[str, Any]:
                          cp=cp, sigH=hs, rain=W["rain_mm_h"][ti])
 
 
-def build(env: GriddedEnv, cache: Any, log: Callable[[str], object] = print) -> dict[str, Any] | None:
+DIGEST = "derived.digest.json"        # beside the store: {built_from, store_sha256}, what `build` made and from what
+
+
+def store_sha256(path: Any) -> str:
+    """sha256 over the relative path and bytes of every file of the zarr store at `path`, in path order."""
+    import hashlib
+    root = pathlib.Path(path)
+    h = hashlib.sha256()
+    for f in sorted(p for p in root.rglob("*") if p.is_file()):
+        h.update(f.relative_to(root).as_posix().encode() + b"\0" + f.read_bytes())
+    return h.hexdigest()
+
+
+def store_span(cache: Any) -> tuple[float, float]:
+    """(first, last) time [s since 1970] of the stored hourly fields."""
+    import xarray as xr
+    t = xr.open_zarr(pathlib.Path(cache) / "derived.zarr").time.values
+    return float(t[0]), float(t[-1])
+
+
+def build(env: GriddedEnv, cache: Any, built_from: str | None = None, log: Callable[[str], object] = print) -> dict[str, Any] | None:
+    """Write cache/derived.zarr and cache/derived.digest.json. `built_from` names what the layer was made from (the pipeline's key over the cache
+    files and the code); it is stored in the store's attributes and in the digest beside it."""
     import xarray as xr
     cache = pathlib.Path(cache)
     nt = len(env.tw.x)
@@ -110,7 +132,9 @@ def build(env: GriddedEnv, cache: Any, log: Callable[[str], object] = print) -> 
     ds = ds.assign_coords(time_u=env.tu.x, lat_s=env.lau.x[js], lon_s=env.lou.x[is_])
     ds.attrs["stokes_fit_check"] = json.dumps(fit)
     ds.attrs["layout_version"] = LAYOUT_VERSION
+    ds.attrs["built_from"] = built_from
     ds.to_zarr(cache / "derived.zarr", mode="w")
+    (cache / DIGEST).write_text(json.dumps(dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1))
     log(f"surface layer: COARE on {nt} hours, warm layer max dT {np.nanmax(dT):.2f} K, Stokes fit check {fit}")
     return fit
 

@@ -153,3 +153,42 @@ def test_a_period_change_scales_the_stokes_drift_with_one_over_tp_cubed():
     s = pe.waves(np.zeros(4), np.zeros(4), 0.0)["stokes0"].value
     assert np.allclose(s[:3, 0], 0.1 * np.array([(9 / 8) ** 3, 1.0, (9 / 10) ** 3]))
     assert np.allclose(s[3, 0], 0.1 * 4 * 9.0 ** 3)                                                                     # Hs x 2, Tp floored at 1 s
+
+
+# Review round 4
+def test_m6_the_current_speed_factor_has_median_one_as_documented():
+    """M-6: the factor was exp(log a / sqrt 2 + cs f / sqrt 2 - cs^2 / 4): with no field error and a = 1 it cut every current by 2 %."""
+    pe = PerturbedEnv(AnalyticEnv(current=(1.0, 0.0)), dict(current_speed_scale=np.ones(3)), [0, 1, 2], 3, PRI)
+    pe.fs = lambda lon, lat: np.zeros(np.shape(lon))
+    assert np.allclose(np.hypot(*pe.current(np.zeros(3), np.zeros(3), 0.0, 0.0).value.T), 1.0, atol=1e-12)
+    M = 4000
+    from scipy.stats import norm
+    a = np.exp(PRI["current_speed_scale"]["value"] * norm.ppf((np.arange(M) + 0.5) / M))                       # lognormal(median 1, sigma cs), stratified
+    pe = PerturbedEnv(AnalyticEnv(current=(1.0, 0.0)), dict(current_speed_scale=a), list(range(M)), 3, PRI)
+    v = pe.current(np.zeros(M), np.zeros(M), 0.0, 0.0).value
+    assert 0.99 < np.median(np.hypot(v[:, 0], v[:, 1])) < 1.01                                                   # 0.978 before the fix
+
+
+def test_m9_the_current_error_field_has_no_seam_at_180_degrees():
+    lat = np.zeros(4)
+    f = Field(20230301, [0, 1, 2, 3], "current_speed_field", 100e3, lon0=180.0)
+    assert np.abs(f(np.full(4, 179.99), lat) - f(np.full(4, -179.99), lat)).max() < 0.1                          # 2 km apart: 3.18 sigma before
+    plain = Field(20230301, [0, 1, 2, 3], "current_speed_field", 100e3)
+    assert np.abs(plain(np.full(4, 179.99), lat) - plain(np.full(4, -179.99), lat)).max() > 1.0                  # the default origin keeps its seam at 180
+    here = np.full(4, -170.0)
+    la = lat + 1.0
+    x, y = np.radians(here) * 6.371e6 * np.cos(np.radians(la)), np.radians(la) * 6.371e6                         # the old formula, away from the seam
+    old = np.sqrt(2.0 / 32) * np.cos(x[:, None] * plain.k[:, :, 0] + y[:, None] * plain.k[:, :, 1] + plain.ph).sum(-1)
+    zero = Field(20230301, [0, 1, 2, 3], "current_speed_field", 100e3, lon0=0.0)
+    assert np.allclose(plain(here, la), old, rtol=0, atol=1e-9) and np.allclose(zero(here, la), old, atol=1e-9)
+
+
+def test_m9_a_perturbed_env_over_a_box_across_the_date_line_reads_one_field_over_it():
+    box = (165.0, -165.0, -5.0, 5.0, -1e12, 1e12)
+    M = 8
+    pe = PerturbedEnv(AnalyticEnv(current=(1.0, 0.0), bounds=box), {}, list(range(M)), 3, PRI)
+    assert pe.fs.lon0 == pytest.approx(180.0) and pe.fd.lon0 == pytest.approx(180.0)
+    z = np.zeros(M)
+    a, b = (pe.current(np.full(M, lon), z, 0.0, 0.0).value for lon in (179.99, -179.99))
+    assert np.abs(np.log(np.hypot(*a.T) / np.hypot(*b.T))).max() < 0.05                                          # several sigma before
+    assert PerturbedEnv(AnalyticEnv(), {}, [0], 3, PRI).fs.lon0 == 0.0                                           # a whole-circle box keeps the old origin

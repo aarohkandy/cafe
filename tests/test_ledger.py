@@ -133,8 +133,21 @@ def test_a_deleted_output_breaks_done(tmp_path):
     assert done(tmp_path, "stage1", "h1") is None
 
 
+def test_the_failure_message_carries_the_notes_of_the_first_three_failed_checks_and_the_count_of_the_rest(tmp_path):
+    """Round 4 M-22: the message used to list bare check names; the actionable text (what to run) was only in the ledger json."""
+    with pytest.raises(StageFailed) as e:
+        with Ledger(tmp_path, "ingest", "h1") as L:
+            L.check("fine", True, note="not shown")
+            for n in "abcde":
+                L.check(f"{n}_present", False, note=f"{n} is not cached: run `fetch`" if n != "b" else "")
+    msg = str(e.value)
+    first = "a_present: a is not cached: run `fetch`; b_present; c_present: c is not cached: run `fetch`"
+    assert msg.startswith(f"stage ingest: self-checks failed: {first} and 2 more (ledger: ")
+    assert msg.endswith(f"{tmp_path / 'checkpoints' / 'ingest' / 'ledger.json'})") and "not shown" not in msg and "d_present" not in msg
+
+
 def test_failed_check_raises_stagefailed_and_still_writes_the_ledger(tmp_path):
-    with pytest.raises(StageFailed, match=r"stage stage1: self-checks failed: \['bad'\]"):
+    with pytest.raises(StageFailed, match=r"stage stage1: self-checks failed: bad \(ledger: .*ledger\.json\)"):
         with Ledger(tmp_path, "stage1", "h1") as L:
             L.check("good", True)
             assert L.check("bad", False, value=5, limit=1) is False

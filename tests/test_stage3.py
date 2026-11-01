@@ -1249,7 +1249,7 @@ def test_a_share_too_small_for_any_window_gives_reasoned_not_run_rows_decided_by
                and "use a larger --budget" in r["reasons"][0] for r in rows if r["part"] != "hull_fs")
     assert [r for r in rows if r["part"] == "hull_fs"][0]["reasons"][0].startswith("free-surface window not run: estimated")     # priced, not started
     assert L.checks["every_failed_window_states_a_reason"][0] and L.checks["every_window_attempted"][0]
-    assert L.checks["stage_held_its_wall_clock_share"][0]                           # nothing ran: no overrun
+    assert "stage_held_its_wall_clock_share" not in L.checks and any(re.fullmatch(r"stage 3 took \d+ s of its 4 s share \(0\.\d\d x\)", n) for n in L.notes)
 
 
 def slow_clock(monkeypatch, factor):
@@ -1311,7 +1311,32 @@ def test_a_clock_so_slow_that_the_slice_is_spent_kills_the_window_and_the_row_sa
     assert killed["resolution"]["planned_steps"] == planned                              # it was sized exactly as before; only its end changed
     assert not never["ok"] and never["cd"] is None and never["reasons"][0].startswith("killed before it started: the stage-3 wall-clock share was spent")
     assert not killed["fea"]["run"] and killed["fea"]["reason"].startswith("not run: the LES window was cut")
-    assert not L.checks["stage_held_its_wall_clock_share"][0]                          # the stage says it overran
+    over = [n for n in L.notes if n.startswith("stage 3 took ")]                       # the stage says it overran, as a note: it is not a check that fails the stage
+    assert "stage_held_its_wall_clock_share" not in L.checks and len(over) == 1 and "over the 1.1 x allowance" in over[0] and "(killed rows)" in over[0]
+    assert L.checks["every_window_attempted"][0]
+
+
+def test_an_overrun_of_the_share_is_a_note_in_the_real_ledger_and_does_not_fail_the_stage(no_wall_receipt, monkeypatch, tmp_path):
+    """Follow-up 2: `stage_held_its_wall_clock_share` was a ledger check, so a loaded machine failed a correct run. The overrun is stated; the budget is
+    still enforced by the windows' slices and the stage deadline (the killed rows)."""
+    import subprocess
+
+    from cafe.pm import ledger
+    cheap(monkeypatch)
+
+    def spawn(cmd, **kw):
+        if kw["timeout"] is not None and kw["timeout"] <= 0:
+            raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+        return in_process_fea(cmd, **kw)
+    monkeypatch.setattr(pw, "_spawn", spawn)
+    slow_clock(monkeypatch, 1e5)
+    ctx = toy_g_ctx(no_wall_receipt, 2000.0)
+    with ledger.Ledger(tmp_path, "stage3", "h") as L:                                   # a failed check here would raise StageFailed on exit
+        rows = pw.run(ctx, {"g": [WIN, dict(WIN, t=WIN["t"] + 3600.0)]}, L)["g"]
+    d = json.loads((tmp_path / "checkpoints" / "stage3" / "ledger.json").read_text())
+    assert d["ok"] and all(r["cut"] or r["reasons"] for r in rows) and "stage_held_its_wall_clock_share" not in {c["name"] for c in d["checks"]}
+    note = next(n for n in d["notes"] if n.startswith("stage 3 took "))
+    assert re.fullmatch(r"stage 3 took \d+ s of its 2000 s share \(\d+\.\d\d x\); over the 1\.1 x allowance: .*\(killed rows\)", note), note
 
 
 def test_a_small_slice_runs_the_plans_size_and_the_fea_is_planned_out_when_its_reserve_is_below_the_minimum(no_wall_receipt, monkeypatch):
@@ -1831,6 +1856,7 @@ def test_a_window_the_planner_did_not_run_is_written_with_its_reason_and_never_r
     r = pw.run(ctx, {"g": [WIN]}, L)["g"][0]
     assert not r["ok"] and r["cd"] is None and r["reasons"] == [reason] and r["error"] == reason and not r["cut"]
     assert L.checks["every_window_attempted"][0] and L.checks["every_failed_window_states_a_reason"][0] and "stage_held_its_wall_clock_share" not in L.checks
+    assert not any(n.startswith("stage 3 took ") for n in L.notes)                                # no share, no statement about it
     assert any("sub-grid layer uncalibrated: no LES window passed" in n for n in L.notes)
     assert len(reason) > 300 and any(reason in m and "s of 0.0]" in m for m in ctx.logs) and not any("-0.0" in m for m in ctx.logs)
 

@@ -40,6 +40,23 @@ def test_build_checks_the_fitted_stokes_field_against_the_real_spectra(sl, ci_en
     assert f["corrected_loo_median_dir_err_deg"] < 1.0                                             # the fixture waves are aligned downwind everywhere
 
 
+def test_build_records_what_it_was_built_from_and_the_hash_of_every_file_of_the_store(ci_env, tmp_path):
+    """Round 4 M-2: `built_from` is in the store's attributes and in derived.digest.json beside it, with the sha256 over the path and bytes of every file."""
+    import json
+    d = tmp_path / "cache"
+    for s in ("wrf.zarr", "umwm.zarr"):
+        shutil.copytree(ci_env.cache / "orca" / s, d / "orca" / s)
+    S.build(GriddedEnv(d, env_sigmas()), d, "key-1", log=lambda m: None)
+    rec = json.loads((d / S.DIGEST).read_text())
+    assert rec == dict(built_from="key-1", store_sha256=S.store_sha256(d / "derived.zarr"))
+    assert json.loads((d / "derived.zarr" / "zarr.json").read_text())["attributes"]["built_from"] == "key-1" and len(rec["store_sha256"]) == 64
+    t0, t1 = S.store_span(d)
+    assert (t0, t1) == (fx.T_REF, fx.T_REF + 36 * 3600.0)                                          # the 37 hourly fields of the fixture window
+    f = next(p for p in sorted((d / "derived.zarr" / "ustar").rglob("*")) if p.is_file() and p.name != "zarr.json")
+    f.write_bytes(f.read_bytes()[:-1] + bytes([f.read_bytes()[-1] ^ 1]))
+    assert S.store_sha256(d / "derived.zarr") != rec["store_sha256"]                               # one flipped bit is a different store
+
+
 def test_build_without_restart_spectra_says_so(parametric):
     env, fit, messages = parametric
     assert fit is None and env.subgrid.fit is None and "Stokes fit check None" in messages[0]
@@ -131,8 +148,8 @@ def test_diurnal_jet_points_downwind_and_vanishes_below_the_warm_layer_and_at_ni
 
 def test_time_since_rain_counts_hours_after_the_last_rainy_hour(sl, ci_full):
     s = sl._g("since_rain_s", np.full(37, 196.5), np.full(37, 1.5), ci_full.tw.x)
-    assert (s[:6] >= 1e9).all()                                                                    # nothing rained before 00Z: the lens clock has not started
-    assert list(s[6:9]) == [0.0, 0.0, 0.0] and list(s[9:12]) == [3600.0, 7200.0, 10800.0]          # 10 mm/h at 00Z, 01Z, 02Z, then 1 h, 2 h, 3 h later
+    assert (s[:5] >= 1e9).all()                                                                    # nothing rained before 23Z: the lens clock has not started
+    assert list(s[5:9]) == [0.0] * 4 and list(s[9:12]) == [3600.0, 7200.0, 10800.0]  # each node: mean of the two interval rates it joins
 
 
 def test_rain_lens_makes_the_surface_lighter_than_the_water_under_it(ci_full, sl):

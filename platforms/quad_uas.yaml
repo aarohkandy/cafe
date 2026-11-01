@@ -112,6 +112,7 @@ sortie:
   land_speed_ms: {value: 1.0, unit: m/s, assumed: true, why: "descent onto a moving deck; AC LAND_SPEED is 0.5 m/s, doubled to keep the sortie near 20 min"}
   deck_height_m: {value: 8.0, unit: m, assumed: true, why: "helideck height above the mean sea surface; sets the height at which wind is read"}
   time_limit_factor: {value: 1.0, unit: "-", assumed: true, why: "return-to-ship failsafe fires when airborne time exceeds duration_s times this"}
+  min_profile_fraction: {value: 1.0, unit: "-", assumed: true, why: "the mission asks for the full flux profile; a sortie that returns before its last level did not deliver it (profile_incomplete: waypoints reached / waypoints in the pattern below this)", replace_with: "the lab's minimum acceptable profile"}
   hard_stop_factor: {value: 1.6, unit: "-", assumed: true, why: "the run for a member that cannot get home ends at duration_s times this (it ditches long before on this battery)"}
   battery_swap: {value: true, unit: "-", assumed: true, why: "every sortie of a mission starts on a full pack; the ship crew swaps it"}
 
@@ -127,6 +128,7 @@ failure:
   stuck_min_cmd_ms: {value: 1.0, unit: m/s, assumed: true, why: "only while the controller is asking for more than this horizontal speed"}
 
 radio:
+  link_loss_hold_s: {value: 5.0, unit: s, assumed: true, why: "a link counts as lost (lost_link) only after it has been below 0 dB margin for this long without a break; ArduCopter's GCS failsafe timeout default (FS_GCS_TIMEOUT 5 s), recalled not re-read; a shorter fade is ridden through", replace_with: "the lab's failsafe timeout"}
   rfd900x:
     freq_mhz: {value: [902.0, 928.0], unit: MHz, source: "RFDesign RFD900x datasheet (docs/BRIEF.md 2.8)"}
     tx_power_dbm: {value: 30.0, unit: dBm, source: "RFDesign RFD900x datasheet: 1 W"}

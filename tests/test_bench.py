@@ -52,12 +52,52 @@ def test_stage1_fits_a_plus_b_times_members_per_vehicle_and_keeps_the_costliest_
     throughput.stage1(mission=CI)
     days = 1.5
     out = json.loads(bench.read_text())["stage1"]
-    assert asked == [(8, 20230301), (32, 20230301)] and set(out) == {"glider", "usv", "uas"}
+    # the warm-up, then each size twice
+    assert asked == [(2, 20230301), (8, 20230301), (32, 20230301), (8, 20230301), (32, 20230301)] and set(out) == {"glider", "usv", "uas"}
     # each is the max over the class
     assert out["glider"]["s_per_batch_day"] == pytest.approx(16.0 / days) and out["glider"]["s_per_member_day"] == pytest.approx(1.0 / days)
     assert out["usv"]["s_per_batch_day"] == 0.0 and out["usv"]["s_per_member_day"] == pytest.approx(1.0 / days)
     assert out["uas"]["s_per_batch_day"] == pytest.approx(40.0 / days) and out["uas"]["s_per_member_day"] == 0.0
     assert json.loads(capsys.readouterr().out) == {"stage1": out}
+
+
+def timed_batches(monkeypatch, extra):
+    """run_batch replaced by one whose glider costs 10 s + 0.5 s per member plus `extra[k]` on its k-th call (0 = the warm-up); -> the batch sizes asked."""
+    n = []
+
+    def run_batch(mission, env, members, seed, pri, marg, scales=None):
+        k = len(n)
+        n.append(len(members))
+        return {"vehicles": {"glider_eq": {"wall_s": 10.0 + 0.5 * len(members) + extra.get(k, 0.0)}, "glider_1n": {"wall_s": 1.0}, "usv": {"wall_s": 1.0},
+                             "uas": {"wall_s": 1.0}}}
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    return n
+
+
+def test_a_one_time_cost_on_the_first_call_is_not_folded_into_the_batch_cost(bench, monkeypatch):
+    """Round 4 M-26: the batch of 8 was the first call in the process, so the JIT compile (10 s here) became the glider's per-batch cost; the warm-up
+    batch takes it now."""
+    n = timed_batches(monkeypatch, {0: 10.0})
+    throughput.stage1(mission=CI)
+    g = json.loads(bench.read_text())["stage1"]["glider"]
+    assert n == [2, 8, 32, 8, 32] and g["s_per_batch_day"] == pytest.approx(10.0 / 1.5) and g["s_per_member_day"] == pytest.approx(0.5 / 1.5)  # a = 10, b = 0.5
+    assert g["slope_resolved"] is True and "after a warm-up batch" in g["note"]
+
+
+def test_the_faster_of_two_timings_of_a_size_is_kept(bench, monkeypatch):
+    """A slow first timing of a size (a stall, a cold cache) is dropped: calls 1 (8 members) and 2 (32) are 30 s slow, their repeats are clean."""
+    timed_batches(monkeypatch, {1: 30.0, 2: 30.0})
+    throughput.stage1(mission=CI)
+    g = json.loads(bench.read_text())["stage1"]["glider"]
+    assert g["s_per_batch_day"] == pytest.approx(10.0 / 1.5) and g["s_per_member_day"] == pytest.approx(0.5 / 1.5)
+
+
+def test_a_flat_pair_stores_a_zero_slope_and_says_it_was_not_resolved(bench, monkeypatch):
+    """Round 4 M-26: a slope clipped to 0 used to look like a measurement; a batch of 32 that is not slower than 8 gives 0 with `slope_resolved: false`."""
+    fake_batches(monkeypatch, {(s, v): 7.0 for s in (8, 32) for v in ("glider_eq", "glider_1n", "usv", "uas")})
+    throughput.stage1(mission=CI)
+    out = json.loads(bench.read_text())["stage1"]
+    assert all(e["s_per_member_day"] == 0.0 and e["slope_resolved"] is False and e["s_per_batch_day"] == pytest.approx(7.0 / 1.5) for e in out.values())
 
 
 def test_stage1_labels_every_class_entry_and_writes_the_machine_block(bench, monkeypatch, capsys):

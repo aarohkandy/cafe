@@ -66,7 +66,8 @@ below the current speed for becalmed_after_h (DECISION: the BRIEF's 'SOG < curre
 drifting boat's SOG equals the current; `<=`, so a boat that cannot move in a zero current is becalmed too); swept_off_track;
 capsize_proxy; wing_stall_calm = apparent wind speed below the tail's authority (trim_min_aws_ms) for calm_sustain_s; wing_stall_angle =
 apparent wind angle inside the bow cone (min_awa_deg, not the wing's stall angle of attack wing_stall_deg, which only the polar uses) for
-stall_sustain_s; battery.
+stall_sustain_s; battery; no_current_data = the environment gave no finite wind or current at the vehicle (a land block, a masked cell):
+the step uses zero for that vector and the member is a labelled failure from that time on (the glider's no_flight).
 """
 from __future__ import annotations
 
@@ -87,7 +88,7 @@ R_E = 6371008.8
 DV = 0.05                 # m/s, speed grid of the root search
 N_IT = 24                 # fixed-point iterations for (beta, phi, depower, rudder)
 NH = 72                   # candidate headings
-FAILS = ("becalmed", "swept_off_track", "capsize_proxy", "wing_stall_calm", "wing_stall_angle", "battery")
+FAILS = ("becalmed", "swept_off_track", "capsize_proxy", "wing_stall_calm", "wing_stall_angle", "battery", "no_current_data")
 MODES = ("section", "station")
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
 STRINGS = ("radio_900mhz", "radio_2g4", "iridium_link")
@@ -523,6 +524,9 @@ class USVSim:
         cur = self.env.current(self.lon, self.lat, P["current_z_m"], t).value
         wav = self.env.waves(self.lon, self.lat, t)
         stokes = wav["stokes0"].value
+        bw, bc = ~np.isfinite(wind).all(-1), ~np.isfinite(cur).all(-1)                    # a land block or masked cell: no wind or current vector there
+        wind, cur = np.where(bw[:, None], 0.0, wind), np.where(bc[:, None], 0.0, cur)  # zero keeps the step finite; the member fails
+        self._flag("no_current_data", bw | bc)
         wr = wind - cur
         c = dict(tws=cv.speed(wr), wfrom=cv.from_deg(wr), hs=wav["Hs"].value, tp=wav["Tp"].value, wdir=wav["dir_to"].value)
         if t - self.t_plan >= P["replan_s"]:

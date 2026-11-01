@@ -75,7 +75,11 @@ def _store_attr(d: pathlib.Path, key: str) -> Any:
 
 
 def _dir_problems(run: str, st: str, f: pathlib.Path, recorded: str) -> list[str]:
-    """A directory input: a zarr store carries the sha256 of the parts manifest it was assembled from, which is what the ledger recorded."""
+    """A directory input: a zarr store carries the sha256 of the parts manifest it was assembled from, which is what the ledger recorded
+    (the derived surface layer has none: its hash is over every file of the store)."""
+    if f.name == "derived.zarr":                                     # the surface layer: no manifest, the ledger recorded the hash of every file of the store
+        from .env.surface import store_sha256
+        return [] if store_sha256(f) == recorded else [f"{run}: stage {st}: input {f} (the derived surface layer) changed since the stage ran"]
     have = _store_attr(f, "manifest_sha256")
     if have is not None and have != recorded:
         return [f"{run}: stage {st}: input {f} changed since the stage ran (store manifest {str(have)[:12]}, ledger {recorded[:12]})"]

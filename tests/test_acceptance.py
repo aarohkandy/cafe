@@ -626,10 +626,13 @@ def _ci(mp, ci_env, tmp_path_factory):
     for m in (pipeline, ocean_mod):
         mp.setattr(m, "DATA", ci_env.data)
     mp.setenv("CAFE_DATA", str(ci_env.data))
+    out = tmp_path_factory.mktemp("acc")
+    # the session-wide ci_env tree also holds the table other modules' real runs append to; acceptance's "pristine shared table" is its own, empty, so
+    # that a run that gets no copy of it (the noisy third run) and one that does (quick, quick_same) start alike whichever test ran before
+    mp.setenv("CAFE_EMULATOR_TABLE", str(out / "pristine_shared" / "train.parquet"))
     mp.setattr(budget, "plan", small_budget(budget.plan))
     fake_module(mp, "cafe.pm.stage3.pipeline_windows", run=Rows().run)
     mp.setattr(acc, "RUNS", dict(quick=("ci", 0), overnight=("ci", 0), gpu=("ci", 1)))
-    out = tmp_path_factory.mktemp("acc")
     m = yaml.safe_load(pathlib.Path(MISSION).read_text())
     m["vehicles"] = [v for v in m["vehicles"] if v["id"] != "uas"]
     m["links"] = [lk for lk in m["links"] if "uas" not in (lk["a"], lk["b"])]

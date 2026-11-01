@@ -127,8 +127,9 @@ DEMO = "missions/tepex_c_demo.yaml"
 
 
 def stage1(sizes=(8, 32), mission=DEMO):
-    """Stage-1 wall time per vehicle class on this machine: one batch of each size on `mission`, fitted as s = a + b*M and divided by the
-    mission days. Batch cost is mostly per environment call (a), not per member (b), so the planner needs both (cafe.pm.budget).
+    """Stage-1 wall time per vehicle class on this machine: one warm-up batch, then a batch of each size twice (the faster kept) on `mission`, fitted
+    as s = a + b*M and divided by the mission days; a slope that is not positive is stored as 0 with `slope_resolved: false`. Batch cost is mostly
+    per environment call (a), not per member (b), so the planner needs both (cafe.pm.budget).
 
     The default is the demo mission on the real environment cache ($CAFE_DATA/cache/<name>, from `fetch`): the rates scale with the vehicles and
     the data the planner will actually plan for. `missions/ci_fixture.yaml` is measured on the synthetic tree (tests/fixtures/ci_env). Refuses to
@@ -160,20 +161,28 @@ def stage1(sizes=(8, 32), mission=DEMO):
     m = ctx.mission
     days = (utc(m["window"]["end"]) - utc(m["window"]["start"])).total_seconds() / 86400
     pri, marg = s1.priors_for(m)
-    wall = {M: s1.run_batch(m, ctx.env, list(range(M)), int(m["seed"]), pri, marg)["vehicles"] for M in sizes}
+    # one warm-up batch (the JIT compile and the first reads of the cache belong to no batch size), then each size twice, the faster of the two kept
+    s1.run_batch(m, ctx.env, [0, 1], int(m["seed"]), pri, marg)
+    wall: dict[int, dict[str, float]] = {M: {} for M in sizes}
+    for _ in range(2):
+        for M in sizes:
+            for vid, r in s1.run_batch(m, ctx.env, list(range(M)), int(m["seed"]), pri, marg)["vehicles"].items():
+                wall[M][vid] = min(wall[M].get(vid, float("inf")), r["wall_s"])
     lo, hi = sizes
     out = {}
     for vid, cls in ctx.classes.items():
-        a_lo, a_hi = wall[lo][vid]["wall_s"], wall[hi][vid]["wall_s"]
-        b = max((a_hi - a_lo) / (hi - lo), 0.0)
+        a_lo, a_hi = wall[lo][vid], wall[hi][vid]
+        b = max((a_hi - a_lo) / (hi - lo), 0.0)                                 # a slope that is not positive is not resolved: stored as 0, said so below
         a = max(a_lo - b * lo, 0.0)
         e = out.setdefault(cls, dict(s_per_batch_day=0.0, s_per_member_day=0.0))
         e["s_per_batch_day"] = max(e["s_per_batch_day"], a / days)              # the costlier vehicle of a class
         e["s_per_member_day"] = max(e["s_per_member_day"], b / days)
     after = os.getloadavg()[0] if hasattr(os, "getloadavg") else None
     for e in out.values():
-        e.update(measured=time.strftime("%Y-%m-%d"), host=platform.node(), cpus=os.cpu_count(), load_1min=load, load_1min_after=after, sizes=list(sizes),
-                 mission=mission, mission_name=m["name"], mission_days=days, note="wall time of stage1.run_batch per vehicle; a + b*M per mission day")
+        e.update(slope_resolved=e["s_per_member_day"] > 0,  # False: a batch costs the same whatever its size (the planner charges per batch only)
+                 measured=time.strftime("%Y-%m-%d"), host=platform.node(), cpus=os.cpu_count(), load_1min=load, load_1min_after=after, sizes=list(sizes),
+                 mission=mission, mission_name=m["name"], mission_days=days,
+                 note="wall time of stage1.run_batch per vehicle, after a warm-up batch, faster of two; a + b*M per mission day")
     data = json.loads(OUT.read_text()) if OUT.exists() else {}
     data["stage1"] = out
     data["machine"] = dict(id=platform.node(), cpu=_cpu(), cpus=os.cpu_count(), measured=time.strftime("%Y-%m-%d"))

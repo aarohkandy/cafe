@@ -28,6 +28,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
+from .config import ConfigError
 from .stats import intervals
 
 NN_QUANTILE = 0.99
@@ -60,7 +61,15 @@ def store_path(path: str | pathlib.Path) -> tuple[pathlib.Path, str]:
 
 
 def read_table(path: pathlib.Path) -> pd.DataFrame:
-    return pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path, float_precision="round_trip")
+    """The stored table. A file that cannot be read (zero bytes, truncated, not parquet/csv) is a `ConfigError` naming it: it is not treated as empty,
+    because the next write would replace the rows in it without a word."""
+    try:
+        return pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path, float_precision="round_trip")
+    except FileNotFoundError:
+        raise
+    except (OSError, ValueError) as e:                                   # pyarrow's ArrowInvalid is a ValueError, pandas' parser and empty-data errors too
+        raise ConfigError(f"training table {path} cannot be read ({type(e).__name__}); move it aside (rows in it are lost) and rerun; "
+                          "the next run starts a new table") from e
 
 
 def write_table(df: pd.DataFrame, path: pathlib.Path) -> None:
@@ -171,14 +180,15 @@ class Emulator:
 
     # ---- predict ----------------------------------------------------------------------------------------------
     def predict(self, x: Any, alpha: float = 0.1) -> dict[str, dict[str, np.ndarray]]:
-        """{target: {"value", "lo", "hi", "std"}} arrays for the rows of x (interval has coverage >= 1 - alpha)."""
+        """{target: {"value", "lo", "hi", "std", "lo_z", "hi_z"}} arrays for the rows of x (the interval has coverage >= 1 - alpha on the model scale:
+        the clipped logit for probabilities, `lo_z`/`hi_z`; `lo`/`hi` are the same bounds mapped back)."""
         xa = self._x(x)
         out = {}
         for t in self.targets:
             mu, sig = self._gp(t, xa)
             q = _conformal_q(self.scores[t], alpha)
             lo, hi = (mu - q * sig, mu + q * sig) if np.isfinite(q) else (np.full_like(mu, -np.inf), np.full_like(mu, np.inf))
-            out[t] = dict(value=self._inv(t, mu), lo=self._inv(t, lo), hi=self._inv(t, hi), std=sig)
+            out[t] = dict(value=self._inv(t, mu), lo=self._inv(t, lo), hi=self._inv(t, hi), std=sig, lo_z=lo, hi_z=hi)  # lo_z, hi_z: the model-scale bounds
         return out
 
     def _dist(self, xa: np.ndarray) -> np.ndarray:
@@ -201,12 +211,17 @@ class Emulator:
 
     # ---- evaluation -------------------------------------------------------------------------------------------
     def score(self, df: pd.DataFrame, alpha: float = 0.1) -> dict[str, Any]:
-        """RMSE (in native units, P for probabilities) and empirical interval coverage on rows the model never saw."""
+        """RMSE (in native units, P for probabilities) and empirical interval coverage on rows the model never saw. `coverage` is on the scale the
+        conformal scores live on (a probability target through the clipped logit, so an exact 0 or 1 is the clip and can be inside a sigmoid
+        interval), which is where the guarantee holds; `coverage_raw_p` is the same intervals against the raw P of the probability targets, where a
+        target of exactly 0 or 1 can never be inside (a sigmoid reaches neither)."""
         p = self.predict(df[self.features], alpha)
         y = {t: df[t].to_numpy() for t in self.targets}
+        z = {t: self._tf(t, y[t]) for t in self.targets}
         return dict(n_test=len(df), nominal=1 - alpha,
                     rmse={t: float(np.sqrt(np.mean((p[t]["value"] - y[t]) ** 2))) for t in self.targets},
-                    coverage={t: float(np.mean((p[t]["lo"] <= y[t]) & (y[t] <= p[t]["hi"]))) for t in self.targets})
+                    coverage={t: float(np.mean((p[t]["lo_z"] <= z[t]) & (z[t] <= p[t]["hi_z"]))) for t in self.targets},
+                    coverage_raw_p={t: float(np.mean((p[t]["lo"] <= y[t]) & (y[t] <= p[t]["hi"]))) for t in self.prob})
 
     def holdout_report(self, df: pd.DataFrame, frac: float = 0.2, alpha: float = 0.1, fresh: FreshDraw | None = None) -> dict[str, Any]:
         """Fit a fresh emulator on the other (1 - frac) of the feature points, score on the held-out frac. The split is by distinct feature

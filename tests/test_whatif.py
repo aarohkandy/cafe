@@ -4,6 +4,7 @@ Stage 1 runs for real on a fake environment where the answer is known (a storm c
 24 h later avoids it); the emulators are fitted on tables fabricated from the same rule, which is test data only.
 """
 import copy
+import math
 import re
 
 import numpy as np
@@ -334,6 +335,9 @@ def test_a_trained_emulator_reports_its_holdout_and_acceptance(storm_em):
     assert info["rmse_debiased"] == pytest.approx(np.sqrt(max(info["rmse"]["p_fail"] ** 2 - info["noise_floor_rmse"] ** 2, 0.0)))
     assert info["acceptance"]["query_ok"] and em.features == whatif.BASE + whatif.TASK["glider"] and em.targets[:2] == ["p_fail", "t_fail_h"]
     assert info["threshold"] == em.threshold and info["multi_fidelity"] is False
+    # on 28 held-out points the +-0.05 gate passes 24, 25 or 26 hits; a calibrated emulator (hits ~ Binomial(28, 0.9)) misses it the rest of the time
+    passes = sum(math.comb(28, k) * 0.9 ** k * 0.1 ** (28 - k) for k in (24, 25, 26))
+    assert info["coverage_chance_fail"] == pytest.approx(1 - passes, rel=1e-9) and 0.3 < info["coverage_chance_fail"] < 0.5
 
 
 def test_acceptance_is_judged_against_the_briefs_limits(tmp_path, monkeypatch):
@@ -644,6 +648,31 @@ def test_an_emulated_what_if_carries_the_distance_and_the_interval(storm_em):
     assert now["method"] == "EMULATED" and now["verdict"] == "NO-GO"
 
 
+MISSED = "the glider emulator missed BRIEF 2.7 acceptance (coverage), so Stage 1 answers"
+
+
+def test_an_emulator_that_missed_the_acceptance_does_not_answer_the_what_if_and_stage_1_does(storm_em):
+    """Follow-up to round 4 M-3: `used: False` in the class's info means no emulator for the answer, and the reason names the gate."""
+    em, info = storm_em
+    missed = dict(info, used=False, unused_reason=MISSED)
+    r = ask(dict(shift_h=24.0), {"glider": (em, missed)})["vehicles"][GL]
+    assert r["method"] == "Stage 1" and r["why"] == MISSED and r["verdict"] == "GO" and r["n"] == 16
+    assert ask(dict(shift_h=24.0), {"glider": (em, dict(info, used=True))})["vehicles"][GL]["method"] == "EMULATED"
+    assert ask(dict(shift_h=24.0), {"glider": (em, info)})["vehicles"][GL]["method"] == "EMULATED"          # an info without the key (older code) still answers
+
+
+def test_an_emulator_that_missed_the_acceptance_does_not_answer_the_flip_search_and_stage_1_does(storm_em, monkeypatch):
+    em, info = storm_em
+    monkeypatch.setattr(whatif, "FALLBACK_K", 20)
+    pri, marg = stage1.priors_for(STORM)
+    ems = {"glider": (em, dict(info, used=False, unused_reason=MISSED))}
+    flips, spent = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=1.0)}, {GL: TRACK}, ENV, ems, plan_for(STORM), pri, marg, None, 5, 1e6,
+                                      lambda *_: None)
+    f = flips[GL]
+    assert f["found"] and not f["emulator"] and spent > 0.0 and f["best"]["method"] == "Stage 1"
+    assert not [t for t in f["tried"] if t["method"] == "EMULATED"] and MISSED in {t["reason"].split(";")[0] for t in f["tried"]}
+
+
 def test_the_what_if_falls_back_to_stage_1_out_of_range_and_says_why(storm_em):
     em, info = storm_em
     r = ask(dict(shift_h=24.0, dlon=-0.5), {"glider": (em, info)}, tracks={})["vehicles"][GL]
@@ -899,6 +928,32 @@ def test_when_the_training_targets_share_their_draws_the_fresh_check_reads_large
     ok = whatif.fit_class(obs, "glider", tmp_path / "t2.parquet")[1]
     # without the check, only the in-sample score is judged
     assert ok["fresh_points"] == 0 and "rmse_fresh_debiased" not in ok and ok["rmse_gate"] == ok["rmse_debiased"]
+
+
+def test_the_coverage_gate_reads_the_calibration_scale_and_the_raw_p_number_is_reported_beside_it(tmp_path):
+    """Round 4 M-3: about a quarter of 16-member P(fail) values are exactly 0 or 1, which no sigmoid interval contains, so the raw-P coverage of a
+    calibrated emulator reads 0.71 here and the old gate (|coverage - 0.90| <= 0.05) rejected it; the conformal guarantee is on the clipped logit."""
+    obs, _ = known_p_table()
+    assert obs["p_fail"].isin([0.0, 1.0]).mean() > 0.2
+    em, info = whatif.fit_class(obs, "glider", tmp_path / "t.parquet")
+    raw = info["coverage_raw_p"]["p_fail"]
+    assert set(info["coverage_raw_p"]) == {"p_fail"} and raw < 0.8 and info["coverage"]["p_fail"] > raw + 0.1
+    assert abs(raw - info["nominal"]) > whatif.LIMITS["coverage"]                                       # the number the old gate used would have failed it
+    assert info["acceptance"]["coverage_ok"] is True and abs(info["coverage"]["p_fail"] - info["nominal"]) <= whatif.LIMITS["coverage"]
+    assert em.holdout["coverage_raw_p"] == info["coverage_raw_p"]
+
+
+@pytest.mark.parametrize("content", [b"this is not parquet", b""], ids=["garbage", "zero bytes"])
+def test_snapshot_of_a_corrupt_shared_table_is_a_config_error_naming_the_file_and_leaves_it_alone(tmp_path, content):
+    """Round 4 M-23: the call raised pyarrow's ArrowInvalid; an absent table is still an empty one (test above)."""
+    from cafe.pm.config import ConfigError
+    t = tmp_path / "train.parquet"
+    t.write_bytes(content)
+    with pytest.raises(ConfigError, match=f"training table {t} cannot be read"):
+        whatif.snapshot(t, tmp_path / "s" / "train_input", "r1")
+    with pytest.raises(ConfigError, match="cannot be read"):
+        whatif.train(t, ["glider"])
+    assert t.read_bytes() == content
 
 
 def test_the_fresh_check_skips_rows_it_cannot_re_run_and_stops_at_three(tmp_path):

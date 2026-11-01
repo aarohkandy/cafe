@@ -94,6 +94,35 @@ def test_conformal_coverage_holds_on_fresh_draws(fitted):
     assert abs(s["coverage"]["p_fail"] - 0.9) < 0.06 and s["n_test"] == 400
 
 
+def test_exact_zero_and_one_targets_are_covered_on_the_calibration_scale_not_missed_on_the_raw_p_scale(tmp_path):
+    """Round 4 M-3. Stage-1 P(fail) is k / 32, so about a quarter of the rows are exactly 0 or 1; the intervals are conformal on the clipped logit, where
+    those rows are the clip and can be inside, but a sigmoid interval never reaches 0 or 1, so on the raw P scale they are always misses and a calibrated
+    emulator read 0.7 against 0.9. `coverage` is the calibration-scale number (what the gate uses), `coverage_raw_p` the other. Five seeds: with 30
+    calibration rows one seed's realised coverage scatters by about 0.05 (seed 3 here: 0.96), so the band is 0.85 to 0.97 each and 0.03 on the mean."""
+    cov, raw = [], []
+    for seed in range(5):
+        df = E.synthetic_table(550, seed, members=32)
+        em = E.Emulator(E.FEATURES, ["p_fail", "t_fail_h"], path=tmp_path / f"{seed}.csv", seed=seed)
+        em.fit(df.iloc[:150])
+        test = df.iloc[150:]
+        s = em.score(test)
+        assert s["n_test"] == 400 and test.p_fail.isin([0.0, 1.0]).mean() > 0.15                  # the exact 0 and 1 rows are in the n
+        assert set(s["coverage_raw_p"]) == {"p_fail"} and set(s["coverage"]) == {"p_fail", "t_fail_h"}
+        cov.append(s["coverage"]["p_fail"])
+        raw.append(s["coverage_raw_p"]["p_fail"])
+        assert 0.85 <= cov[-1] <= 0.97 and raw[-1] < cov[-1] - 0.1
+    assert abs(np.mean(cov) - 0.9) <= 0.03 and np.mean(raw) < 0.8                           # the gate number passes (limit 0.05), the old one would not
+
+
+def test_the_predicted_bounds_are_exposed_on_the_model_scale_and_map_back_to_the_probability_bounds():
+    em = E.Emulator(["a"], ["p_fail", "t"], path="x.csv")
+    df = pd.DataFrame(dict(a=np.linspace(0, 1, 40), p_fail=np.clip(np.linspace(0, 1.2, 40) - 0.1, 0, 1), t=np.linspace(0, 5, 40)))
+    em.fit(df)
+    p = em.predict(df.iloc[:5][["a"]])
+    assert np.allclose(E._sigmoid(p["p_fail"]["lo_z"]), p["p_fail"]["lo"]) and np.allclose(E._sigmoid(p["p_fail"]["hi_z"]), p["p_fail"]["hi"])
+    assert np.array_equal(p["t"]["lo_z"], p["t"]["lo"])                                       # a non-probability target: the same scale
+
+
 def test_receipts_pass_and_fail_when_calibration_is_wrong(monkeypatch):
     from cafe import receipts as R
 
@@ -173,6 +202,30 @@ def test_parquet_path_is_used_when_pyarrow_is_present(monkeypatch, tmp_path):
     em.append(dict(a=1.0, p_fail=0.2))
     em.append(dict(a=2.0, p_fail=0.3))
     assert em.store_format == "parquet" and len(em.table()) == 2 and seen.count("w") == 2 and "r" in seen
+
+
+@pytest.mark.parametrize("name,content", [("train.parquet", b"this is not a table"), ("train.parquet", b""), ("train.csv", b"")],
+                         ids=["parquet garbage", "parquet zero bytes", "csv zero bytes"])  # csv garbage is a one-line header: an empty table
+def test_an_unreadable_training_table_is_a_config_error_naming_the_file_not_an_empty_table(tmp_path, name, content):
+    """Round 4 M-23: the pyarrow/pandas error named nothing and told nobody what to do; the file is not treated as empty (the next write would
+    replace its rows silently)."""
+    from cafe.pm.config import ConfigError
+    f = tmp_path / name
+    f.write_bytes(content)
+    with pytest.raises(ConfigError, match=rf"training table {f} cannot be read \(\w+\); move it aside \(rows in it are lost\)"):
+        E.read_table(f)
+    assert f.read_bytes() == content
+
+
+def test_a_truncated_parquet_table_is_a_config_error_too(tmp_path):
+    from cafe.pm.config import ConfigError
+    f = tmp_path / "t.parquet"
+    pd.DataFrame(dict(a=np.arange(50.0), p_fail=np.linspace(0, 1, 50))).to_parquet(f)
+    f.write_bytes(f.read_bytes()[:-60])
+    with pytest.raises(ConfigError, match="cannot be read"):
+        E.read_table(f)
+    with pytest.raises(FileNotFoundError):                                                          # a missing file is the caller's business, as before
+        E.read_table(tmp_path / "none.parquet")
 
 
 def test_fit_reads_stored_table(tmp_path):

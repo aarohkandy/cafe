@@ -38,7 +38,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy.stats import qmc
+from scipy.stats import binom, qmc
 
 from . import budget, report, stage1
 from .config import ConfigError, _in_box, utc
@@ -387,14 +387,15 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = N
         stale = int((~keep).sum())
         d = d[keep].reset_index(drop=True)
     points = int(len(d[BASE + TASK[cls]].round(9).drop_duplicates()))
-    info: dict[str, Any] = dict(trained=False, cls=cls, rows=int(len(d)), points=points, stale_rows=stale)
+    info: dict[str, Any] = dict(trained=False, cls=cls, rows=int(len(d)), points=points, stale_rows=stale, used=False)
     if points < MIN_ROWS:
         more = f"; only {points} of them are distinct feature points" if points < len(d) else ""
         old = f"; {stale} rows made by other code are left out" if stale else ""
-        return None, dict(info, reason=f"{len(d)} {cls} rows in the training table, {MIN_ROWS} are needed "
-                                       f"(a 20 % hold-out must score 90 % coverage){more}{old}")
+        why = f"{len(d)} {cls} rows in the training table, {MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage){more}{old}"
+        return None, dict(info, reason=why, unused_reason=why)
     if np.ptp(d["p_fail"]) == 0:
-        return None, dict(info, reason=f"P(fail) is {d['p_fail'].iloc[0]:.3f} in all {len(d)} {cls} rows: nothing to learn")
+        why = f"P(fail) is {d['p_fail'].iloc[0]:.3f} in all {len(d)} {cls} rows: nothing to learn"
+        return None, dict(info, reason=why, unused_reason=why)
     modes = [c for c in d.columns if c.startswith("mode_") and d[c].std() > 0]
     modes = sorted(modes, key=lambda c: -d[c].std())[:MODES_MAX]
     em = Emulator(BASE + TASK[cls], ["p_fail", "t_fail_h"] + modes, path)
@@ -422,9 +423,15 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = N
     gate = max(deb, fresh_info.get("rmse_fresh_debiased", 0.0))
     acc = dict(rmse_ok=bool(gate <= LIMITS["rmse"]), coverage_ok=bool(abs(h["coverage"]["p_fail"] - h["nominal"]) <= LIMITS["coverage"]),
                query_ok=bool(q <= LIMITS["query_ms"]))
+    missed = [n for n, ok in (("RMSE", acc["rmse_ok"]), ("coverage", acc["coverage_ok"]), ("query time", acc["query_ok"])) if not ok]
+    # a calibrated emulator's held-out hit count is Binomial(n_test, nominal); on 20 to 30 points that alone misses the +-0.05 gate often
+    k = np.arange(h["n_test"] + 1)
+    chance = float(binom.pmf(k[np.abs(k / max(h["n_test"], 1) - h["nominal"]) > LIMITS["coverage"] + 1e-12], h["n_test"], h["nominal"]).sum())
     return em, dict(info, trained=True, n_train=h["n_train"], n_test=h["n_test"], nominal=h["nominal"], rmse=h["rmse"], coverage=h["coverage"],
-                    query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, rmse_gate=gate, **fresh_info, draws=DRAWS, acceptance=acc,
-                    threshold=em.threshold, multi_fidelity=em.multi_fidelity)
+                    coverage_raw_p=h["coverage_raw_p"], coverage_chance_fail=chance, used=not missed,
+                    unused_reason=f"the {cls} emulator missed BRIEF 2.7 acceptance ({', '.join(missed)}), so Stage 1 answers" if missed else None,
+                    query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, rmse_gate=gate, **fresh_info,
+                    draws=DRAWS, acceptance=acc, threshold=em.threshold, multi_fidelity=em.multi_fidelity)
 
 
 def train(table: Any, classes: Any, path: Any = None, df: pd.DataFrame | None = None, code_digest: str | None = None,
@@ -461,6 +468,15 @@ def with_rows(df: pd.DataFrame, rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 
 # ------------------------------------------------------------------------------------------------------ flip search
+
+def usable(ems: dict[str, tuple[Emulator | None, dict[str, Any]]], cls: str) -> tuple[Emulator | None, str | None]:
+    """(the class's emulator, None) when it may answer; (None, why) when there is none or it missed BRIEF 2.7 acceptance (`used` False in its info):
+    Stage 1 answers then, and `why` is the reason to show beside the old "no emulator"."""
+    em, info = ems.get(cls) or (None, {})
+    if em is None or info.get("used", True):
+        return em, info.get("unused_reason")
+    return None, info.get("unused_reason")
+
 
 def candidates(mission: dict[str, Any], vid: str) -> list[dict[str, Any]]:
     """Single changes in cost order: deploy +-6/12/24/48 h, +-0.5/1 degree in lon or lat, lower duty. Each: mod, cost (notches), change (words)."""
@@ -542,7 +558,7 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
         used = 0.0
         cls = stage1._classes(solo(mission, vid))[vid]
         want = ("GO",) if base["verdict"] == "MARGINAL" else ("GO", "MARGINAL")
-        em = (ems.get(cls) or (None, {}))[0]
+        em, no_em = usable(ems, cls)
         tried: list[dict[str, Any]] = []
         left: list[tuple[int, dict[str, Any]]] = []
         for c in candidates(mission, vid):
@@ -556,7 +572,7 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
             if a["status"] == "ok":
                 tried.append(dict(e, method="EMULATED", **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")}))
             else:
-                tried.append(dict(e, reason=a["status"].replace("_", " ")))
+                tried.append(dict(e, reason=(no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " "))))
                 left.append((len(tried) - 1, m2))
         if not any(t["method"] == "EMULATED" and t["verdict"] in want for t in tried):
             for j, m2 in left[:FALLBACK_K]:
@@ -638,11 +654,13 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
         if b is None:
             b = measure(mission, vid, env, plan, pri, marg, scales, seed)
             b = dict(verdict=b["verdict"], p_fail=b["p_fail"])
-        a = predict((ems.get(cls) or (None, {}))[0], m2, vid, cls, tracks.get(vid), mod, env)
+        em, no_em = usable(ems, cls)
+        a = predict(em, m2, vid, cls, tracks.get(vid), mod, env)
         if a["status"] == "ok":
             out[vid] = dict(base=b, method="EMULATED", **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")})
         else:
-            out[vid] = dict(base=b, method="Stage 1", why=a["status"].replace("_", " "), **_stage1(m2, vid, env, plan, fitted, scales))
+            why = no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " ")
+            out[vid] = dict(base=b, method="Stage 1", why=why, **_stage1(m2, vid, env, plan, fitted, scales))
     gone = [k["id"] for k in mission["links"] if k["a"] in drop or k["b"] in drop]
     return dict(vehicles=out, dropped=drop, links_removed=gone)
 

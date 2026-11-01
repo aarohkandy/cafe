@@ -76,13 +76,27 @@ def test_land_is_nan_in_umwm_and_zero_depth(grid):
     assert (grid.depth_umwm[j[:, None], i[None, :]] == 0).all() and grid.Wstatic["LANDMASK"][j[:, None], i[None, :]].min() == 1
 
 
-def test_rain_rate_is_the_hourly_difference_of_the_accumulation(grid):
+def test_rain_rate_nodes_are_the_mean_of_the_two_intervals_they_join(grid):
+    """M-16: the rate used to be the backward difference stored at the end of its hour, so an hour of rain read 30 min late and twice as wide."""
     rate = grid.W["rain_mm_h"]
-    assert (rate >= 0).all() and (rate[0] == 0).all() and rate.max() == pytest.approx(10.0, rel=1e-3)
+    assert (rate >= 0).all() and rate.max() == pytest.approx(10.0, rel=1e-3)
     j, i = np.unravel_index(np.argmax(fx.rain_footprint(grid.low.x[None, :], grid.law.x[:, None])), rate.shape[1:])
-    k = np.flatnonzero(rate[:, j, i] > 5)
-    assert list(grid.tw.x[k]) == [fx.RAIN_T0 + h * 3600.0 for h in (1, 2, 3)]                    # the accumulation ramps over 3 h from 23Z
+    at = lambda h: float(rate[np.flatnonzero(grid.tw.x == fx.RAIN_T0 + h * 3600.0)[0], j, i])
+    assert [at(h) for h in (-1, 0, 1, 2, 3, 4)] == pytest.approx([0.0, 5.0, 10.0, 10.0, 5.0, 0.0], rel=1e-3)             # 10 mm/h from 23Z to 02Z
     assert grid.W["RAINNC"][0, j, i] > 30                                                         # a forgotten difference would read ~46 mm/h
+    tt = np.linspace(grid.tw.x[0], grid.tw.x[-1], 20001)
+    r = np.interp(tt, grid.tw.x, rate[:, j, i])
+    acc = grid.W["RAINNC"][:, j, i] + grid.W["RAINC"][:, j, i]
+    assert np.trapezoid(r, tt) / 3600.0 == pytest.approx(acc[-1] - acc[0], rel=1e-4)               # the interpolated rate integrates to the accumulation
+    assert np.trapezoid(r * tt, tt) / np.trapezoid(r, tt) == pytest.approx(fx.RAIN_T0 + 1.5 * 3600.0, abs=1.0)  # mid-burst (+2 h before)
+
+
+def test_rain_rate_nodes_edges_and_unequal_steps():
+    acc = np.array([0.0, 4.0, 4.0, 10.0])[:, None, None]
+    assert E.rain_rate_nodes(acc, np.array([0.0, 3600.0, 7200.0, 10800.0]))[:, 0, 0].tolist() == [4.0, 2.0, 3.0, 6.0]          # the first node is not 0
+    assert E.rain_rate_nodes(acc, np.array([0.0, 1800.0, 5400.0, 7200.0]))[:, 0, 0].tolist() == [8.0, 4.0, 6.0, 12.0]        # intervals of 8, 0 and 12 mm/h
+    assert E.rain_rate_nodes(np.array([5.0, 3.0])[:, None, None], np.array([0.0, 3600.0]))[:, 0, 0].tolist() == [0.0, 0.0]  # a reset is 0
+    assert E.rain_rate_nodes(np.array([5.0])[:, None, None], np.array([0.0]))[:, 0, 0].tolist() == [0.0]
 
 
 # ------------------------------------------------------------------------------------------------------------ bounds
@@ -203,6 +217,19 @@ def test_wind_in_hours_without_3d_fields_ignores_them(grid):
     for iso in ("2023-03-02T02:30:00Z", "2023-03-01T20:00:00Z", "2023-03-03T05:00:00Z"):            # between sorties, before the first, after the last
         w = grid.wind(195.0, 0.0, 100.0, E.to_seconds(iso))
         assert "WRF 3-D" not in w.source and np.allclose(w.value, np.stack(fx.wind3d(195.0, 0.0, E.to_seconds(iso), 100.0), -1), atol=1e-3 + 2 * TIME_INTERP)
+
+
+def test_wind_above_the_top_stored_level_is_not_held_constant_nor_counted_as_3d(grid, monkeypatch):
+    """M-15: above the top level (318 m in the fixture; ~400 m in the real cache) the top level's wind used to be returned and counted as 3-D."""
+    t = E.to_seconds("2023-03-02T01:30:00Z")
+    lon, lat, z = np.full(3, 195.1), np.full(3, 0.3), np.array([300.0, 318.0, 600.0])
+    up = grid._wind3d(lon, lat, z, t)
+    assert np.isfinite(up[:2]).all() and np.isnan(up[2]).all()                                      # the top level itself is still inside
+    grid.wind_points = grid.wind3d_points = 0
+    w = grid.wind(lon, lat, z, t)
+    assert (grid.wind_points, grid.wind3d_points) == (3, 2) and np.isfinite(w.value).all()
+    monkeypatch.setattr(grid, "use_3d", False)
+    assert np.allclose(w.value[2], grid.wind(lon, lat, z, t).value[2])                              # the U10 log profile there, not the top level's wind
 
 
 def test_wind_below_the_first_level_ignores_the_3d_fields(grid):

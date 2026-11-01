@@ -33,10 +33,11 @@ wrapper once per shell (pick any data directory with the space above):
 ```bash
 export CAFE_HOST_DATA=$HOME/cafe-data && mkdir -p $CAFE_HOST_DATA
 pm() { docker run --rm --ulimit core=0 -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
+       -e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain)" ]; then echo 1; else echo 0; fi) \
        -v $PWD:/app -v $CAFE_HOST_DATA:/data -w /app cafe-pm "$@"; }
 ```
 
-(On homebase this is `./pm.sh <command>`, which also syncs the checkout there; data is `~/work/cafe/pmdata`.)
+(On homebase this is `./pm.sh <command>`, which also syncs the checkout there and sets the same two variables; data is `~/work/cafe/pmdata`.) The image has no `git`, so the ledgers learn the commit and whether the tree was clean only from `CAFE_GIT_SHA` and `CAFE_GIT_DIRTY`; without the second one a ledger says `"git_dirty": null` and the golden of step 7 cannot be minted or passed (review round 4, M-24, DECISIONS 260). Run `pm` from the repository root, in a git checkout where `git status` works.
 
 ## 2. Check the install without the network (~10 min)
 
@@ -63,6 +64,8 @@ records the load before and after, and measures on the demo mission unless you n
 ```bash
 pm python bench/throughput.py stage1            # on homebase: PM_CPUS=8 ./pm.sh python bench/throughput.py stage1
 ```
+
+Run it twice, on a quiet box, and compare the two files: the tool times a warm-up batch and keeps the faster of two timings per size, but a class whose entry says `slope_resolved: false` has a per-member slope that 8 versus 32 members could not resolve (to the planner a batch then costs the same whatever its size). The shipped `config/throughput.json` was measured at load 33 and has the old single-timing method; re-measure at code freeze (review round 4, M-26, DECISIONS 262).
 
 Use this, not `make bench`, for that: `make bench` also runs OpenFOAM. The planner never overruns stage 1: it halves the batch down to 4 members, else
 refuses with the shortfall. `--budget ci` on the demo mission is refused by design; `ci` is for `missions/ci_fixture.yaml`.
@@ -118,7 +121,7 @@ so a shifted sortie is not compared across two wind models.
 **The emulator needs 100 distinct feature points per vehicle class, and one run does not make that many.** The plan says so before the run (`plan.json`:
 "this budget gives N points per class, 100 are needed: the emulator will not train"), and the report's emulator section repeats it. Until the table has them,
 every what-if answer comes from Stage 1 and says so. Rows accumulate over runs of identical code (the same code digest): give each run the same
-`--emulator-table FILE` (or set `$CAFE_EMULATOR_TABLE`); rows made by other code stay in the file but are not trained on, so any commit to `cafe/`, `config/`
+`--emulator-table FILE` (or set `$CAFE_EMULATOR_TABLE`); a repeat of the same mission with the same seed adds no new point (the variants, the members and so the rows are functions of the mission and its seed, and DECISIONS 174 replaces the repeat), so new points come from a different `--seed`, a different mission, or a bigger budget; rows made by other code stay in the file but are not trained on, so any commit to `cafe/`, `config/`
 or `platforms/` starts the count again. A bigger budget raises the points per run. The threshold is not lowered to make the emulator appear.
 
 ## 6. With a GPU (not tested here: no GPU was available while this was built)
@@ -138,7 +141,7 @@ stage-3 ledger in `calibration.source_run`; review the diff and commit it. Nothi
 
 ```bash
 pm make receipts          # every receipt; exit 0 only if none failed. Read "Receipts on a clean machine" below before expecting 0
-pm make broken            # the deliberately broken wave-direction config must FAIL a receipt: exit 0 means it did
+pm make broken            # the deliberately broken wave-direction config must FAIL a receipt that passes without it: exit 0 means one did; it runs the fast receipts twice (clean, then broken)
 pm make audit             # ledgers of runs/quick, runs/overnight and runs/4h (those that exist) re-hashed, banned tokens, ruff, mypy --strict, coverage, mutation score
 pm make acceptance        # brief 5.3: quick + overnight (+ 4h with GPUS=1), golden diff, same seed, other seed, broken config (~11 h)
 ```
@@ -165,7 +168,7 @@ limitations are retired.
 **The golden is a regression snapshot, not an independent expectation.** `tests/golden/tepex_c_demo_quick.json` is this tool's own output from a
 reviewed quick run, so it catches a change, not an error. `make acceptance` refuses to pass if it is missing, and `golden_diff` FAILs until it records a
 commit sha, a clean tree, the code digest and the reviewed run's report hash. Rewrite it from a reviewed quick run on a clean, committed checkout:
-`./pm.sh python -m cafe.pm acceptance ... --update-golden`; that run then fails the one check until it is rerun without the flag.
+`pm python -m cafe.pm acceptance ... --update-golden` (on homebase `./pm.sh ...`); that run then fails the one check until it is rerun without the flag. The golden records the commit and whether the tree was clean, and the image has no `git`, so mint it through the step 1 wrapper (it passes `CAFE_GIT_SHA` and `CAFE_GIT_DIRTY` from the host checkout) from a checkout where `git status --porcelain` prints nothing; run without `CAFE_GIT_DIRTY` it writes `dirty: null` and `golden_diff` says it "cannot tell whether the checkout was clean" (review round 4, M-24).
 
 **Model receipts in the report.** A report with no `runs/receipts.json` says "Model receipts: not run" and its verdicts cite no receipt group. Run
 `python -m cafe.pm receipts` first. `receipts` also writes `runs/receipts.meta.json` (the code digest, git sha and time of the table); a verdict whose
@@ -175,7 +178,7 @@ receipt table was made by other code than the run's reads "stale: made by other 
 
 | You see | It means | Do |
 |---|---|---|
-| `CAFE_OFFLINE ... run python -m cafe.pm fetch` | an input is not cached | step 4 |
+| `CAFE_OFFLINE is set, so nothing is downloaded: unset CAFE_OFFLINE and run python -m cafe.pm fetch ...` | an input is not cached | step 4 |
 | `ensemble capped at N members by the stage-1 share` | the budget buys N members on this machine (N follows the stage-1 cost in `plan.json`, so it differs between machines and after `make bench`) | expected at `quick`; `overnight` runs more |
 | `error: --budget quick: stage 1 needs ... short by ... s` (exit code 2) | `plan` or `run` of a long window or a big fleet does not fit the budget (`budget.PlanError`) | a larger `--budget`, a shorter window or fewer vehicles. `fetch` never plans a budget, so a 30-day mission can still be fetched |
 | a stage-3 row `not run: the physical lattice viscosity ... needs ... cell-updates; this machine does ...` | the LES window cannot reach the lattice viscosity floor at this machine's rate | expected with `--gpus 0`: no LES coefficients exist on this machine (step 5); a GPU is the way (step 6) |
@@ -183,4 +186,5 @@ receipt table was made by other code than the run's reads "stale: made by other 
 | the DTMB V&V rows read `not run: run_coarse.json was made by recipe None, not pout-lts01-parts-v4` | files of another recipe are never read | copy the files of the current study to `$CAFE_DATA/dtmb5415` |
 | `free-surface window not run: estimated ... it would fit --budget overnight` | the interFoam hull case does not fit this budget | expected at `quick`; the report shows "W3 did not run; not used in the refit: free-surface window not run: ..." and the hull refit was not used |
 | `only N GB free under ...; a DTMB 5415 case needs 4.0 GB` | disk | free space; the DTMB receipts are slow and stored |
-| exit code 2 and `error: ...` | the mission file or a config is invalid | the message names the field |
+| exit code 2 and `error: ...` | the mission file or a config is invalid, or the emulator training table cannot be read | the message names the field, or the table file (move it aside: its rows are lost; the next run starts a new table) |
+| exit code 1 and `error: stage X: self-checks failed: name: note ...` | a stage self-check failed (a missing input, a changed derived layer, an emulator gate) | the message names the check and what to do; the ledger at the path in the message has the detail. With `CAFE_OFFLINE` set, unset it and run `fetch` |

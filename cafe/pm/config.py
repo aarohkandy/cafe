@@ -158,14 +158,18 @@ def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None
         if lk["kind"] == "acoustic" and "uas" in ends:
             raise ConfigError(f"{where}: an acoustic link cannot end at a UAS (it flies, depth 0); use an rf link, or move that end")
         if lk["kind"] == "iridium":
-            if lk.get("when", "always") != "always":
-                raise ConfigError(f"{where}/when: an iridium link is checked at every record, not '{lk['when']}'; use always or leave it out")
+            if lk.get("when", "always") not in ("always", "surfacing") or (lk.get("when") == "surfacing" and "glider" not in ends):
+                raise ConfigError(f"{where}/when: an iridium link is checked at every record, or at a glider's "
+                                  f"surfacings (surfacing, with a glider at one end), not '{lk['when']}'; use always or leave it out")
         elif "when" not in lk:
             raise ConfigError(f"{where}/when: a {lk['kind']} link needs when: always, surfacing or uas_airborne")
         elif lk["when"] == "uas_airborne" and "uas" not in ends:
             raise ConfigError(f"{where}/when: uas_airborne needs the UAS at one end of the link; use always or change a/b")
         elif lk["when"] == "surfacing" and "glider" not in ends:
             raise ConfigError(f"{where}/when: surfacing needs a glider at one end of the link; use always or change a/b")
+        if lk["kind"] in ("rf", "iridium") and "glider" in ends and lk.get("when") != "surfacing":
+            raise ConfigError(f"{where}/when: a glider's radio and Iridium antenna work only at the surface: "
+                              f"use when: surfacing (not '{lk.get('when', 'always')}')")
 
 
 def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
@@ -180,6 +184,10 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
     dup = {i for i in ids if ids.count(i) > 1}
     if dup:
         raise ConfigError(f"{path}: vehicle ids {sorted(dup)} appear more than once; give each vehicle its own id")
+    owners = [(v["id"], f"vehicles/{v['id']}") for v in m["vehicles"]] + [(m[k]["id"], k) for k in ("ship", "shore") if k in m]
+    for i in dict.fromkeys(i for i, _ in owners):
+        if len(who := [w for j, w in owners if j == i]) > 1:
+            raise ConfigError(f"{path}: ids must be unique across vehicles, ship and shore; '{i}' is used by {' and '.join(who)}; rename one")
     if not m["box"]["lat_min"] < m["box"]["lat_max"]:
         raise ConfigError(f"{path}: box.lat_min ({m['box']['lat_min']}) must be below box.lat_max ({m['box']['lat_max']}); swap them")
     if "ship" in m and not _in_box(m["ship"]["lon"], m["ship"]["lat"], m["box"]):
@@ -212,6 +220,20 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
         if so and so.get("every_days", 1) * 1440 < hard:
             raise ConfigError(f"{where}/sorties/every_days: {so.get('every_days', 1)} d is shorter than duration_min x the platform's hard_stop_factor "
                               f"({hard:g} min), so sorties would overlap; raise every_days to at least {hard / 1440:.3g} or shorten duration_min")
+        if so:
+            from . import stage1
+            from .env import orca
+            if not len(stage1.launch_times(so, float(m["ship"]["lon"]), t0.timestamp(), t1.timestamp(), 60.0 * hard)):
+                hh, mm = (int(x) for x in so["local_solar_time"].split(":"))
+                h, mi = divmod(round(hh * 60 + mm - m["ship"]["lon"] * 4.0) % 1440, 60)
+                utc_hm = f"{h:02d}:{mi:02d}"
+                raise ConfigError(f"{where}/sorties: no launch fits in the window "
+                                  f"(local_solar_time {so['local_solar_time']} at lon {m['ship']['lon']:g} is {utc_hm}Z, "
+                                  f"a launch needs {hard:g} min before window.end); widen the window or change the time")
+            if (high := [a for a in so.get("altitudes_m", ()) if a > orca.WIND3D_TOP_M]):
+                raise ConfigError(f"{where}/sorties/altitudes_m: {high[0]:g}: the stored WRF levels end at about {orca.WIND3D_TOP_M:g} m; "
+                                  f"the wind above that is not known; "
+                                  f"use altitudes up to {orca.WIND3D_TOP_M:g} m")
         task = v.get("task", {})
         if "task" in v and cls == "uas":
             raise ConfigError(f"{where}/task: a UAS flies sorties and takes no task; remove task")

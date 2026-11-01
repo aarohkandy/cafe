@@ -1,6 +1,6 @@
 # STATUS — the TEPEX-C pre-mission simulator (`cafe.pm`)
 
-Rewritten from the code on 2026-10-31 (review round 2, M-14), at `8ee5f50` plus the round-2 fixes, and updated for review round 3 (DECISIONS 210 to 236). The earlier version of this file was the audit of the existing app against the
+Rewritten from the code on 2026-10-31 (review round 2, M-14), at `8ee5f50` plus the round-2 fixes, and updated for review rounds 3 (DECISIONS 210 to 236) and 4 (DECISIONS 237 to 263). The earlier version of this file was the audit of the existing app against the
 spec of 2026-10-28 (`ab376fd`); it is in git history and no longer describes the repository.
 
 ## 0. What is physically missing (BRIEF section 0)
@@ -53,26 +53,26 @@ Make targets (each runs where it is invoked; from a laptop prefix `./pm.sh`):
 | `make ci` | every stage at toy resolution on CPU from the synthetic environment (`tests/fixtures/ci_env`), no network, under 10 min; ends with `python -m cafe.pm.audit --ledgers-only runs/ci`, a re-hash of the ledgers of the run it made (M-24) |
 | `make quick`, `make overnight` | the demo mission at `--budget quick` (20 min) or `overnight` (10 h), `GPUS` from the environment, into `runs/` |
 | `make receipts` | every receipt (app and pre-mission) as one table; exits non-zero on any failure, which is expected until the open limitations L08 and L09 are retired |
-| `make broken` | the deliberately broken wave-direction configuration must fail a receipt (exit 0 means it did) |
+| `make broken` | the deliberately broken wave-direction configuration must fail a receipt that passes without it (exit 0 means one did; the fast receipts run twice, DECISIONS 240) |
 | `make mutation` | mutmut on `cafe/pm/physics` and `cafe/pm/stats`, writes `docs/mutation.json`; hours |
 | `make audit` | ledgers of `runs/quick`, `runs/overnight` and `runs/4h` (those that exist) re-hashed, banned tokens (incl. `skip(` and `cafe/static/app.js`), ruff, mypy strict, pytest with coverage gates (100 % on physics, stats and env; 90 % on `cafe/pm`), and the stored mutation result (refused if missing, stale or under 85 %) |
 | `make acceptance` | BRIEF 5.3: quick and overnight (and 4h with `GPUS=1`), golden diff, same-seed and other-seed reproducibility, the broken configuration; about 11 h |
 | `make report` | re-renders a finished run's report |
 
-Tests: 1,822 `def test_` in 49 files, 2,122 collected cases; all 2,122 passed on the round-3 tree on homebase (2026-11-01). Coverage: 99.96 % of 12,214 statements in `cafe/pm` (five error-branch lines missed: `pipeline.py:1075-1076`, `report.py:408-409, 913`), 100 % in `physics`, `stats`, `env` and `stage3`; ruff and mypy --strict clean. Credibility of the last q2 report: see its `credibility.json`; the limitations that cap it are in `docs/CREDIBILITY.md` section 5.
+Tests: <TESTS> (round-4 tree; the lead's full run on homebase fills this in). The round-3 tree had 1,822 `def test_` in 49 files and 2,122 collected cases, all passing (homebase, 2026-11-01). Coverage: 99.96 % of 12,214 statements in `cafe/pm` (five error-branch lines missed: `pipeline.py:1075-1076`, `report.py:408-409, 913`), 100 % in `physics`, `stats`, `env` and `stage3`; ruff and mypy --strict clean. Credibility of the last q2 report: see its `credibility.json`; the limitations that cap it are in `docs/CREDIBILITY.md` section 5.
 
 DTMB 5415 v4 study (recipe `pout-lts01-parts-v4`, three grids at Fr 0.10, 0.20, 0.28, 0.41): done and installed in `/data/dtmb5415`; |E| <= U_val at all four (E x1e3 = +0.865, +0.722, +0.842, -0.040 against U_val x1e3 = 1.882, 1.085, 2.653, 1.993), but U_val / D is 0.27 to 0.63 against 0.1, so it validates little, and iterative convergence fails at Fr 0.28 and 0.41 on every grid (drift 0.03 to 0.07 against 0.005).
 
 ## 2. Pending at code freeze (pending, not done)
 
-The round-3 tree passed the full test suite, ruff and mypy --strict (2026-11-01); a later review round may change code again, so the steps below have not been run on the final tree. Each is a step for an idle box after the last code change.
+The round-3 tree passed the full test suite, ruff and mypy --strict (2026-11-01); the round-4 tree's full run is the lead's and is not recorded here yet. A later review round may change code again, so the steps below have not been run on the final tree. Each is a step for an idle box after the last code change.
 
 - **`make bench`** on an idle box: `config/throughput.json` was measured at load 32.9 on `ci_fixture` and is stale (the plan notes say so).
 - **`make mutation`:** `docs/mutation.json` does not exist, so `make audit` fails its mutation step until it is made (gate 85 %).
-- **The golden:** `tests/golden/tepex_c_demo_quick.json` records no commit sha, clean-tree flag or code digest, so `golden_diff` fails. Mint it from a reviewed quick run on a clean, committed checkout (`--update-golden`, then rerun without).
+- **The golden:** `tests/golden/tepex_c_demo_quick.json` records no commit sha, clean-tree flag or code digest, so `golden_diff` fails. Mint it from a reviewed quick run on a clean, committed checkout, through the RUNBOOK 1 wrapper, which passes `CAFE_GIT_SHA` and `CAFE_GIT_DIRTY` (the image has no `git`; DECISIONS 260) (`--update-golden`, then rerun without).
 - **Final `make acceptance`** (about 11 h) and **`make receipts --slow`** (about 4 h) on the frozen code.
 - **The blind RUNBOOK test (BRIEF exit condition 5):** a fresh agent follows `docs/RUNBOOK.md` on a clean checkout and reports every place it got stuck. Not yet done; no record of one exists.
-- **Review:** round 1 (33 findings, fixed in `8ee5f50`), round 2 (36 findings, each fixed with a regression test, DECISIONS 182 to 207) and round 3 (28 findings, 0 critical, 4 major, 24 minor, fixed with DECISIONS 210 to 236; the q3-run fixes 208 and 209 came before it). BRIEF 5.6 needs two consecutive rounds with zero findings from reviewers who did not write the code, so it is open; round 4 is next.
+- **Review:** round 1 (33 findings, fixed in `8ee5f50`), round 2 (36 findings, each fixed with a regression test, DECISIONS 182 to 207) and round 3 (28 findings, 0 critical, 4 major, 24 minor, fixed with DECISIONS 210 to 236; the q3-run fixes 208 and 209 came before it). BRIEF 5.6 needs two consecutive rounds with zero findings from reviewers who did not write the code, so it is open. **Round 4** (26 findings, 0 critical, 5 major, 21 minor, DECISIONS 237 to 263; `review/round_4/merged.md`) is fixed in the working tree, each with a regression test that failed on the old code, and not committed; a round 5 is next. The majors: the UAS return-to-ship timer cut the flux profile invisibly (M-1), `derived.zarr` was outside every hash (M-2), the emulator coverage gate scored exact 0 and 1 as misses (M-3), `make broken` could pass for the wrong reason (M-4), and a NaN current crashed the USV step (M-5). **What changed in the demo's verdicts is not yet known**: the q5 re-run on the round-4 tree measures it. The UAS verdict will probably move to NO-GO (M-1: at 5.3 m/s, the demo's median 10 m wind, the 20 min pattern ends at 7 of 8 waypoints, and `sortie.min_profile_fraction` is 1.0), every current-driven number moves by about 2 % (M-6), the rain-driven numbers move (M-16), and every stored resume and the derived surface layer are rebuilt. Two decisions wait for the lab: the shortest acceptable UAS profile and the radio failsafe timeout (QUESTIONS_FOR_LAB 4 and 5). Two inputs are new and assumed (`sortie.min_profile_fraction`, `radio.link_loss_hold_s`: 263 assumed inputs now).
 
 ## 3. Not done and not planned in this build
 

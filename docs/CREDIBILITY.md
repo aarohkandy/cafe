@@ -64,6 +64,7 @@ How the details work:
   so no budget reaches it while that prior is assumed.
 - **Robustness 3** needs a vehicle to have been refit, which needs a stage-3 window that passed all its self-checks.
 - **M&S management 2** needs a git sha other than `none`: a run from an archive without `.git` stops at 1.
+- **M&S management 3** is checked by the tool's own audit (ledger chain, `docs/BUILDERS.md`, ruff), not by an independent reference, so the page reads "strong: ledger chain, house rules and lint checked by the tool's own audit (no independent reviewer)" for it, as `LEVEL_TEXT` does for data pedigree (review round 4, M-20).
 - **Use history** and **People** are 0 today: neither `docs/USE_HISTORY.md` nor `docs/QUALIFICATIONS.md` exists. With the file they are 1 and no higher.
 
 ### What the current build can reach
@@ -154,8 +155,8 @@ These were found while writing the docs. They are not in `LIMITATIONS`, so they 
 
 Round 3 (M-12): when the run holds `ingest/env_sigmas_fitted.json`, the `assumptions.yaml:env.sigma.<k>` items for the keys present (`sst_k`, `t2_k`) have kind `fitted` and read "this run used 0.259 (fitted from the TAO comparison); assumed 0.5". They stay in the list, with both values, and the report's count of assumed inputs leaves them out.
 
-On 2026-10-31, in the review-round-1 working tree, that is 253 items: 72 from `assumptions.yaml`; 12 from `perturbations.yaml` (11 priors, 1 assumed: `battery_capacity_scale`); 169 platform leaves marked assumed (`quad_uas` 44, `saildrone_explorer` 57, `slocum` 26, `seaglider` 21,
-`radios` 19, `modems` 2). The counts change whenever an input file does; recount with `pm python -c "from cafe.pm import credibility as C; print(len(C.assumed_inputs()))"`. The mission report marks a verdict that depends on one of these with an "assumed" badge.
+On 2026-11-01, in the review-round-4 working tree, that is 263 items: 78 from `assumptions.yaml`; 12 from `perturbations.yaml` (11 priors, 1 assumed: `battery_capacity_scale`); 173 platform leaves marked assumed (`quad_uas` 46, `saildrone_explorer` 59, `slocum` 26, `seaglider` 21,
+`radios` 19, `modems` 2). Review round 4 added two assumed inputs, both in `platforms/quad_uas.yaml` (44 before): `sortie.min_profile_fraction` (1.0; the shortest acceptable fraction of the flux profile, M-1) and `radio.link_loss_hold_s` (5 s; the radio failsafe timeout, M-10); both are asked of the lab in `QUESTIONS_FOR_LAB.md` 4 and 5. The counts change whenever an input file does; recount with `pm python -c "from cafe.pm import credibility as C; print(len(C.assumed_inputs()))"`. The mission report marks a verdict that depends on one of these with an "assumed" badge.
 
 Provenance is also enforced at load: `glider.load_platform`, `usv.load_platform` and `uas.load_platform` refuse a leaf with neither a `source` nor `assumed: true` with a `why`, and the hangar stage fails a run on one.
 

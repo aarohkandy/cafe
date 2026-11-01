@@ -40,6 +40,11 @@ def set_thresholds(go: float, nogo: float) -> None:
     P_FAIL_GO, P_FAIL_NOGO, LO_SUCCESS_GO = round(1 - go, 12), round(1 - nogo, 12), min(0.75, go)
 
 
+def _at_least(a: float, b: float) -> bool:
+    """a >= b with the float dust of `1 - go` / `round(1 - nogo, 12)` ignored, so a tie (7 of 10 at nogo = 0.3) is the boundary-inclusive side."""
+    return a >= b - 1e-12
+
+
 def _kappa(conf: float) -> float:
     """Two-sided normal quantile for confidence `conf` (1.95996 for 0.95, 1.64485 for 0.90)."""
     return float(norm.ppf(0.5 + conf / 2))
@@ -98,7 +103,7 @@ def n_certify_one_sided(level: float = 0.05, conf: float = 0.95) -> int:
 
 def verdict_from_p(p_fail: float) -> str:
     """The verdict implied by a (predicted) P(fail) alone: <= 0.10 GO, > 0.40 NO-GO, else MARGINAL."""
-    return "GO" if p_fail <= P_FAIL_GO else "NO-GO" if p_fail > P_FAIL_NOGO else "MARGINAL"
+    return "GO" if _at_least(P_FAIL_GO, p_fail) else "NO-GO" if not _at_least(P_FAIL_NOGO, p_fail) else "MARGINAL"
 
 
 def verdict(k_fail: int, n: int, conf: float = 0.90, level: float = 0.05, cert_conf: float = 0.95) -> dict[str, Any]:
@@ -108,12 +113,12 @@ def verdict(k_fail: int, n: int, conf: float = 0.90, level: float = 0.05, cert_c
     """
     lo, hi, method = interval(k_fail, n, conf)
     p = (n - k_fail) / n
-    v = "GO" if (p >= 1 - P_FAIL_GO and 1 - hi >= LO_SUCCESS_GO) else "MARGINAL" if p >= 1 - P_FAIL_NOGO else "NO-GO"
+    v = "GO" if (_at_least(p, 1 - P_FAIL_GO) and _at_least(1 - hi, LO_SUCCESS_GO)) else "MARGINAL" if _at_least(p, 1 - P_FAIL_NOGO) else "NO-GO"
     need = n_certify(level, cert_conf)
     note = ""
     if k_fail == 0 and n < need:
-        note = (f"P(fail) < 3/n = {rule_of_three(n):.3f} (n = {n}; {need} members are needed to certify P(fail) < "
-                f"{level:.0%} at {cert_conf:.0%} confidence)")
+        note = (f"P(fail) < 3/n = {rule_of_three(n):.3f} at 95% confidence, one-sided (n = {n}); {math.ceil(3 / level)} members would be needed "
+                f"for that bound to reach {level:.0%}. The report's certification count, {need}, is for the two-sided {cert_conf:.0%} Wilson upper bound.")
     return dict(verdict=v, n=n, k_fail=k_fail, p_fail=k_fail / n, fail_lo=lo, fail_hi=hi, success_lo=1 - hi,
                 conf=conf, method=method, n_certify=need, note=note)
 
@@ -121,14 +126,14 @@ def verdict(k_fail: int, n: int, conf: float = 0.90, level: float = 0.05, cert_c
 def interval_region(k_fail: int, n: int, conf: float = 0.95) -> str | None:
     """"GO" if the whole P(fail) interval is <= 0.10, "NO-GO" if it is all > 0.40, else None (undecided)."""
     lo, hi, _ = interval(k_fail, n, conf)
-    return "GO" if hi <= P_FAIL_GO else "NO-GO" if lo > P_FAIL_NOGO else None
+    return "GO" if _at_least(P_FAIL_GO, hi) else "NO-GO" if not _at_least(P_FAIL_NOGO, lo) else None
 
 
 def decided_region(k_fail: int, n: int, conf: float = 0.95) -> str | None:
     """interval_region, plus "MARGINAL" when the whole P(fail) interval lies above 0.10 and at or below 0.40: a verdict more members would
     not change either. None only when the interval spans a threshold. (The stopper keeps using interval_region: a MARGINAL is not a reason to stop.)"""
     lo, hi, _ = interval(k_fail, n, conf)
-    return interval_region(k_fail, n, conf) or ("MARGINAL" if P_FAIL_GO < lo and hi <= P_FAIL_NOGO else None)
+    return interval_region(k_fail, n, conf) or ("MARGINAL" if not _at_least(P_FAIL_GO, lo) and _at_least(P_FAIL_NOGO, hi) else None)
 
 
 def coverage(n: int, p_grid: np.ndarray, conf: float = 0.95, method: str = "wilson") -> np.ndarray:

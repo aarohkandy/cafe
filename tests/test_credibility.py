@@ -183,8 +183,10 @@ def test_ms_management_needs_a_git_sha_and_seeds(tmp_path, data):
 
 def test_ms_management_level_three_needs_the_process_files(run, tmp_path):
     assert factors(run)["ms_management"]["level"] == 3
+    t = factors(run)["ms_management"]["level_text"]                # M-20: only self-checks stand behind level 3
+    assert "own audit" in t and "independent reference" not in t
     r = fake_root(tmp_path, 1, builders=False)
-    assert factors(run, r)["ms_management"]["level"] == 2
+    assert factors(run, r)["ms_management"]["level"] == 2 and factors(run, r)["ms_management"]["level_text"] == cr.LEVELS[2]
     assert factors(run, fake_root(tmp_path / "x", 1, pyproject=False))["ms_management"]["level"] == 2
 
 
