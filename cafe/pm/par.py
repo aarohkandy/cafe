@@ -7,8 +7,8 @@ parent has the jax CPU backend running, and a fork of a process with live XLA th
 `adopt(env)` writes every array of at least SHARE_MIN_BYTES once into an .npy file, in /dev/shm when it has SHM_MIN_FREE and the temporary
 directory otherwise, and returns the object with read-only memory maps of those files in their place: the demo's 9 GB environment is then in
 memory once, however many workers read it. A task's function and arguments travel as one pickle in which such a map is its file name and
-everything else is its value. The files have names that are never reused and stay until the process exits: a task still in the queue may
-name any of them.
+everything else is its value. A file's name is never reused, and the file goes when the last of the parent's maps of it does (an
+environment the pipeline rebuilds takes its files with it); a queued task's maps are alive in the parent until its result is back.
 The pickles pass only between this process and the workers it spawned, never through a file another user can write."""
 from __future__ import annotations
 
@@ -27,9 +27,9 @@ STATE = (("cafe.pm.env.subgrid", "_RUN_CAL"), ("cafe.pm.stats.intervals", "P_FAI
 _active: Pool | None = None
 _in_worker = False
 _dir: pathlib.Path | None = None
-_shared: dict[int, tuple[weakref.ref[np.ndarray], str]] = {}       # id -> (the array while it lives, its file); a dead ref's id may be reused
-_names = itertools.count()                                          # never len(_shared): a reused id replaces its entry, and a name must not repeat
-_lock = threading.Lock()                                            # stage1.run drives several batches from threads
+_names = itertools.count()                                          # a file name never repeats (one was once written over a file a task still named)
+_refs: dict[str, int] = {}                                         # file -> the parent's live maps of it
+_lock = threading.RLock()                                           # threads (stage1.run's batches) and finalizers, which run inside a collection
 
 
 def _child() -> bool:
@@ -56,21 +56,36 @@ def _mapped(path: str) -> Any:
     return np.load(path, mmap_mode="r")
 
 
+def _owned(path: str) -> Any:
+    """A parent's map of a shared file, counted: the file goes with the last such map (an adopted object re-maps the files of the maps it held,
+    and those may die first)."""
+    m = np.load(path, mmap_mode="r")
+    with _lock:
+        _refs[path] = _refs.get(path, 0) + 1
+    weakref.finalize(m, _release, path)
+    return m
+
+
+def _release(path: str) -> None:
+    with _lock:
+        _refs[path] -= 1
+        if _refs[path]:
+            return
+        del _refs[path]
+    pathlib.Path(path).unlink(missing_ok=True)
+
+
 def _share(a: np.ndarray) -> str:
-    """The .npy file holding `a`, written on first use; it stays until exit."""
+    """A new .npy file holding `a` (pickle's own memo writes an array met twice in one `adopt` once)."""
     global _dir
     with _lock:
-        hit = _shared.get(id(a))
-        if hit is not None and hit[0]() is a:
-            return hit[1]
         if _dir is None:
             room = shutil.disk_usage(SHM).free if SHM.is_dir() else 0
             _dir = pathlib.Path(tempfile.mkdtemp(prefix=f"cafe-share-{os.getpid()}-", dir=SHM if room >= SHM_MIN_FREE else None))
             atexit.register(shutil.rmtree, _dir, True)
         path = str(_dir / f"{next(_names)}.npy")
-        np.save(path, a)
-        _shared[id(a)] = (weakref.ref(a), path)
-        return path
+    np.save(path, a)
+    return path
 
 
 class _Pickler(pickle.Pickler):
@@ -80,9 +95,9 @@ class _Pickler(pickle.Pickler):
 
     def reducer_override(self, obj: Any) -> Any:
         if isinstance(obj, np.memmap) and isinstance(obj.base, mmap.mmap) and _dir is not None and str(obj.filename).startswith(f"{_dir}{os.sep}"):
-            return _mapped, (str(obj.filename),)                           # a whole adopted map: its own file again
+            return (_owned if self.share else _mapped), (str(obj.filename),)   # a whole adopted map: its own file again
         if self.share and type(obj) is np.ndarray and obj.nbytes >= SHARE_MIN_BYTES and not obj.dtype.hasobject:
-            return _mapped, (_share(obj),)
+            return _owned, (_share(obj),)
         return NotImplemented
 
 

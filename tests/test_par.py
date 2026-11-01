@@ -1,4 +1,5 @@
 """cafe.pm.par: stage 1 on several worker processes gives the same members and the same bits as on one."""
+import gc
 import pathlib
 import pickle
 
@@ -37,8 +38,11 @@ def test_stage1_on_two_workers_is_the_same_bits_as_on_one(ci_full, monkeypatch):
     with ci_full.lenient():
         one = stage1.run(MISSION, ci_full, plan, log=lambda *_: None)
         monkeypatch.setenv("CAFE_WORKERS", "2")
+        written = []
+        real = par._share
+        monkeypatch.setattr(par, "_share", lambda a: written.append(real(a)) or written[-1])
         two = stage1.run(MISSION, ci_full, plan, log=lambda *_: None)
-    assert par._dir is not None and any(pathlib.Path(p).exists() for _, p in par._shared.values())   # the workers read shared files
+    assert written                                                      # the workers read the environment from shared files
     assert one["n"] == two["n"] == 8
     same(one["res"], two["res"])
     for r in (one, two):
@@ -106,14 +110,45 @@ def test_a_shared_file_name_is_never_reused_when_an_array_id_is(monkeypatch):
     """The name came from len(_shared): an array that died and whose id a new array got kept the entry count, so the new array was written over
     the old one's file while a queued task still named it (an 8-worker q4 batch read a wrong environment, 0.66 degrees off from the first record)."""
     monkeypatch.setenv("CAFE_WORKERS", "2")
-    names = set()
+    names, maps = set(), []
     for _ in range(5):
         a = np.full(par.SHARE_MIN_BYTES // 8 + 1, float(len(names)))
-        m = par.adopt(a)
-        names.add(m.filename)
+        maps.append(par.adopt(a))
+        names.add(maps[-1].filename)
         del a                                                           # its id is free for the next array
-        assert m[0] == len(names) - 1                                   # each map still reads its own values
-    assert len(names) == 5
+    assert len(names) == 5 and [m[0] for m in maps] == [0.0, 1.0, 2.0, 3.0, 4.0]       # each map still reads its own values
+
+
+def test_a_shared_file_goes_with_the_parents_map_of_it(monkeypatch):
+    """The ingest stage rebuilds the environment up to three times; each adopted copy kept its 9 GB of files until exit and /dev/shm filled."""
+    monkeypatch.setenv("CAFE_WORKERS", "2")
+    m = par.adopt(np.zeros(par.SHARE_MIN_BYTES // 8 + 1))
+    f = pathlib.Path(m.filename)
+    view = m[1:]
+    del m
+    assert f.exists() and view.sum() == 0.0                             # a view keeps its map, and so the file
+    del view
+    gc.collect()
+    assert not f.exists()
+
+
+
+def test_a_file_lives_while_any_adopted_map_of_it_does(monkeypatch):
+    """The ocean adopts each field as it reads it, then the environment adopts the ocean: its maps re-map the same files. The ingest stage drops
+    the first environment, whose field maps took the files with them while the adopted copy still named them (FileNotFoundError in a worker)."""
+    monkeypatch.setenv("CAFE_WORKERS", "2")
+    first = par.adopt(np.arange(par.SHARE_MIN_BYTES // 8 + 1, dtype=float))
+    holder = par.adopt(dict(field=first))
+    f = pathlib.Path(first.filename)
+    assert holder["field"].filename == first.filename
+    del first
+    gc.collect()
+    assert f.exists()
+    with par.Pool(2):
+        assert par.submit(np.sum, holder["field"]).result() == np.sum(np.arange(par.SHARE_MIN_BYTES // 8 + 1, dtype=float))
+    del holder
+    gc.collect()
+    assert not f.exists()
 
 
 def test_a_task_runs_from_its_pickle_and_an_inline_task_keeps_its_exception(monkeypatch):
