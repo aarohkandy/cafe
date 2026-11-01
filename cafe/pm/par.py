@@ -4,14 +4,16 @@
 when no pool of more than one worker is active, and inside a worker: a task never fans out again). Workers are spawned, not forked: the
 parent has the jax CPU backend running, and a fork of a process with live XLA threads hangs (DECISIONS 149).
 
-A task's function and arguments travel as one pickle in which every array of at least SHARE_MIN_BYTES is a read-only memory map of an .npy
-file written once per process, into /dev/shm when it has SHM_MIN_FREE and the temporary directory otherwise. `adopt(env)` swaps the
-parent's own arrays for those maps, so the demo's 9 GB environment is in memory once, however many workers read it. An array is shared as
-it was when first sent, so a caller must not change one in place between tasks (the environment never does; an adopted one cannot be).
+`adopt(env)` writes every array of at least SHARE_MIN_BYTES once into an .npy file, in /dev/shm when it has SHM_MIN_FREE and the temporary
+directory otherwise, and returns the object with read-only memory maps of those files in their place: the demo's 9 GB environment is then in
+memory once, however many workers read it. A task's function and arguments travel as one pickle in which such a map is its file name and
+everything else is its value. The files have names that are never reused and stay until the process exits: a task still in the queue may
+name any of them.
 The pickles pass only between this process and the workers it spawned, never through a file another user can write."""
 from __future__ import annotations
 
-import atexit, concurrent.futures as cf, faulthandler, importlib, io, mmap, multiprocessing as mp, os, pathlib, pickle, shutil, tempfile, threading, weakref
+import atexit, concurrent.futures as cf, faulthandler, importlib, io, itertools, mmap, multiprocessing as mp, os, pathlib, pickle, shutil, tempfile
+import threading, weakref
 from collections.abc import Callable
 from typing import Any
 
@@ -26,7 +28,7 @@ _active: Pool | None = None
 _in_worker = False
 _dir: pathlib.Path | None = None
 _shared: dict[int, tuple[weakref.ref[np.ndarray], str]] = {}       # id -> (the array while it lives, its file); a dead ref's id may be reused
-_keep: set[str] = set()                                             # files an adopted map reads: kept until exit
+_names = itertools.count()                                          # never len(_shared): a reused id replaces its entry, and a name must not repeat
 _lock = threading.Lock()                                            # stage1.run drives several batches from threads
 
 
@@ -54,13 +56,8 @@ def _mapped(path: str) -> Any:
     return np.load(path, mmap_mode="r")
 
 
-def _drop(path: str) -> None:
-    if path not in _keep:
-        pathlib.Path(path).unlink(missing_ok=True)
-
-
 def _share(a: np.ndarray) -> str:
-    """The .npy file holding `a`, written on first use; it goes when `a` does, unless an adopted map reads it."""
+    """The .npy file holding `a`, written on first use; it stays until exit."""
     global _dir
     with _lock:
         hit = _shared.get(id(a))
@@ -70,25 +67,29 @@ def _share(a: np.ndarray) -> str:
             room = shutil.disk_usage(SHM).free if SHM.is_dir() else 0
             _dir = pathlib.Path(tempfile.mkdtemp(prefix=f"cafe-share-{os.getpid()}-", dir=SHM if room >= SHM_MIN_FREE else None))
             atexit.register(shutil.rmtree, _dir, True)
-        path = str(_dir / f"{len(_shared)}.npy")
+        path = str(_dir / f"{next(_names)}.npy")
         np.save(path, a)
         _shared[id(a)] = (weakref.ref(a), path)
-        weakref.finalize(a, _drop, path)
         return path
 
 
 class _Pickler(pickle.Pickler):
+    def __init__(self, f: io.BytesIO, share: bool):
+        super().__init__(f, protocol=5)
+        self.share = share
+
     def reducer_override(self, obj: Any) -> Any:
         if isinstance(obj, np.memmap) and isinstance(obj.base, mmap.mmap) and _dir is not None and str(obj.filename).startswith(f"{_dir}{os.sep}"):
             return _mapped, (str(obj.filename),)                           # a whole adopted map: its own file again
-        if type(obj) is np.ndarray and obj.nbytes >= SHARE_MIN_BYTES and not obj.dtype.hasobject:
+        if self.share and type(obj) is np.ndarray and obj.nbytes >= SHARE_MIN_BYTES and not obj.dtype.hasobject:
             return _mapped, (_share(obj),)
         return NotImplemented
 
 
-def dumps(obj: Any) -> bytes:
+def dumps(obj: Any, share: bool = False) -> bytes:
+    """`obj` pickled with every adopted map as its file name; share True (`adopt`): every large array is written to a file and named too."""
     f = io.BytesIO()
-    _Pickler(f, protocol=5).dump(obj)
+    _Pickler(f, share).dump(obj)
     return f.getvalue()
 
 
@@ -96,10 +97,7 @@ def adopt(obj: Any) -> Any:
     """`obj` with every large array swapped for its shared read-only map (the one copy the workers read too); `obj` itself on one worker."""
     if workers() == 1:
         return obj
-    blob = dumps(obj)
-    with _lock:
-        _keep.update(path for _, path in _shared.values())
-    return pickle.loads(blob)
+    return pickle.loads(dumps(obj, share=True))
 
 
 def state() -> tuple[Any, ...]:

@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from numpy.typing import NDArray
 
-from . import par
+from . import budget, par
 from .config import load_platform, platform_class, utc
 from .env import conventions as cv, subgrid
 from .env.environment import OutsideData
@@ -823,11 +823,11 @@ def task_counts(mission: dict[str, Any]) -> dict[str, int]:
             for v in mission["vehicles"]}
 
 
-def wave(n: int, batch: int, n_min: int, n_max: int, width: int, tasks: int) -> int:
-    """How many batches to run at once with n members done: those n_min still needs (the stopping rule cannot stop before it), or as many as
-    keep `width` workers busy at `tasks` tasks a batch, never past n_max and at least one."""
+def wave(n: int, batch: int, n_min: int, n_max: int, at_once: int) -> int:
+    """How many batches to run at once with n members done: those n_min still needs (the stopping rule cannot stop before it), or `at_once`
+    (budget.batches_at_once: as many as keep the workers busy), never past n_max and at least one."""
     left = -(-(n_max - n) // batch)
-    return max(1, min(left, max(-(-(n_min - n) // batch), width // max(tasks, 1))))
+    return max(1, min(left, max(-(-(n_min - n) // batch), at_once)))
 
 
 def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger | None = None, log: Callable[[str], None] = print,
@@ -843,9 +843,11 @@ def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger 
     def go(members: list[int]) -> dict[str, Any]:
         return run_batch(mission, env, members, seed, pri, marg, scales)
     with par.Pool(par.workers()), cf.ThreadPoolExecutor(par.width()) as threads:
-        tasks = sum(task_counts(mission).values())
+        if par.width() > 1:
+            env = par.adopt(env)                                          # the pipeline's is adopted already: then this costs nothing
+        at_once = budget.batches_at_once(dict(plan, workers=par.width(), tasks=plan.get("tasks") or task_counts(mission)))
         while not done:
-            k = wave(n, batch, n_min, n_max, par.width(), tasks)
+            k = wave(n, batch, n_min, n_max, at_once)
             blocks = [list(range(n + j * batch, n + (j + 1) * batch)) for j in range(k)]
             for b in (threads.map(go, blocks) if par.width() > 1 else map(go, blocks)):   # in member order; one worker: one batch at a time
                 batches.append(b)

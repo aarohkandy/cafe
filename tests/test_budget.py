@@ -93,9 +93,10 @@ def test_a_stage_1_rate_measured_under_load_or_on_another_mission_is_warned_abou
     assert any("load 2.5" in n for n in budget.plan("quick", 0, named, thr=t, vehicle_classes=CLASSES)["notes"])
 
 
-def test_the_shipped_stage_1_measurement_is_flagged_as_contended():
+def test_the_shipped_stage_1_measurement_was_made_on_a_quiet_box():
+    """DECISIONS 270: re-measured at 1-min load 1.4 (the 2026-10-29 file, at 32.9, was flagged as contended; the test above keeps that path tested)."""
     notes = budget.plan("quick", 0, dict(MISSION, name="tepex_c_demo"), vehicle_classes=CLASSES)["notes"]
-    assert any("measured at load" in n for n in notes)
+    assert not any("measured at load" in n for n in notes)
 
 
 def test_the_plan_says_when_the_emulator_cannot_train_at_this_budget():
@@ -412,7 +413,7 @@ def test_stage3_assumptions_carry_the_assumed_refit_floors_from_the_yaml_only():
 
 def test_workers_cost_a_batch_its_longest_task_and_fit_more_batches_in_the_share():
     """With 8 workers a batch of the demo mission is its longest task (a whole glider; the UAS splits into its 6 sorties), so the quick share
-    holds the full 64 members where one worker fits one batch of 32; one worker plans exactly as before (the sum of the vehicles)."""
+    holds the full 64 members (both batches at once) where one worker fits one batch of 32; one worker plans exactly as before (the sum of the vehicles)."""
     m = config.load_mission(config.ROOT / "missions" / "tepex_c_demo.yaml")
     cls = stage1._classes(m)
     one = budget.plan("quick", 0, m, thr=thr(20.0, 0.01), vehicle_classes=cls, workers=1)
@@ -421,4 +422,4 @@ def test_workers_cost_a_batch_its_longest_task_and_fit_more_batches_in_the_share
     assert budget.batch_cost_s(one) == pytest.approx(len(cls) * v) and one["n_max"] == 32 and one["workers"] == 1
     assert eight["tasks"] == {"glider_eq": 1, "glider_2n": 1, "usv": 1, "uas": 6}
     assert budget.batch_cost_s(eight) == pytest.approx(v) and budget.batch_cost_s(eight, ["uas"]) == pytest.approx(v / 6)
-    assert eight["n_max"] == 64 and eight["stage1_s"] == pytest.approx(2 * v) and eight["stage1_s"] < 2 * one["stage1_s"]
+    assert eight["n_max"] == 64 and budget.batches_at_once(eight) == 2 and eight["stage1_s"] == pytest.approx(v)    # both batches in one wave

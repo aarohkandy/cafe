@@ -4,7 +4,7 @@ import pickle
 
 import numpy as np
 
-from cafe.pm import config, par, pipeline, stage1
+from cafe.pm import budget, config, par, pipeline, stage1
 from cafe.pm.env import subgrid
 from cafe.pm.stats import intervals
 
@@ -50,11 +50,21 @@ def test_stage1_on_two_workers_is_the_same_bits_as_on_one(ci_full, monkeypatch):
 
 
 def test_a_wave_is_what_n_min_needs_or_what_fills_the_workers():
-    assert stage1.wave(0, 32, 32, 64, 1, 9) == 1
-    assert stage1.wave(0, 4, 8, 8, 1, 9) == 2                          # n_min needs both whatever the stopping rule says
-    assert stage1.wave(0, 32, 32, 512, 32, 8) == 4                     # 32 workers, 8 tasks a batch
-    assert stage1.wave(480, 32, 73, 512, 32, 8) == 1                   # never past n_max
-    assert stage1.wave(0, 32, 32, 64, 8, 0) == 2
+    assert stage1.wave(0, 32, 32, 64, 1) == 1
+    assert stage1.wave(0, 4, 8, 8, 1) == 2                             # n_min needs both whatever the stopping rule says
+    assert stage1.wave(0, 32, 32, 512, 4) == 4
+    assert stage1.wave(480, 32, 73, 512, 4) == 1                       # never past n_max
+
+
+def test_a_batch_of_uneven_tasks_keeps_work_over_its_longest_task_workers_busy():
+    """8 workers ran one 9-task demo batch at a time (8 // 9), with half of them idle: its tasks are uneven (100 s of work, a 27 s USV), so a batch
+    keeps about 3.7 workers busy and 8 workers take 2 batches; without costs the plan falls back to one batch per `tasks` workers."""
+    cost = dict(glider_eq=(3.0, 0.0), glider_2n=(3.0, 0.0), usv=(4.5, 0.0), uas=(6.0, 0.0))           # s per batch-day: 18, 18, 27, 36 s over 6 days
+    plan = dict(batch=32, days=6.0, workers=8, tasks=dict(glider_eq=1, glider_2n=1, usv=1, uas=6),
+                member_cost={k: dict(s_per_batch_day=a, s_per_member_day=b) for k, (a, b) in cost.items()})
+    assert budget.batches_at_once(plan) == 2 and budget.batches_at_once(dict(plan, workers=4)) == 1
+    assert budget.batches_at_once(dict(plan, workers=32)) == 8 and budget.batches_at_once(dict(plan, workers=1)) == 1
+    assert budget.batches_at_once(dict(workers=32, tasks=plan["tasks"])) == 3
 
 
 def test_workers_is_the_environment_override_or_the_cpus_and_one_inside_a_pool(monkeypatch):
@@ -85,11 +95,25 @@ def test_an_adopted_object_holds_its_large_arrays_once_as_shared_read_only_maps(
     got = par.adopt(dict(big=big, small=small))
     assert isinstance(got["big"], np.memmap) and np.array_equal(got["big"], big) and type(got["small"]) is np.ndarray
     assert not got["big"].flags.writeable
-    assert len(par.dumps(got)) < 1000 < big.nbytes
+    assert len(par.dumps(got)) < 1000 < big.nbytes and len(par.dumps(big)) > big.nbytes          # a task sends a map by name, an array by value
     del big
     assert pathlib.Path(got["big"].filename).exists()                  # the original is gone; its file stays while a map reads it
     monkeypatch.setenv("CAFE_WORKERS", "1")
     assert par.adopt(small) is small
+
+
+def test_a_shared_file_name_is_never_reused_when_an_array_id_is(monkeypatch):
+    """The name came from len(_shared): an array that died and whose id a new array got kept the entry count, so the new array was written over
+    the old one's file while a queued task still named it (an 8-worker q4 batch read a wrong environment, 0.66 degrees off from the first record)."""
+    monkeypatch.setenv("CAFE_WORKERS", "2")
+    names = set()
+    for _ in range(5):
+        a = np.full(par.SHARE_MIN_BYTES // 8 + 1, float(len(names)))
+        m = par.adopt(a)
+        names.add(m.filename)
+        del a                                                           # its id is free for the next array
+        assert m[0] == len(names) - 1                                   # each map still reads its own values
+    assert len(names) == 5
 
 
 def test_a_task_runs_from_its_pickle_and_an_inline_task_keeps_its_exception(monkeypatch):

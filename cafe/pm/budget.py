@@ -341,16 +341,29 @@ def batch_cost_s(plan: dict[str, Any], vids: Any = None, days: float | None = No
     return work if W <= 1 else max(longest, work / W)
 
 
+def batches_at_once(plan: dict[str, Any]) -> int:
+    """How many stage-1 batches keep plan["workers"] busy: a batch occupies about its work / its longest task workers (its tasks are uneven, a
+    UAS sortie a quarter of a glider), so W workers take W over that, at least 1. Without costs in the plan, one per plan["tasks"] tasks."""
+    W = plan.get("workers", 1)
+    if W <= 1:
+        return 1
+    if plan.get("member_cost"):
+        work, longest = _batch(plan)
+        busy = work / longest if longest > 0 else 1.0
+    else:
+        busy = float(sum(plan.get("tasks", {}).values()) or 1)
+    return max(1, int(W // max(busy, 1.0)))
+
+
 def stage1_wall_s(plan: dict[str, Any], n: int) -> float:
     """Wall seconds stage 1 takes for n members: ceil(n / batch) batches, their environment calls per batch and members per member, on one
-    worker in a row; on more, in waves of as many batches as fill the workers (stage1.wave), each wave at least one longest task."""
+    worker in a row; on more, in waves of `batches_at_once` batches (stage1.wave), each wave at least one longest task."""
     mc, d, b, W = plan["member_cost"].values(), plan["days"], plan["batch"], plan.get("workers", 1)
     nb = -(-n // b)
     work = (nb * sum(v["s_per_batch_day"] for v in mc) + n * sum(v["s_per_member_day"] for v in mc)) * d
     if W <= 1:
         return float(work)
-    k = max(1, W // max(sum(plan.get("tasks", {}).values()), 1))
-    return float(max(-(-nb // k) * _batch(plan)[1], work / W))
+    return float(max(-(-nb // batches_at_once(plan)) * _batch(plan)[1], work / W))
 
 
 def memory_guard(cells: float, bytes_per_cell: float, gpu_mem_gb: float) -> float:
