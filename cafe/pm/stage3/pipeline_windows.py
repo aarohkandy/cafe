@@ -447,7 +447,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     base = _base(ctx, w, part)
 
     def fail(msg: str) -> dict[str, Any]:
-        return dict(base, error=msg[:300], reasons=[msg[:300]], timing=dict(wall_s=time.perf_counter() - t0, wall_share_s=win_s))
+        return dict(base, error=msg, reasons=[msg], timing=dict(wall_s=time.perf_counter() - t0, wall_share_s=win_s))
     plan_w = sizes["les"]["windows"].get(f"{vid}/{part}")
     if plan_w is not None and not plan_w["runs"]:                            # budget.les_windows: unreachable on this machine, its slice went to stage 1
         return fail(plan_w["skip_reason"])
@@ -706,10 +706,10 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
         fs = [(vid, w, _fs_submit(pool, ctx, vid, w, plat[vid], res, a, st, sizes)) for vid, ws in wins.items() if ctx.classes[vid] in FS_PARTS for w in ws]
         runs = [sizes["les"]["windows"].get(f"{vid}/{part}", dict(runs=True))["runs"] for vid, w, part in todo]       # windows budget.les_windows did not skip
         for i, (vid, w, part) in enumerate(todo):
-            win_s = None if share is None else (share - (time.perf_counter() - t_stage)) / max(sum(runs[i:]), 1)
+            win_s = None if share is None else max(share - (time.perf_counter() - t_stage), 0.0) / max(sum(runs[i:]), 1)
             r = _row(ctx, vid, ctx.classes[vid], w, part, plat[vid], res, a, sizes, win_s)
             rows[vid].append(r)
-            msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error') or r['reasons'][0][:200]}"
+            msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error') or r['reasons'][0]}"
             ctx.log(f"stage3 {vid}/{part} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['timing']['wall_s']:.1f} s of {win_s if win_s is None else round(win_s, 1)}]")
         for vid, w, fut in fs:
             r = fut.result()

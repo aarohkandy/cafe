@@ -1817,7 +1817,10 @@ def test_a_window_the_planner_did_not_run_is_written_with_its_reason_and_never_r
     """M-8: an unreachable CPU window is a row that says why; no LES, no FEA, no wall-clock check on a stage whose share went to stage 1."""
     cheap(monkeypatch)
     monkeypatch.setattr(pw.W, "run_window", lambda *a, **k: pytest.fail("a window the plan skipped was run"))
-    reason = "not run: the physical lattice viscosity (stage3.nu_lat_floor 0.0001) needs dx 1.9 mm; this machine does less"
+    # q3 at eceb176: the real reason is ~330 characters and was cut at 300 in the row and 200 in the log, and the log printed "of -0.0"
+    reason = ("not run: the physical lattice viscosity (stage3.nu_lat_floor 0.0001) needs dx 1.9 mm, 6.5e+09 cells and 1.4e+15 cell-updates; this "
+              "machine does 2.2e+08 in the window's slice at 7.5e+06 cell-updates/s (6.3e+06x short, skipped beyond 100x); the window could only fail "
+              "viscosity_floor, so its share went to stage 1")
     ctx = planned_ctx(no_wall_receipt, {"g/body": dict(runs=False, skip_reason=reason, reachable=False)}, 0.0)
     ctx.plan["shares"] = dict(stage3=0.0)
     L = FakeL()
@@ -1825,7 +1828,7 @@ def test_a_window_the_planner_did_not_run_is_written_with_its_reason_and_never_r
     assert not r["ok"] and r["cd"] is None and r["reasons"] == [reason] and r["error"] == reason and not r["cut"]
     assert L.checks["every_window_attempted"][0] and L.checks["every_failed_window_states_a_reason"][0] and "stage_held_its_wall_clock_share" not in L.checks
     assert any("sub-grid layer uncalibrated: no LES window passed" in n for n in L.notes)
-    assert any("not run: the physical lattice" in m for m in ctx.logs)
+    assert len(reason) > 300 and any(reason in m and "s of 0.0]" in m for m in ctx.logs) and not any("-0.0" in m for m in ctx.logs)
 
 
 def test_the_slice_of_a_skipped_window_goes_to_the_windows_that_run(no_wall_receipt, monkeypatch):
