@@ -92,6 +92,10 @@ def _klass(v: dict[str, Any]) -> str:
 
 def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None:
     cls = {v["id"]: _klass(v) for v in m["vehicles"]}
+    lids = [lk["id"] for lk in m["links"]]
+    if dupl := sorted({i for i in lids if lids.count(i) > 1}):
+        raise ConfigError(f"{path}: link ids {dupl} appear more than once; give each link its own id (results are keyed by link id)")
+    shore = m.get("shore", {}).get("id")
     radios, modems = set(_registry("radios.yaml", "radios")), _modem_names()
     for lk in m["links"]:
         where = f"{path}: links/{lk['id']}"
@@ -100,6 +104,8 @@ def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None
         for end in ("a", "b"):
             if lk[end] not in nodes:
                 raise ConfigError(f"{where}/{end}: '{lk[end]}' is not a vehicle, the ship or the shore ({sorted(nodes)})")
+        if lk["kind"] != "iridium" and shore in (lk["a"], lk["b"]):
+            raise ConfigError(f"{where}: the shore has no position; only iridium links can end at the shore, not {lk['kind']}")
         need = {"rf": "radio", "acoustic": "modem"}.get(lk["kind"])
         if need and need not in lk:
             raise ConfigError(f"{where}: a {lk['kind']} link needs '{need}' (a key in platforms/{need}s.yaml)")
@@ -131,6 +137,8 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
     dup = {i for i in ids if ids.count(i) > 1}
     if dup:
         raise ConfigError(f"{path}: vehicle ids {sorted(dup)} appear more than once; give each vehicle its own id")
+    if not m["box"]["lat_min"] < m["box"]["lat_max"]:
+        raise ConfigError(f"{path}: box.lat_min ({m['box']['lat_min']}) must be below box.lat_max ({m['box']['lat_max']}); swap them")
     if "ship" in m and not _in_box(m["ship"]["lon"], m["ship"]["lat"], m["box"]):
         raise ConfigError(f"{path}: ship ({m['ship']['lon']}, {m['ship']['lat']}) is outside the mission box {m['box']}; widen the box or move the ship")
     nodes = set(ids) | {m.get("ship", {}).get("id"), m.get("shore", {}).get("id")} - {None}
@@ -148,7 +156,12 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
             for lon, lat in pts:
                 if not _in_box(lon, lat, m["box"]):
                     raise ConfigError(f"{where}: point ({lon}, {lat}) is outside the mission box {m['box']}; widen the box or move the point")
-        load_platform(v["platform"])
+        plat = load_platform(v["platform"])
+        so = v.get("sorties", {})
+        hard = so.get("duration_min", 0) * float(plat.get("sortie", {}).get("hard_stop_factor", {}).get("value", 1.0))
+        if so and so.get("every_days", 1) * 1440 < hard:
+            raise ConfigError(f"{where}/sorties/every_days: {so.get('every_days', 1)} d is shorter than duration_min x the platform's hard_stop_factor "
+                              f"({hard:g} min), so sorties would overlap; raise every_days to at least {hard / 1440:.3g} or shorten duration_min")
         task = v.get("task", {})
         if task.get("mode") == "station" and "lon" not in task:
             raise ConfigError(f"{where}/task: mode 'station' needs lon, lat and radius_km of the station")

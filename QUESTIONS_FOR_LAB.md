@@ -78,5 +78,15 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
 
 13. **The UAS frame-only drag.** The Hangar `d_x` for the quadrotor includes the rotor momentum drag, so a stage-3 LES of the frame alone cannot be
     compared with it like for like. Can you split `d_x` into its frame and rotor parts, or give the frame's Cd*A?
-    *Default:* UAS stage-3 windows are run and reported but never used in the refit. *If supplied:* put it in `platforms/quad_uas.yaml`
-    and the UAS windows become usable for the refit once a window passes its checks.
+    *Default:* UAS stage-3 windows are never used in the refit (on a CPU machine they are not run at all, see `STATUS.md`). *If supplied:* no code reads such
+    a key yet (`cafe/pm/stage3/pipeline_windows.py` sets `comparable=False` for the UAS window), so the answer needs a small code change: read the frame-only
+    reference from `platforms/quad_uas.yaml` and set `comparable` from it. The UAS windows then become usable for the refit once a window passes its checks.
+
+14. **Does Chiodi et al.'s 0.178 include currents?** The Saildrone speed prior is calibrated to the mean speed over ground / mean wind of Chiodi et al.
+    (0.96 m/s over 5.4 m/s). That ratio was observed in real ocean currents, while the calibration scenario of the tool has none. In the demo mission the
+    ensemble's ratio is 0.120 (0.125 at the anemometer height), and the westward current alone lowers it from 0.186 to 0.150 by turning a beam reach into a
+    close-hauled course. If the 0.178 already contains the effect of currents, the tool penalises the current twice. Which is it, and if you have the
+    underlying Saildrone tracks, what was the current along them?
+    *Default:* assume the 0.178 does not include currents; the prior stays as calibrated, the report prints the mission ratio beside it, and
+    `docs/CREDIBILITY.md` lists the question as L18. *If it does include currents:* `vpp_bias_mean` in `platforms/saildrone_explorer.yaml` has to be
+    recalibrated with the same current in the calibration scenario (a code change, since `usv.mean_sog` has no current), which makes the USV faster in the mission.

@@ -295,7 +295,15 @@ CASES = [
      r"links/glider_eq-ship-acoustic/modem: 'benthos_atm960_xx' is not in platforms/modems.yaml"),
     ("airborne without a UAS", lambda d: d["links"][0].update(b="glider_eq"), r"links/usv-uas-rf/when: uas_airborne needs the UAS"),
     ("surfacing without a glider", lambda d: d["links"][1].update(a="usv"), r"links/glider_eq-ship-acoustic/when: surfacing needs a glider"),
-    ("surfacing between ship and shore", lambda d: d["links"][1].update(a="shore", b="ship"), r"surfacing needs a glider"),
+    ("acoustic link ending at the shore", lambda d: d["links"][1].update(a="shore", b="ship"),
+     r"links/glider_eq-ship-acoustic: the shore has no position; only iridium links can end at the shore, not acoustic"),
+    ("rf link ending at the shore", lambda d: d["links"][0].update(b="shore"), r"links/usv-uas-rf: the shore has no position; .* not rf"),
+    ("duplicate link id", lambda d: d["links"].append(dict(d["links"][0])), r"link ids \['usv-uas-rf'\] appear more than once; give each link its own id"),
+    ("swapped latitude box", lambda d: d["box"].update(lat_min=5.0, lat_max=-5.0), r"box.lat_min \(5.0\) must be below box.lat_max \(-5.0\); swap them"),
+    ("equal latitudes", lambda d: d["box"].update(lat_min=1.0, lat_max=1.0), r"box.lat_min \(1.0\) must be below box.lat_max \(1.0\)"),
+    ("overlapping sorties", lambda d: vehicle(d, "uas")["sorties"].update(every_days=0.02),
+     r"vehicles/uas/sorties/every_days: 0.02 d is shorter than duration_min x the platform's hard_stop_factor \(32 min\).*at least 0.0222"),
+    ("absurd sortie period", lambda d: vehicle(d, "uas")["sorties"].update(every_days=1e-6), r"sorties/every_days: 1e-06 is less than the minimum of 0.01"),
     ("rf with no when", lambda d: d["links"][0].pop("when"), r"links/usv-uas-rf/when: a rf link needs when"),
     ("iridium when surfacing", lambda d: d["links"][3].update(when="surfacing"), r"links/usv-shore-iridium/when: an iridium link"),
     ("hour 25", lambda d: vehicle(d, "uas")["sorties"].update(local_solar_time="25:99"), r"vehicles/\d/sorties/local_solar_time"),
@@ -334,3 +342,10 @@ def test_a_mission_that_is_not_a_mapping_is_refused_by_the_schema_not_crashed_on
     odd["vehicles"][3]["sorties"] = 3
     with pytest.raises(ConfigError, match="problem"):
         load_mission(write(tmp_path, odd))
+
+
+def test_a_sortie_period_just_above_the_overlap_limit_and_an_iridium_link_to_the_shore_load(tmp_path):
+    m = load_mission(edit(tmp_path, lambda d: vehicle(d, "uas")["sorties"].update(every_days=0.023, duration_min=20)))
+    assert vehicle(m, "uas")["sorties"]["every_days"] == 0.023
+    load_mission(edit(tmp_path, lambda d: vehicle(d, "uas")["sorties"].pop("every_days")))                       # the default period is one day
+    assert any(lk["kind"] == "iridium" and "shore" in (lk["a"], lk["b"]) for lk in load_mission(DEMO)["links"])

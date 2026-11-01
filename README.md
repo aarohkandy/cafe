@@ -10,6 +10,22 @@ Built for TEPEX-style deployments (gliders, a support boat, a quad overhead), bu
 
 **Open it:** http://100.108.213.121:8740 (Tailscale only).
 
+## The pre-mission check for TEPEX-C (`cafe.pm`)
+
+A separate tool in `cafe/pm/` that runs a whole mission file (`missions/tepex_c_demo.yaml`) through the lab's own WRF/UMWM run and an ocean model, flies an ensemble of
+every vehicle (glider, Saildrone-class boat, quadcopter, and the radio, acoustic and Iridium links between them), and writes a GO / MARGINAL / NO-GO report with the stage,
+data, uncertainty and receipt behind every number. It is its own pipeline, not the app above; the app's web UI and the static demo do not read its `report.json`.
+
+```bash
+make install                                    # once: builds the cafe and cafe-pm docker images
+make fetch                                      # once: downloads the mission's data (resumable)
+bin/run_premission --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out runs/quick     # then open runs/quick/report/index.html
+```
+
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md) takes it from a clean machine to a report and says which verdicts to trust; [`STATUS.md`](STATUS.md) says what is missing and why (no GPU,
+the lab's HYCOM run, the lab server, platform datasheets); [`QUESTIONS_FOR_LAB.md`](QUESTIONS_FOR_LAB.md) lists what the lab can answer to close the gaps; `docs/CREDIBILITY.md`
+explains the credibility report.
+
 ## Try it: the fleet demo (runs in your browser)
 
 ```bash

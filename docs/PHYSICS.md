@@ -488,8 +488,14 @@ wind_speed_bias     ~ N( -bias_speed,  sqrt(rmse_speed^2 - bias_speed^2) )   = N
 wind_direction_bias ~ N( -bias_dir,    sqrt(rmse_dir^2   - bias_dir^2)   )   = N(+7.2, 23.7) deg
 ```
 
-Conservative by construction: the whole residual sd, hourly scatter included, becomes a member-wide persistent bias, because `PerturbedEnv` has no time-varying wind
-error term. The between-mooring sd of the mean bias alone is about 0.36 m/s (lead's log). Only the two wind priors are fed back: the SST bias and RMSE, and every other
+Review round 2 (M-1, DECISIONS 182) found this wide, not conservative: the whole residual sd, hourly scatter included, became a member-wide persistent bias held for six days,
+because `PerturbedEnv` had no time-varying wind error term, and the data support a persistent part about three times smaller (the 11 per-mooring time-mean speed biases have mean
+0.595 and sd 0.375 m/s, direction sd 8.7 deg; an estimate of the order, not a measurement, because six-day means of a synoptic WRF error are still correlated within the run). The fit
+therefore takes the persistent part from the between-mooring dispersion of the time-mean error minus the mean sampling variance of those means (floored at 0), and fits the remainder,
+the hourly residual about each mooring's own mean, as `wind_speed_noise` and `wind_direction_noise` (an sd and an e-folding time from the lag-1 autocorrelation) in `priors_fitted.json`;
+`PerturbedEnv.wind` adds that remainder as a per-member stationary AR(1) series on an hourly grid over the window, drawn from `member_rng(seed, m, "wind_speed_noise" | "wind_direction_noise")` and read only when
+the fitted priors hold the noise keys (20 to 40 microseconds per query); it is spatially uniform, so one value applies to every point of the box at a time. With fewer than two moorings the split is not defined and the whole hourly misfit stays
+the persistent sd (no noise keys). Limitation L14 says the split is an estimate of the order. Only the two wind priors are fed back: the SST bias and RMSE, and every other
 residual, are recorded in `ingest/tao_compare.json` and not used; `env.sigma.sst_k` and `env.sigma.t2_k` stay at their assumed values (0.5 K, 1.0 K) although the
 text of `assumptions.yaml` says the TAO comparison overwrites `t2_k`. A mission with no TAO download keeps the `perturbations.yaml` priors and the ledger says so.
 
@@ -519,7 +525,8 @@ current: v' = R(b_cdir) v exp(s),   s = ln(a)/sqrt2 + (sigma_c/sqrt2) F_speed(x)
          a = current_speed_scale[m] (lognormal, median 1, sigma 0.30);  half of each prior's variance is member-wide (the LHS draw, so the sensitivity indices see it)
          and half is a smooth random field with correlation length 100 km
 F(x)   = sqrt(2/32) sum_{i=1..32} cos( k_i . x + phi_i ),   k_i ~ N(0, 1/ell^2) per axis, phi_i ~ U(0, 2 pi)        random Fourier features, Gaussian covariance (Rahimi & Recht 2007)
-waves:   Hs' = Hs hs_scale[m];  Tp' = max(Tp + tp_bias[m], 1 s);  Stokes drift x hs_scale^2 (it is quadratic in amplitude)
+waves:   Hs' = Hs hs_scale[m];  Tm' likewise;  Tp' = max(Tp + tp_bias[m], 1 s);  Stokes drift x hs_scale^2 x (Tp / Tp')^3 (surface Stokes drift of a fixed spectrum shape goes as Hs^2 / Tp^3; review round 2, M-21)
+wind:    plus, when the fitted priors hold wind_speed_noise / wind_direction_noise (section 7): an AR(1) series per member, sd and e-folding time tau_h from the fit
 density, sound speed, depth, SST, air: unchanged
 ```
 
@@ -654,7 +661,8 @@ Stage 1 lowers the speed by R_aw/K, K = -dX/dV at the root (first order)
 
 Every `replan_s` the heading is chosen from 72 candidates to maximise velocity made good: `g = V(trk) + (current + Stokes drift)`; speed = `min( max(V_polar - R_aw/K, 0) (1 + bias), 3.3 m/s )`.
 A tack costs `V t_tack` of distance and is taken only if the VMG gain over `tack_horizon` repays it; on a section only headings that reduce the cross-track error are allowed outside the corridor.
-`bias` is the member's `usv_vpp_bias` draw (uniform on [-0.2565, -0.2280], the Chiodi-calibrated prior; the brief's [-0.35, -0.30] runs as the sensitivity case `usv_vpp_bias_brief`); the platform's own N(-0.30, 0.03) default is used only when a caller passes none, and Stage 1 passes the perturbation draw.
+`bias` is the member's `usv_vpp_bias` draw (uniform on [-0.2565, -0.2280], the Chiodi-calibrated prior; the brief's [-0.35, -0.30] runs as the sensitivity case `usv_vpp_bias_brief`); the platform's own N(-0.2422, 0.0082) default (`vpp_bias_mean`, `vpp_bias_sd` in `platforms/saildrone_explorer.yaml`) is used only when a caller passes none, and Stage 1 passes the perturbation draw.
+Mission speed against wind (review round 2, M-2): per member Stage 1 stores the mean speed over ground (path length / time since deploy), the mean 10 m wind along the track and at the anemometer height, and their ratios (`vehicles[usv].speed`: `sog_ms`, `u10_ms`, `wind_anem_ms`, `ratio`, `ratio_anem`, their medians and `calibration_ratio` = Chiodi's 0.96 / 5.4 = 0.178). The demo mission's nominal ratio is 0.120 (0.125 at the anemometer height), against the 0.178 the bias is calibrated to in a scenario without current, in uniform wind, sailing to a station. Adding the mission's effects one at a time: wind field alone 0.186, plus waves 0.180, plus current 0.150, all together 0.120. The current costs a third of the speed, all of it from the westward South Equatorial Current (mean |c| 0.33 m/s): the course changes from a beam reach with a leeward set to close-hauled (true wind angle 85 to 45 deg) and the speed through the water falls from 1.1 to 0.72 m/s. Track holding costs little (0.127 opened against 0.120). The current is counted once. No model fault was found and the prior was not retuned. Whether Chiodi's 0.178 was itself observed in real currents is not known; if it was, the current is penalised twice (limitation L18, QUESTIONS_FOR_LAB 14).
 Flags: `becalmed` (best through-water speed over all headings below the current speed for `becalmed_after_h`; the literal "SOG below current" cannot fire because a drifting boat's SOG equals the current),
 `swept_off_track`, `capsize_proxy`, `wing_stall` (apparent wind below the tail's authority or inside the bow stall cone for `stall_sustain_s`), `battery` (solar gain `eff x area x SWDOWN` minus hotel load).
 
@@ -703,13 +711,15 @@ multirate: rigid body and rate loop at 2.5 ms; wind lookup, guidance and velocit
   the note in the yaml says the NeuroBEM airframe cannot physically carry it). No dyno curve and no thrust loss with forward speed.
 - Sorties: launched at `local_solar_time` (UTC + lon/15 h) every `every_days`, from the ship on station; mission altitudes, duration and launch rules override the platform's. Launch gate: scrub if the mean
   wind at flight height over the sortie exceeds 12 m/s, or a gust front is active at the ship within 15 min. Pattern: stacked legs upwind, climbing at the ends, then return and land.
-  Flags: `battery_reserve`, `wind_exceeds_airspeed` (no headway for 10 s while commanding more than 1 m/s), `attitude_exceedance` (tilt 7 deg beyond the 35 deg limit), `lost_link` (never set in Stage 1: no link callback is
+  Flags: `battery_reserve`, `wind_exceeds_airspeed` (no headway for 10 s while commanding more than 1 m/s), `attitude_exceedance` (tilt 7 deg beyond the 35 deg limit, i.e. 42 deg; **it cannot fire in this controller model**: the commanded horizontal force is clamped at g tan 35 deg, so the tilt stays at 35.00 deg (96 of 96 q2 sorties); limitation L17, review round 2 M-28), `lost_link` (never set in Stage 1: no link callback is
   passed; the RF link is judged separately by `stage1.evaluate_link`), and `no_sortie_flown` (every launch scrubbed).
 - Wind: the mean wind from `env.wind` is looked up every 1 s (20 blocks) and held; turbulence (section 5.1) and gust fronts (5.2) are added at 50 ms. The Mann series are built from the fewest boxes that fit.
 - ArduCopter SITL (JSON backend, ArduPilot 4.7.x) flies the same physics in lockstep for a few members (`fly_sitl`); the firmware is told it is at Canberra (`SITL_HOME`) because its compass and EKF
   misbehave at the equator; only metres from home are used.
 
-Uncertainty: per-member scales on battery capacity (lognormal 0.05, **assumed**) and drag (Stage-3 refit); wind error and turbulence through the environment. The turbulence and gust draws are per batch (Known issues).
+Control authority (review round 2, M-28): per sortie Stage 1 records the seconds the horizontal-force demand was beyond the lean-angle clamp (`sat_s`) and the largest demand / clamp ratio (`demand_ratio_max`); the stage-1b summary carries their median and maximum over the unscrubbed sorties under `vehicles[uas].authority` (`clamp_s_median`, `clamp_s_max`, `demand_ratio_median`, `demand_ratio_max`). A probe in a uniform wind found the demand beyond the clamp in every sortie from about 6 m/s of wind, so a threshold on it would flag them all and separate nothing: no failure mode `authority_saturated` was added; the diagnostic is printed and does not fail a member. The UAS verdict is therefore decided by the battery alone below about 12 m/s of wind (above 12 m/s the launch gate scrubs the sortie).
+
+Uncertainty: per-member scales on battery capacity (lognormal 0.05, **assumed**) and drag (Stage-3 refit); wind error and turbulence through the environment. The turbulence and gust draws are per batch (Known issues). Stage 1 also stores the share of the sorties' wind points the WRF 3-D fields answered (`vehicles[uas].wind3d_fraction`, `GriddedEnv.use_3d`; the 3-D hours exist only for the ingested hours).
 
 Receipts, job `pm.physics.uas` (fast) and `pm.physics.uas.slow` (SITL and the 20 min sortie; 10 min, stored per code digest):
 
@@ -830,19 +840,21 @@ CRN: seed = SeedSequence(entropy = base, spawn_key = (member, sha256(stream_name
 
 Each Stage-1 batch is its own Latin hypercube (`SeedSequence([seed, first_member])`); the ledger records `lhs_stratified_batch<k>`: every stratum hit once and the Kolmogorov-Smirnov distance of each
 column below 1/n (an exact LHS column satisfies it; a p-value would be near 1 for any LHS and could not fail). The random fields of the current error (section 8) and the refit drag draw are keyed by
-member. **The UAS Mann turbulence, the gust-front events and the Iridium sessions are keyed by the batch's first member, not by member** (Known issues).
+member. **The UAS Mann turbulence, the gust-front events and the Iridium sessions are keyed by the batch's first member, not by member** (a Mann box is generated for the whole batch, so a member's turbulence segment depends on the
+batch size; the stage-1 ledger records the batch size). `run_batch` returns the seeds it used (`res["seeds"][vehicle][stream]`), and the `common_random_numbers` ledger check compares them across vehicles and with
+`member_seed(seed, first_member of a batch, stream)`, so a vehicle entering a seed of its own fails it (Known issues).
 
 ### 13.3 Stopping (`sequential.py`, `stage1.run`)
 
 `ensemble_stop` is asked about every vehicle and link after each batch: stop when the 95 % interval on P(fail) lies wholly at or below 0.10 (GO) or above 0.40 (NO-GO), and `n >= n_min`;
-or at `n_max`. `n_min` / `n_max` per budget: ci 8 / 16, quick 32 / 64, 4h 73 / 256, overnight 73 / 512, further limited by the planner's time share. An interval wholly inside GO implies the verdict GO
+or at `n_max`. `n_min` / `n_max` per budget (`budget.N_MIN`, `N_MAX`): ci 8 / 16, quick 32 / 64, 4h 73 / 256, overnight 73 / 512. The planner caps `n_max` by the stage-1 share of the time and lowers `n_min` with it (`n_min = min(N_MIN, n_max)`), so a quick run on a slow or loaded machine plans fewer, for example 16 / 16 (the q2 run of 2026-10-31). An interval wholly inside GO implies the verdict GO
 (tested), so stopping never contradicts the final verdict. Repeated looks at a fixed-sample interval inflate its error slightly (docstring); the 95 % interval is wide.
 
 Wald's SPRT (1945) with an indifference region (Younes & Simmons 2006), `sprt_decide`, is **implemented and tested but not called by the pipeline**; the stopper is the interval rule.
 
 ### 13.4 Sensitivity (`sensitivity.py`)
 
-EASI, Plischke (2010): sort by X_i, reorder to a periodic sequence (even ranks ascending, odd descending), `S_i` = share of the output's spectral power in the first 6 harmonics; small-sample bias removed with
+EASI, Plischke (2010): sort by X_i, reorder to a periodic sequence (even ranks ascending, odd descending), `S_i` = share of the output's spectral power in the first M harmonics, M = `default_harmonics(n)` = min(6, max(2, n // 16)) (2 at 32 to 47 members, 6 from 96; DECISIONS 156); small-sample bias removed with
 `S~ = S - lam/(1 - lam)(1 - S)`, lam = 2M/N (Plischke, Borgonovo & Smith 2012). Applied to the 0/1 failure indicator, only where at least one member failed, one passed, and n >= 16. It names the "most
 sensitive to" parameter; it is a ranking from one sample, not a variance decomposition with a confidence interval.
 
@@ -921,7 +933,7 @@ a no-slip wall with a tuned viscosity (1.3 to 2.6x the log-law stress), a tuned 
   `sponge_clearance_cells`, `wall_model_receipt_error` (the larger of the stored flat-plate and channel errors, at most `PLATE_TOL`; fails when none is stored), and a window that needed the viscosity floor fails with the reason.
 - Refit (`refit.py`): per-window ratio `cd/cd_hangar` (`cd_hangar` is the vehicle's baseline model coefficient at the window's speed, same reference area and density: analytic, with no Hangar CFD run, so no Hangar GCI, observed order or mesh-quality check applies; DECISIONS 171), pooled by DerSimonian & Laird 1986,
   `tau^2 = max(0, (Q - (k-1)) / (S1 - S2/S1))`, `w* = 1/(se^2 + tau^2)`; the multiplier Stage 1 samples is Normal(pooled, sigma) as a **lognormal with that mean** per member, with sigma = sqrt(se^2 + max(tau, f_w m)^2 + (f_d m)^2) for m = pooled value: the between-window term is floored at `f_w` = `stage3.refit.between_window_frac` (assumed 0.10) of m when fewer than two windows exist (tau^2 cannot be estimated from one), and the discretisation term `f_d` is the finest stored sphere grid against its Richardson extrapolation (`nest.sphere_discretisation`) or else `stage3.refit.discretisation_frac` (assumed 0.05). A single window's batch-means standard error alone (a few hundredths of a percent) is not the uncertainty of a drag multiplier; `refit.json` records `sigma_statistical`, `sigma_between`, `sigma_discretisation` and the sources. Only rows with `ok` enter. Speed scales as `d^(-1/2)`
-  for the glider and USV (drag ~ v^2 at fixed propulsive force); the UAS takes d directly. Budget `ci` never refits.
+  for the glider and USV (drag ~ v^2 at fixed propulsive force); the UAS takes d directly. Budget `ci` never refits. Stage 1b is a single rerun of stage 1 with the multipliers, not the loop to convergence of BRIEF 2.6 (limitation L16): `plan.json` carries `refit_iterations_max` (the cap), the stage-1b summary `refit_iterations_performed` (0 when no window was usable and stage 1 is copied, else 1), and the ledger check `refit_iterations_within_cap` compares them.
 
 ### 14.5 Receipts
 

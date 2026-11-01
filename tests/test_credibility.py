@@ -1,4 +1,5 @@
 """Credibility report: levels come from evidence, missing evidence is level 0 with a stated gap, V&V 20 rows, limitations, assumed inputs."""
+import html
 import json
 import math
 import sys
@@ -113,11 +114,45 @@ def test_ingest_ledger_without_inputs_or_with_failed_check(run):
     assert f["level"] == 1 and "failed or absent (['c'])" in f["missing"][0]
 
 
+def write_tao(run, speed_rmse=1.46, dir_rmse=12.0, moorings=("T0N165E", "T2S170W")):
+    (run / "ingest").mkdir(exist_ok=True)
+    pooled = dict(speed_rmse=speed_rmse, speed_bias=0.62, dir_rmse_deg=dir_rmse, dir_bias_deg=-3.0, sst_bias=-0.11)
+    (run / "ingest" / "tao_compare.json").write_text(json.dumps(dict({m: dict(pooled) for m in moorings}, ALL=pooled)))
+
+
 def test_tao_comparison_lifts_data_pedigree(run):
+    write_tao(run)
+    f = factors(run)["data_pedigree"]
+    assert f["evidence_level"] == f["level"] == 3 and not any("TAO" in m for m in f["missing"])
+
+
+def test_the_mooring_comparison_shows_its_numbers_and_says_it_also_sets_the_wind_priors(run):
+    """M-17: level 3 read 'strong: checked against an independent reference' whatever the numbers were."""
+    write_tao(run)
+    f = factors(run)["data_pedigree"]
+    ev = " ".join(x["what"] for x in f["evidence"])
+    assert ("2 TAO/TRITON moorings" in ev
+            and "speed RMSE 1.46 m/s (bias +0.62)" in ev
+            and "direction RMSE 12.0 deg" in ev
+            and "fits the Stage-1 wind priors" in ev)
+    assert f["level_text"] == "strong: compared with moorings (the comparison also sets the wind priors)" and "independent" not in f["level_text"]
+    assert "not independent of the run" in f["rule"]
+    assert "compared with moorings" in cr._render(cr.build(run, REAL))
+
+
+@pytest.mark.parametrize("kw", [dict(speed_rmse=2.5), dict(dir_rmse=24.8), dict(dir_rmse=math.nan)])
+def test_a_mooring_comparison_with_a_large_error_does_not_earn_level_three(run, kw):
+    write_tao(run, **kw)
+    f = factors(run)["data_pedigree"]
+    assert f["evidence_level"] == f["level"] == 2 and "stays at 2" in " ".join(f["missing"])
+    assert f["level_text"] == cr.LEVELS[2]
+
+
+def test_a_comparison_with_no_pooled_numbers_is_not_a_comparison(run):
     (run / "ingest").mkdir(exist_ok=True)
     (run / "ingest" / "tao_compare.json").write_text("{}")
     f = factors(run)["data_pedigree"]
-    assert f["evidence_level"] == f["level"] == 3 and not any("TAO" in m for m in f["missing"])
+    assert f["level"] == 2 and "with pooled numbers" in " ".join(f["missing"])
 
 
 def test_tampered_output_breaks_verification(run):
@@ -188,12 +223,28 @@ def test_uncertainty_levels(tmp_path, data):
     assert factors(short, clean)["uncertainty"]["evidence_level"] == 1
 
 
+def test_a_copied_stage_1b_takes_its_latin_hypercube_checks_from_stage_1(tmp_path, data):
+    """M-16: stage 1b is a copy whenever no window passes; its ledger has no LHS check, but the stage-1 ledger that ran the ensemble does."""
+    d = tmp_path / "copy"
+    d.mkdir()
+    pm_run.make_run(d)
+    clean = fake_root(tmp_path, sourced=3)
+    edit(d / "checkpoints" / "stage1b" / "ledger.json", lambda x: x.update(checks=[], notes=["no vehicle was refit: stage 1b is stage 1 (copied, not rerun)"]))
+    u = factors(d, clean)["uncertainty"]
+    assert u["evidence_level"] >= 2 and any("passed" in e["what"] and e["file"] == "run:checkpoints/stage1/ledger.json" for e in u["evidence"])
+    edit(d / "checkpoints" / "stage1" / "ledger.json", lambda x: x.update(checks=[dict(name="lhs_stratified_batch1", ok=False, value=1, limit=0, note="")]))
+    u = factors(d, clean)["uncertainty"]
+    assert u["evidence_level"] == 1 and "in the stage1 ledger (stage 1b is a copy of it)" in " ".join(u["missing"])
+    edit(d / "checkpoints" / "stage1b" / "ledger.json", lambda x: x.update(notes=[]))          # not a copy: stage 1b's own (absent) checks decide
+    assert "in the stage1b ledger" in " ".join(factors(d, clean)["uncertainty"]["missing"])
+
+
 def test_robustness_levels(tmp_path, data):
     a = tmp_path / "a"
     a.mkdir()
     pm_run.make_run(a, stage1b_differs=False)
     r = factors(a)["robustness"]
-    assert r["evidence_level"] == 3 and r["level"] == 2 and r["capped_by"] == ["L10"]
+    assert r["evidence_level"] == 3 and r["level"] == 2 and r["capped_by"][0] == "L10"
     b = tmp_path / "b"
     b.mkdir()
     pm_run.make_run(b)                                              # the refit changed glider_eq's verdict
@@ -217,12 +268,13 @@ def test_use_history_and_people_come_only_from_a_record(run, tmp_path):
 
 # ---------------------------------------------------------------------------------------------------------- V&V 20
 
-def write_dtmb(data, frs=("0.10", "0.20", "0.28", "0.41"), bias=1.005):
+def write_dtmb(data, frs=("0.10", "0.20", "0.28", "0.41"), bias=1.005, recipe=dtmb5415.RECIPE):
     root = data / "dtmb5415"
     root.mkdir(parents=True)
     for grid, k, cells in (("coarse", 1.02, 1.0e6), ("fine", bias, 8.0e6)):
         speeds = {fr: dict(cells=cells, ct=dtmb5415.CT_REF[float(fr)] * k, ct_std=1e-6) for fr in frs}
-        (root / f"run_{grid}.json").write_text(json.dumps(dict(grid=grid, speeds=speeds)))
+        d = dict(grid=grid, speeds=speeds)
+        (root / f"run_{grid}.json").write_text(json.dumps(d if recipe is None else dict(d, recipe=recipe)))
 
 
 def test_dtmb_rows_follow_asme_vv20(data):
@@ -234,6 +286,37 @@ def test_dtmb_rows_follow_asme_vv20(data):
     assert r["validated"] is True and r["ratio"] == pytest.approx(abs(r["E"]) / r["u_val"])
     assert rows["dtmb5415:Fr0.20"]["status"] == "not run" and "no coarse+fine run for this speed" in rows["dtmb5415:Fr0.20"]["note"]
     assert rows["dtmb5415:Fr0.20"]["E"] is None and rows["dtmb5415:Fr0.20"]["validated"] is None
+
+
+def test_files_of_another_recipe_are_not_rows_and_say_why_so_validation_reads_none(run, data):
+    """M-3: the discarded v3 run files (no recipe stamp) lifted Validation to 2 and showed 'validated' at an uncertainty as large as C_T."""
+    write_dtmb(data, recipe=None)
+    rows = [r for r in cr.vv20_rows(data) if r["id"].startswith("dtmb")]
+    assert len(rows) == 4 and all(r["status"] == "not run" and r["S"] is None and r["validated"] is None for r in rows)
+    note = rows[0]["note"]
+    assert note.startswith("not run: run_") and all(f"run_{g}.json was made by recipe None, not pout-lts01-parts-v4" in note for g in ("coarse", "fine"))
+    f = factors(run)
+    assert f["validation"]["level"] == 0 and f["validation"]["evidence"] == [] and any("recipe None" in m for m in f["validation"]["missing"])
+    assert f["verification"]["evidence_level"] == 2 and "grid-convergence" in " ".join(f["verification"]["missing"])
+    other = data.parent / "other"
+    write_dtmb(other, recipe="old-recipe")
+    assert "run_coarse.json was made by recipe old-recipe, not pout-lts01-parts-v4" in cr.vv20_rows(other)[0]["note"]
+
+
+def test_an_uncertainty_as_wide_as_the_reference_cannot_validate_it(run, data):
+    """M-3: U_val must be below half the reference for a row to count toward Validation level 3."""
+    wide = cr._row("a", "c", "s", 1.0, 1.0, (0.6, 0.6, 0.6), "")
+    assert wide["validated"] is True and wide["informative"] is False and wide["u_frac"] == pytest.approx(math.sqrt(3 * 0.36))
+    narrow = cr._row("a", "c", "s", 1.0, 1.0, (0.1, 0.1, 0.1), "")
+    assert narrow["informative"] is True and cr._row("a", "c", "s", 1.0, 0.0, (0.1, 0.1, 0.1), "")["informative"] is False
+    f = cr.Facts(run, REAL, data)
+    f.vv = [dict(narrow, id=f"n{i}", status="run") for i in range(3)] + [dict(wide, id="w", status="run")]
+    lvl, ev, miss = cr._validation(f)
+    assert lvl == 2 and "U_val is 50% of the reference or more in ['w']" in " ".join(miss) and "with U_val below 50% of the reference" in ev[0]["what"]
+    f.vv[3] = dict(narrow, id="n3", status="run")
+    assert cr._validation(f)[0] == 3
+    c = cr._render(dict(cr.build(run, REAL, data), vv20=[dict(wide, id="w", case="c", status="run", note="")]))
+    assert "yes (U_val is 104% of the reference: too wide to validate it)" in c
 
 
 def test_a_wrong_model_is_not_validated(data):
@@ -308,10 +391,19 @@ LIMITS = ["acoustic 4 km MF range is true by construction", "the USV 12 m/s poin
           "turbulence σ_v/σ_u and σ_w/σ_u are low", "LBM sphere drag is not met on CPU", "the wall model is not validated",
           "the SITL return/landing is unreliable", "the UAS propulsion curve is parametric",
           "GCI values stored before the r = (N_f/N_c)^(1/3) fix were understated"]
+# round 2 (docs/CREDIBILITY.md has the same sentences; L13 is the run-time sub-grid limitation and sits between L12 and L14)
+LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the TAO moorings over this window: an estimate of the order, not a measurement",
+           "no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer and the drag refit stay uncalibrated; "
+           "no GPU run exists",
+           "the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
+           "UAS attitude exceedance cannot fire in this controller model (tilt clamp 35 deg, exceedance 42 deg)",
+           "the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio again; "
+           "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established"]
 
 
 def test_limitations_are_listed_verbatim_and_point_at_real_files():
-    assert [x["text"] for x in cr.LIMITATIONS] == LIMITS
+    assert [x["text"] for x in cr.LIMITATIONS][:12] == LIMITS
+    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18"] and [x["text"] for x in cr.LIMITATIONS][12:] == LIMITS2
     names = {k for k, _ in cr.FACTORS}
     for x in cr.LIMITATIONS:
         assert set(x["factors"]) <= names and x["where"]
@@ -360,7 +452,7 @@ def test_write_produces_valid_json_and_a_static_html_page(run, data):
     for _, name in cr.FACTORS:
         assert name.replace("&", "&amp;") in h
     for x in cr.LIMITATIONS:
-        assert x["text"] in h
+        assert html.escape(x["text"]) in h                                   # (an apostrophe is written as an entity)
     assert "ASME V&amp;V 20" in h and "not run" in h and "Back to the mission report" in h and "prefers-color-scheme:dark" in h
     assert "capped at 2 by" in h and "never awarded" in h
     assert 'name="viewport"' in h and "<script" not in h
@@ -457,10 +549,41 @@ def test_the_sanity_block_compares_each_verdict_with_the_briefs_expected_outcome
     assert rows["usv-uas-rf"]["agrees"] is True
 
 
+def acoustic(run, **fields):
+    edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["glider_eq-ship-acoustic"].update(fields))
+
+
+@pytest.mark.parametrize("verdict,fields,agrees,words", [
+    ("NO-GO", dict(distance_km_median=555.0), True, "median distance to the ship 555 km, beyond 3 km"),
+    ("GO", dict(distance_km_median=555.0), False, "beyond 3 km"),
+    ("GO", dict(distance_km_median=1.2), True, "within 3 km"),
+    ("NO-GO", dict(distance_km_median=1.2), False, "within 3 km"),
+    ("NO-GO", dict(frac_out_of_range=0.9), True, "out of the modem's range, beyond 3 km"),
+    ("NO-GO", dict(frac_out_of_range=0.1), None, "holds no ship distance"),
+    ("NO-GO", dict(), None, "holds no ship distance")])
+def test_the_acoustic_sanity_row_reads_the_runs_ship_distance(run, data, verdict, fields, agrees, words):
+    """M-18: the row said 'the distance is not in the verdict' though the run holds it."""
+    acoustic(run, **fields)
+    edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["glider_eq-ship-acoustic"]["verdict"].update(verdict=verdict))
+    row = next(r for r in cr.build(run, REAL, data)["sanity"]["rows"] if r["id"] == "glider_eq-ship-acoustic")
+    assert row["agrees"] is agrees and words in row["detail"] and "NO-GO beyond it" in row["expected"]
+
+
+def test_the_usv_sanity_row_prints_the_speed_ratio_beside_chiodis(run, data):
+    edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(speed=dict(ratio_median=0.107)))
+    c = cr.build(run, REAL, data)
+    row = next(r for r in c["sanity"]["rows"] if r["id"] == "usv")
+    assert "0.107" in row["detail"] and "0.178" in row["detail"] and "no current, uniform wind, sailing to a station" in row["detail"]
+    assert "double penalty" in row["detail"]
+    cr.write(run)
+    assert "sailing to a station" in (run / "report" / "credibility.html").read_text()
+
+
 def test_another_mission_gets_no_sanity_block_and_the_page_shows_it_only_for_the_demo(run, data):
     cr.write(run)
     h = (run / "report" / "credibility.html").read_text()
     assert "Sanity check against the brief (tepex_c_demo only)" in h and "cannot be checked from the verdict" in h and "<b>NO</b>" in h
+    assert "the run holds no ship distance for this link" in h
     (run / "mission.yaml").write_text((run / "mission.yaml").read_text().replace("name: tepex_c_demo", "name: other"))
     assert cr.build(run, REAL, data)["sanity"] is None
     cr.write(run)
@@ -500,7 +623,8 @@ def test_an_uncalibrated_sub_grid_layer_is_a_limitation_that_caps_validation_and
     why = "sub-grid layer uncalibrated: no LES window passed"
     monkeypatch.setattr(cr, "subgrid_uncalibrated", lambda *a, **k: why)
     c = cr.build(run, REAL, data)
-    assert c["limitations"][-1] == dict(cr.SUBGRID_LIMITATION, text=why) and len(c["limitations"]) == len(cr.LIMITATIONS) + 1
+    assert c["limitations"][12] == dict(cr.SUBGRID_LIMITATION, text=why) and len(c["limitations"]) == len(cr.LIMITATIONS) + 1
+    assert [x["id"] for x in c["limitations"]][11:14] == ["L12", "L13", "L14"]
     f = {x["factor"]: x for x in c["factors"]}
     assert "L13" in f["validation"]["limitations"] and "L13" in f["uncertainty"]["limitations"] and "L13" not in f["people"]["limitations"]
     assert why in cr._render(c)

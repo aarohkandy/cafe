@@ -1,7 +1,7 @@
 """The documents say what the code does where a reader would act on them (review round 1: M-17, M-31, M-32)."""
 import re
 
-from cafe.pm import config
+from cafe.pm import config, credibility
 
 ROOT = config.ROOT
 
@@ -51,3 +51,17 @@ def test_credibility_doc_has_no_claim_the_code_contradicts():
 def test_decisions_rows_are_numbered_without_gaps_or_repeats():
     nums = [int(m.group(1)) for line in text("DECISIONS.md").splitlines() if (m := re.match(r"\| (\d+) \|", line))]
     assert nums == list(range(1, len(nums) + 1)) and nums[-1] >= 162
+
+
+def test_credibility_doc_limitation_table_is_the_code_s_list():
+    """Round 2 integration: docs/CREDIBILITY.md section 5 carries every LIMITATIONS text of credibility.py, character for character, and L13 (run time)."""
+    doc = text("docs", "CREDIBILITY.md")
+    for x in credibility.LIMITATIONS:
+        assert f"| {x['id']} | {x['text']} |" in doc, x["id"]
+    assert "| L13 | sub-grid layer uncalibrated:" in doc
+
+
+def test_credibility_doc_quotes_the_rules_verbatim():
+    doc = text("docs", "CREDIBILITY.md").replace("\\|", "|")
+    for k, v in credibility.RULES.items():
+        assert v in doc, k

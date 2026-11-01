@@ -217,13 +217,6 @@ def test_member_seed_is_common_deterministic_and_independent():
     a, b = S.member_rng(7, 3, "wind").standard_normal(2000), S.member_rng(7, 3, "waves").standard_normal(2000)
     assert abs(np.corrcoef(a, b)[0, 1]) < 0.08                      # streams do not echo each other
     assert np.array_equal(a, S.member_rng(7, 3, "wind").standard_normal(2000))
-    assert S.crn_check(7, 5, ("wind", "waves"), vehicles=3)
-
-
-def test_crn_check_fails_when_the_vehicle_enters_the_seed(monkeypatch):
-    calls = iter(range(10 ** 6))
-    monkeypatch.setattr(S, "member_rng", lambda b, m, s: np.random.default_rng(next(calls)))
-    assert not S.crn_check(7, 3, ("wind",))
 
 
 def test_perturbations_yaml_is_complete_and_usable(tmp_path):

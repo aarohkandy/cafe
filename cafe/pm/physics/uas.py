@@ -251,6 +251,7 @@ class St(NamedTuple):
     f_tilt: Any; f_batt: Any; f_stuck: Any
     t_tilt: Any; t_batt: Any; t_stuck: Any
     tilt_max: Any; dist_max: Any; t_end: Any; wind_max: Any
+    sat_s: Any; k_min: Any             # horizontal force demand beyond the lean-angle clamp: seconds so far, smallest clamp factor (1 / largest demand ratio)
 
 
 def init_state(prm: dict[str, Any], M: int, yaw0: Arr, active: Arr) -> St:
@@ -261,7 +262,7 @@ def init_state(prm: dict[str, Any], M: int, yaw0: Arr, active: Arr) -> St:
     b = jnp.zeros(M, bool)
     return St(z3, z3, q, z3, om0, z3, z3, yaw0, jnp.ones(M), f, f, prm["vref"], f,
               jnp.where(jnp.asarray(active), FLY, DONE).astype(jnp.int32), jnp.zeros(M, jnp.int32), f,
-              b, b, b, nan, nan, nan, f, f, nan, f)
+              b, b, b, nan, nan, nan, f, f, nan, f, f, jnp.ones(M))
 
 
 def _block(prm: dict[str, Any], S: St, wp: Arr, ship_p: Arr, ship_v: Arr, wind: Arr, t: Arr, nsub: int, dt: float) -> St:
@@ -302,6 +303,7 @@ def _block(prm: dict[str, Any], S: St, wp: Arr, ship_p: Arr, ship_v: Arr, wind: 
     fh = jnp.hypot(f[0], f[1])
     k = jnp.minimum(1.0, fz * jnp.tan(prm["tilt_lim"]) / jnp.maximum(fh, 1e-9))
     f_des = jnp.stack([f[0] * k, f[1] * k, fz])
+    sat = flying & (k < 1.0)                                             # the demand for horizontal force is beyond what the lean-angle clamp lets through
     far = eh > 5.0
     tgt_yaw = jnp.arctan2(e[1], e[0])
     dy = (tgt_yaw - S.yawd + jnp.pi) % (2 * jnp.pi) - jnp.pi
@@ -356,7 +358,8 @@ def _block(prm: dict[str, Any], S: St, wp: Arr, ship_p: Arr, ship_v: Arr, wind: 
         t_stuck=jnp.where(n_stuck, tn - stuck, S.t_stuck),
         tilt_max=jnp.where(flying, jnp.maximum(S.tilt_max, tilt), S.tilt_max),
         dist_max=jnp.where(flying, jnp.maximum(S.dist_max, jnp.hypot(rp2[0], rp2[1])), S.dist_max),
-        t_end=jnp.where(fin, tn, S.t_end), wind_max=jnp.where(flying, jnp.maximum(S.wind_max, wnd), S.wind_max))
+        t_end=jnp.where(fin, tn, S.t_end), wind_max=jnp.where(flying, jnp.maximum(S.wind_max, wnd), S.wind_max),
+        sat_s=S.sat_s + jnp.where(sat, DT_ENV, 0.0), k_min=jnp.where(flying, jnp.minimum(S.k_min, k), S.k_min))
 
 
 def _blocks(prm: dict[str, Any], S: St, wp: Arr, ship_p: Arr, ship_v: Arr, wind: Arr, t: Arr, nsub: int, dt: float) -> St:
@@ -511,6 +514,7 @@ def simulate(prm: dict[str, Any], wp: Arr, ship: Ship, wind_fn: WindFn, *, M: in
     return dict(flags=flags, t_first=t_first, landed=(ph == DONE) & active, ditched=ph == DEAD, airborne=(ph < DONE),
                 t_end=np.where(np.isnan(np.asarray(S.t_end)), t + DT_ENV, np.asarray(S.t_end)), energy_wh=np.asarray(S.ewh),
                 soc_end=np.asarray(S.soc), max_tilt_deg=np.degrees(np.asarray(S.tilt_max)), max_dist_m=np.asarray(S.dist_max),
+                sat_s=np.asarray(S.sat_s), demand_ratio_max=1.0 / np.asarray(S.k_min),
                 max_wind_ms=np.asarray(S.wind_max), final=S, track=dict(t=np.array(tr["t"]), pos_rel=np.stack(tr["pos"], 1),
                                                                          soc=np.stack(tr["soc"], 1), tilt_deg=np.stack(tr["tilt"], 1),
                                                                          phase=np.stack(tr["phase"], 1), ewh=np.stack(tr["ewh"], 1)))
@@ -523,7 +527,8 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
     same clock as t_launch and the env. turb (M, n, 3) at 50 ms and gust(t) -> (M, 3) are the caller's perturbations.
     link(t, pos_rel (M,3)) -> bool (M,) lost? is the caller's link model (None: lost_link is never set); scale: see derive.
     -> dict: flags / t_first (s after launch) per FLAGS, scrubbed, failed, landed, ditched, energy_wh, soc_end, max_tilt_deg,
-    max_dist_m, track (1 Hz positions relative to the ship: use them for links), launch (the weather gate's numbers)."""
+    max_dist_m, sat_s (seconds the horizontal-force demand was beyond the lean-angle clamp), demand_ratio_max (the largest demand / clamp), track
+    (1 Hz positions relative to the ship: use them for links), launch (the weather gate's numbers)."""
     P = plat or load_platform()
     so = P["sortie"]
     if turb is not None and turb.shape[1] * DT_ENV < so["duration_s"] + 60.0:
@@ -543,10 +548,12 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
                        t_max=so["duration_s"] * so["hard_stop_factor"], active=gate["ok"], yaw0=yaw0, dt=dt, nsub=int(round(DT_ENV / dt)), link=link)
         out["flags"] = {k: v & gate["ok"] for k, v in out["flags"].items()}
         out["t_first"] = {k: np.where(out["flags"][k], v, np.nan) for k, v in out["t_first"].items()}
+        out["sat_s"], out["demand_ratio_max"] = np.where(gate["ok"], out["sat_s"], 0.0), np.where(gate["ok"], out["demand_ratio_max"], 1.0)
     else:
         z, zb = np.zeros(M), np.zeros(M, bool)
         out = dict(flags={k: zb.copy() for k in FLAGS}, t_first={k: np.full(M, np.nan) for k in FLAGS}, landed=zb.copy(), ditched=zb.copy(),
                    airborne=zb.copy(), t_end=z, energy_wh=z, soc_end=np.ones(M), max_tilt_deg=z, max_dist_m=z, max_wind_ms=z,
+                   sat_s=z, demand_ratio_max=np.ones(M),
                    track=dict(t=np.zeros(0), pos_rel=np.zeros((M, 0, 3)), **{k: np.zeros((M, 0)) for k in ("soc", "tilt_deg", "phase", "ewh")}))
     out.pop("final", None)
     out.update(t_launch=t_launch, scrubbed=~gate["ok"], launch=gate, failed=np.any([out["flags"][k] for k in FLAGS], 0))

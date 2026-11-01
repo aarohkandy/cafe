@@ -145,7 +145,7 @@ def design_row():
 
 
 def make_run(run, *, budget_name="quick", thr=None, git="abc1234", ledgers=True, res=True, stage3=True, refit=True, emulator=True, summary_only=False,
-             stage1b_differs=True, M=48, flip=True):
+             stage1b_differs=True, M=48, flip=True, code_digest=None):
     """Write a run directory. Flags remove parts to exercise the degraded paths. -> (mission, plan)."""
     run = pathlib.Path(run)
     m = mission()
@@ -188,7 +188,7 @@ def make_run(run, *, budget_name="quick", thr=None, git="abc1234", ledgers=True,
         for st in STAGES[:-1]:
             if not res and st == "stage1b":
                 (run / "stage1b" / "res.pkl").unlink()
-            with ledger.Ledger(run, st, "cfg-" + "0" * 20) as L:
+            with ledger.Ledger(run, st, "cfg-" + "0" * 20, code_digest) as L:
                 if prev:
                     L.input(prev)
                 if st == "ingest":

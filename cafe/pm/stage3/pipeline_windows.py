@@ -157,7 +157,7 @@ def uas_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str) -> W.Vehicl
               dict(type="plate", center=(0.0, 0.0, 0.0), size=(arm_l, arm_w, arm_t)),
               dict(type="plate", center=(0.0, 0.0, 0.0), size=(arm_w, arm_l, arm_t))]
     frontal = math.pi * by * bz + (arm_l + arm_w) * arm_t
-    return W.Vehicle(platform, "air", arm_l, shapes, ref_area=frontal, hull=0, extra=dict(resolve_dim=2 * bz, part="body"))
+    return W.Vehicle(platform, "air", arm_l, shapes, ref_area=frontal, hull=0, extra=dict(resolve_dim=2 * bz, part="body", min_dim=min(arm_w, arm_t)))
 
 
 # ---------------------------------------------------------------------------------------------------- kinematics + hangar, per class
@@ -425,7 +425,8 @@ def why_failed(checks: list[dict[str, Any]], res: dict[str, Any], wlog: dict[str
 def _base(ctx: Context, w: dict[str, Any], part: str) -> dict[str, Any]:
     """The row of a window that did not run: every field the refit and the report read, empty."""
     les = ctx.plan["les"]
-    return dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, usable_for_refit=False, reasons=[],
+    return dict(t=w["t"], lon=w["lon"], lat=w["lat"], part=part, fluid=None, resolution=None, checks=[], ok=False, cut=False,
+                usable_for_refit=False, reasons=[],
                 cd=None, cd_spread=None, cl=None, cl_spread=None, added_resistance=None, cd_hangar=None, cl_hangar=None,
                 cd_hangar_source=None, fea=dict(run=False, reason="the window did not run"), label=les["label"] if les["cpu_fallback"] else None)
 
@@ -447,6 +448,9 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
 
     def fail(msg: str) -> dict[str, Any]:
         return dict(base, error=msg[:300], reasons=[msg[:300]], timing=dict(wall_s=time.perf_counter() - t0, wall_share_s=win_s))
+    plan_w = sizes["les"]["windows"].get(f"{vid}/{part}")
+    if plan_w is not None and not plan_w["runs"]:                            # budget.les_windows: unreachable on this machine, its slice went to stage 1
+        return fail(plan_w["skip_reason"])
     if not sizes["runs"]:
         return fail(f"not run: the stage-3 share of this --budget is {sizes['share_s']:.0f} s for {sizes['les_parts']} LES windows, "
                     f"{sizes['slice_s']:.1f} s each (least that can run: {sizes['min_window_s']} s): use a larger --budget")
@@ -485,6 +489,10 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     run_s = None if win_s is None else win_s - fea_s                      # the LES run's safety kill, not its size
     try:
         fit = fit_window(veh, speed, plan_cs, a)
+        thin = veh.extra.get("min_dim")
+        if thin is not None and thin < need(a, "min_cells_thin_part") * fit["dx"]:     # measured (assumptions.yaml): arms under 2 cells diverge, 2 are stable
+            return fail(f"not run: numerically unstable at this resolution: the thinnest part is {thin * 1e3:.1f} mm = {thin / fit['dx']:.2f} cells at dx "
+                        f"{fit['dx'] * 1e3:.1f} mm (stage3.min_cells_thin_part {need(a, 'min_cells_thin_part')}); a part under it makes the window diverge")
         chunk = int(need(a, "chunk_steps"))
         steps = -(-fit["steps"] // chunk) * chunk                           # whole chunks: another chunk length is another XLA compile
         spec = W.WindowSpec(velocity=tuple(float(x) for x in vb), dx=fit["dx"], steps=steps, box=fit["box"], cd_ref=case["cd_h"],
@@ -494,11 +502,14 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     except (ValueError, RuntimeError) as e:                                 # memory guard, empty body, no flow ...
         return dict(base, error=str(e)[:300], reasons=[str(e)[:300]], timing=dict(wall_s=time.perf_counter() - t0, wall_share_s=win_s))
     wl = r["wall"]
+    cut = wl["run_steps"] < wl["planned_steps"]                             # killed by the clock or diverged: where it stopped is machine-dependent
     left = None if win_s is None else win_s - (time.perf_counter() - t0)
     fea_took = 0.0
-    if veh.extra.get("fea") and not sizes["fea"]["runs"]:                    # planned out: the reserve is below stage3.fea_min_s
+    if veh.extra.get("fea") and not sizes["fea"]["runs"]:                    # planned out: the reserve is below stage3.fea_min_s (a plan fact, cut or not)
         fea = dict(run=False, reason=f"not planned: the FEA reserve is {sizes['fea']['reserve_s']:.1f} s of a {sizes['slice_s']:.1f} s slice, below "
                                      f"stage3.fea_min_s ({need(a, 'fea_min_s')} s): use a larger --budget")
+    elif cut:
+        fea = dict(run=False, reason="not run: the LES window was cut, so its wall pressure (the FEA load) is machine-dependent and withheld")
     else:
         t_fea = time.perf_counter()
         fea = _fea(veh, r, a, None if left is None else max(left, 0.0))
@@ -506,21 +517,33 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     timing = dict(wall_s=0.0, wall_share_s=win_s, setup_s=wl["setup_s"], compile_s=wl["compile_s"], les_s=wl["les_s"], fea_s=fea_took,
                   fea_seconds=fea.pop("seconds", None), cells_per_s_measured=wl["cells_per_s"])
     resolution = dict(r["resolution"], cells=fit["cells"], cell_steps=fit["cell_steps"], budget_ok=fit["budget_ok"],
-                      planned_steps=wl["planned_steps"], run_steps=wl["run_steps"], cut_reason=wl.get("cut_reason"),
+                      planned_steps=wl["planned_steps"], run_steps=None if cut else wl["run_steps"], cut_reason=None,
                       cells_per_s_planned=les.get("rate"), cell_steps_budget_plan=plan_cs,
                       cells_per_delta=r["resolution"]["delta_te"] / r["resolution"]["dx"])
-    checks = list(r["checks"])
+    checks = []                                                             # the checks whose value does not depend on where the run stopped
     if not case.get("comparable", True):                                    # a coefficient that is not like-for-like with its Hangar reference must not refit
         checks.append(dict(name="hangar_reference_comparable", value=math.nan, limit=math.nan, ok=False, note=case["not_comparable"]))
     if r["resolution"]["nu_floored"]:                                       # a stability floor changes the Reynolds number: a window that needed it fails
         checks.append(dict(name="viscosity_floor", value=r["resolution"]["nu_lat"], limit=r["resolution"]["nu_lat_physical"], ok=False,
                            note="lattice viscosity raised to the floor; the window is not at the physical Reynolds number"))
-    killed = bool(wl.get("killed"))                                         # a run stopped by its safety kill is never ok, whatever its checks say
+    if cut:
+        # Where a cut run stopped (a chunk boundary the clock or the blow-up picked) changes every coefficient and check value, so none of them is
+        # in the row: they go to `timing`, which the pipeline moves out of the hashed output into the ledger. The row says only what is planned.
+        why = (f"diverged: the flow went non-finite or past Mach 1 inside a chunk of {chunk} steps of the {wl['planned_steps']} planned; the run stopped "
+               "there and the rest of its slice went to the next window" if wl["diverged"] else
+               f"killed: its wall-clock slice was spent before the {wl['planned_steps']} planned steps were done")
+        resolution["cut_reason"] = why
+        timing["machine_dependent"] = dict(run_steps=wl["run_steps"], cut_reason=wl["cut_reason"], cells_per_s=wl["cells_per_s"], cd=float(r["cd"]),
+                                           cd_spread=float(r["cd_spread"]), cl=float(r["cl"]), cl_spread=float(r["cl_spread"]), checks=list(r["checks"]))
+        timing["wall_s"] = time.perf_counter() - t0
+        return dict(base, resolution=resolution, checks=checks, ok=False, cut=True, usable_for_refit=False,
+                    reasons=[why + "; its coefficients and check values are machine-dependent and withheld"] + why_failed(checks, r["resolution"], {}),
+                    fea=fea, ref_area=float(r["ref_area"]), source=r["source"], timing=timing)
+    checks = list(r["checks"]) + checks
     checks_ok = bool(r["ok"] and not any(not c["ok"] for c in checks))
-    ok = checks_ok and not killed
-    reasons = [] if ok else ([wl["cut_reason"]] if killed else []) + ([] if checks_ok else why_failed(checks, r["resolution"], wl))
+    reasons = [] if checks_ok else why_failed(checks, r["resolution"], wl)
     timing["wall_s"] = time.perf_counter() - t0
-    return dict(base, resolution=resolution, checks=checks, ok=ok, usable_for_refit=ok, reasons=reasons,
+    return dict(base, resolution=resolution, checks=checks, ok=checks_ok, usable_for_refit=checks_ok, reasons=reasons,
                 cd=float(r["cd"]), cd_spread=float(r["cd_spread"]), cl=float(r["cl"]), cl_spread=float(r["cl_spread"]),
                 added_resistance=None if r["added_resistance"] is None else float(r["added_resistance"]), fea=fea,
                 ref_area=float(r["ref_area"]), source=r["source"], timing=timing)
@@ -681,11 +704,12 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     st = dict(share=share, t_stage=t_stage, queued=0.0, deadline=None if share is None else t_stage + share)
     with ThreadPoolExecutor(1) as pool:                                     # one free-surface case at a time: they share the CPUs
         fs = [(vid, w, _fs_submit(pool, ctx, vid, w, plat[vid], res, a, st, sizes)) for vid, ws in wins.items() if ctx.classes[vid] in FS_PARTS for w in ws]
+        runs = [sizes["les"]["windows"].get(f"{vid}/{part}", dict(runs=True))["runs"] for vid, w, part in todo]       # windows budget.les_windows did not skip
         for i, (vid, w, part) in enumerate(todo):
-            win_s = None if share is None else (share - (time.perf_counter() - t_stage)) / (len(todo) - i)
+            win_s = None if share is None else (share - (time.perf_counter() - t_stage)) / max(sum(runs[i:]), 1)
             r = _row(ctx, vid, ctx.classes[vid], w, part, plat[vid], res, a, sizes, win_s)
             rows[vid].append(r)
-            msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error')}"
+            msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error') or r['reasons'][0][:200]}"
             ctx.log(f"stage3 {vid}/{part} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['timing']['wall_s']:.1f} s of {win_s if win_s is None else round(win_s, 1)}]")
         for vid, w, fut in fs:
             r = fut.result()
@@ -699,7 +723,7 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     unexplained = [(v, i) for v, rs in rows.items() for i, r in enumerate(rs) if not r["ok"] and not r["reasons"]]
     L.check("every_failed_window_states_a_reason", not unexplained, value=len(unexplained), limit=0)
     spent = time.perf_counter() - t_stage
-    if share is not None:
+    if share:                                                                  # a stage whose windows were all skipped has no share (it went to stage 1)
         L.check("stage_held_its_wall_clock_share", spent <= 1.1 * share, value=round(spent, 1), limit=round(1.1 * share, 1),
                 note="share = plan shares.stage3 x budget_s; a window cut by the budget is a killed row, not an overrun")
     recalibrate_subgrid(ctx, rows, L)

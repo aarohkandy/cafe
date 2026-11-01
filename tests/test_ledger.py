@@ -227,3 +227,27 @@ def test_git_sha_falls_back_to_the_environment_when_the_copy_has_no_git(monkeypa
     assert ledger.git_sha() == "abc123"
     monkeypatch.delenv("CAFE_GIT_SHA")
     assert ledger.git_sha() == "none"
+
+
+# ---- review round 2, M-30: strict JSON
+
+def reject(name):
+    raise ValueError(f"non-standard JSON constant {name}")
+
+
+def test_a_ledger_with_nan_and_infinite_values_is_strict_json(tmp_path):
+    with Ledger(tmp_path, "stage1", "h1") as L:
+        L.check("unbounded", True, value=float("nan"), limit=float("inf"), note="n")
+        L.check("array", True, value=np.array([1.0, np.nan, -np.inf]), limit=np.float32("nan"))
+        L.d["extra"] = {"nested": [float("inf"), {"x": np.float64("nan")}], "n": np.int64(3), "ok": np.bool_(True)}
+    text = (tmp_path / "checkpoints" / "stage1" / "ledger.json").read_text()
+    assert "NaN" not in text and "Infinity" not in text
+    d = json.loads(text, parse_constant=reject)                                                       # what jq and JSON.parse accept
+    assert d["checks"][0]["value"] is None and d["checks"][0]["limit"] is None
+    assert d["checks"][1]["value"] == [1.0, None, None] and d["checks"][1]["limit"] is None
+    assert d["extra"] == {"nested": [None, {"x": None}], "n": 3, "ok": True}
+
+
+def test_clean_keeps_finite_numbers_strings_and_none_and_makes_numpy_and_dates_plain():
+    assert ledger.clean({"a": 1, "b": 1.5, "c": "s", "d": None, "e": True, "f": (1, 2)}) == {"a": 1, "b": 1.5, "c": "s", "d": None, "e": True, "f": [1, 2]}
+    assert ledger.clean([np.arange(2), dt.date(2023, 3, 1), float("-inf")]) == [[0, 1], "2023-03-01", None]

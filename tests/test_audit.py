@@ -407,3 +407,51 @@ def test_module_entry_point_exits_with_the_audit_status(monkeypatch):
     with pytest.raises(SystemExit) as e:
         runpy.run_module("cafe.pm.audit", run_name="__main__")
     assert e.value.code in (0, 1)
+
+
+# ---- review round 2, M-34: the older cafe/ modules the pipeline imports are inside the banned-token scan and (those that pass) ruff
+
+def imported_cafe_modules():
+    """The top-level cafe/<name>.py modules that cafe/pm imports (`from cafe import x`, `import cafe.x`, `from cafe.x import y`), directly."""
+    import ast
+    found = set()
+    for f in (audit.ROOT / "cafe" / "pm").rglob("*.py"):
+        for n in ast.walk(ast.parse(f.read_text())):
+            if isinstance(n, ast.ImportFrom) and n.level == 0 and n.module == "cafe":
+                found |= {a.name for a in n.names}
+            elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module and n.module.startswith("cafe.") and not n.module.startswith("cafe.pm"):
+                found.add(n.module.split(".")[1])
+            elif isinstance(n, ast.Import):
+                found |= {a.name.split(".")[1] for a in n.names if a.name.startswith("cafe.") and not a.name.startswith("cafe.pm")}
+    return {m for m in found if (audit.ROOT / "cafe" / f"{m}.py").is_file()}
+
+
+def test_every_cafe_module_the_pipeline_imports_is_in_the_banned_token_scan():
+    mods = imported_cafe_modules()
+    assert {"cfd", "fea", "emulator", "reach", "receipts"} <= mods
+    assert {f"cafe/{m}.py" for m in mods} <= set(audit.SCAN)
+    assert all((audit.ROOT / s).exists() for s in audit.SCAN)
+
+
+def test_those_modules_are_linted_where_they_pass_ruff():
+    import tomllib
+    inc = tomllib.loads((audit.ROOT / "pyproject.toml").read_text())["tool"]["ruff"]["include"]
+    assert {"cafe/cfd.py", "cafe/emulator.py", "cafe/fea.py", "cafe/reach.py", "cafe/receipts.py"} <= set(inc)
+    assert "cafe/planner.py" not in inc and "cafe/planner.py" in audit.SCAN                      # scanned for banned tokens, not linted (see audit.IMPORTED)
+
+
+def test_a_banned_token_in_an_imported_older_module_is_caught(tmp_path):
+    for s in audit.SCAN:
+        p = tmp_path / s
+        if s.endswith((".py", ".md")) or s == "Makefile":
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("x = 1\n")
+        else:
+            p.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "cafe" / "fea.py").write_text("x = 1\n# TODO later\n")
+    assert audit.banned(tmp_path) == ["cafe/fea.py:2: banned pattern: # TODO later"]
+
+
+def test_the_older_modules_the_scan_names_are_clean_today():
+    older = tuple(audit.IMPORTED)
+    assert len(older) == 15 and not [h for h in audit.banned() if h.startswith(older)]

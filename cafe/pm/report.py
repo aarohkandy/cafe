@@ -12,7 +12,8 @@ table (a ledger check by name, else the sha-256 of the stage output the number w
 receipt that is missing, or a ledger check that failed, is what check_traceability reports. A link is provenance, not a pass: an `output`
 receipt carries the output's own quality bit (windows.json of stage 3 is ok only if some window passed its self-checks) and each verdict
 cites the model-receipt group of its vehicle class or link (`physics:<group>`: pass and fail counts from runs/receipts.json, "not run" when
-that table is not there). A receipt with ok False is shown, never hidden, and does not by itself make the traceability check fail. Verdicts
+that table is not there, "stale: made by other code" when runs/receipts.meta.json does not hold the code digest of the run's own
+ledgers). A receipt with ok False is shown, never hidden, and does not by itself make the traceability check fail. Verdicts
 are those of the final ensemble, stage1b (a copy of stage 1 when nothing was refit). res.pkl is unpickled only after its sha-256 matches the
 ledger's record of it.
 
@@ -44,6 +45,14 @@ from .stats import intervals, sequential
 SCHEMA = "cafe.pm.report/1"
 RECEIPTS_NAME = "runs/receipts.json"                                          # the model receipts (python -m cafe.pm receipts), relative to the repo
 RECEIPTS = credibility.ROOT / RECEIPTS_NAME
+META_NAME = "receipts.meta.json"                                              # beside the table: {code_digest, git_sha, made_at} of the code that made it
+STALE = "stale: made by other code"
+USV_RATIO_NOTE = ("The mission ratio is lowered by the westward current (in the demo mission it turns a beam reach into a close-hauled course, and the speed "
+                  "through the water falls); the calibration may already include part of the current effect, a possible double penalty that is not "
+                  "established.")
+UAS_ATTITUDE_NOTE = ("Attitude exceedance cannot fire in this controller model (the tilt clamp, 35 deg, is below the 42 deg exceedance), so the UAS verdict "
+                     "rests on battery alone below about 12 m/s of wind.")
+CHIODI_RATIO = 0.96 / 5.4                                                     # platforms/saildrone_explorer.yaml chiodi_mean_sog_ms / chiodi_mean_wind_ms
 PHYSICS = dict(glider="pm.physics.glider", usv="pm.physics.usv", uas="pm.physics.uas", link="pm.physics.comms")     # vehicle class or link -> group
 SENSITIVITY = "sensitivity_cases.json"             # stage1b/: {vid: [{case, k_fail, n, verdict, note}]}, written by whoever runs a case
 FORCING = {"glider": ("surface current speed", "m/s"), "usv": ("significant wave height", "m"), "uas": ("10 m wind speed", "m/s")}
@@ -74,6 +83,7 @@ class Trace:
         self.led = {st: _jl(run / "checkpoints" / st / "ledger.json") for st in STAGES}
         self.rows: dict[str, dict[str, Any]] = {}
         self.table = self._table()
+        self.stale = self._stale()
 
     def _table(self) -> tuple[list[dict[str, Any]], str] | str:
         """The model-receipts table (rows, sha-256), or the reason there is none."""
@@ -83,6 +93,20 @@ class Trace:
             return json.loads(RECEIPTS.read_text()), sha256(RECEIPTS)
         except ValueError as e:
             return f"{RECEIPTS_NAME} is not valid JSON ({e})"
+
+    def _stale(self) -> str | None:
+        """Why the receipts table is not for this run's code, or None: the table's meta file (receipts.run writes it) must hold the code digest the run's
+        own ledgers hold. A missing meta file or digest is as stale as a different one: nothing says the table was made by this code."""
+        meta = RECEIPTS.with_name(META_NAME)
+        try:
+            made = json.loads(meta.read_text()).get("code_digest")
+        except (OSError, ValueError, AttributeError):
+            return f"{RECEIPTS_NAME} has no readable {META_NAME} beside it, so nothing says which code made it: rerun `python -m cafe.pm receipts`"
+        mine = next((L["code_digest"] for L in self.led.values() if L and L.get("code_digest")), None)
+        if mine is None or made != mine:
+            return (f"{RECEIPTS_NAME} was made by code {str(made)[:12]}, this run by {str(mine)[:12]}: rerun `python -m cafe.pm receipts` "
+                    "(the receipts below describe other code and are not counted as a pass)")
+        return None
 
     def _row(self, stage: str, rid: str, kind: str, name: str, ok: bool, got: str = "", limit: str = "", sha: str = "", ledger: str | None = None) -> None:
         self.rows.setdefault(rid, dict(id=rid, stage=stage, ledger=ledger or f"checkpoints/{stage}/ledger.json", kind=kind, name=name, ok=ok,
@@ -107,6 +131,9 @@ class Trace:
             return dict(group=group, status="not run", reason=f"no receipt of group {group} in {RECEIPTS_NAME}", failures=[])
         bad = [r["name"] for r in rows if not r["ok"]]
         rid, name = f"physics:{group}", RECEIPTS_NAME
+        if self.stale:
+            self._row("model receipts", rid, "physics", group, False, STALE, sha=self.table[1], ledger=name)
+            return dict(group=group, status=STALE, reason=self.stale, failures=[])
         self._row("model receipts", rid, "physics", group, not bad, f"{len(rows) - len(bad)} pass, {len(bad)} fail", sha=self.table[1], ledger=name)
         ref = dict(stage="model receipts", ledger=name, receipt=rid)
         return dict(group=group, status="FAILED" if bad else "ok", reason=None, failures=bad,
@@ -274,7 +301,9 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
     n_ev = sum(t["method"] != "not evaluated" for t in f["tried"])
     n_inv = sum(bool(t.get("invalid")) for t in f["tried"])
     counted = src + ".tried (counted by the report)"
-    return dict(available=True, needed=True, found=bool(f["found"]), target=f["target"], emulator_trained=bool(f["emulator"]),
+    b2d = f.get("base_2d")
+    return dict(available=True, needed=True, found=bool(f["found"]), target=f["target"], emulator_trained=bool(f["emulator"]), wind_model=f.get("wind_model"),
+                base_2d=None if b2d is None else dict(verdict=b2d["verdict"], p_fail=num(b2d["p_fail"], "fraction", ref, src + ".base_2d.p_fail")),
                 evaluated=num(n_ev, "candidates", ref, counted), invalid=num(n_inv, "candidates", ref, counted),
                 candidates=num(len(f["tried"]) - n_inv, "candidates", ref, counted),
                 verdict_before=f["verdict"], p_fail_before=num(f["p_fail"], "fraction", ref, src + ".p_fail"),
@@ -296,18 +325,25 @@ def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[
     k = e["k_fail"]
     shares = {m: num(n / k, "fraction of the failed members", ref, f"{src}.modes / k_fail") for m, n in e["modes"].items()} if k else {}
     r = ((res or {}).get("vehicles") or {}).get(vid)
-    return dict(first_fail_mode=None if r is None else _first_mode(r), mode_shares=shares)
+    n_left = e["modes"].get("left_data", 0)
+    t_left = None if r is None or not n_left else np.asarray(r["first"].get("left_data", []), float)
+    left = None if not n_left else dict(
+        members=num(n_left, "members", ref, f"{src}.modes.left_data"),
+        first=None if t_left is None or not np.isfinite(t_left).any()
+        else tnum(float(np.nanmin(t_left)), ref, f"stage1b/res.pkl vehicles.{vid}.first.left_data"))
+    return dict(first_fail_mode=None if r is None else _first_mode(r), mode_shares=shares, left_data=left)
 
 
-def _cases(tr: Trace, vid: str) -> list[dict[str, Any]]:
-    """Stored sensitivity cases of a vehicle (stage1b/sensitivity_cases.json): the same ensemble under another setting of one input, to be read
-    next to the verdict. Nothing is computed here; an absent file is an empty list."""
+def _cases(tr: Trace, vid: str, n: int) -> list[dict[str, Any]]:
+    """Stored sensitivity cases of a vehicle (stage1b/sensitivity_cases.json): the verdict's members under another setting of one input when the case has
+    the verdict's n (paired), else a separate sample of its own size, to be read next to the verdict. Nothing is computed here; an absent file is an
+    empty list."""
     stored = (_jl(tr.run / "stage1b" / SENSITIVITY) or {}).get(vid, [])
     ref = tr.ref("stage1b", output=SENSITIVITY) if stored else {}
     out = []
     for i, c in enumerate(stored):
         src = f"stage1b/{SENSITIVITY} {vid}[{i}]"
-        out.append(dict(case=c["case"], verdict=c["verdict"], note=c.get("note", ""), k_fail=num(c["k_fail"], "members", ref, src),
+        out.append(dict(case=c["case"], verdict=c["verdict"], note=c.get("note", ""), paired=c["n"] == n, k_fail=num(c["k_fail"], "members", ref, src),
                         n=num(c["n"], "members", ref, src), p_fail=num(c["k_fail"] / c["n"], "fraction", ref, src + " (k_fail / n)")))
     return out
 
@@ -325,7 +361,10 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         dominant_mode=e["dominant"], modes={k: num(n, "members", ref, f"{src}.modes") for k, n in e["modes"].items()},
                         first_fail=tnum(e["first_fail_t"], ref, f"{src}.first_fail_t"), median_fail=tnum(e["median_fail_t"], ref, f"{src}.median_fail_t"),
                         sensitivity=_sens(e, ref, f"{src}.sensitivity (stats.sensitivity, EASI first-order)"), top3=_top3(e, ref, src),
-                        fix=_fix(flip, vid, tr), physics=tr.physics(e["cls"]), cases=_cases(tr, vid), **_drivers(e, res, vid, ref, src),
+                        fix=_fix(flip, vid, tr), physics=tr.physics(e["cls"]), cases=_cases(tr, vid, e["n"]), **_drivers(e, res, vid, ref, src),
+                        speed_ratio=_speed_ratio(e, ref, src),
+                        wind3d=_opt(e.get("wind3d_fraction"), "fraction of the sortie records", ref, src + ".wind3d_fraction"),
+                        authority=_authority(e.get("authority"), ref, src + ".authority"),
                         verdict_stage1=before["verdict"]["verdict"] if before else None,
                         changed_by_refit=bool(before and before["verdict"]["verdict"] != e["verdict"]["verdict"]),
                         assumed_platform_inputs=num(cred["platform_assumed_counts"].get(p, 0), "inputs", cred_ref, "credibility.json platform_assumed_counts"),
@@ -336,6 +375,28 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
 def _opt(x: Any, unit: str, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
     """A node for a value a summary may not carry (None: not applicable to this link kind, or an older summary)."""
     return None if x is None else num(x, unit, ref, src)
+
+
+def _speed_ratio(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any] | None:
+    """A USV's speed over ground against the mean 10 m wind along its track (median over members), next to Chiodi et al.'s 0.178 that the speed prior
+    is calibrated to; None when the summary has no `speed` block (stage 1 writes it for a USV)."""
+    sp = e.get("speed")
+    if not sp or sp.get("ratio_median") is None:
+        return None
+    src += ".speed"
+    return dict(ratio=num(sp["ratio_median"], "-", ref, src + ".ratio_median"), sog=_opt(sp.get("sog_ms_median"), "m/s", ref, src + ".sog_ms_median"),
+                u10=_opt(sp.get("u10_ms_median"), "m/s", ref, src + ".u10_ms_median"),
+                chiodi=num(sp.get("calibration_ratio", CHIODI_RATIO), "-", ref, src + ".calibration_ratio"))
+
+
+def _authority(a: dict[str, Any] | None, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
+    """A UAS's control-authority diagnostics from the summary (`authority`: seconds the horizontal-force demand was beyond the lean-angle clamp per
+    sortie, and the demand / clamp ratio), or None when the summary has none."""
+    if not a:
+        return None
+    return dict(clamp_s_median=num(a["clamp_s_median"], "s", ref, src + ".clamp_s_median"), clamp_s_max=num(a["clamp_s_max"], "s", ref, src + ".clamp_s_max"),
+                demand_ratio_median=num(a["demand_ratio_median"], "-", ref, src + ".demand_ratio_median"),
+                demand_ratio_max=num(a["demand_ratio_max"], "-", ref, src + ".demand_ratio_max"))
 
 
 def _links(s1b: dict[str, Any], tr: Trace) -> dict[str, Any]:
@@ -418,7 +479,24 @@ def _map(mission: dict[str, Any], res: dict[str, Any] | None, why: str, wins: di
     return out
 
 
-def _reach(mission: dict[str, Any], env: Any, tr: Trace) -> dict[str, Any]:
+def path_speed(r: dict[str, Any]) -> float | None:
+    """The median over members of a vehicle's mean path speed over ground in the Stage-1 result: the length of the track (sum of the displacements
+    between records) over the time it was reported; None when no member moved."""
+    lon, lat = np.asarray(r["lon"], float), np.asarray(r["lat"], float)
+    t = np.asarray(r["t"], float)
+    dy = np.diff(lat, axis=0) * 111.2e3
+    dx = np.diff(lon, axis=0) * 111.2e3 * np.cos(np.radians(0.5 * (lat[1:] + lat[:-1])))
+    dx = (dx + 180.0 * 111.2e3) % (360.0 * 111.2e3) - 180.0 * 111.2e3                     # across the dateline
+    step, dt_ = np.hypot(dx, dy), np.diff(t)[:, None]
+    ok = np.isfinite(step)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        v = np.where(ok, step, 0.0).sum(0) / np.where(ok, dt_, 0.0).sum(0)
+    v = v[np.isfinite(v) & (v > 0)]
+    return float(np.median(v)) if v.size else None
+
+
+def _reach(mission: dict[str, Any], env: Any, tr: Trace, res: dict[str, Any] | None = None) -> dict[str, Any]:
     """Where each drifting vehicle can get to within reach.horizon_h of its deploy, in the environment's currents at the deploy time: the fastest
     route over a 41 x 41 grid (cafe.reach: Zermelo speed made good, Dijkstra over 16 neighbours; land and water outside the ingested data blocked), drawn as the
     farthest reachable cell in each of 24 bearings. A UAS is not drawn: it flies sorties from the ship."""
@@ -436,16 +514,21 @@ def _reach(mission: dict[str, Any], env: Any, tr: Trace) -> dict[str, Any]:
             out[vid] = dict(available=False, reason="A UAS flies its sorties from the ship; how far it gets is a battery and wind question "
                                                     "(physics.uas), not a drift route.")
             continue
-        src = f"cafe.reach._dijkstra over env.current at the deploy time; speed from config/assumptions.yaml reach.speed_ms.{cls[vid]}"
+        speed, how = a[f"reach.speed_ms.{cls[vid]}"]["value"], f"assumed, config/assumptions.yaml reach.speed_ms.{cls[vid]}"
+        sref, run_speed = ref, path_speed(res["vehicles"][vid]) if cls[vid] == "usv" and res is not None and vid in res["vehicles"] else None
+        if run_speed is not None:
+            speed, how = run_speed, "median mean path speed over ground of the Stage-1 ensemble, which already includes the drift in the currents"
+            sref = tr.ref("stage1b", output="res.pkl", label="report (reach map speed from the stage1b tracks)")
+        src = f"cafe.reach._dijkstra over env.current at the deploy time; speed: {how}"
         try:
-            out[vid] = _reach_one(legacy, env, v, cls[vid], a[f"reach.speed_ms.{cls[vid]}"]["value"], hours, allow, ref, src)
+            out[vid] = _reach_one(legacy, env, v, cls[vid], speed, hours, allow, ref, src, how, sref)
         except Exception as ex:                                           # noqa: BLE001  any failure of the environment is reported, not hidden
             out[vid] = dict(available=False, reason=f"{type(ex).__name__}: {ex}")
     return dict(available=True, vehicles=out, horizon=num(hours, "h", ref, "config/assumptions.yaml reach.horizon_h"))
 
 
-def _reach_one(legacy: Any, env: Any, v: dict[str, Any], cls: str, speed: float, hours: float, allow: float, ref: dict[str, Any], src: str, n: int = 41,
-               nb: int = 24) -> dict[str, Any]:
+def _reach_one(legacy: Any, env: Any, v: dict[str, Any], cls: str, speed: float, hours: float, allow: float, ref: dict[str, Any], src: str, how: str,
+               sref: dict[str, Any], n: int = 41, nb: int = 24) -> dict[str, Any]:
     d = v["deploy"]
     R = (speed + allow) * hours * 3600.0
     xs = np.linspace(-R, R, n)
@@ -477,7 +560,7 @@ def _reach_one(legacy: Any, env: Any, v: dict[str, Any], cls: str, speed: float,
     pl = [[float(((d["lon"] + math.degrees(r * math.sin(a) / (6.371e6 * math.cos(math.radians(d["lat"])))) + 180.0) % 360.0) - 180.0),
            float(d["lat"] + math.degrees(r * math.cos(a) / 6.371e6))] for r, a in zip(far, th, strict=True)]
     return dict(available=True, polygon=vals(pl, "deg", ref, src + " (farthest reachable cell per bearing, [lon, lat])"),
-                max_range_km=num(far.max() / 1e3, "km", ref, src), speed=num(speed, "m/s", ref, f"config/assumptions.yaml reach.speed_ms.{cls}"),
+                max_range_km=num(far.max() / 1e3, "km", ref, src), speed=num(speed, "m/s", sref, how), speed_from=how,
                 flow_max=num(float(np.nanmax(np.hypot(flow[..., 0], flow[..., 1]))), "m/s", ref, src + " (largest current on the grid)"),
                 deploy=vals([d["lon"], d["lat"]], "deg", ref, "mission.yaml deploy (lon, lat)"))
 
@@ -531,7 +614,7 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             pref: dict[str, Any]) -> dict[str, Any]:
     les = plan["les"]
     out: dict[str, Any] = dict(label=les["label"], cpu_fallback=bool(les["cpu_fallback"]), backend=les["backend"], rate_source=les["rate_source"],
-                               rate=num(les["rate"], "cell-updates/s", pref, "plan.json les.rate"), vehicles={}, refit={})
+                               rate=num(les["rate"], "cell-updates/s", pref, "plan.json les.rate"), reach=_les_reach(plan), vehicles={}, refit={})
     if st3 is None:
         return dict(out, available=False, reason=NOT_PRESENT.format("stage3/windows.json"))
     r3, rr, wref = tr.ref("stage3", output="windows.json"), tr.ref("refit", output="refit.json"), tr.ref("windows", output="windows.json")
@@ -540,24 +623,31 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
         rows = []
         for i, w in enumerate(ws):
             src = f"stage3/windows.json {vid}[{i}]"
+            cut = bool(w.get("cut"))                                      # a window cut at the time limit: its numbers depend on the clock, so none is read
             failed = [c["name"] for c in w.get("checks", []) if not c["ok"]]
+            reasons = [str(x) for x in w.get("reasons", [])]
             used = bool(rv and rv.get("used") and w.get("ok"))
             if used:
                 why = None
             elif not w.get("ok"):
                 parts = ["failed self-checks: " + ", ".join(failed)] if failed else []
-                why = "; ".join(parts + ([w["error"]] if w.get("error") else [])) or "no check or error recorded"
+                why = "; ".join(parts + reasons + ([w["error"]] if w.get("error") and w["error"] not in reasons else [])
+                                or (["cut at the time limit"] if cut else [])) or "no check or error recorded"
             elif rv is not None:
                 why = rv.get("reason") or "the refit did not use this vehicle"
             else:
                 why = NOT_PRESENT.format("refit/refit.json") if refit is None else "no refit entry for this vehicle"
             at = (wins or {}).get(vid, [])
             rows.append(dict(
-                label=f"W{i + 1}", ok=bool(w.get("ok")), error=w.get("error"), used_in_refit=used, not_used_because=why,
+                label=f"W{i + 1}", ok=bool(w.get("ok")), error=w.get("error"), used_in_refit=used, not_used_because=why, cut=cut, reasons=reasons,
+                cut_statement=CUT_STATEMENT if cut else None,
+                cells_per_delta=None if cut or not (w.get("resolution") or {}).get("cells_per_delta") else
+                num(w["resolution"]["cells_per_delta"], "cells per boundary-layer thickness", r3, src + ".resolution.cells_per_delta"),
+                nu_raised=(w.get("resolution") or {}).get("nu_floored"),
                 t=tnum(at[i]["t"], wref, "windows/windows.json") if i < len(at) else None,
-                checks=[dict(name=c["name"], ok=bool(c["ok"]), value=num(c["value"], "", r3, src + ".checks"), limit=num(c["limit"], "", r3, src + ".checks"),
-                             note=c.get("note", "")) for c in w.get("checks", [])],
-                coefficients={k: num(w[k], "-", r3, f"{src}.{k}") for k in ("cd", "cd_spread", "cd_hangar", "cl") if w.get(k) is not None}))
+                checks=[] if cut else [dict(name=c["name"], ok=bool(c["ok"]), value=num(c["value"], "", r3, src + ".checks"),
+                                            limit=num(c["limit"], "", r3, src + ".checks"), note=c.get("note", "")) for c in w.get("checks", [])],
+                coefficients={} if cut else {k: num(w[k], "-", r3, f"{src}.{k}") for k in ("cd", "cd_spread", "cd_hangar", "cl") if w.get(k) is not None}))
         out["vehicles"][vid] = rows
         if rv is not None:
             drag = rv.get("drag", {})
@@ -567,9 +657,23 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
     return dict(out, available=True)
 
 
-def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Trace) -> dict[str, Any]:
+CUT_STATEMENT = "window cut at the time limit: its coefficients are withheld"
+
+
+def _les_reach(plan: dict[str, Any]) -> dict[str, Any]:
+    """What the planner says about each LES window (plan.json stage3.les: `reachable` = its physical lattice viscosity is within the cell-updates
+    its slice affords, `runs`, `skip_reason`) and its note ("no LES coefficients exist on this machine ..."). Only booleans and strings are read,
+    so no number escapes the traced nodes."""
+    les = (plan.get("stage3") or {}).get("les") or {}
+    return dict(note=les.get("note"), windows=[dict(window=k, reachable=bool(w["reachable"]), runs=bool(w["runs"]), reason=w.get("skip_reason"))
+                                               for k, w in sorted((les.get("windows") or {}).items())])
+
+
+def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Trace, plan: dict[str, Any] | None = None) -> dict[str, Any]:
+    ep = budget.emulator_plan(plan) if plan else {}
+    note = None if ep.get("trains", True) else str(ep["note"])                # the planner's "this budget gives N points per class, 100 are needed"
     if emu is None:
-        return dict(available=False, reason=NOT_PRESENT.format("emulator/holdout.json"), vehicles={})
+        return dict(available=False, reason=NOT_PRESENT.format("emulator/holdout.json"), vehicles={}, plan_note=note)
     ref = tr.ref("emulator", output="holdout.json")
     out = {}
     for vid, e in emu.items():
@@ -605,7 +709,7 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
                   variants=num(len(design["variants"]), "runs", dref, s), spent=num(design["spent_s"], "s", dref, s),
                   flip_spent=num(design["flip_spent_s"], "s", dref, s), rows_added=num(design["rows_added"], "rows", dref, s),
                   table_rows=num(design["table_rows"], "rows", dref, s), table=design["table"], stage1b_free=bool(design["stage1b_free"]))
-    return dict(available=True, vehicles=out, design=dd)
+    return dict(available=True, vehicles=out, design=dd, plan_note=note)
 
 
 def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
@@ -644,7 +748,8 @@ def _sanity(cred: dict[str, Any], vehicles: dict[str, Any], links: dict[str, Any
         return dict(applies=False, reason="BRIEF section 6 states an expected outcome for the demo mission only; this mission has none.")
     both = {**vehicles, **links}
     return dict(applies=True, mission=sn["mission"], note=sn["note"],
-                rows=[dict(id=r["id"], expected=r["expected"], observed=r["observed"], agrees=r["agrees"], p_fail=both[r["id"]]["p_fail"]) for r in sn["rows"]])
+                rows=[dict(id=r["id"], expected=r["expected"], observed=r["observed"], agrees=r["agrees"], detail=r.get("detail", ""),
+                           p_fail=both[r["id"]]["p_fail"]) for r in sn["rows"]])
 
 
 def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env: Any = None) -> dict[str, Any]:
@@ -670,8 +775,8 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
                                         variables="cafe/schemas/wrfout.json and cafe/schemas/umwmout.json (read per hour over the mission window)")),
         verdict_source="stage1b (stage 1 rerun with the stage-3 refit multipliers; a copy of stage 1 when nothing was refit)",
         vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res), links=_links(s1b, tr),
-        map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr), environment=_env(mission, env, res, wins, s1b, tr),
-        stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr), machine=_machine(plan, tr, pref),
+        map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res), environment=_env(mission, env, res, wins, s1b, tr),
+        stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref),
         assumed_inputs=_assumed(cred, cred_ref))
     rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"])
     rep["subgrid"] = dict(calibrated=not any(x["id"] == credibility.SUBGRID_LIMITATION["id"] for x in cred["limitations"]),
@@ -774,7 +879,10 @@ def _fix_html(f: dict[str, Any]) -> str:
                 + ("the emulator answered those in its range." if f["emulator_trained"]
                    else "no emulator is trained yet, so only the nearest few were run in Stage 1."))
     rows = "".join(_tried_html(t) for t in f["tried"])
-    return (f"<p>What would fix it ({e(f['target'])}): {line}</p><details><summary>All {len(f['tried'])} candidates: {_n(f['evaluated'])} evaluated of "
+    b2d = f["base_2d"]
+    wm = (f"<p class=muted>{e(f['wind_model'])}" + (f" The baseline under the same model: {_badge(b2d['verdict'])} P(fail) {_n(b2d['p_fail'])}." if b2d else "")
+          + "</p>") if f["wind_model"] else ""
+    return (f"<p>What would fix it ({e(f['target'])}): {line}</p>{wm}<details><summary>All {len(f['tried'])} candidates: {_n(f['evaluated'])} evaluated of "
             f"{_n(f['candidates'])} that can be evaluated, {_n(f['invalid'])} that cannot (off the window, the box or the data)</summary>"
             "<div class=scroll><table>"
             f"<tr><th>Change<th>Cost (notches)<th>Answered by<th>P(fail)<th>Verdict<th>Note</tr>{rows}</table></div></details>")
@@ -783,8 +891,8 @@ def _fix_html(f: dict[str, Any]) -> str:
 def _physics_html(p: dict[str, Any]) -> str:
     """The model receipts behind a verdict: pass and fail counts of its group, the failing ones named; "not run" is never shown as a pass."""
     e = html.escape
-    if p["status"] == "not run":
-        return f"<p class=warn>Model receipts (<code>{e(p['group'])}</code>): not run. {e(p['reason'])}</p>"
+    if "passed" not in p:                                                  # not run, or stale: made by other code
+        return f"<p class=warn>Model receipts (<code>{e(p['group'])}</code>): {e(p['status'])}. {e(p['reason'])}</p>"
     bad = f" Failing: {e('; '.join(p['failures']))}." if p["failures"] else ""
     return (f"<p class={'warn' if p['failures'] else 'muted'}>Model receipts (<code>{e(p['group'])}</code>): {_n(p['passed'])} pass, {_n(p['failed'])} fail."
             f"{bad} They check the model that produced this verdict against references; they are not a check of the verdict.</p>")
@@ -796,7 +904,10 @@ def _drivers_html(v: dict[str, Any]) -> str:
     first = (f"the first failure was by <b>{e(v['first_fail_mode'])}</b>" if v["first_fail_mode"]
              else "which mode failed first is not known (res.pkl is not available)")
     more = f"; share of the failed members by mode (a member can fail in several): {shares}" if shares else ""
-    return f"<p>What drives the failures: {first}{more}.</p>"
+    ld = v["left_data"]
+    left = (f"<p class=warn>{_n(ld['members'])} members left the downloaded data" + (f" at about {_n(ld['first'])}" if ld["first"] else "")
+            + " (counted as failed): widen <code>box</code> or <code>pad_deg</code> and rerun.</p>") if ld else ""
+    return f"<p>What drives the failures: {first}{more}.</p>{left}"
 
 
 def _cases_html(cases: list[dict[str, Any]]) -> str:
@@ -805,8 +916,31 @@ def _cases_html(cases: list[dict[str, Any]]) -> str:
                    for c in cases)
     if not cases:
         return ""
-    return ("<p>Sensitivity cases (the same ensemble under another setting of one input):</p><div class=scroll><table>"
+    same = all(c["paired"] for c in cases)
+    return (("<p>Sensitivity cases (same members and same other inputs; only the named input replaced):</p>" if same else
+             "<p>Sensitivity cases (a separate sample whose member count differs from the verdict's, so a difference mixes the changed input with the "
+             "changed sample):</p>") + "<div class=scroll><table>"
             f"<tr><th>Case<th>Verdict<th>P(fail)<th>Failed<th>Note</tr>{rows}</table></div>")
+
+
+def _speed_html(v: dict[str, Any]) -> str:
+    """USV speed against the calibration target (and why the mission ratio is lower), the UAS attitude statement (M-28) with the control-authority
+    numbers, and the share of UAS sortie records flown in the 3-D wind field."""
+    sr, w3, au = v["speed_ratio"], v["wind3d"], v["authority"]
+    out = ""
+    if sr:
+        out += (f"<p class=muted>Speed over ground / mean 10 m wind along the track: {_n(sr['ratio'])} (median over members"
+                + (f"; {_n(sr['sog'])} over {_n(sr['u10'])}" if sr["sog"] and sr["u10"] else "") + f"); the speed prior is calibrated to Chiodi et al.'s "
+                f"{_n(sr['chiodi'])}, a scenario that differs from the mission (no current, uniform wind, sailing to a station). {USV_RATIO_NOTE}</p>")
+    if v["cls"] == "uas":
+        out += f"<p class=muted>{UAS_ATTITUDE_NOTE}"
+        if au:
+            out += (f" Horizontal-force demand beyond the lean-angle clamp: {_n(au['clamp_s_median'])} per sortie (median; largest {_n(au['clamp_s_max'])}), "
+                    f"demand / clamp {_n(au['demand_ratio_median'])} (median), {_n(au['demand_ratio_max'])} (largest).")
+        out += "</p>"
+    if w3:
+        out += f"<p class=muted>Sortie records flown in the WRF 3-D wind field: {_n(w3)}; the rest used the 10 m wind scaled by the log profile.</p>"
+    return out
 
 
 def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
@@ -818,7 +952,7 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     return (f"<div class=card><h3>{e(vid)} {_badge(v['verdict'])}{_undecided_badge(v)} <span class=muted>{e(v['cls'])}, {e(str(v['platform']))}</span></h3>"
             f"{_stat_html(v)}{_physics_html(v['physics'])}{ch}<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
-            f"{_drivers_html(v)}{_cases_html(v['cases'])}{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
+            f"{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
             f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} assumed platform inputs, listed in the "
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")
 
@@ -910,7 +1044,7 @@ def _reach_html(r: dict[str, Any]) -> str:
     h = f"<p>Reach map: fastest routes within {_n(r['horizon'])} of the deploy, through the environment's currents at the deploy time.</p><ul>"
     for vid, d in r["vehicles"].items():
         h += (f"<li>{e(vid)}: " + (f"farthest reachable cell {_n(d['max_range_km'])} from {_n(d['deploy'])} at {_n(d['speed'])} through the water "
-                                    f"(assumed, config/assumptions.yaml), largest current on the grid {_n(d['flow_max'])}, outline {_n(d['polygon'])}"
+                                    f"({e(d['speed_from'])}), largest current on the grid {_n(d['flow_max'])}, outline {_n(d['polygon'])}"
                                     if d["available"] else f"not drawn. {e(d['reason'])}"))
     return h + "</ul>"
 
@@ -942,11 +1076,16 @@ def _window_html(w: dict[str, Any]) -> str:
                  for c in w["checks"])
     co = ", ".join(f"{e(k)} {_n(x)}" for k, x in w["coefficients"].items())
     use = "used in the refit" if w["used_in_refit"] else f"not used in the refit: {e(str(w['not_used_because']))}"
-    state = ("passed its self-checks" if w["ok"] else "failed its self-checks" if w["checks"] else "did not run" if w["error"]
-             else "failed with no check recorded")
+    state = ("passed its self-checks" if w["ok"] else "was cut at the time limit" if w["cut"] else "failed its self-checks" if w["checks"]
+             else "did not run" if w["error"] else "failed with no check recorded")
+    raised = "n/a" if w["nu_raised"] is None else "yes" if w["nu_raised"] else "no"
+    why = "".join(f"<li>{e(x)}" for x in w["reasons"])
     return (f"<div class=card><b>{w['label']}</b> {state}; {use}"
             + (f". Reason: {e(str(w['error']))}" if w["error"] else "")
             + (f". At {_n(w['t'])}" if w["t"] else "") + (f". Coefficients: {co}" if co else "")
+            + (f"<p class=warn>{e(w['cut_statement'])}</p>" if w["cut"] else "")
+            + f"<p class=muted>Cells per boundary-layer thickness: {_n(w['cells_per_delta'])} (BRIEF 2.6: 5 to 10); lattice viscosity raised: {raised}.</p>"
+            + (f"<ul>{why}</ul>" if why else "")
             + f"<div class=scroll><table><tr><th>Check<th>Result<th>Value<th>Limit<th>Note</tr>{ck}</table></div></div>")
 
 
@@ -954,6 +1093,11 @@ def _stage3_html(s: dict[str, Any]) -> str:
     e = html.escape
     h = f"<div class=warn><p class=big>{e(s['label'])}</p></div>" if s["cpu_fallback"] else f"<p class=big>{e(s['label'])}</p>"
     h += f"<p>Backend {e(s['backend'])} at {_n(s['rate'])} ({e(s['rate_source'])}).</p>"
+    h += f"<p class=warn>{e(s['reach']['note'])}</p>" if s["reach"]["note"] else ""
+    for r in s["reach"]["windows"]:
+        if r["reason"] or not r["reachable"]:
+            h += (f"<p class=muted>LES window {e(r['window'])}: " + ("reaches" if r["reachable"] else "does not reach") + " the physical lattice viscosity in "
+                  f"its slice of the budget; {'run' if r['runs'] else 'not run'}. {e(r['reason'] or '')}</p>")
     if not s["available"]:
         return h + f"<p class=warn>{e(s['reason'])}</p>"
     for vid, rows in s["vehicles"].items():
@@ -969,9 +1113,10 @@ def _stage3_html(s: dict[str, Any]) -> str:
 
 def _emulator_html(m: dict[str, Any]) -> str:
     e = html.escape
+    note = f"<p class=warn>{e(m['plan_note'])}</p>" if m["plan_note"] else ""
     if not m["available"]:
-        return f"<p class=warn>{e(m['reason'])}</p>"
-    h = ""
+        return f"<p class=warn>{e(m['reason'])}</p>{note}"
+    h = note
     for vid, v in m["vehicles"].items():
         if not v["trained"]:
             h += f"<p><b>{e(vid)}</b>: not trained. {e(v['reason'])}" + (f" ({_n(v['rows'])} of this class.)" if "rows" in v else "") + "</p>"
@@ -1014,9 +1159,11 @@ def _machine_html(m: dict[str, Any]) -> str:
     mc = m["machine"]
     where = f"{e(str(mc['host']))}, {_n(mc['cpus'])}, bench id {e(str(mc['bench_id']))}" if mc else "unknown"
     plan = "; ".join(f"{e(k)} {_n(n)}" for k, n in m["plan"].items())
+    ing = (f"<p class=muted>Ingest took {_n(m['wall_s']['ingest'])}: it is not counted against --budget (a download over the network is a separate step, "
+           "RUNBOOK 4, whose duration depends on the link).</p>") if "ingest" in m["wall_s"] else ""
     return (f"<pre>{e(m['describe'])}</pre><div class=scroll><table><tr><th>Vehicle<th>Cost per mission day (s per batch + s per member)"
             f"<th>Source</tr>{cost}</table></div>"
-            f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div><p>Plan: {plan}.</p>"
+            f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div>{ing}<p>Plan: {plan}.</p>"
             f"<p>Code: git {e(', '.join(m['git_sha']))}. Machine: {where}.</p><p class=muted>{ver}</p>")
 
 
@@ -1045,7 +1192,8 @@ def _sanity_html(sn: dict[str, Any]) -> str:
     if not sn["applies"]:
         return f"<h2>Sanity check against the brief</h2><p class=muted>{e(sn['reason'])}</p>"
     rows = "".join(f"<tr><td>{e(r['id'])}<td>{e(r['expected'])}<td>{_badge(r['observed'])} {_n(r['p_fail'])}"
-                   f"<td>{'cannot be checked from the verdict' if r['agrees'] is None else 'yes' if r['agrees'] else '<b>NO</b>'}</tr>" for r in sn["rows"])
+                   f"<td>{'cannot be checked from the verdict' if r['agrees'] is None else 'yes' if r['agrees'] else '<b>NO</b>'}"
+                   f"{'<br><span class=muted>' + e(r['detail']) + '</span>' if r['detail'] else ''}</tr>" for r in sn["rows"])
     return (f"<h2>Sanity check against the brief</h2><p class=muted>{e(sn['note'])}</p><div class=scroll><table>"
             f"<tr><th>Vehicle or link<th>Brief expects<th>This run<th>Agrees</tr>{rows}</table></div>")
 

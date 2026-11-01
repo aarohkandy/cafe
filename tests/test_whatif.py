@@ -292,6 +292,8 @@ def test_the_design_is_reproducible_valid_and_gives_each_vehicle_its_own_points(
     assert len({round(s, 6) for s in shifts.values()}) > 8
     assert all(-12.0 <= d[k]["uas"]["shift_h"] <= 12.0 for k in range(4)) and all(d[k]["usv"]["duty"] == 1.0 for k in range(4))
     assert any(d[k][GL]["duty"] < 1.0 for k in range(4)) and all(d[k][GL]["shift_h"] >= 0.0 for k in range(4))        # deployed at the start: only later
+    ds = {d[k]["uas"]["duty"] for k in range(4)}
+    assert ds <= {1.0, 0.5} and len({whatif.vehicle(whatif.apply(CI, d[k]), "uas")["sorties"]["every_days"] for k in range(4)}) <= 2   # M-24: whole-day periods
 
 
 def test_a_variant_that_does_not_fit_is_shrunk_and_finally_dropped():
@@ -401,7 +403,7 @@ def test_candidates_are_single_changes_in_cost_order():
     assert {x["change"] for x in c} >= {"deploy 6 h later", "deploy 48 h earlier", "move 0.5 deg west", "move 1 deg north",
                                         "dive 25 % shallower (950 m to 712.5 m)"}
     assert next(x for x in c if x["change"] == "deploy 24 h later")["cost"] == 4.0 and next(x for x in c if x["change"] == "move 1 deg east")["cost"] == 2.0
-    assert len(whatif.candidates(CI, "usv")) == 16 and len(whatif.candidates(CI, "uas")) == 18
+    assert len(whatif.candidates(CI, "usv")) == 16 and len(whatif.candidates(CI, "uas")) == 14
     assert all(len(x["mod"]) == 1 for x in c)
 
 
@@ -484,18 +486,21 @@ def test_a_uas_flip_is_answered_without_a_median_track(tmp_path):
     """UAS rows use the ship and the sortie times, so no track is needed. The emulator here is fabricated to dislike late sorties."""
     rng = np.random.default_rng(1)
     rows = []
+    first = whatif.params(CI, "uas", "uas")["deploy_h"]                                   # P(fail) 0.8 at the baseline, 0.2 six hours later
     for _ in range(120):
-        mod = dict(shift_h=rng.uniform(-12, 12), dlon=rng.uniform(-0.5, 0.5), dlat=rng.uniform(-0.5, 0.5), duty=rng.uniform(0.5, 1.0))
+        mod = dict(shift_h=rng.uniform(-12, 12), dlon=rng.uniform(-0.5, 0.5), dlat=rng.uniform(-0.5, 0.5), duty=float(rng.choice([1.0, 0.5])))
         m2 = whatif.apply(CI, {"uas": mod})
         f = {**whatif.params(m2, "uas", "uas"), **whatif.env_stats(AnalyticEnv(), *whatif.uas_track(m2, "uas"))}
-        p = float(np.clip(0.8 - 0.1 * (f["deploy_h"] - 7.0) + rng.normal(0, 0.02), 0, 1))
+        p = float(np.clip(0.8 - 0.1 * (f["deploy_h"] - first) + rng.normal(0, 0.02), 0, 1))
         rows.append(dict(f, p_fail=p, t_fail_h=10.0, cls="uas", n_members=512))
     em, info = whatif.fit_class(pd.DataFrame(rows), "uas", tmp_path / "t.parquet")
     assert em is not None
     flips, _ = whatif.flip_search(CI, {"uas": dict(verdict="NO-GO", p_fail=0.8)}, {}, AnalyticEnv(), {"uas": (em, info)}, plan_for(CI), {}, {}, None, 5, 0.0,
                                   lambda *_: None)
     b = flips["uas"]["best"]
-    assert b["method"] == "EMULATED" and b["change"].startswith("launch the sorties") and b["change"].endswith("h later") and b["verdict"] != "NO-GO"
+    assert b["method"] == "EMULATED" and b["verdict"] != "NO-GO" and b["change"] == "launch the sorties 6 h later"
+    # M-24: a whole day is the same time of day, not a candidate
+    assert not [t for t in flips["uas"]["tried"] if "24 h" in t["change"] or "48 h" in t["change"]]
 
 
 def test_measure_is_one_batch_of_one_vehicle_on_the_base_members():
@@ -695,3 +700,152 @@ def test_snapshot_copies_the_table_without_the_runs_own_rows_and_an_absent_table
     df, out = whatif.snapshot(tmp_path / "t.parquet", tmp_path / "s" / "train_input", "r1")
     assert list(df["key"]) == ["r2|a"] and list(whatif.read_table(out)["key"]) == ["r2|a"]
     assert len(whatif.read_table(tmp_path / "t.parquet")) == 2                                      # the shared table itself is not touched
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 2, batch D
+
+def test_the_emulator_gate_is_the_budgets_minimum_not_a_number_of_its_own(monkeypatch):
+    """M-7: the gate and the planner that sizes the variants read one constant. Never lowered to make a run train."""
+    import importlib
+    assert whatif.MIN_ROWS == budget.EMULATOR_MIN_POINTS == 100
+    monkeypatch.setattr(budget, "EMULATOR_MIN_POINTS", 7)
+    try:
+        assert importlib.reload(whatif).MIN_ROWS == 7
+    finally:
+        monkeypatch.undo()
+        importlib.reload(whatif)
+    assert whatif.MIN_ROWS == 100
+
+
+@pytest.mark.parametrize("h", [24.0, -24.0, 48.0, 72.0])
+def test_a_uas_shift_by_whole_days_is_refused_as_the_same_launch_time(h):
+    """M-24: shifts of +-24 and +-48 h left local_solar_time unchanged: four of 16 candidates were the baseline, evaluated and priced as changes."""
+    with pytest.raises(whatif.Invalid, match=r"uas: launching \+?-?\d+ h later is a whole number of days, the same launch time of day"):
+        whatif.apply(CI, {"uas": dict(shift_h=h)})
+    assert whatif.apply(CI, {"uas": dict(shift_h=25.0)})["vehicles"][3]["sorties"]["local_solar_time"] != CI["vehicles"][3]["sorties"]["local_solar_time"]
+    assert whatif.apply(CI, {GL: dict(shift_h=24.0)})                                    # a glider deploys 24 h later: a real change
+
+
+def test_the_uas_candidates_leave_out_whole_day_shifts_and_the_others_keep_them():
+    uas = [c["change"] for c in whatif.candidates(CI, "uas")]
+    assert not [c for c in uas if "24 h" in c or "48 h" in c] and "launch the sorties 12 h later" in uas
+    for c in whatif.candidates(CI, "uas"):
+        whatif.apply(CI, {"uas": c["mod"]})                                              # none of them is invalid for being the baseline
+    assert "deploy 48 h earlier" in [c["change"] for c in whatif.candidates(CI, GL)]
+
+
+def test_a_lower_uas_duty_rounds_the_period_up_to_whole_days_and_says_so():
+    """M-24: every 1.3333 d launched at 08:59Z, 16:59Z, 00:59Z, not at the mission's time of day."""
+    m = whatif.apply(CI, {"uas": dict(duty=0.75)})
+    assert whatif.vehicle(m, "uas")["sorties"]["every_days"] == 2.0
+    v = whatif.vehicle(CI, "uas")
+    assert whatif.describe(dict(duty=0.75), v) == "fly sorties every 2 d instead of 1 (rounded up to whole days)"
+    assert whatif.describe(dict(duty=0.5), v) == "fly sorties every 2 d instead of 1"
+    assert [c["change"] for c in whatif.candidates(CI, "uas") if "sorties every" in c["change"]] == [
+        "fly sorties every 2 d instead of 1 (rounded up to whole days)", "fly sorties every 2 d instead of 1"]
+    assert whatif._duty_days(0.5, 0.75) == pytest.approx(2 / 3) and whatif._duty_days(1.0, 1.0) == 1.0 and whatif._duty_days(3.0, 0.75) == 4.0
+
+
+class Env3D(AnalyticEnv):
+    """An environment with the 3-D wind switch (GriddedEnv.use_3d), recording its state at every Stage-1 batch."""
+
+    def __init__(self):
+        super().__init__()
+        self.use_3d = True
+        self.seen = []
+
+
+def stub_batch(monkeypatch, env, p_fail=1.0):
+    def run_batch(mission, e, members, seed, pri, marg, scales):
+        env.seen.append(getattr(e, "use_3d", None))
+        n = len(members)
+        fail = np.arange(n) < round(p_fail * n)
+        return dict(vehicles={v["id"]: dict(fail=dict(x=fail), lon=np.zeros((2, n)), **{"class": "uas"}) for v in mission["vehicles"]})
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+
+
+def test_a_uas_measure_runs_without_the_3d_wind_and_restores_it(monkeypatch):
+    """M-6: the baseline sorties fly in ingested 3-D hours, a shifted one does not: both sides of a UAS comparison use the 10 m profile."""
+    env = Env3D()
+    stub_batch(monkeypatch, env)
+    pri, marg = stage1.priors_for(CI)
+    whatif.measure(CI, "uas", env, plan_for(CI, 4), pri, marg, None, 5)
+    whatif.measure(CI, GL, env, plan_for(CI, 4), pri, marg, None, 5)
+    assert env.seen == [False, True] and env.use_3d is True                      # only the UAS run is 10 m profile; the state is restored
+    with whatif.wind_2d(AnalyticEnv(), "uas"):                                    # an environment without the switch is left alone
+        pass
+    with pytest.raises(RuntimeError), whatif.wind_2d(env, "uas"):
+        assert env.use_3d is False
+        raise RuntimeError("boom")
+    assert env.use_3d is True
+
+
+def test_the_variants_with_a_uas_run_in_the_10_m_profile_and_those_without_do_not(monkeypatch):
+    env = Env3D()
+    stub_batch(monkeypatch, env)
+    monkeypatch.setattr(whatif, "vehicle_rows", lambda *a, **k: [])
+    pri, marg = stage1.priors_for(CI)
+    whatif.run_variant(CI, env, [0, 1], 5, pri, marg, None, {}, {}, "v0")
+    whatif.run_variant(STORM, env, [0, 1], 5, pri, marg, None, {}, {}, "v1")
+    assert env.seen == [False, True] and env.use_3d is True
+
+
+def test_the_uas_flip_search_measures_its_baseline_as_it_measures_the_candidates(monkeypatch):
+    env = Env3D()
+    stub_batch(monkeypatch, env, p_fail=0.75)
+    plan = plan_for(CI, 4)
+    cost = budget.batch_cost_s(plan, ["uas"])
+    base = {"uas": dict(verdict="NO-GO", p_fail=0.8)}
+    flips, spent = whatif.flip_search(CI, base, {}, env, {}, plan, {}, {}, None, 5, 10 * cost, lambda *_: None)
+    f = flips["uas"]
+    assert f["wind_model"] == whatif.WIND_MODEL_2D and f["base_2d"]["p_fail"] == 0.75 and f["base_2d"]["verdict"] == "NO-GO"
+    assert env.seen and not any(env.seen) and env.use_3d is True and spent == (whatif.FALLBACK_K + 1) * cost
+    # the candidates come first: a share that covers only them leaves the baseline unmeasured, and the statement stays
+    env.seen.clear()
+    flips, spent = whatif.flip_search(CI, base, {}, env, {}, plan, {}, {}, None, 5, 3.5 * cost, lambda *_: None)
+    assert flips["uas"]["base_2d"] is None and flips["uas"]["wind_model"] == whatif.WIND_MODEL_2D and spent == 3 * cost
+    flips, _ = whatif.flip_search(CI, base, {}, AnalyticEnv(), {}, plan, {}, {}, None, 5, 10 * cost, lambda *_: None)      # no switch: no claim
+    assert flips["uas"]["wind_model"] is None and flips["uas"]["base_2d"] is None
+
+
+def test_a_baseline_that_leaves_the_data_is_no_number_not_a_crash(monkeypatch):
+    env = Env3D()
+    stub_batch(monkeypatch, env)
+    plan = plan_for(CI, 4)
+    n = {"k": 0}
+    real = whatif.measure
+
+    def measure(*a, **k):
+        n["k"] += 1
+        if n["k"] > whatif.FALLBACK_K:                                                    # the baseline comes after the candidates
+            raise whatif.Invalid("uas: the changed mission leaves the environment data")
+        return real(*a, **k)
+    monkeypatch.setattr(whatif, "measure", measure)
+    flips, _ = whatif.flip_search(CI, {"uas": dict(verdict="NO-GO", p_fail=0.8)}, {}, env, {}, plan, {}, {}, None, 5, 100 * budget.batch_cost_s(plan, ["uas"]),
+                                  lambda *_: None)
+    assert flips["uas"]["base_2d"] is None and flips["uas"]["wind_model"] == whatif.WIND_MODEL_2D
+
+
+def test_the_stage_1_fallback_answer_of_a_uas_runs_in_the_10_m_profile(monkeypatch):
+    env = Env3D()
+    seen = []
+    monkeypatch.setattr(stage1, "run", lambda *a, **k: (seen.append(env.use_3d), dict(summary=dict(vehicles=dict(uas=dict(
+        verdict=dict(p_fail=0.1, fail_lo=0.0, fail_hi=0.2, verdict="MARGINAL"), n=16)))))[1])
+    assert whatif._stage1(CI, "uas", env, plan_for(CI), None, None)["verdict"] == "MARGINAL" and seen == [False] and env.use_3d is True
+
+
+def test_a_variant_that_leaves_the_data_is_rerun_one_vehicle_at_a_time_and_the_others_keep_their_rows(monkeypatch):
+    env = Env3D()
+
+    def run_batch(mission, e, members, seed, pri, marg, scales):
+        env.seen.append(e.use_3d)
+        if len(mission["vehicles"]) > 1 or mission["vehicles"][0]["id"] == "usv":
+            raise OutsideData("wind: outside the cached data")
+        return dict(vehicles={mission["vehicles"][0]["id"]: None})
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    monkeypatch.setattr(whatif, "vehicle_rows", lambda m, res, *a: [dict(vehicle=v) for v in res["vehicles"]])
+    pri, marg = stage1.priors_for(CI)
+    rows, skipped = whatif.run_variant(CI, env, [0, 1], 5, pri, marg, None, {}, {}, "v0")
+    assert {r["vehicle"] for r in rows} == {v["id"] for v in CI["vehicles"]} - {"usv"} and list(skipped) == ["usv"]
+    assert "the variant leaves the environment data" in skipped["usv"] and env.use_3d is True
+    assert env.seen[0] is False and False in env.seen and True in env.seen          # the UAS alone ran without the 3-D wind, the glider with it

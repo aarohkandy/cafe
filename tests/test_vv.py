@@ -766,6 +766,25 @@ def test_tabulate_leaves_out_froude_numbers_not_run(tmp_path):
     assert np.allclose(sorted(x["reference"] for x in out if x.get("kind") == "context"), [4.02, 4.23, 6.67])
 
 
+def test_run_files_of_another_recipe_are_not_tabulated_or_receipted_and_are_listed(tmp_path):
+    """The discarded v3 run files carry no `recipe`: they once lifted the credibility report to 'validated' (review round 2, M-3)."""
+    root = stored(tmp_path, converging())
+    assert dt.stale_files(root) == [] and len(dt.tabulate(root)) == 4
+    for g, recipe in (("fine", None), ("coarse", "pout-lts01-parts-v3")):
+        j = json.loads((root / f"run_{g}.json").read_text())
+        j.pop("recipe")
+        if recipe:
+            j["recipe"] = recipe
+        (root / f"run_{g}.json").write_text(json.dumps(j))
+    assert dt.stale_files(root) == ["run_fine.json", "run_coarse.json"]                  # in GRID_ORDER, whatever the recipe says (or does not)
+    assert dt.tabulate(root) == {}                                                       # one current grid is not a V&V 20 row
+    out = receipt_state()
+    status = dt.receipts(root)
+    assert "0 Froude rows + 4 cases checked" in status and "2 file(s) of another recipe skipped (run_fine.json, run_coarse.json)" in status
+    assert not [x for x in out if x["claim"].startswith(("fine Fr", "coarse Fr"))] and any(x["claim"].startswith("medium Fr") for x in out)
+    assert dt.stale_files(tmp_path / "nothing") == []
+
+
 def receipt_state():
     rc.OUT.clear()
     return rc.OUT

@@ -509,11 +509,23 @@ def discretization(values: Sequence[float], cells: Sequence[float], levels: Sequ
     return max(vv.gci_two_grid(values[0], values[1], r21), (max(values) - min(values)) / 2 / abs(values[0])), r21, f"Fs = 3, p = 2 assumed: {why}"
 
 
-def tabulate(root: pathlib.Path) -> dict[float, vv.Vv20]:
-    """One V&V 20 row per Froude number (keyed by it) that has at least two grids run. S = C_T on the finest grid; U_num = `discretization`
-    of that speed's grids times S, in quadrature with the finest grid's iteration scatter (std of C_T over the last quarter of the run);
-    U_input = S and viscosity assumptions; U_D assumed."""
+def _runs(root: pathlib.Path) -> dict[str, dict[str, Any]]:
+    """{grid: run_<grid>.json} of the files made by this RECIPE; a file of another recipe is not read (see `stale_files`)."""
     runs = {g: json.loads(f.read_text()) for g in GRID_ORDER if (f := root / f"run_{g}.json").exists()}
+    return {g: r for g, r in runs.items() if r.get("recipe") == RECIPE}
+
+
+def stale_files(root: pathlib.Path) -> list[str]:
+    """Names of the run_<grid>.json files under `root` made by another recipe (or none): `tabulate` and `receipts` skip them, as `run_grid`
+    refuses to extend them; a v3 grid mixed with a v4 one is a different experiment."""
+    return [f.name for g in GRID_ORDER if (f := root / f"run_{g}.json").exists() and json.loads(f.read_text()).get("recipe") != RECIPE]
+
+
+def tabulate(root: pathlib.Path) -> dict[float, vv.Vv20]:
+    """One V&V 20 row per Froude number (keyed by it) that has at least two grids run, from files of this RECIPE only. S = C_T on the finest
+    grid; U_num = `discretization` of that speed's grids times S, in quadrature with the finest grid's iteration scatter (std of C_T over the
+    last quarter of the run); U_input = S and viscosity assumptions; U_D assumed."""
+    runs = _runs(root)
     rows = {}
     for fr, ref in CT_REF.items():
         key = f"{fr:.2f}"
@@ -548,19 +560,20 @@ def receipts(root: Optional[pathlib.Path] = None) -> str:
         rc.bracket(grp, f"C_T Fr {fr:.2f}: U_val / D <= {INFORMATIVE} (the validation says something)", row.u_val / row.D, 0.0, INFORMATIVE, "",
                    "a pass with U_val comparable to the quantity claims nothing; U_num must come down with grid and iteration quality")
     n = 0
-    for g in GRID_ORDER:
-        if (root / f"run_{g}.json").exists():
-            for key, c in json.loads((root / f"run_{g}.json").read_text())["speeds"].items():
-                v = {k: math.nan if c.get(k) is None else float(c[k]) for k in ("y_plus", "drift", "drift_parts", "scatter")}
-                rc.bracket(grp, f"{g} Fr {key}: wetted-area mean y+ in the log layer", v["y_plus"], *Y_PLUS_BAND, "",
-                           "Spalding wall function; first prism layer sized per Froude number (first_layer)")
-                rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter drift", v["drift"], 0.0, DRIFT_TOL, "", "resistance history, settle()")
-                rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter drift of the pressure and viscous parts", v["drift_parts"], 0.0,
-                           DRIFT_TOL, "", "pressure and viscous histories, part_drift()")
-                rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter scatter", v["scatter"], 0.0, SCATTER_TOL, "",
-                           "resistance history, settle()")
-                n += 1
-    return f"DTMB 5415: geometry receipts + {len(rows)} Froude rows + {n} cases checked for y+ and convergence"
+    for g, run in _runs(root).items():
+        for key, c in run["speeds"].items():
+            v = {k: math.nan if c.get(k) is None else float(c[k]) for k in ("y_plus", "drift", "drift_parts", "scatter")}
+            rc.bracket(grp, f"{g} Fr {key}: wetted-area mean y+ in the log layer", v["y_plus"], *Y_PLUS_BAND, "",
+                       "Spalding wall function; first prism layer sized per Froude number (first_layer)")
+            rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter drift", v["drift"], 0.0, DRIFT_TOL, "", "resistance history, settle()")
+            rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter drift of the pressure and viscous parts", v["drift_parts"], 0.0,
+                       DRIFT_TOL, "", "pressure and viscous histories, part_drift()")
+            rc.bracket(grp, f"{g} Fr {key}: iterative convergence, last-quarter scatter", v["scatter"], 0.0, SCATTER_TOL, "",
+                       "resistance history, settle()")
+            n += 1
+    stale = stale_files(root)
+    skipped = f", {len(stale)} file(s) of another recipe skipped ({', '.join(stale)})" if stale else ""
+    return f"DTMB 5415: geometry receipts + {len(rows)} Froude rows + {n} cases checked for y+ and convergence{skipped}"
 
 
 def main(argv: list[str]) -> int:

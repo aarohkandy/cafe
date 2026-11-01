@@ -315,11 +315,41 @@ stage3.les_margin:
   unit: "-"
   why: "A window's cells x steps are planned to finish in 1/1.5 of its wall-clock slice (after the compile and the FEA reserve) at the benchmarked LBM rate. The wall clock is only a safety kill, so a box 1.5 times slower than the bench still finishes every window; a slower one has its window killed, and the row says so."
   replace_with: "The spread of measured-to-benchmarked LBM rate over several windows on the lab machine."
+stage3.min_cells_thin_part:
+  value: 2
+  unit: "cells"
+  why: "Fewest cells across the thinnest part of a window's vehicle (UAS arms) below which the window is not run: measured on the q2 UAS case (12 m/s, 33.6 deg tilt, dx 14.6 mm, lattice viscosity at the floor) it diverges after 800 steps with the 10 x 15 mm arms (under one cell) and is stable for 4700 steps with the body alone or with arms two cells thick."
+  replace_with: "A finer dx (a GPU budget), or a stability fix for sub-cell parts in the kernel (an immersed-boundary or interpolated bounce-back treatment)."
 stage3.nu_lat_floor:
   value: 1.0e-4
   unit: "lattice units"
   why: "Smallest lattice viscosity the float32 BGK/regularized kernel survives on coarse grids (tau - 1/2 = 3e-4; the throughput benchmark kernel uses the same); below it the CI quad window went NaN (nu_lat 3e-6). A window that needed the floor is reported failed with the reason."
   replace_with: "A finer dx (nu_lat grows as 1/dx), or a collision operator that is stable at tau -> 1/2 (entropic, cumulant)."
+stage3.skip_factor:
+  value: 100.0
+  unit: "-"
+  why: "ASSUMED. A CPU LES window is not run when the cell-updates it needs for its physical lattice viscosity (stage3.nu_lat_floor) exceed the cell-updates its share affords by more than this factor: such a window fails the viscosity_floor check at any resolution the share can pay for, and its share of the budget goes back to stage 1 (budget.plan). Windows between 1x and this factor still run and fail the check on the record."
+  replace_with: "Nothing: a window either reaches the physical viscosity or it does not. The factor only absorbs the error of the nominal speeds and lengths below."
+stage3.nominal.glider:
+  value: [0.25, 1.8]
+  unit: "[m/s, m]"
+  why: "ASSUMED. Relative speed and length of the glider LES window as the planner sees them before stage 1 has run (Seaglider horizontal speed ~0.23-0.25 m/s, platforms/seaglider.yaml; hull length 1.8 m). Used only to price the window at plan time (budget.les_need); the window itself takes its kinematics from the environment."
+  replace_with: "The window's own kinematics, once the planner can read stage-1 results."
+stage3.nominal.usv_hull:
+  value: [1.5, 6.5]
+  unit: "[m/s, m]"
+  why: "ASSUMED. Through-water speed and waterline length of the USV hull window for the plan-time price (platforms/saildrone_explorer.yaml lwl_m 6.5; the q2 window flew 1.49 m/s)."
+  replace_with: "The window's own kinematics, once the planner can read stage-1 results."
+stage3.nominal.usv_wing:
+  value: [5.0, 5.0]
+  unit: "[m/s, m]"
+  why: "ASSUMED. Apparent-wind speed and largest extent (span 5 m) of the USV wing window for the plan-time price."
+  replace_with: "The window's own kinematics, once the planner can read stage-1 results."
+stage3.nominal.uas:
+  value: [8.0, 0.3]
+  unit: "[m/s, m]"
+  why: "ASSUMED. Relative airspeed (platforms/quad_uas.yaml leg_speed_ms 8) and largest extent (stage3.uas.arm_length_m) of the UAS window for the plan-time price."
+  replace_with: "The window's own kinematics, once the planner can read stage-1 results."
 reach.horizon_h:
   value: 24.0
   unit: h

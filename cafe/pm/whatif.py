@@ -16,20 +16,23 @@ conformal) per class, fitted on the rows of that class made by the current code 
 only from `MIN_ROWS` distinct feature points; below that `trained` is False and says why.
 
 A "mission change" is a dict per vehicle: shift_h (deploy later; a UAS: its daily sorties later in the day), dlon/dlat in degrees (a UAS
-moves with its ship) and duty (<= 1: glider dive depth x duty, UAS every_days / duty). `apply` makes the changed mission or raises Invalid.
+moves with its ship) and duty (<= 1: glider dive depth x duty, UAS every_days / duty rounded up to whole days). `apply` makes the changed
+mission or raises Invalid; a UAS shift of a whole number of days is Invalid (the same launch time of day).
 Candidate changes for the flip search are single changes, ranked by `cost` in units of "one notch": 6 h, 0.5 degree, 25 % of duty.
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import datetime as dt
 import hashlib
 import json
+import math
 import pathlib
 import re
 import time
 import warnings
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import numpy as np
@@ -47,7 +50,8 @@ Track = tuple[NDArray[Any], NDArray[Any], NDArray[Any]]                    # (t,
 BASE = ["deploy_h", "lon", "lat", "wind_mean", "wind_p90", "hs_mean", "hs_p90", "cur_mean", "cur_p90"]
 TASK = dict(glider=["dive_depth_m", "radius_km", "lost_after_h"], usv=["track_tolerance_km", "becalmed_after_h"],
             uas=["every_days", "duration_min", "max_mean_wind_ms"])
-MIN_ROWS = 100                    # distinct feature points per class: with a 20 % hold-out that is 20 test points, enough to say anything of 90 % coverage
+MIN_ROWS = budget.EMULATOR_MIN_POINTS     # distinct feature points per class (budget.py holds it with the plan that sizes the variants):
+#                                   with a 20 % hold-out that is 20 test points, enough to say anything of 90 % coverage. Never lowered to make a run train.
 MODES_MAX = 4                     # failure modes with their own GP (most variable first); the others stay in the table
 LIMITS = dict(rmse=0.05, coverage=0.05, query_ms=10.0)          # BRIEF 2.7 acceptance
 SHIFTS, MOVES, DUTIES = (6.0, 12.0, 24.0, 48.0), (0.5, 1.0), (0.75, 0.5)
@@ -99,6 +103,8 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
         v = vehicle(m, vid)
         h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
         if h and "base" in v:
+            if int(round(h * 60)) % 1440 == 0:
+                raise Invalid(f"{vid}: launching {h:+g} h later is a whole number of days, the same launch time of day: nothing changes")
             hh, mm = (int(x) for x in v["sorties"]["local_solar_time"].split(":"))
             tot = (hh * 60 + mm + int(round(h * 60))) % 1440
             v["sorties"]["local_solar_time"] = f"{tot // 60:02d}:{tot % 60:02d}"
@@ -124,12 +130,19 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
                     raise Invalid(f"{vid}: moving ({dlon:+g}, {dlat:+g}) deg puts ({lon:.2f}, {lat:.2f}) outside the mission box {m['box']}")
         if duty != 1.0:
             if "base" in v:
-                v["sorties"]["every_days"] = float(v["sorties"].get("every_days", 1)) / duty
+                v["sorties"]["every_days"] = _duty_days(float(v["sorties"].get("every_days", 1)), duty)
             elif "dive_depth_m" in v["task"]:
                 v["task"]["dive_depth_m"] = v["task"]["dive_depth_m"] * duty
             else:
                 raise Invalid(f"{vid}: the task has no duty cycle to lower (a glider dive_depth_m, UAS sorties every_days)")
     return m
+
+
+def _duty_days(every: float, duty: float) -> float:
+    """The sortie period at a duty: every / duty, rounded up to whole days once it is a day or more (a fraction of a day moves the launch off the
+    mission's time of day)."""
+    x = every / duty
+    return float(math.ceil(x - 1e-9)) if x >= 1.0 else x
 
 
 def _iso(t: float) -> str:
@@ -155,7 +168,9 @@ def describe(mod: dict[str, Any], v: dict[str, Any] | None = None) -> str:
             out.append(f"move {abs(d):g} deg {pos if d > 0 else neg}")
     if duty != 1.0:
         if v is not None and "base" in v:
-            out.append(f"fly sorties every {float(v['sorties'].get('every_days', 1)) / duty:g} d instead of {float(v['sorties'].get('every_days', 1)):g}")
+            x = float(v["sorties"].get("every_days", 1))
+            up = " (rounded up to whole days)" if x / duty >= 1.0 and x / duty != _duty_days(x, duty) else ""
+            out.append(f"fly sorties every {_duty_days(x, duty):g} d instead of {x:g}{up}")
         else:
             d0 = (v or {}).get("task", {}).get("dive_depth_m")
             out.append(f"dive {100 * (1 - duty):.0f} % shallower" + (f" ({d0:g} m to {d0 * duty:g} m)" if d0 else ""))
@@ -163,6 +178,23 @@ def describe(mod: dict[str, Any], v: dict[str, Any] | None = None) -> str:
 
 
 # ------------------------------------------------------------------------------------------------------ features and rows
+
+WIND_MODEL_2D = ("UAS what-if answers use the 10 m scaled profile for the candidate and the baseline: the WRF 3-D wind fields cover only the ingested "
+                 "hours, so a shifted sortie would otherwise change the wind model as well as the sortie.")
+
+
+@contextlib.contextmanager
+def wind_2d(env: Any, cls: str) -> Iterator[None]:
+    """A UAS run with the environment's 3-D wind switched off (`GriddedEnv.use_3d`), restored after; any other class, or an environment without the
+    switch, is left alone. Both sides of a UAS comparison run inside it."""
+    if cls != "uas" or not hasattr(env, "use_3d"):
+        yield
+        return
+    old, env.use_3d = env.use_3d, False
+    try:
+        yield
+    finally:
+        env.use_3d = old
 
 def uas_track(mission: dict[str, Any], vid: str) -> Track:
     """(t, lon, lat) for a UAS: the ship at the middle of each sortie of the window (the window's middle when none fits)."""
@@ -263,8 +295,10 @@ def run_variant(mission: dict[str, Any], env: Any, members: list[int], seed: int
     leaves the data is skipped with that reason; the others keep their rows. Skipped, not clipped: pulling a track back inside would make it a
     different variant than the one the plan counted, and what a vehicle does near the edge is what the sample would have taught the emulator.
     -> (rows, {vehicle id: why it has none})."""
+    uas = "uas" if "uas" in stage1._classes(mission).values() else ""                    # the variants' UAS rows are 10 m profile rows (see wind_2d)
     try:
-        return vehicle_rows(mission, stage1.run_batch(mission, env, members, seed, pri, marg, scales), env, fidelity, meta, variant), {}
+        with wind_2d(env, uas):
+            return vehicle_rows(mission, stage1.run_batch(mission, env, members, seed, pri, marg, scales), env, fidelity, meta, variant), {}
     except OutsideData:
         pass
     rows: list[dict[str, Any]] = []
@@ -272,7 +306,8 @@ def run_variant(mission: dict[str, Any], env: Any, members: list[int], seed: int
     for v in mission["vehicles"]:
         one = solo(mission, v["id"])
         try:
-            rows += vehicle_rows(one, stage1.run_batch(one, env, members, seed, pri, marg, scales), env, fidelity, meta, variant)
+            with wind_2d(env, stage1._classes(one)[v["id"]]):
+                rows += vehicle_rows(one, stage1.run_batch(one, env, members, seed, pri, marg, scales), env, fidelity, meta, variant)
         except OutsideData as e:
             skipped[v["id"]] = f"the variant leaves the environment data: {e}"
     return rows, skipped
@@ -315,7 +350,10 @@ def design(mission: dict[str, Any], n: int, seed: int) -> list[dict[str, Any]]:
             d = utc(v["deploy"]["time"]).timestamp()
             lo, hi, duty = -min(24.0, (d - t0) / 3600.0), min(48.0, 0.5 * (t1 - d) / 3600.0), "dive_depth_m" in v["task"]
         for k in range(n):
-            mod = dict(shift_h=lo + u[k, 0] * (hi - lo), dlon=-1.0 + 2.0 * u[k, 1], dlat=-1.0 + 2.0 * u[k, 2], duty=1.0 - 0.5 * u[k, 3] if duty else 1.0)
+            # a UAS period is whole days (see `_duty_days`), so its duty is 1 or 1/2: a continuous duty would give every training row 2 d and the baseline's 1 d
+            # would be out of the emulator's range
+            d_k = (1.0 if u[k, 3] < 0.5 else 0.5) if "base" in v else 1.0 - 0.5 * u[k, 3] if duty else 1.0
+            mod = dict(shift_h=lo + u[k, 0] * (hi - lo), dlon=-1.0 + 2.0 * u[k, 1], dlat=-1.0 + 2.0 * u[k, 2], duty=d_k)
             out[k][v["id"]] = _fits(mission, v["id"], mod)
     return out
 
@@ -410,7 +448,8 @@ def with_rows(df: pd.DataFrame, rows: list[dict[str, Any]]) -> pd.DataFrame:
 def candidates(mission: dict[str, Any], vid: str) -> list[dict[str, Any]]:
     """Single changes in cost order: deploy +-6/12/24/48 h, +-0.5/1 degree in lon or lat, lower duty. Each: mod, cost (notches), change (words)."""
     v = vehicle(mission, vid)
-    out: list[dict[str, Any]] = [dict(mod=dict(shift_h=s * h), cost=h / 6.0) for h in SHIFTS for s in (1, -1)]
+    whole_days = "base" in v                                                  # a UAS shifted by whole days flies at the same time of day: not a change
+    out: list[dict[str, Any]] = [dict(mod=dict(shift_h=s * h), cost=h / 6.0) for h in SHIFTS for s in (1, -1) if not (whole_days and h % 24 == 0)]
     out += [dict(mod={ax: s * d}, cost=d / 0.5) for d in MOVES for ax in ("dlon", "dlat") for s in (1, -1)]
     if "base" in v or "dive_depth_m" in v["task"]:
         out += [dict(mod=dict(duty=f), cost=(1 - f) / 0.25) for f in DUTIES]
@@ -452,8 +491,10 @@ def measure(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], p
             scales: dict[str, Any] | None, seed: int, n: int | None = None) -> dict[str, Any]:
     """Stage 1 for one vehicle of the (changed) mission: one batch of the plan's size, the base run's members (common random numbers)."""
     members = list(range(n or plan["batch"]))
+    one = solo(mission, vid)
     try:
-        r = stage1.run_batch(solo(mission, vid), env, members, seed, pri, marg, scales)["vehicles"][vid]
+        with wind_2d(env, stage1._classes(one)[vid]):
+            r = stage1.run_batch(one, env, members, seed, pri, marg, scales)["vehicles"][vid]
     except OutsideData as e:
         raise Invalid(f"{vid}: the changed mission leaves the environment data ({e})") from e
     f = stage1.failed(r)
@@ -513,12 +554,23 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
                 used += cost                                                # the planner's cost, never the clock: the same search on every run
                 if tried[j]["verdict"] in want:
                     break
+        wind_model, base_2d = None, None
+        if cls == "uas" and hasattr(env, "use_3d"):                               # the baseline as the candidates are measured (no 3-D wind), if share is left
+            wind_model = WIND_MODEL_2D
+            cost = budget.batch_cost_s(plan, [vid])
+            if used + cost <= share:
+                try:
+                    b2 = measure(mission, vid, env, plan, pri, marg, scales, seed)
+                    base_2d, used = dict(verdict=b2["verdict"], p_fail=b2["p_fail"], lo=b2["lo"], hi=b2["hi"]), used + cost
+                except Invalid:                                                   # the baseline left the data: no number
+                    pass
         spent += used
         hit = [t for t in tried if t["method"] != "not evaluated" and t["verdict"] in want]
         best = min(hit, key=lambda t: t["cost"]) if hit else None
         evaluated, invalid = sum(t["method"] != "not evaluated" for t in tried), sum(t["invalid"] for t in tried)
         out[vid] = dict(verdict=base["verdict"], p_fail=base["p_fail"], target=" or ".join(want), found=best is not None, best=best, tried=tried,
-                        emulator=em is not None, evaluated=evaluated, invalid=invalid, candidates=len(tried) - invalid)
+                        emulator=em is not None, evaluated=evaluated, invalid=invalid, candidates=len(tried) - invalid, wind_model=wind_model,
+                        base_2d=base_2d)
         log(f"flip search {vid}: " + (f"{best['change']} ({best['method']})" if best else
                                       f"nothing flips it among the {evaluated} evaluated of {len(tried) - invalid} candidates"))
     return out, spent
@@ -580,6 +632,8 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
 def _stage1(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], fitted: dict[str, Any] | None,
             scales: dict[str, Any] | None) -> dict[str, Any]:
     """Stage 1 at the plan's budget (the sequential run, n_min .. n_max members) for one vehicle."""
-    r = stage1.run(solo(mission, vid), env, plan, None, lambda *_: None, scales, fitted)
+    one = solo(mission, vid)
+    with wind_2d(env, stage1._classes(one)[vid]):
+        r = stage1.run(one, env, plan, None, lambda *_: None, scales, fitted)
     e = r["summary"]["vehicles"][vid]
     return dict(p_fail=e["verdict"]["p_fail"], lo=e["verdict"]["fail_lo"], hi=e["verdict"]["fail_hi"], verdict=e["verdict"]["verdict"], n=e["n"])

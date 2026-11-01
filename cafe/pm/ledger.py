@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-import datetime as dt, importlib.metadata, json, os, pathlib, platform, subprocess, sys, time
+import datetime as dt, importlib.metadata, json, math, os, pathlib, platform, subprocess, sys, time
 from types import TracebackType
 from typing import Any, Literal
 
@@ -121,7 +121,7 @@ class Ledger:
             self.d["error"] = f"outputs never written: {missing}"
         self.d["ok"] = et is None and not missing and self.ok
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.d, indent=1, default=_jsonable))
+        tmp.write_text(json.dumps(clean(self.d), indent=1, allow_nan=False))
         os.replace(tmp, self.path)
         if missing and et is None:
             raise StageFailed(f"stage {self.d['stage']}: registered outputs were never written: {missing} (see {self.path})")
@@ -137,6 +137,18 @@ def _jsonable(x: Any) -> Any:
     if hasattr(x, "isoformat"):
         return x.isoformat()
     return str(x)
+
+
+def clean(x: Any) -> Any:
+    """x as strict JSON data: numpy values and dates made plain (`_jsonable`), every non-finite float (NaN, an unbounded limit) replaced by None,
+    because JSON has no NaN or Infinity and `jq` / JSON.parse reject them."""
+    if isinstance(x, dict):
+        return {k: clean(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [clean(v) for v in x]
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    return x if x is None or isinstance(x, (bool, int, str)) else clean(_jsonable(x))
 
 
 def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str, Any] | None:

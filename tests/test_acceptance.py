@@ -25,6 +25,7 @@ from tests.fixtures.fakes import fake_module
 from tests.test_pipeline import Rows, small_budget
 
 ROOT = config.ROOT
+RUN_ONE = acc.run_one                                          # (the CI fixture below replaces acc.run_one for the rest of the module)
 MISSION = str(ROOT / "missions" / "ci_fixture.yaml")
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -107,18 +108,21 @@ def test_run_one_starts_clean_names_the_run_and_reads_its_report(monkeypatch, tm
 
     def execute(argv, env, log, timeout):
         seen.append((argv, log, timeout))
+        if argv[0] == "fetch":
+            return 0
         assert [p.name for p in (out / "quick").iterdir()] == ["emulator_table"]                   # the stale file is gone; its own table dir only
         (out / "quick" / "report").mkdir(parents=True)
         (out / "quick" / "report" / "report.json").write_text(json.dumps(report()))
         return 0
     monkeypatch.setattr(acc, "_execute", execute)
     r = acc.run_one(MISSION, "quick", "quick", 0, out, seed=5)
-    argv, log, timeout = seen[0]
+    assert seen[0] == (["fetch", "--mission", MISSION, "--out", str(out / "quick_fetch"), "--fresh"], out / "quick_fetch.log", None)       # M-25: fetch first
+    argv, log, timeout = seen[1]
     assert argv == ["run", "--mission", MISSION, "--budget", "quick", "--gpus", "0", "--out", str(out / "quick"), "--fresh", "--seed", "5",
                     "--emulator-table", str(out / "quick" / "emulator_table" / "train.parquet")]
     assert log == out / "quick.log" and timeout == 2 * 1200 and r["report"] == report() and r["rc"] == 0 and r["seed"] == 5
     acc.run_one(MISSION, "quick", "4h", 1, out)
-    assert "--seed" not in seen[1][0] and seen[1][0][3:7] == ["--budget", "4h", "--gpus", "1"] and seen[1][2] == 2 * 4 * 3600
+    assert "--seed" not in seen[3][0] and seen[3][0][3:7] == ["--budget", "4h", "--gpus", "1"] and seen[3][2] == 2 * 4 * 3600
 
 
 def test_execute_runs_the_cli_in_a_child_process_and_kills_it_at_the_timeout(tmp_path):
@@ -371,11 +375,12 @@ def test_normalize_hashes_credibility_json_without_its_run_directory(tmp_path):
 
 def test_every_run_gets_its_own_copy_of_the_pristine_emulator_table(tmp_path, monkeypatch):
     seen = []
-    monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: seen.append(argv) or 1)
+    monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: seen.append(argv) or (0 if argv[0] == "fetch" else 1))
     table = tmp_path / "pristine.parquet"
     table.write_bytes(b"rows")
     for name in ("quick", "quick_same"):
         acc.run_one(MISSION, name, "quick", 0, tmp_path / "o", table=table)
+    seen[:] = [a for a in seen if a[0] == "run"]
     own = [pathlib.Path(a[a.index("--emulator-table") + 1]) for a in seen]
     assert own[0] != own[1] and all(p.name == "train.parquet" and p.read_bytes() == b"rows" for p in own)
     acc.run_one(MISSION, "quick_seed", "quick", 0, tmp_path / "o")                       # no shared table yet: its own path, empty
@@ -634,6 +639,8 @@ def _ci(mp, ci_env, tmp_path_factory):
     done = {}
 
     def in_process(argv, env, log, timeout):
+        if argv[0] == "fetch":                                                                         # the data is the synthetic CAFE_DATA: nothing to fetch
+            return 0
         out = pathlib.Path(argv[argv.index("--out") + 1])
         key = (argv[argv.index("--gpus") + 1], argv[argv.index("--seed") + 1] if "--seed" in argv else None)
         if out.name == "overnight":                                                                      # same inputs as quick: not run twice
@@ -747,8 +754,30 @@ GOOD = dict(git_sha=SHA, dirty=False, code_digest="d" * 64, reviewed_run=dict(na
     (dict(reviewed_run={}), "no reviewed_run"),
     (dict(reviewed_run=dict(name="quick")), "no reviewed_run")])
 def test_a_golden_without_provenance_says_what_is_missing(change, words):
-    assert acc.provenance_problems(GOOD) == [] and acc.provenance_problems(dict(GOOD, dirty=None)) == []                          # unknown is not dirty
+    assert acc.provenance_problems(GOOD) == []
     assert any(words in p for p in acc.provenance_problems(dict(GOOD, **change)))
+
+
+def test_a_golden_made_where_it_is_unknown_whether_the_tree_was_clean_has_no_provenance():
+    """M-31: through ./pm.sh the checkout has no .git, `dirty: null` was written and accepted."""
+    bad = acc.provenance_problems(dict(GOOD, dirty=None))
+    assert len(bad) == 1 and "cannot tell whether the checkout was clean" in bad[0] and "$CAFE_GIT_DIRTY" in bad[0]
+
+
+@pytest.mark.parametrize("flag, dirty, problems", [("1", True, 1), ("0", False, 0), (None, None, 1)])
+def test_without_a_git_checkout_the_golden_reads_pm_shs_dirty_flag(monkeypatch, tmp_path, flag, dirty, problems):
+    """M-31: `_dirty` had its own `git status` and never read $CAFE_GIT_DIRTY, which pm.sh sets for exactly this case."""
+    monkeypatch.undo()
+    monkeypatch.setattr(acc, "git_sha", lambda: SHA)
+    monkeypatch.setattr(acc.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 128, "", "not a git repository"))        # no .git
+    monkeypatch.delenv("CAFE_GIT_DIRTY", raising=False)
+    if flag is not None:
+        monkeypatch.setenv("CAFE_GIT_DIRTY", flag)
+    g = tmp_path / "g.json"
+    acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
+    src = json.loads(g.read_text())["source"]
+    assert src["dirty"] is dirty and len(acc.provenance_problems(src)) == problems
+    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["ok"] is (problems == 0)
 
 
 def test_an_unprovenanced_golden_fails_and_names_the_command_that_writes_a_new_one(tmp_path):
@@ -779,6 +808,7 @@ def test_a_golden_records_its_commit_and_the_reviewed_run_by_hash(tmp_path):
 
 def test_dirty_is_true_false_or_unknown(monkeypatch, tmp_path):
     monkeypatch.undo()
+    monkeypatch.delenv("CAFE_GIT_DIRTY", raising=False)
     calls = iter([subprocess.CompletedProcess([], rc, out, "") for rc, out in ((0, " M x.py\n"), (0, ""), (128, ""))])
     monkeypatch.setattr(acc.subprocess, "run", lambda *a, **k: next(calls))
     assert (acc._dirty(), acc._dirty(), acc._dirty()) == (True, False, None)
@@ -792,3 +822,61 @@ def test_dirty_is_true_false_or_unknown(monkeypatch, tmp_path):
 def test_the_golden_in_the_repo_has_the_shape_the_comparison_reads():
     g = json.loads(acc.GOLDEN.read_text())
     assert g["schema"] == 1 and "source" in g and acc.compare(g["summary"], g["summary"]) == ([], [])
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 2, batch D
+
+def fetched(tmp_path, monkeypatch, frc=0, cold=False, wall=0.2, ingest_s=6.0):
+    """acceptance.run_one with `_execute` replaced: fetch (writes an ingest ledger when `cold`, exits `frc`) and run (writes a report and an ingest ledger)."""
+    out = tmp_path / "o"
+
+    def ledger(d, notes, wall_s):
+        (d / "checkpoints" / "ingest").mkdir(parents=True)
+        (d / "checkpoints" / "ingest" / "ledger.json").write_text(json.dumps(dict(notes=notes, wall_s=wall_s)))
+
+    def execute(argv, env, log, timeout):
+        d = pathlib.Path(argv[argv.index("--out") + 1])
+        if argv[0] == "fetch":
+            time.sleep(wall)
+            ledger(d, ["cold fetch: 315 parts, 522 s"] if cold else [], 522.0 if cold else 5.0)
+            return frc
+        (d / "report").mkdir(parents=True)
+        (d / "report" / "report.json").write_text(json.dumps(report()))
+        ledger(d, [], ingest_s)
+        return 0
+    monkeypatch.setattr(acc, "_execute", execute)
+    return RUN_ONE(MISSION, "quick", "quick", 0, out)
+
+
+def test_the_limit_times_the_run_after_a_fetch_and_the_row_says_what_the_fetch_cost(monkeypatch, tmp_path):
+    """M-25: the 20-minute limit was compared with a wall that included a 522 s cold download no budget share covers."""
+    r = fetched(tmp_path, monkeypatch, cold=True)
+    assert (r["rc"] == 0
+            and r["fetch_rc"] == 0
+            and r["cold_fetch"] is True
+            and r["ingest_s"] == 6.0
+            and r["fetch_wall_s"] >= 0.2
+            and r["wall_s"] < r["fetch_wall_s"] + 5)
+    row = acc.check_run(dict(r, wall_s=700.0, fetch_wall_s=522.0))
+    assert (row["ok"]
+            and "11.7 min of the 20 min limit" in row["detail"]
+            and "ingest 6 s, fetch 522 s, neither counted against --budget; cold fetch: yes" in row["detail"])
+    assert row["values"]["cold_fetch"] is True and row["values"]["ingest_s"] == 6.0
+    warm = fetched(tmp_path / "w", monkeypatch)
+    assert warm["cold_fetch"] is False and "cold fetch: no" in acc.check_run(warm)["detail"]
+    assert acc.check_run(dict(r, wall_s=1300.0))["ok"] is False                                          # the run itself is still held to the limit
+
+
+def test_a_failed_fetch_fails_the_run_row_naming_the_fetch_command_and_starts_no_run(monkeypatch, tmp_path):
+    r = fetched(tmp_path, monkeypatch, frc=2)
+    assert (r["rc"] == 2
+            and r["report"] is None
+            and r["wall_s"] == 0.0
+            and r["log"].name == "quick_fetch.log"
+            and not (tmp_path / "o" / "quick" / "report").exists())
+    row = acc.check_run(r)
+    assert (not row["ok"]
+            and "fetch exit code 2" in row["detail"]
+            and f"python -m cafe.pm fetch --mission {MISSION}" in row["detail"]
+            and "CAFE_OFFLINE=1" in row["detail"])
+    assert "no report" not in row["detail"]

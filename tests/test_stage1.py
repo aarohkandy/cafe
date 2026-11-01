@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from cafe.pm import config, ledger, stage1
+from cafe.pm import Tagged, config, ledger, stage1
 from cafe.pm.env.perturb import PerturbedEnv
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import comms, glider, uas, usv
@@ -249,7 +249,7 @@ def sortie_stub(calls, t_first_att=300.0):
         first["attitude_exceedance"][1] = t_first_att
         return dict(t_launch=t_launch, track=dict(t=t, pos_rel=rel, phase=phase), flags=flags, t_first=first, scrubbed=np.array([False, len(calls) > 1]),
                     launch=dict(wind_ms=np.array([4.0, 5.0])), energy_wh=np.array([10.0, 11.0]), soc_end=np.array([0.5, 0.6]),
-                    max_tilt_deg=np.array([7.0, 8.0]))
+                    max_tilt_deg=np.array([7.0, 8.0]), sat_s=np.array([0.0, 12.0]), demand_ratio_max=np.array([1.0, 1.4]))
     return fly_sortie
 
 
@@ -290,7 +290,8 @@ def test_a_sortie_with_no_track_leaves_the_grid_alone(monkeypatch):
     def empty(env, ship, t_launch, *, M, **kw):
         z = np.zeros(M, bool)
         return dict(t_launch=t_launch, track=dict(t=np.zeros(0)), flags={k: z for k in uas.FLAGS}, t_first={k: np.full(M, np.nan) for k in uas.FLAGS},
-                    scrubbed=np.ones(M, bool), launch=dict(wind_ms=np.zeros(M)), energy_wh=np.zeros(M), soc_end=np.ones(M), max_tilt_deg=np.zeros(M))
+                    scrubbed=np.ones(M, bool), launch=dict(wind_ms=np.zeros(M)), energy_wh=np.zeros(M), soc_end=np.ones(M), max_tilt_deg=np.zeros(M),
+                    sat_s=np.zeros(M), demand_ratio_max=np.ones(M))
     monkeypatch.setattr(stage1.uas, "fly_sortie", empty)
     v, P, mission, t0, T, X = uas_inputs()
     r = stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
@@ -307,6 +308,7 @@ class FakeSim:
         FakeSim.last = (a, k)
         self.t0 = a[5] if len(a) == 7 else a[4]                 # GliderSim(P, M, env, lon, lat, t0, mis) / USVSim(P, M, env, start, t0, task)
         self.fail, self.first = {"mode": np.array([True, False])}, {"mode": np.array([42.0, np.nan])}
+        self.path_m = np.array([3600.0, 7200.0])
 
     def run(self, duration, dt, record_s=None):
         """One record per step, the state after it (t0 + dt, t0 + 2 dt, ...), as the real simulators give."""
@@ -363,7 +365,7 @@ def test_usv_waypoints_become_tuples_and_the_drag_scales_the_vpp(monkeypatch):
     monkeypatch.setattr(stage1.usv, "USVSim", FakeSim)
     v = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
     P, X = usv.load_platform("saildrone_explorer"), {"usv_vpp_bias": np.array([0.1, -0.2])}
-    r = stage1._run_usv(v, P, "ENV", 2, X, 0.0, 7200.0, drag=np.array([4.0, 1.0]))
+    r = stage1._run_usv(v, P, AnalyticEnv(wind=(-5.0, 0.0)), 2, X, 0.0, 7200.0, drag=np.array([4.0, 1.0]))
     args, kw = FakeSim.last[0], FakeSim.last[1]
     start, task = args[3], args[5]
     assert start == (-165.0, -1.0) and task["waypoints"] == [(-165.0, -1.0), (-165.0, 1.0)] and task["mode"] == "section"
@@ -372,7 +374,7 @@ def test_usv_waypoints_become_tuples_and_the_drag_scales_the_vpp(monkeypatch):
     assert r["antenna_m"] == P["rf_antenna_height_m"] == 2.2 and r["surfaced"].all() and np.all(r["depth"] == 0.0) and r["fail"]["mode"][0]
     assert r["t"].tolist() == list(np.arange(0.0, 7201.0, 600.0)) and r["lon"].shape == (13, 2) and r["lon"][:2, 0].tolist() == [-165.0, 601.0]
     task_less = dict(v, task=dict(mode="station"))
-    stage1._run_usv(task_less, P, "ENV", 2, X, 0.0, 600.0)
+    stage1._run_usv(task_less, P, AnalyticEnv(), 2, X, 0.0, 600.0)
     assert FakeSim.last[0][5]["waypoints"] == []
 
 
@@ -389,12 +391,12 @@ def spy_vehicle_models(monkeypatch):
                         record("glider", v, env, M, X, t0, T, drag, windage=windage))
     monkeypatch.setattr(stage1, "_run_usv", lambda v, P, env, M, X, t0, T, drag=1.0: record("usv", v, env, M, X, t0, T, drag))
 
-    def run_uas(v, P, env, M, X, t0, T, mission, seed, members, drag=1.0):
+    def run_uas(v, P, env, M, X, t0, T, mission, seed, members, drag=1.0, used=None):
         return record("uas", v, env, M, X, t0, T, drag, (mission, seed, members))
     monkeypatch.setattr(stage1, "_run_uas", run_uas)
     links = {}
 
-    def evaluate_link(lk, out, mission, env, M, seed, members):
+    def evaluate_link(lk, out, mission, env, M, seed, members, used=None):
         links[lk["id"]] = (env, out, M, members)
         return dict(id=lk["id"])
     monkeypatch.setattr(stage1, "evaluate_link", evaluate_link)
@@ -471,6 +473,7 @@ def flat_env(M, wind=6.0, hs=1.0, u10=None):
     """A PerturbedEnv with no perturbation over an analytic base whose 10 m wind is `wind` (or u10(lon, lat, t) -> (..., 2))."""
     base = AnalyticEnv(hs=hs)
     base.u10 = u10 or (lambda lon, lat, t: np.stack([np.full(np.shape(t), wind), np.zeros(np.shape(t))], -1))
+    base.wind = lambda lon, lat, z, t: Tagged(np.asarray(base.u10(lon, lat, t), float), "flat", 0.0, "assumed")          # 10 m wind = u10
     return PerturbedEnv(base, {}, list(range(M)), 3, stage1.priors_for(MISSION)[0])
 
 
@@ -816,13 +819,24 @@ def test_summary_verdicts_dominant_mode_and_first_failure_time():
     assert u["dominant"] == "mode_a" and u["first_fail_t"] == 100.0 and u["median_fail_t"] == pytest.approx(103.5)           # tie: the first mode named
     res["vehicles"]["usv"]["fail"]["mode_a"] = np.arange(24) < 10
     u = stage1.summarize(res, names, MISSION, 73)["vehicles"]["usv"]
-    assert u["modes"] == dict(mode_a=10, mode_b=24) and u["dominant"] == "mode_b" and u["first_fail_t"] == 500.0 and u["median_fail_t"] == pytest.approx(511.5)
+    assert u["modes"] == dict(mode_a=10, mode_b=24) and u["dominant"] == "mode_b" and u["median_fail_t"] == pytest.approx(511.5)
+    assert u["first_fail_t"] == 100.0                      # M-23: mode_a's members fail earlier than mode_b's 500; the first failure is over all failed members
     g = s["vehicles"]["uas"]
     assert g["k_fail"] == 0 and g["dominant"] is None and g["first_fail_t"] is None and g["median_fail_t"] is None
     assert g["sensitivity"] == dict(param=None, S1={}, noise_floor=None)
     assert "73 members" in g["verdict"]["note"]                                                                              # 24 members cannot certify
     h = s["vehicles"]["glider_eq"]
     assert 0 < h["k_fail"] < 24 and h["sensitivity"]["param"] == names[0] and set(h["sensitivity"]["S1"]) == set(names)       # driven by U[:, 0]
+
+
+def test_first_and_median_failure_are_over_every_failed_member_not_the_dominant_modes_members():
+    """M-23: mode A in 3 members (first at 400 s), mode B in 2 others (100 s): A is dominant, the first failure is 100 s, the median over the 5 is 400 s."""
+    res = merged({"usv": 0.0})
+    u = res["vehicles"]["usv"]
+    u["fail"] = dict(mode_a=np.arange(24) < 3, mode_b=(np.arange(24) >= 3) & (np.arange(24) < 5))
+    u["first"] = dict(mode_a=np.where(np.arange(24) < 3, 400.0 + np.arange(24), np.nan), mode_b=np.where(u["fail"]["mode_b"], 100.0 + np.arange(24), np.nan))
+    s = stage1.summarize(res, list(stage1.priors_for(MISSION)[1]), MISSION, 73)["vehicles"]["usv"]
+    assert s["dominant"] == "mode_a" and s["k_fail"] == 5 and s["first_fail_t"] == 103.0 and s["median_fail_t"] == 400.0
 
 
 def test_summary_of_the_links():
@@ -986,10 +1000,10 @@ def test_run_uas_hands_the_members_stress_to_the_forcing(monkeypatch):
     v, P, mission, t0, T, X = uas_inputs(window=("2023-03-01T18:00:00Z", "2023-03-02T12:00:00Z"))
     X["bulk_stress_scale"] = np.array([0.8, 1.3])
     stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
-    assert np.array_equal(got["a"][-1], [0.8, 1.3])
+    assert np.array_equal(got["a"][8], [0.8, 1.3])
     del X["bulk_stress_scale"]
     stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
-    assert got["a"][-1] is None
+    assert got["a"][8] is None
 
 
 class Shifted:
@@ -1088,7 +1102,8 @@ def test_a_lost_link_sets_the_lost_link_flag_in_stage1(monkeypatch):
         first = {k: np.full(M, np.nan) for k in uas.FLAGS}
         t = np.arange(0.0, 601.0, 60.0)
         return dict(t_launch=t_launch, track=dict(t=t, pos_rel=np.zeros((M, t.size, 3)), phase=np.zeros((M, t.size))), flags=flags, t_first=first,
-                    scrubbed=np.zeros(M, bool), launch=dict(wind_ms=np.zeros(M)), energy_wh=np.zeros(M), soc_end=np.ones(M), max_tilt_deg=np.zeros(M))
+                    scrubbed=np.zeros(M, bool), launch=dict(wind_ms=np.zeros(M)), energy_wh=np.zeros(M), soc_end=np.ones(M), max_tilt_deg=np.zeros(M),
+                    sat_s=np.zeros(M), demand_ratio_max=np.ones(M))
     monkeypatch.setattr(stage1.uas, "fly_sortie", fly)
     v, P, mission, t0, T, X = uas_inputs()
     r = stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
@@ -1108,7 +1123,7 @@ def test_the_brief_prior_is_a_named_case_that_the_ensemble_never_samples():
 def test_the_sensitivity_case_reruns_only_the_usv_with_the_brief_prior_and_everything_else_as_drawn(monkeypatch):
     seen = {}
 
-    def run_batch(mission, env, members, seed, pri, marg, scales=None):
+    def run_batch(mission, env, members, seed, pri, marg, scales=None, X=None):
         seen.update(vehicles=[v["id"] for v in mission["vehicles"]], links=mission["links"], members=members, seed=seed, marg=marg, scales=scales)
         f = np.arange(len(members)) < 31
         return dict(U=np.zeros((len(members), 1)), X={}, links={}, vehicles={"usv": dict(
@@ -1149,3 +1164,221 @@ def test_the_sensitivity_command_stores_the_case_where_the_report_reads_it(tmp_p
     assert [c["case"] for c in stored["usv"]] == ["other", "c"] and stored["usv"][1]["k_fail"] == 1             # the same case is replaced, others kept
     assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path / "new"), "--members", "8"]) == 0
     assert got["n"] == 8 and got["fitted"] is None and got["scales"] is None
+
+
+# ------------------------------------------------------------------------------------------------------------ review round 2 (batch B)
+
+def test_usv_speed_over_ground_and_wind_along_the_track_are_stored_per_member_and_summarised(monkeypatch):
+    """M-2: path length / time since deploy, the mean 10 m and anemometer-height wind along the track, their ratios and Chiodi's calibration ratio."""
+    v = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
+    P = usv.load_platform("saildrone_explorer")
+    monkeypatch.setattr(stage1.usv, "USVSim", FakeSim)
+    r = stage1._run_usv(v, P, AnalyticEnv(wind=(-5.0, 0.0)), 2, {"usv_vpp_bias": np.zeros(2)}, 0.0, 7200.0)
+    assert np.allclose(r["sog_ms"], [0.5, 1.0]) and np.allclose(r["u10_ms"], 5.0)
+    assert np.allclose(r["wind_anem_ms"], 5.0 * np.log(P["anemometer_m"] / 2e-4) / np.log(10.0 / 2e-4))
+    res = stage1.merge([dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"usv": dict(r, **{"class": "usv"})})] * 2)
+    assert res["vehicles"]["usv"]["sog_ms"].tolist() == [0.5, 1.0, 0.5, 1.0]
+    sp = stage1.summarize(res, ["a"], MISSION, 73)["vehicles"]["usv"]["speed"]
+    assert sp["sog_ms"] == [0.5, 1.0, 0.5, 1.0] and sp["ratio"] == pytest.approx([0.1, 0.2, 0.1, 0.2]) and sp["ratio_median"] == pytest.approx(0.15)
+    assert sp["sog_ms_median"] == 0.75 and sp["u10_ms_median"] == 5.0 and sp["calibration_ratio"] == pytest.approx(0.96 / 5.4)
+    assert sp["ratio_anem_median"] == pytest.approx(0.75 / r["wind_anem_ms"][0])
+
+
+def test_uas_sortie_arrays_join_along_the_members_and_the_clamp_diagnostics_are_summarised():
+    """M-28: the sorties of a merged run keep every batch's members (they were the first batch's only), and the summary says how long the horizontal-force
+    demand was beyond the lean-angle clamp and by how much."""
+    def batch(sat, ratio, scrubbed):
+        so = dict(t_launch=5.0, sat_s=np.array(sat), demand_ratio_max=np.array(ratio), scrubbed=np.array(scrubbed))
+        r = dict(synth_batch([0, 1])["vehicles"]["uas"], sorties=[so])
+        return dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"uas": r})
+    res = stage1.merge([batch([10.0, 30.0], [1.5, 2.0], [False, False]), batch([50.0, 999.0], [3.0, 9.0], [False, True])])
+    (so,) = res["vehicles"]["uas"]["sorties"]
+    assert so["t_launch"] == 5.0 and so["sat_s"].tolist() == [10.0, 30.0, 50.0, 999.0] and so["scrubbed"].tolist() == [False, False, False, True]
+    a = stage1.summarize(res, ["a"], MISSION, 73)["vehicles"]["uas"]["authority"]
+    assert a == dict(clamp_s_median=30.0, clamp_s_max=50.0, demand_ratio_median=2.0, demand_ratio_max=3.0)       # the scrubbed member never flew: left out
+
+
+def test_the_fraction_of_sortie_wind_points_answered_from_the_3d_fields_is_counted_and_summed_over_batches(monkeypatch):
+    """M-6: stage 1 says how much of a UAS's wind came from the 3-D fields; the gridded environment counts the points it answers."""
+    env = AnalyticEnv()
+    env.wind_points, env.wind3d_points = 7, 3                                         # whatever was asked before the sorties does not count
+    inner = sortie_stub([])
+
+    def fly(env_, *a, **k):
+        env.wind_points += 100
+        env.wind3d_points += 25
+        return dict(inner(env_, *a, **k), sat_s=np.zeros(2), demand_ratio_max=np.ones(2))
+    monkeypatch.setattr(stage1.uas, "fly_sortie", fly)
+    v, P, mission, t0, T, X = uas_inputs(window=("2023-03-01T18:00:00Z", "2023-03-03T06:00:00Z"))
+    r = stage1._run_uas(v, P, env, 2, X, t0, T, mission, 1, [0, 1])
+    assert r["wind3d"] == (50, 200)                                                     # two sorties
+    none = stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    assert none["wind3d"] is None                                                       # an environment without 3-D fields does not count
+    res = stage1.merge([dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"uas": dict(r, **{"class": "uas"})})] * 2)
+    assert res["vehicles"]["uas"]["wind3d"] == (100, 400)
+    assert stage1.summarize(res, ["a"], MISSION, 73)["vehicles"]["uas"]["wind3d_fraction"] == 0.25
+    plain = stage1.merge([dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"uas": dict(none, **{"class": "uas"})})])
+    assert "wind3d_fraction" not in stage1.summarize(plain, ["a"], MISSION, 73)["vehicles"]["uas"]
+
+
+def surfacing_scene(M=2):
+    out, surf = acoustic_scene(M=M, far=(0,) * M)
+    out["usv"] = track(-165.0, 0.0, M, antenna=2.2)                                    # a USV that is always on the surface
+    out["glider_eq"]["lat"][:] = km_north(2.0)
+    return out, surf
+
+
+def test_a_surfacing_link_follows_the_glider_end_whichever_end_names_it_first():
+    """M-10: `a: usv, b: glider_eq, when: surfacing` was required at every record (the USV is always surfaced); with the glider first it was 60."""
+    out, surf = surfacing_scene()
+    lk = dict(LK["glider_eq-ship-acoustic"], b="usv")
+    first = stage1.evaluate_link(dict(lk, a="glider_eq"), out, MISSION, flat_env(2), 2, 3, [0, 1])
+    second = stage1.evaluate_link(dict(lk, a="usv", b="glider_eq"), out, MISSION, flat_env(2), 2, 3, [0, 1])
+    assert first["need_count"].tolist() == second["need_count"].tolist() == [int(surf.sum())] * 2
+    assert np.array_equal(first["success"], second["success"]) and np.allclose(first["margin_db"], second["margin_db"], equal_nan=True)
+
+
+def test_moments_before_a_vehicles_deploy_time_are_not_required():
+    """M-22: record grids start at the vehicle's own deploy time and the link grid at the window's; the clamped first value counted as needed."""
+    k = 48                                                                              # deployed 8 h after the window opens
+    out, _ = surfacing_scene(M=1)
+    cut = {key: out["usv"][key][k:] for key in ("lon", "lat", "depth", "surfaced")}
+    late = {"usv": dict(out["usv"], t=TGRID[k:], **cut)}
+    assert stage1.evaluate_link(LK["usv-shore-iridium"], late, MISSION, flat_env(1), 1, 3, [0])["need_count"].tolist() == [TGRID.size - k]
+    assert stage1.evaluate_link(LK["usv-shore-iridium"], out, MISSION, flat_env(1), 1, 3, [0])["need_count"].tolist() == [TGRID.size]
+    always = dict(LK["glider_eq-ship-acoustic"], a="usv", b="ship", when="always")
+    assert stage1.evaluate_link(always, late, MISSION, flat_env(1), 1, 3, [0])["need_count"].tolist() == [TGRID.size - k]
+    assert stage1.evaluate_link(always, out, MISSION, flat_env(1), 1, 3, [0])["need_count"].tolist() == [TGRID.size]
+
+
+def test_acoustic_wind_noise_uses_the_members_perturbed_wind():
+    """M-20: the noise term read the unperturbed wind; a member whose wind error is +14 m/s must be as noisy as a 20 m/s day."""
+    out, _ = acoustic_scene(M=2, far=(0, 0))
+    for m in (0, 1):
+        out["glider_eq"]["lat"][:, m] = km_north(4.0)
+    base = AnalyticEnv(hs=1.0)
+    base.u10 = lambda lon, lat, t: np.stack([np.full(np.shape(t), 6.0), np.zeros(np.shape(t))], -1)
+    base.wind = lambda lon, lat, z, t: Tagged(np.asarray(base.u10(lon, lat, t), float), "flat", 0.0, "assumed")
+    pen = PerturbedEnv(base, {"wind_speed_bias": np.array([0.0, 14.0])}, [0, 1], 3, stage1.priors_for(MISSION)[0])
+    lk = LK["glider_eq-ship-acoustic"]
+    r = stage1.evaluate_link(lk, out, MISSION, pen, 2, 3, [0, 1])
+    gale = stage1.evaluate_link(lk, out, MISSION, flat_env(2, wind=20.0), 2, 3, [0, 1])
+    calm = stage1.evaluate_link(lk, out, MISSION, flat_env(2, wind=6.0), 2, 3, [0, 1])
+    assert np.allclose(r["margin_db"][:, 0], calm["margin_db"][:, 0], equal_nan=True)
+    assert np.allclose(r["margin_db"][:, 1], gale["margin_db"][:, 1], equal_nan=True)
+    assert np.nanmax(r["margin_db"][:, 1]) < np.nanmin(r["margin_db"][:, 0])
+
+
+def test_a_link_reports_the_median_distance_of_its_needed_moments():
+    """M-18: the summary holds the distance the link was judged at, so a sanity row can say 'beyond 3 km'."""
+    out, surf = acoustic_scene(M=3, far=(0, 0, 40))
+    r = stage1.evaluate_link(LK["glider_eq-ship-acoustic"], out, MISSION, flat_env(3), 3, 3, [0, 1, 2])
+    assert r["dist_m"] == pytest.approx([2000.0, 2000.0, 60e3], rel=0.01)                      # member 2: 40 of 60 needed moments at 60 km, 20 at 2 km
+    assert np.isnan(stage1.evaluate_link(LK["usv-shore-iridium"], {"usv": track(-165.0, 0.0, 3)}, MISSION, flat_env(3), 3, 3, [0, 1, 2])["dist_m"]).all()
+    res = stage1.merge([dict(U=np.zeros((3, 1)), X={"a": np.zeros(3)}, vehicles={}, links={"glider_eq-ship-acoustic": r})])
+    km = stage1.summarize(res, ["a"], MISSION, 73)["links"]["glider_eq-ship-acoustic"]["distance_km_median"]
+    assert km == pytest.approx(np.nanmedian(r["dist_m"]) / 1e3)
+    no = stage1.evaluate_link(LK["usv-shore-iridium"], {"usv": track(-165.0, 0.0, 3)}, MISSION, flat_env(3), 3, 3, [0, 1, 2])
+    res = stage1.merge([dict(U=np.zeros((3, 1)), X={"a": np.zeros(3)}, vehicles={}, links={"usv-shore-iridium": no})])
+    assert stage1.summarize(res, ["a"], MISSION, 73)["links"]["usv-shore-iridium"]["distance_km_median"] is None
+
+
+class Box:
+    """An environment with a box: positions east of -165.5 are outside it. Lenient or not, `inside` says which."""
+    bounds = AnalyticEnv().bounds
+
+    def inside(self, lon, lat, t=None):
+        return np.asarray(lon) < -165.5
+
+
+def test_a_record_outside_the_environments_box_is_the_fail_mode_left_data_at_that_record():
+    """M-11: a member that drifts out of the cached data failed the whole batch with OutsideData; it is now a failed member with the time it left."""
+    t = np.arange(5) * 600.0
+    lon = np.full((5, 3), -166.0)
+    lon[2:, 1] = -165.0                                                                   # member 1 leaves at the third record and stays out
+    lon[4, 2] = -165.0                                                                    # member 2 is out at the last one only
+    r = dict(t=t, lon=lon, lat=np.zeros((5, 3)), fail={"becalmed": np.zeros(3, bool)}, first={"becalmed": np.full(3, np.nan)})
+    stage1._left_data(r, Box())
+    assert r["fail"]["left_data"].tolist() == [False, True, True] and r["first"]["left_data"][1:].tolist() == [1200.0, 2400.0]
+    assert np.isnan(r["first"]["left_data"][0])
+    assert r["fail"]["becalmed"].tolist() == [False] * 3 and stage1.failed(r).tolist() == [False, True, True]
+    nan = dict(t=t, lon=np.where(lon > -165.9, np.nan, lon), lat=np.zeros((5, 3)), fail={}, first={})
+    stage1._left_data(nan, Box())
+    assert not nan["fail"]["left_data"].any()                                           # an unknown position is not a position outside the box
+    plain = dict(t=t, lon=lon, lat=np.zeros((5, 3)), fail={}, first={})
+    stage1._left_data(plain, AnalyticEnv())
+    assert plain["fail"] == {}                                                           # an environment without a box has no mode to add
+
+
+def test_run_batch_flags_left_data_for_every_vehicle_and_returns_the_stream_seeds(monkeypatch):
+    """M-11 and M-12 through run_batch: the mode is on every vehicle's result, and `seeds[vehicle][stream]` holds the seeds the run drew."""
+    spy_vehicle_models(monkeypatch)
+
+    def link(lk, out, mission, env, M, seed, members, used=None):
+        used["iridium/x"] = 5
+        return dict(id=lk["id"])
+    monkeypatch.setattr(stage1, "evaluate_link", link)
+    pri, marg = stage1.priors_for(MISSION)
+    env = AnalyticEnv()
+    env.inside = lambda lon, lat, t=None: np.zeros(np.shape(lon), bool)
+    b = stage1.run_batch(MISSION, env, [4, 5, 6, 7], 11, pri, marg)
+    assert all(v["fail"]["left_data"].all() and v["first"]["left_data"].tolist() == [0.0] * 4 for v in b["vehicles"].values())
+    assert set(b["seeds"]) == set(b["vehicles"]) and all(s == {"iridium/x": 5} for s in b["seeds"].values())
+    one = synth_batch([0, 1, 2, 3])
+    two = stage1.merge([dict(one, seeds={v: {"iridium/x": 5} for v in one["vehicles"]}), dict(one, seeds={v: {"iridium/x": 6} for v in one["vehicles"]})])
+    assert set(two["seeds"]) == set(one["vehicles"]) and all(s == {"iridium/x": [5, 6]} for s in two["seeds"].values())
+    assert "seeds" not in stage1.merge([one])
+
+
+def test_the_stream_seeds_are_the_ones_the_forcing_and_the_iridium_link_drew(ci_full):
+    """M-12: `used` collects {stream: seed} where the seeds are made: UAS turbulence per sortie, the gust set, the Iridium sessions."""
+    P, M, origin = uas_plat(), 2, (-165.0, 0.0)
+    ts = np.array([UTC("2023-03-02T01:00:00Z"), UTC("2023-03-03T01:00:00Z")])
+    used = {}
+    stage1._uas_forcing(ci_full, dict(environment=dict(subgrid=dict(turbulence=True, gust_fronts=True))), origin, ts, P, M, 5, [4, 5], used=used)
+    assert used == {name: sampling.member_seed(5, 4, name) for name in ("uas/turb/0", "uas/turb/1", "uas/gust")}
+    used = {}
+    stage1.evaluate_link(LK["usv-shore-iridium"], {"usv": track(-165.0, -1.0, 2)}, MISSION, flat_env(2), 2, 7, [4, 5], used)
+    assert used == {"iridium/usv-shore-iridium": sampling.member_seed(7, 4, "iridium/usv-shore-iridium")}
+
+
+def test_a_given_hypercube_replaces_the_lhs_draw_and_its_uniforms_are_the_quantiles(monkeypatch):
+    """M-15: run_batch(X=...) runs the columns it is given."""
+    spy_vehicle_models(monkeypatch)
+    pri, marg = stage1.priors_for(MISSION)
+    _, X = sampling.lhs(4, marg, np.random.SeedSequence([11, 4]))
+    b = stage1.run_batch(MISSION, AnalyticEnv(), [4, 5, 6, 7], 11, pri, marg, None, X)
+    assert all(np.array_equal(b["X"][k], X[k]) for k in marg) and b["U"].shape == (4, len(marg))
+    assert np.allclose(b["U"], sampling.lhs(4, marg, np.random.SeedSequence([11, 4]))[0])
+    with pytest.raises(ValueError, match="must hold 3 values"):
+        stage1.run_batch(MISSION, AnalyticEnv(), [4, 5, 6], 11, pri, marg, None, X)
+
+
+def test_the_sensitivity_case_given_the_runs_hypercube_changes_only_the_vpp_bias_at_the_same_quantile(monkeypatch):
+    """M-15: the case was a different n = 32 sample from the verdict beside it; with the run's own X it is paired."""
+    seen = {}
+
+    def run_batch(mission, env, members, seed, pri, marg, scales=None, X=None):
+        seen.update(members=members, X=X, marg=marg)
+        f = np.zeros(len(members), bool)
+        return dict(U=np.zeros((len(members), 1)), X={}, links={}, vehicles={"usv": dict(
+            t=np.zeros(1), lon=np.zeros((1, len(members))), lat=np.zeros((1, len(members))), depth=np.zeros((1, len(members))), fail={"becalmed": f},
+            first={"becalmed": np.full(len(members), np.nan)}, **{"class": "usv", "antenna_m": 1.0})})
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    pri, marg = stage1.priors_for(MISSION)
+    _, X = sampling.lhs(16, marg, np.random.SeedSequence([MISSION["seed"], 0]))
+    out = stage1.sensitivity_case(MISSION, "ENV", n=99, X=dict(X, extra=np.zeros(16)))
+    assert seen["members"] == list(range(16)) and out["usv"][0]["n"] == 16 and set(seen["X"]) == set(marg)
+    assert all(np.array_equal(seen["X"][k], X[k]) for k in marg if k != "usv_vpp_bias")
+    lo, hi = marg["usv_vpp_bias"]["lo"], marg["usv_vpp_bias"]["hi"]
+    q = (X["usv_vpp_bias"] - lo) / (hi - lo)
+    assert np.allclose(seen["X"]["usv_vpp_bias"], -0.35 + 0.05 * q) and seen["X"]["usv_vpp_bias"].min() >= -0.35 and seen["X"]["usv_vpp_bias"].max() <= -0.30
+    assert seen["marg"]["usv_vpp_bias"] == dict(dist="uniform", lo=-0.35, hi=-0.30)
+
+
+@pytest.mark.parametrize("every, first_day", [(2, "2023-03-02"), (3, "2023-03-02"), (1.5, "2023-03-02")])
+def test_a_period_over_one_day_starts_at_the_first_daily_slot_not_where_the_epoch_puts_it(every, first_day):
+    """M-24: every_days: 2 first launched on 03-03 (skipping the 03-02 slot) because the phase came from the epoch day."""
+    t0, t1 = UTC("2023-03-01T12:00:00Z"), UTC("2023-03-12T12:00:00Z")
+    ts = stage1.launch_times({"local_solar_time": "14:00", "every_days": every}, -165.0, t0, t1, 1920.0)
+    assert ts[0] == UTC(f"{first_day}T01:00:00Z") and np.allclose(np.diff(ts), 86400.0 * every)

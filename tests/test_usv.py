@@ -744,3 +744,29 @@ def test_the_prior_spread_is_suns_30_to_35_percent_as_a_speed_factor():
     assert e["hi"] - e["lo"] == pytest.approx(1 / 1.30 - 1 / 1.35, abs=1e-4)                              # width of Sun's range as a speed factor
     assert P["vpp_bias_sd"] == pytest.approx((e["hi"] - e["lo"]) / np.sqrt(12.0), abs=2e-4)
     assert prior("usv_vpp_bias_brief")["dist"] == "uniform" and (prior("usv_vpp_bias_brief")["lo"], prior("usv_vpp_bias_brief")["hi"]) == (-0.35, -0.30)
+
+
+# ------------------------------------------------------------------------------------------------------------ review round 2, M-2
+
+def test_the_calibration_ratio_holds_on_a_section_without_current_and_a_westward_set_against_the_trades_is_what_lowers_it():
+    """M-2: the mission USV makes 0.10 to 0.12 of the wind speed over the ground against the 0.178 the VPP bias is calibrated to. Diagnosed on the demo
+    (6 d, mission wind and current, 1 CPU): the calibration scenario gives 0.178; the mission wind field and the track-holding section with no current
+    give 0.185; waves 0.180; the current 0.120, and all of that from its westward component (a meridional-only current leaves 0.178). The model is not
+    at fault: the speed polar is a function of the wind relative to the water, the current enters once. Same decomposition on a uniform wind (5.4 m/s
+    from the east at the anemometer, section along 165 W, 24 h): without current the calibration is reproduced within its band; a 0.3 m/s set toward
+    the west, the way the trades blow, costs at least 8 % of the path speed; one of 0.3 m/s along the track (north) does not lower it."""
+    from cafe.pm.env.protocol import AnalyticEnv
+    P = usv.load_platform()
+    task = dict(mode="section", waypoints=[(-165.0, -1.0), (-165.0, 1.0)], repeat=True, track_tolerance_km=20.0, becalmed_after_h=6.0)
+
+    def ratio(cur):
+        env = AnalyticEnv(wind=usv._wind_at_anemometer(P, P["chiodi_mean_wind_ms"], 90.0), current=cur, hs=0.0)
+        sim = usv.USVSim(P, 1, env, (-165.0, -1.0), 0.0, task, perturb=dict(vpp_bias=np.array([P["vpp_bias_mean"]])))
+        sim.run(24 * 3600.0, 60.0)
+        return float(sim.path_m[0] / (24 * 3600.0) / P["chiodi_mean_wind_ms"])
+
+    calib = P["chiodi_mean_sog_ms"] / P["chiodi_mean_wind_ms"]
+    none, west, north = ratio((0.0, 0.0)), ratio((-0.3, 0.0)), ratio((0.0, 0.3))
+    assert abs(none / calib - 1.0) < P["chiodi_band"]
+    assert west < 0.92 * none
+    assert north > none

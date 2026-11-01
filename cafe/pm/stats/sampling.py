@@ -128,10 +128,3 @@ def member_seed(base_seed: int, member: int, stream_name: str) -> int:
 def member_rng(base_seed: int, member: int, stream_name: str) -> np.random.Generator:
     """Generator for (member, stream), built on the SeedSequence spawn key so streams are statistically independent."""
     return np.random.default_rng(_seq(base_seed, member, stream_name))
-
-
-def crn_check(base_seed: int, members: int, streams: tuple[str, ...], vehicles: int = 2) -> bool:
-    """Ledger self-check: each vehicle draws every stream for every member; all vehicles must see identical values."""
-    draws = [[member_rng(base_seed, m, s).standard_normal(8) for m in range(members) for s in streams]
-             for _ in range(vehicles)]
-    return all(np.array_equal(draws[0][i], draws[v][i]) for v in range(1, vehicles) for i in range(len(draws[0])))

@@ -316,34 +316,6 @@ def test_stream_ids_member_seeds_and_generators_are_pinned():
     assert not np.array_equal(S.member_rng(7, 3, "wind").standard_normal(5), S.member_rng(7, 3, "wave").standard_normal(5))
 
 
-def test_crn_check_draws_eight_values_for_every_member_stream_and_vehicle(monkeypatch):
-    calls = []
-
-    class Spy:
-        def __init__(self, key):
-            self.key, self.rng = key, np.random.default_rng(0)
-
-        def standard_normal(self, size):
-            calls.append((self.key, size))
-            return self.rng.standard_normal(size)
-
-    monkeypatch.setattr(S, "member_rng", lambda seed, m, s: Spy((seed, m, s)))
-    assert S.crn_check(5, 3, ("a", "b")) is True
-    assert len(calls) == 2 * 3 * 2 and {c[1] for c in calls} == {8} and {c[0] for c in calls} == {(5, m, s) for m in range(3) for s in "ab"}
-    calls.clear()
-    assert S.crn_check(5, 2, ("a",), vehicles=4) is True and len(calls) == 4 * 2
-
-
-def test_crn_check_is_false_when_any_later_vehicle_differs(monkeypatch):
-    n = {"k": 0}
-
-    def rng(seed, m, s):
-        n["k"] += 1
-        return np.random.default_rng(n["k"] if n["k"] > 2 else 0)                                       # the second vehicle's draws differ
-    monkeypatch.setattr(S, "member_rng", rng)
-    assert S.crn_check(5, 1, ("a", "b")) is False
-
-
 # ---- sensitivity --------------------------------------------------------------------------------------------------------
 def easi_reference(x, y, m, correct=True):
     """EASI from the definition: sort by x, even ranks ascending then odd ranks descending, power share of harmonics 1..m."""

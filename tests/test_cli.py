@@ -26,9 +26,10 @@ def calls(monkeypatch):
     """pipeline.run replaced by a recorder that returns an object with a run_dir, as the real one does."""
     seen = []
 
-    def run(mission, budget, gpus, out, resume=True, stop_after=None, log=print, seed=None, emulator_table=None):
+    def run(mission, budget, gpus, out, resume=True, stop_after=None, log=print, seed=None, emulator_table=None, gpu_mem_gb=None):
         seen.append(dict(mission=mission, budget=budget, gpus=gpus, out=out, resume=resume, stop_after=stop_after, **({} if seed is None else dict(seed=seed)),
-                         **({} if emulator_table is None else dict(emulator_table=emulator_table))))
+                         **({} if emulator_table is None else dict(emulator_table=emulator_table)),
+                         **({} if gpu_mem_gb is None else dict(gpu_mem_gb=gpu_mem_gb))))
         return type("Ctx", (), {"run_dir": out})()
     monkeypatch.setattr(pipeline, "run", run)
     return seen
@@ -98,6 +99,7 @@ def test_a_plan_for_an_invalid_mission_exits_2(tmp_path, capsys):
 
 def test_run_calls_the_pipeline_with_its_budget_gpus_and_default_directory(calls, tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pipeline, "gpu_memory_gb", lambda: None)                                                      # no nvidia-smi answer: nothing to guard
     assert cli.main(["run", "--mission", MISSION, "--budget", "4h", "--gpus", "1"]) == 0
     out = pathlib.Path("runs/ci_fixture/4h")
     assert calls == [dict(mission=MISSION, budget="4h", gpus=1, out=out, resume=True, stop_after=None)]
@@ -147,12 +149,14 @@ def test_run_of_an_invalid_mission_never_reaches_the_pipeline(calls, tmp_path, c
 def test_fetch_ingests_the_ci_fixture_for_real(tmp_path, ci_env, monkeypatch, capsys):
     monkeypatch.setattr(pipeline, "DATA", ci_env.data)
     monkeypatch.setattr(ocean_mod, "DATA", ci_env.data)
+    monkeypatch.setattr(budget, "plan", lambda *a, **k: pytest.fail("fetch must not plan a budget"))
     out = tmp_path / "run"
     assert cli.main(["fetch", "--mission", MISSION, "--out", str(out)]) == 0
     assert "ingest: done in" in capsys.readouterr().out
     assert sorted(p.name for p in (out / "checkpoints").iterdir()) == ["ingest"]
     assert json.loads((out / "checkpoints" / "ingest" / "ledger.json").read_text())["ok"]
-    assert (out / "ingest" / "priors_fitted.json").is_file() and (out / "plan.json").is_file() and (out / "mission.yaml").is_file()
+    assert (out / "ingest" / "priors_fitted.json").is_file() and (out / "mission.yaml").is_file()
+    assert not (out / "plan.json").exists()  # fetch plans nothing (M-13): no budget is needed to download
 
 
 def test_report_rerenders_a_finished_run(tmp_path, capsys, monkeypatch):
@@ -410,3 +414,82 @@ def test_whatif_with_the_real_engine_drops_a_vehicle_and_reports_the_links(wi, m
     assert out[0] == "whatif tepex_c_demo: drop glider_2n"
     assert out[1] == "dropped glider_2n; links removed: glider_2n-ship-acoustic. Other vehicles are unaffected: Stage-1 vehicles do not interact."
     assert cli.main(whatif_args(wi, "--drop", "nobody")) == 2 and "no vehicle 'nobody'" in capsys.readouterr().err
+
+
+# ---- review round 2, M-13 and M-33
+
+def test_a_plan_the_budget_cannot_run_exits_2_with_the_refusal_text_and_no_traceback(monkeypatch, capsys):
+    """`plan --budget ci` on the demo used to end in a PlanError traceback (exit 1); a bad mission already gave `error: ...` and exit 2."""
+    def refuse(*a, **k):
+        raise budget.PlanError("--budget ci: stage 1 needs 502 s for even one batch of 4 members but its share is 270 s: short by 232 s. Use a longer --budget")
+    monkeypatch.setattr(budget, "plan", refuse)
+    assert cli.main(["plan", "--mission", MISSION, "--budget", "ci"]) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("error: --budget ci: stage 1 needs 502 s") and "Traceback" not in err
+    monkeypatch.setattr(pipeline, "run", refuse)
+    assert cli.main(["run", "--mission", MISSION, "--budget", "ci"]) == 2 and capsys.readouterr().err.startswith("error: --budget ci: stage 1 needs")
+
+
+def test_the_real_planner_refusal_of_a_long_window_is_an_error_line_not_a_traceback(tmp_path, capsys):
+    import yaml
+    m = yaml.safe_load(pathlib.Path(MISSION).read_text())
+    m["window"]["end"] = "2023-04-30T06:00:00Z"                                                 # 60 days
+    (tmp_path / "long.yaml").write_text(yaml.safe_dump(m))
+    assert cli.main(["plan", "--mission", str(tmp_path / "long.yaml"), "--budget", "ci"]) == 2
+    assert capsys.readouterr().err.startswith("error: --budget ci: stage 1 needs ")
+
+
+def test_fetch_of_a_mission_no_budget_can_run_still_reaches_ingest(tmp_path, monkeypatch):
+    """A 60-day mission plans at no budget the planner offers; fetch used to plan the quick one before downloading, and now plans nothing."""
+    import yaml
+    from cafe.pm import ledger
+    m = yaml.safe_load(pathlib.Path(MISSION).read_text())
+    m["window"]["end"] = "2023-04-30T06:00:00Z"                                                 # 60 days
+    (tmp_path / "long.yaml").write_text(yaml.safe_dump(m))
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "data")
+    monkeypatch.setattr(ocean_mod, "DATA", tmp_path / "data")
+    monkeypatch.setenv("CAFE_OFFLINE", "1")
+    with pytest.raises(budget.PlanError):                                                          # what fetch used to hit, before any download
+        pipeline.Context(tmp_path / "long.yaml", "ci", 0, tmp_path / "x")
+    with pytest.raises(ledger.StageFailed, match="orca_present"):  # the ingest stage ran (and found nothing cached): no PlanError
+        pipeline.run(tmp_path / "long.yaml", "quick", 0, tmp_path / "r", stop_after="ingest", log=lambda _: None)
+
+
+@pytest.mark.parametrize("bad", ["-5", "x", "1.5"])
+def test_a_seed_that_numpy_would_refuse_is_refused_by_argparse(bad, capsys):
+    with pytest.raises(SystemExit) as e:
+        cli.main(["run", "--mission", MISSION, "--seed", bad])
+    assert e.value.code == 2 and "argument --seed" in capsys.readouterr().err
+
+
+def test_a_zero_seed_is_a_seed(calls, tmp_path):
+    assert cli.main(["run", "--mission", MISSION, "--out", str(tmp_path / "o"), "--seed", "0"]) == 0 and calls[0]["seed"] == 0
+
+
+def test_gpu_memory_is_passed_to_the_planner_given_or_asked_from_nvidia_smi(calls, tmp_path, monkeypatch, capsys):
+    out = str(tmp_path / "o")
+    monkeypatch.setattr(pipeline, "gpu_memory_gb", lambda: 24.0)
+    assert cli.main(["run", "--mission", MISSION, "--out", out, "--gpus", "1"]) == 0 and calls[-1]["gpu_mem_gb"] == 24.0           # asked
+    assert cli.main(["run", "--mission", MISSION, "--out", out, "--gpus", "1", "--gpu-mem-gb", "16"]) == 0 and calls[-1]["gpu_mem_gb"] == 16.0   # given wins
+    assert cli.main(["run", "--mission", MISSION, "--out", out]) == 0 and "gpu_mem_gb" not in calls[-1]                              # no GPU: nothing to guard
+    seen = []
+    real = budget.plan
+    monkeypatch.setattr(budget, "plan", lambda *a, **k: seen.append(k.get("gpu_mem_gb")) or real(*a, **k))
+    assert cli.main(["plan", "--mission", MISSION, "--gpus", "1", "--gpu-mem-gb", "40"]) == 0 and seen == [40.0]
+    assert "max_cells" not in capsys.readouterr().err
+
+
+def test_nvidia_smi_memory_is_read_in_gb_and_a_missing_or_garbled_answer_is_none(monkeypatch):
+    import subprocess
+    from types import SimpleNamespace
+    ans = {}
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: ans["r"] if "r" in ans else (_ for _ in ()).throw(FileNotFoundError("nvidia-smi")))
+    assert pipeline.gpu_memory_gb() is None                                                               # no nvidia-smi
+    ans["r"] = SimpleNamespace(returncode=0, stdout="81920\n81920\n")
+    assert pipeline.gpu_memory_gb() == 80.0                                                               # MiB -> GB, the first device
+    ans["r"] = SimpleNamespace(returncode=9, stdout="")
+    assert pipeline.gpu_memory_gb() is None
+    ans["r"] = SimpleNamespace(returncode=0, stdout="")
+    assert pipeline.gpu_memory_gb() is None
+    ans["r"] = SimpleNamespace(returncode=0, stdout="N/A\n")
+    assert pipeline.gpu_memory_gb() is None

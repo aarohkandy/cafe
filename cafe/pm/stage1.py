@@ -94,17 +94,26 @@ def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     sim = usv.USVSim(P, M, env, (d["lon"], d["lat"]), t0, task, perturb=dict(vpp_bias=(1 + X["usv_vpp_bias"]) * drag ** -0.5 - 1))
     h = sim.run(T - t0, dt=DT_VEHICLE, record_s=DT_VEHICLE)
     g = _record_grid(h, dict(t=t0, lon=np.full(M, d["lon"]), lat=np.full(M, d["lat"])))
+    k = slice(None, None, int(3600 // REC_S))                                                          # hourly, as the wind is
+    lon, lat = g["lon"][k].T, g["lat"][k].T
+    tt = np.broadcast_to(g["t"][k], lon.shape)
+    wind = {name: np.hypot(*np.moveaxis(np.asarray(env.wind(lon, lat, z, tt).value, float), -1, 0)).mean(1)
+            for name, z in (("u10", 10.0), ("anem", P["anemometer_m"]))}
     return dict(**g, depth=np.zeros_like(g["lon"]), surfaced=np.ones_like(g["lon"], bool),
-                fail=sim.fail, first=sim.first, sim=sim, antenna_m=P["rf_antenna_height_m"])
+                fail=sim.fail, first=sim.first, sim=sim, antenna_m=P["rf_antenna_height_m"],
+                sog_ms=sim.path_m / (T - t0), u10_ms=wind["u10"], wind_anem_ms=wind["anem"])
 
 
 def launch_times(sorties: dict[str, Any], lon: float, t0: float, T: float, duration_s: float) -> NDArray[np.float64]:
-    """Sortie launches [s UTC] at `local_solar_time` (UTC + lon/15 h) every `every_days`, each one ending inside [t0, T]."""
+    """Sortie launches [s UTC] at `local_solar_time` (UTC + lon/15 h) every `every_days`, each one ending inside [t0, T]. The schedule starts at
+    the first daily slot at or after t0 (a sub-daily period fills the window from t0), so a period of 2 d launches on the first day, not
+    on the day the epoch happens to put it."""
     hh, mm = (int(x) for x in sorties["local_solar_time"].split(":"))
     off = (hh + mm / 60 - lon / 15.0) * 3600.0
-    day0 = np.floor(t0 / 86400.0) * 86400.0 - 86400.0
     every = 86400.0 * float(sorties.get("every_days", 1))                                    # seconds between launches
-    ts = day0 + off + every * np.arange(int((T - day0) / every) + 3)
+    slot = off + 86400.0 * np.ceil((t0 - off) / 86400.0)                                     # first daily slot at or after t0
+    first = slot - every * np.floor((slot - t0) / every)
+    ts = first + every * np.arange(int((T - first) / every) + 2)
     return np.asarray(ts[(ts >= t0) & (ts + duration_s <= T)], float)
 
 
@@ -123,24 +132,31 @@ def _fewest_boxes(args: tuple[int, int, float, float, float, float, float, float
 
 
 def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float], ts: NDArray[Any], P: dict[str, Any], M: int, seed: int, members: list[int],
-                 stress_scale: NDArray[Any] | None = None) -> tuple[list[NDArray[Any] | None], Callable[[Any], NDArray[Any]] | None]:
+                 stress_scale: NDArray[Any] | None = None,
+                 used: dict[str, int] | None = None) -> tuple[list[NDArray[Any] | None], Callable[[Any], NDArray[Any]] | None]:
     """Per-sortie Mann turbulence (M, n, 3) and one gust-front event set for the window, from the surface layer at the ship.
     None where the mission switches them off or the environment has no surface layer (analytic test envs).
     stress_scale (M,): the member's bulk-stress multiplier. sigma_u = 2.5 u* and u*^2 is the stress, so a member's series is
     scaled by sqrt(stress_scale) (the Obukhov length and the mean wind profile are not recomputed: the wind priors perturb those).
-    The gust-front rate uses theta_e from the ship's T2, Q2 and PSFC (subgrid.theta_e), so the cold-pool rate factor works."""
+    The gust-front rate uses theta_e from the ship's T2, Q2 and PSFC (subgrid.theta_e), so the cold-pool rate factor works.
+    used: filled with {stream: seed} of every random stream drawn here (keyed by the batch's first member, so they depend on the batch size)."""
     sw, sl = mission.get("environment", {}).get("subgrid", {}), getattr(env, "subgrid", None)
     lon, lat = origin
     so = P["sortie"]
     z = so["deck_height_m"] + float(np.mean(so["levels_m"]))
     amp = 1.0 if stress_scale is None else np.sqrt(np.asarray(stress_scale, float))[:, None, None]
+    used = {} if used is None else used
+
+    def stream(name: str) -> int:
+        used[name] = sampling.member_seed(seed, members[0], name)
+        return used[name]
     turbs: list[NDArray[Any] | None] = [None] * len(ts)
     if sw.get("turbulence") and sl is not None:
         for i, t in enumerate(ts):
             s = sl.surface_layer(env, np.array([lon]), np.array([lat]), np.array([t]))
             w = np.asarray(env.wind(np.full(M, lon), np.full(M, lat), z, t).value, float)          # (M, 2): one point per member
             U = float(np.hypot(w[:, 0], w[:, 1]).mean())                                           # Mann advection speed
-            args = (sampling.member_seed(seed, members[0], f"uas/turb/{i}"), M, float(s["ustar"].value[0]), float(s["L"].value[0]), z,
+            args = (stream(f"uas/turb/{i}"), M, float(s["ustar"].value[0]), float(s["L"].value[0]), z,
                     max(U, 1.0), so["duration_s"] * so["hard_stop_factor"] + 60.0, uas.DT_ENV)
             g = _fewest_boxes(args, M) * amp
             wdir = cv.to_deg(-np.asarray(env.u10(np.array([lon]), np.array([lat]), np.array([t])), float).reshape(2))   # wind FROM
@@ -153,7 +169,7 @@ def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float],
         wto = cv.to_deg(np.asarray(env.u10(lo, la, hours), float))
         air = env.air(lo, la, hours)
         te = subgrid.theta_e(air["T2"].value, air["q2"].value, air["psfc"].value)
-        ev = subgrid.gust_fronts(sampling.member_seed(seed, members[0], "uas/gust"), rain, hours, M, theta_e_K=te, wind_to_deg=wto)
+        ev = subgrid.gust_fronts(stream("uas/gust"), rain, hours, M, theta_e_K=te, wind_to_deg=wto)
 
         def front(t: Any) -> NDArray[Any]:
             g = subgrid.gust_perturbation(ev, np.asarray(t, float))[0].value
@@ -200,7 +216,7 @@ def _uas_links(env: Any, mission: dict[str, Any], origin: tuple[float, float], t
 
 
 def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], t0: float, T: float, mission: dict[str, Any], seed: int,
-             members: list[int], drag: float | NDArray[Any] = 1.0) -> dict[str, Any]:
+             members: list[int], drag: float | NDArray[Any] = 1.0, used: dict[str, int] | None = None) -> dict[str, Any]:
     """Daily flux-profile sorties from the ship (on station): fly_mission per sortie, then the 10-min grid the links read."""
     ship = mission["ship"]
     origin = (float(ship["lon"]), float(ship["lat"]))
@@ -211,12 +227,15 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     rename = {"max_mean_wind_ms": "max_mean_wind_ms", "no_gust_front_within_min": "gust_lookahead_min"}       # mission key -> platform key
     P["launch_rule"].update({rename[a]: float(x) for a, x in lr.items() if a in rename})
     ts = launch_times(v["sorties"], origin[0], t0, T, so["duration_s"] * so["hard_stop_factor"])
-    turbs, gust = _uas_forcing(env, mission, origin, ts, P, M, seed, members, X.get("bulk_stress_scale"))
+    turbs, gust = _uas_forcing(env, mission, origin, ts, P, M, seed, members, X.get("bulk_stress_scale"), used)
     links = _uas_links(env, mission, origin, ts, P, M)
     still = lambda t: np.zeros(2)
     sc = dict(battery=X["battery_capacity_scale"], drag=drag * np.ones(M))
+    base = getattr(env, "env", env)                                                       # the gridded environment counts the wind points it answers from 3-D
+    asked, from3d = getattr(base, "wind_points", None), getattr(base, "wind3d_points", 0)
     sorties = [uas.fly_sortie(env, still, float(t), M=M, origin=origin, plat=P, turb=tb, gust=gust, scale=sc, link=lk)
                for t, tb, lk in zip(ts, turbs, links, strict=True)]
+    wind3d = None if asked is None else (int(base.wind3d_points - from3d), int(base.wind_points - asked))
     t = np.arange(t0, T + 1, REC_S)
     east, north, alt = (np.zeros((len(t), M)) for _ in range(3))
     air = np.zeros((len(t), M), bool)
@@ -240,9 +259,10 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     first["no_sortie_flown"] = np.where(n_flown == 0, T, np.nan)
     return dict(t=t, lon=lon, lat=lat, alt=alt + so["deck_height_m"], depth=np.zeros_like(lon), airborne=air, surfaced=np.ones_like(air),
                 fail=fail, first=first, antenna_m=P["radio"]["uas_antenna_height_above_body_m"],
-                scrubbed=np.sum([s["scrubbed"] for s in sorties], 0) if sorties else np.zeros(M, int),
+                scrubbed=np.sum([s["scrubbed"] for s in sorties], 0) if sorties else np.zeros(M, int), wind3d=wind3d,
                 sorties=[dict(t_launch=s["t_launch"], scrubbed=s["scrubbed"], wind_ms=s["launch"]["wind_ms"], energy_wh=s["energy_wh"],
-                              soc_end=s["soc_end"], max_tilt_deg=s["max_tilt_deg"]) for s in sorties])
+                              soc_end=s["soc_end"], max_tilt_deg=s["max_tilt_deg"], sat_s=s["sat_s"], demand_ratio_max=s["demand_ratio_max"])
+                         for s in sorties])
 
 
 def refit_drag(scales: dict[str, Any] | None, vid: str, seed: int, members: list[int]) -> float | NDArray[np.float64]:
@@ -257,15 +277,25 @@ def refit_drag(scales: dict[str, Any] | None, vid: str, seed: int, members: list
 
 
 def run_batch(mission: dict[str, Any], env: Any, members: list[int], seed: int, pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]],
-              scales: dict[str, Any] | None = None) -> dict[str, Any]:
+              scales: dict[str, Any] | None = None, X: dict[str, NDArray[Any]] | None = None) -> dict[str, Any]:
     """One batch: LHS over the priors, the perturbed environment, every vehicle, every link; `scales` are the stage-3
-    refit multipliers per vehicle id (stage 1b)."""
+    refit multipliers per vehicle id (stage 1b). `X` ({name: (M,)} for every name in `marg`): these draws instead of the LHS (a paired
+    sensitivity case); U is then their quantiles. Besides the vehicles and links the result holds `seeds[vehicle][stream]`: the seed of every
+    batch-keyed random stream the run drew (UAS turbulence and gusts, Iridium), the same for every vehicle. A vehicle with a record outside
+    the environment's cached box (a lenient environment holds the edge value there) fails with mode `left_data`, first at that record."""
     M = len(members)
-    U, X = sampling.lhs(M, marg, np.random.SeedSequence([seed, members[0]]), antithetic=tuple(a for a in ANTITHETIC if a in marg))
+    if X is None:
+        U, X = sampling.lhs(M, marg, np.random.SeedSequence([seed, members[0]]), antithetic=tuple(a for a in ANTITHETIC if a in marg))
+    else:
+        X = {k: np.asarray(x, float) for k, x in X.items()}
+        if any(len(X[k]) != M for k in marg):
+            raise ValueError(f"X must hold {M} values for each of {sorted(marg)}")
+        U = np.column_stack([sampling.marginal(m).cdf(X[k]) for k, m in marg.items()])
     t0, T = utc(mission["window"]["start"]).timestamp(), utc(mission["window"]["end"]).timestamp()
     sde = dict(t0=t0, t1=T, dt=DT_VEHICLE) if subgrid.switch(mission.get("environment", {}), "ocean_sde") else None
-    penv = PerturbedEnv(env, {k: X[k] for k in FORCING if k in X}, members, seed, pri, sde=sde)
+    penv = PerturbedEnv(env, {k: X[k] for k in FORCING if k in X}, members, seed, pri, sde=sde, window=(t0, T))
     cls = _classes(mission)
+    used: dict[str, int] = {}
     out: dict[str, dict[str, Any]] = {}
     for v in mission["vehicles"]:
         a = time.time()
@@ -279,11 +309,24 @@ def run_batch(mission: dict[str, Any], env: Any, members: list[int], seed: int, 
             out[v["id"]] = _run_usv(v, P, penv, M, X, utc(v["deploy"]["time"]).timestamp(), T, refit_drag(scales, v["id"], seed, members))
         else:
             P = uas.load_platform(v["platform"])
-            out[v["id"]] = _run_uas(v, P, penv, M, X, t0, T, mission, seed, members, refit_drag(scales, v["id"], seed, members))
+            out[v["id"]] = _run_uas(v, P, penv, M, X, t0, T, mission, seed, members, refit_drag(scales, v["id"], seed, members), used)
         out[v["id"]]["class"] = cls[v["id"]]
         out[v["id"]]["wall_s"] = time.time() - a
-    links = {lk["id"]: evaluate_link(lk, out, mission, penv, M, seed, members) for lk in mission["links"]}
-    return dict(U=U, X=X, vehicles=out, links=links)
+        _left_data(out[v["id"]], env)
+    links = {lk["id"]: evaluate_link(lk, out, mission, penv, M, seed, members, used) for lk in mission["links"]}
+    return dict(U=U, X=X, vehicles=out, links=links, seeds={vid: dict(used) for vid in out})
+
+
+def _left_data(r: dict[str, Any], env: Any) -> None:
+    """Fail mode `left_data` for a member with a record outside the environment's cached box or hours (`env.inside`), first at that record. Added
+    only for an environment that has a box; the pipeline runs it lenient (edge values there) and reports the mode."""
+    inside = getattr(env, "inside", None)
+    if inside is None:
+        return
+    lon, lat = np.asarray(r["lon"], float), np.asarray(r["lat"], float)
+    out = np.isfinite(lon) & np.isfinite(lat) & ~np.asarray(inside(lon, lat, np.asarray(r["t"], float)[:, None]), bool)
+    r["fail"]["left_data"] = out.any(0)
+    r["first"]["left_data"] = np.where(out.any(0), np.asarray(r["t"], float)[out.argmax(0)], np.nan)
 
 
 def _pos(node: str, out: dict[str, Any], mission: dict[str, Any], t: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any], NDArray[Any]]:
@@ -367,8 +410,11 @@ def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: ND
     return margin, base + ("" if done == amb.sum() else "; the rest Thorp only (no sound-speed profile or depth there)")
 
 
-def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, Any], env: Any, M: int, seed: int, members: list[int]) -> dict[str, Any]:
-    """Per member: the fraction of the required moments the link worked, against required_fraction.
+def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, Any], env: Any, M: int, seed: int, members: list[int],
+                  used: dict[str, int] | None = None) -> dict[str, Any]:
+    """Per member: the fraction of the required moments the link worked, against required_fraction. A moment before an end vehicle's deploy time
+    is not required. `when: surfacing` follows the glider end and `uas_airborne` the UAS end, whichever way round the link names them.
+    `used`: filled with the seed of the Iridium stream.
 
     `margin_db` is NaN wherever it is not a link budget: not needed, an unknown position, beyond the radio horizon (RF: the NO_LINK_DB clip) or
     beyond comms.valid_range_m (acoustic: Thorp extrapolated), and always for Iridium (a session success, not a margin). `n_invalid` counts the
@@ -376,12 +422,19 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
     t0, T = utc(mission["window"]["start"]).timestamp(), utc(mission["window"]["end"]).timestamp()
     t = np.arange(t0, T + 1, REC_S)
     a, b = lk["a"], lk["b"]
+    live = np.ones((len(t), M), bool)
+    for x in (a, b):                                                            # before a vehicle's deploy time its position is the deploy point
+        if x in out:
+            live &= (t >= out[x]["t"][0])[:, None]
     invalid_kind: str | None = None
     if lk["kind"] == "iridium":
         n = len(t)
-        rng = np.random.default_rng(sampling.member_seed(seed, members[0], f"iridium/{lk['id']}"))
+        stream = f"iridium/{lk['id']}"
+        if used is not None:
+            used[stream] = sampling.member_seed(seed, members[0], stream)
+        rng = np.random.default_rng(sampling.member_seed(seed, members[0], stream))
         ok = np.stack([comms.iridium_session(340, rng, M)[0] for _ in range(n)])
-        need = np.ones((n, M), bool)
+        need = live.copy()
         method = "Iridium SBD availability/latency model (no range dependence)"
         margin = np.full((n, M), np.nan)
         valid = np.zeros((n, M), bool)
@@ -390,17 +443,16 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         A, B = _pos(a, out, mission, t), _pos(b, out, mission, t)
         d = np.maximum(_dist(A, B), 1.0)
         if lk["when"] == "surfacing":
-            need = out[a]["surfaced"].astype(bool) if a in out else out[b]["surfaced"].astype(bool)
-            need = np.stack([np.interp(t, out[a if a in out else b]["t"], need[:, m].astype(float)) > 0.5 for m in range(M)], 1)
+            g = a if out.get(a, {}).get("class") == "glider" else b
+            need = np.stack([np.interp(t, out[g]["t"], out[g]["surfaced"][:, m].astype(float)) > 0.5 for m in range(M)], 1)
         elif lk["when"] == "uas_airborne":
             u = a if out.get(a, {}).get("class") == "uas" else b
             need = np.stack([np.interp(t, out[u]["t"], out[u]["airborne"][:, m].astype(float)) > 0.5 for m in range(M)], 1)
         else:
             need = np.ones((len(t), M), bool)
-        need &= np.isfinite(d)                                                  # an unknown position is not a moment the link was required
+        need &= live & np.isfinite(d)                                           # an unknown position is not a moment the link was required
         lonA, latA = A[0], A[1]
         tt = np.broadcast_to(t[:, None], lonA.shape)                         # each member at its own position
-        wind = np.hypot(*np.moveaxis(np.asarray(env.env.u10(lonA, latA, tt), float), -1, 0))
         if lk["kind"] == "rf":
             hs = np.asarray(env.waves(lonA.T, latA.T, tt.T)["Hs"].value, float).T     # the member's own Hs perturbation (members first)
             margin = comms.rf_margin(d, A[2], B[2], np.nan_to_num(hs), lk["radio"])
@@ -411,14 +463,16 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
             reg = comms._yaml("modems.yaml")["modems"]                        # "<modem>_<band>" as named in modems.yaml
             modem, band = next(((k, bd) for k, v in reg.items() for bd in v["bands"] if lk["modem"].lower() == f"{k}_{bd}".lower()), (lk["modem"], "MF"))
             dz = np.abs(A[3] - B[3])
+            wind = np.hypot(*np.moveaxis(np.asarray(env.wind(lonA.T, latA.T, 10.0, tt.T).value, float), -1, 0)).T          # the member's own wind, as for Hs
             margin, method = _acoustic(modem, band, d, dz, wind, need, A, B, t, env)
             valid = np.hypot(d, dz) <= comms.valid_range_m(modem, band)
             margin_kind, invalid_kind = "acoustic link margin, dB", "out_of_range"
         ok = margin > 0
+    dist = np.full(M, np.nan) if lk["kind"] == "iridium" else np.array([np.median(d[need[:, m], m]) if need[:, m].any() else np.nan for m in range(M)])
     frac = np.where(need.sum(0) > 0, (ok & need).sum(0) / np.maximum(need.sum(0), 1), 1.0)
     n_invalid = (need & ~valid).sum(0) if invalid_kind else np.zeros(M, int)
     return dict(frac=frac, success=frac >= lk["required_fraction"], margin_db=np.where(need & valid, margin, np.nan), n_invalid=n_invalid,
-                need_count=need.sum(0), method=method, margin_kind=margin_kind, invalid_kind=invalid_kind, t=t)
+                need_count=need.sum(0), dist_m=dist, method=method, margin_kind=margin_kind, invalid_kind=invalid_kind, t=t)
 
 
 def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
@@ -431,26 +485,33 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         r0 = batches[0]["vehicles"][vid]
         r: dict[str, Any] = {k: cat([b["vehicles"][vid][k] for b in batches]) for k in ("lon", "lat", "depth")}
         r["t"] = r0["t"]
-        for k in ("alt", "airborne", "surfaced"):
+        for k in ("alt", "airborne", "surfaced", "sog_ms", "u10_ms", "wind_anem_ms"):
             if k in r0:
                 r[k] = cat([b["vehicles"][vid][k] for b in batches])
         r["fail"] = {f: np.concatenate([b["vehicles"][vid]["fail"][f] for b in batches]) for f in r0["fail"]}
         r["first"] = {f: np.concatenate([b["vehicles"][vid]["first"][f] for b in batches]) for f in r0["first"]}
         r["class"], r["antenna_m"] = r0["class"], r0["antenna_m"]
-        for k in ("scrubbed", "sorties"):
-            if k in r0:
-                r[k] = r0[k] if k == "sorties" else np.concatenate([b["vehicles"][vid][k] for b in batches])
+        if "scrubbed" in r0:
+            r["scrubbed"] = np.concatenate([b["vehicles"][vid]["scrubbed"] for b in batches])
+        if "sorties" in r0:                                   # sortie i of every batch is the same launch: its per-member arrays join along the members
+            r["sorties"] = [dict(t_launch=so["t_launch"],
+                                 **{k: np.concatenate([b["vehicles"][vid]["sorties"][i][k] for b in batches]) for k in so if k != "t_launch"})
+                            for i, so in enumerate(r0["sorties"])]
+        if r0.get("wind3d") is not None:
+            r["wind3d"] = tuple(int(sum(b["vehicles"][vid]["wind3d"][i] for b in batches)) for i in (0, 1))
         out["vehicles"][vid] = r
     for lid in batches[0]["links"]:
         l0 = batches[0]["links"][lid]
         out["links"][lid] = dict(frac=cat([b["links"][lid]["frac"] for b in batches]), success=cat([b["links"][lid]["success"] for b in batches]),
                                  margin_db=cat([b["links"][lid]["margin_db"] for b in batches]), method=l0["method"], t=l0["t"])
-        for k in ("need_count", "n_invalid"):
+        for k in ("need_count", "n_invalid", "dist_m"):
             if k in l0:
                 out["links"][lid][k] = cat([b["links"][lid][k] for b in batches])
         for k in ("margin_kind", "invalid_kind"):
             if k in l0:
                 out["links"][lid][k] = l0[k]
+    if "seeds" in batches[0]:
+        out["seeds"] = {vid: {st: [b["seeds"][vid][st] for b in batches] for st in sd} for vid, sd in batches[0]["seeds"].items()}
     return out
 
 
@@ -468,13 +529,25 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         v = intervals.verdict(int(f.sum()), n)
         modes = {k: int(np.sum(x)) for k, x in r["fail"].items()}
         dom = max(modes, key=lambda k: modes[k]) if any(modes.values()) else None
-        first = r["first"][dom] if dom else np.empty(0)
-        t_first = float(np.nanmin(first)) if dom and np.any(np.isfinite(first)) else None
-        t_med = float(np.nanmedian(first)) if dom and np.any(np.isfinite(first)) else None
+        # each failed member's earliest failure, in any mode
+        firsts = [np.where(np.asarray(x, bool), np.asarray(r["first"][k], float), np.nan) for k, x in r["fail"].items()]
+        first = np.fmin.reduce(firsts)[f] if dom else np.empty(0)
+        t_first = float(np.nanmin(first)) if np.any(np.isfinite(first)) else None
+        t_med = float(np.nanmedian(first)) if np.any(np.isfinite(first)) else None
         sens: tuple[str | None, dict[str, float], float | None] = (sensitivity.dominant(names, U, f.astype(float)) if 0 < f.sum() < n and n >= 16
                                                                   else (None, {}, None))
         out["vehicles"][vid] = dict(cls=r["class"], n=n, k_fail=int(f.sum()), verdict=v, modes=modes, dominant=dom,
                                     first_fail_t=t_first, median_fail_t=t_med, sensitivity=dict(param=sens[0], S1=sens[1], noise_floor=sens[2]))
+        if "sog_ms" in r:
+            out["vehicles"][vid]["speed"] = _speed(r, next(v["platform"] for v in mission["vehicles"] if v["id"] == vid))
+        if r.get("sorties") and "sat_s" in r["sorties"][0]:
+            sat, ratio = (np.concatenate([np.asarray(so[k], float)[~np.asarray(so["scrubbed"], bool)] for so in r["sorties"]])
+                          for k in ("sat_s", "demand_ratio_max"))
+            if sat.size:
+                out["vehicles"][vid]["authority"] = dict(clamp_s_median=float(np.median(sat)), clamp_s_max=float(sat.max()),
+                                                         demand_ratio_median=float(np.median(ratio)), demand_ratio_max=float(ratio.max()))
+        if r.get("wind3d") and r["wind3d"][1]:
+            out["vehicles"][vid]["wind3d_fraction"] = r["wind3d"][0] / r["wind3d"][1]      # the share of the sorties' wind points the 3-D fields answered
     for lid, r in res["links"].items():
         f = ~np.asarray(r["success"], bool)
         n = len(f)
@@ -486,22 +559,45 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
                                  margin_db_median=float(np.nanmedian(r["margin_db"])) if np.any(np.isfinite(r["margin_db"])) else None,
                                  margin_kind=r.get("margin_kind"), frac_beyond_horizon=bad if kind == "beyond_horizon" else None,
                                  frac_out_of_range=bad if kind == "out_of_range" else None,
+                                 distance_km_median=float(np.nanmedian(r["dist_m"])) / 1e3 if np.any(np.isfinite(r.get("dist_m", np.nan))) else None,
                                  sensitivity=dict(param=sens[0], S1=sens[1], noise_floor=sens[2]))
     return out
+
+
+def _requantile(new: dict[str, Any], old: dict[str, Any], x: NDArray[Any]) -> NDArray[Any]:
+    """Values of marginal `new` at the quantiles that `x` has under marginal `old`."""
+    return np.asarray(sampling.marginal(new).ppf(sampling.marginal(old).cdf(np.asarray(x, float))), float)
+
+
+def _speed(r: dict[str, Any], platform: str) -> dict[str, Any]:
+    """USV speed against wind per member: mean speed over ground (path length / time since deploy), the mean wind along the track at 10 m and at
+    the anemometer height, and the ratios; `calibration_ratio` is Chiodi et al.'s mean SOG / wind (at the anemometer height) the VPP bias is
+    calibrated to, in a scenario without current, in uniform wind, sailing to a station (usv.mean_sog), which the mission is not."""
+    sog, u10, wa = (np.asarray(r[k], float) for k in ("sog_ms", "u10_ms", "wind_anem_ms"))
+    P = usv.load_platform(platform)
+    return dict(sog_ms=sog.tolist(), u10_ms=u10.tolist(), wind_anem_ms=wa.tolist(), ratio=(sog / u10).tolist(), ratio_anem=(sog / wa).tolist(),
+                sog_ms_median=float(np.median(sog)), u10_ms_median=float(np.median(u10)), ratio_median=float(np.median(sog / u10)),
+                ratio_anem_median=float(np.median(sog / wa)), calibration_ratio=float(P["chiodi_mean_sog_ms"] / P["chiodi_mean_wind_ms"]))
 
 
 BRIEF_PRIOR = "usv_vpp_bias_brief"
 
 
 def sensitivity_case(mission: dict[str, Any], env: Any, prior: str = BRIEF_PRIOR, n: int = 32, fitted: dict[str, Any] | None = None,
-                     scales: dict[str, Any] | None = None) -> dict[str, list[dict[str, Any]]]:
+                     scales: dict[str, Any] | None = None, X: dict[str, NDArray[Any]] | None = None) -> dict[str, list[dict[str, Any]]]:
     """The USV ensemble again with `usv_vpp_bias` drawn from perturbations.yaml's `prior` instead (default: the brief's literal -30 to -35 %,
-    which `priors_for` never samples). Same seed, members 0..n-1 as one batch, every other input drawn from the run's own hypercube columns,
-    the USV vehicles only; -> {vehicle id: [dict(case, k_fail, n, verdict, note)]}, the shape of report.SENSITIVITY."""
+    which `priors_for` never samples). Same seed, members 0..n-1 as one batch, the USV vehicles only; -> {vehicle id: [dict(case, k_fail, n,
+    verdict, note)]}, the shape of report.SENSITIVITY. With `X` (the run's own hypercube, `res["X"]`; n is then its length) the case is paired:
+    every column stays as the run drew it, and only `usv_vpp_bias` is replaced, by the new prior's value at the same quantile, so the members
+    that flip are the effect of the prior alone. Without it the case draws its own n-point hypercube (a different sample from the run's)."""
     pri, marg = priors_for(mission, fitted)
-    marg["usv_vpp_bias"] = sampling.to_marginals(pri, [prior])[prior]
+    new = sampling.to_marginals(pri, [prior])[prior]
     usvs = [v for v in mission["vehicles"] if _classes(mission)[v["id"]] == "usv"]
-    b = run_batch(dict(mission, vehicles=usvs, links=[]), env, list(range(n)), int(mission["seed"]), pri, marg, scales)
+    if X is not None:
+        n = len(X["usv_vpp_bias"])
+        X = dict({k: np.asarray(x, float) for k, x in X.items() if k in marg}, usv_vpp_bias=_requantile(new, marg["usv_vpp_bias"], X["usv_vpp_bias"]))
+    marg["usv_vpp_bias"] = new
+    b = run_batch(dict(mission, vehicles=usvs, links=[]), env, list(range(n)), int(mission["seed"]), pri, marg, scales, X)
     res = merge([b])
     e = pri[prior]
     case = f"usv_vpp_bias uniform [{e['lo']}, {e['hi']}] ({prior})"

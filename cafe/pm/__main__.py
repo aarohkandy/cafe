@@ -1,11 +1,12 @@
 """python -m cafe.pm <command>  (bin/run_premission is `python -m cafe.pm run`)
 
-    run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--out DIR] [--fresh] [--seed S] [--emulator-table FILE]   the whole pipeline, resumable
-    fetch     --mission M                    ingest only (orca + ocean into the cache)
+    run       --mission M --budget {ci,quick,4h,overnight} --gpus N [--gpu-mem-gb G] [--out DIR] [--fresh] [--seed S] [--emulator-table FILE]
+                                             the whole pipeline, resumable
+    fetch     --mission M                    ingest only (orca + ocean into the cache); plans nothing, so it takes no --budget and works for any mission
     ingest-ocean --mission M --path DIR [--temperature-kind {in_situ,potential}] [--grid STEM]
                                              the lab's HYCOM (netCDF or archv .a/.b) -> the mission's ocean store (environment.ocean.path)
     validate  --mission M                    schema and cross-checks, nothing run
-    plan      --mission M --budget B --gpus N   what the budget buys on this machine
+    plan      --mission M --budget B --gpus N [--gpu-mem-gb G]   what the budget buys on this machine
     whatif    --mission M [--run DIR] [--budget B] (--shift 48h | --move "1deg W" | --drop ID)... [--vehicle ID]...
                                              what if: emulator-first, Stage 1 at the budget (default quick) when it cannot answer
     hangar    --platform NAME                provenance check and the Stage-1 coefficients the platform implies
@@ -25,6 +26,17 @@ from . import acceptance, audit, budget, pipeline, report, stage1, whatif
 from .config import ConfigError, load_mission
 
 
+def _seed(text: str) -> int:
+    """argparse type for --seed: a non-negative integer (numpy refuses a negative seed with a traceback)."""
+    try:
+        n = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an integer") from None
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"{n} is negative: the seed must be 0 or more")
+    return n
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m cafe.pm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -34,11 +46,13 @@ def main(argv: list[str] | None = None) -> int:
         if name in ("run", "plan"):
             p.add_argument("--budget", default="quick", choices=list(budget.BUDGET_S))
             p.add_argument("--gpus", type=int, default=0)
+            p.add_argument("--gpu-mem-gb", type=float, default=None, help="device memory the planner sizes nests against (refuses over 85 %%); "
+                           "default: nvidia-smi when --gpus > 0")
         if name in ("run", "fetch"):
             p.add_argument("--out", default=None, help="run directory (default runs/<mission>/<budget>)")
             p.add_argument("--fresh", action="store_true", help="ignore existing checkpoints")
         if name == "run":
-            p.add_argument("--seed", type=int, default=None, help="use this seed, not the mission's (kept in plan.json and mission.yaml; in the resume hash)")
+            p.add_argument("--seed", type=_seed, default=None, help="use this seed, not the mission's (kept in plan.json and mission.yaml; in the resume hash)")
             p.add_argument("--emulator-table", default=None, metavar="FILE",
                            help="the emulator's training table (default $CAFE_EMULATOR_TABLE, else $CAFE_DATA/emulator/train.parquet). The run trains on a "
                                 "copy of it taken when the emulator stage starts (named in that stage's ledger with its sha256) and appends its own rows "
@@ -104,21 +118,27 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{a.mission}: valid ({len(m['vehicles'])} vehicles, {len(m['links'])} links)")
         elif a.cmd == "plan":
             m = load_mission(a.mission)
-            print(budget.describe(budget.plan(a.budget, a.gpus, m, vehicle_classes=stage1._classes(m))))
+            print(budget.describe(budget.plan(a.budget, a.gpus, m, gpu_mem_gb=_gpu_mem(a), vehicle_classes=stage1._classes(m))))
         elif a.cmd in ("run", "fetch"):
             m = load_mission(a.mission)
             bud = getattr(a, "budget", "quick")
             out = pathlib.Path(a.out or f"runs/{m['name']}/{bud}")
             ctx = pipeline.run(a.mission, bud, getattr(a, "gpus", 0), out, resume=not a.fresh, stop_after="ingest" if a.cmd == "fetch" else None,
-                               seed=getattr(a, "seed", None), emulator_table=getattr(a, "emulator_table", None))
+                               seed=getattr(a, "seed", None), emulator_table=getattr(a, "emulator_table", None), gpu_mem_gb=_gpu_mem(a))
             if a.cmd == "run":
                 print(f"report: {ctx.run_dir / 'report' / 'index.html'}")
         else:
             return _report(pathlib.Path(a.run), a.open)
-    except ConfigError as e:
+    except (ConfigError, budget.PlanError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
     return 0
+
+
+def _gpu_mem(a: argparse.Namespace) -> float | None:
+    """--gpu-mem-gb, else what nvidia-smi says when GPUs are asked for, else None (no memory to guard)."""
+    given = getattr(a, "gpu_mem_gb", None)
+    return given if given is not None else pipeline.gpu_memory_gb() if getattr(a, "gpus", 0) > 0 else None
 
 
 def _report(run: pathlib.Path, open_it: bool) -> int:

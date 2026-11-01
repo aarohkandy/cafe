@@ -116,7 +116,7 @@ def dynamics_receipts() -> None:
     dw = dyn.Dynamics(vw, 1)
     st = dyn.State(1, len(vw.actuators), p=[0, 0, hs["draft"] - kg], q=dyn.euler_to_quat(np.radians(4), 0, 0))
     roll, t = [], []
-    for k in range(int(12 / 0.002)):
+    for _ in range(int(12 / 0.002)):
         dw.step(st, np.zeros((1, len(vw.actuators))), _still(1), 0.002, CALM)
         roll.append(dyn.quat_to_euler(st.q)[0, 0]); t.append(st.t)
     roll = np.array(roll); t = np.array(t)
@@ -400,7 +400,8 @@ def fea_receipts() -> None:
     # net moment), balanced by inertia relief (translation + rotation)
     fb = fea.solve(tube, "shell", "al6061", thickness=t, pressure=None, point_loads=[((1.5, 0.0, R), (0.0, 0.0, 1000.0), 0.02)],
                    steps=("static",), h=0.03)
-    # (no supports at all: the mean rigid motion is held by equations, so the stress must be the free-free beam's): peak moment 4PL/27 at L/6 past the centre, toward the load
+    # (no supports at all: the mean rigid motion is held by equations, so the stress must be
+    # the free-free beam's): peak moment 4PL/27 at L/6 past the centre, toward the load
     ff = fb["field"]
     band = np.abs(ff["nodes"][:, 0] - 0.5) < 0.04
     receipt("FEA", "Free-free tube, end load: peak bending stress at L/6", ff["vm"][band].max() / 1e6,
@@ -441,7 +442,7 @@ def fleet_receipts() -> None:
             n = len(lat)
             return dict(current_ne=np.tile([c, 0.0], (n, 1)), wind_ne=np.tile([c, 0.0], (n, 1)), land=np.zeros(n, bool))
     veh = NS(kind="usv", battery_wh=1e9, hotel_w=1.0, actuators=[])
-    real_cruise, real_fam, real_end = ctrl.cruise_speed, ctrl.family, reach.endurance_h
+    real_cruise, real_end = ctrl.cruise_speed, reach.endurance_h
     ctrl.cruise_speed = lambda v: V; reach.endurance_h = lambda *a, **k: 1e9
     try:
         r = reach.reach(veh, FlatEnv(), 10.0, -95.0, hours=12, n=121)

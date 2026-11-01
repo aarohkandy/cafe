@@ -511,3 +511,25 @@ def test_cli_receipts_passes_its_flags_and_returns_the_exit_code(monkeypatch, ca
     assert cli.main(["receipts"]) == 7 and got[-1] == (False, None, None, None)
     assert cli.main(["receipts", "--slow", "--only", "a,b", "--broken", "x.yaml", "--json", "o.json"]) == 7
     assert got[-1] == (True, ["a", "b"], "x.yaml", "o.json")
+
+
+# ---- review round 2, M-4: the table records which code made it
+
+def test_a_receipts_run_writes_a_meta_file_with_the_code_digest_next_to_a_plain_list_table(tmp_path, monkeypatch):
+    from cafe.pm import pipeline, receipts
+    monkeypatch.setattr(receipts, "jobs", jobs_of(("pm.fake", passing)))
+    out = tmp_path / "t" / "receipts.json"
+    rows, rc = receipts.run(out=out, log=lambda _: None)
+    meta = json.loads((tmp_path / "t" / "receipts.meta.json").read_text())
+    assert isinstance(json.loads(out.read_text()), list) and rows and rc == 0  # the table is still a plain list (cafe/app.py reads it as one)
+    assert meta["code_digest"] == pipeline.code_digest() and len(meta["git_sha"]) >= 4 and meta["made_at"].endswith("+00:00")
+    assert meta["slow"] is False and meta["only"] is None
+    receipts.run(slow=True, only=["pm.fake"], out=tmp_path / "t" / "r2.json", log=lambda _: None)
+    assert json.loads((tmp_path / "t" / "r2.meta.json").read_text())["only"] == ["pm.fake"]
+    assert receipts.meta_path(pathlib.Path("runs/receipts_broken.json")) == pathlib.Path("runs/receipts_broken.meta.json")
+
+
+def test_the_meta_digest_changes_when_the_code_does(tmp_path, monkeypatch):
+    from cafe.pm import pipeline, receipts
+    monkeypatch.setattr(pipeline, "code_digest", lambda: "d" * 64)
+    assert json.loads(receipts.write_meta(tmp_path / "x.json").read_text())["code_digest"] == "d" * 64

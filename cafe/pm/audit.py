@@ -26,7 +26,12 @@ from .env.remote import sha256
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STAGES = ["ingest", "hangar", "stage1", "windows", "stage3", "refit", "stage1b", "emulator", "report"]
 BANNED = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError)\b|\bplaceholder\b|pytest\.skip|mark\.skip|skipif|xfail")
-SCAN = ["cafe/pm", "tests", "bench", "platforms", "missions", "config", "docs/RUNBOOK.md", "Makefile"]
+# The older `cafe/` modules the pipeline imports, directly (cfd, fea, emulator, reach, receipts, planner) or through them. Their banned-token scan is
+# cheap and covers all of them; ruff covers the five that pass it (`planner` has 14 loop-closure findings in numerical code that this round does not
+# touch). mypy --strict and the coverage gates are not asked of them: they are pre-mission app code, run through the pipeline and their own receipts.
+IMPORTED = [f"cafe/{m}.py" for m in ("cfd", "ctrl", "dyn", "emulator", "env", "fea", "geom", "hangar", "mission", "ocean", "planner", "reach", "receipts",
+                                     "shapes", "vehicle")]
+SCAN = ["cafe/pm", *IMPORTED, "tests", "bench", "platforms", "missions", "config", "docs/RUNBOOK.md", "Makefile"]
 EXEMPT = ["tests/fixtures/broken/", "cafe/pm/audit.py", "tests/test_audit.py", "docs/BRIEF.md", "review/"]
 GATES = {"cafe/pm": 90.0, "cafe/pm/physics": 100.0, "cafe/pm/stats": 100.0, "cafe/pm/env": 100.0}
 MUTATED = ["cafe/pm/physics", "cafe/pm/stats"]

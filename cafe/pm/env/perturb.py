@@ -4,7 +4,11 @@ Member m's draws come from the Stage-1 Latin hypercube (`stats.sampling.lhs`), k
 vehicle: every vehicle in member m flies through the same perturbed wind, current and waves (common random numbers),
 so inter-vehicle range checks are consistent.
 
-- Wind: speed + wind_speed_bias[m] (floored at 0), direction rotated by wind_direction_bias[m].
+- Wind: speed + wind_speed_bias[m] (floored at 0), direction rotated by wind_direction_bias[m]: one number per member, held for the whole
+  window. When the priors also hold `wind_speed_noise` / `wind_direction_noise` (the TAO fit writes them: sd, e-folding time `tau_h`), each
+  member adds a short-lived error on top: a stationary AR(1) series per member on an hourly grid over the window (the grid the misfit was
+  measured on; the value of the nearest hour is held, so the variance is the fitted sd at every time), the same at every place and height,
+  drawn from `member_rng(seed, m, "wind_speed_noise" | "wind_direction_noise")`. Without those keys nothing changes.
 - Current: speed x scale, rotated by a direction bias. Half of each prior's variance is member-wide (the LHS draw,
   so Sobol indices see it); half is a smooth random field with the configured correlation length (100 km), built
   from random Fourier features (Rahimi & Recht 2007) with a Gaussian covariance, seeded per member. The total
@@ -19,7 +23,8 @@ so inter-vehicle range checks are consistent.
   every vehicle in a member sees the same increments, and a member has the same ones in any batch); the increments are drawn
   once for the whole window and read by step number round((t - t0) / dt), so the layer holds no state a vehicle could
   advance out of order and repeated calls at one time give one answer. The vehicle's own step must be `dt`.
-- Waves: Hs x hs_scale[m], Tp + tp_bias[m] (floored at 1 s). Stokes drift scales with Hs^2 (it is quadratic in amplitude).
+- Waves: Hs x hs_scale[m], Tp + tp_bias[m] (floored at 1 s). Surface Stokes drift of a fixed spectrum shape goes as Hs^2 / Tp^3
+  (u_s(0) = 16 pi^3 / g integral f^3 E df, E ~ Hs^2 f_p^-1 F(f / f_p)), so it is scaled by hs_scale^2 and by (Tp / member Tp)^3.
 Everything else (density, sound speed, depth, SST, air) passes through unchanged.
 
 Arrays passed to the methods must have a leading member axis of length M (or broadcast to it).
@@ -31,6 +36,7 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
+from scipy.signal import lfilter
 
 from .. import Tagged
 from ..stats.sampling import member_rng
@@ -93,11 +99,36 @@ class OceanSDE:
         return subgrid.ocean_sde_step(np.zeros(lat.shape + (2,)), K, gradK, self.dt, None, xi=xi)
 
 
+WIND_NOISE_STEP_S = 3600.0            # the grid of the short-lived wind error: hourly, like the TAO misfit it is fitted to
+
+
+class WindNoise:
+    """Per-member stationary AR(1) series with sd `sd` and e-folding time `tau_h` [h] on an hourly grid over [t0, t1] (module docstring)."""
+
+    def __init__(self, base_seed: Any, members: Iterable[Any], stream: str, spec: dict[str, Any], t0: float, t1: float):
+        self.t0, self.n = float(t0), int(np.ceil((float(t1) - float(t0)) / WIND_NOISE_STEP_S)) + 1
+        sd, tau = float(spec["value"]), float(spec.get("tau_h", 0.0))
+        rho = float(np.exp(-WIND_NOISE_STEP_S / 3600.0 / tau)) if tau > 0 else 0.0
+        z = np.stack([member_rng(base_seed, int(m), stream).standard_normal(self.n) for m in members])           # (M, n)
+        x0 = sd * z[:, 0]
+        # y[k] = rho y[k-1] + sd sqrt(1 - rho^2) z[k], y[0] = sd z[0]: one filter call over all members (axis 1), seeded with rho y[0]
+        rest = lfilter([sd * np.sqrt(1.0 - rho ** 2)], [1.0, -rho], z[:, 1:], axis=1, zi=(rho * x0)[:, None])[0]
+        self.x = np.concatenate([x0[:, None], rest], 1)
+
+    def __call__(self, t: ArrayLike, shape: tuple[int, ...]) -> NDArray[np.float64]:
+        """(M, ...) error at time t (scalar or broadcastable to `shape`, leading axis = members): the nearest hour's value, held at the ends."""
+        k = np.clip(np.rint((np.asarray(t, float) - self.t0) / WIND_NOISE_STEP_S), 0, self.n - 1).astype(int)
+        k = np.broadcast_to(k, shape)
+        out: NDArray[np.float64] = self.x[np.arange(len(self.x)).reshape((-1,) + (1,) * (len(shape) - 1)), k]
+        return out
+
+
 class PerturbedEnv:
     def __init__(self, env: Environment, X: dict[str, ArrayLike], members: Any, base_seed: Any, priors: dict[str, Any],
-                 sde: dict[str, float] | None = None):
-        """X: {param: (M,) array} from the LHS; priors: config/perturbations.yaml as loaded by stats.sampling; sde: None (off) or
-        dict(t0, t1, dt) [s], the window and the vehicles' step, for the ocean SDE."""
+                 sde: dict[str, float] | None = None, window: tuple[float, float] | None = None):
+        """X: {param: (M,) array} from the LHS; priors: config/perturbations.yaml as loaded by stats.sampling (plus the fitted
+        `wind_speed_noise` / `wind_direction_noise` when the TAO fit wrote them: the short-lived wind error then runs over `window` = (t0, t1)
+        [s], which it needs); sde: None (off) or dict(t0, t1, dt) [s], the window and the vehicles' step, for the ocean SDE."""
         self.env, self.X, self.bounds = env, {k: np.asarray(v, float) for k, v in X.items()}, env.bounds
         self.M = len(members)
         ell = float(priors["current_correlation_length"]["mean"])
@@ -106,6 +137,11 @@ class PerturbedEnv:
         self.fs = Field(base_seed, members, "current_speed_field", ell)
         self.fd = Field(base_seed, members, "current_direction_field", ell)
         self.sde = None if sde is None else OceanSDE(base_seed, members, **sde)
+        win = window or ((sde["t0"], sde["t1"]) if sde else None)
+        keys = [k for k in ("wind_speed_noise", "wind_direction_noise") if k in priors]
+        if keys and win is None:
+            raise ValueError("the priors hold a short-lived wind error: pass window=(t0, t1) [s]")
+        self.wn = {k: WindNoise(base_seed, members, k, priors[k], *win) for k in keys} if win else {}
 
     def _m(self, k: str, shape: tuple[int, ...]) -> Any:
         v = self.X.get(k)
@@ -119,6 +155,10 @@ class PerturbedEnv:
         sp = np.hypot(v[..., 0], v[..., 1])
         b = self._m("wind_speed_bias", sp.shape)
         d = self._m("wind_direction_bias", sp.shape)
+        if "wind_speed_noise" in self.wn:
+            b = self.wn["wind_speed_noise"](t, sp.shape) + (0.0 if b is None else b)
+        if "wind_direction_noise" in self.wn:
+            d = self.wn["wind_direction_noise"](t, sp.shape) + (0.0 if d is None else d)
         new = np.maximum(sp + (0.0 if b is None else b), 0.0)
         v = v * np.where(sp > 1e-9, new / np.where(sp > 1e-9, sp, 1.0), 0.0)[..., None]
         if d is not None:
@@ -154,8 +194,12 @@ class PerturbedEnv:
                 w[k] = w[k]._replace(value=w[k].value * hs, source=w[k].source + " x member hs_scale")
             w["stokes0"] = w["stokes0"]._replace(value=w["stokes0"].value * (hs ** 2)[..., None])
         if tp is not None:
+            tp0 = w["Tp"].value
             for k in ("Tp", "Tm"):
                 w[k] = w[k]._replace(value=np.maximum(w[k].value + tp, 1.0), source=w[k].source + " + member tp_bias")
+            f = (tp0 / w["Tp"].value) ** 3                                                     # Stokes drift ~ Hs^2 / Tp^3
+            w["stokes0"] = w["stokes0"]._replace(value=w["stokes0"].value * np.where(np.isfinite(f), f, 1.0)[..., None],
+                                                 source=w["stokes0"].source + " x member (Tp / Tp_member)^3")
         return w
 
     def __getattr__(self, name: str) -> Any:                             # density, sound_speed, depth, sst, air, inside, ...

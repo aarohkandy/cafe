@@ -1,9 +1,12 @@
 """`python -m cafe.pm acceptance --mission M --gpus N --out DIR [--golden FILE] [--update-golden] [--skip-overnight]`: BRIEF 5.3 and 0.1.
 
 Every run is a fresh `python -m cafe.pm run` in its own process and its own run directory under DIR (`quick`, `quick_same`, `quick_seed`,
-`overnight`, and `4h` when N >= 1), timed by the wall clock against `budget.BUDGET_S`: quick 20 min, overnight 10 h, 4h 4 h. The checks:
+`overnight`, and `4h` when N >= 1), timed by the wall clock against `budget.BUDGET_S`: quick 20 min, overnight 10 h, 4h 4 h. The limit counts the compute
+stages with a warm cache: a `python -m cafe.pm fetch` of the same mission runs first (a few seconds when the cache is warm; a cold network fetch is the
+separate step of RUNBOOK 4, whose duration depends on the lab's link, not on `--budget`) and only the `run` after it is timed. The checks:
 
-    run_<name>        the run exits 0, writes report/report.json, and finishes within its budget (a run is killed at twice the limit)
+    run_<name>        the fetch and the run exit 0, the run writes report/report.json and finishes within its budget (a run is killed at twice the
+                      limit); the row shows the run's wall, the ingest wall and whether the fetch was cold
     cpu_fallback      overnight on CPU: plan.json, report.json and index.html all say the LES windows are the CPU fallback (4h: they say the GPU path)
     golden_diff       the quick run against the golden file (default tests/golden/tepex_c_demo_quick.json), see `summary`/`compare`
     same_seed         a second quick run with the same seed gives an identical report.json once the run-specific fields (see `normalize`) and
@@ -43,7 +46,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from . import budget, config, pipeline, receipts
-from .ledger import git_sha
+from .ledger import git_dirty, git_sha
 from .stats import intervals, sequential
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -58,7 +61,7 @@ EPS = 1e-9
 FAMILY_ALPHA = 0.05                                                                                    # family-wise error of the P(fail) comparisons
 
 
-def _execute(argv: list[str], env: dict[str, str], log: pathlib.Path, timeout: float) -> int:
+def _execute(argv: list[str], env: dict[str, str], log: pathlib.Path, timeout: float | None) -> int:
     """`python -m cafe.pm *argv` from the repo root, output to `log`; -> exit code (124 when killed at `timeout`, as timeout(1) does)."""
     with open(log, "w") as f:
         try:
@@ -71,7 +74,8 @@ def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.P
             table: pathlib.Path | None = None) -> dict[str, Any]:
     """A fresh run in out/name with its own emulator table out/name/emulator_table/train.parquet: a copy of `table` (the pristine shared table),
     or none yet when `table` is None, so no run sees another's rows and none appends to the shared table.
-    -> {name, budget, gpus, seed, dir, log, rc, wall_s, limit_s, report (report.json or None)}."""
+    `fetch` runs first, into out/<name>_fetch; only `run` is timed. -> {name, mission, budget, gpus, seed, dir, log, rc, wall_s, limit_s, report (report.json
+    or None), fetch_rc, fetch_wall_s, cold_fetch (the fetch's ingest ledger says it downloaded), ingest_s (the run's own ingest stage)}."""
     d = out / name
     shutil.rmtree(d, ignore_errors=True)
     out.mkdir(parents=True, exist_ok=True)
@@ -83,12 +87,28 @@ def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.P
         shutil.copyfile(table, own)
     argv += ["--emulator-table", str(own.resolve())]
     limit = budget.BUDGET_S[budget_name]
+    fd = out / f"{name}_fetch"
+    shutil.rmtree(fd, ignore_errors=True)
+    t = time.monotonic()
+    frc = _execute(["fetch", "--mission", str(pathlib.Path(mission).resolve()), "--out", str(fd.resolve()), "--fresh"], dict(os.environ),
+                   out / f"{name}_fetch.log", None)
+    fetch_wall = time.monotonic() - t
+    base = dict(name=name, mission=mission, budget=budget_name, gpus=gpus, seed=seed, dir=d, limit_s=limit, fetch_rc=frc, fetch_wall_s=fetch_wall,
+                cold_fetch=any(str(n).startswith("cold fetch") for n in (_ledger(fd) or {}).get("notes", [])))
+    if frc != 0:                                                                                       # nothing to time: the run would start from a cold cache
+        return dict(base, log=out / f"{name}_fetch.log", rc=frc, wall_s=0.0, ingest_s=None, report=None)
     t = time.monotonic()
     rc = _execute(argv, dict(os.environ), out / f"{name}.log", KILL_AT * limit)
     wall = time.monotonic() - t
     rj = d / "report" / "report.json"
-    return dict(name=name, budget=budget_name, gpus=gpus, seed=seed, dir=d, log=out / f"{name}.log", rc=rc, wall_s=wall, limit_s=limit,
+    return dict(base, log=out / f"{name}.log", rc=rc, wall_s=wall, ingest_s=(_ledger(d) or {}).get("wall_s"),
                 report=json.loads(rj.read_text()) if rj.is_file() else None)
+
+
+def _ledger(run: pathlib.Path) -> dict[str, Any] | None:
+    """The ingest ledger of a run directory, or None."""
+    p = run / "checkpoints" / "ingest" / "ledger.json"
+    return json.loads(p.read_text()) if p.is_file() else None
 
 
 def _row(name: str, ok: bool, detail: str, **values: Any) -> dict[str, Any]:
@@ -98,15 +118,21 @@ def _row(name: str, ok: bool, detail: str, **values: Any) -> dict[str, Any]:
 def check_run(r: dict[str, Any]) -> dict[str, Any]:
     """Exit 0, a report, and the wall-clock limit."""
     why = []
-    if r["rc"] != 0:
+    if r.get("fetch_rc"):
+        why.append(f"fetch exit code {r['fetch_rc']}: the run needs a warm cache, so run `python -m cafe.pm fetch --mission {r['mission']}` first "
+                   f"(RUNBOOK 4; with CAFE_OFFLINE=1 a cold cache cannot be filled), see {r['log']}")
+    elif r["rc"] != 0:
         why.append(f"exit code {r['rc']}" + (" (killed at the time limit)" if r["rc"] == 124 else "") + f", see {r['log']}")
     elif r["report"] is None:
         why.append(f"no report/report.json in {r['dir']}")
     if r["wall_s"] > r["limit_s"]:
         why.append(f"took {r['wall_s'] / 60:.1f} min, over the {r['limit_s'] / 60:.0f} min limit of --budget {r['budget']}")
     ok_text = f"--budget {r['budget']} --gpus {r['gpus']}: {r['wall_s'] / 60:.1f} min of the {r['limit_s'] / 60:.0f} min limit"
-    return _row(f"run_{r['name']}", not why, "; ".join(why) or ok_text,
-                budget=r["budget"], gpus=r["gpus"], wall_s=r["wall_s"], limit_s=r["limit_s"], rc=r["rc"])
+    if "fetch_wall_s" in r:                                                                              # (an older run dict has none of these)
+        ing = "" if r.get("ingest_s") is None else f"ingest {r['ingest_s']:.0f} s, "
+        ok_text += f" ({ing}fetch {r['fetch_wall_s']:.0f} s, neither counted against --budget; cold fetch: {'yes' if r['cold_fetch'] else 'no'})"
+    return _row(f"run_{r['name']}", not why, "; ".join(why) or ok_text, budget=r["budget"], gpus=r["gpus"], wall_s=r["wall_s"], limit_s=r["limit_s"],
+                rc=r["rc"], fetch_wall_s=r.get("fetch_wall_s"), ingest_s=r.get("ingest_s"), cold_fetch=r.get("cold_fetch"))
 
 
 def check_label(r: dict[str, Any]) -> dict[str, Any]:
@@ -189,17 +215,12 @@ def _allowed(notes: list[str]) -> str:
     return "; undecided in both, allowed to differ: " + "; ".join(notes) if notes else ""
 
 
-def _dirty() -> bool | None:
-    """Whether the checkout has changes its HEAD does not contain; None when that cannot be told (no git checkout, as in the container)."""
-    try:
-        p = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain"], capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return bool(p.stdout.strip()) if p.returncode == 0 else None
+_dirty = git_dirty                                      # the checkout's `git status`, else $CAFE_GIT_DIRTY (pm.sh sets it for a copy without .git), else None
 
 
 def provenance_problems(source: dict[str, Any]) -> list[str]:
-    """What a golden's `source` lacks to say where it came from: a commit, the code digest, a clean checkout (unknown is not dirty), the reviewed run."""
+    """What a golden's `source` lacks to say where it came from: a commit, the code digest, a checkout known to be clean (unknown is a problem too),
+    the reviewed run."""
     bad = []
     if not re.fullmatch(r"[0-9a-f]{40}", str(source.get("git_sha", ""))):
         bad.append(f"git_sha {source.get('git_sha')!r} is not a commit")
@@ -207,6 +228,8 @@ def provenance_problems(source: dict[str, Any]) -> list[str]:
         bad.append("no code_digest")
     if source.get("dirty") is True:
         bad.append("made from a checkout with uncommitted changes, so its git sha does not describe the code")
+    elif source.get("dirty") is None:
+        bad.append("cannot tell whether the checkout was clean (no .git and no $CAFE_GIT_DIRTY): run it from a git checkout or through ./pm.sh")
     run = source.get("reviewed_run") or {}
     if not (run.get("name") and run.get("report_sha256")):
         bad.append("no reviewed_run (the name of the run it was made from and the sha-256 of its report.json)")

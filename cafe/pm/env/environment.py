@@ -11,7 +11,8 @@ the TAO comparison overwrites the wind and SST ones, see cafe.pm.env.tao).
 """
 from __future__ import annotations
 
-import datetime as dt, pathlib
+import contextlib, datetime as dt, pathlib
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -50,6 +51,8 @@ class GriddedEnv:
         import xarray as xr
         cache = pathlib.Path(cache)
         self.cache, self.sig, self.strict = cache, sigmas, strict
+        self.use_3d = True                                                # False: wind above the first level is always the U10 profile (what-if comparisons)
+        self.wind_points = self.wind3d_points = 0                         # wind() points asked for / answered from the 3-D fields (stage 1 reads the deltas)
         w = xr.open_zarr(cache / "orca" / "wrf.zarr").load()
         u = xr.open_zarr(cache / "orca" / "umwm.zarr").load()
         self.wrf_src = f"WRF {w.attrs.get('TITLE', '').strip()} 12 km hourly ({w.attrs.get('source', '')})"
@@ -88,6 +91,16 @@ class GriddedEnv:
                                                          self.law.x[0], self.law.x[-1], self.tw.x[0], self.tw.x[-1]))
 
     # ------------------------------------------------------------ helpers
+
+    @contextlib.contextmanager
+    def lenient(self) -> Iterator[GriddedEnv]:
+        """Inside the block a query outside the cached box returns the edge value instead of raising (`inside` still says so); the caller
+        records who left. The previous strictness is restored on exit."""
+        was, self.strict = self.strict, False
+        try:
+            yield self
+        finally:
+            self.strict = was
 
     def _check(self, inside: Any, what: str, lon: Any, lat: Any, t: Any) -> None:
         if self.strict and not np.all(inside):
@@ -148,12 +161,20 @@ class GriddedEnv:
             ratio = np.log(np.maximum(z, 0.1) / 2e-4) / np.log(10.0 / 2e-4)
             psrc = "neutral log profile, z0 = 2e-4 m (no COARE stability: subgrid disabled)"
         v = u10 * np.asarray(ratio)[..., None]
-        if self.w3 is not None:
+        used = 0
+        if self.w3 is not None and self.use_3d:
             up = self._wind3d(lon, lat, z, t)
             if up is not None:
                 use = np.isfinite(up[..., 0])
                 v = np.where(use[..., None], up, v)
-                src += "; above 21 m in sortie hours: WRF 3-D U/V log-linear in z"
+                used = int(use.sum())
+        self.wind_points += v.size // 2
+        self.wind3d_points += used
+        if used:
+            src += "; above 21 m in sortie hours: WRF 3-D U/V log-linear in z"
+        else:
+            why = "use_3d is off" if not self.use_3d else "no 3-D fields" if self.w3 is None else "no ingested 3-D hour here"
+            src += f"; 3-D WRF U/V not used ({why})"
         return Tagged(v, f"{src}; below the first level: {psrc}", self.sig["wind_ms"], "data")
 
     def _wind3d(self, lon: Any, lat: Any, z: Any, t: Any) -> Any:

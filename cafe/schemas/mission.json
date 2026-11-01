@@ -50,7 +50,7 @@
           "becalmed_after_h": {"type": "number", "exclusiveMinimum": 0}}},
         "sorties": {"type": "object", "required": ["local_solar_time", "duration_min"], "properties": {
           "local_solar_time": {"type": "string", "pattern": "^([01]\\d|2[0-3]):[0-5]\\d$", "description": "HH:MM, 00:00 to 23:59"}, "duration_min": {"type": "number", "exclusiveMinimum": 0, "maximum": 120},
-          "every_days": {"type": "number", "exclusiveMinimum": 0}, "pattern": {"enum": ["flux_profile"]},
+          "every_days": {"type": "number", "minimum": 0.01, "description": "days between launches; load_mission also refuses a period under duration_min x hard_stop_factor"}, "pattern": {"enum": ["flux_profile"]},
           "altitudes_m": {"type": "array", "minItems": 1, "items": {"type": "number", "minimum": 2, "maximum": 1000}}}},
         "launch_rules": {"type": "object", "properties": {"max_mean_wind_ms": {"type": "number"}, "no_gust_front_within_min": {"type": "number"}}}},
       "allOf": [{"if": {"required": ["base"]}, "then": {"required": ["sorties"]}, "else": {"required": ["deploy", "task"]}}]}},

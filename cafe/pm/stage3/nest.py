@@ -242,12 +242,19 @@ def make_run(spec: NestSpec, u_env: UEnv, steps: int, traj: Traj = linear_track,
     return jax.jit(jax.vmap(run) if batched else run)
 
 
+def diverged(ser: dict[str, NDArray[Any]]) -> bool:
+    """A chunk's series went non-finite (force or speed) or past Mach 1 (lattice speed above the lattice sound speed 1/sqrt 3): the state is
+    garbage and more steps only burn the wall clock. `simulate` stops at the first such chunk."""
+    return not (np.isfinite(ser["F"]).all() and np.isfinite(ser["umax"]).all()) or bool(ser["umax"].max() * math.sqrt(3) > 1.0)
+
+
 def simulate(spec: NestSpec, u_env: UEnv, geom: Geom, p0: ArrayLike, params: Any, steps: int, chunk: int = 200, v0: ArrayLike = (0, 0, 0),
              traj: Traj = linear_track, state: State | None = None, on_chunk: Callable[[State, int], None] | None = None,
              steps_hook: Callable[[int, float], float] | None = None, **kw: Any) -> tuple[State, dict[str, NDArray[Any]]]:
     """Run `steps` steps in jitted chunks. Returns (state, series dict of NumPy arrays over steps).
     steps_hook(done, elapsed_s) -> total steps: called after every chunk with the wall time since the start (compile included); the
-    run goes on to min(steps, what it returns). Return a multiple of `chunk` (another chunk length is another compile)."""
+    run goes on to min(steps, what it returns). Return a multiple of `chunk` (another chunk length is another compile). A chunk that
+    `diverged` ends the run there (the series is shorter than `steps`)."""
     state = state or init_state(spec, geom, u_env, p0, v0)
     chunks: list[dict[str, NDArray[Any]]] = []
     done, t_start = 0, time.perf_counter()
@@ -261,6 +268,8 @@ def simulate(spec: NestSpec, u_env: UEnv, geom: Geom, p0: ArrayLike, params: Any
         done += k
         if on_chunk:
             on_chunk(state, done)
+        if diverged(chunks[-1]):
+            break
         if steps_hook:
             steps = min(steps, max(int(steps_hook(done, time.perf_counter() - t_start)), done))
     series = {key: np.concatenate([c[key] for c in chunks]) for key in chunks[0]}

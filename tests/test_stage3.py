@@ -813,14 +813,14 @@ def fresh_fs():
 
 def cheap(monkeypatch, **over):
     base = pw.assumptions()
-    base.update(fea_elements_along=6, **over)
+    base.update(dict(fea_elements_along=6, min_cells_thin_part=0), **over)             # (0: the toy sizes run the UAS arms under a cell)
     monkeypatch.setattr(pw, "assumptions", lambda: base)
     monkeypatch.setattr(pw, "_spawn", in_process_fea)
 
 
 def test_assumptions_file_carries_every_key_the_adapter_reads():
     a = pw.assumptions()
-    for k in ("window_s", "box_bodies", "cells_per_delta", "min_cells_across", "min_flow_throughs", "spinup", "fea_elements_along",
+    for k in ("window_s", "box_bodies", "cells_per_delta", "min_cells_across", "min_cells_thin_part", "min_flow_throughs", "spinup", "fea_elements_along",
               "glider.hull_diameter_m", "glider.wing_span_m", "glider.wing_chord_m", "glider.wing_thickness_m", "glider.wing_x_frac",
               "glider.hull_thickness_m", "glider.hull_material", "glider.window_depth_m", "slocum.length_m", "slocum.hull_diameter_m",
               "usv.hull_draft_m", "usv.wing_t_c", "fs.margin", "fs.cost_factor", "fs.mesh_s_per_cell", "fs.snappy_cell_factor",
@@ -1301,10 +1301,12 @@ def test_a_clock_so_slow_that_the_slice_is_spent_kills_the_window_and_the_row_sa
     L = FakeL()
     killed, never = pw.run(ctx2, {"g": [WIN, w2]}, L)["g"]
     assert ok[0]["resolution"]["run_steps"] == ok[0]["resolution"]["planned_steps"]
-    assert not killed["ok"] and killed["reasons"][0].startswith("killed after 100 of ") and killed["resolution"]["run_steps"] == 100
-    assert killed["resolution"]["planned_steps"] == ok[0]["resolution"]["planned_steps"]    # it was sized exactly as before; only its end changed
+    planned = ok[0]["resolution"]["planned_steps"]
+    assert not killed["ok"] and killed["cut"] and killed["reasons"][0].startswith(f"killed: its wall-clock slice was spent before the {planned} planned steps")
+    assert killed["resolution"]["run_steps"] is None and killed["timing"]["machine_dependent"]["run_steps"] == 100     # where it stopped is machine-dependent
+    assert killed["resolution"]["planned_steps"] == planned                              # it was sized exactly as before; only its end changed
     assert not never["ok"] and never["cd"] is None and never["reasons"][0].startswith("killed before it started: the stage-3 wall-clock share was spent")
-    assert not killed["fea"]["run"] and killed["fea"]["reason"].startswith("killed: the FEA")
+    assert not killed["fea"]["run"] and killed["fea"]["reason"].startswith("not run: the LES window was cut")
     assert not L.checks["stage_held_its_wall_clock_share"][0]                          # the stage says it overran
 
 
@@ -1744,3 +1746,110 @@ def test_the_unioned_hull_meshes_and_solves_in_openfoam_at_toy_size(tmp_path, mo
     info = fs.write_stl(pw.usv_vehicle(P, a, "saildrone_explorer", "hull_fs"), tmp_path / "h.stl")
     r = cfd.free_surface(str(tmp_path / "h.stl"), info["draft"], tmp_path / "case", [2.0], -3, iters=5, log=lambda *x: None, surf_level=0)
     assert 0.9 * 70_585 < r["mesh"]["cells"] < 1.1 * 70_585 and np.isfinite(r["speeds"][2.0]["resistance"]) and r["half"]
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 2: M-5, M-8, M-26
+
+def test_a_cut_window_withholds_every_machine_dependent_number_so_two_cut_points_give_the_same_rows(no_wall_receipt, monkeypatch):
+    """M-5: the chunk the clock cut a run at changes cd and every check value; none of them may be in the hashed row."""
+    cheap(monkeypatch)
+
+    def run_cut(step_s):                                  # nest's clock advances `step_s` per reading: chunk k ends at k x step_s
+        tick = iter(range(1, 10 ** 6))
+        monkeypatch.setattr(nest, "time", SimpleNamespace(perf_counter=lambda: step_s * next(tick), time=time.time, sleep=time.sleep))
+        return pw.run(toy_g_ctx(no_wall_receipt, 2000.0), {"g": [WIN]}, FakeL())
+    early, late = run_cut(2000.0), run_cut(600.0)         # the slice is about 1500 s: cut after chunk 1, or after chunk 3
+    e, l = early["g"][0], late["g"][0]
+    assert e["cut"] and l["cut"] and not e["ok"] and not l["ok"] and e["resolution"]["planned_steps"] > 300
+    assert e["timing"]["machine_dependent"]["run_steps"] == 100 and l["timing"]["machine_dependent"]["run_steps"] == 300
+    assert untimed(early) == untimed(late)                                              # equal hashed rows
+    for r in (e, l):
+        assert r["cd"] is None and r["cl"] is None and r["cd_spread"] is None and r["resolution"]["run_steps"] is None
+        assert not any(c["name"] in ("mach_max", "force_running_mean_dev") for c in r["checks"])          # solver check values are withheld too
+        assert {"cd", "cd_spread", "cl", "cl_spread", "checks"} <= set(r["timing"]["machine_dependent"])
+        assert "withheld" in r["reasons"][0] and r["usable_for_refit"] is False
+    assert e["timing"]["machine_dependent"]["cd"] != l["timing"]["machine_dependent"]["cd"]       # the numbers do differ; they are just not hashed
+
+
+def test_a_run_that_is_not_cut_has_cut_false_and_keeps_its_numbers(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
+    r = pw.run(toy_g_ctx(no_wall_receipt, 2000.0), {"g": [WIN]}, FakeL())["g"][0]
+    assert r["cut"] is False and r["cd"] is not None and r["resolution"]["run_steps"] == r["resolution"]["planned_steps"]
+    assert "machine_dependent" not in r["timing"]
+
+
+def test_nest_diverged_sees_non_finite_forces_and_speeds_and_mach_above_one():
+    ok = dict(F=np.ones((4, 3)), umax=np.full(4, 0.05))
+    assert not nest.diverged(ok)
+    assert nest.diverged(dict(ok, F=np.array([[1.0, np.nan, 0.0]])))
+    assert nest.diverged(dict(ok, umax=np.array([0.05, np.inf])))
+    assert nest.diverged(dict(ok, umax=np.array([0.05, 0.6]))) and not nest.diverged(dict(ok, umax=np.array([0.05, 0.57])))
+
+
+def test_a_diverged_chunk_ends_the_run_there_and_does_not_run_to_the_wall_clock_kill():
+    """M-26: lattice speed 0.7 is Mach 1.2 from the first chunk; the run used to go on to its kill."""
+    sp = W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=1200, box=(2.0, 0.8, 0.8), chunk=100, u_lat=0.7)
+    r = W.run_window(HULL, sp, _uniform([0, 0, 0]))
+    assert r["wall"]["diverged"] and not r["wall"]["killed"] and r["wall"]["run_steps"] == r["wall"]["diverged_at_step"] == 100 == r["steps_run"]
+    assert r["wall"]["planned_steps"] == 1200 and r["wall"]["cut_reason"].startswith("diverged after 100 of 1200 steps") and not r["ok"]
+    fine = W.run_window(HULL, W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=200, box=(2.0, 0.8, 0.8), chunk=100), _uniform([0, 0, 0]))
+    assert not fine["wall"]["diverged"] and fine["steps_run"] == 200
+
+
+def test_a_diverged_window_row_says_so_without_the_step_and_frees_the_rest_of_its_slice(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
+    monkeypatch.setattr(nest, "diverged", lambda ser: True)
+    w2 = dict(WIN, t=WIN["t"] + 3600.0)
+    first, second = pw.run(toy_g_ctx(no_wall_receipt, 2000.0), {"g": [WIN, w2]}, FakeL())["g"]
+    for r in (first, second):
+        assert r["cut"] and not r["ok"] and r["cd"] is None and r["reasons"][0].startswith("diverged: the flow went non-finite or past Mach 1")
+        assert r["timing"]["machine_dependent"]["run_steps"] == 100
+    assert second["timing"]["wall_share_s"] > first["timing"]["wall_share_s"]           # what the first did not use went to the second
+
+
+def planned_ctx(tmp, windows, share_s=2000.0):
+    ctx = toy_g_ctx(tmp, share_s)
+    ctx.plan["les"]["windows"] = windows
+    return ctx
+
+
+def test_a_window_the_planner_did_not_run_is_written_with_its_reason_and_never_reaches_the_solver(no_wall_receipt, monkeypatch):
+    """M-8: an unreachable CPU window is a row that says why; no LES, no FEA, no wall-clock check on a stage whose share went to stage 1."""
+    cheap(monkeypatch)
+    monkeypatch.setattr(pw.W, "run_window", lambda *a, **k: pytest.fail("a window the plan skipped was run"))
+    reason = "not run: the physical lattice viscosity (stage3.nu_lat_floor 0.0001) needs dx 1.9 mm; this machine does less"
+    ctx = planned_ctx(no_wall_receipt, {"g/body": dict(runs=False, skip_reason=reason, reachable=False)}, 0.0)
+    ctx.plan["shares"] = dict(stage3=0.0)
+    L = FakeL()
+    r = pw.run(ctx, {"g": [WIN]}, L)["g"][0]
+    assert not r["ok"] and r["cd"] is None and r["reasons"] == [reason] and r["error"] == reason and not r["cut"]
+    assert L.checks["every_window_attempted"][0] and L.checks["every_failed_window_states_a_reason"][0] and "stage_held_its_wall_clock_share" not in L.checks
+    assert any("sub-grid layer uncalibrated: no LES window passed" in n for n in L.notes)
+    assert any("not run: the physical lattice" in m for m in ctx.logs)
+
+
+def test_the_slice_of_a_skipped_window_goes_to_the_windows_that_run(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
+    ctx = fake_ctx(no_wall_receipt, vehicles=VEHICLES[:1], classes=dict(g="glider"), rate=2000.0)
+    ctx.plan.update(shares=dict(stage3=1.0), budget_s=2000.0)
+    ctx.plan["les"]["windows"] = {"g/body": dict(runs=True, skip_reason=None, reachable=False)}
+    runs = pw.run(ctx, {"g": [WIN]}, FakeL())["g"][0]
+    assert runs["timing"]["wall_share_s"] == pytest.approx(2000.0, rel=0.01)                         # the whole share, no skipped window takes a part of it
+    two = fake_ctx(no_wall_receipt, vehicles=VEHICLES[:2], classes=dict(g="glider", g2="glider"), rate=2000.0)
+    two.plan.update(shares=dict(stage3=1.0), budget_s=2000.0)
+    two.plan["les"]["windows"] = {"g/body": dict(runs=False, skip_reason="not run: x", reachable=False),
+                                  "g2/body": dict(runs=True, skip_reason=None, reachable=False)}
+    rows = pw.run(two, {"g": [WIN], "g2": [WIN]}, FakeL())
+    assert rows["g"][0]["reasons"] == ["not run: x"] and rows["g2"][0]["timing"]["wall_share_s"] == pytest.approx(2000.0, rel=0.01)
+
+
+def test_a_uas_window_with_arms_under_two_cells_is_not_run_because_that_resolution_diverges(no_wall_receipt, monkeypatch):
+    """M-26: the q2 case (arms 10 x 15 mm at dx 14.6 mm) diverged; measured here at 1 CPU, arms two cells thick are stable. The slice is not wasted."""
+    cheap(monkeypatch, min_cells_thin_part=2)
+    monkeypatch.setattr(pw.W, "run_window", lambda *a, **k: pytest.fail("a window with sub-cell arms was run"))
+    r = pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())["q"][0]
+    assert not r["ok"] and r["cd"] is None and r["reasons"][0].startswith("not run: numerically unstable at this resolution: the thinnest part is 10.0 mm")
+    assert "stage3.min_cells_thin_part 2" in r["reasons"][0] and not r["cut"]
+    a = pw.assumptions()
+    assert pw.uas_vehicle(uas.load_platform(), a, "quad_uas").extra["min_dim"] == min(a["uas.arm_width_m"], a["uas.arm_thickness_m"])
+    assert "min_dim" not in pw.glider_vehicle(pg.load_platform("seaglider"), a, "seaglider", 500.0).extra

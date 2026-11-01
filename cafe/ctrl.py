@@ -36,7 +36,7 @@ class Autopilot:
         M = veh.M
         self.m_eff = np.diag(M)[:3]
         self.I_eff = np.diag(M)[3:]
-        # bandwidths (rad/s); position < velocity < attitude < rate
+        # bandwidths (rad/s), ordered position, velocity, attitude, rate (each loop faster than the one outside it)
         bw = dict(multirotor=(0.8, 2.0, 6.0, 25.0), steered=(0.15, 0.5, 1.0, 3.0), holonomic=(0.3, 0.8, 2.0, 6.0),
                   glider=(0.05, 0.2, 0.4, 1.0))[self.fam]
         self.kp, self.kv, self.katt, self.krate = bw

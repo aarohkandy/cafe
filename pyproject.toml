@@ -5,7 +5,8 @@ markers = ["network: needs orca/HYCOM/TAO over the internet (skipped offline by 
 
 [tool.ruff]
 line-length = 160
-include = ["cafe/pm/**/*.py", "tests/**/*.py", "bench/**/*.py"]
+include = ["cafe/pm/**/*.py", "tests/**/*.py", "bench/**/*.py", "cafe/cfd.py", "cafe/emulator.py", "cafe/fea.py", "cafe/reach.py", "cafe/receipts.py"]
+# (the older cafe/ modules the pipeline imports; see cafe/pm/audit.py IMPORTED for which are scanned and why not all are linted)
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "B"]

@@ -3,6 +3,9 @@
 # where lo/hi are given); `mean`/`median` default to 0 / 1. Parameters the brief lists but gives no magnitude for
 # (propulsion efficiency, battery capacity, drag-coefficient/GCI spread) are not here: they belong in
 # config/assumptions.yaml until the Hangar and the vehicle datasheets supply them.
+# Not here, and not sampled: `wind_speed_noise` and `wind_direction_noise` (value = sd, tau_h = e-folding time in hours). The TAO fit writes
+# them into ingest/priors_fitted.json beside the persistent wind biases; when present, env/perturb.py adds the short-lived wind error as a
+# per-member AR(1) series on top of the bias. Without a fit there is no such error (nothing in the literature gives its sd and time scale here).
 wind_speed_bias:
   dist: normal
   mean: 0.0

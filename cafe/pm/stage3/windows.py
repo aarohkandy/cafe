@@ -223,7 +223,7 @@ def wall_hook(steps: int, chunk: int, wall_s: float | None, cells: int, log: dic
     steady cost per step is measured and reported (cells_per_s, compile_s: diagnostics, not inputs to anything)."""
     prev: list[float] = [0, 0.0]                                                          # (steps done, elapsed) after the previous chunk
     first: list[float] = []
-    log.update(planned_steps=steps, run_steps=steps, cut_reason=None, killed=False, cells_per_s=None, compile_s=None, les_s=0.0)
+    log.update(planned_steps=steps, run_steps=steps, cut_reason=None, killed=False, diverged=False, cells_per_s=None, compile_s=None, les_s=0.0)
 
     def hook(done: int, elapsed: float) -> int:
         if not first:
@@ -282,6 +282,10 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
                                steps_hook=wall_hook(steps, spec.chunk, wall, res["cells"], wlog))
     wlog["setup_s"] = pre
     n = len(ser["F"])
+    if n < steps and not wlog["killed"]:                                       # nest.simulate stopped at a chunk that diverged (non-finite or Mach > 1)
+        wlog.update(run_steps=n, diverged=True, diverged_at_step=n,
+                    cut_reason=f"diverged after {n} of {steps} steps: the flow went non-finite or past Mach 1 inside a chunk "
+                               f"of {spec.chunk} steps; the run stopped there")
     rho_f = RHO[vehicle.fluid]
     fsi = ser["F"] * rho_f * ns.force_scale                                    # N, body axes
     t = (np.arange(n) + 1) * ns.dt

@@ -1,118 +1,86 @@
-# STATUS — cafe against the pre-mission multilevel spec
+# STATUS — the TEPEX-C pre-mission simulator (`cafe.pm`)
 
-Audit of 2026-10-28. "done / partial / missing" per spec section, citing code. Decisions that keep an existing
-choice over the spec are in `DECISIONS.md`.
+Rewritten from the code on 2026-10-31 (review round 2, M-14), at `8ee5f50` plus the round-2 fixes. The earlier version of this file was the audit of the existing app against the
+spec of 2026-10-28 (`ab376fd`); it is in git history and no longer describes the repository.
 
-**Hardware reality (read first).** The spec's hard requirement is "under 1 h on 8×H100". The compute here is
-`homebase`: 8 vCPU, no GPU, and the Azure subscription has GPU quota 0 everywhere (a quota request is in
-progress, see below). Everything below is built and measured on CPU, with the backend as a config switch.
-Until a GPU node exists, any GPU number is a projection from the benchmark, labelled as one.
+## 0. What is physically missing (BRIEF section 0)
 
-**Checkpoint (2026-10-28):** steps 1–3 of section 10 done (this audit, `bench/`, `cafe/planner.py`).
-On track for step 4 (L1 ingestion fixes); see the bottom of this file.
+Every exit condition of the brief that is unmet is unmet for one of these inputs, none of which exists on this side. For each: the code path exists and is exercised by a
+test or the synthetic CI environment, the one command that completes it, and what you get meanwhile. Each row was checked against `QUESTIONS_FOR_LAB.md` and the code.
 
-## 1. What the system does
+| Missing input | Command once it exists | What you get meanwhile |
+|---|---|---|
+| **A GPU.** The Azure subscription has GPU quota 0 for every VM family in every region; a quota request is the first step. | `bin/run_premission --mission missions/tepex_c_demo.yaml --budget 4h --gpus 1 --out runs/4h`; `python bench/throughput.py lbm gpu` to measure the card; `make acceptance GPUS=1` adds the 4 h run. | `--gpus 0`: Stage 1 and the free-surface hull window run on CPU (the glider hull's FEA belongs to its LES window and runs only when that window does). **No LES coefficients exist on this machine; sub-grid and refit stay uncalibrated:** every LES window would need about 1e13 to 1e14 cell-updates to reach the lattice viscosity floor against about 2e8 in its share of `quick` (M-8), so the plan marks it "not run" with that reason and gives the time back to Stage 1 (`--budget ci` keeps one smoke window so the code is exercised). Any GPU figure in a plan is a projection from published benchmarks and is labelled one. |
+| **The lab's HYCOM run** for `run_2023mar_waves_v4` (QUESTIONS 1), netCDF or `archv.*.a/.b`. | Set `environment.ocean: {source: lab_hycom, path: /data/ocean/lab_tepex_c_demo.zarr}` in the mission, then `python -m cafe.pm ingest-ocean --mission missions/tepex_c_demo.yaml --path <dir> --temperature-kind <in_situ\|potential>` (`--grid <stem>` for archv). | HYCOM GOFS 3.1 GLBy0.08 (in-situ T, 3-hourly, 40 z-levels). The lab reader is tested on synthetic `.a/.b` and netCDF files built from GOFS values, never on a real lab file. |
+| **The lab server** (QUESTIONS 6). | `make install bench acceptance GPUS=1` on it; the planner re-sizes every stage from that machine's measured rates. | `homebase`: 8 vCPU, no GPU, run as `./pm.sh <command>`. |
+| **Platform datasheets** for the vehicles TEPEX-C will fly (QUESTIONS 4): mass, CG, geometry or CAD, propulsion and battery curves, polars, comms hardware. | Edit `platforms/*.yaml`; `python -m cafe.pm hangar --platform <name>` lists every value still marked assumed. | Class defaults (`seaglider`, `slocum`, `saildrone_explorer`, `quad_uas`, `radios`, `modems`), each number cited or marked `assumed: true` with its reason; the report badges a verdict that depends on one. |
+| **A frame-only drag for the UAS** (QUESTIONS 13, "Q13"): the Hangar `d_x` includes the rotor momentum drag, so a frame-only LES cannot be compared with it. | The number, **and a small code change**: no code reads such a key yet (`stage3/pipeline_windows.py` fixes `comparable=False` for the UAS window). Then `pm bin/run_premission ...` with a GPU. | UAS windows are never used in the refit. On CPU the UAS window is not run at all (it also diverged in the q2 run, M-26). |
+| **The intended ship and glider positions** (QUESTIONS 12): the brief puts the gliders 555 and 598 km from a ship that needs an acoustic link with a 4 km modem, and the USV up to 111 km from a ship whose radio horizon with the UAS is 24 to 49 km. | Edit `missions/tepex_c_demo.yaml` (a ship, a relay, an Iridium route); `python -m cafe.pm validate --mission <file>`. | The mission as written: the two acoustic links are NO-GO in every member by range, and the report says so (a geometry result, not an environment one). |
+| **Hourly UMWM spectra and Stokes drift** (QUESTIONS 2): a UMWM re-output with `outspec > 0` and `stokes = .t.`. | Lay the files out like orca's and point `CAFE_ORCA` at them. | The 6-hourly restart spectra on orca plus a spectrum fitted to the integrated parameters in between; Stokes drift is modelled and badged MODELLED. |
+| **A coupled-SST WRF run** (QUESTIONS 3): the orca run froze SST (`SST_UPDATE = 0`). | Lay the files out like orca's WRF files and point `CAFE_ORCA` at them. | Frozen SST plus the COARE warm-layer model, badged MODELLED; the TAO comparison quantifies the frozen-SST error. |
+| **Second validation truth** (QUESTIONS 7): Saildrone 2023 wind, SST, waves, SOG. | `cafe.pm.env.tao.compare` takes any time series, but it is a library call; no command reads another data set yet. | TAO/TRITON only. |
+| **Campaign layout and forecast mode** (QUESTIONS 9, 10, 11): 2028 files, UWIN-CM in forecast mode, the orca run growing past 7 March. | Re-point `CAFE_ORCA`, regenerate `cafe/schemas/*.json` from one new file (ingest refuses any file that does not match them); widen `window` in the mission as hours appear. | The 2023 hindcast: 2023-03-01 00Z to 03-07 18Z, demo window 03-01 12Z to 03-07 12Z. |
 
-| | |
+Decisions, not inputs: the go/no-go thresholds the PIs use (QUESTIONS 5, the mission's `verdict` block) and the FluidX3D licence (QUESTIONS 8, `"fluidx3d": {"enabled": true, "binary": ...}`
+in `config/premission.json`; shipped disabled). Each has a working default.
+
+## 1. What runs
+
+`bin/run_premission` is `python -m cafe.pm run`. One command takes the two orca files plus the ocean source to `report/index.html`, `report.json` and `credibility.html`, with a sha256
+ledger per stage, resume, and a chained audit. The q2 quick run of 2026-10-31 on homebase did it end to end; the eight compute stages took 691.9 s and its cold ingest 522 s (a warm ingest takes about 6 s, so a warm quick
+run is about 700 s of the 1200 s limit; the planner's stage-1 estimate is 2.5 times high until `make bench` is rerun on an idle box).
+
+| Stage | What it does | State |
+|---|---|---|
+| ingest | byte-range reads of orca WRF, UMWM and restart spectra, GOFS 3.1, TAO/TRITON, GEBCO into Zarr, schema-checked | runs; offline once cached (`CAFE_OFFLINE=1`) |
+| hangar | provenance check of the platform files, baseline model coefficients (no Hangar CFD run) | runs |
+| stage 1 | ensemble (Latin hypercube, 16 to 512 members by budget) of glider, USV, UAS and the RF, acoustic and Iridium links; Wilson intervals; sequential stopper; failure modes; sensitivities | runs |
+| windows, stage 3 | LES windows (native JAX lattice kernel), FEA of the glider hull, free-surface hull window (OpenFOAM interFoam) | LES windows are not run with `--gpus 0` (above; `ci` keeps one smoke window); the free-surface hull window runs where it fits; no GPU path has ever run |
+| refit | pools passed windows into drag multipliers | never fires on CPU (no window passes); a single pass, not the loop of BRIEF 2.6 |
+| stage 1b | stage 1 rerun with refitted multipliers, else a copy; USV brief-prior sensitivity case | runs |
+| emulator | Kriging per vehicle class, flip search of single changes | trains only with 100 distinct points per class, which one run does not make; the flip search falls back to Stage 1 |
+| report | `report.json` as the source of truth, HTML from it, credibility report (NASA-STD-7009B, ASME V&V 20, assumed inputs), reach map | runs |
+
+Commands (`python -m cafe.pm ...`): `run`, `fetch`, `ingest-ocean`, `validate`, `plan`, `whatif`, `hangar`, `audit`, `report`, `receipts`, `acceptance`.
+
+Make targets (each runs where it is invoked; from a laptop prefix `./pm.sh`):
+
+| Target | What it does |
 |---|---|
-| **done** | Three drone kinds flying one mission on one clock: quad (`uav`), boat (`usv`), buoyancy glider (`uuv`, layout `glider`) — `mission.World`, `vehicle.default_actuators`. Failure probabilities with Wilson 90 % intervals over Monte Carlo runs: battery empty / under reserve, out of range, below rated depth, seafloor, aground, capsized, out of time — `mission._summary`, `mission._fleet`, `mission._rate`. |
-| **partial** | Controller saturation is measured (`Drone.sat`, `mission.tick`) but not reported as a failure mode. Structural loads are checked once per design at characterization (`hangar`, `fea`), not over the mission. |
-| **missing** | Saildrone (wind-propelled surface drone with a sail). Attitude-exceedance and structural-load-exceedance failure modes. High-fidelity loads at the worst moments (hull pressure, mast stress). HR: under 1 h on 8×H100 (no GPU, see above). |
+| `make install` | builds the `cafe` and `cafe-pm` images |
+| `make bench` | measures this machine and writes `config/throughput.json` (OpenFOAM and LBM rates, stage-1 cost per vehicle class); the planner reads it |
+| `make fetch` | the mission's data, resumable and hash-checked |
+| `make ci` | every stage at toy resolution on CPU from the synthetic environment (`tests/fixtures/ci_env`), no network, under 10 min |
+| `make quick`, `make overnight` | the demo mission at `--budget quick` (20 min) or `overnight` (10 h), `GPUS` from the environment, into `runs/` |
+| `make receipts` | every receipt (app and pre-mission) as one table; exits non-zero on any failure, which is expected until the open limitations L08 and L09 are retired |
+| `make broken` | the deliberately broken wave-direction configuration must fail a receipt (exit 0 means it did) |
+| `make mutation` | mutmut on `cafe/pm/physics` and `cafe/pm/stats`, writes `docs/mutation.json`; hours |
+| `make audit` | ledgers re-hashed, banned tokens, ruff, mypy strict, pytest with coverage gates (100 % on physics, stats and env; 90 % on `cafe/pm`), and the stored mutation result (refused if missing, stale or under 85 %) |
+| `make acceptance` | BRIEF 5.3: quick and overnight (and 4h with `GPUS=1`), golden diff, same-seed and other-seed reproducibility, the broken configuration; about 11 h |
+| `make report` | re-renders a finished run's report |
 
-## 2. Nested levels in space
+Tests: 1,757 `def test_` in 47 files, 2,040 collected cases; all 2,040 passed on the integrated round-2 tree on homebase (2026-11-01, coverage 100 % of 11,920 statements in `cafe/pm`). Credibility of the last q2 report: see its `credibility.json`; the limitations that cap it are in `docs/CREDIBILITY.md` section 5.
 
-| | |
-|---|---|
-| **done** | L1 read-only and one-way: WRF wind (`env.Env`), HYCOM 3-D currents + seafloor (`ocean.currents`), in-situ seawater density by TEOS-10 (`gsw`) from HYCOM temperature and salinity (`ocean.temp_salt`, `env.Env._density`; one HYCOM snapshot nearest the start, held for the mission, fetched on the first underwater lookup so charts and quad-only missions don't wait for it), used for buoyancy per Monte Carlo run (`dyn.Dynamics.step`); gliders are ballasted neutral for the water at their launch point (`mission.World`). Falls back to 1025 kg/m³, labelled in the run's sources, when HYCOM is down. At TEPEX (2023-03-07) the column runs 1021.8 kg/m³ at the surface to 1026.5 at 100 m. WW3 waves (`ocean.waves`). Grid-relative winds rotated with COSALPHA/SINALPHA (`env.Env.__init__`). Lat/lon → local north-east metres (`mission.Frame`). Log wind profile below 10 m with Charnock z₀ = 0.011 u*²/g (+ smooth-flow term) (`env.Env.at`). Linear time interpolation between L1 outputs (`env.Env.surface`). |
-| **partial** | Waves: random-phase linear superposition of 40 JONSWAP components seeded from WW3 Hs/Tp/direction (`env.Waves`) — not phase-resolved HOS. Vertical coordinates: only WRF surface fields are read (no 3-D atmosphere yet), HYCOM is already on z-levels; nothing needs sigma/hybrid conversion today, but nothing handles it either. |
-| **missing** | L2a/L2b moving LES nests, synthetic inflow turbulence, sponge zones, whole-cell nest shifts, refinement-ratio enforcement, free surface across levels, subcycling L3/L2/L1. Staggered-grid handling (not needed for U10/V10; needed once 3-D WRF U/V are read). |
+## 2. Pending at code freeze (pending, not done)
 
-## 3. Zooming in time
+The integrated round-2 tree passed the full test suite, ruff, mypy --strict and the code-only audit (2026-11-01); the steps below have not been run on it. Each is a step for an idle box after the last code change.
 
-| | |
-|---|---|
-| **done** | Stage 1 ensemble, in effect: `mission.run` flies 16–64 batched Monte Carlo runs of a Fossen 6-DOF (`dyn.Dynamics`, `M ν̇ + C ν + D ν + g = τ` about the CoG) with relative velocity throughout (`dyn.Dynamics.step`, `v_r`). Varies weather error, CFD uncertainty, propulsion and battery spread. Dryden gusts (`env.Gusts`). |
-| **partial** | Gust intensity comes from U10 (MIL-HDBK-1797 low-altitude form), not calibrated from L2. One L1 start state per mission, perturbed — not several L1 starting states. |
-| **missing** | Worst-moment extraction, stage 2 (L2 full mission), stage 3 (L3 + FEA windows), refitting coefficients from window forces, configurable event triggers, the "probabilities and conditions, not a timeline" report wording for gusts. |
+- **`make bench`** on an idle box: `config/throughput.json` was measured at load 32.9 on `ci_fixture` and is stale (the plan notes say so).
+- **`make mutation`:** `docs/mutation.json` does not exist, so `make audit` fails its mutation step until it is made (gate 85 %).
+- **The golden:** `tests/golden/tepex_c_demo_quick.json` records no commit sha, clean-tree flag or code digest, so `golden_diff` fails. Mint it from a reviewed quick run on a clean, committed checkout (`--update-golden`, then rerun without).
+- **Final `make acceptance`** (about 11 h) and **`make receipts --slow`** (about 4 h) on the frozen code.
+- **DTMB 5415 v4 study** (recipe `pout-lts01-parts-v4`, running on homebase): until its files are copied to `/data/dtmb5415` and the v3 files moved aside, the DTMB V&V rows read "not run" and the report shows Validation 1.
+- **The blind RUNBOOK test (BRIEF exit condition 5):** a fresh agent follows `docs/RUNBOOK.md` on a clean checkout and reports every place it got stuck. Not yet done; no record of one exists.
+- **Review:** round 1 (33 findings, fixed in `8ee5f50`) and round 2 (36 findings, each fixed with a regression test, DECISIONS 182 to 207). BRIEF 5.6 needs two consecutive rounds with zero findings from reviewers who did not write the code, so it is open.
 
-## 4. Drone models
+## 3. Not done and not planned in this build
 
-| | |
-|---|---|
-| **done** | 6-DOF rigid body, semi-implicit Euler (velocities then pose) for every vehicle (`dyn.Dynamics.step`) — satisfies the HR for the glider and submerged hulls. Quadratic drag on relative velocity from CFD tables (`dyn.Dynamics.drag`), BEM added mass (`hangar.bem`), panel buoyancy/gravity + Froude–Krylov wave forces (`dyn.Dynamics.panel_forces`), thrust maps, never blades (`vehicle.prop_perf`). Real firmware in lockstep: ArduCopter / ArduRover / ArduSub SITL over the JSON backend, the sim answers each servo packet (`emulator.Sim`). |
-| **partial** | Multirate: per-vehicle step (`mission.PHYS_DT`): quad 2.5 ms (ArduCopter's 400 Hz rate loop, HR met), boat/sub 20 ms, glider 60 ms; one shared 20 ms clock. Air/water blending: panel hydrostatics integrate only the wetted panels, windage is separate; no single submerged-fraction blend. Sensor model: SITL gets truth (`emulator.Sim.reply`), no IMU noise/bias, GPS, depth, airspeed models; no actuator lag beyond motor τ (`vehicle.TAU_MOTOR`). Structure: CalculiX static/buckling/modal at characterization (`fea`, `hangar`), quad-frame modes reported. Glider firmware: ArduSub has no fin/buoyancy control, so gliders and finned AUVs use the built-in controller (`ctrl.Autopilot._glider`) — a stub in the spec's sense. |
-| **missing** | Craig–Bampton reduced modal model every step. FEA from L3 pressures in event windows. Sail FSI flag. Actuator-disk/BEM propeller in L3. Saildrone vehicle + ArduRover sailboat firmware. |
+- **The web UI and the static demo do not read `report.json`** (BRIEF 2.9; DECISIONS 206). A reader was not built.
+- No GPU run, no lab-server run, no run on a lab HYCOM file (section 0).
+- The 20-minute and 10-hour contracts hold for compute with a warm cache; a cold fetch is a separate step (DECISIONS 196).
+- `docs/USE_HISTORY.md` and `docs/QUALIFICATIONS.md` do not exist, so those two credibility factors read 0.
 
-## 5. Resolution planner — **done (CPU-measured)**
+## 4. The existing app (`cafe/*.py`)
 
-`cafe/planner.py`: cost = T·U·V/(CFL·Δx⁴) per level, solved for Δx from budget × share × throughput × devices,
-clamped to ≤10× between adjacent levels. Reads `bench/throughput.json`. `python -m cafe.planner --check` asserts the
-invariants and the spec's air/ocean reference rows at 10⁹ cell-updates/s/GPU (they are one L2a-sized nest per medium with
-20 % of the budget: 1.7 m / 0.5 m on 8 GPUs, 0.6 m / 0.18 m on 512). The spec's hull rows (5 mm, 1 cm, 2 mm) are **not**
-reproduced: the graded L3 here gives 9.3 mm, 6.3 mm, 3 mm, and the spec's L3 cost model isn't on disk to compare.
-(Earlier versions of this file said the whole table was reproduced; the check only printed it.) Output on homebase: bottom of this file.
-
-## 6. Throughput benchmark — **done (CPU)**
-
-`bench/throughput.py`, run on homebase 2026-10-28 with the box otherwise idle (an earlier pass overlapped other
-load and read 10–15 % low at 4–8 cores). Results in `bench/throughput.json`:
-
-| Solver | 1 core | 2 | 4 | 8 |
-|---|---|---|---|---|
-| OpenFOAM v2506 `pimpleFoam` LES, 100³ | 4.64e4 | 8.64e4 | 1.42e5 | 1.65e5 cell-updates/s (44 % efficiency 1→8) |
-| JAX D3Q19 LBM + Smagorinsky, 128³, one process | | | | 7.53e6 (whole CPU) |
-
-The 4→8 step gains only 16 %: the 8 vCPUs are 4 physical cores with SMT. LBM vs OpenFOAM is **not** 46× per simulated
-second: an LBM step is acoustically limited (lattice velocity 0.05 here), so it needs ~20× more steps than a CFL-1
-step for the same physical time, so ~2× better. The planner's `cfl` is one number for every solver, so it must be set to
-~0.05 before planning with the LBM entry. The LBM kernel never ran before this date (a jit bug in the
-roll shifts); earlier versions of this file called it measured. No GPU measurement exists; 1→8 GPU scaling is still missing.
-
-## 7. Config and run interface
-
-| | |
-|---|---|
-| **done** | A run is restartable at the design level (characterization cached by mesh bytes, `cfd.cached`). |
-| **partial** | Missions are files (`mission.json`) and run through the worker queue (`worker.py`); `lab/check.py` runs a fleet file end to end. Many thresholds still live in code (`mission.SIG`, `PHYS_DT`, verdict cut-offs in `mission._verdict`). |
-| **missing** | `run_premission --mission --budget --gpus` entry point, stage checkpoints, per-stage wall-clock logging against budget, shrinking event windows on overrun. |
-
-## 8. Report
-
-| | |
-|---|---|
-| **done** | Per-drone and per-link probabilities with intervals, reasons and "what would pass" advice (`mission._advice`, `Link.advice`); interactive replay in the web UI; validation report from receipts (`report/build.py`). |
-| **missing** | Single per-mission HTML/Markdown report with risk timeline, event-window details, resolution and budget used, calibrated-vs-assumed caveats. |
-
-## 9. Validation
-
-| | |
-|---|---|
-| **done** | `cafe/receipts.py` (each can fail): REMUS area/drag vs Prestero, Wigley resistance vs Kajitani, SUBOFF side force/yaw moment vs Roddy 1990, Wigley free-roll period vs linear hydrostatics, Lamb spheroid and strip-theory added mass, Bresse long-tube collapse, beam-theory stresses, Dryden σu/σw ratio, Hs reproduction, Zermelo reach, link geometry, HYCOM node match, WRF time interpolation. Planner self-check (air/ocean rows asserted). Quad time-step convergence, 2.5 vs 1.25 ms (receipt "Time step"). |
-| **missing** | Unit tests for grid rotation / vertical interpolation as standalone tests (TEOS-10 has receipts: EOS-80 check values, a HYCOM grid node); nest conservation; wave through an L2/L3 boundary; sphere drag over Re; sphere added mass (½ρV) as a separate receipt; −5/3 slope of L2 spectra; field telemetry comparison (no telemetry yet); timed end-to-end on 8 GPUs. |
-
-## 10. Progress against the order of work
-
-| Step | State |
-|---|---|
-| 1 Audit | done (this file, `DECISIONS.md`) |
-| 2 Throughput benchmark | done on CPU; GPU pending hardware |
-| 3 Resolution planner | done |
-| 4 L1 ingestion fixes | quad step 2.5 ms and TEOS-10 density done; next: standalone unit tests (grid rotation, vertical interpolation) |
-| 5 Reduced models + multirate + ensemble | mostly exists (`mission`, `dyn`); needs saildrone, worst-moment extraction, attitude/saturation/load failure modes |
-| 6–11 | not started |
-
-## Planner output on homebase (measured OpenFOAM rate, `python -m cafe.planner`)
-
-```
-8 x cpu, openfoam-pimpleFoam-les: 1.65e+05 cell-updates/s (measured on 8 x cpu core, 2026-10-28)
-budget 60 min, mission 3.0 h, shares {'L2a': 0.1, 'L2b': 0.2, 'L3': 0.3}
-  air   L1 1.2e+04 m -> bridges 1.2e+03 m -> L2a 120 m -> L2b 12 m  (coarsened to 10x L2a)
-  ocean L1 9e+03 m -> bridges 900 m -> 90 m -> L2a 18 m -> L2b 3.67 m
-  L3 aerial    full mission 50 cm | event windows 8.8 cm, 6.0 min, 2 bands, BL shell 1.4 cm
-  L3 saildrone full mission 1.68 m | event windows 6.9 cm, 6.0 min, 5 bands, BL shell 9.7 cm
-  L3 glider    full mission 34 cm | event windows 1.9 cm, 6.0 min, 5 bands, BL shell 4.8 cm
-  planned CFD wall time 33.9 min of 60
-```
-
-So in one hour this box can't resolve a hull: the event-window cells (2–9 cm) are coarser than each hull's boundary layer
-(1.4–9.7 cm). The spec's 8×H100 assumption is 8e9 cell-updates/s, ~48,000× this box, which is ~15× finer cells.
+Unchanged by the pre-mission work apart from the CAD uploads and `lab/check.py` (`2928de5`) and the quad step and TEOS-10 density (`ab376fd`). The pipeline imports `cafe.cfd`, `cafe.fea`,
+`cafe.emulator`, `cafe.reach` and `cafe.receipts` from it. DECISIONS rows 1 to 11 keep the old choices over the spec.

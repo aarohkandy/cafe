@@ -396,6 +396,21 @@ def summary(rows: list[dict[str, Any]]) -> tuple[dict[str, int], str]:
     return c, "\n".join(lines)
 
 
+def meta_path(table: pathlib.Path) -> pathlib.Path:
+    """Where the code that made `table` is recorded: receipts.json -> receipts.meta.json (the table itself stays a plain list)."""
+    return table.with_suffix(".meta.json")
+
+
+def write_meta(table: pathlib.Path, slow: bool = False, only: list[str] | None = None) -> pathlib.Path:
+    """Record next to the table which code made it (`code_digest` of the pipeline's resume hash, git sha, time, whether slow receipts were run and
+    which were selected), so a verdict that cites the table can tell that the table is from other code (M-4 of review round 2)."""
+    from .ledger import git_sha
+    p = meta_path(table)
+    p.write_text(json.dumps(dict(code_digest=code_digest("pm"), git_sha=git_sha(), made_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                                 slow=slow, only=only), indent=1))
+    return p
+
+
 def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib.Path | None = None, out: str | pathlib.Path | None = None,
         log: Callable[[str], None] = _say) -> tuple[list[dict[str, Any]], int]:
     """-> (rows, exit code). `broken`: the overlay yaml to apply for this run (exit code inverted, see the module docstring)."""
@@ -416,6 +431,7 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
     out = pathlib.Path(out or ROOT / "runs" / ("receipts_broken.json" if broken else "receipts.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(rows, indent=1, allow_nan=False))
+    write_meta(out, slow, only)
     counts, text = summary(rows)
     log(text)
     log(f"table: {out}")

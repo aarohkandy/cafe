@@ -143,7 +143,8 @@ def test_the_emulator_files_of_two_same_seed_runs_are_identical(twin_runs):
 def test_the_plan_json_of_a_run_holds_every_size_the_stages_used(twin_runs):
     for ctx in twin_runs.ctx.values():
         plan = json.loads((ctx.run_dir / "plan.json").read_text())
-        assert plan["stage3"]["cell_steps_per_part"] and plan["stage3"]["share_s"] == pytest.approx(0.3 * 6000) and plan["stage3"]["fs"]["cases"] == 1
+        assert plan["stage3"]["cell_steps_per_part"] and plan["stage3"]["fs"]["cases"] == 1
+        assert plan["stage3"]["share_s"] == pytest.approx(plan["shares"]["stage3"] * 6000)
         d = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
         assert d["planned_variants"] == plan["emulator"]["variants_no_refit"] == len(d["variants"]) and d["killed"] is None
         assert all(sk["reason"].startswith("the variant leaves the environment data") for sk in d["skipped"])        # a skipped vehicle is a stated reason
@@ -181,7 +182,7 @@ def test_two_runs_with_the_same_seed_make_the_same_report_json_with_the_real_sta
     assert len(flat) == 6 and {r["part"] for r in flat} == {"body", "hull", "wing", "hull_fs"}
     ran = [r for r in flat if r["part"] != "hull_fs"]
     assert not any("killed" in " ".join(r["reasons"]) or (r["resolution"] or {}).get("cut_reason") for r in ran)                        # nothing was killed
-    assert sum(r["cd"] is not None for r in ran) >= 3  # the windows really ran
+    assert sum(r["cd"] is not None for r in ran) >= 1  # a window really ran (M-8: on CPU the ci plan runs the smoke window; the rest are skipped by the plan)
     assert any(r["fea"]["run"] for r in ran)  # the glider hull's FEA ran
     assert all("timing" not in r for r in flat) and a["stage3"]["vehicles"]
     sizes = json.loads((t.ctx["a"].run_dir / "plan.json").read_text())["stage3"]["cell_steps_per_part"]

@@ -112,7 +112,9 @@ def test_wave_error_scales_height_and_the_quadratic_stokes_drift_but_not_the_dir
     lon, lat = np.full(M, 195.0), np.zeros(M)
     w, w0 = pe.waves(lon, lat, T), ci_full.waves(lon, lat, T)
     assert np.allclose(w["Hs"].value, [w0["Hs"].value[0], 2 * w0["Hs"].value[1], w0["Hs"].value[2]])
-    assert np.allclose(w["stokes0"].value[1], 4.0 * w0["stokes0"].value[1]) and np.allclose(w["stokes0"].value[[0, 2]], w0["stokes0"].value[[0, 2]])
+    s0 = w0["stokes0"].value
+    assert np.allclose(w["stokes0"].value[1], 4.0 * s0[1]) and np.allclose(w["stokes0"].value[0], s0[0])
+    assert np.allclose(w["stokes0"].value[2], s0[2] * w0["Tp"].value[2] ** 3)                       # Tp floored at 1 s: Hs^2 / Tp^3 grows by Tp0^3
     assert np.allclose(w["Tp"].value[[0, 1]], w0["Tp"].value[[0, 1]]) and w["Tp"].value[2] == 1.0 and w["Tm"].value[2] == 1.0       # floored at 1 s
     assert np.array_equal(w["dir_to"].value, w0["dir_to"].value)
     assert abs(cv.to_deg(w["stokes0"].value[1]) - w["dir_to"].value[1]) < 3.0

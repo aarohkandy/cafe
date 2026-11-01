@@ -9,7 +9,8 @@ level below is this tool's own reading of the factor, not the wording of NASA-ST
 the report prints the rule next to every level. A known limitation that bears on a factor caps it at 2.
 
 ASME V&V 20 (E = S - D, U_val = sqrt(U_num^2 + U_input^2 + U_D^2), |E| <= U_val): rows come from cafe.pm.dtmb5415.tabulate
-(all four uncertainty terms) and from the stored slow-run receipts under $CAFE_DATA/receipts (S and D only: the runs store no
+(all four uncertainty terms; files of another recipe are "not run", and a row whose U_val is half the reference or more is listed but does not
+count toward Validation level 3) and from the stored slow-run receipts under $CAFE_DATA/receipts (S and D only: the runs store no
 uncertainty terms, so they are listed with E and "U_val not stored", never as validated). A comparison that was not run is
 listed as "not run" with the file that would hold it.
 """
@@ -49,6 +50,20 @@ LIMITATIONS = [
     dict(id="L11", text="the UAS propulsion curve is parametric", factors=["input_pedigree"], where=["platforms/quad_uas.yaml"]),
     dict(id="L12", text="GCI values stored before the r = (N_f/N_c)^(1/3) fix were understated", factors=["verification", "uncertainty"],
          where=["cafe/pm/vv.py", "cafe/pm/dtmb5415.py"]),
+    dict(id="L14", text="the wind prior's persistent and short-lived parts are split from the TAO moorings over this window: "
+                        "an estimate of the order, not a measurement",
+         factors=["uncertainty"], where=["cafe/pm/pipeline.py", "cafe/pm/env/perturb.py", "config/perturbations.yaml"]),
+    dict(id="L15", text="no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer and the drag refit stay "
+                        "uncalibrated; no GPU run exists", factors=["validation", "robustness"],
+         where=["config/assumptions.yaml", "cafe/pm/budget.py", "cafe/pm/stage3/pipeline_windows.py"]),
+    dict(id="L16", text="the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
+         factors=["robustness"], where=["cafe/pm/pipeline.py"]),
+    dict(id="L17", text="UAS attitude exceedance cannot fire in this controller model (tilt clamp 35 deg, exceedance 42 deg)", factors=["validation"],
+         where=["cafe/pm/physics/uas.py", "platforms/quad_uas.yaml"]),
+    dict(id="L18", text="the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio "
+                        "again; "
+                        "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established",
+         factors=["validation", "uncertainty"], where=["platforms/saildrone_explorer.yaml", "cafe/pm/physics/usv.py"]),
 ]
 
 SUBGRID = "sub-grid layer uncalibrated"
@@ -58,12 +73,20 @@ FACTORS = [("data_pedigree", "Data pedigree"), ("verification", "Verification"),
            ("uncertainty", "Uncertainty characterization"), ("robustness", "Results robustness"), ("use_history", "Use history"),
            ("ms_management", "M&S management"), ("people", "People qualifications")]
 
+LEVEL_TEXT = {"data_pedigree": {3: "strong: compared with moorings (the comparison also sets the wind priors)"}}      # replaces LEVELS[3] for that factor
+WIND_RMSE_LIMIT = (2.0, 15.0)     # pooled speed (m/s) and direction (deg) RMSE above which the mooring comparison does not earn level 3: BRIEF 5.4's prior sd
+UVAL_MAX_FRAC = 0.5               # a V&V 20 row counts toward Validation level 3 only when U_val is below this fraction of the reference (DECISIONS row)
+USV_CHIODI_RATIO = 0.178          # Chiodi et al. (2021) mean SOG / mean wind, 0.96 / 5.4 (platforms/saildrone_explorer.yaml)
+ACOUSTIC_NEAR_KM = 3.0            # BRIEF section 6: a glider acoustic link is GO within this distance of the ship, NO-GO beyond it
+
 RULES = {
     "data_pedigree": "1 ingest ledger names its inputs; 2 and every ingest self-check passed and the wrfout/umwmout schemas exist; "
-                     "3 and a TAO/TRITON comparison is stored for this mission.",
+                     "3 and the WRF wind and SST were compared with TAO/TRITON moorings for this mission, with pooled wind RMSE within the brief's prior sd "
+                     "(2.0 m/s, 15 deg); the comparison also sets the wind priors, so it is not independent of the run.",
     "verification": "1 a stage ledger exists; 2 every ledger is clean (ok, no failed check, chain intact, hashes reproduce) and tests exist; "
                     "3 and a grid-convergence (GCI) study backs a V&V 20 row.",
-    "validation": "1 a comparison with a reference ran; 2 and one has all of U_num, U_input, U_D; 3 and at least four such rows all satisfy |E| <= U_val.",
+    "validation": "1 a comparison with a reference ran; 2 and one has all of U_num, U_input, U_D; 3 and at least four such rows all satisfy |E| <= U_val "
+                  "with U_val below half the reference (a wider uncertainty cannot validate it).",
     "input_pedigree": "1 platform inputs carry provenance; 2 and at least half are sourced (not assumed, not recalled); "
                       "3 and at least 80 % are, and no perturbation prior is of kind assumed.",
     "uncertainty": "1 verdict intervals exist; 2 and the Latin-hypercube stratification checks passed; "
@@ -77,7 +100,7 @@ RULES = {
 }
 
 # What BRIEF section 6 says a correct tool should report for the demo mission: a sanity check, not a target. allowed: the verdicts that agree with the
-# sentence, None where the sentence depends on something the verdict alone does not show (a gust-front window, the glider-ship distance).
+# sentence, None where the sentence depends on something the verdict alone does not show (a gust-front window; a glider-ship distance has `distance`).
 EXPECTED: dict[str, dict[str, dict[str, Any]]] = {"tepex_c_demo": {
     "glider_eq": dict(allowed=["MARGINAL", "NO-GO"], text="gliders MARGINAL or NO-GO for station-keeping against the jet"),
     "glider_2n": dict(allowed=["GO"], text="gliders GO for a drift section"),
@@ -86,8 +109,8 @@ EXPECTED: dict[str, dict[str, dict[str, Any]]] = {"tepex_c_demo": {
     "uas": dict(allowed=None, text="UAS NO-GO in any gust-front window (needs the gust-front windows, which the verdict does not show)"),
     "usv-uas-rf": dict(allowed=["GO"], text="links GO except glider acoustic at more than 3 km"),
     "usv-shore-iridium": dict(allowed=["GO"], text="links GO except glider acoustic at more than 3 km"),
-    "glider_eq-ship-acoustic": dict(allowed=None, text="glider acoustic link GO within 3 km of the ship (the distance is not in the verdict)"),
-    "glider_2n-ship-acoustic": dict(allowed=None, text="glider acoustic link GO within 3 km of the ship (the distance is not in the verdict)"),
+    "glider_eq-ship-acoustic": dict(allowed=None, distance=True, text="glider acoustic link GO within 3 km of the ship, NO-GO beyond it"),
+    "glider_2n-ship-acoustic": dict(allowed=None, distance=True, text="glider acoustic link GO within 3 km of the ship, NO-GO beyond it"),
 }}
 SANITY_NOTE = ("BRIEF section 6, 'Expected outcome': what a correct tool should say about the demo mission, used as a sanity check and not as a "
                "target. It applies to that mission only, so no other mission has a sanity block. A disagreement is not a verdict on the model: it "
@@ -205,7 +228,7 @@ def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None) -
 def _row(rid: str, case: str, source: str, S: float | None, D: float | None, u: tuple[float, float, float] | None, note: str) -> dict[str, Any]:
     """One V&V 20 row. u = (u_num, u_input, u_D) or None when the run stored no uncertainty terms."""
     r: dict[str, Any] = dict(id=rid, case=case, source=source, status="run" if S is not None else "not run", S=S, D=D, E=None, u_num=None, u_input=None,
-                             u_D=None, u_val=None, ratio=None, validated=None, note=note)
+                             u_D=None, u_val=None, ratio=None, validated=None, u_frac=None, informative=None, note=note)
     if S is not None and D is not None:
         r["E"] = S - D
     if S is not None and u is not None:
@@ -213,6 +236,8 @@ def _row(rid: str, case: str, source: str, S: float | None, D: float | None, u: 
         r["u_val"] = math.sqrt(sum(x * x for x in u))
         r["ratio"] = abs(r["E"]) / r["u_val"] if r["u_val"] > 0 else (0.0 if r["E"] == 0 else math.inf)
         r["validated"] = r["ratio"] <= 1.0
+        r["u_frac"] = r["u_val"] / abs(D) if D else math.inf                           # an uncertainty as large as the reference cannot validate it
+        r["informative"] = r["u_frac"] < UVAL_MAX_FRAC
     return r
 
 
@@ -223,6 +248,8 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
         return [_row("dtmb5415", "DTMB 5415 C_T", "cafe/pm/dtmb5415.py", None, None, None, f"not run: cafe.pm.dtmb5415 cannot be imported ({e})")]
     root = data / "dtmb5415"
     rows = dtmb5415.tabulate(root)
+    stale = dtmb5415.stale_files(root)                                         # files of another recipe: tabulate skips them, this says why
+    why = "; ".join(f"{n} was made by recipe {(_json(root / n) or {}).get('recipe')}, not {dtmb5415.RECIPE}" for n in stale)
     out = []
     for fr in dtmb5415.CT_REF:
         src = f"{root}/run_coarse.json + run_fine.json"
@@ -232,7 +259,7 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
                             "U_D and U_input are assumed (config/assumptions.yaml dtmb5415.*); the free surface is held at the static draft"))
         else:
             out.append(_row(f"dtmb5415:Fr{fr:.2f}", f"DTMB 5415 C_T at Fr {fr:.2f} (INSEAN 2340)", src, None, None, None,
-                            f"not run: no coarse+fine run for this speed under {root}"))
+                            f"not run: {why}" if why else f"not run: no coarse+fine run for this speed under {root}"))
     return out
 
 
@@ -293,7 +320,8 @@ class Facts:
         self.perts = yaml.safe_load((root / "config" / "perturbations.yaml").read_text()) or {}
         self.vv = vv20_rows(data)
         why = subgrid_uncalibrated(run, root)
-        self.limitations = LIMITATIONS + ([] if why is None else [dict(SUBGRID_LIMITATION, text=why)])
+        sub = [] if why is None else [dict(SUBGRID_LIMITATION, text=why)]
+        self.limitations = LIMITATIONS[:12] + sub + LIMITATIONS[12:]                       # L13 sits between L12 and L14
 
     def ev(self, what: str, f: str) -> dict[str, Any]:
         return dict(file=f, what=what)
@@ -323,11 +351,21 @@ def _data_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
         miss.append(f"ingest self-checks failed or absent ({bad or 'none recorded'}) or a schema file is missing")
     name = (f.mission or {}).get("name", "")
     tao = f.run / "ingest" / "tao_compare.json"
-    if lvl == 2 and name and tao.is_file():
+    pooled = (_json(tao) or {}).get("ALL") if tao.is_file() else None
+    if not (lvl == 2 and name and pooled):
+        miss.append(f"no TAO/TRITON wind and SST comparison with pooled numbers stored (looked for {tao}); the WRF winds and frozen SST are not checked "
+                    "against buoys")
+        return lvl, ev, miss
+    sp, dr = float(pooled["speed_rmse"]), float(pooled["dir_rmse_deg"])
+    n = len([k for k in _json(tao) if k != "ALL"])
+    ev.append(f.ev(f"WRF compared with {n} TAO/TRITON moorings: wind speed RMSE {sp:.2f} m/s (bias {float(pooled['speed_bias']):+.2f}), direction RMSE "
+                   f"{dr:.1f} deg (bias {float(pooled['dir_bias_deg']):+.1f}), SST bias {float(pooled.get('sst_bias', math.nan)):+.2f} K; the same comparison "
+                   "fits the Stage-1 wind priors", str(tao)))
+    if sp <= WIND_RMSE_LIMIT[0] and dr <= WIND_RMSE_LIMIT[1]:                       # (a NaN fails both)
         lvl = 3
-        ev.append(f.ev("WRF wind and SST compared with TAO/TRITON moorings; the fitted wind errors are the Stage-1 priors", str(tao)))
     else:
-        miss.append(f"no TAO/TRITON wind and SST comparison stored (looked for {tao}); the WRF winds and frozen SST are not checked against buoys")
+        miss.append(f"the pooled wind error ({sp:.2f} m/s, {dr:.1f} deg) is above {WIND_RMSE_LIMIT[0]:g} m/s or {WIND_RMSE_LIMIT[1]:g} deg, the brief's "
+                    "prior sd: agreement with the moorings is not shown, so the level stays at 2")
     return lvl, ev, miss
 
 
@@ -352,16 +390,20 @@ def _verification(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
 def _validation(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     ran = [r for r in f.vv if r["status"] == "run"]
     full = [r for r in ran if r["u_val"] is not None]
-    miss = [f"not run: {r['case']}" for r in f.vv if r["status"] != "run"]
+    miss = [f"not run: {r['case']}" + (f" ({r['note'].removeprefix('not run: ')})" if " recipe " in r["note"] else "") for r in f.vv if r["status"] != "run"]
     if not ran:
         return 0, [], ["no validation comparison has been run"] + miss
-    ev = [f.ev(f"{len(ran)} comparison(s) ran, {len(full)} with all uncertainty terms, {sum(bool(r['validated']) for r in full)} with |E| <= U_val",
-               "credibility.json: vv20")]
+    ev = [f.ev(f"{len(ran)} comparison(s) ran, {len(full)} with all uncertainty terms, {sum(bool(r['validated']) for r in full)} with |E| <= U_val, "
+               f"{sum(bool(r['informative']) for r in full)} with U_val below {UVAL_MAX_FRAC:.0%} of the reference", "credibility.json: vv20")]
     if not full:
         return 1, ev, ["no comparison stored U_num, U_input and U_D, so |E| <= U_val cannot be assessed"] + miss
-    if len(full) >= 4 and all(r["validated"] for r in full):
+    wide = [r["id"] for r in full if not r["informative"]]
+    if len(full) >= 4 and all(r["validated"] for r in full) and not wide:
         return 3, ev, miss
-    return 2, ev, ["fewer than four complete comparisons, or one with |E| > U_val"] + miss
+    why = ["fewer than four complete comparisons, or one with |E| > U_val"]
+    if wide:
+        why.append(f"U_val is {UVAL_MAX_FRAC:.0%} of the reference or more in {wide}: an uncertainty that wide cannot validate it")
+    return 2, ev, why + miss
 
 
 def _input_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
@@ -385,12 +427,14 @@ def _uncertainty(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     if not ens:
         return 0, [], ["no stage-1b summary: no verdict intervals"]
     ev, miss, lvl = [f.ev(f"{len(ens)} verdicts with {ens[0]['verdict']['method']} intervals", "run:stage1b/summary.json")], [], 1
-    lhs = [c for c in (f.have.get("stage1b") or {}).get("checks", []) if c["name"].startswith("lhs_stratified")]
+    copied = any("copied" in str(n) for n in (f.have.get("stage1b") or {}).get("notes", []))             # stage 1b is stage 1 when nothing was refit
+    st = "stage1" if copied else "stage1b"                                                                  # the stage that ran the verdicts' ensemble
+    lhs = [c for c in (f.have.get(st) or {}).get("checks", []) if c["name"].startswith("lhs_stratified")]
     if lhs and all(c["ok"] for c in lhs):
         lvl = 2
-        ev.append(f.ev(f"{len(lhs)} Latin-hypercube stratification checks passed", f.lg("stage1b")))
+        ev.append(f.ev(f"{len(lhs)} Latin-hypercube stratification checks passed", f.lg(st)))
     else:
-        miss.append("no passed Latin-hypercube stratification check in the stage-1b ledger (a copied stage 1b has none)")
+        miss.append(f"no passed Latin-hypercube stratification check in the {st} ledger" + (" (stage 1b is a copy of it)" if copied else ""))
     short = [e["n"] for e in ens if e["n"] < e["verdict"]["n_certify"]]
     if lvl == 2 and not short and not f.assumed_perts():
         lvl = 3
@@ -470,19 +514,47 @@ def factor_table(f: Facts) -> list[dict[str, Any]]:
         lim = [x["id"] for x in f.limitations if key in x["factors"]]
         capped = min(lvl, 2) if lim else lvl
         out.append(dict(factor=key, name=name, level=capped, evidence_level=lvl, capped_by=lim if capped < lvl else [], limitations=lim, rule=RULES[key],
-                        evidence=ev, missing=miss))
+                        level_text=LEVEL_TEXT.get(key, {}).get(capped, LEVELS[capped]), evidence=ev, missing=miss))
     return out
 
 
+def _far(e: dict[str, Any]) -> bool | None:
+    """Whether a link's median distance to the ship is beyond ACOUSTIC_NEAR_KM: from the summary's `distance_km_median`, else from the share of the needed
+    samples that are out of the modem's range (more than half of them: the median distance is beyond the range, which is longer than 3 km); None if neither."""
+    d = e.get("distance_km_median")
+    if d is not None:
+        return bool(d > ACOUSTIC_NEAR_KM)
+    out = e.get("frac_out_of_range")
+    return True if out is not None and out > 0.5 else None
+
+
 def sanity(f: Facts) -> dict[str, Any] | None:
-    """The verdicts of the run against what BRIEF section 6 expects of the demo mission, or None for any other mission."""
+    """The verdicts of the run against what BRIEF section 6 expects of the demo mission, or None for any other mission. A row with `distance` set
+    (an acoustic link) agrees when the link is NO-GO beyond ACOUSTIC_NEAR_KM of the ship and GO within it; None only when the run holds no distance."""
     name = (f.mission or {}).get("name", "")
     exp = EXPECTED.get(name)
     if exp is None or not f.s1b:
         return None
     ens = {**f.s1b["summary"]["vehicles"], **f.s1b["summary"]["links"]}
-    rows = [dict(id=k, expected=x["text"], allowed=x["allowed"], observed=ens[k]["verdict"]["verdict"], k_fail=ens[k]["k_fail"], n=ens[k]["n"],
-                 agrees=None if x["allowed"] is None else ens[k]["verdict"]["verdict"] in x["allowed"]) for k, x in exp.items() if k in ens]
+    rows = []
+    for k, x in exp.items():
+        if k not in ens:
+            continue
+        e, v = ens[k], ens[k]["verdict"]["verdict"]
+        far = _far(e) if x.get("distance") else None
+        agrees = v in x["allowed"] if x["allowed"] is not None else None if far is None else v == ("NO-GO" if far else "GO")
+        detail = ""
+        if x.get("distance"):
+            d = e.get("distance_km_median")
+            detail = ("the run holds no ship distance for this link" if far is None else
+                      f"median distance to the ship {d:.0f} km" if d is not None else "most needed samples are out of the modem's range"
+                      ) + (f", beyond {ACOUSTIC_NEAR_KM:g} km" if far else f", within {ACOUSTIC_NEAR_KM:g} km" if far is False else "")
+        if k == "usv" and (e.get("speed") or {}).get("ratio_median") is not None:
+            detail = (f"speed over ground / mean 10 m wind along the track {e['speed']['ratio_median']:.3f} (median over members) against Chiodi et al.'s "
+                      f"{USV_CHIODI_RATIO}: the calibration scenario differs from the mission (no current, uniform wind, sailing to a station); the westward "
+                      f"current lowers the mission ratio and the calibration may already include part of that effect, a possible double penalty that is "
+                      "not established")
+        rows.append(dict(id=k, expected=x["text"], allowed=x["allowed"], observed=v, k_fail=e["k_fail"], n=e["n"], agrees=agrees, detail=detail))
     return dict(mission=name, note=SANITY_NOTE, rows=rows)
 
 
@@ -535,13 +607,14 @@ def _render(c: dict[str, Any]) -> str:
     for r in c["factors"]:
         ev = "<br>".join(f"{e(x['what'])} <code>{e(x['file'])}</code>" for x in r["evidence"]) or "none"
         lim = f"<br>capped at 2 by {', '.join(r['capped_by'])}" if r["capped_by"] else ""
-        h.append(f"<tr><td>{e(r['name'])}<td><b>{r['level']}</b> of 4{lim}<br><span class=muted>{e(LEVELS[r['level']])}</span><td>{ev}"
+        h.append(f"<tr><td>{e(r['name'])}<td><b>{r['level']}</b> of 4{lim}<br><span class=muted>{e(r['level_text'])}</span><td>{ev}"
                  f"<td>{'<br>'.join(e(m) for m in r['missing']) or 'nothing recorded as missing'}<td>{e(r['rule'])}</tr>")
     h.append("</table></div><h2 id=vv20>ASME V&amp;V 20 comparisons</h2><p class=muted>E = S &minus; D; U_val = sqrt(U_num&sup2; + U_input&sup2; + U_D&sup2;); "
              "validation is reported, not pass/fail.</p><div class=scroll><table><tr><th>Comparison<th>Status<th>S<th>D<th>E<th>U_num<th>U_input<th>U_D"
              "<th>U_val<th>|E| &le; U_val<th>Note</tr>")
     for r in c["vv20"]:
-        ok = "not assessable (U_val not stored)" if r["validated"] is None else "yes" if r["validated"] else "no"
+        ok = ("not assessable (U_val not stored)" if r["validated"] is None else ("yes" if r["validated"] else "no")
+              + ("" if r["informative"] else f" (U_val is {r['u_frac']:.0%} of the reference: too wide to validate it)"))
         cells = "".join(f"<td>{_g(r[k])}" for k in ("S", "D", "E", "u_num", "u_input", "u_D", "u_val"))
         h.append(f"<tr id='vv-{e(r['id'])}'><td>{e(r['case'])}<td>{e(r['status'])}" + cells
                  + f"<td>{ok if r['status'] == 'run' else 'n/a'}<td>{e(r['note'])}</tr>")
@@ -556,7 +629,8 @@ def _render(c: dict[str, Any]) -> str:
                  "<tr><th>Vehicle or link<th>Brief expects<th>This run<th>Failed<th>Agrees</tr>")
         for r in sn["rows"]:
             ag = "cannot be checked from the verdict" if r["agrees"] is None else "yes" if r["agrees"] else "<b>NO</b>"
-            h.append(f"<tr><td>{e(r['id'])}<td>{e(r['expected'])}<td>{e(r['observed'])}<td>{r['k_fail']} of {r['n']}<td>{ag}</tr>")
+            h.append(f"<tr><td>{e(r['id'])}<td>{e(r['expected'])}<td>{e(r['observed'])}<td>{r['k_fail']} of {r['n']}<td>{ag}"
+                     f"{'<br><span class=muted>' + e(r['detail']) + '</span>' if r['detail'] else ''}</tr>")
         h.append("</table></div>")
     h.append("<h2 id=assumed>Assumed inputs and priors</h2><p class=muted>Every assumptions.yaml key, every perturbation prior, "
              "every platform input marked assumed. "

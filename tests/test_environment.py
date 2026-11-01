@@ -385,3 +385,50 @@ def test_3d_winds_go_through_the_grid_to_earth_rotation_like_u10(grid, monkeypat
     assert "WRF 3-D U/V" in got.source and np.allclose(got.value, want, atol=1e-9)
     monkeypatch.setattr(E.cv, "rotate_grid_to_earth", lambda u, v, c, s: (u, v))                                          # the old behaviour
     assert not np.allclose(grid.wind(lon, lat, z, t).value, want, atol=1e-3)
+
+
+# ------------------------------------------------------------------------------------------------------------ use_3d, lenient (review round 2, M-6 and M-11)
+
+def test_use_3d_off_gives_the_u10_profile_in_a_sortie_hour_and_the_source_says_so(grid, monkeypatch):
+    monkeypatch.setitem(grid.w3, "U", grid.w3["U"] * 1.5)                                              # a 3-D field that is not the log profile
+    t = E.to_seconds("2023-03-02T01:30:00Z")
+    z = np.array([30.0, 100.0, 300.0])
+    lon, lat = np.full(3, 195.1), np.full(3, 0.3)
+    on = grid.wind(lon, lat, z, t)
+    assert "WRF 3-D U/V" in on.source and grid.use_3d
+    monkeypatch.setattr(grid, "use_3d", False)
+    off = grid.wind(lon, lat, z, t)
+    assert "WRF 3-D U/V" not in off.source and "3-D WRF U/V not used (use_3d is off)" in off.source
+    assert not np.allclose(off.value, on.value, atol=0.1)                                              # the two wind models differ above the first level
+    u10 = grid.u10(lon, lat, t)
+    ratio = np.log(z / 2e-4) / np.log(10.0 / 2e-4)
+    assert np.allclose(off.value, u10 * ratio[:, None], rtol=1e-6)                                     # the neutral profile scaled from U10
+
+
+def test_the_source_names_why_the_3d_fields_were_not_used(grid, bare):
+    assert "no 3-D fields" in bare.wind(195.0, 0.0, 100.0, bare.tw.x[8]).source
+    assert "no ingested 3-D hour here" in grid.wind(195.0, 0.0, 100.0, E.to_seconds("2023-03-02T02:30:00Z")).source
+
+
+def test_the_env_counts_wind_points_and_those_answered_from_the_3d_fields(grid):
+    grid.wind_points = grid.wind3d_points = 0
+    z = np.array([30.0, 100.0])
+    grid.wind(np.full(2, 195.1), np.full(2, 0.3), z, E.to_seconds("2023-03-02T01:30:00Z"))        # sortie hour: both from the 3-D fields
+    grid.wind(np.full(2, 195.1), np.full(2, 0.3), z, E.to_seconds("2023-03-02T03:30:00Z"))        # no 3-D hour: U10 profile
+    grid.wind(np.full(2, 195.1), np.full(2, 0.3), np.array([10.0, 15.0]), E.to_seconds("2023-03-02T01:30:00Z"))   # below the first level: U10 profile
+    assert (grid.wind_points, grid.wind3d_points) == (6, 2)
+
+
+def test_lenient_returns_edge_values_inside_the_block_and_restores_strictness(grid):
+    t = grid.tw.x[5]
+    with grid.lenient() as env:
+        assert env is grid and not grid.strict
+        assert np.allclose(grid.u10(190.0, 0.0, t), grid.u10(grid.low.x[0], 0.0, t))                 # edge-held, no OutsideData
+        assert not grid.inside(190.0, 0.0, t)                                                        # and `inside` still says it is outside
+    assert grid.strict
+    with pytest.raises(OutsideData):
+        grid.u10(190.0, 0.0, t)
+    with pytest.raises(RuntimeError):
+        with grid.lenient():
+            raise RuntimeError("x")
+    assert grid.strict                                                                                # restored even when the block raises

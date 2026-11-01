@@ -591,3 +591,27 @@ def test_reply_is_ned_frd_with_the_field_order_the_parser_needs():
     assert j["position"] == [4.0, 3.0, -5.0] and j["velocity"] == [2.0, 1.0, -3.0]                # north, east, down
     assert np.allclose(j["imu"]["gyro"], [0.1, -0.2, -0.3]) and np.allclose(j["imu"]["accel_body"], [0.5, -0.6, -G])
     assert j["battery"] == {"voltage": 20.0, "current": 5.0} and np.isclose(np.linalg.norm(j["quaternion"]), 1.0)
+
+
+# ------------------------------------------------------------------------------------------------------------ review round 2, M-28
+
+def test_the_clamp_diagnostics_carry_the_wind_the_tilt_cannot():
+    """M-28: max_tilt_deg is 35.00 in every sortie (the horizontal force is clamped to g tan 35 deg, so the 42 deg exceedance needs 7 deg of
+    overshoot), so it says nothing about the wind. The time the demand was beyond the clamp and the largest demand / clamp do."""
+    plat = fast_plat()
+    plat["launch_rule"]["max_mean_wind_ms"] = 99.0
+    calm, strong = fly(plat=plat, M=1), fly(wind=(10.0, 0.0), plat=plat, M=1)
+    assert calm["sat_s"][0] == 0.0 and calm["demand_ratio_max"][0] == 1.0
+    assert strong["sat_s"][0] > 100.0 and strong["demand_ratio_max"][0] > 3.0                  # most of the 300 s sortie, asking for 3x what the clamp gives
+    assert strong["max_tilt_deg"][0] < 35.5 and not strong["flags"]["attitude_exceedance"][0]  # the tilt stays at the clamp: no exceedance
+    gate = fly(wind=(14.0, 0.0), M=1)
+    assert gate["scrubbed"][0]                                                                  # the default launch rule (12 m/s): nothing flown
+    assert gate["sat_s"][0] == 0.0 and gate["demand_ratio_max"][0] == 1.0
+
+
+def test_a_gust_series_that_demands_more_than_the_clamp_shows_in_the_diagnostics():
+    plat = fast_plat()
+    gust = np.zeros((2, 7200, 3))
+    gust[1, :, 0] = 9.0                                              # member 1 flies in a 9 m/s mean error the launch gate never saw
+    r = fly(plat=plat, M=2, turb=gust, heading_deg=[270.0, 270.0])   # legs run west, into the 9 m/s that blows toward the east
+    assert r["sat_s"][0] < 10.0 and r["demand_ratio_max"][0] < 1.6 and r["sat_s"][1] > 100.0 and r["demand_ratio_max"][1] > 3.0
