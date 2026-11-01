@@ -19,7 +19,7 @@ data, uncertainty and receipt behind every number. It is its own pipeline, not t
 ```bash
 make install                                    # once: builds the cafe and cafe-pm docker images (the only step that runs on the host as it is)
 export CAFE_HOST_DATA=$HOME/cafe-data && mkdir -p $CAFE_HOST_DATA
-pm() { docker run --rm --ulimit core=0 -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
+pm() { docker run --rm --ulimit core=0 --shm-size 16g -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
        -e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain)" ]; then echo 1; else echo 0; fi) \
        -v $PWD:/app -v $CAFE_HOST_DATA:/data -w /app cafe-pm "$@"; }                                  # every other command runs inside the cafe-pm image
 pm python -m cafe.pm fetch --mission missions/tepex_c_demo.yaml                                        # once: downloads the mission's data (resumable, ~2.5 h)

@@ -1,5 +1,6 @@
 """Shared fixtures for the ingest tests: a Range-capable HTTP(S) server, the mini orca tree, a no-sleep clock."""
 import http.server
+import os
 import pathlib
 import re
 import shutil
@@ -13,6 +14,11 @@ import pytest
 
 from cafe.pm.env import orca, remote
 from tests.fixtures.orca import make_fixtures as mk
+
+# Stage 1 runs in the test process unless a test asks for workers (tests/test_par.py). Set at import, not in a fixture: a module- or
+# session-scoped fixture is set up before any function-scoped one, and test_acceptance's runs planned for the container's CPUs while the
+# run its test made planned for one worker, so the "identical" repeat differed in its emulator plan.
+os.environ["CAFE_WORKERS"] = "1"
 
 
 class Server:
@@ -130,9 +136,8 @@ def clock(monkeypatch):
 @pytest.fixture(autouse=True)
 def offline(monkeypatch):
     """CAFE_OFFLINE=1 for every test: the pipeline downloads nothing unless a test clears it (and then points the URLs at a local server).
-    CAFE_WORKERS=1 too: stage 1 runs in this process unless a test asks for workers (tests/test_par.py)."""
+    CAFE_WORKERS=1 is set for the whole session at import (above)."""
     monkeypatch.setenv("CAFE_OFFLINE", "1")
-    monkeypatch.setenv("CAFE_WORKERS", "1")
 
 
 @pytest.fixture
