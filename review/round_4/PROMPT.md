@@ -1,0 +1,40 @@
+# Round 4 reviewer prompt (BRIEF §5.6)
+
+Both reviewers got this prompt word for word, apart from the reviewer letter and the output file. Neither saw the other's findings, took part in rounds 1 to 3, or wrote any of the code.
+
+---
+
+You are reviewer {A|B} of the TEPEX-C pre-mission simulator in `/Users/aaroh/Downloads/everything/cafe` (branch `premission-step4`).
+
+**Find every way this is not perfect. Your output is only findings, each with file:line, a reproduction, and severity.**
+
+Material:
+- The brief: `docs/BRIEF.md`. Its §5.6 lists the lanes, and you cover all of them: physics, numerics, statistics, data, performance, reproducibility, robustness, documentation, honesty.
+- The repo; `cafe/pm/` is the pipeline. Also read `DECISIONS.md`, `QUESTIONS_FOR_LAB.md`, `docs/RUNBOOK.md`, `docs/PHYSICS.md` and `docs/CREDIBILITY.md`.
+- A real quick run of `missions/tepex_c_demo.yaml` (`--budget quick --gpus 0`) at commit `23e9a95`, which holds the round-1 to round-3 fixes. Its report, credibility report, `report.json` and every stage's ledger are in `{RUN}`. Large binary outputs (parquet, zarr, pkl) were left out of that copy; they are on homebase at `~/work/cafe/pmdata/runs/q4/`.
+
+Rules:
+- Do not edit anything in the repo. Write your findings only to `{OUT}`.
+- You may read files on homebase: `ssh -i ~/.ssh/homebase_ed25519 azureuser@100.108.213.121`. Other people's services run on the box and the lead's jobs share it, so do not start CFD, long runs or full test suites there. You can reproduce one targeted test or a short python snippet at 1 CPU with `PMX=pm_rev_{a|b} PM_CPUS=1 PM_MEM=6g {PMX} python -m pytest -q tests/test_x.py::test_y`, run from the repo root. It syncs the repo into your private directory on the box. Do not touch other directories in `~/work/cafe`.
+- If you open a browser page with media, mute it immediately.
+- Earlier rounds' merged findings are in `review/round_1/merged.md` (fixes: DECISIONS 152 to 181), `review/round_2/merged.md` (fixes: DECISIONS 182 to 207; 208 and 209 came from run attempts) and `review/round_3/merged.md` (fixes: DECISIONS 210 to 236). A fix that does not hold, or that broke something else, is a finding.
+- Known and already stated in the repo, so do not report these unless the repo's claim about them is wrong:
+  - no GPU exists (quota 0), so the GPU path is untested;
+  - the DTMB 5415 v4 three-grid study is done and does not validate the model (U_val / D 0.27 to 0.63, no iterative convergence at Fr 0.28 and 0.41), as STATUS.md says;
+  - lab inputs are missing (QUESTIONS_FOR_LAB.md);
+  - the golden has no provenance yet and `docs/mutation.json` does not exist yet; both are produced at code freeze;
+  - `config/throughput.json` predates the round-1 changes and is re-measured at code freeze;
+  - the receipts table is shown as stale because `runs/receipts.meta.json` was written by older code; `make receipts` reruns it at code freeze.
+
+Format of each finding in `{OUT}`:
+
+```
+### <A|B>-<n>. <one-line title>
+severity: critical | major | minor
+lane: <lane>
+where: path/to/file.py:LINE (more than one if needed)
+reproduction: exact command, or exact reasoning with numbers from the run, that shows the defect
+why it matters: one or two sentences
+```
+
+Be concrete and checkable. A finding without a reproduction is not a finding. Do not pad with style nits; do report wrong physics, wrong statistics, an untraced number, a claim the code does not back, a runbook step that fails, and a crash on an edge-case input. Order your findings by severity. End with one line: `total: N findings (c critical, m major, n minor)`.
