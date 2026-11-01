@@ -30,9 +30,15 @@ _keep: set[str] = set()                                             # files an a
 _lock = threading.Lock()                                            # stage1.run drives several batches from threads
 
 
+def _child() -> bool:
+    """A worker, or any process multiprocessing started: true from its first line, before the initializer runs (a spawned child re-imports the
+    parent's main script, and one without an `if __name__ == "__main__"` guard would otherwise build and share an environment of its own)."""
+    return _in_worker or mp.parent_process() is not None
+
+
 def workers() -> int:
     """CAFE_WORKERS when set, else the CPUs this process may use: its affinity mask, cut to the cgroup quota (docker --cpus); 1 in a worker."""
-    if _in_worker:
+    if _child():
         return 1
     if os.environ.get("CAFE_WORKERS"):
         return max(1, int(os.environ["CAFE_WORKERS"]))
@@ -124,7 +130,7 @@ class Pool:
     def __enter__(self) -> Pool:
         global _active
         self.prev = _active
-        if _active is None and self.n > 1 and not _in_worker:             # inside another pool's block this one stays empty: that pool serves
+        if _active is None and self.n > 1 and not _child():             # inside another pool's block this one stays empty: that pool serves
             _active = self
         return self
 

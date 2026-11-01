@@ -53,6 +53,7 @@ def test_an_ocean_pickles_with_every_field_read(data):
     assert {"water_u", "water_v", "water_temp"} <= set(w.f) and not o.f.keys() - w.f.keys()
     assert np.array_equal(w.f["water_u"], o.ds["water_u"].values.astype("f4"), equal_nan=True)
     assert np.array_equal(w.current(-165.0, 0.0, 10.0, w.axes[0].x[0]).value, o.current(-165.0, 0.0, 10.0, o.axes[0].x[0]).value)
+    assert len(pickle.dumps(o.ds)) < sum(x.nbytes for x in o.f.values()) / 4      # xarray keeps no second copy of a field it read
 
 
 def test_open_ocean_finds_the_store_and_the_gebco_format_cache(data):

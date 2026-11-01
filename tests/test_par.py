@@ -101,3 +101,10 @@ def test_a_task_runs_from_its_pickle_and_an_inline_task_keeps_its_exception(monk
     monkeypatch.setattr(par, "_in_worker", False)
     f = par.submit(int, "not a number")
     assert f.done() and isinstance(f.exception(), ValueError)
+
+
+def test_a_process_multiprocessing_started_is_a_worker_before_its_initializer_runs():
+    """A spawned child re-imports the parent's main script; without a main guard it would otherwise build, adopt and share its own environment."""
+    with par.Pool(2):
+        assert par.submit(par.workers).result() == 1
+    assert par.workers() >= 1 and not par._child()

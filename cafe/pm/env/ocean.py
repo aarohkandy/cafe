@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from .. import Tagged
+from .. import Tagged, par
 from . import bathy, conventions as cv, hycom
 from .grid import Axis, interp
 
@@ -35,7 +35,7 @@ def store_path(spec: dict[str, Any], mission_name: str | None) -> pathlib.Path:
 class Ocean:
     def __init__(self, path: Any, bathymetry: bathy.Bathymetry | None = None):
         self.path = pathlib.Path(path)
-        self.ds = hycom.open_store(self.path)
+        self.ds = hycom.open_store(self.path, cache=False)
         a = self.ds.attrs
         self.src = f"{a.get('source', 'HYCOM')} ({self.path.name}, manifest sha256 {str(a.get('manifest_sha256', '?'))[:12]})"
         self.axes = [Axis(self.ds.time.values, "time"), Axis(self.ds.depth.values, "depth"), Axis(self.ds.lat.values, "lat"),
@@ -53,7 +53,7 @@ class Ocean:
 
     def _field(self, name: str) -> Any:
         if name not in self.f:
-            self.f[name] = self.ds[name].values.astype("f4")
+            self.f[name] = par.adopt(self.ds[name].values.astype("f4"))     # straight into shared memory when stage 1 runs workers: one field at a time
         return self.f[name]
 
     def _at(self, name: str, lon: Any, lat: Any, z: Any, t: Any) -> Any:

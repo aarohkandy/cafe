@@ -13,6 +13,7 @@ Choices and numbers are in `DECISIONS.md`; the equations are in `docs/PHYSICS.md
 Pipeline and tools
 
 - Stage 1 on every CPU (`cafe/pm/par.py`, DECISIONS 264 to 266): gliders, USVs and UAS sorties of a batch run as tasks in spawned workers that read the environment from one shared-memory copy, batches run in waves when one does not fill the workers, and the result is the same bits as on one worker. `CAFE_WORKERS=N` overrides the CPU count; `pm.sh` and `bin/pmx.sh` pass `--shm-size 16g`. One q4 batch: 225.7 s on one worker, 109.7 s on two.
+- Faster `env.grid.interp` with the same bits (no `np.clip` on tiny arrays, cached spacings, one call for all levels of the 3-D wind) and half the memory for the ocean (its fields read straight into shared memory, no xarray cache): one q4 batch on two workers 86.4 s, container peak 12.5 GB (DECISIONS 267, 268).
 - `python -m cafe.pm` (`cafe/pm/__main__.py`) with `run`, `fetch`, `validate`, `plan`, `report` and `receipts`; `pm.sh` runs it on homebase in the `cafe-pm` image (`Dockerfile.pm`, `requirements-pm.txt`).
 - `cafe/pm/pipeline.py`: ingest, hangar, stage 1, windows, stage 3, refit, stage 1b, emulator, report, each with a sha256 ledger (`ledger.py`), resume and a chained audit (`audit.py`).
 - `cafe/pm/budget.py` and `config/throughput.json`: `--budget {ci,quick,4h,overnight}` sized from measured throughput, with labelled fallbacks; `bench/throughput.py` measures the OpenFOAM and JAX LBM rates and, since `3c75f38`, the stage-1 cost per vehicle class.

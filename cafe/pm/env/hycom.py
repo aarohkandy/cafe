@@ -185,10 +185,12 @@ def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> 
     return out
 
 
-def open_store(path: Any) -> Any:
-    """The Zarr store, time as float seconds. Refuses a store without a valid temperature_kind attribute."""
+def open_store(path: Any, cache: bool = True) -> Any:
+    """The Zarr store, time as float seconds. Refuses a store without a valid temperature_kind attribute. cache False: xarray keeps no copy of a
+    variable it has read (env.ocean.Ocean keeps its own float32 one, and xarray's would be a second copy of every field, pickled into each worker)."""
     import xarray as xr
-    ds = xr.open_zarr(path, decode_times=False, consolidated=False)
+    ds = (xr.open_zarr(path, decode_times=False, consolidated=False) if cache else
+          xr.open_dataset(path, engine="zarr", decode_times=False, consolidated=False, cache=False))      # open_zarr has no `cache`
     kind_of(ds.attrs.get("temperature_kind"))
     return ds
 

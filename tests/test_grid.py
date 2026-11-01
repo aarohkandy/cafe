@@ -57,3 +57,17 @@ def test_symmetric(w):
     v1, _ = interp(F, [Axis([0, 1])], [w])
     v2, _ = interp(F[::-1].copy(), [Axis([0, 1])], [1 - w])
     assert np.isclose(v1, v2)
+
+
+def test_a_leading_dimension_interpolates_each_slice_exactly_as_on_its_own():
+    """The 3-D wind interpolates every level in one call; each level (NaN corners, outside points, a mixed-shape query) must equal its own call."""
+    rng = np.random.default_rng(3)
+    f = rng.normal(size=(4, 5, 6))
+    f[rng.random(f.shape) < 0.2] = np.nan
+    axes = [Axis(np.linspace(0, 4, 5)), Axis(np.linspace(-1, 1, 6))]
+    q = [rng.uniform(-1, 5, (7, 3)), rng.uniform(-2, 2, (3,))]
+    got, inside = interp(f, axes, q)
+    assert got.shape == (4, 7, 3) and inside.shape == (7, 3)
+    for k in range(4):
+        assert np.array_equal(got[k], interp(f[k], axes, q)[0], equal_nan=True)
+    assert np.array_equal(interp(f[0], axes, [np.nan, 0.0])[0], np.nan, equal_nan=True)     # a NaN query is NaN, as np.clip left it

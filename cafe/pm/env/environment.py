@@ -211,10 +211,9 @@ class GriddedEnv:
             w = (t[m] - T[k]) / (T[k + 1] - T[k])
             ca, sa = (interp(self.Wstatic[a], [self.law, self.low], [latq[m], cv.wrap360(lonq[m])])[0][:, None] for a in ("COSALPHA", "SINALPHA"))
             vals = []
+            at = [latq[m], cv.wrap360(lonq[m])]
             for kk, ww in ((k, 1 - w), (k + 1, w)):
-                zc = np.stack([interp(Z[kk, l], [self.law, self.low], [latq[m], cv.wrap360(lonq[m])])[0] for l in range(Z.shape[1])], -1)
-                uc = np.stack([interp(self.w3["U"][kk, l], [self.law, self.low], [latq[m], cv.wrap360(lonq[m])])[0] for l in range(Z.shape[1])], -1)
-                vc = np.stack([interp(self.w3["V"][kk, l], [self.law, self.low], [latq[m], cv.wrap360(lonq[m])])[0] for l in range(Z.shape[1])], -1)
+                zc, uc, vc = (np.ascontiguousarray(interp(F[kk], [self.law, self.low], at)[0].T) for F in (Z, self.w3["U"], self.w3["V"]))   # (n, levels)
                 uc, vc = cv.rotate_grid_to_earth(uc, vc, ca, sa)             # grid-relative -> earth, like U10 (the 3-D fields are grid-relative too)
                 lz = np.log(np.maximum(zc, 1.0))
                 q = np.log(np.maximum(zq[m], 1.0))
