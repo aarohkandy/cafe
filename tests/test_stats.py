@@ -232,6 +232,10 @@ def test_perturbations_yaml_is_complete_and_usable(tmp_path):
     assert -0.2565 <= x["usv_vpp_bias"].min() and x["usv_vpp_bias"].max() <= -0.2280          # the Chiodi-calibrated prior of review M-2 (batch B)
     with pytest.raises(ValueError):
         S.to_marginals(cfg, ["current_correlation_length"])
+    for sd in (0.0, -1.0, float("nan")):                                                     # q3: norm(scale=0).ppf is NaN, never a silent member
+        for dist in ("normal", "lognormal"):
+            with pytest.raises(ValueError, match="finite sd > 0"):
+                S.to_marginals({"w": dict(dist=dist, value=sd)})
     bad = tmp_path / "p.yaml"
     bad.write_text(yaml.safe_dump({"x": {"value": 1, "unit": "m", "citation": "c", "kind": "measured"}}))
     with pytest.raises(ValueError):

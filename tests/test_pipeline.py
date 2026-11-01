@@ -702,11 +702,24 @@ def test_a_different_split_is_recovered_too_and_white_noise_has_no_memory():
     assert w["persistent"] < 0.15 and w["noise"] == pytest.approx(1.0, rel=0.1) and w["tau_h"] < 0.5
 
 
-def test_no_persistent_error_gives_zero_not_a_negative_variance():
-    """Identical means: the dispersion of the means is below its sampling variance, so the difference is negative and is floored at 0."""
+def test_no_persistent_error_floors_the_spread_at_zero_and_keeps_only_the_uncertainty_of_the_mean():
+    """Near-identical means: the dispersion of the means is below its sampling variance, so that difference is floored at 0 and what is left
+    is the variance of the fitted mean, var(means) / k: tiny here, but not 0."""
     ramp = np.sin(np.arange(60) / 5.0)
     got = pipeline.fit_wind_error({"a": ramp, "b": ramp + 1e-9, "c": ramp - 1e-9})
-    assert got["persistent"] == 0.0 and got["noise"] > 0.5
+    assert 0.0 < got["persistent"] == pytest.approx(np.sqrt(1e-18 / 3), rel=1e-3) and got["noise"] > 0.5
+
+
+def test_the_persistent_sd_is_never_zero_when_the_moorings_disagree_so_stage_1_gets_no_nan_members():
+    # q3 at f78e7ef: 11 moorings whose mean spread was below its sampling variance gave persistent 0.0, scipy's norm(scale=0).ppf gave NaN wind
+    # biases for every member and a glider integrated NaN wind into a NaN position. Persistent is now the predictive sd (spread + var of the mean).
+    rng = np.random.default_rng(3)
+    s = {f"m{i}": rng.normal(0.0, 2.0, 100) + 0.01 * i for i in range(11)}                      # spread of the means far below 2/sqrt(100)
+    got = pipeline.fit_wind_error(s)
+    means = np.array([np.nanmean(x) for x in s.values()])
+    assert got["persistent"] >= np.sqrt(np.var(means, ddof=1) / 11) > 0
+    marg = sampling.to_marginals({"wind_speed_bias": dict(dist="normal", mean=-0.6, value=got["persistent"])})
+    assert np.isfinite(sampling.lhs(32, marg, 0)[1]["wind_speed_bias"]).all()
 
 
 def test_fewer_than_two_moorings_with_three_samples_gives_no_split():

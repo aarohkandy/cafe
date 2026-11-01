@@ -522,9 +522,11 @@ def _wind_residuals(wrf: dict[str, Any], moor: dict[str, Any]) -> dict[str, NDAr
 
 def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] | None:
     """Split the hourly model-minus-mooring error of one wind quantity into what Stage 1 can hold fixed per member and what it cannot.
-    `series`: mooring -> hourly residuals (NaN gaps). persistent: the sd of the moorings' time-mean errors across moorings, less the mean sampling
-    variance of those means (s^2 / n x (1 + rho) / (1 - rho) for an AR(1) series), floored at 0. noise: the pooled sd of the residuals about each
-    mooring's own mean; tau_h: its e-folding time from the lag-1 autocorrelation rho of those residuals (0 when rho <= 0, rho capped at 0.999).
+    `series`: mooring -> hourly residuals (NaN gaps). persistent: the predictive sd of the error at a new site (random effects): the variance of
+    the moorings' time-mean errors across moorings, less the mean sampling variance of those means (s^2 / n x (1 + rho) / (1 - rho) for an AR(1)
+    series) and floored at 0, plus the variance of the fitted mean (var(means) / k for k moorings), so it is 0 only when every mean is equal.
+    noise: the pooled sd of the residuals about each mooring's own mean; tau_h: its e-folding time from the lag-1 autocorrelation rho of those
+    residuals (0 when rho <= 0, rho capped at 0.999).
     None when fewer than two moorings have 3 or more samples (the dispersion between moorings is then not defined)."""
     kept = [x for x in series.values() if np.isfinite(x).sum() >= 3]
     if len(kept) < 2:
@@ -539,7 +541,8 @@ def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] |
         num, den0, den1 = num + float(a[both] @ b[both]), den0 + float(a[both] @ a[both]), den1 + float(b[both] @ b[both])
     rho = float(np.clip(num / np.sqrt(den0 * den1), 0.0, 0.999)) if den0 > 0 and den1 > 0 else 0.0
     sampling = float(np.mean(s2 / n * (1 + rho) / (1 - rho)))
-    return dict(persistent=float(np.sqrt(max(float(np.var(means, ddof=1)) - sampling, 0.0))), noise=float(np.sqrt(np.average(s2, weights=n - 1))),
+    between = float(np.var(means, ddof=1))
+    return dict(persistent=float(np.sqrt(max(between - sampling, 0.0) + between / len(kept))), noise=float(np.sqrt(np.average(s2, weights=n - 1))),
                 tau_h=0.0 if rho <= 0 else float(-1.0 / np.log(rho)), rho=rho, moorings=float(len(kept)))
 
 
@@ -578,7 +581,8 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
         if split is None:
             how = f"fewer than 2 moorings, so the whole hourly misfit ({hourly:.3g} {unit}) is held as one persistent error"
         else:
-            how = f"persistent part only: the between-mooring spread of the time-mean error less its sampling variance; the hourly rest is wind_{key}_noise"
+            how = (f"persistent part only: the between-mooring spread of the time-mean error less its sampling variance, plus the uncertainty "
+                   f"of the mean of {n} moorings; the hourly rest is wind_{key}_noise")
         value = hourly if split is None else split["persistent"]
         fit[f"wind_{key}_bias"] = dict(dist="normal", mean=mean, value=value, unit=unit, citation=f"{cite}; {how}", kind="data")
         said.append(f"{key} persistent {value:.3g} {unit}")
