@@ -94,7 +94,7 @@ def test_a_stage_1_rate_measured_under_load_or_on_another_mission_is_warned_abou
 
 
 def test_the_shipped_stage_1_measurement_was_made_on_a_quiet_box():
-    """DECISIONS 270: re-measured at 1-min load 1.4 (the 2026-10-29 file, at 32.9, was flagged as contended; the test above keeps that path tested)."""
+    """DECISIONS 272: re-measured at 1-min load 1.4 (the 2026-10-29 file, at 32.9, was flagged as contended; the test above keeps that path tested)."""
     notes = budget.plan("quick", 0, dict(MISSION, name="tepex_c_demo"), vehicle_classes=CLASSES)["notes"]
     assert not any("measured at load" in n for n in notes)
 

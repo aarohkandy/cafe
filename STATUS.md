@@ -63,7 +63,7 @@ Tests: <TESTS> (round-4 tree; the lead's full run on homebase fills this in). Th
 
 DTMB 5415 v4 study (recipe `pout-lts01-parts-v4`, three grids at Fr 0.10, 0.20, 0.28, 0.41): done and installed in `/data/dtmb5415`; |E| <= U_val at all four (E x1e3 = +0.865, +0.722, +0.842, -0.040 against U_val x1e3 = 1.882, 1.085, 2.653, 1.993), but U_val / D is 0.27 to 0.63 against 0.1, so it validates little, and iterative convergence fails at Fr 0.28 and 0.41 on every grid (drift 0.03 to 0.07 against 0.005).
 
-**Every CPU (DECISIONS 264 to 272).** Stage 1, stage 1b, the emulator variants and the fresh draws run on every CPU the run may use
+**Every CPU (DECISIONS 266 to 274).** Stage 1, stage 1b, the emulator variants and the fresh draws run on every CPU the run may use
 (`--cpus`; `CAFE_WORKERS=N` overrides): each glider, USV and UAS sortie of a batch is a task in a spawned worker, the workers read one
 shared-memory copy of the environment (`--shm-size 16g`, which `pm.sh` passes), batches run several at a time when one does not fill
 the workers, and the planner counts the workers. The result does not depend on the worker count: one q4 batch is the same bits on 1, 2, 4
