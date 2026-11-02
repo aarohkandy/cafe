@@ -731,8 +731,8 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     if share:                                                                  # a stage whose windows were all skipped has no share (it went to stage 1)
         # a measurement of the machine, not a test of the code: noted, never a check that fails a correct run on a loaded machine. The budget itself is
         # enforced above, window by window: each window's slice (`win_s`) and the stage `deadline` kill a window that runs past them (a killed row).
-        L.note(f"stage 3 took {spent:.0f} s of its {share:.0f} s share ({spent / share:.2f} x)"
-               + ("; over the 1.1 x allowance: a busy machine or a low estimate, the windows past the deadline were cut (killed rows)" if spent > 1.1 * share else ""))
+        past = "; over the 1.1 x allowance: a busy machine or a low estimate, the windows past the deadline were cut (killed rows)"
+        L.note(f"stage 3 took {spent:.0f} s of its {share:.0f} s share ({spent / share:.2f} x)" + (past if spent > 1.1 * share else ""))
     recalibrate_subgrid(ctx, rows, L)
     return rows
 

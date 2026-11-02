@@ -1311,7 +1311,7 @@ def test_a_clock_so_slow_that_the_slice_is_spent_kills_the_window_and_the_row_sa
     assert killed["resolution"]["planned_steps"] == planned                              # it was sized exactly as before; only its end changed
     assert not never["ok"] and never["cd"] is None and never["reasons"][0].startswith("killed before it started: the stage-3 wall-clock share was spent")
     assert not killed["fea"]["run"] and killed["fea"]["reason"].startswith("not run: the LES window was cut")
-    over = [n for n in L.notes if n.startswith("stage 3 took ")]                       # the stage says it overran, as a note: it is not a check that fails the stage
+    over = [n for n in L.notes if n.startswith("stage 3 took ")]           # the stage says it overran, as a note: not a check that fails the stage
     assert "stage_held_its_wall_clock_share" not in L.checks and len(over) == 1 and "over the 1.1 x allowance" in over[0] and "(killed rows)" in over[0]
     assert L.checks["every_window_attempted"][0]
 

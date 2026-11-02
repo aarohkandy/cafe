@@ -252,6 +252,10 @@ Round 4 read the q4 quick run (`runs/q4` on homebase) and the code at `23e9a95`.
   - M-19: the failure-driver line no longer blames a missing `res.pkl` for a vehicle that had no failure.
   - M-20: M&S management level 3 no longer reads "checked against an independent reference".
   - Report parts: the UAS block prints the waypoints flown and names `profile_incomplete`, the report names `no_current_data`, the emulator section prints both coverage numbers with their scales, and the USV reach map uses the speed through the water and says so (the glider reach map's current band runs from 5 m to the task's dive depth and is named).
+- Follow-ups (DECISIONS 264, 265):
+  - A missed BRIEF 2.7 emulator gate no longer aborts the run: it is noted (with the chance a calibrated emulator misses it), the report says so, and Stage 1 answers for that class instead of the emulator.
+  - Stage 3 running past its wall-clock share is a note, not a failed check; the per-window slices and the stage deadline still cut the overrun.
+  - `tests/test_acceptance.py` gives its runs their own emulator table, so it no longer depends on the rows `tests/test_pipeline.py` left in the session's table (`table_rows` 11 against 6 when run after it).
 - Documents (M-21, M-24, M-25; DECISIONS 257, 260, 261): PHYSICS states the glider's surface windage once and correctly (0.01 for a bare `GliderSim`, 1.8 to 2.3 % per member in Stage 1); the RUNBOOK and README `pm()` wrapper pass `CAFE_GIT_DIRTY` (the image has no `git`, so a lab user could never mint or pass the acceptance golden) and RUNBOOK 7 says what minting needs; RUNBOOK says a repeated run with the same mission and seed adds no emulator training point (use another `--seed`, mission or budget). `docs/PHYSICS.md`, `docs/CREDIBILITY.md` (263 assumed inputs, two of them new), `docs/RUNBOOK.md`, `QUESTIONS_FOR_LAB.md` (items 4 and 5) and `STATUS.md` are updated for the rows above.
 
 ### Known issues
