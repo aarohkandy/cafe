@@ -135,7 +135,17 @@ def stage1(sizes=(8, 32), mission=DEMO):
     The default is the demo mission on the real environment cache ($CAFE_DATA/cache/<name>, from `fetch`): the rates scale with the vehicles and
     the data the planner will actually plan for. `missions/ci_fixture.yaml` is measured on the synthetic tree (tests/fixtures/ci_env). Refuses to
     write when the machine was busy before the run (1-min load above budget.LOAD_WARN_FRAC x cpus): such a rate is the other work's, not the
-    pipeline's. The load recorded (`load_1min`) is the one before the run; `load_1min_after` includes the run itself."""
+    pipeline's. The load recorded (`load_1min`) is the one before the run; `load_1min_after` includes the run itself.
+
+    stdout carries only the JSON: whatever the libraries print while it times (warp prints its deprecation notices to stdout when xlb is imported)
+    goes to stderr."""
+    import contextlib
+    with contextlib.redirect_stdout(sys.stderr):
+        out = _stage1(sizes, mission)
+    print(json.dumps(dict(stage1=out), indent=2))
+
+
+def _stage1(sizes, mission):
     import os, tempfile
     root = pathlib.Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root))
@@ -191,7 +201,7 @@ def stage1(sizes=(8, 32), mission=DEMO):
     data["stage1"] = out
     data["machine"] = dict(id=platform.node(), cpu=_cpu(), cpus=os.cpu_count(), measured=time.strftime("%Y-%m-%d"))
     OUT.write_text(json.dumps(data, indent=2) + "\n")
-    print(json.dumps(dict(stage1=out), indent=2))
+    return out
 
 
 def _cpu():

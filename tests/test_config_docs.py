@@ -115,3 +115,14 @@ def test_the_ci_workflow_can_reach_its_evidence_steps_and_finish():
     ci, broken, audit = (next(i for i, s in enumerate(steps) if f"cafe-pm make {t}" in s.get("run", "")) for t in ("ci", "broken", "audit"))
     assert ci < broken < audit
     assert all(steps[i].get("if") == "always()" for i in (broken, audit)) and job["timeout-minutes"] >= 150
+
+
+def test_the_runbook_says_what_budget_ci_does_on_the_demo_and_how_to_build_bellhop():
+    """Review round 5, M-24 and M-25: nothing refuses `--budget ci` on the demo mission, and `make install` builds no Bellhop (an ambiguous acoustic link is
+    judged on Thorp absorption alone without it), so the RUNBOOK names the script that builds it."""
+    rb = text("docs", "RUNBOOK.md")
+    assert "refused by design" not in rb and "plans and runs on any mission, including the demo" in rb
+    assert "install_bellhop.sh" in rb and (ROOT / "bench" / "install_bellhop.sh").is_file() and "Thorp absorption alone" in rb
+    # the script installs where the RUNBOOK's pm() mounts /data, so no copy step is needed (it wrote into homebase's ~/work/cafe/pmdata only)
+    script = (ROOT / "bench" / "install_bellhop.sh").read_text()
+    assert 'OUT="${CAFE_HOST_DATA:-$HOME/work/cafe/pmdata}/bin"' in script and "cp $HOME/work/cafe/pmdata" not in rb

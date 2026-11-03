@@ -29,10 +29,9 @@ import shutil
 from typing import Any, cast
 
 import numpy as np
-import yaml
 from numpy.typing import ArrayLike, NDArray
 
-from .. import Tagged
+from .. import Tagged, config
 
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
 C0 = 299792458.0
@@ -52,7 +51,7 @@ def _plain(node: Any) -> Any:
 
 @functools.lru_cache(None)
 def _yaml(name: str) -> dict[str, Any]:
-    d = yaml.safe_load((PLATFORMS / name).read_text())
+    d = config._yaml(PLATFORMS / name)                                 # duplicate keys and octal numbers refused (round 5, M-18)
     return cast(dict[str, Any], _plain(d) if name == "radios.yaml" else d)
 
 

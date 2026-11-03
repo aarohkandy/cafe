@@ -59,6 +59,13 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    ensemble is replaced by the fitted TAO error. *If Saildrone data is shared:* it becomes a second validation set
    for wind, SST, waves and the USV speed model (`cafe.pm.env.tao.compare` takes any time series).
 
+   7a. **Should the persistent wind prior be its 95 % upper bound?** The TAO fit gives a persistent wind-speed sd of 0.113 m/s from 11 moorings in
+   one 6-day regime, a boundary estimate (the sampling variance of a mooring mean, about 0.15, is as large as the variance between the 11 moorings, 0.14, so the true spread
+   is estimated as 0 and the 0.113 is only the uncertainty of the mean of 11 moorings).
+   Its one-sided 95 % upper bound is about 0.5 m/s (`value_hi95` in `ingest/priors_fitted.json`; the literature prior was 2.0 m/s), and regime-to-regime
+   bias outside the six days is not sampled. *Default:* the point estimate stays the prior (BRIEF 5.2); the report prints both, and `docs/CREDIBILITY.md`
+   lists the question as L19. *If the bound should replace it:* a decision, then a small code change in `pipeline._tao` (write the bound as `value`).
+
 8. **FluidX3D licence.** Is FluidX3D's licence (no commercial or military use; modifications must be published)
    acceptable for NOAA use? *Default:* the FluidX3D backend exists but ships disabled; free-surface windows use
    interFoam on CPU. *If yes:* after reading `docs/LICENSES.md`, build FluidX3D and set
@@ -95,9 +102,9 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
     reference from `platforms/quad_uas.yaml` and set `comparable` from it. The UAS windows then become usable for the refit once a window passes its checks.
 
 14. **Does Chiodi et al.'s 0.178 include currents?** The Saildrone speed prior is calibrated to the mean speed over ground / mean wind of Chiodi et al.
-    (0.96 m/s over 5.4 m/s). That ratio was observed in real ocean currents, while the calibration scenario of the tool has none. In the demo mission the
-    ensemble's ratio is 0.120 (0.125 at the anemometer height), and the westward current alone lowers it from 0.186 to 0.150 by turning a beam reach into a
-    close-hauled course. If the 0.178 already contains the effect of currents, the tool penalises the current twice. Which is it, and if you have the
+    (0.96 m/s over 5.4 m/s). That ratio was observed in real ocean currents, while the calibration scenario of the tool has none. In the q5 run the
+    ensemble's median ratio is 0.129 (0.135 at the anemometer height); in the nominal diagnosis scenario of review round 2 (not the ensemble) it was 0.120, and the
+    westward current alone lowered it from 0.186 to 0.150 by turning a beam reach into a close-hauled course. If the 0.178 already contains the effect of currents, the tool penalises the current twice. Which is it, and if you have the
     underlying Saildrone tracks, what was the current along them?
     *Default:* assume the 0.178 does not include currents; the prior stays as calibrated, the report prints the mission ratio beside it, and
     `docs/CREDIBILITY.md` lists the question as L18. *If it does include currents:* `vpp_bias_mean` in `platforms/saildrone_explorer.yaml` has to be

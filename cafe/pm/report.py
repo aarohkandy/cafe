@@ -837,26 +837,26 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
     return dict(available=True, vehicles=out, design=dd, plan_note=note)
 
 
-def _timing(plan: dict[str, Any], tr: Trace, pref: dict[str, Any], design: dict[str, Any] | None) -> dict[str, Any]:
+def _timing(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
     """What the planner charged against what the stages took (round 5, M-13): stage 1's `plan.json` stage1_s (a lower bound, `stage1_s_basis`) against its
-    ledger's wall_s, and the emulator's variant runs (design.json `variant_planned_s` each, `variant_wall_s` measured; neither is in an older run) as planned
-    and as measured. A part whose two sides are not both there is left out."""
+    ledger's wall_s, and the emulator's variant runs (its ledger's `variant_planned_s` each and `variant_wall_s` measured, kept out of the hashed design.json
+    by DECISIONS 139; neither is in an older run) as planned and as measured. A part whose two sides are not both there is left out."""
     out: dict[str, Any] = {}
     L = tr.led.get("stage1")
     if L and plan.get("stage1_s") is not None:
         out["stage1"] = dict(planned=num(plan["stage1_s"], "s", pref, "plan.json stage1_s"), basis=plan.get("stage1_s_basis"),
                              measured=num(L["wall_s"], "s", tr.ref("stage1"), "checkpoints/stage1/ledger.json wall_s"))
-    d = design or {}
+    d = tr.led.get("emulator") or {}
     w = d.get("variant_wall_s")
     if w and d.get("variant_planned_s") is not None:
-        ref, src = tr.ref("emulator", output="design.json"), "emulator/design.json"
+        ref, src = tr.ref("emulator"), "checkpoints/emulator/ledger.json"
         out["variants"] = dict(runs=num(len(w), "runs", ref, src + " variant_wall_s"),
                                planned=num(d["variant_planned_s"] * len(w), "s", ref, src + " variant_planned_s x runs"),
                                measured=num(sum(w), "s", ref, src + " variant_wall_s (sum)"))
     return out
 
 
-def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any], design: dict[str, Any] | None = None) -> dict[str, Any]:
+def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
     # the report's own ledger is not written until the report is: any on disk is an earlier attempt's
     live = {st: L for st, L in tr.led.items() if L and st != "report"}
     first = next(iter(live.values()), None)
@@ -871,7 +871,7 @@ def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any], design: dict
     return dict(describe=budget.describe(plan), notes=list(plan["notes"]), member_costs=costs,
                 plan={k: num(plan[k], u, pref, f"plan.json {k}") for k, u in units.items()},
                 wall_s={st: num(L["wall_s"], "s", tr.ref(st), f"checkpoints/{st}/ledger.json wall_s") for st, L in live.items()},
-                timing=_timing(plan, tr, pref, design), git_sha=sorted({L["git_sha"] for L in live.values()}), versions=(first or {}).get("versions", {}),
+                timing=_timing(plan, tr, pref), git_sha=sorted({L["git_sha"] for L in live.values()}), versions=(first or {}).get("versions", {}),
                 report_stage="report stage: written after this table, so its wall time and code are not in it",
                 machine=None if first is None else dict(host=first["machine"]["host"], bench_id=first["machine"]["bench_id"], cpus=cpus))
 
@@ -923,7 +923,7 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
         verdict_source="stage1b (stage 1 rerun with the stage-3 refit multipliers; a copy of stage 1 when nothing was refit)",
         vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res), links=_links(s1b, tr, mission),
         map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res, s1b), environment=_env(mission, env, res, wins, s1b, tr),
-        stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref, design),
+        stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref),
         assumed_inputs=_assumed(cred, cred_ref), sensitivity_scope=_sens_scope(tr))
     rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"])
     own = _jl(run / "stage3" / "subgrid_calibration.json")

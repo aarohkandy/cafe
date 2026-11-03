@@ -15,6 +15,8 @@ Then, the same day:
 - **Round 5 review:** A 17, B 16 raw (`a3bc3e7`); merged into 26 (0 critical, 6 major, 20 minor; 21 confirmed, 5 partly), `4155b3c`.
 - **Round 5 fixes, in progress:** five builders, each in its own worktree `../cafe-r5<x>` on branch `r5-<x>` from `2439265` and its own homebase dir `pm_r5<x>`: V (M-1, 4, 9, 20), C (M-3, 17, 18, 19), S (M-2, 7, 8, 10 report, 11, 12, 13 report, 26), P (M-5, 6, 10 pipeline, 13 budget, 15, 21, 23), W (M-14, 16, 22). Prompts: `review/round_5/batch_prompts/`. Each commits on its branch with a hand-back in `review/round_5/handbacks/`. Then: review each hand-back, merge the five branches into `premission-step4`, write DECISIONS 276+ and the docs (M-24, M-25 and the RUNBOOK text the hand-backs give), run the full gate, commit, q6, round 6.
 
+**Round 5 is fixed and committed:** the five branches (`r5-v`, `r5-c`, `r5-s`, `r5-p`, `r5-w`) merged into `premission-step4`, the lead's integration items (DECISIONS 302 to 307: the bench's stdout, the platform loaders through `config._yaml`, `plan` with the memory model, the report reading the variant timings from the emulator ledger, measured timings volatile in the same-seed comparison, the query-time test as the fastest of 5 rounds), docs (DECISIONS 276 to 307). Gate: ruff and mypy clean, 2,364 collected, all passing, coverage 99.95 % (100 % on physics, stats, env, stage3). The full-suite container needs at least 12 GB (the memory model of `plan`). Next: q6 on the round-5 code (what moved in the demo verdicts is not known), then round 6.
+
 ## 1. The goal and the stop rule
 
 `docs/BRIEF.md` section 0 is the definition of done.

@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse, json, os, pathlib, sys, webbrowser
 from typing import Any
 
-from . import acceptance, audit, budget, ledger, pipeline, report, stage1, whatif
+from . import acceptance, audit, budget, ledger, par, pipeline, report, stage1, whatif
 from .config import ConfigError, load_mission
 
 
@@ -134,7 +134,9 @@ def main(argv: list[str] | None = None) -> int:
             m = load_mission(a.mission)
             if a.gpus > 0 and not a.assume_gpu and not pipeline.gpu_visible():
                 print(f"no GPU found on this machine: the {a.gpus} GPU(s) below are projected from published benchmarks, not measured")
-            print(budget.describe(budget.plan(a.budget, a.gpus, m, gpu_mem_gb=_gpu_mem(a), vehicle_classes=stage1._classes(m))))
+            mem = par.memory_gb()                                                     # the memory model of `run` (round 5, M-6)
+            print(budget.describe(budget.plan(a.budget, a.gpus, m, gpu_mem_gb=_gpu_mem(a), vehicle_classes=stage1._classes(m), mem_gb=mem,
+                                              env_gb=None if mem is None else budget.env_gb(m, pipeline.DATA / "cache" / m["name"]))))
         elif a.cmd in ("run", "fetch"):
             m = load_mission(a.mission)
             if getattr(a, "gpus", 0) > 0 and not a.assume_gpu and not pipeline.gpu_visible():

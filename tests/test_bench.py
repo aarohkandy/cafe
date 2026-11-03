@@ -49,6 +49,21 @@ def fake_batches(monkeypatch, wall):
     return asked
 
 
+def test_stage1_prints_only_its_json_on_stdout_whatever_a_library_prints_while_it_times(bench, monkeypatch, capsys):
+    """Round 5 integration: importing xlb makes warp print a deprecation notice on stdout, so `throughput.py stage1 > out.json` was not JSON (and
+    the test below failed when its file ran alone). The timing runs with stdout sent to stderr; only the JSON is printed."""
+    fake_batches(monkeypatch, {(n, v): 1.0 for n in (2, 8, 32) for v in ("glider_eq", "glider_1n", "glider_2n", "usv", "uas")})
+    run = stage1.run_batch
+
+    def chatty(*a, **k):
+        print("Warp DeprecationWarning: The symbol `warp.utils.ScopedTimer` will soon be removed from the public API.")
+        return run(*a, **k)
+    monkeypatch.setattr(stage1, "run_batch", chatty)
+    throughput.stage1(mission=CI)
+    got = capsys.readouterr()
+    assert json.loads(got.out) == {"stage1": json.loads(bench.read_text())["stage1"]} and "ScopedTimer" in got.err
+
+
 def test_stage1_fits_a_plus_b_times_members_per_vehicle_and_keeps_the_costliest_of_a_class(bench, monkeypatch, capsys):
     wall = {(8, "glider_eq"): 10.0, (32, "glider_eq"): 34.0,                     # b = 1.0 s/member, a = 2.0 s
             (8, "glider_1n"): 20.0, (32, "glider_1n"): 20.0 + 24 * 0.5,          # b = 0.5, a = 16.0: dearer per batch, cheaper per member

@@ -30,11 +30,11 @@ from typing import Any, Callable, NamedTuple, Optional, cast
 import jax
 import jax.numpy as jnp
 import numpy as np
-import yaml
 from jax import lax
 from numpy.typing import NDArray
 
 from ..env import conventions as cv
+from ..config import _yaml as read_yaml
 from . import check_params
 
 Arr = Any
@@ -97,7 +97,7 @@ def load_platform(path: Optional[str] = None) -> dict[str, Any]:
     """quad_uas.yaml as nested dicts of plain values (provenance stripped after it is checked)."""
     p = pathlib.Path(path or PLATFORM)
     p = p if p.suffix in (".yaml", ".yml") else PLATFORM.parent / f"{p}.yaml"         # a platform name, like the other loaders take
-    doc = yaml.safe_load(p.read_text())
+    doc = read_yaml(p)                                                 # duplicate keys and octal numbers refused (round 5, M-18)
     bad = check_provenance(doc)
     if bad:
         raise ValueError(f"platform numbers without a source or an assumed+why: {bad}")

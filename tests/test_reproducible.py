@@ -36,7 +36,8 @@ def data(ci_env):
     mp.undo()
 
 
-TIMING = ("run", "machine.wall_s", "machine.git_sha", "machine.versions", "machine.machine")        # what differs between runs of the same code and seed
+TIMING = ("run", "machine.wall_s", "machine.git_sha", "machine.versions", "machine.machine",       # what differs between runs of the same code and seed
+          "machine.timing.stage1.measured", "machine.timing.variants.measured")
 
 
 def _drop(node, path):

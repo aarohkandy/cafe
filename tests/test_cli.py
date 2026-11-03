@@ -11,7 +11,7 @@ import sys
 
 import pytest
 
-from cafe.pm import __main__ as cli, audit, budget, config, pipeline, whatif
+from cafe.pm import __main__ as cli, audit, budget, config, par, pipeline, whatif
 from cafe.pm.env import ocean as ocean_mod
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider
@@ -486,13 +486,26 @@ def test_a_plan_the_budget_cannot_run_exits_2_with_the_refusal_text_and_no_trace
     assert cli.main(["run", "--mission", MISSION, "--budget", "ci"]) == 2 and capsys.readouterr().err.startswith("error: --budget ci: stage 1 needs")
 
 
-def test_the_real_planner_refusal_of_a_long_window_is_an_error_line_not_a_traceback(tmp_path, capsys):
+def long_mission(tmp_path):
     import yaml
     m = yaml.safe_load(pathlib.Path(MISSION).read_text())
     m["window"]["end"] = "2023-04-30T06:00:00Z"                                                 # 60 days
     (tmp_path / "long.yaml").write_text(yaml.safe_dump(m))
-    assert cli.main(["plan", "--mission", str(tmp_path / "long.yaml"), "--budget", "ci"]) == 2
+    return str(tmp_path / "long.yaml")
+
+
+def test_the_real_planner_refusal_of_a_long_window_is_an_error_line_not_a_traceback(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(par, "memory_gb", lambda: None)                                        # the time refusal; the memory one is the next test
+    assert cli.main(["plan", "--mission", long_mission(tmp_path), "--budget", "ci"]) == 2
     assert capsys.readouterr().err.startswith("error: --budget ci: stage 1 needs ")
+
+
+def test_plan_applies_the_memory_model_of_run(tmp_path, capsys, monkeypatch):
+    """Round 5 integration of M-6: `run` planned with the memory limit and `plan` without it, so `plan` printed a plan that `run` then refused."""
+    monkeypatch.setattr(par, "memory_gb", lambda: 30.0)
+    assert cli.main(["plan", "--mission", long_mission(tmp_path), "--budget", "ci"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: stage 1 needs about ") and "60-day window" in err and "30 GB is available" in err
 
 
 def test_fetch_of_a_mission_no_budget_can_run_still_reaches_ingest(tmp_path, monkeypatch):

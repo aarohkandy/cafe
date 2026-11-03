@@ -1,14 +1,15 @@
 #!/bin/sh
-# Build Bellhop (Acoustics Toolbox, Michael Porter / HLS Research) into ~/work/cafe/pmdata/bin on homebase.
+# Build Bellhop (Acoustics Toolbox, Michael Porter / HLS Research) into $CAFE_HOST_DATA/bin, the directory the RUNBOOK's pm() mounts as /data
+# (default ~/work/cafe/pmdata/bin, homebase's).
 # Run on homebase:   sh ~/work/cafe/pm/bench/install_bellhop.sh        (after ./pm.sh has synced the checkout)
 # or from the laptop: ssh -i ~/.ssh/homebase_ed25519 azureuser@100.108.213.121 'sh -s' < bench/install_bellhop.sh
 # Fetches the official source zip, verifies its sha256 against the pinned value (prints it either way), installs
 # gfortran/make in a throwaway root container (nothing is committed to any image), and leaves bellhop.exe in
-# /data/bin inside cafe-pm (= ~/work/cafe/pmdata/bin on the host). Re-running is safe.
+# /data/bin inside cafe-pm (= $CAFE_HOST_DATA/bin on the host). Re-running is safe.
 set -eu
 URL="http://oalib.hlsresearch.com/AcousticsToolbox/at_2026_10_27.zip"
 SHA256="00b100a87d267a23517b96bb14eee40be8886f8a1ebbad265a63ca5aa1a8a853"   # measured 2026-10-29
-OUT="$HOME/work/cafe/pmdata/bin"
+OUT="${CAFE_HOST_DATA:-$HOME/work/cafe/pmdata}/bin"                     # round 5, M-25: where pm() mounts /data
 mkdir -p "$OUT"
 docker run --rm -e URL="$URL" -e SHA256="$SHA256" -v "$OUT:/out" cafe-pm sh -ec '
   export DEBIAN_FRONTEND=noninteractive

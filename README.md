@@ -26,7 +26,7 @@ pm python -m cafe.pm fetch --mission missions/tepex_c_demo.yaml                 
 pm bin/run_premission --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out runs/quick   # then open runs/quick/report/index.html
 ```
 
-Run from the repository root, in a git checkout (the image has no `git`; the wrapper passes the commit and the clean-tree flag, which the ledgers and the acceptance golden need). On homebase use `./pm.sh <command>` instead of `pm <command>`. The numpy, jax, xlb and gsw the pipeline needs are in the image, not on the host.
+Run from the repository root, in a git checkout (the image has no `git`; the wrapper passes the commit and the clean-tree flag, which the ledgers and the acceptance golden need). On homebase use `./pm.sh <command>` instead of `pm <command>`. The numpy, jax, xlb and gsw the pipeline needs are in the image, not on the host. Add `--cpus N --memory M` to the wrapper's `docker run` so the plan sees the limits (it needs about 1.5 GB per window day plus 0.9 GB per stage-1 worker, and refuses a mission that does not fit); RUNBOOK step 1 has the details and the optional Bellhop build for acoustic links.
 
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md) takes it from a clean machine to a report and says which verdicts to trust; [`STATUS.md`](STATUS.md) says what is missing and why (no GPU,
 the lab's HYCOM run, the lab server, platform datasheets); [`QUESTIONS_FOR_LAB.md`](QUESTIONS_FOR_LAB.md) lists what the lab can answer to close the gaps; `docs/CREDIBILITY.md`

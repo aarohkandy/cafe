@@ -78,9 +78,9 @@ import pathlib
 from typing import Any, NamedTuple, cast
 
 import numpy as np
-import yaml
 
 from ..env import conventions as cv
+from ..config import _yaml as read_yaml
 from . import check_params
 
 Arr = Any
@@ -120,7 +120,7 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
     path = pathlib.Path(name)
     if not path.suffix:
         path = PLATFORMS / f"{name}.yaml"
-    raw = yaml.safe_load(path.read_text())
+    raw = read_yaml(path)                                              # duplicate keys and octal numbers refused (round 5, M-18)
 
     def flat(block: dict[str, Any], where: str) -> dict[str, Any]:
         out = {}

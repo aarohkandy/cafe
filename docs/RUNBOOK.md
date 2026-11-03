@@ -40,7 +40,17 @@ pm() { docker run --rm --ulimit core=0 --shm-size 16g -u $(id -u):$(id -g) -e HO
 Stage 1 uses every CPU the container may use (`--cpus`; `CAFE_WORKERS=N` overrides), and its workers read the environment from
 files in `/dev/shm`, which Docker caps at 64 MB unless `--shm-size` raises it: without it they fall back to the temporary directory, on disk.
 
+Give the container its limits so the plan can see them: add `--cpus N --memory M` to the `docker run` of `pm()` (on homebase `PM_CPUS` and `PM_MEM`, default 8 and 28g). `plan` reads the memory limit (else the host's free memory), needs the environment (about 1.5 GB per window day, so 9 GB for the demo, or the size of the cache on disk if that is larger) plus 0.9 GB per worker, caps the workers to what fits (`plan.json` has `workers_by_cpu`, `workers_by_memory` and `workers`; `plan` says when memory capped the count) and refuses a mission for which not even one worker fits (exit 2: a 30-day window needs about 45 GB). The demo is refused under about 10 GB and capped below 8 workers only under about 16 GB. `CAFE_WORKERS` must be a whole number of at least 1, else `error: ...` and exit 2; an explicit count is honoured and the plan notes the memory it needs. If `/dev/shm` fills part-way, the error says so and tells you to raise `--shm-size`.
+
 (On homebase this is `./pm.sh <command>`, which also syncs the checkout there and sets the same two variables; data is `~/work/cafe/pmdata`.) The image has no `git`, so the ledgers learn the commit and whether the tree was clean only from `CAFE_GIT_SHA` and `CAFE_GIT_DIRTY`; without the second one a ledger says `"git_dirty": null` and the golden of step 7 cannot be minted or passed (review round 4, M-24, DECISIONS 260). Run `pm` from the repository root, in a git checkout where `git status` works.
+
+Optional, for acoustic links near the ship (review round 5, M-25): `make install` builds no Bellhop. Without it every ambiguous acoustic link (one within about 6 dB of its margin) is judged on Thorp absorption alone, and the report says "Thorp only, Bellhop unavailable" on each such link. To build it (needs the network and the `cafe-pm` image; gfortran is installed inside a throwaway container and nothing is added to an image):
+
+```bash
+sh bench/install_bellhop.sh
+```
+
+The script writes `bellhop.exe` into `$CAFE_HOST_DATA/bin` (set in step 1; without it, homebase's `~/work/cafe/pmdata/bin`), which `pm()` mounts as `/data/bin`, the first place the code looks. The demo's own acoustic links (555 and 633 km) fail by range and never use Bellhop.
 
 ## 2. Check the install without the network (~10 min)
 
@@ -59,7 +69,7 @@ pm make bench
 
 It writes `config/throughput.json`: OpenFOAM and LBM cell-update rates per core count and the stage-1 cost per vehicle class.
 The budgets are wall-clock: every stage is sized from these numbers, so a stale or loaded measurement makes the plan wrong
-(`python -m cafe.pm plan` prints what the budget buys and where each rate came from, with the load it was measured at).
+(`python -m cafe.pm plan` prints what the budget buys and where each rate came from, with the load it was measured at). The stage-1 time it prints is a lower bound (the longest task or the work over the workers; the parent's serial part and worker start-up are not in it), and the report's machine block prints it next to the time stage 1 took. The UAS cost scales with sortie-minutes: the benchmark stores the sortie-minutes of its mission (`sortie_min`), and the planner multiplies the UAS cost by this mission's sortie-minutes per day over the benchmark's, so a mission with more or longer sorties plans (or is refused) accordingly.
 
 To re-measure only the stage-1 cost per vehicle class, on a quiet machine (one-minute load below 2 on 8 cores; the tool refuses to write on a busy one,
 records the load before and after, and measures on the demo mission unless you name another):
@@ -71,7 +81,7 @@ pm python bench/throughput.py stage1            # on homebase: PM_CPUS=8 ./pm.sh
 Run it twice, on a quiet box, and compare the two files: the tool times a warm-up batch and keeps the faster of two timings per size, but a class whose entry says `slope_resolved: false` has a per-member slope that 8 versus 32 members could not resolve (to the planner a batch then costs the same whatever its size). The shipped `config/throughput.json` was measured at load 33 and has the old single-timing method; re-measure at code freeze (review round 4, M-26, DECISIONS 262).
 
 Use this, not `make bench`, for that: `make bench` also runs OpenFOAM. The planner never overruns stage 1: it halves the batch down to 4 members, else
-refuses with the shortfall. `--budget ci` on the demo mission is refused by design; `ci` is for `missions/ci_fixture.yaml`.
+refuses with the shortfall. `--budget ci` is the 10 minute toy profile (8 to 16 members, one LES window part, no refit): it plans and runs on any mission, including the demo, but its numbers are a smoke test, not a verdict; it is meant for `missions/ci_fixture.yaml`.
 
 ## 4. Fetch the mission's data (once, ~2.5 h; resumable)
 
@@ -87,10 +97,14 @@ only missing parts are fetched). `fetch` needs no `--budget` and plans none, so 
 
 What `validate` enforces about vehicles (it exits 2 with `error: ...` naming the field, so a wrong file is found here and not hours into a run). A vehicle with `base` is a UAS: it takes `sorties`
 and `launch_rules` and no `task`. A vehicle without `base` takes a `task` and no `sorties`: a glider flies `station`, `section` or `drift`, a USV `station` or `section`. A `station` task
-names the station (`lon`, `lat`, `radius_km`); for a USV `radius_km` is the distance from the station at which it counts as swept off track. A glider `drift` task needs `heading_to`, the compass heading in degrees
+names the station (`lon`, `lat`; `radius_km`, default 5, and `lost_after_h`, default 6, are optional); for a USV `radius_km` is the distance from the station at which it counts as swept off track. A glider `drift` task needs `heading_to`, the compass heading in degrees
 (0 to 360) it swims on: a drift glider has no pass/fail criterion, so its GO means only that the battery and depth limits held on that heading. The platform file must be of the
 vehicle's class (a Seaglider or Slocum for a glider, `saildrone_explorer` for a USV, `quad_uas` for a UAS), an acoustic link cannot end at a UAS, every time must be a real calendar time,
-every vehicle must be deployed at least 10 min before `window.end`, and a key that is not in the schema (a typo in `task`, `sorties`, `launch_rules`, `shore`) is refused.
+every vehicle must be deployed at least 10 min before `window.end`, and a key that is not in the schema (a typo in `task`, `sorties`, `launch_rules`, `shore`) is refused. It also refuses a NaN or infinite number (a missing value is a missing key, not `.nan`), a repeated key, and a leading-zero number such as `010` (YAML reads it as octal 8; write 8, or quote it), naming the field or the line.
+
+A platform file must hold every parameter its model reads, each a finite number in its physical range; `python -m cafe.pm hangar --platform <file>` and `validate` name the file and the field that is missing or out of range. A repeated key or an octal number in a platform file is refused like in a mission.
+
+The mission's `environment.subgrid` block has five switches: `turbulence`, `gust_fronts`, `warm_layer`, `rain_lens`, `ocean_sde`. Each is on unless the mission says `false`; the report's header lists the five and which of them the mission left out.
 
 ## 5. Run the mission
 
@@ -103,12 +117,12 @@ pm bin/run_premission --mission missions/tepex_c_demo.yaml --budget quick --gpus
   stage-3 budget holds at this machine's rate is "not run: the physical lattice viscosity ... needs dx ..., N cells and M cell-updates; this machine does Y in the window's slice ..." (every CPU
   window today except the one smoke window of `--budget ci`, because the lattice viscosity floor of `config/assumptions.yaml` `stage3.nu_lat_floor` cannot be
   met at a CPU's resolution). So **no LES coefficients exist on this machine; sub-grid and refit stay uncalibrated**, and the time goes back to stage 1.
-  The free-surface hull window still runs where it fits; the glider hull's FEA belongs to its LES window, so it does not run when that window is skipped.
+  The free-surface hull window still runs where it fits, on `min(6, workers)` MPI ranks (fewer on a machine with fewer CPUs; `CAFE_NPROC` overrides) and the plan prices the same number; the glider hull's FEA belongs to its LES window, so it does not run when that window is skipped.
 * A vehicle that drifts out of the downloaded box is a failed member (failure mode `left_data`), and the report says how many left and when. The pad around the
   mission box is `box.pad_deg` if the mission sets it, else the window length x 0.5 m/s in degrees (at most 10, reached at about 26 days); set `pad_deg`
   for a long window or a fast drifter and rerun the ingest.
 * The run is resumable: rerunning the same command skips every stage whose ledger and outputs are intact. `--fresh` ignores
-  the checkpoints. `--seed S` replaces the mission's seed (same seed + same machine bench = the same `report.json`).
+  the checkpoints. `--seed S` replaces the mission's seed (same seed, same machine bench and the same CPU count = the same `report.json`; stage 1 and 1b are the same at any count, the emulator variants are not, so a resume under another CPU count reruns the emulator and the report).
 * You should see one line per stage and finally `report: runs/quick/report/index.html`, exit code 0.
 
 Read, in this order: `runs/quick/report/index.html` (verdicts, failure modes, links, map, the stage-3 windows and why each
@@ -117,8 +131,8 @@ input), and `runs/quick/report/report.json` (the same numbers, each with its sta
 Re-render a finished run with `pm python -m cafe.pm report --run runs/quick`.
 
 What if: `pm python -m cafe.pm whatif --mission missions/tepex_c_demo.yaml --run runs/quick --shift 48h` (also `--move "1deg W"`,
-`--drop uas`, `--vehicle usv`); it answers from the emulator when it can and runs stage 1 when it cannot, and says which. A UAS shift that is a whole
-number of days is refused ("the same launch time of day"). UAS what-if answers use the 10 m scaled wind profile for the candidate and the baseline alike,
+`--drop uas`, `--vehicle usv`); it answers from the emulator when it can and runs stage 1 when it cannot, and says which. A UAS shifted by a whole
+number of days launches at the same time of day: the command prints `uas: unchanged (...)` next to the answers for the other vehicles. UAS what-if answers use the 10 m scaled wind profile for the candidate and the baseline alike,
 so a shifted sortie is not compared across two wind models.
 
 **The emulator needs 100 distinct feature points per vehicle class, and one run does not make that many.** The plan says so before the run (`plan.json`:
@@ -190,4 +204,9 @@ receipt table was made by other code than the run's reads "stale: made by other 
 | `free-surface window not run: estimated ... it would fit --budget overnight` | the interFoam hull case does not fit this budget | expected at `quick`; the report shows "W3 did not run; not used in the refit: free-surface window not run: ..." and the hull refit was not used |
 | `only N GB free under ...; a DTMB 5415 case needs 4.0 GB` | disk | free space; the DTMB receipts are slow and stored |
 | exit code 2 and `error: ...` | the mission file or a config is invalid, or the emulator training table cannot be read | the message names the field, or the table file (move it aside: its rows are lost; the next run starts a new table) |
+| `error: environment cache file ... cannot be read` | a downloaded file is truncated or corrupt | delete the directory the message names (the orca or ocean part of the cache) and run `fetch` again: only that part is downloaded again |
+| `error: ... duplicate key` or `... is read as octal` | the mission or a config file repeats a key, or has a number such as `010` | fix the line the message names |
+| `error: CAFE_WORKERS=... is not a whole number of at least 1` | the variable is set to something else | `CAFE_WORKERS=N` with N of 1 or more, or unset it |
+| `error: ...: no plan.json; this is not a finished run directory` | `report` was pointed at a directory that no `run` finished | run the mission first (step 5) |
+| `error: stage 1 needs about N GB for the environment of a D-day window ...` (exit code 2) | the memory limit holds not even one worker plus the window's environment | a shorter window, a machine or `--memory` with more memory (step 1) |
 | exit code 1 and `error: stage X: self-checks failed: name: note ...` | a stage self-check failed (a missing input, a changed derived layer, an emulator gate) | the message names the check and what to do; the ledger at the path in the message has the detail. With `CAFE_OFFLINE` set, unset it and run `fetch` |

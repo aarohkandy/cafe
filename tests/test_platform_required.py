@@ -111,3 +111,27 @@ def test_every_parameter_the_models_read_is_in_a_table():
             assert key in uas.REQUIRED[group], (group, key)
     for key in re.findall(r'\blr\["(\w+)"\]', inspect.getsource(uas.launch_check)):
         assert key in uas.REQUIRED["launch_rule"], key
+
+
+@pytest.mark.parametrize("mod,name", [(glider, "seaglider"), (usv, "saildrone_explorer"), (uas, "quad_uas")])
+def test_a_platform_file_with_a_repeated_key_is_refused_like_a_mission(tmp_path, mod, name):
+    """Round 5 integration of M-18: the platform loaders read with yaml.safe_load, so a repeated key in a platform file silently kept the later value
+    (a mission refused it). They read through config's loader now: the repeated key and its line are named."""
+    text = (ROOT / "platforms" / f"{name}.yaml").read_text()
+    first = next(ln for ln in text.splitlines() if re.match(r"^[a-z_]+:", ln))
+    p = tmp_path / f"{name}.yaml"
+    p.write_text(text + "\n" + first + "\n")
+    with pytest.raises(ConfigError, match=rf"duplicate key '{first.split(':')[0]}'"):
+        mod.load_platform(str(p))
+
+
+def test_the_radio_table_is_read_with_the_same_loader(tmp_path, monkeypatch):
+    from cafe.pm.physics import comms
+    (tmp_path / "radios.yaml").write_text("a: 1\na: 2\n")
+    monkeypatch.setattr(comms, "PLATFORMS", tmp_path)
+    comms._yaml.cache_clear()
+    try:
+        with pytest.raises(ConfigError, match=r"line 2: duplicate key 'a'"):
+            comms._yaml("radios.yaml")
+    finally:
+        comms._yaml.cache_clear()

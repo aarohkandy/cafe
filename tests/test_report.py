@@ -1829,7 +1829,7 @@ def test_the_machine_block_prints_what_the_planner_charged_next_to_what_the_stag
     assert s1["planned"]["value"] == plan["stage1_s"] and s1["measured"]["value"] == rep["machine"]["wall_s"]["stage1"]["value"]
     assert "variants" not in rep["machine"]["timing"]
     assert f"Stage 1: planned {plan['stage1_s']:.4g} s, measured {s1['measured']['value']:.4g} s (the plan is a lower bound: critical path" in t
-    edit_json(run / "emulator" / "design.json", lambda d: d.update(variant_planned_s=26.34, variant_wall_s=[31.0, 36.0, 33.0, 72.0]))
+    edit_json(run / "checkpoints" / "emulator" / "ledger.json", lambda d: d.update(variant_planned_s=26.34, variant_wall_s=[31.0, 36.0, 33.0, 72.0]))
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
     v = rep["machine"]["timing"]["variants"]
@@ -1837,6 +1837,6 @@ def test_the_machine_block_prints_what_the_planner_charged_next_to_what_the_stag
     assert "Emulator variant runs: 4 runs, planned 105.4 s, measured 172 s." in plain(h)
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
     del plan["stage1_s_basis"]                                               # an older plan without the basis, an older design without the keys
-    edit_json(run / "emulator" / "design.json", lambda d: (d.pop("variant_planned_s"), d.pop("variant_wall_s")))
+    edit_json(run / "checkpoints" / "emulator" / "ledger.json", lambda d: (d.pop("variant_planned_s"), d.pop("variant_wall_s")))
     report.write(run, m, plan)
     assert set(load(run)["machine"]["timing"]) == {"stage1"} and "the plan is a lower bound" not in (run / "report" / "index.html").read_text()

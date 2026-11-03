@@ -35,7 +35,7 @@ Pipeline and tools
 - `python -m cafe.pm ingest-ocean` writes the lab's HYCOM (netCDF or archv `.a/.b`) into the store the mission names; `QUESTIONS_FOR_LAB.md` Q1 and Q8 give the commands and keys; `docs/RUNBOOK.md`, first draft (`d7a618b`).
 - `mypy --strict` reports 0 errors in `cafe/pm`; `pyproject.toml` sets `strict = true` and the audit's mypy step reads it. `type: ignore` is used only on third-party calls (warp, trimesh, jax.config, smt), each with its code and reason (`84db079`, DECISIONS 115).
 - `ledger.git_sha` falls back to `CAFE_GIT_SHA` in a copy without `.git` (`f48fde3`).
-- 1,908 `def test_` and 2,224 collected cases, all passing, in 48 test files in `tests/` after round 4 and the parallel stage 1 (1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
+- 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files in `tests/` after round 5 (1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
 
 Environment
 
@@ -258,6 +258,45 @@ Round 4 read the q4 quick run (`runs/q4` on homebase) and the code at `23e9a95`.
   - `tests/test_acceptance.py` gives its runs their own emulator table, so it no longer depends on the rows `tests/test_pipeline.py` left in the session's table (`table_rows` 11 against 6 when run after it).
 - Documents (M-21, M-24, M-25; DECISIONS 257, 260, 261): PHYSICS states the glider's surface windage once and correctly (0.01 for a bare `GliderSim`, 1.8 to 2.3 % per member in Stage 1); the RUNBOOK and README `pm()` wrapper pass `CAFE_GIT_DIRTY` (the image has no `git`, so a lab user could never mint or pass the acceptance golden) and RUNBOOK 7 says what minting needs; RUNBOOK says a repeated run with the same mission and seed adds no emulator training point (use another `--seed`, mission or budget). `docs/PHYSICS.md`, `docs/CREDIBILITY.md` (263 assumed inputs, two of them new), `docs/RUNBOOK.md`, `QUESTIONS_FOR_LAB.md` (items 4 and 5) and `STATUS.md` are updated for the rows above.
 
+Review round 5 (`review/round_5/merged.md`: 26 findings, 0 critical, 6 major, 20 minor; DECISIONS 276 to 305)
+
+Round 5 read the q5 quick run (`runs/q5` on homebase, code `d9878e4`) and the code at `7f604c5`. Five batches fixed disjoint files (vehicles and environment, mission config, report and statistics, pipeline and planner, what-if and CI) and a document pass wrote the rest; each code fix has a regression test that failed on the old code, and the lead's four integration items (L1 to L4, DECISIONS 302 to 305) came with the merge. Every stored resume is invalidated again (the code digest changes), and q6 will show what moved in the demo verdicts (not yet known). Counts: 1,983 `def test_`, 2,364 collected cases, all passing; coverage 99.95 % of `cafe/pm`, 100 % on physics, stats, env and stage3.
+
+- Vehicles, environment and platform files (M-1, M-4, M-9, M-20, L2; DECISIONS 276, 279, 284, 295, 303):
+  - M-1: glider and USV runs never step past the requested time, so a deploy time with seconds no longer makes every member `left_data` (a spurious 100 % NO-GO; 2 of the q5 design's 28 vehicle-variants were skipped and the message blamed the place); `OutsideData` prints seconds.
+  - M-4: platform files are checked for missing, NaN and unphysical parameters at load (a table per class of what its model reads); a vehicle file without `mass_kg` is a `ConfigError` and a failed hangar check, not a `KeyError` after the ingest.
+  - M-9: UAS gust fronts are drawn from the exact hourly rain rate (`GriddedEnv.rain_hourly`), not the smoothed node rate, which halved the peak.
+  - M-20: a box with no sea cells fails an ingest check by name instead of a `ValueError`.
+  - L2: the platform loaders and the radios table read through `config._yaml`, so a repeated key or an octal number in a platform file is refused like in a mission.
+- Mission config (M-3, M-17, M-18, M-19; DECISIONS 278, 292 to 294):
+  - M-3: `load_mission` refuses NaN and infinite numbers, naming the field (a NaN radius or `required_fraction` switched a criterion off).
+  - M-17: a station task without `lat` (or `lon`) is a `ConfigError`, not a `KeyError`.
+  - M-18: YAML duplicate keys and leading-zero numbers are refused with the line.
+  - M-19: a corrupt environment cache file and a run directory without `plan.json` end in a named error, exit 2.
+- Planner, workers and pipeline (M-5, M-6, M-13, M-15, M-21, M-22, M-23, L3; DECISIONS 280, 281, 288, 290, 296 to 298, 304):
+  - M-5: the planner scales the UAS stage-1 cost by the mission's sortie-minutes per day against the benchmark's (119 sorties of 20 min in 6 days: `stage1_s` 258.2 s, 52.7 s before); `bench/throughput.py stage1` stores `sortie_min`.
+  - M-6: `plan` has a memory term (0.9 GB per worker plus the environment, 1.5 GB per window day or the cache size if larger): `plan.json` `workers_by_cpu`, `workers_by_memory`, `workers`, `mem_gb`, `env_gb`; a `PlanError` when one worker does not fit; `par._share` names a full directory. L3: the `plan` command passes the same memory arguments as `run`.
+  - M-13: `stage1_s` is called a lower bound (`stage1_s_basis`); the emulator's self-comparing `emulator_variants_within_share` check is replaced by a ledger note with the planned and measured variant seconds.
+  - M-15: a resume under another worker count reruns the emulator and the report (their stage hash includes the emulator plan and the workers); the ledger's `machine` records `workers`.
+  - M-21: a `CAFE_WORKERS` that is not a whole number of at least 1 is a `ConfigError`.
+  - M-22: free-surface ranks follow the machine (`CAFE_NPROC`, else `min(6, workers)`) in the plan and the run.
+  - M-23: `tests/test_par.py` tests the cgroup-quota branch of `par.workers()`.
+- Report, statistics and credibility (M-2, M-7, M-8, M-10 to M-13, L4, L5; DECISIONS 277, 282, 283, 285 to 288, 305, 306):
+  - M-2: the UAS sensitivity ranks the fraction of the flux profile delivered when `profile_incomplete` is the dominant mode (`profile_margin`); "top sensitivities" names the ranked quantity instead of "variance of failure"; the permutation noise floor uses 2000 shuffles (200 before) and a ranked sentence says one in twenty unrelated outcomes would also clear it and how many such tests the report makes.
+  - M-7: `turbulence` and `gust_fronts` default on when `environment.subgrid` omits them; the summary carries `subgrid_switches` and the report prints the five switches and which the mission left out.
+  - M-8: the Verdicts table shows "undecided: granularity" for a link whose required fraction cannot be resolved, including one never required.
+  - M-10: `priors_fitted.json` wind bias entries carry `value_hi95`, the 95 % upper bound of the persistent spread (the fitted value is unchanged); the report prints both, and limitation L19 says the prior is a boundary estimate from 11 moorings in one regime.
+  - M-11: "cannot be certified" is printed only for ensembles that leave P(fail) < 5 % open; the zero-failure note asks for 60 members only below 60; the credibility Uncertainty factor stops counting excluded ensembles as short.
+  - M-12: the report states the verdict rule with its ties and the 90 % Wilson bound the GO rule also needs.
+  - M-13 (report): the machine block prints planned and measured seconds for stage 1 and for the emulator variants. L4: the variant timings are read from the emulator ledger, where they are kept out of the hashed `design.json`.
+  - L1: `bench/throughput.py stage1` prints only its JSON on stdout (importing xlb made warp print a notice there, and `tests/test_bench.py` failed when the file ran alone).
+  - L5: the measured seconds of the planned/measured lines are dropped from the same-seed report comparison like `machine.wall_s` (two identical runs differed only there).
+  - The emulator query-time test takes the fastest of 5 rounds of 30 against the 10 ms limit (DECISIONS 307): one round read 14.9 ms on a loaded box.
+- What-if and CI (M-14, M-16; DECISIONS 289, 291):
+  - M-14: a UAS shifted by whole days is reported "unchanged" and the other vehicles are answered (the RUNBOOK's first example, `--shift 48h`, aborted before).
+  - M-16: CI runs `make ci` and `make broken` before `make audit` and despite its failure; the job timeout is 180 min.
+- Documents (M-24 to M-26; DECISIONS 299 to 301): RUNBOOK says what `--budget ci` really does on the demo (a smoke-test profile, not a refusal), names the optional Bellhop build, the memory limits and the sortie-minute cost; the stale USV ratio and the "battery verdict" wording are corrected (QUESTIONS_FOR_LAB 14, PHYSICS, CREDIBILITY L17 and L18, the known issue below); `tests/test_config_docs.py` pins the three RUNBOOK sentences.
+
 ### Known issues
 
 Each was checked against the committed code at `d7a618b` on 2026-10-30 before it was listed. Line numbers are those of `d7a618b`; the working tree also holds uncommitted edits to `cafe/pm/physics/*.py`, `stats/intervals.py` and `audit.py`, which were not read as part of this entry.
@@ -286,6 +325,6 @@ Open after review round 2 (the integrated tree; each is also in `STATUS.md` or `
 - **No LES coefficients exist on CPU** (L15): every LES window needs about 1e13 to 1e14 cell-updates to reach the lattice viscosity floor, against 2.2e8 per window at `quick`. Sub-grid and refit stay uncalibrated until a GPU run exists. The UAS window has no frame-only reference drag either (QUESTIONS_FOR_LAB 13: no code reads such a key yet, so supplying it needs a code change) and, below 2 cells across its arms, diverges.
 - **The refit is one pass, not the loop of BRIEF 2.6** (L16), and the emulator needs 100 distinct points per vehicle class that one run does not make (DECISIONS 188; the variant batches were not shrunk).
 - **The USV speed reaches 0.12 of the wind in the demo mission against the 0.178 it is calibrated to**; the westward current explains the gap and may already be inside the 0.178 (L18, QUESTIONS_FOR_LAB 14). The demo USV NO-GO (13 of 16, 31 of 32 under the brief's prior, on q2) rests on it.
-- **The UAS verdict is a battery verdict** below about 12 m/s of wind (L17).
+- **The UAS verdict rests on the battery and on finishing the profile in time** (L17; q5: 55 of 64 members failed `profile_incomplete`, 6 `battery_reserve`, the attitude mode fired in 0).
 - **The quick run took 20 min 14 s in q2 only because its ingest was a cold fetch** (522 s; warm ingests take about 6 s). A warm quick run is about 698 s. `config/throughput.json` was measured at load 32.9 and overestimates stage 1 by 2.5 times until `make bench` is rerun on an idle box.
 - **Not done at the time of writing, and pending, not passed:** `make bench` (idle box), `make mutation` (`docs/mutation.json` does not exist), the golden (`tests/golden/tepex_c_demo_quick.json` has no commit sha, clean-tree flag or code digest, so `golden_diff` fails and it must be re-minted from the final code), the model-receipts table (`make receipts`: every code change makes `runs/receipts.json` stale), the final `make acceptance`, a real quick run on homebase with the integrated code (the TAO wind split, the CPU stage-3 skip and the `left_data` path have only run in tests), the DTMB v4 files in `/data/dtmb5415`, and the blind RUNBOOK test by a fresh agent on a clean checkout (BRIEF exit condition 5; there is no record of one).
