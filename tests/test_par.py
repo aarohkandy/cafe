@@ -1,9 +1,12 @@
 """cafe.pm.par: stage 1 on several worker processes gives the same members and the same bits as on one."""
 import gc
+import itertools
 import pathlib
 import pickle
+import types
 
 import numpy as np
+import pytest
 
 from cafe.pm import budget, config, par, pipeline, stage1
 from cafe.pm.env import subgrid
@@ -167,3 +170,89 @@ def test_a_process_multiprocessing_started_is_a_worker_before_its_initializer_ru
     with par.Pool(2):
         assert par.submit(par.workers).result() == 1
     assert par.workers() >= 1 and not par._child()
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 5: M-21, M-23, M-6
+
+def fake_files(monkeypatch, files):
+    """pathlib.Path.read_text answers `files[path]` (an exception is raised) for the named paths and reads the real file for every other."""
+    real = pathlib.Path.read_text
+
+    def read_text(self, *a, **k):
+        if str(self) in files:
+            if isinstance(files[str(self)], Exception):
+                raise files[str(self)]
+            return files[str(self)]
+        return real(self, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "read_text", read_text)
+
+
+CPU_MAX = "/sys/fs/cgroup/cpu.max"
+
+
+@pytest.mark.parametrize("quota,want", [("200000 100000", 2), ("150000 100000", 1), ("max 100000", 8), ("800000 100000", 8), ("1600000 100000", 8)])
+def test_the_cgroup_quota_cuts_the_cpus_of_the_affinity_mask(monkeypatch, quota, want):
+    """M-23: `docker --cpus 2` on an 8-CPU box is 2 workers; `quota // period` turned into `quota * period` gave 8 here and the old test still passed."""
+    monkeypatch.delenv("CAFE_WORKERS")
+    monkeypatch.setattr(par.os, "sched_getaffinity", lambda pid: set(range(8)))
+    fake_files(monkeypatch, {CPU_MAX: quota})
+    assert par.workers() == want
+
+
+@pytest.mark.parametrize("quota", [OSError("no cgroup v2"), "garbage", ""])
+def test_without_a_readable_cgroup_quota_every_cpu_of_the_mask_is_a_worker(monkeypatch, quota):
+    monkeypatch.delenv("CAFE_WORKERS")
+    monkeypatch.setattr(par.os, "sched_getaffinity", lambda pid: set(range(8)))
+    fake_files(monkeypatch, {CPU_MAX: quota})
+    assert par.workers() == 8
+
+
+@pytest.mark.parametrize("v", ["abc", "2.5", "1e1", "0", "-3", " "])
+def test_a_bad_cafe_workers_is_a_config_error_and_not_a_traceback_or_a_silent_one(monkeypatch, v):
+    """M-21: `int("abc")` was a bare ValueError out of Context, and 0 or -3 became 1 without a word."""
+    monkeypatch.setenv("CAFE_WORKERS", v)
+    with pytest.raises(config.ConfigError, match=r"CAFE_WORKERS=.* is not a whole number of at least 1; set CAFE_WORKERS=N or unset it"):
+        par.workers()
+    monkeypatch.setenv("CAFE_WORKERS", "3")
+    assert par.workers() == 3
+    monkeypatch.setenv("CAFE_WORKERS", "")
+    assert par.workers() >= 1                                                         # empty is unset
+
+
+def test_the_limit_of_a_run_cuts_the_workers_inside_its_block_only(monkeypatch):
+    monkeypatch.setenv("CAFE_WORKERS", "5")
+    with par.limit(2):
+        assert par.workers() == 2
+        with par.limit(9):
+            assert par.workers() == 5
+        assert par.workers() == 2
+    assert par.workers() == 5
+
+
+def test_memory_is_the_cgroup_limit_else_what_the_host_has_available_else_unknown(monkeypatch):
+    v2, v1, info = "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes", "/proc/meminfo"
+    meminfo = "MemTotal:       65000000 kB\nMemAvailable:   16777216 kB\nSwapTotal: 0 kB\n"
+    fake_files(monkeypatch, {v2: "28000000000\n", v1: OSError(), info: meminfo})
+    assert par.memory_gb() == pytest.approx(28.0)
+    fake_files(monkeypatch, {v2: "max\n", v1: OSError(), info: meminfo})
+    assert par.memory_gb() == pytest.approx(16777216 * 1024 / 1e9)
+    fake_files(monkeypatch, {v2: OSError(), v1: str(2 ** 63 - 4096), info: meminfo})                   # cgroup v1 spells unlimited as a huge number
+    assert par.memory_gb() == pytest.approx(16777216 * 1024 / 1e9)
+    fake_files(monkeypatch, {v2: OSError(), v1: "8589934592", info: meminfo})
+    assert par.memory_gb() == pytest.approx(8.589934592)
+    for bad in (OSError(), "MemTotal: 1 kB\n", "MemAvailable:\n"):
+        fake_files(monkeypatch, {v2: OSError(), v1: OSError(), info: bad})
+        assert par.memory_gb() is None
+
+
+def test_a_full_directory_is_a_named_error_and_not_a_bare_errno_28(monkeypatch, tmp_path):
+    """M-6: SHM_MIN_FREE was looked at once, for the first file; a long window filled /dev/shm part-way through the later arrays."""
+    monkeypatch.setattr(par, "_dir", tmp_path)
+    monkeypatch.setattr(par, "_names", itertools.count(7))
+    monkeypatch.setattr(par.shutil, "disk_usage", lambda d: types.SimpleNamespace(free=10))
+    a = np.zeros(100)
+    with pytest.raises(OSError, match=rf"{tmp_path} is full after 7 arrays: raise --shm-size \(RUNBOOK 1\) or free the disk"):
+        par._share(a)
+    assert list(tmp_path.iterdir()) == []
+    monkeypatch.setattr(par.shutil, "disk_usage", lambda d: types.SimpleNamespace(free=a.nbytes))
+    assert pathlib.Path(par._share(a)).name == "8.npy"                                                  # exactly enough room is enough

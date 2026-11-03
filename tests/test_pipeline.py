@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 import yaml
 
-from cafe.pm import audit, budget, config, ledger, pipeline, report, stage1
+from cafe.pm import audit, budget, config, ledger, par, pipeline, report, stage1
 from cafe.pm.audit import STAGES
 from cafe.pm.env import ocean as ocean_mod, orca, surface, tao
 from cafe.pm.env.environment import GriddedEnv
@@ -274,7 +274,7 @@ def test_a_fresh_run_writes_the_plan_the_mission_and_one_chained_ledger_per_stag
     prev = None
     for st in STAGES:
         d = read_ledger(run, st)
-        assert d["ok"] and d["stage"] == st and d["config_hash"] == ctx.hash and d["error"] is None
+        assert d["ok"] and d["stage"] == st and d["config_hash"] == ctx.stage_hash(st) and d["error"] is None   # round 5 M-15: the emulator's carries its plan
         refs = [i["ref"] for i in d["inputs"]]
         assert (str(prev) in refs) if prev else not refs
         assert [pathlib.Path(o["path"]).name for o in d["outputs"]] == ["out.txt"]
@@ -1464,7 +1464,7 @@ def test_the_variant_runs_stay_inside_the_emulator_share(tmp_path, table, fake_s
     # round 3 M-4: variant k runs its own members (k + 1) x batch .. (k + 2) x batch - 1, not the baseline's 0..batch-1 that every variant used to share
     assert [c[1] for c in fake_stage1][:3] == [list(range(16 * (k + 1), 16 * (k + 2))) for k in range(3)]
     assert [c[0] for c in fake_stage1][:3] == [["glider_eq", "glider_2n", "usv", "uas"]] * 3
-    assert check_of(d, "emulator_variants_within_share")["ok"] and check_of(d, "emulator_rows_appended")["value"] == 16
+    assert check_of(d, "emulator_rows_appended")["value"] == 16 and "emulator_variants_within_share" not in [c["name"] for c in d["checks"]]   # round 5 M-13
     assert any("3 variant run(s) of 4 s each (the planner's estimate" in n for n in d["notes"]) and any("incl. stage 1b" in n for n in d["notes"])
     refit = cheap_plan(synthetic_ctx(tmp_path, 48, "refit"), 100.0)                                            # glider_eq was refit: share 5 s -> none
     run_stage(pipeline.s_emulator, refit, "emulator")
@@ -1517,7 +1517,7 @@ def test_the_emulator_is_not_trained_on_a_few_rows_and_the_stage_still_passes(tm
     assert set(out) == {"glider_eq", "glider_2n", "usv", "uas"} and all(not v["trained"] for v in out.values())
     assert out["glider_eq"]["reason"].startswith("2 glider rows in the training table") and out["glider_eq"]["rows"] == 2
     assert out["usv"]["cls"] == "usv" and out["glider_eq"] == out["glider_2n"]
-    assert [c["name"] for c in d["checks"]] == ["emulator_rows_appended", "emulator_variants_within_share"] and all(c["ok"] for c in d["checks"])
+    assert [c["name"] for c in d["checks"]] == ["emulator_rows_appended"] and all(c["ok"] for c in d["checks"])
     assert any("not trained (trained: false)" in n and "glider" in n for n in d["notes"]) and len([n for n in d["notes"] if "not trained" in n]) == 3
     flip = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]
     assert set(flip) == {"usv", "uas"}                                                                         # the two vehicles that are not GO
@@ -2666,3 +2666,86 @@ def test_an_emulator_that_answers_a_mission_far_outside_its_training_rows_fails_
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     with pytest.raises(ledger.StageFailed, match="emulator_range_guard_glider"):
         run_stage(pipeline.s_emulator, ctx, "emulator")
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 5: M-6, M-10, M-13, M-15
+
+@pytest.fixture(autouse=True)
+def memory_unknown(monkeypatch):
+    """The demo mission's 9 GB environment would be refused by `plan` in the small containers these tests run in (M-6); the memory model has its own
+    tests below and in test_budget.py, which set the memory they need."""
+    monkeypatch.setattr(par, "memory_gb", lambda: None)
+
+
+def test_the_persistent_wind_prior_gets_a_95_percent_upper_bound_above_its_point_estimate():
+    """M-10: 11 moorings with equal means have a point estimate near the floor; the 95 % bound on the spread is more than twice as large."""
+    eq = pipeline.fit_wind_error({k: np.random.default_rng(i).normal(0, 1.0, 400) + 0.5 for i, k in enumerate("abcdefghijk")})
+    assert eq["persistent_hi95"] > eq["persistent"] > 0 and eq["persistent_hi95"] > 2 * eq["persistent"]
+    assert eq["moorings"] == 11
+
+
+def test_the_upper_bound_of_the_persistent_spread_covers_a_known_spread_in_nine_of_ten_fits():
+    fits = [pipeline.fit_wind_error(ar1_moorings(np.random.default_rng(100 + i), n_moor=11, n_t=300, persistent=0.5)) for i in range(30)]
+    hits = [f["persistent_hi95"] >= 0.5 for f in fits]
+    assert sum(hits) >= 27
+
+
+def test_tao_writes_value_hi95_beside_the_persistent_value_with_its_citation(tmp_path, data):
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    tao_stage(ctx, t0, t1)
+    fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
+    for k in ("wind_speed_bias", "wind_direction_bias"):
+        assert fit[k]["value_hi95"] > fit[k]["value"] and fit[k]["citation_hi95"] == "95 % upper bound of the between-mooring variance, 1 degrees of freedom"
+    assert "value_hi95" not in fit["wind_speed_noise"]
+
+
+def test_the_emulator_ledger_has_the_planned_and_measured_variant_seconds_and_no_self_comparing_check(tmp_path, table, fake_stage1):
+    """M-13: the old check compared `len(variants) x est` with the share, which the sizing guarantees; the ledger now says planned, measured and the share."""
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    assert "emulator_variants_within_share" not in [c["name"] for c in d["checks"]]
+    assert any(n.startswith("variant runs: planned 12 s (3 x 4 s), measured ") and "emulator share 20 s" in n and "lower bound" in n for n in d["notes"])
+    assert d["variant_planned_s"] == 4.0 and len(d["variant_wall_s"]) == 3 and all(w >= 0 for w in d["variant_wall_s"])
+    assert design["variant_planned_s"] == 4.0 and "variant_wall_s" not in design and "wall_s" not in json.dumps(design)       # DECISIONS 139: no timing
+
+
+def test_a_resume_under_another_worker_count_reruns_the_emulator_and_reuses_stage_1(tmp_path, monkeypatch):
+    """M-15: the demo plans 1 emulator variant on 1 worker and 6 on 8; the hash of the stages before the emulator does not move, the emulator's does."""
+    demo = ROOT / "missions" / "tepex_c_demo.yaml"
+    monkeypatch.setenv("CAFE_WORKERS", "1")
+    a = ctx_for(tmp_path / "a", "quick", demo)
+    monkeypatch.setenv("CAFE_WORKERS", "8")
+    b = ctx_for(tmp_path / "b", "quick", demo)
+    assert a.plan["workers"] == 1 and b.plan["workers"] == 8 and a.plan["emulator"]["variants_no_refit"] != b.plan["emulator"]["variants_no_refit"]
+    assert a.hash == b.hash and [a.stage_hash(n) == b.stage_hash(n) for n in STAGES] == [True] * STAGES.index("emulator") + [False] * 2
+    calls = []
+    stub_stages(monkeypatch, calls)
+    run = tmp_path / "run"
+    monkeypatch.setenv("CAFE_WORKERS", "1")
+    pipeline.run(demo, "quick", 0, run, log=lambda s: None)
+    assert calls == STAGES
+    del calls[:]
+    pipeline.run(demo, "quick", 0, run, log=lambda s: None)
+    assert calls == []                                                                                     # the same count: everything up to date
+    monkeypatch.setenv("CAFE_WORKERS", "8")
+    pipeline.run(demo, "quick", 0, run, log=lambda s: None)
+    assert calls == ["emulator", "report"]                                                                 # stage 1 and 1b are reused
+
+
+def test_the_workers_of_a_run_are_the_cpus_cut_to_what_the_memory_holds_and_every_stage_sees_that_count(tmp_path, monkeypatch):
+    """M-6: a 4 GB container holds one worker besides the 2.25 GB environment of the CI window; the pool, `par.workers()` in the stages and the plan agree."""
+    monkeypatch.delenv("CAFE_WORKERS")
+    monkeypatch.setattr(par, "memory_gb", lambda: 4.0)
+    monkeypatch.setattr(par.os, "sched_getaffinity", lambda pid: set(range(8)))
+    real = pathlib.Path.read_text
+    monkeypatch.setattr(pathlib.Path, "read_text", lambda self, *a, **k: real(self, *a, **k) if str(self) != "/sys/fs/cgroup/cpu.max" else "max 100000")
+    seen, log = [], []
+    stub_stages(monkeypatch, [])
+    stub = pipeline.FUNCS["ingest"]
+    monkeypatch.setitem(pipeline.FUNCS, "ingest", lambda ctx, L: (seen.append((par.workers(), par.width())), stub(ctx, L)))
+    ctx = go(tmp_path / "run", log)
+    plan = json.loads((tmp_path / "run" / "plan.json").read_text())
+    assert (plan["workers_by_cpu"], plan["workers_by_memory"], plan["workers"], ctx.plan["workers"]) == (8, 1, 1, 1) and plan["mem_gb"] == 4.0
+    assert plan["env_gb"] == pytest.approx(2.25) and seen == [(1, 1)] and any(m.startswith("workers: 1 ") for m in log)
+    assert "capped from 8 by memory" in log[0] and par.workers() == 8                                      # and the cap is gone after the run

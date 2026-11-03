@@ -71,10 +71,12 @@ def versions() -> dict[str, str | None]:
 
 
 def machine() -> dict[str, Any]:
-    """Which benchmarked machine this is: the `machine` block of config/throughput.json written by bench/, plus the host."""
+    """Which benchmarked machine this is: the `machine` block of config/throughput.json written by bench/, plus the host, its CPU count and the
+    stage-1 workers this process runs (`par.workers()`: the CPUs it may use, or CAFE_WORKERS, or the run's planned count)."""
+    from . import par
     p = ROOT / "config" / "throughput.json"
     m = json.loads(p.read_text()).get("machine", {}) if p.exists() else {}
-    return dict(host=platform.node(), cpus=os.cpu_count(), bench_id=m.get("id"), bench_measured=m.get("measured"))
+    return dict(host=platform.node(), cpus=os.cpu_count(), workers=par.workers(), bench_id=m.get("id"), bench_measured=m.get("measured"))
 
 
 class Ledger:

@@ -5,7 +5,7 @@ import math
 import pytest
 from hypothesis import given, settings, strategies as st
 
-from cafe.pm import budget, config, stage1
+from cafe.pm import budget, config, par, stage1
 from cafe.pm.budget import PlanError
 
 MISSION = dict(window=dict(start="2023-03-01T12:00:00Z", end="2023-03-07T12:00:00Z"))          # 6 days
@@ -423,3 +423,117 @@ def test_workers_cost_a_batch_its_longest_task_and_fit_more_batches_in_the_share
     assert eight["tasks"] == {"glider_eq": 1, "glider_2n": 1, "usv": 1, "uas": 6}
     assert budget.batch_cost_s(eight) == pytest.approx(v) and budget.batch_cost_s(eight, ["uas"]) == pytest.approx(v / 6)
     assert eight["n_max"] == 64 and budget.batches_at_once(eight) == 2 and eight["stage1_s"] == pytest.approx(v)    # both batches in one wave
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 5: M-5, M-6, M-13
+
+def demo(every_days=1, duration_min=20):
+    """The demo mission with the UAS flying a sortie every `every_days` days of `duration_min` minutes, and its vehicle classes."""
+    m = config.load_mission(config.ROOT / "missions" / "tepex_c_demo.yaml")
+    so = next(v for v in m["vehicles"] if v["id"] == "uas")["sorties"]
+    so.update(every_days=every_days, duration_min=duration_min)
+    return m, stage1._classes(m)
+
+
+def uas_cost(every_days=1, duration_min=20, **kw):
+    m, c = demo(every_days, duration_min)
+    p = budget.plan("quick", 0, m, vehicle_classes=c, workers=6, **kw)
+    return p, p["member_cost"]["uas"]
+
+
+def test_the_uas_cost_follows_the_sortie_minutes_the_mission_flies_and_the_demos_is_untouched():
+    """M-5: 119 sorties in six days cost the same 4.62 s per batch-day as 6, and `--budget` was not held. The benchmark flew 6 x 20 = 120 sortie-minutes."""
+    thr = budget.throughput()["stage1"]["uas"]
+    base, mc = uas_cost()
+    assert mc["s_per_batch_day"] == thr["s_per_batch_day"] and mc["s_per_member_day"] == thr["s_per_member_day"] and "sortie" not in mc["source"]
+    many, mm = uas_cost(every_days=0.05)
+    assert many["tasks"]["uas"] == 119 and mm["s_per_batch_day"] == pytest.approx(thr["s_per_batch_day"] * 119 / 6)
+    assert mm["s_per_member_day"] == pytest.approx(thr["s_per_member_day"] * 119 / 6) and "x19.8 for 2380 sortie-minutes in 6 days" in mm["source"]
+    long, ml = uas_cost(duration_min=120)
+    assert long["tasks"]["uas"] == 6 and ml["s_per_batch_day"] == pytest.approx(thr["s_per_batch_day"] * 6)
+    assert many["stage1_s"] > 1.3 * base["stage1_s"] and long["stage1_s"] > base["stage1_s"]                    # was 52.7 s in all three
+    assert long["member_cost"]["glider_eq"] == base["member_cost"]["glider_eq"] and long["member_cost"]["usv"] == base["member_cost"]["usv"]
+
+
+def test_the_sortie_scale_is_per_day_so_a_longer_window_of_the_same_sorties_is_not_scaled_twice():
+    m, c = demo()
+    m["window"]["end"] = "2023-03-13T12:00:00Z"                                                                  # 12 days of the benchmark's one sortie a day
+    p = budget.plan("4h", 0, m, vehicle_classes=c, workers=6)
+    assert p["days"] == 12.0 and p["member_cost"]["uas"]["s_per_batch_day"] == budget.throughput()["stage1"]["uas"]["s_per_batch_day"]
+
+
+def test_a_mission_whose_sorties_alone_outrun_the_stage_1_share_is_refused_with_the_shortfall():
+    m, c = demo(every_days=0.05, duration_min=120)                                       # 119 sorties of 2 h: 119 times the benchmark's UAS work
+    ok, _ = demo()
+    budget.plan("quick", 0, ok, vehicle_classes=c, workers=1)
+    with pytest.raises(PlanError, match=r"stage 1 needs \d+ s for even one batch of 4 members .* short by \d+ s"):
+        budget.plan("quick", 0, m, vehicle_classes=c, workers=1)
+
+
+def test_the_benchmark_sortie_rate_is_stored_or_read_from_the_mission_it_names():
+    assert budget.bench_sortie_rate(dict(sortie_min=120.0, mission_days=6.0)) == 20.0
+    assert budget.bench_sortie_rate(budget.throughput()["stage1"]["uas"]) == 20.0                                # the stored file names the demo
+    assert budget.bench_sortie_rate(dict(mission="missions/no_such.yaml", mission_days=6.0)) is None
+    m, c = demo()
+    t = {"stage1": {k: dict(v, mission="missions/no_such.yaml") for k, v in budget.throughput()["stage1"].items()}}
+    assert any("not scaled by sortie-minutes" in n for n in budget.plan("quick", 0, m, thr=t, vehicle_classes=c, workers=6)["notes"])
+
+
+def test_the_memory_caps_the_workers_and_the_plan_records_which_limit_set_them(monkeypatch):
+    """M-6: 16 GB less the demo's 9 GB environment holds 7 workers of 0.9 GB, not 8; `describe` says memory capped them."""
+    monkeypatch.delenv("CAFE_WORKERS")
+    monkeypatch.setattr(par, "workers", lambda: 8)
+    MISSION, CLASSES = demo()
+    p = budget.plan("quick", 0, MISSION, vehicle_classes=CLASSES, mem_gb=16.0, env_gb=9.0)
+    assert (p["workers_by_cpu"], p["workers_by_memory"], p["workers"]) == (8, 7, 7) and p["mem_gb"] == 16.0 and p["env_gb"] == 9.0
+    assert "capped from 8 by memory (16 GB less 9 GB environment, 0.9 GB each)" in budget.describe(p)
+    roomy = budget.plan("quick", 0, MISSION, vehicle_classes=CLASSES, mem_gb=28.0, env_gb=9.0)
+    assert (roomy["workers_by_cpu"], roomy["workers_by_memory"], roomy["workers"]) == (8, 21, 8) and "capped" not in budget.describe(roomy)
+    unknown = budget.plan("quick", 0, MISSION, vehicle_classes=CLASSES)
+    assert (unknown["workers_by_cpu"], unknown["workers_by_memory"], unknown["workers"]) == (8, None, 8) and unknown["mem_gb"] is None
+    assert budget.plan("quick", 0, MISSION, vehicle_classes=CLASSES, mem_gb=16.0)["env_gb"] == 9.0               # the default is 1.5 GB per window day
+
+
+def test_an_explicit_worker_count_is_honoured_and_the_plan_prints_the_memory_it_needs(monkeypatch):
+    monkeypatch.setenv("CAFE_WORKERS", "1")
+    MISSION, CLASSES = demo()
+    one = budget.plan("quick", 0, MISSION, vehicle_classes=CLASSES, mem_gb=16.0, env_gb=9.0)
+    assert (one["workers_by_cpu"], one["workers_by_memory"], one["workers"]) == (1, 7, 1) and not [n for n in one["notes"] if "kernel" in n]
+    plain = budget.plan("quick", 0, MISSION, vehicle_classes=CLASSES)
+    assert {k: v for k, v in one.items() if k not in ("mem_gb", "env_gb", "workers_by_memory")} == {k: v for k, v in plain.items() if k not in
+                                                                                                 ("mem_gb", "env_gb", "workers_by_memory")}
+    eight = budget.plan("quick", 0, MISSION, vehicle_classes=CLASSES, mem_gb=16.0, env_gb=9.0, workers=8)
+    assert eight["workers"] == 8 and any("8 worker(s) were asked for and need about 16 GB (9 GB environment + 0.9 GB each); 16 GB is available" in n
+                                         for n in eight["notes"])
+
+
+def test_a_window_whose_environment_leaves_no_room_for_one_worker_is_refused_naming_the_memory():
+    m = dict(MISSION, window=dict(start="2023-03-01T12:00:00Z", end="2023-03-31T12:00:00Z"))                     # 30 days: 45 GB of environment
+    with pytest.raises(PlanError, match=r"stage 1 needs about 45 GB for the environment of a 30-day window and 0.9 GB per worker, and 28 GB is available"):
+        budget.plan("4h", 0, m, vehicle_classes=CLASSES, mem_gb=28.0)
+    assert budget.plan("4h", 0, m, vehicle_classes=CLASSES, mem_gb=64.0)["workers_by_memory"] == 21
+    with pytest.raises(PlanError, match="9 GB for the environment of a 6-day window"):
+        budget.plan("quick", 0, MISSION, vehicle_classes=CLASSES, mem_gb=9.5)
+
+
+def test_the_environment_is_1_5_gb_a_day_or_the_stores_on_disk_when_they_are_larger(tmp_path):
+    m = dict(MISSION)
+    assert budget.env_gb(m) == 9.0 and budget.env_gb(m, tmp_path / "nowhere") == 9.0
+    (tmp_path / "derived.zarr" / "c").mkdir(parents=True)
+    (tmp_path / "derived.zarr" / "c" / "0").write_bytes(b"x" * 1000)
+    (tmp_path / "other").write_bytes(b"x" * 10 ** 6)                                                              # not a store
+    assert budget.env_gb(m, tmp_path) == 9.0
+    big = tmp_path / "big.zarr"
+    big.mkdir()
+    with open(big / "0", "wb") as f:
+        f.truncate(12 * 10 ** 9)                                                                                  # a sparse 12 GB file
+    assert budget.env_gb(m, tmp_path) == pytest.approx(12.0, abs=0.01)
+
+
+def test_describe_and_plan_call_the_stage_1_time_a_lower_bound_and_say_what_it_leaves_out():
+    m, c = demo()
+    p = budget.plan("quick", GPU, m, thr=thr(1.0, 0.05), vehicle_classes=c, workers=4)
+    assert p["stage1_s_basis"].startswith("critical path: the longest task or the work over the workers")
+    assert "lower bound" in p["stage1_s_basis"] and "serial part" in p["stage1_s_basis"] and "start-up" in p["stage1_s_basis"]
+    line = budget.describe(p).splitlines()[1]
+    assert f"about {p['stage1_s']:.0f} s (a lower bound, not a schedule: plan.json stage1_s_basis) on 4 worker(s)" in line

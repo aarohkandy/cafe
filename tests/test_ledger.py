@@ -264,3 +264,13 @@ def test_a_ledger_with_nan_and_infinite_values_is_strict_json(tmp_path):
 def test_clean_keeps_finite_numbers_strings_and_none_and_makes_numpy_and_dates_plain():
     assert ledger.clean({"a": 1, "b": 1.5, "c": "s", "d": None, "e": True, "f": (1, 2)}) == {"a": 1, "b": 1.5, "c": "s", "d": None, "e": True, "f": [1, 2]}
     assert ledger.clean([np.arange(2), dt.date(2023, 3, 1), float("-inf")]) == [[0, 1], "2023-03-01", None]
+
+
+def test_machine_records_the_stage_1_workers_beside_the_host_cpu_count(monkeypatch, tmp_path):
+    """Round 5 M-15: `cpus` is the host's; the plan was sized on the workers (CAFE_WORKERS, or the CPUs the container may use)."""
+    from cafe.pm import par
+    monkeypatch.setenv("CAFE_WORKERS", "3")
+    m = ledger.machine()
+    assert m["workers"] == 3 and m["cpus"] >= 1
+    with par.limit(2):
+        assert Ledger(tmp_path, "s", "h").d["machine"]["workers"] == 2                                  # what the run's pool has, not what the env var says
