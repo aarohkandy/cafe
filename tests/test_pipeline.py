@@ -2745,9 +2745,10 @@ def test_a_resume_under_another_worker_count_reruns_the_emulator_and_reuses_stag
 
 
 def test_the_workers_of_a_run_are_the_cpus_cut_to_what_the_memory_holds_and_every_stage_sees_that_count(tmp_path, monkeypatch):
-    """M-6: a 4 GB container holds one worker besides the 2.25 GB environment of the CI window; the pool, `par.workers()` in the stages and the plan agree."""
+    """M-6: a 1 GB container holds one worker besides the 0.08 GB environment of the CI window (its 4 x 4 deg box, 1.5 days: M-2 of round 6);
+    the pool, `par.workers()` in the stages and the plan agree."""
     monkeypatch.delenv("CAFE_WORKERS")
-    monkeypatch.setattr(par, "memory_gb", lambda: 4.0)
+    monkeypatch.setattr(par, "memory_gb", lambda: 1.0)
     monkeypatch.setattr(par.os, "sched_getaffinity", lambda pid: set(range(8)))
     real = pathlib.Path.read_text
     monkeypatch.setattr(pathlib.Path, "read_text", lambda self, *a, **k: real(self, *a, **k) if str(self) != "/sys/fs/cgroup/cpu.max" else "max 100000")
@@ -2757,6 +2758,60 @@ def test_the_workers_of_a_run_are_the_cpus_cut_to_what_the_memory_holds_and_ever
     monkeypatch.setitem(pipeline.FUNCS, "ingest", lambda ctx, L: (seen.append((par.workers(), par.width())), stub(ctx, L)))
     ctx = go(tmp_path / "run", log)
     plan = json.loads((tmp_path / "run" / "plan.json").read_text())
-    assert (plan["workers_by_cpu"], plan["workers_by_memory"], plan["workers"], ctx.plan["workers"]) == (8, 1, 1, 1) and plan["mem_gb"] == 4.0
-    assert plan["env_gb"] == pytest.approx(2.25) and seen == [(1, 1)] and any(m.startswith("workers: 1 ") for m in log)
+    assert (plan["workers_by_cpu"], plan["workers_by_memory"], plan["workers"], ctx.plan["workers"]) == (8, 1, 1, 1) and plan["mem_gb"] == 1.0
+    assert plan["env_gb"] == pytest.approx(0.0756, abs=1e-4) and seen == [(1, 1)] and any(m.startswith("workers: 1 ") for m in log)
     assert "capped from 8 by memory" in log[0] and par.workers() == 8                                      # and the cap is gone after the run
+
+
+def test_the_plan_is_made_again_at_the_end_of_the_ingest_with_the_stores_it_put_on_disk(tmp_path, data_copy, monkeypatch):
+    """M-2: the plan was made once, before the ingest, so a cold-cache run had no disk floor; a store the ingest wrote that is larger than the
+    model now changes the memory term, plan.json and the worker count."""
+    monkeypatch.delenv("CAFE_WORKERS")
+    monkeypatch.setattr(par, "_limit", None)
+    monkeypatch.setattr(par, "memory_gb", lambda: 3.0)
+    monkeypatch.setattr(par.os, "sched_getaffinity", lambda pid: set(range(8)))
+    real = pathlib.Path.read_text
+    monkeypatch.setattr(pathlib.Path, "read_text", lambda self, *a, **k: real(self, *a, **k) if str(self) != "/sys/fs/cgroup/cpu.max" else "max 100000")
+    log = []
+    ctx = ctx_for(tmp_path / "r", log=log.append)
+    assert ctx.plan["workers"] == 3 and ctx.plan["workers_by_memory"] == 3 and ctx.plan["env_gb"] == pytest.approx(0.0756, abs=1e-4)
+    cold = json.loads(json.dumps(ctx.plan))
+    (ctx.cache / "orca" / "big.zarr").mkdir()
+    with open(ctx.cache / "orca" / "big.zarr" / "0", "wb") as f:
+        f.truncate(2 * 10 ** 9)                                                                  # what a larger box's download leaves on disk
+    run_stage(pipeline.s_ingest, ctx, "ingest")
+    assert ctx.plan["env_gb"] >= 2.0 and ctx.plan["workers_by_memory"] == 1 and ctx.plan["workers"] == 1 and ctx.plan != cold
+    assert json.loads((tmp_path / "r" / "plan.json").read_text())["workers"] == 1 and par.workers() == 1
+    assert any("the plan changed now that the cache is on disk: environment 0.1 GB -> " in m and "workers 3 -> 1" in m for m in log)
+    quiet_again = len(log)
+    assert ctx.replan() is False and len(log) == quiet_again                                     # nothing changed: nothing printed
+    assert pipeline.Context(MISSION_PATH, "ci", 0, tmp_path / "r2").plan == ctx.plan             # a resume (warm cache) plans the same
+    (ctx.cache / "orca" / "big.zarr" / "0").write_bytes(b"")
+    with open(ctx.cache / "orca" / "big.zarr" / "0", "wb") as f:
+        f.truncate(5 * 10 ** 9)
+    with pytest.raises(budget.PlanError, match="needs about 5 GB for the environment"):
+        ctx.replan()                                                                             # no longer fits: the refusal names the sizes
+    bare = pipeline.Context(MISSION_PATH, None, 0, tmp_path / "f", log.append)
+    assert bare.replan() is False and bare.plan == {}
+
+
+def test_a_plan_made_again_without_a_memory_figure_prints_unknown(tmp_path, monkeypatch):
+    monkeypatch.setattr(par, "memory_gb", lambda: None)
+    ctx = ctx_for(tmp_path / "r")
+    assert ctx.plan["env_gb"] is None and ctx.replan() is False
+    assert pipeline._gb(None) == "unknown" and pipeline._gb(2.25) == "2.2 GB"
+
+
+def test_cafe_offline_reads_1_true_yes_on_as_offline_and_0_false_no_off_as_online_and_nothing_else(monkeypatch):
+    """M-23: `false` and `no` turned offline mode on (anything but '' and '0' did)."""
+    monkeypatch.delenv("CAFE_OFFLINE")
+    assert pipeline._offline() is False
+    for v in ("", "0", "false", "False", "NO", "off"):
+        monkeypatch.setenv("CAFE_OFFLINE", v)
+        assert pipeline._offline() is False, v
+    for v in ("1", "true", "TRUE", "yes", "On"):
+        monkeypatch.setenv("CAFE_OFFLINE", v)
+        assert pipeline._offline() is True, v
+    monkeypatch.setenv("CAFE_OFFLINE", "maybe")
+    with pytest.raises(config.ConfigError, match="CAFE_OFFLINE='maybe' is not 0 or 1; set CAFE_OFFLINE=1 to download nothing, or 0 or unset it"):
+        pipeline._offline()

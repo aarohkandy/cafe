@@ -550,3 +550,42 @@ def test_the_free_surface_price_follows_the_machines_cores(monkeypatch):
     assert one["estimate"]["cores"] == 1 and six["estimate"]["cores"] == 6 and one["need_s"] > 2.0 * six["need_s"]
     monkeypatch.setenv("CAFE_NPROC", "4")
     assert budget.fs_plan(CLASSES, 1, a3(), 1e9)["estimate"]["cores"] == 4
+
+
+DEMO_BOX = dict(MISSION, name="m", box=dict(lon_min=165.0, lon_max=-165.0, lat_min=-5.0, lat_max=5.0, pad_deg=2.0),
+                 environment=dict(ocean=dict(source="gofs31")))
+
+
+def test_the_environment_grows_with_the_area_of_the_padded_box_and_the_demo_stays_9_gb():
+    """M-2: `env_gb` took only the window's days, so a box 90 times the demo's area was planned at the demo's 9.0 GB."""
+    assert budget.padded_area_deg2(DEMO_BOX) == 14 * 34                                                          # 165 to -165 wraps: 30 deg + 2 x 2
+    assert budget.env_gb(DEMO_BOX) == 9.0 and budget.env_model_gb(DEMO_BOX) == 9.0                               # the one measured point, to the digit
+    big = dict(DEMO_BOX, box=dict(lon_min=-180.0, lon_max=179.9, lat_min=-60.0, lat_max=60.0, pad_deg=2.0))
+    assert budget.env_gb(big) == pytest.approx(9.0 * 360 * 124 / (14 * 34), rel=1e-12) and budget.env_gb(big) > 80 * 9.0
+    long = dict(DEMO_BOX, window=dict(start="2023-03-01T12:00:00Z", end="2023-03-13T12:00:00Z"))
+    assert budget.env_gb(long) == pytest.approx(18.0)                                                            # linear in the days too
+    with pytest.raises(PlanError, match="about 844 GB for the environment"):
+        budget.plan("quick", 0, big, vehicle_classes=CLASSES, mem_gb=64.0)                                       # was planned at 9 GB and passed
+    assert budget.plan("quick", 0, DEMO_BOX, vehicle_classes=CLASSES, mem_gb=28.0)["env_gb"] == 9.0
+
+
+def test_every_zarr_store_below_the_cache_and_the_ocean_store_count_toward_the_floor(tmp_path, monkeypatch):
+    """M-2: the disk floor summed `cache/*.zarr` only (derived.zarr, 218 MB); the big stores are cache/orca/*.zarr and DATA/ocean/gofs_<m>.zarr."""
+    cache = tmp_path / "cache" / "m"
+    (cache / "orca" / "wrf.zarr").mkdir(parents=True)
+    with open(cache / "orca" / "wrf.zarr" / "0", "wb") as f:
+        f.truncate(12 * 10 ** 9)                                                                                 # a sparse 12 GB file
+    assert budget.env_gb(DEMO_BOX, cache) == pytest.approx(12.0, abs=0.01)                                       # 9.0 before: orca/ was not looked at
+    from cafe.pm.env import ocean
+    monkeypatch.setattr(ocean, "DATA", tmp_path)
+    (tmp_path / "ocean" / "gofs_m.zarr").mkdir(parents=True)
+    with open(tmp_path / "ocean" / "gofs_m.zarr" / "0", "wb") as f:
+        f.truncate(5 * 10 ** 9)
+    assert budget.env_gb(DEMO_BOX, cache) == pytest.approx(17.0, abs=0.01)                                       # the orca store plus the ocean store
+    lab = dict(DEMO_BOX, environment=dict(ocean=dict(source="lab_hycom")))                                       # no path: validate's error, not a crash here
+    assert budget.env_gb(lab, cache) == pytest.approx(12.0, abs=0.01)
+    assert budget.env_gb({k: v for k, v in DEMO_BOX.items() if k != "environment"}, cache) == pytest.approx(12.0, abs=0.01)
+
+
+def test_a_mission_without_a_box_is_planned_on_the_demos_box():
+    assert budget.env_gb(MISSION) == 9.0 and budget.padded_area_deg2(MISSION) == 14 * 34

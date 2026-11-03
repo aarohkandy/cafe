@@ -1,4 +1,7 @@
 """Tests for cafe.pm.emulator."""
+import pathlib
+import sys
+import threading
 import time
 
 import numpy as np
@@ -386,3 +389,44 @@ def test_holdout_report_scores_the_held_out_points_against_fresh_draws_and_stops
     assert "fresh" not in em.holdout_report(df, fresh=lambda row: None)                          # nothing could be re-run
     em.fit(df, holdout=0.2, fresh=fresh)
     assert em.holdout is not None and em.holdout["fresh"]["points"] == 3                         # fit keeps it for the ledger
+
+
+def test_write_table_uses_a_temporary_of_its_own_and_leaves_none_behind_when_it_fails(tmp_path, monkeypatch):
+    """M-6: every writer renamed the one fixed `train.parquet.tmp`, so two writers raced on it and a failed write left it behind."""
+    t = tmp_path / "train.parquet"
+    seen = []
+    real = E.os.replace
+    monkeypatch.setattr(E.os, "replace", lambda a, b: (seen.append(pathlib.Path(a).name), real(a, b)))
+    E.write_table(pd.DataFrame(dict(key=["a"], x=[1.0])), t)
+    E.write_table(pd.DataFrame(dict(key=["a", "b"], x=[1.0, 2.0])), t)
+    assert len(set(seen)) == 2 and "train.parquet.tmp" not in seen and all(n.startswith("train.parquet.") and n.endswith(".tmp") for n in seen)
+    assert list(tmp_path.iterdir()) == [t] and len(E.read_table(t)) == 2
+
+    def half(self, name, *a, **k):
+        pathlib.Path(name).write_bytes(b"PAR1 half a file")
+        raise OSError("disk full")
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", half)
+    with pytest.raises(OSError, match="disk full"):
+        E.write_table(pd.DataFrame(dict(key=["c"], x=[3.0])), t)
+    assert list(tmp_path.iterdir()) == [t]                                                  # no half-written temporary; the old table is whole
+    monkeypatch.undo()
+    assert len(E.read_table(t)) == 2
+
+
+def test_the_table_lock_makes_a_second_holder_wait_and_is_skipped_without_fcntl(tmp_path, monkeypatch):
+    t = tmp_path / "sub" / "train.parquet"
+    got = []
+    def second():
+        with E.locked(t):
+            got.append(time.time())
+    with E.locked(t):
+        th = threading.Thread(target=second)
+        th.start()
+        time.sleep(0.3)
+        assert got == []                                                                    # queued behind the first holder
+        released = time.time()
+    th.join(10)
+    assert got and got[0] >= released and (tmp_path / "sub" / "train.parquet.lock").exists()
+    monkeypatch.setitem(sys.modules, "fcntl", None)                                         # `import fcntl` raises ImportError
+    with E.locked(t):
+        pass

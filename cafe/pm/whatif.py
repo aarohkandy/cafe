@@ -43,7 +43,7 @@ from scipy.stats import binom, qmc
 
 from . import budget, par, report, stage1
 from .config import ConfigError, _in_box, utc
-from .emulator import Emulator, FreshDraw, read_table, store_path, write_table
+from .emulator import Emulator, FreshDraw, locked, read_table, store_path, write_table
 from .env.environment import OutsideData
 from .stats import intervals
 
@@ -329,8 +329,9 @@ def add_rows(path: Any, rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, str]:
     """Append rows to the training table (rows with a key already in it are replaced; see `row_key`). -> (whole table, the file used)."""
     p, _ = store_path(path)
     new = pd.DataFrame(rows)
-    df = pd.concat([read_table(p)[lambda d: ~d["key"].isin(new["key"])], new], ignore_index=True) if p.exists() else new
-    write_table(df, p)
+    with locked(p):                                                               # concurrent runs share the table: one read-modify-write at a time
+        df = pd.concat([read_table(p)[lambda d: ~d["key"].isin(new["key"])], new], ignore_index=True) if p.exists() else new
+        write_table(df, p)
     return df, str(p)
 
 
