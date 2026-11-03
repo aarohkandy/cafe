@@ -708,3 +708,25 @@ def test_r5_m19_open_store_names_a_corrupt_or_missing_store_and_the_fix(fx, tmp_
             h.open_store(bad, cache=cache)
     with pytest.raises(ConfigError, match="cannot be read"):
         h.open_store(tmp_path / "absent.zarr")
+
+
+def test_r6_m7_the_remedy_names_the_store_itself_never_its_parent_and_a_lab_store_is_restored(fx, tmp_path):
+    from cafe.pm.config import ConfigError
+    ocean = tmp_path / "ocean"
+    ocean.mkdir()
+    bad, other, lab = ocean / "gofs_m.zarr", ocean / "gofs_other.zarr", ocean / "lab_m.zarr"
+    for p in (bad, other, lab):
+        shutil.copytree(fx["gofs_zarr"], p)
+    for p in (bad, lab):
+        (p / "zarr.json").write_text("{not json")
+    with pytest.raises(ConfigError) as e:
+        h.open_store(bad)
+    msg = str(e.value)
+    assert f"delete {bad} and run `python -m cafe.pm fetch" in msg and str(other) not in msg and f"delete {ocean} " not in msg
+    with pytest.raises(ConfigError) as e:
+        h.open_store(lab)                                                       # not a gofs* name: the lab's, which cannot be downloaded again
+    assert f"restore {lab} from the lab's source" in str(e.value) and "delete" not in str(e.value) and "cannot download it" in str(e.value)
+    with pytest.raises(ConfigError, match="restore .*gofs_m.zarr from the lab's source"):
+        h.open_store(bad, lab=True)                                             # the mission says so: the name does not matter
+    with pytest.raises(ConfigError, match="delete .*lab_m.zarr and run"):
+        h.open_store(lab, lab=False)

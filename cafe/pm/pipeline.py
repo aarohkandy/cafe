@@ -194,8 +194,12 @@ def _umwm_depth(cache: str | pathlib.Path) -> dict[str, NDArray[np.float64]] | N
     p = pathlib.Path(cache) / "orca" / "umwm.zarr"
     if not p.exists():
         return None
-    u = xr.open_zarr(p)
-    return dict(lon=u.lon.values, lat=u.lat.values, depth=np.where(u["seamask"].values > 0, u["depth"].values.astype("f8"), 0.0))
+    try:
+        u = xr.open_zarr(p)
+        return dict(lon=u.lon.values, lat=u.lat.values, depth=np.where(u["seamask"].values > 0, u["depth"].values.astype("f8"), 0.0))
+    except Exception as e:                                                # noqa: BLE001  any unreadable chunk or metadata file is the same advice
+        raise ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); delete {pathlib.Path(cache) / 'orca'} and run "
+                          f"`python -m cafe.pm fetch --mission ...` again: only that part is downloaded again") from e
 
 
 def ocean(ctx: Context) -> Any:
@@ -263,7 +267,9 @@ def _tao_cached(tdir: pathlib.Path, box: tuple[float, float, float, float], t0: 
     mp = tdir / "manifest.json"
     if not mp.is_file():
         return False
-    m = json.loads(mp.read_text())
+    m = orca.read_json(mp)
+    if m is None:                                                         # empty or truncated: the files are fetched again and the manifest rewritten
+        return False
     s, n, w, e = hycom.box360(box)
     if not (m["t0"] <= t0 and m["t1"] >= t1 and m["box"][0] <= s and m["box"][1] >= n and m["box"][2] <= w and m["box"][3] >= e):
         return False
@@ -312,7 +318,10 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
         return int(next((m.group(1) for m in map(re.compile(r"fetching (\d+) with").search, lines) if m), 0))
 
     def orca_covers() -> bool:
-        return man.exists() and _orca_covers(json.loads(man.read_text()), t0, t1, box, h3)
+        d = orca.read_json(man)
+        if d is None and man.exists():
+            ctx.log(f"ingest: orca manifest {man} is unreadable (empty or truncated): fetching again")
+        return d is not None and _orca_covers(d, t0, t1, box, h3)
 
     if orca_covers():
         ctx.log(f"ingest: orca cache {man.parent} covers the window, the box and the 3-D hours")

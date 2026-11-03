@@ -206,13 +206,18 @@ def _ingest_ocean(a: argparse.Namespace) -> int:
 
 def _hangar(name: str) -> int:
     """Provenance check of one platform file and the numbers Stage 1 takes from it (what the pipeline's hangar stage records)."""
-    from .config import load_platform
+    from .config import TABLES, load_platform, table_provenance
     from .physics import glider, uas, usv
     raw = load_platform(name)
     kind = str(raw.get("kind", "")).lower()
-    cls, loader = ("uas", uas) if "kind" not in raw else ("usv", usv) if "sail" in kind or "usv" in kind else ("glider", glider)
+    table = next((t for t in TABLES if t in raw and "kind" not in raw), None)             # radios.yaml / modems.yaml: a table of parts, not a vehicle
+    cls: str = TABLES[table] if table else "uas" if "kind" not in raw else "usv" if "sail" in kind or "usv" in kind else "glider"
+    loader: Any = None if table else {"uas": uas, "usv": usv, "glider": glider}[cls]
     try:
-        loader.load_platform(name)
+        if loader is not None:
+            loader.load_platform(name)
+        elif bad := table_provenance(raw):
+            raise ValueError(f"table numbers without a source or an assumed+why: {bad}")
     except ValueError as e:
         print(f"{name} ({cls}): provenance FAILED: {e}")
         return 1

@@ -198,3 +198,40 @@ def test_interpolated_current_stays_within_the_store_extremes(oc, lon, lat, z, f
         a = oc._field(name)
         if np.isfinite(c[k]):
             assert np.nanmin(a) - 1e-6 <= c[k] <= np.nanmax(a) + 1e-6
+
+
+# ---- review round 6, M-7: a damaged chunk is the same ConfigError as a damaged store
+
+def _damaged(ci_env, tmp_path, name):
+    import shutil
+    from cafe.pm.env import hycom
+    bad = tmp_path / name
+    shutil.copytree(ci_env.ocean_store, bad)
+    chunk = next(p for p in sorted((bad / "water_u").rglob("*")) if p.is_file() and p.name != "zarr.json")
+    chunk.write_bytes(b"x")                                                     # one byte: what a truncated download leaves
+    return bad, hycom
+
+
+def test_r6_m7_a_damaged_chunk_is_a_config_error_naming_the_store(ci_env, tmp_path):
+    from cafe.pm.config import ConfigError
+    bad, _ = _damaged(ci_env, tmp_path, "gofs_x.zarr")
+    o = O.Ocean(bad)                                                            # the metadata opens; the chunk is read lazily
+    with pytest.raises(ConfigError, match=rf"environment cache file {bad} cannot be read .*delete {bad} and run `python -m cafe.pm fetch"):
+        o.current(195.0, 0.0, -10.0, T0)
+    lab, _ = _damaged(ci_env, tmp_path, "lab_x.zarr")
+    with pytest.raises(ConfigError, match=rf"restore {lab} from the lab's source"):
+        O.Ocean(lab, lab=True).current(195.0, 0.0, -10.0, T0)
+    with pytest.raises(ConfigError, match="cannot be read"):                    # the pickle for the stage-1 workers reads every field first
+        pickle.dumps(O.Ocean(bad))
+
+
+def test_r6_m7_open_ocean_tells_a_lab_store_from_a_downloaded_one(ci_env, tmp_path, data):
+    from cafe.pm.config import ConfigError
+    lab = tmp_path / "gofs_but_the_labs.zarr"
+    import shutil
+    shutil.copytree(ci_env.ocean_store, lab)
+    (lab / "zarr.json").write_text("{not json")
+    with pytest.raises(ConfigError, match="restore .* from the lab's source"):
+        O.open_ocean({"source": "lab_hycom", "path": str(lab)}, ci_env.cache, "ci_fixture", fetch_bathy=False)
+    with pytest.raises(ConfigError, match="delete .* and run"):
+        O.open_ocean({"source": "gofs31", "path": str(lab)}, ci_env.cache, "ci_fixture", fetch_bathy=False)

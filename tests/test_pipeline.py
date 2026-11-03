@@ -2760,3 +2760,50 @@ def test_the_workers_of_a_run_are_the_cpus_cut_to_what_the_memory_holds_and_ever
     assert (plan["workers_by_cpu"], plan["workers_by_memory"], plan["workers"], ctx.plan["workers"]) == (8, 1, 1, 1) and plan["mem_gb"] == 4.0
     assert plan["env_gb"] == pytest.approx(2.25) and seen == [(1, 1)] and any(m.startswith("workers: 1 ") for m in log)
     assert "capped from 8 by memory" in log[0] and par.workers() == 8                                      # and the cap is gone after the run
+
+
+# ---- review round 6, M-8: a truncated or empty cache JSON is repaired by a fetch or named, never a JSONDecodeError
+
+def test_r6_m8_an_empty_or_truncated_orca_manifest_is_fetched_again_and_says_so(tmp_path, data_copy, monkeypatch):
+    monkeypatch.delenv("CAFE_OFFLINE")
+    man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
+    saved = man.read_text()
+    calls, logged = [], []
+
+    def fake_ingest(t0, t1, box, out, hours3d=(), threads=8, spectra=True, log=print):
+        calls.append(box)
+        man.write_text(saved)
+    monkeypatch.setattr(orca, "ingest", fake_ingest)
+    for damage in ("", saved[:40]):
+        calls.clear()
+        man.write_text(damage)
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / f"r{len(damage)}", log=logged.append), "ingest")
+        assert len(calls) == 1
+    assert any("orca manifest" in x and "unreadable" in x and "fetching again" in x for x in logged)
+
+
+def test_r6_m8_an_unreadable_orca_manifest_offline_fails_the_check_naming_the_command(tmp_path, data_copy):
+    (data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json").write_text("")
+    with pytest.raises(ledger.StageFailed, match="orca_present"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    notes = {c["name"]: c["note"] for c in read_ledger(tmp_path / "r", "ingest")["checks"] if not c["ok"]}
+    assert "python -m cafe.pm fetch --mission" in notes["orca_present"]
+
+
+def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
+    tdir = data_copy / "tao"
+    mp = tdir / "manifest.json"
+    m = config.load_mission(MISSION_PATH)
+    box, t0, t1 = pipeline.ocean_box(m), config.utc(m["window"]["start"]).timestamp(), config.utc(m["window"]["end"]).timestamp()
+    saved = mp.read_text()
+    assert pipeline._tao_cached(tdir, box, t0, t1) is True
+    for damage in ("", saved[:30]):
+        mp.write_text(damage)
+        assert pipeline._tao_cached(tdir, box, t0, t1) is False
+
+
+def test_r6_m8_a_corrupt_umwm_zarr_json_is_a_config_error_naming_the_file_and_the_fix(data_copy):
+    cache = data_copy / "cache" / "ci_fixture"
+    (cache / "orca" / "umwm.zarr" / "zarr.json").write_text("{garbage")
+    with pytest.raises(config.ConfigError, match=rf"environment cache file {cache}/orca/umwm.zarr cannot be read .*delete {cache}/orca and run `python -m cafe.pm fetch"):
+        pipeline._umwm_depth(cache)

@@ -595,3 +595,29 @@ def test_whatif_prints_the_uas_that_a_whole_day_shift_leaves_unchanged(wi, capsy
     monkeypatch.setattr(whatif, "answer", lambda *a, **k: dict(vehicles={}, dropped=[], links_removed=[], unchanged={"uas": why}))
     assert cli.main(whatif_args(wi, "--shift", "48h")) == 0
     assert f"uas: unchanged ({why})" in capsys.readouterr().out.splitlines()
+
+
+# ---- review round 6, M-22: hangar on the radio and modem tables
+
+@pytest.mark.parametrize("name,label", [("radios", "radio table"), ("modems", "modem table")])
+def test_r6_m22_hangar_checks_the_radio_and_modem_tables_as_tables(name, label, capsys):
+    assert cli.main(["hangar", "--platform", name]) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith(f"{name} ({label}): provenance OK, ") and "(uas)" not in out[0] and len(out) == 1 + int(out[0].split(" of ")[1].split()[0])
+
+
+def test_r6_m22_a_radio_table_number_without_a_source_fails_naming_the_leaf_and_an_unknown_platform_marks_the_tables(tmp_path, capsys):
+    text = (config.PLATFORMS / "radios.yaml").read_text()
+    bad = text.replace('gt_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted."}',
+                       "gt_dbi: {value: 2.0, unit: dBi}", 1)
+    assert bad != text
+    (tmp_path / "radios.yaml").write_text(bad)
+    assert cli.main(["hangar", "--platform", str(tmp_path / "radios.yaml")]) == 1
+    out = capsys.readouterr().out
+    assert "(radio table): provenance FAILED" in out and "radios.rfd900x.gt_dbi" in out
+    (tmp_path / "modems.yaml").write_text((config.PLATFORMS / "modems.yaml").read_text().replace("    source:", "    sourc:", 1))
+    assert cli.main(["hangar", "--platform", str(tmp_path / "modems.yaml")]) == 1
+    out = capsys.readouterr().out
+    assert "(modem table): provenance FAILED" in out and "modems.benthos_atm960.source" in out
+    assert cli.main(["hangar", "--platform", "no_such_boat"]) == 2
+    assert "'modems (table)'" in capsys.readouterr().err
