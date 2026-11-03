@@ -1974,3 +1974,112 @@ def test_the_summary_says_which_of_the_five_switches_the_mission_left_out():
     assert all(s[k] == dict(on=True, defaulted=True) for k in ("turbulence", "gust_fronts", "warm_layer"))
     bare = stage1.subgrid_switches({k: x for k, x in MISSION.items() if k != "environment"})
     assert all(x == dict(on=True, defaulted=True) for x in bare.values())
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 6 (batch V)
+
+class SeaMaskHole:
+    """`env` with every UMWM wave variable NaN, as at a node outside the sea mask (environment.py masks all of them together)."""
+
+    def __init__(self, env):
+        self.env = env
+
+    def __getattr__(self, name):
+        return getattr(self.env, name)
+
+    def waves(self, lon, lat, t):
+        return {k: Tagged(np.full(np.shape(v.value), np.nan), "test", 0.0, "assumed") for k, v in self.env.waves(lon, lat, t).items()}
+
+
+def test_a_usv_in_a_hole_of_the_sea_mask_is_a_no_go_labelled_no_current_data_not_a_crash(ci_full):
+    """M-1: Hs, Tp and direction are NaN together at a masked node; the run died with an IndexError in `usv._lin` after ingest and stage 1 had run."""
+    v = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
+    mission = dict(MISSION, vehicles=[v], links=[])
+    pri, marg = stage1.priors_for(mission)
+    b = stage1.run_batch(mission, SeaMaskHole(ci_full), [0, 1, 2, 3], 11, pri, marg)
+    r = b["vehicles"]["usv"]
+    assert r["fail"]["no_current_data"].all() and np.isfinite(r["lon"]).all() and np.isfinite(r["lat"]).all()
+    s = stage1.summarize(stage1.merge([b]), list(marg), mission, 73)["vehicles"]["usv"]
+    assert s["modes"]["no_current_data"] == 4 and s["verdict"]["verdict"] == "NO-GO"
+
+
+def test_the_speed_over_ground_of_a_track_along_60_north_is_half_the_equatorial_one():
+    """M-26: `path_speed` without cos(lat) survived (its tests ran along a meridian or at latitude 0)."""
+    t, one = 600.0 * np.arange(3), np.radians(1.0) * usv.R_E / 600.0
+    lon = np.array([[-165.0], [-164.9], [-164.8]])
+    assert stage1.path_speed(lon, np.zeros((3, 1)), t)[0] == pytest.approx(0.1 * one, rel=1e-9)
+    assert stage1.path_speed(lon, np.full((3, 1), 60.0), t)[0] == pytest.approx(0.05 * one, rel=1e-9)
+    mer = np.array([[60.0], [60.1], [60.2]])
+    assert stage1.path_speed(np.full((3, 1), -165.0), mer, t)[0] == pytest.approx(0.1 * one, rel=1e-9)         # a meridian does not shrink
+
+
+def window_env(ci_full):
+    """The CI environment's time span: the launches below are placed against its first and last hour."""
+    return ci_full.bounds[4], ci_full.bounds[5]
+
+
+def forcing_hours(env, launch, monkeypatch):
+    """The hours the gust fronts were drawn on for one sortie launched at `launch`, and the forcing hooks (no OutsideData raised)."""
+    seen = []
+    real = stage1.subgrid.gust_fronts
+    monkeypatch.setattr(stage1.subgrid, "gust_fronts", lambda seed, rain, hours, *a, **k: seen.append(np.asarray(hours)) or real(seed, rain, hours, *a, **k))
+    _, gust = stage1._uas_forcing(env, dict(environment=dict(subgrid=dict(gust_fronts=True))), (-165.0, 0.0), np.array([launch]), uas_plat(), 2, 1, [0, 1])
+    return seen[0], gust
+
+
+@pytest.mark.parametrize("from_start,minutes", [(False, 55), (False, 40), (False, 32), (True, 10), (True, 50)],
+                         ids=["end-05:05", "end-05:20", "end-05:28", "start-18:10", "start-18:50"])
+def test_a_launch_in_the_last_or_first_hour_of_the_window_builds_the_gust_forcing_on_the_hours_the_data_has(ci_full, monkeypatch, from_start, minutes):
+    """M-4: launches 05:05, 05:20, 05:28Z on the last day and 18:10, 18:50Z on the first (window 18:00Z..06:00Z) raised OutsideData from rain_hourly."""
+    b0, b1 = window_env(ci_full)
+    hours, gust = forcing_hours(ci_full, b0 + 60.0 * minutes if from_start else b1 - 60.0 * minutes, monkeypatch)
+    assert gust is not None and hours.min() >= b0 and hours.max() <= b1 and (hours[1:] - hours[:-1] == 3600.0).all()
+    assert np.isfinite(gust(b0 + 3600.0)).all()
+
+
+def test_a_launch_well_inside_the_window_keeps_the_hours_it_always_had(ci_full, monkeypatch):
+    """M-4: nothing moves for the launches the old hour set served (the demo's 01:00Z is hours from both ends): look-back hour to two hours past."""
+    b0, b1 = window_env(ci_full)
+    for launch in (b1 - 70 * 60.0, b0 + 90 * 60.0, UTC("2023-03-02T01:00:00Z")):
+        hours, _ = forcing_hours(ci_full, launch, monkeypatch)
+        want = np.arange(np.floor(launch / 3600) * 3600 - 3600, launch + 7200, 3600.0)
+        assert np.array_equal(hours, want[(want >= b0) & (want <= b1)])
+    assert stage1._uas_hours(ci_full, np.array([UTC("2023-03-02T01:00:00Z")]))[1] == 0
+    assert stage1._uas_hours(ci_full, np.array([b1 - 600.0]))[1] > 0
+    assert stage1._uas_hours(AnalyticEnv(), np.array([b1 - 600.0]))[1] == 0                               # no limit on an analytic env
+
+
+def test_the_uas_result_counts_the_dropped_hours_and_the_stage_note_says_so(ci_full, monkeypatch, tmp_path):
+    monkeypatch.setattr(stage1.uas, "fly_sortie", sortie_stub([]))
+    v, P, mission, t0, T, X = uas_inputs(window=("2023-03-01T18:00:00Z", "2023-03-03T06:00:00Z"))
+    v = dict(v, sorties=dict(v["sorties"], local_solar_time="18:20"))                                   # 05:20Z at 165 W: the last hour of the window
+    mission = dict(mission, environment=dict(subgrid=dict(gust_fronts=True)))
+    ts = stage1._uas_setup(v, P, mission, t0, T)[2]
+    assert stage1._run_uas(v, P, ci_full, 2, X, t0, T, mission, 1, [0, 1])["hours_dropped"] == stage1._uas_hours(ci_full, ts)[1] > 0
+    assert "hours_dropped" not in stage1._run_uas(v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    a, b = synth_batch(list(range(0, 8))), synth_batch(list(range(8, 16)))
+    for batch in (a, b):
+        batch["vehicles"]["uas"]["hours_dropped"] = 3
+    assert stage1.merge([a, b])["vehicles"]["uas"]["hours_dropped"] == 3                                    # the same in every batch: not added up
+    monkeypatch.setattr(stage1, "run_batch", lambda mission, env, members, seed, pri, marg, scales=None: dict(synth_batch(members, seed=seed), vehicles={
+        k: dict(v, **({"hours_dropped": 3} if k == "uas" else {})) for k, v in synth_batch(members, seed=seed)["vehicles"].items()}))
+    r, log, L = drive(tmp_path, dict(batch=8, n_max=16, n_min=8))
+    assert any("3 hourly steps of the UAS gust-front forcing lie outside the ingested time span" in x for x in L.d["notes"])
+
+
+def test_the_sensitivity_sentence_prints_the_index_and_its_floor_to_three_places_and_the_gap_when_they_agree_to_two(monkeypatch):
+    """M-16: S1 0.12392 and a floor of 0.11799 were both printed '0.12' ('above the 0.12 that unrelated outcomes reach')."""
+    names, U = draw(32, 3)
+    margin = U[:, 0]
+    f = U[:, 0] < 0.3
+
+    def sens(param, s1, floor):
+        monkeypatch.setattr(stage1.sensitivity, "dominant", lambda nm, Ux, y: (param, s1, floor))
+        return stage1._sensitivity(names, U, f, set(names), margin, "current speed")
+    close = sens("current_speed_scale", dict(current_speed_scale=0.12392, hs_scale=0.01), 0.11799)
+    assert "(S1 0.124)" in close["text"] and "above the 0.118 that unrelated outcomes reach at this member count by 0.006." in close["text"]
+    far = sens("hs_scale", dict(hs_scale=0.5123, wind_speed_bias=0.02), 0.2987)
+    assert "(S1 0.512)" in far["text"] and " by " not in far["text"]
+    assert far["text"].endswith("above the 0.299 that unrelated outcomes reach at this member count.")
+    none = sens(None, dict(hs_scale=0.1124, wind_speed_bias=0.02), 0.2987)
+    assert none["case"] == "nothing_above_floor" and "largest S1 0.112, hs_scale; floor 0.299)" in none["text"]

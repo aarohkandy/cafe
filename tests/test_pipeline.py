@@ -2760,3 +2760,28 @@ def test_the_workers_of_a_run_are_the_cpus_cut_to_what_the_memory_holds_and_ever
     assert (plan["workers_by_cpu"], plan["workers_by_memory"], plan["workers"], ctx.plan["workers"]) == (8, 1, 1, 1) and plan["mem_gb"] == 4.0
     assert plan["env_gb"] == pytest.approx(2.25) and seen == [(1, 1)] and any(m.startswith("workers: 1 ") for m in log)
     assert "capped from 8 by memory" in log[0] and par.workers() == 8                                      # and the cap is gone after the run
+
+
+# ---- review round 6, M-5: no usable wind direction at the moorings leaves the configured priors alone ----------------------------------------------
+@pytest.mark.parametrize("calm", [True, False], ids=["no-direction-at-all", "only-the-mean-is-nan"])
+def test_a_comparison_without_a_usable_wind_direction_writes_no_direction_prior_and_stage1_accepts_the_fit(tmp_path, data, monkeypatch, calm):
+    """M-5: a calm WRF (or moorings without a direction channel) wrote `wind_direction_bias: {mean: null, value: null}` and stage 1 died with a TypeError."""
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    real_cmp, real_res = tao.compare, pipeline._wind_residuals
+    nan = float("nan")
+    nan_dir = {"dir_bias_deg": nan, **({"dir_rmse_deg": nan} if calm else {})}
+
+    def compare(wrf, moor):
+        out = real_cmp(wrf, moor)
+        return {**out, "ALL": {**out["ALL"], **nan_dir}}
+    monkeypatch.setattr(tao, "compare", compare)
+    if calm:
+        monkeypatch.setattr(pipeline, "_wind_residuals",
+                            lambda wrf, moor: {k: np.column_stack([v[:, 0], np.full(len(v), nan)]) for k, v in real_res(wrf, moor).items()})
+    d = tao_stage(ctx, t0, t1)
+    fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
+    assert set(fit) >= {"wind_speed_bias", "wind_speed_noise"} and not [k for k in fit if k.startswith("wind_direction")]
+    assert any("no usable wind direction at the moorings (dir_n " in n and "stay the perturbations.yaml priors" in n for n in d["notes"])
+    assert all(np.isfinite(e["mean"]) and np.isfinite(e["value"]) for e in fit.values())
+    pri, marg = stage1.priors_for(ctx.mission, fit)                                  # the TypeError of `np.isfinite(None)` before
+    assert marg["wind_direction_bias"]["sd"] == pri["wind_direction_bias"]["value"] and marg["wind_speed_bias"]["mean"] == fit["wind_speed_bias"]["mean"]

@@ -504,3 +504,10 @@ def test_the_static_app_script_is_scanned_the_vendored_libraries_and_the_html_ar
     root = tree(tmp_path, {"cafe/static/app.js": "let a = 1;\n// TODO fix\nf.mass.placeholder = 'x';\nq.skip(2);\n",
                            "cafe/static/vendor/three.js": "// TODO\n", "cafe/static/index.html": '<input placeholder="x">\n'})
     assert audit.banned(root) == ["cafe/static/app.js:2: banned pattern: // TODO fix", "cafe/static/app.js:4: banned pattern: q.skip(2);"]
+
+
+def test_an_assert_that_ends_in_or_True_is_a_banned_pattern_and_other_uses_of_it_are_not(tmp_path):
+    """Round 6, M-26: `assert a or True` cannot fail and passed the token audit (tests/test_glider.py:413); a callback returning `... or True` is fine."""
+    root = tree(tmp_path, {"tests/test_a.py": 'def test_a():\n    assert (h["lon"] < 0).any() or (s.lon < 0).all() or True\n    assert x == 1  \n'
+                                              "    opened = lambda url: log.append(url) or True\n    assert flag or not True\n"})
+    assert audit.banned(root) == ['tests/test_a.py:2: banned pattern: assert (h["lon"] < 0).any() or (s.lon < 0).all() or True']

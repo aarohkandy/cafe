@@ -177,6 +177,16 @@ def _fewest_boxes(args: tuple[int, int, float, float, float, float, float, float
     return last
 
 
+def _uas_hours(env: Any, ts: NDArray[Any]) -> tuple[NDArray[Any], int]:
+    """The hours the gust fronts are drawn on (the look-back hour to two hours past the last launch) that lie inside the environment's time span, and how many
+    fell outside it: a sortie in the first or last hour of the window would otherwise read an hour the data does not have (OutsideData). An hour outside
+    the data has no rain to drive an event, so it gets none; `rain_hourly` itself stays strict."""
+    hours = np.arange(np.floor(ts[0] / 3600) * 3600 - 3600, ts[-1] + 7200, 3600.0)
+    b = getattr(env, "bounds", None)
+    keep = np.ones(hours.size, bool) if b is None else (hours >= b[4]) & (hours <= b[5])
+    return hours[keep], int((~keep).sum())
+
+
 def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float], ts: NDArray[Any], P: dict[str, Any], M: int, seed: int, members: list[int],
                  stress_scale: NDArray[Any] | None = None,
                  used: dict[str, int] | None = None, only: int | None = None) -> tuple[list[NDArray[Any] | None], Callable[[Any], NDArray[Any]] | None]:
@@ -212,7 +222,7 @@ def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float],
             turbs[i] = subgrid.gust_enu(g, wdir)
     gust: Callable[[Any], NDArray[Any]] | None = None
     if sw.get("gust_fronts") and sl is not None and len(ts):
-        hours = np.arange(np.floor(ts[0] / 3600) * 3600 - 3600, ts[-1] + 7200, 3600.0)
+        hours, _ = _uas_hours(env, ts)
         lo, la = np.full(hours.size, lon), np.full(hours.size, lat)
         rain = np.asarray(env.rain_hourly(lo, la, hours), float)                                  # the hour's own mean rate (row 252 smooths it)
         wto = cv.to_deg(np.asarray(env.u10(lo, la, hours), float))
@@ -320,6 +330,8 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     """Daily flux-profile sorties from the ship (on station): fly_mission per sortie, each a task of its own (`_uas_sortie`), then the 10-min
     grid the links read."""
     Q, origin, ts = _uas_setup(v, P, mission, t0, T)
+    gusts = len(ts) and subgrid_switches(mission)["gust_fronts"]["on"] and getattr(env, "subgrid", None) is not None
+    n_off = _uas_hours(env, ts)[1] if gusts else 0
     futs = [par.submit(_uas_sortie, i, v, P, env, M, X, t0, T, mission, seed, members, drag) for i in range(len(ts))]
     P, so = Q, Q["sortie"]
     done = [f.result() for f in futs]
@@ -378,7 +390,8 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
                               soc_end=s["soc_end"], max_tilt_deg=s["max_tilt_deg"], sat_s=s["sat_s"], demand_ratio_max=s["demand_ratio_max"],
                               **({"wp_done": s["wp_done"]} if "wp_done" in s else {}))              # the waypoints reached; an older sortie result has none
                          for s in sorties],
-                **({"n_wp": int(sorties[0]["n_wp"])} if sorties and "n_wp" in sorties[0] else {}), hs_filled=hs_filled)
+                **({"n_wp": int(sorties[0]["n_wp"])} if sorties and "n_wp" in sorties[0] else {}), hs_filled=hs_filled,
+                **({"hours_dropped": n_off} if n_off else {}))
 
 
 def refit_drag(scales: dict[str, Any] | None, vid: str, seed: int, members: list[int]) -> float | NDArray[np.float64]:
@@ -646,9 +659,9 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
             r["sorties"] = [dict(t_launch=so["t_launch"],
                                  **{k: np.concatenate([b["vehicles"][vid]["sorties"][i][k] for b in batches]) for k in so if k != "t_launch"})
                             for i, so in enumerate(r0["sorties"])]
-        for k in ("n_wp", "hs_filled"):                       # the pattern length is the same in every batch; the filled Hs samples add up
+        for k in ("n_wp", "hs_filled", "hours_dropped"):      # the pattern length and dropped hours repeat in every batch; the filled Hs samples add up
             if k in r0:
-                r[k] = r0[k] if k == "n_wp" else sum(b["vehicles"][vid][k] for b in batches)
+                r[k] = r0[k] if k != "hs_filled" else sum(b["vehicles"][vid][k] for b in batches)
         if r0.get("wind3d") is not None:
             r["wind3d"] = tuple(int(sum(b["vehicles"][vid]["wind3d"][i] for b in batches)) for i in (0, 1))
         out["vehicles"][vid] = r
@@ -702,11 +715,12 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
     param, s1, floor = sensitivity.dominant(nm, Ux[row], y[row])
     out.update(param=param, S1=s1, noise_floor=floor)
     if param is not None:
-        return dict(out, case="ranked", text=f"{param} has the largest first-order index (S1 {s1[param]:.2f}) for the {out['quantity']}, "
-                                             f"above the {floor:.2f} that unrelated outcomes reach at this member count.")
+        by = f" by {s1[param] - floor:.3f}" if round(s1[param], 2) == round(floor, 2) else ""                  # agree to two places: say how far apart they are
+        return dict(out, case="ranked", text=f"{param} has the largest first-order index (S1 {s1[param]:.3f}) for the {out['quantity']}, "
+                                             f"above the {floor:.3f} that unrelated outcomes reach at this member count{by}.")
     top = max(s1, key=lambda p: s1[p])
-    return dict(out, case="nothing_above_floor", text=f"No parameter clears the noise floor for the {out['quantity']} (largest S1 {s1[top]:.2f}, {top}; "
-                                                      f"floor {floor:.2f}): the sample cannot rank them, which is not the same as none mattering.")
+    return dict(out, case="nothing_above_floor", text=f"No parameter clears the noise floor for the {out['quantity']} (largest S1 {s1[top]:.3f}, {top}; "
+                                                      f"floor {floor:.3f}): the sample cannot rank them, which is not the same as none mattering.")
 
 
 def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_certify: int) -> dict[str, Any]:
@@ -895,6 +909,9 @@ def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger 
     if ledger is not None and n_fill:
         ledger.note(f"{n_fill} non-finite wave-height samples (UMWM sea mask) on the UAS and RF link tracks were replaced by the same member's last finite Hs "
                     "(next one at the start); Hs 0 would be a glass-calm sea, the deepest two-ray null")
+    if ledger is not None and (n_off := max((r.get("hours_dropped", 0) for r in res["vehicles"].values()), default=0)):
+        ledger.note(f"{n_off} hourly steps of the UAS gust-front forcing lie outside the ingested time span (a sortie within an hour of the window's "
+                    "start or end) and carry no events: rain is not known there")
     summ = summarize(res, names, mission, intervals.n_certify())
     return dict(res=res, summary=summ, names=names, priors={k: marg[k] for k in names}, n=len(res["U"]),
                 certify=len(res["U"]) >= intervals.n_certify(), n_certify=intervals.n_certify(),

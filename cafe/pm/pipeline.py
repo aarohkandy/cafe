@@ -619,6 +619,11 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
             how = (f"persistent part only: the between-mooring spread of the time-mean error less its sampling variance, plus the uncertainty "
                    f"of the mean of {n} moorings; the hourly rest is wind_{key}_noise")
         value = hourly if split is None else split["persistent"]
+        if not (np.isfinite(mean) and np.isfinite(value)):                 # calm wind or no such channel: the configured priors stand (round 6, M-5)
+            n_ok = int(sum(np.isfinite(v[:, 0 if key == "speed" else 1]).sum() for v in res.values()))
+            L.note(f"no usable wind {key} at the moorings ({'dir' if key == 'direction' else 'speed'}_n {n_ok}): "
+                   f"wind_{key}_bias/noise stay the perturbations.yaml priors")
+            continue
         fit[f"wind_{key}_bias"] = dict(dist="normal", mean=mean, value=value, unit=unit, citation=f"{cite}; {how}", kind="data")
         if split is not None:
             fit[f"wind_{key}_bias"].update(value_hi95=split["persistent_hi95"], citation_hi95="95 % upper bound of the between-mooring variance, "

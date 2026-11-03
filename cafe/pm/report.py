@@ -56,8 +56,8 @@ UAS_ATTITUDE_NOTE_NO_PROFILE = ("Attitude exceedance cannot fire in this control
                                 "verdict rests on battery alone below about 12 m/s of wind.")      # a summary from before the profile was counted
 MODE_TEXT = dict(profile_incomplete="a flown sortie returned (time limit or battery reserve) before its last pattern waypoint, so it did not deliver "
                                     "the full profile",
-                 no_current_data="the ocean current was not a number at the vehicle's position (a land block or a hole in the store), so its drift could "
-                                 "not be computed")
+                 no_current_data="there was no finite wind, current or wave state at the vehicle's position (a land block, a masked cell or a hole in the sea "
+                                 "mask), so its motion could not be computed")
 SENS_SCOPE = ("These indices rank only the sampled columns (the member-wide biases and scales of the forcing and of the vehicle). The larger errors are "
               "per-member random streams that are not columns and are not ranked: the hourly wind error{wind}, half of the current error (the 100 km random "
               "field), the ocean SDE, the UAS turbulence and gusts, and the Iridium draws.")
