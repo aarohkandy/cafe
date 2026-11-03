@@ -108,8 +108,10 @@ GRIDS = {"coarse": (-3, 0), "fine": (0, 0)}                                  # (
 
 
 def nproc() -> int:
-    """MPI ranks cafe.cfd will use (its CAFE_NPROC, default 6): the child inherits the environment."""
-    return int(os.environ.get("CAFE_NPROC", "6"))
+    """MPI ranks the free-surface run uses: CAFE_NPROC when set, else the machine's workers (par.workers()) capped at 6, the measured scaling knee
+    (8 cores reach efficiency 0.44). pipeline_windows.run exports it as CAFE_NPROC before anything imports cafe.cfd, so the run uses what was planned."""
+    from .. import par
+    return int(os.environ["CAFE_NPROC"]) if os.environ.get("CAFE_NPROC") else max(1, min(6, par.workers()))
 
 
 def rate(cores: int) -> tuple[float, str]:

@@ -537,3 +537,16 @@ def test_describe_and_plan_call_the_stage_1_time_a_lower_bound_and_say_what_it_l
     assert "lower bound" in p["stage1_s_basis"] and "serial part" in p["stage1_s_basis"] and "start-up" in p["stage1_s_basis"]
     line = budget.describe(p).splitlines()[1]
     assert f"about {p['stage1_s']:.0f} s (a lower bound, not a schedule: plan.json stage1_s_basis) on 4 worker(s)" in line
+
+
+def test_the_free_surface_price_follows_the_machines_cores(monkeypatch):
+    """M-22: `fs_plan` priced 6 cores whatever the machine had."""
+    monkeypatch.setenv("CAFE_NPROC", "x")
+    monkeypatch.delenv("CAFE_NPROC")
+    monkeypatch.setenv("CAFE_WORKERS", "1")
+    one = budget.fs_plan(CLASSES, 1, a3(), 1e9)
+    monkeypatch.setenv("CAFE_WORKERS", "16")
+    six = budget.fs_plan(CLASSES, 1, a3(), 1e9)
+    assert one["estimate"]["cores"] == 1 and six["estimate"]["cores"] == 6 and one["need_s"] > 2.0 * six["need_s"]
+    monkeypatch.setenv("CAFE_NPROC", "4")
+    assert budget.fs_plan(CLASSES, 1, a3(), 1e9)["estimate"]["cores"] == 4
