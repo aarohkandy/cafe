@@ -2,6 +2,16 @@
 
 Written by the lead session when the user paused it to hand the work to another agent. Read `CLAUDE.md` first (how to run things, the bar for a change, the money rule), then this file.
 
+## 0. Update, 2026-11-03 ~03:00 UTC (new lead session)
+
+Round 4 is closed on `premission-step4` (the parallel stage 1, DECISIONS 266-275, was already committed on top of it).
+- The three unverified items of section 2 are verified on homebase (`pmdata/r4v.sh`): each new test fails on a copy with the old behaviour (what-if and flip search with `whatif.usable` handing back the emulator; acceptance without its own table, run after `test_pipeline.py`; stage 3's share as a check again) and passes on the tree.
+- Full gate on the tip (`pmdata/r5gate.sh`, `-n 6`, 35 min): ruff and mypy clean, 2,224 collected, all passed, coverage 99.94 % of 12,659 statements and 100 % on physics, stats, env, stage3. `audit --code-only` reports only the missing `docs/mutation.json` (code freeze).
+- Section 2's "2,250 passed" was a miscount: the CLAUDE.md recipe also counted traceback lines starting with `E`; the real figure was 2,196 passed and 6 errors. CLAUDE.md has the stricter recipe now.
+- Row 263 and CHANGELOG no longer claim the `seed_table(seed=4)` workaround that P reverted.
+
+Next: section 3 (q5 quick run, then review round 5; its prompt is `review/round_5/PROMPT.md`).
+
 ## 1. The goal and the stop rule
 
 `docs/BRIEF.md` section 0 is the definition of done.
@@ -102,6 +112,7 @@ P ran these files in full on homebase, all passing: `test_pipeline`, `test_whati
    - **The blind RUNBOOK test:** a fresh agent follows `docs/RUNBOOK.md` on a clean checkout; fix until it doesn't get stuck.
    - Final STATUS and CHANGELOG; commit and push.
    - Clean the homebase private directories (section 5).
+   - **Last, after everything above (the user asked, 2026-11-03):** plain-language documentation a non-specialist can follow: what the tool does, how to run it, how to read the report. Simple words, no padding, no document that is not needed (improve README and RUNBOOK before adding files). Then push it to GitHub in an easy-to-read layout.
 
 ## 4. How the lead ran things (what works)
 

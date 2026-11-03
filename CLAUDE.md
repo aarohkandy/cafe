@@ -26,7 +26,7 @@ Read these before changing anything, in this order:
   - `TM=<name>` runs it detached in tmux. The log goes to `~/logs/<name>.log` and ends with `rc=N`.
 - Both runners split their arguments on spaces. For anything with quotes or pipes, write a script, copy it over and run it:
   `scp -i ~/.ssh/homebase_ed25519 x.sh azureuser@100.108.213.121:work/cafe/pmdata/` then `bin/pmx.sh sh /data/x.sh`.
-- pytest's summary line is suppressed (`-q -q`). Read the result from the exit code, or count the result characters: `grep -a "^[.sxFE]" log | sed "s/ *\[.*//" | tr -d "\n" | fold -w1 | sort | uniq -c`.
+- pytest's summary line is suppressed (`-q -q`). Read the result from the exit code, or count the result characters on the progress lines only: `grep -aE "^[.sxFE]+ *(\[ *[0-9]+%\])?$" log | sed "s/ *\[.*//" | tr -d "\n" | fold -w1 | sort | uniq -c`. A looser `^[.sxFE]` also counts traceback lines that start with `E` (round 4 read 2,250 passed for a real 2,196).
 - Timings:
   - **The full suite** takes about 75 min on 6 CPUs. Run single files with `-k` while you work.
   - **`python -m cafe.pm audit <run>`** runs the whole suite with coverage. Use `--code-only` or `--ledgers-only` unless you mean it.
