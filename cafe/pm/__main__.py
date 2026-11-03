@@ -166,6 +166,8 @@ def _gpu_mem(a: argparse.Namespace) -> float | None:
 def _report(run: pathlib.Path, open_it: bool) -> int:
     """Re-render a finished run's report; with the environment cache present the report also routes the reach map through its currents."""
     m = load_mission(run / "mission.yaml")
+    if not (run / "plan.json").is_file():
+        raise ConfigError(f"{run}: no plan.json; this is not a finished run directory (run `python -m cafe.pm run` first)")
     plan = json.loads((run / "plan.json").read_text())
     ctx = pipeline.Context(run / "mission.yaml", plan["budget"], plan["gpus"], run)
     env = None

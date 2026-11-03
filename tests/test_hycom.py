@@ -696,3 +696,15 @@ def test_default_main_runs_the_receipts(monkeypatch, capsys):
     R.OUT.clear()
     runpy.run_module("cafe.pm.env.hycom", run_name="__main__")
     assert "PASS" in capsys.readouterr().out
+
+
+def test_r5_m19_open_store_names_a_corrupt_or_missing_store_and_the_fix(fx, tmp_path):
+    from cafe.pm.config import ConfigError
+    bad = tmp_path / "gofs.zarr"
+    shutil.copytree(fx["gofs_zarr"], bad)
+    (bad / "zarr.json").write_text("{not json")
+    for cache in (True, False):
+        with pytest.raises(ConfigError, match=r"environment cache file .*gofs\.zarr cannot be read .*delete .* and run `python -m cafe.pm fetch"):
+            h.open_store(bad, cache=cache)
+    with pytest.raises(ConfigError, match="cannot be read"):
+        h.open_store(tmp_path / "absent.zarr")

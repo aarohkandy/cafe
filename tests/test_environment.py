@@ -521,3 +521,27 @@ def test_rain_hourly_reads_the_burst_hour_by_hour(grid):
     t = fx.RAIN_T0 + 3600.0 * np.arange(-1, 4)
     got = grid.rain_hourly(np.full(5, grid.low.x[i]), np.full(5, grid.law.x[j]), t)
     assert got == pytest.approx([0.0, 10.0, 10.0, 10.0, 0.0], rel=1e-3)
+
+
+def _copy_cache(ci_env, tmp_path):
+    d = tmp_path / "cache"
+    shutil.copytree(ci_env.cache, d)
+    return d
+
+
+def test_r5_m19_a_truncated_chunk_is_a_config_error_naming_the_file_and_the_fix(ci_env, tmp_path):
+    from cafe.pm.config import ConfigError
+    d = _copy_cache(ci_env, tmp_path)
+    chunk = next(p for p in sorted((d / "orca" / "wrf.zarr" / "U10").rglob("*")) if p.is_file() and p.name != "zarr.json")
+    chunk.write_bytes(b"")
+    with pytest.raises(ConfigError, match=r"environment cache file .*wrf\.zarr cannot be read .*delete .*orca and run `python -m cafe.pm fetch"):
+        GriddedEnv(d, env_sigmas())
+
+
+def test_r5_m19_a_corrupt_zarr_json_is_a_config_error_for_every_store(ci_env, tmp_path):
+    from cafe.pm.config import ConfigError
+    for store in ("umwm.zarr", "wrf3d.zarr", "umwmspec.zarr"):
+        d = _copy_cache(ci_env, tmp_path / store)
+        (d / "orca" / store / "zarr.json").write_text("{not json")
+        with pytest.raises(ConfigError, match=rf"environment cache file .*{store} cannot be read"):
+            GriddedEnv(d, env_sigmas())
