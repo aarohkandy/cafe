@@ -104,3 +104,14 @@ def test_the_runbook_and_readme_wrappers_pass_the_commit_and_the_clean_tree_flag
     assert "CAFE_GIT_DIRTY" in text("pm.sh") and "git" not in text("Dockerfile.pm").lower().replace("github", "")
     rb = text("docs", "RUNBOOK.md")
     assert "dirty: null" in rb and "git status --porcelain" in rb
+
+
+def test_the_ci_workflow_can_reach_its_evidence_steps_and_finish():
+    """Review round 5, M-16: the fast `make ci` and `make broken` come before `make audit` (red until the mutation record exists, and a serial full
+    suite), every later step runs even after a red one, and the job timeout is longer than the audit."""
+    import yaml
+    job = yaml.safe_load(text(".github", "workflows", "premission.yml"))["jobs"]["audit-and-ci"]
+    steps = job["steps"]
+    ci, broken, audit = (next(i for i, s in enumerate(steps) if f"cafe-pm make {t}" in s.get("run", "")) for t in ("ci", "broken", "audit"))
+    assert ci < broken < audit
+    assert all(steps[i].get("if") == "always()" for i in (broken, audit)) and job["timeout-minutes"] >= 150

@@ -574,3 +574,11 @@ def test_nvidia_smi_memory_is_read_in_gb_and_a_missing_or_garbled_answer_is_none
     assert pipeline.gpu_memory_gb() is None
     ans["r"] = SimpleNamespace(returncode=0, stdout="N/A\n")
     assert pipeline.gpu_memory_gb() is None
+
+
+def test_whatif_prints_the_uas_that_a_whole_day_shift_leaves_unchanged(wi, capsys, monkeypatch):
+    """M-14: the line is printed next to the answers for the other vehicles."""
+    why = "launching +48 h later keeps the same launch time of day: nothing changes"
+    monkeypatch.setattr(whatif, "answer", lambda *a, **k: dict(vehicles={}, dropped=[], links_removed=[], unchanged={"uas": why}))
+    assert cli.main(whatif_args(wi, "--shift", "48h")) == 0
+    assert f"uas: unchanged ({why})" in capsys.readouterr().out.splitlines()

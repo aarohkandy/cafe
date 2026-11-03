@@ -266,6 +266,8 @@ def _whatif(a: argparse.Namespace) -> int:
             how = "unchanged"
         iv = f" ({r['lo']:.3f} to {r['hi']:.3f})" if "lo" in r else ""
         print(f"{vid}: {r['base']['verdict']} (P(fail) {r['base']['p_fail']:.3f}) -> {r['verdict']} (P(fail) {r['p_fail']:.3f}){iv}  [{how}]")
+    for vid, why in ans.get("unchanged", {}).items():
+        print(f"{vid}: unchanged ({why})")
     if ans["dropped"]:
         print(f"dropped {', '.join(ans['dropped'])}; links removed: {', '.join(ans['links_removed']) or 'none'}. "
               "Other vehicles are unaffected: Stage-1 vehicles do not interact.")

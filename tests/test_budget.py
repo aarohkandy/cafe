@@ -423,3 +423,16 @@ def test_workers_cost_a_batch_its_longest_task_and_fit_more_batches_in_the_share
     assert eight["tasks"] == {"glider_eq": 1, "glider_2n": 1, "usv": 1, "uas": 6}
     assert budget.batch_cost_s(eight) == pytest.approx(v) and budget.batch_cost_s(eight, ["uas"]) == pytest.approx(v / 6)
     assert eight["n_max"] == 64 and budget.batches_at_once(eight) == 2 and eight["stage1_s"] == pytest.approx(v)    # both batches in one wave
+
+
+def test_the_free_surface_price_follows_the_machines_cores(monkeypatch):
+    """M-22: `fs_plan` priced 6 cores whatever the machine had."""
+    monkeypatch.setenv("CAFE_NPROC", "x")
+    monkeypatch.delenv("CAFE_NPROC")
+    monkeypatch.setenv("CAFE_WORKERS", "1")
+    one = budget.fs_plan(CLASSES, 1, a3(), 1e9)
+    monkeypatch.setenv("CAFE_WORKERS", "16")
+    six = budget.fs_plan(CLASSES, 1, a3(), 1e9)
+    assert one["estimate"]["cores"] == 1 and six["estimate"]["cores"] == 6 and one["need_s"] > 2.0 * six["need_s"]
+    monkeypatch.setenv("CAFE_NPROC", "4")
+    assert budget.fs_plan(CLASSES, 1, a3(), 1e9)["estimate"]["cores"] == 4

@@ -1003,3 +1003,23 @@ def test_measure_runs_the_members_it_is_given(monkeypatch):
     with pytest.raises(whatif.Invalid):
         whatif.measure(STORM, GL, ENV, plan, *PRI, None, 7)
     assert got == [list(range(48, 64)), list(range(16))]                                  # the base run's members when none are named
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 5, batch W
+
+def test_a_whole_day_shift_answers_the_vehicles_it_can_and_names_the_uas_as_unchanged():
+    """M-14: the RUNBOOK's first example (`--shift 48h`) aborted on the UAS's refusal before any vehicle was answered."""
+    m = whatif.apply(CI, drop=["usv", "glider_1n"])
+    base = {GL: dict(verdict="GO", p_fail=0.0), "uas": dict(verdict="GO", p_fail=0.0)}
+    r = whatif.answer(m, dict(shift_h=24.0), base, {GL: TRACK}, ENV, {}, plan_for(m), None, None)
+    assert set(r["vehicles"]) == {GL} and r["unchanged"] == {"uas": "launching +24 h later keeps the same launch time of day: nothing changes"}
+    with pytest.raises(whatif.Invalid, match="whole number of days"):
+        whatif.apply(m, {"uas": dict(shift_h=24.0)})                                      # a direct caller is still refused (row 195)
+    only = whatif.answer(m, dict(shift_h=48.0), base, {}, ENV, {}, plan_for(m), None, None, only=["uas"])
+    assert only["vehicles"] == {} and list(only["unchanged"]) == ["uas"]
+
+
+def test_a_whole_day_shift_with_a_move_moves_the_uas_ship_and_still_says_the_shift_changes_nothing():
+    m = whatif.apply(CI, drop=["usv", "glider_1n", GL])
+    r = whatif.answer(m, dict(shift_h=24.0, dlon=0.1), {"uas": dict(verdict="GO", p_fail=0.0)}, {}, ENV, {}, plan_for(m), None, None)
+    assert list(r["vehicles"]) == ["uas"] and r["vehicles"]["uas"]["method"] == "Stage 1" and "uas" in r["unchanged"]

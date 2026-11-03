@@ -89,6 +89,11 @@ def _points(v: dict[str, Any], ship: dict[str, Any] | None) -> list[list[float]]
     return [[v["deploy"]["lon"], v["deploy"]["lat"]]] + ([[t["lon"], t["lat"]]] if "lon" in t else []) + [list(p) for p in t.get("waypoints", [])]
 
 
+def _whole_days(h: float) -> bool:
+    """A launch shift of a whole number of days: the same time of day."""
+    return bool(h) and int(round(h * 60)) % 1440 == 0
+
+
 def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Sequence[str] = ()) -> dict[str, Any]:
     """A copy of the mission with the changes `mods` = {vid: dict(shift_h, dlon, dlat, duty)} and the vehicles `drop` (with their links) removed."""
     m = copy.deepcopy(mission)
@@ -104,7 +109,7 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
         v = vehicle(m, vid)
         h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
         if h and "base" in v:
-            if int(round(h * 60)) % 1440 == 0:
+            if _whole_days(h):
                 raise Invalid(f"{vid}: launching {h:+g} h later is a whole number of days, the same launch time of day: nothing changes")
             hh, mm = (int(x) for x in v["sorties"]["local_solar_time"].split(":"))
             tot = (hh * 60 + mm + int(round(h * 60))) % 1440
@@ -644,7 +649,8 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
            only: list[str] | None = None) -> dict[str, Any]:
     """The what-if: `ops` = dict(shift_h, dlon, dlat, drop=[ids]) applied to every vehicle (or to `only`). `base` = {vid: Stage-1 verdict dict}
     of the unchanged mission. Per changed vehicle: emulator-first, else Stage 1 at `plan`. Dropped vehicles need no run: Stage-1 vehicles do not
-    interact, only the links through them go. -> dict(vehicles={vid: ...}, dropped, links_removed)."""
+    interact, only the links through them go. -> dict(vehicles={vid: ...}, dropped, links_removed, unchanged={vid: why}): `unchanged` holds a UAS
+    whose launch shift is whole days (the same time of day), left out of `vehicles` unless a move applies to it."""
     pri, marg = stage1.priors_for(mission, fitted)
     seed = int(mission["seed"])
     drop = list(ops.get("drop", []))
@@ -653,6 +659,14 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
     for vid in only or []:
         vehicle(mission, vid)
     changed = {vid: mod for vid in live} if any(mod.values()) else {}
+    unchanged: dict[str, str] = {}
+    for vid in list(changed):                   # a UAS shifted by whole days keeps its launch time of day: apply() refuses it, the answer says so and goes on
+        if "base" in vehicle(mission, vid) and _whole_days(mod["shift_h"]):
+            unchanged[vid] = f"launching {mod['shift_h']:+g} h later keeps the same launch time of day: nothing changes"
+            if mod["dlon"] or mod["dlat"]:
+                changed[vid] = dict(mod, shift_h=0.0)
+            else:
+                del changed[vid]
     m2 = apply(mission, changed, drop)
     out: dict[str, Any] = {}
     for vid in changed:
@@ -669,7 +683,7 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
             why = no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " ")
             out[vid] = dict(base=b, method="Stage 1", why=why, **_stage1(m2, vid, env, plan, fitted, scales))
     gone = [k["id"] for k in mission["links"] if k["a"] in drop or k["b"] in drop]
-    return dict(vehicles=out, dropped=drop, links_removed=gone)
+    return dict(vehicles=out, dropped=drop, links_removed=gone, unchanged=unchanged)
 
 
 def _stage1(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], fitted: dict[str, Any] | None,

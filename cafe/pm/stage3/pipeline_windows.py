@@ -48,6 +48,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+import os
 import pathlib
 import pickle
 import shutil
@@ -694,6 +695,7 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     A USV window also gets a `hull_fs` row, run in a child process while the LBM windows run (killed at the stage deadline); the rows
     follow the LBM rows of the vehicle. A case that does not fit is a row with ok False and the minutes it needs. Every row carries
     `timing` (seconds, measured rates); pipeline.s_stage3 moves it out of the hashed output into the ledger."""
+    os.environ.setdefault("CAFE_NPROC", str(freesurface.nproc()))           # the ranks planned are the ranks run (cafe.cfd reads it at import)
     a = assumptions()
     res = _load_res(ctx)
     for f in (pathlib.Path(ctx.run_dir) / "stage1" / "res.pkl", config.CONFIG / "assumptions.yaml"):      # what the rows depend on, for the ledger

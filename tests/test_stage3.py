@@ -1683,7 +1683,8 @@ def test_nproc_follows_the_environment(monkeypatch):
     monkeypatch.setenv("CAFE_NPROC", "3")
     assert fs.nproc() == 3
     monkeypatch.delenv("CAFE_NPROC")
-    assert fs.nproc() == 6
+    monkeypatch.setenv("CAFE_WORKERS", "16")
+    assert fs.nproc() == 6                                                                  # the measured knee caps it
 
 
 def test_two_grid_runs_the_coarse_and_fine_cases_and_puts_the_gci_at_the_measured_ratio(tmp_path, monkeypatch):
@@ -1886,3 +1887,19 @@ def test_a_uas_window_with_arms_under_two_cells_is_not_run_because_that_resoluti
     a = pw.assumptions()
     assert pw.uas_vehicle(uas.load_platform(), a, "quad_uas").extra["min_dim"] == min(a["uas.arm_width_m"], a["uas.arm_thickness_m"])
     assert "min_dim" not in pw.glider_vehicle(pg.load_platform("seaglider"), a, "seaglider", 500.0).extra
+
+
+def test_nproc_follows_the_machine_and_stage_3_runs_the_ranks_it_planned(monkeypatch):
+    """M-22: 6 ranks whatever the machine had (the plan on 1 CPU was 6 times too low, 32 cores used 6)."""
+    monkeypatch.setenv("CAFE_NPROC", "x")
+    monkeypatch.delenv("CAFE_NPROC")                                                        # (monkeypatch restores it to unset after the test)
+    monkeypatch.setenv("CAFE_WORKERS", "1")
+    assert fs.nproc() == 1
+    monkeypatch.setenv("CAFE_WORKERS", "3")
+    assert fs.nproc() == 3
+    monkeypatch.setenv("CAFE_NPROC", "4")
+    assert fs.nproc() == 4                                                                  # an explicit CAFE_NPROC still wins
+    monkeypatch.delenv("CAFE_NPROC")
+    monkeypatch.setenv("CAFE_WORKERS", "2")
+    pw.run(fake_ctx(pathlib.Path(tempfile.mkdtemp())), {}, FakeL())
+    assert os.environ["CAFE_NPROC"] == "2"                                                  # exported before cafe.cfd or a child reads it
