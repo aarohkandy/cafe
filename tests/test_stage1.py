@@ -940,7 +940,8 @@ def test_run_hands_the_priors_scales_and_seed_to_every_batch_and_returns_the_boo
     members, marg, scales, seed = batches.calls[0]
     assert marg["wind_speed_bias"] == dict(dist="normal", mean=-0.4, sd=1.7) and scales is sc and seed == MISSION["seed"]
     assert r["names"] == list(marg) and r["priors"] == marg and r["t0"] == "2023-03-01T18:00:00+00:00"
-    assert set(r["summary"]) == {"vehicles", "links"} and set(r["summary"]["vehicles"]) == {"glider_eq", "usv", "uas"} and set(r["summary"]["links"]) == set(LK)
+    assert set(r["summary"]) == {"vehicles", "links", "subgrid_switches"}                                      # subgrid_switches: round 5, M-7
+    assert set(r["summary"]["vehicles"]) == {"glider_eq", "usv", "uas"} and set(r["summary"]["links"]) == set(LK)
     assert r["res"]["U"].shape == (8, len(marg)) and "usv 1 s" in log[0]
     checks = {c["name"]: c for c in L.d["checks"]}
     assert list(checks) == ["lhs_stratified_batch1"] and checks["lhs_stratified_batch1"]["ok"]
@@ -1874,3 +1875,102 @@ def test_gust_fronts_are_drawn_from_the_rain_of_each_hour_not_from_the_smoothed_
     rain, hours = seen[0]
     assert hours[0] == fx.RAIN_T0 - 3600.0
     assert rain.tolist() == pytest.approx([0.0, 10.0, 10.0], rel=1e-3)                          # the hours 22Z, 23Z, 00Z; the nodes gave [0, 5, 10]
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 5 (batch S)
+
+def profile_stub(per_sortie, n_wp=10, scrubbed=None):
+    """sortie_stub plus what the real fly_sortie returns for the pattern: wp_done (M,) of the sortie being flown and n_wp; `scrubbed` replaces the stub's."""
+    calls = []
+    base = sortie_stub(calls)
+
+    def fly(*a, **k):
+        r = base(*a, **k)
+        r.update(wp_done=per_sortie[len(calls) - 1], n_wp=n_wp)
+        return r if scrubbed is None else dict(r, scrubbed=np.asarray(scrubbed))
+    return fly
+
+
+def test_the_uas_profile_margin_is_the_lowest_share_of_the_pattern_over_the_flown_sorties(monkeypatch):
+    """M-2: stage 1 stored only the battery margin, so a UAS that failed `profile_incomplete` in 55 of 55 members was ranked on its battery."""
+    v, P, mission, t0, T, X = uas_inputs(window=("2023-03-01T18:00:00Z", "2023-03-03T06:00:00Z"))
+    fly_args = (v, P, AnalyticEnv(), 2, X, t0, T, mission, 1, [0, 1])
+    # sortie 2: member 1 is scrubbed (the stub does that), so its 2 of 10 does not count
+    monkeypatch.setattr(stage1.uas, "fly_sortie", profile_stub([np.array([8, 5]), np.array([10, 2])]))
+    r = stage1._run_uas(*fly_args)
+    assert r["profile_margin"].tolist() == [0.8, 0.5] and r["profile_margin_name"] == "fraction of the flux profile delivered (lowest sortie)"
+    assert r["margin_name"] == "battery reserve margin"                      # the battery margin is still stored beside it
+    monkeypatch.setattr(stage1.uas, "fly_sortie", sortie_stub([]))
+    assert "profile_margin" not in stage1._run_uas(*fly_args)                 # a sortie result without wp_done (an older fly_sortie) gives none
+    monkeypatch.setattr(stage1.uas, "fly_sortie", profile_stub([np.array([8, 5])] * 2, scrubbed=[True, True]))
+    assert np.isnan(stage1._run_uas(*fly_args)["profile_margin"]).all()       # no flown sortie: no margin
+
+
+def test_the_profile_margin_joins_along_the_members_like_the_battery_margin():
+    a, b = synth_batch(list(range(0, 8))), synth_batch(list(range(8, 16)))
+    for batch in (a, b):
+        batch["vehicles"]["uas"].update(profile_margin=np.arange(8.0) / 8, profile_margin_name="q")
+    r = stage1.merge([a, b])["vehicles"]["uas"]
+    assert r["profile_margin"].shape == (16,) and r["profile_margin_name"] == "q" and "profile_margin" not in stage1.merge([a, b])["vehicles"]["usv"]
+
+
+def uas_profile_ensemble(dominant):
+    """24 members; the UAS fails by `dominant`, both margins stored: the battery margin follows battery_capacity_scale, the profile margin bulk_stress_scale."""
+    names = list(stage1.priors_for(MISSION)[1])
+    res = merged({})
+    n, r = 24, res["vehicles"]["uas"]
+    prof = 1.0 - res["U"][:, names.index("bulk_stress_scale")]
+    f = prof < 0.5
+    r["fail"] = {m: f if m == dominant else np.zeros(n, bool) for m in ("battery_reserve", "profile_incomplete")}
+    r["first"] = {m: np.where(f, 100.0, np.nan) if m == dominant else np.full(n, np.nan) for m in r["fail"]}
+    r["margin"], r["margin_name"] = res["U"][:, names.index("battery_capacity_scale")].copy(), "battery reserve margin"
+    r["profile_margin"], r["profile_margin_name"] = prof, "fraction of the flux profile delivered (lowest sortie)"
+    return names, res
+
+
+def test_a_uas_that_fails_by_an_incomplete_profile_ranks_the_profile_not_the_battery():
+    names, res = uas_profile_ensemble("profile_incomplete")
+    s = stage1.summarize(res, names, MISSION, 73)["vehicles"]["uas"]["sensitivity"]
+    assert s["quantity"] == "fraction of the flux profile delivered (lowest sortie)" and s["case"] == "ranked" and s["param"] == "bulk_stress_scale"
+    assert "for the fraction of the flux profile delivered" in s["text"] and "battery" not in s["text"]
+    names, res = uas_profile_ensemble("battery_reserve")                     # a battery failure keeps ranking the battery margin
+    s = stage1.summarize(res, names, MISSION, 73)["vehicles"]["uas"]["sensitivity"]
+    assert s["quantity"] == "battery reserve margin"
+
+
+def test_a_ranked_sentence_says_how_many_unrelated_outcomes_would_clear_the_floor_and_how_many_such_tests_the_report_makes():
+    names = list(stage1.priors_for(MISSION)[1])
+    res = merged({"glider_eq": 0.25, "usv": 0.25}, {"usv-uas-rf": 0.25, "glider_eq-ship-acoustic": 0.25})
+    for vid, q in (("glider_eq", "maximum distance from the station"), ("usv", "maximum cross-track error")):
+        res["vehicles"][vid]["margin"], res["vehicles"][vid]["margin_name"] = -res["U"][:, 0].copy(), q
+    s = stage1.summarize(res, names, MISSION, 73)
+    tests = [e["sensitivity"] for k in ("vehicles", "links") for e in s[k].values() if e["sensitivity"]["noise_floor"] is not None]
+    ranked = [t for t in tests if t["case"] == "ranked"]
+    assert ranked and len(tests) >= 4
+    for t in ranked:
+        assert t["text"].endswith(f"(one in twenty unrelated outcomes would also clear it, and the report makes {len(tests)} such tests).")
+    assert all("one in twenty" not in t["text"] for t in tests if t["case"] != "ranked")
+
+
+def test_a_mission_that_leaves_out_environment_subgrid_flies_the_uas_with_turbulence_and_gust_fronts(ci_full, monkeypatch):
+    """M-7: `stage1` read those two switches with no default, so a smaller mission than the demo flew a laminar UAS and said nothing."""
+    monkeypatch.setattr(stage1.uas, "fly_sortie", sortie_stub([]))
+    v, P, mission, t0, T, X = uas_inputs(window=("2023-03-01T18:00:00Z", "2023-03-02T12:00:00Z"))
+    bare = {k: x for k, x in mission.items() if k != "environment"}
+    for m, want in ((bare, ["uas/gust", "uas/turb/0"]), (dict(mission, environment={}), ["uas/gust", "uas/turb/0"]),
+                    (dict(mission, environment=dict(subgrid=dict(turbulence=False, gust_fronts=False))), [])):
+        used = {}
+        stage1._run_uas(v, P, ci_full, 2, X, t0, T, m, 1, [0, 1], used=used)
+        assert sorted(used) == want, m.get("environment")
+
+
+def test_the_summary_says_which_of_the_five_switches_the_mission_left_out():
+    names = list(stage1.priors_for(MISSION)[1])
+    s = stage1.summarize(merged({}), names, MISSION, 73)["subgrid_switches"]
+    assert list(s) == ["turbulence", "gust_fronts", "warm_layer", "rain_lens", "ocean_sde"] and all(x == dict(on=True, defaulted=False) for x in s.values())
+    odd = dict(MISSION, environment=dict(MISSION["environment"], subgrid=dict(rain_lens=False, ocean_sde=True)))
+    s = stage1.summarize(merged({}), names, odd, 73)["subgrid_switches"]
+    assert s["rain_lens"] == dict(on=False, defaulted=False) and s["ocean_sde"] == dict(on=True, defaulted=False)
+    assert all(s[k] == dict(on=True, defaulted=True) for k in ("turbulence", "gust_fronts", "warm_layer"))
+    bare = stage1.subgrid_switches({k: x for k, x in MISSION.items() if k != "environment"})
+    assert all(x == dict(on=True, defaulted=True) for x in bare.values())

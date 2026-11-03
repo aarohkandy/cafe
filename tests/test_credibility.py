@@ -407,12 +407,15 @@ LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the
            "the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
            "UAS attitude exceedance cannot fire in this controller model (tilt clamp 35 deg, exceedance 42 deg)",
            "the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio again; "
-           "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established"]
+           "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established",
+           "the persistent wind-speed prior is a boundary moment estimate from the TAO moorings of one regime, not a measured spread: in the evidence run "
+           "q5 11 moorings over 6 days gave 0.113 m/s, with a 95 % upper bound of about 0.5 m/s (the literature prior was 2.0 m/s), and regime-to-regime "
+           "bias outside the window is not sampled"]
 
 
 def test_limitations_are_listed_verbatim_and_point_at_real_files():
     assert [x["text"] for x in cr.LIMITATIONS][:12] == LIMITS
-    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18"] and [x["text"] for x in cr.LIMITATIONS][12:] == LIMITS2
+    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18", "L19"] and [x["text"] for x in cr.LIMITATIONS][12:] == LIMITS2
     names = {k for k, _ in cr.FACTORS}
     for x in cr.LIMITATIONS:
         assert set(x["factors"]) <= names and x["where"]
@@ -677,3 +680,30 @@ def test_an_uncalibrated_sub_grid_layer_is_a_limitation_that_caps_validation_and
     assert why in cr._render(c)
     monkeypatch.setattr(cr, "subgrid_uncalibrated", lambda *a, **k: None)
     assert cr.build(run, REAL, data)["limitations"] == cr.LIMITATIONS
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 5 (batch S)
+
+def test_the_wind_prior_limitation_names_the_upper_bound_and_the_one_regime_and_lowers_no_cap():
+    """Round 5 M-10: L19. Both factors it bears on were already capped at 2 by other limitations, so it moves no level."""
+    x = next(x for x in cr.LIMITATIONS if x["id"] == "L19")
+    assert "95 % upper bound" in x["text"] and "one regime" in x["text"] and "regime-to-regime bias" in x["text"] and x["where"] == ["cafe/pm/pipeline.py"]
+    others = {f for y in cr.LIMITATIONS if y["id"] != "L19" for f in y["factors"]}
+    assert set(x["factors"]) <= others
+
+
+def test_only_an_ensemble_that_leaves_5_percent_open_counts_as_short_of_n_certify(tmp_path):
+    """Round 5 M-11: the Uncertainty factor listed '8 verdict(s) have n below n_certify' for NO-GO ensembles no number of members could certify."""
+    run = tmp_path / "run"
+    run.mkdir()
+    pm_run.make_run(run, M=48)
+    clean = fake_root(tmp_path / "root", sourced=3)
+    def only_failing(d):
+        for e in (*d["summary"]["vehicles"].values(), *d["summary"]["links"].values()):
+            e["k_fail"] = 40                                                                                     # 40 of 48 failed: lower bound 0.7, excluded
+    edit(run / "stage1b" / "summary.json", only_failing)
+    u = factors(run, clean)["uncertainty"]
+    assert not any("n below n_certify" in m for m in u["missing"]) and u["evidence_level"] == 3
+    edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(k_fail=0))
+    u = factors(run, clean)["uncertainty"]
+    assert u["evidence_level"] == 2 and "1 verdict(s) have n below n_certify" in " ".join(u["missing"])             # a zero-failure ensemble does

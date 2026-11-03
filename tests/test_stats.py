@@ -450,3 +450,27 @@ def test_extreme_ranks_gives_the_hypercube_ranks_of_the_few_members_for_the_most
     assert SE.extreme_ranks(["a", "b", "c", "d"], x, few) == [("b", [0, 2]), ("a", [1, 4]), ("d", [0, 3])]
     assert SE.extreme_ranks(["a", "b", "c", "d"], x, few, top=1) == [("b", [0, 2])]
     assert SE.extreme_ranks(["a", "b", "c", "d"], x, np.array([False, True, False, False, False]), top=2) == [("a", [0]), ("b", [1])]
+
+
+# ---- review round 5 (M-2, M-11) ----------------------------------------------------------------------------------------
+def test_the_noise_floor_does_not_move_with_the_seed_at_the_default_permutation_count():
+    """M-2: at 200 permutations the floor of a 64-member sample had an sd of 0.014 over seeds (0.006 in the q5 UAS case), the size of the gap between a driver
+    and the floor the report printed as a finding; at the default 2000 it is 0.004 (measured: the sample below, seeds 0 to 9)."""
+    rng = np.random.default_rng(3)
+    x = rng.random((64, 8))
+    y = x[:, 0] * 0.3 + rng.normal(size=64)
+    floors = [SE.noise_floor(x, y, seed=s) for s in range(10)]
+    assert np.std(floors, ddof=1) < 0.007 and 0.15 < np.mean(floors) < 0.3
+    few = [SE.noise_floor(x, y, perms=200, seed=s) for s in range(10)]
+    assert np.std(few, ddof=1) > 0.007                                                 # the old default is what the bound above tells apart
+
+
+def test_the_zero_failure_note_asks_for_60_members_only_below_60():
+    """M-11: 'P(fail) < 3/n = 0.047 ...; 60 members would be needed' was printed at n = 64, already above 60."""
+    for n in (30, 59):
+        assert "60 members would be needed" in I.verdict(0, n)["note"]
+    for n in (60, 64, 72):
+        note = I.verdict(0, n)["note"]
+        assert "60 members would be needed" not in note and f"3/n = {3 / n:.3f}" in note and f"(n = {n}): already below 5%." in note
+        assert "certification count, 73, is for the two-sided 95% Wilson upper bound" in note
+    assert I.verdict(0, 73)["note"] == ""

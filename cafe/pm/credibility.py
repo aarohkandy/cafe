@@ -28,7 +28,7 @@ import yaml
 
 from . import config
 from .audit import STAGES, ledger_problems
-from .stats import sampling
+from .stats import intervals, sampling
 
 ROOT = config.ROOT
 LEVELS = {0: "none: no evidence", 1: "weak: evidence exists, nothing checked it", 2: "moderate: checked by this tool's own self-checks",
@@ -65,6 +65,10 @@ LIMITATIONS = [
                         "again; "
                         "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established",
          factors=["validation", "uncertainty"], where=["platforms/saildrone_explorer.yaml", "cafe/pm/physics/usv.py"]),
+    dict(id="L19", text="the persistent wind-speed prior is a boundary moment estimate from the TAO moorings of one regime, not a measured spread: in the "
+                        "evidence run q5 11 moorings over 6 days gave 0.113 m/s, with a 95 % upper bound of about 0.5 m/s (the literature prior was 2.0 m/s), "
+                        "and regime-to-regime bias outside the window is not sampled",
+         factors=["uncertainty", "validation"], where=["cafe/pm/pipeline.py"]),
 ]
 
 SUBGRID = "sub-grid layer uncalibrated"
@@ -93,7 +97,8 @@ RULES = {
     "input_pedigree": "1 platform inputs carry provenance; 2 and at least half are sourced (not assumed, not recalled); "
                       "3 and at least 80 % are, and no perturbation prior is of kind assumed.",
     "uncertainty": "1 verdict intervals exist; 2 and the Latin-hypercube stratification checks passed; "
-                   "3 and every vehicle and link has n >= n_certify and no perturbation prior is of kind assumed.",
+                   "3 and every vehicle and link that leaves P(fail) < 5 % open (95 % Wilson lower bound on P(fail) below 5 %) has n >= n_certify, "
+                   "and no perturbation prior is of kind assumed.",
     "robustness": "1 one ensemble ran; 2 and first-order sensitivities exist for a vehicle or link with both outcomes; "
                   "3 and a stage-3 refit reran stage 1 and no verdict changed.",
     "use_history": "1 only if docs/USE_HISTORY.md records a past prediction compared with a real outcome; otherwise 0.",
@@ -453,7 +458,8 @@ def _uncertainty(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
         ev.append(f.ev(f"{len(lhs)} Latin-hypercube stratification checks passed", f.lg(st)))
     else:
         miss.append(f"no passed Latin-hypercube stratification check in the {st} ledger" + (" (stage 1b is a copy of it)" if copied else ""))
-    short = [e["n"] for e in ens if e["n"] < e["verdict"]["n_certify"]]
+    # round 5, M-11: an ensemble whose 95 % Wilson lower bound on P(fail) is already 5 % or more excludes P(fail) < 5 %; no n certifies it, so it is not "short"
+    short = [e["n"] for e in ens if e["n"] < e["verdict"]["n_certify"] and intervals.wilson(e["k_fail"], e["n"], 0.95)[0] < 0.05]
     if lvl == 2 and not short and not f.assumed_perts():
         lvl = 3
     else:

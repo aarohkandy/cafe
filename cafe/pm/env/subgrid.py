@@ -353,8 +353,8 @@ def sde_diffusivity(lat: ArrayLike) -> tuple[Any, Any]:
 
 
 def switch(environment: dict[str, Any], name: str) -> bool:
-    """Mission `environment.subgrid.<name>`. warm_layer, rain_lens and ocean_sde are on unless the mission says false (the brief
-    enables the warm layer by default); turbulence and gust_fronts are read as before, by stage1, and are off unless true."""
+    """Mission `environment.subgrid.<name>`: all five switches (turbulence, gust_fronts, warm_layer, rain_lens, ocean_sde) are on unless the mission says
+    false (the brief enables the warm layer by default and says gust fronts and cold pools must be modelled, never assumed away; review round 5, M-7)."""
     return bool(environment.get("subgrid", {}).get(name, True))
 
 

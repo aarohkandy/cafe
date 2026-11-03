@@ -268,13 +268,16 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     where = src + " (stats.intervals.interval at stats.sequential.STOP_CONF)"
     d["stop_interval"] = dict(lo=num(lo, "fraction", ref, where, sunc), hi=num(hi, "fraction", ref, where, sunc))
     d["thresholds"] = dict(go=num(intervals.P_FAIL_GO, "fraction", ref, "stats/intervals.py P_FAIL_GO"),
+                           go_bound=num(1 - intervals.LO_SUCCESS_GO, "fraction", ref, "stats/intervals.py LO_SUCCESS_GO (1 - LO_SUCCESS_GO)"),
                            nogo=num(intervals.P_FAIL_NOGO, "fraction", ref, "stats/intervals.py P_FAIL_NOGO"))
     d["region"] = intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF)
     d["decided"] = d["region"] is not None
     d["undecided_statement"] = None if d["decided"] else _undecided(d["stop_interval"]["lo"]["value"], d["stop_interval"]["hi"]["value"])
     if e["n"] < v["n_certify"]:
+        fail_lo = intervals.interval(e["k_fail"], e["n"], 0.95)[0]
         d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members (two-sided 95 % Wilson bound) are needed "
-                                  f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, one-sided 95 %).")
+                                  f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, one-sided 95 %)." if fail_lo < 0.05 else
+                                  f"P(fail) < 5 % is excluded by this ensemble (lower 95 % bound {fail_lo:.2f}): no number of members certifies it.")
     return d
 
 
@@ -286,7 +289,8 @@ def _floor(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any] |
 def _sens(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     p = e["sensitivity"]["param"]
     return dict(param=p, s1=None if p is None else num(e["sensitivity"]["S1"][p], "fraction of variance", ref, src), noise_floor=_floor(e, ref, src),
-                computed=bool(e["sensitivity"]["S1"]), text=e["sensitivity"].get("text"), case=e["sensitivity"].get("case"))
+                computed=bool(e["sensitivity"]["S1"]), text=e["sensitivity"].get("text"), case=e["sensitivity"].get("case"),
+                quantity=e["sensitivity"].get("quantity"))
 
 
 def _top3(e: dict[str, Any], ref: dict[str, Any], src: str) -> list[Any]:
@@ -303,13 +307,15 @@ def _sens_scope(tr: Trace) -> dict[str, Any]:
     f = _jl(tr.run / "ingest" / "priors_fitted.json") or {}
     keys = ("wind_speed_noise", "wind_direction_noise", "wind_speed_bias", "wind_direction_bias")
     if not all(isinstance(f.get(k), dict) and isinstance(f[k].get("value"), (int, float)) for k in keys):
-        return dict(text=SENS_SCOPE.format(wind=""), wind_sd=None)
+        return dict(text=SENS_SCOPE.format(wind=""), wind_sd=None, wind_hi95={})
     ref, src = tr.ref("ingest", output="priors_fitted.json"), "ingest/priors_fitted.json"
     nodes = {k: num(f[k]["value"], f[k].get("unit", ""), ref, f"{src} {k}.value") for k in keys}
-    g = {k: _txt(n) for k, n in nodes.items()}
+    hi = {k: num(f[k]["value_hi95"], f[k].get("unit", ""), ref, f"{src} {k}.value_hi95")          # round 5, M-10: the fit's 95 % upper bound, if it has one
+          for k in keys if isinstance(f[k].get("value_hi95"), (int, float))}
+    g = {k: _txt(n) + (f" (95 % upper bound {_txt(hi[k])})" if k in hi else "") for k, n in nodes.items()}
     wind = (f" (sd {g['wind_speed_noise']} and {g['wind_direction_noise']}, against {g['wind_speed_bias']} and {g['wind_direction_bias']} for the "
             "wind-speed and direction columns)")
-    return dict(text=SENS_SCOPE.format(wind=wind), wind_sd=nodes)
+    return dict(text=SENS_SCOPE.format(wind=wind), wind_sd=nodes, wind_hi95=hi)
 
 
 def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
@@ -831,7 +837,26 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
     return dict(available=True, vehicles=out, design=dd, plan_note=note)
 
 
-def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
+def _timing(plan: dict[str, Any], tr: Trace, pref: dict[str, Any], design: dict[str, Any] | None) -> dict[str, Any]:
+    """What the planner charged against what the stages took (round 5, M-13): stage 1's `plan.json` stage1_s (a lower bound, `stage1_s_basis`) against its
+    ledger's wall_s, and the emulator's variant runs (design.json `variant_planned_s` each, `variant_wall_s` measured; neither is in an older run) as planned
+    and as measured. A part whose two sides are not both there is left out."""
+    out: dict[str, Any] = {}
+    L = tr.led.get("stage1")
+    if L and plan.get("stage1_s") is not None:
+        out["stage1"] = dict(planned=num(plan["stage1_s"], "s", pref, "plan.json stage1_s"), basis=plan.get("stage1_s_basis"),
+                             measured=num(L["wall_s"], "s", tr.ref("stage1"), "checkpoints/stage1/ledger.json wall_s"))
+    d = design or {}
+    w = d.get("variant_wall_s")
+    if w and d.get("variant_planned_s") is not None:
+        ref, src = tr.ref("emulator", output="design.json"), "emulator/design.json"
+        out["variants"] = dict(runs=num(len(w), "runs", ref, src + " variant_wall_s"),
+                               planned=num(d["variant_planned_s"] * len(w), "s", ref, src + " variant_planned_s x runs"),
+                               measured=num(sum(w), "s", ref, src + " variant_wall_s (sum)"))
+    return out
+
+
+def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any], design: dict[str, Any] | None = None) -> dict[str, Any]:
     # the report's own ledger is not written until the report is: any on disk is an earlier attempt's
     live = {st: L for st, L in tr.led.items() if L and st != "report"}
     first = next(iter(live.values()), None)
@@ -846,7 +871,7 @@ def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str,
     return dict(describe=budget.describe(plan), notes=list(plan["notes"]), member_costs=costs,
                 plan={k: num(plan[k], u, pref, f"plan.json {k}") for k, u in units.items()},
                 wall_s={st: num(L["wall_s"], "s", tr.ref(st), f"checkpoints/{st}/ledger.json wall_s") for st, L in live.items()},
-                git_sha=sorted({L["git_sha"] for L in live.values()}), versions=(first or {}).get("versions", {}),
+                timing=_timing(plan, tr, pref, design), git_sha=sorted({L["git_sha"] for L in live.values()}), versions=(first or {}).get("versions", {}),
                 report_stage="report stage: written after this table, so its wall time and code are not in it",
                 machine=None if first is None else dict(host=first["machine"]["host"], bench_id=first["machine"]["bench_id"], cpus=cpus))
 
@@ -898,14 +923,15 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
         verdict_source="stage1b (stage 1 rerun with the stage-3 refit multipliers; a copy of stage 1 when nothing was refit)",
         vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res), links=_links(s1b, tr, mission),
         map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res, s1b), environment=_env(mission, env, res, wins, s1b, tr),
-        stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref),
+        stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref, design),
         assumed_inputs=_assumed(cred, cred_ref), sensitivity_scope=_sens_scope(tr))
     rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"])
     own = _jl(run / "stage3" / "subgrid_calibration.json")
     rep["subgrid"] = dict(source=("this run's stage3/subgrid_calibration.json" if own
                                   else "the shipped config/subgrid.json (no passed LES window in this run)"),
                           calibrated=not any(x["id"] == credibility.SUBGRID_LIMITATION["id"] for x in cred["limitations"]),
-                          statement=next((x["text"] for x in cred["limitations"] if x["id"] == credibility.SUBGRID_LIMITATION["id"]), None))
+                          statement=next((x["text"] for x in cred["limitations"] if x["id"] == credibility.SUBGRID_LIMITATION["id"]), None),
+                          switches=s1b["summary"].get("subgrid_switches"))          # {name: {on, defaulted}}; None for a summary from before round 5, M-7
     rep["receipts"] = sorted(tr.rows.values(), key=lambda r: r["id"])
     rep["traceability_problems"] = check_traceability(rep)
     return rep
@@ -942,7 +968,11 @@ def _badge(v: str) -> str:
 
 
 def _undecided_badge(d: dict[str, Any]) -> str:
-    return "" if d["decided"] else f' <span class="badge undecided">undecided at n = {d["n"]["value"]}</span>'
+    """The badges of a verdict that is not decided: the stopping interval spans a threshold, and (a link only) the required fraction cannot be resolved on the
+    samples it is judged on (granularity; a link never required at all is the extreme case). The Verdicts table and the card both use this."""
+    g = d.get("granularity")
+    return ("" if d["decided"] else f' <span class="badge undecided">undecided at n = {d["n"]["value"]}</span>') \
+        + ("" if g is None or g["ok"] else ' <span class="badge undecided">undecided: granularity</span>')
 
 
 def _stat_html(d: dict[str, Any]) -> str:
@@ -951,7 +981,9 @@ def _stat_html(d: dict[str, Any]) -> str:
     h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g} (the verdict's own level); "
          f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}, two-sided 95 % Wilson bound).</p>"
          f"<p class=muted>Stopping rule: the {si['lo']['uncertainty']['conf']:.0%} {html.escape(si['lo']['uncertainty']['kind'].replace(' bound', ''))} "
-         f"on P(fail) is {_n(si['lo'])} to {_n(si['hi'])}; verdict thresholds: GO below {_n(th['go'])}, NO-GO from {_n(th['nogo'])}.</p>")
+         f"on P(fail) is {_n(si['lo'])} to {_n(si['hi'])}; verdict rule: GO when P(fail) is at most {_n(th['go'])} and the "
+         f"{u['conf'] * 100:.0f} % Wilson upper bound on P(fail) is at most {_n(th['go_bound'])}; "
+         f"NO-GO when P(fail) is above {_n(th['nogo'])}; MARGINAL between.</p>")
     if d["undecided_statement"]:
         h += f"<p class=warn>{html.escape(d['undecided_statement'])}</p>"
     if d["certify_statement"]:
@@ -971,12 +1003,14 @@ def _sens_html(s: dict[str, Any]) -> str:
     return f"<code>{html.escape(s['param'])}</code> (S1 {_n(s['s1'])})"
 
 
-def _top3_html(top: list[Any], floor: Any = None) -> str:
+def _top3_html(top: list[Any], floor: Any = None, quantity: str | None = None) -> str:
+    """`quantity` is what the indices were taken on (the sensitivity entry's own: a margin, a fraction, or the failure indicator; round 5, M-2)."""
     fl = f"; the noise floor at this member count is S1 {_n(floor)}" if floor else ""
+    what = "the 0/1 failure indicator" if quantity == "failure indicator" else f"the {html.escape(quantity)}" if quantity else "the ranked outcome"
     if not top:
         return f"<p class=muted>Top sensitivities: none above the noise floor (or all-pass, all-fail, or fewer than 16 members){fl}.</p>"
     items = "; ".join(f"<code>{html.escape(t['param'])}</code> {_n(t['s1'])}" for t in top)
-    return f"<p>Top sensitivities (Sobol first-order, share of the variance of failure, above the permutation noise floor): {items}{fl}.</p>"
+    return f"<p>Top sensitivities (Sobol first-order, share of the variance of {what}, above the permutation noise floor): {items}{fl}.</p>"
 
 
 def _tried_html(t: dict[str, Any]) -> str:
@@ -1104,7 +1138,7 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
             f"{_stat_html(v)}{_physics_html(v['physics'])}{ch}<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
             f"{_task_html(v)}{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}"
-            f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'])}{_fix_html(v['fix'])}"
+            f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'], v['sensitivity'].get('quantity'))}{_fix_html(v['fix'])}"
             f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} assumed platform inputs, listed in the "
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")
 
@@ -1123,6 +1157,9 @@ def _margin_html(k: dict[str, Any]) -> str:
 def _granularity_html(g: dict[str, Any] | None) -> str:
     if g is None:
         return ""
+    if g["need_count"]["value"] == 0:
+        return (f"<p class=warn>Required at no moment in the median member ({_n(g['need_count'])}): the link was not exercised, "
+                f"so its pass fraction says nothing (the mission allows {_n(g['allowed_miss'])} to be missed); this verdict is undecided: granularity.</p>")
     miss = f"; one missed sample is {_n(g['one_sample'])} of them and the mission allows {_n(g['allowed_miss'])} to be missed"
     return (f"<p class={'muted' if g['ok'] else 'warn'}>Each member's pass fraction is decided on {_n(g['need_count'])} "
             f"(the median number of required samples per member){miss}"
@@ -1131,14 +1168,12 @@ def _granularity_html(g: dict[str, Any] | None) -> str:
 
 def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
-    g = k["granularity"]
-    gran = "" if g is None or g["ok"] else ' <span class="badge undecided">undecided: granularity</span>'
-    return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}{gran}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
-            f"{_granularity_html(g)}"
+    return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
+            f"{_granularity_html(k['granularity'])}"
             f"<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
             f"median margin {_n(k['margin_db_median'])}{_margin_html(k)}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
-            f"{_top3_html(k['top3'], k['sensitivity']['noise_floor'])}</div>")
+            f"{_top3_html(k['top3'], k['sensitivity']['noise_floor'], k['sensitivity'].get('quantity'))}</div>")
 
 
 def _svg(m: dict[str, Any], reach: dict[str, Any]) -> str:
@@ -1344,11 +1379,20 @@ def _machine_html(m: dict[str, Any]) -> str:
     mc = m["machine"]
     where = f"{e(str(mc['host']))}, {_n(mc['cpus'])}, bench id {e(str(mc['bench_id']))}" if mc else "unknown"
     plan = "; ".join(f"{e(k)} {_n(n)}" for k, n in m["plan"].items())
+    tm = m.get("timing") or {}
+    s1, vr = tm.get("stage1"), tm.get("variants")
+    took = ""
+    if s1:
+        basis = f" (the plan is a lower bound: {e(s1['basis'])})" if s1["basis"] else ""
+        took += f"<p>Stage 1: planned {_n(s1['planned'])}, measured {_n(s1['measured'])}{basis}.</p>"
+    if vr:
+        took += f"<p>Emulator variant runs: {_n(vr['runs'])}, planned {_n(vr['planned'])}, measured {_n(vr['measured'])}.</p>"
     ing = (f"<p class=muted>Ingest took {_n(m['wall_s']['ingest'])}: it is not counted against --budget (a download over the network is a separate step, "
            "RUNBOOK 4, whose duration depends on the link).</p>") if "ingest" in m["wall_s"] else ""
     return (f"<pre>{e(m['describe'])}</pre><div class=scroll><table><tr><th>Vehicle<th>Cost per mission day (s per batch + s per member)"
             f"<th>Source</tr>{cost}</table></div>"
-            f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div><p class=muted>{e(m['report_stage'])}.</p>{ing}<p>Plan: {plan}.</p>"
+            f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div><p class=muted>{e(m['report_stage'])}.</p>{ing}"
+            f"<p>Plan: {plan}.</p>{took}"
             f"<p>Code: git {e(', '.join(m['git_sha']))}. Machine: {where}.</p><p class=muted>{ver}</p>")
 
 
@@ -1395,6 +1439,11 @@ def render(rep: dict[str, Any]) -> str:
                "or a group of model receipts. A link is provenance, not a pass.</p>")
     tr += f"<p class=warn>{e(rep['subgrid']['statement'])}</p>" if rep["subgrid"]["statement"] else ""
     tr += f"<p class=muted>Sub-grid calibration used by the stages after stage 3: {e(rep['subgrid']['source'])}.</p>"
+    sw = rep["subgrid"].get("switches")
+    left = " (left out of the mission: on by default)"
+    names = {k: k.replace("_", " ").replace("sde", "SDE") for k in (sw or {})}
+    tr += (("<p class=muted>Sub-grid switches: " + ", ".join(f"{names[k]} {'on' if x['on'] else 'off'}{left if x['defaulted'] else ''}" for k, x in sw.items())
+            + ".</p>") if sw else "")
     n = len(rep["receipts"])
     tr += (f"<p class=warn>{len(by['fail'])} of {n} receipts below failed a check and are marked FAILED: {e('; '.join(by['fail']))}.</p>" if by["fail"] else "")
     tr += (f"<p class=warn>{len(by['stale'])} of {n} are stale (made by other code; rerun <code>python -m cafe.pm receipts</code>): "

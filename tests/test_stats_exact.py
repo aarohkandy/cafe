@@ -348,7 +348,7 @@ def test_first_order_matches_a_reimplementation_from_the_definition(m, correct):
 
 def test_first_order_defaults_clip_and_offset_invariance():
     assert default(SE.first_order, "harmonics") is default(SE.noise_floor, "harmonics") is default(SE.dominant, "harmonics") is None
-    assert default(SE.first_order, "correct") is True and default(SE.noise_floor, "perms") == 200 and default(SE.noise_floor, "level") == 0.95
+    assert default(SE.first_order, "correct") is True and default(SE.noise_floor, "perms") == 2000 and default(SE.noise_floor, "level") == 0.95
     assert default(SE.noise_floor, "seed") == 0
     x, y = sample()
     s = SE.first_order(x, y)

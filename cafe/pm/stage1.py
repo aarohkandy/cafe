@@ -45,6 +45,16 @@ ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_v
 SENS_MIN_N = 16                       # fewest members the first-order indices are computed from (stats.sensitivity: EASI harmonics vs member count)
 
 
+SUBGRID_SWITCHES = ("turbulence", "gust_fronts", "warm_layer", "rain_lens", "ocean_sde")
+
+
+def subgrid_switches(mission: dict[str, Any]) -> dict[str, dict[str, bool]]:
+    """The five `environment.subgrid` switches as the run reads them (`subgrid.switch`: on unless the mission says false): {name: {on, defaulted}},
+    `defaulted` where the mission left the key out."""
+    env = mission.get("environment", {})
+    return {k: dict(on=subgrid.switch(env, k), defaulted=k not in env.get("subgrid", {})) for k in SUBGRID_SWITCHES}
+
+
 def _classes(mission: dict[str, Any]) -> dict[str, str]:
     return {v["id"]: platform_class(v) for v in mission["vehicles"]}
 
@@ -293,6 +303,8 @@ def _uas_sortie(i: int, v: dict[str, Any], P: dict[str, Any], env: Any, M: int, 
     from 3-D, wind points asked) while it flew, None for an environment that does not count them)."""
     P, origin, ts = _uas_setup(v, P, mission, t0, T)
     used: dict[str, int] = {}
+    sw = {k: x["on"] for k, x in subgrid_switches(mission).items()}                           # a switch the mission left out is on (round 5, M-7)
+    mission = dict(mission, environment=dict(mission.get("environment", {}), subgrid=sw))
     turbs, gust = _uas_forcing(env, mission, origin, ts, P, M, seed, members, X.get("bulk_stress_scale"), used, only=i)
     filled: list[int] = []
     link = _uas_links(env, mission, origin, ts[i:i + 1], P, M, filled)[0]
@@ -354,7 +366,11 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     fail["no_sortie_flown"] = n_flown == 0                                         # every launch scrubbed: no flux profiles at all
     first["no_sortie_flown"] = np.where(n_flown == 0, T, np.nan)
     soc = np.where(np.stack([s["scrubbed"] for s in sorties]), np.inf, np.stack([s["soc_end"] for s in sorties])).min(0) if sorties else np.full(M, np.inf)
-    return dict(t=t, lon=lon, lat=lat, alt=alt + so["deck_height_m"], depth=np.zeros_like(lon), airborne=air, surfaced=np.ones_like(air), fine=fine,
+    prof: dict[str, Any] = {}
+    if sorties and all("wp_done" in s and "n_wp" in s for s in sorties):                  # the share of the pattern each flown sortie reached, the lowest one
+        share = np.where(np.stack([s["scrubbed"] for s in sorties]), np.inf, np.stack([np.asarray(s["wp_done"], float) / s["n_wp"] for s in sorties])).min(0)
+        prof = dict(profile_margin=np.where(np.isfinite(share), share, np.nan), profile_margin_name="fraction of the flux profile delivered (lowest sortie)")
+    return dict(**prof, t=t, lon=lon, lat=lat, alt=alt + so["deck_height_m"], depth=np.zeros_like(lon), airborne=air, surfaced=np.ones_like(air), fine=fine,
                 fail=fail, first=first, antenna_m=P["radio"]["uas_antenna_height_above_body_m"],
                 margin=np.where(np.isfinite(soc), soc - P["battery"]["reserve_frac"], np.nan), margin_name="battery reserve margin",
                 scrubbed=np.sum([s["scrubbed"] for s in sorties], 0) if sorties else np.zeros(M, int), wind3d=wind3d,
@@ -613,11 +629,12 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         r0 = batches[0]["vehicles"][vid]
         r: dict[str, Any] = {k: cat([b["vehicles"][vid][k] for b in batches]) for k in ("lon", "lat", "depth")}
         r["t"] = r0["t"]
-        for k in ("alt", "airborne", "surfaced", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin"):
+        for k in ("alt", "airborne", "surfaced", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin", "profile_margin"):
             if k in r0:
                 r[k] = cat([b["vehicles"][vid][k] for b in batches])
-        if "margin_name" in r0:
-            r["margin_name"] = r0["margin_name"]
+        for k in ("margin_name", "profile_margin_name"):
+            if k in r0:
+                r[k] = r0[k]
         if r0.get("fine") is not None:                       # the same sortie windows in every batch: only the members differ
             r["fine"] = dict(t=r0["fine"]["t"], **{k: cat([b["vehicles"][vid]["fine"][k] for b in batches]) for k in r0["fine"] if k != "t"})
         r["fail"] = {f: np.concatenate([b["vehicles"][vid]["fail"][f] for b in batches]) for f in r0["fail"]}
@@ -707,7 +724,8 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         first = np.fmin.reduce(firsts)[f] if dom else np.empty(0)
         t_first = float(np.nanmin(first)) if np.any(np.isfinite(first)) else None
         t_med = float(np.nanmedian(first)) if np.any(np.isfinite(first)) else None
-        sens = _sensitivity(names, U, f, set(FORCING) | set(ACTS[r["class"]]), r.get("margin"), r.get("margin_name", "failure indicator"))
+        key = "profile_margin" if dom == "profile_incomplete" and "profile_margin" in r else "margin"          # the margin that belongs to the dominant mode
+        sens = _sensitivity(names, U, f, set(FORCING) | set(ACTS[r["class"]]), r.get(key), r.get(f"{key}_name", "failure indicator"))
         out["vehicles"][vid] = dict(cls=r["class"], n=n, k_fail=int(f.sum()), verdict=v, modes=modes, dominant=dom,
                                     first_fail_t=t_first, median_fail_t=t_med, sensitivity=sens)
         if "sog_ms" in r:
@@ -725,6 +743,7 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         if r.get("wind3d") and r["wind3d"][1]:
             out["vehicles"][vid]["wind3d_fraction"] = r["wind3d"][0] / r["wind3d"][1]      # the share of the sorties' wind points the 3-D fields answered
     lk_ends = {lk["id"]: lk for lk in mission["links"]}
+    out["subgrid_switches"] = subgrid_switches(mission)
     for lid, r in res["links"].items():
         f = ~np.asarray(r["success"], bool)
         n = len(f)
@@ -743,6 +762,11 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
                                  distance_km_median=float(np.nanmedian(r["dist_m"])) / 1e3 if np.any(np.isfinite(r.get("dist_m", np.nan))) else None,
                                  need_count_median=nc, granularity_ok=None if nc is None else nc > 0 and (rf >= 1.0 or 1.0 / nc <= 1.0 - rf + 1e-12),
                                  sensitivity=sens)
+    tests = [e["sensitivity"] for k in ("vehicles", "links") for e in out[k].values() if e["sensitivity"]["noise_floor"] is not None]  # a permutation test each
+    for t in tests:
+        if t["case"] == "ranked":
+            t["text"] = (t["text"].rstrip(".") + f" (one in twenty unrelated outcomes would also clear it, and the report makes {len(tests)} such "
+                         f"test{'s' if len(tests) != 1 else ''}).")
     return out
 
 
