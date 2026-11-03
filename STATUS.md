@@ -110,10 +110,11 @@ The round-3 tree passed the full test suite, ruff and mypy --strict (2026-11-01)
   and merged from five branches, each finding with a regression test that failed on the old code. The majors: a deploy time with seconds failed every member as
   `left_data` (M-1), the UAS sensitivity ranked the battery for a profile failure and called the index a share of the variance of failure (M-2), NaN and
   infinity passed `validate` (M-3), a platform file missing a parameter loaded and crashed or flew silently (M-4), the planner did not scale the UAS cost with
-  the sorties (M-5), and stage 1 had no memory model (M-6). **What changed in the demo verdicts is not known yet: q6, the first run on the round-5 code,
-  measures it.** The code paths that can move a q5 number are the UAS sensitivity sentence (M-2), the 2000-permutation noise floor (M-2), the gust-front
-  rain (M-9, which only moves a UAS run that has gust fronts on, as the demo does) and the verdict-rule and certification wording (M-11, M-12);
-  M-1 changes no whole-minute deploy, but the two vehicle-variants of the q5 emulator design that it skipped now run. Not run since the merge: the full gate and q6.
+  the sorties (M-5), and stage 1 had no memory model (M-6). **q6, the quick run on the round-5 code (`3c9c64d`, 2026-11-03), moved no verdict and no P(fail):** glider_eq MARGINAL 15 of 64, glider_2n GO 0 of 64,
+  USV NO-GO 60 of 64, UAS NO-GO 55 of 64, every link as in q5. What changed is what the round fixed: the UAS sensitivity now ranks the fraction of the flux
+  profile delivered and says no parameter clears the noise floor (largest S1 0.14 against a floor of 0.21; the battery sentence is gone, M-2); the emulator design ran
+  all 28 vehicle-variants (2 were skipped in q5, M-1); the wind prior prints its 95 % upper bound, 0.48 m/s beside 0.113 (M-10); the machine block prints stage 1
+  planned 52.7 s against 116.7 s measured (2.2 times, the plan is a lower bound), and the variants planned 26.3 s each against 31.8 to 37.3 s measured (M-13).
 
 ## 3. Not done and not planned in this build
 
