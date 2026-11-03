@@ -81,12 +81,14 @@ def test_loader_refuses_bad_leaves(tmp_path, leaf, msg):
 
 
 def test_loader_accepts_a_good_file(tmp_path):
+    """Review round 5, M-4: the old version loaded a stub with one invented parameter; a file now has to hold everything the model reads, so the
+    good file is the shipped slocum.yaml with a parameter and a mission default added."""
+    raw = yaml.safe_load((g.PLATFORMS / "slocum.yaml").read_text())
+    raw["params"]["x"] = {"value": 2.0, "unit": "m", "assumed": True, "why": "because"}
+    raw["mission_defaults"]["y"] = {"value": 1.0, "unit": "m", "source": "s"}
     f = tmp_path / "ok.yaml"
-    f.write_text(
-        "kind: slocum\nparams:\n  x: {value: 2.0, unit: m, assumed: true, why: because}\n"
-        "mission_defaults:\n  y: {value: 1.0, unit: m, source: s}\n"
-    )
-    assert g.load_platform(str(f)) == {"x": 2.0, "kind": "slocum", "mission_defaults": {"y": 1.0}}
+    f.write_text(yaml.safe_dump(raw))
+    assert g.load_platform(str(f)) == {**SL, "x": 2.0, "mission_defaults": {**SL["mission_defaults"], "y": 1.0}}
 
 
 # ---- Seaglider steady flight -------------------------------------------------------------------------------------------
@@ -561,3 +563,11 @@ def test_a_per_member_windage_replaces_the_platforms_on_the_surface_phase():
     assert np.allclose(drift, [0.018, 0.02, 0.023], rtol=0.05) and drift[2] > drift[0]
     d = sim(e=shallow, lon=10.0, M=2)
     assert np.allclose(d.windage, SG["windage"])                                                    # without the perturbation: the platform's value
+
+
+# ---- review round 5, M-1: a run never steps past the time it was asked for -------------------------------------------------
+def test_run_stops_at_the_last_whole_step_inside_the_time_it_was_given():
+    """M-1: 170 s at dt 60 was int(round(2.83)) = 3 steps, ending 10 s past the window; a deploy time with seconds then left the data."""
+    h = sim().run(170.0)
+    assert len(h["t"]) == 2 and h["t"][-1] <= 170.0
+    assert [len(sim().run(x)["t"]) for x in (180.0, 179.9999999999, 59.0)] == [3, 3, 0]                    # a whole number of steps is unchanged

@@ -503,7 +503,8 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
                  f"more than 1 %) at {sp['mss_clipped']:.1%} of the points; {where}")
     n, med, frac = _ustar_agreement(env)
     L.check("coare_ustar_vs_umwm_ust", n > 0 and bool(np.isfinite(med)), value=None if not n else round(frac, 4),
-            note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within 20 %; BRIEF 5.5 asks that the agreement is logged")
+            note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within 20 %; BRIEF 5.5 asks that the agreement is logged"
+            if n else "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask")
     kind = None if oc is None else oc.ds.attrs.get("temperature_kind")
     gofs = m["environment"]["ocean"]["source"] == "gofs31"
     L.check("ocean_temperature_kind_flag", kind in hycom.KINDS and (not gofs or kind == "in_situ"), value=kind,

@@ -43,6 +43,8 @@ def interp(field: ArrayLike, axes: Sequence[Axis], qs: Sequence[ArrayLike]) -> t
     shape = bq[0].shape
     f = np.asarray(field)
     lead = f.shape[:f.ndim - len(axes)]
+    if 0 in shape:                                                       # an empty query (no points): nothing to gather, and the reshape below cannot take it
+        return np.empty(lead + shape), np.ones(shape, bool)
     flat = f.reshape(lead + (-1,))
     stride, n = [], 1
     for k in reversed(f.shape[len(lead):]):

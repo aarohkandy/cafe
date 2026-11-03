@@ -111,9 +111,10 @@ def test_inside_is_the_data_box(grid):
 def test_outside_data_names_the_point_and_the_box(grid):
     t = grid.tw.x[5]
     for lon, lat, tt in ((190.0, 0.0, t), (195.0, 5.0, t), (195.0, 0.0, grid.tw.x[0] - 7200.0)):
-        with pytest.raises(OutsideData, match=r"outside the ingested data \(box \(-167\.125, -162\.875, -2\.125, 2\.125\), 2023-03-01 18Z\.\.2023-03-03 06Z\)"):
+        with pytest.raises(OutsideData, match=r"outside the ingested data \(box \(-167\.125, -162\.875, -2\.125, 2\.125\), "
+                                              r"2023-03-01 18:00:00Z\.\.2023-03-03 06:00:00Z\)"):
             grid.u10(lon, lat, tt)
-    with pytest.raises(OutsideData, match=r"\(190\.000, 0\.000\) at 2023-03-01 23:00Z"):
+    with pytest.raises(OutsideData, match=r"\(190\.000, 0\.000\) at 2023-03-01 23:00:00Z"):
         grid.u10(np.array([195.0, 190.0]), np.array([0.0, 0.0]), t)                               # reports the first bad element
     with pytest.raises(OutsideData, match="UMWM swh"):
         grid.waves(190.0, 0.0, t)
@@ -476,3 +477,47 @@ def test_lenient_holds_the_edge_depth_off_the_bathymetry_grid_and_inside_says_so
     with env.lenient():
         assert np.allclose(env.depth(195.0, 0.9).value, env.depth(195.0, 0.5).value)                 # lenient: the edge depth
         assert np.allclose(env.depth(-165.0, 0.0).value, b(195.0, 0.0).value)                        # a -180..180 longitude is wrapped first
+
+
+# ---- review round 5: M-1 (the message prints seconds) and M-9 (rain_hourly) ---------------------------------------------------
+def test_outside_data_prints_the_time_and_the_data_end_to_the_second(grid):
+    """M-1: a time 4 s past the end read '2023-03-03 06:00Z' against an end of '06Z', so the time looked equal to the end and the point got the blame."""
+    end = float(grid.tw.x[-1])
+    with pytest.raises(OutsideData, match=r"at 2023-03-03 06:00:04Z is outside the ingested data .*2023-03-01 18:00:00Z\.\.2023-03-03 06:00:00Z\)"):
+        grid.u10(195.0, 0.0, end + 4.0)
+
+
+def hourly_stub(acc, strict=True):
+    """A GriddedEnv with only a rain accumulation on a 2 x 2 grid and hourly nodes (no stores)."""
+    e = object.__new__(GriddedEnv)
+    e.strict, e.tw, e.law, e.low = strict, E.Axis(3600.0 * np.arange(len(acc))), E.Axis([0.0, 1.0]), E.Axis([0.0, 1.0])
+    e.W = dict(RAINNC=np.broadcast_to(np.asarray(acc, float)[:, None, None], (len(acc), 2, 2)).copy(), RAINC=np.zeros((len(acc), 2, 2)))
+    e.bounds = (0.0, 1.0, 0.0, 1.0, 0.0, 3600.0 * (len(acc) - 1))
+    return e
+
+
+def test_rain_hourly_is_the_mean_rate_of_the_hour_that_starts_at_the_node():
+    """M-9: 6 mm in the hour 1 h .. 2 h is [0, 6, 0, 0, 0] mm/h by the hour; rain_mm_h (the nodes) reads [0, 3, 3, 0, 0, 0], half of it an hour late."""
+    e = hourly_stub([0, 0, 6, 6, 6, 6])
+    t = 3600.0 * np.arange(5)
+    assert e.rain_hourly(np.full(5, 0.5), np.full(5, 0.5), t).tolist() == [0.0, 6.0, 0.0, 0.0, 0.0]
+    assert E.rain_rate_nodes(e.W["RAINNC"] + e.W["RAINC"], e.tw.x)[:, 0, 0].tolist() == [0.0, 3.0, 3.0, 0.0, 0.0, 0.0]
+    assert e.rain_hourly(0.5, 0.5, 5400.0) == pytest.approx(3.0)                                  # half an hour in: the exact mean of the hour 1.5 h .. 2.5 h
+    assert e.rain_hourly(0.5, 0.5, 3600.0 * 4) == 0.0 and e.rain_hourly(0.5, 0.5, 3600.0 * 5) == 0.0   # the hour that runs past the data end, and at it
+
+
+def test_rain_hourly_is_floored_at_zero_and_a_time_outside_the_data_is_the_strict_environments_error():
+    e = hourly_stub([5, 3, 4, 4, 4, 4])
+    assert e.rain_hourly(0.5, 0.5, np.array([0.0, 3600.0])).tolist() == [0.0, 1.0]                 # a reset (5 -> 3) is 0
+    with pytest.raises(OutsideData, match="WRF rain_hourly"):
+        e.rain_hourly(0.5, 0.5, 3600.0 * 9)
+    e.strict = False
+    assert e.rain_hourly(0.5, 0.5, 3600.0 * 9) == 0.0
+
+
+def test_rain_hourly_reads_the_burst_hour_by_hour(grid):
+    """The burst is 10 mm/h from 23Z to 02Z: by the hour 0, 10, 10, 10, 0 where the nodes of rain_mm_h read 0, 5, 10, 10, 5, 0."""
+    j, i = np.unravel_index(np.argmax(fx.rain_footprint(grid.low.x[None, :], grid.law.x[:, None])), grid.W["rain_mm_h"].shape[1:])
+    t = fx.RAIN_T0 + 3600.0 * np.arange(-1, 4)
+    got = grid.rain_hourly(np.full(5, grid.low.x[i]), np.full(5, grid.law.x[j]), t)
+    assert got == pytest.approx([0.0, 10.0, 10.0, 10.0, 0.0], rel=1e-3)

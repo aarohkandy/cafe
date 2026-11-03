@@ -11,7 +11,7 @@ the TAO comparison overwrites the wind and SST ones, see cafe.pm.env.tao).
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, pathlib
+import contextlib, datetime as dt, functools, pathlib
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -49,7 +49,8 @@ class OutsideData(ValueError):
 def rain_rate_nodes(accum: Any, t: Any) -> Any:
     """Rain rate [mm/h] at each hourly node from the accumulation (time first): the mean of the rates of the two intervals the node joins (the first
     and the last node take the one interval they touch), floored at 0. Linear interpolation between the nodes then integrates to the accumulation
-    and puts an hour of rain at the middle of that hour; a backward difference stored at the end of the hour would centre it half an hour late."""
+    in total, not hour by hour (an hour of X mm/h reads X/2 at its two end nodes), and puts an hour of rain at the middle of that hour; `rain_hourly` gives
+    the exact mean rate of an hour; a backward difference stored at the end of the hour would centre it half an hour late."""
     r = np.maximum(np.diff(accum, axis=0) / np.diff(t)[:, None, None] * 3600.0, 0.0)               # mm/h over each interval (k, k+1)
     return np.concatenate([r[:1], 0.5 * (r[:-1] + r[1:]), r[-1:]]) if len(r) else np.zeros_like(accum)
 
@@ -115,16 +116,32 @@ class GriddedEnv:
             bad = ~np.broadcast_to(inside, np.broadcast(lon, lat, t).shape)
             i = np.flatnonzero(bad)[0]
             L, A, T = (np.broadcast_to(np.asarray(x, float), bad.shape).ravel()[i] for x in (lon, lat, t))
-            raise OutsideData(f"{what}: ({L:.3f}, {A:.3f}) at {dt.datetime.fromtimestamp(T, dt.timezone.utc):%Y-%m-%d %H:%M}Z "
+            raise OutsideData(f"{what}: ({L:.3f}, {A:.3f}) at {dt.datetime.fromtimestamp(T, dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z "
                               f"is outside the ingested data (box {self.bounds[:4]}, "
-                              f"{dt.datetime.fromtimestamp(self.bounds[4], dt.timezone.utc):%Y-%m-%d %H}Z.."
-                              f"{dt.datetime.fromtimestamp(self.bounds[5], dt.timezone.utc):%Y-%m-%d %H}Z); "
+                              f"{dt.datetime.fromtimestamp(self.bounds[4], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z.."
+                              f"{dt.datetime.fromtimestamp(self.bounds[5], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z); "
                               "re-run `cafe fetch` with a larger box or window")
 
     def _w(self, k: str, lon: Any, lat: Any, t: Any) -> Any:
         v, ins = interp(self.W[k], [self.tw, self.law, self.low], [t, lat, cv.wrap360(lon)])
         self._check(ins, f"WRF {k}", lon, lat, t)
         return v
+
+    @functools.cached_property
+    def _rain_acc(self) -> Any:
+        return self.W["RAINNC"] + self.W["RAINC"]
+
+    def rain_hourly(self, lon: Any, lat: Any, hours: Any) -> Any:
+        """Mean rain rate [mm/h] over [t, t + 1 h) for each `hours` entry t, from the accumulation RAINNC + RAINC (piecewise linear in time, so
+        this is the hour's exact mean whatever the alignment), floored at 0. An hour that runs past the end of the data is read to the end of it
+        (a mean over the part that exists). What a gust front needs; `rain_mm_h` is the smoothed node rate the rain lens uses (row 252)."""
+        t, la, lo = np.asarray(hours, float), np.asarray(lat, float), cv.wrap360(lon)
+        t1 = np.minimum(t + 3600.0, self.tw.x[-1])
+        a0, i0 = interp(self._rain_acc, [self.tw, self.law, self.low], [t, la, lo])
+        a1, _ = interp(self._rain_acc, [self.tw, self.law, self.low], [t1, la, lo])
+        self._check(i0, "WRF rain_hourly", lon, lat, t)
+        span = np.maximum(t1 - t, 1.0)
+        return np.where(t1 > t, np.maximum(a1 - a0, 0.0) / span * 3600.0, 0.0)
 
     def _u(self, k: str, lon: Any, lat: Any, t: Any) -> Any:
         v, ins = interp(self.U[k], [self.tu, self.lau, self.lou], [t, lat, cv.wrap360(lon)])

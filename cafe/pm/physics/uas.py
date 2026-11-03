@@ -35,6 +35,7 @@ from jax import lax
 from numpy.typing import NDArray
 
 from ..env import conventions as cv
+from . import check_params
 
 Arr = Any
 F = NDArray[np.float64]
@@ -72,6 +73,26 @@ def check_provenance(node: Any, path: str = "") -> list[str]:
     return [path]
 
 
+# What the model reads, per group, with the kind of value each must be (physics.check_params; see glider.REQUIRED). `radio.rfd900x` and `link_2g4` are
+# not read here (stage 1 takes radios from platforms/radios.yaml).
+REQUIRED = {
+    "airframe": dict(mass_kg="pos", inertia_kgm2="pos", motor_radius_m="pos", hotel_w="nonneg"),
+    "rotor": dict(thrust_max_n_each="pos", omega_max_rpm="pos", prop_diameter_m="pos", figure_of_merit="pos", motor_time_const_s="pos", esc_motor_eff="pos",
+                  rho_ref_kgm3="pos", yaw_torque_ratio_priority="nonneg"),
+    "aero": dict(d_x="pos", d_y="pos", d_z="nonneg"),
+    "battery": dict(energy_wh="pos", cells="pos", v_nom_cell="pos", peukert_exponent="pos", peukert_hours="pos", r_int_ohm="nonneg", ocv_soc="unit",
+                    ocv_cell_v="pos", cutoff_cell_v="pos", reserve_frac="frac"),
+    "limits": dict(max_tilt_deg="pos", tilt_exceedance_deg="pos", max_airspeed_ms="pos"),
+    "controller": dict(pos_p="pos", vel_p="pos", vel_i="nonneg", vel_z_p="pos", vel_z_i="nonneg", accel_wp="pos", accel_z="pos", speed_up="pos",
+                       speed_dn="pos", att_p="pos", rate_p="pos", yaw_slew_degs="pos", vel_i_max="nonneg"),
+    "sortie": dict(duration_s="pos", levels_m="pos", leg_speed_ms="pos", leg_heading="other", rtl_height_m="nonneg", wp_radius_m="pos", land_speed_ms="pos",
+                   deck_height_m="nonneg", time_limit_factor="pos", min_profile_fraction="unit", hard_stop_factor="pos", battery_swap="other"),
+    "launch_rule": dict(max_mean_wind_ms="pos", wind_check_height_m="pos", gust_lookahead_min="nonneg", gust_front_threshold_ms="pos"),
+    "failure": dict(stuck_window_s="pos", stuck_closing_ms="nonneg", stuck_min_cmd_ms="nonneg"),
+    "radio": dict(link_loss_hold_s="pos", uas_antenna_height_above_body_m="nonneg", ship_antenna_height_m="nonneg"),
+}
+
+
 def load_platform(path: Optional[str] = None) -> dict[str, Any]:
     """quad_uas.yaml as nested dicts of plain values (provenance stripped after it is checked)."""
     p = pathlib.Path(path or PLATFORM)
@@ -83,7 +104,12 @@ def load_platform(path: Optional[str] = None) -> dict[str, Any]:
 
     def strip(n: Any) -> Any:
         return n["value"] if isinstance(n, dict) and "value" in n else {k: strip(v) for k, v in n.items()}
-    return cast(dict[str, Any], strip(doc))
+    P = cast(dict[str, Any], strip(doc))
+    if missing := [g for g in REQUIRED if not isinstance(P.get(g), dict)]:
+        raise ValueError(f"{p.name}: missing {missing}; add them (see platforms/quad_uas.yaml for the layout)")
+    for g, table in REQUIRED.items():
+        check_params(table, P[g], f"{p.name}:{g}", "quad_uas")
+    return P
 
 
 # ---------------------------------------------------------------------------------------------- constants -> arrays

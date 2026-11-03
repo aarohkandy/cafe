@@ -71,3 +71,15 @@ def test_a_leading_dimension_interpolates_each_slice_exactly_as_on_its_own():
     for k in range(4):
         assert np.array_equal(got[k], interp(f[k], axes, q)[0], equal_nan=True)
     assert np.array_equal(interp(f[0], axes, [np.nan, 0.0])[0], np.nan, equal_nan=True)     # a NaN query is NaN, as np.clip left it
+
+
+def test_an_empty_query_returns_empty_arrays_of_the_right_shape():
+    """Review round 5, M-20: a box with no sea cells asks for zero points, and the corner-weight reshape raised ValueError on the zero size."""
+    x, y = Axis([0, 1, 3]), Axis([10, 20])
+    F = np.ones((3, 2))
+    v, ins = interp(F, [x, y], [np.empty(0), np.empty(0)])
+    assert v.shape == (0,) and ins.shape == (0,) and ins.dtype == bool
+    v, ins = interp(np.ones((4, 3, 2)), [x, y], [np.empty((0, 5)), np.empty((0, 5))])               # leading dimensions of the field stay in front
+    assert v.shape == (4, 0, 5) and ins.shape == (0, 5)
+    v, ins = interp(F, [x, y], [np.empty((2, 0)), np.empty((2, 0))])
+    assert v.shape == (2, 0) and ins.shape == (2, 0)
