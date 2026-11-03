@@ -34,6 +34,7 @@ wrapper once per shell (pick any data directory with the space above):
 export CAFE_HOST_DATA=$HOME/cafe-data && mkdir -p $CAFE_HOST_DATA
 pm() { docker run --rm --ulimit core=0 --shm-size 16g -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
        -e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain)" ]; then echo 1; else echo 0; fi) \
+       -e CAFE_WORK=/data/work \
        -v $PWD:/app -v $CAFE_HOST_DATA:/data -w /app cafe-pm "$@"; }
 ```
 
@@ -51,6 +52,15 @@ sh bench/install_bellhop.sh
 ```
 
 The script writes `bellhop.exe` into `$CAFE_HOST_DATA/bin` (set in step 1; without it, homebase's `~/work/cafe/pmdata/bin`), which `pm()` mounts as `/data/bin`, the first place the code looks. The demo's own acoustic links (555 and 633 km) fail by range and never use Bellhop.
+
+For the UAS autopilot receipts (`make audit` runs them, and one of its tests fails without it): the ArduCopter SITL binary, ArduPilot's own
+stable-4.7.1 build, and its two parameter files. The script fetches them and checks each sha-256 (needs the network and `curl`):
+
+```bash
+sh bench/install_sitl.sh $CAFE_HOST_DATA/work/sitl
+```
+
+`pm()` passes `-e CAFE_WORK=/data/work`, so the code finds them at `/data/work/sitl`.
 
 ## 2. Check the install without the network (~10 min)
 

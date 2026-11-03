@@ -295,13 +295,14 @@ def test_main_runs_ruff_mypy_pytest_and_the_coverage_gates(tmp_path, monkeypatch
     monkeypatch.setattr(audit, "ROOT", tmp_path)
 
     def fake(cmd):
-        calls.append(cmd[0] if cmd[0] != sys.executable else "pytest")
+        calls.append(cmd[0] if cmd[0] != sys.executable else "pytest-cov-append" if "--cov-append" in cmd else "pytest")
         return (1, f"{cmd[0]} failed") if cmd[0] in ("ruff", "mypy") else (0, "")
     monkeypatch.setattr(audit, "_run", fake)
     cov(tmp_path, {"cafe/pm/a.py": (10, 1)})
     assert audit.main([]) == 1
     out = capsys.readouterr().out
-    assert calls == ["ruff", "mypy", "pytest"] and "AUDIT FAIL: ruff:\nruff failed" in out and "AUDIT FAIL: mypy:" in out
+    # the test step is two passes (round 6, L-W1): the suite by file over the workers, then the real-time tests with --cov-append
+    assert calls == ["ruff", "mypy", "pytest", "pytest-cov-append"] and "AUDIT FAIL: ruff:\nruff failed" in out and "AUDIT FAIL: mypy:" in out
     assert "coverage cafe/pm: 10.0 % < 90 %" in out and "audit: 3 problem(s)" in out
     monkeypatch.setattr(audit, "_run", lambda cmd: (1, "pytest output") if cmd[0] == sys.executable else (0, ""))
     (tmp_path / "coverage.json").unlink()
@@ -504,3 +505,33 @@ def test_the_static_app_script_is_scanned_the_vendored_libraries_and_the_html_ar
     root = tree(tmp_path, {"cafe/static/app.js": "let a = 1;\n// TODO fix\nf.mass.placeholder = 'x';\nq.skip(2);\n",
                            "cafe/static/vendor/three.js": "// TODO\n", "cafe/static/index.html": '<input placeholder="x">\n'})
     assert audit.banned(root) == ["cafe/static/app.js:2: banned pattern: // TODO fix", "cafe/static/app.js:4: banned pattern: q.skip(2);"]
+
+
+def test_review_round_6_m20_a_wrong_path_or_option_is_refused_before_any_step_runs(tmp_path, monkeypatch, capsys):
+    """The audit started ruff, mypy and the whole suite (an hour) before saying that the run directory did not exist, and dropped an unknown --flag."""
+    def never(cmd):
+        raise AssertionError(f"a step ran: {cmd}")
+    monkeypatch.setattr(audit, "_run", never)
+    monkeypatch.setattr(audit, "banned", never)
+    assert audit.main(["/nonexistent"]) == 2
+    assert "error: /nonexistent is not a run directory (the run directories are runs/quick, runs/overnight, runs/4h)" in capsys.readouterr().out
+    assert audit.main(["--ledger-only", str(make_run(tmp_path))]) == 2
+    assert "error: unknown option --ledger-only (--code-only, --ledgers-only, --mutation-record)" in capsys.readouterr().out
+    monkeypatch.setattr(audit, "banned", lambda: [])
+    monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
+    assert audit.main(["--ledgers-only", str(make_run(tmp_path / "ok"))]) == 0                  # a good run directory and a known option still go through
+
+
+def test_l_w1_the_test_step_runs_both_passes_and_reports_a_failure_of_either(monkeypatch, capsys):
+    calls = []
+
+    def fake(cmd):
+        calls.append(cmd)
+        return (1, "boom") if "--cov-append" in cmd else (0, "")
+    monkeypatch.setattr(audit, "_run", fake)
+    monkeypatch.setattr(audit, "banned", lambda: [])
+    monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
+    monkeypatch.setattr(audit, "coverage_problems", lambda p: [])
+    assert audit.main([]) == 1
+    pytests = [c for c in calls if "pytest" in c]
+    assert len(pytests) == 2 and "-n" in pytests[0] and "--cov-append" in pytests[1] and "AUDIT FAIL: pytest:\nboom" in capsys.readouterr().out

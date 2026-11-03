@@ -134,12 +134,13 @@ def estimate(cores: int, snappy_factor: float, cost_factor: float, mesh_s_per_ce
                 total_s=solve + mesh)
 
 
-def fitting_budget(need_s: float, share: float, profiles: dict[str, int]) -> str:
-    """Which `--budget` profile has a stage-3 share of at least need_s (smallest first), or the plain statement that none does."""
-    for name, b in sorted(profiles.items(), key=lambda kv: kv[1]):
-        if share * b >= need_s:
-            return f"--budget {name} ({share * b / 60:.0f} min of stage 3)"
-    return f"no --budget profile (the largest gives {share * max(profiles.values()) / 60:.0f} min of stage 3)"
+def fitting_budget(need_s: float, stage3_s: dict[str, float]) -> str:
+    """Which `--budget` profile's own plan holds need_s of stage 3 (`stage3_s`: profile -> the stage-3 seconds that plan gives this mission, the
+    smallest budget first), or the plain statement that none does and what the largest gives."""
+    for name, s in stage3_s.items():
+        if s >= need_s:
+            return f"--budget {name} ({s / 60:.0f} min of stage 3 in that plan)"
+    return f"no --budget profile's plan holds it (the largest gives {next(reversed(stage3_s.values()), 0.0) / 60:.0f} min)"
 
 
 # ---------------------------------------------------------------------------------------------------- the child

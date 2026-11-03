@@ -126,3 +126,51 @@ def test_the_runbook_says_what_budget_ci_does_on_the_demo_and_how_to_build_bellh
     # the script installs where the RUNBOOK's pm() mounts /data, so no copy step is needed (it wrote into homebase's ~/work/cafe/pmdata only)
     script = (ROOT / "bench" / "install_bellhop.sh").read_text()
     assert 'OUT="${CAFE_HOST_DATA:-$HOME/work/cafe/pmdata}/bin"' in script and "cp $HOME/work/cafe/pmdata" not in rb
+
+
+# ---- review round 6 (M-19, M-21, L-W1)
+
+def test_pmx_passes_the_commit_and_the_clean_tree_flag_exactly_as_pm_sh_does():
+    """M-19: the image has no git, so a run through bin/pmx.sh recorded `git_dirty: null` and could back no golden or provenance claim."""
+    flag = '-e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo 1; else echo 0; fi)'
+    assert "-e CAFE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null)" in text("bin", "pmx.sh") and flag in text("bin", "pmx.sh") and flag in text("pm.sh")
+
+
+def test_make_acceptance_writes_into_its_own_directory_and_make_audit_checks_its_quick_run():
+    """M-21: `--out $(RUNS)` made acceptance remove the user's reviewed runs/quick (run_one rmtree's out/<name>) before its own run."""
+    mk = text("Makefile")
+    recipe = re.search(r"^acceptance:.*\n\t(.*)$", mk, re.M).group(1)
+    assert re.search(r"--out \$\(RUNS\)/acceptance$", recipe) and "--out $(RUNS) " not in recipe + " "
+    assert "$(RUNS)/acceptance/quick" in re.search(r"^audit:.*\n\t(.*)$", mk, re.M).group(1)
+
+
+def test_the_audit_spreads_the_suite_over_the_cpus_and_runs_the_real_time_tests_alone_in_the_same_coverage_record():
+    """L-W1: the serial audit was killed at the 180 min job timeout on the hosted runner. Pass 1 is xdist by file without the real-time tests, pass 2
+    those alone with --cov-append and the json report; the pins and the five tests are the ones mutmut deselects."""
+    import tomllib
+    from cafe.pm import audit
+    one, two = audit.pytest_passes(4)
+    assert one[one.index("-n") + 1] == "4" and one[one.index("--dist") + 1] == "loadfile"
+    assert "--cov-append" not in one and "--cov-report=json:coverage.json" not in one
+    assert {a for a in one if a.startswith("--deselect=")} == {f"--deselect={t}" for t in audit.SERIAL_TESTS} and len(audit.SERIAL_TESTS) == 5
+    assert "--cov-append" in two and "--cov-report=json:coverage.json" in two and set(audit.SERIAL_TESTS) <= set(two) and "-n" not in two
+    py = tomllib.loads(text("pyproject.toml"))["tool"]["mutmut"]["pytest_add_cli_args"]
+    assert {a for a in py if a.startswith("tests/")} == set(audit.SERIAL_TESTS)
+    assert "pip install --no-cache-dir pytest-xdist==3.6.1 execnet==2.1.1" in text("Dockerfile.pm") and "--cov=cafe/pm" in one
+    wf = text(".github", "workflows", "premission.yml")
+    assert "no xdist" not in wf and "make audit" in wf and "$(PY) -m cafe.pm.audit" in text("Makefile")
+
+
+def test_ci_and_the_runbook_install_the_same_pinned_arducopter_the_receipts_fly():
+    """Round 6 integration (L-W2): the UAS SITL receipt test fails without the ArduCopter binary, and neither image nor the CI job installed it, so the
+    hosted audit could not pass whatever its timing. bench/install_sitl.sh fetches ArduPilot's stable-4.7.1 SITL build and its two parameter files,
+    pinned to the sha-256 of the files homebase runs (README); CI runs it and mounts the result at /work, and RUNBOOK 1 does the same for a lab."""
+    import re
+    sh, readme, rb = text("bench", "install_sitl.sh"), text("README.md"), text("docs", "RUNBOOK.md")
+    pins = dict(re.findall(r"^get \"\$\S+\" (\S+) ([0-9a-f]{64})$", sh, re.M))
+    assert set(pins) == {"arducopter", "copter.parm", "copter-X.parm"} and pins["arducopter"].startswith("011627d4") and "011627d4" in readme
+    assert "firmware.ardupilot.org/Copter/stable-4.7.1/SITL_x86_64_linux_gnu/arducopter" in sh and "dbe792162d06cab66c3475fd5556bf7a120f119e" in sh
+    wf = text(".github", "workflows", "premission.yml")
+    assert wf.index("sh bench/install_sitl.sh $PWD/.work/sitl") < wf.index("make audit (code") and "-v $PWD/.work:/work:ro" in wf
+    assert "sh bench/install_sitl.sh $CAFE_HOST_DATA/work/sitl" in rb and "-e CAFE_WORK=/data/work" in rb
+    assert "-e CAFE_WORK=/data/work" in readme                                          # the README wrapper is the RUNBOOK one
