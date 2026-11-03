@@ -256,3 +256,35 @@ def test_a_full_directory_is_a_named_error_and_not_a_bare_errno_28(monkeypatch, 
     assert list(tmp_path.iterdir()) == []
     monkeypatch.setattr(par.shutil, "disk_usage", lambda d: types.SimpleNamespace(free=a.nbytes))
     assert pathlib.Path(par._share(a)).name == "8.npy"                                                  # exactly enough room is enough
+
+
+def test_env_count_is_a_whole_number_of_at_least_one_or_a_config_error_naming_the_variable(monkeypatch):
+    """M-23: CAFE_NPROC was `int()` of the string (a letter was a traceback, 0 and -3 were accepted); CAFE_WORKERS had the check, now shared."""
+    monkeypatch.delenv("CAFE_X", raising=False)
+    assert par.env_count("CAFE_X") is None
+    monkeypatch.setenv("CAFE_X", "")
+    assert par.env_count("CAFE_X") is None
+    monkeypatch.setenv("CAFE_X", "4")
+    assert par.env_count("CAFE_X") == 4
+    for bad in ("abc", "0", "-3", "2.5"):
+        monkeypatch.setenv("CAFE_X", bad)
+        with pytest.raises(config.ConfigError, match=rf"CAFE_X='{bad}' is not a whole number of at least 1; set CAFE_X=N or unset it"):
+            par.env_count("CAFE_X")
+    monkeypatch.setenv("CAFE_WORKERS", "0")
+    with pytest.raises(config.ConfigError, match="CAFE_WORKERS='0' is not a whole number of at least 1; set CAFE_WORKERS=N or unset it"):
+        par.workers()
+
+
+def test_resize_lowers_the_limit_and_the_width_of_a_pool_that_has_not_started(monkeypatch):
+    """M-2: the plan made again after the ingest may allow fewer workers than the pool was opened for."""
+    monkeypatch.setattr(par, "_limit", None)
+    monkeypatch.setenv("CAFE_WORKERS", "8")
+    with par.Pool(8) as pool:
+        par.resize(3)
+        assert par.workers() == 3 and pool.n == 3
+        pool.ex = object()                                                                                       # processes already started: the width stays
+        par.resize(2)
+        assert par.workers() == 2 and pool.n == 3
+        pool.ex = None
+    par.resize(5)                                                                                                # no active pool: only the limit
+    assert par.workers() == 5

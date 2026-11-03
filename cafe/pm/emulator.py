@@ -17,11 +17,14 @@ Storage: emulator/train.parquet needs pyarrow; when it is missing the same table
 """
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import itertools
+import os
 import pathlib
+import uuid
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, cast
 
 import numpy as np
@@ -73,10 +76,31 @@ def read_table(path: pathlib.Path) -> pd.DataFrame:
 
 
 def write_table(df: pd.DataFrame, path: pathlib.Path) -> None:
+    """Write the table so that a reader sees the old file or the new one, never a part: to a temporary of its own name (two writers never share one)
+    in the same directory, then `os.replace`."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    df.to_parquet(tmp) if path.suffix == ".parquet" else df.to_csv(tmp, index=False)
-    tmp.replace(path)
+    name = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")     # not mkstemp: its 0600 would lock other users out
+    try:
+        df.to_parquet(name) if path.suffix == ".parquet" else df.to_csv(name, index=False)
+        os.replace(name, path)
+    except BaseException:
+        name.unlink(missing_ok=True)
+        raise
+
+
+@contextlib.contextmanager
+def locked(path: pathlib.Path) -> Iterator[None]:
+    """An exclusive lock (`fcntl.flock` on the sibling `<table>.lock`) for a read-modify-write of the table: concurrent runs queue instead of
+    overwriting each other's rows. Without `fcntl` (not Linux) there is no lock and `write_table` stays atomic."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path.with_name(path.name + ".lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)                                    # released when f closes
+        yield
 
 
 class Emulator:
@@ -102,7 +126,8 @@ class Emulator:
         if miss:
             raise KeyError(f"row lacks {miss}")
         new = pd.DataFrame([row])
-        write_table(pd.concat([self.table(), new], ignore_index=True) if self.path.exists() else new, self.path)
+        with locked(self.path):
+            write_table(pd.concat([self.table(), new], ignore_index=True) if self.path.exists() else new, self.path)
 
     def _x(self, x: Any) -> np.ndarray:
         """dict / Series / DataFrame / array -> (m, d) float array in feature order."""

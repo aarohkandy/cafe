@@ -18,6 +18,7 @@ import jax.numpy as jnp
 
 import cafe.receipts as cr
 from cafe.pm import budget
+from cafe.pm.config import ConfigError
 from cafe.pm.env import subgrid as sg_mod
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider as pg, uas, usv as pu
@@ -1903,3 +1904,14 @@ def test_nproc_follows_the_machine_and_stage_3_runs_the_ranks_it_planned(monkeyp
     monkeypatch.setenv("CAFE_WORKERS", "2")
     pw.run(fake_ctx(pathlib.Path(tempfile.mkdtemp())), {}, FakeL())
     assert os.environ["CAFE_NPROC"] == "2"                                                  # exported before cafe.cfd or a child reads it
+
+
+def test_a_bad_cafe_nproc_is_a_config_error_and_0_or_negative_is_not_accepted(monkeypatch):
+    """M-23: `abc` was a ValueError traceback, `0` and `-3` were returned as the rank count."""
+    for bad in ("abc", "0", "-3"):
+        monkeypatch.setenv("CAFE_NPROC", bad)
+        with pytest.raises(ConfigError, match=rf"CAFE_NPROC='{bad}' is not a whole number of at least 1; set CAFE_NPROC=N or unset it"):
+            fs.nproc()
+    monkeypatch.setenv("CAFE_NPROC", "")
+    monkeypatch.setenv("CAFE_WORKERS", "2")
+    assert fs.nproc() == 2                                                                  # empty is unset

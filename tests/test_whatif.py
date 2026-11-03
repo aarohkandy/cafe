@@ -1034,3 +1034,30 @@ def test_a_whole_day_shift_with_a_move_moves_the_uas_ship_and_still_says_the_shi
     m = whatif.apply(CI, drop=["usv", "glider_1n", GL])
     r = whatif.answer(m, dict(shift_h=24.0, dlon=0.1), {"uas": dict(verdict="GO", p_fail=0.0)}, {}, ENV, {}, plan_for(m), None, None)
     assert list(r["vehicles"]) == ["uas"] and r["vehicles"]["uas"]["method"] == "Stage 1" and "uas" in r["unchanged"]
+
+
+ADDER = """
+import sys, time, pathlib
+import pandas as pd
+from cafe.pm import whatif
+table, go, tag = sys.argv[1:]
+while not pathlib.Path(go).exists():
+    time.sleep(0.01)
+for i in range(12):
+    whatif.add_rows(table, [dict(key=f"{tag}{i}", x=float(i), pad="p" * 400_000)])
+"""
+
+
+def test_three_processes_adding_rows_to_one_table_lose_none_and_never_corrupt_it(tmp_path):
+    """M-6: `add_rows` was an unlocked read-modify-write over one fixed temporary name: concurrent runs lost rows, met a half-written file
+    (ConfigError "cannot be read") or renamed each other's temporary (FileNotFoundError)."""
+    import subprocess, sys
+    table, go = tmp_path / "train.parquet", tmp_path / "go"
+    env = dict(__import__("os").environ, PYTHONPATH=str(ROOT))
+    procs = [subprocess.Popen([sys.executable, "-c", ADDER, str(table), str(go), tag], cwd=ROOT, env=env, stderr=subprocess.PIPE, text=True) for tag in "abc"]
+    go.write_text("")                                                                       # all three start adding at once
+    errs = [p.communicate(timeout=600)[1] for p in procs]
+    assert [p.returncode for p in procs] == [0, 0, 0], errs
+    df = pd.read_parquet(table)
+    assert len(df) == 36 and df["key"].nunique() == 36
+    assert sorted(f.name for f in tmp_path.iterdir()) == ["go", "train.parquet", "train.parquet.lock"]        # no temporary left

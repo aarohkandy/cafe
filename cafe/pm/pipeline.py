@@ -103,21 +103,47 @@ class Context:
         self.log = log
         self.classes = stage1._classes(self.mission)
         self.plan: dict[str, Any] = {}
+        self._planned = (budget_name, gpus, gpu_mem_gb, seed)
         if budget_name is not None:
-            mem = par.memory_gb()
-            self.plan = budget.plan(budget_name, gpus, self.mission, gpu_mem_gb=gpu_mem_gb, vehicle_classes=self.classes, mem_gb=mem,
-                                    env_gb=None if mem is None else budget.env_gb(self.mission, self.cache))
-            if seed is not None:
-                self.plan["seed_override"] = seed
-            self.plan["refit_iterations_max"] = self.plan["refit_iterations"]            # the cap; stage 1b records the passes done
-            self.plan["stage3"] = budget.stage3_plan(self.plan, self.classes, budget.stage3_assumptions())      # every size stage 3 uses
-            self.plan["emulator"] = budget.emulator_plan(self.plan)
+            self.plan = self._make_plan()
         self._table = emulator_table
         subgrid.use_calibration(None)                                    # the shipped sub-grid calibration until a stage after stage 3 loads the run's own
         self.code_digest = code_digest()
         mission = {k: v for k, v in self.mission.items() if k != "_path"}                                 # not the spelling of the path it was read from
         self.hash = digest(dict(mission=mission, budget=budget_name or hash_budget, gpus=gpus, code=self.code_digest))
         self._env: GriddedEnv | None = None
+
+    def _make_plan(self) -> dict[str, Any]:
+        """The budget plan for this machine and the cache as it is now (its stores on disk are a floor of the environment's memory)."""
+        budget_name, gpus, gpu_mem_gb, seed = self._planned
+        assert budget_name is not None
+        mem = par.memory_gb()
+        with par.limit(None):                                              # the machine's CPUs, not the count an earlier plan of this run cut them to
+            plan = budget.plan(budget_name, gpus, self.mission, gpu_mem_gb=gpu_mem_gb, vehicle_classes=self.classes, mem_gb=mem,
+                               env_gb=None if mem is None else budget.env_gb(self.mission, self.cache))
+            if seed is not None:
+                plan["seed_override"] = seed
+            plan["refit_iterations_max"] = plan["refit_iterations"]            # the cap; stage 1b records the passes done
+            plan["stage3"] = budget.stage3_plan(plan, self.classes, budget.stage3_assumptions())      # every size stage 3 uses
+            plan["emulator"] = budget.emulator_plan(plan)
+        return plan
+
+    def replan(self) -> bool:
+        """Plan again with the cache as it is now (the ingest has put the stores on disk, which the first plan, made on a cold cache, could not count).
+        If the plan changed, it replaces `plan`, is written to plan.json and printed, and the worker count follows it. -> whether it changed. A plan
+        that no longer fits raises `budget.PlanError` naming the sizes. Nothing without a plan (`fetch`)."""
+        if not self.plan:
+            return False
+        new = self._make_plan()
+        if new == self.plan:
+            return False
+        old, self.plan = self.plan, new
+        _dump(new, self.path("plan.json"))
+        self.log(f"ingest: the plan changed now that the cache is on disk: environment {_gb(old['env_gb'])} -> {_gb(new['env_gb'])}, workers "
+                 f"{old['workers']} -> {new['workers']}")
+        self.log(budget.describe(new))
+        par.resize(new["workers"])
+        return True
 
     def stage_hash(self, name: str) -> str:
         """The config hash a stage's ledger carries: `hash`, and for the emulator and the stages after it also the emulator plan and the workers it
@@ -183,9 +209,18 @@ def ocean_box(m: dict[str, Any]) -> tuple[float, float, float, float]:
     return (b["lat_min"] - pad, b["lat_max"] + pad, b["lon_min"] - pad, b["lon_max"] + pad)
 
 
+def _gb(v: float | None) -> str:
+    return "unknown" if v is None else f"{v:.1f} GB"
+
+
 def _offline() -> bool:
-    """CAFE_OFFLINE set (and not 0): nothing is ever downloaded."""
-    return os.environ.get("CAFE_OFFLINE", "") not in ("", "0")
+    """CAFE_OFFLINE is 1, true, yes or on (any case): nothing is ever downloaded. Unset, empty, 0, false, no or off: online. Anything else is a ConfigError."""
+    v = os.environ.get("CAFE_OFFLINE", "")
+    if v.lower() in ("", "0", "false", "no", "off"):
+        return False
+    if v.lower() in ("1", "true", "yes", "on"):
+        return True
+    raise ConfigError(f"CAFE_OFFLINE={v!r} is not 0 or 1; set CAFE_OFFLINE=1 to download nothing, or 0 or unset it")
 
 
 def _umwm_depth(cache: str | pathlib.Path) -> dict[str, NDArray[np.float64]] | None:
@@ -366,6 +401,7 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     _ingest_checks(ctx, L, oc, sbox)
     L.output(man)
     _tao(ctx, L, t0.timestamp(), t1.timestamp())
+    ctx.replan()
 
 
 OCEAN_SNAP_DEG = 0.1             # the ocean store is cut to its 0.08-0.1 degree grid, so its edge may sit this far inside the requested box

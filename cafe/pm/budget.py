@@ -50,7 +50,8 @@ NOMINAL_WINDOW = {("glider", "body"): ("nominal.glider", "water"), ("usv", "hull
                   ("usv", "wing"): ("nominal.usv_wing", "air"), ("uas", "body"): ("nominal.uas", "air")}
 MIN_BATCH = 4                     # members: the smallest stage-1 batch the planner will shrink to (below it an ensemble has no spread worth reporting)
 WORKER_GB = 0.9                   # private memory of a stage-1 worker before it touches the environment: 0.81 to 0.84 GB measured (B's mem.py, 2026-11-05)
-ENV_GB_PER_DAY = 1.5              # the environment in memory per window day: about 9 GB for the 6-day demo (DECISIONS 267, 270), linear in the window
+ENV_REF_GB, ENV_REF_DEG2_DAY = 9.0, 14.0 * 34.0 * 6.0   # the one measured point (DECISIONS 267, 270): 9 GB for the 6-day demo's 14 x 34 deg padded box
+ENV_GB_PER_DEG2_DAY = ENV_REF_GB / ENV_REF_DEG2_DAY      # 0.0031 GB per deg^2 day: the environment in memory, linear in the padded area and the days
 STAGE1_S_BASIS = ("critical path: the longest task or the work over the workers; the parent's serial part (link evaluation, merge, pickling) "
                   "and worker start-up are not in it, so it is a lower bound")
 LOAD_WARN_FRAC = 0.25             # x cpus: a rate measured with more 1-min load than this (2 on 8 CPUs) was contended by other work
@@ -169,11 +170,40 @@ def window_days(mission: dict[str, Any]) -> float:
     return (utc(mission["window"]["end"]) - utc(mission["window"]["start"])).total_seconds() / 86400
 
 
+def padded_area_deg2(mission: dict[str, Any]) -> float:
+    """deg^2 of the box ingest downloads (`pipeline.padding` on each side; longitude wraps at 180, so 165 to -165 is 30 deg wide). A mission with no
+    `box` (a bare window) is taken as the demo's 14 x 34 deg, the one box the model was measured on."""
+    b = mission.get("box")
+    if not b:
+        return ENV_REF_DEG2_DAY / 6.0
+    from .pipeline import padding
+    pad = padding(mission)
+    w = (b["lon_max"] - b["lon_min"]) % 360.0 or 360.0
+    return float(min(360.0, w + 2 * pad) * min(180.0, b["lat_max"] - b["lat_min"] + 2 * pad))
+
+
+def env_model_gb(mission: dict[str, Any]) -> float:
+    """GB the environment takes in memory before any download: `ENV_GB_PER_DEG2_DAY` x the padded box's area x the window's days. Linear in both,
+    calibrated at one box and window (the demo's), so a floor beyond it, not a measurement; exactly `ENV_REF_GB` for the demo."""
+    return ENV_REF_GB * (padded_area_deg2(mission) * window_days(mission)) / ENV_REF_DEG2_DAY
+
+
+def _files_gb(d: pathlib.Path) -> float:
+    return sum(f.stat().st_size for f in d.rglob("*") if f.is_file()) / 1e9
+
+
 def env_gb(mission: dict[str, Any], cache: pathlib.Path | None = None) -> float:
-    """GB the environment takes in memory: `ENV_GB_PER_DAY` per window day, or the size of the cache's Zarr stores on disk when that is more (the
-    stores are compressed, so the disk size is a floor)."""
-    disk = sum(f.stat().st_size for z in cache.glob("*.zarr") for f in z.rglob("*") if f.is_file()) / 1e9 if cache is not None and cache.is_dir() else 0.0
-    return max(ENV_GB_PER_DAY * window_days(mission), disk)
+    """GB the environment takes in memory: `env_model_gb`, or the size on disk of every Zarr store below the cache (the orca stores too) plus the
+    mission's ocean store when that is more (the stores are compressed, so the disk size is a floor)."""
+    if cache is None or not cache.is_dir():
+        return env_model_gb(mission)
+    from .env import ocean
+    try:
+        store = ocean.store_path(mission["environment"]["ocean"], mission.get("name"))
+    except (KeyError, ValueError):                                       # no ocean in the mission, or a lab store without a path: validate says so
+        store = None
+    disk = sum(_files_gb(z) for z in cache.rglob("*.zarr") if z.is_dir()) + (_files_gb(store) if store is not None and store.is_dir() else 0.0)
+    return max(env_model_gb(mission), disk)
 
 
 def sortie_minutes(mission: dict[str, Any], classes: dict[str, str]) -> dict[str, float]:
@@ -229,7 +259,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     """`workers`: the stage-1 worker processes the run will have (default `par.workers()`, this machine's CPUs, cut to what `mem_gb` allows): a
     batch costs its longest task or its tasks spread over the workers, whichever is longer, and several batches run at once when one does not fill.
     `mem_gb`: the memory the run may use (`par.memory_gb()`; None: unknown, no memory term). Each worker needs `WORKER_GB` on top of the
-    environment (`env_gb`, default `ENV_GB_PER_DAY` per window day): the workers are the CPUs or what memory holds, the smaller, and a plan for
+    environment (`env_gb`, default `env_model_gb`: per deg^2 day of the padded box): the workers are the CPUs or what memory holds, the smaller, and a plan for
     which not even one worker fits is refused. A `workers` argument or CAFE_WORKERS is honoured as given, with a note when memory is short for it."""
     if budget not in BUDGET_S:
         raise PlanError(f"--budget {budget!r}: choose one of {list(BUDGET_S)}")
@@ -245,7 +275,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     cpu = par.workers() if workers is None else max(1, int(workers))
     by_mem: int | None = None
     if mem_gb is not None:
-        env = ENV_GB_PER_DAY * days if env_gb is None else env_gb
+        env = env_model_gb(mission) if env_gb is None else env_gb
         by_mem = int((mem_gb - env) // WORKER_GB)
         if by_mem < 1:
             raise PlanError(f"stage 1 needs about {env:.0f} GB for the environment of a {days:.0f}-day window and {WORKER_GB} GB per worker, and "

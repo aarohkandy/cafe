@@ -108,10 +108,11 @@ GRIDS = {"coarse": (-3, 0), "fine": (0, 0)}                                  # (
 
 
 def nproc() -> int:
-    """MPI ranks the free-surface run uses: CAFE_NPROC when set, else the machine's workers (par.workers()) capped at 6, the measured scaling knee
-    (8 cores reach efficiency 0.44). pipeline_windows.run exports it as CAFE_NPROC before anything imports cafe.cfd, so the run uses what was planned."""
+    """MPI ranks the free-surface run uses: CAFE_NPROC when set (a whole number of at least 1, else ConfigError), else the machine's workers
+    (par.workers()) capped at 6, the measured scaling knee (8 cores reach efficiency 0.44).
+    pipeline_windows.run exports it as CAFE_NPROC before anything imports cafe.cfd, so the run uses what was planned."""
     from .. import par
-    return int(os.environ["CAFE_NPROC"]) if os.environ.get("CAFE_NPROC") else max(1, min(6, par.workers()))
+    return par.env_count("CAFE_NPROC") or max(1, min(6, par.workers()))
 
 
 def rate(cores: int) -> tuple[float, str]:

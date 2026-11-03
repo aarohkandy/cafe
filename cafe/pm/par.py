@@ -39,21 +39,28 @@ def _child() -> bool:
     return _in_worker or mp.parent_process() is not None
 
 
+def env_count(name: str) -> int | None:
+    """The whole number of at least 1 in the environment variable `name`; None when it is unset or empty; anything else is a `ConfigError` naming it."""
+    v = os.environ.get(name)
+    if not v:
+        return None
+    try:
+        n = int(v)
+    except ValueError:
+        n = 0
+    if n < 1:
+        from .config import ConfigError
+        raise ConfigError(f"{name}={v!r} is not a whole number of at least 1; set {name}=N or unset it")
+    return n
+
+
 def workers() -> int:
     """CAFE_WORKERS when set (a whole number of at least 1, else ConfigError), else the CPUs this process may use: its affinity mask, cut to the
     cgroup quota (docker --cpus); at most the `limit` of the run (the plan's memory cap); 1 in a worker."""
     if _child():
         return 1
-    v = os.environ.get("CAFE_WORKERS")
-    if v:
-        try:
-            n = int(v)
-        except ValueError:
-            n = 0
-        if n < 1:
-            from .config import ConfigError
-            raise ConfigError(f"CAFE_WORKERS={v!r} is not a whole number of at least 1; set CAFE_WORKERS=N or unset it")
-    else:
+    n = env_count("CAFE_WORKERS")
+    if n is None:
         n = len(os.sched_getaffinity(0))
         try:
             quota, period = pathlib.Path("/sys/fs/cgroup/cpu.max").read_text().split()
@@ -64,14 +71,23 @@ def workers() -> int:
 
 
 @contextlib.contextmanager
-def limit(n: int) -> Iterator[None]:
-    """`workers()` is at most n inside the block (the run's planned count: memory can allow fewer workers than there are CPUs)."""
+def limit(n: int | None) -> Iterator[None]:
+    """`workers()` is at most n inside the block (the run's planned count: memory can allow fewer workers than there are CPUs); None: no limit."""
     global _limit
     prev, _limit = _limit, n
     try:
         yield
     finally:
         _limit = prev
+
+
+def resize(n: int) -> None:
+    """The run's worker count becomes n from here on (the plan was made again after the ingest and memory allows fewer): `workers()` is at most n
+    and the active pool, if it has not started its processes yet, is n wide. Undone with the enclosing `limit` block."""
+    global _limit
+    _limit = n
+    if _active is not None and _active.ex is None:
+        _active.n = n
 
 
 def memory_gb() -> float | None:
