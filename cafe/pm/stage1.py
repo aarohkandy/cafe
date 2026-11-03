@@ -204,7 +204,7 @@ def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float],
     if sw.get("gust_fronts") and sl is not None and len(ts):
         hours = np.arange(np.floor(ts[0] / 3600) * 3600 - 3600, ts[-1] + 7200, 3600.0)
         lo, la = np.full(hours.size, lon), np.full(hours.size, lat)
-        rain = np.asarray(env._w("rain_mm_h", lo, la, hours), float)
+        rain = np.asarray(env.rain_hourly(lo, la, hours), float)                                  # the hour's own mean rate (row 252 smooths it)
         wto = cv.to_deg(np.asarray(env.u10(lo, la, hours), float))
         air = env.air(lo, la, hours)
         te = subgrid.theta_e(air["T2"].value, air["q2"].value, air["psfc"].value)

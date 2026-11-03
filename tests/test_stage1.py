@@ -1836,3 +1836,41 @@ def test_an_iridium_link_to_a_glider_is_required_only_while_the_glider_is_surfac
     assert always["need_count"].tolist() == [TGRID.size] * 3                                       # still every moment for a vehicle that is not a glider
     swapped = stage1.evaluate_link(dict(lk, a="shore", b="glider_eq"), out, MISSION, flat_env(3), 3, 3, [0, 1, 2])
     assert swapped["need_count"].tolist() == [2, 2, 2]
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 5: M-1, M-9
+
+@pytest.mark.parametrize("cls,run", [("glider_eq", "_run_glider"), ("usv", "_run_usv")])
+@pytest.mark.parametrize("sec", [20.0, 30.0, 50.0])
+def test_a_deploy_time_with_seconds_does_not_leave_the_data(ci_full, cls, run, sec):
+    """M-1: the step count was rounded, so with the window ending on the hour a deploy at hh:00:20 or hh:00:30 stepped up to 30 s past the end (the last
+    record, a multiple of 10 steps, was then outside the data) and every member failed `left_data`; the emulator design lost those variants."""
+    v = next(x for x in MISSION["vehicles"] if x["id"] == cls)
+    M, T = 4, float(ci_full.tw.x[-1])
+    X = {"glider_speed_scale": np.ones(M), "battery_capacity_scale": np.ones(M), "usv_vpp_bias": np.full(M, -0.24)}
+    P = glider.load_platform("seaglider") if cls == "glider_eq" else usv.load_platform("saildrone_explorer")
+    with ci_full.lenient():
+        r = getattr(stage1, run)(v, P, ci_full, M, X, T - 4 * 3600.0 + sec, T)
+        stage1._left_data(r, ci_full)
+    assert r["t"][-1] <= T and not r["fail"]["left_data"].any()
+
+
+def test_gust_fronts_are_drawn_from_the_rain_of_each_hour_not_from_the_smoothed_node_rate(ci_full, monkeypatch):
+    """M-9: the gust-front draw read rain_mm_h (the hourly node values, half of an hour's rain at each end node) as the rate of the hour that starts at
+    the node: the 10 mm/h burst of 23Z..02Z read 0, 5, 10, 10, 5, 0, so rain fell into the hour after it stopped and the first hour got half."""
+    from tests.fixtures.ci_env import make as fx
+    seen = []
+    real = stage1.subgrid.gust_fronts
+
+    def spy(seed, rain, hours, *a, **k):
+        seen.append((np.asarray(rain), np.asarray(hours)))
+        return real(seed, rain, hours, *a, **k)
+    monkeypatch.setattr(stage1.subgrid, "gust_fronts", spy)
+    foot = fx.rain_footprint(ci_full.low.x[None, :], ci_full.law.x[:, None])
+    j, i = np.unravel_index(np.argmax(foot), foot.shape)
+    origin = (float(ci_full.low.x[i]) - 360.0, float(ci_full.law.x[j]))
+    mission = dict(environment=dict(subgrid=dict(gust_fronts=True)))
+    stage1._uas_forcing(ci_full, mission, origin, np.array([fx.RAIN_T0]), uas_plat(), 2, 1, [0, 1])
+    rain, hours = seen[0]
+    assert hours[0] == fx.RAIN_T0 - 3600.0
+    assert rain.tolist() == pytest.approx([0.0, 10.0, 10.0], rel=1e-3)                          # the hours 22Z, 23Z, 00Z; the nodes gave [0, 5, 10]

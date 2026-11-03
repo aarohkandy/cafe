@@ -851,3 +851,12 @@ def test_a_current_that_is_nan_everywhere_fails_every_member_the_way_the_gliders
 def test_a_non_finite_wind_vector_is_the_same_labelled_failure():
     h = sim(HoleEnv(holes=[0, 3], field="wind", wind=(-6.0, 0.0)), m=4).run(HR, 60.0)
     assert h["fail"]["no_current_data"].tolist() == [True, False, False, True] and np.isfinite(h["lat"]).all()
+
+
+# ---- review round 5, M-1: a run never steps past the time it was asked for ---------------------------------------------------
+def test_run_stops_at_the_last_whole_step_inside_the_time_it_was_given():
+    """M-1: 170 s at dt 60 was int(round(2.83)) = 3 steps, ending 10 s past the window; a deploy time with seconds then left the data."""
+    s = sim(AnalyticEnv())
+    h = s.run(170.0, record_s=60.0)
+    assert len(h["t"]) == 2 and h["t"][-1] <= 170.0 and s.t <= 170.0
+    assert [len(sim(AnalyticEnv()).run(x, record_s=60.0)["t"]) for x in (180.0, 179.9999999999)] == [3, 3]

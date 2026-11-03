@@ -81,6 +81,7 @@ import numpy as np
 import yaml
 
 from ..env import conventions as cv
+from . import check_params
 
 Arr = Any
 G = 9.80665
@@ -95,6 +96,23 @@ STRINGS = ("radio_900mhz", "radio_2g4", "iridium_link")
 
 
 # ------------------------------------------------------------------ parameters
+
+# What the model reads from `params`, with the kind of value each must be (physics.check_params; see glider.REQUIRED). Includes the keys stage 1 and the
+# stage-3 windows read (antenna height, keel).
+REQUIRED = dict(
+    loa_m="pos", lwl_m="pos", beam_wl_m="pos", mass_kg="pos", wetted_area_m2="pos", form_factor_k="nonneg", cr0="nonneg", cr_fr_ref="pos",
+    appendage_cda_m2="nonneg", heel_resist_c="pos", gm_m="pos", clr_depth_m="pos", kyy_frac="pos", kxx_roll_m="pos", roll_damping="nonneg",
+    wing_span_m="pos", wing_area_m2="pos", anemometer_m="pos", wing_cl_alpha_2d="pos", wing_stall_deg="pos", wing_trim_deg="pos", wing_cd0="nonneg",
+    wing_oswald_e="pos", wing_ce_height_m="nonneg", wing_ce_x_m="any", heel_target_deg="pos", trim_min_aws_ms="nonneg", min_awa_deg="nonneg",
+    keel_area_m2="pos", keel_span_m="pos", keel_t_c="pos", keel_stall_deg="pos", keel_x_m="any", rudder_cl_max="pos", rudder_x_m="any",
+    wind_area_front_m2="nonneg", wind_area_side_m2="nonneg", wind_cd_front="nonneg", wind_cd_side="nonneg", wind_height_m="pos",
+    rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms="pos", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos", chiodi_max_sog_ms="pos",
+    chiodi_max_wind_ms="pos", chiodi_band="nonneg", sun_overpredict_lo="nonneg", sun_overpredict_hi="nonneg", battery_wh="pos", solar_area_m2="nonneg",
+    solar_eff="unit", hotel_w="nonneg", soc0="unit", rf_antenna_height_m="nonneg", vpp_bias_mean="any", vpp_bias_sd="nonneg", current_z_m="any",
+    tack_time_s="nonneg", tack_speed_frac="unit", tack_horizon_s="pos", replan_s="pos",
+)
+OPTIONAL = ("draft_nominal_m", "rudder_area_m2", "rudder_span_m", "rudder_t_c", "keel_depth_m", "iridium_antenna_height_m") + STRINGS      # read by no code
+
 
 def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
     """platforms/<name>.yaml (or a path) -> flat dict of values plus 'kind' and 'mission_defaults'.
@@ -117,8 +135,10 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
         return out
 
     P = flat(raw["params"], "params")
+    check_params(REQUIRED, P, f"{path.name}:params", "saildrone_explorer")
     P["kind"] = raw["kind"]
     P["mission_defaults"] = flat(raw["mission_defaults"], "mission_defaults")
+    check_params({}, P["mission_defaults"], f"{path.name}:mission_defaults", "saildrone_explorer")
     return P
 
 
@@ -591,7 +611,7 @@ class USVSim:
 
     def run(self, seconds: float, dt: float = 60.0, record_s: float = 3600.0) -> dict[str, Any]:
         """Advance `seconds` in steps of dt, recording every `record_s`; returns `history()`."""
-        for _ in range(int(round(seconds / dt))):
+        for _ in range(int(seconds / dt + 1e-9)):                                  # never a step past `seconds` (a deploy time with seconds)
             self.step(dt)
             if self.t - self.t_rec >= record_s:
                 self.t_rec = self.t

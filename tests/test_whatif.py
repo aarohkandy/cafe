@@ -1003,3 +1003,14 @@ def test_measure_runs_the_members_it_is_given(monkeypatch):
     with pytest.raises(whatif.Invalid):
         whatif.measure(STORM, GL, ENV, plan, *PRI, None, 7)
     assert got == [list(range(48, 64)), list(range(16))]                                  # the base run's members when none are named
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 5: M-1
+
+def test_a_variant_shifted_by_a_fraction_of_a_minute_keeps_its_glider_and_usv_rows(ci_full):
+    """M-1: on a window ending on the hour a deploy shifted by 8.8344 h (the q5 design's variant 3) steps a multiple of 10 steps and ends 3 s past the
+    data: the batch raised OutsideData and the glider and the USV were skipped as 'leaving the data' (2 of the q5 design's 28 rows)."""
+    m = whatif.apply(CI, {v: dict(shift_h=8.8344) for v in ("glider_eq", "usv")}, drop=["uas", "glider_1n"])
+    pri, marg = stage1.priors_for(m)
+    rows, skipped = whatif.run_variant(m, ci_full, [0, 1], 5, pri, marg, None, {}, {}, "v3")
+    assert not skipped and {r["vehicle"] for r in rows} == {"glider_eq", "usv"}

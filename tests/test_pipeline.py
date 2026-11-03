@@ -2666,3 +2666,14 @@ def test_an_emulator_that_answers_a_mission_far_outside_its_training_rows_fails_
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     with pytest.raises(ledger.StageFailed, match="emulator_range_guard_glider"):
         run_stage(pipeline.s_emulator, ctx, "emulator")
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 5: M-20
+
+def test_a_box_with_no_sea_cells_fails_the_ustar_check_by_name_and_does_not_raise(tmp_path):
+    """M-20: with no sea node to sample, env.grid.interp was asked for zero points and ingest ended in 'cannot reshape array of size 0'."""
+    ctx = ctx_for(tmp_path / "r")
+    ctx.env.sea[:] = False
+    assert pipeline._ustar_agreement(ctx.env)[0] == 0
+    c = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")
+    assert not c["ok"] and c["value"] is None and c["note"] == "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask"

@@ -45,6 +45,7 @@ import numpy as np
 import yaml
 
 from ..env import conventions as cv
+from . import check_params
 
 Arr = Any
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
@@ -60,6 +61,22 @@ class Steady(NamedTuple):
     w: Arr  # vertical speed through water, + up [m/s]
     alpha_deg: Arr  # angle of attack, BS3 convention alpha = pitch - glide [deg]
     ok: Arr  # False: no steady solution / stall / pitch opposes buoyancy
+
+
+# What the model reads from `params`, with the kind of value each must be (physics.check_params): an absent, NaN, infinite or unphysical value is a
+# ValueError naming the file and field at load time, not a KeyError or a silent flight later. Includes the keys stage 1 and the stage-3 windows read.
+_COMMON = dict(
+    gravity="pos", u_min_ms="pos", rating_m="pos", pitch_deg="pos", vbd_delta_cc="pos", vbd_min_cc="any", vbd_range_cc="pos", t_deep_c="any",
+    thermocline_scale_m="pos", battery_J="pos", reserve_frac="frac", hotel_W="nonneg", pump_eta="pos", pump_time_s="nonneg", apogee_overshoot="nonneg",
+    attitude_J_per_dive="nonneg", iridium_Bps="pos", bytes_per_dive="nonneg", comms_W="nonneg", gps_s="nonneg", windage="nonneg",
+    antenna_height_m="nonneg", seafloor_margin_m="nonneg", min_dive_m="nonneg",
+)
+REQUIRED: dict[str, dict[str, str]] = {
+    "seaglider": dict(_COMMON, length_m="pos", hd_a="pos", hd_b="pos", hd_c="pos", hd_s="any", abs_compress="pos", therm_expan="pos", temp_ref="any",
+                      mass_kg="pos", volmax_cc="pos"),
+    "slocum": dict(_COMMON, mg="pos", Vg="pos", S="pos", AR="pos", aw="pos", ah="pos", Cd0="pos", Cd1="pos", epsilon="nonneg"),
+}
+OPTIONAL = ("rho_ref", "acoustic_modem")        # in the files, read by no model code
 
 
 def load_platform(name: str) -> dict[str, Any]:
@@ -84,8 +101,12 @@ def load_platform(name: str) -> dict[str, Any]:
         return out
 
     P = flat(raw["params"], "params")
+    if raw["kind"] not in REQUIRED:
+        raise ValueError(f"{path.name}:kind: {raw['kind']!r} is not a glider kind; use one of {sorted(REQUIRED)}")
+    check_params(REQUIRED[raw["kind"]], P, f"{path.name}:params", raw["kind"])
     P["kind"] = raw["kind"]
     P["mission_defaults"] = flat(raw["mission_defaults"], "mission_defaults")
+    check_params({}, P["mission_defaults"], f"{path.name}:mission_defaults", raw["kind"])
     return P
 
 
@@ -455,7 +476,7 @@ class GliderSim:
             self._rec[k].append(np.copy(v))
 
     def run(self, seconds: float, dt: float = 60.0) -> dict[str, Any]:
-        for _ in range(int(round(seconds / dt))):
+        for _ in range(int(seconds / dt + 1e-9)):                                  # never a step past `seconds` (a deploy time with seconds)
             self.step(dt)
         return self.history()
 
