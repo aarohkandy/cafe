@@ -2,15 +2,13 @@
 
 Branch `r6-p`, worktree `/Users/aaroh/Downloads/everything/cafe-r6p`. All three findings are fixed.
 
-## Incident to know about first (shared `git stash`)
+## Incident (shared `git stash`), resolved
 
-I ran `git stash push -- cafe/` to run my new tests on the old code, then `git stash pop`. A `git stash` stack is shared by every worktree of the
-repo, so my pop took builder C's stash (their `cafe/` edits for M-7/M-8/M-9/M-11/M-22/M-24) into my tree, and C popped mine into theirs.
-I restored my own tree (C's source changes are removed from it; a copy is in `.git/worktrees/cafe-r6p/c_theirs.patch` and in the shared scratchpad as
-`p_tree_now.patch`). **I did not touch `/Users/aaroh/Downloads/everything/cafe-r6c`.** At 10:57 its `cafe/` held my six source files
-(`budget.py emulator.py par.py pipeline.py stage3/freesurface.py whatif.py`) in place of its own source edits. To put it right (C's call): in
-`cafe-r6c`, `git apply -R` my source diff (`git diff r6-p -- cafe/` of the six files, or `p_stash.patch` in the scratchpad) and `git apply p_tree_now.patch`
-(C's own source changes, 7 files). Nobody should use `git stash` in this setup.
+I ran `git stash push -- cafe/` / `git stash pop` to test the old code; the stash stack is shared by every worktree, so my pop and builder C's crossed and for a few
+minutes each tree held the other's `cafe/` edits. My tree was restored from the diffs (C's edits removed from it). Checked afterwards: `git diff 77732a7 HEAD -- cafe/`
+(the dangling stash of my work) shows only my later line-length/mypy edits in budget.py, emulator.py and stage3/freesurface.py; config.py, env/hycom.py, env/ocean.py,
+env/orca.py, `__main__.py` and mission.json are identical to e9bf044 in `r6-p`; and C's branch `r6-c` holds only C's files. I did not edit C's worktree. No `git stash` since.
+(The "before" results below were produced by that stash run: the new tests on the old `cafe/`.)
 
 ## M-2  memory model (budget.py, pipeline.py, par.py)
 
