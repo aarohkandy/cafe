@@ -1049,8 +1049,10 @@ def _sensitivity_cases(ctx: Context, L: Ledger, scales: dict[str, Any]) -> None:
     fp = ctx.run_dir / "ingest" / "priors_fitted.json"
     X = pickle.loads(ctx.path("stage1", "res.pkl").read_bytes())["X"]
     fitted = json.loads(fp.read_text()) if fp.is_file() else None
+    t0 = time.perf_counter()
     with _lenient(ctx.env):
         cases = stage1.sensitivity_case(ctx.mission, ctx.env, stage1.BRIEF_PRIOR, len(next(iter(X.values()))), fitted, scales or None, X=X)
+    L.d["sensitivity_wall_s"] = round(time.perf_counter() - t0, 3)             # in no share of the plan; shown in the machine block (M-17)
     out = ctx.path("stage1b", "sensitivity_cases.json")
     out.write_text(json.dumps(ledger.clean(cases), indent=1, sort_keys=True, allow_nan=False))
     L.output(out)
@@ -1076,7 +1078,9 @@ def s_stage1b(ctx: Context, L: Ledger) -> None:
             note="refit passes performed (a single pass: stage 1 reran once with the multipliers, no loop to convergence); "
                  f"the plan allows {ctx.plan['refit_iterations']}, the refit module caps it at {refit_mod.MAX_ITER}")
     if not scales and not recal:
-        L.note("no vehicle was refit: stage 1b is stage 1 (copied, not rerun)")
+        ran = L.d.get("sensitivity_wall_s")
+        L.note("no vehicle was refit: stage 1b is stage 1 (copied, not rerun)"
+               + ("" if ran is None else f"; the sensitivity case reran the USV in {ran:.3g} s, not charged to any share"))
         shutil.copy(ctx.path("stage1", "res.pkl"), ctx.path("stage1b", "res.pkl"))
         L.output(ctx.path("stage1b", "res.pkl"))
         L.output(_dump(dict(json.loads(ctx.path("stage1", "summary.json").read_text()), refit_iterations_performed=0), ctx.path("stage1b", "summary.json")))

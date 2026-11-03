@@ -28,7 +28,7 @@ def test_cheap_batches_get_the_full_ensemble_and_certify():
     assert p["n_max"] == budget.N_MAX["quick"] == 64 and p["n_min"] == 32 and p["certify_possible"] is False
     assert [n for n in p["notes"] if "ensemble" in n or "batch" in n] == []
     big = budget.plan("overnight", GPU, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)
-    assert big["n_max"] == 512 and big["certify_possible"] and big["n_min"] == 73 and big["sitl_members"] == 8 and big["refit_iterations"] == 2
+    assert big["n_max"] == 512 and big["certify_possible"] and big["n_min"] == 73 and big["sitl_members"] == 0 and big["refit_iterations"] == 2
 
 
 def test_a_high_measured_batch_cost_shrinks_the_ensemble_to_whole_batches_and_says_so():
@@ -550,3 +550,12 @@ def test_the_free_surface_price_follows_the_machines_cores(monkeypatch):
     assert one["estimate"]["cores"] == 1 and six["estimate"]["cores"] == 6 and one["need_s"] > 2.0 * six["need_s"]
     monkeypatch.setenv("CAFE_NPROC", "4")
     assert budget.fs_plan(CLASSES, 1, a3(), 1e9)["estimate"]["cores"] == 4
+
+
+def test_the_plan_charges_no_sitl_member_because_no_stage_flies_one():
+    """Round 6 M-3: 4h printed 4 SITL members and overnight 8; stage 1 and the pipeline never call `fly_sitl`, so the number must be 0 until one does."""
+    for name in budget.BUDGET_S:
+        assert budget.plan(name, GPU, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)["sitl_members"] == 0
+    import pathlib
+    for f in ("stage1.py", "pipeline.py"):
+        assert "fly_sitl" not in (pathlib.Path(budget.__file__).parent / f).read_text()          # a stage that flies SITL must make the count non-zero

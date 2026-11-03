@@ -27,6 +27,9 @@ Broken configuration. `--broken tests/fixtures/broken/wave_direction.yaml` sets 
 exit code is then inverted, because the point is that the receipts notice: the same receipts are first run without the overlay, and
 the exit code is 0 if at least one receipt that passes there fails with it, 1 if none does (a receipt that fails either way, or is not run
 on this machine, proves nothing about the overlay; what `make broken` and the CI job check). The table goes to runs/receipts_broken.json.
+
+`--only` selects groups by a part of their name and writes runs/receipts_partial.json, never runs/receipts.json (the table the report reads), unless
+`--json` names the file; a part that matches no group exits 2 and writes nothing (round 6, M-12). A table whose meta file says `only` is stale to the report.
 """
 from __future__ import annotations
 
@@ -417,6 +420,10 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
     """-> (rows, exit code). `broken`: the overlay yaml to apply for this run (exit code inverted, see the module docstring). The same receipts are
     first run without the overlay: the broken run counts only receipts that pass in that baseline and fail with the overlay."""
     from .env import conventions as cv
+    names = [n for n, _ in jobs(slow)]
+    if only and not any(o in n for o in only for n in names):                   # round 6 M-12: nothing selected is not an empty table
+        log(f"no receipt group matches {', '.join(repr(o) for o in only)}; the groups are: {', '.join(names)}")
+        return [], 2
     old = os.environ.get(cv.OVERLAY_ENV)
     base: dict[str, str] = {}
     if broken:
@@ -435,7 +442,7 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
             os.environ.pop(cv.OVERLAY_ENV, None)
         else:
             os.environ[cv.OVERLAY_ENV] = old
-    out = pathlib.Path(out or ROOT / "runs" / ("receipts_broken.json" if broken else "receipts.json"))
+    out = pathlib.Path(out or ROOT / "runs" / ("receipts_broken.json" if broken else "receipts_partial.json" if only else "receipts.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(rows, indent=1, allow_nan=False))
     write_meta(out, slow, only)

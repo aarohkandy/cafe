@@ -69,6 +69,9 @@ LIMITATIONS = [
                         "evidence run q5 11 moorings over 6 days gave 0.113 m/s, with a 95 % upper bound of about 0.5 m/s (the literature prior was 2.0 m/s), "
                         "and regime-to-regime bias outside the window is not sampled",
          factors=["uncertainty", "validation"], where=["cafe/pm/pipeline.py"]),
+    dict(id="L20", text="UAS turbulence is generated at one height for all legs: one Mann box per sortie, at the deck height plus the mean of the sortie's "
+                        "flight altitudes, is applied to every leg, so a leg flown at another altitude sees the length scale of that height",
+         factors=["validation"], where=["cafe/pm/stage1.py", "cafe/pm/env/subgrid.py"]),
 ]
 
 SUBGRID = "sub-grid layer uncalibrated"

@@ -565,3 +565,22 @@ def test_the_meta_digest_changes_when_the_code_does(tmp_path, monkeypatch):
     from cafe.pm import pipeline, receipts
     monkeypatch.setattr(pipeline, "code_digest", lambda: "d" * 64)
     assert json.loads(receipts.write_meta(tmp_path / "x.json").read_text())["code_digest"] == "d" * 64
+
+
+# ---- review round 6, M-12: --only can neither replace the full table nor pass for it
+
+def test_only_that_matches_no_group_exits_2_and_writes_nothing_and_a_part_goes_to_its_own_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(pr, "ROOT", tmp_path)
+    monkeypatch.setattr(pr, "jobs", jobs_of(("pm.env.waves", passing), ("pm.emulator", failing)))
+    logs = []
+    full = pr.run(log=lambda s: None)[0]
+    table = tmp_path / "runs" / "receipts.json"
+    before = table.read_text()
+    assert pr.run(only=["zzz"], log=logs.append) == ([], 2) and table.read_text() == before and not (tmp_path / "runs" / "receipts_partial.json").exists()
+    assert "no receipt group matches 'zzz'; the groups are: pm.env.waves, pm.emulator" in logs[-1]
+    part = pr.run(only=["waves"], log=lambda s: None)[0]
+    assert table.read_text() == before and len(part) < len(full)                                         # the full table is untouched
+    assert json.loads((tmp_path / "runs" / "receipts_partial.json").read_text()) == part
+    assert json.loads((tmp_path / "runs" / "receipts_partial.meta.json").read_text())["only"] == ["waves"]
+    pr.run(only=["waves"], out=tmp_path / "x.json", log=lambda s: None)                                  # --json still names the file
+    assert (tmp_path / "x.json").exists()

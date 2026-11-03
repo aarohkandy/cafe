@@ -325,6 +325,7 @@ amplitude: the series is rescaled so sigma_u = 2.5 u*         (Panofsky & Dutton
 - Members share boxes through non-overlapping x-segments (two members of a box are separated by at least U x duration, many integral lengths); a
   `ValueError` states the capacity when exceeded. The pipeline picks the fewest boxes that hold the members (`stage1._fewest_boxes`).
 - Uncertainty tag: `0.2 sigma_u` (**assumed**).
+- The UAS gets one Mann box per sortie, at z = deck height + the mean of the sortie's altitudes (58 m for the demo mission: deck 8 m, altitudes 10, 30, 60 and 100 m), advected at the mean wind of that height; the series is applied to every leg, so the 10 m leg sees the length scale of 58 m (Lambda_1 = 40.6 m; 12.6 m at its own height z = 18 m, 42 m at 100 m). sigma_u = 2.5 u* does not depend on height here, so only the length scale is affected. Credibility limitation L20.
 
 ### 5.2 Gust fronts
 
