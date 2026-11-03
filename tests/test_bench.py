@@ -6,7 +6,7 @@ import shutil
 import pytest
 
 from bench import throughput
-from cafe.pm import pipeline, stage1
+from cafe.pm import par, pipeline, stage1
 from cafe.pm.env import ocean as ocean_mod
 from tests.fixtures.ci_env import make as ci_make
 
@@ -26,6 +26,12 @@ def bench(tmp_path, ci_env, monkeypatch):
     monkeypatch.setattr(ocean_mod, "DATA", ci_env.data)
     monkeypatch.setattr(throughput.os, "getloadavg", lambda: (0.5, 0.5, 0.5), raising=False)      # the box is shared: the quiet-machine guard is tested below
     return out
+
+
+@pytest.fixture(autouse=True)
+def memory_unknown(monkeypatch):
+    """The bench plans the demo mission (a 9 GB environment) only to read its vehicle classes; a small container must not refuse that (M-6)."""
+    monkeypatch.setattr(par, "memory_gb", lambda: None)
 
 
 CI = "missions/ci_fixture.yaml"
@@ -201,3 +207,13 @@ def test_stage1_on_the_demo_mission_records_it_and_its_days(bench, monkeypatch, 
     e = json.loads(bench.read_text())["stage1"]["glider"]
     assert e["mission"] == "missions/tepex_c_demo.yaml" and e["mission_name"] == "tepex_c_demo" and e["mission_days"] == 6.0
     assert e["s_per_member_day"] == pytest.approx(1.0)
+
+
+def test_stage1_stores_the_sortie_minutes_the_uas_batch_flew_so_the_planner_can_scale_its_cost(bench, monkeypatch):
+    """Round 5 M-5: the CI fixture's quadrotor flies 20 min on each of two days; only the UAS entry carries `sortie_min`."""
+    fake_batches(monkeypatch, {(s, v): float(s) for s in (8, 32) for v in ("glider_eq", "glider_1n", "usv", "uas")})
+    throughput.stage1(mission=CI)
+    out = json.loads(bench.read_text())["stage1"]
+    assert out["uas"]["sortie_min"] == 40.0 and "sortie_min" not in out["glider"] and "sortie_min" not in out["usv"]
+    from cafe.pm import budget
+    assert budget.bench_sortie_rate(out["uas"]) == pytest.approx(40.0 / 1.5)

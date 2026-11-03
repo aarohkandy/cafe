@@ -21,7 +21,7 @@ slice affords is not run (`les_windows`): it could only fail the viscosity_floor
 """
 from __future__ import annotations
 
-import json, math, pathlib
+import json, math, os, pathlib
 from collections import Counter
 from typing import Any
 
@@ -49,6 +49,10 @@ LES_BYTES_PER_CELL = 55.0         # FP16S storage (Lehmann et al. 2022), the fig
 NOMINAL_WINDOW = {("glider", "body"): ("nominal.glider", "water"), ("usv", "hull"): ("nominal.usv_hull", "water"),   # (stage3.* key of [speed, length], fluid)
                   ("usv", "wing"): ("nominal.usv_wing", "air"), ("uas", "body"): ("nominal.uas", "air")}
 MIN_BATCH = 4                     # members: the smallest stage-1 batch the planner will shrink to (below it an ensemble has no spread worth reporting)
+WORKER_GB = 0.9                   # private memory of a stage-1 worker before it touches the environment: 0.81 to 0.84 GB measured (B's mem.py, 2026-11-05)
+ENV_GB_PER_DAY = 1.5              # the environment in memory per window day: about 9 GB for the 6-day demo (DECISIONS 267, 270), linear in the window
+STAGE1_S_BASIS = ("critical path: the longest task or the work over the workers; the parent's serial part (link evaluation, merge, pickling) "
+                  "and worker start-up are not in it, so it is a lower bound")
 LOAD_WARN_FRAC = 0.25             # x cpus: a rate measured with more 1-min load than this (2 on 8 CPUs) was contended by other work
 
 
@@ -160,22 +164,97 @@ def fs_plan(classes: dict[str, str], K: int, a: dict[str, Any], share: float | N
     return dict(cases=cases, estimate=est, margin=a["fs.margin"], need_s=need, share_s=share, fit=cases if share is None else int(min(cases, share // need)))
 
 
+def window_days(mission: dict[str, Any]) -> float:
+    from .config import utc
+    return (utc(mission["window"]["end"]) - utc(mission["window"]["start"])).total_seconds() / 86400
+
+
+def env_gb(mission: dict[str, Any], cache: pathlib.Path | None = None) -> float:
+    """GB the environment takes in memory: `ENV_GB_PER_DAY` per window day, or the size of the cache's Zarr stores on disk when that is more (the
+    stores are compressed, so the disk size is a floor)."""
+    disk = sum(f.stat().st_size for z in cache.glob("*.zarr") for f in z.rglob("*") if f.is_file()) / 1e9 if cache is not None and cache.is_dir() else 0.0
+    return max(ENV_GB_PER_DAY * window_days(mission), disk)
+
+
+def sortie_minutes(mission: dict[str, Any], classes: dict[str, str]) -> dict[str, float]:
+    """{UAS vehicle id: sortie-minutes in the window}: its launches (`stage1.launch_times`; at least 1, its setup runs anyway) x the sortie duration."""
+    from . import stage1
+    from .config import utc
+    from .physics import uas
+    t0, T = utc(mission["window"]["start"]).timestamp(), utc(mission["window"]["end"]).timestamp()
+    out: dict[str, float] = {}
+    for v in mission.get("vehicles", []):
+        if classes.get(v.get("id")) == "uas" and "sorties" in v:
+            P, _, ts = stage1._uas_setup(v, uas.load_platform(v["platform"]), mission, t0, T)
+            out[v["id"]] = max(1, len(ts)) * P["sortie"]["duration_s"] / 60.0
+    return out
+
+
+def bench_sortie_rate(e: dict[str, Any]) -> float | None:
+    """Sortie-minutes per mission day of a UAS benchmark entry: its `sortie_min` over `mission_days` (bench/ stores both), else computed from the
+    mission it names (the file measured before `sortie_min` existed); None when neither is known."""
+    sm, days = e.get("sortie_min"), e.get("mission_days")
+    if sm is None and e.get("mission") and (ROOT / e["mission"]).is_file():
+        from . import stage1
+        from .config import load_mission
+        m = load_mission(ROOT / e["mission"])
+        sm, days = max(sortie_minutes(m, stage1._classes(m)).values(), default=None), window_days(m)
+    return float(sm) / float(days) if sm and days else None
+
+
+def scale_uas_costs(costs: dict[str, tuple[tuple[float, float], str]], thr: dict[str, Any], mission: dict[str, Any], classes: dict[str, str],
+                    days: float) -> list[str]:
+    """The measured UAS cost is for the benchmark mission's sorties; a UAS flies sortie-minutes, so its (s per batch, s per member) per day are
+    scaled, in place, by (this mission's sortie-minutes per day) / (the benchmark's). The factor is 1 for the mission the benchmark flew, and the
+    costs and their source text are then untouched. -> notes (the benchmark's sortie-minutes are unknown)."""
+    e = thr.get("stage1", {}).get("uas")
+    mins = sortie_minutes(mission, classes) if e else {}
+    if not mins:
+        return []
+    base = bench_sortie_rate(e)
+    if base is None:
+        return ["UAS stage-1 cost is not scaled by sortie-minutes: the benchmark entry has no sortie_min and its mission cannot be read; re-run "
+                "`python bench/throughput.py stage1`"]
+    for vid, m in mins.items():
+        f = m / days / base
+        if abs(f - 1.0) > 1e-9:
+            (a, b), src = costs[vid]
+            costs[vid] = ((a * f, b * f), f"{src}; x{f:.3g} for {m:.0f} sortie-minutes in {days:g} days against the benchmark's {base:.3g} per day")
+    return []
+
+
 def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | None = None, gpu_mem_gb: float | None = None,
-         vehicle_classes: dict[str, str] | None = None, workers: int | None = None) -> dict[str, Any]:
-    """`workers`: the stage-1 worker processes the run will have (default `par.workers()`, this machine's CPUs): a batch costs its longest
-    task or its tasks spread over the workers, whichever is longer, and several batches run at once when one does not fill them."""
+         vehicle_classes: dict[str, str] | None = None, workers: int | None = None, mem_gb: float | None = None,
+         env_gb: float | None = None) -> dict[str, Any]:
+    """`workers`: the stage-1 worker processes the run will have (default `par.workers()`, this machine's CPUs, cut to what `mem_gb` allows): a
+    batch costs its longest task or its tasks spread over the workers, whichever is longer, and several batches run at once when one does not fill.
+    `mem_gb`: the memory the run may use (`par.memory_gb()`; None: unknown, no memory term). Each worker needs `WORKER_GB` on top of the
+    environment (`env_gb`, default `ENV_GB_PER_DAY` per window day): the workers are the CPUs or what memory holds, the smaller, and a plan for
+    which not even one worker fits is refused. A `workers` argument or CAFE_WORKERS is honoured as given, with a note when memory is short for it."""
     if budget not in BUDGET_S:
         raise PlanError(f"--budget {budget!r}: choose one of {list(BUDGET_S)}")
     if gpus < 0:
         raise PlanError("--gpus must be >= 0")
     thr = throughput() if thr is None else thr
     B = BUDGET_S[budget]
-    from .config import utc
-    days = (utc(mission["window"]["end"]) - utc(mission["window"]["start"])).total_seconds() / 86400
+    days = window_days(mission)
     classes = vehicle_classes or {}
     costs = {vid: member_cost(thr, c) for vid, c in classes.items()}
+    notes = scale_uas_costs(costs, thr, mission, classes, days)
     from . import par, stage1
-    W = par.workers() if workers is None else max(1, int(workers))
+    cpu = par.workers() if workers is None else max(1, int(workers))
+    by_mem: int | None = None
+    if mem_gb is not None:
+        env = ENV_GB_PER_DAY * days if env_gb is None else env_gb
+        by_mem = int((mem_gb - env) // WORKER_GB)
+        if by_mem < 1:
+            raise PlanError(f"stage 1 needs about {env:.0f} GB for the environment of a {days:.0f}-day window and {WORKER_GB} GB per worker, and "
+                            f"{mem_gb:.0f} GB is available; shorten the window or use a machine with more memory (docker --memory)")
+    explicit = workers is not None or bool(os.environ.get("CAFE_WORKERS"))
+    W = cpu if by_mem is None or explicit else min(cpu, by_mem)
+    if by_mem is not None and explicit and cpu > by_mem:
+        notes.append(f"{cpu} worker(s) were asked for and need about {env + cpu * WORKER_GB:.0f} GB ({env:.0f} GB environment + {WORKER_GB} GB each); "
+                     f"{mem_gb:.0f} GB is available, so the kernel may kill a worker")
     counts = stage1.task_counts(mission) if W > 1 else {}                  # one worker runs a batch's tasks in a row: their count does not matter
     tasks = {vid: counts.get(vid, 1) for vid in classes}
     timing = dict(workers=W, tasks=tasks, days=days, member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1]) for k, (c, _) in costs.items()})
@@ -206,7 +285,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     while n_batches * bs < N_MAX[budget] and stage1_wall_s(dict(timing, batch=bs), (n_batches + 1) * bs) <= share1:
         n_batches += 1
     n_max = min(N_MAX[budget], n_batches * bs)
-    notes = measurement_warnings(thr, classes, mission)
+    notes += measurement_warnings(thr, classes, mission)
     if bs < BATCH[budget]:
         notes.append(f"stage-1 batch shrunk from {BATCH[budget]} to {bs} members: a batch of {BATCH[budget]} costs "
                      f"{per_batch + BATCH[budget] * per_member:.0f} s against a stage-1 share of {share1:.0f} s")
@@ -234,7 +313,8 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         les["gpu_mem_gb"] = gpu_mem_gb
         les["max_cells"] = int(GPU_MEM_GUARD * gpu_mem_gb * 1e9 / LES_BYTES_PER_CELL)
     p: dict[str, Any] = dict(budget=budget, budget_s=B, gpus=gpus, days=days, n_max=n_max, n_min=n_min, batch=min(bs, n_max),
-             stage1_s=stage1_wall_s(dict(timing, batch=min(bs, n_max)), n_max), stage1_share_s=share1, workers=W, tasks=tasks,
+             stage1_s=stage1_wall_s(dict(timing, batch=min(bs, n_max)), n_max), stage1_share_s=share1, workers=W, workers_by_cpu=cpu, workers_by_memory=by_mem,
+             mem_gb=mem_gb, env_gb=None if mem_gb is None else env, stage1_s_basis=STAGE1_S_BASIS, tasks=tasks,
              sitl_members=SITL[budget], member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1], source=s) for k, (c, s) in costs.items()},
              les=les, refit_iterations=0 if budget == "ci" else 2, notes=notes, certify_possible=n_max >= 73, shares=shares, vehicle_classes=dict(classes))
     em = emulator_plan(p)
@@ -381,10 +461,18 @@ def wall_estimate(p: dict[str, Any]) -> dict[str, float]:
                 stage3=p["les"]["cell_steps_per_window"] * p["les"]["windows_per_vehicle"] * max(len(p["member_cost"]), 1) / p["les"]["rate"])
 
 
+def capped(p: dict[str, Any]) -> str:
+    """Which limit set the worker count when it is not the CPUs'."""
+    by_mem = p.get("workers_by_memory")
+    return f", capped from {p['workers_by_cpu']} by memory ({p['mem_gb']:.0f} GB less {p['env_gb']:.0f} GB environment, {WORKER_GB} GB each)" \
+        if by_mem is not None and p["workers"] < p["workers_by_cpu"] else ""
+
+
 def describe(p: dict[str, Any]) -> str:
     lines = [f"budget {p['budget']} ({p['budget_s'] / 60:.0f} min), {p['gpus']} GPU(s), {p['days']:.2f} mission days",
              f"stage 1: {p['n_min']}..{p['n_max']} members in batches of {p['batch']} "
-             f"({'can' if p['certify_possible'] else 'cannot'} certify P(fail) < 5 %), about {p['stage1_s']:.0f} s on {p.get('workers', 1)} worker(s)"]
+             f"({'can' if p['certify_possible'] else 'cannot'} certify P(fail) < 5 %), about {p['stage1_s']:.0f} s "
+             f"(a lower bound, not a schedule: plan.json stage1_s_basis) on {p.get('workers', 1)} worker(s){capped(p)}"]
     for k, v in p["member_cost"].items():
         lines.append(f"  {k}: {v['s_per_batch_day']:.3g} s/batch/day + {v['s_per_member_day']:.3g} s/member/day, {v['source']}")
     L = p["les"]

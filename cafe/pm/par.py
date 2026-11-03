@@ -12,9 +12,9 @@ environment the pipeline rebuilds takes its files with it); a queued task's maps
 The pickles pass only between this process and the workers it spawned, never through a file another user can write."""
 from __future__ import annotations
 
-import atexit, concurrent.futures as cf, faulthandler, importlib, io, itertools, mmap, multiprocessing as mp, os, pathlib, pickle, shutil, tempfile
+import atexit, concurrent.futures as cf, contextlib, faulthandler, importlib, io, itertools, mmap, multiprocessing as mp, os, pathlib, pickle, shutil, tempfile
 import threading, weakref
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import numpy as np
@@ -26,6 +26,7 @@ STATE = (("cafe.pm.env.subgrid", "_RUN_CAL"), ("cafe.pm.stats.intervals", "P_FAI
          ("cafe.pm.stats.intervals", "LO_SUCCESS_GO"))   # module state the parent sets (the run's sub-grid calibration, the mission's verdict cut-offs)
 _active: Pool | None = None
 _in_worker = False
+_limit: int | None = None                                           # set by `limit`: the plan's worker count when memory cut it below the CPUs
 _dir: pathlib.Path | None = None
 _names = itertools.count()                                          # a file name never repeats (one was once written over a file a task still named)
 _refs: dict[str, int] = {}                                         # file -> the parent's live maps of it
@@ -39,17 +40,54 @@ def _child() -> bool:
 
 
 def workers() -> int:
-    """CAFE_WORKERS when set, else the CPUs this process may use: its affinity mask, cut to the cgroup quota (docker --cpus); 1 in a worker."""
+    """CAFE_WORKERS when set (a whole number of at least 1, else ConfigError), else the CPUs this process may use: its affinity mask, cut to the
+    cgroup quota (docker --cpus); at most the `limit` of the run (the plan's memory cap); 1 in a worker."""
     if _child():
         return 1
-    if os.environ.get("CAFE_WORKERS"):
-        return max(1, int(os.environ["CAFE_WORKERS"]))
-    n = len(os.sched_getaffinity(0))
+    v = os.environ.get("CAFE_WORKERS")
+    if v:
+        try:
+            n = int(v)
+        except ValueError:
+            n = 0
+        if n < 1:
+            from .config import ConfigError
+            raise ConfigError(f"CAFE_WORKERS={v!r} is not a whole number of at least 1; set CAFE_WORKERS=N or unset it")
+    else:
+        n = len(os.sched_getaffinity(0))
+        try:
+            quota, period = pathlib.Path("/sys/fs/cgroup/cpu.max").read_text().split()
+            n = n if quota == "max" else max(1, min(n, int(quota) // int(period)))
+        except (OSError, ValueError):
+            pass
+    return n if _limit is None else min(n, _limit)
+
+
+@contextlib.contextmanager
+def limit(n: int) -> Iterator[None]:
+    """`workers()` is at most n inside the block (the run's planned count: memory can allow fewer workers than there are CPUs)."""
+    global _limit
+    prev, _limit = _limit, n
     try:
-        quota, period = pathlib.Path("/sys/fs/cgroup/cpu.max").read_text().split()
-    except (OSError, ValueError):
-        return n
-    return n if quota == "max" else max(1, min(n, int(quota) // int(period)))
+        yield
+    finally:
+        _limit = prev
+
+
+def memory_gb() -> float | None:
+    """GB this process may use: the cgroup limit (v2 `memory.max`, v1 `memory.limit_in_bytes`) when there is one, else /proc/meminfo MemAvailable;
+    None when neither can be read."""
+    for f in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            b = int(pathlib.Path(f).read_text())
+        except (OSError, ValueError):                                   # absent, or "max"
+            continue
+        if b < 2 ** 60:                                                 # cgroup v1 spells unlimited as a number near 2**63
+            return b / 1e9
+    try:
+        return next(int(l.split()[1]) * 1024 / 1e9 for l in pathlib.Path("/proc/meminfo").read_text().splitlines() if l.startswith("MemAvailable:"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
 
 
 def _mapped(path: str) -> Any:
@@ -83,7 +121,10 @@ def _share(a: np.ndarray) -> str:
             room = shutil.disk_usage(SHM).free if SHM.is_dir() else 0
             _dir = pathlib.Path(tempfile.mkdtemp(prefix=f"cafe-share-{os.getpid()}-", dir=SHM if room >= SHM_MIN_FREE else None))
             atexit.register(shutil.rmtree, _dir, True)
-        path = str(_dir / f"{next(_names)}.npy")
+        i = next(_names)
+        path = str(_dir / f"{i}.npy")
+        if shutil.disk_usage(_dir).free < a.nbytes:                      # SHM_MIN_FREE is looked at once, for the directory; a long window outgrows it later
+            raise OSError(f"{_dir} is full after {i} arrays: raise --shm-size (RUNBOOK 1) or free the disk")
     np.save(path, a)
     return path
 

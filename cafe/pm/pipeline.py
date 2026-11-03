@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.stats import chi2
 
 from . import budget, ledger, par, stage1
 from .audit import STAGES
@@ -103,7 +104,9 @@ class Context:
         self.classes = stage1._classes(self.mission)
         self.plan: dict[str, Any] = {}
         if budget_name is not None:
-            self.plan = budget.plan(budget_name, gpus, self.mission, gpu_mem_gb=gpu_mem_gb, vehicle_classes=self.classes)
+            mem = par.memory_gb()
+            self.plan = budget.plan(budget_name, gpus, self.mission, gpu_mem_gb=gpu_mem_gb, vehicle_classes=self.classes, mem_gb=mem,
+                                    env_gb=None if mem is None else budget.env_gb(self.mission, self.cache))
             if seed is not None:
                 self.plan["seed_override"] = seed
             self.plan["refit_iterations_max"] = self.plan["refit_iterations"]            # the cap; stage 1b records the passes done
@@ -115,6 +118,13 @@ class Context:
         mission = {k: v for k, v in self.mission.items() if k != "_path"}                                 # not the spelling of the path it was read from
         self.hash = digest(dict(mission=mission, budget=budget_name or hash_budget, gpus=gpus, code=self.code_digest))
         self._env: GriddedEnv | None = None
+
+    def stage_hash(self, name: str) -> str:
+        """The config hash a stage's ledger carries: `hash`, and for the emulator and the stages after it also the emulator plan and the workers it
+        was sized on (the variants depend on them), so a resume under another CPU count reruns those and reuses stage 1 and 1b."""
+        if not self.plan or STAGES.index(name) < STAGES.index("emulator"):
+            return self.hash
+        return digest(dict(config=self.hash, emulator=self.plan["emulator"], workers=self.plan["workers"]))
 
     @property
     def env(self) -> GriddedEnv:
@@ -548,6 +558,8 @@ def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] |
     series) and floored at 0, plus the variance of the fitted mean (var(means) / k for k moorings), so it is 0 only when every mean is equal.
     noise: the pooled sd of the residuals about each mooring's own mean; tau_h: its e-folding time from the lag-1 autocorrelation rho of those
     residuals (0 when rho <= 0, rho capped at 0.999).
+    persistent_hi95: the same with the between-mooring variance at its 95 % one-sided upper bound ((k - 1) var / chi2_0.05(k - 1)): the data cannot
+    exclude a persistent sd that large (with 11 moorings the point estimate can sit at the floor of 0 and the bound is still several tenths of a m/s).
     None when fewer than two moorings have 3 or more samples (the dispersion between moorings is then not defined)."""
     kept = [x for x in series.values() if np.isfinite(x).sum() >= 3]
     if len(kept) < 2:
@@ -563,7 +575,9 @@ def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] |
     rho = float(np.clip(num / np.sqrt(den0 * den1), 0.0, 0.999)) if den0 > 0 and den1 > 0 else 0.0
     sampling = float(np.mean(s2 / n * (1 + rho) / (1 - rho)))
     between = float(np.var(means, ddof=1))
-    return dict(persistent=float(np.sqrt(max(between - sampling, 0.0) + between / len(kept))), noise=float(np.sqrt(np.average(s2, weights=n - 1))),
+    hi = between * (len(kept) - 1) / float(chi2.ppf(0.05, len(kept) - 1))                       # 95 % one-sided upper bound of the between-mooring variance
+    return dict(persistent=float(np.sqrt(max(between - sampling, 0.0) + between / len(kept))),
+                persistent_hi95=float(np.sqrt(max(hi - sampling, 0.0) + hi / len(kept))), noise=float(np.sqrt(np.average(s2, weights=n - 1))),
                 tau_h=0.0 if rho <= 0 else float(-1.0 / np.log(rho)), rho=rho, moorings=float(len(kept)))
 
 
@@ -606,6 +620,9 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
                    f"of the mean of {n} moorings; the hourly rest is wind_{key}_noise")
         value = hourly if split is None else split["persistent"]
         fit[f"wind_{key}_bias"] = dict(dist="normal", mean=mean, value=value, unit=unit, citation=f"{cite}; {how}", kind="data")
+        if split is not None:
+            fit[f"wind_{key}_bias"].update(value_hi95=split["persistent_hi95"], citation_hi95="95 % upper bound of the between-mooring variance, "
+                                           f"{int(split['moorings']) - 1} degrees of freedom")
         said.append(f"{key} persistent {value:.3g} {unit}")
         if split is not None:
             fit[f"wind_{key}_noise"] = dict(dist="normal", value=split["noise"], tau_h=split["tau_h"], unit=unit, kind="data",
@@ -1122,7 +1139,11 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
         L.note(f"variant {sk['variant']} skipped for {sk['vehicle']}: {sk['reason']}")
     want = len(res["vehicles"]) * (1 + len(variants)) - len(skipped)
     L.check("emulator_rows_appended", len(rows) == want, value=len(rows), limit=want)
-    L.check("emulator_variants_within_share", len(variants) * est <= share, value=len(variants) * est, limit=share, note="planned cost of the variant runs")
+    wall = sum(walls)
+    L.note(f"variant runs: planned {len(variants) * est:.0f} s ({len(variants)} x {est:.0f} s), measured {wall:.0f} s, "
+           f"emulator share {share:.0f} s; the planned cost is a lower bound (plan.json stage1_s_basis) and only the kill before a variant holds "
+           "the share (a look-ahead from measured seconds would make the number of variants depend on the clock)")
+    L.d["variant_planned_s"], L.d["variant_wall_s"] = est, [round(w, 3) for w in walls]       # timings stay out of the hashed design.json (DECISIONS 139)
     if killed:
         L.note(killed["reason"])
     by_key = {r["key"]: r for r in rows if r["variant"] != "base"}        # the base rows are 3-D-wind UAS rows, the variants' are not: not comparable
@@ -1180,9 +1201,9 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
                                        share - spent, ctx.log)
     L.note(f"flip search: {sum(f['found'] for f in flips.values())} of {len(flips)} non-GO vehicles flip; {fspent:.0f} s of Stage 1 (planned cost)")
     L.output(_dump(dict(vehicles=flips), ctx.path("emulator", "flip.json")))
-    L.output(_dump(dict(share_s=share, variant_s=est, variant_s_source=sizes["variant_s_source"], variants=variants, skipped=skipped, killed=killed,
-                        spent_s=spent, flip_spent_s=fspent, rows_added=len(rows), table_rows=len(train_df), table=pathlib.Path(used).name,
-                        train_input_rows=len(train_in),
+    L.output(_dump(dict(share_s=share, variant_s=est, variant_planned_s=est, variant_s_source=sizes["variant_s_source"], variants=variants,
+                        skipped=skipped, killed=killed, spent_s=spent, flip_spent_s=fspent, rows_added=len(rows), table_rows=len(train_df),
+                        table=pathlib.Path(used).name, train_input_rows=len(train_in),
                         train_fraction=whatif.TRAIN_FRAC, planned_variants=n_var, stage1b_free=free), ctx.path("emulator", "design.json")))
 
 
@@ -1225,15 +1246,16 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
         _dump(ctx.plan, ctx.path("plan.json"))
         log(budget.describe(ctx.plan))
     prev, redo = None, not resume
-    log(f"workers: {par.workers()} (the CPUs this run may use; CAFE_WORKERS=N overrides)")
-    with par.Pool(par.workers()):                                       # one pool for every stage: each worker starts and compiles once
+    n = int(ctx.plan.get("workers") or par.workers())                      # the planned count: the CPUs, or fewer when memory holds fewer
+    log(f"workers: {n} (the CPUs this run may use, cut to what the memory holds; CAFE_WORKERS=N overrides)")
+    with par.limit(n), par.Pool(n):                                     # one pool for every stage: each worker starts and compiles once
         for name in STAGES:
             lp = ctx.run_dir / "checkpoints" / name / "ledger.json"
-            if not redo and ledger.done(ctx.run_dir, name, ctx.hash):
+            if not redo and ledger.done(ctx.run_dir, name, ctx.stage_hash(name)):
                 log(f"{name}: up to date (ledger {lp})")
             else:
                 a, redo = time.time(), True                                   # everything after a rerun stage reruns too
-                with ledger.Ledger(ctx.run_dir, name, ctx.hash, ctx.code_digest) as L:
+                with ledger.Ledger(ctx.run_dir, name, ctx.stage_hash(name), ctx.code_digest) as L:
                     if prev is not None:
                         L.input(prev)
                     FUNCS[name](ctx, L)
