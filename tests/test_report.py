@@ -120,9 +120,16 @@ def test_verdicts_match_the_ensemble(full):
 
 def test_not_certifiable_below_n_certify(full):
     rep = full[4]
+    kinds = set()
     for d in [*rep["vehicles"].values(), *rep["links"].values()]:
         assert d["n"]["value"] == 48 < d["n_certify"]["value"] == 73
-        assert "cannot be certified at n = 48" in d["certify_statement"] and "73 members" in d["certify_statement"]
+        if intervals.interval(d["k_fail"]["value"], 48, 0.95)[0] < 0.05:                    # round 5, M-11: only one that leaves 5 % open is told to get more
+            assert "cannot be certified at n = 48" in d["certify_statement"] and "73 members" in d["certify_statement"]
+            kinds.add("open")
+        else:
+            assert "excluded by this ensemble" in d["certify_statement"] and "cannot be certified" not in d["certify_statement"]
+            kinds.add("excluded")
+    assert kinds == {"open", "excluded"}
     assert "3/n" in rep["vehicles"]["glider_2n"]["note"]
     d = rep["vehicles"]["glider_2n"]                                           # M-18: each sentence names the rule its number belongs to
     assert "one-sided" in d["note"] and "two-sided" in d["note"] and "60 members" in d["note"] and "(two-sided 95 % Wilson bound)" in d["certify_statement"]
@@ -428,7 +435,7 @@ def test_top_three_sensitivities_by_sobol_first_order_index(full):
     u = rep["vehicles"]["usv"]
     assert u["top3"][0]["param"] == u["sensitivity"]["param"] and u["sensitivity"]["noise_floor"]["value"] > 0 and rep["vehicles"]["glider_2n"]["top3"] == []
     h = (run / "report" / "index.html").read_text()
-    assert "Top sensitivities (Sobol first-order, share of the variance of failure, above the permutation noise floor): <code>" in h
+    assert "Top sensitivities (Sobol first-order, share of the variance of the 0/1 failure indicator, above the permutation noise floor): <code>" in h
     assert "Top sensitivities: none above the noise floor" in h and "the noise floor at this member count is S1" in h
 
 
@@ -849,7 +856,8 @@ def test_the_page_labels_both_intervals_with_their_level(full):
     si = d["stop_interval"]
     kind = si["lo"]["uncertainty"]["kind"].replace(" bound", "")
     assert (f"Stopping rule: the 95% {kind} on P(fail) is {si['lo']['value']:.4g} to {si['hi']['value']:.4g}; "
-            "verdict thresholds: GO below 0.1, NO-GO from 0.4.") in t
+            "verdict rule: GO when P(fail) is at most 0.1 and the 90 % Wilson upper bound on P(fail) is at most 0.25; NO-GO when P(fail) is above 0.4; "
+            "MARGINAL between.") in t
 
 
 def test_check_rendered_matches_whole_numeric_tokens():
@@ -999,13 +1007,15 @@ def test_the_report_says_when_the_sub_grid_layer_is_uncalibrated_and_why(run, mo
     monkeypatch.setattr(credibility_mod, "subgrid_uncalibrated", lambda *a, **k: why)
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
-    assert {k: v for k, v in rep["subgrid"].items() if k != "source"} == dict(calibrated=False, statement=why) and f"<p class=warn>{html.escape(why)}</p>" in h
+    own = {k: v for k, v in rep["subgrid"].items() if k not in ("source", "switches")}                     # `switches` is round 5, M-7's
+    assert own == dict(calibrated=False, statement=why) and f"<p class=warn>{html.escape(why)}</p>" in h
     assert json.loads((run / "report" / "credibility.json").read_text())["limitations"][12] == dict(
         credibility_mod.SUBGRID_LIMITATION, text=why)
     monkeypatch.setattr(credibility_mod, "subgrid_uncalibrated", lambda *a, **k: None)
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
-    assert {k: v for k, v in rep["subgrid"].items() if k != "source"} == dict(calibrated=True, statement=None) and "sub-grid layer uncalibrated" not in h
+    own = {k: v for k, v in rep["subgrid"].items() if k not in ("source", "switches")}
+    assert own == dict(calibrated=True, statement=None) and "sub-grid layer uncalibrated" not in h
 
 
 def test_a_link_without_a_margin_prints_n_a_never_a_number(full):
@@ -1282,7 +1292,8 @@ def test_the_usv_block_prints_its_speed_ratio_next_to_chiodis_and_the_sanity_row
 
 
 def test_the_uas_block_says_attitude_exceedance_cannot_fire_and_prints_the_authority_numbers(run):
-    """M-28: the clamp (35 deg) is below the exceedance (42 deg): the UAS verdict is a battery verdict below about 12 m/s of wind."""
+    """M-28: the clamp (35 deg) is below the exceedance (42 deg), so the mode cannot fire. (The note's older wording, 'a battery verdict below about 12 m/s',
+    is kept for a summary without the profile count; round 4's M-1 made the verdict rest on the battery and on finishing the profile, round 5's M-26.)"""
     m, plan = pm_run.make_run(run)
     edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].update(
         authority=dict(clamp_s_median=12.0, clamp_s_max=80.0, demand_ratio_median=1.3, demand_ratio_max=2.5)))
@@ -1494,7 +1505,7 @@ def test_a_link_decided_on_too_few_samples_is_undecided_granularity_and_the_othe
             "0.05 to be missed, so this verdict is undecided: granularity") in t
     assert "decided on 40 samples (the median number of required samples per member); one missed sample is 0.025 of them" in t
     assert h.count("undecided: granularity") >= 2
-    assert h.count('badge undecided">undecided: granularity') == 1 and report.check_rendered(rep, h) == []
+    assert h.count('badge undecided">undecided: granularity') == 2 and report.check_rendered(rep, h) == []     # round 5, M-8: the Verdicts row and the card
 
 
 def test_the_worst_window_forcing_is_labelled_as_the_analysis_field_and_names_when_the_members_failed(run):
@@ -1718,3 +1729,114 @@ def test_the_glider_reach_current_band_ends_at_the_depth_its_task_dives_to(run):
     assert depth == {"glider_eq": 950.0, "glider_2n": 500.0}
     assert g["glider_eq"]["current_band"] == "mean current from 5 m to 950 m" and g["glider_2n"]["current_band"] == "mean current from 5 m to 500 m"
     assert min(seen) == -950.0 and -500.0 in seen and "mean current from 5 m to 950 m" in t and g["usv"]["current_band"] == "current at the surface"
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 5 (batch S)
+
+def test_a_p_fail_the_ensemble_excludes_is_not_told_to_get_more_members():
+    """Round 5 M-11: 'P(fail) < 5 % cannot be certified at n = 64: 73 members are needed' was printed for 60 failures of 64."""
+    d = stat_block(60, 64)
+    assert "excluded by this ensemble" in d["certify_statement"] and "no number of members certifies it" in d["certify_statement"]
+    assert "cannot be certified" not in d["certify_statement"]
+    t = plain(report._stat_html(d))
+    assert "excluded by this ensemble (lower 95 % bound 0.8" in t and "cannot be certified" not in t
+    d = stat_block(0, 64)                                                    # a zero-failure ensemble does leave 5 % open
+    assert "cannot be certified at n = 64" in d["certify_statement"] and "73 members" in d["certify_statement"]
+    assert "60 members would be needed" not in d["note"] and "already below 5%" in d["note"]
+    assert stat_block(2, 80)["certify_statement"] is None                    # n >= n_certify: nothing to say
+
+
+def test_the_verdict_rule_is_stated_with_its_ties_and_the_wilson_bound_the_go_rule_also_needs(run):
+    """Round 5 M-12: the page printed 'GO below 0.1, NO-GO from 0.4', the opposite at both ties and silent on the 0.75 rule."""
+    d = stat_block(16, 32)
+    assert d["thresholds"]["go_bound"]["value"] == pytest.approx(1 - intervals.LO_SUCCESS_GO) == 0.25
+    assert d["thresholds"]["go_bound"]["source"].startswith("stats/intervals.py LO_SUCCESS_GO")
+    t = plain(report._stat_html(d))
+    assert ("verdict rule: GO when P(fail) is at most 0.1 and the 90 % Wilson upper bound on P(fail) is at most 0.25; "
+            "NO-GO when P(fail) is above 0.4; MARGINAL between.") in t
+    assert "GO below" not in t and "NO-GO from" not in t
+    assert intervals.verdict(10, 100)["verdict"] == "GO" and intervals.verdict(40, 100)["verdict"] == "MARGINAL"        # the ties the sentence now describes
+
+
+def test_a_link_that_was_never_required_is_undecided_in_the_verdicts_table_and_once_on_the_card(run):
+    """Round 5 M-8: the granularity badge was on the card only, so the headline table said a plain GO for a link that had no moment to fail."""
+    m, plan = pm_run.make_run(run)
+    set_link_fields(run, **{"usv-uas-rf": dict(need_count_median=0, granularity_ok=False)})
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    row = h[h.index("<a href='#v-usv-uas-rf'>"):].split("</tr>")[0]
+    assert "undecided: granularity" in row
+    assert h[h.index("<a href='#v-glider_eq-ship-acoustic'>"):].split("</tr>")[0].count("undecided: granularity") == 0
+    card = h.split("<div id='v-usv-uas-rf'>")[1].split("<div id='v-")[0]
+    assert card.count('<span class="badge undecided">undecided: granularity</span>') == 1      # drawn once, not by the card and again by the badge helper
+    t = plain(card)
+    assert "Required at no moment in the median member (0 samples): the link was not exercised" in t
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
+
+
+def test_the_top_sensitivities_line_names_the_quantity_the_indices_were_taken_on():
+    """Round 5 M-2: 'share of the variance of failure' was printed over indices taken on a battery margin."""
+    top = [dict(param="p", s1=dict(value=0.5, unit="fraction of variance", stage="s", source="x", uncertainty=None, receipt="r", ledger="l"))]
+    t = plain(report._top3_html(top, None, "fraction of the flux profile delivered (lowest sortie)"))
+    assert "share of the variance of the fraction of the flux profile delivered (lowest sortie)," in t and "variance of failure" not in t
+    assert "of the 0/1 failure indicator," in plain(report._top3_html(top, None, "failure indicator"))
+    assert "of the ranked outcome," in plain(report._top3_html(top)) and "variance of failure" not in report._top3_html(top)
+
+
+def test_the_page_prints_the_five_subgrid_switches_and_which_the_mission_left_out(run):
+    """Round 5 M-7: a mission without `environment.subgrid` flew a UAS without turbulence and gust fronts and the page did not say so."""
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)
+    sw = load(run)["subgrid"]["switches"]
+    assert set(sw) == {"turbulence", "gust_fronts", "warm_layer", "rain_lens", "ocean_sde"} and not any(x["defaulted"] for x in sw.values())
+    t = plain((run / "report" / "index.html").read_text())
+    assert "Sub-grid switches: turbulence on, gust fronts on, warm layer on, rain lens on, ocean SDE on." in t
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["subgrid_switches"]["gust_fronts"].update(defaulted=True))
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert "gust fronts on (left out of the mission: on by default), warm layer on" in t and "turbulence on, gust" in t
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"].pop("subgrid_switches"))                       # a summary from before round 5
+    report.write(run, m, plan)
+    assert load(run)["subgrid"]["switches"] is None and "Sub-grid switches" not in (run / "report" / "index.html").read_text()
+
+
+def test_the_wind_prior_line_prints_the_upper_bound_when_the_fit_has_one(run):
+    """Round 5 M-10: 0.113 m/s was printed as if known; the fit's 95 % upper bound (`value_hi95`, written by the ingest stage) goes beside it."""
+    m, plan = pm_run.make_run(run)
+    fit = {k: dict(dist="normal", value=v, unit=u) for k, v, u in (("wind_speed_bias", 0.113, "m/s"), ("wind_speed_noise", 1.283, "m/s"),
+                                                                  ("wind_direction_bias", 2.63, "deg"), ("wind_direction_noise", 22.2, "deg"))}
+    (run / "ingest").mkdir(exist_ok=True)
+    (run / "ingest" / "priors_fitted.json").write_text(json.dumps(fit))
+    report.write(run, m, plan)
+    assert "95 % upper bound" not in plain((run / "report" / "index.html").read_text()) and load(run)["sensitivity_scope"]["wind_hi95"] == {}   # an older fit
+    fit["wind_speed_bias"]["value_hi95"] = 0.49
+    (run / "ingest" / "priors_fitted.json").write_text(json.dumps(fit))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    assert "against 0.113 m/s (95 % upper bound 0.49 m/s) and 2.63 deg for the wind-speed and direction columns" in plain(h)
+    assert rep["sensitivity_scope"]["wind_hi95"]["wind_speed_bias"]["value"] == 0.49
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
+
+
+def test_the_machine_block_prints_what_the_planner_charged_next_to_what_the_stages_took(run):
+    """Round 5 M-13: the printed plan was 2.05 times low and nothing on the page set it against the ledger."""
+    m, plan = pm_run.make_run(run)
+    plan["stage1_s_basis"] = "critical path: the longest task or the work over the workers"
+    report.write(run, m, plan)
+    rep = load(run)
+    t = plain((run / "report" / "index.html").read_text())
+    s1 = rep["machine"]["timing"]["stage1"]
+    assert s1["planned"]["value"] == plan["stage1_s"] and s1["measured"]["value"] == rep["machine"]["wall_s"]["stage1"]["value"]
+    assert "variants" not in rep["machine"]["timing"]
+    assert f"Stage 1: planned {plan['stage1_s']:.4g} s, measured {s1['measured']['value']:.4g} s (the plan is a lower bound: critical path" in t
+    edit_json(run / "emulator" / "design.json", lambda d: d.update(variant_planned_s=26.34, variant_wall_s=[31.0, 36.0, 33.0, 72.0]))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    v = rep["machine"]["timing"]["variants"]
+    assert (v["runs"]["value"], v["planned"]["value"], v["measured"]["value"]) == (4, pytest.approx(4 * 26.34), 172.0)
+    assert "Emulator variant runs: 4 runs, planned 105.4 s, measured 172 s." in plain(h)
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
+    del plan["stage1_s_basis"]                                               # an older plan without the basis, an older design without the keys
+    edit_json(run / "emulator" / "design.json", lambda d: (d.pop("variant_planned_s"), d.pop("variant_wall_s")))
+    report.write(run, m, plan)
+    assert set(load(run)["machine"]["timing"]) == {"stage1"} and "the plan is a lower bound" not in (run / "report" / "index.html").read_text()

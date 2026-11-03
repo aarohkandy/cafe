@@ -109,7 +109,7 @@ def verdict_from_p(p_fail: float) -> str:
 def verdict(k_fail: int, n: int, conf: float = 0.90, level: float = 0.05, cert_conf: float = 0.95) -> dict[str, Any]:
     """GO / MARGINAL / NO-GO for k_fail failures in n members, with the interval and the honest caveat.
 
-    `note` is "P(fail) < 3/n ..." when there are no failures and n is below `n_certify(level, cert_conf)`.
+    `note` is "P(fail) < 3/n ..." when there are no failures and n is below `n_certify(level, cert_conf)`; it asks for 60 members only below 60.
     """
     lo, hi, method = interval(k_fail, n, conf)
     p = (n - k_fail) / n
@@ -117,8 +117,10 @@ def verdict(k_fail: int, n: int, conf: float = 0.90, level: float = 0.05, cert_c
     need = n_certify(level, cert_conf)
     note = ""
     if k_fail == 0 and n < need:
-        note = (f"P(fail) < 3/n = {rule_of_three(n):.3f} at 95% confidence, one-sided (n = {n}); {math.ceil(3 / level)} members would be needed "
-                f"for that bound to reach {level:.0%}. The report's certification count, {need}, is for the two-sided {cert_conf:.0%} Wilson upper bound.")
+        r3 = math.ceil(3 / level)
+        note = (f"P(fail) < 3/n = {rule_of_three(n):.3f} at 95% confidence, one-sided (n = {n})"
+                + (f"; {r3} members would be needed for that bound to reach {level:.0%}." if n < r3 else f": already below {level:.0%}.")      # round 5, M-11
+                + f" The report's certification count, {need}, is for the two-sided {cert_conf:.0%} Wilson upper bound.")
     return dict(verdict=v, n=n, k_fail=k_fail, p_fail=k_fail / n, fail_lo=lo, fail_hi=hi, success_lo=1 - hi,
                 conf=conf, method=method, n_certify=need, note=note)
 

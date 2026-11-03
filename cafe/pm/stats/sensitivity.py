@@ -36,10 +36,12 @@ def first_order(x: np.ndarray, y: np.ndarray, harmonics: int | None = None, corr
     return np.clip(out, 0.0, 1.0)
 
 
-def noise_floor(x: np.ndarray, y: np.ndarray, perms: int = 200, level: float = 0.95, seed: int = 0, harmonics: int | None = None) -> float:
+def noise_floor(x: np.ndarray, y: np.ndarray, perms: int = 2000, level: float = 0.95, seed: int = 0, harmonics: int | None = None) -> float:
     """The largest S1 over all columns that y unrelated to x reaches with probability 1 - level: the `level` quantile of
     max_i S1_i over `perms` random permutations of y (a family-wise permutation test). With 32 members and the default two harmonics it is
-    about 0.30 (measured, tests/test_stats.py); with six harmonics it would be 0.53 to 0.60. An S1 below it is no evidence that the parameter matters."""
+    about 0.30 (measured, tests/test_stats.py); with six harmonics it would be 0.53 to 0.60. An S1 below it is no evidence that the parameter matters.
+    2000 permutations (review round 5, M-2): the floor's own sd at 64 members falls from about 0.014 at 200 to 0.004 (tests/test_stats.py), so a driver
+    0.005 above a floor is not read off one seed's noise. One test in twenty on unrelated outcomes still clears it, by construction of the 95 % level."""
     rng = np.random.default_rng(seed)
     null = [first_order(x, rng.permutation(np.asarray(y, float)), harmonics).max() for _ in range(perms)]
     return float(np.quantile(null, level))
