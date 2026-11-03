@@ -471,6 +471,34 @@ def test_the_zero_failure_note_asks_for_60_members_only_below_60():
         assert "60 members would be needed" in I.verdict(0, n)["note"]
     for n in (60, 64, 72):
         note = I.verdict(0, n)["note"]
-        assert "60 members would be needed" not in note and f"3/n = {3 / n:.3f}" in note and f"(n = {n}): already below 5%." in note
-        assert "certification count, 73, is for the two-sided 95% Wilson upper bound" in note
+        assert "60 members would be needed" not in note and f"3/n = {3 / n:.3f}" in note and f"(n = {n}), below 5%;" in note
+        assert "two-sided 95% Wilson upper bound below 5%: 73 members." in note       # round 6, M-15: the wording changed, the rule and the numbers did not
     assert I.verdict(0, 73)["note"] == ""
+
+
+def test_the_rule_of_three_note_says_it_is_a_weaker_statement_than_the_certification():
+    """Round 6, M-15: 'already below 5%' beside 'cannot be certified at n = 64' read as a contradiction; the note now names the two bounds."""
+    note = I.verdict(0, 64)["note"]
+    assert "weaker" in note and "73" in note and "already below" not in note and "3/n = 0.047" in note
+    assert "60 members would be needed" in I.verdict(0, 30)["note"] and "weaker" not in I.verdict(0, 30)["note"]     # below 60 the sentence keeps its form
+
+
+def test_the_go_lower_bound_is_the_smaller_of_075_and_the_missions_go():
+    """Round 6, M-26: `min(0.5, go)` survived the stats tests (only test_config and test_report pinned the 0.75, and neither is in the mutation selection)."""
+    saved = (I.P_FAIL_GO, I.P_FAIL_NOGO, I.LO_SUCCESS_GO)
+    try:
+        I.set_thresholds(0.9, 0.7)
+        assert I.LO_SUCCESS_GO == 0.75
+        I.set_thresholds(0.6, 0.4)
+        assert I.LO_SUCCESS_GO == 0.6
+        I.set_thresholds(0.75, 0.4)
+        assert I.LO_SUCCESS_GO == 0.75
+    finally:
+        I.P_FAIL_GO, I.P_FAIL_NOGO, I.LO_SUCCESS_GO = saved
+
+
+def test_a_prior_without_a_numeric_sd_is_a_value_error_naming_the_key():
+    """Round 6, M-5: `value: None` (a null written by an earlier run's priors_fitted.json) was a TypeError out of np.isfinite."""
+    for bad in (None, "0.3", [0.3]):
+        with pytest.raises(ValueError, match=r"'w': the sd is .*finite sd > 0"):
+            S.to_marginals({"w": dict(dist="normal", value=bad)})

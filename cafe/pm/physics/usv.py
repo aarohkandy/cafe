@@ -66,8 +66,9 @@ below the current speed for becalmed_after_h (DECISION: the BRIEF's 'SOG < curre
 drifting boat's SOG equals the current; `<=`, so a boat that cannot move in a zero current is becalmed too); swept_off_track;
 capsize_proxy; wing_stall_calm = apparent wind speed below the tail's authority (trim_min_aws_ms) for calm_sustain_s; wing_stall_angle =
 apparent wind angle inside the bow cone (min_awa_deg, not the wing's stall angle of attack wing_stall_deg, which only the polar uses) for
-stall_sustain_s; battery; no_current_data = the environment gave no finite wind or current at the vehicle (a land block, a masked cell):
-the step uses zero for that vector and the member is a labelled failure from that time on (the glider's no_flight).
+stall_sustain_s; battery; no_current_data = the environment gave no finite wind, current or wave state at the vehicle (a land block, a masked
+cell, a hole in the sea mask): the step uses zero for that vector (Hs 0, Tp the first table period, direction 0, Stokes 0) and the member is a
+labelled failure from that time on (the glider's no_flight).
 """
 from __future__ import annotations
 
@@ -104,14 +105,16 @@ REQUIRED = dict(
     appendage_cda_m2="nonneg", heel_resist_c="pos", gm_m="pos", clr_depth_m="pos", kyy_frac="pos", kxx_roll_m="pos", roll_damping="nonneg",
     wing_span_m="pos", wing_area_m2="pos", anemometer_m="pos", wing_cl_alpha_2d="pos", wing_stall_deg="pos", wing_trim_deg="pos", wing_cd0="nonneg",
     wing_oswald_e="pos", wing_ce_height_m="nonneg", wing_ce_x_m="any", heel_target_deg="pos", trim_min_aws_ms="nonneg", min_awa_deg="nonneg",
-    keel_area_m2="pos", keel_span_m="pos", keel_t_c="pos", keel_stall_deg="pos", keel_x_m="any", rudder_cl_max="pos", rudder_x_m="any",
+    keel_area_m2="pos", keel_span_m="pos", keel_t_c="pos", keel_stall_deg="pos", keel_x_m="any", rudder_cl_max="pos", rudder_x_m="nonzero",
+    rudder_area_m2="pos", rudder_span_m="pos", rudder_t_c="pos",
     wind_area_front_m2="nonneg", wind_area_side_m2="nonneg", wind_cd_front="nonneg", wind_cd_side="nonneg", wind_height_m="pos",
-    rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms="pos", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos", chiodi_max_sog_ms="pos",
+    rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms="pos<=50", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos", chiodi_max_sog_ms="pos",
     chiodi_max_wind_ms="pos", chiodi_band="nonneg", sun_overpredict_lo="nonneg", sun_overpredict_hi="nonneg", battery_wh="pos", solar_area_m2="nonneg",
     solar_eff="unit", hotel_w="nonneg", soc0="unit", rf_antenna_height_m="nonneg", vpp_bias_mean="any", vpp_bias_sd="nonneg", current_z_m="any",
     tack_time_s="nonneg", tack_speed_frac="unit", tack_horizon_s="pos", replan_s="pos",
 )
-OPTIONAL = ("draft_nominal_m", "rudder_area_m2", "rudder_span_m", "rudder_t_c", "keel_depth_m", "iridium_antenna_height_m") + STRINGS      # read by no code
+MISSION_REQUIRED = dict(cap_cycles="ge1")       # the one mission default the model takes a log of (sqrt(2 ln N): N >= 1); the others only have to be finite
+OPTIONAL = ("draft_nominal_m", "keel_depth_m", "iridium_antenna_height_m") + STRINGS      # read by no code
 
 
 def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
@@ -138,7 +141,7 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
     check_params(REQUIRED, P, f"{path.name}:params", "saildrone_explorer")
     P["kind"] = raw["kind"]
     P["mission_defaults"] = flat(raw["mission_defaults"], "mission_defaults")
-    check_params({}, P["mission_defaults"], f"{path.name}:mission_defaults", "saildrone_explorer")
+    check_params(MISSION_REQUIRED, P["mission_defaults"], f"{path.name}:mission_defaults", "saildrone_explorer")
     return P
 
 
@@ -546,9 +549,12 @@ class USVSim:
         stokes = wav["stokes0"].value
         bw, bc = ~np.isfinite(wind).all(-1), ~np.isfinite(cur).all(-1)                    # a land block or masked cell: no wind or current vector there
         wind, cur = np.where(bw[:, None], 0.0, wind), np.where(bc[:, None], 0.0, cur)  # zero keeps the step finite; the member fails
-        self._flag("no_current_data", bw | bc)
+        hs, tp, wdir = wav["Hs"].value, wav["Tp"].value, wav["dir_to"].value
+        bv = ~(np.isfinite(hs) & np.isfinite(tp) & np.isfinite(wdir) & np.isfinite(stokes).all(-1))      # a hole in the UMWM sea mask: all NaN together
+        hs, tp, wdir, stokes = np.where(bv, 0.0, hs), np.where(bv, self.wt.tp[0], tp), np.where(bv, 0.0, wdir), np.where(bv[:, None], 0.0, stokes)
+        self._flag("no_current_data", bw | bc | bv)
         wr = wind - cur
-        c = dict(tws=cv.speed(wr), wfrom=cv.from_deg(wr), hs=wav["Hs"].value, tp=wav["Tp"].value, wdir=wav["dir_to"].value)
+        c = dict(tws=cv.speed(wr), wfrom=cv.from_deg(wr), hs=hs, tp=tp, wdir=wdir)
         if t - self.t_plan >= P["replan_s"]:
             self.t_plan = t
             e = self._eval(np.broadcast_to(self.cand, (M, NH)), c)

@@ -410,7 +410,6 @@ def test_members_are_independent_and_scale_applies():
 def test_dateline_and_history_shapes():
     s = sim(lon=179.99, M=2, mission=dict(mode="drift", heading_to=90.0))
     h = s.run(DAY)
-    assert (h["lon"] < 0).any() or (s.lon < 0).all() or True
     assert s.lon.min() >= -180.0 and s.lon.max() < 180.0 and (s.lon < 0).all()
     assert h["lon"].shape == (1440, 2) and h["t"].shape == (1440,) and h["t"][0] == 60.0 and h["t"][-1] == DAY
     assert set(h["fail"]) == set(g.FAILS) == set(h["first"]) and h["phase"].min() >= 0 and h["phase"].max() <= 3
@@ -571,3 +570,34 @@ def test_run_stops_at_the_last_whole_step_inside_the_time_it_was_given():
     h = sim().run(170.0)
     assert len(h["t"]) == 2 and h["t"][-1] <= 170.0
     assert [len(sim().run(x)["t"]) for x in (180.0, 179.9999999999, 59.0)] == [3, 3, 0]                    # a whole number of steps is unchanged
+
+
+# ---- review round 6, M-10: a platform leaf the model divides by, exponentiates or integrates has a stated range -------------------------------------
+def glider_file(tmp_path, kind, key, value):
+    raw = yaml.safe_load((g.PLATFORMS / f"{kind}.yaml").read_text())
+    raw["params"][key]["value"] = value
+    f = tmp_path / f"{kind}.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    return str(f)
+
+
+@pytest.mark.parametrize("kind,key,value", [
+    ("seaglider", "hd_s", -1.0), ("seaglider", "hd_s", 0.5), ("seaglider", "abs_compress", 0.0), ("seaglider", "abs_compress", -1.0),
+    ("seaglider", "abs_compress", 1e12), ("seaglider", "therm_expan", 0.0), ("seaglider", "therm_expan", 1e12), ("seaglider", "temp_ref", 1e12),
+    ("seaglider", "temp_ref", -1e12), ("seaglider", "t_deep_c", 1e12), ("seaglider", "gravity", 1e12), ("seaglider", "gravity", 0.0),
+    ("seaglider", "apogee_overshoot", 1e12), ("seaglider", "apogee_overshoot", -1.0),
+    ("slocum", "gravity", 1e12), ("slocum", "t_deep_c", 1e12), ("slocum", "apogee_overshoot", 1e12)])
+def test_the_glider_loader_refuses_a_leaf_the_simulator_would_divide_by_or_exponentiate(tmp_path, kind, key, value):
+    with pytest.raises(ValueError, match=rf"{kind}\.yaml:params\.{key}: .* must be a finite number"):
+        g.load_platform(glider_file(tmp_path, kind, key, value))
+
+
+def test_the_glider_loader_names_the_limit_and_still_takes_the_shipped_files(tmp_path):
+    assert SG["hd_s"] == -0.25 and SL["gravity"] == 9.81
+    with pytest.raises(ValueError, match=r"slocum\.yaml:params\.gravity: 1000000000000\.0 must be a finite number above 0 and at most 20"):
+        g.load_platform(glider_file(tmp_path, "slocum", "gravity", 1e12))
+
+
+def test_every_leaf_of_the_glider_tables_that_may_take_any_value_is_one_the_model_only_adds():
+    """M-10: a new `any` leaf must be a conscious choice."""
+    assert {k for t in g.REQUIRED.values() for k, v in t.items() if v == "any"} == {"vbd_min_cc"}

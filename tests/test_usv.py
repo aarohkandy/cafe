@@ -860,3 +860,89 @@ def test_run_stops_at_the_last_whole_step_inside_the_time_it_was_given():
     h = s.run(170.0, record_s=60.0)
     assert len(h["t"]) == 2 and h["t"][-1] <= 170.0 and s.t <= 170.0
     assert [len(sim(AnalyticEnv()).run(x, record_s=60.0)["t"]) for x in (180.0, 179.9999999999)] == [3, 3]
+
+
+# ---- review round 6, M-1: a wave state that is not a number is a labelled failure, not a NaN position or an IndexError -----------------------------
+@pytest.mark.parametrize("kw", [dict(hs=np.nan), dict(tp=np.nan), dict(hs=np.nan, tp=np.nan), dict(wave_to=np.nan)], ids=["hs", "tp", "hs-tp", "direction"])
+def test_a_wave_state_that_is_not_a_number_fails_every_member_from_the_first_step_and_the_run_goes_on(kw):
+    """M-1: Hs NaN alone gave NaN positions and no flag (a pass); Tp NaN gave an IndexError out of `_lin` (the UMWM sea mask makes all of them NaN together)."""
+    h = sim(AnalyticEnv(wind=(-6.0, 0.0), **kw), m=4).run(3 * HR, 60.0)
+    assert h["fail"]["no_current_data"].all() and np.all(h["first"]["no_current_data"] == 0.0)
+    assert np.isfinite(h["lon"]).all() and np.isfinite(h["lat"]).all()
+    tp0 = float(usv.tables(P)[1].tp[0])                                                    # the step runs on Hs 0, Tp the table's first, direction 0
+    calm = sim(AnalyticEnv(wind=(-6.0, 0.0), hs=0.0, tp=tp0, wave_to=0.0), m=4).run(3 * HR, 60.0)
+    assert np.array_equal(h["lon"], calm["lon"]) and all(np.array_equal(h["fail"][k], calm["fail"][k]) for k in usv.FAILS if k != "no_current_data")
+
+
+def test_a_stokes_drift_that_is_not_a_number_is_the_same_failure():
+    h = sim(DriftEnv(stokes=(np.nan, 0.1), wind=(-6.0, 0.0)), m=2).run(HR, 60.0)
+    assert h["fail"]["no_current_data"].all() and np.isfinite(h["lon"]).all() and np.isfinite(h["lat"]).all()
+
+
+# ---- review round 6, M-10: a platform leaf the model divides by or takes a log of has a range --------------------------------------------------
+def usv_file(tmp_path, group, key, value):
+    raw = yaml.safe_load((usv.PLATFORMS / "saildrone_explorer.yaml").read_text())
+    raw[group][key]["value"] = value
+    f = tmp_path / "saildrone_explorer.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    return str(f)
+
+
+@pytest.mark.parametrize("group,key,value", [
+    ("mission_defaults", "cap_cycles", 0.0), ("mission_defaults", "cap_cycles", -1.0), ("mission_defaults", "cap_cycles", 0.5),
+    ("params", "rudder_area_m2", 0.0), ("params", "rudder_area_m2", -1.0), ("params", "rudder_span_m", 0.0), ("params", "rudder_span_m", -1.0),
+    ("params", "rudder_t_c", 0.0), ("params", "rudder_x_m", 0.0), ("params", "stw_cap_ms", 1e12), ("params", "stw_cap_ms", 51.0)])
+def test_the_usv_loader_refuses_a_leaf_the_simulator_would_divide_by_or_take_a_log_of(tmp_path, group, key, value):
+    with pytest.raises(ValueError, match=rf"saildrone_explorer\.yaml:{group}\.{key}: .* must be a finite number"):
+        usv.load_platform(usv_file(tmp_path, group, key, value))
+
+
+def test_the_usv_loader_still_takes_the_shipped_values_and_the_stated_edges(tmp_path):
+    assert usv.load_platform()["stw_cap_ms"] == 3.3
+    assert usv.load_platform(usv_file(tmp_path, "params", "stw_cap_ms", 50.0))["stw_cap_ms"] == 50.0
+    assert usv.load_platform(usv_file(tmp_path, "mission_defaults", "cap_cycles", 1.0))["mission_defaults"]["cap_cycles"] == 1.0
+
+
+def test_every_leaf_of_the_usv_table_that_may_take_any_value_is_one_the_model_only_adds_or_multiplies():
+    """M-10: a new `any` leaf must be a conscious choice (the others were `any` while the model divided by them)."""
+    assert {k for k, v in usv.REQUIRED.items() if v == "any"} == {"wing_ce_x_m", "keel_x_m", "vpp_bias_mean", "current_z_m"}
+    assert usv.MISSION_REQUIRED["cap_cycles"] != "any"
+
+
+# ---- review round 6, M-26: the unit conversions and the becalmed rule are pinned away from the equator ---------------------------------------------
+def test_met_scales_east_west_metres_by_the_cosine_of_the_mean_latitude_and_leaves_a_meridian_alone():
+    """M-26: `_met` without cos(lat) survived every test (all of them were at latitude 0): at 60 N a degree of longitude is half the equatorial length."""
+    one = np.radians(1.0) * usv.R_E
+    east = usv.USVSim._met(np.array([-165.0]), np.array([60.0]), np.array([-164.0]), np.array([60.0]))
+    assert east[0, 0] == pytest.approx(0.5 * one, rel=1e-9) and abs(east[0, 1]) < 1e-9
+    north = usv.USVSim._met(np.array([-165.0]), np.array([60.0]), np.array([-165.0]), np.array([61.0]))
+    assert north[0, 1] == pytest.approx(one, rel=1e-9) and abs(north[0, 0]) < 1e-9
+    slant = usv.USVSim._met(np.array([-165.0]), np.array([59.0]), np.array([-164.0]), np.array([61.0]))        # the cosine is of the MEAN latitude (60 N)
+    assert slant[0, 0] == pytest.approx(0.5 * one, rel=1e-9)
+
+
+def test_a_section_leg_east_west_at_60_north_has_the_waypoint_distance_and_cross_track_error_of_its_true_length():
+    s = sim(AnalyticEnv(), wps=((-165.0, 60.0), (-164.0, 60.0)), m=1, start=(-165.0, 60.0))
+    half = 0.5 * np.radians(1.0) * usv.R_E
+    s.idx[:] = 1                                                                          # the active waypoint is the leg's far end
+    dist, uhat, xte, _ = s._geom()
+    assert dist[0] == pytest.approx(half, rel=1e-9) and uhat[0] == pytest.approx([1.0, 0.0]) and abs(xte[0]) < 1e-6
+    s.lat = s.lat + np.degrees(1000.0 / usv.R_E)                                          # 1 km north of the leg: the error is 1 km, whatever the latitude
+    assert abs(s._geom()[2][0]) == pytest.approx(1000.0, rel=1e-6)
+    s.lon = s.lon + 0.5                                                                   # half-way along the leg: a quarter degree of this latitude is left
+    assert s._geom()[0][0] == pytest.approx(0.25 * np.radians(1.0) * usv.R_E, rel=1e-3)
+
+
+def becalmed_after(wind, current, hours=2.0):
+    s = sim(AnalyticEnv(wind=(-wind, 0.0), current=(current, 0.0)), m=1, bias=0.0, mode="station", station=(-165.0, -1.0), start=(-165.0, -1.0),
+            becalmed_after_h=hours)
+    s.run((hours + 1.0) * HR, 60.0)
+    return s
+
+
+def test_becalmed_is_a_best_speed_below_the_current_not_below_half_of_it():
+    """M-26: `vmax <= 0.5 * speed(current)` survived: the best through-water speed here is 0.62 of the current (becalmed) and 1.15 of it (not)."""
+    slow, fast = becalmed_after(3.0, 2.0), becalmed_after(3.0, 0.8)
+    assert 0.55 < slow.vmax[0] / 2.0 < 0.9 and fast.vmax[0] / 0.8 > 1.1                                  # the pair is where the mutant and the rule disagree
+    assert slow.fail["becalmed"].all() and 2.0 <= first_h(slow, "becalmed") < 2.1
+    assert not fast.fail["becalmed"].any()

@@ -56,7 +56,7 @@ def to_marginals(cfg: dict[str, dict[str, Any]], names: list[str] | None = None)
     for k in names or [k for k in cfg if cfg[k]["dist"] != "fixed"]:
         e = cfg[k]
         d = e["dist"]
-        if d in ("normal", "lognormal") and not (np.isfinite(e["value"]) and e["value"] > 0):
+        if d in ("normal", "lognormal") and not (isinstance(e["value"], (int, float, np.number)) and np.isfinite(e["value"]) and e["value"] > 0):
             raise ValueError(f"{k!r}: the sd is {e['value']!r}; a {d} prior needs a finite sd > 0 (scipy turns 0 into NaN members)")
         if d == "normal":
             out[k] = dict(dist="normal", mean=e.get("mean", 0.0), sd=e["value"])
