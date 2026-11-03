@@ -1,0 +1,5 @@
+You are builder S (stage-1 summary, statistics, report, credibility) for review round 5. First read review/round_5/batch_prompts/r5_common.md and follow it exactly. Your letter is s; PM_CPUS=2.
+
+Your findings: M-2, M-7, M-8, M-10 (the report line and the credibility row L19; batch P writes `value_hi95`), M-11, M-12, M-13 (the report's planned/measured lines; batch P does the budget and pipeline parts), M-26.
+Files you own: cafe/pm/stage1.py (everything except `_uas_forcing`, which is batch V's), cafe/pm/subgrid.py (only the switch reader M-7 needs), cafe/pm/stats/*.py, cafe/pm/report.py, cafe/pm/credibility.py, docs/CREDIBILITY.md and docs/PHYSICS.md (the rows and sentences M-10 and M-26 change; the generated parts must match the code), tests/test_stage1.py, tests/test_stats*.py, tests/test_sensitivity*.py, tests/test_intervals*.py, tests/test_report.py, tests/test_credibility.py, tests/test_config_docs.py (only the credibility table check).
+For M-13 and M-10 your report must read the interface keys and accept their absence; build test fixtures that carry them.
