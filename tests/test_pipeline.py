@@ -2805,5 +2805,5 @@ def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
 def test_r6_m8_a_corrupt_umwm_zarr_json_is_a_config_error_naming_the_file_and_the_fix(data_copy):
     cache = data_copy / "cache" / "ci_fixture"
     (cache / "orca" / "umwm.zarr" / "zarr.json").write_text("{garbage")
-    with pytest.raises(config.ConfigError, match=rf"environment cache file {cache}/orca/umwm.zarr cannot be read .*delete {cache}/orca and run `python -m cafe.pm fetch"):
+    with pytest.raises(config.ConfigError, match=rf"cache file {cache}/orca/umwm.zarr cannot be read .*delete {cache}/orca and run `python -m cafe.pm fetch"):
         pipeline._umwm_depth(cache)

@@ -538,7 +538,8 @@ R6_M9 = [
      r"vehicles/uas/sorties/altitudes_m: \[100, 10\] does not rise"),
     ("dive 20 m on the Seaglider", lambda d: vehicle(d, "glider_eq")["task"].update(dive_depth_m=20.0),
      r"vehicles/glider_eq/task/dive_depth_m: 20 m is outside what the seaglider 'seaglider' dives: min_dive_m 30 m to rating_m 1000 m"),
-    ("dive below the rating", lambda d: vehicle(d, "glider_eq")["task"].update(dive_depth_m=1500.0), r"task/dive_depth_m: 1500 m is outside .* rating_m 1000 m"),
+    ("dive below the rating", lambda d: vehicle(d, "glider_eq")["task"].update(dive_depth_m=1500.0),
+     r"task/dive_depth_m: 1500 m is outside .* rating_m 1000 m"),
 ]
 
 

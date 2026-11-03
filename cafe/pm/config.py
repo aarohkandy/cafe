@@ -299,8 +299,8 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
             from .physics import glider
             P, dd = glider.load_platform(v["platform"]), v["task"]["dive_depth_m"]
             if not P["min_dive_m"] <= dd <= P["rating_m"]:
-                raise ConfigError(f"{where}/task/dive_depth_m: {dd:g} m is outside what the {P['kind']} '{v['platform']}' dives: min_dive_m {P['min_dive_m']:g} m "
-                                  f"to rating_m {P['rating_m']:g} m; use a depth in that range")
+                raise ConfigError(f"{where}/task/dive_depth_m: {dd:g} m is outside what the {P['kind']} '{v['platform']}' "
+                                  f"dives: min_dive_m {P['min_dive_m']:g} m to rating_m {P['rating_m']:g} m; use a depth in that range")
         if "sorties" in v and cls != "uas":
             raise ConfigError(f"{where}/sorties: only a UAS (a vehicle with `base`) flies sorties; remove sorties, or add base: <the ship's id>")
         so = v.get("sorties", {})
@@ -319,7 +319,7 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
                                   f"(local_solar_time {so['local_solar_time']} at lon {m['ship']['lon']:g} is {utc_hm}Z, "
                                   f"a launch needs {hard:g} min before window.end); widen the window or change the time")
             alt = so.get("altitudes_m", ())
-            if any(b <= a for a, b in zip(alt, alt[1:])):
+            if any(b <= a for a, b in zip(alt, alt[1:], strict=False)):
                 raise ConfigError(f"{where}/sorties/altitudes_m: {list(alt)} does not rise; list the flight levels from the lowest to the highest, each once")
             if (high := [a for a in alt if a > orca.WIND3D_TOP_M]):
                 raise ConfigError(f"{where}/sorties/altitudes_m: {high[0]:g}: the stored WRF levels end at about {orca.WIND3D_TOP_M:g} m; "

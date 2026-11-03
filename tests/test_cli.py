@@ -608,8 +608,8 @@ def test_r6_m22_hangar_checks_the_radio_and_modem_tables_as_tables(name, label, 
 
 def test_r6_m22_a_radio_table_number_without_a_source_fails_naming_the_leaf_and_an_unknown_platform_marks_the_tables(tmp_path, capsys):
     text = (config.PLATFORMS / "radios.yaml").read_text()
-    bad = text.replace('gt_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted."}',
-                       "gt_dbi: {value: 2.0, unit: dBi}", 1)
+    line = next(x for x in text.splitlines() if x.lstrip().startswith("gt_dbi: {value: 2.0"))
+    bad = text.replace(line, "    gt_dbi: {value: 2.0, unit: dBi}", 1)
     assert bad != text
     (tmp_path / "radios.yaml").write_text(bad)
     assert cli.main(["hangar", "--platform", str(tmp_path / "radios.yaml")]) == 1
