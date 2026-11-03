@@ -61,8 +61,16 @@ class GriddedEnv:
         self.cache, self.sig, self.strict = cache, sigmas, strict
         self.use_3d = True                                                # False: wind above the first level is always the U10 profile (what-if comparisons)
         self.wind_points = self.wind3d_points = 0                         # wind() points asked for / answered from the 3-D fields (stage 1 reads the deltas)
-        w = xr.open_zarr(cache / "orca" / "wrf.zarr").load()
-        u = xr.open_zarr(cache / "orca" / "umwm.zarr").load()
+        def load(store: pathlib.Path) -> Any:
+            try:
+                return xr.open_zarr(store).load()
+            except Exception as e:                                        # noqa: BLE001  any unreadable chunk or metadata file is the same advice
+                from ..config import ConfigError
+                raise ConfigError(f"environment cache file {store} cannot be read ({type(e).__name__}: {e}); delete {cache / 'orca'} and run "
+                                  f"`python -m cafe.pm fetch --mission ...` again: only that part is downloaded again") from e
+
+        w = load(cache / "orca" / "wrf.zarr")
+        u = load(cache / "orca" / "umwm.zarr")
         self.wrf_src = f"WRF {w.attrs.get('TITLE', '').strip()} 12 km hourly ({w.attrs.get('source', '')})"
         self.umwm_src = f"UMWM hourly ({u.attrs.get('source', '')})"
         self.tw = Axis(seconds(w.time.values), "time")
@@ -83,13 +91,13 @@ class GriddedEnv:
         self.w3: dict[str, Any] | None = None
         p3 = cache / "orca" / "wrf3d.zarr"
         if p3.exists():
-            d3 = xr.open_zarr(p3).load()
+            d3 = load(p3)
             self.w3 = dict(t=seconds(d3.time.values), U=d3.U3.values.astype("f8"), V=d3.V3.values.astype("f8"),
                            Z=d3.Z3.values.astype("f8"))
         self.spec: dict[str, Any] | None = None
         ps = cache / "orca" / "umwmspec.zarr"
         if ps.exists():
-            s = xr.open_zarr(ps).load()
+            s = load(ps)
             self.spec = dict(t=seconds(s.time.values), F=s.F.values, k=s.k.values, lon=s.plon.values, lat=s.plat.values,
                              f=s.f.values, th=s.th.values)
         self.ocean = ocean

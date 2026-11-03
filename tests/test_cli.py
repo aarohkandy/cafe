@@ -229,8 +229,8 @@ def test_report_of_a_directory_that_is_not_a_run_exits_2(tmp_path, capsys):
     assert cli.main(["report", "--run", str(tmp_path)]) == 2
     assert "mission.yaml: file not found" in capsys.readouterr().err
     shutil.copy(MISSION, tmp_path / "mission.yaml")
-    with pytest.raises(FileNotFoundError, match="plan.json"):
-        cli.main(["report", "--run", str(tmp_path)])
+    assert cli.main(["report", "--run", str(tmp_path)]) == 2                    # was a FileNotFoundError traceback (review round 5, M-19)
+    assert "no plan.json; this is not a finished run directory" in capsys.readouterr().err
 
 
 def test_receipts_forwards_its_options_and_returns_the_runs_exit_code(monkeypatch):

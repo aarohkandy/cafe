@@ -476,3 +476,27 @@ def test_lenient_holds_the_edge_depth_off_the_bathymetry_grid_and_inside_says_so
     with env.lenient():
         assert np.allclose(env.depth(195.0, 0.9).value, env.depth(195.0, 0.5).value)                 # lenient: the edge depth
         assert np.allclose(env.depth(-165.0, 0.0).value, b(195.0, 0.0).value)                        # a -180..180 longitude is wrapped first
+
+
+def _copy_cache(ci_env, tmp_path):
+    d = tmp_path / "cache"
+    shutil.copytree(ci_env.cache, d)
+    return d
+
+
+def test_r5_m19_a_truncated_chunk_is_a_config_error_naming_the_file_and_the_fix(ci_env, tmp_path):
+    from cafe.pm.config import ConfigError
+    d = _copy_cache(ci_env, tmp_path)
+    chunk = next(p for p in sorted((d / "orca" / "wrf.zarr" / "U10").rglob("*")) if p.is_file() and p.name != "zarr.json")
+    chunk.write_bytes(b"")
+    with pytest.raises(ConfigError, match=r"environment cache file .*wrf\.zarr cannot be read .*delete .*orca and run `python -m cafe.pm fetch"):
+        GriddedEnv(d, env_sigmas())
+
+
+def test_r5_m19_a_corrupt_zarr_json_is_a_config_error_for_every_store(ci_env, tmp_path):
+    from cafe.pm.config import ConfigError
+    for store in ("umwm.zarr", "wrf3d.zarr", "umwmspec.zarr"):
+        d = _copy_cache(ci_env, tmp_path / store)
+        (d / "orca" / store / "zarr.json").write_text("{not json")
+        with pytest.raises(ConfigError, match=rf"environment cache file .*{store} cannot be read"):
+            GriddedEnv(d, env_sigmas())

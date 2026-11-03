@@ -130,7 +130,7 @@ BAD = [
     (mutate_waypoint_outside_box, r"point \(-165.0, 40.0\) is outside the mission box"),
     (mutate_station_outside_box, r"point \(-170.0, 40.0\) is outside the mission box"),
     (mutate_platform, "platform 'no_such_platform': no file .*available: .*seaglider"),
-    (mutate_station_without_point, "mode 'station' needs lon, lat and radius_km"),
+    (mutate_station_without_point, "mode 'station' needs lon and lat of the station"),
     (mutate_section_without_waypoints, "mode 'section' needs at least two waypoints"),
     (mutate_section_with_empty_waypoints, r"vehicles/2/task/waypoints: \[\] should be non-empty"),
     (mutate_link_end, "links/usv-uas-rf/a: 'ghost' is not a vehicle, the ship or the shore"),
@@ -467,3 +467,56 @@ def test_round4_good_variants_load(tmp_path):
     load_mission(edit(tmp_path, lambda d: d["window"].update(end="2023-03-02T02:00:00Z")))                         # the 01:00Z launch (and 32 min) fits
     with pytest.raises(ConfigError, match=r"links/usv-shore-iridium/when: an iridium link"):                       # surfacing needs a glider at one end
         load_mission(edit(tmp_path, lambda d: d["links"][3].update(when="surfacing")))
+
+
+# (path in the demo document, the slash path the message must name); a string step picks the list item with that id
+NONFINITE = [(("box", "pad_deg"),) * 2, (("ship", "antenna_height_m"),) * 2, (("ship", "transducer_depth_m"),) * 2,
+             *[((("vehicles", v, *rest),) * 2) for v, rest in (("glider_eq", ("task", "radius_km")), ("glider_eq", ("task", "lost_after_h")),
+                                                             ("glider_eq", ("task", "dive_depth_m")), ("glider_2n", ("task", "heading_to")),
+                                                             ("usv", ("task", "track_tolerance_km")), ("usv", ("task", "becalmed_after_h")),
+                                                             ("uas", ("sorties", "every_days")), ("uas", ("launch_rules", "max_mean_wind_ms")),
+                                                             ("uas", ("sorties", "altitudes_m", 0)))],
+             (("links", "usv-uas-rf", "required_fraction"),) * 2]
+
+
+@pytest.mark.parametrize("val", [float("nan"), float("inf")], ids=["nan", "inf"])
+@pytest.mark.parametrize("keys,named", NONFINITE, ids=["/".join(map(str, k)) for k, _ in NONFINITE])
+def test_r5_m3_a_non_finite_number_is_refused_naming_the_field(tmp_path, keys, named, val):
+    d = doc()
+    cur = d
+    for k in keys[:-1]:
+        cur = next(x for x in cur if x["id"] == k) if isinstance(cur, list) and isinstance(k, str) else cur[k]
+    cur[keys[-1]] = val
+    with pytest.raises(ConfigError, match=re.escape("/".join(map(str, named))) + r": .* is not a finite number"):
+        load_mission(write(tmp_path, d))
+
+
+@pytest.mark.parametrize("which", ["lat", "lon"])
+def test_r5_m17_a_station_without_lon_or_lat_is_a_config_error(tmp_path, which):
+    with pytest.raises(ConfigError, match=r"vehicles/glider_eq/task: mode 'station' needs lon and lat"):
+        load_mission(edit(tmp_path, lambda d: vehicle(d, "glider_eq")["task"].pop(which)))
+
+
+def test_r5_m18_a_duplicate_key_is_refused_with_its_line(tmp_path):
+    p = tmp_path / "m.yaml"
+    p.write_text(DEMO.read_text() + "verdict: {go: 0.5, nogo: 0.1}\n")
+    line = len(DEMO.read_text().splitlines()) + 1
+    with pytest.raises(ConfigError, match=rf"m.yaml: line {line}: duplicate key 'verdict'; a later value would silently replace"):
+        load_mission(p)
+
+
+def test_r5_m18_a_leading_zero_number_is_refused_not_read_as_octal(tmp_path):
+    p = tmp_path / "m.yaml"
+    p.write_text(DEMO.read_text().replace("seed: 20230301", "seed: 010"))
+    with pytest.raises(ConfigError, match=r"line \d+: 010 is read as octal 8; write 8, or quote it for a string"):
+        load_mission(p)
+    p.write_text(DEMO.read_text().replace("seed: 20230301", "seed: 0"))                  # a plain zero, a quoted string and a decimal float are fine
+    assert load_mission(p)["seed"] == 0
+
+
+def test_r5_m18_a_merge_key_is_not_a_duplicate_and_the_shipped_files_load(tmp_path):
+    p = tmp_path / "x.yaml"
+    p.write_text("a: &a {k: 1}\nb: {<<: *a, k: 2}\n")
+    assert config._yaml(p)["b"] == {"k": 2}
+    for f in [*(config.ROOT / "missions").glob("*.yaml"), *config.PLATFORMS.glob("*.yaml"), *config.CONFIG.glob("*.yaml")]:
+        assert config._yaml(f) is not None

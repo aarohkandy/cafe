@@ -7,7 +7,8 @@
 """
 from __future__ import annotations
 
-import datetime as dt, hashlib, json, pathlib
+import datetime as dt, hashlib, json, math, pathlib, re
+from collections.abc import Hashable
 from typing import Any
 
 import yaml
@@ -24,14 +25,52 @@ class ConfigError(ValueError):
     """A file the user wrote is wrong; the message says where and how to fix it."""
 
 
+class _Loader(yaml.SafeLoader):                                         # type: ignore[misc]
+    """SafeLoader that refuses what YAML 1.1 accepts silently: a repeated mapping key (the later value wins) and a leading-zero integer (octal)."""
+
+    def construct_mapping(self, node: Any, deep: bool = False) -> dict[Any, Any]:
+        seen: set[Any] = set()
+        for k, _ in node.value:
+            if k.tag == "tag:yaml.org,2002:merge":
+                continue
+            key = self.construct_object(k, deep=True)
+            if isinstance(key, Hashable) and key in seen:
+                raise ConfigError(f"line {k.start_mark.line + 1}: duplicate key {key!r}; a later value would silently replace an earlier one")
+            seen.add(key)
+        out: dict[Any, Any] = super().construct_mapping(node, deep)
+        return out
+
+
+def _int(self: _Loader, node: Any) -> Any:
+    text = str(node.value)
+    v = yaml.SafeLoader.construct_yaml_int(self, node)
+    if re.fullmatch(r"[-+]?0[0-7_]+", text):
+        raise ConfigError(f"line {node.start_mark.line + 1}: {text} is read as octal {v}; write {v}, or quote it for a string")
+    return v
+
+
+_Loader.add_constructor("tag:yaml.org,2002:int", _int)
+
+
 def _yaml(path: str | pathlib.Path) -> Any:
     path = pathlib.Path(path)
     if not path.exists():
         raise ConfigError(f"{path}: file not found")
     try:
-        return yaml.safe_load(path.read_text())
+        return yaml.load(path.read_text(), Loader=_Loader)                  # noqa: S506  _Loader is a SafeLoader
+    except ConfigError as e:
+        raise ConfigError(f"{path}: {e}") from e
     except yaml.YAMLError as e:
         raise ConfigError(f"{path}: not valid YAML ({e})") from e
+
+
+def _finite(node: Any, path: pathlib.Path, where: str = "") -> None:
+    """Refuse a NaN or infinite number anywhere in the mission (JSON Schema's `number` accepts both and every comparison with NaN is False)."""
+    if isinstance(node, float) and not math.isfinite(node):
+        raise ConfigError(f"{path}: {where or '(top level)'}: {node!r} is not a finite number; write a number (a missing value is a missing key, not .nan)")
+    for k, v in (node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()):
+        name = v["id"] if isinstance(node, list) and isinstance(v, dict) and "id" in v else k          # a vehicle or link is named by its id
+        _finite(v, path, f"{where}/{name}".lstrip("/"))
 
 
 def validate(doc: Any, schema_name: str, where: str) -> Any:
@@ -176,6 +215,7 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
     path = pathlib.Path(path)
     doc = _yaml(path)
     _unread_keys(doc, path)
+    _finite(doc, path)
     m: dict[str, Any] = validate(doc, "mission.json", str(path))
     t0, t1 = utc(m["window"]["start"], f"{path}: window/start"), utc(m["window"]["end"], f"{path}: window/end")
     if t1 <= t0:
@@ -197,6 +237,9 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
         where = f"{path}: vehicles/{v['id']}"
         if "base" in v and v["base"] != m.get("ship", {}).get("id"):
             raise ConfigError(f"{where}/base: '{v['base']}' is not the ship's id; add a ship block with that id or fix the base")
+        if "base" not in v and v.get("task", {}).get("mode") == "station" and not {"lon", "lat"} <= set(v["task"]):          # a UAS's task is refused below
+            raise ConfigError(f"{where}/task: mode 'station' needs lon and lat of the station "
+                              "(radius_km, default 5, and lost_after_h, default 6, are optional)")
         if "deploy" in v:
             d = v["deploy"]
             td = utc(d["time"], f"{where}/deploy/time")
@@ -242,8 +285,6 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
         if task.get("mode") == "drift" and "heading_to" not in task:
             raise ConfigError(f"{where}/task: drift needs heading_to, the compass heading the glider swims on; "
                               f"there is no pass/fail criterion other than battery, depth and seafloor")
-        if task.get("mode") == "station" and "lon" not in task:
-            raise ConfigError(f"{where}/task: mode 'station' needs lon, lat and radius_km of the station")
         if task.get("mode") == "section" and len(task.get("waypoints", [])) < 2:
             raise ConfigError(f"{where}/task: mode 'section' needs at least two waypoints: [[lon, lat], [lon, lat], ...]")
     _check_links(m, path, nodes)
