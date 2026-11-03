@@ -45,10 +45,10 @@ mutation:           ## mutmut on cafe/pm/physics + cafe/pm/stats; stores docs/mu
 	$(PY) -m cafe.pm.audit --mutation-record
 
 audit:              ## ledgers, banned patterns, ruff, mypy, pytest + coverage, and the stored mutation result (see `make mutation`)
-	$(PY) -m cafe.pm.audit $(wildcard $(RUNS)/quick $(RUNS)/overnight $(RUNS)/4h)
+	$(PY) -m cafe.pm.audit $(wildcard $(RUNS)/quick $(RUNS)/overnight $(RUNS)/4h $(RUNS)/acceptance/quick)
 
 acceptance:         ## brief section 5.3: quick + overnight (+ 4h when GPUS>0), golden diff, reproducibility, broken config
-	$(PY) -m cafe.pm acceptance --mission $(MISSION) --gpus $(GPUS) --out $(RUNS)
+	$(PY) -m cafe.pm acceptance --mission $(MISSION) --gpus $(GPUS) --out $(RUNS)/acceptance
 
 report:
 	$(PY) -m cafe.pm report --run $(RUNS)/quick --open

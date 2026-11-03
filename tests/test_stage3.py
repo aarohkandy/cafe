@@ -817,6 +817,7 @@ def cheap(monkeypatch, **over):
     base.update(dict(fea_elements_along=6, min_cells_thin_part=0), **over)             # (0: the toy sizes run the UAS arms under a cell)
     monkeypatch.setattr(pw, "assumptions", lambda: base)
     monkeypatch.setattr(pw, "_spawn", in_process_fea)
+    monkeypatch.setattr(pw, "profile_stage3_s", lambda ctx: {"quick": 100.0, "overnight": 1e6})                # (the fake plans have no mission to plan with)
 
 
 def test_assumptions_file_carries_every_key_the_adapter_reads():
@@ -1672,12 +1673,34 @@ def test_the_estimate_is_cells_x_iterations_over_the_rate_times_the_measured_fac
     assert fs.estimate(8, 0.98, 2.0, 1e-3)["solve_s"] < e["solve_s"] < fs.estimate(1, 0.98, 2.0, 1e-3)["solve_s"]       # more cores, less time
 
 
-def test_the_smallest_budget_profile_that_holds_the_estimate_is_named():
-    prof = {"ci": 600, "quick": 1200, "4h": 14400, "overnight": 36000}
-    assert fs.fitting_budget(300, 0.3, prof) == "--budget quick (6 min of stage 3)" and fs.fitting_budget(361, 0.3, prof).startswith("--budget 4h")
-    assert fs.fitting_budget(5000, 0.3, prof).startswith("--budget overnight")
-    assert fs.fitting_budget(11000, 0.3, prof) == "no --budget profile (the largest gives 180 min of stage 3)"
-    assert fs.fitting_budget(100, 0.3, prof).startswith("--budget ci")
+def test_the_smallest_budget_profile_whose_plan_holds_the_estimate_is_named():
+    prof = {"ci": 360.0, "quick": 360.0, "4h": 4320.0, "overnight": 10800.0}
+    assert fs.fitting_budget(300, prof) == "--budget ci (6 min of stage 3 in that plan)" and fs.fitting_budget(361, prof).startswith("--budget 4h")
+    assert fs.fitting_budget(5000, prof) == "--budget overnight (180 min of stage 3 in that plan)"
+    assert fs.fitting_budget(11000, prof) == "no --budget profile's plan holds it (the largest gives 180 min)"
+    assert fs.fitting_budget(1, {}) == "no --budget profile's plan holds it (the largest gives 0 min)"
+
+
+def test_review_round_6_m14_each_profile_is_judged_by_its_own_plan_not_by_the_running_plans_share(monkeypatch):
+    """The demo at 6 cores: the quick and 4h plans give stage 3 nothing (their LES slices went to stage 1), overnight's gives 118 min, so a 117 min case
+    fits overnight and a 10 h case fits none. The running plan's share (0 at quick) times each budget said "no profile" for both."""
+    from cafe.pm import config, stage1
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    m = config.load_mission("missions/tepex_c_demo.yaml")
+    ctx = SimpleNamespace(mission=m, classes=stage1._classes(m), plan=dict(gpus=0, workers=6, mem_gb=None, env_gb=None, les={}))
+    s = pw.profile_stage3_s(ctx)
+    assert s["quick"] == 0.0 and s["4h"] == 0.0 and 100 * 60 < s["overnight"] < budget.SHARE["stage3"] * budget.BUDGET_S["overnight"]
+    assert list(s) == sorted(s, key=budget.BUDGET_S.get)
+    assert fs.fitting_budget(117 * 60, s) == f"--budget overnight ({s['overnight'] / 60:.0f} min of stage 3 in that plan)"
+    assert fs.fitting_budget(36000, s) == f"no --budget profile's plan holds it (the largest gives {s['overnight'] / 60:.0f} min)"
+    real = budget.plan
+
+    def refuse_ci(name, *args, **kw):
+        if name == "ci":
+            raise budget.PlanError("stage 1 cannot run in it")
+        return real(name, *args, **kw)
+    monkeypatch.setattr(budget, "plan", refuse_ci)
+    assert "ci" not in pw.profile_stage3_s(ctx) and "quick" in pw.profile_stage3_s(ctx)                 # a profile that cannot run holds nothing
 
 
 def test_nproc_follows_the_environment(monkeypatch):

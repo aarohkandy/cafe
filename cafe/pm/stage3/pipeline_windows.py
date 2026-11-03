@@ -559,19 +559,33 @@ def _fs_fail(base: dict[str, Any], msg: str, t0: float, **extra: Any) -> dict[st
     return dict(base, error=msg[:600], reasons=[msg[:600]], timing=dict(wall_s=time.perf_counter() - t0), **extra)
 
 
-def _fs_gate(est: dict[str, Any], a: dict[str, Any], plan: dict[str, Any], left_s: float, queued_s: float) -> tuple[bool, str, float]:
+def profile_stage3_s(ctx: Context) -> dict[str, float]:
+    """Per `--budget` profile (smallest first), the stage-3 seconds that profile's own plan gives this mission and run: its stage-3 share after the
+    slices of the LES windows that cannot run went to stage 1 (budget.plan), times its budget. The running plan's share says nothing about the others."""
+    p, out = ctx.plan, {}
+    for name, b in sorted(budget.BUDGET_S.items(), key=lambda kv: kv[1]):
+        try:
+            q = budget.plan(name, p["gpus"], ctx.mission, gpu_mem_gb=p["les"].get("gpu_mem_gb"), vehicle_classes=ctx.classes, workers=p["workers"],
+                            mem_gb=p["mem_gb"], env_gb=p["env_gb"])
+        except budget.PlanError:
+            continue                                                                # stage 1 cannot run in it: no case of stage 3 either
+        out[name] = q["shares"]["stage3"] * b
+    return out
+
+
+def _fs_gate(est: dict[str, Any], a: dict[str, Any], ctx: Context, left_s: float, queued_s: float) -> tuple[bool, str, float]:
     """(fits, reason, seconds the case holds in the queue). The estimate times `fs.margin` must fit the share left after the cases already
     queued (a plan-time rule, the same as budget.stage3_plan's `fs.fit`, not the clock): minutes needed, minutes available and the smallest
     `--budget` profile whose stage-3 share would hold it (and what is already queued) are in the sentence."""
     need_s = est["total_s"] * need(a, "fs.margin")
     if need_s <= left_s:
         return True, "", need_s
-    share = plan["shares"]["stage3"]
+    plan = ctx.plan
     return False, (f"free-surface window not run: estimated {est['total_s'] / 60:.0f} min x {need(a, 'fs.margin')} margin = {need_s / 60:.0f} min "
                    f"({sum(est['cells'].values()):,.0f} cells on two grids, {est['iters']} iterations, {est['cores']} cores at {est['rate'] / 1e3:.0f}k "
                    f"cell-updates/s) against {max(left_s, 0) / 60:.1f} min left of the {plan['shares']['stage3'] * plan['budget_s'] / 60:.0f} min "
                    f"stage-3 share; it would fit "
-                   f"{freesurface.fitting_budget(queued_s + need_s, share, budget.BUDGET_S)}"), need_s
+                   f"{freesurface.fitting_budget(queued_s + need_s, profile_stage3_s(ctx))}"), need_s
 
 
 def _fs_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: float, geo: dict[str, float], jobdir: str, cfg: dict[str, Any],
@@ -632,7 +646,7 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
         est = None if sizes["fs"] is None else sizes["fs"]["estimate"]       # priced once, in the plan (None: the FluidX3D plugin runs it)
         left = None if st["share"] is None else st["share"] - st["queued"]
         if est is not None and left is not None:
-            fits, why, held = _fs_gate(est, a, ctx.plan, left, st["queued"])
+            fits, why, held = _fs_gate(est, a, ctx, left, st["queued"])
             if not fits:
                 shutil.rmtree(jobdir, ignore_errors=True)
                 done.set_result(_fs_fail(base, why, t0, resolution=dict(estimate=est, speed_ms=speed, left_s=left)))

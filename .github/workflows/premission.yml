@@ -2,8 +2,9 @@
 # The ci budget uses the synthetic environment fixture (tests/fixtures/ci_env), so no job here needs orca or HYCOM: `make ci`
 # generates it into /tmp/cafe_ci_data inside the same container, first, then runs every stage against it.
 # Order: the two fast steps first (about 10 min each), the audit last, every step `if: always()` so a red step does not hide the ones after it.
-# The audit runs the whole suite serially (about 71 min on 6 CPUs, more on a 4-CPU hosted runner; the real-time ArduCopter test fails under
-# parallel load, so no xdist), hence the long timeout (hosted runners allow 360 minutes).
+# The audit runs the suite with pytest-xdist by file (cafe/pm/audit.py pytest_passes), then the real-time ArduCopter tests alone with --cov-append
+# (they fail under parallel load). Run serially it took 71 min on 6 CPUs and was killed at the 180 min timeout on the 4-CPU hosted runner
+# (run 41595101496); the timeout stays long because the first run of the parallel audit has not been timed there.
 name: premission
 on: [push, pull_request]
 jobs:
@@ -20,6 +21,10 @@ jobs:
         if: always()
         run: docker run --rm -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make broken
       # red until `make mutation` has stored docs/mutation.json (STATUS.md, made at code freeze): the audit refuses a tree without the mutation record
+      # the real autopilot the UAS receipts fly against: ArduPilot's stable-4.7.1 SITL build, sha-256 pinned (bench/install_sitl.sh), at /work/sitl
+      - name: ArduCopter SITL
+        if: always()
+        run: sh bench/install_sitl.sh $PWD/.work/sitl
       - name: make audit (code, tests, coverage gates)
         if: always()
-        run: docker run --rm -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make audit
+        run: docker run --rm -v $PWD:/app -v $PWD/.work:/work:ro -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make audit

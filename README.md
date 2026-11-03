@@ -21,6 +21,7 @@ make install                                    # once: builds the cafe and cafe
 export CAFE_HOST_DATA=$HOME/cafe-data && mkdir -p $CAFE_HOST_DATA
 pm() { docker run --rm --ulimit core=0 --shm-size 16g -u $(id -u):$(id -g) -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD) \
        -e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain)" ]; then echo 1; else echo 0; fi) \
+       -e CAFE_WORK=/data/work \
        -v $PWD:/app -v $CAFE_HOST_DATA:/data -w /app cafe-pm "$@"; }                                  # every other command runs inside the cafe-pm image
 pm python -m cafe.pm fetch --mission missions/tepex_c_demo.yaml                                        # once: downloads the mission's data (resumable, ~2.5 h)
 pm bin/run_premission --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out runs/quick   # then open runs/quick/report/index.html
@@ -189,10 +190,12 @@ anything marked running, so a CFD characterization in progress starts over: chec
 Pinned packages: `requirements.txt` holds the direct dependencies at the versions in the running image (the
 Dockerfile pins `capytaine` too); transitive packages float. The ArduPilot SITL binaries and `.parm` files in
 `~/work/cafe/data/sitl/` (`arducopter`, `ardurover`, `ardusub`) are ArduPilot 4.7.1 (git `dbe79216`), static x86-64
-builds dated 2026-10-10. Nothing in this repo or its history records where they came from or
-how they were built, so they are **not reproducible from this repository**; if they are lost, rebuild
-ArduPilot `Copter-4.7.1`/`Rover-4.7.1`/`Sub-4.7.1` for SITL (`waf configure --board sitl`) and copy the
-binaries and parm files there. sha256: arducopter `011627d4…`, ardurover `ef27042b…`, ardusub `e659c26c…`.
+builds dated 2026-10-10. `arducopter` is byte for byte ArduPilot's own published build
+(`firmware.ardupilot.org/Copter/stable-4.7.1/SITL_x86_64_linux_gnu/arducopter`, checked 2026-11-03), and `copter.parm`
+and `copter-X.parm` are `Tools/autotest/default_params` at that commit: `sh bench/install_sitl.sh [DIR]` fetches all
+three and checks their sha-256, which is how CI and a lab install get them. `ardurover` and `ardusub` are used only by
+the app, not by the pre-mission pipeline; if they are lost, rebuild `Rover-4.7.1`/`Sub-4.7.1` for SITL
+(`waf configure --board sitl`). sha256: arducopter `011627d4…`, ardurover `ef27042b…`, ardusub `e659c26c…`.
 
 ## Known limits: read before trusting a GO or a NO-GO
 

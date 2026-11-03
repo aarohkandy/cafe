@@ -237,7 +237,31 @@ def mutation_problems(root: pathlib.Path = ROOT) -> list[str]:
     return []
 
 
+OPTIONS = ("--code-only", "--ledgers-only", "--mutation-record")
+# The real-time tests (ArduCopter and its fake firmware bind sockets and wait on the wall clock): they fail under parallel load, so they run alone in the
+# second pass. The same five that pyproject.toml deselects for mutmut (tests/test_config_docs.py holds the two lists equal).
+SERIAL_TESTS = ("tests/test_uas.py::test_scrambled_motor_order_fails_the_sitl_receipts", "tests/test_uas.py::test_lockstep_machinery_answers_every_frame_once",
+                "tests/test_uas.py::test_an_autopilot_that_never_arms_is_reported_and_fails_the_sitl_receipts",
+                "tests/test_uas.py::test_an_autopilot_that_never_speaks_mavlink_is_reported", "tests/test_uas.py::test_a_firmware_that_dies_is_reported")
+
+
+def pytest_passes(workers: int) -> list[list[str]]:
+    """The audit's test step as two pytest runs under one coverage record: the suite spread over `workers` processes by file, then the real-time
+    tests alone with --cov-append (the whole suite serially took 180+ min on a 4-CPU hosted runner)."""
+    base = [sys.executable, "-m", "pytest", "-q", "-m", "not network", "--cov=cafe/pm"]
+    return [base + ["-n", str(workers), "--dist", "loadfile", "--cov-report="] + [f"--deselect={t}" for t in SERIAL_TESTS],
+            base + ["--cov-append", "--cov-report=json:coverage.json", *SERIAL_TESTS]]
+
+
 def main(argv: list[str]) -> int:
+    bad = [a for a in argv if a.startswith("--") and a not in OPTIONS]
+    if bad:
+        print(f"error: unknown option {bad[0]} ({', '.join(OPTIONS)})")
+        return 2
+    for a in argv:
+        if not a.startswith("--") and not pathlib.Path(a).is_dir():
+            print(f"error: {a} is not a run directory (the run directories are runs/quick, runs/overnight, runs/4h)")
+            return 2
     if "--mutation-record" in argv:
         (ROOT / MUTATION_FILE).write_text(json.dumps(mutation_record(ROOT), indent=1) + "\n")
         print(f"wrote {MUTATION_FILE}")
@@ -258,9 +282,11 @@ def main(argv: list[str]) -> int:
         rc, out = _run(["mypy"])
         if rc:
             problems.append("mypy:\n" + out)
-        rc, out = _run([sys.executable, "-m", "pytest", "-q", "-m", "not network", "--cov=cafe/pm", "--cov-report=json:coverage.json"])
-        if rc:
-            problems.append("pytest:\n" + out)
+        from . import par
+        for cmd in pytest_passes(par.workers()):
+            rc, out = _run(cmd)
+            if rc:
+                problems.append("pytest:\n" + out)
         if (ROOT / "coverage.json").exists():
             problems += coverage_problems(ROOT / "coverage.json")
     for p in problems:
