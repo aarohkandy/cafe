@@ -91,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("receipts")
     p.add_argument("--broken", default=None, help="overlay yaml to apply; the exit code is 0 only if it makes a receipt fail")
     p.add_argument("--slow", action="store_true", help="also run the slow receipts instead of reading their stored results")
-    p.add_argument("--only", default=None, help="comma-separated parts of receipt-group names to run")
+    p.add_argument("--only", default=None, help="comma-separated parts of receipt-group names to run; the table goes to runs/receipts_partial.json "
+                                         "(not receipts.json) unless --json says otherwise, and a part that matches no group exits 2")
     p.add_argument("--json", default=None, help="where to write the table (default runs/receipts.json, runs/receipts_broken.json with --broken)")
     p = sub.add_parser("acceptance", description=(
         "BRIEF 5.3 gates. Two independent runs agree when every verdict that is decided in either (its 95 % P(fail) interval wholly inside GO or "

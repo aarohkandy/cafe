@@ -33,7 +33,7 @@ N_MAX = {"ci": 16, "quick": 64, "4h": 256, "overnight": 512}
 N_MIN = {"ci": 8, "quick": 32, "4h": 73, "overnight": 73}            # 73: smallest n that can certify P(fail) < 5 % (stats.intervals)
 BATCH = {"ci": 16, "quick": 32, "4h": 64, "overnight": 128}         # cost is per environment call, not per member: big batches
 WINDOWS = {"ci": 1, "quick": 1, "4h": 3, "overnight": 3}             # worst windows per vehicle that get L3 LES + FEA
-SITL = {"ci": 0, "quick": 0, "4h": 4, "overnight": 8}                # ArduCopter SITL members (serial, run as parallel -I instances)
+SITL = {"ci": 0, "quick": 0, "4h": 0, "overnight": 0}                # ArduCopter SITL members: no stage flies one (round 6 M-3), only the slow receipts do
 SHARE = dict(stage1=0.45, stage3=0.30, stage1b=0.15, emulator=0.05)   # stage 1b is a copy (free) when no window passes: its share goes to the emulator
 EMULATOR_VARIANTS = {"ci": 2, "quick": 6, "4h": 24, "overnight": 48}   # most mission variants (a batch of every vehicle each) per run ...
 EMULATOR_REACH = ("4h", "overnight")                                   # ... except on these, where the cap is the count that reaches EMULATOR_MIN_POINTS

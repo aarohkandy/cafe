@@ -11,6 +11,7 @@ import pathlib
 import pickle                      # res.pkl is the pipeline's own checkpoint, written into this test's temporary run directory and read back from there
 import re
 import shutil
+import time
 import types
 
 import numpy as np
@@ -1248,7 +1249,8 @@ def test_stage1b_is_a_copy_of_stage1_when_no_vehicle_was_refit(tmp_path, monkeyp
     ctx.path("refit", "refit.json").write_text(json.dumps({"usv": dict(used=False, reason="x"), "uas": dict(used=False, reason="y")}))
     monkeypatch.setattr(pipeline, "_stage1", boom)
     d = run_stage(pipeline.s_stage1b, ctx, "stage1b")
-    assert d["notes"] == [SENS_NOTE, "no vehicle was refit: stage 1b is stage 1 (copied, not rerun)"]
+    assert d["notes"][0] == SENS_NOTE and len(d["notes"]) == 2          # round 6 M-17: the copy note now also says the sensitivity case ran (test below)
+    assert d["notes"][1].startswith("no vehicle was refit: stage 1b is stage 1 (copied, not rerun)")
     assert (ctx.run_dir / "stage1b" / "res.pkl").read_bytes() == (ctx.run_dir / "stage1" / "res.pkl").read_bytes()
     # stage 1's summary plus the passes done
     assert json.loads((ctx.run_dir / "stage1b" / "summary.json").read_text()) == dict(n=8, refit_iterations_performed=0)
@@ -1958,7 +1960,8 @@ def test_no_passing_window_means_no_refit_and_stage1b_is_a_copy(ci_runs):
         assert r["used"] is False and "window passed its stage-3" in r["reason"] and r["failed_checks"] == ["mach_max"]
     sens_note, copied = f.ledger1b["notes"]
     assert f.res1b == f.res1 and f.summary1b == dict(f.summary1, refit_iterations_performed=0)
-    assert copied == "no vehicle was refit: stage 1b is stage 1 (copied, not rerun)"
+    assert copied.startswith("no vehicle was refit: stage 1b is stage 1 (copied, not rerun); the sensitivity case reran the USV in ")
+    assert copied.endswith(" s, not charged to any share")
     assert re.fullmatch(r"sensitivity case \(brief VPP bias, same members and inputs, only usv_vpp_bias replaced\): usv \d+ of 8 (GO|MARGINAL|NO-GO)",
                         sens_note)
     outs = {pathlib.Path(o["path"]).name: o["sha256"] for o in f.ledger1b["outputs"]}
@@ -2760,3 +2763,22 @@ def test_the_workers_of_a_run_are_the_cpus_cut_to_what_the_memory_holds_and_ever
     assert (plan["workers_by_cpu"], plan["workers_by_memory"], plan["workers"], ctx.plan["workers"]) == (8, 1, 1, 1) and plan["mem_gb"] == 4.0
     assert plan["env_gb"] == pytest.approx(2.25) and seen == [(1, 1)] and any(m.startswith("workers: 1 ") for m in log)
     assert "capped from 8 by memory" in log[0] and par.workers() == 8                                      # and the cap is gone after the run
+
+
+def test_the_stage_1b_copy_note_and_ledger_say_how_long_the_sensitivity_case_ran(tmp_path, monkeypatch, sens):
+    """Round 6 M-17: the ledger called stage 1b a copy although it had run a 30 s USV case that no share was charged."""
+    ctx = ctx_for(tmp_path / "r")
+    stage1_files(ctx)
+    ctx.path("refit", "refit.json").write_text(json.dumps({"usv": dict(used=False, reason="x")}))
+    ticks = iter([100.0, 130.0])
+    monkeypatch.setattr(pipeline, "time", types.SimpleNamespace(time=time.time, perf_counter=lambda: next(ticks)))           # only this module's clock
+    d = run_stage(pipeline.s_stage1b, ctx, "stage1b")
+    assert d["sensitivity_wall_s"] == 30.0
+    assert d["notes"][1] == ("no vehicle was refit: stage 1b is stage 1 (copied, not rerun); the sensitivity case reran the USV in 30 s, "
+                             "not charged to any share")
+    ctx2 = ctx_for(tmp_path / "r2")                                                           # no USV: no case ran, the note is the old one
+    ctx2.mission = dict(ctx2.mission, vehicles=[v for v in ctx2.mission["vehicles"] if pipeline.stage1._classes(ctx2.mission)[v["id"]] != "usv"])
+    stage1_files(ctx2)
+    ctx2.path("refit", "refit.json").write_text(json.dumps({}))
+    d2 = run_stage(pipeline.s_stage1b, ctx2, "stage1b")
+    assert "sensitivity_wall_s" not in d2 and d2["notes"] == ["no vehicle was refit: stage 1b is stage 1 (copied, not rerun)"]

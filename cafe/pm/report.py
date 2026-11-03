@@ -108,9 +108,13 @@ class Trace:
         own ledgers hold. A missing meta file or digest is as stale as a different one: nothing says the table was made by this code."""
         meta = RECEIPTS.with_name(META_NAME)
         try:
-            made = json.loads(meta.read_text()).get("code_digest")
+            md = json.loads(meta.read_text())
+            made, part = md.get("code_digest"), md.get("only")
         except (OSError, ValueError, AttributeError):
             return f"{RECEIPTS_NAME} has no readable {META_NAME} beside it, so nothing says which code made it: rerun `python -m cafe.pm receipts`"
+        if part:                                                                   # a table made with `--only` (older meta files have no key or null)
+            return (f"{RECEIPTS_NAME} was made with --only {','.join(part)}: it holds a part of the receipts; rerun `python -m cafe.pm receipts` "
+                    "(the receipts below are not counted as a pass)")
         mine = next((L["code_digest"] for L in self.led.values() if L and L.get("code_digest")), None)
         if mine is None or made != mine:
             return (f"{RECEIPTS_NAME} was made by code {str(made)[:12]}, this run by {str(mine)[:12]}: rerun `python -m cafe.pm receipts` "
@@ -336,6 +340,7 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
         d["distance"] = num(t["distance"], "z-scored", ref, src + path + ".distance") if "distance" in t else None
         d["threshold"] = num(t["threshold"], "z-scored", ref, src + path + ".threshold") if "threshold" in t else None
         d["n"] = num(t["n"], "members", ref, src + path + ".n") if "n" in t else None
+        d["same_as_baseline"] = bool(t["lo"] <= f["p_fail"] <= t["hi"]) if "p_fail" in t else None      # a flag, not a test (round 6 M-13)
         return d
     n_ev = sum(t["method"] != "not evaluated" for t in f["tried"])
     n_inv = sum(bool(t.get("invalid")) for t in f["tried"])
@@ -846,6 +851,9 @@ def _timing(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, 
     if L and plan.get("stage1_s") is not None:
         out["stage1"] = dict(planned=num(plan["stage1_s"], "s", pref, "plan.json stage1_s"), basis=plan.get("stage1_s_basis"),
                              measured=num(L["wall_s"], "s", tr.ref("stage1"), "checkpoints/stage1/ledger.json wall_s"))
+    sw = (tr.led.get("stage1b") or {}).get("sensitivity_wall_s")               # the USV rerun under the brief's VPP bias: in no share of the plan (M-17)
+    if sw is not None:
+        out["stage1b_sensitivity"] = dict(measured=num(sw, "s", tr.ref("stage1b"), "checkpoints/stage1b/ledger.json sensitivity_wall_s"))
     d = tr.led.get("emulator") or {}
     w = d.get("variant_wall_s")
     if w and d.get("variant_planned_s") is not None:
@@ -1013,11 +1021,17 @@ def _top3_html(top: list[Any], floor: Any = None, quantity: str | None = None) -
     return f"<p>Top sensitivities (Sobol first-order, share of the variance of {what}, above the permutation noise floor): {items}{fl}.</p>"
 
 
+SAME_AS_BASELINE = "not distinguishable from the baseline (its interval contains the baseline's P(fail))"
+
+
 def _tried_html(t: dict[str, Any]) -> str:
     e = html.escape
     how = e("n/a" if t["method"] == "not evaluated" else t["method"]) + (f", n = {_n(t['n'])}" if t["n"] else "") \
         + (f", distance {_n(t['distance'])} of {_n(t['threshold'])}" if t["distance"] else "")
-    return (f"<tr><td>{e(t['change'])}<td>{_n(t['cost'])}<td>{how}<td>{_n(t['p_fail'])}<td>{e(str(t['verdict'] or ''))}<td>{e(t['reason'])}</tr>")
+    u = (t["p_fail"] or {}).get("uncertainty")
+    pf = _n(t["p_fail"]) + (f" ({u['lo']:.3g} to {u['hi']:.3g})" if u else "")
+    note = e(t["reason"]) + (f"{'; ' if t['reason'] else ''}{SAME_AS_BASELINE}" if t.get("same_as_baseline") else "")
+    return f"<tr><td>{e(t['change'])}<td>{_n(t['cost'])}<td>{how}<td>{pf}<td>{e(str(t['verdict'] or ''))}<td>{note}</tr>"
 
 
 def _fix_html(f: dict[str, Any]) -> str:
@@ -1032,7 +1046,7 @@ def _fix_html(f: dict[str, Any]) -> str:
         u = b["p_fail"]["uncertainty"]
         how = (f"EMULATED, training-set distance {_n(b['distance'])} of {_n(b['threshold'])}" if b["method"] == "EMULATED" else f"Stage 1, n = {_n(b['n'])}")
         line = (f"<b>{e(b['change'])}</b>: P(fail) {_n(f['p_fail_before'])} becomes {_n(b['p_fail'])} ({u['lo']:.3g} to {u['hi']:.3g}, {e(u['kind'])}), "
-                f"{_badge(f['verdict_before'])} to {_badge(b['verdict'])} ({how}).")
+                f"{_badge(f['verdict_before'])} to {_badge(b['verdict'])} ({how}){'; ' + SAME_AS_BASELINE if b.get('same_as_baseline') else ''}.")
     elif f["evaluated"]["value"] == 0:
         line = (f"<b>not searched</b>: none of the {_n(f['candidates'])} could be evaluated (no emulator answer in range, and this vehicle's share "
                 f"of the Stage-1 budget did not cover a run), so this is not a finding that nothing helps (P(fail) now {_n(f['p_fail_before'])}).")
@@ -1361,7 +1375,8 @@ def _emulator_html(m: dict[str, Any]) -> str:
               f"Variant runs of the mission: {_n(d['variants'])} "
               f"({_n(d['variant'])} each, from {e(d['variant_source'])}) were charged {_n(d['spent'])} of planned cost against the emulator share "
               f"{_n(d['share'])}, of which {_n(d['train_budget'])} is for them"
-              f"{' (including stage 1b, which was a copy)' if d['stage1b_free'] else ''}; the flip search was charged {_n(d['flip_spent'])} of planned "
+              f"{' (the share of stage 1b included, since no vehicle was refit)' if d['stage1b_free'] else ''}; "
+              f"the flip search was charged {_n(d['flip_spent'])} of planned "
               "Stage-1 cost (a planned charge, not a measurement: each stage's measured time is under Machine and budget).</p>")
         if d["variants"]["value"] == 0:
             h += (f"<p class=warn>No variant run fitted: one costs {_n(d['variant'])}, more than the {_n(d['train_budget'])} they may use, so this run "
@@ -1385,6 +1400,9 @@ def _machine_html(m: dict[str, Any]) -> str:
     if s1:
         basis = f" (the plan is a lower bound: {e(s1['basis'])})" if s1["basis"] else ""
         took += f"<p>Stage 1: planned {_n(s1['planned'])}, measured {_n(s1['measured'])}{basis}.</p>"
+    if sv := tm.get("stage1b_sensitivity"):
+        took += ("<p>Stage 1b sensitivity case (the USV again under the brief's VPP bias): planned none, it is charged to no share; "
+                 f"measured {_n(sv['measured'])}.</p>")
     if vr:
         took += f"<p>Emulator variant runs: {_n(vr['runs'])}, planned {_n(vr['planned'])}, measured {_n(vr['measured'])}.</p>"
     ing = (f"<p class=muted>Ingest took {_n(m['wall_s']['ingest'])}: it is not counted against --budget (a download over the network is a separate step, "
@@ -1392,7 +1410,8 @@ def _machine_html(m: dict[str, Any]) -> str:
     return (f"<pre>{e(m['describe'])}</pre><div class=scroll><table><tr><th>Vehicle<th>Cost per mission day (s per batch + s per member)"
             f"<th>Source</tr>{cost}</table></div>"
             f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div><p class=muted>{e(m['report_stage'])}.</p>{ing}"
-            f"<p>Plan: {plan}.</p>{took}"
+            f"<p>Plan: {plan}. ArduCopter SITL is not part of the pipeline; it runs only as the slow receipts (<code>UAS SITL vs our controller</code>, "
+            f"<code>UAS sortie</code>), so the ensemble is pure physics.</p>{took}"
             f"<p>Code: git {e(', '.join(m['git_sha']))}. Machine: {where}.</p><p class=muted>{ver}</p>")
 
 

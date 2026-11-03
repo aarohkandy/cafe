@@ -481,7 +481,7 @@ def test_the_emulator_section_shows_acceptance_the_noise_floor_and_the_training_
     assert g["acceptance"]["coverage_chance_fail"]["value"] == 0.42
     assert "a calibrated emulator misses it by chance with probability <span class=n>0.42<a" in html_
     assert "from the planner&#x27;s estimate" in html_
-    assert "including stage 1b" in html_
+    assert "the share of stage 1b included, since no vehicle was refit" in html_
     assert report.check_traceability(rep) == [] and report.check_rendered(rep, html_) == []
 
 
@@ -1840,3 +1840,66 @@ def test_the_machine_block_prints_what_the_planner_charged_next_to_what_the_stag
     edit_json(run / "checkpoints" / "emulator" / "ledger.json", lambda d: (d.pop("variant_planned_s"), d.pop("variant_wall_s")))
     report.write(run, m, plan)
     assert set(load(run)["machine"]["timing"]) == {"stage1"} and "the plan is a lower bound" not in (run / "report" / "index.html").read_text()
+
+
+def test_the_plan_block_says_sitl_is_not_in_the_pipeline_instead_of_a_member_count(run):
+    """Round 6 M-3: a 4h plan said '4 members' of ArduCopter SITL that no stage flew."""
+    m, plan = pm_run.make_run(run, budget_name="4h")
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert "sitl_members 0 members" in t and "sitl_members 4" not in t
+    assert ("ArduCopter SITL is not part of the pipeline; it runs only as the slow receipts (UAS SITL vs our controller, UAS sortie), "
+            "so the ensemble is pure physics") in t
+
+
+def test_a_receipts_table_made_with_only_is_stale_even_when_its_digest_is_current(run):
+    """Round 6 M-12: `receipts --only comms` replaced the full table, and the report called it current because only the digest was compared."""
+    write_receipts(report.RECEIPTS, MODEL_ROWS)
+    meta = report.RECEIPTS.with_name(report.META_NAME)
+    m, plan = pm_run.make_run(run, code_digest=DIGEST)
+    report.write(run, m, plan)
+    assert load(run)["vehicles"]["glider_eq"]["physics"]["status"] == "ok"
+    meta.write_text(json.dumps(dict(code_digest=DIGEST, only=["comms"])))
+    report.write(run, m, plan)
+    p = load(run)["vehicles"]["glider_eq"]["physics"]
+    assert p["status"] == report.STALE and "made with --only comms" in p["reason"] and "passed" not in p
+    meta.write_text(json.dumps(dict(code_digest=DIGEST, only=None)))                                    # a full table (and an older meta file without the key)
+    report.write(run, m, plan)
+    assert load(run)["vehicles"]["glider_eq"]["physics"]["status"] == "ok"
+
+
+def test_a_what_if_candidate_prints_its_interval_and_is_flagged_when_it_contains_the_baseline(run):
+    """Round 6 M-13: 9 of 32 (0.28) was listed beside a baseline of 15 of 64 (0.23) as if it were an evaluated change."""
+    m, plan = pm_run.make_run(run)
+    f = json.loads((run / "emulator" / "flip.json").read_text())
+    usv = f["vehicles"]["usv"]
+    usv["p_fail"] = 15 / 64
+    usv["tried"] = [dict(change="deploy 6 h later", mod=dict(shift_h=6.0), cost=1.0, method="Stage 1", reason="", p_fail=9 / 32, lo=0.1716, hi=0.425,
+                         verdict="MARGINAL", n=32),
+                    dict(change="deploy 12 h later", mod=dict(shift_h=12.0), cost=2.0, method="Stage 1", reason="", p_fail=0.0, lo=0.0, hi=0.0889,
+                         verdict="GO", n=32)]
+    usv.update(found=True, best=usv["tried"][0])
+    (run / "emulator" / "flip.json").write_text(json.dumps(f))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    a, b = rep["vehicles"]["usv"]["fix"]["tried"]
+    assert a["same_as_baseline"] is True and b["same_as_baseline"] is False
+    rows = [plain(r) for r in re.findall(r"<tr><td>deploy (?:6|12) h later.*?</tr>", h)]
+    assert "(0.172 to 0.425)" in rows[0] and "not distinguishable from the baseline" in rows[0]
+    assert "(0 to 0.0889)" in rows[1] and "not distinguishable" not in rows[1]
+    assert "MARGINAL (Stage 1, n = 32 members); not distinguishable from the baseline" in plain(h)               # the 'best' line says it too
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
+
+
+def test_the_machine_block_shows_the_stage_1b_sensitivity_case_seconds_it_charged_to_no_share(run):
+    """Round 6 M-17: stage 1b took 30 s of which the report said nothing; its ledger now carries `sensitivity_wall_s` and the block prints it."""
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)
+    assert "stage1b_sensitivity" not in load(run)["machine"]["timing"] and "sensitivity case (the USV again" not in (run / "report" / "index.html").read_text()
+    edit_json(run / "checkpoints" / "stage1b" / "ledger.json", lambda d: d.update(sensitivity_wall_s=30.014))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    sv = rep["machine"]["timing"]["stage1b_sensitivity"]["measured"]
+    assert sv["value"] == 30.014 and sv["stage"] == "stage1b"
+    assert "Stage 1b sensitivity case (the USV again under the brief's VPP bias): planned none, it is charged to no share; measured 30.01 s" in plain(h)
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []

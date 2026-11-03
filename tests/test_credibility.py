@@ -415,7 +415,7 @@ LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the
 
 def test_limitations_are_listed_verbatim_and_point_at_real_files():
     assert [x["text"] for x in cr.LIMITATIONS][:12] == LIMITS
-    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18", "L19"] and [x["text"] for x in cr.LIMITATIONS][12:] == LIMITS2
+    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18", "L19", "L20"] and [x["text"] for x in cr.LIMITATIONS][12:-1] == LIMITS2
     names = {k for k, _ in cr.FACTORS}
     for x in cr.LIMITATIONS:
         assert set(x["factors"]) <= names and x["where"]
@@ -707,3 +707,15 @@ def test_only_an_ensemble_that_leaves_5_percent_open_counts_as_short_of_n_certif
     edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(k_fail=0))
     u = factors(run, clean)["uncertainty"]
     assert u["evidence_level"] == 2 and "1 verdict(s) have n below n_certify" in " ".join(u["missing"])             # a zero-failure ensemble does
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 6 (batch S)
+
+def test_the_single_height_uas_turbulence_is_a_listed_limitation_that_moves_no_level():
+    """Round 6 M-18: L20. The Mann box of a sortie is made at one height (stage1 `z = deck + mean(levels)`) and used on every leg."""
+    x = next(x for x in cr.LIMITATIONS if x["id"] == "L20")
+    assert x["text"].startswith("UAS turbulence is generated at one height for all legs") and x["where"] == ["cafe/pm/stage1.py", "cafe/pm/env/subgrid.py"]
+    assert "z = so[\"deck_height_m\"] + float(np.mean(so[\"levels_m\"]))" in (REAL / "cafe/pm/stage1.py").read_text()          # the claim is the code's
+    others = {f for y in cr.LIMITATIONS if y["id"] != "L20" for f in y["factors"]}
+    assert set(x["factors"]) <= others
+    assert "Credibility limitation L20" in (REAL / "docs/PHYSICS.md").read_text()
