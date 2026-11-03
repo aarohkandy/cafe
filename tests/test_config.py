@@ -520,3 +520,61 @@ def test_r5_m18_a_merge_key_is_not_a_duplicate_and_the_shipped_files_load(tmp_pa
     assert config._yaml(p)["b"] == {"k": 2}
     for f in [*(config.ROOT / "missions").glob("*.yaml"), *config.PLATFORMS.glob("*.yaml"), *config.CONFIG.glob("*.yaml")]:
         assert config._yaml(f) is not None
+
+
+# ---- review round 6: M-9, M-11, M-24
+
+R6_M9 = [
+    ("negative max wind", lambda d: vehicle(d, "uas")["launch_rules"].update(max_mean_wind_ms=-5), r"vehicles/\d/launch_rules/max_mean_wind_ms"),
+    ("zero max wind", lambda d: vehicle(d, "uas")["launch_rules"].update(max_mean_wind_ms=0), r"vehicles/\d/launch_rules/max_mean_wind_ms"),
+    ("negative gust-front window", lambda d: vehicle(d, "uas")["launch_rules"].update(no_gust_front_within_min=-1),
+     r"vehicles/\d/launch_rules/no_gust_front_within_min"),
+    ("dive 1e6 m", lambda d: vehicle(d, "glider_eq")["task"].update(dive_depth_m=1e6), r"vehicles/\d/task/dive_depth_m"),
+    ("dive 1 mm", lambda d: vehicle(d, "glider_eq")["task"].update(dive_depth_m=0.001), r"vehicles/\d/task/dive_depth_m"),
+    ("radius 1e-9 km", lambda d: vehicle(d, "glider_eq")["task"].update(radius_km=1e-9), r"vehicles/\d/task/radius_km"),
+    ("radius 1e9 km", lambda d: vehicle(d, "glider_eq")["task"].update(radius_km=1e9), r"vehicles/\d/task/radius_km"),
+    ("duplicate altitudes", lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[2, 2, 2]), r"vehicles/\d/sorties/altitudes_m"),
+    ("unsorted altitudes", lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[100, 10]),
+     r"vehicles/uas/sorties/altitudes_m: \[100, 10\] does not rise"),
+    ("dive 20 m on the Seaglider", lambda d: vehicle(d, "glider_eq")["task"].update(dive_depth_m=20.0),
+     r"vehicles/glider_eq/task/dive_depth_m: 20 m is outside what the seaglider 'seaglider' dives: min_dive_m 30 m to rating_m 1000 m"),
+    ("dive below the rating", lambda d: vehicle(d, "glider_eq")["task"].update(dive_depth_m=1500.0),
+     r"task/dive_depth_m: 1500 m is outside .* rating_m 1000 m"),
+]
+
+
+@pytest.mark.parametrize("what,fn,msg", R6_M9, ids=[c[0] for c in R6_M9])
+def test_r6_m9_numbers_that_cannot_be_right_are_refused_naming_the_field(tmp_path, what, fn, msg):
+    with pytest.raises(ConfigError, match=msg):
+        load_mission(edit(tmp_path, fn))
+
+
+def test_r6_m9_the_edges_of_the_ranges_and_the_shipped_missions_still_load(tmp_path):
+    def fn(d):
+        vehicle(d, "glider_eq")["task"].update(dive_depth_m=30.0, radius_km=1000.0, lost_after_h=720.0)
+        vehicle(d, "glider_2n")["task"].update(dive_depth_m=1000.0)
+        vehicle(d, "uas")["launch_rules"].update(max_mean_wind_ms=60, no_gust_front_within_min=0)
+        vehicle(d, "uas")["sorties"].update(altitudes_m=[2, 10, 400])
+    load_mission(edit(tmp_path, fn))
+    for f in (config.ROOT / "missions").glob("*.yaml"):
+        load_mission(f)
+
+
+def test_r6_m11_a_lab_hycom_store_without_a_path_is_refused_at_validation(tmp_path):
+    with pytest.raises(ConfigError, match=r"m.yaml: environment/ocean: source 'lab_hycom' needs a path to the lab's ingested HYCOM store; add path: <store>"):
+        load_mission(edit(tmp_path, lambda d: d["environment"].update(ocean=dict(source="lab_hycom"))))
+    with pytest.raises(ConfigError, match=r"environment/ocean/temperature_kind: it belongs to the lab's HYCOM .*remove it"):
+        load_mission(edit(tmp_path, lambda d: d["environment"]["ocean"].update(temperature_kind="in_situ")))
+    m = load_mission(edit(tmp_path, lambda d: d["environment"].update(ocean=dict(source="lab_hycom", path="/data/lab.zarr", temperature_kind="potential"))))
+    assert m["environment"]["ocean"]["path"] == "/data/lab.zarr"
+
+
+def test_r6_m24_an_unquoted_timestamp_and_an_empty_value_say_how_to_fix_them(tmp_path):
+    p = tmp_path / "t.yaml"
+    p.write_text(DEMO.read_text().replace('start: "2023-03-01T12:00:00Z"', "start: 2023-03-01T12:00:00Z"))
+    with pytest.raises(ConfigError, match=r'window/start: an unquoted timestamp is read by YAML as a time; put it in quotes, e.g. "2023-03-01T12:00:00Z"') as e:
+        load_mission(p)
+    assert "datetime" not in str(e.value)
+    p.write_text(re.sub(r"description: >\n(  .*\n)+", "description:\n", DEMO.read_text()))
+    with pytest.raises(ConfigError, match=r"description: is empty; give it a value or remove the key"):
+        load_mission(p)

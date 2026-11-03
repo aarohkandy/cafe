@@ -185,17 +185,29 @@ def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> 
     return out
 
 
-def open_store(path: Any, cache: bool = True) -> Any:
+def unreadable(path: Any, e: Exception, lab: bool | None = None) -> Exception:
+    """The ConfigError for a store (or a chunk of it) that cannot be read: it names the store itself and the repair. lab: the store is the lab's HYCOM,
+    which the pipeline cannot download again (deleting it would destroy the only copy); None: by the name, `gofs*` is the one the pipeline fetched."""
+    from ..config import ConfigError
+    p = pathlib.Path(path)
+    if lab is None:
+        lab = not p.name.startswith("gofs")
+    fix = (f"restore {p} from the lab's source (`python -m cafe.pm ingest-ocean --mission ... --path DIR --temperature-kind K` writes it); "
+           "the pipeline cannot download it" if lab else
+           f"delete {p} and run `python -m cafe.pm fetch --mission ...` again: only that part is downloaded again")
+    return ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); {fix}")
+
+
+def open_store(path: Any, cache: bool = True, lab: bool | None = None) -> Any:
     """The Zarr store, time as float seconds. Refuses a store without a valid temperature_kind attribute. cache False: xarray keeps no copy of a
-    variable it has read (env.ocean.Ocean keeps its own float32 one, and xarray's would be a second copy of every field, pickled into each worker)."""
+    variable it has read (env.ocean.Ocean keeps its own float32 one, and xarray's would be a second copy of every field, pickled into each worker).
+    lab: see `unreadable`."""
     import xarray as xr
     try:
         ds = (xr.open_zarr(path, decode_times=False, consolidated=False) if cache else
               xr.open_dataset(path, engine="zarr", decode_times=False, consolidated=False, cache=False))      # open_zarr has no `cache`
     except Exception as e:                                                # noqa: BLE001  a missing or unreadable store is one advice
-        from ..config import ConfigError
-        raise ConfigError(f"environment cache file {path} cannot be read ({type(e).__name__}: {e}); delete {pathlib.Path(path).parent} and run "
-                          f"`python -m cafe.pm fetch --mission ...` again: only that part is downloaded again") from e
+        raise unreadable(path, e, lab) from e
     kind_of(ds.attrs.get("temperature_kind"))
     return ds
 

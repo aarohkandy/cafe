@@ -33,9 +33,9 @@ def store_path(spec: dict[str, Any], mission_name: str | None) -> pathlib.Path:
 
 
 class Ocean:
-    def __init__(self, path: Any, bathymetry: bathy.Bathymetry | None = None):
-        self.path = pathlib.Path(path)
-        self.ds = hycom.open_store(self.path, cache=False)
+    def __init__(self, path: Any, bathymetry: bathy.Bathymetry | None = None, lab: bool | None = None):
+        self.path, self.lab = pathlib.Path(path), lab                      # lab: the store is the lab's HYCOM (see hycom.unreadable)
+        self.ds = hycom.open_store(self.path, cache=False, lab=lab)
         a = self.ds.attrs
         self.src = f"{a.get('source', 'HYCOM')} ({self.path.name}, manifest sha256 {str(a.get('manifest_sha256', '?'))[:12]})"
         self.axes = [Axis(self.ds.time.values, "time"), Axis(self.ds.depth.values, "depth"), Axis(self.ds.lat.values, "lat"),
@@ -53,7 +53,12 @@ class Ocean:
 
     def _field(self, name: str) -> Any:
         if name not in self.f:
-            self.f[name] = par.adopt(self.ds[name].values.astype("f4"))     # straight into shared memory when stage 1 runs workers: one field at a time
+            var = self.ds[name]
+            try:
+                a = var.values.astype("f4")                                # the chunks are read here: a truncated one is the same advice as an unreadable store
+            except Exception as e:                                         # noqa: BLE001  zarr/numcodecs raise RuntimeError, ValueError, OSError ...
+                raise hycom.unreadable(self.path, e, self.lab) from e
+            self.f[name] = par.adopt(a)                                    # straight into shared memory when stage 1 runs workers: one field at a time
         return self.f[name]
 
     def _at(self, name: str, lon: Any, lat: Any, z: Any, t: Any) -> Any:
@@ -85,6 +90,7 @@ def open_ocean(spec: dict[str, Any], cache: Any, mission_name: str | None = None
     path = store_path(spec, mission_name or pathlib.Path(cache).name)
     if not path.exists():
         return None
-    ds = hycom.open_store(path)
+    lab = spec.get("source", "gofs31") != "gofs31"
+    ds = hycom.open_store(path, lab=lab)
     b = box or tuple(float(x) for x in (ds.lat.values[0], ds.lat.values[-1], ds.lon.values[0], ds.lon.values[-1]))
-    return Ocean(path, bathy.choose(b, DATA / "bathy", gofs=path, umwm=umwm, fetch=fetch_bathy, url=gebco_url or bathy.GEBCO_URL))
+    return Ocean(path, bathy.choose(b, DATA / "bathy", gofs=path, umwm=umwm, fetch=fetch_bathy, url=gebco_url or bathy.GEBCO_URL), lab=lab)

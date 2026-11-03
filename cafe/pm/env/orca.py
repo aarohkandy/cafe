@@ -227,6 +227,23 @@ def _save(path: pathlib.Path, d: dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def read_json(path: str | pathlib.Path) -> dict[str, Any] | None:
+    """The JSON object in `path`, or None when the file is absent, empty, truncated or not an object: the caller treats it as "no record" and fetches
+    again (the writers below replace the file atomically, so only a file from an older run or a damaged disk is ever like that)."""
+    try:
+        d = json.loads(pathlib.Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def write_json(path: pathlib.Path, obj: Any, **kw: Any) -> None:
+    """`obj` as JSON in `path`, through a sibling temporary and os.replace: an ingest killed mid-write leaves the old file, never half of a new one."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(obj, **kw))
+    os.replace(tmp, path)
+
+
 def ingest(t0: dt.datetime, t1: dt.datetime, box: Box, out: str | pathlib.Path, hours3d: Iterable[dt.datetime] = (), threads: int = 8,
            spectra: bool = True, log: Callable[[str], None] = print) -> dict[str, Any]:
     """Fetch every hour t0..t1 for `box` into `out`. Returns the manifest (also written to out/manifest.json)."""
@@ -269,16 +286,16 @@ def _drop_stale_parts(out: pathlib.Path, box: Box, h3: set[str]) -> None:
     the parts on disk (written before anything is fetched, so an interrupted ingest resumes): another box, or no record, drops every part; a 3-D
     hour the parts did not have drops that hour's wrf part."""
     cut = out / "cut.json"
-    old: dict[str, Any] = json.loads(cut.read_text()) if cut.is_file() else {}
+    old = read_json(cut) or {}                                           # an unreadable record is no record: every part is dropped and fetched again
     have: set[str] = set()
-    if old.get("box") != list(box):
+    if old.get("box") != list(box) or not isinstance(old.get("hours3d"), list):
         stale = list((out / "hours").glob("*.npz"))
     else:
         have = set(old["hours3d"])
         stale = [out / "hours" / f"wrf_{s}.npz" for s in sorted(h3 - have)]
     for p in stale:
         p.unlink(missing_ok=True)
-    cut.write_text(json.dumps(dict(box=list(box), hours3d=sorted(have | h3))))
+    write_json(cut, dict(box=list(box), hours3d=sorted(have | h3)))
 
 
 def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any], ug: dict[str, Any], pts: dict[str, Any] | None,
@@ -325,5 +342,5 @@ def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any],
                umwm_index=dict(j=ug["j"], i=ug["i"]), wrf_attrs=wg["attrs"],
                parts={p.name: remote.sha256(p) for p in parts},
                bytes_fetched=int(sum(int(w["_bytes"]) for w in W)))
-    (out / "manifest.json").write_text(json.dumps(man, indent=1, default=str))
+    write_json(out / "manifest.json", man, indent=1, default=str)
     return man

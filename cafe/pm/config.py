@@ -73,12 +73,21 @@ def _finite(node: Any, path: pathlib.Path, where: str = "") -> None:
         _finite(v, path, f"{where}/{name}".lstrip("/"))
 
 
+def _say(e: Any) -> str:
+    """The schema's message, except for the two slips a lab user makes first: YAML reads an unquoted timestamp as a time, and an empty key as None."""
+    if e.validator == "type" and isinstance(e.instance, (dt.datetime, dt.date)):
+        return f"an unquoted timestamp is read by YAML as a time; put it in quotes, e.g. \"{e.instance:%Y-%m-%dT%H:%M:%SZ}\""
+    if e.validator == "type" and e.instance is None:
+        return "is empty; give it a value or remove the key"
+    return str(e.message)
+
+
 def validate(doc: Any, schema_name: str, where: str) -> Any:
     import jsonschema
     schema = json.loads((SCHEMAS / schema_name).read_text())
     errs = sorted(jsonschema.Draft202012Validator(schema).iter_errors(doc), key=lambda e: list(e.absolute_path))
     if errs:
-        lines = [f"  {'/'.join(map(str, e.absolute_path)) or '(top level)'}: {e.message}" for e in errs[:12]]
+        lines = [f"  {'/'.join(map(str, e.absolute_path)) or '(top level)'}: {_say(e)}" for e in errs[:12]]
         raise ConfigError(f"{where}: {len(errs)} problem(s) against cafe/schemas/{schema_name}:\n" + "\n".join(lines))
     return doc
 
@@ -116,6 +125,30 @@ def _unread_keys(doc: Any, path: pathlib.Path) -> None:
         pat = v.get("sorties", {}).get("pattern") if isinstance(v, dict) and isinstance(v.get("sorties"), dict) else None
         if pat not in (None, "flux_profile"):
             raise ConfigError(f"{path}: vehicles/{v.get('id')}/sorties/pattern: only 'flux_profile' is flown by this build, not {pat!r}; use flux_profile")
+
+
+TABLES = {"radios": "radio table", "modems": "modem table"}      # platform files that hold a table of radios / modems, not one vehicle
+
+
+def table_provenance(doc: Any) -> list[str]:
+    """Paths in a radios.yaml / modems.yaml table that say nothing about where they come from: an entry (radios.rfd900x, modems.benthos_atm960)
+    with no `source`, and a {value, ...} leaf that has neither a `source` nor (`assumed: true` and a `why`)."""
+    bad: list[str] = []
+    for group, entries in (doc.items() if isinstance(doc, dict) else ()):
+        for name, entry in (entries.items() if isinstance(entries, dict) else ()):
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get("source"):
+                bad.append(f"{group}.{name}.source")
+            bad += [f"{group}.{name}.{p}" for p in _leaf_problems(entry)]
+    return bad
+
+
+def _leaf_problems(node: Any, path: str = "") -> list[str]:
+    from .physics.uas import check_provenance
+    if isinstance(node, dict) and "value" in node:
+        return check_provenance(node, path)
+    return [b for k, v in node.items() for b in _leaf_problems(v, f"{path}.{k}" if path else k)] if isinstance(node, dict) else []
 
 
 def _registry(name: str, key: str) -> dict[str, Any]:
@@ -220,6 +253,12 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
     t0, t1 = utc(m["window"]["start"], f"{path}: window/start"), utc(m["window"]["end"], f"{path}: window/end")
     if t1 <= t0:
         raise ConfigError(f"{path}: window.end {m['window']['end']} is not after window.start; swap them")
+    oc = m["environment"]["ocean"]
+    if oc["source"] == "lab_hycom" and not oc.get("path"):
+        raise ConfigError(f"{path}: environment/ocean: source 'lab_hycom' needs a path to the lab's ingested HYCOM store; add path: <store>, "
+                          f"e.g. path: /data/ocean/lab_{m['name']}.zarr")
+    if oc["source"] == "gofs31" and "temperature_kind" in oc:
+        raise ConfigError(f"{path}: environment/ocean/temperature_kind: it belongs to the lab's HYCOM (source: lab_hycom) and GOFS 3.1 has its own; remove it")
     ids = [v["id"] for v in m["vehicles"]]
     dup = {i for i in ids if ids.count(i) > 1}
     if dup:
@@ -256,6 +295,12 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
                 if not _in_box(lon, lat, m["box"]):
                     raise ConfigError(f"{where}: point ({lon}, {lat}) is outside the mission box {m['box']}; widen the box or move the point")
         plat, cls = load_platform(v["platform"]), _check_platform(v, where)
+        if cls == "glider" and "dive_depth_m" in v.get("task", {}):
+            from .physics import glider
+            P, dd = glider.load_platform(v["platform"]), v["task"]["dive_depth_m"]
+            if not P["min_dive_m"] <= dd <= P["rating_m"]:
+                raise ConfigError(f"{where}/task/dive_depth_m: {dd:g} m is outside what the {P['kind']} '{v['platform']}' "
+                                  f"dives: min_dive_m {P['min_dive_m']:g} m to rating_m {P['rating_m']:g} m; use a depth in that range")
         if "sorties" in v and cls != "uas":
             raise ConfigError(f"{where}/sorties: only a UAS (a vehicle with `base`) flies sorties; remove sorties, or add base: <the ship's id>")
         so = v.get("sorties", {})
@@ -273,7 +318,10 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
                 raise ConfigError(f"{where}/sorties: no launch fits in the window "
                                   f"(local_solar_time {so['local_solar_time']} at lon {m['ship']['lon']:g} is {utc_hm}Z, "
                                   f"a launch needs {hard:g} min before window.end); widen the window or change the time")
-            if (high := [a for a in so.get("altitudes_m", ()) if a > orca.WIND3D_TOP_M]):
+            alt = so.get("altitudes_m", ())
+            if any(b <= a for a, b in zip(alt, alt[1:], strict=False)):
+                raise ConfigError(f"{where}/sorties/altitudes_m: {list(alt)} does not rise; list the flight levels from the lowest to the highest, each once")
+            if (high := [a for a in alt if a > orca.WIND3D_TOP_M]):
                 raise ConfigError(f"{where}/sorties/altitudes_m: {high[0]:g}: the stored WRF levels end at about {orca.WIND3D_TOP_M:g} m; "
                                   f"the wind above that is not known; "
                                   f"use altitudes up to {orca.WIND3D_TOP_M:g} m")
@@ -299,7 +347,7 @@ def load_platform(name: str | pathlib.Path) -> dict[str, Any]:
     p = pathlib.Path(name)
     path = p if p.suffix in (".yaml", ".yml") else PLATFORMS / f"{name}.yaml"
     if not path.exists():
-        have = sorted(x.stem for x in PLATFORMS.glob("*.yaml"))
+        have = sorted(x.stem + (" (table)" if x.stem in TABLES else "") for x in PLATFORMS.glob("*.yaml"))
         raise ConfigError(f"platform '{name}': no file {path}; available: {have}")
     doc = _yaml(path)
     if not isinstance(doc, dict):

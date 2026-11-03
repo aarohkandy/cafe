@@ -502,3 +502,37 @@ def test_ingest_stops_on_a_drifted_hour(orca_env, tmp_path):
     put_wrf(orca_env, 2, units={"U10": "knots"})
     with pytest.raises(ValueError, match=r"U10\.units = 'knots'"):
         ingest(orca_env, tmp_path / "out")
+
+
+# ---- review round 6, M-8: the manifests are written atomically and an unreadable record is no record
+
+def test_r6_m8_read_json_treats_an_empty_truncated_or_non_object_file_as_absent(tmp_path):
+    f = tmp_path / "m.json"
+    assert orca.read_json(f) is None
+    for text in ("", "{garbage", '{"a": ', "[1, 2]", "null"):
+        f.write_text(text)
+        assert orca.read_json(f) is None
+    f.write_text('{"a": 1}')
+    assert orca.read_json(f) == {"a": 1}
+
+
+def test_r6_m8_a_write_interrupted_after_the_temporary_leaves_the_old_file(tmp_path, monkeypatch):
+    f = tmp_path / "manifest.json"
+    orca.write_json(f, {"v": 1})
+
+    def boom(a, b):
+        raise OSError("killed")
+    monkeypatch.setattr(orca.os, "replace", boom)
+    with pytest.raises(OSError, match="killed"):
+        orca.write_json(f, {"v": 2})
+    assert json.loads(f.read_text()) == {"v": 1}
+
+
+@pytest.mark.parametrize("text", ["", "{garbage", '{"box": [175.0, 185.0, -2.0, 2.0]}'])
+def test_r6_m8_an_unreadable_cut_record_drops_every_part_like_no_record(orca_env, tmp_path, text):
+    out = tmp_path / "out"
+    ingest(orca_env, out)
+    (out / "cut.json").write_text(text)                                         # a truncated record, or a valid one without the 3-D hours
+    _, lines = ingest(orca_env, out)
+    assert lines[0] == "ingest: 7 parts, 0 cached, fetching 7 with 4 threads"
+    assert json.loads((out / "cut.json").read_text())["box"] == list(BOX)
