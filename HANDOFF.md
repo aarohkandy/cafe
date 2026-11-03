@@ -10,7 +10,10 @@ Round 4 is closed on `premission-step4` (the parallel stage 1, DECISIONS 266-275
 - Section 2's "2,250 passed" was a miscount: the CLAUDE.md recipe also counted traceback lines starting with `E`; the real figure was 2,196 passed and 6 errors. CLAUDE.md has the stricter recipe now.
 - Row 263 and CHANGELOG no longer claim the `seed_table(seed=4)` workaround that P reverted.
 
-Next: section 3 (q5 quick run, then review round 5; its prompt is `review/round_5/PROMPT.md`).
+Then, the same day:
+- **q5** (`runs/q5`, code `d9878e4`, 6 CPUs): UAS GO -> NO-GO (P(fail) 0.859, 55 of 64, all `profile_incomplete`), the rest as in q4; 64 members per vehicle now (parallel stage 1). In STATUS and DECISIONS 237.
+- **Round 5 review:** A 17, B 16 raw (`a3bc3e7`); merged into 26 (0 critical, 6 major, 20 minor; 21 confirmed, 5 partly), `4155b3c`.
+- **Round 5 fixes, in progress:** five builders, each in its own worktree `../cafe-r5<x>` on branch `r5-<x>` from `2439265` and its own homebase dir `pm_r5<x>`: V (M-1, 4, 9, 20), C (M-3, 17, 18, 19), S (M-2, 7, 8, 10 report, 11, 12, 13 report, 26), P (M-5, 6, 10 pipeline, 13 budget, 15, 21, 23), W (M-14, 16, 22). Prompts: `review/round_5/batch_prompts/`. Each commits on its branch with a hand-back in `review/round_5/handbacks/`. Then: review each hand-back, merge the five branches into `premission-step4`, write DECISIONS 276+ and the docs (M-24, M-25 and the RUNBOOK text the hand-backs give), run the full gate, commit, q6, round 6.
 
 ## 1. The goal and the stop rule
 
