@@ -483,11 +483,11 @@ def _base(ctx: Context, w: dict[str, Any], part: str) -> dict[str, Any]:
                 cd_hangar_source=None, fea=dict(run=False, reason="the window did not run"), label=les["label"] if les["cpu_fallback"] else None)
 
 
-def _describe(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], vb: NDArray[np.float64], heading: float | None) -> None:
+def _describe(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], vb: NDArray[np.float64], heading: float | None, source: str) -> None:
     """Kinematics and hangar numbers of the case into the row."""
     base.update(fluid=veh.fluid, heading_deg=case["heading"], env_enu_ms=[float(x) for x in case["u_env"]], velocity_body_ms=[float(x) for x in vb],
                 cd_hangar=case["cd_h"], cl_hangar=case["cl_h"], cd_hangar_source=case["src"], kinematics=case["info"],
-                heading_source="stage-1 median track" if heading is not None else "relative-flow direction (no stage-1 track)")
+                heading_source=source if heading is not None else "relative-flow direction (no stage-1 track)")
     if "wetted_window_m2" in case:
         base.update(wetted_area_window_m2=case["wetted_window_m2"], wetted_area_platform_m2=case["wetted_platform_m2"],
                     wetted_area_note=case["wetted_area_note"])
@@ -512,7 +512,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     if win_s is not None and win_s < need(a, "min_window_s"):
         return fail(f"killed before it started: the stage-3 wall-clock share was spent ({win_s:.1f} s left for this window, least that can run: "
                     f"{need(a, 'min_window_s')} s)")
-    heading = track_heading(res, vid, w["t"])
+    heading, hsrc = track_heading(res, vid, w["t"]), track_heading_source(res, vid, w["t"])
     try:
         if cls == "glider":
             P = glider.load_platform(platform)
@@ -538,7 +538,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     vb = case["v"] - case["u_env"] if R is None else R @ (case["v"] - case["u_env"])
     ub = np.zeros(3)
     speed = float(np.linalg.norm(vb))
-    _describe(base, veh, case, vb, heading)
+    _describe(base, veh, case, vb, heading, hsrc)
     plan_cs = sizes["cell_steps_per_part"][cls]
     fea_s = need(a, "fea_reserve_frac") * win_s if (win_s is not None and veh.extra.get("fea")) else 0.0
     run_s = None if win_s is None else win_s - fea_s                      # the LES run's safety kill, not its size
@@ -690,12 +690,12 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
     try:
         P = usv.load_platform(platform)
         veh = usv_vehicle(P, a, platform, "hull_fs")
-        heading = track_heading(res, vid, w["t"])
+        heading, hsrc = track_heading(res, vid, w["t"]), track_heading_source(res, vid, w["t"])
         geo = freesurface.write_stl(veh, pathlib.Path(jobdir) / "hull.stl")
         case = usv_case(ctx, w, P, veh, a, heading, "hull_fs", geo["wetted_hull_m2"])      # the Hangar reference on the mesh's own wetted area
         vb = case["R"] @ (case["v"] - case["u_env"])
         speed = float(np.linalg.norm(vb))
-        _describe(base, veh, case, vb, heading)
+        _describe(base, veh, case, vb, heading, hsrc)
         base.update(wetted_area_mesh_m2=geo["wetted_hull_m2"], ref_area=veh.ref_area)
         est = None if sizes["fs"] is None else sizes["fs"]["estimate"]       # priced once, in the plan (None: the FluidX3D plugin runs it)
         left = None if st["share"] is None else st["share"] - st["queued"]

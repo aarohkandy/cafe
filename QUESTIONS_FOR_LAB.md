@@ -113,3 +113,8 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
     *Default:* assume the 0.178 does not include currents; the prior stays as calibrated, the report prints the mission ratio beside it, and
     `docs/CREDIBILITY.md` lists the question as L18. *If it does include currents:* `vpp_bias_mean` in `platforms/saildrone_explorer.yaml` has to be
     recalibrated with the same current in the calibration scenario (a code change, since `usv.mean_sog` has no current), which makes the USV faster in the mission.
+
+    14a. **Which Chiodi target matters more, the 5.4 m/s mean or the 12 m/s maximum?** (review round 7, M-4) The polar is capped at 3.3 m/s, so no single speed bias meets both:
+    the bias is solved for the 0.96 / 5.4 mean, and Stage 1 then flies 2.215 m/s at 12 m/s against Chiodi's 2.9 (24 % under; the unbiased polar's 2.92 is what `appendage_cda_m2` was fitted to).
+    *Default:* the 5.4 m/s mean is met and the 12 m/s maximum is not; both rows are in the receipts table and `docs/CREDIBILITY.md` lists it as part of L02. *If the maximum matters more:*
+    a different bias and a different cap, which is a recalibration (a code change).

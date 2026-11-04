@@ -486,7 +486,8 @@ def memory_guard(cells: float, bytes_per_cell: float, gpu_mem_gb: float) -> floa
     if need > GPU_MEM_GUARD * gpu_mem_gb:
         f = (GPU_MEM_GUARD * gpu_mem_gb / need) ** (1 / 3)
         raise PlanError(f"nest needs {need:.1f} GB > {GPU_MEM_GUARD:.0%} of {gpu_mem_gb} GB: coarsen each axis by "
-                        f"{1 / f:.2f}x (cell size x{1 / f:.2f}), or halve the box, or use FP16 storage (55 B/cell)")
+                        f"{1 / f:.2f}x (cell size x{1 / f:.2f}), or halve the box, or lower the per-cell memory (the native nest needs "
+                        f"{bytes_per_cell:g} B/cell, the figure of nest.NEST_BYTES_PER_CELL)")
     return need
 
 

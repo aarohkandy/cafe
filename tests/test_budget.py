@@ -285,7 +285,8 @@ def test_memory_guard_passes_a_fitting_nest_and_refuses_an_oversized_one_with_ad
     msg = str(e.value)
     f = (0.85 * 24.0 / 55.0) ** (1 / 3)
     assert "nest needs 55.0 GB > 85% of 24.0 GB" in msg and f"coarsen each axis by {1 / f:.2f}x" in msg
-    assert "halve the box" in msg and "FP16 storage (55 B/cell)" in msg
+    # round 7 M-13: 55 B/cell is FluidX3D's FP16 layout, which the native nest cannot use; the advice names the figure the guard was given
+    assert "halve the box" in msg and "the native nest needs 55 B/cell" in msg and "FP16" not in msg
     assert budget.memory_guard(0.85 * 24.0 * 1e9 / 55.0 * 0.9999, 55.0, 24.0) == pytest.approx(0.85 * 24.0, rel=1e-3)
 
 

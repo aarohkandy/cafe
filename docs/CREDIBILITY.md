@@ -57,7 +57,7 @@ How the details work:
 
 - **Data pedigree 3** needs `ingest/tao_compare.json`. The comparison feeds the wind priors, so it is a check against moorings and not an independent one; it is evidence about the WRF wind and the frozen SST, not about waves (TAO has no wave variable) or the ocean. The evidence line carries the pooled RMSE, bias and mooring count (q2: speed RMSE 1.46 m/s, bias +0.62; direction RMSE 24.8 deg; SST bias -0.11 K).
 - **Verification 3** needs a V&V row with a numerical-uncertainty term, which only the DTMB 5415 rows have (`vv.gci_two_grid`: Roache, `Fs = 3`, assumed order 2, `r` from the cell counts).
-- **Validation 2** needs one row with all three terms; the stored sphere and wall-model rows never have them (section 4), so Validation 2 rests on the DTMB rows. **3 needs four complete rows and every one inside its `U_val`.**
+- **Validation 2** needs one row with all three terms; the stored sphere and wall-model rows never have them (section 4), so Validation 2 rests on the DTMB rows. **3 needs four complete rows, each with a converged finest grid, and every one inside its `U_val`** (review round 7, M-5).
 - **Input pedigree** counts a platform leaf as sourced when it has a `source` and is neither `assumed` nor "recalled" in its text. It reads only the `value / source / assumed` structure, so a bare number is not counted at all and a block that carries a `source`
   string counts as one sourced item whatever its numbers are.
 - **Uncertainty 3** needs `n >= n_certify` (73) for every vehicle and link that leaves P(fail) < 5 % open, i.e. whose 95 % Wilson lower bound on P(fail) is below 5 % (an ensemble above that excludes P(fail) < 5 %, and no number of members certifies it; review round 5, M-11), and no prior of kind `assumed`. Budget `quick` (at most 64 members) cannot reach it; `battery_capacity_scale` is of kind `assumed`,
@@ -120,7 +120,7 @@ Copied from the code. "Bears on" lists the factors it caps at 2. L01 to L12 were
 | Id | Text | Bears on | Where | State today |
 |---|---|---|---|---|
 | L01 | acoustic 4 km MF range is true by construction | validation, input pedigree | `platforms/modems.yaml`, `cafe/pm/physics/comms.py` | holds: the implementation loss is derived from the vendor range with a 3 dB margin; the 6 and 8 km rows test the shape |
-| L02 | the USV 12 m/s point is a fit | validation | `platforms/saildrone_explorer.yaml`, `cafe/pm/physics/usv.py` | holds: `appendage_cda_m2` 0.02 to 0.04; the receipt is labelled CALIBRATED |
+| L02 | the USV 12 m/s point is a fit | validation | `platforms/saildrone_explorer.yaml`, `cafe/pm/physics/usv.py` | holds: `appendage_cda_m2` 0.02 to 0.04; the receipt is labelled CALIBRATED and a second row shows the model as flown (review round 7, M-4: 2.215 m/s at 12 m/s against 2.9) |
 | L03 | the Sun et al. magnitude is 8–26 % vs the published 30–35 % | validation | `cafe/pm/physics/usv.py` | holds: the sign is reproduced, the size is not |
 | L04 | the Cd receipt is a closure | validation, verification | `cafe/pm/env/coare.py` | holds: Edson's Cd table was unreadable (HTTP 403) |
 | L05 | several citations were recalled, not re-read | input pedigree | `platforms/saildrone_explorer.yaml`, `seaglider.yaml`, `quad_uas.yaml` | holds; also `config/assumptions.yaml` (the Seaglider and Slocum dimensions) and `config/subgrid.json` (Iyer and Drushka, Wills et al., Okubo) |
@@ -142,8 +142,11 @@ Copied from the code. "Bears on" lists the factors it caps at 2. L01 to L12 were
 
 ### Limitations that bear on a factor and are not in the list
 
-These were found while writing the docs. They are not in `LIMITATIONS`, so they do not cap anything; each is in `CHANGELOG.md` under Known issues.
+These were found while writing the docs. They are not in `LIMITATIONS`, so they do not cap anything; each is in `CHANGELOG.md` under Known issues, except the first three, which round 7 found (V's hand-back proposed them as limitations; making them entries of `LIMITATIONS` is a code change and was not made in the document pass).
 
+- **USV speed at moderate and strong wind is 24 % under the maximum the calibration was meant to hit** (review round 7, M-4): the best-heading speed at 12 m/s as Stage 1 flies it is 2.215 m/s against Chiodi's 2.9; the 5.4 m/s mean is met by construction (the bias is solved to give it), and no single bias meets both because the polar is capped at 3.3 m/s (Validation). Limitation L02 describes the fit; this is the part of it the flown model does not hit.
+- **USV added resistance is linearised about the calm speed** (review round 7, M-19): in short steep seas (Hs 2 m, Tp 6 s) the boat is credited 0.57 m/s it cannot make, so `becalmed` and `swept_off_track` are under-reported in exactly those sea states (Validation).
+- **USV winds above 30 m/s are outside the polar** (review round 7, M-20): members that stay there for 30 min fail `capsize_proxy` (a flag, not a physical capsize).
 - `wind_sea_age` (2.0) and `swell_age` (1.2) in `cafe/pm/env/waves.py` are assumed and are not in `assumptions.yaml`, so they are not in the assumed-inputs list.
 - The "Hangar" coefficient that the refit and the stage-3 rows divide by is the vehicle's baseline model coefficient (analytic; no Hangar CFD run), so there is no Hangar GCI, observed order or mesh-quality evidence behind it (Verification, Validation).
 - The stage-1 UAS Mann-turbulence draws are keyed by batch, not by member (a Mann box is generated for the whole batch), so a member's turbulence segment depends on the batch size, which the stage-1 ledger records. Round 2 (M-12) keys the gust-front and Iridium draws per member where that is cheap (Uncertainty).

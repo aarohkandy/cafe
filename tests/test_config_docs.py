@@ -203,3 +203,35 @@ def test_the_ci_containers_run_as_the_runner_and_the_audit_log_is_uploaded():
     up = wf.split("- name: audit log")[1]
     assert "uses: actions/upload-artifact@v4" in up and "path: audit.log" in up and "if: always()" in up
     assert "audit.log" in text(".gitignore")
+
+
+def test_the_usv_speed_prior_says_its_width_is_not_an_uncertainty_of_this_model():
+    """Round 7 M-15: the +-1.4 % prior read as the model's uncertainty; the platform source and the perturbation citation both say what it is."""
+    import yaml
+    plat = yaml.safe_load(text("platforms", "saildrone_explorer.yaml"))
+    src = next(v["source"] for blk in plat.values() if isinstance(blk, dict) for k, v in blk.items() if k == "vpp_bias_sd")
+    pert = yaml.safe_load(text("config", "perturbations.yaml"))["usv_vpp_bias"]
+    assert "not an uncertainty of this model" in src and "not an uncertainty of this model" in str(pert)
+
+
+# ---- review round 7, documents (M-38, M-45, M-46)
+
+def test_the_runbook_says_what_fits_in_memory_and_that_the_figure_is_the_models():
+    """M-38: a 30-day window is refused on a 32 GB machine on a figure that rests on one measured 6-day point; the RUNBOOK says so."""
+    rb = text("docs", "RUNBOOK.md")
+    assert "About 15 days of the demo box fit 32 GB" in rb and "(`pad_deg`)" in rb
+    assert "The memory figure is the model's (linear from one measured 6-day point), not a measurement." in rb
+
+
+def test_the_runbook_names_the_last_line_make_ci_prints():
+    """M-45: the `ci` target ends with the ledger audit, whose last print is `audit: N problem(s)`, not the run's `report:` line."""
+    recipe = re.search(r"^ci:.*\n((?:\t.*\n)+)", text("Makefile"), re.M).group(1).splitlines()
+    assert recipe[-1].strip().startswith("$(PY) -m cafe.pm.audit --ledgers-only")
+    assert 'print(f"audit: {len(problems)} problem(s)")' in text("cafe", "pm", "audit.py")
+    assert "then `audit: 0 problem(s)` as the last line, and exit code 0" in text("docs", "RUNBOOK.md")
+
+
+def test_the_round_7_corrections_of_rows_213_and_281_are_in_the_rows():
+    """M-7 and M-46: row 213 named the member blocks the code does not build, and row 281 dated a measurement after the commit that carries it."""
+    assert "the block of batch members after the ones stage 1b used" in row(213) and "(k + 1) x batch" in row(213) and "(amended by 346 and 347)" in row(213)
+    assert "2026-11-05" not in row(281).split(" | ")[1] and "the date is not recorded" in row(281)

@@ -19,6 +19,8 @@ Then, the same day:
 
 **Round 6 fixes are merged** (update, 2026-11-03): the five branches (`r6-v`, `r6-c`, `r6-s`, `r6-p`, `r6-w`) are merged into `premission-step4` with the lead's integration edits (DECISIONS 308 to 338: the 26 findings in order, then L-W1 and L-W2 for the audit's two-pass test step and the pinned SITL install, L3 to L5), and the documents are written from the hand-backs in `review/round_6/handbacks/`. Batch W was finished by the lead, not by its builder. Next: the full gate on the merged tree (the test count is pending everywhere it is quoted), then q7 on the round-6 code to see what moved in the demo verdicts, then round 7. Never use `git stash` (CLAUDE.md): the stash list is shared by every worktree, and two builders' stashes crossed in round 6.
 
+**Round 7 fixes are merged** (update): round 7 had four reviewers (A and B over everything, C and D over the parts they did not cover) and 47 findings (0 critical, 14 major, 33 minor); six batches (`r7-c`, `r7-p`, `r7-o`, `r7-v`, `r7-s`, `r7-r`) are merged into `premission-step4` with the lead's integration items L1 to L5, and the DECISIONS rows 341 to 392, CHANGELOG, RUNBOOK, PHYSICS, CREDIBILITY, QUESTIONS_FOR_LAB 14a and STATUS are written from the hand-backs in `review/round_7/handbacks/`. Next: the full gate on the merged tree (the test count is pending everywhere it is quoted), then q8 on the round-7 code to see what moved in the demo verdicts, then round 8. At code freeze the stored slow stage-3 results must be stored again (they are stale since `lbm.physics_sha()` changed, STATUS section 2 and RUNBOOK 7) and the golden re-based. Never use `git stash`.
+
 ## 1. The goal and the stop rule
 
 `docs/BRIEF.md` section 0 is the definition of done.

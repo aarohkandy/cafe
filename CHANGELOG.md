@@ -35,7 +35,7 @@ Pipeline and tools
 - `python -m cafe.pm ingest-ocean` writes the lab's HYCOM (netCDF or archv `.a/.b`) into the store the mission names; `QUESTIONS_FOR_LAB.md` Q1 and Q8 give the commands and keys; `docs/RUNBOOK.md`, first draft (`d7a618b`).
 - `mypy --strict` reports 0 errors in `cafe/pm`; `pyproject.toml` sets `strict = true` and the audit's mypy step reads it. `type: ignore` is used only on third-party calls (warp, trimesh, jax.config, smt), each with its code and reason (`84db079`, DECISIONS 115).
 - `ledger.git_sha` falls back to `CAFE_GIT_SHA` in a copy without `.git` (`f48fde3`).
-- 2,052 `def test_` and 2,481 collected cases, all passing, in 49 test files in `tests/` after round 6 (after round 5: 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files; 1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
+- After round 7: 2,153 `def test_` and 2,598 collected cases, all passing, in 49 test files; redone at code freeze. 2,052 `def test_` and 2,481 collected cases, all passing, in 49 test files in `tests/` after round 6 (after round 5: 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files; 1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
 
 Environment
 
@@ -340,11 +340,74 @@ Round 6 read the q6 quick run (`runs/q6` on homebase, code `3c9c64d`) and the co
   - L7: the integration gate's fixes (DECISIONS 340): stage 1b's measured seconds left out of the same-seed comparison, three tests brought to the merged code, CLAUDE.md on `audit --code-only`.
   - RUNBOOK, README, PHYSICS, CREDIBILITY, QUESTIONS_FOR_LAB 4d, STATUS and HANDOFF are updated for the rows above.
 
+Review round 7 (`review/round_7/merged.md`: 47 findings, 0 critical, 14 major, 33 minor; DECISIONS 341 to 387, plus the lead's items 388 to 392)
+
+Round 7 read the q7 quick run (`runs/q7`, code `8dc0ffc`) and the code at `7b74820`, with four reviewers: A and B over everything, C and D over the parts A and B did not cover. Six batches fixed disjoint files (mission config and CLI, emulator and planner and workers, ocean and cache readers, vehicles, stage 3, report and credibility and statistics), the lead added five integration items, and a document pass wrote the rest; each code fix has a regression test that failed on the old code. Every stored resume is invalidated again (the code digest changes), and every stored slow stage-3 result (`wm_flat_plate`, `wm_channel`, `nest_sphere_*`, `lbm_sphere_*`) is stale until it is stored again (M-8). q8 will show what moved in the demo verdicts (not yet known; the credibility Validation evidence level is expected to fall from 3 to 2, M-5). Counts: 2,153 `def test_`, 2,598 collected cases, all passing; coverage 99.96 % of `cafe/pm` (13,382 of 13,388), 100 % on physics, stats, env and stage3, the same from the two-pass audit.
+
+- Mission config, CLI and the verdict cut-offs (M-1, M-32, M-33, M-34, M-47; DECISIONS 341, 372 to 374, 387):
+  - M-1: a UAS mission's own `verdict: {go, nogo}` is no longer replaced by the demo's 0.9 / 0.6 when the budget is planned (`load_mission(..., set_verdict=False)` for a mission read only for its sortie-minutes).
+  - M-32: a mission box that crosses 0 deg E, with its pad, is refused by `validate`, `plan`, `fetch` and `run` with an `error:` line (it ended in a `ValueError` traceback at `fetch`).
+  - M-33: a mission `name` over 64 characters is refused at validation (it ended in `OSError: File name too long` at ingest).
+  - M-34: a non-UTF-8 mission or platform file, and a corrupt or non-object `plan.json` (and the other run files `whatif` reads), end in an `error:` line with exit 2, not a traceback.
+  - M-47: tests for the five bounds of row 316 that no test refused and for the emulator table locks of row 313.
+- Ocean and cache readers (M-2, M-3, M-12, M-17, M-24, M-30, M-31, M-36; DECISIONS 342, 343, 352, 357, 364, 370, 371, 376):
+  - M-2: a missing or old-layout `derived.zarr` fails `derived_unchanged` instead of running on the neutral profile, and an unreadable chunk is a `ConfigError` naming it.
+  - M-3: the manifest of GOFS parts pins the box (a changed box fetches every part again) and the parts are joined with `join="exact"`, so parts of two boxes are refused, not turned into NaN holes.
+  - M-12: a lab HYCOM store of any regular cadence is cached when its times cover the window; the failed check names the short edge.
+  - M-17: `orca.hours` is the whole hours that cover the window (a 12:30 start read the 12:00 file labelled 12:30).
+  - M-24: `gofs_steps` covers the window; `Ocean.inside` tests the store's axes, `GriddedEnv.inside` includes it and a strict environment raises `OutsideData` outside the ocean store.
+  - M-30: an unusable GOFS part is removed with its manifest entry and the error says to rerun `fetch`.
+  - M-31: after one failed part `orca.ingest` cancels the queued parts and keeps the finished ones.
+  - M-36: a z-level lab netCDF is sorted by depth ascending, and an all-NaN field is refused with the file named.
+- Emulator, planner and workers (M-6, M-7, M-14, M-22, M-25, M-37, M-38; DECISIONS 346, 347, 354, 362, 365, 377, 378):
+  - M-6: an emulator variant keeps its shift and duty when only its move is invalid; a variant equal to the base mission is not run; a feature point is the mission columns.
+  - M-7: the variants and the fresh draws use the blocks of members after those stage 1b used (variant 0 reused stage 1's second batch).
+  - M-14: the variant count follows the same free test as the share (it depended on the wall clock with a calibration and no refit).
+  - M-22: the `ensemble_size` note names the profile or the share that caps the ensemble.
+  - M-25: the range threshold is taken on distinct points, not replicate rows.
+  - M-37: `par.workers()` reads the cgroup v1 CPU quota.
+  - M-38: the refusal of a long window says its memory figure is the model's and not a measurement; RUNBOOK 1 says about 15 days of the demo box fit 32 GB.
+- Vehicles and platform files (M-4, M-16, M-18, M-19, M-20, M-27, M-35, M-42, M-43; DECISIONS 344, 356, 358 to 360, 367, 375, 382, 383):
+  - M-4: the USV 12 m/s receipt is split into the unbiased polar (the fit) and the model Stage 1 flies (2.215 against 2.9 m/s, `chiodi_band`); calibration labels and the platform file's header state what is fitted to what.
+  - M-16: a USV with a non-finite shortwave value uses 0 W and is flagged `no_current_data`; a non-finite start position is flagged at t = 0.
+  - M-18: `usv.N_IT` 24 to 48 (storm-wind cells were off by up to 1.5 m/s); the table digest includes `N_IT`.
+  - M-19: the first-order added resistance in short steep seas is pinned in a test and stated in PHYSICS and CREDIBILITY.
+  - M-20: a USV member in wind above the polar's 30 m/s for 30 min fails `capsize_proxy`.
+  - M-27: stage 1 records each glider's and USV's bow heading in `res.pkl`; the stage-3 window heading is its circular median, the course over ground only without it.
+  - M-35: the glider and USV loaders name the file and the missing top-level blocks (`hangar` ended in `KeyError: 'params'`).
+  - M-42: `sortie.battery_swap` removed (read by no code).
+  - M-43: `fly_sitl` reads the environment at the launch time plus the time since launch.
+- Stage 3 (M-8, M-9, M-10, M-13, M-28, M-29, M-44; DECISIONS 348 to 350, 353, 368, 369, 384):
+  - M-8: a stored slow result counts only when the current code made it; a missing `code_sha` is stale; the wall-model gate and the receipts table share one rule; `wallmodel channel` stores `code_sha`.
+  - M-9: the refit's discretisation floor is the larger of the assumed 0.05 and the stored sphere study; a study outside the asymptotic range says so.
+  - M-10: the USV `hull` and `hull_fs` windows' Hangar reference uses the window's own wetted area; both areas are recorded.
+  - M-13: one memory figure for the native LES nest, 300 B/cell, in the planner, `max_cells`, `fit_window` and `run_window`.
+  - M-28: windows use the platform's water viscosity and density (USV 0.86e-6, 1023).
+  - M-29: the free-surface GCI notes say it is the horizontal-refinement sensitivity, not a bound of the total error.
+  - M-44: the wall-model plate receipt prints Re_L and is a FAIL below 1e6; the plate run length is 400.
+- Report, credibility and statistics (M-5, M-11, M-15, M-21, M-23, M-26, M-39, M-40, M-41; DECISIONS 345, 351, 355, 361, 363, 366, 379 to 381):
+  - M-5: DTMB rows with an unconverged finest grid are not judged and do not count toward Validation 3; the notes name the Fs = 3 fallback and the drift.
+  - M-11: the report's environment section drops track points outside the downloaded data and says so; it no longer fails the run.
+  - M-15: the USV speed-model width is described as the published VPP spread, not a model uncertainty (perturbations, platform file, report, credibility).
+  - M-21: every verdict's interval is labelled as the sampling error at fixed inputs.
+  - M-23: M&S management 3 says ruff is configured, not run; Results robustness 2 discounts sensitivities that chance explains.
+  - M-26: `subset_simulation` takes the chain-correlation factor on the new threshold's indicator (the c.o.v. was about 2.5 x too low); two pinned values repinned.
+  - M-39: the receipts find the GEBCO cache under the name `bathy` writes; its absence is a context row.
+  - M-40: the rule-of-three note at n = 60 says 0.050 "is 5%, not below it".
+  - M-41: doubled units removed ("261 inputs inputs", "21 inputs assumed platform inputs", "1 candidates evaluated (of 14 candidates )").
+- Documents and comments (M-38, M-45, M-46; DECISIONS 378, 385, 386): RUNBOOK step 2 names the real last line of `make ci` (`audit: 0 problem(s)`, M-45); the `WORKER_GB` comment and DECISIONS 281 carry no date they cannot have, and the `GriddedEnv` docstring sizes the WRF fields at 0.76 GB in float64 (M-46); DECISIONS 213 and 281 corrected. RUNBOOK, PHYSICS, CREDIBILITY, QUESTIONS_FOR_LAB 14a, STATUS and HANDOFF are updated for the rows above; `tests/test_config_docs.py` pins the RUNBOOK sentences of M-38 and M-45 and the two row corrections.
+- Build, CI and the lead's integration items (L1 to L5; DECISIONS 388 to 392):
+  - L1: CI runs every container as the runner's user (`-u $(id -u):$(id -g) -e HOME=/tmp`, as the RUNBOOK's `pm()`): as root, OpenFOAM's `mpirun` refused to start and both OpenFOAM tests failed on the hosted runner.
+  - L2: the audit appends every step's whole output to `audit.log` (gitignored), which CI uploads as an artifact; the printed problem keeps the last 4000 characters.
+  - L3: the planner's memory refusal advises "lower the per-cell memory (the native nest needs N B/cell)" instead of FluidX3D's "FP16 storage (55 B/cell)".
+  - L4: `platforms/saildrone_explorer.yaml` `vpp_bias_sd` says its width is not an uncertainty of this model.
+  - L5: a stage-3 window row's `heading_source` names what `track_heading` used.
+
 ### Known issues
 
 Each was checked against the committed code at `d7a618b` on 2026-10-30 before it was listed. Line numbers are those of `d7a618b`; the working tree also holds uncommitted edits to `cafe/pm/physics/*.py`, `stats/intervals.py` and `audit.py`, which were not read as part of this entry.
 
-- **DTMB 5415 validation.** The v4 three-grid study (recipe `pout-lts01-parts-v4`) is done and installed (Fixed, review round 3). C_T over-predicts at Fr 0.10 to 0.28 (4.885e-3 against 4.02e-3 at Fr 0.10, +22 %; E x1e3 = +0.865, +0.722, +0.842) and matches at Fr 0.41 (-0.040), every one inside U_val, but U_val / D is 0.27 to 0.63 against the 0.1 the check asks for, so the validation is too uncertain to confirm the model. Iterative convergence fails at Fr 0.28 and 0.41 on all three grids (drift 0.03 to 0.07 against 0.005), so those numbers are not converged. DECISIONS 145 attributes the over-prediction to the wall treatment at 25 mm hull cells on a 20 to 80 mm boundary layer; the study did not test that.
+- **DTMB 5415 validation.** The v4 three-grid study (recipe `pout-lts01-parts-v4`) is done and installed (Fixed, review round 3). C_T over-predicts at Fr 0.10 to 0.28 (4.885e-3 against 4.02e-3 at Fr 0.10, +22 %; E x1e3 = +0.865, +0.722, +0.842) and matches at Fr 0.41 (-0.040), every one inside U_val, but U_val / D is 0.27 to 0.63 against the 0.1 the check asks for, so the validation is too uncertain to confirm the model. Iterative convergence fails at Fr 0.28 and 0.41 on all three grids (drift 0.03 to 0.07 against 0.005) and at Fr 0.20 on the fine grid (drift 0.0075; review round 7, M-5), so those numbers are not converged. DECISIONS 145 attributes the over-prediction to the wall treatment at 25 mm hull cells on a 20 to 80 mm boundary layer; the study did not test that.
 - **Stage-3 wall model and sphere drag.** The wall model is validated only in a body-force channel at CI size (C_f 0.00513 against Dean's 0.00518, as recorded at `bb68642`); the flat plate against ITTC-57 fails at -16.5 % (DECISIONS 108) and the gate was not relaxed. Since `7a359dd` a window's wall-model check takes the worse of the two (`wallmodel.py:341`, `windows.py:207`), so every window is `ok = False` and the refit uses nothing until the plate passes. The XLB staircase sphere overpredicts Cd by 30 % (Re = 100, d = 8), 59 % (Re = 1000, d = 10) and 73 % (Re = 1e4, d = 12) and fails its 10 % rows; the native curved-wall kernel passes at Re = 100 only after Richardson extrapolation from d = 8 and 12 (-2.2 %, finest grid +16 %), Re = 1e3 needs d of at least 24 (about 16 h on the loaded box, one grid at a time in tmux) and Re = 1e4 needs d of at least 40 (27.6 M cells, about 132 h on this CPU; a GPU, whose quota here is 0) (DECISIONS 106). The sphere and channel values are the ones stored on homebase at `bb68642` and were not re-read for this entry. Credibility limitations L08 and L09.
 - **Free-surface hull windows.** The 8 cm cell at the hull (not 1 cm) and the rule that rudder, appendage and wing windage scale like hull plus keel are assumptions; wave resistance goes as v^4, so the multiplier holds near the window speed only (DECISIONS 116, 118). FluidX3D rows have no second grid and always fail the GCI check, so the refit never uses them (DECISIONS 119). The app's cached free-surface results were made at maxCo 10 / maxAlphaCo 5 and are not recomputed (DECISIONS 123).
 - **SITL return and landing.** ArduCopter's EKF drifts on the return: touchdown lands 4 m to 160 m from the ship in 4 trials; its tilt estimate differs from the attitude sent (context rows in `UAS SITL vs our controller`, `uas.py:985`). Only "SITL completes the descent" and the leg-end hold are pass/fail. `WP_YAW_BEHAVIOR = 0` avoids a GPS/compass glitch flag (`uas.py:613`); the equator-compass problem is worked around by telling the firmware it is at Canberra (`SITL_HOME`, `uas.py:52`). Limitation L10.

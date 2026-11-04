@@ -1094,7 +1094,12 @@ def test_track_heading_from_res_pkl_and_cpu_fallback_label_off(no_wall_receipt, 
     jax.config.update("jax_compilation_cache_dir", None)
     assert jax.config.jax_persistent_cache_min_compile_time_secs == 0.0 and r_ok(out)
     r = out["q"][0]
-    assert r["heading_source"] == "stage-1 median track" and r["heading_deg"] == pytest.approx(90.0, abs=0.5) and r["label"] is None
+    assert r["heading_source"] == "course over ground (no heading in res.pkl)" and r["heading_deg"] == pytest.approx(90.0, abs=0.5) and r["label"] is None
+    # round 7 M-27: with a recorded bow heading the row says so (it said "stage-1 median track" whichever was used)
+    res["vehicles"]["q"]["heading"] = np.full((3, 2), 80.0)
+    (no_wall_receipt / "stage1" / "res.pkl").write_bytes(pickle.dumps(res))
+    r = pw.run(ctx, {"q": [WIN]}, FakeL())["q"][0]
+    assert r["heading_source"] == "stage-1 heading (circular median)" and r["heading_deg"] == pytest.approx(80.0, abs=0.5)
 
 
 def test_windows_that_cannot_run_become_error_rows_not_crashes(no_wall_receipt, monkeypatch):
