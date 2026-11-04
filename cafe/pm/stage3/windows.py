@@ -146,11 +146,16 @@ def frontal_area(solid: NDArray[np.bool_], dx: float, axis: int = 0) -> float:
     return float(solid.any(axis).sum() * dx * dx)
 
 
+def bl_length(vehicle: Vehicle) -> float:
+    """The length the flow runs along (the wing's chord); `length` sizes the box (round 8 M-48)."""
+    return float(vehicle.extra.get("bl_length", vehicle.length))
+
+
 def window_resolution(vehicle: Vehicle, spec: WindowSpec) -> dict[str, Any]:
     """dx, grid shape, time step and step count of a window from the BRIEF 2.6 rule (lbm.les_resolution)."""
     u_rel = float(np.linalg.norm(spec.velocity))
     r = lbm.les_resolution(vehicle.length, u_rel, nu_of(vehicle), (spec.cells_per_delta,), spec.box, spec.duration,
-                           spec.u_lat, spec.storage)
+                           spec.u_lat, spec.storage, bl_length=bl_length(vehicle))
     row = r["rows"][spec.cells_per_delta]
     dx = spec.dx or row["dx"]
     shape = tuple(max(8, math.ceil(b * vehicle.length / dx)) for b in spec.box)

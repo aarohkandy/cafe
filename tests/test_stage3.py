@@ -2170,3 +2170,102 @@ def test_the_free_surface_check_notes_say_what_the_gci_is_and_is_not():
     assert "horizontal" in notes["fs_gci"] and "not a bound of the total error" in notes["fs_gci"] and "vertical resolution is the same" in notes["fs_gci"]
     assert "effective ratio from the cell counts" in notes["fs_refinement_ratio"] and "Celik" in notes["fs_refinement_ratio"]
     assert "GCI-based (Fs = 3) spread" in fs.row_fields.__doc__ and "standard error" in fs.row_fields.__doc__
+
+
+# ------------------------------------------------------------------ review round 8, batch S: M-15, M-32, M-43 (stage 3), M-48
+def test_the_hull_fs_row_states_the_displacement_next_to_the_platforms_mass(no_wall_receipt):
+    """M-15: the free-surface hull (half ellipsoid + keel) displaces 2.0 t against the platform's 0.75 t; the row said only the wetted-area ratio."""
+    a, P, veh, c = _usv_case(no_wall_receipt, "hull_fs", 8.392)
+    kc = P["keel_area_m2"] / P["keel_span_m"]
+    v_half = 2 * math.pi / 3 * (P["lwl_m"] / 2) * (P["beam_wl_m"] / 2) * a["usv.hull_draft_m"]              # independent of the vehicle's shapes
+    v_keel = kc * P["keel_t_c"] * kc * P["keel_span_m"]
+    vol = v_half + v_keel
+    assert vol == pytest.approx(1.98, abs=0.01) and vol * P["rho_water"] / P["mass_kg"] == pytest.approx(2.7, abs=0.05)
+    note = c["wetted_area_note"]
+    assert f"displaces {vol:.2f} m3 ({vol * P['rho_water']:.0f} kg) against the platform's {P['mass_kg'] / P['rho_water']:.2f} m3 (750 kg), 2.7 x" in note
+    assert "1.29 x" in note and "wave-making resistance is for that larger displacement" in note             # the wetted-area sentence is still there
+    assert "displaces" not in _usv_case(no_wall_receipt, "hull")[3]["wetted_area_note"]                   # the fully submerged `hull` window is another body
+    import yaml
+    why = yaml.safe_load((pathlib.Path(__file__).parents[1] / "config" / "assumptions.yaml").read_text())["stage3.usv.hull_draft_m"]["why"]
+    assert "displaces about 2.0 t" in why and "0.75 t" in why and "2.7 times the displacement" in why and "1.29" in why
+
+
+def test_a_truncated_wall_model_receipt_is_stale_not_a_crash(monkeypatch, tmp_path):
+    """M-32: a half-written wm_flat_plate.json raised JSONDecodeError out of stored_wall_error() after the window's LES had run."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    wm.slow_path().write_text('{"cf": 0.0036, "ittc": 0.0039, "re": 1.0e6, "err": 0.0')
+    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.01, code_sha=lbm.physics_sha())))
+    assert wm.stale_wall_receipts() == ["wm_flat_plate.json is unreadable (rerun it)"] and wm.stored_wall_error() is None
+    wm.slow_path().write_text("[1, 2]")                                                                      # valid JSON, not an object
+    assert wm.stale_wall_receipts() == ["wm_flat_plate.json is unreadable (rerun it)"]
+    wm.slow_path().write_text('{"cf": 0.0036, "ittc"')
+    monkeypatch.setattr(wm, "channel", lambda **k: _stub_channel())
+    plate_row = [r for r in wm.receipts() if "Flat plate" in r["claim"]][0]                                  # the receipts table reads it as not stored
+    assert plate_row["ok"] is False and "NOT STORED" in plate_row["claim"]
+    cr.OUT.clear()
+    spec = nest.NestSpec((20, 20, 20), 0.01, 1.0, 1e-6)
+    row = [c for c in W.stage3_checks(_series(), spec, np.ones(300), 10, wm.stored_wall_error(), "; ".join(wm.stale_wall_receipts()))
+           if c["name"] == "wall_model_receipt_error"][0]
+    assert not row["ok"] and "unreadable" in row["problem"]
+
+
+def test_a_killed_wall_model_run_leaves_the_old_receipt(monkeypatch, tmp_path):
+    """M-32: wallmodel slow / channel wrote the receipt with write_text, so a kill left half of the new one and none of the old."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(wm, "flat_plate", lambda **k: _stub_plate())
+    monkeypatch.setattr(wm, "channel", lambda **k: dict(_stub_channel(), profile=None))
+    old = json.dumps(dict(cf=0.0036, code_sha="OLD"))
+    wm.slow_path().write_text(old)
+    wm.channel_path().write_text(old)
+    orig = pathlib.Path.write_text
+
+    def cut(self, text, *a, **k):                                                                            # the process dies halfway through the write
+        orig(self, text[:20], *a, **k)
+        raise OSError("killed")
+    monkeypatch.setattr(pathlib.Path, "write_text", cut)
+    for cmd, f in (("slow", wm.slow_path()), ("channel", wm.channel_path())):
+        with pytest.raises(OSError, match="killed"):
+            wm.main([cmd])
+        assert f.read_text() == old
+    monkeypatch.undo()
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(wm, "flat_plate", lambda **k: _stub_plate())
+    assert wm.main(["slow"]) == 0 and json.loads(wm.slow_path().read_text())["code_sha"] == lbm.physics_sha()
+    assert not (tmp_path / "wm_flat_plate.json.tmp").exists()                                                # the temporary is gone once the replace is done
+
+
+def test_the_coefficient_spread_is_the_standard_error_of_five_blocks_and_the_lift_axis_is_perpendicular_to_the_flow():
+    """M-43: cd_spread = cd_s / sqrt(nb) -> cd_s (a factor 2.24 on the refit sigma) and a lift axis of plain body z survived every test."""
+    rho, area = 1000.0, 0.5
+    rel = np.array([-1.0, 0.0, -0.5])                                                          # the flow has a z part: z is not perpendicular to it
+    e_d = rel / np.linalg.norm(rel)
+    q = 0.5 * rho * area * float(rel @ rel)
+    ramp = np.repeat([1.0, 2.0, 3.0, 4.0, 5.0], 10) * q                                                      # block means 1..5: std (ddof 1) sqrt(2.5)
+    c = W.coefficients(np.outer(ramp, e_d), rel, rho, area, spinup=0.0)
+    se = math.sqrt(2.5) / math.sqrt(5)
+    assert c["cd"] == pytest.approx(3.0) and c["cd_spread"] == pytest.approx(se) and c["cl"] == pytest.approx(0.0, abs=1e-12)    # all drag
+    e_l = np.array([0.0, 0.0, 1.0]) - (np.array([0.0, 0.0, 1.0]) @ e_d) * e_d
+    e_l /= np.linalg.norm(e_l)
+    assert abs(e_l @ e_d) < 1e-12 and abs(e_l[2]) < 1.0
+    c = W.coefficients(np.outer(ramp, e_l), rel, rho, area, spinup=0.0)
+    assert c["cl"] == pytest.approx(3.0) and c["cl_spread"] == pytest.approx(se) and c["cd"] == pytest.approx(0.0, abs=1e-12)  # all lift
+
+
+def test_the_wing_window_sizes_its_boundary_layer_on_the_chord_not_the_span(no_wall_receipt):
+    """M-48: veh.length (the 5 m span) was the plate length of delta_te, so dx was 3.1 x too coarse for the 1.2 m chord."""
+    a = pw.assumptions()
+    P = pu.load_platform("saildrone_explorer")
+    wing = pw.usv_vehicle(P, a, "saildrone_explorer", "wing")
+    chord, U, nu = P["wing_area_m2"] / P["wing_span_m"], 5.0, W.NU["air"]
+    assert wing.length == P["wing_span_m"] == 5.0 and W.bl_length(wing) == pytest.approx(chord) == pytest.approx(1.2)
+    d_chord = 0.37 * chord * (U * chord / nu) ** -0.2                                                         # independent: the BL rule on the chord
+    sp = W.WindowSpec(velocity=(U, 0.0, 0.0), box=(2.0, 0.6, 0.6))
+    r = W.window_resolution(wing, sp)
+    assert r["delta_te"] == pytest.approx(d_chord, rel=1e-6) and r["dx"] == pytest.approx(d_chord / 10, rel=1e-6) and r["dx"] == pytest.approx(3.4e-3, rel=0.03)
+    assert r["shape"][0] == math.ceil(2.0 * wing.length / r["dx"])                                           # the box stays the span's
+    assert pw.fit_window(wing, U, 1e30, a)["dx"] == pytest.approx(d_chord / 10, rel=1e-6)                    # was 10.5 mm
+    glider = pw.glider_vehicle(pg.load_platform("seaglider"), a, "seaglider", 500.0)
+    assert W.bl_length(glider) == glider.length
+    coarse = W.window_resolution(wing, W.WindowSpec(velocity=(U, 0.0, 0.0), dx=0.0105))                      # the dx the span gave
+    why = pw.why_failed([], coarse, {})
+    assert len(why) == 1 and "resolution below the rule: 3.2 cells per boundary-layer thickness at dx = 0.0105 m" in why[0]

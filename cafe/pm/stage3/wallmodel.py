@@ -339,17 +339,36 @@ def channel_path() -> pathlib.Path:
     return SLOW_DIR / "wm_channel.json"
 
 
+def _read_receipt(f: pathlib.Path) -> dict[str, Any] | None:
+    """The stored receipt as a dict; None when the file is missing, undecodable (a write cut short by a kill) or not a JSON object."""
+    try:
+        d = json.loads(f.read_text())
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _write_receipt(f: pathlib.Path, obj: dict[str, Any]) -> None:
+    """Through a sibling temporary and os.replace: a run killed mid-write leaves the old receipt, never half of a new one (round 8 M-32)."""
+    tmp = f.with_name(f.name + ".tmp")
+    tmp.write_text(json.dumps(obj, default=float))
+    os.replace(tmp, f)
+
+
 def stale_wall_receipts() -> list[str]:
     """The stored wall-model receipts that cannot count, one phrase each: not stored, stored without a `code_sha` (legacy or hand-written)
-    or stored by code other than lbm.physics_sha(). The same rule as lbm.result_row, so the receipts table and the stage-3 gate agree."""
+    or stored by code other than lbm.physics_sha(), or unreadable (a truncated file). The same rule as lbm.result_row, so the receipts table
+    and the stage-3 gate agree."""
     out = []
     for f in (slow_path(), channel_path()):
-        sha = json.loads(f.read_text()).get("code_sha") if f.exists() else "-"
-        if sha == "-":
+        d = _read_receipt(f)
+        if not f.exists():
             out.append(f"{f.name} is not stored")
-        elif sha is None:
+        elif d is None:
+            out.append(f"{f.name} is unreadable (rerun it)")
+        elif d.get("code_sha") is None:
             out.append(f"{f.name} was stored without a code sha (rerun it)")
-        elif sha != lbm.physics_sha():
+        elif d["code_sha"] != lbm.physics_sha():
             out.append(f"{f.name} was stored by different code (rerun it)")
     return out
 
@@ -384,8 +403,8 @@ def receipts(plate: dict[str, Any] | None = None, chan: dict[str, Any] | None = 
     bracket(g, "Channel: matching height y/h", c["ym_over_h"], 0.0, 0.3, "", "log layer: y/h < ~0.3 (Pope 2000, ch. 7)")
     bracket(g, "Channel: bounce-back tangential exchange / wall shear", c["bb_tangential_frac"], 0.0, 0.01, "", "specular reflection exchanges none")
     f = slow_path()
-    if plate is None and f.exists():
-        plate = json.loads(f.read_text())
+    if plate is None:
+        plate = _read_receipt(f)
     elif plate:                                                               # a run handed in was made by this code, just now
         plate = dict(plate, code_sha=lbm.physics_sha())
     ref = "ITTC-57: 0.075/(log10 Re - 2)^2, averaged over the same strip"
@@ -408,7 +427,7 @@ def main(argv: list[str]) -> int:
         r = channel(**CHANNEL_CI)
         r.pop("profile")
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
-        channel_path().write_text(json.dumps(dict(r, params=CHANNEL_CI, code_sha=sha0), default=float))
+        _write_receipt(channel_path(), dict(r, params=CHANNEL_CI, code_sha=sha0))
         print(json.dumps(r, default=float))
         return 0
     if argv[:1] == ["slow"]:
@@ -416,7 +435,7 @@ def main(argv: list[str]) -> int:
         r = flat_plate(**PLATE_SLOW)
         r.pop("force")
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
-        slow_path().write_text(json.dumps(dict(r, params=PLATE_SLOW, code_sha=sha0), default=float))
+        _write_receipt(slow_path(), dict(r, params=PLATE_SLOW, code_sha=sha0))
         print(json.dumps(r, default=float))
         return 0
     import cafe.receipts as cr

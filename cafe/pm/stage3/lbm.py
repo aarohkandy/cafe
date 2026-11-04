@@ -147,7 +147,7 @@ def lattice_params(U: float, dx: float, nu: float, u_lat: float = U_LAT) -> dict
 
 def les_resolution(L: float, U: float, nu: float, cells_per_delta: tuple[float, ...] = (5, 10),
                    box: tuple[float, ...] = (4.0, 1.0, 1.0), T: float = 10.0, u_lat: float = U_LAT, storage: str = "fp32",
-                   kappa: float = 0.41, B: float = 5.2) -> dict[str, Any]:
+                   kappa: float = 0.41, B: float = 5.2, bl_length: float | None = None) -> dict[str, Any]:
     """Wall-modelled LES resolution for a body of length L at relative speed U in a fluid of viscosity nu.
 
     delta_te = 0.37 L Re^-1/5 (turbulent flat plate, trailing edge, 1/5-power law: Schlichting & Gersten, Boundary-Layer Theory, ch. 18;
@@ -157,9 +157,12 @@ def les_resolution(L: float, U: float, nu: float, cells_per_delta: tuple[float, 
     (Ma = u_lat sqrt 3 <= 0.1), tau, and y+ of the third-cell matching point y = 2.5 dx using the flat-plate skin friction
     (Schlichting: cf = 0.0592 Re^-1/5; u_tau = U sqrt(cf/2)). The 30-300 y+ window of the wall model is checked and
     reported, not forced: at the BRIEF's own 1.5 m hull this gives y+ ~ 400 at dx = 3 mm.
+    `bl_length` (default L): the length the flow runs along, for the boundary layer and dx; L alone sizes the box (a wing's chord is not its span,
+    round 8 M-48).
     """
-    re = U * L / nu
-    d_te = float(boundary_layer(L, U, nu))
+    lb = L if bl_length is None else bl_length
+    re = U * lb / nu
+    d_te = float(boundary_layer(lb, U, nu))
     u_tau = U * math.sqrt(0.0592 * re ** -0.2 / 2)
     rows = {}
     for n in cells_per_delta:
