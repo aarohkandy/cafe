@@ -182,7 +182,7 @@ def test_cpu_plan_is_labelled_as_the_fallback_and_gpu_plan_sizes_the_nest_cap():
     assert "no LES coefficients exist on this machine" in cpu["les"]["label"] and "pooled window coefficient" not in cpu["les"]["label"]
     gpu = budget.plan("4h", 1, MISSION, thr={}, gpu_mem_gb=48.0, vehicle_classes=CLASSES)
     assert gpu["les"]["cpu_fallback"] is False and gpu["les"]["label"] == "GPU LES windows" and gpu["les"]["gpu_mem_gb"] == 48.0
-    assert gpu["les"]["max_cells"] == int(0.85 * 48e9 / 55.0)
+    assert gpu["les"]["max_cells"] == int(0.85 * 48e9 / 300.0)                    # the native nest's 300 B/cell (round 7 M-13; 55 is FluidX3D's FP16 layout)
     assert gpu["les"]["cell_steps_per_window"] > cpu["les"]["cell_steps_per_window"]
     assert "max_cells" not in budget.plan("4h", 1, MISSION, thr={}, vehicle_classes=CLASSES)["les"]
 
@@ -628,3 +628,13 @@ def test_the_worker_memory_comment_carries_no_date_it_cannot_have_and_names_what
     comment = src[src.rindex("\n\n", 0, i):i]
     assert "0.81 to 0.84 GB measured in round 5 by B's mem.py (the date is not recorded;" in comment and "not in the repository" in comment
     assert not re.search(r"\d{4}-\d{2}-\d{2}", comment)
+
+
+def test_the_nest_cap_and_the_memory_guard_use_the_native_kernels_300_bytes_per_cell():
+    """Round 7 M-13: the planner used FluidX3D's 55 B/cell, 5.5 x too lenient for the native nest (300 B/cell: 182 measured + masks + Bouzidi q)."""
+    assert budget.LES_BYTES_PER_CELL == 300.0
+    gpu = budget.plan("4h", 1, MISSION, thr={}, gpu_mem_gb=24.0, vehicle_classes=CLASSES)
+    assert gpu["les"]["max_cells"] == int(0.85 * 24e9 / 300.0)
+    with pytest.raises(PlanError, match="nest needs"):
+        budget.memory_guard(gpu["les"]["max_cells"] * 1.01, budget.LES_BYTES_PER_CELL, 24.0)
+    assert budget.memory_guard(gpu["les"]["max_cells"], budget.LES_BYTES_PER_CELL, 24.0) <= 0.85 * 24.0

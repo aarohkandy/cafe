@@ -334,12 +334,14 @@ def test_receipts_sphere_rows_are_required_pass_or_fail(monkeypatch, tmp_path):
     sph = [r for r in out if "Sphere" in r["claim"]]
     assert len(sph) == 3 and all(r["ok"] is False and "NOT STORED" in r["claim"] and "run:" in r["source"] for r in sph)   # nothing stored: fail
     for tag, re in lbm.SPHERE_RUNS:
-        lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=lbm.morrison(re) * 1.3, ref=lbm.morrison(re), seconds=600, shape=[1, 2, 3], d=8)))
+        lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=lbm.morrison(re) * 1.3, ref=lbm.morrison(re), seconds=600, shape=[1, 2, 3], d=8,
+                                                                   code_sha=lbm.physics_sha())))
     cr.OUT.clear()
     sph = [r for r in lbm.receipts("jax") if "Sphere" in r["claim"]]
     assert len(sph) == 3 and all(r["ok"] is False and r["value"] == pytest.approx(r["reference"] * 1.3, rel=1e-3) for r in sph)    # stored, 30 % off: fail
     for tag, re in lbm.SPHERE_RUNS:
-        lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=lbm.morrison(re) * 1.02, ref=lbm.morrison(re), seconds=600, shape=[1, 2, 3], d=48)))
+        lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=lbm.morrison(re) * 1.02, ref=lbm.morrison(re), seconds=600, shape=[1, 2, 3], d=48,
+                                                                   code_sha=lbm.physics_sha())))
     cr.OUT.clear()
     assert all(r["ok"] is True for r in lbm.receipts("jax") if "Sphere" in r["claim"])
 
@@ -352,8 +354,9 @@ def test_result_row_branches_physics_sha_and_eta(monkeypatch):
     assert cr.OUT[-1]["ok"] is False and "DIFFERENT CODE" in cr.OUT[-1]["claim"]
     lbm.result_row("g", "claim", dict(cd=1.05, ref=1.0, code_sha=lbm.physics_sha()), "cd", "ref", 0.1, "cmd", "2 h", "src")
     assert cr.OUT[-1]["ok"] is True
-    lbm.result_row("g", "claim", dict(cd=1.2, ref=1.0), "cd", "ref", 0.1, "cmd", "2 h", "src")        # no sha: stored before the policy, judged on its number
-    assert cr.OUT[-1]["ok"] is False and cr.OUT[-1]["value"] == pytest.approx(1.2)
+    lbm.result_row("g", "claim", dict(cd=1.0, ref=1.0), "cd", "ref", 0.1, "cmd", "2 h", "src")    # no sha (legacy, hand-written): FAIL even at zero error (M-8)
+    assert cr.OUT[-1]["ok"] is False and "STORED WITHOUT A CODE SHA" in cr.OUT[-1]["claim"]
+    assert "rerun: cmd" in cr.OUT[-1]["source"] and "2 h" in cr.OUT[-1]["source"]
     a = lbm.physics_sha()
     assert a == lbm.physics_sha() and len(a) == 16
     assert "h" in lbm.eta_text(8.6e10) and "loaded" in lbm.eta_text(8.6e10)
@@ -435,7 +438,7 @@ def test_cli_plumbing(monkeypatch, tmp_path, capsys):
     cr.OUT.clear()
     assert lbm.main(["receipts", "--backend", "jax"]) == 1                                  # sphere rows are required and two are not stored
     for tag in ("100", "1000"):
-        lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=1.0, ref=1.0, seconds=1.0, shape=[1], d=8)))
+        lbm.slow_path(f"sphere_{tag}").write_text(json.dumps(dict(cd=1.0, ref=1.0, seconds=1.0, shape=[1], d=8, code_sha=lbm.physics_sha())))
     cr.OUT.clear()
     assert lbm.main(["receipts", "--backend", "jax"]) == 0
     _stub_fast(monkeypatch, taylor_green=dict(ratio=2.0))

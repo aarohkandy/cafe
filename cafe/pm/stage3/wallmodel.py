@@ -322,11 +322,12 @@ def wm_kappa() -> float:
     return KAPPA
 
 
-PLATE_SLOW: dict[str, Any] = dict(length=384, nu_lat=1.5e-5, half=48, span=8, nose=16, thick=1, steps=30000, tu=0.03)
+PLATE_SLOW: dict[str, Any] = dict(length=400, nu_lat=1.5e-5, half=48, span=8, nose=16, thick=1, steps=30000, tu=0.03)
 SLOW_DIR = pathlib.Path(os.environ.get("CAFE_DATA", "/data")) / "receipts"
 PLATE_TOL = 0.10
+PLATE_RE_MIN = 1e6            # ITTC-57 is a turbulent correlation: a plate run below this Re_L is not compared with it
 PLATE_COMMAND = "python -m cafe.pm.stage3.wallmodel slow"
-PLATE_ETA = "about 1.8 h on 2 CPUs (measured), ~1 GB"
+PLATE_ETA = "about 1.8 h on 2 CPUs (measured at length 384; 4 % more cells at 400), ~1 GB"
 CHANNEL_CI: dict[str, Any] = dict(h=12, re_tau=1000.0, u_tau=0.0026, steps=150000, span=4)      # ~15 s
 
 
@@ -338,12 +339,27 @@ def channel_path() -> pathlib.Path:
     return SLOW_DIR / "wm_channel.json"
 
 
+def stale_wall_receipts() -> list[str]:
+    """The stored wall-model receipts that cannot count, one phrase each: not stored, stored without a `code_sha` (legacy or hand-written)
+    or stored by code other than lbm.physics_sha(). The same rule as lbm.result_row, so the receipts table and the stage-3 gate agree."""
+    out = []
+    for f in (slow_path(), channel_path()):
+        sha = json.loads(f.read_text()).get("code_sha") if f.exists() else "-"
+        if sha == "-":
+            out.append(f"{f.name} is not stored")
+        elif sha is None:
+            out.append(f"{f.name} was stored without a code sha (rerun it)")
+        elif sha != lbm.physics_sha():
+            out.append(f"{f.name} was stored by different code (rerun it)")
+    return out
+
+
 def stored_wall_error() -> float | None:
-    """Largest relative error of the stored wall-model receipts (flat plate vs ITTC-57, channel vs Dean), None unless both are stored.
-    The channel alone cannot clear a window: the plate is the external developing boundary layer a hull sees, so
-    windows.stage3_checks fails every window until both are within PLATE_TOL."""
+    """Largest relative error of the stored wall-model receipts (flat plate vs ITTC-57, channel vs Dean), None unless both are stored by the
+    current code (`stale_wall_receipts` is empty). The channel alone cannot clear a window: the plate is the external developing boundary
+    layer a hull sees, so windows.stage3_checks fails every window until both are current and within PLATE_TOL."""
     fs = (slow_path(), channel_path())
-    if not all(f.exists() for f in fs):
+    if stale_wall_receipts():
         return None
     return max(float(json.loads(f.read_text())["err"]) for f in fs)
 
@@ -370,10 +386,16 @@ def receipts(plate: dict[str, Any] | None = None, chan: dict[str, Any] | None = 
     f = slow_path()
     if plate is None and f.exists():
         plate = json.loads(f.read_text())
-    from cafe.pm.stage3 import lbm
+    elif plate:                                                               # a run handed in was made by this code, just now
+        plate = dict(plate, code_sha=lbm.physics_sha())
     ref = "ITTC-57: 0.075/(log10 Re - 2)^2, averaged over the same strip"
-    claim = "Flat plate C_f vs ITTC-57 at Re_L >= 1e6, wall-modelled with inflow turbulence"
-    lbm.result_row(g, claim + (f" (Re_L = {plate['re']:.3g})" if plate else ""), plate, "cf", "ittc", PLATE_TOL, PLATE_COMMAND, PLATE_ETA, ref)
+    claim = "Flat plate C_f vs ITTC-57 (applies at Re_L >= 1e6), wall-modelled with inflow turbulence"
+    if plate and plate["re"] < PLATE_RE_MIN:                                  # the run that stands for the receipt is outside the correlation's range
+        bracket(g, f"Flat plate C_f vs ITTC-57 (Re_L = {plate['re']:.3g}, below the 1e6 the comparison needs)", math.nan, 0.0, 0.0, "",
+                f"stored C_f {plate['cf']:.4g} vs {plate['ittc']:.4g}: not a pass whatever its error; rerun (PLATE_SLOW length >= 400): "
+                f"{PLATE_COMMAND}   [{PLATE_ETA}]")
+    else:
+        lbm.result_row(g, claim + (f" (Re_L = {plate['re']:.3g})" if plate else ""), plate, "cf", "ittc", PLATE_TOL, PLATE_COMMAND, PLATE_ETA, ref)
     if plate:
         bracket(g, "... share of wall cells with y+ at the matching point in 30-300", plate["yfrac"], 0.9, 1.0, "", "BRIEF 5.5 stage3 check")
     return [r for r in cr.OUT if r["group"] == g]
@@ -382,14 +404,14 @@ def receipts(plate: dict[str, Any] | None = None, chan: dict[str, Any] | None = 
 def main(argv: list[str]) -> int:
     """python -m cafe.pm.stage3.wallmodel [slow|channel|receipts]"""
     if argv[:1] == ["channel"]:
+        sha0 = lbm.physics_sha()
         r = channel(**CHANNEL_CI)
         r.pop("profile")
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
-        channel_path().write_text(json.dumps(dict(r, params=CHANNEL_CI), default=float))
+        channel_path().write_text(json.dumps(dict(r, params=CHANNEL_CI, code_sha=sha0), default=float))
         print(json.dumps(r, default=float))
         return 0
     if argv[:1] == ["slow"]:
-        from cafe.pm.stage3 import lbm
         sha0 = lbm.physics_sha()
         r = flat_plate(**PLATE_SLOW)
         r.pop("force")
