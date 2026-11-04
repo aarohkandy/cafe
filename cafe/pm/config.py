@@ -77,12 +77,29 @@ def _finite(node: Any, path: pathlib.Path, where: str = "") -> None:
         _finite(v, path, f"{where}/{name}".lstrip("/"))
 
 
+def _is_float(v: str) -> bool:
+    try:
+        return math.isfinite(float(v))
+    except ValueError:
+        return False
+
+
 def _say(e: Any) -> str:
-    """The schema's message, except for the two slips a lab user makes first: YAML reads an unquoted timestamp as a time, and an empty key as None."""
+    """The schema's message, except for the slips a lab user makes first: YAML reads an unquoted timestamp as a time, an empty key as None,
+    an unquoted HH:MM as minutes, an unquoted no/yes/on/off as a boolean, and `5e0` as text."""
     if e.validator == "type" and isinstance(e.instance, (dt.datetime, dt.date)):
         return f"an unquoted timestamp is read by YAML as a time; put it in quotes, e.g. \"{e.instance:%Y-%m-%dT%H:%M:%SZ}\""
     if e.validator == "type" and e.instance is None:
         return "is empty; give it a value or remove the key"
+    if e.validator == "type" and e.validator_value == "string" and type(e.instance) is int and list(e.absolute_path)[-1:] == ["local_solar_time"]:
+        v = e.instance
+        hm = f"{v // 60:02d}:{v % 60:02d}"
+        return (f"YAML reads an unquoted HH:MM as a number ({v} = {hm} as minutes); put it in quotes, e.g. \"{hm}\"" if 0 <= v < 1440
+                else f"YAML reads an unquoted time as the number {v}; put it in quotes, e.g. \"14:00\"")
+    if e.validator == "type" and e.validator_value == "string" and isinstance(e.instance, bool):
+        return f"YAML reads an unquoted no/yes/on/off as {str(e.instance).lower()}; put it in quotes"
+    if e.validator == "type" and e.validator_value == "number" and isinstance(e.instance, str) and _is_float(e.instance):
+        return f"the number is written in a form YAML reads as text ({e.instance!r}); write {float(e.instance):g}"
     return str(e.message)
 
 

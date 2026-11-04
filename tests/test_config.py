@@ -645,3 +645,62 @@ R7_M47 = [
 def test_r7_m47_the_other_bounds_of_r6_m9_are_each_refused_naming_their_field(tmp_path, what, fn, msg):
     with pytest.raises(ConfigError, match=msg):
         load_mission(edit(tmp_path, fn))
+
+
+# ---- review round 8: M-18 (the bounds of the ship block), M-39 (the YAML slips that were refused with a number the user never typed)
+
+R8_M18 = [
+    ("antenna 1000 m", lambda d: d["ship"].update(antenna_height_m=1000), r"ship/antenna_height_m"),
+    ("antenna 100.5 m", lambda d: d["ship"].update(antenna_height_m=100.5), r"ship/antenna_height_m"),
+    ("antenna 0 m", lambda d: d["ship"].update(antenna_height_m=0), r"ship/antenna_height_m"),
+    ("antenna 0.1 m", lambda d: d["ship"].update(antenna_height_m=0.1), r"ship/antenna_height_m"),
+    ("transducer 20000 m", lambda d: d["ship"].update(transducer_depth_m=20000), r"ship/transducer_depth_m"),
+    ("transducer 100.5 m", lambda d: d["ship"].update(transducer_depth_m=100.5), r"ship/transducer_depth_m"),
+    ("transducer -1 m", lambda d: d["ship"].update(transducer_depth_m=-1), r"ship/transducer_depth_m"),
+]
+
+
+@pytest.mark.parametrize("what,fn,msg", R8_M18, ids=[c[0] for c in R8_M18])
+def test_r8_m18_the_ship_antenna_and_transducer_are_bounded_on_both_sides_and_named(tmp_path, what, fn, msg):
+    with pytest.raises(ConfigError, match=msg):
+        load_mission(edit(tmp_path, fn))
+
+
+def test_r8_m18_the_edges_of_the_ship_bounds_and_the_shipped_missions_load(tmp_path):
+    for lo, hi in ((0.5, 0.0), (100.0, 100.0)):
+        load_mission(edit(tmp_path, lambda d, lo=lo, hi=hi: d["ship"].update(antenna_height_m=lo, transducer_depth_m=hi)))
+    for f in (config.ROOT / "missions").glob("*.yaml"):
+        load_mission(f)
+
+
+def unquoted(tmp_path, old, new):
+    """The demo text with `old` replaced by `new` (the way a lab user types it), written out."""
+    text = DEMO.read_text()
+    assert text.count(old) == 1
+    p = tmp_path / "u.yaml"
+    p.write_text(text.replace(old, new))
+    return p
+
+
+LINK = "{id: glider_eq-ship-acoustic, a: glider_eq, b: "
+TIME = 'local_solar_time: "14:00"'
+R8_M39 = [
+    (TIME, "local_solar_time: 14:00",
+     r'sorties/local_solar_time: YAML reads an unquoted HH:MM as a number \(840 = 14:00 as minutes\); put it in quotes, e.g. "14:00"'),
+    (TIME, "local_solar_time: 14:00:00", r"sorties/local_solar_time: YAML reads an unquoted time as the number 50400; put it in quotes"),
+    (LINK + "ship", LINK + "no", r"links/\d/b: YAML reads an unquoted no/yes/on/off as false; put it in quotes"),
+    ("radius_km: 5.0", "radius_km: 5e0", r"task/radius_km: the number is written in a form YAML reads as text \('5e0'\); write 5"),
+    ("radius_km: 5.0", "radius_km: five", r"task/radius_km: 'five' is not of type 'number'"),
+]
+
+
+@pytest.mark.parametrize("old,new,msg", R8_M39, ids=["hhmm", "hhmmss", "no", "5e0", "text"])
+def test_r8_m39_an_unquoted_time_a_no_and_an_exponent_without_a_dot_say_why(tmp_path, old, new, msg):
+    with pytest.raises(ConfigError, match=msg):
+        load_mission(unquoted(tmp_path, old, new))
+
+
+def test_r8_m39_the_quoted_forms_load(tmp_path):
+    load_mission(unquoted(tmp_path, "radius_km: 5.0", "radius_km: 5"))
+    load_mission(unquoted(tmp_path, 'local_solar_time: "14:00"', 'local_solar_time: "09:30"'))
+    assert config._yaml(unquoted(tmp_path, 'local_solar_time: "14:00"', "local_solar_time: 14:00"))["vehicles"][3]["sorties"]["local_solar_time"] == 840

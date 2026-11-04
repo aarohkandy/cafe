@@ -10,7 +10,7 @@
     whatif    --mission M [--run DIR] [--budget B] (--shift 48h | --move "1deg W" | --drop ID)... [--vehicle ID]...
                                              what if: emulator-first, Stage 1 at the budget (default quick) when it cannot answer
     hangar    --platform NAME                provenance check and the Stage-1 coefficients the platform implies
-    audit     [RUN ...] [--code-only]        the ledger/code/test audit (cafe.pm.audit)
+    audit     [RUN ...] [--code-only] [--ledgers-only]  the ledger/code/test audit (cafe.pm.audit)
     promote-calibration --run DIR            copy that run's stage3/subgrid_calibration.json into the tracked config/subgrid.json (a deliberate, committed act)
     report    --run DIR [--open]             re-render the report from a finished run; --open shows it in a browser when there is a display
     receipts  [--broken YAML] [--slow] [--only NAME,..] [--json OUT]   every receipt (app + pre-mission) as one table; see cafe/pm/receipts.py
@@ -88,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("audit")
     p.add_argument("runs", nargs="*")
     p.add_argument("--code-only", action="store_true")
+    p.add_argument("--ledgers-only", action="store_true")
     p = sub.add_parser("receipts")
     p.add_argument("--broken", default=None, help="overlay yaml to apply; the exit code is 0 only if it makes a receipt fail")
     p.add_argument("--slow", action="store_true", help="also run the slow receipts instead of reading their stored results")
@@ -113,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             from . import receipts
             return receipts.run(a.slow, a.only.split(",") if a.only else None, a.broken, a.json)[1]
         if a.cmd == "audit":
-            return audit.main(a.runs + (["--code-only"] if a.code_only else []))
+            return audit.main(a.runs + (["--code-only"] if a.code_only else []) + (["--ledgers-only"] if a.ledgers_only else []))
         if a.cmd == "hangar":
             return _hangar(a.platform)
         if a.cmd == "promote-calibration":
@@ -183,7 +184,7 @@ def _report(run: pathlib.Path, open_it: bool) -> int:
     if not (run / "plan.json").is_file():
         raise ConfigError(f"{run}: no plan.json; this is not a finished run directory (run `python -m cafe.pm run` first)")
     plan = _json_object(run / "plan.json")
-    ctx = pipeline.Context(run / "mission.yaml", plan["budget"], plan["gpus"], run)
+    ctx = pipeline.Context(run / "mission.yaml", None, plan["gpus"], run, hash_budget=plan["budget"])         # no plan: no stage-1 memory model
     env = None
     if ctx.cache.is_dir():
         try:
@@ -256,6 +257,14 @@ def _whatif(a: argparse.Namespace) -> int:
     moves = [whatif.parse_move(x) for x in a.move]
     ops = dict(shift_h=sum(whatif.parse_shift(x) for x in a.shift), dlon=sum(d for d, _ in moves), dlat=sum(d for _, d in moves), drop=a.drop)
     run = pathlib.Path(a.run or f"runs/{m['name']}/{a.budget}")
+    if (copy := run / "mission.yaml").is_file():                          # the mission the run was made from: a what-if compares a change with its verdicts
+        old = load_mission(copy, set_verdict=False)
+        diff = sorted(k for k in m.keys() | old.keys() if k not in ("seed", "_path") and m.get(k) != old.get(k))
+        if diff:
+            raise ConfigError(f"--mission {a.mission} is not the mission run {run} was made from (differs in: {', '.join(diff)}); what-if compares a change "
+                              f"with that run's verdicts. Use `--mission {copy}`, or run the edited mission first")
+        if m.get("seed") != old.get("seed"):
+            print(f"note: the run used seed {old.get('seed')}, this file says {m.get('seed')}; the what-if draws use {m.get('seed')}")
     ctx = pipeline.Context(a.mission, a.budget, a.gpus, run)
     if not ctx.cache.is_dir():
         raise ConfigError(f"no environment cache at {ctx.cache}: run `python -m cafe.pm fetch --mission {a.mission}` first")
