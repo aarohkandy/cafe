@@ -61,6 +61,20 @@ class Ocean:
             self.f[name] = par.adopt(a)                                    # straight into shared memory when stage 1 runs workers: one field at a time
         return self.f[name]
 
+    def inside(self, lon: Any, lat: Any, t: Any = None) -> Any:
+        """Whether (lon, lat[, t]) is within the store's lat, lon and time axes: `interp` holds the edge value outside them, without a flag."""
+        x, la = cv.wrap360(np.asarray(lon, float)), np.asarray(lat, float)
+        ok = (x >= self.axes[3].x[0]) & (x <= self.axes[3].x[-1]) & (la >= self.axes[2].x[0]) & (la <= self.axes[2].x[-1])
+        if t is not None:
+            ok &= (np.asarray(t) >= self.axes[0].x[0]) & (np.asarray(t) <= self.axes[0].x[-1])
+        return ok
+
+    def bounds(self) -> tuple[float, float, float, float, float, float]:
+        """(lon0, lon1 in -180..180, lat0, lat1, t0, t1) of the store, rounded like GriddedEnv.bounds (for the OutsideData message)."""
+        lo, la, tt = self.axes[3].x, self.axes[2].x, self.axes[0].x
+        w0, w1 = (float(cv.wrap360(x + 180) - 180) for x in (lo[0], lo[-1]))
+        return round(w0, 3), round(w1, 3), round(float(la[0]), 3), round(float(la[-1]), 3), round(float(tt[0]), 3), round(float(tt[-1]), 3)
+
     def _at(self, name: str, lon: Any, lat: Any, z: Any, t: Any) -> Any:
         v, _ = interp(self._field(name), self.axes, [t, -np.asarray(z, float), lat, cv.wrap360(lon)])
         return v

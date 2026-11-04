@@ -79,8 +79,12 @@ def stamp(t: dt.datetime) -> str:
 
 
 def hours(t0: dt.datetime, t1: dt.datetime) -> list[dt.datetime]:
-    n = int((t1 - t0).total_seconds() // 3600)
-    return [t0 + dt.timedelta(hours=k) for k in range(n + 1)]
+    """The whole hours that cover t0..t1: floor(t0) to ceil(t1). The files are hourly and `stamp` names them by their hour, so the time axis built
+    from this list is the files' own hours (a window that starts at 12:30 gets the 12:00 file, labelled 12:00, not 12:30)."""
+    a = t0.replace(minute=0, second=0, microsecond=0)
+    b = t1.replace(minute=0, second=0, microsecond=0)
+    n = int((b - a).total_seconds() // 3600) + (b < t1)
+    return [a + dt.timedelta(hours=k) for k in range(n + 1)] if t1 >= t0 else []
 
 
 def urls(t: dt.datetime) -> dict[str, str]:
@@ -273,11 +277,20 @@ def ingest(t0: dt.datetime, t1: dt.datetime, box: Box, out: str | pathlib.Path, 
     t_start, done = time.time(), 0
     with cf.ThreadPoolExecutor(threads) as ex:
         fut = {ex.submit(f): p for p, f in todo}
-        for fu in cf.as_completed(fut):
-            _save(fut[fu], fu.result())
-            done += 1
-            if done % 20 == 0 or done == len(todo):
-                log(f"  {done}/{len(todo)} parts, {time.time() - t_start:.0f} s")
+        saved: set[pathlib.Path] = set()
+        try:
+            for fu in cf.as_completed(fut):
+                _save(fut[fu], fu.result())
+                saved.add(fut[fu])
+                done += 1
+                if done % 20 == 0 or done == len(todo):
+                    log(f"  {done}/{len(todo)} parts, {time.time() - t_start:.0f} s")
+        except BaseException:                                          # the first failure: start nothing more, keep what was paid for
+            ex.shutdown(wait=True, cancel_futures=True)
+            for fu, p in fut.items():
+                if p not in saved and not fu.cancelled() and fu.exception() is None:
+                    _save(p, fu.result())
+            raise
     return assemble(out, ts, wg, ug, pts, sorted(h3), box)
 
 

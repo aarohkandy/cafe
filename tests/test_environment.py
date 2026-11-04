@@ -545,3 +545,40 @@ def test_r5_m19_a_corrupt_zarr_json_is_a_config_error_for_every_store(ci_env, tm
         (d / "orca" / store / "zarr.json").write_text("{not json")
         with pytest.raises(ConfigError, match=rf"environment cache file .*{store} cannot be read"):
             GriddedEnv(d, env_sigmas())
+
+
+# ---- review round 7, M-24: the ocean store's own extent is part of `inside` and a strict environment refuses outside it
+
+def _short_ocean_env(ci_full):
+    """ci_full over an ocean whose time axis stops two steps early and whose east edge is cut: inside the WRF box and window, outside the store."""
+    import copy
+    from cafe.pm.env.grid import Axis
+    o = copy.copy(ci_full.ocean)
+    o.axes = [Axis(o.axes[0].x[:-2], "time"), o.axes[1], o.axes[2], Axis(o.axes[3].x[:-4], "lon")]
+    env = GriddedEnv.__new__(GriddedEnv)
+    env.__dict__.update(ci_full.__dict__)
+    env.ocean = o
+    return env, o
+
+
+def test_r7_m24_inside_is_false_where_the_ocean_store_ends_and_a_strict_env_raises_there(ci_full):
+    env, o = _short_ocean_env(ci_full)
+    t_in, t_out = float(o.axes[0].x[-1]) - 3600.0, float(o.axes[0].x[-1]) + 3600.0            # an hour either side of the store's last step; WRF has both
+    east = float(o.axes[3].x[-1])
+    assert ci_full.inside(195.0, 0.0, t_out) and ci_full.inside(east + 0.25, 0.0, t_in)        # the WRF box and window hold them
+    assert env.inside(195.0, 0.0, t_in) and not env.inside(195.0, 0.0, t_out) and not env.inside(east + 0.25, 0.0, t_in)
+    with pytest.raises(OutsideData, match=r"ocean current: \(195\.000, 0\.000\) at .* is outside the ingested data"):
+        env.current(195.0, 0.0, np.zeros(1), t_out)
+    for call in (env.density, env.sound_speed):
+        with pytest.raises(OutsideData, match="ocean"):
+            call(east + 0.25, 0.0, np.zeros(1), t_in)
+    with env.lenient():                                                                         # lenient: the edge value, and `inside` says so
+        assert np.isfinite(env.current(195.0, 0.0, np.zeros(1), t_out).value).all() and not env.inside(195.0, 0.0, t_out)
+    assert np.isfinite(env.current(195.0, 0.0, np.zeros(1), t_in).value).all()
+
+
+def test_r7_m46_the_docstring_sizes_the_wrf_fields_in_float64_and_gives_the_measured_total():
+    """The docstring said 0.4 GB (the float32 figure) for fields the code holds as float64: 2 x low for WRF alone, 20 x low for the whole environment."""
+    doc = " ".join(E.__doc__.split())
+    assert "6 days x 130 x 313 x 16 x 8 bytes = 0.76 GB in float64" in doc and "about 9 GB in memory, DECISIONS 267/270, measured" in doc
+    assert "0.4 GB" not in doc

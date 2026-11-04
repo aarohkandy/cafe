@@ -84,9 +84,9 @@ def padded(box: Any, pad: float = 2.0) -> Box:
 
 
 def gofs_steps(t0: Any, t1: Any) -> np.ndarray:
-    """The 3-hourly GOFS times (epoch s) in [t0, t1], anchored on 00Z."""
-    a = np.ceil(epoch(t0) / STEP_S) * STEP_S
-    return np.arange(a, epoch(t1) + 1, STEP_S)
+    """The 3-hourly GOFS times (epoch s, anchored on 00Z) that cover [t0, t1]: the last step at or before t0 to the first at or after t1, so the
+    store spans the window (Ocean interpolates in time, and a window edge between two steps needs both). An aligned window gives its own steps."""
+    return np.arange(np.floor(epoch(t0) / STEP_S) * STEP_S, np.ceil(epoch(t1) / STEP_S) * STEP_S + 1, STEP_S)
 
 
 def _iso(t: float) -> str:
@@ -296,9 +296,10 @@ def _chunks(steps: Iterable[float], n: int) -> list[list[float]]:
 
 
 def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1, deadline_s: float = 1500.0, servers: tuple[str, ...] = ("ncss", "opendap"),
-               workers: int = 3, tries: int = 2, ncss: str = NCSS, dods: str = DODS, name: str = "gofs_tepex_c", keep_parts: bool = True) -> pathlib.Path:
+               workers: int = 3, tries: int = 2, ncss: str = NCSS, dods: str = DODS, name: str = "gofs_tepex_c", keep_parts: bool = True,
+               log: Callable[[str], None] = print) -> pathlib.Path:
     """GOFS 3.1 GLBy0.08 expt_93.0 water_temp/salinity/water_u/water_v/surf_el for `box` (south, north, west, east; any lon
-    convention, pad it yourself: see padded()) and t0..t1 (the 3-hourly steps inside) -> <out_dir>/<name>.zarr.
+    convention, pad it yourself: see padded()) and t0..t1 (the 3-hourly steps that cover it, see gofs_steps) -> <out_dir>/<name>.zarr.
 
     The request list is cut by time into `chunk_steps`-step parts per dataset (default one 3-hourly step) so one hung request loses
     only its part; every request runs in a child killed after `deadline_s`. Measured on 2026-10-29 for the 14 x 34 deg, 40-level box:
@@ -306,8 +307,9 @@ def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1
     the server with HTTP 500 after 302 s; OPeNDAP takes 310-335 s per step of two variables, in parallel too, and a 4-step read failed
     with "DAP failure". Hence one step per request, and the order of `servers` is the caller's call.
     A part is fetched from `servers` in order ('ncss' = ncss.hycom.org NetcdfSubset, 'opendap' = tds.hycom.org), `tries` times each;
-    the server that answered, bytes, seconds and SHA-256 go in <out_dir>/<name>.parts/manifest.json. Rerunning skips parts whose file hash
-    matches the manifest. Parts that fail on every server raise FetchError after all the others finished. Returns the Zarr path."""
+    the server that answered, bytes, seconds and SHA-256 go in <out_dir>/<name>.parts/manifest.json, with the box the parts were cut to.
+    Rerunning skips parts whose file hash matches the manifest, unless the box differs from the manifest's: then every part is fetched again.
+    Parts that fail on every server raise FetchError after all the others finished. Returns the Zarr path."""
     box = box360(box)
     steps = gofs_steps(t0, t1)
     if len(steps) == 0:
@@ -317,9 +319,12 @@ def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1
     pdir.mkdir(parents=True, exist_ok=True)
     mpath = pdir / "manifest.json"
     man = json.loads(mpath.read_text()) if mpath.exists() else {}
-    man.update(box=list(box), t0=float(steps[0]), t1=float(steps[-1]), dataset="GOFS 3.1 GLBy0.08 expt_93.0", parts=man.get("parts", {}))
     lock = threading.Lock()
     jobs = [(d, c) for d in DATASETS for c in _chunks(steps, chunk_steps)]
+    if man.get("parts") and man.get("box") != list(box):             # parts cut to another box are not this box's: a part is reused by name and hash only
+        log(f"the ocean parts were cut to {man.get('box')}, this fetch asks for {list(box)}: all {len(jobs)} parts are fetched again")
+        man["parts"] = {}
+    man.update(box=list(box), t0=float(steps[0]), t1=float(steps[-1]), dataset="GOFS 3.1 GLBy0.08 expt_93.0", parts=man.get("parts", {}))
 
     def one(job: tuple[str, list[float]]) -> str | None:
         d, c = job
@@ -368,15 +373,34 @@ def assemble_gofs(pdir: Any, steps: Any, out_zarr: Any) -> pathlib.Path:
     for fn, rec in man["parts"].items():
         if _sha(pdir / fn) != rec["sha256"]:
             raise ValueError(f"{pdir / fn}: SHA-256 differs from the manifest; delete it and rerun fetch_gofs to fetch that part again")
+    opened: dict[str, Any] = {}
+    bad: dict[str, str] = {}
+    for fn in man["parts"]:
+        try:
+            a = xr.open_dataset(pdir / fn)
+            if a.sizes.get("time", 0) == 0:
+                raise ValueError("no time step in it")
+            opened[fn] = a.assign_coords(lat=np.round(a.lat.values.astype("float64"), 4), lon=np.round(a.lon.values.astype("float64"), 4))
+        except Exception as e:                                        # noqa: BLE001  netCDF4 raises OSError, RuntimeError, ValueError ...
+            bad[fn] = f"{type(e).__name__}: {e}"
+    if bad:                                                           # a part recorded by its hash is never fetched again: take each one and its entry out
+        for fn in bad:
+            (pdir / fn).unlink(missing_ok=True)
+            del man["parts"][fn]
+        _write_json(pdir / "manifest.json", man)
+        one = len(bad) == 1
+        raise FetchError("; ".join(f"the part {fn} was unusable ({why})" for fn, why in bad.items())
+                         + f"; {'it has' if one else 'they have'} been removed: rerun fetch to download {'it' if one else 'them'} again")
     per = {}
     for d in DATASETS:
-        fs = sorted(pdir / fn for fn, r in man["parts"].items() if r["dataset"] == d)
-        if not fs:
+        names = sorted(fn for fn, r in man["parts"].items() if r["dataset"] == d)
+        if not names:
             raise ValueError(f"no {d} parts in {pdir}")
-        a = xr.concat([xr.open_dataset(f) for f in fs], dim="time").sortby("time")
-        a = a.isel(time=~a.indexes["time"].duplicated())
-        a = a.assign_coords(lat=np.round(a.lat.values.astype("float64"), 4), lon=np.round(a.lon.values.astype("float64"), 4))
-        per[d] = a
+        try:                                                          # join="exact": parts of different boxes never become NaN holes (the outer default did)
+            a = xr.concat([opened[fn] for fn in names], dim="time", join="exact").sortby("time")
+        except ValueError as e:
+            raise ValueError(f"the {d} parts in {pdir} were cut to different boxes ({e}); delete {pdir} and run fetch again") from e
+        per[d] = a.isel(time=~a.indexes["time"].duplicated())
     joined = xr.merge([per[d] for d in DATASETS], join="inner", compat="override")
     t = joined.time.values.astype("datetime64[s]").astype("int64").astype("float64")
     missing = sorted(set(map(float, steps)) - set(map(float, t)))
@@ -463,7 +487,7 @@ def _dim(v: Any, key: str) -> str | None:
 
 def read_lab_netcdf(path: Any, temperature_kind: Any = None, depth: Any = None) -> tuple[Any, str]:
     """One per-snapshot lab HYCOM netCDF -> (standardized dataset, temperature_kind); cafe/schemas/hycom_netcdf.json says what is
-    assumed. z-level files (a 1-D depth coordinate in metres, positive down) keep their own levels unless `depth` is given;
+    assumed. z-level files (a 1-D depth coordinate in metres, positive down, in any order) keep their own levels unless `depth` is given;
     layered files (a thickness variable thknss/dp in Pa or m) go to `depth` (default GOFS_DEPTHS) with layers_to_z.
     Velocities are total (not baroclinic), on T-points, east/north. The kind comes from the argument, else the file's
     temperature_kind attribute (global or on the temperature variable), else it is an error."""
@@ -486,6 +510,7 @@ def read_lab_netcdf(path: Any, temperature_kind: Any = None, depth: Any = None) 
         dpv = dpv / ONEM if str(ds[nm["dp"]].attrs["units"]).lower() in PA_UNITS else dpv
         depth = GOFS_DEPTHS if depth is None else depth
     else:
+        ds = ds.sortby(dim["z"])                    # _to_levels searches zc ascending: a file that lists the deepest level first read as all NaN
         zc = ds[dim["z"]].values.astype(float)
         if (zc < 0).any():
             raise ValueError(f"{path}: depth must be positive down (found negative values); flip it before ingest")
@@ -665,20 +690,27 @@ def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any =
     if not files:
         raise ValueError(f"{p} holds no *.nc and no archv*.b files")
     if all(f.suffix == ".nc" for f in files):
-        reads = [functools.partial(read_lab_netcdf, f, temperature_kind, depth) for f in files]
+        reads, labels = [functools.partial(read_lab_netcdf, f, temperature_kind, depth) for f in files], files
     else:
         stems = [f.with_suffix("") if f.suffix in (".a", ".b") else f for f in files]
         gstem = pathlib.Path(grid) if grid else stems[0].parent / "regional.grid"
-        reads = [functools.partial(read_archv, s, gstem, temperature_kind, depth, box) for s in stems]
+        reads, labels = [functools.partial(read_archv, s, gstem, temperature_kind, depth, box) for s in stems], stems
     kinds: list[str] = []
 
     def steps() -> Iterator[Any]:
-        for rd in reads:
+        from ..config import ConfigError
+        for rd, label in zip(reads, labels, strict=True):
             ds, kind = rd()
             kinds.append(kind)
             if kind != kinds[0]:
                 raise ValueError(f"files disagree about temperature_kind: {sorted(set(kinds))}")
-            yield _std(_sub(ds, box))
+            out = _std(_sub(ds, box))
+            for v in ("water_temp", "salinity", "water_u", "water_v"):          # a store of NaN is no ocean: the failure would show far away, in Axis or Ocean
+                for t, empty in zip(out.time.values, np.isnan(out[v].values).all(axis=(1, 2, 3)), strict=True):
+                    if empty:
+                        raise ConfigError(f"{label}: every value of {v} is NaN after reading (time {_iso(float(t))}; "
+                                          "check the depth axis and the variable names)")
+            yield out
     it = steps()
     first = next(it)
     return write_store(itertools.chain([first], it), out_zarr, kinds[0], dict(source=f"lab HYCOM {p}", box=json.dumps(list(box360(box)))))

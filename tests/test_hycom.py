@@ -37,7 +37,7 @@ class Ncss:
         for d in h.DATASETS:
             fs = sorted(pathlib.Path(parts_dir).glob(f"{d}_*.nc"))
             self.data[d] = xr.concat([xr.open_dataset(f).load() for f in fs], dim="time").sortby("time")
-        self.mode, self.fail, self.log = "ok", set(), []
+        self.mode, self.fail, self.log, self.empty = "ok", set(), [], set()          # empty: datasets answered with a NetCDF that has no time step
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -79,6 +79,8 @@ class Ncss:
         if "vertCoord" in q:
             a = a.sel(depth=[float(q["vertCoord"][0])], method="nearest")
         a = a[[v for v in q["var"]]]
+        if ds in self.empty:
+            a = a.isel(time=slice(0, 0))
         if self.mode == "shift":
             a = a + 1.0
         out = io.BytesIO()
@@ -151,7 +153,7 @@ def test_box_refusals():
 def test_steps_and_epoch():
     s = h.gofs_steps("2023-03-01T12:00:00Z", "2023-03-07T12:00:00Z")
     assert len(s) == 49 and s[0] == mk.T0 and s[-1] - s[0] == 6 * 86400 and set(np.diff(s)) == {10800.0}
-    assert len(h.gofs_steps("2023-03-01T13:00:00Z", "2023-03-01T14:00:00Z")) == 0
+    assert list(h.gofs_steps("2023-03-01T13:00:00Z", "2023-03-01T14:00:00Z")) == [mk.T0, mk.T0 + 10800.0]      # r7 M-24: the steps that cover the window
     assert h.epoch(mk.T0) == h.epoch("2023-03-01T12:00:00Z") == h.epoch(dt.datetime(2023, 3, 1, 12))
 
 
@@ -340,8 +342,8 @@ def test_one_failed_dataset_does_not_lose_the_others_and_a_rerun_completes(fx, t
 
 
 def test_fetch_refuses_an_empty_window(tmp_path):
-    with pytest.raises(ValueError, match="no 3-hourly"):
-        h.fetch_gofs(mk.BOX, mk.T0 + 3700, mk.T0 + 3800, tmp_path)
+    with pytest.raises(ValueError, match="no 3-hourly"):                  # r7 M-24: a window between two steps has both; only an end before the start has none
+        h.fetch_gofs(mk.BOX, mk.T0 + 86400, mk.T0, tmp_path)
 
 
 def test_dods_child_says_when_the_box_has_no_data(dods, tmp_path):
@@ -730,3 +732,113 @@ def test_r6_m7_the_remedy_names_the_store_itself_never_its_parent_and_a_lab_stor
         h.open_store(bad, lab=True)                                             # the mission says so: the name does not matter
     with pytest.raises(ConfigError, match="delete .*lab_m.zarr and run"):
         h.open_store(lab, lab=False)
+
+
+# ---- review round 7: M-3 (the manifest pins the box), M-30 (an unusable part is removed), M-24 (steps cover the window), M-36 (depth order, all-NaN refusal)
+
+def test_r7_m3_a_changed_box_fetches_every_part_again_and_the_store_has_no_holes_of_the_old_box(fx, truth, ncss, tmp_path, capsys):
+    """A first fetch of a smaller box for one step, then the fixture box over three into the same directory: part names are the same and every
+    hash matched, so the old step 0 (cut to the small box) was mixed in and the outer join made NaN holes (0.468 against 0.024 NaN share in the demo)."""
+    small = (-0.04, 0.04, 179.92, 180.4)
+    h.fetch_gofs(small, mk.STEPS[0], mk.STEPS[0], tmp_path, chunk_steps=1, workers=2, deadline_s=120, tries=1, ncss=ncss.base, dods="/nonexistent")
+    n = len(ncss.log)
+    capsys.readouterr()
+    z = h.fetch_gofs(mk.BOX, mk.STEPS[0], mk.STEPS[-1], tmp_path, chunk_steps=1, workers=2, deadline_s=120, tries=1, ncss=ncss.base, dods="/nonexistent")
+    said = capsys.readouterr().out
+    _same(h.open_store(z), truth)                                                   # step 0 was the small box's: NaN where the truth has water (outer join)
+    assert len(ncss.log) - n == 9                                                   # 3 datasets x 3 steps: not one of the 3 old parts was kept
+    assert "were cut to [-0.04, 0.04, 179.92, 180.4]" in said and "all 9 parts are fetched again" in said
+    assert json.loads((tmp_path / "gofs_tepex_c.parts" / "manifest.json").read_text())["box"] == list(h.box360(mk.BOX))
+
+
+def test_r7_m3_a_grown_box_asks_the_server_again_and_the_same_box_still_asks_for_nothing(fx, truth, ncss, tmp_path):
+    kw = dict(chunk_steps=1, workers=2, deadline_s=120, tries=1, ncss=ncss.base, dods="/nonexistent")
+    h.fetch_gofs(mk.BOX, mk.STEPS[0], mk.STEPS[-1], tmp_path, **kw)
+    n = len(ncss.log)
+    h.fetch_gofs(mk.BOX, mk.STEPS[0], mk.STEPS[-1], tmp_path, **kw)
+    assert len(ncss.log) == n                                                        # same box: resumed from the hashes
+    grown = (mk.BOX[0] - 0.1, mk.BOX[1] + 0.1, mk.BOX[2] - 0.1, mk.BOX[3] + 0.1)
+    h.fetch_gofs(grown, mk.STEPS[0], mk.STEPS[-1], tmp_path, **kw)
+    assert len(ncss.log) - n == 9                                                    # 0 before: every part was a "hash match" and the store kept the old extent
+
+
+def test_r7_m3_parts_cut_to_different_boxes_are_refused_not_joined_into_holes(fx, tmp_path):
+    import warnings
+
+    import xarray as xr
+    p = tmp_path / "parts"
+    shutil.copytree(fx["gofs_parts"], p)
+    man = json.loads((p / "manifest.json").read_text())
+    victim = sorted(fn for fn, r in man["parts"].items() if r["dataset"] == "ts3z")[0]
+    a = xr.open_dataset(p / victim).load()
+    a.isel(lat=slice(1, -1), lon=slice(2, -2)).to_netcdf(p / "cut.nc")
+    (p / "cut.nc").replace(p / victim)
+    man["parts"][victim]["sha256"] = h._sha(p / victim)
+    (p / "manifest.json").write_text(json.dumps(man))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)                                  # the xarray default join must never decide (it warned, then will raise)
+        with pytest.raises(ValueError, match=r"ts3z parts in .*parts were cut to different boxes.*delete .*parts and run fetch again"):
+            h.assemble_gofs(p, mk.STEPS, tmp_path / "x.zarr")
+        h.assemble_gofs(fx["gofs_parts"], mk.STEPS, tmp_path / "ok.zarr")              # and the ordinary store carries no FutureWarning either
+
+
+def test_r7_m30_an_unusable_part_is_removed_with_its_entry_and_the_rerun_downloads_it_again(fx, truth, ncss, tmp_path):
+    """A server answered one dataset with a NetCDF that holds no time step; the part was recorded by hash, so the rerun made 0 requests and failed alike."""
+    ncss.empty = {"uv3z"}
+    parts = tmp_path / "gofs_tepex_c.parts"
+    with pytest.raises(h.FetchError, match=r"the part uv3z_\S+\.nc was unusable \(OSError: .*Unknown file format.*\); it has been removed: "
+                                           "rerun fetch to download it again"):
+        _fetch(tmp_path, ncss, chunk_steps=3)
+    man = json.loads((parts / "manifest.json").read_text())
+    assert not list(parts.glob("uv3z_*")) and {r["dataset"] for r in man["parts"].values()} == {"ts3z", "ssh"}          # the file and its entry are gone
+    ncss.empty = set()
+    n = len(ncss.log)
+    z = _fetch(tmp_path, ncss, chunk_steps=3)
+    assert [d for d, _ in ncss.log[n:]] == ["uv3z"]                                      # only the removed part is asked for (0 requests before)
+    _same(h.open_store(z), truth)
+
+
+def test_r7_m30_a_part_with_no_time_step_is_unusable_too(fx, tmp_path):
+    import netCDF4
+    p = tmp_path / "parts"
+    shutil.copytree(fx["gofs_parts"], p)
+    man = json.loads((p / "manifest.json").read_text())
+    ssh = sorted(fn for fn, r in man["parts"].items() if r["dataset"] == "ssh")
+    for victim in ssh:
+        with netCDF4.Dataset(p / victim, "w") as nc:                                   # a valid NetCDF whose unlimited time dimension holds nothing
+            nc.createDimension("time", None)
+            nc.createVariable("time", "f8", ("time",))
+        man["parts"][victim]["sha256"] = h._sha(p / victim)
+    (p / "manifest.json").write_text(json.dumps(man))
+    with pytest.raises(h.FetchError, match=rf"(?s)the part {ssh[0]} was unusable \(ValueError: no time step in it\); the part {ssh[1]} was unusable "
+                                           ".*; they have been removed: rerun fetch to download them again"):
+        h.assemble_gofs(p, mk.STEPS, tmp_path / "x.zarr")
+    assert not any((p / v).exists() for v in ssh) and not set(ssh) & set(json.loads((p / "manifest.json").read_text())["parts"])
+
+
+def test_r7_m24_the_steps_cover_the_window_and_an_aligned_window_gets_its_own():
+    s = h.gofs_steps("2023-03-01T13:00:00Z", "2023-03-02T13:00:00Z")
+    assert s[0] == mk.T0 and s[-1] == mk.T0 + 86400 + 10800.0 and s[0] <= h.epoch("2023-03-01T13:00:00Z") and s[-1] >= h.epoch("2023-03-02T13:00:00Z")
+    assert np.array_equal(h.gofs_steps("2023-03-01T12:00:00Z", "2023-03-02T12:00:00Z"), mk.T0 + 10800.0 * np.arange(9))
+
+
+def test_r7_m36_a_z_level_file_listing_depth_deepest_first_reads_like_the_ordered_one(fx, tmp_path):
+    import xarray as xr
+    src = next(fx["zlevel_dir"].glob("*.nc"))
+    good, _ = h.read_lab_netcdf(src)
+    xr.open_dataset(src).load().isel(depth=slice(None, None, -1)).to_netcdf(tmp_path / "rev.nc")
+    rev, _ = h.read_lab_netcdf(tmp_path / "rev.nc")
+    assert np.array_equal(rev.depth.values, good.depth.values) and np.isfinite(rev.water_temp.values).mean() > 0.9 * np.isfinite(good.water_temp.values).mean()
+    for v in ("water_temp", "salinity", "water_u", "water_v"):
+        assert np.array_equal(rev[v].values, good[v].values, equal_nan=True), v
+
+
+def test_r7_m36_a_lab_file_whose_field_is_all_nan_is_refused_with_the_file_named(fx, tmp_path):
+    import xarray as xr
+    from cafe.pm.config import ConfigError
+    d = tmp_path / "lab"
+    d.mkdir()
+    f = xr.open_dataset(next(fx["zlevel_dir"].glob("*.nc"))).load()
+    f.assign(temp=f.temp * np.nan).to_netcdf(d / "nan.nc")
+    with pytest.raises(ConfigError, match=r"nan\.nc: every value of water_temp is NaN after reading \(.*check the depth axis and the variable names\)"):
+        h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")

@@ -49,7 +49,7 @@ def test_stamp_hours_urls(monkeypatch):
                                "umwm": "http://h/run/output/umwmout_2023-03-05_06:00:00.nc",
                                "rst": "http://h/run/restart/umwmrst_2023-03-05_06:00:00.nc"}
     assert orca.hours(t(0), t(2)) == [t(0), t(1), t(2)]
-    assert orca.hours(t(0), t(0) + dt.timedelta(minutes=119)) == [t(0), t(1)]      # whole hours only
+    assert orca.hours(t(0), t(0) + dt.timedelta(minutes=119)) == [t(0), t(1), t(2)]      # the hours that cover the window (r7 M-17: it dropped the third file)
     assert orca.hours(t(3), t(0)) == []
     np.testing.assert_array_equal(orca.lon360(np.array([-180.0, -0.5, 0.0, 359.5, 360.0, -350.0])), [180, 359.5, 0, 359.5, 0, 10])
 
@@ -536,3 +536,51 @@ def test_r6_m8_an_unreadable_cut_record_drops_every_part_like_no_record(orca_env
     _, lines = ingest(orca_env, out)
     assert lines[0] == "ingest: 7 parts, 0 cached, fetching 7 with 4 threads"
     assert json.loads((out / "cut.json").read_text())["box"] == list(BOX)
+
+
+# ---- review round 7: M-17 (a window that does not start on the hour reads the hour's files, labelled with the hour) and M-31 (a failed part stops the rest)
+
+def test_r7_m17_hours_are_the_whole_hours_that_cover_the_window():
+    half = dt.timedelta(minutes=30)
+    assert orca.hours(t(0) + half, t(4) + half) == [t(h) for h in range(0, 6)]                    # 12:30..16:30 -> 12:00 .. 17:00 on the hour
+    assert orca.hours(t(0) + half, t(4)) == [t(h) for h in range(0, 5)]                          # an end on the hour loses no file and gains none
+    assert orca.hours(t(0), t(2)) == [t(0), t(1), t(2)]                                           # an aligned window: the list it always gave
+    assert orca.hours(t(3), t(0)) == [] and orca.hours(t(1) + half, t(1) + dt.timedelta(minutes=10)) == []
+
+
+def test_r7_m17_a_half_hour_window_builds_a_time_axis_equal_to_the_file_stamps(orca_env, tmp_path):
+    out = tmp_path / "out"
+    half = dt.timedelta(minutes=30)
+    man, _ = ingest_dt(out, t(0) + half, t(5) + half)                                               # 00:30 .. 05:30 -> files 00 .. 06
+    wrf = zarr(out, "wrf.zarr")
+    assert man["hours"] == 7
+    assert [np.datetime_as_string(x, unit="m") for x in wrf.time.values] == [f"2023-03-05T{h:02d}:00" for h in range(7)]     # the files' own hours
+    assert [orca.stamp(x) for x in orca.hours(t(0) + half, t(5) + half)] == [orca.stamp(t(h)) for h in range(7)]
+
+
+def ingest_dt(out, a, b, **kw):
+    lines = []
+    kw.setdefault("threads", 4)
+    return orca.ingest(a, b, BOX, out, log=lines.append, **kw), lines
+
+
+def test_r7_m31_a_failed_part_stops_the_rest_and_keeps_the_finished_ones(orca_env, tmp_path, monkeypatch):
+    """Ten jobs on two threads, one of them raising: the exception reached the caller after the other nine had run to completion and none was saved."""
+    import threading
+    import time
+    real, lock, ran, bad_hour = orca.wrf_hour, threading.Lock(), [], t(1)
+
+    def wrf(tt, *a, **k):
+        if tt == bad_hour:
+            raise OSError("server went away")
+        time.sleep(0.3)
+        with lock:
+            ran.append(tt)
+        return real(tt, *a, **k)
+    monkeypatch.setattr(orca, "wrf_hour", wrf)
+    out = tmp_path / "out"
+    with pytest.raises(OSError, match="server went away"):
+        ingest(orca_env, out, t0=0, t1=6, threads=2, spectra=False)                                   # 7 wrf + 7 umwm jobs
+    assert len(ran) <= 3                                                                              # the jobs in flight, not the seven queued (6 before)
+    saved = {p.name for p in (out / "hours").glob("*.npz")}
+    assert saved and all(f"wrf_{orca.stamp(x)}.npz" in saved for x in ran)                            # what finished was kept

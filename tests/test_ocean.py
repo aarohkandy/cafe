@@ -235,3 +235,14 @@ def test_r6_m7_open_ocean_tells_a_lab_store_from_a_downloaded_one(ci_env, tmp_pa
         O.open_ocean({"source": "lab_hycom", "path": str(lab)}, ci_env.cache, "ci_fixture", fetch_bathy=False)
     with pytest.raises(ConfigError, match="delete .* and run"):
         O.open_ocean({"source": "gofs31", "path": str(lab)}, ci_env.cache, "ci_fixture", fetch_bathy=False)
+
+
+# ---- review round 7, M-24: the store knows when a query is outside it
+
+def test_r7_m24_ocean_inside_tests_the_stores_lat_lon_and_time_axes_and_bounds_names_them(oc):
+    t = oc.axes[0].x
+    assert oc.inside(195.0, 0.0, t[3]) and oc.inside(-165.0, 0.0, t[3]) and oc.inside(195.0, 0.0)                    # -165 is 195 east
+    assert not oc.inside(195.0, 3.0, t[3]) and not oc.inside(190.0, 0.0, t[3])
+    assert not oc.inside(195.0, 0.0, t[-1] + 1.0) and not oc.inside(195.0, 0.0, t[0] - 1.0)
+    assert list(oc.inside(np.array([195.0, 190.0]), np.array([0.0, 0.0]), t[3])) == [True, False]
+    assert oc.bounds() == (-167.5, -162.5, -2.5, 2.5, float(t[0]), float(t[-1]))
