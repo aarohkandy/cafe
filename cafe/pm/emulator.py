@@ -105,10 +105,12 @@ def locked(path: pathlib.Path) -> Iterator[None]:
 
 class Emulator:
     def __init__(self, features: list[str], targets: list[str], path: str | pathlib.Path = "emulator/train.parquet",
-                 prob_targets: list[str] | None = None, eps: float = 1e-3, noise: float = 1e-2, seed: int = 0):
+                 prob_targets: list[str] | None = None, eps: float = 1e-3, noise: float = 1e-2, seed: int = 0, point_cols: list[str] | None = None):
         """`prob_targets` (default: "p_fail" if it is a target) are logit-transformed; `noise` is the GP nugget on the
-        normalized scale (the targets are Monte-Carlo estimates, not exact)."""
+        normalized scale (the targets are Monte-Carlo estimates, not exact). `point_cols` (default: all features) are the columns that identify
+        one feature point for the hold-out split: rows equal in them are replicates of one point."""
         self.features, self.targets = list(features), list(targets)
+        self.point_cols = list(point_cols or features)
         self.prob = [t for t in (prob_targets if prob_targets is not None else ["p_fail"]) if t in self.targets]
         self.path, self.store_format = store_path(path)
         self.eps, self.noise, self.seed = eps, noise, seed
@@ -182,7 +184,8 @@ class Emulator:
         self.mu, self.sd = x_all.mean(0), np.where(x_all.std(0) > 0, x_all.std(0), 1.0)
         z = (x_all - self.mu) / self.sd
         self._tree = cKDTree(z)
-        nn = self._tree.query(z, k=2)[0][:, 1]
+        u = np.unique(z.round(9), axis=0)                                # replicate rows are one point, not a neighbour at distance 0 (round 7 M-25)
+        nn = cKDTree(u).query(u, k=2)[0][:, 1]
         self.threshold = float(np.quantile(nn, NN_QUANTILE))
         self.n_train, self.n_cal = len(tr) + len(low), len(cal)
         self.models, self.scores, self.ysd = {}, {}, {}
@@ -250,25 +253,25 @@ class Emulator:
 
     def holdout_report(self, df: pd.DataFrame, frac: float = 0.2, alpha: float = 0.1, fresh: FreshDraw | None = None) -> dict[str, Any]:
         """Fit a fresh emulator on the other (1 - frac) of the feature points, score on the held-out frac. The split is by distinct feature
-        point: rows that share a feature vector (replicates of one mission) are all on one side, so a point the model trained on is never
+        point (`point_cols`): rows that share it (replicates of one mission) are all on one side, so a point the model trained on is never
         scored. `n_train` and `n_test` count rows.
 
         The table's targets are estimates from member draws that the training rows may share with the held-out ones (the same hypercube and noise
         streams), so the in-sample score can under-read the error against the true P(fail). `fresh(row)` re-estimates P(fail) at one held-out row
         on members used nowhere else and returns (p, n_members), or None when it cannot; for up to FRESH_POINTS held-out points the emulator
         trained without them is scored against that independent estimate, in `["fresh"]`: points, p_fresh, p_emulated, rmse, n_members."""
-        point = df[self.features].round(9).groupby(self.features, sort=False, dropna=False).ngroup().to_numpy()
+        point = df[self.point_cols].round(9).groupby(self.point_cols, sort=False, dropna=False).ngroup().to_numpy()
         pts = np.unique(point)
         if len(pts) < 2:
             raise ValueError(f"a hold-out needs at least two distinct feature points, the table has {len(pts)}")
         k = min(max(int(round(frac * len(pts))), 1), len(pts) - 1)
         test = np.isin(point, np.random.default_rng(self.seed + 1).permutation(pts)[:k])
-        sub = Emulator(self.features, self.targets, self.path, self.prob, self.eps, self.noise, self.seed)
+        sub = Emulator(self.features, self.targets, self.path, self.prob, self.eps, self.noise, self.seed, self.point_cols)
         sub.fit(df[~test])
         out = dict(sub.score(df[test], alpha), n_train=sub.n_train + sub.n_cal)
         if fresh is not None:
             got: list[tuple[pd.Series, float, int]] = []
-            for _, row in df[test].drop_duplicates(self.features).iterrows():
+            for _, row in df[test].drop_duplicates(self.point_cols).iterrows():
                 r = fresh(row)
                 if r is not None:
                     got.append((row, *r))

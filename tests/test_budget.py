@@ -1,6 +1,8 @@
 """cafe.pm.budget: the plan adapts to the measured machine, shrinks when the measured member cost is high, and refuses oversized nests."""
 import json
 import math
+import pathlib
+import re
 
 import pytest
 from hypothesis import given, settings, strategies as st
@@ -608,3 +610,21 @@ def test_r7_m1_planning_the_budget_does_not_replace_the_missions_verdict_cut_off
     intervals.set_thresholds(0.8, 0.5)                                                  # the user's mission: verdict {go: 0.8, nogo: 0.5}
     budget.plan("quick", 0, m, vehicle_classes=c, workers=6)
     assert (intervals.P_FAIL_GO, intervals.P_FAIL_NOGO) == (pytest.approx(0.2), 0.5)
+
+
+def test_the_refusal_of_a_long_window_says_its_memory_figure_is_the_models_and_not_a_measurement():
+    """Round 7 M-38: 45 GB for 30 days is a linear extrapolation of one 6-day point; the refusal read like a measurement."""
+    m = dict(MISSION, window=dict(start="2023-03-01T12:00:00Z", end="2023-03-31T12:00:00Z"))
+    with pytest.raises(PlanError) as e:
+        budget.plan("4h", 0, m, vehicle_classes=CLASSES, mem_gb=28.0)
+    assert "The 45 GB is the model's figure (linear from one measured 6-day point), not a measurement: " in str(e.value)
+    assert "measure the peak memory of a longer window before relying on it" in str(e.value)
+
+
+def test_the_worker_memory_comment_carries_no_date_it_cannot_have_and_names_what_is_missing():
+    """Round 7 M-46: the comment dated the measurement 2026-11-05, after the commit that carries it; no script or output behind it is in the repository."""
+    src = pathlib.Path(budget.__file__).read_text()
+    i = src.index("WORKER_GB = 0.9")
+    comment = src[src.rindex("\n\n", 0, i):i]
+    assert "0.81 to 0.84 GB measured in round 5 by B's mem.py (the date is not recorded;" in comment and "not in the repository" in comment
+    assert not re.search(r"\d{4}-\d{2}-\d{2}", comment)

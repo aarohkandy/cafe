@@ -1463,8 +1463,8 @@ def test_the_variant_runs_stay_inside_the_emulator_share(tmp_path, table, fake_s
     assert design["variant_s"] == est and design["variant_s_source"].startswith("the planner's estimate")
     assert design["rows_added"] == 4 * 4 and design["table_rows"] == 16 and design["planned_variants"] == 3
     assert design["spent_s"] == 3 * est                                                                        # charged at the plan's cost, not the clock
-    # round 3 M-4: variant k runs its own members (k + 1) x batch .. (k + 2) x batch - 1, not the baseline's 0..batch-1 that every variant used to share
-    assert [c[1] for c in fake_stage1][:3] == [list(range(16 * (k + 1), 16 * (k + 2))) for k in range(3)]
+    # round 3 M-4: every variant runs its own members, not the baseline's that every variant used to share; round 7 M-7: and none stage 1b used (48 here)
+    assert [c[1] for c in fake_stage1][:3] == [list(range(16 * (3 + k), 16 * (4 + k))) for k in range(3)]
     assert [c[0] for c in fake_stage1][:3] == [["glider_eq", "glider_2n", "usv", "uas"]] * 3
     assert check_of(d, "emulator_rows_appended")["value"] == 16 and "emulator_variants_within_share" not in [c["name"] for c in d["checks"]]   # round 5 M-13
     assert any("3 variant run(s) of 4 s each (the planner's estimate" in n for n in d["notes"]) and any("stage 1b's share included" in n for n in d["notes"])
@@ -1757,7 +1757,8 @@ def test_the_stage_learns_from_what_the_table_already_holds(tmp_path, table, fak
 
 
 def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, table, fake_stage1, monkeypatch):
-    """Round 3 M-4: variant k runs members (k + 1) x batch.., the baseline 0..batch-1, and the hold-out's fresh-draw check runs blocks after the variants'."""
+    """Round 3 M-4: every variant runs members of its own and the hold-out's fresh-draw check runs blocks after the variants'; round 7 M-7: all of them
+    after the 48 members stage 1b used."""
     from cafe.pm import whatif
     seed_table(table, n=100)                                         # 100 rows + this run's glider rows: just enough distinct points to train
     monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
@@ -1769,8 +1770,8 @@ def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, tab
     assert h["trained"] and "its own members" in h["draws"] and n_var >= 1
     runs = [c[1] for c in fake_stage1]
     variants, later = runs[:n_var], runs[n_var:]
-    assert variants == [list(range(16 * (k + 1), 16 * (k + 2))) for k in range(n_var)]
-    fresh_blocks = [m for m in later if m[0] >= 16 * (n_var + 2)]
+    assert variants == [list(range(16 * (3 + k), 16 * (4 + k))) for k in range(n_var)]
+    fresh_blocks = [m for m in later if m[0] >= 16 * (3 + n_var)]
     assert len(fresh_blocks) == h["fresh_points"] and len({m[0] for m in fresh_blocks}) == len(fresh_blocks)         # each fresh draw its own unused block
     assert h["fresh_points"] == 0 or (h["rmse_gate"] >= h["rmse_debiased"] and h["rmse_gate"] >= h["rmse_fresh_debiased"])
     note = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 RMSE"))
@@ -2931,3 +2932,54 @@ def test_r7_m32_ocean_box_across_0_deg_e_is_a_config_error_for_a_mission_loaded_
     with pytest.raises(config.ConfigError, match=r"crosses 0 deg E; the GLBy ocean fetch cannot cross it: move the box east or west of 0 deg, or split"):
         pipeline.ocean_box(m)
     assert pipeline.ocean_box(yaml.safe_load((ROOT / "missions" / "tepex_c_demo.yaml").read_text()))[2:] == (163.0, -163.0)
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 7: M-7, M-14, M-22
+
+@pytest.mark.parametrize("M,batch,budget_s,n_variants", [(48, 16, 100.0, 3), (96, 32, 40.0, 1), (256, 64, 40.0, 1)])
+def test_no_variant_and_no_fresh_draw_reuses_a_member_stage_1b_used(tmp_path, table, fake_stage1, monkeypatch, M, batch, budget_s, n_variants):
+    """Round 7 M-7: variant 0 ran members `batch` .. 2 x batch - 1, the very hypercube and noise streams of stage 1's second batch (the base row's
+    ensemble is all M members); the fresh-draw blocks started at (variants + 2) x batch, inside a longer ensemble (4h: M 256, batch 64, one variant)."""
+    from cafe.pm import whatif
+    seed_table(table, n=100)
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
+    ctx = cheap_plan(synthetic_ctx(tmp_path, M, unused_refit=True), budget_s)
+    ctx.plan["batch"] = batch
+    run_stage(pipeline.s_emulator, ctx, "emulator")
+    assert len(json.loads((ctx.run_dir / "emulator" / "design.json").read_text())["variants"]) == n_variants
+    runs = [c[1] for c in fake_stage1]
+    variants, later = runs[:n_variants], [m for m in runs[n_variants:] if m != list(range(batch))]       # the flip search's fallback uses the base members
+    assert variants[0][0] == -(-M // batch) * batch
+    blocks = [set(m) for m in variants + later]
+    assert all(len(b) == batch for b in blocks) and not set().union(*blocks) & set(range(M)) and sum(map(len, blocks)) == len(set().union(*blocks))
+
+
+def test_a_calibration_without_a_refit_sizes_the_variants_for_the_emulators_own_share(tmp_path, table, fake_stage1):
+    """Round 7 M-14: with stage3/subgrid_calibration.json and no refit stage 1b reran, so the share is the emulator's own 5 % (5 s here), but the count
+    was the one sized for the share with stage 1b's added (3 variants), which only the wall clock then cut short."""
+    from cafe.pm.env import subgrid
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)
+    ctx.path("stage3", "subgrid_calibration.json").parent.mkdir(exist_ok=True)
+    ctx.path("stage3", "subgrid_calibration.json").write_text(json.dumps(dict(source_run="t")))
+    try:
+        run_stage(pipeline.s_emulator, ctx, "emulator")
+    finally:
+        subgrid.use_calibration(None)
+    d = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    sizes = budget.emulator_plan(ctx.plan)
+    assert d["share_s"] == 5.0 and not d["stage1b_free"] and d["planned_variants"] == sizes["variants_refit"] == 0 != sizes["variants_no_refit"]
+    assert d["variants"] == [] and d["killed"] is None
+
+
+def ensemble_note(tmp_path, monkeypatch, **plan):
+    d = stage1_ledger(tmp_path, monkeypatch, plan=plan)
+    return next(c for c in d["checks"] if c["name"] == "ensemble_size")["note"]
+
+
+def test_the_ensemble_size_note_names_the_profile_that_caps_the_ensemble_and_the_share_when_it_is_the_share(tmp_path, monkeypatch):
+    """Round 7 M-22: q7 (quick) planned 64 members from the table constant `N_MAX`, used 13 % of its share, and the note blamed 'the budget'."""
+    note = ensemble_note(tmp_path / "a", monkeypatch, budget="quick", n_max=64, stage1_share_s=900.0)
+    assert "because the quick budget profile caps the ensemble at 64 members (budget.N_MAX); the stage-1 share (900 s) would have allowed more: " \
+           "use --budget 4h to certify" in note
+    note = ensemble_note(tmp_path / "b", monkeypatch, budget="quick", n_max=32, stage1_share_s=40.0)
+    assert "because the stage-1 share (40 s) caps the ensemble at 32 members: use a longer --budget" in note and "profile" not in note

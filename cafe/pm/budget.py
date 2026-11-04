@@ -49,7 +49,9 @@ LES_BYTES_PER_CELL = 55.0         # FP16S storage (Lehmann et al. 2022), the fig
 NOMINAL_WINDOW = {("glider", "body"): ("nominal.glider", "water"), ("usv", "hull"): ("nominal.usv_hull", "water"),   # (stage3.* key of [speed, length], fluid)
                   ("usv", "wing"): ("nominal.usv_wing", "air"), ("uas", "body"): ("nominal.uas", "air")}
 MIN_BATCH = 4                     # members: the smallest stage-1 batch the planner will shrink to (below it an ensemble has no spread worth reporting)
-WORKER_GB = 0.9                   # private memory of a stage-1 worker before it touches the environment: 0.81 to 0.84 GB measured (B's mem.py, 2026-11-05)
+# private memory of a stage-1 worker before it touches the environment: 0.81 to 0.84 GB measured in round 5 by B's mem.py (the date is not recorded;
+# the script and its output are not in the repository); re-measure the peak memory of a worker
+WORKER_GB = 0.9
 ENV_REF_GB, ENV_REF_DEG2_DAY = 9.0, 14.0 * 34.0 * 6.0   # the one measured point (DECISIONS 267, 270): 9 GB for the 6-day demo's 14 x 34 deg padded box
 ENV_GB_PER_DEG2_DAY = ENV_REF_GB / ENV_REF_DEG2_DAY      # 0.0031 GB per deg^2 day: the environment in memory, linear in the padded area and the days
 STAGE1_S_BASIS = ("critical path: the longest task or the work over the workers; the parent's serial part (link evaluation, merge, pickling) "
@@ -279,7 +281,9 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         by_mem = int((mem_gb - env) // WORKER_GB)
         if by_mem < 1:
             raise PlanError(f"stage 1 needs about {env:.0f} GB for the environment of a {days:.0f}-day window and {WORKER_GB} GB per worker, and "
-                            f"{mem_gb:.0f} GB is available; shorten the window or use a machine with more memory (docker --memory)")
+                            f"{mem_gb:.0f} GB is available; shorten the window or use a machine with more memory (docker --memory). "
+                            f"The {env:.0f} GB is the model's figure (linear from one measured 6-day point), not a measurement: measure the peak memory of a "
+                            "longer window before relying on it")
     explicit = workers is not None or bool(os.environ.get("CAFE_WORKERS"))
     W = cpu if by_mem is None or explicit else min(cpu, by_mem)
     if by_mem is not None and explicit and cpu > by_mem:

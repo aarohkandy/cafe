@@ -1,4 +1,5 @@
 """Tests for cafe.pm.emulator."""
+import contextlib
 import pathlib
 import sys
 import threading
@@ -430,3 +431,70 @@ def test_the_table_lock_makes_a_second_holder_wait_and_is_skipped_without_fcntl(
     monkeypatch.setitem(sys.modules, "fcntl", None)                                         # `import fcntl` raises ImportError
     with E.locked(t):
         pass
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 7: M-6, M-25, M-47
+
+def test_the_range_threshold_ignores_replicate_rows(tmp_path):
+    """Round 7 M-25: a row with an exact duplicate has nearest-neighbour distance 0; with replicates of every row the 99 % quantile was 0 and the guard
+    refused every query."""
+    once = E.synthetic_table(120, 1)
+    a = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "a.parquet", seed=2)
+    a.fit(once)
+    b = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "b.parquet", seed=2)
+    b.fit(pd.concat([once] * 5, ignore_index=True))
+    assert a.threshold > 0 and b.threshold == pytest.approx(a.threshold, rel=1e-6)
+    fresh = E.synthetic_table(1000, 99)
+    refused = [float(np.mean(m._dist(m._x(fresh[E.FEATURES])) > m.threshold)) for m in (a, b)]
+    assert refused[1] == pytest.approx(refused[0], abs=0.02) and refused[1] < 0.5                  # 1.0 before: every query refused
+
+
+def test_the_holdout_splits_on_the_point_columns_so_replicates_with_other_noise_columns_stay_together(tmp_path, monkeypatch):
+    """Round 7 M-6: replicates of one mission differ in the environment medians of their member draws and were split by the hold-out as distinct points."""
+    base = E.synthetic_table(40, 1)
+    rng = np.random.default_rng(3)
+    df = pd.concat([base.assign(wind_mean=base.wind_mean + 0.01 * rng.normal(size=len(base)), hs_max=base.hs_max + 0.01 * rng.normal(size=len(base)))
+                    for _ in range(3)], ignore_index=True)
+    cols = ["deploy_shift_h", "lon_shift_deg", "duty_cycle", "battery_wh"]
+    em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "t.parquet", seed=1, point_cols=cols)
+    seen = {}
+    real_fit, real_score = E.Emulator.fit, E.Emulator.score
+    monkeypatch.setattr(E.Emulator, "fit", lambda self, d, *a, **k: (seen.setdefault("train", d), real_fit(self, d, *a, **k))[1])
+    monkeypatch.setattr(E.Emulator, "score", lambda self, d, *a, **k: (seen.setdefault("test", d), real_score(self, d, *a, **k))[1])
+    h = em.holdout_report(df)
+
+    def points(d):
+        return set(map(tuple, d[cols].round(9).to_numpy()))
+    assert not points(seen["train"]) & points(seen["test"]) and len(points(seen["test"])) == 8 and h["n_test"] == 24 and h["n_train"] == 96
+
+
+def test_append_holds_the_table_lock_once(tmp_path, monkeypatch):
+    """Round 7 M-47: replacing `with locked(self.path):` by a null context left every test green (row 313)."""
+    entered = []
+
+    @contextlib.contextmanager
+    def locked(p):
+        entered.append(p)
+        yield
+    monkeypatch.setattr(E, "locked", locked)
+    em = E.Emulator(["x"], ["y"], path=tmp_path / "t.parquet")
+    em.append(dict(x=1.0, y=2.0))
+    assert entered == [tmp_path / "t.parquet"]
+
+
+def test_threads_appending_to_one_table_lose_none(tmp_path):
+    """Round 7 M-47: two read-modify-writes of the table at once keep only the later one unless `append` holds the lock (flock: POSIX)."""
+    import fcntl  # noqa: F401  (without it `locked` is no lock and this test has nothing to show)
+    em = E.Emulator(["x"], ["y"], path=tmp_path / "t.parquet")
+    errs = []
+
+    def add(tag):
+        try:
+            for i in range(5):
+                em.append(dict(x=float(i), y=0.0, key=f"{tag}{i}", pad="p" * 300_000))
+        except BaseException as e:                                                              # a thread's failure must fail the test, not vanish
+            errs.append(e)
+    ts = [threading.Thread(target=add, args=(t,)) for t in "abcd"]
+    [t.start() for t in ts]
+    [t.join(300) for t in ts]
+    assert errs == [] and sorted(E.read_table(tmp_path / "t.parquet")["key"]) == sorted(f"{t}{i}" for t in "abcd" for i in range(5))

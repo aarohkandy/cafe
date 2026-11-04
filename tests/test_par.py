@@ -1,4 +1,5 @@
 """cafe.pm.par: stage 1 on several worker processes gives the same members and the same bits as on one."""
+import functools
 import gc
 import itertools
 import pathlib
@@ -288,3 +289,20 @@ def test_resize_lowers_the_limit_and_the_width_of_a_pool_that_has_not_started(mo
         pool.ex = None
     par.resize(5)                                                                                                # no active pool: only the limit
     assert par.workers() == 5
+
+
+@pytest.mark.parametrize("files,want", [({"cpu/cpu.cfs_quota_us": "800000", "cpu/cpu.cfs_period_us": "100000"}, 8),
+                                       ({"cpu/cpu.cfs_quota_us": "150000", "cpu/cpu.cfs_period_us": "100000"}, 1),
+                                       ({"cpu/cpu.cfs_quota_us": "-1", "cpu/cpu.cfs_period_us": "100000"}, 64),
+                                       ({"cpu.max": "200000 100000", "cpu/cpu.cfs_quota_us": "800000", "cpu/cpu.cfs_period_us": "100000"}, 2),
+                                       ({"cpu.max": "max 100000"}, 64), ({"cpu/cpu.cfs_quota_us": "x", "cpu/cpu.cfs_period_us": "100000"}, 64),
+                                       ({"cpu/cpu.cfs_quota_us": "800000", "cpu/cpu.cfs_period_us": "0"}, 64), ({}, 64)])
+def test_the_cgroup_v1_cpu_quota_cuts_the_cpus_like_the_v2_one_does(monkeypatch, tmp_path, files, want):
+    """Round 7 M-37: on a cgroup-v1 host `docker --cpus 8` left `workers()` at every CPU of the host (64 here); `memory_gb` already read v1."""
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text + "\n")
+    monkeypatch.delenv("CAFE_WORKERS")
+    monkeypatch.setattr(par.os, "sched_getaffinity", lambda pid: set(range(64)))
+    monkeypatch.setattr(par, "_cgroup_cpus", functools.partial(par._cgroup_cpus, str(tmp_path)))
+    assert par.workers() == want
