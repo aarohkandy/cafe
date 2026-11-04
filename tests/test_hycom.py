@@ -879,6 +879,28 @@ def test_r8_m29_a_fine_grid_is_cut_as_before(tmp_path):
         h._sub(ds, (40.0, 41.0, 10.0, 11.0))
 
 
+@pytest.mark.parametrize("step", [0.5, 1.0])
+@pytest.mark.parametrize("wrap", [False, True])
+def test_r8_m29_a_box_just_east_of_greenwich_is_cut_with_the_neighbours_that_lie_across_0_e(step, wrap):
+    """The unwrap in `_sub` ranks the points not kept around the box centre: a box at 0.3..0.8 E on a 1 deg grid has its western neighbour at 0 E,
+    which `lon < w - 0.1` has moved to 360, so only the unwrap makes it the point below the box (rather than the one above it). A box that spans
+    0 E itself is refused by `box360`, so this is the case that can occur."""
+    import xarray as xr
+    box = s, n, w, e = (-0.12, 0.12, 0.3, 0.8)
+    bad = []
+    for off in np.linspace(0.0, step, 9)[:-1]:
+        lat = np.arange(-4.0, 4.0, step) + off
+        lon = np.arange(-5.0, 5.0, step) + off
+        lon = lon if wrap else np.mod(lon, 360.0)                                           # the lab file writes -180..180 or 0..360
+        ds = xr.Dataset({"x": (("lat", "lon"), np.zeros((len(lat), len(lon))))}, coords=dict(lat=lat, lon=lon))
+        out = h._sub(ds, box)                                                                # ValueError "no lab-HYCOM points" with the plain longitude
+        la, lo = out.lat.values, (out.lon.values - 0.5 * (w + e) + 180.0) % 360.0 - 180.0 + 0.5 * (w + e)  # mod 360 stored: 359.5 is -0.5
+        if not (la.min() <= s + 0.1 and la.max() >= n - 0.1 and lo.min() <= w + 0.1 and lo.max() >= e - 0.1):
+            bad.append(round(float(off), 3))
+        assert lo.min() >= w - 0.1 - step and lo.max() <= e + 0.1 + step                      # at most one extra point per edge, none from the far side
+    assert bad == []
+
+
 def _copies(fx, tmp_path, names):
     """The fixture's z-level snapshots (12Z, 15Z, 18Z by time) copied to `names` (a list of (source index, new name))."""
     d = tmp_path / "lab"

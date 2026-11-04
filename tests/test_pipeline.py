@@ -3162,6 +3162,9 @@ def test_r8_m2_a_lab_store_with_a_step_over_a_day_inside_the_window_is_a_problem
     for step in (3 * h, 6 * h, day):                                                                          # 3-hourly, 6-hourly and daily stores serve it
         assert pipeline._ocean_time_problem(t0 + step * np.arange(0, 7 * day / step + 1), (t0, t0 + 6 * day)) is None
     assert pipeline._ocean_time_problem(np.array([t0, t0 + 2 * day]), (t0, t0 + 2 * day), max_step_s=3 * day) is None
+    early = np.array([t0 - 30 * h, t0, t0 + 3 * h, t0 + 6 * h])        # a time exactly at the window start: the step before it does not count
+    assert pipeline._ocean_time_problem(early, (t0, t0 + 6 * h)) is None        # "step 30 h" with side="left"
+    assert pipeline._ocean_cadence(early, (t0, t0 + 6 * h)) == (3.0, 3.0)
     assert pipeline._ocean_cadence(t0 + 6 * h * np.arange(9), (t0, t0 + 2 * day)) == (6.0, 6.0)
     assert pipeline._ocean_cadence(np.array([t0]), (t0, t0)) == (0.0, 0.0)
 
