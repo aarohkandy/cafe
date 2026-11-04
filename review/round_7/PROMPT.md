@@ -1,6 +1,6 @@
 # Round 7 reviewer prompt (BRIEF §5.6)
 
-Both reviewers got this prompt word for word, apart from the reviewer letter and the output file. Neither saw the other's findings, took part in rounds 1 to 6, or wrote any of the code.
+Both reviewers got this prompt word for word, apart from the reviewer letter and the output file. Reviewers A and B each ended with the parts they did not cover; the parts neither covered went to two more fresh reviewers, C and D, with this prompt and a scope line (in the lead's spawn message): C the line-by-line physics of `physics/usv.py`, `physics/uas.py` and `physics/glider.py` and all of `stage3/` (lbm, nest, wallmodel, freesurface, fluidx3d, windows, refit, pipeline_windows); D the readers in `env/` (hycom, ocean, orca, tao, bathy, remote), `report.py`, `credibility.py`, `receipts.py`, `dtmb5415.py`, and whether each round-6 regression test fails on a mutant of its fix. Neither saw the other's findings, took part in rounds 1 to 6, or wrote any of the code.
 
 ---
 
