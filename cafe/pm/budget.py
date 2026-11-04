@@ -227,7 +227,7 @@ def bench_sortie_rate(e: dict[str, Any]) -> float | None:
     if sm is None and e.get("mission") and (ROOT / e["mission"]).is_file():
         from . import stage1
         from .config import load_mission
-        m = load_mission(ROOT / e["mission"])
+        m = load_mission(ROOT / e["mission"], set_verdict=False)               # read only: its verdict block must not replace the run's
         sm, days = max(sortie_minutes(m, stage1._classes(m)).values(), default=None), window_days(m)
     return float(sm) / float(days) if sm and days else None
 

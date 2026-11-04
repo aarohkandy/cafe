@@ -206,7 +206,13 @@ def ocean_box(m: dict[str, Any]) -> tuple[float, float, float, float]:
     """(south, north, west, east) of mission m's box plus its pad: what the ocean store, GEBCO and TAO are cut to."""
     b = m["box"]
     pad = padding(m)
-    return (b["lat_min"] - pad, b["lat_max"] + pad, b["lon_min"] - pad, b["lon_max"] + pad)
+    box = (b["lat_min"] - pad, b["lat_max"] + pad, b["lon_min"] - pad, b["lon_max"] + pad)
+    try:
+        hycom.box360(box)
+    except ValueError as e:                                              # the only refusal left: load_mission checked south < north
+        raise ConfigError(f"box {box}: the box (with its pad of {pad:g} deg) crosses 0 deg E; the GLBy ocean fetch cannot cross it: "
+                          "move the box east or west of 0 deg, or split the mission") from e
+    return box
 
 
 def _gb(v: float | None) -> str:

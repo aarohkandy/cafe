@@ -58,6 +58,10 @@ def _yaml(path: str | pathlib.Path) -> Any:
         raise ConfigError(f"{path}: file not found")
     try:
         return yaml.load(path.read_text(), Loader=_Loader)                  # noqa: S506  _Loader is a SafeLoader
+    except UnicodeDecodeError as e:
+        raise ConfigError(f"{path}: not a UTF-8 text file ({e.reason} at byte {e.start}); the mission and platform files are UTF-8 YAML") from e
+    except OSError as e:
+        raise ConfigError(f"{path}: cannot be read ({e.strerror or e})") from e
     except ConfigError as e:
         raise ConfigError(f"{path}: {e}") from e
     except yaml.YAMLError as e:
@@ -244,7 +248,9 @@ def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None
                               f"use when: surfacing (not '{lk.get('when', 'always')}')")
 
 
-def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
+def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str, Any]:
+    """The checked mission. `set_verdict` sets the verdict cut-offs of `stats.intervals` (module state of the one mission a command runs); a mission
+    loaded only to be read (the benchmark's, for its sortie-minutes) passes False and leaves them alone."""
     path = pathlib.Path(path)
     doc = _yaml(path)
     _unread_keys(doc, path)
@@ -269,6 +275,11 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
             raise ConfigError(f"{path}: ids must be unique across vehicles, ship and shore; '{i}' is used by {' and '.join(who)}; rename one")
     if not m["box"]["lat_min"] < m["box"]["lat_max"]:
         raise ConfigError(f"{path}: box.lat_min ({m['box']['lat_min']}) must be below box.lat_max ({m['box']['lat_max']}); swap them")
+    from .pipeline import ocean_box                                         # refuse here the box ingest would refuse
+    try:
+        ocean_box(m)
+    except ConfigError as e:
+        raise ConfigError(f"{path}: {e}") from e
     if "ship" in m and not _in_box(m["ship"]["lon"], m["ship"]["lat"], m["box"]):
         raise ConfigError(f"{path}: ship ({m['ship']['lon']}, {m['ship']['lat']}) is outside the mission box {m['box']}; widen the box or move the ship")
     nodes = set(ids) | {m.get("ship", {}).get("id"), m.get("shore", {}).get("id")} - {None}
@@ -338,7 +349,8 @@ def load_mission(path: str | pathlib.Path) -> dict[str, Any]:
     _check_links(m, path, nodes)
     if not m["verdict"]["nogo"] < m["verdict"]["go"]:
         raise ConfigError(f"{path}: verdict.nogo ({m['verdict']['nogo']}) must be below verdict.go ({m['verdict']['go']})")
-    intervals.set_thresholds(m["verdict"]["go"], m["verdict"]["nogo"])
+    if set_verdict:
+        intervals.set_thresholds(m["verdict"]["go"], m["verdict"]["nogo"])
     m["_path"] = str(path)
     return m
 
