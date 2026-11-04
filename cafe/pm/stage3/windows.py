@@ -26,7 +26,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from cafe.pm.stage3 import lbm, nest, wallmodel as wm
 
-RHO = {"water": 1025.0, "air": 1.20}
+RHO = {"water": 1025.0, "air": 1.20}                  # defaults by fluid; a Vehicle that carries its platform's own rho / nu overrides them (rho_of, nu_of)
 NU = {"water": 1.19e-6, "air": 1.5e-5}
 
 
@@ -62,7 +62,9 @@ class WindowSpec:
 class Vehicle:
     """shapes: dicts in body axes. {"type": "ellipsoid", "center", "radii"}, {"type": "cylinder", "center", "radius", "length"}
     (axis x), {"type": "plate", "center", "size"} (a box: a wing is a flat plate), {"type": "stl", "path"} (body frame, metres).
-    ref_area: for the coefficients (default: frontal area of the voxels). structure: material, wall thickness for FEA."""
+    ref_area: for the coefficients (default: frontal area of the voxels). structure: material, wall thickness for FEA.
+    nu, rho: kinematic viscosity (m2/s) and density (kg/m3) of the fluid, the platform's own where it has them (the USV's seawater leaves);
+    None: the RHO / NU default of the fluid."""
     name: str
     fluid: str
     length: float
@@ -73,6 +75,16 @@ class Vehicle:
     depth: float = 0.0
     hull: int = 0                                                            # index of the shape that carries FEA
     extra: dict[str, Any] = field(default_factory=dict)
+    nu: float | None = None
+    rho: float | None = None
+
+
+def nu_of(vehicle: Vehicle) -> float:
+    return NU[vehicle.fluid] if vehicle.nu is None else vehicle.nu
+
+
+def rho_of(vehicle: Vehicle) -> float:
+    return RHO[vehicle.fluid] if vehicle.rho is None else vehicle.rho
 
 
 # ---------------------------------------------------------------------------------------------------- geometry
@@ -137,14 +149,14 @@ def frontal_area(solid: NDArray[np.bool_], dx: float, axis: int = 0) -> float:
 def window_resolution(vehicle: Vehicle, spec: WindowSpec) -> dict[str, Any]:
     """dx, grid shape, time step and step count of a window from the BRIEF 2.6 rule (lbm.les_resolution)."""
     u_rel = float(np.linalg.norm(spec.velocity))
-    r = lbm.les_resolution(vehicle.length, u_rel, NU[vehicle.fluid], (spec.cells_per_delta,), spec.box, spec.duration,
+    r = lbm.les_resolution(vehicle.length, u_rel, nu_of(vehicle), (spec.cells_per_delta,), spec.box, spec.duration,
                            spec.u_lat, spec.storage)
     row = r["rows"][spec.cells_per_delta]
     dx = spec.dx or row["dx"]
     shape = tuple(max(8, math.ceil(b * vehicle.length / dx)) for b in spec.box)
     steps = spec.steps or math.ceil(spec.duration / (spec.u_lat * dx / u_rel))
     return dict(dx=dx, shape=shape, steps=steps, dt=spec.u_lat * dx / u_rel, delta_te=r["delta_te"], u_rel=u_rel,
-                cells=int(np.prod(shape)), y_plus_estimate=2.5 * dx * r["u_tau"] / NU[vehicle.fluid])
+                cells=int(np.prod(shape)), y_plus_estimate=2.5 * dx * r["u_tau"] / nu_of(vehicle))
 
 
 # ---------------------------------------------------------------------------------------------------- LES window
@@ -190,8 +202,9 @@ def check_row(name: str, value: float, limit: float, ok: bool, **kw: Any) -> dic
 
 
 def stage3_checks(series: dict[str, NDArray[Any]], spec: nest.NestSpec, force_series: NDArray[Any], buffer: int,
-                  plate_error: float | None = None) -> list[dict[str, Any]]:
-    """The BRIEF 5.5 `stage3` list. Each can fail; `ok` is the verdict, value/limit are the numbers."""
+                  plate_error: float | None = None, plate_problem: str = "") -> list[dict[str, Any]]:
+    """The BRIEF 5.5 `stage3` list. Each can fail; `ok` is the verdict, value/limit are the numbers. `plate_problem`: which stored wall-model
+    receipt is missing or stale (wallmodel.stale_wall_receipts), kept in the wall-model row as `problem`."""
     ma = float(series["umax"].max() * math.sqrt(3))
     cfl = float(series["umax"].max())
     yf = float(series["yfrac"][len(series["yfrac"]) // 3:].mean()) if spec.wall_model else 1.0
@@ -213,7 +226,7 @@ def stage3_checks(series: dict[str, NDArray[Any]], spec: nest.NestSpec, force_se
             check_row("wall_model_receipt_error", math.nan if plate_error is None else plate_error, wm.PLATE_TOL,
                       plate_error is not None and plate_error <= wm.PLATE_TOL,
                       note="worse of the stored wall-model receipts (flat plate vs ITTC-57, channel vs Dean); "
-                           "fails unless both are stored and within tolerance")]
+                           "fails unless both are stored by the current code and within tolerance", **(dict(problem=plate_problem) if plate_problem else {}))]
 
 
 def wall_hook(steps: int, chunk: int, wall_s: float | None, cells: int, log: dict[str, Any]) -> Callable[[int, float], int]:
@@ -249,9 +262,10 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
     t_enter = time.perf_counter()
     res = window_resolution(vehicle, spec)
     dx, shape, steps = res["dx"], res["shape"], res["steps"]
-    ns = nest.NestSpec(shape, dx, res["u_rel"], NU[vehicle.fluid], u_lat=spec.u_lat, storage=spec.storage, nu_floor=spec.nu_floor)
-    res.update(nu_lat=ns.nu_lat, nu_lat_physical=NU[vehicle.fluid] * res["dt"] / dx ** 2, nu_floored=ns.nu_lat > NU[vehicle.fluid] * res["dt"] / dx ** 2)
-    lbm.check_memory(res["cells"], None, spec.storage, "native")
+    nu = nu_of(vehicle)
+    ns = nest.NestSpec(shape, dx, res["u_rel"], nu, u_lat=spec.u_lat, storage=spec.storage, nu_floor=spec.nu_floor)
+    res.update(nu_lat=ns.nu_lat, nu_lat_physical=nu * res["dt"] / dx ** 2, nu_floored=ns.nu_lat > nu * res["dt"] / dx ** 2)
+    nest.check_memory(res["cells"])
     anchor = np.array(shape) // 2
     solid = voxelize(vehicle, dx, shape, tuple(anchor))
     if not solid.any():
@@ -286,7 +300,7 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
         wlog.update(run_steps=n, diverged=True, diverged_at_step=n,
                     cut_reason=f"diverged after {n} of {steps} steps: the flow went non-finite or past Mach 1 inside a chunk "
                                f"of {spec.chunk} steps; the run stopped there")
-    rho_f = RHO[vehicle.fluid]
+    rho_f = rho_of(vehicle)
     fsi = ser["F"] * rho_f * ns.force_scale                                    # N, body axes
     t = (np.arange(n) + 1) * ns.dt
     z0 = jnp.zeros(1)
@@ -299,7 +313,8 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
         pwall = (np.mean(acc, 0) - 1.0) / 3.0 * rho_f * (dx / ns.dt) ** 2
     cell = np.asarray(geom.ws.cell)
     pts = (cell.T - anchor) * dx
-    checks = stage3_checks(ser, ns, co["drag"][cut:], clearance, wm.stored_wall_error() if ns.wall_model else 0.0)
+    checks = stage3_checks(ser, ns, co["drag"][cut:], clearance, wm.stored_wall_error() if ns.wall_model else 0.0,
+                           "; ".join(wm.stale_wall_receipts()) if ns.wall_model else "")
     return dict(vehicle=vehicle.name, resolution=res, t=t, force=fsi, ref_area=area, **co, checks=checks,
                 ok=all(c["ok"] for c in checks), wall_points=pts, wall_pressure=pwall, source="native-nest",
                 shifts=int(np.abs(ser["shift"]).sum()), series={k: ser[k] for k in ("umax", "res", "yfrac")}, wall=wlog, steps_run=n)
@@ -323,7 +338,7 @@ def fea_window(vehicle: Vehicle, points: NDArray[Any], pressure: NDArray[Any], w
     from cafe import fea
     m = vehicle_mesh(vehicle)
     tree = cKDTree(points)
-    hydro = RHO[vehicle.fluid] * 9.81 * vehicle.depth
+    hydro = rho_of(vehicle) * 9.81 * vehicle.depth
     pr = lambda cen, nrm: pressure[tree.query(cen)[1]] + hydro            # noqa: E731  (positive pushes inward)
     steps = ("static", "buckle") if buckle else ("static",)
     r = fea.solve(m, "shell", vehicle.material, thickness=vehicle.thickness, pressure=pr, steps=steps, h=h, workdir=workdir)
@@ -362,8 +377,8 @@ def fluidx3d_window(vehicle: Vehicle, spec: WindowSpec, config: dict[str, Any] |
     """The same window through the FluidX3D plugin (raises FluidX3DUnavailable unless the config enables it and the binary exists)."""
     from cafe.pm.stage3 import fluidx3d
     res = window_resolution(vehicle, spec)
-    rho = RHO[vehicle.fluid]
-    case = fluidx3d.case_dict(vehicle.name, res["shape"], res["dx"], res["dt"], NU[vehicle.fluid], rho, spec.velocity, res["steps"],
+    rho = rho_of(vehicle)
+    case = fluidx3d.case_dict(vehicle.name, res["shape"], res["dx"], res["dt"], nu_of(vehicle), rho, spec.velocity, res["steps"],
                               stl, free_surface, draft)
     r = fluidx3d.run_case(config, case, workdir)
     v = np.asarray(spec.velocity, float)

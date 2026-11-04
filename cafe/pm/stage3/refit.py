@@ -10,8 +10,9 @@ coefficient, not only the error of the mean. Multipliers are relative to the Han
 A single window (the ci and quick budgets) has no between-window spread (tau^2 = 0) and its standard error is the batch-means error of one run, a
 few hundredths of a percent: not the uncertainty of a drag multiplier. So the sigma carries two floors, both stated in the output (`floor`):
 the between-window spread is at least `between_window_frac` of the pooled value when fewer than two windows exist, and the discretisation error
-(`discretisation_frac` of the pooled value, the finest stored sphere grid against its Richardson extrapolation, nest.sphere_discretisation, else
-the assumed default) is always added in quadrature. `refit(..., floor={})` pools without them.
+(`discretisation_frac` of the pooled value: the larger of the assumed default and the finest stored sphere grid's distance to its
+Richardson extrapolation, nest.sphere_discretisation; a study can raise the floor, never lower it) is always added in
+quadrature. `refit(..., floor={})` pools without them.
 """
 from __future__ import annotations
 
@@ -46,14 +47,17 @@ def pool(means: ArrayLike, ses: ArrayLike) -> dict[str, float]:
 
 def default_floor() -> dict[str, Any]:
     """The sigma floors `refit` applies unless told otherwise: the assumed between-window fraction (config/assumptions.yaml `stage3.refit.*`)
-    and the discretisation fraction, from the stored sphere grid study when there is one."""
+    and the discretisation fraction: the larger of the assumed one and the stored sphere grid study's (a study of two or three grids
+    that happen to agree is no evidence of a smaller error than the assumption; round 7 M-9)."""
     from .nest import sphere_discretisation
     a = budget.stage3_assumptions()
     disc = sphere_discretisation()
+    assumed = float(a["refit.discretisation_frac"])
     return dict(between_window_frac=float(a["refit.between_window_frac"]),
                 between_window_source="ASSUMED (config/assumptions.yaml stage3.refit.between_window_frac)",
-                discretisation_frac=float(a["refit.discretisation_frac"]) if disc is None else disc[0],
-                discretisation_source="ASSUMED: no stored sphere grid study (needs two grids of one Re)" if disc is None else disc[1])
+                discretisation_frac=assumed if disc is None else max(assumed, disc[0]),
+                discretisation_source="ASSUMED: no stored sphere grid study (needs two grids of one Re)" if disc is None else
+                f"{disc[1]}: floor = max(assumed {assumed:g}, study {disc[0]:.3g})")
 
 
 def _sigma(mean: float, se: float, tau: float, windows: float, floor: dict[str, Any]) -> dict[str, float]:

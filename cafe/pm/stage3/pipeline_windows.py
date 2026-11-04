@@ -136,7 +136,16 @@ def glider_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, depth: f
                      thickness=need(a, "glider.hull_thickness_m"), depth=depth, hull=0, extra=dict(resolve_dim=D, part="body"))
 
 
+def ellipsoid_area(a: float, b: float, c: float) -> float:
+    """Surface of an ellipsoid with semi-axes a, b, c: Knud Thomsen's formula, 4 pi (((ab)^p + (ac)^p + (bc)^p) / 3)^(1/p), p = 1.6075 (within 1.1 %)."""
+    p = 1.6075
+    return float(4.0 * math.pi * (((a * b) ** p + (a * c) ** p + (b * c) ** p) / 3.0) ** (1.0 / p))
+
+
 def usv_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, part: str) -> W.Vehicle:
+    """The USV's window bodies carry the platform's own water (rho_water, nu_water) and air (rho_air) so the window and the Hangar reference
+    run at one Reynolds number (round 7 M-28). The `hull` window is the FULLY SUBMERGED ellipsoid of semi-axes (lwl/2, beam/2, usv.hull_draft_m)
+    plus the keel, not the waterline hull; its wetted area is the ellipsoid's own surface (usv_case builds the reference on it)."""
     if part in ("hull", "hull_fs"):
         draft = need(a, "usv.hull_draft_m")
         kc = P["keel_area_m2"] / P["keel_span_m"]
@@ -144,11 +153,11 @@ def usv_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, part: str) 
         keel = dict(type="plate", center=(0.0, 0.0, -(draft + P["keel_span_m"] / 2)), size=(kc, P["keel_t_c"] * kc, P["keel_span_m"]))
         frontal = math.pi * (P["beam_wl_m"] / 2) * draft + P["keel_t_c"] * kc * P["keel_span_m"]
         return W.Vehicle(platform, "water", P["lwl_m"], [hull, keel], ref_area=frontal, hull=0,
-                         extra=dict(resolve_dim=min(P["beam_wl_m"], 2 * draft), part=part))
+                         extra=dict(resolve_dim=min(P["beam_wl_m"], 2 * draft), part=part), nu=P["nu_water"], rho=P["rho_water"])
     c = P["wing_area_m2"] / P["wing_span_m"]
     wing = dict(type="plate", center=(0.0, 0.0, 0.0), size=(c, P["wing_span_m"], need(a, "usv.wing_t_c") * c))     # span along y: lift axis is body z
     return W.Vehicle(platform, "air", max(c, P["wing_span_m"]), [wing], ref_area=P["wing_area_m2"], hull=0,
-                     extra=dict(resolve_dim=c, part="wing"))
+                     extra=dict(resolve_dim=c, part="wing"), rho=P["rho_air"])
 
 
 def uas_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str) -> W.Vehicle:
@@ -206,7 +215,11 @@ def _keel_drag(P: dict[str, Any], stw: float) -> float:
 
 
 def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle, a: dict[str, Any], heading: float | None,
-             part: str) -> dict[str, Any]:
+             part: str, wetted_m2: float | None = None) -> dict[str, Any]:
+    """The USV window's kinematics and Hangar reference. The reference is evaluated on the window's OWN wetted surface so that cd / cd_hangar is
+    CFD over model on the same hull (round 7 M-10): `hull`: the ellipsoid's surface (ellipsoid_area), `hull_fs`: `wetted_m2`, the area of the
+    mesh the free-surface run uses (None: the platform's assumed wetted_area_m2). The platform's value stays what Stage 1 uses; both areas are
+    in the case (`wetted_window_m2`, `wetted_platform_m2`) and `wetted_area_note` states the ratio."""
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
     wind = _val(env.wind(lon, lat, P["anemometer_m"], t))[:2]
     cur = _val(env.current(lon, lat, P["current_z_m"], t))[:2]
@@ -222,19 +235,27 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
         rho_w = P["rho_water"]
         r_keel = _keel_drag(P, stw)
         u_env, v = np.array([cur[0], cur[1], 0.0]), np.array([vg[0], vg[1], 0.0])
+        wetted = ellipsoid_area(*veh.shapes[0]["radii"]) if part == "hull" else P["wetted_area_m2"] if wetted_m2 is None else wetted_m2
+        ratio = wetted / P["wetted_area_m2"]
+        what = (f"a fully submerged ellipsoid of draft {veh.shapes[0]['radii'][2]:.2f} m (not the waterline hull)" if part == "hull"
+                else "the free-surface mesh hull")
         kin = dict(R=rotation(heading, 0.0), u_env=u_env, v=v, heading=heading, rho_h=rho_w, area=veh.ref_area, cl_h=None,
-                   info=dict(stw_ms=stw, leeway_deg=lee, heel_deg=float(np.asarray(tw["heel_deg"]))))
+                   info=dict(stw_ms=stw, leeway_deg=lee, heel_deg=float(np.asarray(tw["heel_deg"]))), wetted_window_m2=wetted,
+                   wetted_platform_m2=P["wetted_area_m2"],
+                   wetted_area_note=f"the {part} window hull is {what} with {ratio:.2f} x the platform's assumed wetted area ({wetted:.2f} vs "
+                                    f"{P['wetted_area_m2']:.2f} m2); its Hangar reference is built on the window's own surface, so the multiplier "
+                                    "is per unit of that surface")
         if part == "hull_fs":                                               # the VPP's whole hull resistance, upright (the window has no heel)
-            r_hull = float(usv.hull_resistance(P, np.float64(stw), 0.0))
+            r_hull = float(usv.hull_resistance(dict(P, wetted_area_m2=wetted), np.float64(stw), 0.0))
             return dict(kin, cd_h=_coef(r_hull + r_keel, rho_w, stw, veh.ref_area),
                         src="usv.hull_resistance (ITTC-57 friction x (1 + form_factor_k) + residuary cr0 (Fr / cr_fr_ref)^4 on the wetted area, upright) "
                             f"+ keel friction/profile drag at zero leeway; rudder and appendage terms excluded; stw {stw:.3f} m/s, leeway {lee:.1f} deg")
-        # viscous part of hull_resistance (ITTC-57 friction x (1 + k) on the wetted area; no residuary term: no free surface in the window)
+        # viscous part of hull_resistance (ITTC-57 friction x (1 + k) on the window's wetted area; no residuary term: no free surface in the window)
         # plus the keel's friction/profile drag at zero leeway (usv._forces)
         re = stw * P["lwl_m"] / P["nu_water"]
-        r_hull = 0.5 * rho_w * stw ** 2 * P["wetted_area_m2"] * usv.cf_ittc57(re) * (1.0 + P["form_factor_k"])
+        r_hull = 0.5 * rho_w * stw ** 2 * wetted * usv.cf_ittc57(re) * (1.0 + P["form_factor_k"])
         return dict(kin, cd_h=_coef(float(r_hull + r_keel), rho_w, stw, veh.ref_area),
-                    src="usv.cf_ittc57 x (1 + form_factor_k) on the wetted area + keel friction/profile drag at zero leeway; residuary and "
+                    src="usv.cf_ittc57 x (1 + form_factor_k) on the window ellipsoid's surface + keel friction/profile drag at zero leeway; residuary and "
                         f"appendage terms excluded (no free surface / appendages in the window); stw {stw:.3f} m/s, leeway {lee:.1f} deg")
     aw = wind - vg                                                          # apparent wind (air relative to the boat, over the ground frame)
     aws = float(np.hypot(*aw))
@@ -301,20 +322,26 @@ def uas_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
 
 
 # ---------------------------------------------------------------------------------------------------- resolution
-def fit_window(veh: W.Vehicle, speed: float, budget: float, a: dict[str, Any]) -> dict[str, Any]:
+def fit_window(veh: W.Vehicle, speed: float, budget: float, a: dict[str, Any], max_cells: float | None = None) -> dict[str, Any]:
     """dx, steps and box so that cells x steps <= budget where the body allows. The shortest acceptable run is `min_flow_throughs`
     box transits; dx is the 10-cells-per-delta value coarsened by the fourth root of (cells x shortest run) / budget (cells ~ dx^-3,
     transit steps ~ dx^-1), then capped so the smallest body dimension keeps `min_cells_across` cells. The run then takes as many
-    steps as the budget allows between that shortest run and `window_s` of physical time."""
+    steps as the budget allows between that shortest run and `window_s` of physical time. `max_cells` (plan["les"]["max_cells"], GPU plans):
+    dx is then coarsened until the box has no more cells, so the window the plan sizes is one run_window's memory guard accepts (round 7 M-13;
+    the memory wins over `min_cells_across`: a window that does not fit does not run)."""
     box = tuple(need(a, "box_bodies"))
     T, n = need(a, "window_s"), need(a, "cells_per_delta")
-    fine = lbm.les_resolution(veh.length, speed, W.NU[veh.fluid], (n,), box, T)["rows"][n]
+    fine = lbm.les_resolution(veh.length, speed, W.nu_of(veh), (n,), box, T)["rows"][n]
     transits = need(a, "min_flow_throughs") * fine["shape"][0] / lbm.U_LAT
     short = fine["cells"] * transits / max(budget, 1.0)
     dx = fine["dx"] * max(1.0, short ** 0.25)
     dx = min(dx, veh.extra["resolve_dim"] / need(a, "min_cells_across"))
     shape = tuple(max(8, math.ceil(b * veh.length / dx)) for b in box)
     cells = int(np.prod(shape))
+    while max_cells is not None and cells > max_cells:
+        dx *= max((cells / max_cells) ** (1 / 3), 1.001)
+        shape = tuple(max(8, math.ceil(b * veh.length / dx)) for b in box)
+        cells = int(np.prod(shape))
     dt = lbm.U_LAT * dx / speed
     steps_T = math.ceil(T / dt)
     min_steps = math.ceil(need(a, "min_flow_throughs") * shape[0] / lbm.U_LAT)
@@ -395,7 +422,8 @@ def why_failed(checks: list[dict[str, Any]], res: dict[str, Any], wlog: dict[str
             continue
         n, v, lim = c["name"], c["value"], c["limit"]
         if n == "wall_model_receipt_error":
-            out.append("wall model unvalidated: the flat plate (vs ITTC-57) and channel (vs Dean) receipts are not both stored and passing" if math.isnan(v)
+            out.append("wall model unvalidated: the flat plate (vs ITTC-57) and channel (vs Dean) receipts are not both stored by the current code and passing"
+                       + (f" ({c['problem']})" if c.get("problem") else "") if math.isnan(v)
                        else f"wall model unvalidated: stored receipt error {v:.0%} > {lim:.0%}")
         elif n == "yplus_in_30_300_fraction" and c.get("note") == W.YPLUS_RAISED_NOTE:
             out.append(f"y+ fraction {v:.0%} was evaluated at the raised lattice viscosity, not the physical one (estimate at the physical "
@@ -437,6 +465,9 @@ def _describe(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], vb: ND
     base.update(fluid=veh.fluid, heading_deg=case["heading"], env_enu_ms=[float(x) for x in case["u_env"]], velocity_body_ms=[float(x) for x in vb],
                 cd_hangar=case["cd_h"], cl_hangar=case["cl_h"], cd_hangar_source=case["src"], kinematics=case["info"],
                 heading_source="stage-1 median track" if heading is not None else "relative-flow direction (no stage-1 track)")
+    if "wetted_window_m2" in case:
+        base.update(wetted_area_window_m2=case["wetted_window_m2"], wetted_area_platform_m2=case["wetted_platform_m2"],
+                    wetted_area_note=case["wetted_area_note"])
 
 
 def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platform: str, res: dict[str, Any] | None, a: dict[str, Any],
@@ -489,7 +520,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     fea_s = need(a, "fea_reserve_frac") * win_s if (win_s is not None and veh.extra.get("fea")) else 0.0
     run_s = None if win_s is None else win_s - fea_s                      # the LES run's safety kill, not its size
     try:
-        fit = fit_window(veh, speed, plan_cs, a)
+        fit = fit_window(veh, speed, plan_cs, a, les.get("max_cells"))
         thin = veh.extra.get("min_dim")
         if thin is not None and thin < need(a, "min_cells_thin_part") * fit["dx"]:     # measured (assumptions.yaml): arms under 2 cells diverge, 2 are stable
             return fail(f"not run: numerically unstable at this resolution: the thinnest part is {thin * 1e3:.1f} mm = {thin / fit['dx']:.2f} cells at dx "
@@ -637,12 +668,12 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
         P = usv.load_platform(platform)
         veh = usv_vehicle(P, a, platform, "hull_fs")
         heading = track_heading(res, vid, w["t"])
-        case = usv_case(ctx, w, P, veh, a, heading, "hull_fs")
+        geo = freesurface.write_stl(veh, pathlib.Path(jobdir) / "hull.stl")
+        case = usv_case(ctx, w, P, veh, a, heading, "hull_fs", geo["wetted_hull_m2"])      # the Hangar reference on the mesh's own wetted area
         vb = case["R"] @ (case["v"] - case["u_env"])
         speed = float(np.linalg.norm(vb))
         _describe(base, veh, case, vb, heading)
-        geo = freesurface.write_stl(veh, pathlib.Path(jobdir) / "hull.stl")
-        base.update(wetted_area_mesh_m2=geo["wetted_hull_m2"], wetted_area_platform_m2=P["wetted_area_m2"], ref_area=veh.ref_area)
+        base.update(wetted_area_mesh_m2=geo["wetted_hull_m2"], ref_area=veh.ref_area)
         est = None if sizes["fs"] is None else sizes["fs"]["estimate"]       # priced once, in the plan (None: the FluidX3D plugin runs it)
         left = None if st["share"] is None else st["share"] - st["queued"]
         if est is not None and left is not None:
@@ -737,6 +768,8 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
             rows[vid].append(r)
             msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error')}"
             ctx.log(f"stage3 {vid}/{FS_PARTS[ctx.classes[vid]]} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['timing']['wall_s']:.1f} s]")
+    for n in sorted({r["wetted_area_note"] for rs in rows.values() for r in rs if r.get("wetted_area_note")}):
+        L.note(n)                                                               # the window hull's surface vs the platform's, once per distinct statement
     want, got = len(todo) + len(fs), sum(len(r) for r in rows.values())
     L.check("every_window_attempted", got == want, value=got, limit=want)
     bad = [(v, i) for v, rs in rows.items() for i, r in enumerate(rs) if r["ok"] and any(not c["ok"] for c in r["checks"])]

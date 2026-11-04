@@ -197,8 +197,9 @@ def check(name: str, value: float, limit: float, ok: bool, note: str) -> dict[st
 
 def row_fields(r: dict[str, Any], speed: float, rho: float, area: float, cd_hangar: float) -> dict[str, Any]:
     """The coefficient fields of a free-surface row from windows.free_surface_window's result `r` (speeds keyed by float): cd on `area` and
-    `rho` (the reference of cd_hangar), cd_spread = the numerical uncertainty (GCI x cd, with the force's own wobble added in quadrature
-    when the solver reported it), the GCI and refinement ratio, and the two checks that decide `ok`."""
+    `rho` (the reference of cd_hangar), cd_spread = the GCI-based (Fs = 3) spread (GCI x cd, with the force's own wobble added in quadrature
+    when the solver reported it), used as a standard error by the refit (conservative: the sensitivity to horizontal refinement, not a bound),
+    the GCI and refinement ratio, and the two checks that decide `ok`."""
     s = r["speeds"][speed]
     q = 0.5 * rho * speed * speed * area
     R = float(s["resistance"])
@@ -211,10 +212,12 @@ def row_fields(r: dict[str, Any], speed: float, rho: float, area: float, cd_hang
     ratio = vv.refinement_ratio(r["cells"], r["coarse_cells"]) if r.get("cells") and r.get("coarse_cells") else None
     spread = math.hypot(gci * cd if gci_ok else 0.0, (s.get("std") or 0.0) / q)
     checks = [check("fs_gci", math.nan if not gci_ok else float(gci), GCI_MAX, informative,
-                    "two-grid GCI (Roache, Fs = 3) of the resistance; fails when the run has no second grid (FluidX3D), it is not finite, "
-                    f"or it is above {GCI_MAX:.0%} (a multiplier that uncertain is not information)"),
+                    "two-grid GCI (Roache, Fs = 3) of the resistance: the grids differ in the horizontal only, so the vertical resolution is the same and "
+                    "the GCI is the sensitivity to horizontal refinement, not a bound of the total error; fails when the run has no second grid (FluidX3D), "
+                    f"it is not finite, or it is above {GCI_MAX:.0%} (a multiplier that uncertain is not information)"),
               check("fs_refinement_ratio", math.nan if ratio is None else ratio, vv.R_MIN, ratio is not None and ratio >= vv.R_MIN,
-                    "r = (N_fine / N_coarse)^(1/3), Celik et al. 2008: at least 1.3 or the GCI is not meaningful"),
+                    "r = (N_fine / N_coarse)^(1/3), Celik et al. 2008's effective ratio from the cell counts (the grids are refined in the horizontal "
+                    "only): at least 1.3 or the GCI is not meaningful"),
               check("fs_iterative_scatter", math.nan if s.get("std") is None else float(s["std"]) / R, SCATTER_MAX,
                     s.get("std") is not None and float(s["std"]) / R <= SCATTER_MAX,
                     "std / mean of the resistance over the last 20 % of the pseudo-time iterations: a run still wandering has no single answer")]

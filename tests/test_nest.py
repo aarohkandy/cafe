@@ -58,7 +58,7 @@ def test_receipts_pass_and_are_recorded(monkeypatch, tmp_path):
 
 
 def _sphere_json(re, cd, **over):
-    d = dict(cd=cd, ref=lbm.morrison(re), d=16, shape=[8, 9, 9], seconds=1200.0, needs_d=32, re=re)
+    d = dict(cd=cd, ref=lbm.morrison(re), d=16, shape=[8, 9, 9], seconds=1200.0, needs_d=32, re=re, code_sha="cur")   # "cur": the monkeypatched current sha
     d.update(over)
     return json.dumps(d)
 
@@ -407,3 +407,20 @@ def test_viscosity_floor_only_raises_the_lattice_viscosity():
     assert nest.NestSpec(**base, nu_floor=1e-4).nu_lat == 1e-4 and nest.NestSpec(**base, nu_floor=1e-4).tau0 == pytest.approx(0.5003)
     big = dict(base, nu=1.0)
     assert nest.NestSpec(**big, nu_floor=1e-4).nu_lat == nest.NestSpec(**big).nu_lat
+
+
+def test_a_sphere_grid_stored_without_a_code_sha_never_passes(monkeypatch, tmp_path):
+    """Round 7 M-8: a missing code_sha (legacy or hand-transcribed file) is stale, not 'current': the row fails even at a Cd that is spot on."""
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(lbm, "physics_sha", lambda: "cur")
+    nest.sphere_path("1000", 24).write_text(_sphere_json(1000.0, lbm.morrison(1000.0), d=24, code_sha=None))       # one grid, no sha, exact Cd
+    one = _rows(nest.sphere_receipts(), "1000", "d=24")[-1]
+    assert one["ok"] is False and "STORED WITHOUT A CODE SHA" in one["claim"] and "nest slow 1000 24" in one["source"]
+    cr.OUT.clear()
+    nest.sphere_path("100", 8).write_text(_sphere_json(100.0, 1.0382, d=8))                                         # current sha ...
+    nest.sphere_path("100", 12).write_text(_sphere_json(100.0, 1.0382, d=12, code_sha=None))            # ... but one grid without: stale
+    rich = _rows(nest.sphere_receipts(), "100", "Richardson")[0]
+    assert rich["ok"] is False and "STORED WITHOUT A CODE SHA" in rich["claim"]
+    cr.OUT.clear()
+    nest.sphere_path("100", 12).write_text(_sphere_json(100.0, 1.0382, d=12))
+    assert _rows(nest.sphere_receipts(), "100", "Richardson")[0]["ok"] is True                                       # both current: the same numbers pass

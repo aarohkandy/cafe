@@ -637,16 +637,21 @@ def eta_text(updates: float) -> str:
 
 def result_row(group: str, claim: str, rec: dict[str, Any] | None, value_key: str, ref_key: str, tol: float, command: str, eta: str, source: str) -> None:
     """A required pass/fail row from a stored slow result. Stored and within `tol` of the reference: pass. Stored and outside: fail with
-    the measured error in the row. Not stored, or stored by different code (its `code_sha` differs from physics_sha()): FAIL,
-    with the command and its run time in the note. Never a context row."""
+    the measured error in the row. Not stored, stored without a `code_sha` (legacy or hand-transcribed) or stored by different code (its `code_sha`
+    differs from physics_sha()): FAIL, with the command and its run time in the note. Never a context row."""
     nan = float("nan")
     if rec is None:
         bracket(group, f"{claim} -- NOT STORED", nan, 0.0, 0.0, "", f"run: {command}   [{eta}]")
         return
     ref = rec[ref_key]
-    if rec.get("code_sha") not in (None, physics_sha()):
+    sha = rec.get("code_sha")
+    if sha is None:
+        bracket(group, f"{claim} -- STORED WITHOUT A CODE SHA (legacy or transcribed)", nan, ref * (1 - tol), ref * (1 + tol), "",
+                f"rerun: {command}   [{eta}]")
+        return
+    if sha != physics_sha():
         bracket(group, f"{claim} -- STORED BY DIFFERENT CODE", nan, ref * (1 - tol), ref * (1 + tol), "",
-                f"stored {rec['code_sha']} != current {physics_sha()}; rerun: {command}   [{eta}]")
+                f"stored {sha} != current {physics_sha()}; rerun: {command}   [{eta}]")
         return
     receipt(group, claim, rec[value_key], ref, tol, "", source)
 

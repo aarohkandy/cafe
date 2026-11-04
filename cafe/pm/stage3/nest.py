@@ -40,6 +40,7 @@ from jax.scipy.ndimage import map_coordinates
 
 import cafe.receipts as cr
 from cafe.receipts import bracket
+from cafe.pm import budget
 from cafe.pm.stage3 import lbm, wallmodel as wm
 
 UEnv = Callable[[jax.Array, jax.Array, jax.Array, Any], jax.Array]       # coarse velocity u(x, y, z, t) -> (3, ...)
@@ -347,6 +348,17 @@ def _sphere(shape: tuple[int, ...], c: ArrayLike, r: float) -> NDArray[np.bool_]
     return m
 
 
+def check_memory(cells: float, device_bytes: float | None = None) -> float:
+    """Refuse a nest of `cells` that needs more than 85 % of device memory at NEST_BYTES_PER_CELL, the one figure the planner (budget.memory_guard,
+    les["max_cells"]) and every window use. Returns the fraction used."""
+    have = lbm.device_memory_bytes() if device_bytes is None else device_bytes
+    need = cells * NEST_BYTES_PER_CELL
+    if need > lbm.MEM_LIMIT * have:
+        raise lbm.MemoryGuardError(f"{cells:.3g} cells need {need / 1e9:.1f} GB at {NEST_BYTES_PER_CELL:g} B/cell, more than {lbm.MEM_LIMIT:.0%} of "
+                                   f"{have / 1e9:.1f} GB: shrink the box or coarsen dx (cells ~ dx^-3)")
+    return need / have
+
+
 def sphere_drag(re: float, d: int = 8, domain: tuple[float, ...] = (12, 6, 6), steps: int | None = None, lateral: str = "dirichlet",
                 cs: float | None = None, u_lat: float = 0.05, sponge: int = 4, bouzidi: bool = True) -> dict[str, Any]:
     """Sphere of d cells in a uniform stream through the nest machinery (stationary nest, no wall model: bounce-back no-slip):
@@ -355,9 +367,7 @@ def sphere_drag(re: float, d: int = 8, domain: tuple[float, ...] = (12, 6, 6), s
     over the last 20 % of the run. This is the native-kernel counterpart of lbm.sphere; `bouzidi` uses the exact sphere wall distance
     (curved-wall bounce-back), False the staircase halfway wall that XLB 0.3.1 has."""
     shape = tuple(int(round(a * d)) for a in domain)
-    need, have = float(np.prod(shape)) * NEST_BYTES_PER_CELL, lbm.device_memory_bytes()
-    if need > lbm.MEM_LIMIT * have:
-        raise lbm.MemoryGuardError(f"{np.prod(shape):.3g} cells need {need / 1e9:.1f} GB of {have / 1e9:.1f} GB: shrink the box or use d smaller")
+    check_memory(float(np.prod(shape)))
     nu = u_lat * d / re
     steps = steps or int(30 * d / u_lat)                                       # 30 flow-throughs of a diameter: Cd flat to <0.2 % at Re=100
     cs = (0.0 if re < 500 else 0.17) if cs is None else cs
@@ -427,7 +437,8 @@ def sphere_path(tag: str, d: int) -> pathlib.Path:
     return SLOW_DIR / f"nest_sphere_{tag}_d{d}.json"
 
 
-NEST_BYTES_PER_CELL = 300.0      # populations + double buffer + masks + Bouzidi q (182 B/cell measured for the bare kernel, + 38 masks + 76 q)
+# 300 B/cell: populations + double buffer + masks + Bouzidi q (182 B/cell measured for the bare kernel, + 38 masks + 76 q); the planner's figure too
+NEST_BYTES_PER_CELL = budget.LES_BYTES_PER_CELL
 DOMAIN = (12, 6, 6)              # diameters: length, width, height of the sphere runs
 PLAN = {"100": (16, "d = 16 (with the d = 8 and 12 runs for the extrapolation)"), "1000": (24, "d >= 24"), "1e4": (40, "d >= 40")}
 
@@ -475,7 +486,8 @@ def richardson(ds: ArrayLike, cds: ArrayLike) -> dict[str, Any]:
 def sphere_discretisation() -> tuple[float, str] | None:
     """The discretisation error of the native kernel on the stored sphere grid study: |Cd(finest grid) - Cd_inf| / |Cd_inf| with Cd_inf the
     Richardson extrapolation (`richardson`), the largest over the Reynolds numbers that have two or more stored grids. None when none has;
-    the second item names the grids it came from."""
+    the second item names the grids it came from, says when the study is not in the asymptotic range (the extrapolations of the consecutive
+    pairs and of all grids differ by more than the finest grid's distance to the last) and what the extrapolated Cd is against Morrison."""
     worst: tuple[float, str] | None = None
     for tag, re in SPHERE_RUNS:
         runs = sorted((json.loads(f.read_text()) for f in SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")), key=lambda r: r["d"])
@@ -483,16 +495,21 @@ def sphere_discretisation() -> tuple[float, str] | None:
             continue
         rc = richardson([r["d"] for r in runs], [r["cd"] for r in runs])
         e = abs(runs[-1]["cd"] - rc["cd_inf"]) / abs(rc["cd_inf"])
+        ex = [richardson([r["d"] for r in runs[i:i + 2]], [r["cd"] for r in runs[i:i + 2]])["cd_inf"] for i in range(len(runs) - 1)] + [rc["cd_inf"]]
+        spread = (max(ex) - min(ex)) / abs(rc["cd_inf"])
+        vs = rc["cd_inf"] / lbm.morrison(re) - 1
         if worst is None or e > worst[0]:
-            worst = (float(e), f"stored sphere grid study, Re = {re:g}, d = {[int(r['d']) for r in runs]} cells per diameter (finest grid vs Richardson)")
+            worst = (float(e), f"stored sphere grid study, Re = {re:g}, d = {[int(r['d']) for r in runs]} cells per diameter (finest grid vs Richardson)"
+                     + (f"; NOT in the asymptotic range (extrapolations {min(ex):.3f} to {max(ex):.3f})" if len(runs) >= 3 and spread > e else "")
+                     + f"; its Richardson Cd is {vs:+.1%} from Morrison 2013 ({'within' if abs(vs) <= 0.10 else 'outside'} the 10 % of the receipt)")
     return worst
 
 
 def sphere_receipts() -> list[dict[str, Any]]:
     """Sphere Cd vs Morrison 2013 at Re = 1e2, 1e3, 1e4 on the native kernel (curved-wall bounce-back), one pass/fail row each (10 %).
     The row is the Richardson-extrapolated Cd from the stored grids (nest_sphere_<Re>_d*.json) when there are two or more, else the
-    single stored grid. Stored and within 10 %: pass; stored and outside: fail with the measured error; not stored or stored by
-    different code: fail, naming the command and its run time. Each stored grid also gets a context row (the resolution study)."""
+    single stored grid. Stored and within 10 %: pass; stored and outside: fail with the measured error; not stored, stored without a
+    code sha or stored by different code: fail, naming the command and its run time. Each stored grid also gets a context row (the resolution study)."""
     from cafe.receipts import context
     g = "LBM native sphere"
     for tag, re in SPHERE_RUNS:
@@ -504,9 +521,9 @@ def sphere_receipts() -> list[dict[str, Any]]:
         rec = None
         if len(runs) >= 2:
             rc = richardson([r["d"] for r in runs], [r["cd"] for r in runs])
-            shas = {r.get("code_sha") for r in runs} - {None}
-            stale = sorted(shas - {lbm.physics_sha()})
-            rec = dict(cd=rc["cd_inf"], ref=ref, code_sha=stale[0] if stale else None)
+            shas = {r.get("code_sha") for r in runs}                                  # a grid stored without a sha counts as stale (result_row says so)
+            stale = sorted(shas - {lbm.physics_sha(), None})
+            rec = dict(cd=rc["cd_inf"], ref=ref, code_sha=None if None in shas else stale[0] if stale else lbm.physics_sha())
             claim = f"Sphere Cd at Re={re:g}, Richardson-extrapolated from d={[int(x) for x in rc['ds']]} (order {rc['p']:.2f})"
         elif runs:
             rec = dict(runs[0], ref=ref)

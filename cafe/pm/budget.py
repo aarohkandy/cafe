@@ -45,7 +45,7 @@ FS_PARTS = {"usv": "hull_fs"}                                                   
 FEA_CLASSES = ("glider",)                                                            # classes whose window carries an FEA of the pressure hull
 FALLBACK_COST = {"glider": (8.0, 0.1), "usv": (11.0, 0.1), "uas": (20.0, 0.3)}   # (s per batch, s per member) per mission day without bench
 GPU_MEM_GUARD = 0.85
-LES_BYTES_PER_CELL = 55.0         # FP16S storage (Lehmann et al. 2022), the figure `les["max_cells"]` and the memory guard use
+LES_BYTES_PER_CELL = 300.0        # the native nest's (nest.NEST_BYTES_PER_CELL: 182 B measured + masks + q), for max_cells
 NOMINAL_WINDOW = {("glider", "body"): ("nominal.glider", "water"), ("usv", "hull"): ("nominal.usv_hull", "water"),   # (stage3.* key of [speed, length], fluid)
                   ("usv", "wing"): ("nominal.usv_wing", "air"), ("uas", "body"): ("nominal.uas", "air")}
 MIN_BATCH = 4                     # members: the smallest stage-1 batch the planner will shrink to (below it an ensemble has no spread worth reporting)

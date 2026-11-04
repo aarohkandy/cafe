@@ -273,9 +273,11 @@ def test_wall_model_receipts_pass_and_fail(monkeypatch, tmp_path):
     assert "NOT STORED" in plate_row[0]["claim"] and wm.PLATE_COMMAND in plate_row[0]["source"] and wm.PLATE_ETA in plate_row[0]["source"]
     cr.OUT.clear()
     assert all(r["ok"] for r in wm.receipts(_stub_plate(cf=0.0042), _stub_channel()))
-    wm.slow_path().write_text(json.dumps({k: v for k, v in _stub_plate(cf=0.0010, err=0.75).items() if k != "force"}))   # friction 4x too low
+    sha = lbm.physics_sha()                                                    # (stored by the current code: round 7 M-8 makes a missing or old sha stale)
+    bad_plate = {k: v for k, v in _stub_plate(cf=0.0010, err=0.75).items() if k != "force"}              # friction 4x too low
+    wm.slow_path().write_text(json.dumps(dict(bad_plate, code_sha=sha)))
     assert wm.stored_wall_error() is None                                      # the plate alone is not enough
-    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.03)))
+    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.03, code_sha=sha)))
     assert wm.stored_wall_error() == 0.75                                      # the worse stored receipt counts: a passing channel cannot hide the plate
     cr.OUT.clear()
     bad = wm.receipts()
@@ -305,6 +307,7 @@ def test_wall_model_cli(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(wm, "channel", lambda **k: _stub_channel(profile=np.ones(3)))
     assert wm.main(["slow"]) == 0 and json.loads(wm.slow_path().read_text())["cf"] == 0.004 and "code_sha" in json.loads(wm.slow_path().read_text())
     assert wm.main(["channel"]) == 0 and json.loads(wm.channel_path().read_text())["cf"] == 0.0051
+    assert json.loads(wm.channel_path().read_text())["code_sha"] == lbm.physics_sha()                   # round 7 M-8: the CLI stores the sha it ran with
     assert wm.main([]) == 0
     monkeypatch.setattr(wm, "flat_plate", lambda **k: _stub_plate(cf=0.001))
     assert wm.main(["slow"]) == 0
@@ -720,9 +723,10 @@ def test_the_default_floor_uses_the_stored_sphere_grid_study_else_says_it_is_ass
     (tmp_path / "nest_sphere_1000_d24.json").write_text(json.dumps(dict(d=24, cd=0.5)))         # one grid only: no estimate from it
     e, src = nest.sphere_discretisation()
     assert e == pytest.approx(0.4 / 16, rel=0.02) and "Re = 100" in src and "[8, 12, 16]" in src
+    assert "NOT in the asymptotic range" not in src                                              # first order exactly: the pairs agree
     f = refit.default_floor()
-    assert f["discretisation_frac"] == e and f["discretisation_source"] == src
-    assert refit.refit(ONE)["drag"]["sigma_discretisation"] == pytest.approx(e * 1.962 / 1.8)
+    assert e < 0.05 and f["discretisation_frac"] == 0.05 and src in f["discretisation_source"]  # a study cannot lower the assumed floor (round 7 M-9)
+    assert refit.refit(ONE)["drag"]["sigma_discretisation"] == pytest.approx(0.05 * 1.962 / 1.8)
 
 
 def test_verdict_changes_and_the_two_iteration_cap():
@@ -1060,12 +1064,13 @@ def test_run_all_classes_rows_have_everything_and_nothing_unvalidated_is_ok(no_w
 def test_both_stored_passing_receipts_clear_only_the_wall_model_row(no_wall_receipt, monkeypatch):
     cheap(monkeypatch)
     wm.channel_path().parent.mkdir(parents=True, exist_ok=True)
-    wm.channel_path().write_text(json.dumps(dict(err=0.03)))
+    sha = lbm.physics_sha()                                                    # stored by the current code (round 7 M-8)
+    wm.channel_path().write_text(json.dumps(dict(err=0.03, code_sha=sha)))
     row = lambda: [c for c in pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())["q"][0]["checks"] if c["name"] == "wall_model_receipt_error"][0]
     assert not row()["ok"]                                                     # the channel alone does not validate a hull
-    wm.slow_path().write_text(json.dumps(dict(err=0.165)))
+    wm.slow_path().write_text(json.dumps(dict(err=0.165, code_sha=sha)))
     assert not row()["ok"]                                                     # nor does it hide a failing plate
-    wm.slow_path().write_text(json.dumps(dict(err=0.05)))
+    wm.slow_path().write_text(json.dumps(dict(err=0.05, code_sha=sha)))
     out = pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())
     r = out["q"][0]
     assert [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]["ok"]
@@ -1391,8 +1396,9 @@ def test_the_hull_fs_hangar_number_is_the_vpps_whole_hull_resistance_on_the_wind
     d = pu._forces(P, np.float64(stw), np.float64(0.0), np.float64(0.0), np.float64(1.0), np.float64(0.0), *(np.float64(0.0),) * 4)["d"]
     assert hull + keel + rest == pytest.approx(float(d))                    # the three pieces are exactly the VPP's total at zero leeway, heel and wind
     visc = pw.usv_case(ctx, WIN, P, pw.usv_vehicle(P, a, "saildrone_explorer", "hull"), a, 0.0, "hull")
-    resid = q * P["wetted_area_m2"] * P["cr0"] * (stw / math.sqrt(pu.G * P["lwl_m"]) / P["cr_fr_ref"]) ** 4
-    assert (c["cd_h"] - visc["cd_h"]) * q * veh.ref_area == pytest.approx(resid)       # the viscous `hull` number differs by the residuary term, nothing else
+    both = pw.usv_case(ctx, WIN, P, veh, a, 0.0, "hull_fs", visc["wetted_window_m2"])    # (one surface for both; each has its own since round 7 M-10)
+    resid = q * visc["wetted_window_m2"] * P["cr0"] * (stw / math.sqrt(pu.G * P["lwl_m"]) / P["cr_fr_ref"]) ** 4
+    assert (both["cd_h"] - visc["cd_h"]) * q * veh.ref_area == pytest.approx(resid)    # the viscous `hull` number differs by the residuary term, nothing else
     assert visc["info"] == c["info"] and np.allclose(visc["v"], c["v"]) and veh.extra["part"] == "hull_fs" and veh.fluid == "water"
 
 
@@ -1414,7 +1420,8 @@ def test_every_usv_window_gets_a_hull_fs_row_with_total_resistance_on_the_hangar
     assert A == hull["ref_area"] and A == pytest.approx(pw.usv_vehicle(P, pw.assumptions(), "x", "hull_fs").ref_area)
     assert r["cd"] == pytest.approx(FS["R"] / (q * A)) and r["resistance_n"] == FS["R"]                    # total resistance / (q A_ref), not a viscous part
     h, k, _ = keel_and_hull(P, stw)
-    assert r["cd_hangar"] * q * A == pytest.approx(h + k) and r["cd_hangar"] > hull["cd_hangar"]            # friction (1+k) + residuary + keel
+    h = float(pu.hull_resistance(dict(P, wetted_area_m2=r["wetted_area_mesh_m2"]), np.float64(stw), 0.0))      # on the mesh's own wetted area (round 7 M-10)
+    assert r["cd_hangar"] * q * A == pytest.approx(h + k)                                                    # friction (1+k) + residuary + keel
     assert r["added_resistance"] == pytest.approx(r["cd"] / r["cd_hangar"] - 1.0) and r["cl"] is None and r["cl_hangar"] is None
     assert r["source"] == "interfoam" and r["fluid"] == "water" and r["ok"] and r["reasons"] == [] and not r["fea"]["run"]
     # the spread is GCI x cd and the force's own wobble, in quadrature
@@ -1422,7 +1429,7 @@ def test_every_usv_window_gets_a_hull_fs_row_with_total_resistance_on_the_hangar
     assert r["refinement_ratio"] == pytest.approx((300_000 / 120_000) ** (1 / 3))
     assert [c["name"] for c in r["checks"]] == ["fs_gci", "fs_refinement_ratio", "fs_iterative_scatter"]
     assert all(c["ok"] for c in r["checks"]) and r["resolution"]["cells_fine"] == 300_000 and r["resolution"]["cells_coarse"] == 120_000
-    # the stand-in ellipsoid is 29 % over the yaml's wetted area
+    # the stand-in mesh is 29 % over the yaml's wetted area; the row carries both and its reference is on the mesh's
     assert r["wetted_area_platform_m2"] == P["wetted_area_m2"] and 7.5 < r["wetted_area_mesh_m2"] < 9.5
     stl, draft, speeds = FS["calls"][0]
     # the through-water speed; the hull's vertical semi-axis plus the keel span below the waterline
@@ -1938,3 +1945,197 @@ def test_a_bad_cafe_nproc_is_a_config_error_and_0_or_negative_is_not_accepted(mo
     monkeypatch.setenv("CAFE_NPROC", "")
     monkeypatch.setenv("CAFE_WORKERS", "2")
     assert fs.nproc() == 2                                                                  # empty is unset
+
+
+# ------------------------------------------------------------------ review round 7, batch S: M-8, M-9, M-10, M-13, M-28, M-29, M-44
+def test_the_wall_model_gate_counts_a_stored_receipt_only_when_the_current_code_made_it(monkeypatch, tmp_path):
+    """M-8: stored_wall_error ignored code_sha, so a plate made by other code (or a hand-written file) cleared the stage-3 check."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    plate = {k: v for k, v in _stub_plate(err=0.09).items() if k != "force"}
+    chan = _stub_channel(err=0.01)
+    wm.slow_path().write_text(json.dumps(dict(plate, code_sha="OLDCODE")))
+    assert wm.stale_wall_receipts() == ["wm_flat_plate.json was stored by different code (rerun it)", "wm_channel.json is not stored"]
+    wm.channel_path().write_text(json.dumps(chan))                                                    # no code_sha at all
+    assert wm.stored_wall_error() is None                                                             # (0.09 before: it passed the 0.10 gate)
+    problems = "; ".join(wm.stale_wall_receipts())
+    assert problems == "wm_flat_plate.json was stored by different code (rerun it); wm_channel.json was stored without a code sha (rerun it)"
+    spec = nest.NestSpec((20, 20, 20), 0.01, 1.0, 1e-6)
+    row = lambda err, why="": [c for c in W.stage3_checks(_series(), spec, np.ones(300), 10, err, why) if c["name"] == "wall_model_receipt_error"][0]  # noqa: E731
+    r = row(wm.stored_wall_error(), problems)
+    assert not r["ok"] and r["problem"] == problems
+    why = pw.why_failed([r], dict(delta_te=1.0, dx=0.1), {})[0]
+    assert "not both stored by the current code" in why and "wm_channel.json was stored without a code sha" in why
+    wm.slow_path().write_text(json.dumps(dict(plate, code_sha=lbm.physics_sha())))
+    assert wm.stored_wall_error() is None and wm.stale_wall_receipts() == ["wm_channel.json was stored without a code sha (rerun it)"]     # one stale is enough
+    wm.channel_path().write_text(json.dumps(dict(chan, code_sha=lbm.physics_sha())))
+    assert wm.stored_wall_error() == 0.09 and wm.stale_wall_receipts() == [] and row(wm.stored_wall_error())["ok"] and "problem" not in row(0.09)
+    ok = row(None, "wm_channel.json is not stored")                                                   # a missing receipt keeps the old NaN wording
+    assert not ok["ok"] and pw.why_failed([ok], dict(delta_te=1.0, dx=0.1), {})[0].endswith("(wm_channel.json is not stored)")
+
+
+def test_the_plate_receipt_names_its_reynolds_number_and_is_not_a_pass_below_1e6(monkeypatch, tmp_path):
+    """M-44: the stored plate run had Re_L = 9.8e5 under a claim that said 'at Re_L >= 1e6'."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    plate_row = lambda out: [r for r in out if "Flat plate" in r["claim"]][0]  # noqa: E731
+    low = plate_row(wm.receipts(_stub_plate(re=9.8e5, cf=0.0040, ittc=0.0040, err=0.0), _stub_channel()))
+    assert low["ok"] is False and "Re_L = 9.8e+05, below the 1e6 the comparison needs" in low["claim"] and "not a pass whatever its error" in low["source"]
+    cr.OUT.clear()
+    fine = plate_row(wm.receipts(_stub_plate(re=1.02e6, cf=0.0040, ittc=0.0040), _stub_channel()))
+    assert fine["ok"] is True and "applies at Re_L >= 1e6" in fine["claim"] and "Re_L = 1.02e+06" in fine["claim"]
+    p = wm.PLATE_SLOW
+    assert lbm.U_LAT * (p["length"] - p["nose"]) / p["nu_lat"] >= 1e6                                  # the run the next re-store makes (9.8e5 at length 384)
+
+
+def test_the_default_refit_floor_is_the_larger_of_the_assumed_and_the_stored_study(tmp_path, monkeypatch):
+    """M-9: the stored three-grid sphere study (1.3053, 1.2087, 1.1848 at d = 8, 12, 16) gave a 1.5 % floor under an assumed 5 %."""
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    for d, cd in ((8, 1.3053), (12, 1.2087), (16, 1.1848)):
+        (tmp_path / f"nest_sphere_100_d{d}.json").write_text(json.dumps(dict(d=d, cd=cd)))
+    e, src = nest.sphere_discretisation()
+    assert e == pytest.approx(0.0153, abs=2e-4)
+    f = refit.default_floor()
+    assert f["discretisation_frac"] == 0.05                                                            # (0.0153 before)
+    s = f["discretisation_source"]
+    assert "NOT in the asymptotic range (extrapolations 1.016 to 1.167)" in s and "floor = max(assumed 0.05, study 0.0153)" in s
+    assert "+12.4% from Morrison 2013 (outside the 10 % of the receipt)" in s and "[8, 12, 16]" in s
+    assert refit.refit(ONE)["floor"]["discretisation_source"] == s
+
+
+def test_a_study_in_the_asymptotic_range_can_raise_the_floor_and_none_gives_the_assumed_value(tmp_path, monkeypatch):
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    assert refit.default_floor()["discretisation_frac"] == 0.05 and refit.default_floor()["discretisation_source"].startswith("ASSUMED")
+    for d in (8, 12, 16):                                                                # Cd(d) = 1 + 2 / d: first order, Cd_inf = 1, 12.5 % at d = 16
+        (tmp_path / f"nest_sphere_100_d{d}.json").write_text(json.dumps(dict(d=d, cd=1 + 2.0 / d)))
+    f = refit.default_floor()
+    assert f["discretisation_frac"] == pytest.approx(0.125, rel=0.02) and "NOT in the asymptotic range" not in f["discretisation_source"]
+    assert refit.refit(ONE)["drag"]["sigma_discretisation"] == pytest.approx(f["discretisation_frac"] * 1.962 / 1.8)
+    (tmp_path / "nest_sphere_100_d8.json").unlink()
+    (tmp_path / "nest_sphere_100_d16.json").unlink()                                                   # one grid: no study
+    assert refit.default_floor()["discretisation_frac"] == 0.05
+
+
+def _usv_case(no_wall_receipt, part="hull", wetted=None, heading=0.0):          # heading None: downwind, as pw.run without a stage-1 track
+    a = pw.assumptions()
+    P = pu.load_platform("saildrone_explorer")
+    veh = pw.usv_vehicle(P, a, "saildrone_explorer", part)
+    return a, P, veh, pw.usv_case(fake_ctx(no_wall_receipt), WIN, P, veh, a, heading, part, *([] if wetted is None else [wetted]))
+
+
+def test_the_hull_window_reference_is_evaluated_on_the_windows_own_ellipsoid_not_the_platforms_wetted_area(no_wall_receipt):
+    """M-10: the `hull` window is a fully submerged ellipsoid of 17 m2; its Hangar reference used the platform's 6.5 m2, so cd / cd_hangar carried 2.62 x."""
+    a, P, veh, c = _usv_case(no_wall_receipt)
+    stw = c["info"]["stw_ms"]
+    A_e = W.vehicle_mesh(veh, 0).area                                                                  # independent: the area of the meshed ellipsoid
+    assert c["wetted_window_m2"] == pytest.approx(A_e, rel=0.02) and c["wetted_window_m2"] == pytest.approx(17.03, abs=0.05)
+    assert c["wetted_platform_m2"] == P["wetted_area_m2"] == 6.5
+    assert "2.62 x" in c["wetted_area_note"] and "fully submerged ellipsoid of draft 0.45 m" in c["wetted_area_note"]
+    q = 0.5 * P["rho_water"] * stw ** 2
+    _, keel, _ = keel_and_hull(P, stw)
+    fr = float(pu.cf_ittc57(stw * P["lwl_m"] / P["nu_water"])) * (1 + P["form_factor_k"])
+    assert c["cd_h"] == pytest.approx((q * c["wetted_window_m2"] * fr + keel) / (q * veh.ref_area))
+    window_drag = q * A_e * fr + keel                                              # a window whose drag is exactly the model on its own surface ...
+    assert window_drag / (q * veh.ref_area) / c["cd_h"] == pytest.approx(1.0, rel=0.02)                  # ... is a multiplier of 1 (1.9 before)
+    old = (q * P["wetted_area_m2"] * fr + keel) / (q * veh.ref_area)
+    assert window_drag / (q * veh.ref_area) / old > 1.5                                               # (1.9 x: the keel is the same in both)
+
+
+def test_the_hull_fs_reference_is_built_on_the_meshes_wetted_area_and_the_row_carries_both_areas(no_wall_receipt, monkeypatch):
+    a, P, veh, c = _usv_case(no_wall_receipt, "hull_fs", 8.392)
+    stw = c["info"]["stw_ms"]
+    q = 0.5 * P["rho_water"] * stw ** 2
+    _, keel, _ = keel_and_hull(P, stw)
+    assert c["cd_h"] == pytest.approx((float(pu.hull_resistance(dict(P, wetted_area_m2=8.392), np.float64(stw), 0.0)) + keel) / (q * veh.ref_area))
+    assert c["wetted_window_m2"] == 8.392 and "1.29 x" in c["wetted_area_note"]
+    assert _usv_case(no_wall_receipt, "hull_fs")[3]["wetted_window_m2"] == P["wetted_area_m2"]          # no mesh area given: the platform's, as before
+    rows, L = None, FakeL()
+    cheap(monkeypatch)
+    rows = pw.run(fake_ctx(no_wall_receipt, budget=2e6), {"u": [WIN]}, L)["u"]
+    fs_row, hull_row = rows[2], rows[0]
+    assert fs_row["part"] == "hull_fs" and fs_row["wetted_area_window_m2"] == fs_row["wetted_area_mesh_m2"] and 7.5 < fs_row["wetted_area_window_m2"] < 9.5
+    assert fs_row["wetted_area_platform_m2"] == hull_row["wetted_area_platform_m2"] == 6.5
+    assert hull_row["wetted_area_window_m2"] == pytest.approx(17.03, abs=0.05)
+    assert hull_row["wetted_area_note"] in L.notes and fs_row["wetted_area_note"] in L.notes             # the ledger states both ratios
+    _, _, _, mesh = _usv_case(no_wall_receipt, "hull_fs", fs_row["wetted_area_mesh_m2"], None)
+    assert fs_row["cd_hangar"] == pytest.approx(mesh["cd_h"])
+
+
+def test_the_windows_use_the_platforms_water_and_air_not_the_tank_water_of_the_old_app(no_wall_receipt):
+    """M-28: the window ran at nu = 1.19e-6, the Hangar reference at the platform's 0.86e-6: +6 % in the friction part."""
+    a, P, hull, c = _usv_case(no_wall_receipt)
+    assert hull.nu == P["nu_water"] == 0.86e-6 and hull.rho == P["rho_water"] == 1023.0 and W.nu_of(hull) == 0.86e-6 and W.rho_of(hull) == 1023.0
+    stw = c["info"]["stw_ms"]
+    assert hull.length * stw / W.nu_of(hull) == pytest.approx(stw * P["lwl_m"] / P["nu_water"])      # the window's Reynolds number is the reference's
+    wing = pw.usv_vehicle(P, a, "saildrone_explorer", "wing")
+    assert W.nu_of(wing) == W.NU["air"] and W.rho_of(wing) == P["rho_air"] == 1.16
+    g = pw.glider_vehicle(pg.load_platform("seaglider"), a, "seaglider", 500.0)
+    assert g.nu is None and W.nu_of(g) == 1.19e-6 and W.rho_of(g) == 1025.0                          # no water leaf on the glider platforms: the default stays
+    sp = W.WindowSpec(velocity=(1.0, 0.0, 0.0), box=(2.0, 0.6, 0.6))
+    lo = W.window_resolution(hull, sp)
+    hi = W.window_resolution(W.Vehicle(**dict(hull.__dict__, nu=1.19e-6)), sp)
+    assert lo["dx"] == pytest.approx(lbm.les_resolution(hull.length, 1.0, 0.86e-6, (sp.cells_per_delta,), sp.box, sp.duration, sp.u_lat)["rows"][10]["dx"])
+    assert lo["dx"] != hi["dx"] and lo["y_plus_estimate"] != hi["y_plus_estimate"]
+    fit = pw.fit_window(hull, 1.0, 1e15, a)
+    n = a["cells_per_delta"]
+    assert fit["dx"] == pytest.approx(lbm.les_resolution(hull.length, 1.0, 0.86e-6, (n,), fit["box"], a["window_s"])["rows"][n]["dx"])
+
+
+def test_run_window_runs_at_the_vehicles_own_viscosity_and_density():
+    air = W.Vehicle("probe", "air", 0.3, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.1, 0.04, 0.04))], ref_area=0.005)
+    sp = W.WindowSpec(velocity=(5.0, 0.0, 0.0), dx=0.01, steps=40, box=(2.0, 0.8, 0.8))
+    r0 = W.run_window(air, sp, _uniform([0, 0, 0]))
+    r1 = W.run_window(W.Vehicle(**dict(air.__dict__, nu=3e-5, rho=2.4)), sp, _uniform([0, 0, 0]))
+    assert r1["resolution"]["nu_lat_physical"] == pytest.approx(2.0 * r0["resolution"]["nu_lat_physical"])       # nu 3e-5 against the default 1.5e-5
+    assert r1["q"] == pytest.approx(2.0 * r0["q"])                                                                 # rho 2.4 against 1.2
+
+
+def test_the_planners_memory_figure_is_the_nests_and_run_window_refuses_what_the_plan_would_refuse(monkeypatch):
+    """M-13: the plan allowed 0.85 x 24e9 / 55 = 3.7e8 cells, run_window 1.5e8 (fp16) or 0.9e8 (fp32); the nest needs 300 B/cell."""
+    assert budget.LES_BYTES_PER_CELL == nest.NEST_BYTES_PER_CELL == 300.0
+    plan = budget.plan("4h", 1, dict(window=dict(start="2023-03-01T12:00:00Z", end="2023-03-07T12:00:00Z")), thr={}, gpu_mem_gb=24.0,
+                       vehicle_classes=dict(g="glider", u="usv", q="uas"))
+    cap = plan["les"]["max_cells"]
+    assert cap == int(0.85 * 24e9 / 300.0)                                                             # 3.7e8 before
+    dev = 24e9
+    for cells in (0.5 * cap, 0.99 * cap, 1.01 * cap, 2 * cap):                                         # the plan's guard and the window's agree
+        try:
+            budget.memory_guard(cells, budget.LES_BYTES_PER_CELL, 24.0)
+            planner = True
+        except budget.PlanError:
+            planner = False
+        try:
+            nest.check_memory(cells, dev)
+            window = True
+        except lbm.MemoryGuardError as e:
+            window = False
+            assert "300 B/cell" in str(e)
+        assert planner == window == (cells <= cap)
+    sp = W.WindowSpec(velocity=(0.5, 0, 0), dx=0.01, steps=10, box=(2.0, 0.8, 0.8))
+    cells = W.window_resolution(HULL, sp)["cells"]
+    monkeypatch.setattr(lbm, "device_memory_bytes", lambda: cells * 300.0 / 0.85 * 0.9)                # fits at the old 232 B/cell, not at the nest's 300
+    with pytest.raises(lbm.MemoryGuardError, match="300 B/cell"):
+        W.run_window(HULL, sp, _uniform([0, 0, 0]))
+
+
+def test_fit_window_never_sizes_a_box_above_the_plans_max_cells(no_wall_receipt, monkeypatch):
+    a = pw.assumptions()
+    veh = pw.glider_vehicle(pg.load_platform("seaglider"), a, "seaglider", 500.0)
+    free = pw.fit_window(veh, 0.25, 1e15, a)
+    cap = int(free["cells"] / 5)
+    held = pw.fit_window(veh, 0.25, 1e15, a, cap)
+    assert free["cells"] > cap and held["cells"] <= cap and held["dx"] > free["dx"] and held["steps"] >= held["min_flow_throughs_steps"]
+    assert pw.fit_window(veh, 0.25, 1e15, a, free["cells"]) == free                                   # a cap it already meets changes nothing
+    cheap(monkeypatch)                                                                                 # the stage passes the plan's cap to every window
+    ctx = fake_ctx(no_wall_receipt, budget=2e6)
+    base = pw.run(ctx, {"q": [WIN]}, FakeL())["q"][0]["resolution"]["cells"]
+    ctx.plan["les"]["max_cells"] = base // 3
+    r = pw.run(ctx, {"q": [WIN]}, FakeL())["q"][0]
+    assert r["resolution"]["cells"] <= base // 3 < base and r.get("error") is None
+
+
+def test_the_free_surface_check_notes_say_what_the_gci_is_and_is_not():
+    """M-29: the notes and the cd_spread docstring said 'GCI' without saying it holds only the horizontal refinement."""
+    r = dict(speeds={2.0: dict(resistance=500.0, gci=0.1, lift=3.0, std=1e-9)}, cells=250, coarse_cells=100)
+    notes = {c["name"]: c["note"] for c in fs.row_fields(r, 2.0, 1000.0, 0.5, 0.2)["checks"]}
+    assert "horizontal" in notes["fs_gci"] and "not a bound of the total error" in notes["fs_gci"] and "vertical resolution is the same" in notes["fs_gci"]
+    assert "effective ratio from the cell counts" in notes["fs_refinement_ratio"] and "Celik" in notes["fs_refinement_ratio"]
+    assert "GCI-based (Fs = 3) spread" in fs.row_fields.__doc__ and "standard error" in fs.row_fields.__doc__

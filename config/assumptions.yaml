@@ -243,7 +243,7 @@ stage3.slocum.hull_diameter_m:
 stage3.usv.hull_draft_m:
   value: 0.45
   unit: "m"
-  why: "Vertical semi-axis of the submerged hull body in the water window; the yaml draft (2 m) is the keel, which is modelled separately. About 0.45 m for a 7 m slender hull."
+  why: "Vertical semi-axis of the submerged hull body in the water window; the yaml draft (2 m) is the keel, which is modelled separately. About 0.45 m for a 7 m slender hull. The `hull` window is a FULLY SUBMERGED ellipsoid of semi-axes (lwl/2, beam/2, this value), not the waterline hull: its surface (about 17 m2 for the explorer, 2.6 x the platform's assumed wetted area) is wetted all over, and the Hangar reference is evaluated on that surface (stage3/pipeline_windows.py usv_case), so the multiplier is per unit of the window's surface."
   replace_with: "CAD (waterline sections)."
 stage3.usv.wing_t_c:
   value: 0.15
