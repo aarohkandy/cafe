@@ -295,12 +295,19 @@ def vehicle_rows(mission: dict[str, Any], res: dict[str, Any], env: Any, fidelit
 
 
 def run_variant(mission: dict[str, Any], env: Any, members: list[int], seed: int, pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]],
-                scales: dict[str, Any] | None, fidelity: dict[str, Any], meta: dict[str, Any], variant: str) -> tuple[list[dict[str, Any]], dict[str, str]]:
+                scales: dict[str, Any] | None, fidelity: dict[str, Any], meta: dict[str, Any], variant: str,
+                mods: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], dict[str, str]]:
     """Training rows of one mission variant: one Stage-1 batch of every vehicle. A variant that moves a vehicle past the environment data
     (GriddedEnv refuses a point outside the cache) is not an error: the batch is rerun one vehicle at a time and each vehicle whose track
     leaves the data is skipped with that reason; the others keep their rows. Skipped, not clipped: pulling a track back inside would make it a
     different variant than the one the plan counted, and what a vehicle does near the edge is what the sample would have taught the emulator.
+    A vehicle whose change in `mods` is empty (`is_base`: `design` found nothing valid to change) is not run: its row would be the base mission's again.
     -> (rows, {vehicle id: why it has none})."""
+    same = {vid for vid, m in (mods or {}).items() if is_base(m)}
+    if same:
+        left = apply(mission, drop=sorted(same))
+        kept, left_why = run_variant(left, env, members, seed, pri, marg, scales, fidelity, meta, variant) if left["vehicles"] else ([], {})
+        return kept, {**left_why, **dict.fromkeys(sorted(same), "the variant equals the base mission")}
     uas = "uas" if "uas" in stage1._classes(mission).values() else ""                    # the variants' UAS rows are 10 m profile rows (see wind_2d)
     try:
         with wind_2d(env, uas):
@@ -338,16 +345,21 @@ def add_rows(path: Any, rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, str]:
 # ------------------------------------------------------------------------------------------------------ training design
 
 def _fits(mission: dict[str, Any], vid: str, mod: dict[str, Any]) -> dict[str, Any]:
-    """The change shrunk (halving shift and move) until it is valid; no change when nothing fits."""
-    for k in range(5):
-        s = 0.5 ** k
-        m = dict(mod, shift_h=mod["shift_h"] * s, dlon=mod["dlon"] * s, dlat=mod["dlat"] * s)
+    """The change shrunk until it is valid: shift and move halved together, then (a move that cannot be made at any size: a vehicle at the box
+    edge) the move dropped and the shift halved with the duty kept. The all-zero change only when nothing valid is left."""
+    for shift_s, move_s in [(0.5 ** k, 0.5 ** k) for k in range(5)] + [(0.5 ** k, 0.0) for k in range(5)]:
+        m = dict(mod, shift_h=mod["shift_h"] * shift_s, dlon=mod["dlon"] * move_s, dlat=mod["dlat"] * move_s)
         try:
             apply(mission, {vid: m})
             return m
         except Invalid:
             continue
     return dict(shift_h=0.0, dlon=0.0, dlat=0.0, duty=1.0)
+
+
+def is_base(mod: dict[str, Any]) -> bool:
+    """The change moves nothing: the variant of this vehicle is the base mission again."""
+    return not (mod.get("shift_h") or mod.get("dlon") or mod.get("dlat")) and mod.get("duty", 1.0) == 1.0
 
 
 def design(mission: dict[str, Any], n: int, seed: int) -> list[dict[str, Any]]:
@@ -381,15 +393,22 @@ def _clean(df: pd.DataFrame, cls: str) -> pd.DataFrame:
     return d.dropna(subset=need).reset_index(drop=True)
 
 
-DRAWS = ("Each variant of a run is run on its own members (variant k: members (k + 1) x batch up to (k + 2) x batch - 1, the baseline row: members 0 up to "
-         "batch - 1), so its hypercube and noise streams are independent of every other training row of the run; rows of other runs were made with their "
-         "own seeds. The hold-out is therefore not scored against targets that share draws with the training points, and the `fresh` check "
-         "re-estimates up to 3 held-out points of this run on members used nowhere else.")
+DRAWS = ("Each variant of a run is run on its own members (variant k: the block of `batch` members after the ones Stage 1b used, k blocks further on), so "
+         "its hypercube and noise streams are independent of every other training row of the run, the baseline row included; rows of other runs were "
+         "made with their own seeds. The hold-out is therefore not scored against targets that share draws with the training points, and the `fresh` "
+         "check re-estimates up to 3 held-out points of this run on members used nowhere else.")
+
+
+def key_cols(cls: str) -> list[str]:
+    """The columns that define a mission (where and when it starts and its task), not the environment medians of one member draw: replicates of a mission
+    differ in those, and are one feature point."""
+    return BASE[:3] + TASK[cls]
 
 
 def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = None, fresh: FreshDraw | None = None) -> tuple[Emulator | None, dict[str, Any]]:
     """Fit the emulator of one vehicle class on its rows and score it on a 20 % hold-out (split by distinct feature point, see
-    `Emulator.holdout_report`). With `code_digest`, rows made by other code (or by code of unknown digest) stay in the table but are not trained on.
+    `Emulator.holdout_report`; a point is the mission-defining columns, `key_cols`). With `code_digest`, rows made by other code (or by code
+    of unknown digest) stay in the table but are not trained on.
     With `fresh` (see `Emulator.holdout_report`) the hold-out also scores the emulator against P(fail) re-estimated on fresh members, and the RMSE
     gate uses the larger of the two debiased RMSEs.
     The `MIN_ROWS` gate counts distinct feature points, so reruns of one mission cannot reach it. -> (Emulator | None, info for holdout.json)."""
@@ -399,7 +418,7 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = N
         keep = (d["code_digest"] == code_digest).to_numpy() if "code_digest" in d else np.zeros(len(d), bool)
         stale = int((~keep).sum())
         d = d[keep].reset_index(drop=True)
-    points = int(len(d[BASE + TASK[cls]].round(9).drop_duplicates()))
+    points = int(len(d[key_cols(cls)].round(9).drop_duplicates()))
     info: dict[str, Any] = dict(trained=False, cls=cls, rows=int(len(d)), points=points, stale_rows=stale, used=False)
     if points < MIN_ROWS:
         more = f"; only {points} of them are distinct feature points" if points < len(d) else ""
@@ -411,7 +430,7 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = N
         return None, dict(info, reason=why, unused_reason=why)
     modes = [c for c in d.columns if c.startswith("mode_") and d[c].std() > 0]
     modes = sorted(modes, key=lambda c: -d[c].std())[:MODES_MAX]
-    em = Emulator(BASE + TASK[cls], ["p_fail", "t_fail_h"] + modes, path)
+    em = Emulator(BASE + TASK[cls], ["p_fail", "t_fail_h"] + modes, path, point_cols=key_cols(cls))
     em.fit(d, holdout=0.2, fresh=fresh)
     x = d.iloc[0][em.features]
     em.query(x)

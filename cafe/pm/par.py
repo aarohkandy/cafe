@@ -54,6 +54,19 @@ def env_count(name: str) -> int | None:
     return n
 
 
+def _cgroup_cpus(root: str = "/sys/fs/cgroup") -> int | None:
+    """The CPUs the cgroup quota allows (docker --cpus), rounded down, at least 1: v2 `cpu.max`, else v1 `cpu/cpu.cfs_quota_us` over
+    `cpu/cpu.cfs_period_us`. None: no quota (v2 "max", v1 -1) or none readable."""
+    r = pathlib.Path(root)
+    for files in (("cpu.max",), ("cpu/cpu.cfs_quota_us", "cpu/cpu.cfs_period_us")):
+        try:
+            quota, period = " ".join((r / f).read_text() for f in files).split()
+            return max(1, int(quota) // int(period)) if quota not in ("max", "-1") else None
+        except (OSError, ValueError, ZeroDivisionError):
+            continue
+    return None
+
+
 def workers() -> int:
     """CAFE_WORKERS when set (a whole number of at least 1, else ConfigError), else the CPUs this process may use: its affinity mask, cut to the
     cgroup quota (docker --cpus); at most the `limit` of the run (the plan's memory cap); 1 in a worker."""
@@ -62,11 +75,8 @@ def workers() -> int:
     n = env_count("CAFE_WORKERS")
     if n is None:
         n = len(os.sched_getaffinity(0))
-        try:
-            quota, period = pathlib.Path("/sys/fs/cgroup/cpu.max").read_text().split()
-            n = n if quota == "max" else max(1, min(n, int(quota) // int(period)))
-        except (OSError, ValueError):
-            pass
+        q = _cgroup_cpus()
+        n = n if q is None else min(n, q)
     return n if _limit is None else min(n, _limit)
 
 

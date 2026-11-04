@@ -848,8 +848,13 @@ def _stage1_checks(ctx: Context, L: Ledger, r: dict[str, Any]) -> None:
     from statsmodels.stats.proportion import proportion_confint
     from .stats import intervals, sampling
     res, n, seed = r["res"], r["n"], int(ctx.mission["seed"])
-    L.check("ensemble_size", r["certify"] or ctx.plan["n_max"] < r["n_certify"], value=n, limit=r["n_certify"],
-            note="below the certifying size only because the budget cannot reach it: the report says it cannot certify < 5 %")
+    pl = ctx.plan
+    why = (f"the stage-1 share ({pl['stage1_share_s']:.0f} s) caps the ensemble at {pl['n_max']} members: use a longer --budget"
+           if pl["n_max"] < budget.N_MAX[pl["budget"]] else
+           f"the {pl['budget']} budget profile caps the ensemble at {pl['n_max']} members (budget.N_MAX); the stage-1 share ({pl['stage1_share_s']:.0f} s) "
+           "would have allowed more: use --budget 4h to certify")
+    L.check("ensemble_size", r["certify"] or pl["n_max"] < r["n_certify"], value=n, limit=r["n_certify"],
+            note=f"below the certifying size because {why}; the report says it cannot certify < 5 %")
     batch = ctx.plan["batch"]
     ks = sampling.marginal_report({k: res["X"][k] for k in r["priors"] if k in res["X"]}, r["priors"])
     L.check("sampled_marginals_match_priors", max(ks.values(), default=0.0) <= 1.0 / batch + 1e-9, value=max(ks.values(), default=0.0), limit=1.0 / batch,
@@ -1161,13 +1166,14 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     free = not scales and not ctx.run_dir.joinpath("stage3", "subgrid_calibration.json").is_file()      # stage 1b was a copy of stage 1
     share = budget.emulator_share_s(ctx.plan, stage1b_free=free)
     est = sizes["variant_s"]
-    n_var = sizes["variants_refit" if scales else "variants_no_refit"]
+    n_var = sizes["variants_no_refit" if free else "variants_refit"]            # the count follows the same `free` as the share (round 7 M-14)
     variants: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     killed: dict[str, Any] | None = None
     walls: list[float] = []
     mvs: dict[str, dict[str, Any]] = {}                                   # variant name -> its mission, for the fresh-draw check
     batch = ctx.plan["batch"]
+    first = -(-len(res["U"]) // batch)                                    # the first block after the members stage 1b used (round 7 M-7)
     t0 = time.perf_counter()
     for k, mods in enumerate(whatif.design(ctx.mission, n_var, seed)):
         if time.perf_counter() - t0 > share:                              # the safety kill: the whole stage share is gone
@@ -1176,8 +1182,9 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
             break
         a = time.perf_counter()
         mv = mvs[f"v{k}"] = whatif.apply(ctx.mission, mods)
-        # its own members, not the baseline's 0..batch-1: the same members would give every training row the same hypercube and noise streams (round 3 M-4)
-        vrows, why = whatif.run_variant(mv, ctx.env, list(range((k + 1) * batch, (k + 2) * batch)), seed, pri, marg, scales, fid, meta, f"v{k}")
+        # its own members, none the baseline used: the same members would give two training rows the same hypercube and noise streams (round 3 M-4)
+        members = list(range((first + k) * batch, (first + k + 1) * batch))
+        vrows, why = whatif.run_variant(mv, ctx.env, members, seed, pri, marg, scales, fid, meta, f"v{k}", mods)
         rows += vrows
         variants.append(dict(variant=f"v{k}", mods=mods, vehicles=sorted({r["vehicle"] for r in vrows}), skipped=why))
         skipped += [dict(variant=f"v{k}", vehicle=vid, reason=r) for vid, r in why.items()]
@@ -1210,7 +1217,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
         if r is None:                                                     # a row of another run: its mission is not here
             return None
         a = time.perf_counter()
-        j = len(variants) + 2 + len(n_fresh)
+        j = first + len(variants) + len(n_fresh)
         try:
             m = whatif.measure(mvs[r["variant"]], r["vehicle"], ctx.env, ctx.plan, pri, marg, scales, seed, members=list(range(j * batch, (j + 1) * batch)))
         except whatif.Invalid:

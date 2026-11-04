@@ -3,6 +3,7 @@
 Stage 1 runs for real on a fake environment where the answer is known (a storm current that stops 20 h into the window, so that deploying
 24 h later avoids it); the emulators are fitted on tables fabricated from the same rule, which is test data only.
 """
+import contextlib
 import copy
 import math
 import re
@@ -1061,3 +1062,78 @@ def test_three_processes_adding_rows_to_one_table_lose_none_and_never_corrupt_it
     df = pd.read_parquet(table)
     assert len(df) == 36 and df["key"].nunique() == 36
     assert sorted(f.name for f in tmp_path.iterdir()) == ["go", "train.parquet", "train.parquet.lock"]        # no temporary left
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 7: M-6, M-47
+
+ZERO = dict(shift_h=0.0, dlon=0.0, dlat=0.0, duty=1.0)
+
+
+def test_a_vehicle_at_the_box_edge_whose_move_is_invalid_keeps_its_shift_and_its_duty():
+    """Round 7 M-6: any `dlon > 0` of a vehicle at the box edge (the demo's USV and ship at 165 W = `lon_max`) turned the whole variant into the base
+    mission, which also dropped its shift and its duty."""
+    assert whatif._fits(DEMO, "usv", dict(shift_h=6.0, dlon=0.9, dlat=0.0, duty=1.0)) == dict(shift_h=6.0, dlon=0.0, dlat=0.0, duty=1.0)
+    assert whatif._fits(DEMO, "uas", dict(shift_h=6.5, dlon=0.5, dlat=0.2, duty=0.5)) == dict(shift_h=6.5, dlon=0.0, dlat=0.0, duty=0.5)
+    # the shift is halved too when it is the shift that does not fit (the window is 144 h); nothing valid left: no change
+    assert whatif._fits(DEMO, "usv", dict(shift_h=200.0, dlon=0.9, dlat=0.0, duty=1.0)) == dict(shift_h=100.0, dlon=0.0, dlat=0.0, duty=1.0)
+    assert whatif._fits(DEMO, "usv", dict(shift_h=3000.0, dlon=0.9, dlat=0.0, duty=1.0)) == ZERO
+    # a move that fits stays, halved as before
+    assert whatif._fits(DEMO, "usv", dict(shift_h=6.0, dlon=-0.5, dlat=0.0, duty=1.0)) == dict(shift_h=6.0, dlon=-0.5, dlat=0.0, duty=1.0)
+
+
+def test_no_variant_of_the_demo_is_the_base_mission_again_and_every_usv_variant_has_a_shift():
+    d = whatif.design(DEMO, 6, int(DEMO["seed"]))
+    assert [(k, vid) for k, mods in enumerate(d) for vid, m in mods.items() if m == ZERO] == []                 # 3 of 6 UAS and 3 of 6 USV variants were
+    assert all(mods["usv"]["shift_h"] != 0.0 for mods in d)
+
+
+def test_a_vehicle_whose_change_is_empty_is_not_run_and_says_why(monkeypatch):
+    """Round 7 M-6: its row would be the base mission's again; it is skipped with that reason (the existing `skipped` list), the others keep theirs."""
+    ran = []
+
+    def run_batch(mission, e, members, seed, pri, marg, scales):
+        ran.append([v["id"] for v in mission["vehicles"]])
+        return dict(vehicles={v["id"]: None for v in mission["vehicles"]})
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    monkeypatch.setattr(whatif, "vehicle_rows", lambda m, res, *a: [dict(vehicle=v) for v in res["vehicles"]])
+    pri, marg = stage1.priors_for(CI)
+    mods = {v["id"]: dict(ZERO, shift_h=1.0) for v in CI["vehicles"]}
+    mods["usv"] = ZERO
+    rows, skipped = whatif.run_variant(CI, Env3D(), [0, 1], 5, pri, marg, None, {}, {}, "v0", mods)
+    others = [v["id"] for v in CI["vehicles"] if v["id"] != "usv"]
+    assert [r["vehicle"] for r in rows] == others and ran == [others]
+    assert skipped == {"usv": "the variant equals the base mission"}
+    ran.clear()
+    rows, skipped = whatif.run_variant(CI, Env3D(), [0, 1], 5, pri, marg, None, {}, {}, "v1", {v["id"]: ZERO for v in CI["vehicles"]})
+    assert rows == [] and ran == [] and set(skipped) == {v["id"] for v in CI["vehicles"]}                       # nothing to run at all
+
+
+def test_replicates_of_one_mission_are_one_feature_point_whatever_their_environment_medians(tmp_path):
+    """Round 7 M-6: four member-draw replicates of one mission differ in the wind, Hs and current medians and counted as four points."""
+    base = storm_table(30, seed=2)
+    rng = np.random.default_rng(5)
+    noisy = ("wind_mean", "wind_p90", "hs_mean", "cur_p90")
+    df = pd.concat([base.assign(**{c: base[c] * (1 + 0.05 * rng.normal(size=len(base))) for c in noisy}) for _ in range(4)], ignore_index=True)
+    assert len(df) == 120 and len(df[whatif.BASE + whatif.TASK["glider"]].round(9).drop_duplicates()) == 120
+    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    assert em is None and info["rows"] == 120 and info["points"] == 30 and "only 30 of them are distinct feature points" in info["reason"]
+
+
+def test_the_emulator_of_a_class_is_fitted_on_the_mission_columns_as_its_points(tmp_path):
+    df = pd.concat([storm_table(110, seed=3).assign(**{"wind_mean": lambda d, i=i: d["wind_mean"] + 0.01 * i}) for i in range(2)], ignore_index=True)
+    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    assert em is not None and em.point_cols == whatif.key_cols("glider") == whatif.BASE[:3] + whatif.TASK["glider"]
+    assert info["rows"] == 220 and info["points"] == 110
+
+
+def test_add_rows_holds_the_table_lock_once(tmp_path, monkeypatch):
+    """Round 7 M-47: nothing failed when the lock around the read-modify-write was removed (row 313)."""
+    entered = []
+
+    @contextlib.contextmanager
+    def locked(p):
+        entered.append(p)
+        yield
+    monkeypatch.setattr(whatif, "locked", locked)
+    whatif.add_rows(tmp_path / "t.parquet", [dict(key="a", x=1.0)])
+    assert entered == [tmp_path / "t.parquet"]
