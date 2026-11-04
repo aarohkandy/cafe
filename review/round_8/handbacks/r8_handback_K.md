@@ -78,6 +78,9 @@ M-42 mutants, each applied to a copy of the fixed code (throwaway worktree `cafe
 
 `credibility.py` reads the ingest check `coare_ustar_vs_umwm_ust` (`value` = the agreeing fraction; level 2 needs at least `USTAR_AGREE_MIN = 0.90`, inclusive; the message starts "BRIEF 2.1 finding:") and E's `forcing_in_physical_range` (a failed one is in `bad` and holds the level at 1). Both are accepted as absent in an older ledger (the `pm_run` fixture has neither, and the synthetic run stays at 2). `USTAR_AGREE_MIN` is a second copy of E's `pipeline.USTAR_AGREE_FRACTION` (0.90): credibility.py does not import pipeline; the lead may point one at the other after the merge. Test: `test_r8_m1_both_ingest_checks_present_and_passing_keep_level_two_and_absent_ones_are_accepted` (0.90 passes, 0.8999 caps). Not covered by a K test: winds x 3 on the CI fixture (needs E's ingest change).
 
+Checked against E's branch (`git show r8-e:cafe/pm/pipeline.py`): E writes `forcing_in_physical_range` (ok = no bad points, `value` = count) and `coare_ustar_vs_umwm_ust` with `ok = n > 0 and finite(median)` and `value = round(frac, 4)` (None when n = 0), so the check is `ok` even at 50 %: the fraction test in `_data_pedigree` is what holds the level, and n = 0 lands in `bad` through `ok=False`. Fail-first: the three M-1 tests (`..._two_needs_the_brief_ninety_percent_ustar_agreement`, `..._a_failed_physical_range_check_or_an_unrecorded_fraction_...`, `..._both_ingest_checks_present_and_passing_...`) FAIL on credibility.py from eaf0e27 (pre-K) with the new tests copied in (3 failed) and pass on this branch.
+Exact one-line integration after the merge (optional, removes the second copy of 0.90): in `cafe/pm/credibility.py` replace the line `USTAR_AGREE_MIN = 0.90 ...` with `USTAR_AGREE_MIN = pipeline.USTAR_AGREE_FRACTION` plus `from . import pipeline` (only if credibility importing pipeline does not create an import cycle or pull stage code into the report; otherwise leave both at 0.90). Edge: E rounds the stored fraction to 4 decimals, so 0.89996 is stored as 0.9 and passes here while E's own note (on the unrounded value) fires; harmless, 4-decimal resolution.
+
 ## Proposed DECISIONS rows (the lead numbers them from 393)
 
 | ? | Data pedigree level 2 needs the ingest check `coare_ustar_vs_umwm_ust` to record a fraction of at least 0.90 (BRIEF 2.1); below it the factor stays 1 and says the number; a ledger without the check is not held down | Review round 8, M-1. Amends 168: the u* agreement is still not a gate, but the finding the brief asks for now moves a credibility level. |
@@ -136,3 +139,7 @@ def test_the_fresh_draws_are_asked_for_distinct_points_not_for_replicates_of_one
 2. E: nothing needed for my reader (it reads the existing check `coare_ustar_vs_umwm_ust` and its `value`); E's `forcing_in_physical_range` fails the level through the existing `bad` list.
 3. After the merge, M-20's tests assume `report.py` imports `credibility` (it does) and `stats.sampling.PERTURBATIONS`.
 
+
+## Final run (finish pass, homebase, PM_CPUS=2 PM_MEM=12g, detached)
+
+`ruff check cafe/pm tests bench`: All checks passed. `mypy cafe/pm`: no issues in 54 source files. `pytest tests/test_credibility.py tests/test_vv.py tests/test_report.py`: pytest1_rc=0 (all dots, no F/E). `pytest tests/test_cli.py tests/test_config.py -k r8`: pytest2_rc=0. M-1 fail-first on pre-K credibility.py (eaf0e27): 3 failed. No container of K left running.
