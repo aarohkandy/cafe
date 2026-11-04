@@ -269,6 +269,12 @@ def _uas_radio(P: dict[str, Any]) -> dict[str, Any]:
     return dict(base.get(name, base["rfd900x"]), center_mhz=float(np.mean(r["freq_mhz"])), tx_dbm=r["tx_power_dbm"], rx_sens_dbm=r["rx_sensitivity_dbm"])
 
 
+def ship_antenna_m(mission: dict[str, Any], radio: dict[str, Any] | None = None) -> float:
+    """The ship's RF antenna height [m]: the mission's, else the UAS platform's `radio.ship_antenna_height_m` (10 m without a UAS platform). The one fallback
+    of the sortie hook and the mission-level link (round 8, M-17: the link used a literal 10 and ignored the platform's listed assumed input)."""
+    return float(mission["ship"].get("antenna_height_m", (radio or {}).get("ship_antenna_height_m", 10.0)))
+
+
 def _uas_links(env: Any, mission: dict[str, Any], origin: tuple[float, float], ts: NDArray[Any], P: dict[str, Any],
                M: int, filled: list[int] | None = None) -> list[Callable[[float, NDArray[Any]], NDArray[np.bool_]]]:
     """One `link(t, pos_rel (M, 3)) -> lost (M,)` hook per sortie for uas.fly_sortie: the UAS-to-ship RF budget
@@ -277,7 +283,7 @@ def _uas_links(env: Any, mission: dict[str, Any], origin: tuple[float, float], t
     on a 30 s grid per sortie, once, and interpolated; a non-finite Hs is the member's last finite one (fill_hs), and `filled` gets the count per sortie."""
     so, ra = P["sortie"], P["radio"]
     radio = _uas_radio(P)
-    hr = float(mission["ship"].get("antenna_height_m", ra["ship_antenna_height_m"]))
+    hr = ship_antenna_m(mission, ra)
     out: list[Callable[[float, NDArray[Any]], NDArray[np.bool_]]] = []
     for t0 in ts:
         tg = t0 + np.arange(0.0, so["duration_s"] * so["hard_stop_factor"] + 61.0, 30.0)
@@ -474,8 +480,10 @@ def _left_data(r: dict[str, Any], env: Any) -> None:
     r["first"]["left_data"] = np.where(out.any(0), np.asarray(r["t"], float)[out.argmax(0)], np.nan)
 
 
-def _pos(node: str, out: dict[str, Any], mission: dict[str, Any], t: NDArray[Any]) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any], NDArray[Any]]:
-    """(lon, lat, height above sea [m], depth [m]) of a vehicle/ship at times t (n,), shape (n, M)."""
+def _pos(node: str, out: dict[str, Any], mission: dict[str, Any], t: NDArray[Any],
+         radio: dict[str, Any] | None = None) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any], NDArray[Any]]:
+    """(lon, lat, height above sea [m], depth [m]) of a vehicle/ship at times t (n,), shape (n, M). `radio`: the UAS platform's radio group, the ship
+    antenna's default height (ship_antenna_m)."""
     if node == mission.get("ship", {}).get("id"):
         s = mission["ship"]
         M = next(iter(out.values()))["lon"].shape[1]
@@ -483,7 +491,7 @@ def _pos(node: str, out: dict[str, Any], mission: dict[str, Any], t: NDArray[Any
         def f(v: float) -> NDArray[Any]:
             return np.full((len(t), M), float(v))
 
-        return f(s["lon"]), f(s["lat"]), f(s.get("antenna_height_m", 10.0)), f(s.get("transducer_depth_m", 5.0))
+        return f(s["lon"]), f(s["lat"]), f(ship_antenna_m(mission, radio)), f(s.get("transducer_depth_m", 5.0))
     r = out[node].get("fine") or out[node]  # a UAS: its 30 s sortie grid (on the deck between sorties), not the 10 min records
 
     def g(a: NDArray[Any]) -> NDArray[Any]:
@@ -597,7 +605,9 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         valid = np.zeros((n, M), bool)
         margin_kind = "none: Iridium reports a success fraction, not a margin"
     else:
-        A, B = _pos(a, out, mission, t), _pos(b, out, mission, t)
+        uas_v = next((v for v in mission["vehicles"] if out.get(v["id"], {}).get("class") == "uas"), None)
+        radio = uas.load_platform(uas_v["platform"])["radio"] if uas_v and "antenna_height_m" not in mission["ship"] else None
+        A, B = _pos(a, out, mission, t, radio), _pos(b, out, mission, t, radio)
         d = np.maximum(_dist(A, B), 1.0)
         if lk["when"] == "surfacing":
             need = _surfaced(out, a, b, t)

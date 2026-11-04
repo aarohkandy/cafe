@@ -44,13 +44,13 @@ import gsw
 import numpy as np
 
 from ..env import conventions as cv
-from ..config import _yaml as read_yaml
+from ..config import platform_doc as read_yaml
 from . import check_params
 
 Arr = Any
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
 DESC, APO, ASC, SURF = 0, 1, 2, 3  # phase codes recorded per member and step
-FAILS = ("station_lost", "battery", "seafloor", "overdepth", "no_flight", "waypoint_unreachable")
+FAILS = ("station_lost", "battery", "seafloor", "overdepth", "no_flight", "waypoint_unreachable", "no_current_data")
 P_ATM = 101325.0
 MODES = ("station", "section", "drift")
 
@@ -279,6 +279,8 @@ class GliderSim:
             self.wps = np.zeros((0, 2))
         self.drift_dir = cv.vec_from_to(1.0, np.full(M, float(md.get("heading_to", 0.0))))
         self.md = md
+        if not md["dive_depth_m"] > 0:                                                         # round 8, M-28 (also refuses NaN)
+            raise ValueError(f"dive_depth_m must be > 0, got {md['dive_depth_m']!r}; it is the depth of each dive in metres")
         self.target_depth = min(md["dive_depth_m"], P["rating_m"])
         pt = perturb or {}
 
@@ -340,10 +342,11 @@ class GliderSim:
         n = neutral_vbd_cc(P, rho, p, T)
         lo, hi = P["vbd_min_cc"], P["vbd_min_cc"] + P["vbd_range_cc"]
         d = self.md.get("vbd_delta_cc", P["vbd_delta_cc"])
-        need_lo, need_hi = n.min() - d, n.max() + d
+        ok = np.isfinite(n).all(1)                                  # round 8, M-13: a member with no environment at its start does not decide the others' trim
         self.ballast_kg = 0.0
+        need_lo, need_hi = (n[ok].min() - d, n[ok].max() + d) if ok.any() else (lo, hi)
         if need_lo < lo or need_hi > hi:
-            self.ballast_kg = float(0.5 * (lo + hi - need_lo - need_hi) * 1e-6 * rho.mean())
+            self.ballast_kg = float(0.5 * (lo + hi - need_lo - need_hi) * 1e-6 * rho[ok].mean())
             key = "mass_kg" if P["kind"] == "seaglider" else "mg"
             P = self.P = {**P, key: P[key] + self.ballast_kg}
             n = neutral_vbd_cc(P, rho, p, T)
@@ -414,8 +417,13 @@ class GliderSim:
         d0, apo0, a0, s0 = (self.phase == k for k in (DESC, APO, ASC, SURF))
         fly = d0 | a0
         cur = env.current(self.lon, self.lat, -self.depth, self.t).value
+        hole = ~np.isfinite(cur).all(-1)                                                      # round 8, M-14: a hole in the input is not a flight-model failure
         if s0.any():
-            cur = np.where(s0[:, None], cur + self.windage[:, None] * env.wind(self.lon, self.lat, 10.0, self.t).value, cur)
+            wind = env.wind(self.lon, self.lat, 10.0, self.t).value
+            hole |= s0 & ~np.isfinite(wind).all(-1)
+            cur = np.where(s0[:, None], cur + self.windage[:, None] * wind, cur)
+        self._flag("no_current_data", hole)
+        cur = np.where(np.isfinite(cur).all(-1)[:, None], cur, 0.0)                           # zero keeps the step finite; the member is labelled from now on
         dr_nom = np.zeros((self.M, 2))
         move = cur * dt
         if fly.any():

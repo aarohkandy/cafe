@@ -2008,3 +2008,9 @@ def test_a_track_half_inside_the_data_keeps_its_inside_points_and_says_how_many_
     assert re.fullmatch(r"\d+ of \d+ track points are outside the downloaded data \(more than half of the members left it\): not shown", d["dropped"])
     assert d["dropped"].split(" of ")[0] != "0" and "track points are outside the downloaded data" in plain(h)
     assert report.check_traceability(rep) == []
+
+
+# ---- review round 8, M-14: the mode text covers both vehicle classes and says it is the input, not the flight model
+def test_r8_m14_the_no_current_data_text_says_a_hole_in_the_input_not_a_flight_model_failure():
+    text = report.MODE_TEXT["no_current_data"]
+    assert "no finite wind, current or wave state" in text and "not a failure of the vehicle's flight model" in text

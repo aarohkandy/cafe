@@ -645,3 +645,16 @@ R7_M47 = [
 def test_r7_m47_the_other_bounds_of_r6_m9_are_each_refused_naming_their_field(tmp_path, what, fn, msg):
     with pytest.raises(ConfigError, match=msg):
         load_mission(edit(tmp_path, fn))
+
+
+# ---- review round 8, M-25: an empty platform file is left to the class loader (and `hangar`) to name; a list is refused here
+def test_r8_m25_an_empty_platform_file_loads_as_nothing_and_a_scalar_document_is_refused(tmp_path):
+    empty = tmp_path / "empty.yaml"
+    empty.write_text("# a failed copy\n")
+    assert config.load_platform(str(empty)) == {}
+    scalar = tmp_path / "scalar.yaml"
+    scalar.write_text("42\n")
+    with pytest.raises(ConfigError, match=r"expected a mapping of platform parameters \(the file is empty or not a mapping\)"):
+        config.load_platform(str(scalar))
+    with pytest.raises(ConfigError, match=r"the file is empty or not a mapping\); a platform file has `params:`"):
+        config.platform_doc(str(empty))

@@ -123,7 +123,11 @@ def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, a_eff: float = A_EF
     """Path loss [dB] over the sea: the curved-earth two-ray loss with divergence (two_ray_curved_db) while the grazing angle at the specular point
     is above psi_critical; between that limit and the radio horizon the larger of it and the plane-earth loss (FLAT_A), so the loss cannot fall
     toward free space as D -> 0 where the geometric optics no longer holds; beyond the horizon the curved loss, unchanged (rf_margin gives no link
-    there). Within 2 km it is the plane-earth result to 0.15 dB.
+    there). Within 2 km the curved and the plane-earth loss agree between interference nulls and differ AT them,
+    by an amount that grows as the distance is sampled more finely (the nulls are sharp): the largest |difference| for d = 100 to 2000 m at 915 MHz,
+    Hs 0, sampled every 1 m (every 5 cm): 0.8 dB (1.0) for a surface antenna pair, ht 2.2 m and hr 10 m; 26 dB (29) with the UAS at the top of
+    its profile, ht 2.2 m and hr 108.1 m; 20 dB (34) for ht 10 m and hr 18.1 m; with Hs 1 m 2.4 dB and with Hs 3 m 0.3 dB for that last pair. The
+    lost-link time of a UAS sortie is the statistic that depends on it (round 8, M-49; the earlier 0.15 dB was measured at single distances).
     ponytail: no smooth-earth diffraction (ITU-R P.526) in the transition zone, the plane-earth loss stands in for it and is conservative by
     construction; upgrade path is the P.526 field between psi_critical and the horizon."""
     d = np.maximum(d, 1.0)
@@ -267,7 +271,8 @@ def bellhop_available() -> bool:
 def _run_bellhop(r_m: ArrayLike, f_hz: float, z: ArrayLike, c: F, tx_depth: float, rx_depth: float, water_depth: float) -> F:
     """Incoherent TL [dB] (Bellhop 'T' option includes Thorp volume attenuation) at ranges r_m (increasing, > 0)."""
     import arlpy.uwapm as pm
-    os.environ["PATH"] = f"{_bellhop_dir()}{os.pathsep}{os.environ['PATH']}"          # arlpy shells out to `bellhop.exe`
+    if (bd := _bellhop_dir()) not in os.environ["PATH"].split(os.pathsep):             # arlpy shells out to `bellhop.exe`; once (round 8, M-37)
+        os.environ["PATH"] = f"{bd}{os.pathsep}{os.environ['PATH']}"
     d = -np.asarray(z, float)
     if d[0] > 0:                                                                       # Bellhop needs the surface node
         d, c = np.r_[0.0, d], np.r_[c[0], c]

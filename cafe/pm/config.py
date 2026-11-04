@@ -68,6 +68,17 @@ def _yaml(path: str | pathlib.Path) -> Any:
         raise ConfigError(f"{path}: not valid YAML ({e})") from e
 
 
+def platform_doc(path: str | pathlib.Path) -> Any:
+    """A platform file's mapping, read as `_yaml` does (round 8, M-25). An empty or comment-only file (a failed copy), a list or a bare value is a
+    ConfigError that says what a platform file is, the same for the three vehicle classes; it was a bare TypeError (USV, glider) or a misleading
+    message (UAS)."""
+    doc = _yaml(path)
+    if not isinstance(doc, dict):
+        raise ConfigError(f"{path}: expected a mapping of platform parameters (the file is empty or not a mapping); a platform file has `params:` "
+                          f"with a `value` and a `source` or `assumed` + `why` for each number")
+    return doc
+
+
 def _finite(node: Any, path: pathlib.Path, where: str = "") -> None:
     """Refuse a NaN or infinite number anywhere in the mission (JSON Schema's `number` accepts both and every comparison with NaN is False)."""
     if isinstance(node, float) and not math.isfinite(node):
@@ -362,9 +373,7 @@ def load_platform(name: str | pathlib.Path) -> dict[str, Any]:
         have = sorted(x.stem + (" (table)" if x.stem in TABLES else "") for x in PLATFORMS.glob("*.yaml"))
         raise ConfigError(f"platform '{name}': no file {path}; available: {have}")
     doc = _yaml(path)
-    if not isinstance(doc, dict):
-        raise ConfigError(f"{path}: expected a mapping of platform parameters")
-    return doc
+    return {} if doc is None else platform_doc(path)                  # an empty file: the class loader (and `hangar`) names it, as "provenance FAILED"
 
 
 def assumptions() -> dict[str, Any]:

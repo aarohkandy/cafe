@@ -2,6 +2,7 @@
 import pathlib
 import re
 
+import numpy as np
 import pytest
 import yaml
 
@@ -62,7 +63,8 @@ def test_the_shipped_platform_files_satisfy_their_loaders():
 
 
 def test_check_params_kinds_and_non_numbers():
-    check_params(dict(a="other", b="pos", c="any", d="nonneg"), dict(a="text", b=[1.0, 2.0], c=-3.0, d=0.0, e="free text", f=True), "x.yaml:p", "r")
+    # round 8, M-26: a list for a number is refused (b was [1.0, 2.0])
+    check_params(dict(a="other", b="pos", c="any", d="nonneg"), dict(a="text", b=2.0, c=-3.0, d=0.0, e="free text", f=True), "x.yaml:p", "r")
     for bad in (True, "1.0", [], [1.0, float("inf")], float("nan"), 0.0, -1.0):
         with pytest.raises(ValueError, match=r"x\.yaml:p\.b: .* must be a finite number above 0"):
             check_params(dict(b="pos"), dict(b=bad), "x.yaml:p", "r")
@@ -135,3 +137,52 @@ def test_the_radio_table_is_read_with_the_same_loader(tmp_path, monkeypatch):
             comms._yaml("radios.yaml")
     finally:
         comms._yaml.cache_clear()
+
+
+# ---- review round 8: M-11 (r_int 0), M-26 (arrays and lists), M-28 (angles and mass), M-25 (an empty file)
+CASES_R8 = [
+    ("quad_uas", lambda r: r["battery"]["r_int_ohm"].update(value=0.0), r"battery\.r_int_ohm: 0\.0 must be a finite number above 0; an ideal pack .* use 1e-6"),
+    ("quad_uas", lambda r: r["battery"]["ocv_soc"].update(value=[1.0, 0.8, 0.5, 0.2, 0.1, 0.0]), r"battery\.ocv_soc: .* strictly increasing"),
+    ("quad_uas", lambda r: r["battery"]["ocv_cell_v"].update(value=[3.0, 3.45, 3.6, 3.78, 4.02]), r"battery\.ocv_cell_v: 5 values for 6 states of charge"),
+    ("quad_uas", lambda r: r["airframe"]["inertia_kgm2"].update(value=[0.0025, 0.0025]),
+     r"airframe\.inertia_kgm2: .* must be a finite number above 0 in every place of a list of 3"),
+    ("quad_uas", lambda r: r["airframe"]["mass_kg"].update(value=[0.77, 0.8]), r"airframe\.mass_kg: .* must be a number, got a list"),
+    ("saildrone_explorer", lambda r: r["params"]["mass_kg"].update(value=[750.0, 760.0]), r"params\.mass_kg: .* must be a number, got a list"),
+    ("saildrone_explorer", lambda r: r["params"]["mass_kg"].update(value=1e300), r"params\.mass_kg: 1e\+300 must be a finite number from 1 to 100000"),
+    ("saildrone_explorer", lambda r: r["params"]["wing_stall_deg"].update(value=120.0),
+     r"params\.wing_stall_deg: 120\.0 must be a finite number above 0 and below 90"),
+    ("saildrone_explorer", lambda r: r["params"]["wing_stall_deg"].update(value=90.0), r"params\.wing_stall_deg: 90\.0 must be"),
+    ("saildrone_explorer", lambda r: r["params"]["heel_target_deg"].update(value=120.0), r"params\.heel_target_deg: 120\.0 must be"),
+    ("saildrone_explorer", lambda r: r["params"]["heel_target_deg"].update(value=90.0), r"params\.heel_target_deg: 90\.0 must be"),
+    ("saildrone_explorer", lambda r: r["params"]["min_awa_deg"].update(value=400.0), r"params\.min_awa_deg: 400\.0 must be a finite number from 0 to 180"),
+    ("saildrone_explorer", lambda r: r["params"]["wing_trim_deg"].update(value=200.0), r"params\.wing_trim_deg: 200\.0 must be"),
+    ("saildrone_explorer", lambda r: r["params"]["keel_stall_deg"].update(value=200.0), r"params\.keel_stall_deg: 200\.0 must be"),
+    ("seaglider", lambda r: r["params"]["battery_J"].update(value=[1.0e7, 1.1e7]), r"params\.battery_J: .* must be a number, got a list"),
+]
+
+
+@pytest.mark.parametrize("name,edit,msg", CASES_R8, ids=[f"{c[0]}-{i}" for i, c in enumerate(CASES_R8)])
+def test_r8_a_list_for_a_number_a_bad_table_and_an_out_of_range_angle_are_refused_naming_the_leaf(tmp_path, name, edit, msg):
+    path = copy_of(tmp_path, name, edit)
+    with pytest.raises(ValueError, match=msg):
+        LOADERS[name].load_platform(path)
+
+
+def test_r8_m11_a_one_micro_ohm_pack_flies_with_finite_state():
+    P = uas.load_platform()
+    P["battery"]["r_int_ohm"] = 1e-6
+    prm = uas.derive(P, 2)
+    soc, qah, ewh, volt, cur = uas._batt(prm, np.ones(2), np.zeros(2), np.zeros(2), np.full(2, 120.0), 1.0)
+    assert np.isfinite([soc, qah, ewh, volt, cur]).all() and 0.99 < float(soc[0]) < 1.0
+    assert float(cur[0]) == pytest.approx(120.0 / float(volt[0]), rel=2e-2)          # float32: the sqrt cancels at 1e-6 ohm
+
+
+@pytest.mark.parametrize("name", ["saildrone_explorer", "seaglider", "quad_uas"])
+@pytest.mark.parametrize("text", ["", "# only a comment\n"], ids=["empty", "comment"])
+def test_r8_m25_an_empty_or_comment_only_platform_file_is_one_named_refusal_for_every_class_and_the_hangar(tmp_path, capsys, name, text):
+    f = tmp_path / f"{name}.yaml"
+    f.write_text(text)
+    with pytest.raises(ValueError, match=r"expected a mapping of platform parameters \(the file is empty or not a mapping\); a platform file has `params:`"):
+        LOADERS[name].load_platform(str(f))
+    assert cli.main(["hangar", "--platform", str(f)]) == 1
+    assert "provenance FAILED" in capsys.readouterr().out
