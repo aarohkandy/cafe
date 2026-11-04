@@ -1,4 +1,4 @@
-You are the merger for review round 8 of the TEPEX-C pre-mission simulator in `/Users/aaroh/Downloads/everything/cafe` (branch `premission-step4`, commit `3236375`, code at `0a0509c`). You did not write the code or either review.
+You are the merger for review round 8 of the TEPEX-C pre-mission simulator in `/Users/aaroh/Downloads/everything/cafe` (branch `premission-step4`, commit `46567a1`, code at `0a0509c`). You did not write the code or either review.
 
 Inputs: `review/round_8/reviewer_a.md` (15 findings), `reviewer_b.md` (12), `reviewer_c.md` (15), `reviewer_d.md` (17) and the lead's `lead_findings.md` (L-1 to L-3, from the hosted CI runs; check them like the others), made with the prompt in `review/round_8/PROMPT.md` against the quick run copied to `/private/tmp/claude-501/-Users-aaroh--claude-spares-spare-P6utrU/96cd665b-6853-40e7-8769-780fbfcaeebd/scratchpad/q8` (big binaries on homebase at `~/work/cafe/pmdata/runs/q8/`).
 
