@@ -709,14 +709,26 @@ def _env(mission: dict[str, Any], env: Any, res: dict[str, Any] | None, wins: di
         n_ok = int(ok.sum())
         i = np.flatnonzero(ok)[np.unique(np.linspace(0, max(n_ok - 1, 0), min(n_ok, 24)).astype(int))]
         t, lo, la = np.asarray(r["t"], float)[i], lon[i], lat[i]
-        w, h, cur = env.wind(lo, la, 10.0, t), env.waves(lo, la, t)["Hs"], env.current(lo, la, 0.0, t)
+        m_all = lo.size
+        try:
+            ins = np.asarray(env.inside(lo, la, t), bool) if hasattr(env, "inside") else np.ones(m_all, bool)       # round 7, M-11
+            t, lo, la = t[ins], lo[ins], la[ins]
+            dropped = (f"{m_all - lo.size} of {m_all} track points are outside the downloaded data (more than half of the members left it): not shown"
+                       if lo.size < m_all else None)
+            if m_all and not lo.size:
+                out["vehicles"][vid] = dict(available=False, reason=dropped)
+                continue
+            w, h, cur = env.wind(lo, la, 10.0, t), env.waves(lo, la, t)["Hs"], env.current(lo, la, 0.0, t)
+        except Exception as ex:                                           # noqa: BLE001  a failure of the environment never fails the report (as in _reach)
+            out["vehicles"][vid] = dict(available=False, reason=f"{type(ex).__name__}: {ex}")
+            continue
 
         def speed(a: Any) -> NDArray[np.float64]:
             return np.asarray(np.hypot(*np.moveaxis(np.asarray(a.value, np.float64), -1, 0)), np.float64)
 
         def q(a: Any, v: np.ndarray, unit: str, what: str) -> dict[str, Any]:
             return vals(v, unit, ref, f"{a.source} ({what} at the stage1b median track)", None if a.uncertainty is None else float(np.mean(a.uncertainty)))
-        out["vehicles"][vid] = dict(t=vals(t, "s since 1970-01-01T00:00:00Z", ref, "stage1b/res.pkl vehicles.t"),
+        out["vehicles"][vid] = dict(available=True, dropped=dropped, t=vals(t, "s since 1970-01-01T00:00:00Z", ref, "stage1b/res.pkl vehicles.t"),
                                     wind10=q(w, speed(w), "m/s", "10 m wind speed"), hs=q(h, np.asarray(h.value, float), "m", "Hs"),
                                     current=q(cur, speed(cur), "m/s", "surface current speed"))
     out.update(available=True, how=f"Queried from the Environment passed to report.write ({type(env).__name__}) at up to 24 points of each "
@@ -983,11 +995,24 @@ def _undecided_badge(d: dict[str, Any]) -> str:
         + ("" if g is None or g["ok"] else ' <span class="badge undecided">undecided: granularity</span>')
 
 
+INTERVAL_SCOPE = ("This interval is the sampling error of {n} at fixed inputs: the fitted priors enter as their point values and the other assumed inputs "
+                  "are not varied beyond their stated priors (see the sensitivity scope and the credibility report).")          # round 7, M-21
+
+
+def _usv_bias_html(v: dict[str, Any]) -> str:
+    """Under a USV's interval: the speed model is sampled over 1.4 % only; the stored brief-bias case beside it (round 7, M-15). Nothing without the case."""
+    c = next((c for c in v["cases"] if "usv_vpp_bias_brief" in c["case"]), None) if v["cls"] == "usv" else None
+    return "" if c is None else (f"<p class=muted>The speed model is sampled over 1.4 % only (the published spread of VPP over-prediction, "
+                                 f"not an uncertainty of this model); the brief's bias case gives {_n(c['k_fail'])} of {_n(c['n'])} "
+                                 f"({_badge(c['verdict'])}).</p>")
+
+
 def _stat_html(d: dict[str, Any]) -> str:
     u = d["p_fail"]["uncertainty"]
     si, th = d["stop_interval"], d["thresholds"]
     h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g} (the verdict's own level); "
          f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}, two-sided 95 % Wilson bound).</p>"
+         f"<p class=muted>{INTERVAL_SCOPE.format(n=_n(d['n']))}</p>"
          f"<p class=muted>Stopping rule: the {si['lo']['uncertainty']['conf']:.0%} {html.escape(si['lo']['uncertainty']['kind'].replace(' bound', ''))} "
          f"on P(fail) is {_n(si['lo'])} to {_n(si['hi'])}; verdict rule: GO when P(fail) is at most {_n(th['go'])} and the "
          f"{u['conf'] * 100:.0f} % Wilson upper bound on P(fail) is at most {_n(th['go_bound'])}; "
@@ -1051,7 +1076,7 @@ def _fix_html(f: dict[str, Any]) -> str:
         line = (f"<b>not searched</b>: none of the {_n(f['candidates'])} could be evaluated (no emulator answer in range, and this vehicle's share "
                 f"of the Stage-1 budget did not cover a run), so this is not a finding that nothing helps (P(fail) now {_n(f['p_fail_before'])}).")
     else:
-        line = (f"none of the {_n(f['evaluated'])} evaluated (of {_n(f['candidates'])}) reaches {e(f['target'])} "
+        line = (f"{_n(f['evaluated'])} evaluated, of {_n(f['candidates'])} that could be: none reaches {e(f['target'])} "
                 f"(P(fail) now {_n(f['p_fail_before'])}); "
                 + ("the emulator answered those in its range." if f["emulator_trained"]
                    else "no emulator is trained yet, so only the nearest few were run in Stage 1."))
@@ -1149,11 +1174,12 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     if v["changed_by_refit"]:
         ch = f"<p class=warn>The verdict changed from {_badge(v['verdict_stage1'])} to {_badge(v['verdict'])} after the stage-3 refit.</p>"
     return (f"<div class=card><h3>{e(vid)} {_badge(v['verdict'])}{_undecided_badge(v)} <span class=muted>{e(v['cls'])}, {e(str(v['platform']))}</span></h3>"
-            f"{_stat_html(v)}{_physics_html(v['physics'])}{ch}<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
+            f"{_stat_html(v)}{_usv_bias_html(v)}{_physics_html(v['physics'])}{ch}"
+            f"<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
             f"{_task_html(v)}{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}"
             f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'], v['sensitivity'].get('quantity'))}{_fix_html(v['fix'])}"
-            f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} assumed platform inputs, listed in the "
+            f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} (assumed platform values), listed in the "
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")
 
 
@@ -1277,7 +1303,11 @@ def _env_html(env: dict[str, Any]) -> str:
     e = html.escape
     h = f"<p>{e(env['how'])}</p>" if "how" in env else ""
     for vid, d in env["vehicles"].items():
-        h += f"<p><b>{e(vid)}</b>: 10 m wind {_n(d['wind10'])}; Hs {_n(d['hs'])}; surface current {_n(d['current'])}; at times {_n(d['t'])}.</p>"
+        if not d.get("available", True):                                  # older reports have no flag; round 7, M-11
+            h += f"<p class=warn><b>{e(vid)}</b>: {e(d['reason'])}.</p>"
+            continue
+        h += (f"<p><b>{e(vid)}</b>: 10 m wind {_n(d['wind10'])}; Hs {_n(d['hs'])}; surface current {_n(d['current'])}; at times {_n(d['t'])}."
+              + (f" {e(d['dropped'][0].upper() + d['dropped'][1:])}." if d.get("dropped") else "") + "</p>")
     for vid, d in env["forcing_at_windows"].items():
         rows = "; ".join(f"{_n(w['t'])}: {_n(w['forcing'])} ({e(w['forcing']['basis'])})"
                          + (f"; those members failed at {', '.join(_n(x) for x in w['failed_at'])}" if w["failed_at"] else "") for w in d["windows"])
@@ -1420,7 +1450,7 @@ def _assumed_html(a: dict[str, Any]) -> str:
     rows = "".join(f"<tr><td>{e(f)}<td>{_n(n)}</tr>" for f, n in a["by_file"].items())
     fac = "".join(f"<tr><td>{e(f['name'])}<td>{e(f['level'])}</tr>" for f in a["factors"])
     lst = "".join(f"<li><a href='{e(i['href'])}'><code>{e(i['id'])}</code></a> ({e(i['kind'])}) {e(i['value'])} {e(i['unit'])}" for i in a["items"])
-    return (f"<p>{_n(a['total'])} inputs are assumed or are priors, not measurements, and verdicts depend on them. Full detail: "
+    return (f"<p>{_n(a['total'])} are assumed or are priors, not measurements, and verdicts depend on them. Full detail: "
             f"<a href='credibility.html'>credibility report</a> (levels, V&amp;V 20 table, limitations).</p>"
             f"<div class=scroll><table><tr><th>File<th>Inputs</tr>{rows}</table></div>"
             f"<div class=scroll><table><tr><th>NASA-STD-7009B factor<th>Level</tr>{fac}</table></div>"

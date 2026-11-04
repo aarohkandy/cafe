@@ -469,7 +469,7 @@ def test_the_zero_failure_note_asks_for_60_members_only_below_60():
     """M-11: 'P(fail) < 3/n = 0.047 ...; 60 members would be needed' was printed at n = 64, already above 60."""
     for n in (30, 59):
         assert "60 members would be needed" in I.verdict(0, n)["note"]
-    for n in (60, 64, 72):
+    for n in (61, 64, 72):
         note = I.verdict(0, n)["note"]
         assert "60 members would be needed" not in note and f"3/n = {3 / n:.3f}" in note and f"(n = {n}), below 5%;" in note
         assert "two-sided 95% Wilson upper bound below 5%: 73 members." in note       # round 6, M-15: the wording changed, the rule and the numbers did not
@@ -502,3 +502,11 @@ def test_a_prior_without_a_numeric_sd_is_a_value_error_naming_the_key():
     for bad in (None, "0.3", [0.3]):
         with pytest.raises(ValueError, match=r"'w': the sd is .*finite sd > 0"):
             S.to_marginals({"w": dict(dist="normal", value=bad)})
+
+
+def test_the_rule_of_three_note_does_not_call_5_percent_below_5_percent():      # round 7, M-40
+    n59, n60, n61 = (I.verdict(0, n)["note"] for n in (59, 60, 61))
+    assert "60 members would be needed for that bound to reach 5%" in n59 and "below 5%" not in n59
+    assert "3/n = 0.050 at 95% confidence (n = 60), which is 5%, not below it;" in n60 and "(n = 60), below 5%" not in n60
+    assert "60 members would be needed" not in n60 and "73 members." in n60
+    assert "(n = 61), below 5%;" in n61 and "not below it" not in n61

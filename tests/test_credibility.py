@@ -184,7 +184,7 @@ def test_ms_management_needs_a_git_sha_and_seeds(tmp_path, data):
 def test_ms_management_level_three_needs_the_process_files(run, tmp_path):
     assert factors(run)["ms_management"]["level"] == 3
     t = factors(run)["ms_management"]["level_text"]                # M-20: only self-checks stand behind level 3
-    assert "own audit" in t and "independent reference" not in t
+    assert "audited by the tool" in t and "ruff configured (not run by the audit)" in t and "independent reference" not in t      # round 7, M-23
     r = fake_root(tmp_path, 1, builders=False)
     assert factors(run, r)["ms_management"]["level"] == 2 and factors(run, r)["ms_management"]["level_text"] == cr.LEVELS[2]
     assert factors(run, fake_root(tmp_path / "x", 1, pyproject=False))["ms_management"]["level"] == 2
@@ -736,3 +736,87 @@ def test_the_reach_table_lists_every_limitation_that_caps_each_factor():
         assert rows[row].split(", ") == want, (row, rows[row], want)
     assert set(names) | {"Data pedigree", "Use history", "M&S management", "People qualifications"} == set(rows)
     assert {f for lim in lims for f in lim["factors"]} <= set(names.values())
+
+
+# ---------------------------------------------------------------------------------------------------------- round 7 (M-5, M-15, M-23)
+
+def write_dtmb3(data, converged, drift=0.0075):
+    """Three grids per speed with the medium value off the line (the grid sequence oscillates); `converged` is {fr: finest grid converged}."""
+    root = data / "dtmb5415"
+    root.mkdir(parents=True)
+    for grid, k, cells in (("coarse", 1.010, 1.0e6), ("medium", 0.995, 3.0e6), ("fine", 1.005, 8.0e6)):
+        speeds = {fr: dict(cells=cells, ct=dtmb5415.CT_REF[float(fr)] * k, ct_std=1e-6, **({"converged": c, "drift": drift} if grid == "fine" else {}))
+                  for fr, c in converged.items()}
+        (root / f"run_{grid}.json").write_text(json.dumps(dict(grid=grid, recipe=dtmb5415.RECIPE, speeds=speeds)))
+
+
+CONV = {"0.10": True, "0.20": False, "0.28": False, "0.41": False}
+
+
+def test_an_unconverged_finest_grid_leaves_the_row_not_judged_and_the_note_names_the_grid_sequence(data):      # round 7, M-5
+    write_dtmb3(data, CONV)
+    rows = {r["id"]: r for r in cr.vv20_rows(data)}
+    ok = rows["dtmb5415:Fr0.10"]
+    assert ok["validated"] is True and "oscillating" in ok["note"] and "Fs = 3, p = 2 assumed" in ok["note"] and "not converged" not in ok["note"]
+    for fr in ("0.20", "0.28", "0.41"):
+        r = rows[f"dtmb5415:Fr{fr}"]
+        assert r["validated"] is None and r["not_judged"].startswith("not judged") and "finest grid not converged (iterative drift 0.0075 > 0.005)" in r["note"]
+        assert "oscillating" in r["note"]
+
+
+def test_validation_three_counts_only_rows_whose_finest_grid_converged(run, data):
+    write_dtmb3(data, {k: True for k in CONV})
+    assert factors(run)["validation"]["evidence_level"] == 3                              # four converged rows, all inside U_val
+    for p in (data / "dtmb5415").iterdir():
+        p.unlink()
+    (data / "dtmb5415").rmdir()
+    write_dtmb3(data, CONV)
+    v = factors(run)["validation"]
+    assert v["evidence_level"] == 2 and "3 not judged (finest grid not converged)" in v["evidence"][0]["what"]
+    assert any("not judged because the finest grid has not converged" in m for m in v["missing"])
+
+
+def test_the_table_header_says_both_informative_thresholds_and_verification_names_the_fallback(run, data):
+    write_dtmb3(data, {k: True for k in CONV})
+    c = cr.build(run, REAL, data)
+    h = cr._render(c)
+    assert "counts toward Validation 3 if U_val / D &lt; 0.5 (credibility)" in h and "the DTMB receipts require &le; 0.10" in h
+    assert any("rest on the Fs = 3, p = 2 fallback" in m for m in {f["factor"]: f for f in c["factors"]}["verification"]["missing"])
+    c2 = cr.build(run, REAL, data)
+    c2["vv20"][0]["not_judged"] = "not judged: the finest grid has not converged"
+    c2["vv20"][0]["validated"] = None
+    assert "not judged: the finest grid has not converged" in cr._render(c2)
+
+
+def sens_run(tmp_path, ranked):
+    """A run whose every ensemble has a permutation test at the noise floor and `ranked` of them a named parameter; no refit."""
+    d = tmp_path / "s"
+    d.mkdir(parents=True)
+    pm_run.make_run(d)
+    (d / "refit" / "refit.json").write_text("{}")
+    def put(s):
+        es = [*s["summary"]["vehicles"].values(), *s["summary"]["links"].values()]
+        for i, e in enumerate(es):
+            e["sensitivity"].update(param="x" if i < ranked else None, noise_floor=0.118)
+    edit(d / "stage1b" / "summary.json", put)
+    return d
+
+
+def test_one_sensitivity_among_many_tests_is_not_clearly_above_chance(tmp_path, data):      # round 7, M-23
+    r = factors(sens_run(tmp_path, 1))["robustness"]
+    assert r["evidence_level"] == 1 and any("none stands clearly above chance" in e["what"] for e in r["evidence"])
+    assert "no first-order sensitivity" not in " ".join(r["missing"]) and any("do not stand clearly above chance" in m for m in r["missing"])
+    assert factors(sens_run(tmp_path / "y", 3))["robustness"]["evidence_level"] == 2           # three of seven: a 0.3 % chance by luck
+
+
+def test_a_refit_alone_earns_robustness_two_as_the_printed_rule_says(tmp_path, data):
+    d = sens_run(tmp_path, 0)
+    assert "or a refit reran" in cr.RULES["robustness"] and "clearly above chance" in cr.RULES["robustness"]
+    (d / "refit" / "refit.json").write_text(json.dumps({"glider_eq": {"used": True}}))
+    assert factors(d)["robustness"]["evidence_level"] == 2
+
+
+def test_the_usv_speed_prior_width_is_not_an_uncertainty_of_the_model(run, data):      # round 7, M-15
+    assert "not an uncertainty of this model" in yaml.safe_load((REAL / "config" / "perturbations.yaml").read_text())["usv_vpp_bias"]["citation"]
+    u = factors(run)["uncertainty"]
+    assert any("sampled over 1.4 % only" in e["what"] and "usv_vpp_bias_brief" in e["what"] for e in u["evidence"])

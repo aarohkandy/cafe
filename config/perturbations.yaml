@@ -75,7 +75,7 @@ usv_vpp_bias:
   hi: -0.2280
   value: 0.0
   unit: dimensionless (fractional speed change)
-  citation: "CALIBRATED to Chiodi et al. 2021 (DECISIONS, review round 1 M-2). The VPP already solves the current inside the polar, so the brief's still-water factor (BRIEF 2.5: -30 to -35 %) is not applied on top. Centre -0.2422 is the bias at which usv.mean_sog reproduces Chiodi's mean SOG / wind = 0.96 / 5.4 = 0.1778 (the unbiased model gives 0.2345, i.e. 1.319 x observed). Half-width 0.0143 is Sun et al.'s stated 30-35 % overprediction (model / observed 1.30 to 1.35) as a speed factor: 1/1.35 - 1 = -0.2593 to 1/1.30 - 1 = -0.2308, width 0.0285. Chiodi quotes no spread on the mean."
+  citation: "CALIBRATED to Chiodi et al. 2021 (DECISIONS, review round 1 M-2). The VPP already solves the current inside the polar, so the brief's still-water factor (BRIEF 2.5: -30 to -35 %) is not applied on top. Centre -0.2422 is the bias at which usv.mean_sog reproduces Chiodi's mean SOG / wind = 0.96 / 5.4 = 0.1778 (the unbiased model gives 0.2345, i.e. 1.319 x observed). Half-width 0.0143 is Sun et al.'s stated 30-35 % overprediction (model / observed 1.30 to 1.35) as a speed factor: 1/1.35 - 1 = -0.2593 to 1/1.30 - 1 = -0.2308, width 0.0285. Chiodi quotes no spread on the mean. The width is the published spread of VPP over-prediction (Sun et al.), not an uncertainty of this model: the model's own parameters (mass, wing area, wetted area, residuary coefficient, form factor, heel penalty) are assumed and the anchor has no spread, so the ensemble holds the speed nearly fixed (sd 0.8 %); the stage-1b case usv_vpp_bias_brief is the sensitivity."
   kind: prior
 usv_vpp_bias_brief:
   dist: uniform

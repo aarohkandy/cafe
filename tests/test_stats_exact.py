@@ -496,7 +496,7 @@ def test_subset_simulation_pinned_two_level_run():
     assert r["converged"] is True
     assert r["n_evals"] == 560
     assert r["p"] == pytest.approx(0.0041, rel=1e-12)
-    assert r["cov"] == pytest.approx(0.3544901912004715, rel=1e-9)
+    assert r["cov"] == pytest.approx(0.43665008377114367, rel=1e-9)
     assert r["levels"] == pytest.approx([1.387835253675902, 2.2828661922404923, 2.5], rel=1e-12)
     assert list(r) == ["p", "cov", "levels", "n_evals", "converged"] and isinstance(r["levels"][0], float) and isinstance(r["cov"], float)
     assert abs(r["p"] - sp.norm.sf(2.5)) < 3 * r["p"] * r["cov"] + 1e-3
@@ -507,7 +507,7 @@ def test_subset_simulation_pinned_run_with_other_p0_and_width():
     assert r["converged"] is True
     assert r["n_evals"] == 520
     assert r["p"] == pytest.approx(0.0102, rel=1e-9)
-    assert r["cov"] == pytest.approx(0.3037728921604659, rel=1e-9)
+    assert r["cov"] == pytest.approx(0.3602470957711304, rel=1e-9)
     assert r["levels"] == pytest.approx([0.8442612088388082, 1.7019619732445643, 2.5], rel=1e-12)
     two = rare.subset_simulation(lambda u: u[:, 0], 1, 1.5, n=200, seed=3)
     assert two["levels"][-1] == 1.5 and len(two["levels"]) == 2 and two["converged"] is True
@@ -542,3 +542,23 @@ def test_noise_floor_at_32_members_is_about_a_third_not_a_half():
         y = np.r_[np.ones(ones), np.zeros(32 - ones)]
         floor = SE.noise_floor(x, y, perms=200)
         assert 0.2 < floor < 0.42 and SE.noise_floor(x, y, perms=200, harmonics=6) > 0.5
+
+
+def test_subset_simulation_takes_the_chain_correlation_on_the_new_threshold_at_every_level(monkeypatch):      # round 7, M-26
+    calls = []
+    real = rare._gamma
+
+    def spy(ind):
+        calls.append((float(ind.mean()), real(ind)))
+        return calls[-1][1]
+    monkeypatch.setattr(rare, "_gamma", spy)
+    rare.subset_simulation(lambda u: u[:, 0], 1, 3.5, n=1000, seed=1)
+    assert len(calls) >= 3
+    assert calls[0][0] < 1.0 and calls[0][1] != 0.0                      # the first intermediate level: not the all-ones indicator of the old threshold
+    assert all(m < 1.0 for m, _ in calls)
+
+
+def test_subset_simulation_cov_is_not_far_below_the_empirical_one():      # round 7, M-26: 2.5 x too low before the fix
+    est = [rare.subset_simulation(lambda u: u[:, 0], 1, 3.5, n=500, seed=s) for s in range(40)]
+    ps = np.array([e["p"] for e in est])
+    assert np.mean([e["cov"] for e in est]) * 1.8 > ps.std() / ps.mean()

@@ -390,8 +390,8 @@ def test_what_would_fix_it_when_nothing_flips_the_verdict(run):
     rep, h = load(run), (run / "report" / "index.html").read_text()
     assert rep["vehicles"]["uas"]["fix"]["best"] is None and report.check_traceability(rep) == []
     t = plain(h)
-    assert "none of the 2 candidates evaluated (of 3 candidates) reaches GO or MARGINAL" in t and "the emulator answered those in its range." in t
-    assert "none of the 1 candidates evaluated (of 2 candidates) reaches GO" in t
+    assert "2 candidates evaluated, of 3 candidates that could be: none reaches GO or MARGINAL" in t and "the emulator answered those in its range." in t
+    assert "1 candidates evaluated, of 2 candidates that could be: none reaches GO" in t
     assert "no emulator is trained yet, so only the nearest few were run in Stage 1." in t
     assert "no single change" not in t
 
@@ -1903,3 +1903,96 @@ def test_the_machine_block_shows_the_stage_1b_sensitivity_case_seconds_it_charge
     assert sv["value"] == 30.014 and sv["stage"] == "stage1b"
     assert "Stage 1b sensitivity case (the USV again under the brief's VPP bias): planned none, it is charged to no share; measured 30.01 s" in plain(h)
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
+
+
+class _Gated(AnalyticEnv):
+    """Data only where `keep(lon)`; like GriddedEnv, a query of a point outside it raises OutsideData (round 7, M-11)."""
+    keep = staticmethod(lambda lon: lon > 0)
+
+    def inside(self, lon, lat, t=None):
+        return self.keep(np.asarray(lon, float))
+
+    def _chk(self, lon):
+        from cafe.pm.env.environment import OutsideData
+        if not self.keep(np.asarray(lon, float)).all():
+            raise OutsideData("outside the ingested data")
+
+    def wind(self, lon, lat, z, t):
+        self._chk(lon)
+        return super().wind(lon, lat, z, t)
+
+    def waves(self, lon, lat, t):
+        self._chk(lon)
+        return super().waves(lon, lat, t)
+
+    def current(self, lon, lat, z, t):
+        self._chk(lon)
+        return super().current(lon, lat, z, t)
+
+
+def test_the_environment_section_drops_track_points_outside_the_data_and_never_fails_the_report(run):      # round 7, M-11
+    class Nowhere(_Gated):
+        keep = staticmethod(lambda lon: lon < 0)                                              # the median tracks are on 0..360: 190 and 195
+    rep, h = reach_report(run, Nowhere(current=(0.1, 0.0)))
+    vs = rep["environment"]["vehicles"]
+    assert vs and all(v["available"] is False and "track points are outside the downloaded data" in v["reason"] and "not shown" in v["reason"]
+                      for v in vs.values())
+    assert "track points are outside the downloaded data" in h and report.check_traceability(rep) == []
+
+
+def test_the_environment_section_keeps_the_track_points_inside_the_data(run):
+    class Half(_Gated):
+        keep = staticmethod(lambda lon: lon < 192.5)                                          # glider_eq (190 E) is inside, usv and uas (195 E) are outside
+    rep, h = reach_report(run, Half(current=(0.1, 0.0)))
+    vs = rep["environment"]["vehicles"]
+    assert vs["glider_eq"]["available"] is True and vs["glider_eq"]["dropped"] is None and len(vs["glider_eq"]["wind10"]["values"]) > 0
+    assert any(v["available"] is False for k, v in vs.items() if k != "glider_eq")
+    assert report.check_traceability(rep) == []
+
+
+def test_the_environment_section_reports_a_failing_environment_instead_of_failing_the_report(run):
+    class Broken(AnalyticEnv):
+        def waves(self, lon, lat, t):
+            raise RuntimeError("store unreadable")
+    rep, _ = reach_report(run, Broken(current=(0.1, 0.0)))
+    assert all(v["available"] is False and "RuntimeError: store unreadable" in v["reason"] for v in rep["environment"]["vehicles"].values())
+
+
+def test_every_verdict_and_link_card_says_what_its_interval_holds(full):      # round 7, M-21
+    run, _, _, _, rep = full
+    t = plain((run / "report" / "index.html").read_text())
+    n_cards = len(rep["vehicles"]) + len(rep["links"])
+    assert t.count("is the sampling error of") == n_cards and n_cards >= 7
+    assert "at fixed inputs: the fitted priors enter as their point values and the other assumed inputs are not varied beyond their stated priors" in t
+
+
+def test_the_usv_card_says_the_speed_model_is_sampled_over_1_4_percent_only_when_the_brief_case_is_stored(run):      # round 7, M-15
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert "sampled over 1.4 % only" not in t
+    cases = dict(usv=[dict(case="usv_vpp_bias uniform [-0.35, -0.3] (usv_vpp_bias_brief)", k_fail=30, n=32, verdict="NO-GO", note="brief")],
+                 uas=[dict(case="usv_vpp_bias uniform [-0.35, -0.3] (usv_vpp_bias_brief)", k_fail=1, n=32, verdict="GO", note="not a usv")])
+    (run / "stage1b" / report.SENSITIVITY).write_text(json.dumps(cases))
+    report.write(run, m, plan)
+    h = (run / "report" / "index.html").read_text()
+    t = plain(h)
+    assert t.count("sampled over 1.4 % only") == 1 and "not an uncertainty of this model); the brief's bias case gives 30 members of 32 members (NO-GO)" in t
+    assert report.check_rendered(load(run), h) == [] and load(run)["traceability_problems"] == []
+
+
+def test_the_rendered_report_repeats_no_noun_and_has_no_unit_doubled_by_its_sentence(full, run):      # round 7, M-41
+    t = plain((run / "report" / "index.html").read_text())
+    assert re.findall(r"\b([A-Za-z]+) \1\b", t) == [] and "inputs assumed platform" not in t and "inputs inputs" not in t
+
+
+def test_a_track_half_inside_the_data_keeps_its_inside_points_and_says_how_many_were_dropped(run):      # round 7, M-11
+    class Parity(AnalyticEnv):
+        def inside(self, lon, lat, t=None):
+            return np.arange(np.asarray(lon).size) % 2 == 0
+    rep, h = reach_report(run, Parity(current=(0.1, 0.0)))
+    d = rep["environment"]["vehicles"]["glider_eq"]
+    assert d["available"] is True and len(d["wind10"]["values"]) == len(d["t"]["values"]) > 0
+    assert re.fullmatch(r"\d+ of \d+ track points are outside the downloaded data \(more than half of the members left it\): not shown", d["dropped"])
+    assert d["dropped"].split(" of ")[0] != "0" and "track points are outside the downloaded data" in plain(h)
+    assert report.check_traceability(rep) == []

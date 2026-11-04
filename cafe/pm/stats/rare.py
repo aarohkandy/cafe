@@ -58,7 +58,6 @@ def subset_simulation(fn: Callable[[np.ndarray], np.ndarray], d: int, target: fl
     n_evals, d2, p = n, 0.0, 1.0
     levels: list[float] = []
     for lvl in range(max_levels):
-        gam = _gamma(g.reshape(length, nc) >= levels[-1]) if lvl else 0.0
         order = np.argsort(-g)
         b = 0.5 * (g[order[nc - 1]] + g[order[nc]])
         if b >= target:
@@ -69,6 +68,7 @@ def subset_simulation(fn: Callable[[np.ndarray], np.ndarray], d: int, target: fl
             return dict(p=p * frac, cov=float(np.sqrt(d2)), levels=levels, n_evals=n_evals, converged=True)
         if lvl and b <= levels[-1]:
             break
+        gam = _gamma(g.reshape(length, nc) >= b) if lvl else 0.0      # the NEW threshold's indicator (Au & Beck eq. 29); round 7, M-26
         d2 += (1 - p0) / (p0 * n) * (1 + gam)
         p *= nc / n
         levels.append(float(b))
