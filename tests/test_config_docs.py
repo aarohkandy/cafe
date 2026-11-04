@@ -152,10 +152,12 @@ def test_the_audit_spreads_the_suite_over_the_cpus_and_runs_the_real_time_tests_
     one, two = audit.pytest_passes(4)
     assert one[one.index("-n") + 1] == "4" and one[one.index("--dist") + 1] == "loadfile"
     assert "--cov-append" not in one and "--cov-report=json:coverage.json" not in one
-    assert {a for a in one if a.startswith("--deselect=")} == {f"--deselect={t}" for t in audit.SERIAL_TESTS} and len(audit.SERIAL_TESTS) == 5
+    assert {a for a in one if a.startswith("--deselect=")} == {f"--deselect={t}" for t in audit.SERIAL_TESTS} and len(audit.SERIAL_TESTS) == 7
     assert "--cov-append" in two and "--cov-report=json:coverage.json" in two and set(audit.SERIAL_TESTS) <= set(two) and "-n" not in two
     py = tomllib.loads(text("pyproject.toml"))["tool"]["mutmut"]["pytest_add_cli_args"]
     assert {a for a in py if a.startswith("tests/")} == set(audit.SERIAL_TESTS)
+    slow = {"tests/test_emulator.py::test_query_under_10_ms_and_format", "tests/test_emulator.py::test_receipts_pass_and_fail_when_calibration_is_wrong"}
+    assert slow <= set(audit.SERIAL_TESTS)                                           # round 8 M-5: the two tests that measure the query time run alone
     assert "pip install --no-cache-dir pytest-xdist==3.6.1 execnet==2.1.1" in text("Dockerfile.pm") and "--cov=cafe/pm" in one
     wf = text(".github", "workflows", "premission.yml")
     assert "no xdist" not in wf and "make audit" in wf and "$(PY) -m cafe.pm.audit" in text("Makefile")
@@ -201,7 +203,8 @@ def test_the_ci_containers_run_as_the_runner_and_the_audit_log_is_uploaded():
     runs = [ln for ln in wf.splitlines() if "docker run" in ln]
     assert len(runs) == 3 and all("-u $(id -u):$(id -g) -e HOME=/tmp" in ln for ln in runs)
     up = wf.split("- name: audit log")[1]
-    assert "uses: actions/upload-artifact@v4" in up and "path: audit.log" in up and "if: always()" in up
+    assert "uses: actions/upload-artifact@v4" in up and "if: always()" in up
+    assert "path: |" in up and "            audit.log\n" in up and "            coverage.json\n" in up  # round 8 M-40: the missed lines are in the upload
     assert "audit.log" in text(".gitignore")
 
 

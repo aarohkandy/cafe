@@ -135,6 +135,19 @@ def sha256(path: str | pathlib.Path, chunk: int = 8 << 20) -> str:
     return h.hexdigest()
 
 
+def tree_sha256(path: str | pathlib.Path) -> str:
+    """sha256 over the relative path and bytes of every file under the directory `path` (a zarr store), in path order: what a store's ledger input
+    and the audit compare, so a changed value, a deleted chunk or an added file is a different hash."""
+    root = pathlib.Path(path)
+    h = hashlib.sha256()
+    for f in sorted(p for p in root.rglob("*") if p.is_file()):
+        h.update(f.relative_to(root).as_posix().encode() + b"\0")
+        with open(f, "rb") as fh:
+            for b in iter(lambda: fh.read(8 << 20), b""):
+                h.update(b)
+    return h.hexdigest()
+
+
 def download(url: str, path: str | pathlib.Path, sha: str | None = None) -> pathlib.Path:
     """Resumable download to `path` (a `.part` file grows until complete), verified by size and optional SHA-256."""
     path = pathlib.Path(path)

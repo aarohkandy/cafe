@@ -20,6 +20,8 @@ from cafe.pm.env.environment import OutsideData
 from cafe.pm.env.protocol import AnalyticEnv
 from tests.fixtures import pm_run
 
+pytestmark = pytest.mark.usefixtures("emulator_speed_not_tested")  # the emulator's speed is measured alone (audit.SERIAL_TESTS), not by these logic tests
+
 ROOT = config.ROOT
 CI = config.load_mission(ROOT / "missions" / "ci_fixture.yaml")
 DEMO = config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml")
@@ -76,7 +78,9 @@ def storm_table(n=140, seed=0, noise=0.02):
 
 @pytest.fixture(scope="module")
 def storm_em(tmp_path_factory):
-    em, info = whatif.fit_class(storm_table(), "glider", tmp_path_factory.mktemp("em") / "train.parquet")
+    with pytest.MonkeyPatch.context() as mp:                                # the speed of this host is not what these tests are about (round 8 M-5)
+        mp.setitem(whatif.LIMITS, "query_ms", 1e9)
+        em, info = whatif.fit_class(storm_table(), "glider", tmp_path_factory.mktemp("em") / "train.parquet")
     assert em is not None, info
     return em, info
 
@@ -1137,3 +1141,21 @@ def test_add_rows_holds_the_table_lock_once(tmp_path, monkeypatch):
     monkeypatch.setattr(whatif, "locked", locked)
     whatif.add_rows(tmp_path / "t.parquet", [dict(key="a", x=1.0)])
     assert entered == [tmp_path / "t.parquet"]
+
+
+def test_r8_m5_the_emulator_logic_tests_do_not_depend_on_the_hosts_speed(tmp_path, monkeypatch):
+    """Round 8 M-5: on the 4-CPU hosted runner a query took 11 to 23 ms and ten logic tests failed on BRIEF 2.7's 10 ms. With every query taking 50 ms, a test
+    that takes `emulator_speed_not_tested` (this module does) still gets an emulator that answers; the speed itself is measured alone (audit.SERIAL_TESTS)."""
+    import types
+    now = [0.0]
+
+    def slow():
+        now[0] += 0.05
+        return now[0]
+    monkeypatch.setattr(whatif, "time", types.SimpleNamespace(perf_counter=slow))
+    em, info = whatif.fit_class(storm_table(), "glider", tmp_path / "t.parquet")
+    assert whatif.LIMITS["query_ms"] == 1e9 and info["query_ms"] == pytest.approx(50.0)
+    assert em is not None and info["used"] and info["unused_reason"] is None and info["acceptance"]["query_ok"]
+    monkeypatch.setitem(whatif.LIMITS, "query_ms", 10.0)                                      # the limit BRIEF 2.7 states: the same 50 ms query now misses it
+    _, slow_info = whatif.fit_class(storm_table(), "glider", tmp_path / "t2.parquet")
+    assert not slow_info["used"] and "query time" in slow_info["unused_reason"]

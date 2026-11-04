@@ -37,7 +37,7 @@ from .audit import STAGES
 from .config import ConfigError, digest, env_sigmas, load_mission, utc
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.hycom import FetchError
-from .env.remote import sha256
+from .env.remote import sha256, tree_sha256
 from .ledger import Ledger
 
 if TYPE_CHECKING:
@@ -411,23 +411,43 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     want = int((t1 - t0).total_seconds() // 3600) + 1
     L.input(d["base"], sha=None, kind="remote", note="orca UWIN-CM run (byte-range reads; per-hour npz cache)")
     L.input(man, kind="orca cache manifest")
-    L.input(store, sha=hycom.open_store(store).attrs.get("manifest_sha256"), kind="ocean store (sha256 of its parts manifest)")
+    orca_trees = {n: tree_sha256(man.parent / n) for n in ORCA_STORES if (man.parent / n).is_dir()}  # the manifest lists the parts, not these
+    for n, h in orca_trees.items():
+        L.input(man.parent / n, tree=h, kind="orca assembled store (tree_sha256 over every file of the store)")
+    L.input(store, sha=hycom.open_store(store).attrs.get("manifest_sha256"), tree=tree_sha256(store),
+            kind="ocean store (sha256 of its parts manifest; tree_sha256 over every file of the store)")
     L.input(gebco, kind="GEBCO_2026 cut")
     L.check("orca_hours_cover_window", d["hours"] >= want, value=d["hours"], limit=want)
-    key = digest(dict(orca=sha256(man), ocean=hycom.open_store(store).attrs.get("manifest_sha256"), gebco=sha256(gebco), code=ctx.code_digest))
+    holes = ocean_store_nan_mask(hycom.open_store(store))
+    L.check("ocean_store_nan_mask", holes == 0, value=holes, limit=0,
+            note="cells whose NaN pattern at the surface level differs between time steps or between water_u, water_v, water_temp and salinity "
+                 "(a land/sea mask does not move; a deleted chunk reads as NaN)")
+    key = digest(dict(orca=sha256(man), ocean=hycom.open_store(store).attrs.get("manifest_sha256"), gebco=sha256(gebco), orca_stores=orca_trees,
+                      code=ctx.code_digest))
     if not (_derived_current(ctx.cache, key) and _derived_span_problem(ctx.cache, ctx.window_s()) is None):      # about a minute; every code edit rebuilds it
         shutil.rmtree(ctx.cache / "derived.zarr", ignore_errors=True)
         ctx._env = None
         surface.build(ctx.env, ctx.cache, key, log=ctx.log)
         ctx._env = None                                                  # rebuild with the surface layer just written
     rec = json.loads((ctx.cache / surface.DIGEST).read_text())
-    L.input(ctx.cache / "derived.zarr", sha=rec["store_sha256"], kind="derived surface layer (sha256 of every file of the store)")
+    L.input(ctx.cache / "derived.zarr", sha=rec["store_sha256"], tree=rec["store_sha256"], kind="derived surface layer (sha256 of every file of the store)")
     L.output(_dump(rec, ctx.path("ingest", surface.DIGEST)))
     oc = ocean(ctx)
     _ingest_checks(ctx, L, oc, sbox)
     L.output(man)
     _tao(ctx, L, t0.timestamp(), t1.timestamp())
     ctx.replan()
+
+
+ORCA_STORES = ("wrf.zarr", "wrf3d.zarr", "umwm.zarr", "umwmspec.zarr")      # what `orca.assemble` writes beside the manifest
+
+
+def ocean_store_nan_mask(ds: Any) -> int:
+    """Surface cells (lat, lon) of the ocean store where NaN is not the same at every time step and in water_u, water_v, water_temp and salinity.
+    A land/sea mask does not move, so any such cell is a damaged store (a deleted chunk reads as NaN), 0 when none. Damage that
+    hits all four variables and every time step alike looks like land and is not seen here; damage after the ingest is the tree hash's."""
+    nan = np.stack([np.isnan(ds[v].isel(depth=0).values) for v in ("water_u", "water_v", "water_temp", "salinity")])       # (variable, time, lat, lon)
+    return int((nan.any(axis=(0, 1)) & ~nan.all(axis=(0, 1))).sum())
 
 
 OCEAN_SNAP_DEG = 0.1             # the ocean store is cut to its 0.08-0.1 degree grid, so its edge may sit this far inside the requested box

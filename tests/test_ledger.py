@@ -274,3 +274,65 @@ def test_machine_records_the_stage_1_workers_beside_the_host_cpu_count(monkeypat
     assert m["workers"] == 3 and m["cpus"] >= 1
     with par.limit(2):
         assert Ledger(tmp_path, "s", "h").d["machine"]["workers"] == 2                                  # what the run's pool has, not what the env var says
+
+
+# ---- review round 8: M-4 (the contents of a directory input), M-23 (an unreadable ledger), M-35 (Bellhop and more libraries in the versions)
+
+def test_r8_m4_a_changed_or_damaged_directory_input_breaks_done(tmp_path):
+    """The ocean store is a directory: `done` re-hashed only file inputs, so a value edited in it, a chunk deleted from it or a file added was 'up to date'."""
+    store = tmp_path / "ocean.zarr"
+    (store / "water_u" / "c").mkdir(parents=True)
+    (store / "water_u" / "c" / "0").write_bytes(b"\x01\x02\x03")
+    (store / "zarr.json").write_text('{"attributes": {"manifest_sha256": "abc"}}')
+    with Ledger(tmp_path, "ingest", "h1") as L:
+        L.input(store, sha="abc", tree=ledger.tree_sha256(store), kind="ocean store")
+    d = done(tmp_path, "ingest", "h1")
+    assert d is not None and d["inputs"][0]["tree_sha256"] == ledger.tree_sha256(store) and d["inputs"][0]["sha256"] == "abc"
+    chunk = store / "water_u" / "c" / "0"
+    for change, undo in ((lambda: chunk.write_bytes(b"\x01\x02\x04"), lambda: chunk.write_bytes(b"\x01\x02\x03")),
+                         (lambda: chunk.unlink(), lambda: chunk.write_bytes(b"\x01\x02\x03")),
+                         (lambda: (store / "extra").write_text("x"), lambda: (store / "extra").unlink())):
+        change()
+        assert done(tmp_path, "ingest", "h1") is None
+        undo()
+        assert done(tmp_path, "ingest", "h1") is not None
+
+
+def test_r8_m4_a_directory_input_recorded_without_a_tree_hash_is_not_rehashed(tmp_path):
+    """Ledgers written before round 8 hold the manifest hash only: their directories stay as they were."""
+    store = tmp_path / "ocean.zarr"
+    store.mkdir()
+    with Ledger(tmp_path, "ingest", "h1") as L:
+        L.input(store, sha="abc")
+    assert "tree_sha256" not in json.loads((tmp_path / "checkpoints" / "ingest" / "ledger.json").read_text())["inputs"][0]
+    (store / "new").write_text("x")
+    assert done(tmp_path, "ingest", "h1") is not None
+
+
+def test_r8_m23_a_truncated_or_garbage_ledger_is_a_stage_not_done_and_says_so(tmp_path, capsys):
+    run_stage(tmp_path)
+    p = tmp_path / "checkpoints" / "stage1" / "ledger.json"
+    good = p.read_text()
+    assert len(good) > 200 and done(tmp_path, "stage1", "h1") is not None
+    for bad in (good[:200], "", "\x00\x00garbage", "[1, 2]", "null"):
+        p.write_text(bad)
+        assert done(tmp_path, "stage1", "h1") is None
+        err = capsys.readouterr().err
+        assert f"ledger {p} is unreadable" in err and "the stage runs again" in err
+    p.write_text(good)
+    assert done(tmp_path, "stage1", "h1") is not None and capsys.readouterr().err == ""
+
+
+def test_r8_m35_the_versions_carry_bellhop_and_the_libraries_the_verdicts_depend_on(monkeypatch, tmp_path):
+    from cafe.pm.physics import comms
+    v = ledger.versions()
+    for lib in ("pandas", "pyarrow", "arlpy", "yaml", "jsonschema", "netCDF4", "bellhop"):
+        assert lib in v, lib
+    assert v["pandas"] and v["yaml"]
+    monkeypatch.setattr(comms, "_bellhop_dir", lambda: None)
+    assert ledger.versions()["bellhop"] == "absent"
+    (tmp_path / "bellhop.exe").write_bytes(b"one")
+    monkeypatch.setattr(comms, "_bellhop_dir", lambda: str(tmp_path))
+    assert ledger.versions()["bellhop"] == ledger.sha256(tmp_path / "bellhop.exe") != "absent"
+    (tmp_path / "bellhop.exe").write_bytes(b"two")
+    assert ledger.versions()["bellhop"] == ledger.sha256(tmp_path / "bellhop.exe")

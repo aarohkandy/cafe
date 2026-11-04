@@ -506,3 +506,39 @@ def test_the_finding_case_20_km_is_in_the_transition_zone_and_gets_the_flat_loss
     assert c.two_ray_curved_db(20e3, 15.0, 3.0, 0.0, F915) == pytest.approx(122.4, abs=0.1) and _flat(20e3, 15.0, 3.0) == pytest.approx(139.0, abs=0.1)
     assert c.rf_margin(20e3, 15.0, 3.0, 0.0) == pytest.approx(budget - 139.0, abs=0.1) and c.rf_margin(20e3, 15.0, 3.0, 0.0) == pytest.approx(13.0, abs=0.2)
     assert c.rf_margin(24e3, 15.0, 3.0, 0.0) == c.NO_LINK_DB                                              # beyond the horizon: none
+
+
+# ---- review round 8, M-40: the profile branches of `_run_bellhop` and its return, covered without a bellhop.exe (the hosted image has none)
+
+def _run_with_a_fake_field(monkeypatch, tmp_path, z, cc, field):
+    """`_run_bellhop` with arlpy's solver replaced by one that returns `field`; -> (the TL, the sound-speed profile it was handed)."""
+    import os
+
+    import arlpy.uwapm as pm
+    seen = {}
+    monkeypatch.setenv("PATH", os.environ["PATH"])                       # restored at teardown: `_run_bellhop` puts the Bellhop directory on PATH
+    monkeypatch.setattr(c, "_bellhop_dir", lambda: str(tmp_path))
+
+    def solve(env, mode=None, model=None):
+        seen["profile"] = np.asarray(env["soundspeed"])
+        return field
+    monkeypatch.setattr(pm, "compute_transmission_loss", solve)
+    return c._run_bellhop(np.array([500.0, 1000.0]), 18500.0, z, cc, 1.0, 5.0, 4000.0), seen["profile"]
+
+
+def test_r8_m40_a_profile_that_starts_below_the_surface_gets_the_surface_node(monkeypatch, tmp_path):
+    tl, prof = _run_with_a_fake_field(monkeypatch, tmp_path, np.array([-5.0, -3000.0, -4000.0]), np.array([1490.0, 1500.0, 1510.0]), np.array([[0.1, 0.01]]))
+    assert prof[:, 0].tolist() == [0.0, 5.0, 3000.0, 4000.0] and prof[0, 1] == 1490.0                  # the surface node repeats the first sound speed
+    assert np.allclose(tl, [20.0, 40.0])
+
+
+def test_r8_m40_a_profile_that_ends_above_the_bottom_is_deepened_to_it(monkeypatch, tmp_path):
+    tl, prof = _run_with_a_fake_field(monkeypatch, tmp_path, np.array([0.0, -100.0, -2000.0, -3000.0]), np.array([1500.0, 1495.0, 1490.0, 1485.0]),
+                                      np.array([[0.1, 1.0]]))
+    assert prof[:, 0].tolist() == [0.0, 100.0, 2000.0, 3000.0, 4000.0] and prof[-1, 1] == 1485.0       # the bottom node repeats the last sound speed
+    assert np.allclose(tl, [20.0, 0.0])
+
+
+def test_r8_m40_the_loss_is_minus_20_log10_of_the_first_field_row_and_floors_a_zero(monkeypatch, tmp_path):
+    tl, _ = _run_with_a_fake_field(monkeypatch, tmp_path, Z, C, np.array([[0.5, 0.0], [9.0, 9.0]]))
+    assert np.allclose(tl, [-20 * np.log10(0.5), 600.0])                                          # row 0 only; |p| floored at 1e-30

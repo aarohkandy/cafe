@@ -1540,7 +1540,7 @@ def test_the_flip_search_of_the_stage_falls_back_to_stage_1_and_finds_a_change(t
 def test_a_trained_emulator_is_scored_and_held_to_the_briefs_acceptance(tmp_path, table, fake_stage1, monkeypatch):
     from cafe.pm import whatif
     seed_table(table)
-    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))     # coverage on 28 test rows is too coarse to pin to +-5 %
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))     # coverage on 28 test rows is too coarse to pin to +-5 %
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     out = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())
@@ -1579,7 +1579,7 @@ def test_a_trained_emulator_that_misses_the_acceptance_is_noted_not_used_and_doe
 def test_a_missed_coverage_gate_alone_completes_the_run_with_a_note_that_gives_the_chance_of_missing_it(tmp_path, table, fake_stage1, monkeypatch):
     from cafe.pm import whatif
     seed_table(table)
-    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.5, coverage=0.0, query_ms=10.0))     # coverage must be exactly nominal: missed by any hold-out
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.5, coverage=0.0, query_ms=1e9))     # coverage must be exactly nominal: missed by any hold-out
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     assert not [c for c in d["checks"] if c["name"].startswith("emulator_coverage")]
@@ -1745,7 +1745,7 @@ def test_the_stage_learns_from_what_the_table_already_holds(tmp_path, table, fak
     """With a trained glider emulator the glider candidates are answered by it (EMULATED) and Stage 1 is not run for them."""
     from cafe.pm import whatif
     seed_table(table)
-    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     summ = json.loads((ctx.run_dir / "stage1b" / "summary.json").read_text())
     summ["summary"]["vehicles"]["glider_eq"]["verdict"] = dict(summ["summary"]["vehicles"]["glider_eq"]["verdict"], verdict="NO-GO", p_fail=0.9)
@@ -1761,7 +1761,7 @@ def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, tab
     after the 48 members stage 1b used."""
     from cafe.pm import whatif
     seed_table(table, n=100)                                         # 100 rows + this run's glider rows: just enough distinct points to train
-    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)                  # share 20 s: three variants
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
@@ -2652,7 +2652,7 @@ def test_the_refit_ledger_records_the_multiplier(tmp_path, monkeypatch):
 def test_a_trained_emulator_also_records_its_training_points_and_refuses_a_far_mission(tmp_path, table, fake_stage1, monkeypatch):
     from cafe.pm import whatif
     seed_table(table)
-    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     pts = check_of(d, "emulator_training_points_glider")
@@ -2664,7 +2664,7 @@ def test_a_trained_emulator_also_records_its_training_points_and_refuses_a_far_m
 def test_an_emulator_that_answers_a_mission_far_outside_its_training_rows_fails_the_stage(tmp_path, table, fake_stage1, monkeypatch):
     from cafe.pm import emulator, whatif
     seed_table(table)
-    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
     real = emulator.Emulator.query
     monkeypatch.setattr(emulator.Emulator, "query", lambda self, x, alpha=0.1: dict(real(self, x, alpha), status="ok"))
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
@@ -2942,7 +2942,7 @@ def test_no_variant_and_no_fresh_draw_reuses_a_member_stage_1b_used(tmp_path, ta
     ensemble is all M members); the fresh-draw blocks started at (variants + 2) x batch, inside a longer ensemble (4h: M 256, batch 64, one variant)."""
     from cafe.pm import whatif
     seed_table(table, n=100)
-    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=10.0))
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
     ctx = cheap_plan(synthetic_ctx(tmp_path, M, unused_refit=True), budget_s)
     ctx.plan["batch"] = batch
     run_stage(pipeline.s_emulator, ctx, "emulator")
@@ -3066,3 +3066,86 @@ def test_r7_m12_ingest_accepts_a_six_hourly_lab_store_and_a_store_that_ends_earl
     note = check_of(read_ledger(tmp_path / "b", "ingest"), "ocean_store_present")["note"]
     assert "lab_short.zarr" in note and "its times span 2023-03-01 18:00 to 2023-03-02 06:00 UTC" in note
     assert "the store ends 24.0 h before the window end" in note
+
+
+# ---- review round 8: M-4 (the contents of the ocean store), M-23 (a cut checkpoint ledger), M-35 (Bellhop in the code digest)
+
+def _ocean_store_of(data_copy):
+    return data_copy / "ocean" / "gofs_ci_fixture.zarr"
+
+
+def test_r8_m4_a_changed_ocean_store_is_not_up_to_date_and_the_audit_names_it(tmp_path, data_copy):
+    """Resume and the audit compared the store's own manifest attribute, written at assembly: 9 m/s written into `water_u` afterwards was 'up to date'."""
+    import zarr
+    store = _ocean_store_of(data_copy)
+    ctx = ctx_for(tmp_path / "r")
+    d = run_stage(pipeline.s_ingest, ctx, "ingest")
+    rec = next(i for i in d["inputs"] if i["ref"] == str(store))
+    assert rec["tree_sha256"] == ledger.tree_sha256(store) and rec["sha256"] != rec["tree_sha256"]
+    c = check_of(d, "ocean_store_nan_mask")
+    assert c["ok"] and c["value"] == 0 and c["limit"] == 0
+    derived = next(i for i in d["inputs"] if i["ref"].endswith("derived.zarr"))
+    assert derived["tree_sha256"] == surface.store_sha256(data_copy / "cache" / "ci_fixture" / "derived.zarr")
+    assert ledger.done(ctx.run_dir, "ingest", ctx.hash) is not None
+    assert [p for p in audit.ledger_problems(ctx.run_dir) if str(store) in p] == []
+    g = zarr.open_group(store, mode="r+")
+    g["water_u"][...] = 9.0
+    assert ledger.done(ctx.run_dir, "ingest", ctx.hash) is None
+    probs = [p for p in audit.ledger_problems(ctx.run_dir) if str(store) in p]
+    assert len(probs) == 1 and "changed since the stage ran (tree " in probs[0] and "run `fetch` again" in probs[0]
+
+
+def test_r8_m4c_the_assembled_orca_stores_are_tree_hashed_inputs_and_a_changed_one_is_not_up_to_date(tmp_path, data_copy):
+    """The orca manifest lists the hourly parts, not the assembled wrf.zarr / umwm.zarr: wind x 3 in a store left the ingest 'up to date', the audit clean."""
+    orca_dir = data_copy / "cache" / "ci_fixture" / "orca"
+    ctx = ctx_for(tmp_path / "r")
+    d = run_stage(pipeline.s_ingest, ctx, "ingest")
+    got = {pathlib.Path(i["ref"]).name: i for i in d["inputs"] if "tree_sha256" in i and i["ref"].startswith(str(orca_dir))}
+    assert set(got) == {n for n in pipeline.ORCA_STORES if (orca_dir / n).is_dir()} and "wrf.zarr" in got and "umwm.zarr" in got
+    assert all(i["tree_sha256"] == ledger.tree_sha256(orca_dir / n) for n, i in got.items())
+    assert ledger.done(ctx.run_dir, "ingest", ctx.hash) is not None and [p for p in audit.ledger_problems(ctx.run_dir) if "wrf.zarr" in p] == []
+    chunk = next(f for f in sorted((orca_dir / "wrf.zarr").rglob("*")) if f.is_file() and f.name != "zarr.json")
+    chunk.write_bytes(chunk.read_bytes() + b"\0")
+    assert ledger.done(ctx.run_dir, "ingest", ctx.hash) is None
+    assert any(str(orca_dir / "wrf.zarr") in p and "(tree " in p for p in audit.ledger_problems(ctx.run_dir))
+
+
+def test_r8_m4_a_chunk_of_the_ocean_store_deleted_before_the_ingest_fails_the_nan_mask_check_with_the_count(tmp_path, data_copy):
+    """A deleted chunk reads as NaN where the sea was: nothing named it (the store is hashed as it is found, so the hash cannot tell)."""
+    from cafe.pm.env import hycom
+    store = _ocean_store_of(data_copy)
+    assert pipeline.ocean_store_nan_mask(hycom.open_store(store)) == 0
+    chunk = sorted((store / "water_v").rglob("*"))
+    chunk = next(f for f in chunk if f.is_file() and f.name != "zarr.json" and f.name != ".zarray")
+    chunk.unlink()
+    holes = pipeline.ocean_store_nan_mask(hycom.open_store(store))
+    assert holes > 0
+    with pytest.raises(ledger.StageFailed, match="ocean_store_nan_mask"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    c = check_of(read_ledger(tmp_path / "r", "ingest"), "ocean_store_nan_mask")
+    assert not c["ok"] and c["value"] == holes and c["limit"] == 0
+
+
+def test_r8_m23_a_cut_ledger_reruns_its_stage_on_resume_and_the_run_audits_clean(tmp_path, monkeypatch):
+    calls = []
+    stub_stages(monkeypatch, calls)
+    go(tmp_path / "run")
+    p = tmp_path / "run" / "checkpoints" / "ingest" / "ledger.json"
+    p.write_text(p.read_text()[:200])
+    assert any("is not valid JSON" in x for x in audit.ledger_problems(tmp_path / "run"))
+    calls.clear()
+    go(tmp_path / "run")
+    assert calls == STAGES and audit.ledger_problems(tmp_path / "run") == []
+
+
+def test_r8_m35_installing_bellhop_changes_the_code_digest_and_nothing_else_does(monkeypatch, tmp_path):
+    from cafe.pm.physics import comms
+    monkeypatch.setattr(comms, "_bellhop_dir", lambda: None)
+    before = pipeline.code_digest()
+    assert pipeline.code_digest() == before
+    (tmp_path / "bellhop.exe").write_bytes(b"build one")
+    monkeypatch.setattr(comms, "_bellhop_dir", lambda: str(tmp_path))
+    installed = pipeline.code_digest()
+    assert installed != before
+    (tmp_path / "bellhop.exe").write_bytes(b"build two")
+    assert pipeline.code_digest() not in (before, installed)
