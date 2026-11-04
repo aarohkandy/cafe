@@ -411,7 +411,7 @@ def test_what_would_fix_it_says_not_searched_when_no_candidate_was_evaluated(run
     fix = rep["vehicles"]["usv"]["fix"]
     assert (fix["evaluated"]["value"], fix["candidates"]["value"], fix["invalid"]["value"]) == (0, 2, 1) and report.check_traceability(rep) == []
     assert "not searched: none of the 2 candidates could be evaluated" in t and "so this is not a finding that nothing helps" in t
-    assert "no single change among" not in t and "All 3 candidates: 0 candidates evaluated of 2 candidates that can be evaluated, 1 candidates that cannot" in t
+    assert "no single change among" not in t and "All 3 candidates: 0 candidates evaluated of 2 candidates that can be evaluated, 1 candidate that cannot" in t
 
 
 def test_what_would_fix_it_without_the_flip_file(run):
@@ -856,8 +856,8 @@ def test_the_page_labels_both_intervals_with_their_level(full):
     si = d["stop_interval"]
     kind = si["lo"]["uncertainty"]["kind"].replace(" bound", "")
     assert (f"Stopping rule: the 95% {kind} on P(fail) is {si['lo']['value']:.4g} to {si['hi']['value']:.4g}; "
-            "verdict rule: GO when P(fail) is at most 0.1 and the 90 % Wilson upper bound on P(fail) is at most 0.25; NO-GO when P(fail) is above 0.4; "
-            "MARGINAL between.") in t
+            "verdict rule: GO when P(fail) is at most 0.1 and the 90 % Wilson upper bound on P(fail) is at most 0.25 (looser than 1 - go); "
+            "NO-GO when P(fail) is above 0.4; MARGINAL between.") in t
 
 
 def test_check_rendered_matches_whole_numeric_tokens():
@@ -1752,7 +1752,7 @@ def test_the_verdict_rule_is_stated_with_its_ties_and_the_wilson_bound_the_go_ru
     assert d["thresholds"]["go_bound"]["value"] == pytest.approx(1 - intervals.LO_SUCCESS_GO) == 0.25
     assert d["thresholds"]["go_bound"]["source"].startswith("stats/intervals.py LO_SUCCESS_GO")
     t = plain(report._stat_html(d))
-    assert ("verdict rule: GO when P(fail) is at most 0.1 and the 90 % Wilson upper bound on P(fail) is at most 0.25; "
+    assert ("verdict rule: GO when P(fail) is at most 0.1 and the 90 % Wilson upper bound on P(fail) is at most 0.25 (looser than 1 - go); "
             "NO-GO when P(fail) is above 0.4; MARGINAL between.") in t
     assert "GO below" not in t and "NO-GO from" not in t
     assert intervals.verdict(10, 100)["verdict"] == "GO" and intervals.verdict(40, 100)["verdict"] == "MARGINAL"        # the ties the sentence now describes

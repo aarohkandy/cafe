@@ -159,9 +159,10 @@ def usv_speed_sampling() -> str:
     the half-width and range against the unbiased polar speed, the sd, and the half-width against the speed actually flown (1 + centre of it)."""
     e = sampling.load_perturbations()["usv_vpp_bias"]
     half, centre = (e["hi"] - e["lo"]) / 2, (e["hi"] + e["lo"]) / 2
-    sd = 2 * half / math.sqrt(12)
-    return (f"speed factor is sampled within +-{100 * half:.1f} % of the unbiased polar speed (range {200 * half:.1f} %, sd {100 * sd:.1f} %; "
-            f"+-{100 * half / (1 + centre):.1f} % of the speed flown)")
+    def pct(x: float) -> str:
+        return f"{round(100 * x, 9):.1f} %"                                                  # (2.8499999999999996 is 2.85)
+    return (f"speed factor is sampled within +-{pct(half)} of the unbiased polar speed (range {pct(2 * half)}, sd {pct(2 * half / math.sqrt(12))}; "
+            f"+-{pct(half / (1 + centre))} of the speed flown)")
 
 
 def data_root() -> pathlib.Path:

@@ -184,7 +184,8 @@ def test_ms_management_needs_a_git_sha_and_seeds(tmp_path, data):
 def test_ms_management_level_three_needs_the_process_files(run, tmp_path):
     assert factors(run)["ms_management"]["level"] == 3
     t = factors(run)["ms_management"]["level_text"]                # M-20: only self-checks stand behind level 3
-    assert "audited by the tool" in t and "ruff configured (not run by the audit)" in t and "independent reference" not in t      # round 7, M-23
+    assert "audited by the tool" in t and "independent reference" not in t      # round 7, M-23
+    assert "`make audit` runs ruff; this report only checks that it is configured" in t and "not run by the audit" not in t      # round 8, M-46
     r = fake_root(tmp_path, 1, builders=False)
     assert factors(run, r)["ms_management"]["level"] == 2 and factors(run, r)["ms_management"]["level_text"] == cr.LEVELS[2]
     assert factors(run, fake_root(tmp_path / "x", 1, pyproject=False))["ms_management"]["level"] == 2
@@ -274,8 +275,8 @@ def write_dtmb(data, frs=("0.10", "0.20", "0.28", "0.41"), bias=1.005, recipe=dt
     root = data / "dtmb5415"
     root.mkdir(parents=True)
     for grid, k, cells in (("coarse", 1.02, 1.0e6), ("fine", bias, 8.0e6)):
-        speeds = {fr: dict(cells=cells, ct=dtmb5415.CT_REF[float(fr)] * k, ct_std=1e-6) for fr in frs}
-        d = dict(grid=grid, speeds=speeds)
+        speeds = {fr: dict(cells=cells, ct=dtmb5415.CT_REF[float(fr)] * k, ct_std=1e-6, **({"converged": True} if grid == "fine" else {})) for fr in frs}
+        d = dict(grid=grid, speeds=speeds)      # (round 8, M-10: a finest grid with no `converged` record is not judged, and the real files always have it)
         (root / f"run_{grid}.json").write_text(json.dumps(d if recipe is None else dict(d, recipe=recipe)))
 
 
@@ -953,3 +954,13 @@ def test_r8_m22_a_truncated_run_json_is_a_config_error_naming_the_file(tmp_path,
     p.write_text("[]")
     with pytest.raises(cr.config.ConfigError, match="it holds list"):
         cr._json(p)
+
+
+def test_r8_m1_both_ingest_checks_present_and_passing_keep_level_two_and_absent_ones_are_accepted(run):
+    d = run / "checkpoints" / "ingest" / "ledger.json"
+    both = [dict(name="forcing_in_physical_range", ok=True, value=0, limit=0, note=""),
+            dict(name="coare_ustar_vs_umwm_ust", ok=True, value=0.90, limit=None, note="")]
+    edit(d, lambda x: x["checks"].extend(both))
+    assert factors(run)["data_pedigree"]["level"] == 2                                       # 0.90 is the brief's floor, inclusive
+    edit(d, lambda x: x["checks"].__setitem__(-1, dict(both[1], value=0.8999)))
+    assert factors(run)["data_pedigree"]["level"] == 1
