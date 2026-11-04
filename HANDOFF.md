@@ -2,6 +2,54 @@
 
 Written by the lead session when the user paused it to hand the work to another agent. Read `CLAUDE.md` first (how to run things, the bar for a change, the money rule), then this file.
 
+## 00. CURRENT STATE, 2026-11-04 ~22:10 UTC (read this first; older updates follow in section 0)
+
+The lead paused here at the user's request, mid round 8. Everything below is exact.
+
+### Where the loop is
+| Round | Findings (merged) | Major | State |
+|---|---|---|---|
+| 4 | 26 | 5 | fixed, committed |
+| 5 | 26 | 6 | fixed `3c9c64d` |
+| 6 | 26 | 6 | fixed `8dc0ffc` |
+| 7 | 47 (four reviewers) | 14 | fixed `0a0509c`; q8 run, `e4b6210` |
+| 8 | 56 (four reviewers + lead L-1..L-3) | 6 | **fixes in progress** |
+No round has been clean yet. The user keeps the strict rule (two consecutive rounds with zero findings, minor included; they chose "A" again on 2026-11-04 after being told it may not converge). Demo verdicts unchanged since q5: glider_eq MARGINAL 15/64, glider_2n GO 0, USV NO-GO 60, UAS NO-GO 55.
+
+### Round 8 fixes: branch by branch (merge into `premission-step4`, tip `feb0937`, pushed)
+Prompts: `review/round_8/batch_prompts/` (r8_common.md, r8_{E,A,K,C,V,S}.md, r8_A2.md). Merged findings: `review/round_8/merged.md` (M-44 "not confirmed", no fix).
+- **C** done, `r8-c` `b529eb0` (worktree `../cafe-r8c`): M-3, M-6, M-18, M-39, M-52. Note: an autouse `roomy_machine` fixture near the top of tests/test_cli.py.
+- **S** done, `r8-s` `6a0f773` (`../cafe-r8s`): M-15, M-32, M-48, M-43 stage-3 part. Trailer corrected to Sonnet 5.5.
+- **E** done, `r8-e` `caca79d` (`../cafe-r8e`): M-1 ingest part, M-2, M-24, M-29, M-30, M-31, M-33, M-34. Needs K: Data pedigree reads `forcing_in_physical_range` and `coare_ustar_vs_umwm_ust` value >= `pipeline.USTAR_AGREE_FRACTION` 0.90 (sent to K).
+- **K** running when paused, `r8-k` has commit `59ac4b7` (may be partial; read its hand-back `../cafe-r8k/review/round_8/handbacks/r8_handback_K.md` if present); homebase job `r8k_cov`. Extra worktrees `../cafe-r8k-mut`, `../cafe-r8k-old` are its scratch.
+- **V** running, `r8-v` uncommitted at pause (`../cafe-r8v`); homebase job `r8v_s1`; scratch worktree `../cafe-r8v-old`.
+- **A**: builder A coded all seven (M-4, M-5, M-9, M-23, M-35, M-40, M-41) but ran out of context twice; **A2** (prompt r8_A2.md) is finishing it in `../cafe-r8a` (uncommitted at pause; homebase container `pmx_pm_r8a`; scratch `../cafe-r8a-base`, `/private/tmp/claude-501/r8a/`). A added M-4(c): the assembled orca stores are tree-hashed ingest inputs and in the derived-layer key; its cost on the 2.1 GB cache is to be measured.
+- If an agent of this paused session is gone, check its worktree: `git -C ../cafe-r8<x> status`, its hand-back, and `ssh ... 'tmux ls; docker ps'`. Finish a batch from its hand-back the way A2 does.
+- Then, as every round: review each hand-back; merge (append conflicts in tests/: keep both sides; `review/round_*` scratch script `keepboth.py` idea: split on conflict markers); integration items from the hand-backs' "needs"; a docs pass (prompt like `review/round_7/batch_prompts/r7_D.md`; DECISIONS from 393; doc-only findings M-50, M-51, M-53 to M-56); the gate; commit; push; q9; round 9.
+
+### The gate (how it is run now)
+- **Once per round** (decided 2026-11-04; the two methods were shown to give identical coverage in rounds 6 and 7): `python -m cafe.pm audit` (two passes: xdist by file, then the real-time tests with --cov-append; `audit.log` holds the whole output). On homebase: `PMX=pm_int5 PM_CPUS=6 PM_MEM=28g TM=<name> bin/pmx.sh python -m cafe.pm audit`, about 43 min. The only expected AUDIT FAIL is `docs/mutation.json` (code freeze).
+- Note: `audit --code-only` SKIPS ruff, mypy and pytest (CLAUDE.md says so now).
+
+### The burst test VM (approved by the user 2026-11-04: "yes do it")
+- `burst-cafetest-rg` / VM `cafetest`, Standard_D32as_v5 (32 vCPU, 128 GB, about $1.4/h running), StandardSSD 64 GB, Ubuntu 24.04, **private IP 10.0.0.5 in homebaseVNET/homebaseSubnet, no public IP**, auto-shutdown 06:00 UTC daily. **Deallocated at the pause** (disk only, a few $/month).
+- Reach it only through homebase: `ssh -i ~/.ssh/homebase_ed25519 azureuser@100.108.213.121` then `ssh -i ~/.ssh/burst_ed25519 azureuser@10.0.0.5` (the laptop key is also authorized: `ssh -J azureuser@100.108.213.121 -i ~/.ssh/homebase_ed25519 azureuser@10.0.0.5`).
+- **Not ready yet:** cloud-init (docker.io install) was still running at the pause; `docker` was missing. Start it (`az vm start -g burst-cafetest-rg -n cafetest`), check `cloud-init status`, install docker if needed (`sudo apt-get install -y docker.io && sudo usermod -aG docker azureuser`).
+- Plan: stream the image from homebase (`docker save cafe-pm | ssh -i ~/.ssh/burst_ed25519 azureuser@10.0.0.5 docker load`, nothing written on homebase), rsync the repo, `bench/install_sitl.sh ~/work/sitl`, copy `pmdata/bin/bellhop.exe` and `pmdata/dtmb5415`, then run the gate there at 30 CPUs (expect ~10-15 min). **Deallocate it after every gate** (`az vm deallocate ...`) and **delete the group when the loop ends** (`az group delete -n burst-cafetest-rg --yes`; show the user it is gone). Month-to-date spend was $46.19 on 2026-11-04 (budget $415).
+
+### Ultracode
+The user turned ultracode on (2026-11-04) after being told it speeds mainly the merge/verify step. Use a workflow for round 9's review: reviewers in parallel, then per-finding adversarial verification in parallel (instead of one serial merger, which took 1-8 h), then a dedup/merge stage.
+
+### CI (GitHub Actions on every push; repo `aarohkandy/cafe` is PUBLIC, the user was told)
+- `make ci`, `make broken`, the SITL install and the image build pass on the hosted runner; the audit finishes in 113-115 min (limit 180).
+- Fixed and pushed: containers run as the runner's user (OpenFOAM's mpirun refused root); the audit's whole output is uploaded as artifact `audit-log`.
+- Still failing on the hosted runner (round 8 M-5, M-40, M-41, being fixed by batch A): the emulator query-time gate (10 ms) is missed at ~11 ms there, so 10 emulator-logic tests fail; physics coverage 99.8 % (comms.py 273, 275, 287 run only with Bellhop); the `make -n ci` test prints "Leaving directory" under `make audit`.
+
+### Housekeeping
+- Never `git stash` (CLAUDE.md). Builders sign commits with their own model's trailer (Sonnet 5.5 for builders; the lead's merges use Opus 5.5).
+- homebase disk is 98 % full (~5.6 GB free); old cafe copies were deleted 2026-11-04. `~/.cache` (5.6 GB) is the shared account's: left alone.
+- The user asked for plain-language docs at the very end (memory `plain-docs`), after the loop and code freeze.
+
 ## 0. Update, 2026-11-03 ~03:00 UTC (new lead session)
 
 Round 4 is closed on `premission-step4` (the parallel stage 1, DECISIONS 266-275, was already committed on top of it).
