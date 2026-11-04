@@ -2983,3 +2983,86 @@ def test_the_ensemble_size_note_names_the_profile_that_caps_the_ensemble_and_the
            "use --budget 4h to certify" in note
     note = ensemble_note(tmp_path / "b", monkeypatch, budget="quick", n_max=32, stage1_share_s=40.0)
     assert "because the stage-1 share (40 s) caps the ensemble at 32 members: use a longer --budget" in note and "profile" not in note
+
+
+# ---- review round 7: M-2 (a missing or old-layout derived layer is a failed check), M-12 (a lab store must cover the window, whatever its cadence)
+
+def test_r7_m2_a_missing_or_old_layout_derived_layer_fails_derived_unchanged_instead_of_running_on_the_neutral_profile(tmp_path, data_copy):
+    store = data_copy / "cache" / "ci_fixture" / "derived.zarr"
+    ctx = ctx_for(tmp_path / "r")                                                                  # the record ingest leaves is there
+    assert ctx.env.subgrid is not None
+    pipeline._derived_unchanged(ctx, L := ledger.Ledger(tmp_path / "ok", "s", "h"))
+    assert [c["ok"] for c in L.d["checks"]] == [True]
+    z = json.loads((store / "zarr.json").read_text())
+    z["attributes"]["layout_version"] = surface.LAYOUT_VERSION + 1                                 # another layout
+    (store / "zarr.json").write_text(json.dumps(z))
+    for how in ("old layout", "missing"):
+        if how == "missing":
+            shutil.rmtree(store)
+        fresh = pipeline.Context(MISSION_PATH, "ci", 0, tmp_path / "r", quiet)                      # a new context builds its env from what is on disk now
+        L = ledger.Ledger(tmp_path / how.replace(" ", "_"), "s", "h")
+        pipeline._derived_unchanged(fresh, L)
+        c = check_of(L.d, "derived_unchanged")
+        assert fresh.env.subgrid is None and not c["ok"], how
+        assert "is missing or has another layout" in c["note"] and "python -m cafe.pm fetch --mission" in c["note"], how
+    with pytest.raises(ledger.StageFailed, match="derived_unchanged: .*is missing or has another layout"):
+        with ledger.Ledger(tmp_path / "stage", "stage1", "h") as L:                                   # the check fails the stage that would read the layer
+            pipeline._derived_unchanged(fresh, L)
+    fresh._env = "ENV"                                                                              # an analytic environment still records nothing
+    pipeline._derived_unchanged(fresh, L := ledger.Ledger(tmp_path / "y", "s", "h"))
+    assert L.d["checks"] == []
+
+
+def test_r7_m2_a_truncated_chunk_of_the_derived_layer_stops_the_context_with_a_config_error(tmp_path, data_copy):
+    chunk = next(p for p in sorted((data_copy / "cache" / "ci_fixture" / "derived.zarr" / "ustar").rglob("*")) if p.is_file() and p.name != "zarr.json")
+    chunk.write_bytes(b"x")
+    ctx = pipeline.Context(MISSION_PATH, "ci", 0, tmp_path / "r", quiet)
+    with pytest.raises(config.ConfigError, match=r"derived surface layer .*derived\.zarr cannot be read .*delete .* and run `python -m cafe\.pm fetch"):
+        assert ctx.env is None
+
+
+def _lab_mission(tmp_path, store):
+    raw = yaml.safe_load(MISSION_PATH.read_text())
+    raw["environment"]["ocean"] = dict(source="lab_hycom", path=str(store))
+    (tmp_path / "lab.yaml").write_text(yaml.safe_dump(raw))
+    return tmp_path / "lab.yaml"
+
+
+def _cadence_store(src, dst, idx):
+    """The CI ocean store cut to the time steps `idx` (the lab's own cadence), written the way ingest_lab_hycom writes a store."""
+    from cafe.pm.env import hycom
+    ds = hycom.open_store(src).load()
+    hycom.write_store((hycom._std(ds.isel(time=slice(i, i + 1))) for i in idx), dst, "in_situ", dict(source=f"lab HYCOM {dst.name}"))
+    return dst
+
+
+def test_r7_m12_a_six_hourly_lab_store_covers_the_window_and_is_cached_while_gofs_still_wants_every_step(tmp_path, data):
+    from cafe.pm.env import hycom
+    store6 = _cadence_store(data.ocean_store, tmp_path / "lab6.zarr", range(0, 13, 2))               # 18Z, 00Z, ... 06Z: 6-hourly over the 36 h window
+    box = (-2.0, 2.0, -167.0, -163.0)
+    window = (T0, T1)
+    steps = hycom.gofs_steps(T0, T1)
+    assert pipeline._ocean_cached(store6, box, steps, window)                                        # False before: the 3-hourly steps are not all in it
+    assert not pipeline._ocean_cached(store6, box, steps)                                            # GOFS: membership of the steps, unchanged
+    assert pipeline._ocean_cached(data.ocean_store, box, steps, window) and pipeline._ocean_cached(data.ocean_store, box, steps)
+    assert not pipeline._ocean_cached(store6, box, steps, (T0 - 7200.0, T1))
+    assert not pipeline._ocean_cached(store6, box, steps, (T0, T1 + 7200.0))
+    assert pipeline._ocean_cached(store6, box, steps, (T0 + 3600.0, T1 - 3600.0))                    # a window inside the span: interpolated in time
+    t = hycom.open_store(store6).time.values
+    assert pipeline._ocean_time_problem(t, window) is None
+    assert pipeline._ocean_time_problem(t, (T0 - 7200.0, T1)).endswith("the store starts 2.0 h after the window start")
+    assert pipeline._ocean_time_problem(t, (T0, T1 + 5400.0)).endswith("the store ends 1.5 h before the window end")
+    both = pipeline._ocean_time_problem(t, (T0 - 3600.0, T1 + 3600.0))
+    assert "starts 1.0 h after the window start and ends 1.0 h before the window end" in both and "2023-03-01 18:00 to 2023-03-03 06:00 UTC" in both
+
+
+def test_r7_m12_ingest_accepts_a_six_hourly_lab_store_and_a_store_that_ends_early_fails_naming_the_edge(tmp_path, data_copy):
+    ok = _cadence_store(data_copy / "ocean" / "gofs_ci_fixture.zarr", data_copy / "ocean" / "lab6.zarr", range(0, 13, 2))
+    d = run_stage(pipeline.s_ingest, ctx_for(tmp_path / "a", mission=_lab_mission(tmp_path, ok)), "ingest")
+    assert check_of(d, "ocean_store_present")["ok"]
+    short = _cadence_store(data_copy / "ocean" / "gofs_ci_fixture.zarr", data_copy / "ocean" / "lab_short.zarr", range(0, 5, 2))
+    with pytest.raises(ledger.StageFailed, match="ocean_store_present"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "b", mission=_lab_mission(tmp_path, short)), "ingest")
+    note = check_of(read_ledger(tmp_path / "b", "ingest"), "ocean_store_present")["note"]
+    assert "lab_short.zarr" in note and "its times span 2023-03-01 18:00 to 2023-03-02 06:00 UTC" in note
+    assert "the store ends 24.0 h before the window end" in note

@@ -257,3 +257,19 @@ def test_rain_lens_off_removes_the_lens_and_leaves_the_warm_layer(ci_env, ci_ful
     assert abs((ci_full.density(lon, lat, zz, T_RAIN).value - rho0 - warm)[0]) > 0.2                        # the lens is there with the switch on
     assert np.array_equal(off.sst(lon, lat, T_RAIN).value, ci_full.sst(lon, lat, T_RAIN).value)
     assert off.subgrid.warm_layer and not off.subgrid.cfg["rain_lens"]["enabled"] and ci_full.subgrid.cfg["rain_lens"]["enabled"]
+
+
+# ---- review round 7, M-2: an unreadable derived layer is a ConfigError with the repair, not a RuntimeError out of zarr
+
+def test_r7_m2_a_truncated_chunk_of_the_derived_layer_is_a_config_error_naming_it(ci_env, tmp_path):
+    from cafe.pm.config import ConfigError
+    cache = tmp_path / "cache"
+    shutil.copytree(ci_env.cache, cache)
+    chunk = next(p for p in sorted((cache / "derived.zarr" / "ustar").rglob("*")) if p.is_file() and p.name != "zarr.json")
+    chunk.write_bytes(b"x")                                                                       # one byte: what a truncated copy leaves
+    with pytest.raises(ConfigError, match=rf"derived surface layer {cache}/derived\.zarr cannot be read \(.*\); delete {cache}/derived\.zarr and run "
+                                          r"`python -m cafe\.pm fetch"):
+        S.SurfaceLayer(cache)
+    (cache / "derived.zarr" / "zarr.json").write_text("{not json")
+    with pytest.raises(ConfigError, match="cannot be read"):                                      # and an unreadable metadata file is the same advice
+        S.SurfaceLayer(cache)

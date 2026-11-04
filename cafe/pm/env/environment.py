@@ -1,7 +1,8 @@
 """The gridded Environment: WRF + UMWM (+ restart spectra) from orca, ocean from GOFS 3.1 or the lab's HYCOM, all from
 the Zarr cache `cafe.pm.env.orca.ingest` and `cafe.pm.env.hycom` write. Implements `protocol.Environment`.
 
-Everything for the mission box is loaded into memory once (6 days x 130 x 313 x 16 WRF fields is ~0.4 GB); every
+Everything for the mission box is loaded into memory once (the WRF fields alone are 6 days x 130 x 313 x 16 x 8 bytes = 0.76 GB in float64;
+with UMWM and the ocean the demo's environment is about 9 GB in memory, DECISIONS 267/270, measured); every
 query is vectorized multilinear interpolation (`grid.interp`): linear in time across the hourly files, bilinear in
 space, linear in depth for the ocean. Wind below the first WRF mass level (~21 m), and at hours without 3-D fields,
 comes from U10 through the COARE 3.5 stability-corrected profile; above it, log-linear between mass levels.
@@ -119,15 +120,16 @@ class GriddedEnv:
         finally:
             self.strict = was
 
-    def _check(self, inside: Any, what: str, lon: Any, lat: Any, t: Any) -> None:
+    def _check(self, inside: Any, what: str, lon: Any, lat: Any, t: Any, bounds: tuple[float, ...] | None = None) -> None:
         if self.strict and not np.all(inside):
+            bounds = bounds or self.bounds
             bad = ~np.broadcast_to(inside, np.broadcast(lon, lat, t).shape)
             i = np.flatnonzero(bad)[0]
             L, A, T = (np.broadcast_to(np.asarray(x, float), bad.shape).ravel()[i] for x in (lon, lat, t))
             raise OutsideData(f"{what}: ({L:.3f}, {A:.3f}) at {dt.datetime.fromtimestamp(T, dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z "
-                              f"is outside the ingested data (box {self.bounds[:4]}, "
-                              f"{dt.datetime.fromtimestamp(self.bounds[4], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z.."
-                              f"{dt.datetime.fromtimestamp(self.bounds[5], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z); "
+                              f"is outside the ingested data (box {bounds[:4]}, "
+                              f"{dt.datetime.fromtimestamp(bounds[4], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z.."
+                              f"{dt.datetime.fromtimestamp(bounds[5], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z); "
                               "re-run `cafe fetch` with a larger box or window")
 
     def _w(self, k: str, lon: Any, lat: Any, t: Any) -> Any:
@@ -164,7 +166,14 @@ class GriddedEnv:
         b = self._bathy_bounds()
         if b is not None:                                            # the bathymetry grid can be smaller than the WRF box
             ok &= (x >= b[0]) & (x <= b[1]) & (np.asarray(lat) >= b[2]) & (np.asarray(lat) <= b[3])
+        if self.ocean is not None and hasattr(self.ocean, "inside"):                    # and so can the ocean store, in space and in time: Ocean holds its edge
+            ok &= self.ocean.inside(lon, lat, t)                                         # value outside it
         return ok
+
+    def _ocean_check(self, what: str, lon: Any, lat: Any, t: Any) -> None:
+        """A strict environment refuses an ocean query outside the store's lat, lon and time axes (a lenient one holds the edge; `inside` says so)."""
+        if self.ocean is not None and hasattr(self.ocean, "inside"):
+            self._check(self.ocean.inside(lon, lat, t), what, lon, lat, t, self.ocean.bounds())
 
     def _bathy_bounds(self) -> tuple[float, float, float, float] | None:
         """(lon0, lon1 in 0..360, lat0, lat1) of the ocean's bathymetry grid, or None without one."""
@@ -296,6 +305,7 @@ class GriddedEnv:
     def current(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         if self.ocean is None:
             raise OutsideData("no ocean source loaded: run `cafe fetch` (GOFS 3.1 by default) or point ocean.source at the lab's HYCOM")
+        self._ocean_check("ocean current", lon, lat, t)
         v = self.ocean.current(lon, lat, z, t)
         if self.subgrid is not None:
             v = self.subgrid.current_extra(self, v, lon, lat, z, t)
@@ -303,11 +313,13 @@ class GriddedEnv:
 
     def density(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         assert self.ocean is not None
+        self._ocean_check("ocean density", lon, lat, t)
         v = self.ocean.density(lon, lat, z, t)
         return self.subgrid.density_extra(self, v, lon, lat, z, t) if self.subgrid is not None else v
 
     def sound_speed(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         assert self.ocean is not None
+        self._ocean_check("ocean sound speed", lon, lat, t)
         return self.ocean.sound_speed(lon, lat, z, t)
 
     def depth(self, lon: Any, lat: Any) -> Tagged:

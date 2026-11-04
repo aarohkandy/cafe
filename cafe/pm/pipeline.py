@@ -289,14 +289,27 @@ def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], b
     return ok
 
 
-def _ocean_cached(path: pathlib.Path, box: tuple[float, float, float, float], steps: Any) -> bool:
-    """The GOFS store at `path` has every 3-hourly step and spans `box` (to the 0.1 degree grid snap), and its recorded parts-manifest
-    hash is the one on disk when the parts are still there (assemble_gofs hash-checks every part against that manifest)."""
+def _ocean_time_problem(times: Any, window: tuple[float, float]) -> str | None:
+    """Why a lab store whose time axis is `times` (epoch s) cannot serve `window`, else None. A lab store has the cadence of the lab's files, and
+    `Ocean` interpolates linearly in time, so what it needs is coverage: the first time at or before the start, the last at or after the end."""
+    def f(t: float) -> str:
+        return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%d %H:%M")
+    lo, hi = float(np.min(times)), float(np.max(times))
+    short = ([f"starts {(lo - window[0]) / 3600:.1f} h after the window start"] if lo > window[0] else []) + (
+        [f"ends {(window[1] - hi) / 3600:.1f} h before the window end"] if hi < window[1] else [])
+    return f"its times span {f(lo)} to {f(hi)} UTC, the window is {f(window[0])} to {f(window[1])} UTC: the store " + " and ".join(short) if short else None
+
+
+def _ocean_cached(path: pathlib.Path, box: tuple[float, float, float, float], steps: Any, window: tuple[float, float] | None = None) -> bool:
+    """The ocean store at `path` spans `box` (to the 0.1 degree grid snap) and its recorded parts-manifest hash is the one on disk when the parts
+    are still there (assemble_gofs hash-checks every part against that manifest). GOFS (`window` None): it has every 3-hourly step. A lab store
+    (`window` given) has the cadence of the lab's files, so it must cover the window instead (`_ocean_time_problem`)."""
     if not path.exists():
         return False
     ds = hycom.open_store(path)
     s, n, w, e = hycom.box360(box)
-    ok = bool(np.isin(steps, ds.time.values).all() and ds.lat.values.min() <= s + 0.1 and ds.lat.values.max() >= n - 0.1
+    ok = bool((np.isin(steps, ds.time.values).all() if window is None else _ocean_time_problem(ds.time.values, window) is None)
+              and ds.lat.values.min() <= s + 0.1 and ds.lat.values.max() >= n - 0.1
               and ds.lon.values.min() <= w + 0.1 and ds.lon.values.max() >= e - 0.1)
     man = path.with_name(path.stem + ".parts") / "manifest.json"
     return ok and (not man.is_file() or ds.attrs.get("manifest_sha256") == sha256(man))
@@ -349,7 +362,8 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     h3 = sorted({h for v in uas_v for h in _sortie_hours(v, m["ship"]["lon"], t0, t1)})
 
     def fetch_orca() -> int:
-        """-> the number of parts it had to fetch (orca.ingest logs it; the manifest does not say)."""
+        """-> the number of parts it had to fetch (orca.ingest logs it; the manifest does not say). The ingest holds the whole hours that cover
+        the window (floor of the start to ceil of the end), each labelled with its own hour."""
         lines: list[str] = []
 
         def log(line: str) -> None:
@@ -370,6 +384,11 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     gebco = bathy.cache_path(sbox, ocean_mod.DATA / "bathy")
     store = ocean_mod.store_path(spec, m["name"])
     steps = hycom.gofs_steps(t0.timestamp(), t1.timestamp())
+    window = None if spec["source"] == "gofs31" else (t0.timestamp(), t1.timestamp())         # a lab store must cover it; GOFS must have every step
+    short = None                                                         # which edge of the window a lab store that exists does not reach
+    if window and store.exists():
+        with contextlib.suppress(ConfigError):                           # a damaged store is `_ocean_cached`'s to report
+            short = _ocean_time_problem(hycom.open_store(store).time.values, window)
 
     def fetch_ocean() -> None:
         if spec["source"] != "gofs31":
@@ -382,7 +401,8 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
                  lambda: tao.fetch_tao(sbox, t0.timestamp(), t1.timestamp(), tdir, base=tao.BASE)),
            _need(ctx, L, "gebco", "the GEBCO_2026 cut for the box", lambda: _gebco_cached(gebco),
                  lambda: bathy.fetch_gebco(sbox, gebco, bathy.GEBCO_URL)),
-           _need(ctx, L, "ocean_store", f"the ocean store {store.name} for the box and window", lambda: _ocean_cached(store, sbox, steps), fetch_ocean,
+           _need(ctx, L, "ocean_store", f"the ocean store {store.name} for the box and window" + (f" ({short})" if short else ""),
+                 lambda: _ocean_cached(store, sbox, steps, window), fetch_ocean,
                  hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {ctx.mission_path} --path <lab HYCOM dir> "
                                                                   "--temperature-kind <in_situ|potential>")]
     if not all(got):
@@ -743,9 +763,13 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
     """The self-check of the stages that read the surface layer: the store now hashes to what ingest recorded (ingest/derived.digest.json, itself a
     ledger output of ingest), so a store edited, rebuilt or replaced since ingest fails the stage instead of feeding it."""
     from .env import surface
-    if getattr(ctx.env, "subgrid", None) is None:                        # an environment without the layer (the analytic ones) reads nothing derived
-        return
+    from .env.environment import GriddedEnv
     rec, store = ctx.run_dir / "ingest" / surface.DIGEST, ctx.cache / "derived.zarr"
+    if getattr(ctx.env, "subgrid", None) is None:
+        if isinstance(ctx.env, GriddedEnv):                              # a gridded one has it unless missing or in another layout: other physics, not a pass
+            L.check("derived_unchanged", False, note=f"{store} is missing or has another layout: ingest recorded it as an input of this run; "
+                                                     f"rerun `python -m cafe.pm fetch --mission {ctx.mission_path}` and the run")
+        return                                                           # an environment without the layer (the analytic ones) reads nothing derived
     if not rec.is_file():
         L.check("derived_unchanged", False, note=f"{rec} is missing: ingest did not record the surface layer this stage reads")
         return

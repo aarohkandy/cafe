@@ -206,7 +206,13 @@ class SurfaceLayer:
     def __init__(self, cache: Any, warm_layer: bool = True, rain_lens: bool = True):
         import gsw
         import xarray as xr
-        d = xr.open_zarr(pathlib.Path(cache) / "derived.zarr").load()
+        store = pathlib.Path(cache) / "derived.zarr"
+        try:
+            d = xr.open_zarr(store).load()
+        except Exception as e:                                         # noqa: BLE001  zarr/numcodecs raise RuntimeError, ValueError, OSError ...
+            from ..config import ConfigError
+            raise ConfigError(f"derived surface layer {store} cannot be read ({type(e).__name__}: {e}); delete {store} and run "
+                              "`python -m cafe.pm fetch --mission ...` again: only it is rebuilt") from e
         self.t, self.la, self.lo = Axis(d.time.values, "time"), Axis(d.lat.values, "lat"), Axis(d.lon.values, "lon")
         if d.attrs.get("layout_version") != LAYOUT_VERSION:
             raise ValueError(f"{cache}/derived.zarr has layout {d.attrs.get('layout_version')}, this code needs {LAYOUT_VERSION}: "
