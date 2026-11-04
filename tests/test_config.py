@@ -645,3 +645,33 @@ R7_M47 = [
 def test_r7_m47_the_other_bounds_of_r6_m9_are_each_refused_naming_their_field(tmp_path, what, fn, msg):
     with pytest.raises(ConfigError, match=msg):
         load_mission(edit(tmp_path, fn))
+
+
+# ---- review round 8 (K batch)
+
+def test_r8_m42_lost_after_h_of_zero_is_refused_naming_above_0(tmp_path):
+    """D-9: `minimum: 0` in place of `exclusiveMinimum: 0` left every test green; DECISIONS 387 says 'above 0'."""
+    with pytest.raises(ConfigError, match=r"vehicles/\d/task/lost_after_h"):
+        load_mission(edit(tmp_path, lambda d: vehicle(d, "glider_eq")["task"].update(lost_after_h=0)))
+
+
+def test_r8_m16_a_defaults_leaf_needs_a_source_or_an_assumed_why_but_not_an_entry_source():
+    ok = dict(defaults=dict(a=dict(value=1.0, unit="dB", assumed=True, why="w"), b=2.0))
+    assert config.table_provenance(ok) == []
+    assert config.table_provenance(dict(defaults=dict(a=dict(value=1.0, unit="dB")))) == ["defaults.a"]
+    assert config.table_provenance(dict(modems=dict(m=dict(bands=dict(x=dict(value=1)))))) == ["modems.m.source", "modems.m.bands.x"]
+
+
+def test_r8_m22_json_object_refuses_damage_and_other_json(tmp_path):
+    p = tmp_path / "x.json"
+    p.write_text('{"a": 1}')
+    assert config.json_object(p) == {"a": 1}
+    for text, why in (('{"a": 1, "b', "Unterminated"), ("[]", "it holds list"), ("null", "it holds NoneType")):
+        p.write_text(text)
+        with pytest.raises(ConfigError, match=rf"x.json: not a JSON object .*{why}.*run it again \(--fresh\)"):
+            config.json_object(p)
+    p.write_bytes(b"\xff\xfe")
+    with pytest.raises(ConfigError, match="not a JSON object"):
+        config.json_object(p)
+    with pytest.raises(ConfigError, match="not a JSON object"):
+        config.json_object(tmp_path / "missing.json")

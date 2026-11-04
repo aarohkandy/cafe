@@ -391,7 +391,7 @@ def test_what_would_fix_it_when_nothing_flips_the_verdict(run):
     assert rep["vehicles"]["uas"]["fix"]["best"] is None and report.check_traceability(rep) == []
     t = plain(h)
     assert "2 candidates evaluated, of 3 candidates that could be: none reaches GO or MARGINAL" in t and "the emulator answered those in its range." in t
-    assert "1 candidates evaluated, of 2 candidates that could be: none reaches GO" in t
+    assert "1 candidate evaluated, of 2 candidates that could be: none reaches GO" in t and "1 candidates" not in t      # round 8, M-47
     assert "no emulator is trained yet, so only the nearest few were run in Stage 1." in t
     assert "no single change" not in t
 
@@ -1978,18 +1978,19 @@ def test_every_verdict_and_link_card_says_what_its_interval_holds(full):      # 
     assert "at fixed inputs: the fitted priors enter as their point values and the other assumed inputs are not varied beyond their stated priors" in t
 
 
-def test_the_usv_card_says_the_speed_model_is_sampled_over_1_4_percent_only_when_the_brief_case_is_stored(run):      # round 7, M-15
+def test_the_usv_card_says_the_speed_factor_is_sampled_over_its_range_only_when_the_brief_case_is_stored(run):      # round 7, M-15; round 8, M-20
     m, plan = pm_run.make_run(run)
     report.write(run, m, plan)
     t = plain((run / "report" / "index.html").read_text())
-    assert "sampled over 1.4 % only" not in t
+    assert "speed factor is sampled within" not in t
     cases = dict(usv=[dict(case="usv_vpp_bias uniform [-0.35, -0.3] (usv_vpp_bias_brief)", k_fail=30, n=32, verdict="NO-GO", note="brief")],
                  uas=[dict(case="usv_vpp_bias uniform [-0.35, -0.3] (usv_vpp_bias_brief)", k_fail=1, n=32, verdict="GO", note="not a usv")])
     (run / "stage1b" / report.SENSITIVITY).write_text(json.dumps(cases))
     report.write(run, m, plan)
     h = (run / "report" / "index.html").read_text()
     t = plain(h)
-    assert t.count("sampled over 1.4 % only") == 1 and "not an uncertainty of this model); the brief's bias case gives 30 members of 32 members (NO-GO)" in t
+    assert t.count("speed factor is sampled within +-1.4 % of the unbiased polar speed (range 2.9 %, sd 0.8 %; +-1.9 % of the speed flown)") == 1
+    assert "not an uncertainty of this model); the brief's bias case gives 30 members of 32 members (NO-GO)" in t
     assert report.check_rendered(load(run), h) == [] and load(run)["traceability_problems"] == []
 
 
@@ -2008,3 +2009,50 @@ def test_a_track_half_inside_the_data_keeps_its_inside_points_and_says_how_many_
     assert re.fullmatch(r"\d+ of \d+ track points are outside the downloaded data \(more than half of the members left it\): not shown", d["dropped"])
     assert d["dropped"].split(" of ")[0] != "0" and "track points are outside the downloaded data" in plain(h)
     assert report.check_traceability(rep) == []
+
+
+# ---------------------------------------------------------------------------------------------------------- round 8 (K batch)
+
+@pytest.fixture
+def default_thresholds():
+    yield
+    intervals.set_thresholds(0.9, 0.6)                                       # the module state load_mission sets: restore the demo's
+
+
+@pytest.mark.parametrize("go,clause", [(0.99, True), (0.9, True), (0.7, False)])
+def test_r8_m7_the_rule_sentence_says_when_the_interval_term_is_looser_than_one_minus_go(run, default_thresholds, go, clause):
+    m, plan = pm_run.make_run(run)                                                          # (it loads the demo mission, which sets the thresholds)
+    intervals.set_thresholds(go, 0.5)
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert ("is at most 0.25 (looser than 1 - go); NO-GO" in t) is clause and ("(looser than 1 - go)" in t) is clause
+
+
+def test_r8_m47_a_count_of_one_is_not_pluralised(full):
+    run = full[0]
+    t = plain((run / "report" / "index.html").read_text())
+    assert re.findall(r"\b1 (candidates|notches|members)\b", t) == []
+    n = lambda v, u: dict(value=v, unit=u, utc=None)
+    assert report._txt(n(1, "notches")) == "1 notch" and report._txt(n(2, "notches")) == "2 notches" and report._txt(n(1, "candidates")) == "1 candidate"
+    assert report._txt(n(1, "members")) == "1 member" and report._txt(n(1.0, "m/s")) == "1 m/s" and report._txt(n(0, "members")) == "0 members"
+    assert report._txt(n(True, "members")) == "True members"
+
+
+RUN_FILES = ["stage1b/summary.json", "refit/refit.json", "stage3/windows.json", "windows/windows.json", "emulator/flip.json", "emulator/holdout.json"]
+
+
+@pytest.mark.parametrize("rel", RUN_FILES)
+def test_r8_m22_a_truncated_run_file_is_a_config_error_naming_it(run, rel):
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)                                                                # a finished run
+    p = run / rel
+    p.write_text('{"a": 1, "b')
+    with pytest.raises(config.ConfigError, match=rf"{p.name}: not a JSON object .*run it again \(--fresh\)"):
+        report.write(run, m, plan)
+
+
+def test_r8_m22_a_run_file_that_is_json_but_not_an_object_is_refused_too(run):
+    m, plan = pm_run.make_run(run)
+    (run / "stage1b" / "summary.json").write_text("[]")
+    with pytest.raises(config.ConfigError, match=r"summary.json: not a JSON object \(it holds list\)"):
+        report.write(run, m, plan)

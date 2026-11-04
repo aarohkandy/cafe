@@ -82,18 +82,24 @@ FACTORS = [("data_pedigree", "Data pedigree"), ("verification", "Verification"),
            ("ms_management", "M&S management"), ("people", "People qualifications")]
 
 LEVEL_TEXT = {"data_pedigree": {3: "strong: compared with moorings (the comparison also sets the wind priors)"},
-              "ms_management": {3: "strong: ledger chain audited by the tool; house rules and ruff configured (not run by the audit); no independent reviewer"}}
-# (LEVEL_TEXT replaces LEVELS[3] for the factor it names)
+              "verification": {2: "moderate: the ledger chain audits clean and test files exist; this report does not run or read the tests "
+                                  "(`make audit` does)"},
+              "ms_management": {3: "strong: ledger chain audited by the tool; house rules and ruff configured (`make audit` runs ruff; this report only checks "
+                                   "that it is configured); no independent reviewer"}}
+# (LEVEL_TEXT replaces LEVELS[n] for the factor and level it names)
 WIND_RMSE_LIMIT = (2.0, 15.0)     # pooled speed (m/s) and direction (deg) RMSE above which the mooring comparison does not earn level 3: BRIEF 5.4's prior sd
+USTAR_AGREE_MIN = 0.90            # BRIEF 2.1: COARE u* within 20 % of UMWM ust at this fraction of sea points, or Data pedigree stays at 1 (DECISIONS 168)
 UVAL_MAX_FRAC = 0.5               # a V&V 20 row counts toward Validation level 3 only when U_val is below this fraction of the reference (DECISIONS row)
 USV_CHIODI_RATIO = 0.178          # Chiodi et al. (2021) mean SOG / mean wind, 0.96 / 5.4 (platforms/saildrone_explorer.yaml)
 ACOUSTIC_NEAR_KM = 3.0            # BRIEF section 6: a glider acoustic link is GO within this distance of the ship, NO-GO beyond it
 
 RULES = {
-    "data_pedigree": "1 ingest ledger names its inputs; 2 and every ingest self-check passed and the wrfout/umwmout schemas exist; "
+    "data_pedigree": "1 ingest ledger names its inputs; 2 and every ingest self-check passed, the COARE u* is within 20 % of the UMWM ust at 90 % of the "
+                     "sea points (BRIEF 2.1) and the wrfout/umwmout schemas exist; "
                      "3 and the WRF wind and SST were compared with TAO/TRITON moorings for this mission, with pooled wind RMSE within the brief's prior sd "
                      "(2.0 m/s, 15 deg); the comparison also sets the wind priors, so it is not independent of the run.",
-    "verification": "1 a stage ledger exists; 2 every ledger is clean (ok, no failed check, chain intact, hashes reproduce) and tests exist; "
+    "verification": "1 a stage ledger exists; 2 every ledger is clean (ok, no failed check, chain intact, hashes reproduce) and test files exist "
+                    "(their results are not read here); "
                     "3 and a grid-convergence (GCI) study backs a V&V 20 row.",
     "validation": "1 a comparison with a reference ran; 2 and one has all of U_num, U_input, U_D; 3 and at least four such rows, "
                   "each with a converged finest grid, all satisfy |E| <= U_val with U_val below half the reference "
@@ -148,12 +154,22 @@ def subgrid_uncalibrated(run: pathlib.Path, root: pathlib.Path = ROOT) -> str | 
     return None
 
 
+def usv_speed_sampling() -> str:
+    """What the stage-1 USV speed prior (`usv_vpp_bias`, uniform [lo, hi] on the fractional speed change) samples, computed from config/perturbations.yaml:
+    the half-width and range against the unbiased polar speed, the sd, and the half-width against the speed actually flown (1 + centre of it)."""
+    e = sampling.load_perturbations()["usv_vpp_bias"]
+    half, centre = (e["hi"] - e["lo"]) / 2, (e["hi"] + e["lo"]) / 2
+    sd = 2 * half / math.sqrt(12)
+    return (f"speed factor is sampled within +-{100 * half:.1f} % of the unbiased polar speed (range {200 * half:.1f} %, sd {100 * sd:.1f} %; "
+            f"+-{100 * half / (1 + centre):.1f} % of the speed flown)")
+
+
 def data_root() -> pathlib.Path:
     return pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
 
 
 def _json(p: pathlib.Path) -> Any:
-    return json.loads(p.read_text()) if p.is_file() else None
+    return config.json_object(p) if p.is_file() else None
 
 
 # ------------------------------------------------------------------------------------------------------ assumed inputs
@@ -281,10 +297,8 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
             row = _row(f"dtmb5415:Fr{fr:.2f}", f"DTMB 5415 C_T at Fr {fr:.2f} (INSEAN 2340)", src, r.S, r.D, (r.u_num, r.u_input, r.u_D),
                        "U_D and U_input are assumed (config/assumptions.yaml dtmb5415.*); the free surface is held at the static draft; "
                        f"discretization: {nt['note']}")                      # round 7, M-5: the grid sequence's own note
-            if fine["converged"] is False:
-                d = fine["drift"]
-                drift = f"drift {d:.4g} > {dtmb5415.DRIFT_TOL}" if isinstance(d, float) else "drift not stored"
-                row["note"] += f"; finest grid not converged (iterative {drift})"
+            if fine["reasons"]:                                                      # round 8, M-10: not True is not converged; the note names the causes
+                row["note"] += f"; finest grid not converged ({'; '.join(fine['reasons'])})"
                 row["validated"], row["not_judged"] = None, "not judged: the finest grid has not converged"
             out.append(row)
         else:
@@ -381,7 +395,13 @@ def _data_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     ev, miss, lvl = [f.ev(f"{len(L['inputs'])} input(s) named: {L['inputs'][0]['ref']}", f.lg("ingest"))], [], 1
     schemas = [f.root / "cafe" / "schemas" / n for n in ("wrfout.json", "umwmout.json")]
     bad = [c["name"] for c in L["checks"] if not c["ok"]]
-    if not bad and L["checks"] and all(s.is_file() for s in schemas):
+    ust = next((c for c in L["checks"] if c["name"] == "coare_ustar_vs_umwm_ust"), None)             # absent in ledgers from before round 8's reading of it
+    agree = None if ust is None else ust.get("value")
+    if not bad and ust is not None and not (isinstance(agree, (int, float)) and agree >= USTAR_AGREE_MIN):
+        got = f"only {100 * agree:.1f} %" if isinstance(agree, (int, float)) else "no fraction recorded for"
+        miss.append(f"BRIEF 2.1 finding: {got} of the sea points have COARE u* within 20 % of UMWM ust; the brief asks {USTAR_AGREE_MIN:.0%}, "
+                    "so the forcing is not shown to be consistent and the level stays at 1")
+    elif not bad and L["checks"] and all(s.is_file() for s in schemas):
         lvl = 2
         ev.append(f.ev(f"{len(L['checks'])} ingest self-checks passed; schemas present", "cafe/schemas/wrfout.json, cafe/schemas/umwmout.json"))
     else:
@@ -413,7 +433,7 @@ def _verification(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     tests = sorted((f.root / "tests").glob("test_*.py"))
     if not f.problems and tests:
         lvl = 2
-        ev.append(f.ev(f"ledger chain audits clean; {len(tests)} test files", "cafe/pm/audit.py, tests/"))
+        ev.append(f.ev(f"ledger chain audits clean; {len(tests)} test files present (their results are not read here)", "cafe/pm/audit.py, tests/"))
     else:
         miss.append(f"ledger problems: {f.problems[:3]}" if f.problems else "no test files in tests/")
     if lvl == 2 and any(r["status"] == "run" and r["u_num"] is not None for r in f.vv):
@@ -482,7 +502,7 @@ def _uncertainty(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     else:
         miss.append(f"no passed Latin-hypercube stratification check in the {st} ledger" + (" (stage 1b is a copy of it)" if copied else ""))
     if any(e.get("cls") == "usv" for e in f.ensembles()):                          # round 7, M-15
-        ev.append(f.ev("USV speed model sampled over 1.4 % only: the width of usv_vpp_bias is the published spread of VPP over-prediction, not an uncertainty "
+        ev.append(f.ev(f"USV {usv_speed_sampling()}: the width of usv_vpp_bias is the published spread of VPP over-prediction, not an uncertainty "
                        "of this model; the stage-1b case usv_vpp_bias_brief is the sensitivity", "config/perturbations.yaml usv_vpp_bias"))
     # round 5, M-11: an ensemble whose 95 % Wilson lower bound on P(fail) is already 5 % or more excludes P(fail) < 5 %; no n certifies it, so it is not "short"
     short = [e["n"] for e in ens if e["n"] < e["verdict"]["n_certify"] and intervals.wilson(e["k_fail"], e["n"], 0.95)[0] < 0.05]
@@ -504,7 +524,7 @@ def _robustness(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     sens = [k for k, e in allv.items() if e["sensitivity"]["param"]]
     tests = sum(e["sensitivity"].get("noise_floor") is not None for e in allv.values())            # a permutation test each, at the 5 % level (stage1._summary)
     luck = sum(math.comb(tests, i) * 0.05 ** i * 0.95 ** (tests - i) for i in range(len(sens), tests + 1))      # P(at least this many clear it by chance)
-    clear = bool(sens) and luck < 0.05                    # round 7, M-23: one of three tests clears by luck 14 % of the time
+    clear = bool(sens) and tests >= len(sens) and luck < 0.05   # round 7, M-23: 1 of 3 tests clears by luck 14 % of the time; round 8, M-21: no floor, no test
     refit = [k for k, r in f.refit.items() if r.get("used")]
     if clear or refit:
         lvl = 2
@@ -512,7 +532,9 @@ def _robustness(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
                        "run:stage1b/summary.json, run:refit/refit.json"))
     elif sens:
         ev.append(f.ev(f"sensitivity indices exist for {sens}; none stands clearly above chance ({len(sens)} of {tests} tests cleared the 95 % floor; "
-                       f"{luck:.0%} chance of that many by luck)", "run:stage1b/summary.json"))
+                       f"{luck:.0%} chance of that many by luck)"
+                       + ("; ranked parameters without a permutation floor are not counted" if tests < len(sens) else ""),
+                       "run:stage1b/summary.json"))
         miss.append("the first-order sensitivities do not stand clearly above chance and no refit reran")
     else:
         miss.append("no first-order sensitivity (every ensemble is all-pass or all-fail, or n < 16) and no refit rerun")

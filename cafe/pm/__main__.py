@@ -20,11 +20,12 @@
 """
 from __future__ import annotations
 
-import argparse, json, os, pathlib, sys, webbrowser
+import argparse, os, pathlib, sys, webbrowser
 from typing import Any
 
 from . import acceptance, audit, budget, ledger, par, pipeline, report, stage1, whatif
-from .config import ConfigError, load_mission
+from .config import ConfigError, json_object as _json_object, load_mission
+from .stats import intervals
 
 
 def _seed(text: str) -> int:
@@ -131,6 +132,12 @@ def main(argv: list[str] | None = None) -> int:
         if a.cmd == "validate":
             m = load_mission(a.mission)
             print(f"{a.mission}: valid ({len(m['vehicles'])} vehicles, {len(m['links'])} links)")
+            go = round(1 - intervals.P_FAIL_GO, 12)
+            if go > 0.75:                                                  # round 8, M-7: the interval term stays at 0.75, so it is looser than 1 - go
+                n0 = next(n for n in range(1, 100_000) if intervals.verdict(0, n)["verdict"] == "GO")
+                print(f"note: verdict.go {go:g}: GO needs the point estimate of P(success) >= {go:g} and the 90 % Wilson lower bound on success >= "
+                      f"{intervals.LO_SUCCESS_GO:g} (DECISIONS 68), so {n0} members without a failure are GO; the stopper uses the 95 % bound against "
+                      f"{1 - go:.3g}", file=sys.stderr)
         elif a.cmd == "plan":
             m = load_mission(a.mission)
             if a.gpus > 0 and not a.assume_gpu and not pipeline.gpu_visible():
@@ -158,17 +165,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     return 0
-
-
-def _json_object(p: pathlib.Path) -> dict[str, Any]:
-    """A JSON object a run wrote and a command reads back; a corrupt file or any other JSON is a ConfigError (exit 2), not a traceback."""
-    try:
-        d = json.loads(p.read_text())
-    except (ValueError, OSError) as e:                                   # JSONDecodeError and UnicodeDecodeError are ValueErrors
-        raise ConfigError(f"{p}: not a JSON object ({e}); `run` writes it, so run it again (--fresh)") from e
-    if not isinstance(d, dict):
-        raise ConfigError(f"{p}: not a JSON object (it holds {type(d).__name__}); `run` writes it, so run it again (--fresh)")
-    return d
 
 
 def _gpu_mem(a: argparse.Namespace) -> float | None:

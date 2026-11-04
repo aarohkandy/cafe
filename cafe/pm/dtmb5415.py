@@ -344,6 +344,28 @@ def part_drift(series: np.ndarray, total: float) -> float:
     return abs(float(series[-w:].mean()) - float(series[-2 * w:-w].mean())) / abs(total)
 
 
+def unsettled(iters: Optional[float], drift: Optional[float], parts: Optional[float], scatter: Optional[float]) -> list[str]:
+    """Why a resistance history has not converged, from the numbers `_converge` stores: the rule (at least MIN_ITERS iterations, resistance drift and
+    pressure/viscous drift inside DRIFT_TOL, scatter inside SCATTER_TOL) once, for the run loop, the credibility table and the receipts. A number that
+    is None is not stored and is not counted; a NaN fails its limit."""
+    out = [f"fewer than {MIN_ITERS} iterations"] if iters is not None and iters < MIN_ITERS else []
+    for what, v, tol in (("iterative drift", drift, DRIFT_TOL), ("pressure/viscous drift", parts, DRIFT_TOL), ("scatter", scatter, SCATTER_TOL)):
+        if v is not None and not v <= tol:
+            out.append(f"{what} {v:.4g} (limit {tol})")
+    return out
+
+
+def not_converged_reasons(case: dict[str, Any]) -> list[str]:
+    """[] when the stored case converged; else the causes. `converged` missing is "no convergence record" (not known to have converged, as the
+    receipts read it: a missing drift fails its bracket), a False flag with no stored cause says so."""
+    flag = case.get("converged")
+    if flag is True:
+        return []
+    if flag is None:
+        return ["no convergence record"]
+    return unsettled(case.get("iters"), case.get("drift"), case.get("drift_parts"), case.get("scatter")) or ["convergence limits not met (cause not stored)"]
+
+
 def _set(text: str, key: str, value: object) -> str:
     out, n = re.subn(rf"^{key} .*;$", f"{key} {value};", text, flags=re.M)
     if n != 1:
@@ -380,7 +402,7 @@ def _converge(run: Callable[[Any, str, str], None], case: pathlib.Path, cmd: str
         f = _cfd.read_forces(case)["force"]
         mean, std, drift, scatter = settle(-f["total"][:, 0])
         parts = max(part_drift(-f[k][:, 0], mean) for k in ("pressure", "viscous"))
-        ok = done >= MIN_ITERS and max(drift, parts) <= DRIFT_TOL and scatter <= SCATTER_TOL
+        ok = not unsettled(done, drift, parts, scatter)
         if ok or done >= max_iters:
             break
         check_disk(case, ABORT_FREE_GB)
@@ -542,7 +564,8 @@ def tabulate(root: pathlib.Path) -> dict[float, vv.Vv20]:
 
 def row_notes(root: pathlib.Path) -> dict[float, dict[str, Any]]:
     """{Fr: dict(note, grids)} for the speeds `tabulate` makes a row of: `note` is the discretization note ("Fs = 3, p = 2 assumed: oscillating" ...) and
-    `grids` is {grid: dict(converged, drift)} finest first, as run_<grid>.json stored them (None where it did not). Round 7, M-5: the V&V table cites both."""
+    `grids` is {grid: dict(converged, drift, reasons)} finest first, as run_<grid>.json stored them (None where it did not; `reasons` is
+    `not_converged_reasons`, [] when the grid converged). Round 7, M-5: the V&V table cites both."""
     runs, out = _runs(root), {}
     for fr in CT_REF:
         key = f"{fr:.2f}"
@@ -551,7 +574,8 @@ def row_notes(root: pathlib.Path) -> dict[float, dict[str, Any]]:
             continue
         got = [runs[g]["speeds"][key] for g in grids]
         note = discretization([c["ct"] for c in got], [c["cells"] for c in got], [c.get("surf_level") for c in got])[2]
-        out[fr] = dict(note=note, grids={g: dict(converged=c.get("converged"), drift=c.get("drift")) for g, c in zip(grids, got, strict=True)})
+        out[fr] = dict(note=note, grids={g: dict(converged=c.get("converged"), drift=c.get("drift"), reasons=not_converged_reasons(c))
+                                         for g, c in zip(grids, got, strict=True)})
     return out
 
 
@@ -566,12 +590,16 @@ def receipts(root: Optional[pathlib.Path] = None) -> str:
     rc.receipt(grp, "Lofted hull displacement at T = 0.248 m", h["displacement"], DISPLACEMENT, 0.01, "m3", SIMMAN)
     rc.receipt(grp, "Lofted hull Lwl at T = 0.248 m", h["lwl"], LWL, 0.005, "m", SIMMAN)
     rc.receipt(grp, "Lofted hull Bwl at T = 0.248 m", h["bwl"], BWL, 0.01, "m", SIMMAN)
-    rows = tabulate(root)
+    rows, notes = tabulate(root), row_notes(root)
     for fr, row in rows.items():
         src = "INSEAN 2340, Olivieri et al. 2001 via docs/BRIEF.md 5.2; U_D, U_input assumed (see cafe.pm.dtmb5415.ASSUMED)"
         rc.context(grp, f"C_T x1e3 at Fr {fr:.2f}: E = {row.E * 1e3:+.3f}, U_val = {row.u_val * 1e3:.3f}, U_num = {row.u_num * 1e3:.3f}",
                    row.S * 1e3, row.D * 1e3, "", src)
-        rc.bracket(grp, f"C_T Fr {fr:.2f}: |E| <= U_val (ASME V&V 20)", abs(row.E), 0.0, row.u_val, "", src)
+        if why := next(iter(notes[fr]["grids"].values()))["reasons"]:         # round 8, M-19: the credibility table does not judge this row either (row 345)
+            rc.context(grp, f"C_T Fr {fr:.2f}: |E| <= U_val is not judged: the finest grid has not converged ({'; '.join(why)}; see the convergence rows)",
+                       abs(row.E), row.u_val, "", src)
+        else:
+            rc.bracket(grp, f"C_T Fr {fr:.2f}: |E| <= U_val (ASME V&V 20)", abs(row.E), 0.0, row.u_val, "", src)
         rc.bracket(grp, f"C_T Fr {fr:.2f}: U_val / D <= {INFORMATIVE} (the validation says something)", row.u_val / row.D, 0.0, INFORMATIVE, "",
                    "a pass with U_val comparable to the quantity claims nothing; U_num must come down with grid and iteration quality")
     n = 0

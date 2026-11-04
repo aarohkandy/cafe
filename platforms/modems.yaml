@@ -6,10 +6,10 @@
 defaults:
   ref_wind_ms: 5.0         # reference conditions for the range anchor: mean 10 m wind of the TEPEX-C demo window is 5.4 m/s (BRIEF 1.2)
   ref_shipping: 0.5        # Stojanovic 2007 "moderate shipping"; irrelevant above ~10 kHz
-  anchor_margin_db: 3.0    # assumed: the published range is a "range >= x" so the budget closes there with 3 dB (a normal design margin)
+  anchor_margin_db: {value: 3.0, unit: dB, assumed: true, why: "the published range is a \"range >= x\" so the budget closes there with 3 dB (a normal design margin); it moves a link margin one for one (margin = this value at the vendor's range)"}
   spreading_k: 1.5         # Stojanovic 2007 practical spreading (1 cylindrical, 2 spherical)
   ambiguous_db: 6.0        # BRIEF 2.8: Bellhop runs when the Thorp margin is within +-6 dB of 0
-  valid_range_factor: 10.0 # assumed: the Thorp/Stojanovic budget is anchored to the vendor's published range; beyond this many times it, the margin is an extrapolation (a dB number that is not a link budget) and is reported as out of range, never as a margin
+  valid_range_factor: {value: 10.0, unit: "-", assumed: true, why: "the Thorp/Stojanovic budget is anchored to the vendor's published range; beyond this many times it, the margin is an extrapolation (a dB number that is not a link budget) and is reported as out of range, never as a margin"}
 
 modems:
   benthos_atm960:

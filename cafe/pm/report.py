@@ -37,6 +37,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import budget, credibility
+from .config import json_object
 from .audit import STAGES
 from .stage1 import _classes, path_speed as _member_speeds
 from .env.remote import sha256
@@ -71,7 +72,7 @@ NOT_PRESENT = "{} is not in the run directory"
 
 
 def _jl(p: pathlib.Path) -> Any:
-    return json.loads(p.read_text()) if p.is_file() else None
+    return json_object(p) if p.is_file() else None
 
 
 def _f(x: Any) -> Any:
@@ -923,7 +924,7 @@ def _sanity(cred: dict[str, Any], vehicles: dict[str, Any], links: dict[str, Any
 
 def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env: Any = None) -> dict[str, Any]:
     tr = Trace(run)
-    cred = json.loads((run / "report" / "credibility.json").read_text())
+    cred = json_object(run / "report" / "credibility.json")
     s1b = _jl(run / "stage1b" / "summary.json")
     if s1b is None:
         raise FileNotFoundError(f"{run / 'stage1b' / 'summary.json'}: {NOT_PRESENT.format('stage1b/summary.json')}; run the stage1b stage first")
@@ -961,6 +962,9 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
 
 # ------------------------------------------------------------------------------------------------------ HTML (from the JSON only)
 
+SINGULAR = {"candidates": "candidate", "notches": "notch", "members": "member"}      # round 8, M-47: "1 candidates" read as a count of one
+
+
 def _txt(n: dict[str, Any]) -> str:
     if n.get("utc"):
         return str(n["utc"])
@@ -968,6 +972,8 @@ def _txt(n: dict[str, Any]) -> str:
     if "values" in n:
         return f"{len(n['values'])} values{unit}"
     v = n["value"]
+    if v == 1 and not isinstance(v, bool):
+        unit = f" {SINGULAR.get(n['unit'], n['unit'])}"
     return ("n/a" if v is None else f"{v:.4g}" if isinstance(v, float) else str(v)) + unit
 
 
@@ -1002,9 +1008,9 @@ INTERVAL_SCOPE = ("This interval is the sampling error of {n} at fixed inputs: t
 
 
 def _usv_bias_html(v: dict[str, Any]) -> str:
-    """Under a USV's interval: the speed model is sampled over 1.4 % only; the stored brief-bias case beside it (round 7, M-15). Nothing without the case."""
+    """Under a USV's interval: the speed factor's sampled range (computed from the prior) and the stored brief-bias case (round 7, M-15); else nothing."""
     c = next((c for c in v["cases"] if "usv_vpp_bias_brief" in c["case"]), None) if v["cls"] == "usv" else None
-    return "" if c is None else (f"<p class=muted>The speed model is sampled over 1.4 % only (the published spread of VPP over-prediction, "
+    return "" if c is None else (f"<p class=muted>The {credibility.usv_speed_sampling()} (the published spread of VPP over-prediction, "
                                  f"not an uncertainty of this model); the brief's bias case gives {_n(c['k_fail'])} of {_n(c['n'])} "
                                  f"({_badge(c['verdict'])}).</p>")
 
@@ -1017,7 +1023,8 @@ def _stat_html(d: dict[str, Any]) -> str:
          f"<p class=muted>{INTERVAL_SCOPE.format(n=_n(d['n']))}</p>"
          f"<p class=muted>Stopping rule: the {si['lo']['uncertainty']['conf']:.0%} {html.escape(si['lo']['uncertainty']['kind'].replace(' bound', ''))} "
          f"on P(fail) is {_n(si['lo'])} to {_n(si['hi'])}; verdict rule: GO when P(fail) is at most {_n(th['go'])} and the "
-         f"{u['conf'] * 100:.0f} % Wilson upper bound on P(fail) is at most {_n(th['go_bound'])}; "
+         f"{u['conf'] * 100:.0f} % Wilson upper bound on P(fail) is at most {_n(th['go_bound'])}"
+         f"{' (looser than 1 - go)' if th['go_bound']['value'] > th['go']['value'] + 1e-12 else ''}; "
          f"NO-GO when P(fail) is above {_n(th['nogo'])}; MARGINAL between.</p>")
     if d["undecided_statement"]:
         h += f"<p class=warn>{html.escape(d['undecided_statement'])}</p>"
@@ -1086,7 +1093,9 @@ def _fix_html(f: dict[str, Any]) -> str:
     b2d = f["base_2d"]
     wm = (f"<p class=muted>{e(f['wind_model'])}" + (f" The baseline under the same model: {_badge(b2d['verdict'])} P(fail) {_n(b2d['p_fail'])}." if b2d else "")
           + "</p>") if f["wind_model"] else ""
-    return (f"<p>What would fix it ({e(f['target'])}): {line}</p>{wm}<details><summary>All {len(f['tried'])} candidates: {_n(f['evaluated'])} evaluated of "
+    k = len(f["tried"])
+    s = "" if k == 1 else "s"
+    return (f"<p>What would fix it ({e(f['target'])}): {line}</p>{wm}<details><summary>All {k} candidate{s}: {_n(f['evaluated'])} evaluated of "
             f"{_n(f['candidates'])} that can be evaluated, {_n(f['invalid'])} that cannot (off the window, the box or the data)</summary>"
             "<div class=scroll><table>"
             f"<tr><th>Change<th>Cost (notches)<th>Answered by<th>P(fail)<th>Verdict<th>Note</tr>{rows}</table></div></details>")

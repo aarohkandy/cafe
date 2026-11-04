@@ -219,7 +219,7 @@ def implementation_loss_db(modem: str, band: str, k: float = 1.5) -> float:
     fc = np.mean(b["f_khz"])
     f_lo, f_hi = b["f_khz"]
     nl = band_noise_db(f_lo, f_hi, d["ref_wind_ms"], d["ref_shipping"])
-    return float(b["sl_db"] - acoustic_tl_db(b["range_km"] * 1e3, fc, k) - nl - b["snr_req_db"] - d["anchor_margin_db"])
+    return float(b["sl_db"] - acoustic_tl_db(b["range_km"] * 1e3, fc, k) - nl - b["snr_req_db"] - d["anchor_margin_db"]["value"])
 
 
 def valid_range_m(modem: str, band: str) -> float:
@@ -228,7 +228,7 @@ def valid_range_m(modem: str, band: str) -> float:
     b = _band(modem, band)
     if "implementation_loss_like" in b:
         return valid_range_m(*b["implementation_loss_like"])
-    return float(_yaml("modems.yaml")["defaults"]["valid_range_factor"] * b["range_km"] * 1e3)
+    return float(_yaml("modems.yaml")["defaults"]["valid_range_factor"]["value"] * b["range_km"] * 1e3)
 
 
 def acoustic_margin(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: FA = 5.0, shipping: float = 0.5, k: float = 1.5,

@@ -142,10 +142,24 @@ def table_provenance(doc: Any) -> list[str]:
         for name, entry in (entries.items() if isinstance(entries, dict) else ()):
             if not isinstance(entry, dict):
                 continue
+            if "value" in entry:                         # a {value, ...} leaf of `defaults`: it needs a source or assumed+why, not an entry source
+                bad += [f"{group}.{name}"] if _leaf_problems(entry) else []
+                continue
             if not entry.get("source"):
                 bad.append(f"{group}.{name}.source")
             bad += [f"{group}.{name}.{p}" for p in _leaf_problems(entry)]
     return bad
+
+
+def json_object(p: pathlib.Path) -> dict[str, Any]:
+    """A JSON object a run wrote and a command reads back; a corrupt file or any other JSON is a ConfigError (exit 2), not a traceback."""
+    try:
+        d = json.loads(p.read_text())
+    except (ValueError, OSError) as e:                                   # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        raise ConfigError(f"{p}: not a JSON object ({e}); `run` writes it, so run it again (--fresh)") from e
+    if not isinstance(d, dict):
+        raise ConfigError(f"{p}: not a JSON object (it holds {type(d).__name__}); `run` writes it, so run it again (--fresh)")
+    return d
 
 
 def _leaf_problems(node: Any, path: str = "") -> list[str]:
