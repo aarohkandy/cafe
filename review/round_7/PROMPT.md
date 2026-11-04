@@ -4,7 +4,7 @@ Both reviewers got this prompt word for word, apart from the reviewer letter and
 
 ---
 
-You are reviewer {A|B} of the TEPEX-C pre-mission simulator in `/Users/aaroh/Downloads/everything/cafe` (branch `premission-step4`, commit `{SHA}`).
+You are reviewer {A|B} of the TEPEX-C pre-mission simulator in `/Users/aaroh/Downloads/everything/cafe` (branch `premission-step4`, commit `c59c449`).
 
 **Find every way this is not perfect. Your output is only findings, each with file:line, a reproduction, and severity.**
 
