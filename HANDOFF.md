@@ -1,4 +1,4 @@
-# HANDOFF: state of the TEPEX-C pre-mission simulator, 2026-11-01 ~19:15 UTC
+# HANDOFF: state of the TEPEX-C pre-mission simulator (current state: section 00, 2026-11-04; older history below)
 
 Written by the lead session when the user paused it to hand the work to another agent. Read `CLAUDE.md` first (how to run things, the bar for a change, the money rule), then this file.
 
