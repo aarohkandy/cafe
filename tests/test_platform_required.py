@@ -143,6 +143,9 @@ def test_the_radio_table_is_read_with_the_same_loader(tmp_path, monkeypatch):
 CASES_R8 = [
     ("quad_uas", lambda r: r["battery"]["r_int_ohm"].update(value=0.0), r"battery\.r_int_ohm: 0\.0 must be a finite number above 0; an ideal pack .* use 1e-6"),
     ("quad_uas", lambda r: r["battery"]["ocv_soc"].update(value=[1.0, 0.8, 0.5, 0.2, 0.1, 0.0]), r"battery\.ocv_soc: .* strictly increasing"),
+    ("quad_uas", lambda r: r["battery"]["ocv_soc"].update(value=[0.0, 0.1, 0.1, 0.5, 0.9, 1.0]), r"battery\.ocv_soc: .* strictly increasing"),
+    ("quad_uas", lambda r: (r["battery"]["ocv_soc"].update(value=[0.5]), r["battery"]["ocv_cell_v"].update(value=[3.7])),
+     r"battery\.ocv_soc: .* at least two states of charge"),
     ("quad_uas", lambda r: r["battery"]["ocv_cell_v"].update(value=[3.0, 3.45, 3.6, 3.78, 4.02]), r"battery\.ocv_cell_v: 5 values for 6 states of charge"),
     ("quad_uas", lambda r: r["airframe"]["inertia_kgm2"].update(value=[0.0025, 0.0025]),
      r"airframe\.inertia_kgm2: .* must be a finite number above 0 in every place of a list of 3"),
@@ -151,6 +154,8 @@ CASES_R8 = [
     ("saildrone_explorer", lambda r: r["params"]["mass_kg"].update(value=1e300), r"params\.mass_kg: 1e\+300 must be a finite number from 1 to 100000"),
     ("saildrone_explorer", lambda r: r["params"]["wing_stall_deg"].update(value=120.0),
      r"params\.wing_stall_deg: 120\.0 must be a finite number above 0 and below 90"),
+    ("saildrone_explorer", lambda r: r["params"]["wing_stall_deg"].update(value=0.0), r"params\.wing_stall_deg: 0\.0 must be .* above 0 and below 90"),
+    ("saildrone_explorer", lambda r: r["params"]["heel_target_deg"].update(value=-5.0), r"params\.heel_target_deg: -5\.0 must be .* above 0 and below 90"),
     ("saildrone_explorer", lambda r: r["params"]["wing_stall_deg"].update(value=90.0), r"params\.wing_stall_deg: 90\.0 must be"),
     ("saildrone_explorer", lambda r: r["params"]["heel_target_deg"].update(value=120.0), r"params\.heel_target_deg: 120\.0 must be"),
     ("saildrone_explorer", lambda r: r["params"]["heel_target_deg"].update(value=90.0), r"params\.heel_target_deg: 90\.0 must be"),

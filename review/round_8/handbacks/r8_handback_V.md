@@ -64,6 +64,7 @@ Method. Fail-first: the 56 `r8` tests (plus parametrised cases) ran on the old c
 - Tests: `test_platform_required.py::test_r8_a_...[quad_uas-1..4, saildrone-5, seaglider-14]`: reversed `ocv_soc`, a short `ocv_cell_v`, a 2-element `inertia_kgm2`, `mass_kg` as a list (UAS and USV), `battery_J` as a list (glider); each names the leaf. All fail on old code. The shipped files load (existing tests). One existing assertion changed on purpose: `check_params(..., b=[1.0, 2.0], ...)` in the table-kinds test now passes `b=2.0`, because the same test asserted that a list for a number was accepted (the behaviour M-26 removes); no assertion was weakened.
 - DECISIONS: `| ? | Platform numbers are scalars unless their kind says list: a list for a number is refused naming the leaf; ocv_soc must be strictly increasing in [0, 1] with at least two entries, ocv_cell_v the same length and positive, inertia_kgm2 three positive numbers, sortie.levels_m a list of positive numbers. | Review round 8, M-26. A reversed or short table loaded and flew with different numbers or failed late. |`
 - CHANGELOG: `Platform loaders refuse a list for a scalar and check the UAS battery curve and inertia (review round 8, M-26).`
+- Adversary follow-up: added `test_platform_required.py` CASES_R8 `quad_uas` cases with a repeated `ocv_soc` value `[0,.1,.1,.5,.9,1]` and a one-entry `ocv_soc`/`ocv_cell_v` (both named in the refusal). Mutants `np.diff(soc) <= 0` -> `< 0` and `soc.size < 2 or` -> `False or` now fail (rc=1, `[quad_uas-2]`, `[quad_uas-3]`); fixed code rc=0.
 
 ### M-27 t_end and empty launch list
 - `uas.py:596` a scrubbed member's `t_end` is 0 whatever the others do (docstring says so); `:612` `fly_mission` raises `ValueError("fly_mission needs at least one launch time")`.
@@ -76,6 +77,7 @@ Method. Fail-first: the 56 `r8` tests (plus parametrised cases) ran on the old c
 - Tests: `test_platform_required.py::test_r8_a_...[saildrone-6..13]` (mass 1e300; wing_stall 120 and 90; heel_target 120 and 90; min_awa 400; wing_trim 200; keel_stall 200) and `test_glider.py::test_r8_m28_...` (negative and zero dive depth). Fail on old code; the shipped files load. Seaglider `pitch_deg` etc. untouched.
 - DECISIONS: `| ? | USV angles wing_stall_deg, wing_trim_deg, heel_target_deg, keel_stall_deg must lie above 0 and below 90 deg, min_awa_deg in 0..180, mass_kg in 1..1e5 kg; GliderSim refuses a dive depth that is not above 0. The bounds are choices. | Review round 8, M-28. Nonsense ranges loaded and built a finite but meaningless polar, or failed unnamed inside gsw. |`
 - CHANGELOG: `Range checks for USV angles and mass, and for the glider dive depth (review round 8, M-28).`
+- Adversary follow-up: added `wing_stall_deg = 0.0` and `heel_target_deg = -5.0` cases (message 'above 0 and below 90'). Mutant `(a > 0) & (a < 90)` -> `(a >= 0) & ...` now fails (rc=1, `[saildrone_explorer-10]`); fixed code rc=0 (26 test points of `-k r8` in the file).
 
 ### M-36 USV table cache key
 - `usv.py:155-157` `_digest` hashes the numbers with `N_IT` and then the bytes of `usv.py`.
