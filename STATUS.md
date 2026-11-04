@@ -1,6 +1,6 @@
 # STATUS — the TEPEX-C pre-mission simulator (`cafe.pm`)
 
-Rewritten from the code on 2026-10-31 (review round 2, M-14), at `8ee5f50` plus the round-2 fixes, and updated for review rounds 3 (DECISIONS 210 to 236), 4 (DECISIONS 237 to 265) and 5 (DECISIONS 276 to 305). The earlier version of this file was the audit of the existing app against the
+Rewritten from the code on 2026-10-31 (review round 2, M-14), at `8ee5f50` plus the round-2 fixes, and updated for review rounds 3 (DECISIONS 210 to 236), 4 (DECISIONS 237 to 265), 5 (DECISIONS 276 to 307) and 6 (DECISIONS 308 to 338). The earlier version of this file was the audit of the existing app against the
 spec of 2026-10-28 (`ab376fd`); it is in git history and no longer describes the repository.
 
 ## 0. What is physically missing (BRIEF section 0)
@@ -55,11 +55,11 @@ Make targets (each runs where it is invoked; from a laptop prefix `./pm.sh`):
 | `make receipts` | every receipt (app and pre-mission) as one table; exits non-zero on any failure, which is expected until the open limitations L08 and L09 are retired |
 | `make broken` | the deliberately broken wave-direction configuration must fail a receipt that passes without it (exit 0 means one did; the fast receipts run twice, DECISIONS 240) |
 | `make mutation` | mutmut on `cafe/pm/physics` and `cafe/pm/stats`, writes `docs/mutation.json`; hours |
-| `make audit` | ledgers of `runs/quick`, `runs/overnight` and `runs/4h` (those that exist) re-hashed, banned tokens (incl. `skip(` and `cafe/static/app.js`), ruff, mypy strict, pytest with coverage gates (100 % on physics, stats and env; 90 % on `cafe/pm`), and the stored mutation result (refused if missing, stale or under 85 %) |
-| `make acceptance` | BRIEF 5.3: quick and overnight (and 4h with `GPUS=1`), golden diff, same-seed and other-seed reproducibility, the broken configuration; about 11 h |
+| `make audit` | ledgers of `runs/quick`, `runs/overnight` and `runs/4h` (those that exist) re-hashed, banned tokens (incl. `skip(` and `cafe/static/app.js`), ruff, mypy strict, pytest in two passes with coverage gates (xdist by file, then the five real-time tests alone; 100 % on physics, stats and env; 90 % on `cafe/pm`), and the stored mutation result (refused if missing, stale or under 85 %) |
+| `make acceptance` | BRIEF 5.3: quick and overnight (and 4h with `GPUS=1`), golden diff, same-seed and other-seed reproducibility, the broken configuration; about 11 h; writes into `runs/acceptance`, not over your `runs/quick` (M-21) |
 | `make report` | re-renders a finished run's report |
 
-Tests: 1,983 `def test_` in 49 files and 2,364 collected cases after round 5, all passing (homebase, 2026-11-03, `pytest -n 6`), with each of its 26 findings under a regression test (the round-4 tree with the parallel stage 1 had 1,908 in 48 files and 2,224 collected cases, all passing, homebase, 2026-11-03, `pytest -n 6`; the round-3 tree had 1,822 and 2,122 in 47 files). Coverage after round 5: 99.95 % of 12,910 statements in `cafe/pm` (six lines missed: the error branches `pipeline.py:1161-1162` and `report.py:440-441, 1003`, and `par.py:94`, the map reader a worker calls when it unpickles a shared array, which coverage does not trace in spawned workers), 100 % in `physics`, `stats`, `env` and `stage3`; ruff and mypy --strict clean. Credibility of the last q2 report: see its `credibility.json`; the limitations that cap it are in `docs/CREDIBILITY.md` section 5.
+Tests: 2,052 `def test_` in 49 files and 2,481 collected cases after round 6, all passing (homebase, 2026-11-03, `pytest -n 6`; each of its 26 findings has a regression test); coverage 99.95 % of 13,125 statements in `cafe/pm` (six lines missed: `pipeline.py:1215-1216`, `report.py:445-446, 1011`, `par.py:110`), 100 % in `physics`, `stats`, `env` and `stage3`, and `python -m cafe.pm audit` (two passes) gives the same numbers in 2,438 s on 6 CPUs. After round 5: 1,983 `def test_` in 49 files and 2,364 collected cases, all passing (homebase, 2026-11-03, `pytest -n 6`), with each of its 26 findings under a regression test (the round-4 tree with the parallel stage 1 had 1,908 in 48 files and 2,224 collected cases, all passing, homebase, 2026-11-03, `pytest -n 6`; the round-3 tree had 1,822 and 2,122 in 47 files). Coverage after round 5: 99.95 % of 12,910 statements in `cafe/pm` (six lines missed: the error branches `pipeline.py:1161-1162` and `report.py:440-441, 1003`, and `par.py:94`, the map reader a worker calls when it unpickles a shared array, which coverage does not trace in spawned workers), 100 % in `physics`, `stats`, `env` and `stage3`; ruff and mypy --strict clean. Credibility of the last q2 report: see its `credibility.json`; the limitations that cap it are in `docs/CREDIBILITY.md` section 5.
 
 DTMB 5415 v4 study (recipe `pout-lts01-parts-v4`, three grids at Fr 0.10, 0.20, 0.28, 0.41): done and installed in `/data/dtmb5415`; |E| <= U_val at all four (E x1e3 = +0.865, +0.722, +0.842, -0.040 against U_val x1e3 = 1.882, 1.085, 2.653, 1.993), but U_val / D is 0.27 to 0.63 against 0.1, so it validates little, and iterative convergence fails at Fr 0.28 and 0.41 on every grid (drift 0.03 to 0.07 against 0.005).
 
@@ -83,13 +83,13 @@ faster batch: more members and more emulator variants in the same budget. The sa
 225.7 s before at load 11; `env.grid.interp` 74 to 54 us per call, the 3-D wind one call for every level) and holds the ocean once (a
 2-worker batch peaks at 12.5 GB for the whole container, about 25 GB before).
 
-**Memory model of stage 1 (review round 5, M-6, DECISIONS 281).** The worker count is the CPUs or what the memory holds, the smaller: `budget.plan` takes the
-memory limit (`par.memory_gb()`: the cgroup limit, else the host's available memory), the environment (`ENV_GB_PER_DAY` 1.5 GB per window day, about 9 GB
-for the 6-day demo, or the cache's size on disk if larger) and `WORKER_GB` 0.9 per worker (0.81 to 0.84 GB measured, before the real environment), and writes
+**Memory model of stage 1 (review round 5, M-6, DECISIONS 281; changed in round 6, M-2, DECISIONS 309).** The worker count is the CPUs or what the memory holds, the smaller: `budget.plan` takes the
+memory limit (`par.memory_gb()`: the cgroup limit, else the host's available memory), the environment (`ENV_GB_PER_DEG2_DAY` 0.0031 GB per deg^2 of the padded box per window day,
+9.0 GB for the 6-day demo, or the size on disk of every Zarr store of the cache and the ocean store if larger; the plan is made again when the ingest ends) and `WORKER_GB` 0.9 per worker (0.81 to 0.84 GB measured, before the real environment), and writes
 `workers_by_cpu`, `workers_by_memory` and `workers` into `plan.json`. It refuses a mission for which not even one worker fits (exit 2) and notes the memory an
 explicit `CAFE_WORKERS` needs. The demo on 8 CPUs and 28 GB plans 8 workers (`workers_by_memory` 23); it is capped below 8 only under about 16 GB and refused
-under about 10 GB. **Not measured:** a real 30-day or memory-capped run (the figures are the review's and rows 267 and 270's), and the memory of a cache that
-holds several Zarr stores. `par._share` now stops with a named error when `/dev/shm` fills.
+under about 10 GB. **Not measured:** a real 30-day or memory-capped run, and the growth with the box's area: 9 GB is measured at one box and window (rows 267 and 270), and the model is linear in area
+and days from that one point, so for another box it is a floor and not a measurement. `par._share` now stops with a named error when `/dev/shm` fills.
 
 ## 2. Pending at code freeze (pending, not done)
 
@@ -99,7 +99,7 @@ The round-3 tree passed the full test suite, ruff and mypy --strict (2026-11-01)
 - **`make mutation`:** `docs/mutation.json` does not exist, so `make audit` fails its mutation step until it is made (gate 85 %).
 - **CI job order (review round 5, M-16, DECISIONS 291):** `.github/workflows/premission.yml` builds the images, runs `make ci`, then `make broken` and `make audit`
   (each of the last two `if: always()`; `timeout-minutes: 180`), so the audit's red mutation step no longer hides the broken-configuration step, which is the
-  evidence for exit condition 3. The audit is serial (about 71 min on 6 CPUs) and stays red until `make mutation` has stored `docs/mutation.json`. Before this, GitHub ran the old order on every push to
+  evidence for exit condition 3. The audit's test step is now two passes in one coverage record (round 6, L-W1, DECISIONS 334): pytest-xdist by file on every CPU, then the five real-time tests alone (the serial suite, about 71 min on 6 CPUs, was killed at the 180 min timeout on the 4-CPU hosted runner: run 41595101496; `make ci` and `make broken` passed in it). The SITL ArduCopter binary is installed in CI from ArduPilot's published `stable-4.7.1` build by `bench/install_sitl.sh` with pinned sha-256 sums (L-W2, DECISIONS 335), because the UAS SITL receipt test fails without it. **No hosted run has timed the two-pass audit yet.** It stays red until `make mutation` has stored `docs/mutation.json`. Before this, GitHub ran the old order on every push to
   `premission-step4`: of the last 34 runs (to 2026-11-03), 27 were cancelled at the old 60-minute limit inside `make audit` and 7 failed, and `make ci` and
   `make broken` were skipped in every one. The first run of the new order is on the round-5 commit.
 - **The golden:** `tests/golden/tepex_c_demo_quick.json` records no commit sha, clean-tree flag or code digest, so `golden_diff` fails. Mint it from a reviewed quick run on a clean, committed checkout, through the RUNBOOK 1 wrapper, which passes `CAFE_GIT_SHA` and `CAFE_GIT_DIRTY` (the image has no `git`; DECISIONS 260) (`--update-golden`, then rerun without).
@@ -115,11 +115,17 @@ The round-3 tree passed the full test suite, ruff and mypy --strict (2026-11-01)
   profile delivered and says no parameter clears the noise floor (largest S1 0.14 against a floor of 0.21; the battery sentence is gone, M-2); the emulator design ran
   all 28 vehicle-variants (2 were skipped in q5, M-1); the wind prior prints its 95 % upper bound, 0.48 m/s beside 0.113 (M-10); the machine block prints stage 1
   planned 52.7 s against 116.7 s measured (2.2 times, the plan is a lower bound), and the variants planned 26.3 s each against 31.8 to 37.3 s measured (M-13).
+  **Round 6** (`review/round_6/merged.md`: 26 findings, 0 critical, 6 major, 20 minor; DECISIONS 308 to 333, plus the lead's items 334 to 338) is fixed and merged from five branches, each finding with a regression
+  test. The majors: a USV on a hole of the UMWM sea mask crashed with an `IndexError` or passed with a NaN position (M-1), the memory model ignored the area of the box and counted
+  only `derived.zarr` (M-2), the plan printed 4 and 8 SITL members that no stage flies (M-3), a UAS launch in the first or last hour of the window ended stage 1 with `OutsideData` (M-4), a calm
+  wind or moorings without a direction wrote a null prior that crashed stage 1 (M-5), and concurrent runs corrupted the shared emulator table (M-6). **q7, the quick run on the round-6 code, will measure what
+  moved in the demo verdicts; it is not known yet.** The gate on the merged tree (test count, coverage, ruff, mypy) has not run: the count is pending.
 
 ## 3. Not done and not planned in this build
 
 - **The web UI and the static demo do not read `report.json`** (BRIEF 2.9; DECISIONS 206). A reader was not built.
 - No GPU run, no lab-server run, no run on a lab HYCOM file (section 0).
+- ArduCopter SITL is not part of the pipeline: `uas.fly_sitl` runs only in the slow receipts, so `plan.json` says `sitl_members` 0 for every budget and the ensemble is pure physics (round 6, M-3, DECISIONS 310).
 - The 20-minute and 10-hour contracts hold for compute with a warm cache; a cold fetch is a separate step (DECISIONS 196).
 - `docs/USE_HISTORY.md` and `docs/QUALIFICATIONS.md` do not exist, so those two credibility factors read 0.
 

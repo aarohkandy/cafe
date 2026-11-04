@@ -29,7 +29,7 @@ Read these before changing anything, in this order:
 - pytest's summary line is suppressed (`-q -q`). Read the result from the exit code, or count the result characters on the progress lines only: `grep -aE "^[.sxFE]+ *(\[ *[0-9]+%\])?$" log | sed "s/ *\[.*//" | tr -d "\n" | fold -w1 | sort | uniq -c`. A looser `^[.sxFE]` also counts traceback lines that start with `E` (round 4 read 2,250 passed for a real 2,196).
 - Timings:
   - **The full suite** takes about 75 min on 6 CPUs. Run single files with `-k` while you work.
-  - **`python -m cafe.pm audit <run>`** runs the whole suite with coverage. Use `--code-only` or `--ledgers-only` unless you mean it.
+  - **`python -m cafe.pm audit [<run>]`** runs ruff, mypy and the whole suite with coverage (two passes since round 6: xdist by file, then the real-time tests), plus the banned scan, the mutation record and the ledgers of any run given. `--code-only` *skips* ruff, mypy and pytest (only the scans and ledgers); `--ledgers-only` checks only the ledgers.
   - **A quick demo run:** `bin/pmx.sh python -m cafe.pm run --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out /data/runs/<name> --fresh`, about 5 min.
 - The SITL ArduCopter test in `tests/test_uas.py` depends on real time and fails now and then. Rerun it before believing a failure.
 
@@ -57,5 +57,6 @@ Read these before changing anything, in this order:
 One session at a time leads: it runs the review rounds, the builder batches per round, the full gate and the commits (`HANDOFF.md` says who and where it stopped). Any other agent, while a lead is active:
 - **Do not edit its working tree.** Work in your own worktree and branch, then hand the branch back for merging:
   `git worktree add ../cafe-<task> -b <task> premission-step4`
+- **Never use `git stash`.** The stash list is shared by every worktree of the repo, so two agents' stashes cross (it happened in round 6). To run a test on the unfixed code, use a throwaway `git worktree add --detach` or a scratch copy on homebase.
 - **Use only your own homebase directory**, `pm_<you>`. Do not touch `pm_int*`, `pm_q*`, `pm_r*`, `pm_rev*`, `pm_merge*`, `pm_mut`, `pmdata/runs/*`, `pmdata/dtmb5415` or `pmdata/cache`.
 - **CPU share:** the box has 8 vCPU and 64 GB. Keep to 2 CPUs unless the lead says the box is free.

@@ -719,3 +719,20 @@ def test_the_single_height_uas_turbulence_is_a_listed_limitation_that_moves_no_l
     others = {f for y in cr.LIMITATIONS if y["id"] != "L20" for f in y["factors"]}
     assert set(x["factors"]) <= others
     assert "Credibility limitation L20" in (REAL / "docs/PHYSICS.md").read_text()
+
+
+def test_the_reach_table_lists_every_limitation_that_caps_each_factor():
+    """Round 6 integration: L19 (round 5) caps validation and uncertainty but the "What the current build can reach" table of docs/CREDIBILITY.md
+    never listed it; nothing compared that table with the code. Each row's "Caps from" is the code's limitations of that factor, L13 included."""
+    import pathlib, re
+    doc = (pathlib.Path(cr.ROOT) / "docs" / "CREDIBILITY.md").read_text()
+    table = doc.split("### What the current build can reach")[1].split("This table is derived")[0]
+    rows = {m[0].strip(): m[1].strip() for m in re.findall(r"^\| ([^|]+) \| ([^|]+) \|", table, re.M) if m[0].strip() not in ("Factor", "---")}
+    names = {"Verification": "verification", "Validation": "validation", "Input pedigree": "input_pedigree", "Uncertainty characterization": "uncertainty",
+             "Results robustness": "robustness"}
+    lims = cr.LIMITATIONS + [cr.SUBGRID_LIMITATION]
+    for row, fac in names.items():
+        want = sorted(lim["id"] for lim in lims if fac in lim["factors"])
+        assert rows[row].split(", ") == want, (row, rows[row], want)
+    assert set(names) | {"Data pedigree", "Use history", "M&S management", "People qualifications"} == set(rows)
+    assert {f for lim in lims for f in lim["factors"]} <= set(names.values())

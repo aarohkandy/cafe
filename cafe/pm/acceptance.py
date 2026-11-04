@@ -55,7 +55,8 @@ BROKEN = ROOT / "tests" / "fixtures" / "broken" / "wave_direction.yaml"
 WAVE_MODULE = "pm.env.wave_direction"
 RUNS: dict[str, tuple[str, int]] = dict(quick=("quick", 0), overnight=("overnight", 0), gpu=("4h", 1))      # role -> (budget, gpus)
 VOLATILE = ("run", "machine.wall_s", "machine.git_sha", "machine.versions", "machine.machine",   # report.json paths that differ between identical runs
-            "machine.timing.stage1.measured", "machine.timing.variants.measured")                # the measured side of planned/measured (round 5, M-13)
+            # the measured side of planned/measured (round 5, M-13; round 6, M-17)
+            "machine.timing.stage1.measured", "machine.timing.variants.measured", "machine.timing.stage1b_sensitivity.measured")
 HOLDOUT, CREDIBILITY = "emulator:output:holdout.json", "report:output:credibility.json"            # receipts whose files hold a timing / the run's name
 KILL_AT = 2.0                                                                                          # a run is killed at this multiple of its limit
 EPS = 1e-9

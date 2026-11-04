@@ -174,3 +174,21 @@ def test_ci_and_the_runbook_install_the_same_pinned_arducopter_the_receipts_fly(
     assert wf.index("sh bench/install_sitl.sh $PWD/.work/sitl") < wf.index("make audit (code") and "-v $PWD/.work:/work:ro" in wf
     assert "sh bench/install_sitl.sh $CAFE_HOST_DATA/work/sitl" in rb and "-e CAFE_WORK=/data/work" in rb
     assert "-e CAFE_WORK=/data/work" in readme                                          # the README wrapper is the RUNBOOK one
+
+
+# ---- review round 6, documents (M-21, M-25)
+
+def test_the_runbook_names_the_directory_make_acceptance_writes_into():
+    """M-21: `make acceptance` removed the user's runs/quick; the RUNBOOK says where its runs and tables are now."""
+    rb = text("docs", "RUNBOOK.md")
+    assert "runs/acceptance/<name>" in rb and "runs/acceptance/acceptance.json" in rb and "your `runs/quick` is not touched" in rb
+
+
+def test_three_statements_the_code_outlived_do_not_come_back():
+    """M-25: the pipeline passes theta_e (stage1 does), the UAS verdict is not the battery alone (q6: 55 of 64 members profile_incomplete), and
+    env/wrf.py does not exist."""
+    physics = text("docs", "PHYSICS.md")
+    assert "does not pass `theta_e`" not in physics and "decided by the battery alone" not in physics and "The pipeline passes `theta_e`" in physics
+    assert "theta_e_K=te" in text("cafe", "pm", "stage1.py") and "since then it passes `theta_e`" in row(37)
+    assert not (ROOT / "cafe" / "pm" / "env" / "wrf.py").exists() and "env/wrf.py" not in text("requirements-pm.txt")
+    assert "rotate_grid_to_earth" in text("requirements-pm.txt") and "def rotate_grid_to_earth" in text("cafe", "pm", "env", "conventions.py")

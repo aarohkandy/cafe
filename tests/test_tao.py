@@ -131,6 +131,17 @@ def test_fetch_is_resumable_without_refetching(tree, server, tmp_path):
     assert len([1 for name, _ in server.log if "fileServer" in name]) == n
 
 
+@pytest.mark.parametrize("damage", [b"", b'{"files": {"T0N165E/OS_T0'])
+def test_an_empty_or_truncated_manifest_is_fetched_again_not_a_traceback(tree, tmp_path, damage):
+    """Round 6 integration of M-8: `_tao_cached` sends a damaged TAO manifest back to `fetch_tao`, which then read it with json.loads and raised
+    JSONDecodeError every time. It is no record now: the files are checked against the server again and the manifest is rewritten."""
+    base = tree.publish()
+    good = json.loads(tao.fetch_tao(BOX, T0, T1, tmp_path / "tao", base).read_text())
+    (tmp_path / "tao" / "manifest.json").write_bytes(damage)
+    again = json.loads(tao.fetch_tao(BOX, T0, T1, tmp_path / "tao", base).read_text())
+    assert again["files"] == good["files"] and again["selected"] == good["selected"] and tao.verify(tmp_path / "tao") == len(good["files"])
+
+
 def test_a_later_deployment_inside_the_window_is_a_candidate_but_the_fuller_series_wins(tree, tmp_path):
     base = tree.publish()
     man = json.loads(tao.fetch_tao(BOX, T0, T1, tmp_path / "tao", base).read_text())

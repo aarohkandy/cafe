@@ -1,6 +1,6 @@
 # Pre-mission pipeline (cafe/pm) dependencies, on top of requirements.txt. Pinned to the versions
-# resolved for Python 3.12 on 2026-10-28. wrf-python has no 3.12 wheel: its uvmet10 rotation is done
-# in cafe/pm/env/wrf.py and tested against a hand-rotated case.
+# resolved for Python 3.12 on 2026-10-28. wrf-python has no 3.12 wheel: its uvmet10 rotation is
+# cafe.pm.env.conventions.rotate_grid_to_earth, tested against a hand-rotated case.
 h5py==3.16.0
 pyyaml==6.0.3
 jsonschema==4.26.0

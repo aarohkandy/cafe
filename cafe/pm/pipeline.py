@@ -1187,7 +1187,8 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     df, used = whatif.add_rows(ctx.table, rows)                           # after the fit is decided: the table grows for the next run, not for this one
     L.note(f"training table {used}: {len(df)} rows now; this run trained on {len(train_df)} ({len(train_in)} from {snap.name}, {len(rows)} added by this run: "
            f"{len(res['vehicles'])} vehicles x {1 + len(variants)} missions less {len(skipped)} skipped)")
-    L.note(f"emulator share {share:.0f} s ({'incl. stage 1b, which was a copy' if free else 'stage 1b reran'}): {len(variants)} variant run(s) of "
+    s1b = "stage 1b's share included, since no vehicle was refit" if free else "stage 1b reran"
+    L.note(f"emulator share {share:.0f} s ({s1b}): {len(variants)} variant run(s) of "
            f"{est:.0f} s each ({sizes['variant_s_source']}); measured {', '.join(f'{w:.0f}' for w in walls)} s (timings are not in the hashed output)")
     for sk in skipped:
         L.note(f"variant {sk['variant']} skipped for {sk['vehicle']}: {sk['reason']}")

@@ -37,7 +37,7 @@ def data(ci_env):
 
 
 TIMING = ("run", "machine.wall_s", "machine.git_sha", "machine.versions", "machine.machine",       # what differs between runs of the same code and seed
-          "machine.timing.stage1.measured", "machine.timing.variants.measured")
+          "machine.timing.stage1.measured", "machine.timing.variants.measured", "machine.timing.stage1b_sensitivity.measured")
 
 
 def _drop(node, path):

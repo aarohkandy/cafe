@@ -1664,7 +1664,7 @@ def test_no_current_data_is_a_named_failure_mode_on_the_page(run):
     report.write(run, m, plan)
     rep, t = load(run), plain((run / "report" / "index.html").read_text())
     assert rep["vehicles"]["usv"]["mode_notes"] == dict(no_current_data=report.MODE_TEXT["no_current_data"]) and rep["vehicles"]["uas"]["mode_notes"] == {}
-    assert "no_current_data: 4" in t and "the ocean current was not a number at the vehicle's position" in t
+    assert "no_current_data: 4" in t and "there was no finite wind, current or wave state at the vehicle's position" in t
 
 
 def test_the_emulator_section_prints_both_coverage_numbers_with_their_scales(run):
@@ -1742,7 +1742,7 @@ def test_a_p_fail_the_ensemble_excludes_is_not_told_to_get_more_members():
     assert "excluded by this ensemble (lower 95 % bound 0.8" in t and "cannot be certified" not in t
     d = stat_block(0, 64)                                                    # a zero-failure ensemble does leave 5 % open
     assert "cannot be certified at n = 64" in d["certify_statement"] and "73 members" in d["certify_statement"]
-    assert "60 members would be needed" not in d["note"] and "already below 5%" in d["note"]
+    assert "60 members would be needed" not in d["note"] and "weaker statement" in d["note"] and "already below" not in d["note"]
     assert stat_block(2, 80)["certify_statement"] is None                    # n >= n_certify: nothing to say
 
 

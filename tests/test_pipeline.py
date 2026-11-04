@@ -1467,7 +1467,7 @@ def test_the_variant_runs_stay_inside_the_emulator_share(tmp_path, table, fake_s
     assert [c[1] for c in fake_stage1][:3] == [list(range(16 * (k + 1), 16 * (k + 2))) for k in range(3)]
     assert [c[0] for c in fake_stage1][:3] == [["glider_eq", "glider_2n", "usv", "uas"]] * 3
     assert check_of(d, "emulator_rows_appended")["value"] == 16 and "emulator_variants_within_share" not in [c["name"] for c in d["checks"]]   # round 5 M-13
-    assert any("3 variant run(s) of 4 s each (the planner's estimate" in n for n in d["notes"]) and any("incl. stage 1b" in n for n in d["notes"])
+    assert any("3 variant run(s) of 4 s each (the planner's estimate" in n for n in d["notes"]) and any("stage 1b's share included" in n for n in d["notes"])
     refit = cheap_plan(synthetic_ctx(tmp_path, 48, "refit"), 100.0)                                            # glider_eq was refit: share 5 s -> none
     run_stage(pipeline.s_emulator, refit, "emulator")
     d2 = json.loads((refit.run_dir / "emulator" / "design.json").read_text())
@@ -2721,6 +2721,8 @@ def test_the_emulator_ledger_has_the_planned_and_measured_variant_seconds_and_no
     assert "emulator_variants_within_share" not in [c["name"] for c in d["checks"]]
     assert any(n.startswith("variant runs: planned 12 s (3 x 4 s), measured ") and "emulator share 20 s" in n and "lower bound" in n for n in d["notes"])
     assert d["variant_planned_s"] == 4.0 and len(d["variant_wall_s"]) == 3 and all(w >= 0 for w in d["variant_wall_s"])
+    # round 6 M-17: stage 1b is not "a copy" when its sensitivity case ran; the share note says why stage 1b's share is in it
+    assert any("(stage 1b's share included, since no vehicle was refit)" in n for n in d["notes"]) and not any("which was a copy" in n for n in d["notes"])
     assert design["variant_planned_s"] == 4.0 and "variant_wall_s" not in design and "wall_s" not in json.dumps(design)       # DECISIONS 139: no timing
 
 
@@ -2786,7 +2788,9 @@ def test_a_comparison_without_a_usable_wind_direction_writes_no_direction_prior_
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
     assert set(fit) >= {"wind_speed_bias", "wind_speed_noise"} and not [k for k in fit if k.startswith("wind_direction")]
     assert any("no usable wind direction at the moorings (dir_n " in n and "stay the perturbations.yaml priors" in n for n in d["notes"])
-    assert all(np.isfinite(e["mean"]) and np.isfinite(e["value"]) for e in fit.values())
+    nums = [x for e in fit.values() for x in e.values() if isinstance(x, (int, float)) and not isinstance(x, bool)]   # no null and no NaN in any prior
+    assert all(np.isfinite(x) for x in nums) and not [k for e in fit.values() for k, x in e.items() if x is None]
+    assert np.isfinite(fit["wind_speed_bias"]["mean"])
     pri, marg = stage1.priors_for(ctx.mission, fit)                                  # the TypeError of `np.isfinite(None)` before
     assert marg["wind_direction_bias"]["sd"] == pri["wind_direction_bias"]["value"] and marg["wind_speed_bias"]["mean"] == fit["wind_speed_bias"]["mean"]
 

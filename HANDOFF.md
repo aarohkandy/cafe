@@ -17,6 +17,8 @@ Then, the same day:
 
 **Round 5 is fixed and committed:** the five branches (`r5-v`, `r5-c`, `r5-s`, `r5-p`, `r5-w`) merged into `premission-step4`, the lead's integration items (DECISIONS 302 to 307: the bench's stdout, the platform loaders through `config._yaml`, `plan` with the memory model, the report reading the variant timings from the emulator ledger, measured timings volatile in the same-seed comparison, the query-time test as the fastest of 5 rounds), docs (DECISIONS 276 to 307). Gate: ruff and mypy clean, 2,364 collected, all passing, coverage 99.95 % (100 % on physics, stats, env, stage3). The full-suite container needs at least 12 GB (the memory model of `plan`). Next: q6 on the round-5 code (what moved in the demo verdicts is not known), then round 6.
 
+**Round 6 fixes are merged** (update, 2026-11-03): the five branches (`r6-v`, `r6-c`, `r6-s`, `r6-p`, `r6-w`) are merged into `premission-step4` with the lead's integration edits (DECISIONS 308 to 338: the 26 findings in order, then L-W1 and L-W2 for the audit's two-pass test step and the pinned SITL install, L3 to L5), and the documents are written from the hand-backs in `review/round_6/handbacks/`. Batch W was finished by the lead, not by its builder. Next: the full gate on the merged tree (the test count is pending everywhere it is quoted), then q7 on the round-6 code to see what moved in the demo verdicts, then round 7. Never use `git stash` (CLAUDE.md): the stash list is shared by every worktree, and two builders' stashes crossed in round 6.
+
 ## 1. The goal and the stop rule
 
 `docs/BRIEF.md` section 0 is the definition of done.

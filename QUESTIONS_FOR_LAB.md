@@ -34,6 +34,10 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    *Default:* `radio.link_loss_hold_s` = 5 s, assumed from ArduCopter's GCS failsafe default (`FS_GCS_TIMEOUT`, recalled, not re-read); a shorter fade is ridden through. *If supplied:* edit it in `platforms/quad_uas.yaml`.
    Two numbers of the Saildrone file are asked for by name (review round 3, M-8): is there a minimum apparent wind angle below which the vehicle cannot hold a tack, and what is it?
    *Default:* `min_awa_deg` = 15 deg, assumed with no source (the polar still gives positive speed inside it). *If supplied:* edit `params.min_awa_deg` in `platforms/saildrone_explorer.yaml`.
+   (d) Do the range limits the loaders enforce fit your vehicles? (review round 6, M-9 and M-10) The limits are bounds of the model that we chose, not datasheet values: a platform leaf outside its range
+   (for example `stw_cap_ms` above 50 m/s, `gravity` above 20, `rudder_x_m` 0, Seaglider `hd_s` outside -0.9 to 0) is refused at load, and a mission with `dive_depth_m` outside 1 to 2000 m (for a glider, outside its
+   `min_dive_m` to `rating_m`), `radius_km` outside 0.01 to 1000 or `lost_after_h` above 720 is refused by `validate`, each message naming the field and the limit.
+   *Default:* those limits. *If a real vehicle or mission is outside one:* tell us the number, and the limit in `cafe/schemas/mission.json` or the platform's `REQUIRED` table is widened (a code change).
 
 5. **Mission definition.** Deployment windows, waypoints, station-keeping tolerance, surfacing schedule, which
    link pairs must hold and what outage is acceptable, and the go/no-go thresholds the PIs actually use.

@@ -75,9 +75,9 @@ With the limitations below (L01 to L12, L13 while the sub-grid layer is uncalibr
 |---|---|---|---|
 | Data pedigree | none | 3 | a mission with a TAO comparison stored |
 | Verification | L04, L10, L12 | 2 | retire L04 (an independent Cd), L10 (a reliable SITL return) and L12 (rerun the stored CFD); the v4 DTMB study is installed in `$CAFE_DATA/dtmb5415` and fills the four V&V rows (numbers in section 4) |
-| Validation | L01, L02, L03, L04, L07, L08, L09, L13, L15, L17, L18, L20 | 2 | retire the twelve; complete V&V rows from the current recipe with U_val below 50 % of the reference |
+| Validation | L01, L02, L03, L04, L07, L08, L09, L13, L15, L17, L18, L19, L20 | 2 | retire the thirteen; complete V&V rows from the current recipe with U_val below 50 % of the reference |
 | Input pedigree | L01, L05, L06, L11 | 2 | retire the four; sourced platform data; no assumed prior |
-| Uncertainty characterization | L07, L12, L13, L14, L18 | 2 | retire the five; at least 73 members; no assumed prior |
+| Uncertainty characterization | L07, L12, L13, L14, L18, L19 | 2 | retire the six; at least 73 members; no assumed prior |
 | Results robustness | L10, L15, L16 | 2 | retire the three; a refit that does not change a verdict |
 | Use history | none | 0 (1 with the file) | a record in `docs/USE_HISTORY.md` of a prediction compared with a campaign outcome |
 | M&S management | none | 3 | nothing the repository lacks, when run from a git checkout |

@@ -35,7 +35,7 @@ Pipeline and tools
 - `python -m cafe.pm ingest-ocean` writes the lab's HYCOM (netCDF or archv `.a/.b`) into the store the mission names; `QUESTIONS_FOR_LAB.md` Q1 and Q8 give the commands and keys; `docs/RUNBOOK.md`, first draft (`d7a618b`).
 - `mypy --strict` reports 0 errors in `cafe/pm`; `pyproject.toml` sets `strict = true` and the audit's mypy step reads it. `type: ignore` is used only on third-party calls (warp, trimesh, jax.config, smt), each with its code and reason (`84db079`, DECISIONS 115).
 - `ledger.git_sha` falls back to `CAFE_GIT_SHA` in a copy without `.git` (`f48fde3`).
-- 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files in `tests/` after round 5 (1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
+- 2,052 `def test_` and 2,481 collected cases, all passing, in 49 test files in `tests/` after round 6 (after round 5: 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files; 1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
 
 Environment
 
@@ -297,6 +297,49 @@ Round 5 read the q5 quick run (`runs/q5` on homebase, code `d9878e4`) and the co
   - M-16: CI runs `make ci` and `make broken` before `make audit` and despite its failure; the job timeout is 180 min.
 - Documents (M-24 to M-26; DECISIONS 299 to 301): RUNBOOK says what `--budget ci` really does on the demo (a smoke-test profile, not a refusal), names the optional Bellhop build, the memory limits and the sortie-minute cost; the stale USV ratio and the "battery verdict" wording are corrected (QUESTIONS_FOR_LAB 14, PHYSICS, CREDIBILITY L17 and L18, the known issue below); `tests/test_config_docs.py` pins the three RUNBOOK sentences.
 
+Review round 6 (`review/round_6/merged.md`: 26 findings, 0 critical, 6 major, 20 minor; DECISIONS 308 to 333, plus the lead's items 334 to 338)
+
+Round 6 read the q6 quick run (`runs/q6` on homebase, code `3c9c64d`) and the code at `4ba0230`. Five batches fixed disjoint files (vehicles and forcing, mission config and cache files, report and statistics, planner and pipeline, build and CI), batch W was finished by the lead, and a document pass wrote the rest; each code fix has a regression test that failed on the old code. Every stored resume is invalidated again (the code digest changes). q7 will show what moved in the demo verdicts (not yet known). Counts: 2,052 `def test_`, 2,481 collected cases, all passing; coverage 99.95 % of `cafe/pm` (13,119 of 13,125), 100 % on physics, stats, env and stage3, the same from the two-pass audit.
+
+- Vehicles, forcing and platform files (M-1, M-4, M-5, M-10; DECISIONS 308, 311, 312, 317):
+  - M-1: a USV whose wave state (Hs, Tp, direction, Stokes drift) is not finite, a hole in the UMWM sea mask, is flagged `no_current_data` from that step instead of a NaN position that passed or an `IndexError` after the ingest.
+  - M-4: a UAS launch in the first or last hour of the window no longer ends stage 1 with `OutsideData`; the gust-front hours outside the data carry no events and are counted in the stage-1 ledger.
+  - M-5: no usable mooring wind direction (calm WRF, moorings without a direction channel) leaves the direction priors at their configured values instead of writing a null that crashed stage 1; a non-numeric prior sd is a `ValueError` naming the key.
+  - M-10: the platform loaders refuse the 17 out-of-range leaf values (new `check_params` kinds `nonzero`, `ge1`, `<kind><=max`, `range:lo:hi`; `usv.MISSION_REQUIRED` for `cap_cycles`).
+- Mission config and cache files (M-7, M-8, M-9, M-11, M-22, M-24, L3; DECISIONS 314 to 316, 318, 329, 331, 336):
+  - M-7: an unreadable ocean store or chunk is a `ConfigError` naming the store itself (the old text said to delete the whole `ocean` directory); "restore" for the lab's store, which the pipeline cannot download.
+  - M-8: the orca manifest and cut record are written atomically; an unreadable one is no record and the parts are fetched again; an unreadable `umwm.zarr` is a named error. L3: `fetch_tao` reads its old manifest through `orca.read_json`, so an empty or truncated TAO manifest is fetched again, not a traceback.
+  - M-9: `mission.json` has ranges (wind limit, gust window, radius, lost time, dive depth, track tolerance, strictly rising unique altitudes), and a glider's `dive_depth_m` must lie between its platform's `min_dive_m` and `rating_m`.
+  - M-11: `lab_hycom` without `path` and `temperature_kind` on `gofs31` are `ConfigError`s.
+  - M-22: `hangar --platform radios` and `modems` check the two files as tables ("radio table", "modem table") instead of failing them as a UAS.
+  - M-24: an unquoted timestamp and an empty value in a mission file say what to do.
+- Planner, pipeline and tools (M-2, M-3, M-6, M-12, M-14, M-20, M-21, M-23; DECISIONS 309, 310, 313, 319, 321, 327, 328, 330):
+  - M-2: the stage-1 environment size follows the padded box's area (0.0031 GB per deg^2 day from the one measured point; the demo is still 9.0 GB), the disk floor counts every Zarr store of the cache and the ocean store, and the plan is made again at the end of the ingest (`plan.json` and the worker count follow it).
+  - M-3: `sitl_members` is 0 for every budget (4 and 8 were printed for `4h` and `overnight`, and no stage flies one); the report says ArduCopter SITL is only a slow receipt.
+  - M-6: the emulator training table is written through a temporary of its own and read-modify-writes hold a file lock, so concurrent runs share it safely.
+  - M-12: `receipts --only` writes `runs/receipts_partial.json` and not the full table, an unmatched name exits 2, and the report treats a partial table as stale.
+  - M-14: the free-surface message judges each `--budget` profile by its own plan ("--budget overnight (118 min of stage 3 in that plan)"), not by the running plan's share.
+  - M-20: `audit` refuses a path that is not a run directory or an unknown option with exit 2 before ruff, mypy or the suite.
+  - M-21: `make acceptance` writes into `runs/acceptance` and no longer removes the user's `runs/quick` and `runs/overnight`; `make audit` checks `runs/acceptance/quick` too.
+  - M-23: `CAFE_NPROC` is validated like `CAFE_WORKERS` (`par.env_count`); `CAFE_OFFLINE` takes 1/true/yes/on and 0/false/no/off and rejects anything else.
+- Report and statistics (M-13, M-15, M-16, M-17, L4; DECISIONS 320, 322 to 324, 337):
+  - M-13: the what-if table prints each candidate's interval and flags one whose interval contains the baseline's P(fail) as not distinguishable from it.
+  - M-15: the rule-of-three note says it is a weaker statement than the 73-member certification and no longer says "already below 5 %".
+  - M-16: the sensitivity sentence prints three places for the index and its floor, and their difference when they agree to two.
+  - M-17: the stage-1b ledger and the machine block name the 30 s USV sensitivity case, which is charged to no share. L4: the emulator ledger's share note says "stage 1b's share included, since no vehicle was refit".
+- Build and CI (M-19, L-W1, L-W2; DECISIONS 326, 334, 335):
+  - M-19: `bin/pmx.sh` passes `CAFE_GIT_DIRTY` like `pm.sh`, so a run made with it can back the golden (q6's ledgers say `git_dirty: null`).
+  - L-W1: the audit's test step is two passes in one coverage record, xdist by file and then the five real-time tests alone (the serial suite was killed at the 180 min timeout on the hosted runner); xdist 3.6.1 and execnet 2.1.1 on their own `Dockerfile.pm` line.
+  - L-W2: `bench/install_sitl.sh` installs ArduPilot's published `stable-4.7.1` SITL build and parameter files with pinned sha-256 sums for CI and for a lab (RUNBOOK 1, `CAFE_WORK=/data/work` in both `pm()` wrappers). No hosted run has timed the audit with it yet.
+- Tests and documents (M-18, M-25, M-26, L5 to L7; DECISIONS 325, 332, 333, 338 to 340):
+  - M-18: limitation L20 (UAS turbulence generated at one height for all legs) in `credibility.py`, `docs/CREDIBILITY.md` and PHYSICS 5.1.
+  - M-25: PHYSICS and DECISIONS 37 say the pipeline passes `theta_e`; PHYSICS no longer says the UAS verdict is decided by the battery alone; `requirements-pm.txt` names `conventions.rotate_grid_to_earth`, not the `env/wrf.py` that does not exist; a doc test keeps all three out.
+  - M-26: tests for the four mutants that survived (USV east-west metres, `path_speed` east-west, the `becalmed` rule, the 0.75 go-bound), the vacuous `or True` assertion deleted, and `audit.BANNED` catches an assert ending in `or True`.
+  - L5: CLAUDE.md says never to use `git stash` (the stash list is shared by every worktree; two builders' stashes crossed).
+  - L6: docs/CREDIBILITY.md's reach table lists L19 under validation and uncertainty, and a test derives the table from the code's limitation list.
+  - L7: the integration gate's fixes (DECISIONS 340): stage 1b's measured seconds left out of the same-seed comparison, three tests brought to the merged code, CLAUDE.md on `audit --code-only`.
+  - RUNBOOK, README, PHYSICS, CREDIBILITY, QUESTIONS_FOR_LAB 4d, STATUS and HANDOFF are updated for the rows above.
+
 ### Known issues
 
 Each was checked against the committed code at `d7a618b` on 2026-10-30 before it was listed. Line numbers are those of `d7a618b`; the working tree also holds uncommitted edits to `cafe/pm/physics/*.py`, `stats/intervals.py` and `audit.py`, which were not read as part of this entry.
@@ -314,7 +357,7 @@ Each was checked against the committed code at `d7a618b` on 2026-10-30 before it
 - **Ocean SDE.** The glider's dive-averaged current omits the SDE; a GPS-based DAC would carry about 0.04 m/s of it over a 3 h dive, below the current prior's sigma. K is Okubo's value at the 0.08 deg HYCOM cell at every depth (DECISIONS 100).
 - **TAO.** TAO has no wave variable (`tao.py:17`), so UMWM `swh` is not validated against buoys.
 - **Receipts scored on synthetic data.** The emulator receipts (held-out accuracy, conformal coverage, range guard) run on `emulator.synthetic_table` (`emulator.py:263`, `:292`), not on a real mission table. The real-spectrum Stokes correction uses a leave-one-out median error as a 1-sigma (`surface.py:232`).
-- **Not called by any pipeline stage** although implemented and receipted: the SPRT (`sequential.sprt_decide`), subset simulation (`rare.subset_simulation`), `subgrid.diurnal_jet` (the surface layer computes its own jet, `surface.py:247`), `waves.Realization`, `stokes_breivik2016`, `encounter_spectrum`, and `Emulator.flip_search` and `next_candidate` (the pipeline uses `whatif.flip_search`).
+- **Not called by any pipeline stage** although implemented and receipted: the SPRT (`sequential.sprt_decide`), subset simulation (`rare.subset_simulation`), `subgrid.diurnal_jet` (the surface layer computes its own jet, `surface.py:247`), `waves.Realization`, `stokes_breivik2016`, `encounter_spectrum`, and `Emulator.flip_search` and `next_candidate` (the pipeline uses `whatif.flip_search`), and `uas.fly_sitl` (ArduCopter SITL runs only in the slow receipts; `plan.json` says `sitl_members` 0 for every budget, round 6, M-3).
 - **Limitations found while writing the docs**, each in the code now: the acoustic 4 km mid-frequency range is true by construction, the USV 12 m/s point is a fit, the Sun et al. magnitude is 8 to 26 % against the published 30 to 35 %, the Cd receipt is a closure, several citations were recalled and not re-read, the glider T(z) is assumed, and the turbulence sigma_v/sigma_u and sigma_w/sigma_u are low (0.63 and 0.43 against 0.8 and 0.5). Limitations L01 to L07.
 - No GPU exists (Azure quota 0), so every GPU figure is a labelled projection, the GPU acceptance run (`--budget 4h --gpus 1`) cannot run here and the lab's server has not been used (DECISIONS 106, 132).
 

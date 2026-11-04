@@ -502,10 +502,10 @@ def test_the_real_planner_refusal_of_a_long_window_is_an_error_line_not_a_traceb
 
 def test_plan_applies_the_memory_model_of_run(tmp_path, capsys, monkeypatch):
     """Round 5 integration of M-6: `run` planned with the memory limit and `plan` without it, so `plan` printed a plan that `run` then refused."""
-    monkeypatch.setattr(par, "memory_gb", lambda: 30.0)
+    monkeypatch.setattr(par, "memory_gb", lambda: 1.0)                                         # the 60-day CI box needs about 3 GB (row 309: by area)
     assert cli.main(["plan", "--mission", long_mission(tmp_path), "--budget", "ci"]) == 2
     err = capsys.readouterr().err
-    assert err.startswith("error: stage 1 needs about ") and "60-day window" in err and "30 GB is available" in err
+    assert err.startswith("error: stage 1 needs about ") and "60-day window" in err and "1 GB is available" in err
 
 
 def test_fetch_of_a_mission_no_budget_can_run_still_reaches_ingest(tmp_path, monkeypatch):

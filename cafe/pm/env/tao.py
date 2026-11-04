@@ -32,7 +32,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from typing import Any
 
-from . import conventions as cv, remote
+from . import conventions as cv, orca, remote
 from .hycom import box360
 
 BASE = "https://dods.ndbc.noaa.gov/thredds"
@@ -125,7 +125,7 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     mpath = out / "manifest.json"
-    old = json.loads(mpath.read_text())["files"] if mpath.exists() else {}
+    old = (orca.read_json(mpath) or {}).get("files", {})                 # an empty or truncated manifest is no record: every file is checked again
     man: dict[str, Any] = dict(source=base + CATALOG, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={}, waves=dict(checked=0, matches=[]))
     for name, lat, lon in moorings(box, base):
         listing = _files(name, base)
