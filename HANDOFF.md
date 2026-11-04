@@ -16,16 +16,17 @@ The lead paused here at the user's request, mid round 8. Everything below is exa
 | 8 | 56 (four reviewers + lead L-1..L-3) | 6 | **fixes in progress** |
 No round has been clean yet. The user keeps the strict rule (two consecutive rounds with zero findings, minor included; they chose "A" again on 2026-11-04 after being told it may not converge). Demo verdicts unchanged since q5: glider_eq MARGINAL 15/64, glider_2n GO 0, USV NO-GO 60, UAS NO-GO 55.
 
-### Round 8 fixes: branch by branch (merge into `premission-step4`, tip `feb0937`, pushed)
+### Round 8 fixes: branch by branch (all six branches pushed to GitHub; merge into `premission-step4`)
+**The worktrees were deleted on 2026-11-04 at the owner's request** (one project folder only: `/Users/aaroh/Downloads/everything/cafe`). All work is on the branches below, committed and pushed. To continue a batch, recreate its worktree: `git worktree add ../cafe-r8<x> r8-<x>`, and remove it when done (`git worktree remove ../cafe-r8<x>`), so the folder stays single.
 Prompts: `review/round_8/batch_prompts/` (r8_common.md, r8_{E,A,K,C,V,S}.md, r8_A2.md). Merged findings: `review/round_8/merged.md` (M-44 "not confirmed", no fix).
-- **C** done, `r8-c` `b529eb0` (worktree `../cafe-r8c`): M-3, M-6, M-18, M-39, M-52. Note: an autouse `roomy_machine` fixture near the top of tests/test_cli.py.
-- **S** done, `r8-s` `6a0f773` (`../cafe-r8s`): M-15, M-32, M-48, M-43 stage-3 part. Trailer corrected to Sonnet 5.5.
-- **E** done, `r8-e` `caca79d` (`../cafe-r8e`): M-1 ingest part, M-2, M-24, M-29, M-30, M-31, M-33, M-34. Needs K: Data pedigree reads `forcing_in_physical_range` and `coare_ustar_vs_umwm_ust` value >= `pipeline.USTAR_AGREE_FRACTION` 0.90 (sent to K).
-- **K** running when paused, `r8-k` has commit `59ac4b7` (may be partial; read its hand-back `../cafe-r8k/review/round_8/handbacks/r8_handback_K.md` if present); homebase job `r8k_cov`. Extra worktrees `../cafe-r8k-mut`, `../cafe-r8k-old` are its scratch.
-- **V** running, `r8-v` uncommitted at pause (`../cafe-r8v`); homebase job `r8v_s1`; scratch worktree `../cafe-r8v-old`.
-- **A**: builder A coded all seven (M-4, M-5, M-9, M-23, M-35, M-40, M-41) but ran out of context twice; **A2** (prompt r8_A2.md) is finishing it in `../cafe-r8a` (uncommitted at pause; homebase container `pmx_pm_r8a`; scratch `../cafe-r8a-base`, `/private/tmp/claude-501/r8a/`). A added M-4(c): the assembled orca stores are tree-hashed ingest inputs and in the derived-layer key; its cost on the 2.1 GB cache is to be measured.
-- If an agent of this paused session is gone, check its worktree: `git -C ../cafe-r8<x> status`, its hand-back, and `ssh ... 'tmux ls; docker ps'`. Finish a batch from its hand-back the way A2 does.
-- Then, as every round: review each hand-back; merge (append conflicts in tests/: keep both sides; `review/round_*` scratch script `keepboth.py` idea: split on conflict markers); integration items from the hand-backs' "needs"; a docs pass (prompt like `review/round_7/batch_prompts/r7_D.md`; DECISIONS from 393; doc-only findings M-50, M-51, M-53 to M-56); the gate; commit; push; q9; round 9.
+- **C** done, `r8-c` `b529eb0`: M-3, M-6, M-18, M-39, M-52 (an autouse `roomy_machine` fixture near the top of tests/test_cli.py).
+- **S** done, `r8-s` `6a0f773`: M-15, M-32, M-48, M-43 stage-3 part.
+- **E** done, `r8-e` `caca79d`: M-1 ingest part, M-2, M-24, M-29, M-30, M-31, M-33, M-34. K must read its checks (below).
+- **K** paused, `r8-k` `52381a0` (WIP on top of `59ac4b7`): credibility edits and a hand-back draft (`review/round_8/handbacks/r8_handback_K.md` on that branch). Check that M-1's Data pedigree reads `forcing_in_physical_range` and `coare_ustar_vs_umwm_ust` value >= `pipeline.USTAR_AGREE_FRACTION` 0.90; finish its verification.
+- **V** paused, `r8-v` `bf4d2a7` (WIP, NOT verified, no hand-back): vehicle edits for its 15 findings; it was about to run the new platform tests.
+- **A** paused, `r8-a` `3feb79b` (WIP, NOT verified): all seven findings coded; what is left is listed in `r8_A2.md` (the M-5 slow-query fail-first, the comms mutant and M-41 make proofs, the `tree_sha256` timing on the orca cache, whole-file runs, ruff/mypy, the hand-back). The slow-query plugin it used is in `/private/tmp/claude-501/r8a/slowq_plugin.py` on the laptop (scratch, may be gone).
+- No builder is running; their homebase jobs were stopped. Their homebase directories `~/work/cafe/pm_r8*` are leftovers (delete when done).
+- Then, as every round: review each hand-back; merge (append conflicts in tests/: keep both sides; check no test name appears twice); integration items from the hand-backs' "needs"; a docs pass (DECISIONS from 393; doc-only findings M-50, M-51, M-53 to M-56); the gate; commit; push; q9; round 9.
 
 ### The gate (how it is run now)
 - **Once per round** (decided 2026-11-04; the two methods were shown to give identical coverage in rounds 6 and 7): `python -m cafe.pm audit` (two passes: xdist by file, then the real-time tests with --cov-append; `audit.log` holds the whole output). On homebase: `PMX=pm_int5 PM_CPUS=6 PM_MEM=28g TM=<name> bin/pmx.sh python -m cafe.pm audit`, about 43 min. The only expected AUDIT FAIL is `docs/mutation.json` (code freeze).
