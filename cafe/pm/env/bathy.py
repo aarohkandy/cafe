@@ -172,6 +172,11 @@ def cache_path(box: Any, cache_dir: Any) -> pathlib.Path:
     return pathlib.Path(cache_dir) / f"gebco2026_{s:g}_{n:g}_{w:g}_{e:g}.npz"
 
 
+def cached_cuts(cache_dir: Any) -> list[pathlib.Path]:
+    """The finished GEBCO cuts in `cache_dir` (the `cache_path` names, or hand-made ones), sorted; the `.part.npz` an interrupted fetch leaves is not one."""
+    return sorted(p for p in pathlib.Path(cache_dir).glob("gebco2026_*.npz") if not p.name.endswith(".part.npz"))
+
+
 def choose(box: Any, cache_dir: Any, gofs: Any = None, umwm: Any = None, fetch: bool = True, url: str = GEBCO_URL) -> Bathymetry:
     """First of GEBCO -> GOFS -> UMWM that works. cache_dir/gebco2026_<box>.npz is reused, else fetched when `fetch`; gofs: the
     Zarr path; umwm: dict(lon=, lat=, depth=). Raises LookupError listing every failure when none works."""

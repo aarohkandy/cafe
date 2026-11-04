@@ -666,16 +666,53 @@ def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = 
 # ------------------------------------------------------------------ ingest
 
 
+def _cut(pos: Any, lo: float, hi: float, x: Any = None, pad: float = 0.1) -> Any:
+    """Mask of the points of `pos` inside [lo - pad, hi + pad] and, so that the store always brackets the box whatever the grid (the ingest check wants
+    an edge within `pad` of the box edge), the nearest point beyond an edge when the nearest kept one lies more than `pad` inside it, or when none is
+    kept (a grid coarser than the box): then both neighbours, or nothing when the grid does not reach both sides. `x` ranks the points not kept
+    (the same coordinate unwrapped around the box); default `pos`."""
+    keep = (pos >= lo - pad) & (pos <= hi + pad)
+    x, mid = pos if x is None else x, 0.5 * (lo + hi)
+    near, far = np.flatnonzero(~keep & (x < mid)), np.flatnonzero(~keep & (x >= mid))
+    below, above = (near[np.argmax(x[near])] if len(near) else None), (far[np.argmin(x[far])] if len(far) else None)
+    if not keep.any():
+        if below is not None and above is not None:
+            keep[[below, above]] = True
+        return keep
+    add_below, add_above = pos[keep].min() > lo + pad, pos[keep].max() < hi - pad
+    if below is not None and add_below:
+        keep[below] = True
+    if above is not None and add_above:
+        keep[above] = True
+    return keep
+
+
 def _sub(ds: Any, box: Any) -> Any:
-    """Cut a dataset to the box (lon taken mod 360, so across the dateline), padded by 0.1 deg."""
+    """Cut a dataset to the box (lon taken mod 360, so across the dateline), padded by 0.1 deg, plus the nearest point beyond an edge where the grid is
+    too coarse for the pad to reach it (`_cut`)."""
     s, n, w, e = box360(box)
     lon = np.mod(ds.lon.values, 360.0)
-    ll = np.where(lon < w - 0.1, lon + 360.0, lon)
-    ds = ds.assign_coords(lon=ll).isel(lon=np.where((ll >= w - 0.1) & (ll <= e + 0.1))[0]).sortby("lat")
-    ds = ds.isel(lat=np.where((ds.lat.values >= s - 0.1) & (ds.lat.values <= n + 0.1))[0])
+    ll, mid = np.where(lon < w - 0.1, lon + 360.0, lon), 0.5 * (w + e)
+    ds = ds.assign_coords(lon=ll).isel(lon=np.flatnonzero(_cut(ll, w, e, (lon - mid + 180.0) % 360.0 - 180.0 + mid))).sortby("lat")
+    ds = ds.isel(lat=np.flatnonzero(_cut(ds.lat.values, s, n)))
     if ds.sizes["lon"] == 0 or ds.sizes["lat"] == 0:
         raise ValueError(f"no lab-HYCOM points inside the box {box}")
     return ds.assign_coords(lon=np.mod(ds.lon.values, 360.0))
+
+
+def _snapshot_times(label: pathlib.Path) -> list[float]:
+    """The epoch seconds of the time steps of one lab snapshot (a netCDF file or an archv stem), read without its fields; [] when they cannot be
+    read, which the reader then reports by name."""
+    import xarray as xr
+    try:
+        if label.suffix == ".nc":
+            with xr.open_dataset(label) as ds:
+                tc = _dim(ds[_pick(ds, "temp") or ""], "time") or ""
+                return [float(t) for t in ds[tc].values.astype("datetime64[s]").astype("int64")] if np.issubdtype(ds[tc].dtype, np.datetime64) else []
+        doc = read_b(str(label) + ".b")
+        return [model_day_to_epoch(doc["fields"][0]["day"], doc["header"].get("yrflag", 3))]
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return []
 
 
 def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any = None, grid: Any = None, depth: Any = None) -> pathlib.Path:
@@ -695,6 +732,15 @@ def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any =
         stems = [f.with_suffix("") if f.suffix in (".a", ".b") else f for f in files]
         gstem = pathlib.Path(grid) if grid else stems[0].parent / "regional.grid"
         reads, labels = [functools.partial(read_archv, s, gstem, temperature_kind, depth, box) for s in stems], stems
+    times = [_snapshot_times(lab) for lab in labels]
+    order = sorted(range(len(labels)), key=lambda i: (min(times[i], default=np.inf), i))        # by time, not by name (snap_10 sorts before snap_9)
+    reads, labels, times = [reads[i] for i in order], [labels[i] for i in order], [times[i] for i in order]
+    seen: dict[float, Any] = {}
+    for lab, ts in zip(labels, times, strict=True):
+        for t in ts:
+            if t in seen:
+                raise ValueError(f"{seen[t].name} and {lab.name} are the same time ({_iso(t)} UTC); remove one")
+            seen[t] = lab
     kinds: list[str] = []
 
     def steps() -> Iterator[Any]:

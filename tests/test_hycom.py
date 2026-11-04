@@ -842,3 +842,82 @@ def test_r7_m36_a_lab_file_whose_field_is_all_nan_is_refused_with_the_file_named
     f.assign(temp=f.temp * np.nan).to_netcdf(d / "nan.nc")
     with pytest.raises(ConfigError, match=r"nan\.nc: every value of water_temp is NaN after reading \(.*check the depth axis and the variable names\)"):
         h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
+
+
+# ---- review round 8: M-29 (a coarse lab grid is cut so that the store still brackets the box) and M-30 (snapshots go in by time)
+
+
+@pytest.mark.parametrize("step", [0.25, 0.5, 1.0])
+@pytest.mark.parametrize("wrap", [False, True])
+def test_r8_m29_the_cut_of_a_coarse_lab_grid_always_brackets_the_box_to_the_ingest_checks_tolerance(step, wrap):
+    import xarray as xr
+    box = s, n, w, e = (-0.12, 0.12, 179.84, 180.48)
+    bad = []
+    for off in np.linspace(0.0, step, 9)[:-1]:
+        lat = np.arange(-4.0, 4.0, step) + off
+        lon = 170.0 + np.arange(0.0, 20.0, step) + off
+        lon = np.where(lon > 180.0, lon - 360.0, lon) if wrap else lon                       # the lab file may write the dateline as -180..180
+        ds = xr.Dataset({"x": (("lat", "lon"), np.zeros((len(lat), len(lon))))}, coords=dict(lat=lat, lon=lon))
+        out = h._sub(ds, box)
+        la, lo = out.lat.values, out.lon.values
+        if not (la.min() <= s + 0.1 and la.max() >= n - 0.1 and lo.min() <= w + 0.1 and lo.max() >= e - 0.1):            # what pipeline._ocean_cached asks
+            bad.append(round(float(off), 3))
+        assert (np.diff(lo) > 0).all() and (np.diff(la) > 0).all() and lo.min() >= 0 and lo.max() < 360
+        assert la.min() >= s - 0.1 - step and la.max() <= n + 0.1 + step                      # at most one extra point per edge
+        assert lo.min() >= w - 0.1 - step and lo.max() <= e + 0.1 + step
+    assert bad == []                                                                         # for 0.5 and 1 deg, most offsets failed before
+
+
+def test_r8_m29_a_fine_grid_is_cut_as_before(tmp_path):
+    """The pad alone brackets a grid finer than 0.2 deg: the extra points are for coarse grids only (the fixture's 0.04 x 0.08 deg store has none)."""
+    import xarray as xr
+    lat, lon = np.arange(-1.0, 1.0, 0.04), 179.0 + np.arange(0.0, 3.0, 0.08)
+    ds = xr.Dataset({"x": (("lat", "lon"), np.zeros((len(lat), len(lon))))}, coords=dict(lat=lat, lon=lon))
+    out = h._sub(ds, (-0.12, 0.12, 179.84, 180.48))
+    assert out.lat.values.min() >= -0.22 and out.lat.values.max() <= 0.22 and out.lon.values.min() >= 179.74 and out.lon.values.max() <= 180.58
+    with pytest.raises(ValueError, match="no lab-HYCOM points"):
+        h._sub(ds, (40.0, 41.0, 10.0, 11.0))
+
+
+def _copies(fx, tmp_path, names):
+    """The fixture's z-level snapshots (12Z, 15Z, 18Z by time) copied to `names` (a list of (source index, new name))."""
+    d = tmp_path / "lab"
+    d.mkdir(parents=True)
+    src = sorted(fx["zlevel_dir"].glob("*.nc"))
+    for i, name in names:
+        shutil.copy(src[i], d / name)
+    return d
+
+
+def test_r8_m30_snapshots_go_into_the_store_by_time_not_by_file_name(fx, tmp_path):
+    d = _copies(fx, tmp_path, [(0, "snap_2.nc"), (1, "snap_1.nc"), (2, "snap_0.nc")])           # names sort the wrong way round
+    store = h.open_store(h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ"))
+    assert np.array_equal(store.time.values, mk.STEPS)                                          # strictly increasing; reversed before
+    ten = tmp_path / "ten"
+    ten.mkdir()
+    for i, name in ((0, "snap_9.nc"), (1, "snap_10.nc")):                                       # snap_10 sorts before snap_9
+        shutil.copy(sorted(fx["zlevel_dir"].glob("*.nc"))[i], ten / name)
+    assert np.array_equal(h.open_store(h.ingest_lab_hycom(ten, fx["box"], tmp_path / "y.zarr", "in_situ")).time.values, mk.STEPS[:2])
+
+
+def test_r8_m30_the_same_snapshot_twice_is_refused_naming_both_files(fx, tmp_path):
+    d = _copies(fx, tmp_path, [(0, "a.nc"), (1, "b.nc"), (0, "c.nc")])
+    with pytest.raises(ValueError, match=r"a\.nc and c\.nc are the same time \(2023-03-01T12:00:00Z UTC\); remove one"):
+        h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
+    assert not (tmp_path / "x.zarr").exists()                                                   # refused before anything is written
+    one = _copies(fx, tmp_path / "one", [(1, "only.nc")])
+    assert h.open_store(h.ingest_lab_hycom(one, fx["box"], tmp_path / "z.zarr", "in_situ")).sizes["time"] == 1
+
+
+def test_r8_m30_a_file_whose_time_cannot_be_read_is_left_to_the_reader_to_name(fx, tmp_path):
+    d = tmp_path / "lab"
+    d.mkdir()
+    (d / "bad.nc").write_text("not a netCDF")
+    assert h._snapshot_times(d / "bad.nc") == [] and h._snapshot_times(d / "missing.b") == []
+    with pytest.raises(ValueError, match="IO backends"):                                         # the reader's own error, not masked by the time pass
+        h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
+    undecoded = _copies(fx, tmp_path / "u", [(0, "u.nc")])
+    import xarray as xr
+    f = xr.open_dataset(undecoded / "u.nc").load()
+    f.assign_coords(time=np.arange(f.sizes["time"], dtype=float)).to_netcdf(undecoded / "u2.nc")
+    assert h._snapshot_times(undecoded / "u2.nc") == []

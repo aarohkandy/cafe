@@ -603,3 +603,24 @@ def test_the_gebco_cache_is_found_under_the_name_bathy_writes_and_its_absence_is
     ctx = [d for d in new if d.get("kind") == "context"]
     assert len(ctx) == 1 and "GEBCO cache not found under" in ctx[0]["claim"] and "checks were not run" in ctx[0]["claim"]
     assert any("linear field" in d["claim"] for d in new)                  # the raster-free receipt still ran
+
+
+def test_r8_m31_a_part_file_left_by_an_interrupted_gebco_fetch_is_not_the_cache(tmp_path, monkeypatch):
+    from cafe import receipts as R
+    from cafe.pm.env import bathy
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
+    monkeypatch.setattr(pr, "_call", lambda mod, fn="receipts", **kw: kw)
+    (tmp_path / "bathy").mkdir()
+    part = tmp_path / "bathy" / "gebco2026_-7_7_163_197.npz.part.npz"
+    part.write_bytes(b"half a zip")
+    n0 = len(R.OUT)
+    try:
+        dict(pr.jobs())["pm.env.bathy"]()                                                              # BadZipFile on the .part.npz before
+        new = R.OUT[n0:]
+    finally:
+        del R.OUT[n0:]
+    assert [d for d in new if d.get("kind") == "context" and "GEBCO cache not found under" in d["claim"]]
+    assert bathy.cached_cuts(tmp_path / "bathy") == []
+    done = tmp_path / "bathy" / "gebco2026_-7_7_163_197.npz"
+    done.write_bytes(b"")
+    assert bathy.cached_cuts(tmp_path / "bathy") == [done] and dict(pr.jobs())["pm.env.bathy"] == {"cache": done}

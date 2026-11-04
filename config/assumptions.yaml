@@ -390,3 +390,23 @@ stage3.fs.snappy_cell_factor:
   unit: "-"
   why: "Final cells over the blockMesh + refineMesh count at snappy surface level 0 (snappy removes the cells inside the hull): 1.002, 0.980, 0.983 and 0.975 for one to four refinement boxes, Explorer hull and keel, homebase 2026-10-29. Surface levels 1 and 2 failed on this hull (hexRef8 'more than 8 points' on refineMesh's directional splits)."
   replace_with: "Measured cell counts of the lab's own hull and keel STL."
+ingest.wind_speed_max_ms:
+  value: 100.0
+  unit: m/s
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF 10 m wind speed above it (a unit slip or the wrong run; the strongest tropical-cyclone winds are about 90 m/s)."
+  replace_with: "The largest 10 m wind speed the lab's domain and season can produce."
+ingest.swh_range_m:
+  value: [0.0, 30.0]
+  unit: m
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any UMWM significant wave height at a sea node outside it (the largest wave height ever measured at sea is about 19 m)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.sst_range_k:
+  value: [271.0, 315.0]
+  unit: K
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF sea surface temperature at a water cell outside it (sea water freezes at 271.3 K; no open ocean exceeds about 308 K)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.ust_range_ms:
+  value: [0.0, 5.0]
+  unit: m/s
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any UMWM friction velocity at a sea node outside it (hurricane-force wind gives about 2 m/s)."
+  replace_with: "The range the lab's domain and season can produce."
