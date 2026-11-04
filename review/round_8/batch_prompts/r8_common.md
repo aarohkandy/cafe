@@ -2,7 +2,7 @@
 
 Findings: `review/round_8/merged.md` (M-1 .. M-26). Read the whole finding (claim, check, fix) for each one you own before you change anything, and the file map at its end. The brief is `docs/BRIEF.md`; earlier choices are in `DECISIONS.md` (rows up to 392). Read `CLAUDE.md` (the bar for a change, the banned tokens of `cafe/pm/audit.py` `BANNED`, how to run on homebase).
 
-**Your own worktree.** Six builders work at once. Before anything else, from `/Users/aaroh/Downloads/everything/cafe`:
+**Your own worktree.** Six builders work at once. Before anything else, from `/Users/aaroh/Downloads/everything/cafe_main`:
 `git worktree add ../cafe-r8<x> -b r8-<x> premission-step4` (`<x>` is your batch letter in lower case), and work only in `/Users/aaroh/Downloads/everything/cafe-r8<x>`. Never edit the main checkout or another batch's worktree.
 
 **Edit only the files and functions your batch owns** (your prompt lists them; a shared file names the functions you may touch). If a fix needs a change elsewhere, do not make it: write it in your hand-back under "needs from other batches", with the exact change. New tests go at the end of the test file, or in a new test function placed next to the code's existing tests, so the lead's merge stays simple.

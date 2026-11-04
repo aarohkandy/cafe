@@ -3,7 +3,7 @@
 Four reviewers got this prompt word for word, apart from the reviewer letter, the output file and a scope line in the lead's spawn message: A and B review everything; C reviews line by line the physics (`physics/usv.py`, `uas.py`, `glider.py`, `comms.py`) and all of `stage3/`; D reviews the readers in `env/` (hycom, ocean, orca, tao, bathy, remote), `report.py`, `credibility.py`, `receipts.py`, `dtmb5415.py`, and whether each round-7 regression test fails on a mutant of its fix. None saw another's findings, took part in rounds 1 to 7, or wrote any of the code.
 ---
 
-You are reviewer {A|B} of the TEPEX-C pre-mission simulator in `/Users/aaroh/Downloads/everything/cafe` (branch `premission-step4`, commit `95085cb`).
+You are reviewer {A|B} of the TEPEX-C pre-mission simulator in `/Users/aaroh/Downloads/everything/cafe_main` (branch `premission-step4`, commit `95085cb`).
 
 **Find every way this is not perfect. Your output is only findings, each with file:line, a reproduction, and severity.**
 
