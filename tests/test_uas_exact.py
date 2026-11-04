@@ -19,9 +19,9 @@ def quiet(k, t, pos):
     return np.zeros((3, 1))
 
 
-def air(q=None, home=(0.0, 0.0), motor_map=(0, 1, 2, 3), wind_fn=quiet, prm=PRM):
+def air(q=None, home=(0.0, 0.0), motor_map=(0, 1, 2, 3), wind_fn=quiet, prm=PRM, t_launch=0.0):
     """A member 100 m above the sea, so the ground contact does not hold it."""
-    s = uas._Sim1(P, prm, wind_fn, home, motor_map)
+    s = uas._Sim1(P, prm, wind_fn, home, motor_map, t_launch)
     s.p = jnp.asarray([[0.0], [0.0], [100.0]])
     if q is not None:
         s.q = jnp.asarray(q)
@@ -232,3 +232,17 @@ def test_reply_is_the_state_in_ned_frd_with_the_clock_and_the_battery():
     assert np.allclose(j["imu"]["gyro"], [0.1, -0.2, -0.3]) and np.allclose(j["imu"]["accel_body"], [0.5, -0.6, -uas.G0], atol=1e-5)
     assert np.allclose(j["quaternion"], np.array([0.0, 0.0, 0.0, 0.0]) + uas._qm(uas._qm(uas._QC, np.asarray(s.q, float)[:, 0]), uas._QB))
     assert s.reply().endswith(b"\n")
+
+
+# ---- review round 7, M-43: the environment is read at launch time + seconds since launch, not at seconds since boot
+def test_r7_m43_the_wind_is_read_at_the_launch_epoch_plus_the_time_since_launch():
+    calls = []
+
+    def wind(k, t, pos):
+        calls.append((k, t))
+        return np.zeros((3, 1))
+    s = air(wind_fn=wind, t_launch=1.7e9)
+    for _ in range(45):
+        s.step(IDLE)
+    assert [c[0] for c in calls] == [0, 1, 2] and [c[1] for c in calls] == pytest.approx([1.7e9, 1.7e9 + 0.05, 1.7e9 + 0.10], abs=1e-3)
+    assert s.t == pytest.approx(45 * 0.0025)                                                              # the sortie clock itself still starts at 0

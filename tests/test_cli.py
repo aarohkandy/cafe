@@ -639,3 +639,13 @@ def test_r7_m34_a_plan_json_that_is_not_a_json_object_ends_in_an_error_line(tmp_
     assert cli.main(["report", "--run", str(tmp_path)]) == 2
     err = capsys.readouterr().err
     assert err.startswith("error: ") and "plan.json: not a JSON object" in err and "Traceback" not in err
+
+
+# ---- review round 7, M-35: hangar on a glider or USV file without its top-level blocks
+@pytest.mark.parametrize("kind", ["seaglider", "saildrone_usv"])
+def test_r7_m35_hangar_on_a_file_without_params_prints_provenance_failed_and_exits_1(kind, tmp_path, capsys):
+    f = tmp_path / "boat.yaml"
+    f.write_text(f"kind: {kind}\nmass_kg: 52\n")
+    assert cli.main(["hangar", "--platform", str(f)]) == 1
+    out = capsys.readouterr().out
+    assert "provenance FAILED: boat.yaml: missing ['params', 'mission_defaults']" in out

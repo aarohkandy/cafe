@@ -1903,3 +1903,15 @@ def test_the_machine_block_shows_the_stage_1b_sensitivity_case_seconds_it_charge
     assert sv["value"] == 30.014 and sv["stage"] == "stage1b"
     assert "Stage 1b sensitivity case (the USV again under the brief's VPP bias): planned none, it is charged to no share; measured 30.01 s" in plain(h)
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
+
+
+# ---- review round 7, M-16 and M-20: the mode text for a missing insolation and for a wind above the polar
+def test_r7_m16_m20_the_page_names_a_missing_insolation_and_a_wind_above_the_polar(run):
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(modes=dict(no_current_data=4, capsize_proxy=2)))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    notes = rep["vehicles"]["usv"]["mode_notes"]
+    assert notes == dict(no_current_data=report.MODE_TEXT["no_current_data"], capsize_proxy=report.MODE_TEXT["capsize_proxy"])
+    assert "no finite insolation" in notes["no_current_data"] and "above the polar's top (30 m/s: outside the model, counted as a failure, not a pass)" in t
+    assert "there was no finite wind, current or wave state at the vehicle's position" in t                         # round 4's wording is kept

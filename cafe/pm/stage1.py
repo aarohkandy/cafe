@@ -87,6 +87,11 @@ def _record_grid(h: dict[str, Any], init: dict[str, Any], dt: float = DT_VEHICLE
     return out
 
 
+def _no_heading(h: dict[str, Any], M: int) -> dict[str, NDArray[Any]]:
+    """The deploy-state entry of the bow heading for `_record_grid` (round 7, M-27): unknown (NaN) at t0; none when the history holds no heading."""
+    return dict(heading=np.full(M, np.nan)) if "heading" in h else {}
+
+
 def path_speed(lon: NDArray[Any], lat: NDArray[Any], t: NDArray[Any]) -> NDArray[np.float64]:
     """Each member's speed over ground [m/s] from its stored records ((records, members) lon and lat [deg], t (records,) [s]): the sum of the
     segment lengths (equirectangular on the sphere of radius usv.R_E, across the dateline the short way) over the time those segments span;
@@ -117,7 +122,7 @@ def _run_glider(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[
                                         density_bias=np.zeros(M), **({} if windage is None else dict(windage=windage))))
     h = sim.run(T - t0, dt=DT_VEHICLE)
     start = dict(t=t0, lon=np.full(M, d["lon"]), lat=np.full(M, d["lat"]))
-    g = _record_grid(dict(h, surfaced=h["phase"] == 3), dict(start, depth=np.zeros(M), surfaced=np.ones(M, bool)))
+    g = _record_grid(dict(h, surfaced=h["phase"] == 3), dict(start, depth=np.zeros(M), surfaced=np.ones(M, bool), **_no_heading(h, M)))
     if task["mode"] == "station":                                               # the largest excursion from the station [km]
         far = _dist((g["lon"], g["lat"]), (np.full_like(g["lon"], task["lon"]), np.full_like(g["lat"], task["lat"]))).max(0) / 1e3
         margin, what = far, "maximum distance from the station"
@@ -137,7 +142,7 @@ def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     d = v["deploy"]
     sim = usv.USVSim(P, M, env, (d["lon"], d["lat"]), t0, task, perturb=dict(vpp_bias=(1 + X["usv_vpp_bias"]) * drag ** -0.5 - 1))
     h = sim.run(T - t0, dt=DT_VEHICLE, record_s=DT_VEHICLE)
-    g = _record_grid(h, dict(t=t0, lon=np.full(M, d["lon"]), lat=np.full(M, d["lat"])))
+    g = _record_grid(h, dict(t=t0, lon=np.full(M, d["lon"]), lat=np.full(M, d["lat"]), **_no_heading(h, M)))
     k = slice(None, None, int(3600 // REC_S))                                                          # hourly, as the wind is
     lon, lat = g["lon"][k].T, g["lat"][k].T
     tt = np.broadcast_to(g["t"][k], lon.shape)
@@ -642,7 +647,7 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         r0 = batches[0]["vehicles"][vid]
         r: dict[str, Any] = {k: cat([b["vehicles"][vid][k] for b in batches]) for k in ("lon", "lat", "depth")}
         r["t"] = r0["t"]
-        for k in ("alt", "airborne", "surfaced", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin", "profile_margin"):
+        for k in ("alt", "airborne", "surfaced", "heading", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin", "profile_margin"):
             if k in r0:
                 r[k] = cat([b["vehicles"][vid][k] for b in batches])
         for k in ("margin_name", "profile_margin_name"):

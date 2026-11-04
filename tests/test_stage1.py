@@ -2083,3 +2083,34 @@ def test_the_sensitivity_sentence_prints_the_index_and_its_floor_to_three_places
     assert far["text"].endswith("above the 0.299 that unrelated outcomes reach at this member count.")
     none = sens(None, dict(hs_scale=0.1124, wind_speed_bias=0.02), 0.2987)
     assert none["case"] == "nothing_above_floor" and "largest S1 0.112, hs_scale; floor 0.299)" in none["text"]
+
+
+# ---- review round 7, M-27: res.pkl records each member's bow heading beside lon and lat
+def test_r7_m27_the_usv_and_glider_records_hold_the_bow_heading_which_a_current_sets_apart_from_the_course():
+    t0, T = 1_000_000.0, 1_000_000.0 + 7200.0
+    env = AnalyticEnv(wind=(-5.0, 0.0), current=(0.6, 0.0))                                                           # eastward, across a northbound section
+    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2), "usv_vpp_bias": np.full(2, -0.24)}
+    u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
+    ru = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), env, 2, X, t0, T)
+    g = next(x for x in MISSION["vehicles"] if x["id"] == "glider_eq")
+    rg = stage1._run_glider(g, glider.load_platform("seaglider"), env, 2, X, t0, T)
+    for r in (ru, rg):
+        assert r["heading"].shape == r["lon"].shape == (13, 2) and np.isnan(r["heading"][0]).all()                  # unknown at the deploy record
+        assert np.isfinite(r["heading"][1:]).all() and ((r["heading"][1:] >= 0.0) & (r["heading"][1:] < 360.0)).all()
+    assert np.array_equal(ru["heading"][-1], ru["sim"].hd)                                                  # what the simulator holds at the last record
+    east, north = rg["sim"].heading.T
+    assert np.allclose(rg["heading"][-1], np.degrees(np.arctan2(east, north)) % 360.0)
+    # the USV's course over ground differs from its bow
+    course = np.degrees(np.arctan2(np.diff(ru["lon"][-3:], axis=0).sum(0) * np.cos(np.radians(ru["lat"][-1])), np.diff(ru["lat"][-3:], axis=0).sum(0))) % 360.0
+    off = np.abs((course - ru["heading"][-1] + 180.0) % 360.0 - 180.0)
+    assert off.max() > 5.0, (course, ru["heading"][-1])
+
+
+def test_r7_m27_merge_joins_the_heading_along_the_members_and_a_run_without_one_has_none():
+    u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
+    X = {"usv_vpp_bias": np.full(2, -0.24)}
+    r = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), AnalyticEnv(wind=(-5.0, 0.0)), 2, X, 0.0, 3600.0)
+    batch = lambda r_: dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"usv": dict(r_, **{"class": "usv"})})
+    res = stage1.merge([batch(r)] * 2)
+    assert res["vehicles"]["usv"]["heading"].shape == (7, 4) and np.array_equal(res["vehicles"]["usv"]["heading"][:, 2:], r["heading"], equal_nan=True)
+    assert "heading" not in stage1.merge([batch({k: v for k, v in r.items() if k != "heading"})] * 2)["vehicles"]["usv"]

@@ -86,7 +86,7 @@ REQUIRED = {
     "controller": dict(pos_p="pos", vel_p="pos", vel_i="nonneg", vel_z_p="pos", vel_z_i="nonneg", accel_wp="pos", accel_z="pos", speed_up="pos",
                        speed_dn="pos", att_p="pos", rate_p="pos", yaw_slew_degs="pos", vel_i_max="nonneg"),
     "sortie": dict(duration_s="pos", levels_m="pos", leg_speed_ms="pos", leg_heading="other", rtl_height_m="nonneg", wp_radius_m="pos", land_speed_ms="pos",
-                   deck_height_m="nonneg", time_limit_factor="pos", min_profile_fraction="unit", hard_stop_factor="pos", battery_swap="other"),
+                   deck_height_m="nonneg", time_limit_factor="pos", min_profile_fraction="unit", hard_stop_factor="pos"),
     "launch_rule": dict(max_mean_wind_ms="pos", wind_check_height_m="pos", gust_lookahead_min="nonneg", gust_front_threshold_ms="pos"),
     "failure": dict(stuck_window_s="pos", stuck_closing_ms="nonneg", stuck_min_cmd_ms="nonneg"),
     "radio": dict(link_loss_hold_s="pos", uas_antenna_height_above_body_m="nonneg", ship_antenna_height_m="nonneg"),
@@ -597,7 +597,7 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
 
 
 def fly_mission(env: Any, ship: Ship, launch_times: Arr, *, M: int, **kw: Any) -> dict[str, Any]:
-    """N sorties (each on a fresh pack: sortie.battery_swap) -> dict(sorties=[fly_sortie results], mission=per-member roll-up):
+    """N sorties (each starts on a full pack: the ship crew swaps it) -> dict(sorties=[fly_sortie results], mission=per-member roll-up):
     n_scrubbed / n_flown / n_failed / n_landed, flags (any sortie), t_first (earliest absolute time per flag), failed,
     first_failure (time, mode index into FLAGS)."""
     sorties = [fly_sortie(env, ship, float(t), M=M, **kw) for t in launch_times]
@@ -660,8 +660,9 @@ def sitl_params(P: dict[str, Any], rate_scale: float = 1.0, **extra: Any) -> dic
 class _Sim1:
     """One member's physics answering ArduCopter's servo packets (lockstep: one 2.5 ms step per new frame)."""
 
-    def __init__(self, P: dict[str, Any], prm: dict[str, Any], wind_fn: WindFn, home_en: Arr, link_motor_map: Arr) -> None:
+    def __init__(self, P: dict[str, Any], prm: dict[str, Any], wind_fn: WindFn, home_en: Arr, link_motor_map: Arr, t_launch: float = 0.0) -> None:
         self.P, self.prm, self.wind_fn, self.home, self.map = P, prm, wind_fn, home_en, list(link_motor_map)
+        self.t_launch = t_launch                  # epoch s of the launch: `t` counts from it, the environment is read at the sum (round 7, M-43)
         self.p, self.v, self.w = jnp.zeros((3, 1)), jnp.zeros((3, 1)), jnp.zeros((3, 1))
         self.q, self.om = jnp.array([[math.sqrt(0.5)], [0.0], [0.0], [math.sqrt(0.5)]]), jnp.zeros((4, 1))   # facing north
         self.soc, self.qah, self.ewh, self.volt = jnp.ones(1), jnp.zeros(1), jnp.zeros(1), prm["vref"]
@@ -676,7 +677,7 @@ class _Sim1:
         cmd = u * self.prm["om_max"] * jnp.minimum(self.volt / self.prm["vref"], 1.0)
         if self.n_acc == 0:                                              # 50 ms: environment lookup, then battery for the last block
             pos = np.asarray(self.p) + np.array([[self.pos_en[0]], [self.pos_en[1]], [0.0]])
-            self.wind = jnp.asarray(self.wind_fn(self.k, self.t, pos))
+            self.wind = jnp.asarray(self.wind_fn(self.k, self.t_launch + self.t, pos))
         self.p, self.v, self.q, self.w, self.om, self.pe, self.sf, zbz = _dyn_jit(
             self.prm, self.p, self.v, self.q, self.w, self.om, cmd, self.wind, jnp.zeros((2, 1)), DT_PHYS)
         self.t += DT_PHYS
@@ -750,7 +751,7 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
     proc = subprocess.Popen([str(exe), "-w", "--model", "JSON:127.0.0.1", "-I", str(inst), "--sysid", str(inst + 1), "--home",
                              f"{SITL_HOME[1]:.7f},{SITL_HOME[0]:.7f},{so['deck_height_m']:.2f},0", "--defaults", defaults], cwd=wd,
                             stdout=open(wd / "sitl.out", "w"), stderr=subprocess.STDOUT)
-    sim = _Sim1(P, prm, wfn, ship0, motor_map)
+    sim = _Sim1(P, prm, wfn, ship0, motor_map, t_launch)
     cap = max_s if max_s is not None else so["duration_s"] * so["hard_stop_factor"]
     stop = threading.Event()
     notes: list[str] = []

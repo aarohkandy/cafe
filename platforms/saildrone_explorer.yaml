@@ -4,9 +4,12 @@
 # that is not a number printed in the BRIEF is an assumption, and the `why` says what would replace it (a lab datasheet,
 # an inclining test, a tow-tank or CFD run from the Hangar).  Sources recalled from memory and not re-read this session
 # are marked "(recalled)": check them before they go into the credibility report.
-# Calibration note: `appendage_cda_m2` (parasitic drag) was raised from 0.02 to 0.04 so that the still-water, best-heading
-# speed at 12 m/s true wind is ~2.9 m/s (Chiodi et al. 2021); cr0 and wing_area_m2 were left at their first plausible values.  That receipt is therefore a fit;
-# the 5.4 m/s mean, the 3.3 m/s cap, the SPURS-2 failure and the Sun et al. direction are not fitted to.
+# Calibration note (round 7, M-4): two numbers are fitted, each to one target and neither checked against the other.
+# `appendage_cda_m2` (parasitic drag) was raised from 0.02 to 0.04 so that the still-water, best-heading speed at 12 m/s true wind on the polar WITHOUT the
+# VPP bias is ~2.9 m/s (Chiodi et al. 2021).  `vpp_bias_mean` is solved so that usv.mean_sog gives exactly the 5.4 m/s mean SOG / wind of 0.96 / 5.4: a
+# closure, not a reproduction.  Stage 1 flies the polar times (1 + vpp_bias_mean), which is 2.2 m/s at 12 m/s, 24 % under 2.9; no single bias meets both
+# targets, because the polar is capped at 3.3 m/s (3.3 x 0.7578 = 2.50 m/s < 2.9).  cr0 and wing_area_m2 were left at their first plausible values.
+# The 3.3 m/s cap, the SPURS-2 failure and the Sun et al. direction are not fitted to.
 kind: wing_sail_usv
 params:
   # ---- hull and mass (BRIEF 2.4: 7 m hull, 2 m draft, keel 2.5 m) --------------------------------------------------
@@ -19,7 +22,7 @@ params:
   form_factor_k:    {value: 0.20,    unit: "-",  assumed: true, why: "viscous form factor (1+k) multiplying the ITTC-57 friction line. Order of the Watanabe-type formula for L/B~5, Cb~0.35 as quoted in Molland et al. (2011), Ship Resistance and Propulsion (recalled, not applied in code); a CFD run in the Hangar replaces it"}
   cr0:              {value: 2.0e-3,  unit: "-",  assumed: true, why: "residuary (wave) resistance coefficient on wetted area at Fr = cr_fr_ref; C_R = cr0 (Fr/cr_fr_ref)^4. Delft-series order of magnitude for R_R/Delta at Fr 0.3-0.4 (Keuning & Sonnenberg 1998, recalled); not calibrated. A free-surface CFD/Capytaine run replaces it"}
   cr_fr_ref:        {value: 0.35,    unit: "-",  assumed: true, why: "Froude number at which cr0 is quoted (just below the resistance hump of a displacement hull)"}
-  appendage_cda_m2: {value: 0.04,    unit: m2,   assumed: true, why: "drag area (C_D x area) of everything else in the water: sensor fairings, ADCP, through-hulls, anodes, growth. Resistance = 0.5 rho V^2 CdA. About 3x the keel profile drag area, i.e. a 0.2 m square plate normal to the flow; CALIBRATED (see header) because the clean-hull terms alone give 3.2 m/s at 12 m/s. An outfitted-hull tow or CFD replaces it"}
+  appendage_cda_m2: {value: 0.04,    unit: m2,   assumed: true, why: "drag area (C_D x area) of everything else in the water: sensor fairings, ADCP, through-hulls, anodes, growth. Resistance = 0.5 rho V^2 CdA. About 3x the keel profile drag area, i.e. a 0.2 m square plate normal to the flow; CALIBRATED (see header) on the polar without the VPP bias, to the 12 m/s maximum, because the clean-hull terms alone give 3.2 m/s at 12 m/s; it does not fit the 5.4 m/s mean (that is vpp_bias_mean's). An outfitted-hull tow or CFD replaces it"}
   heel_resist_c:    {value: 1.0,     unit: "1/rad2", assumed: true, why: "hull resistance grows as (1 + c phi^2) with heel phi: wetted-surface and waterline-asymmetry penalty. Order from Delft heeled-resistance trends (Gerritsma et al. 1981, recalled); towing-tank heel runs replace it"}
   gm_m:             {value: 1.2,     unit: m,    assumed: true, why: "metacentric height; sets righting moment Delta g GM sin(phi) and so heel, depowering and the capsize proxy. An inclining test (or the Hangar mass/buoyancy model with the real keel ballast) replaces it"}
   clr_depth_m:      {value: 1.2,     unit: m,    assumed: true, why: "depth of the centre of lateral resistance below the waterline (keel centre); lever arm of the heeling moment"}
@@ -84,7 +87,7 @@ params:
   radio_2g4:        {value: xbee_pro_24, unit: "-", source: "platforms/radios.yaml `xbee_pro_24` (Digi XBee-PRO 802.15.4, 2.4 GHz): the usual UAS-side 2.4 GHz telemetry radio (BRIEF 'infer the obvious extension')"}
   iridium_link:     {value: sbd,         unit: "-", source: "platforms/radios.yaml `iridium.sbd` (Iridium Short Burst Data): the BRIEF's USV<->shore link"}
   # ---- sampling and numerics ---------------------------------------------------------------------------------------
-  vpp_bias_mean:    {value: -0.2422, unit: "-",  source: "CALIBRATED: the bias at which usv.mean_sog reproduces Chiodi et al. (2021) mean SOG / wind = 0.96 / 5.4 (the unbiased model gives 1.319 x that); config/perturbations.yaml usv_vpp_bias is uniform on [-0.2565, -0.2280] about it and, when a caller passes perturb['vpp_bias'], replaces this draw"}
+  vpp_bias_mean:    {value: -0.2422, unit: "-",  source: "CALIBRATED: the bias solved so that usv.mean_sog gives exactly Chiodi et al. (2021) mean SOG / wind = 0.96 / 5.4 (a closure; the unbiased model gives 1.319 x that); with it the best-heading speed at 12 m/s is 2.2 m/s against Chiodi's 2.9, which no single bias can meet; config/perturbations.yaml usv_vpp_bias is uniform on [-0.2565, -0.2280] about it and, when a caller passes perturb['vpp_bias'], replaces this draw"}
   vpp_bias_sd:      {value: 0.0082,  unit: "-",  source: "standard deviation of the uniform usv_vpp_bias prior (width 0.0285 / sqrt 12): Sun et al. (2026) 30-35 % overprediction as a speed factor, centred on the calibrated bias"}
   current_z_m:      {value: -1.0,    unit: m,    assumed: true, why: "depth at which the surface current is sampled: mid-depth of the immersed hull and upper keel"}
   tack_time_s:      {value: 120.0,   unit: s,    assumed: true, why: "time a tack or gybe takes (wing flip, turn through the wind) during which speed is tack_speed_frac of the polar value"}
