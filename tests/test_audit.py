@@ -542,3 +542,13 @@ def test_l_w1_the_test_step_runs_both_passes_and_reports_a_failure_of_either(mon
     assert audit.main([]) == 1
     pytests = [c for c in calls if "pytest" in c]
     assert len(pytests) == 2 and "-n" in pytests[0] and "--cov-append" in pytests[1] and "AUDIT FAIL: pytest:\nboom" in capsys.readouterr().out
+
+
+def test_run_keeps_the_tail_for_the_message_and_the_whole_output_in_the_log(tmp_path, monkeypatch):
+    """Round 7 integration: on the hosted runner 12 tests failed and the audit printed only the last 4000 characters of pytest's output, the summary
+    without one traceback, so nothing could be diagnosed. `_run` appends every step's whole output to audit.log, which CI uploads."""
+    monkeypatch.setattr(audit, "ROOT", tmp_path)
+    rc, out = audit._run([sys.executable, "-c", "print('a' * 6000); print('end')"])
+    log = (tmp_path / audit.LOG).read_text()
+    assert rc == 0 and len(out) == 4000 and out.rstrip().endswith("end")
+    assert "a" * 6000 in log and log.endswith("rc=0\n") and log.startswith(f"$ {sys.executable} -c")

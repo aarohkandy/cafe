@@ -1,6 +1,7 @@
 # Required checks for every commit (brief section 5.3/5.5). Runs in the same image the pipeline runs in.
 # The ci budget uses the synthetic environment fixture (tests/fixtures/ci_env), so no job here needs orca or HYCOM: `make ci`
 # generates it into /tmp/cafe_ci_data inside the same container, first, then runs every stage against it.
+# Every container runs as the runner's user, as the RUNBOOK's pm() does (as root, OpenFOAM's mpirun refuses to start).
 # Order: the two fast steps first (about 10 min each), the audit last, every step `if: always()` so a red step does not hide the ones after it.
 # The audit runs the suite with pytest-xdist by file (cafe/pm/audit.py pytest_passes), then the real-time ArduCopter tests alone with --cov-append
 # (they fail under parallel load). Run serially it took 71 min on 6 CPUs and was killed at the 180 min timeout on the 4-CPU hosted runner
@@ -16,10 +17,10 @@ jobs:
       - name: Build images
         run: docker build -t cafe . && docker build -f Dockerfile.pm -t cafe-pm .
       - name: make ci (generate the synthetic environment, then every stage at toy resolution on CPU, < 10 min)
-        run: docker run --rm -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make ci MISSION=missions/ci_fixture.yaml
+        run: docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make ci MISSION=missions/ci_fixture.yaml
       - name: broken configuration must fail a receipt
         if: always()
-        run: docker run --rm -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make broken
+        run: docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v $PWD:/app -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make broken
       # red until `make mutation` has stored docs/mutation.json (STATUS.md, made at code freeze): the audit refuses a tree without the mutation record
       # the real autopilot the UAS receipts fly against: ArduPilot's stable-4.7.1 SITL build, sha-256 pinned (bench/install_sitl.sh), at /work/sitl
       - name: ArduCopter SITL
@@ -27,4 +28,12 @@ jobs:
         run: sh bench/install_sitl.sh $PWD/.work/sitl
       - name: make audit (code, tests, coverage gates)
         if: always()
-        run: docker run --rm -v $PWD:/app -v $PWD/.work:/work:ro -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make audit
+        run: docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v $PWD:/app -v $PWD/.work:/work:ro -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make audit
+      # the audit prints only the tail of each failing step; its whole output is audit.log
+      - name: audit log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-log
+          path: audit.log
+          if-no-files-found: warn

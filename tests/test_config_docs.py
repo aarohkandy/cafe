@@ -192,3 +192,14 @@ def test_three_statements_the_code_outlived_do_not_come_back():
     assert "theta_e_K=te" in text("cafe", "pm", "stage1.py") and "since then it passes `theta_e`" in row(37)
     assert not (ROOT / "cafe" / "pm" / "env" / "wrf.py").exists() and "env/wrf.py" not in text("requirements-pm.txt")
     assert "rotate_grid_to_earth" in text("requirements-pm.txt") and "def rotate_grid_to_earth" in text("cafe", "pm", "env", "conventions.py")
+
+
+def test_the_ci_containers_run_as_the_runner_and_the_audit_log_is_uploaded():
+    """Round 7 integration: as root, OpenFOAM's mpirun refused to start and both OpenFOAM tests failed on the hosted runner (they pass as uid 1000 on
+    homebase, the RUNBOOK's pm() user); and the audit's whole output, the only place a hosted traceback is, was not kept."""
+    wf = text(".github", "workflows", "premission.yml")
+    runs = [ln for ln in wf.splitlines() if "docker run" in ln]
+    assert len(runs) == 3 and all("-u $(id -u):$(id -g) -e HOME=/tmp" in ln for ln in runs)
+    up = wf.split("- name: audit log")[1]
+    assert "uses: actions/upload-artifact@v4" in up and "path: audit.log" in up and "if: always()" in up
+    assert "audit.log" in text(".gitignore")

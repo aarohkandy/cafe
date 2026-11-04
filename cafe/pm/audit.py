@@ -173,8 +173,13 @@ def banned(root: pathlib.Path = ROOT) -> list[str]:
     return hits
 
 
+LOG = "audit.log"                      # every step's whole output: the printed problem keeps only its last 4000 characters (CI uploads this file)
+
+
 def _run(cmd: list[str]) -> tuple[int, str]:
     r = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    with open(ROOT / LOG, "a") as f:
+        f.write(f"$ {' '.join(cmd)}\n{r.stdout}{r.stderr}\nrc={r.returncode}\n")
     return r.returncode, (r.stdout + r.stderr)[-4000:]
 
 
@@ -276,6 +281,7 @@ def main(argv: list[str]) -> int:
         problems += banned()
         problems += mutation_problems(ROOT)
     if not code_only:
+        (ROOT / LOG).write_text("")
         rc, out = _run(["ruff", "check"])
         if rc:
             problems.append("ruff:\n" + out)
@@ -291,6 +297,8 @@ def main(argv: list[str]) -> int:
             problems += coverage_problems(ROOT / "coverage.json")
     for p in problems:
         print("AUDIT FAIL:", p)
+    if not code_only:
+        print(f"the whole output of ruff, mypy and pytest is in {LOG}")
     print(f"audit: {len(problems)} problem(s)")
     return 1 if problems else 0
 

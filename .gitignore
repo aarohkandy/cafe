@@ -11,3 +11,4 @@ runs/
 checkpoints/
 emulator/train.*
 mutants/
+audit.log
