@@ -20,7 +20,8 @@ so the flow relative to the body is R (u_env - v_vehicle):
           body tilted by atan(d_x |v_rel| / g) (Faessler et al. 2018 linear rotor drag), rotors are not modelled (no actuator disk). Its Hangar
           reference is the TOTAL drag (rotor momentum drag included) and the window is the frame alone: the row carries a failed
           `hangar_reference_comparable` check, so it is never ok and `usable_for_refit` is False.
-Heading is the median stage-1 track heading around the window (`stage1/res.pkl`, nanmedian over members, central difference of the
+Heading is the stage-1 heading at the window's record (`stage1/res.pkl`, circular median over members), or without one (an older run, a UAS)
+the median stage-1 track heading around the window (nanmedian over members, central difference of the
 two neighbouring records); without it, the relative-flow direction: gliders head with the current, the USV downwind, the UAS into the wind.
 
 `cd_hangar`, `cl_hangar`: what the vehicle's own Stage-1 model implies at this window's speed, as coefficients on the same reference
@@ -99,8 +100,25 @@ def compass(e: float, n: float) -> float:
     return math.degrees(math.atan2(e, n)) % 360.0
 
 
+def _bow_heading(res: dict[str, Any] | None, vid: str, t: float) -> float | None:
+    """The circular median over members of the heading stage 1 recorded (`res.pkl` vehicles[vid]["heading"], compass degrees) at the record nearest t;
+    None when the run has no heading (an older run, a UAS) or no member has a finite one there."""
+    if not res or vid not in res.get("vehicles", {}) or res["vehicles"][vid].get("heading") is None:
+        return None
+    r = res["vehicles"][vid]
+    h = np.asarray(r["heading"], float)[int(np.argmin(np.abs(np.asarray(r["t"], float) - t)))]
+    h = h[np.isfinite(h)]
+    if not h.size:
+        return None
+    m = math.degrees(math.atan2(np.sin(np.radians(h)).mean(), np.cos(np.radians(h)).mean()))        # the median of the offsets from the circular mean
+    return float((m + np.median((h - m + 180.0) % 360.0 - 180.0)) % 360.0) % 360.0                  # (a float -1e-15 % 360 is 360.0)
+
+
 def track_heading(res: dict[str, Any] | None, vid: str, t: float) -> float | None:
-    """Median stage-1 track heading around time t: central difference of the member-median position at the records either side."""
+    """The heading the bow points at around time t (round 7, M-27): the stage-1 heading, circular median over members, when `res.pkl` holds it;
+    otherwise (an older run, a UAS) the course over ground: central difference of the member-median position at the records either side."""
+    if (bow := _bow_heading(res, vid, t)) is not None:
+        return bow
     if not res or vid not in res.get("vehicles", {}):
         return None
     r = res["vehicles"][vid]
@@ -114,6 +132,11 @@ def track_heading(res: dict[str, Any] | None, vid: str, t: float) -> float | Non
     de = ((lon[j1] - lon[j0] + 180.0) % 360.0 - 180.0) * math.cos(math.radians(0.5 * (lat[j0] + lat[j1])))
     dn = lat[j1] - lat[j0]
     return None if math.hypot(de, dn) < 1e-9 else compass(de, dn)
+
+
+def track_heading_source(res: dict[str, Any] | None, vid: str, t: float) -> str:
+    """What `track_heading` used, as the row's `heading_source` says it: the stage-1 bow heading, or the course over ground without one."""
+    return "stage-1 heading (circular median)" if _bow_heading(res, vid, t) is not None else "course over ground (no heading in res.pkl)"
 
 
 def _val(x: Any) -> NDArray[np.float64]:

@@ -621,3 +621,13 @@ def test_r6_m22_a_radio_table_number_without_a_source_fails_naming_the_leaf_and_
     assert "(modem table): provenance FAILED" in out and "modems.benthos_atm960.source" in out
     assert cli.main(["hangar", "--platform", "no_such_boat"]) == 2
     assert "'modems (table)'" in capsys.readouterr().err
+
+
+# ---- review round 7, M-35: hangar on a glider or USV file without its top-level blocks
+@pytest.mark.parametrize("kind", ["seaglider", "saildrone_usv"])
+def test_r7_m35_hangar_on_a_file_without_params_prints_provenance_failed_and_exits_1(kind, tmp_path, capsys):
+    f = tmp_path / "boat.yaml"
+    f.write_text(f"kind: {kind}\nmass_kg: 52\n")
+    assert cli.main(["hangar", "--platform", str(f)]) == 1
+    out = capsys.readouterr().out
+    assert "provenance FAILED: boat.yaml: missing ['params', 'mission_defaults']" in out

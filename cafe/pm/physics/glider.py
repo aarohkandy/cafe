@@ -87,6 +87,9 @@ def load_platform(name: str) -> dict[str, Any]:
         path = PLATFORMS / f"{name}.yaml"
     raw = read_yaml(path)                                              # duplicate keys and octal numbers refused (round 5, M-18)
 
+    if missing := [k for k in ("kind", "params", "mission_defaults") if k not in raw]:                          # round 7, M-35
+        raise ValueError(f"{path.name}: missing {missing}; add them (see platforms/seaglider.yaml for the layout)")
+
     def flat(block: dict[str, Any], where: str) -> dict[str, Any]:
         out = {}
         for k, leaf in block.items():
@@ -305,7 +308,7 @@ class GliderSim:
         self.out_s = np.zeros(M)
         self.fail = {k: np.zeros(M, bool) for k in FAILS}
         self.first = {k: np.full(M, np.nan) for k in FAILS}
-        self._rec: dict[str, Any] = {k: [] for k in ("t", "lon", "lat", "depth", "energy", "phase", "wp")}
+        self._rec: dict[str, Any] = {k: [] for k in ("t", "lon", "lat", "depth", "energy", "phase", "wp", "heading")}
         self.surf_s = P["gps_s"] + P["bytes_per_dive"] / P["iridium_Bps"] + P["pump_time_s"]
         self.comm_J = P["comms_W"] * (P["gps_s"] + P["bytes_per_dive"] / P["iridium_Bps"]) + P["attitude_J_per_dive"]
         self._trim()
@@ -472,6 +475,7 @@ class GliderSim:
             ("energy", self.E),
             ("phase", self.phase),
             ("wp", self.wp_idx),
+            ("heading", np.where(np.hypot(*self.heading.T) > 0.0, np.degrees(np.arctan2(*self.heading.T)) % 360.0, np.nan)),     # compass deg, NaN: no dive yet
         ):
             self._rec[k].append(np.copy(v))
 
@@ -482,8 +486,8 @@ class GliderSim:
 
     def history(self) -> dict[str, Any]:
         """Arrays (steps, M) for lon, lat, depth, energy [J used], phase (0 descent, 1 apogee pump, 2 ascent, 3 surface), wp
-        (active waypoint index); t (steps,) [s]; fail[name] (M,) bool; first[name] (M,) end of the first step in which it was
-        true, NaN if never."""
+        (active waypoint index), heading (compass degrees of the horizontal swim direction, NaN before the first dive); t (steps,) [s];
+        fail[name] (M,) bool; first[name] (M,) end of the first step in which it was true, NaN if never."""
         h: dict[str, Any] = {k: np.array(v) for k, v in self._rec.items()}
         h["fail"], h["first"] = self.fail, self.first
         return h

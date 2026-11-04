@@ -671,6 +671,11 @@ def run_receipts(P_=None):
         R.OUT[:] = saved
 
 
+MEAN_ROW = "mean SOG / U at 5.4 m/s (VMG routing, all bearings, prior bias; CALIBRATED: vpp_bias_mean)"
+POLAR_ROW = "best-heading still-water speed at 12 m/s, polar without the VPP bias (CALIBRATED: appendage_cda_m2; not what Stage 1 flies)"
+FLOWN_ROW = "best-heading speed at 12 m/s as Stage 1 flies it (polar x (1 + vpp_bias_mean))"
+
+
 def failed(res):
     return {c for c, e in res.items() if e["ok"] is False}
 
@@ -680,9 +685,9 @@ def test_receipts_pass_and_are_numbers_not_stubs():
     assert failed(res) == set(), failed(res)
     checked = [e for e in res.values() if e["ok"] is not None]
     assert len(checked) >= 15 and len([e for e in res.values() if e.get("kind") == "context"]) == 3
-    mean = res["mean SOG / U at 5.4 m/s (VMG routing, all bearings, prior bias)"]
+    mean = res[MEAN_ROW]
     assert 0.8 * 0.178 < mean["value"] < 1.2 * 0.178
-    assert 2.6 < res["best-heading still-water speed at 12 m/s (CALIBRATED: appendage_cda_m2)"]["value"] < 3.2
+    assert 2.6 < res[POLAR_ROW]["value"] < 3.2
     assert res["SPURS-2: becalmed first fires (h)"]["value"] >= 6.0 - 1e-6
 
 
@@ -704,14 +709,14 @@ def test_receipt_fails_when_the_apparent_wind_sign_is_flipped(fresh_tables, monk
     monkeypatch.setattr(usv, "_apparent", lambda wx, wy, vx, vy: (wx + vx, wy + vy))
     bad = failed(run_receipts())
     assert "apparent wind speed = |true wind - boat velocity| (max relative error over 9 states)" in bad
-    assert "best-heading still-water speed at 12 m/s (CALIBRATED: appendage_cda_m2)" in bad
+    assert POLAR_ROW in bad
     assert "still-water VPP + current / current-coupled SOG (6 m/s wind, 0.5 m/s current with it)" in bad
 
 
 def test_receipt_fails_when_the_wing_is_ten_times_too_big(fresh_tables):
     bad = failed(run_receipts({**P, "wing_area_m2": 60.0}))
-    assert "best-heading still-water speed at 12 m/s (CALIBRATED: appendage_cda_m2)" in bad
-    assert "mean SOG / U at 5.4 m/s (VMG routing, all bearings, prior bias)" in bad
+    assert POLAR_ROW in bad
+    assert MEAN_ROW in bad
 
 
 def test_spurs2_receipts_fail_when_the_current_is_in_cm_per_s(fresh_tables, monkeypatch):
@@ -946,3 +951,115 @@ def test_becalmed_is_a_best_speed_below_the_current_not_below_half_of_it():
     assert 0.55 < slow.vmax[0] / 2.0 < 0.9 and fast.vmax[0] / 0.8 > 1.1                                  # the pair is where the mutant and the rule disagree
     assert slow.fail["becalmed"].all() and 2.0 <= first_h(slow, "becalmed") < 2.1
     assert not fast.fail["becalmed"].any()
+
+
+# ---- review round 7, M-35: a file without its top-level blocks is a ValueError naming the file and the blocks, not a KeyError
+def test_r7_m35_the_usv_loader_names_the_file_and_the_missing_blocks(tmp_path):
+    f = tmp_path / "typo.yaml"
+    f.write_text("kind: saildrone_usv\nmass_kg: 52\n")
+    with pytest.raises(ValueError, match=r"typo\.yaml: missing \['params', 'mission_defaults'\]; add them \(see platforms/saildrone_explorer\.yaml"):
+        usv.load_platform(str(f))
+
+
+# ---- review round 7, M-16: a non-finite shortwave value or start position is a labelled failure, not a NaN battery
+class SwEnv(AnalyticEnv):
+    """AnalyticEnv whose shortwave is NaN from `t_bad` on (a hole in the WRF radiation field); wind, current and waves stay finite."""
+
+    def __init__(self, t_bad=HR, **kw):
+        super().__init__(**kw)
+        self.t_bad = t_bad
+
+    def air(self, lon, lat, t):
+        a = super().air(lon, lat, t)
+        if t >= self.t_bad:
+            a["swdown"] = Tagged(np.full(np.shape(a["swdown"].value), np.nan), "test", 0.0, "assumed")
+        return a
+
+
+def test_r7_m16_a_non_finite_shortwave_flags_no_current_data_and_the_battery_state_stays_finite_and_still_runs_down():
+    """NaN before: `np.clip` of NaN is NaN and `NaN <= 0` is False, so soc_wh was NaN for good and `battery` never fired."""
+    s = sim(SwEnv(wind=(-6.0, 0.0), swdown=0.0), m=3)
+    s.run(60 * HR, 600.0)
+    assert np.isfinite(s.soc_wh).all() and s.fail["no_current_data"].all() and 1.0 <= first_h(s, "no_current_data") <= 1.3
+    t_empty = P["battery_wh"] / P["hotel_w"]
+    assert s.fail["battery"].all() and t_empty - 0.2 <= first_h(s, "battery") <= t_empty + 0.3                  # 0 W of sun: the hotel load alone
+    clean = sim(AnalyticEnv(wind=(-6.0, 0.0), swdown=0.0), m=3)
+    clean.run(60 * HR, 600.0)
+    assert not clean.fail["no_current_data"].any() and first_h(clean, "battery") == pytest.approx(first_h(s, "battery"), abs=1e-9)
+
+
+def test_r7_m16_a_non_finite_start_position_is_flagged_at_t0_and_the_run_stays_finite():
+    s = sim(AnalyticEnv(wind=(-6.0, 0.0)), m=3, start=(np.array([-165.0, np.nan, -165.0]), np.array([-1.0, -1.0, np.nan])))
+    assert s.fail["no_current_data"].tolist() == [False, True, True] and s.first["no_current_data"][1:].tolist() == [0.0, 0.0]
+    h = s.run(HR, 60.0)
+    assert np.isfinite(h["lon"]).all() and np.isfinite(h["lat"]).all() and np.isnan(h["first"]["no_current_data"][0])
+
+
+# ---- review round 7, M-20: wind above the polar is a failure, not a pass
+def test_r7_m20_a_wind_above_the_polar_fails_every_member_after_stall_sustain_s_and_a_wind_inside_it_is_unchanged():
+    def run(wind):
+        s = sim(AnalyticEnv(wind=(-wind, 0.0), hs=2.0), m=3, bias=0.0, mode="station", station=(-165.0, -1.0), start=(-165.0, -1.0))
+        s.run(HR, 60.0)
+        return s
+    out, ok = run(40.0), run(25.0)
+    assert out.fail["capsize_proxy"].all() and P["mission_defaults"]["stall_sustain_s"] / HR <= first_h(out, "capsize_proxy") < 0.6
+    assert not ok.fail["capsize_proxy"].any() and ok.acc["wind_out"].max() == 0.0
+
+
+# ---- review round 7, M-18: the 4-DOF fixed point is converged at the shipped N_IT
+def test_r7_m18_the_polar_at_the_shipped_iteration_count_is_converged_everywhere_including_storm_winds(monkeypatch):
+    """N_IT 24 left 58 cells (TWS 27 to 30 m/s) off the converged answer by more than 0.01 m/s, the worst by 1.55 m/s; 48 and 200 agree to 0.03."""
+    shipped = usv._build_polar(P).f[..., 0]
+    monkeypatch.setattr(usv, "N_IT", 200)
+    ref = usv._build_polar(P).f[..., 0]
+    assert np.abs(shipped - ref).max() < 0.03 and usv.N_IT == 200
+    monkeypatch.setattr(usv, "N_IT", 24)
+    old = usv._build_polar(P).f[..., 0]
+    assert (np.abs(old - ref) > 0.01).sum() > 50 and np.abs(old - ref).max() > 1.0                                  # the test can see the defect
+
+
+def test_r7_m18_the_table_cache_key_follows_the_iteration_count(monkeypatch):
+    a = usv._digest(P)
+    monkeypatch.setattr(usv, "N_IT", usv.N_IT + 1)
+    assert usv._digest(P) != a
+
+
+# ---- review round 7, M-4: the 12 m/s receipt is two rows, the polar the 12 m/s fit was made on and the model Stage 1 flies
+def test_r7_m4_the_12_ms_receipt_has_a_row_for_the_unflown_polar_and_one_for_the_model_stage_1_flies():
+    res = run_receipts()
+    pol = usv.tables(P)[0]
+    top = float(pol.f[int(np.argmin(np.abs(pol.tws - P["chiodi_max_wind_ms"]))), :, 0].max())
+    fit, flown = res[POLAR_ROW], res[FLOWN_ROW]
+    assert fit["value"] == pytest.approx(top, rel=1e-9) and fit["tol"] == 0.10 and fit["ok"]
+    assert flown["value"] == pytest.approx(top * (1.0 + P["vpp_bias_mean"]), rel=1e-9) and flown["tol"] == P["chiodi_band"] and flown["ok"]
+    assert flown["value"] < 0.8 * P["chiodi_max_sog_ms"] and flown["reference"] == P["chiodi_max_sog_ms"]            # 24 % under, inside the 25 % band
+    assert "no single bias" in flown["source"] and "CALIBRATED: vpp_bias_mean" in MEAN_ROW
+
+
+def test_r7_m4_the_flown_row_follows_the_bias(fresh_tables):
+    flown = run_receipts({**P, "vpp_bias_mean": -0.40})[FLOWN_ROW]                                                  # a bigger bias: the row follows it
+    assert not flown["ok"] and flown["value"] < 0.65 * P["chiodi_max_sog_ms"]
+
+
+def P_why(key):
+    leaf = yaml.safe_load((usv.PLATFORMS / "saildrone_explorer.yaml").read_text())["params"][key]
+    return leaf.get("why") or leaf["source"]
+
+
+def test_r7_m4_the_platform_header_says_what_is_fitted_to_what():
+    text = (usv.PLATFORMS / "saildrone_explorer.yaml").read_text()
+    head = text[:text.index("kind: wing_sail_usv")]
+    assert "closure" in head and "5.4 m/s mean, the 3.3 m/s cap" not in head and "24 % under" in head
+    assert "closure" in P_why("vpp_bias_mean") and "without the VPP bias" in P_why("appendage_cda_m2")
+
+
+# ---- review round 7, M-19: added resistance is linearised about the calm speed; the numbers that statement rests on are pinned
+def test_r7_m19_in_short_steep_head_seas_the_first_order_speed_is_credited_with_what_the_boat_cannot_make():
+    pol, wt = usv.tables(P)
+    v0, _, _, k, *_ = usv._lin(pol.f, (pol.tws, pol.twa), (6.0, 90.0))
+    assert v0 == pytest.approx(1.554, abs=2e-3) and k == pytest.approx(131.8, abs=0.5)                         # TWS 6 m/s, TWA 90 deg, still water
+    r = usv.added_resistance(P, wt, 2.0, 6.0, 180.0, np.array([0.0, 0.5, 1.0, v0]))                            # Hs 2 m, Tp 6 s, head seas
+    assert r == pytest.approx([312.6, 207.9, 155.6, 129.3], abs=0.5) and np.all(np.diff(r) < 0)                  # largest at rest
+    s = sim(AnalyticEnv(wind=(-6.0, 0.0), hs=2.0, tp=6.0, wave_to=180.0), m=1, bias=0.0)
+    e = s._eval(np.array([[0.0]]), dict(wfrom=np.array([90.0]), tws=np.array([6.0]), hs=np.array([2.0]), tp=np.array([6.0]), wdir=np.array([180.0])))
+    assert float(e["v"][0, 0]) == pytest.approx(v0 - r[-1] / k, abs=1e-6) and float(e["v"][0, 0]) == pytest.approx(0.573, abs=3e-3)

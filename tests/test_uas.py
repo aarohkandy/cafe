@@ -704,3 +704,20 @@ def test_the_hold_counts_each_member_on_its_own_run():
         return np.array([19.5 < t < 25.5, (19.5 < t < 22.5) or (24.5 < t < 27.5)])
     r = fly(link=link, M=2)
     assert r["flags"]["lost_link"].tolist() == [True, False] and r["t_first"]["lost_link"][0] == pytest.approx(20.0) and np.isnan(r["t_first"]["lost_link"][1])
+
+
+# ---- review round 7, M-42: `sortie.battery_swap` was required and read by no code
+def test_r7_m42_battery_swap_is_not_a_platform_input_and_an_old_file_that_carries_it_still_loads(tmp_path):
+    assert "battery_swap" not in uas.load_platform("quad_uas")["sortie"] and "battery_swap" not in uas.REQUIRED["sortie"]
+    raw = yaml.safe_load((uas.PLATFORM.parent / "quad_uas.yaml").read_text())
+    raw["sortie"]["battery_swap"] = dict(value=True, unit="-", assumed=True, why="an old file")
+    f = tmp_path / "quad_uas.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    assert uas.load_platform(str(f))["sortie"]["battery_swap"] is True                                  # extra leaves are not refused
+
+
+def test_r7_m42_every_required_key_of_the_uas_platform_is_named_in_the_code_that_reads_it():
+    """A key in `REQUIRED` that no code reads is an input a lab user sets in vain; each key must appear quoted in the package's code."""
+    src = "".join(f.read_text() for f in (pathlib.Path(uas.__file__).parents[1]).rglob("*.py"))
+    unread = [(g, k) for g, table in uas.REQUIRED.items() for k in table if f'"{k}"' not in src and f"'{k}'" not in src]
+    assert unread == [], unread

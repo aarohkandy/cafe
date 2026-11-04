@@ -601,3 +601,14 @@ def test_the_glider_loader_names_the_limit_and_still_takes_the_shipped_files(tmp
 def test_every_leaf_of_the_glider_tables_that_may_take_any_value_is_one_the_model_only_adds():
     """M-10: a new `any` leaf must be a conscious choice."""
     assert {k for t in g.REQUIRED.values() for k, v in t.items() if v == "any"} == {"vbd_min_cc"}
+
+
+# ---- review round 7, M-35: a file without its top-level blocks is a ValueError naming the file and the blocks, not a KeyError
+def test_r7_m35_the_glider_loader_names_the_file_and_the_missing_blocks(tmp_path):
+    f = tmp_path / "typo.yaml"
+    f.write_text("kind: seaglider\nmass_kg: 52\n")
+    with pytest.raises(ValueError, match=r"typo\.yaml: missing \['params', 'mission_defaults'\]; add them \(see platforms/seaglider\.yaml"):
+        g.load_platform(str(f))
+    f.write_text("params: {}\nmission_defaults: {}\n")
+    with pytest.raises(ValueError, match=r"typo\.yaml: missing \['kind'\]"):
+        g.load_platform(str(f))

@@ -64,10 +64,12 @@ during the manoeuvre; on a section only headings that reduce the cross-track err
 Failure flags (first occurrence in `first[name]`, epoch seconds): becalmed = the best through-water speed over all headings is
 below the current speed for becalmed_after_h (DECISION: the BRIEF's 'SOG < current' read as speed through water, because a
 drifting boat's SOG equals the current; `<=`, so a boat that cannot move in a zero current is becalmed too); swept_off_track;
-capsize_proxy; wing_stall_calm = apparent wind speed below the tail's authority (trim_min_aws_ms) for calm_sustain_s; wing_stall_angle =
-apparent wind angle inside the bow cone (min_awa_deg, not the wing's stall angle of attack wing_stall_deg, which only the polar uses) for
-stall_sustain_s; battery; no_current_data = the environment gave no finite wind, current or wave state at the vehicle (a land block, a masked
-cell, a hole in the sea mask): the step uses zero for that vector (Hs 0, Tp the first table period, direction 0, Stokes 0) and the member is a
+capsize_proxy (also: the wind relative to the water above the polar's top, 30 m/s, for stall_sustain_s: outside the model, so a failure);
+wing_stall_calm = apparent wind speed below the tail's authority (trim_min_aws_ms) for calm_sustain_s; wing_stall_angle = apparent wind angle
+inside the bow cone (min_awa_deg, not the wing's stall angle of attack wing_stall_deg, which only the polar uses) for stall_sustain_s; battery;
+no_current_data = the environment gave no finite wind, current, wave state or shortwave value at the vehicle, or the start position was not finite
+(a land block, a masked cell, a hole in the sea mask): the step uses zero for that vector (Hs 0, Tp the first table period, direction 0, Stokes 0;
+0 W of sun) and the member is a
 labelled failure from that time on (the glider's no_flight).
 """
 from __future__ import annotations
@@ -88,7 +90,7 @@ Arr = Any
 G = 9.80665
 R_E = 6371008.8
 DV = 0.05                 # m/s, speed grid of the root search
-N_IT = 24                 # fixed-point iterations for (beta, phi, depower, rudder)
+N_IT = 48                 # fixed-point iterations for (beta, phi, depower, rudder); 24 left 58 cells at TWS 27-30 m/s off by up to 1.5 m/s (round 7, M-18)
 NH = 72                   # candidate headings
 FAILS = ("becalmed", "swept_off_track", "capsize_proxy", "wing_stall_calm", "wing_stall_angle", "battery", "no_current_data")
 MODES = ("section", "station")
@@ -125,6 +127,9 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
         path = PLATFORMS / f"{name}.yaml"
     raw = read_yaml(path)                                              # duplicate keys and octal numbers refused (round 5, M-18)
 
+    if missing := [k for k in ("kind", "params", "mission_defaults") if k not in raw]:                          # round 7, M-35
+        raise ValueError(f"{path.name}: missing {missing}; add them (see platforms/saildrone_explorer.yaml for the layout)")
+
     def flat(block: dict[str, Any], where: str) -> dict[str, Any]:
         out = {}
         for k, leaf in block.items():
@@ -147,7 +152,7 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
 
 def _digest(P: dict[str, Any]) -> str:
     nums = {k: v for k, v in P.items() if isinstance(v, (int, float))}
-    return hashlib.sha1(json.dumps(nums, sort_keys=True).encode()).hexdigest()[:16]
+    return hashlib.sha1(json.dumps({**nums, "N_IT": N_IT}, sort_keys=True).encode()).hexdigest()[:16]               # the tables depend on N_IT (round 7, M-18)
 
 
 # ------------------------------------------------------------------ small numerics
@@ -479,8 +484,9 @@ class USVSim:
         pt = perturb or {}
         bias = pt["vpp_bias"] if "vpp_bias" in pt else draw_vpp_bias(P, M, int(md.get("seed", 0)))
         self.fac = 1.0 + np.broadcast_to(np.asarray(bias, float), (M,)).copy()
-        self.lon = np.broadcast_to(np.asarray(start[0], float), (M,)).copy()
-        self.lat = np.broadcast_to(np.asarray(start[1], float), (M,)).copy()
+        lon, lat = (np.broadcast_to(np.asarray(a, float), (M,)).copy() for a in start)
+        nf = ~(np.isfinite(lon) & np.isfinite(lat))                                      # round 7, M-16: a non-finite start is a labelled failure from t = 0
+        self.lon, self.lat = np.where(nf, 0.0, lon), np.where(nf, 0.0, lat)               # (finite, so the step stays finite)
         self.leg_lon, self.leg_lat = self.lon.copy(), self.lat.copy()
         self.idx = np.zeros(M, int)
         self.hd = np.zeros(M)
@@ -491,9 +497,10 @@ class USVSim:
         self.path_m = np.zeros(M)
         self.xte_max = np.zeros(M)                                                      # largest |cross-track error| (station: distance from it) [m]
         self.soc_wh = P["soc0"] * P["battery_wh"] * np.ones(M)
-        self.acc = {"becalmed": np.zeros(M), "wing_stall_calm": np.zeros(M), "wing_stall_angle": np.zeros(M)}
+        self.acc = {"becalmed": np.zeros(M), "wing_stall_calm": np.zeros(M), "wing_stall_angle": np.zeros(M), "wind_out": np.zeros(M)}
         self.fail = {k: np.zeros(M, bool) for k in FAILS}
         self.first = {k: np.full(M, np.nan) for k in FAILS}
+        self._flag("no_current_data", nf)
         self.arrived = np.full(M, np.nan)
         self.t_plan = -np.inf
         self.t_rec = -np.inf
@@ -605,13 +612,17 @@ class USVSim:
         self.xte_max = np.maximum(self.xte_max, np.abs(xte))
         self._flag("swept_off_track", np.abs(xte) > md["track_tolerance_km"] * 1e3)
         peak = e1["phi"] + np.sqrt(2.0 * np.log(md["cap_cycles"])) * roll_sigma_deg(P, c["hs"], c["tp"], e1["chi"])
-        self._flag("capsize_proxy", peak > md["roll_limit_deg"])
+        # round 7, M-20: the polar ends at its top wind and the model is silent beyond it, so a member that stays there fails
+        self.acc["wind_out"] = np.where(c["tws"] > self.pol.tws[-1], self.acc["wind_out"] + dt, 0.0)
+        self._flag("capsize_proxy", (peak > md["roll_limit_deg"]) | (self.acc["wind_out"] >= md["stall_sustain_s"]))
         for name, stalled, hold in (("wing_stall_calm", e1["aws"] < P["trim_min_aws_ms"], "calm_sustain_s"),
                                     ("wing_stall_angle", e1["awa"] < P["min_awa_deg"], "stall_sustain_s")):
             self.acc[name] = np.where(stalled, self.acc[name] + dt, 0.0)
             self._flag(name, self.acc[name] >= md[hold])
         sw = self.env.air(self.lon, self.lat, t)["swdown"].value
-        gain = P["solar_eff"] * P["solar_area_m2"] * sw - P["hotel_w"]
+        bs = ~np.isfinite(sw)                                                              # round 7, M-16: no insolation value: 0 W, and the member is labelled
+        self._flag("no_current_data", bs)
+        gain = P["solar_eff"] * P["solar_area_m2"] * np.where(bs, 0.0, sw) - P["hotel_w"]
         self.soc_wh = np.clip(self.soc_wh + gain * dt / 3600.0, 0.0, P["battery_wh"])
         self._flag("battery", self.soc_wh <= 0.0)
 
@@ -689,12 +700,16 @@ def receipts(P: dict[str, Any] | None = None) -> None:  # pragma: no mutate bloc
             "Mazza et al. 2026 Part 1 (3.3 m/s hull-speed cap) as quoted in BRIEF 2.4")
     # Chiodi et al. 2021: mean SOG band at 5.4 m/s, max at 12 m/s, never above the cap
     u, band = P["chiodi_mean_wind_ms"], P["chiodi_band"]
-    receipt(grp, "mean SOG / U at 5.4 m/s (VMG routing, all bearings, prior bias)", mean_sog(P, u) / u,
+    receipt(grp, "mean SOG / U at 5.4 m/s (VMG routing, all bearings, prior bias; CALIBRATED: vpp_bias_mean)", mean_sog(P, u) / u,
             P["chiodi_mean_sog_ms"] / u, band, "-",
-            "Chiodi et al. 2021: 0.96 m/s at 5.4 m/s mean wind (0.18 U); band is the yaml's chiodi_band")
+            "Chiodi et al. 2021: 0.96 m/s at 5.4 m/s mean wind (0.18 U); band is the yaml's chiodi_band; vpp_bias_mean is solved to give it (a closure)")
     i12 = int(np.argmin(np.abs(pol.tws - P["chiodi_max_wind_ms"])))
-    receipt(grp, "best-heading still-water speed at 12 m/s (CALIBRATED: appendage_cda_m2)", float(pol.f[i12, :, 0].max()),
+    vmax12 = float(pol.f[i12, :, 0].max())
+    receipt(grp, "best-heading still-water speed at 12 m/s, polar without the VPP bias (CALIBRATED: appendage_cda_m2; not what Stage 1 flies)", vmax12,
             P["chiodi_max_sog_ms"], 0.10, "m/s", "Chiodi et al. 2021: maximum hourly SOG 2.9 m/s at 12 m/s; a fit")
+    receipt(grp, "best-heading speed at 12 m/s as Stage 1 flies it (polar x (1 + vpp_bias_mean))", vmax12 * (1.0 + P["vpp_bias_mean"]),
+            P["chiodi_max_sog_ms"], band, "m/s", "Chiodi et al. 2021: 2.9 m/s at 12 m/s; passes only because chiodi_band is wide; no single bias meets this "
+            "and the 5.4 m/s mean: the polar is capped at 3.3 m/s")
     bracket(grp, "no (TWS, TWA) in the polar exceeds the hull-speed cap", float(pol.f[..., 0].max()), 0.0, P["stw_cap_ms"] + 1e-9,
             "m/s", "Mazza et al. 2026 Part 1")
     i, j = np.meshgrid([4, 8, 14], [16, 36, 56], indexing="ij")                    # TWS 4, 8, 14 m/s; TWA 40, 90, 140 deg

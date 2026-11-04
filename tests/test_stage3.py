@@ -1938,3 +1938,29 @@ def test_a_bad_cafe_nproc_is_a_config_error_and_0_or_negative_is_not_accepted(mo
     monkeypatch.setenv("CAFE_NPROC", "")
     monkeypatch.setenv("CAFE_WORKERS", "2")
     assert fs.nproc() == 2                                                                  # empty is unset
+
+
+# ---- review round 7, M-27: the window's heading is the bow heading stage 1 recorded, not the course over ground
+def _bow_res(heading, n=3):
+    """A USV whose course is north-east (45 deg) at every record: a current sets it north of the east-pointing bow."""
+    t = np.arange(n) * 3600.0
+    return dict(vehicles=dict(u=dict(t=t, lon=np.stack([-170 + 0.01 * np.arange(n)] * 4, 1), lat=np.stack([0.0 + 0.01 * np.arange(n)] * 4, 1),
+                                     **({} if heading is None else dict(heading=np.full((n, 4), heading))))))
+
+
+def test_r7_m27_track_heading_is_the_recorded_bow_heading_and_the_course_only_without_one():
+    t = 3600.0
+    assert pw.track_heading(_bow_res(None), "u", t) == pytest.approx(45.0, abs=1.0)                                    # the course, as before
+    assert pw.track_heading(_bow_res(90.0), "u", t) == pytest.approx(90.0, abs=1e-9)                                   # the bow, not the course
+    assert pw.track_heading_source(_bow_res(None), "u", t) == "course over ground (no heading in res.pkl)"
+    assert pw.track_heading_source(_bow_res(90.0), "u", t) == "stage-1 heading (circular median)"
+
+
+def test_r7_m27_the_heading_median_is_circular_and_skips_members_without_one():
+    res = _bow_res(0.0)
+    res["vehicles"]["u"]["heading"][1] = [350.0, 355.0, 5.0, 10.0]                                                    # a plain median of these is 180
+    assert pw.track_heading(res, "u", 3600.0) == pytest.approx(0.0, abs=1e-9)
+    res["vehicles"]["u"]["heading"][1] = [np.nan, 270.0, 280.0, np.nan]
+    assert pw.track_heading(res, "u", 3600.0) == pytest.approx(275.0, abs=1e-9)
+    res["vehicles"]["u"]["heading"][0] = np.nan                                                             # no heading at the deploy record: the course
+    assert pw.track_heading(res, "u", 0.0) == pytest.approx(45.0, abs=1.0) and pw.track_heading_source(res, "u", 0.0).startswith("course over ground")
