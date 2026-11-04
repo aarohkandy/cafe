@@ -1,0 +1,4 @@
+You are builder P (emulator, planner, workers) for review round 7. First read review/round_7/batch_prompts/r7_common.md and follow it exactly. Your letter is p; PM_CPUS=1.
+Your findings: M-6, M-7, M-14, M-22, M-25, M-37, M-38, M-46 (the `WORKER_GB` comment; the `GriddedEnv` docstring is batch O's), and M-47's part about the `Emulator.append` lock (row 313: a test that fails without the lock).
+Files you own: cafe/pm/whatif.py, cafe/pm/emulator.py, cafe/pm/par.py, cafe/pm/budget.py (all but `bench_sortie_rate`, C's, and `LES_BYTES_PER_CELL`/`max_cells`, S's), tests/test_whatif.py, tests/test_emulator.py, tests/test_par.py, tests/test_budget.py.
+Shared, only these parts: cafe/pm/pipeline.py `n_var` (M-14), the `ensemble_size` note (M-22), the member offsets in `s_emulator` (M-7); tests appended to tests/test_pipeline.py.

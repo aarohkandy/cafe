@@ -1,0 +1,3 @@
+You are builder R (report, credibility, statistics, receipts) for review round 7. First read review/round_7/batch_prompts/r7_common.md and follow it exactly. Your letter is r; PM_CPUS=1.
+Your findings: M-5, M-11, M-15, M-21, M-23, M-26, M-39, M-40, M-41.
+Files you own: cafe/pm/report.py (all but the `MODE_TEXT` entries of M-16 and M-20, batch V's), cafe/pm/credibility.py, cafe/pm/dtmb5415.py, cafe/pm/receipts.py, cafe/pm/stats/rare.py, cafe/pm/stats/intervals.py (all but the docstring of M-1, batch C's), config/perturbations.yaml (M-15's citation), docs/CREDIBILITY.md (the rows your fixes change; generated parts must match the code), tests/test_report.py, tests/test_credibility.py, tests/test_receipts.py, tests/test_stats*.py, tests/test_dtmb*.py.
