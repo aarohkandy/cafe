@@ -118,8 +118,9 @@ The round-3 tree passed the full test suite, ruff and mypy --strict (2026-11-01)
   **Round 6** (`review/round_6/merged.md`: 26 findings, 0 critical, 6 major, 20 minor; DECISIONS 308 to 333, plus the lead's items 334 to 338) is fixed and merged from five branches, each finding with a regression
   test. The majors: a USV on a hole of the UMWM sea mask crashed with an `IndexError` or passed with a NaN position (M-1), the memory model ignored the area of the box and counted
   only `derived.zarr` (M-2), the plan printed 4 and 8 SITL members that no stage flies (M-3), a UAS launch in the first or last hour of the window ended stage 1 with `OutsideData` (M-4), a calm
-  wind or moorings without a direction wrote a null prior that crashed stage 1 (M-5), and concurrent runs corrupted the shared emulator table (M-6). **q7, the quick run on the round-6 code, will measure what
-  moved in the demo verdicts; it is not known yet.** The gate on the merged tree (test count, coverage, ruff, mypy) has not run: the count is pending.
+  wind or moorings without a direction wrote a null prior that crashed stage 1 (M-5), and concurrent runs corrupted the shared emulator table (M-6). **q7, the quick run on the round-6 code (`8dc0ffc`,
+  2026-11-04), moved no verdict and no P(fail)** (glider_eq MARGINAL 15 of 64, glider_2n GO 0, USV NO-GO 60, UAS NO-GO 55, links as in q6); the plan's
+  `sitl_members` is 0 (M-3). The gate on the merged tree passed (section 1, Tests).
 
 ## 3. Not done and not planned in this build
 
