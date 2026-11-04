@@ -50,6 +50,31 @@ The user turned ultracode on (2026-11-04) after being told it speeds mainly the 
 - homebase disk is 98 % full (~5.6 GB free); old cafe copies were deleted 2026-11-04. `~/.cache` (5.6 GB) is the shared account's: left alone.
 - The user asked for plain-language docs at the very end (memory `plain-docs`), after the loop and code freeze.
 
+### The owner's standing instructions (everything a new agent needs; nothing here depends on any agent's memory)
+- **What cafe is for:** the TEPEX campaign (NOAA/PMEL/UW lab): "I'm going to deploy drones here, here and here: can they stay close enough to each other, and can they get where we want?" Real platform numbers come from the lab later; until then the example designs stand in and the results say so.
+- **Honesty above all:** "make sure you aren't just making bullshit up". Every physics claim gets a receipt that can fail; check numbers against formulas or data before reporting; a failed check is reported as failed.
+- **The stop rule:** two consecutive review rounds with zero findings, minor included ("i need this to be perfect"). Asked again on 2026-11-04, after being told it may not converge, the owner chose to keep it.
+- **Keep going without asking:** plan once and run every phase back to back; stop only when it is checked end to end on homebase. Ask only for real owner decisions (money, policy, other people's work).
+- **Test very well:** every fix has a regression test that fails before and passes after; never weaken an assertion.
+- **Money:** "MAKE SURE YOU DON'T CHARGE MY CARD." Azure Sponsorship, spending limit Off, $10,000 credits to about Aug 2028, paced at $415/month (`~/az_serv/docs/MONEY.md`). Check month-to-date spend before creating anything; every burst VM gets an auto-shutdown and is deleted when its job is done; no GPU, no paid marketplace images.
+- **The burst test VM is approved** ("yes do it", 2026-11-04): see "The burst test VM" above. Deallocate after every gate; delete the group when the loop ends and show the owner it is gone.
+- **Ultracode is on** (2026-11-04): use workflows for the review rounds.
+- **homebase:** run every test and pipeline there, never on the laptop (Python 3.9). The owner allows deleting cafe's own leftovers on homebase for space (check nothing runs from them first); other people's services, containers and `~/.cache` are not ours. Every cafe container passes `--ulimit core=0` (core dumps once filled the disk). `docker ps --no-trunc` before deciding a job died. Never start a CFD case in a directory another container uses.
+- **The live app** (separate from the simulator): http://100.108.213.121:8740, deploy copy `~/work/cafe/src` on homebase, containers `cafe` and `cafe-worker`. The owner declined browser clicks on it.
+- **At the very end** (after two clean rounds and code freeze): write plenty of good documentation in plain, simple words a non-expert can follow, improving README and RUNBOOK first and adding a file only when it has a job (short sentences, examples, how to read the report), then push it to GitHub laid out to be easy to read. The repo `aarohkandy/cafe` is public (the owner was told).
+- **Talking to the owner:** they found the long technical updates hard to follow ("idk whats happening honestly"); give short, plain status: what is done, what is running, what is next.
+
+### How to run one review round (copy the newest templates)
+1. **Run** the quick demo on the committed code: `PMX=pm_q<N> PM_CPUS=6 PM_MEM=24g TM=q<N> bin/pmx.sh python -m cafe.pm run --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out /data/runs/q<N> --fresh` (about 8 min); copy it without the big binaries (`rsync --exclude '*.parquet' --exclude '*.zarr' --exclude '*.pkl' --exclude '*.npy'`) to a scratch folder; record what moved in STATUS.
+2. **Prompt:** copy the last `review/round_<n>/PROMPT.md`, update the round, commits, run path, DECISIONS ranges and the known list; commit it.
+3. **Review:** four fresh reviewers (A and B over everything, C physics and stage 3, D readers, report, receipts and whether the last round's tests fail on mutants), each ending with a `not covered:` line. With ultracode, do this and step 4 as one workflow (reviewers in parallel, then per-finding adversarial verification in parallel, then a dedup/merge agent). Commit the raw findings.
+4. **Merge:** `review/round_<n>/batch_prompts/r<n>_merge_prompt.md` from the last one; every claim checked against code and run; output `merged.md` with a file map. Commit it.
+5. **Fix:** one common rules file plus one file per batch (see `review/round_8/batch_prompts/`); each builder works in its own worktree `../cafe-r<n><x>` on branch `r<n>-<x>` and its own homebase dir `pm_r<n><x>`, owns named files or functions, proves each test fails on the unfixed code (a throwaway `git worktree add --detach`, never `git stash`), and commits with its own model's trailer. Builders sometimes die on network errors or run out of context: resume them with a message, or start a fresh builder from the dead one's notes (as `r8_A2.md` does).
+6. **Merge the branches** into `premission-step4`; conflicts are almost always two batches appending tests at the end of the same file: keep both sides, then check no test function name appears twice.
+7. **Integration:** do the cross-batch "needs" from each hand-back yourself, each with a fail-first test.
+8. **Docs pass:** one agent writes DECISIONS rows (numbered after the last), CHANGELOG, RUNBOOK, STATUS and QUESTIONS from the hand-backs (template `review/round_7/batch_prompts/r7_D.md`); check its claims (it once wrote "the repo is not pushed" when it was).
+9. **Gate once:** `python -m cafe.pm audit` (on the burst VM when ready, else homebase); fix what fails; fill the test counts; commit and push. Then the next round.
+
 ## 0. Update, 2026-11-03 ~03:00 UTC (new lead session)
 
 Round 4 is closed on `premission-step4` (the parallel stage 1, DECISIONS 266-275, was already committed on top of it).
