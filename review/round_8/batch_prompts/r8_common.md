@@ -34,6 +34,6 @@ Interfaces between batches (fixed in advance). Shared files are split by functio
 - M-44 is "not confirmed": no batch fixes it.
 - New test functions go at the end of a test file; several batches append to the same test file and the lead merges them.
 
-When done: commit your work on your branch `r8-<x>` (one commit is fine; message ends with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`; do not push), and write the hand-back to `review/round_8/handbacks/r8_handback_<X>.md` inside your worktree and commit it too. Hand-back: per finding, what changed (file:line), the test, its before/after result, and the doc text; then "needs from other batches"; then the exact commands you ran and their results. Reply with one line: the findings fixed and any not fixed.
+When done: commit your work on your branch `r8-<x>` (one commit is fine; message ends with the Co-Authored-By line of the model you are, from your own session's attribution guidance; do not push), and write the hand-back to `review/round_8/handbacks/r8_handback_<X>.md` inside your worktree and commit it too. Hand-back: per finding, what changed (file:line), the test, its before/after result, and the doc text; then "needs from other batches"; then the exact commands you ran and their results. Reply with one line: the findings fixed and any not fixed.
 
 If you open a browser page with media, mute it immediately.
