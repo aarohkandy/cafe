@@ -540,6 +540,21 @@ def tabulate(root: pathlib.Path) -> dict[float, vv.Vv20]:
     return rows
 
 
+def row_notes(root: pathlib.Path) -> dict[float, dict[str, Any]]:
+    """{Fr: dict(note, grids)} for the speeds `tabulate` makes a row of: `note` is the discretization note ("Fs = 3, p = 2 assumed: oscillating" ...) and
+    `grids` is {grid: dict(converged, drift)} finest first, as run_<grid>.json stored them (None where it did not). Round 7, M-5: the V&V table cites both."""
+    runs, out = _runs(root), {}
+    for fr in CT_REF:
+        key = f"{fr:.2f}"
+        grids = [g for g in GRID_ORDER if g in runs and key in runs[g]["speeds"]]
+        if len(grids) < 2:
+            continue
+        got = [runs[g]["speeds"][key] for g in grids]
+        note = discretization([c["ct"] for c in got], [c["cells"] for c in got], [c.get("surf_level") for c in got])[2]
+        out[fr] = dict(note=note, grids={g: dict(converged=c.get("converged"), drift=c.get("drift")) for g, c in zip(grids, got, strict=True)})
+    return out
+
+
 def receipts(root: Optional[pathlib.Path] = None) -> str:
     """Hull-geometry receipts when hydro.json exists; per-Froude C_T rows when two grids have run; per-case wall and convergence rows
     for every case on disk (a case that recorded none of it fails them: a required check that did not happen is not fine). -> a status line."""

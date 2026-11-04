@@ -345,7 +345,7 @@ def test_stored_data_directories_are_passed_only_when_they_exist(tmp_path, monke
     monkeypatch.setenv("CAFE_DATA", str(tmp_path))
     monkeypatch.setattr(pr, "_call", lambda mod, fn="receipts", **kw: kw)
     j = dict(pr.jobs())
-    assert j["pm.env.tao"] == {"out_dir": None} and j["pm.env.bathy"] == {"cache": None}
+    assert j["pm.env.tao"] == {"out_dir": None} and callable(j["pm.env.bathy"])        # round 7, M-39: no raster -> the job that says so
     (tmp_path / "tao").mkdir()
     (tmp_path / "bathy").mkdir()
     (tmp_path / "bathy" / "gebco2026_tepex_c.npz").write_bytes(b"")
@@ -584,3 +584,22 @@ def test_only_that_matches_no_group_exits_2_and_writes_nothing_and_a_part_goes_t
     assert json.loads((tmp_path / "runs" / "receipts_partial.meta.json").read_text())["only"] == ["waves"]
     pr.run(only=["waves"], out=tmp_path / "x.json", log=lambda s: None)                                  # --json still names the file
     assert (tmp_path / "x.json").exists()
+
+
+def test_the_gebco_cache_is_found_under_the_name_bathy_writes_and_its_absence_is_a_context_row(tmp_path, monkeypatch):      # round 7, M-39
+    from cafe import receipts as R
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
+    monkeypatch.setattr(pr, "_call", lambda mod, fn="receipts", **kw: kw)
+    (tmp_path / "bathy").mkdir()
+    (tmp_path / "bathy" / "gebco2026_-7_7_163_197.npz").write_bytes(b"")
+    assert dict(pr.jobs())["pm.env.bathy"] == {"cache": tmp_path / "bathy" / "gebco2026_-7_7_163_197.npz"}
+    (tmp_path / "bathy" / "gebco2026_-7_7_163_197.npz").unlink()
+    n0 = len(R.OUT)
+    try:
+        dict(pr.jobs())["pm.env.bathy"]()
+        new = R.OUT[n0:]
+    finally:
+        del R.OUT[n0:]
+    ctx = [d for d in new if d.get("kind") == "context"]
+    assert len(ctx) == 1 and "GEBCO cache not found under" in ctx[0]["claim"] and "checks were not run" in ctx[0]["claim"]
+    assert any("linear field" in d["claim"] for d in new)                  # the raster-free receipt still ran

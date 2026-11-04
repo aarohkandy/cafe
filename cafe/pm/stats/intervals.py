@@ -119,10 +119,11 @@ def verdict(k_fail: int, n: int, conf: float = 0.90, level: float = 0.05, cert_c
     note = ""
     if k_fail == 0 and n < need:
         r3 = math.ceil(3 / level)
+        cmp = f"which is {level:.0%}, not below it" if n == r3 else f"below {level:.0%}"      # round 7, M-40: 3/60 is 0.050
         note = (f"P(fail) < 3/n = {rule_of_three(n):.3f} at 95% confidence, one-sided (n = {n}); "
                 f"{r3} members would be needed for that bound to reach {level:.0%}. "
                 f"The report's certification count, {need}, is for the two-sided {cert_conf:.0%} Wilson upper bound." if n < r3 else
-                f"the one-sided rule of three gives P(fail) < 3/n = {rule_of_three(n):.3f} at 95% confidence (n = {n}), below {level:.0%}; "
+                f"the one-sided rule of three gives P(fail) < 3/n = {rule_of_three(n):.3f} at 95% confidence (n = {n}), {cmp}; "
                 f"that is a weaker statement than the report's certification, which needs the two-sided {cert_conf:.0%} Wilson upper bound "
                 f"below {level:.0%}: {need} members.")      # round 6, M-15
     return dict(verdict=v, n=n, k_fail=k_fail, p_fail=k_fail / n, fail_lo=lo, fail_hi=hi, success_lo=1 - hi,

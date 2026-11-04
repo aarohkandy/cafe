@@ -332,10 +332,20 @@ def _nest_sphere() -> Any:
             nest.SLOW_DIR = old
 
 
+def _no_gebco(d: pathlib.Path) -> Callable[[], Any]:
+    """The bathymetry receipts without a raster: the table says the raster checks were not run (round 7, M-39)."""
+    def job() -> Any:
+        from cafe import receipts as R
+        R.context("Bathymetry", f"GEBCO cache not found under {d}/bathy: the bathymetry raster checks were not run", 0.0, 0.0, "",
+                  "python -m cafe.pm fetch")
+        return importlib.import_module("cafe.pm.env.bathy").receipts(cache=None)
+    return job
+
+
 def jobs(slow: bool = False) -> list[tuple[str, Callable[[], Any]]]:
     """[(name, zero-argument function)]; each function records through cafe.receipts and returns anything (a str is kept as a note)."""
     d = data_root()
-    gebco, tao = d / "bathy" / "gebco2026_tepex_c.npz", d / "tao"
+    gebco, tao = next(iter(sorted((d / "bathy").glob("gebco2026_*.npz"))), None), d / "tao"      # the name `bathy.cache_path` writes, or a hand-made one
     pm = "cafe.pm."
     sitl_groups = ("UAS sortie", "UAS SITL vs our controller")
     return [
@@ -353,7 +363,7 @@ def jobs(slow: bool = False) -> list[tuple[str, Callable[[], Any]]]:
         ("pm.env.subgrid", _call(pm + "env.subgrid")),
         ("pm.env.hycom", _call(pm + "env.hycom")),
         ("pm.env.tao", _call(pm + "env.tao", out_dir=tao if tao.is_dir() else None)),
-        ("pm.env.bathy", _call(pm + "env.bathy", cache=gebco if gebco.exists() else None)),
+        ("pm.env.bathy", _call(pm + "env.bathy", cache=gebco) if gebco else _no_gebco(d)),
         ("pm.stats.intervals", _call(pm + "stats.intervals")),
         ("pm.emulator", slow_group("pm.emulator", 35, "pm", _call(pm + "emulator"), slow)),
         ("pm.dtmb5415", _call(pm + "dtmb5415")),

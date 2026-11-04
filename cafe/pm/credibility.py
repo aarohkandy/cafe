@@ -82,7 +82,7 @@ FACTORS = [("data_pedigree", "Data pedigree"), ("verification", "Verification"),
            ("ms_management", "M&S management"), ("people", "People qualifications")]
 
 LEVEL_TEXT = {"data_pedigree": {3: "strong: compared with moorings (the comparison also sets the wind priors)"},
-              "ms_management": {3: "strong: ledger chain, house rules and lint checked by the tool's own audit (no independent reviewer)"}}
+              "ms_management": {3: "strong: ledger chain audited by the tool; house rules and ruff configured (not run by the audit); no independent reviewer"}}
 # (LEVEL_TEXT replaces LEVELS[3] for the factor it names)
 WIND_RMSE_LIMIT = (2.0, 15.0)     # pooled speed (m/s) and direction (deg) RMSE above which the mooring comparison does not earn level 3: BRIEF 5.4's prior sd
 UVAL_MAX_FRAC = 0.5               # a V&V 20 row counts toward Validation level 3 only when U_val is below this fraction of the reference (DECISIONS row)
@@ -95,14 +95,16 @@ RULES = {
                      "(2.0 m/s, 15 deg); the comparison also sets the wind priors, so it is not independent of the run.",
     "verification": "1 a stage ledger exists; 2 every ledger is clean (ok, no failed check, chain intact, hashes reproduce) and tests exist; "
                     "3 and a grid-convergence (GCI) study backs a V&V 20 row.",
-    "validation": "1 a comparison with a reference ran; 2 and one has all of U_num, U_input, U_D; 3 and at least four such rows all satisfy |E| <= U_val "
-                  "with U_val below half the reference (a wider uncertainty cannot validate it).",
+    "validation": "1 a comparison with a reference ran; 2 and one has all of U_num, U_input, U_D; 3 and at least four such rows, "
+                  "each with a converged finest grid, all satisfy |E| <= U_val with U_val below half the reference "
+                  "(a wider uncertainty cannot validate it; a row whose finest grid has not converged is not judged).",
     "input_pedigree": "1 platform inputs carry provenance; 2 and at least half are sourced (not assumed, not recalled); "
                       "3 and at least 80 % are, and no perturbation prior is of kind assumed.",
     "uncertainty": "1 verdict intervals exist; 2 and the Latin-hypercube stratification checks passed; "
                    "3 and every vehicle and link that leaves P(fail) < 5 % open (95 % Wilson lower bound on P(fail) below 5 %) has n >= n_certify, "
                    "and no perturbation prior is of kind assumed.",
-    "robustness": "1 one ensemble ran; 2 and first-order sensitivities exist for a vehicle or link with both outcomes; "
+    "robustness": "1 one ensemble ran; 2 and a first-order sensitivity clearly above chance exists (more ranked than the 5 % level allows by luck over "
+                  "the report's tests), or a refit reran; "
                   "3 and a stage-3 refit reran stage 1 and no verdict changed.",
     "use_history": "1 only if docs/USE_HISTORY.md records a past prediction compared with a real outcome; otherwise 0.",
     "ms_management": "1 ledgers exist; 2 and every ledger carries a git sha, config hash, versions, and the stage-1 seeds; "
@@ -266,7 +268,7 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     except ImportError as e:
         return [_row("dtmb5415", "DTMB 5415 C_T", "cafe/pm/dtmb5415.py", None, None, None, f"not run: cafe.pm.dtmb5415 cannot be imported ({e})")]
     root = data / "dtmb5415"
-    rows = dtmb5415.tabulate(root)
+    rows, notes = dtmb5415.tabulate(root), dtmb5415.row_notes(root)
     stale = dtmb5415.stale_files(root)                                         # files of another recipe: tabulate skips them, this says why
     why = "; ".join(f"{n} was made by recipe {(_json(root / n) or {}).get('recipe')}, not {dtmb5415.RECIPE}" for n in stale)
     out = []
@@ -274,8 +276,17 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
         src = f"{root}/run_coarse.json + run_fine.json"
         if fr in rows:
             r = rows[fr]
-            out.append(_row(f"dtmb5415:Fr{fr:.2f}", f"DTMB 5415 C_T at Fr {fr:.2f} (INSEAN 2340)", src, r.S, r.D, (r.u_num, r.u_input, r.u_D),
-                            "U_D and U_input are assumed (config/assumptions.yaml dtmb5415.*); the free surface is held at the static draft"))
+            nt = notes[fr]
+            fine = next(iter(nt["grids"].values()))
+            row = _row(f"dtmb5415:Fr{fr:.2f}", f"DTMB 5415 C_T at Fr {fr:.2f} (INSEAN 2340)", src, r.S, r.D, (r.u_num, r.u_input, r.u_D),
+                       "U_D and U_input are assumed (config/assumptions.yaml dtmb5415.*); the free surface is held at the static draft; "
+                       f"discretization: {nt['note']}")                      # round 7, M-5: the grid sequence's own note
+            if fine["converged"] is False:
+                d = fine["drift"]
+                drift = f"drift {d:.4g} > {dtmb5415.DRIFT_TOL}" if isinstance(d, float) else "drift not stored"
+                row["note"] += f"; finest grid not converged (iterative {drift})"
+                row["validated"], row["not_judged"] = None, "not judged: the finest grid has not converged"
+            out.append(row)
         else:
             out.append(_row(f"dtmb5415:Fr{fr:.2f}", f"DTMB 5415 C_T at Fr {fr:.2f} (INSEAN 2340)", src, None, None, None,
                             f"not run: {why}" if why else f"not run: no coarse+fine run for this speed under {root}"))
@@ -408,6 +419,10 @@ def _verification(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     if lvl == 2 and any(r["status"] == "run" and r["u_num"] is not None for r in f.vv):
         lvl = 3
         ev.append(f.ev("a two-grid GCI sets U_num of a V&V 20 row", "cafe/pm/vv.py, cafe/pm/dtmb5415.py"))
+        fb = [r["id"] for r in f.vv if r["status"] == "run" and "Fs = 3, p = 2 assumed" in r["note"]]
+        if fb:                                                                  # round 7, M-5: the evidence is the fallback, not the three-grid GCI
+            miss.append(f"{len(fb)} V&V 20 row(s) rest on the Fs = 3, p = 2 fallback (the grid sequence is not monotone, "
+                        f"so the three-grid GCI was not used): {fb}")
     else:
         miss.append("no grid-convergence (GCI) study stored under the data directory: numerical error of the CFD is not estimated")
     return lvl, ev, miss
@@ -419,14 +434,19 @@ def _validation(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     miss = [f"not run: {r['case']}" + (f" ({r['note'].removeprefix('not run: ')})" if " recipe " in r["note"] else "") for r in f.vv if r["status"] != "run"]
     if not ran:
         return 0, [], ["no validation comparison has been run"] + miss
+    unj = [r["id"] for r in full if r.get("not_judged")]                                    # round 7, M-5: a finest grid that has not converged judges nothing
     ev = [f.ev(f"{len(ran)} comparison(s) ran, {len(full)} with all uncertainty terms, {sum(bool(r['validated']) for r in full)} with |E| <= U_val, "
-               f"{sum(bool(r['informative']) for r in full)} with U_val below {UVAL_MAX_FRAC:.0%} of the reference", "credibility.json: vv20")]
+               f"{sum(bool(r['informative']) for r in full)} with U_val below {UVAL_MAX_FRAC:.0%} of the reference"
+               + (f", {len(unj)} not judged (finest grid not converged)" if unj else ""), "credibility.json: vv20")]
     if not full:
         return 1, ev, ["no comparison stored U_num, U_input and U_D, so |E| <= U_val cannot be assessed"] + miss
     wide = [r["id"] for r in full if not r["informative"]]
-    if len(full) >= 4 and all(r["validated"] for r in full) and not wide:
+    judged = [r for r in full if not r.get("not_judged")]
+    if len(judged) >= 4 and all(r["validated"] for r in judged) and not wide:
         return 3, ev, miss
     why = ["fewer than four complete comparisons, or one with |E| > U_val"]
+    if unj:
+        why.append(f"{len(unj)} comparison(s) not judged because the finest grid has not converged, so not counted toward level 3: {unj}")
     if wide:
         why.append(f"U_val is {UVAL_MAX_FRAC:.0%} of the reference or more in {wide}: an uncertainty that wide cannot validate it")
     return 2, ev, why + miss
@@ -461,6 +481,9 @@ def _uncertainty(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
         ev.append(f.ev(f"{len(lhs)} Latin-hypercube stratification checks passed", f.lg(st)))
     else:
         miss.append(f"no passed Latin-hypercube stratification check in the {st} ledger" + (" (stage 1b is a copy of it)" if copied else ""))
+    if any(e.get("cls") == "usv" for e in f.ensembles()):                          # round 7, M-15
+        ev.append(f.ev("USV speed model sampled over 1.4 % only: the width of usv_vpp_bias is the published spread of VPP over-prediction, not an uncertainty "
+                       "of this model; the stage-1b case usv_vpp_bias_brief is the sensitivity", "config/perturbations.yaml usv_vpp_bias"))
     # round 5, M-11: an ensemble whose 95 % Wilson lower bound on P(fail) is already 5 % or more excludes P(fail) < 5 %; no n certifies it, so it is not "short"
     short = [e["n"] for e in ens if e["n"] < e["verdict"]["n_certify"] and intervals.wilson(e["k_fail"], e["n"], 0.95)[0] < 0.05]
     if lvl == 2 and not short and not f.assumed_perts():
@@ -477,11 +500,20 @@ def _robustness(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
         return 0, [], ["no stage-1b summary"]
     ev, miss, lvl = [f.ev(f"{len(ens)} ensembles", "run:stage1b/summary.json")], [], 1
     s = (f.s1b or {})["summary"]
-    sens = [k for k, e in {**s["vehicles"], **s["links"]}.items() if e["sensitivity"]["param"]]
+    allv = {**s["vehicles"], **s["links"]}
+    sens = [k for k, e in allv.items() if e["sensitivity"]["param"]]
+    tests = sum(e["sensitivity"].get("noise_floor") is not None for e in allv.values())            # a permutation test each, at the 5 % level (stage1._summary)
+    luck = sum(math.comb(tests, i) * 0.05 ** i * 0.95 ** (tests - i) for i in range(len(sens), tests + 1))      # P(at least this many clear it by chance)
+    clear = bool(sens) and luck < 0.05                    # round 7, M-23: one of three tests clears by luck 14 % of the time
     refit = [k for k, r in f.refit.items() if r.get("used")]
-    if sens or refit:
+    if clear or refit:
         lvl = 2
-        ev.append(f.ev(f"sensitivity indices for {sens}; refit rerun for {refit}", "run:stage1b/summary.json, run:refit/refit.json"))
+        ev.append(f.ev(f"sensitivity indices for {sens}" + ("" if clear else " (none stands clearly above chance)") + f"; refit rerun for {refit}",
+                       "run:stage1b/summary.json, run:refit/refit.json"))
+    elif sens:
+        ev.append(f.ev(f"sensitivity indices exist for {sens}; none stands clearly above chance ({len(sens)} of {tests} tests cleared the 95 % floor; "
+                       f"{luck:.0%} chance of that many by luck)", "run:stage1b/summary.json"))
+        miss.append("the first-order sensitivities do not stand clearly above chance and no refit reran")
     else:
         miss.append("no first-order sensitivity (every ensemble is all-pass or all-fail, or n < 16) and no refit rerun")
     s1 = ((f.s1 or {}).get("summary") or {}).get("vehicles", {})
@@ -641,9 +673,10 @@ def _render(c: dict[str, Any]) -> str:
                  f"<td>{'<br>'.join(e(m) for m in r['missing']) or 'nothing recorded as missing'}<td>{e(r['rule'])}</tr>")
     h.append("</table></div><h2 id=vv20>ASME V&amp;V 20 comparisons</h2><p class=muted>E = S &minus; D; U_val = sqrt(U_num&sup2; + U_input&sup2; + U_D&sup2;); "
              "validation is reported, not pass/fail.</p><div class=scroll><table><tr><th>Comparison<th>Status<th>S<th>D<th>E<th>U_num<th>U_input<th>U_D"
-             "<th>U_val<th>|E| &le; U_val<th>Note</tr>")
+             "<th>U_val<th>|E| &le; U_val<br><span class=muted>counts toward Validation 3 if U_val / D &lt; 0.5 (credibility); "
+             "the DTMB receipts require &le; 0.10</span><th>Note</tr>")
     for r in c["vv20"]:
-        ok = ("not assessable (U_val not stored)" if r["validated"] is None else ("yes" if r["validated"] else "no")
+        ok = (r["not_judged"] if r.get("not_judged") else "not assessable (U_val not stored)" if r["validated"] is None else ("yes" if r["validated"] else "no")
               + ("" if r["informative"] else f" (U_val is {r['u_frac']:.0%} of the reference: too wide to validate it)"))
         cells = "".join(f"<td>{_g(r[k])}" for k in ("S", "D", "E", "u_num", "u_input", "u_D", "u_val"))
         h.append(f"<tr id='vv-{e(r['id'])}'><td>{e(r['case'])}<td>{e(r['status'])}" + cells
