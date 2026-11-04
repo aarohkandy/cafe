@@ -2913,3 +2913,21 @@ def test_cafe_offline_reads_1_true_yes_on_as_offline_and_0_false_no_off_as_onlin
     monkeypatch.setenv("CAFE_OFFLINE", "maybe")
     with pytest.raises(config.ConfigError, match="CAFE_OFFLINE='maybe' is not 0 or 1; set CAFE_OFFLINE=1 to download nothing, or 0 or unset it"):
         pipeline._offline()
+
+
+def test_r7_m1_a_context_keeps_the_missions_own_verdict_cut_offs_after_it_plans(tmp_path, monkeypatch):
+    from cafe.pm.stats import intervals
+    for name in ("P_FAIL_GO", "P_FAIL_NOGO", "LO_SUCCESS_GO"):
+        monkeypatch.setattr(intervals, name, getattr(intervals, name))
+    p = tmp_path / "m.yaml"
+    p.write_text((ROOT / "missions" / "tepex_c_demo.yaml").read_text().replace("verdict: {go: 0.9, nogo: 0.6}", "verdict: {go: 0.8, nogo: 0.5}"))
+    pipeline.Context(p, "quick", 0, tmp_path / "r", quiet)
+    assert (intervals.P_FAIL_GO, intervals.P_FAIL_NOGO) == (pytest.approx(0.2), 0.5)
+
+
+def test_r7_m32_ocean_box_across_0_deg_e_is_a_config_error_for_a_mission_loaded_without_validation():
+    m = yaml.safe_load((ROOT / "missions" / "tepex_c_demo.yaml").read_text())
+    m["box"].update(lon_min=-15.0, lon_max=15.0)
+    with pytest.raises(config.ConfigError, match=r"crosses 0 deg E; the GLBy ocean fetch cannot cross it: move the box east or west of 0 deg, or split"):
+        pipeline.ocean_box(m)
+    assert pipeline.ocean_box(yaml.safe_load((ROOT / "missions" / "tepex_c_demo.yaml").read_text()))[2:] == (163.0, -163.0)

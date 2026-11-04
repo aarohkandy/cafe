@@ -621,3 +621,21 @@ def test_r6_m22_a_radio_table_number_without_a_source_fails_naming_the_leaf_and_
     assert "(modem table): provenance FAILED" in out and "modems.benthos_atm960.source" in out
     assert cli.main(["hangar", "--platform", "no_such_boat"]) == 2
     assert "'modems (table)'" in capsys.readouterr().err
+
+
+# ---- review round 7, M-34: a corrupt file is an `error:` line and exit 2
+
+def test_r7_m34_a_mission_that_is_not_utf8_text_ends_in_an_error_line(tmp_path, capsys):
+    p = tmp_path / "bin.yaml"
+    p.write_bytes(bytes(range(256)))
+    assert cli.main(["validate", "--mission", str(p)]) == 2
+    assert "error: " in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("text", ["[]", "{", "\xff\xfe"], ids=["array", "truncated", "not utf-8"])
+def test_r7_m34_a_plan_json_that_is_not_a_json_object_ends_in_an_error_line(tmp_path, capsys, text):
+    (tmp_path / "mission.yaml").write_text((config.ROOT / "missions" / "tepex_c_demo.yaml").read_text())
+    (tmp_path / "plan.json").write_bytes(text.encode("latin-1"))
+    assert cli.main(["report", "--run", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "plan.json: not a JSON object" in err and "Traceback" not in err

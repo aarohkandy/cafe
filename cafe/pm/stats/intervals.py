@@ -33,7 +33,8 @@ LO_SUCCESS_GO = 0.75    # GO also needs the Wilson lower bound on success >= 0.7
 
 def set_thresholds(go: float, nogo: float) -> None:
     """Use the mission's P(success) cut-offs: GO at p >= go, NO-GO at p < nogo (0 < nogo < go <= 1). The demo's 0.9 / 0.6 give back 0.10 / 0.40.
-    Module state, set by `config.load_mission` (one mission per process)."""
+    Module state, set by `config.load_mission` for the one mission a command runs; a mission loaded only to be read
+    (`load_mission(..., set_verdict=False)`) does not set it."""
     global P_FAIL_GO, P_FAIL_NOGO, LO_SUCCESS_GO
     if not 0 < nogo < go <= 1:
         raise ValueError(f"need 0 < nogo < go <= 1, got go={go}, nogo={nogo}")

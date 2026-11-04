@@ -598,3 +598,13 @@ def test_every_zarr_store_below_the_cache_and_the_ocean_store_count_toward_the_f
 
 def test_a_mission_without_a_box_is_planned_on_the_demos_box():
     assert budget.env_gb(MISSION) == 9.0 and budget.padded_area_deg2(MISSION) == 14 * 34
+
+
+def test_r7_m1_planning_the_budget_does_not_replace_the_missions_verdict_cut_offs(monkeypatch):
+    from cafe.pm.stats import intervals
+    m, c = demo()
+    for name in ("P_FAIL_GO", "P_FAIL_NOGO", "LO_SUCCESS_GO"):
+        monkeypatch.setattr(intervals, name, getattr(intervals, name))
+    intervals.set_thresholds(0.8, 0.5)                                                  # the user's mission: verdict {go: 0.8, nogo: 0.5}
+    budget.plan("quick", 0, m, vehicle_classes=c, workers=6)
+    assert (intervals.P_FAIL_GO, intervals.P_FAIL_NOGO) == (pytest.approx(0.2), 0.5)

@@ -578,3 +578,70 @@ def test_r6_m24_an_unquoted_timestamp_and_an_empty_value_say_how_to_fix_them(tmp
     p.write_text(re.sub(r"description: >\n(  .*\n)+", "description:\n", DEMO.read_text()))
     with pytest.raises(ConfigError, match=r"description: is empty; give it a value or remove the key"):
         load_mission(p)
+
+
+# ---- review round 7: M-1, M-32, M-33, M-34, M-47 (the bounds of M-9)
+
+def test_r7_m1_a_mission_loaded_only_to_be_read_leaves_the_verdict_cut_offs_alone(tmp_path):
+    load_mission(edit(tmp_path, lambda d: d["verdict"].update(go=0.8, nogo=0.5)))
+    assert (I.P_FAIL_GO, I.P_FAIL_NOGO) == (pytest.approx(0.2), 0.5)
+    load_mission(DEMO, set_verdict=False)
+    assert (I.P_FAIL_GO, I.P_FAIL_NOGO) == (pytest.approx(0.2), 0.5)                    # still the first mission's
+    load_mission(DEMO)
+    assert (I.P_FAIL_GO, I.P_FAIL_NOGO) == (0.10, 0.40)
+
+
+def prime(d, lo=-15.0, hi=15.0, at=-5.0):
+    """The reviewer's prime.yaml: the demo with its box across the prime meridian and everything inside it."""
+    d["box"].update(lon_min=lo, lon_max=hi)
+    d["ship"].update(lon=at)
+    for v in d["vehicles"]:
+        if "deploy" in v:
+            v["deploy"]["lon"] = at
+        t = v.get("task", {})
+        if "lon" in t:
+            t["lon"] = at
+        if "waypoints" in t:
+            t["waypoints"] = [[at, -1.0], [at, 1.0]]
+
+
+def test_r7_m32_a_box_across_0_deg_e_is_refused_at_validation_naming_the_box(tmp_path):
+    with pytest.raises(ConfigError, match=r"m.yaml: box \(.*\): the box \(with its pad of 2 deg\) crosses 0 deg E; the GLBy ocean fetch cannot cross it"):
+        load_mission(edit(tmp_path, prime))
+    load_mission(edit(tmp_path, lambda d: prime(d, 2.0, 10.0, 5.0)))          # pad 2: the west edge is 0
+    load_mission(DEMO)                                                                  # the dateline box is one request
+
+
+def test_r7_m33_a_mission_name_is_at_most_64_characters_and_its_paths_can_be_made(tmp_path):
+    with pytest.raises(ConfigError, match=r"name: .*too long"):
+        load_mission(edit(tmp_path, lambda d: d.update(name="a" * 65)))
+    m = load_mission(edit(tmp_path, lambda d: d.update(name="a" * 64)))
+    for part in (m["name"], f"gofs_{m['name']}.zarr"):
+        (tmp_path / "cache" / part).mkdir(parents=True)
+
+
+def test_r7_m34_a_mission_file_that_is_not_utf8_text_is_a_config_error(tmp_path):
+    p = tmp_path / "bin.yaml"
+    p.write_bytes(bytes(range(256)))
+    with pytest.raises(ConfigError, match=r"bin.yaml: not a UTF-8 text file \(invalid start byte at byte 128\); the mission and platform files are UTF-8 YAML"):
+        load_mission(p)
+    with pytest.raises(ConfigError, match=r"bin.yaml: not a UTF-8 text file"):
+        load_platform(p)
+    with pytest.raises(ConfigError, match=r"cannot be read"):
+        load_mission(tmp_path)                                                          # a directory exists but cannot be read as a file
+
+
+R7_M47 = [
+    ("max wind 61", lambda d: vehicle(d, "uas")["launch_rules"].update(max_mean_wind_ms=61), r"vehicles/\d/launch_rules/max_mean_wind_ms"),
+    ("lost after 721 h", lambda d: vehicle(d, "glider_eq")["task"].update(lost_after_h=721), r"vehicles/\d/task/lost_after_h"),
+    ("lost after -5 h", lambda d: vehicle(d, "glider_eq")["task"].update(lost_after_h=-5), r"vehicles/\d/task/lost_after_h"),
+    ("track tolerance 1001 km", lambda d: vehicle(d, "usv")["task"].update(track_tolerance_km=1001), r"vehicles/\d/task/track_tolerance_km"),
+    ("gust-front window 1441 min", lambda d: vehicle(d, "uas")["launch_rules"].update(no_gust_front_within_min=1441),
+     r"vehicles/\d/launch_rules/no_gust_front_within_min"),
+]
+
+
+@pytest.mark.parametrize("what,fn,msg", R7_M47, ids=[c[0] for c in R7_M47])
+def test_r7_m47_the_other_bounds_of_r6_m9_are_each_refused_naming_their_field(tmp_path, what, fn, msg):
+    with pytest.raises(ConfigError, match=msg):
+        load_mission(edit(tmp_path, fn))

@@ -160,6 +160,17 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _json_object(p: pathlib.Path) -> dict[str, Any]:
+    """A JSON object a run wrote and a command reads back; a corrupt file or any other JSON is a ConfigError (exit 2), not a traceback."""
+    try:
+        d = json.loads(p.read_text())
+    except (ValueError, OSError) as e:                                   # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        raise ConfigError(f"{p}: not a JSON object ({e}); `run` writes it, so run it again (--fresh)") from e
+    if not isinstance(d, dict):
+        raise ConfigError(f"{p}: not a JSON object (it holds {type(d).__name__}); `run` writes it, so run it again (--fresh)")
+    return d
+
+
 def _gpu_mem(a: argparse.Namespace) -> float | None:
     """--gpu-mem-gb, else what nvidia-smi says when GPUs are asked for, else None (no memory to guard)."""
     given = getattr(a, "gpu_mem_gb", None)
@@ -171,7 +182,7 @@ def _report(run: pathlib.Path, open_it: bool) -> int:
     m = load_mission(run / "mission.yaml")
     if not (run / "plan.json").is_file():
         raise ConfigError(f"{run}: no plan.json; this is not a finished run directory (run `python -m cafe.pm run` first)")
-    plan = json.loads((run / "plan.json").read_text())
+    plan = _json_object(run / "plan.json")
     ctx = pipeline.Context(run / "mission.yaml", plan["budget"], plan["gpus"], run)
     env = None
     if ctx.cache.is_dir():
@@ -250,13 +261,13 @@ def _whatif(a: argparse.Namespace) -> int:
         raise ConfigError(f"no environment cache at {ctx.cache}: run `python -m cafe.pm fetch --mission {a.mission}` first")
     base, tracks, scales, fitted = {}, {}, None, None
     if (run / "stage1b" / "summary.json").is_file():
-        base = {k: v["verdict"] for k, v in json.loads((run / "stage1b" / "summary.json").read_text())["summary"]["vehicles"].items()}
+        base = {k: v["verdict"] for k, v in _json_object(run / "stage1b" / "summary.json")["summary"]["vehicles"].items()}
         res, why = report._load_res(run, report.Trace(run))
         tracks = {k: whatif.track_points(r, m) for k, r in (res or {"vehicles": {}})["vehicles"].items() if r["class"] != "uas"}
         rf = run / "refit" / "refit.json"
-        scales = {k: r for k, r in json.loads(rf.read_text()).items() if r["used"]} if rf.is_file() else None
+        scales = {k: r for k, r in _json_object(rf).items() if r["used"]} if rf.is_file() else None
         pf = run / "ingest" / "priors_fitted.json"
-        fitted = json.loads(pf.read_text()) if pf.is_file() else None
+        fitted = _json_object(pf) if pf.is_file() else None
         if res is None:
             print(f"note: {why}; every changed vehicle goes to Stage 1")
     else:

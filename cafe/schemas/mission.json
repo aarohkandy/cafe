@@ -13,7 +13,7 @@
                "properties": {"time": {"$ref": "#/$defs/time"}, "lon": {"$ref": "#/$defs/lon"}, "lat": {"$ref": "#/$defs/lat"}}}
   },
   "properties": {
-    "name": {"type": "string", "pattern": "^[a-z0-9_\\-]+$"},
+    "name": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9_\\-]+$"},
     "description": {"type": "string"},
     "window": {"type": "object", "required": ["start", "end"], "additionalProperties": false,
                "properties": {"start": {"$ref": "#/$defs/time"}, "end": {"$ref": "#/$defs/time"}}},
