@@ -3110,6 +3110,24 @@ def test_r8_m4c_the_assembled_orca_stores_are_tree_hashed_inputs_and_a_changed_o
     assert any(str(orca_dir / "wrf.zarr") in p and "(tree " in p for p in audit.ledger_problems(ctx.run_dir))
 
 
+def test_r8_m4c_a_changed_assembled_orca_store_rebuilds_the_derived_layer(tmp_path, data_copy, monkeypatch):
+    """The orca manifest lists the hourly parts, not wrf.zarr: without `orca_stores=` in the derived key a changed assembled store left derived.zarr current."""
+    orca_dir = data_copy / "cache" / "ci_fixture" / "orca"
+    ctx = ctx_for(tmp_path / "a")
+    run_stage(pipeline.s_ingest, ctx, "ingest")
+    built = []
+    real = surface.build
+    monkeypatch.setattr(surface, "build", lambda *a, **k: (built.append(1), real(*a, **k))[1])
+    key0 = json.loads((ctx.cache / surface.DIGEST).read_text())["built_from"]
+    assert pipeline._derived_current(ctx.cache, key0)
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "b"), "ingest")
+    assert built == [] and json.loads((ctx.cache / surface.DIGEST).read_text())["built_from"] == key0         # unchanged inputs: kept
+    (orca_dir / "wrf.zarr" / "changed_after_assembly.bin").write_bytes(b"x")
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "c"), "ingest")
+    assert built == [1] and json.loads((ctx.cache / surface.DIGEST).read_text())["built_from"] != key0
+    assert not pipeline._derived_current(ctx.cache, key0)
+
+
 def test_r8_m4_a_chunk_of_the_ocean_store_deleted_before_the_ingest_fails_the_nan_mask_check_with_the_count(tmp_path, data_copy):
     """A deleted chunk reads as NaN where the sea was: nothing named it (the store is hashed as it is found, so the hash cannot tell)."""
     from cafe.pm.env import hycom
