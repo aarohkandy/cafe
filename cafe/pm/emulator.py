@@ -180,8 +180,8 @@ class Emulator:
         low = np.flatnonzero(fid == 0) if self.multi_fidelity else np.empty(0, int)
         rng = np.random.default_rng(self.seed)
         lead = 3 if self.multi_fidelity else 2
-        if self.point_cols:  # whole feature points, as `holdout_report` splits them (round 8 M-9): a calibration row with
-            point = df[self.point_cols].round(9).groupby(self.point_cols, sort=False, dropna=False).ngroup().to_numpy()[prim]  # else a trained twin scores it in-sample
+        if self.point_cols:  # whole feature points, as `holdout_report` splits them (round 8 M-9): else a calibration row with a trained twin scores in-sample
+            point = df[self.point_cols].round(9).groupby(self.point_cols, sort=False, dropna=False).ngroup().to_numpy()[prim]
             pts = rng.permutation(np.unique(point))
             n_cal = max(min(max(int(round(cal_frac * len(pts))), 1), len(pts) - lead), 0)
             is_cal = np.isin(point, pts[:n_cal])
