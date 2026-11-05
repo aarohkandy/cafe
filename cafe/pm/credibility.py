@@ -98,7 +98,7 @@ RULES = {
                      "3 and the WRF wind and SST were compared with TAO/TRITON moorings for this mission, with pooled wind RMSE within the brief's prior sd "
                      "(2.0 m/s, 15 deg); the comparison also sets the wind priors, so it is not independent of the run.",
     "verification": "1 a stage ledger exists; 2 every ledger is clean (ok, no failed check, chain intact, hashes reproduce) and test files exist "
-                    "(their results are not read here); "
+                    "(this report does not read their results); "
                     "3 and a grid-convergence (GCI) study backs a V&V 20 row.",
     "validation": "1 a comparison with a reference ran; 2 and one has all of U_num, U_input, U_D; 3 and at least four such rows, "
                   "each with a converged finest grid, all satisfy |E| <= U_val with U_val below half the reference "
