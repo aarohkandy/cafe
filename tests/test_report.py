@@ -2036,6 +2036,8 @@ def test_r8_m47_a_count_of_one_is_not_pluralised(full):
     assert report._txt(n(1, "notches")) == "1 notch" and report._txt(n(2, "notches")) == "2 notches" and report._txt(n(1, "candidates")) == "1 candidate"
     assert report._txt(n(1, "members")) == "1 member" and report._txt(n(1.0, "m/s")) == "1 m/s" and report._txt(n(0, "members")) == "0 members"
     assert report._txt(n(True, "members")) == "True members"
+    assert [report._txt(n(1, u)) for u in ("fraction", "-", "")] == ["1", "1", "1"]                  # a unit that is not shown is not rebuilt for 1
+    assert [report._txt(n(2, u)) for u in ("fraction", "-", "")] == ["2", "2", "2"]
 
 
 RUN_FILES = ["stage1b/summary.json", "refit/refit.json", "stage3/windows.json", "windows/windows.json", "emulator/flip.json", "emulator/holdout.json"]
@@ -2056,3 +2058,24 @@ def test_r8_m22_a_run_file_that_is_json_but_not_an_object_is_refused_too(run):
     (run / "stage1b" / "summary.json").write_text("[]")
     with pytest.raises(config.ConfigError, match=r"summary.json: not a JSON object \(it holds list\)"):
         report.write(run, m, plan)
+
+
+def test_r8_m22_build_reads_the_credibility_file_through_the_checked_reader(run):
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)                                                                # a finished run
+    p = run / "report" / "credibility.json"
+    p.write_text('{"a": 1, "b')                                                               # write() rewrites it before build() reads it: call build
+    with pytest.raises(config.ConfigError, match=r"credibility.json: not a JSON object .*run it again \(--fresh\)"):
+        report.build(run, m, plan)
+
+
+def test_r8_m47_a_single_candidate_is_all_1_candidate(run):
+    m, plan = pm_run.make_run(run)
+    f = json.loads((run / "emulator" / "flip.json").read_text())
+    usv = f["vehicles"]["usv"]
+    usv["tried"] = usv["tried"][:1]
+    usv.update(found=False, best=None)
+    (run / "emulator" / "flip.json").write_text(json.dumps(f))
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert "All 1 candidate:" in t and "All 1 candidates" not in t

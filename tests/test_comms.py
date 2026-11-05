@@ -394,7 +394,7 @@ def test_acoustic_link_budget_uses_the_slant_range_but_bellhop_the_horizontal_on
 
 
 def test_valid_range_is_a_factor_times_the_vendor_range_and_follows_like_bands():
-    f = c._yaml("modems.yaml")["defaults"]["valid_range_factor"]
+    f = c._yaml("modems.yaml")["defaults"]["valid_range_factor"]["value"]
     assert f == 10.0 and c.valid_range_m("benthos_atm960", "MF") == pytest.approx(f * 4e3) and c.valid_range_m("benthos_atm960", "LF") == pytest.approx(f * 6e3)
     assert c.valid_range_m("whoi_micromodem", "long_10k") == c.valid_range_m("benthos_atm960", "MF")
 

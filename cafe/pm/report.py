@@ -972,7 +972,7 @@ def _txt(n: dict[str, Any]) -> str:
     if "values" in n:
         return f"{len(n['values'])} values{unit}"
     v = n["value"]
-    if v == 1 and not isinstance(v, bool):
+    if unit and v == 1 and not isinstance(v, bool):                                  # only a unit that is shown is made singular
         unit = f" {SINGULAR.get(n['unit'], n['unit'])}"
     return ("n/a" if v is None else f"{v:.4g}" if isinstance(v, float) else str(v)) + unit
 

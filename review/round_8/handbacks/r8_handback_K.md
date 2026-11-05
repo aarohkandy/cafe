@@ -1,6 +1,6 @@
 # Round 8, batch K hand-back (credibility, report, shared JSON reading)
 
-Branch `r8-k` (worktree `/Users/aaroh/Downloads/everything/cafe-r8k`). Fixed: M-1 (Data pedigree part), M-7, M-10, M-16, M-19, M-20, M-21, M-22, M-42 (all but the emulator test, see "needs"), M-45, M-46, M-47.
+Branch `r8-k` (worktree `/Users/aaroh/Downloads/everything/cafe-r8k`). Fixed: M-1 (Data pedigree part), M-7, M-10, M-16, M-19, M-20, M-21, M-22, M-42, M-45, M-46, M-47.
 The commit trailer is `Co-Authored-By: Claude Sonnet 5.5` (the model that did the work), not the Opus line in r8_common.md.
 
 ## Per finding
@@ -38,17 +38,17 @@ The commit trailer is `Co-Authored-By: Claude Sonnet 5.5` (the model that did th
 ### M-22
 - `config.json_object` (moved from `__main__._json_object`, which is now an import alias); `credibility._json` and `report._jl` use it, so a truncated or non-object run file is a ConfigError (exit 2, one `error:` line). Also the `credibility.json` read in `report.build`.
 - Tests: `test_r8_m22_report_of_a_run_with_a_damaged_json_file_ends_in_an_error_line` (cli, 8 files x truncated/array: summary, refit, priors_fitted, tao_compare, stage3 windows, windows, flip, ingest ledger), `test_r8_m22_a_truncated_run_file_is_a_config_error_naming_it` and `..._not_an_object_is_refused_too` (report), `test_r8_m22_a_truncated_run_json_is_a_config_error_naming_the_file` (credibility), `test_r8_m22_json_object_refuses_damage_and_other_json` (config).
-- Not testable as merged.md says: a cut `report/credibility.json` is rewritten by `report.write` before `build` reads it, so it never reaches the reader (no test; the read still goes through `json_object`). Emulator `holdout.json` is covered through `report.write`.
+- `report.build`'s read of `report/credibility.json`: `report.write` rewrites that file before `build` reads it, so the test calls `build` directly after a finished `write`: `test_r8_m22_build_reads_the_credibility_file_through_the_checked_reader` (a cut file is a ConfigError naming `credibility.json`). Emulator `holdout.json` is covered through `report.write`.
 - The ledger cut passes through `report.Trace._jl` here; M-23 (batch A) changes how `done` and the audit read ledgers, not this path.
 
 ### M-42 (tests)
-- Robustness (a), (b), (c) and D-7 in tests/test_credibility.py; D-9(a) in tests/test_config.py. D-8 (emulator) is in "needs". Mutant results below.
+- Robustness (a), (b), (c) and D-7 in tests/test_credibility.py; D-9(a) in tests/test_config.py; D-8 in tests/test_emulator.py (`test_the_holdout_draws_fresh_members_once_per_point_not_once_per_replicate`). Mutant results below.
 
 ### M-45, M-46
 - `LEVEL_TEXT["verification"][2]` = "moderate: the ledger chain audits clean and test files exist; this report does not run or read the tests (`make audit` does)"; evidence "{n} test files present (their results are not read here)"; `RULES["verification"]` says so. `LEVEL_TEXT["ms_management"][3]` = "... house rules and ruff configured (`make audit` runs ruff; this report only checks that it is configured); no independent reviewer". docs/CREDIBILITY.md rows (Data pedigree, Verification, M&S management, the DTMB row note, the assumed-input count, receipts). Tests: `test_r8_m45_verification_two_says_it_does_not_run_or_read_the_tests`, `test_r8_m46_the_management_text_no_longer_says_the_audit_does_not_run_ruff`.
 
 ### M-47
-- `report._txt` singularises `candidates`, `notches`, `members` when the value is exactly 1; "All {k} candidate(s)" in the flip summary. Existing test `test_what_would_fix_it_when_nothing_flips_the_verdict` pinned "1 candidates evaluated"; it now asserts "1 candidate evaluated" and that "1 candidates" is absent. New: `test_r8_m47_a_count_of_one_is_not_pluralised`.
+- `report._txt` singularises `candidates`, `notches`, `members` when the value is exactly 1, and only when the unit is shown (finish pass: a hidden unit `fraction`, `-`, `` printed `1 fraction`, `1 -`, `1 ` because the unit was rebuilt for the value 1; now `1`; callers of `_txt`: `report.py` lines for the stat sentence, `_n`, and the "node is in the HTML" check, all use the same function so they stay consistent); "All {k} candidate(s)" in the flip summary (test `test_r8_m47_a_single_candidate_is_all_1_candidate`). Existing test `test_what_would_fix_it_when_nothing_flips_the_verdict` pinned "1 candidates evaluated"; it now asserts "1 candidate evaluated" and that "1 candidates" is absent. New: `test_r8_m47_a_count_of_one_is_not_pluralised`.
 
 ## Before / after
 
@@ -63,7 +63,11 @@ M-42 mutants, each applied to a copy of the fixed code (throwaway worktree `cafe
 | `tests = len(allv)` | `...[10-entries-2-floors]` (1 != 2) |
 | `judged = list(full)` | `test_r8_m42_validation_three_counts_four_judged_rows_beside_a_row_not_judged` (2 != 3) |
 | `lost_after_h` `"minimum": 0` | `test_r8_m42_lost_after_h_of_zero_is_refused_naming_above_0` (DID NOT RAISE) |
-| `drop_duplicates(self.features)` | the D-8 test below, in a scratch file (3 asks for one point; passes on the fixed code) |
+| `drop_duplicates(self.features)` | `test_the_holdout_draws_fresh_members_once_per_point_not_once_per_replicate` (1 distinct point asked 3 times, `1 == 3`) |
+| `_txt`: unit rebuilt for 1 even when hidden (`if v == 1 ...` without `unit and`) | `test_r8_m47_a_count_of_one_is_not_pluralised` (`['1 fraction', '1 -', '1 ']` != `['1', '1', '1']`) |
+| `s = "s"` ("All 1 candidates") | `test_r8_m47_a_single_candidate_is_all_1_candidate` |
+| `report.build` reads `credibility.json` with plain `json.loads` | `test_r8_m22_build_reads_the_credibility_file_through_the_checked_reader` (JSONDecodeError, not ConfigError) |
+| `modems.yaml` `valid_range_factor` back to a bare `10.0` / value `12.0` | `test_valid_range_is_a_factor_times_the_vendor_range_...` (TypeError `'float' object is not subscriptable` / `12.0 == 10.0`); the test now reads `["value"]`, it had compared the whole leaf to 10.0 and failed on the fixed code |
 
 ## Existing tests changed (each pinned the old behaviour; no assertion was loosened)
 
@@ -117,29 +121,14 @@ Exact one-line integration after the merge (optional, removes the second copy of
 
 ## Needs from other batches
 
-1. tests/test_emulator.py (M-9's batch / whoever owns it), append at the end (D-8 of M-42; verified here to pass on the fixed code and fail on `drop_duplicates(self.features)`):
-
-```python
-def test_the_fresh_draws_are_asked_for_distinct_points_not_for_replicates_of_one(tmp_path):
-    """Round 8 M-42 (D-8): `drop_duplicates(self.features)` in place of `point_cols` left the suite green; replicates sit next to each other here."""
-    base = E.synthetic_table(40, 1)
-    rng = np.random.default_rng(3)
-    cols = ["deploy_shift_h", "lon_shift_deg", "duty_cycle", "battery_wh"]
-    df = pd.concat([base.assign(wind_mean=base.wind_mean + 0.01 * rng.normal(size=len(base)), hs_max=base.hs_max + 0.01 * rng.normal(size=len(base)))
-                    for _ in range(3)], ignore_index=True).sort_values(cols, kind="stable").reset_index(drop=True)
-    em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "t.parquet", seed=1, point_cols=cols)
-    asked = []
-
-    def fresh(row):
-        asked.append(tuple(row[cols].round(9)))
-        return 0.5, 10
-    h = em.holdout_report(df, fresh=fresh)
-    assert len(asked) == E.FRESH_POINTS == len(set(asked)) and h["fresh"]["points"] == E.FRESH_POINTS
-```
-2. E: nothing needed for my reader (it reads the existing check `coare_ustar_vs_umwm_ust` and its `value`); E's `forcing_in_physical_range` fails the level through the existing `bad` list.
-3. After the merge, M-20's tests assume `report.py` imports `credibility` (it does) and `stats.sampling.PERTURBATIONS`.
+1. E: nothing needed for my reader (it reads the existing check `coare_ustar_vs_umwm_ust` and its `value`); E's `forcing_in_physical_range` fails the level through the existing `bad` list.
+2. After the merge, M-20's tests assume `report.py` imports `credibility` (it does) and `stats.sampling.PERTURBATIONS`.
 
 
 ## Final run (finish pass, homebase, PM_CPUS=2 PM_MEM=12g, detached)
 
 `ruff check cafe/pm tests bench`: All checks passed. `mypy cafe/pm`: no issues in 54 source files. `pytest tests/test_credibility.py tests/test_vv.py tests/test_report.py`: pytest1_rc=0 (all dots, no F/E). `pytest tests/test_cli.py tests/test_config.py -k r8`: pytest2_rc=0. M-1 fail-first on pre-K credibility.py (eaf0e27): 3 failed. No container of K left running.
+
+## Finish pass 2 (burst VM, `cafe-burst`, pm_r8k)
+
+The uncommitted tests of the dead repair builder were checked and kept (test_comms `["value"]`, D-8, `build` credibility read, "All 1 candidate:"); the `_txt` hidden-unit bug was fixed. `pytest -n 6 --dist loadfile tests/test_report.py tests/test_comms.py tests/test_emulator.py`: rc=0 (whole files). `ruff check cafe/pm tests`: clean. `mypy cafe/pm`: no issues in 54 source files. Mutants (throwaway detached worktree `cafe-r8k-mut`, removed): each killed as in the table above.
