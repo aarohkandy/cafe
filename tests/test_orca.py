@@ -584,3 +584,9 @@ def test_r7_m31_a_failed_part_stops_the_rest_and_keeps_the_finished_ones(orca_en
     assert len(ran) <= 3                                                                              # the jobs in flight, not the seven queued (6 before)
     saved = {p.name for p in (out / "hours").glob("*.npz")}
     assert saved and all(f"wrf_{orca.stamp(x)}.npz" in saved for x in ran)                            # what finished was kept
+
+
+def test_r8_m33_the_manifest_records_the_layout_version_of_the_hour_labelling(orca_env, tmp_path):
+    out = tmp_path / "out"
+    man, _ = ingest(orca_env, out)
+    assert man["layout_version"] == orca.LAYOUT_VERSION == json.loads((out / "manifest.json").read_text())["layout_version"] == 2

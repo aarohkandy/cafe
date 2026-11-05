@@ -29,12 +29,13 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import yaml
 from numpy.typing import NDArray
 from scipy.stats import chi2
 
 from . import budget, ledger, par, stage1
 from .audit import STAGES
-from .config import ConfigError, digest, env_sigmas, load_mission, utc
+from .config import ConfigError, _yaml, assumptions, digest, env_sigmas, load_mission, utc
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.hycom import FetchError
 from .env.remote import sha256
@@ -289,21 +290,49 @@ def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], b
     return ok
 
 
-def _ocean_time_problem(times: Any, window: tuple[float, float]) -> str | None:
+OCEAN_MAX_STEP_S = 86400.0       # the longest step of a lab ocean store inside the window (an assumption: QUESTIONS_FOR_LAB); a longer one is a straight line
+
+
+def _ocean_steps(times: Any, window: tuple[float, float]) -> NDArray[np.float64]:
+    """The finite, sorted `times` from the last one at or before the window start to the first one at or after its end (as far as they reach)."""
+    t = np.asarray(times, np.float64)
+    t = np.sort(t[np.isfinite(t)])
+    return t[max(int(np.searchsorted(t, window[0], side="right")) - 1, 0):int(np.searchsorted(t, window[1], side="left")) + 1]
+
+
+def _ocean_cadence(times: Any, window: tuple[float, float]) -> tuple[float, float]:
+    """(median, largest) step in hours of the store's times that serve `window` (`_ocean_steps`); 0 for a store of one time."""
+    d = np.diff(_ocean_steps(times, window)) / 3600.0
+    return (float(np.median(d)), float(d.max())) if d.size else (0.0, 0.0)
+
+
+def _ocean_time_problem(times: Any, window: tuple[float, float], max_step_s: float = OCEAN_MAX_STEP_S) -> str | None:
     """Why a lab store whose time axis is `times` (epoch s) cannot serve `window`, else None. A lab store has the cadence of the lab's files, and
-    `Ocean` interpolates linearly in time, so what it needs is coverage: the first time at or before the start, the last at or after the end."""
+    `Ocean` interpolates linearly in time, so what it needs is coverage (the first time at or before the start, the last at or after the end) with
+    no step longer than `max_step_s` between them: a longer step is a current that is a straight line across it."""
     def f(t: float) -> str:
         return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%d %H:%M")
-    lo, hi = float(np.min(times)), float(np.max(times))
+    t = np.asarray(times, np.float64)
+    t = np.sort(t[np.isfinite(t)])
+    if not t.size:
+        return "the store has no finite times"
+    lo, hi = float(t[0]), float(t[-1])
     short = ([f"starts {(lo - window[0]) / 3600:.1f} h after the window start"] if lo > window[0] else []) + (
         [f"ends {(window[1] - hi) / 3600:.1f} h before the window end"] if hi < window[1] else [])
-    return f"its times span {f(lo)} to {f(hi)} UTC, the window is {f(window[0])} to {f(window[1])} UTC: the store " + " and ".join(short) if short else None
+    if short:
+        return f"its times span {f(lo)} to {f(hi)} UTC, the window is {f(window[0])} to {f(window[1])} UTC: the store " + " and ".join(short)
+    seg = _ocean_steps(t, window)
+    k = int(np.argmax(np.diff(seg))) if seg.size > 1 else 0
+    if seg.size > 1 and seg[k + 1] - seg[k] > max_step_s:
+        return (f"its largest step inside the window is {(seg[k + 1] - seg[k]) / 3600:g} h (from {f(seg[k])} to {f(seg[k + 1])} UTC), more than the "
+                f"{max_step_s / 3600:g} h limit: the current would be a straight line across it; ingest a store with a shorter cadence")
+    return None
 
 
 def _ocean_cached(path: pathlib.Path, box: tuple[float, float, float, float], steps: Any, window: tuple[float, float] | None = None) -> bool:
     """The ocean store at `path` spans `box` (to the 0.1 degree grid snap) and its recorded parts-manifest hash is the one on disk when the parts
     are still there (assemble_gofs hash-checks every part against that manifest). GOFS (`window` None): it has every 3-hourly step. A lab store
-    (`window` given) has the cadence of the lab's files, so it must cover the window instead (`_ocean_time_problem`)."""
+    (`window` given) has the cadence of the lab's files, so it must cover the window with no step over a day instead (`_ocean_time_problem`)."""
     if not path.exists():
         return False
     ds = hycom.open_store(path)
@@ -376,6 +405,9 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
         d = orca.read_json(man)
         if d is None and man.exists():
             ctx.log(f"ingest: orca manifest {man} is unreadable (empty or truncated): fetching again")
+        if d is not None and _old_orca_layout(d, t0):
+            ctx.log(f"ingest: orca manifest {man} was made by older code (its hour labels are shifted for a window that starts at "
+                    f":{t0.minute:02d}): fetching again")
         return d is not None and _orca_covers(d, t0, t1, box, h3)
 
     if orca_covers():
@@ -414,6 +446,9 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     L.input(store, sha=hycom.open_store(store).attrs.get("manifest_sha256"), kind="ocean store (sha256 of its parts manifest)")
     L.input(gebco, kind="GEBCO_2026 cut")
     L.check("orca_hours_cover_window", d["hours"] >= want, value=d["hours"], limit=want)
+    med, big = _ocean_cadence(hycom.open_store(store).time.values, (t0.timestamp(), t1.timestamp()))
+    L.check("ocean_time_cadence", big <= OCEAN_MAX_STEP_S / 3600.0, value=round(big, 3), limit=OCEAN_MAX_STEP_S / 3600.0,
+            note=f"median {med:g} h, largest {big:g} h between the ocean store's steps that serve the window; linear interpolation in time between steps")
     key = digest(dict(orca=sha256(man), ocean=hycom.open_store(store).attrs.get("manifest_sha256"), gebco=sha256(gebco), code=ctx.code_digest))
     if not (_derived_current(ctx.cache, key) and _derived_span_problem(ctx.cache, ctx.window_s()) is None):      # about a minute; every code edit rebuilds it
         shutil.rmtree(ctx.cache / "derived.zarr", ignore_errors=True)
@@ -424,7 +459,8 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     L.input(ctx.cache / "derived.zarr", sha=rec["store_sha256"], kind="derived surface layer (sha256 of every file of the store)")
     L.output(_dump(rec, ctx.path("ingest", surface.DIGEST)))
     oc = ocean(ctx)
-    _ingest_checks(ctx, L, oc, sbox)
+    if not _ingest_checks(ctx, L, oc, sbox):
+        return
     L.output(man)
     _tao(ctx, L, t0.timestamp(), t1.timestamp())
     ctx.replan()
@@ -456,16 +492,22 @@ def ocean_margins(ds: Any, sbox: tuple[float, float, float, float], pts: list[tu
     out = [("box south edge", float(s - la.min())), ("box north edge", float(la.max() - n)), ("box west edge", float(w - lo.min())),
            ("box east edge", float(lo.max() - e))]
     for label, lon, lat in pts:
-        x = float(cv.wrap360(lon))
+        x = float(cv.wrap_about(lon, 0.5 * (lo.min() + lo.max())))                 # in the frame of the store's axis (continuous across 0 E)
         out.append((label, float(min(lat - la.min(), la.max() - lat, x - lo.min(), lo.max() - x))))
     return out
 
 
+def _old_orca_layout(d: dict[str, Any], t0: dt.datetime) -> bool:
+    """The orca manifest `d` was made by code that labelled a window starting at :30 with :30 over the :00 files (no `layout_version`), and `t0` is
+    such a window; a window that starts on the hour has the same labels either way."""
+    return d.get("layout_version") != orca.LAYOUT_VERSION and t0 != t0.replace(minute=0, second=0, microsecond=0)
+
+
 def _orca_covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime, box: tuple[float, float, float, float], hours3d: list[dt.datetime]) -> bool:
     """The orca manifest covers the window, its recorded box contains `box` (lon_min, lon_max, lat_min, lat_max; a manifest with no box was
-    written before the box was recorded and cannot say) and it has every 3-D hour wanted."""
+    written before the box was recorded and cannot say) and it has every 3-D hour wanted, and it is not of the old layout (`_old_orca_layout`)."""
     b = d.get("box")
-    return bool(_covers(d, t0, t1) and b is not None and b[0] <= box[0] and b[1] >= box[1] and b[2] <= box[2] and b[3] >= box[3]
+    return bool(_covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and b[0] <= box[0] and b[1] >= box[1] and b[2] <= box[2] and b[3] >= box[3]
                 and {orca.stamp(h) for h in hours3d} <= set(d.get("hours3d", [])))
 
 
@@ -514,6 +556,32 @@ def _spectrum_errors(env: GriddedEnv) -> dict[str, float]:
                 mss_clipped=float(np.mean(np.asarray(mss_err) > 0.01)), n=len(tp_err))
 
 
+def _forcing_range(env: GriddedEnv) -> tuple[int, str]:
+    """-> (how many values of the forcing are not finite and inside the gross-error bounds of config/assumptions.yaml `ingest.*`, the note naming
+    each field with a value outside and its worst): WRF 10 m wind speed and SST (at water cells, by LANDMASK, when the cache has it), UMWM swh and
+    ust (at sea nodes). The bounds are not a model of the weather; a unit slip or the wrong run lands outside them."""
+    a = assumptions()
+    wmax, (h0, h1), (s0, s1), (u0, u1) = (a[f"ingest.{k}"]["value"] for k in ("wind_speed_max_ms", "swh_range_m", "sst_range_k", "ust_range_ms"))
+    land = env.Wstatic.get("LANDMASK")
+    water = np.ones(env.W["SST"].shape[1:], bool) if land is None else land < 0.5
+    fields = [("WRF U10/V10 wind speed", np.hypot(env.W["U10"], env.W["V10"]), None, 0.0, wmax, "m/s"),
+              ("UMWM swh", env.U["swh"], env.sea, h0, h1, "m"), ("WRF SST", env.W["SST"], water, s0, s1, "K"),
+              ("UMWM ust", env.U["ust"], env.sea, u0, u1, "m/s")]
+    total, notes = 0, []
+    for name, v, where, lo, hi, unit in fields:
+        v = v if where is None else v[..., where]
+        out = ~(np.isfinite(v) & (v >= lo) & (v <= hi))
+        if out.any():
+            f = v[out][np.isfinite(v[out])]
+            total += int(out.sum())
+            notes.append(f"{name}: {int(out.sum())} values outside [{lo:g}, {hi:g}] {unit}, the worst {f[np.argmax(np.maximum(lo - f, f - hi))]:.4g}" if f.size
+                         else f"{name}: {int(out.sum())} values are not finite")
+    return total, "; ".join(notes) or "WRF 10 m wind speed and SST, UMWM swh and ust: all finite and inside the bounds of config/assumptions.yaml ingest.*"
+
+
+USTAR_AGREE_FRACTION = 0.90      # BRIEF 2.1: COARE u* within 20 % of UMWM ust at this share of the sea points; a lower share is a finding, not a gate (row 168)
+
+
 def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float]:
     """COARE u* (the surface layer built at ingest) against UMWM's `ust` at the sample: (points, median |dif|/ust, fraction within 20 %)."""
     sl = env.subgrid
@@ -553,12 +621,18 @@ def _round_trip_errors(env: GriddedEnv, oc: Any) -> dict[str, float]:
     return dict(wind_ms=vec_err(env.u10(lon, lat, t)), wave_deg=wave, current_ms=cur)
 
 
-def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, float, float]) -> None:
+def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, float, float]) -> bool:
     """The BRIEF 5.5 ingest self-checks that the cached data can answer: the ocean store covers the box and every mission point; the time axes
     are hourly and gap-free; no NaN in sea cells; the spectrum synthesised from the file's parameters has the file's peak period, mean direction and
     slope variance (not swh, which it is forced to: that check could not fail); COARE u* against
-    UMWM `ust` (logged); the temperature kind flag; direction conventions round-trip; every mission point is inside the cached grids."""
-    m, env = ctx.mission, ctx.env
+    UMWM `ust` (logged); the temperature kind flag; direction conventions round-trip; every mission point is inside the cached grids.
+    -> False when the environment cannot be built (a time axis that is not increasing): that one check is recorded and the stage stops."""
+    m = ctx.mission
+    try:
+        env = ctx.env
+    except ConfigError as e:                                              # a repeated or reversed time stamp in a cached store: the axis cannot be built
+        L.check("time_axes_hourly_gap_free", False, note=str(e))
+        return False
     margins = ocean_margins(oc.ds, sbox, mission_points(m)) if oc is not None else []
     worst = min(margins, key=lambda x: x[1]) if margins else None
     tight = "no ocean store" if worst is None else f"tightest is {worst[0]} ({worst[1]:+.3f} deg inside the store; grid snap {OCEAN_SNAP_DEG} deg)"
@@ -573,6 +647,8 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
     L.check("time_axes_hourly_gap_free", gap < 1.0, value=gap, limit=1.0, note="largest departure of a WRF or UMWM time step from 3600 s")
     nan = sum(int((np.isnan(a) & env.sea).sum()) for a in env.U.values()) + sum(int(np.isnan(a).sum()) for a in env.W.values())
     L.check("no_nan_in_sea_cells", nan == 0, value=nan, limit=0, note="NaN values in UMWM sea nodes and in the WRF fields")
+    bad, what = _forcing_range(env)
+    L.check("forcing_in_physical_range", bad == 0, value=bad, limit=0, note=what)
     sp = _spectrum_errors(env)
     where = f"spectrum_from_params at {sp['n']} sampled sea points against the file's dwp / dwd / mss (Hs is forced to the file's swh, so it is not a test)"
     L.check("spectrum_peak_period_vs_file", bool(sp["tp"] <= TP_LIMIT), value=None if np.isnan(sp["tp"]) else sp["tp"], limit=TP_LIMIT,
@@ -586,6 +662,9 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
     L.check("coare_ustar_vs_umwm_ust", n > 0 and bool(np.isfinite(med)), value=None if not n else round(frac, 4),
             note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within 20 %; BRIEF 5.5 asks that the agreement is logged"
             if n else "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask")
+    if n and frac < USTAR_AGREE_FRACTION:                                 # row 168: not a gate, but the finding BRIEF 2.1 asks for is made
+        L.note(f"BRIEF 2.1 finding: only {100 * frac:.1f} % of the {n} sea points have COARE u* within 20 % of UMWM ust; "
+               f"the brief asks {100 * USTAR_AGREE_FRACTION:.0f} %")
     kind = None if oc is None else oc.ds.attrs.get("temperature_kind")
     gofs = m["environment"]["ocean"]["source"] == "gofs31"
     L.check("ocean_temperature_kind_flag", kind in hycom.KINDS and (not gofs or kind == "in_situ"), value=kind,
@@ -593,6 +672,7 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
     rt = _round_trip_errors(env, oc)
     L.check("direction_round_trip", all(bool(v <= 1e-6) for v in rt.values()), value=rt, limit=1e-6,
             note="wind, wave and current directions out to compass and back at sampled points")
+    return True
 
 
 def _wind_residuals(wrf: dict[str, Any], moor: dict[str, Any]) -> dict[str, NDArray[np.float64]]:
@@ -1331,9 +1411,11 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
         table = store_path(ctx.table)[0]
         if table.exists():
             read_table(table)  # a corrupt shared table stops the run here (ConfigError), not at the emulator stage after the others
-    shutil.copy(ctx.mission_path, ctx.path("mission.yaml"))
-    if seed is not None:                                                  # the copy is what `report` and `whatif` reload: it must carry the seed that was run
-        ctx.path("mission.yaml").write_text(re.sub(r"(?m)^seed:.*$", f"seed: {seed}", ctx.mission_path.read_text()))
+    if seed is None:
+        shutil.copy(ctx.mission_path, ctx.path("mission.yaml"))
+    else:                                                                 # the copy is what `report` and `whatif` reload: it must carry the seed that was run,
+        # whatever the spelling of `seed` in the file (`seed : 5`, "seed": 5, a flow mapping); its comments are lost, the original is `plan.json`'s mission_path
+        ctx.path("mission.yaml").write_text(yaml.safe_dump(dict(_yaml(ctx.mission_path), seed=seed), sort_keys=False))
     if ctx.plan:
         _dump(ctx.plan, ctx.path("plan.json"))
         log(budget.describe(ctx.plan))

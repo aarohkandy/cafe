@@ -2135,7 +2135,8 @@ def failing(d):
 def test_the_ingest_checks_all_pass_on_the_fixture_and_record_numbers(tmp_path):
     d = ingest_checks(ctx_for(tmp_path / "r"))
     assert failing(d) == [] and [c["name"] for c in d["checks"]] == [
-        "ocean_source_covers_box", "mission_points_inside_cached_grids", "time_axes_hourly_gap_free", "no_nan_in_sea_cells", "spectrum_peak_period_vs_file",
+        "ocean_source_covers_box", "mission_points_inside_cached_grids", "time_axes_hourly_gap_free", "no_nan_in_sea_cells", "forcing_in_physical_range",
+        "spectrum_peak_period_vs_file",
         "spectrum_direction_vs_file", "spectrum_mss_vs_file", "coare_ustar_vs_umwm_ust", "ocean_temperature_kind_flag", "direction_round_trip"]
     c = {x["name"]: x for x in d["checks"]}
     assert c["ocean_source_covers_box"]["value"] >= -pipeline.OCEAN_SNAP_DEG and "tightest is " in c["ocean_source_covers_box"]["note"]
@@ -3066,3 +3067,176 @@ def test_r7_m12_ingest_accepts_a_six_hourly_lab_store_and_a_store_that_ends_earl
     note = check_of(read_ledger(tmp_path / "b", "ingest"), "ocean_store_present")["note"]
     assert "lab_short.zarr" in note and "its times span 2023-03-01 18:00 to 2023-03-02 06:00 UTC" in note
     assert "the store ends 24.0 h before the window end" in note
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 8, batch E
+
+def _repeat_wrf_stamp(cache, store="wrf.zarr"):
+    """The cached `store` with its 11th time stamp equal to the 10th (what a damaged or hand-edited cache looks like)."""
+    import xarray as xr
+    p = cache / "orca" / store
+    ds = xr.open_zarr(p).load()
+    t = ds.time.values.copy()
+    t[10] = t[9]
+    ds = ds.assign_coords(time=t)
+    for v in ds.variables.values():
+        v.encoding.clear()
+    shutil.rmtree(p)
+    ds.to_zarr(p, mode="w")
+
+
+def test_r8_m24_a_repeated_time_stamp_in_the_cached_wrf_fails_the_hourly_check_naming_the_store_instead_of_a_traceback(tmp_path, data_copy):
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "warm"), "ingest")                    # the surface layer is built once; the next ingest only checks
+    _repeat_wrf_stamp(data_copy / "cache" / "ci_fixture")
+    with pytest.raises(ledger.StageFailed, match="time_axes_hourly_gap_free"):                      # a raw ValueError before
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    d = read_ledger(tmp_path / "r", "ingest")
+    c = check_of(d, "time_axes_hourly_gap_free")
+    assert not c["ok"] and "wrf.zarr" in c["note"] and "axis time: must be strictly increasing" in c["note"] and "delete" in c["note"]
+    assert failing(d) == ["time_axes_hourly_gap_free"]                                              # the stage stops there
+
+
+def test_r8_m24_the_ingest_that_has_to_build_the_surface_layer_ends_in_a_config_error_naming_the_store(tmp_path, data_copy):
+    _repeat_wrf_stamp(data_copy / "cache" / "ci_fixture")
+    shutil.rmtree(data_copy / "cache" / "ci_fixture" / "derived.zarr")
+    with pytest.raises(config.ConfigError, match=r"environment cache file .*wrf\.zarr: axis time: must be strictly increasing"):       # exit 2 in the CLI
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+
+
+def test_r8_m1_the_forcing_check_passes_on_the_fixture_and_records_its_bounds(tmp_path):
+    c = check_of(ingest_checks(ctx_for(tmp_path / "r")), "forcing_in_physical_range")
+    assert c["ok"] and c["value"] == 0 and c["limit"] == 0 and "ingest.*" in c["note"]
+    a = config.assumptions()
+    for k in ("wind_speed_max_ms", "swh_range_m", "sst_range_k", "ust_range_ms"):
+        assert a[f"ingest.{k}"]["why"].startswith("Gross-error bound, not a model of the weather")
+
+
+def _forcing_check(tmp_path, edit):
+    ctx = ctx_for(tmp_path / "r")
+    edit(ctx.env)
+    return check_of(ingest_checks(ctx), "forcing_in_physical_range")
+
+
+@pytest.mark.parametrize("name,edit,worst", [
+    ("U10", lambda e: e.W["U10"].__setitem__((5, 4, 4), 500.0), "500"),                                           # one cell, 500 m/s
+    ("swh", lambda e: e.U["swh"].__setitem__((3, *np.argwhere(e.sea)[0]), -3.0), "-3"),
+    ("SST", lambda e: e.W["SST"].__setitem__((2, *np.argwhere(e.Wstatic["LANDMASK"] < 0.5)[0]), 0.0), "0"),       # a water cell at 0 K for an hour
+    ("ust", lambda e: e.U["ust"].__setitem__((3, *np.argwhere(e.sea)[0]), 9.0), "9"),
+])
+def test_r8_m1_one_cell_outside_the_gross_error_bounds_fails_the_forcing_check_naming_the_field_and_the_worst_value(tmp_path, name, edit, worst):
+    c = _forcing_check(tmp_path, edit)
+    assert not c["ok"] and c["value"] == 1 and c["limit"] == 0 and name in c["note"] and f"the worst {worst}" in c["note"]
+
+
+def test_r8_m1_a_land_cell_of_wrf_sst_is_not_judged_and_a_nan_is_counted_without_a_worst_value(tmp_path):
+    land = lambda e: np.argwhere(e.Wstatic["LANDMASK"] > 0.5)[0]                                                  # noqa: E731
+    assert _forcing_check(tmp_path / "a", lambda e: e.W["SST"].__setitem__((2, *land(e)), 0.0))["ok"]
+    c = _forcing_check(tmp_path / "b", lambda e: e.W["U10"].__setitem__((1, 1, 1), np.nan))
+    assert not c["ok"] and c["value"] == 1 and "UMWM" not in c["note"] and "1 values are not finite" in c["note"]
+
+
+def test_r8_m1_a_ustar_agreement_below_the_briefs_90_percent_is_a_finding_in_the_ledger_and_not_a_failed_check(tmp_path, monkeypatch):
+    ctx = ctx_for(tmp_path / "r")
+    ctx.env.U["ust"] *= 0.1                                                                                       # UMWM friction velocity a tenth of COARE's
+    d = ingest_checks(ctx)
+    n, _, frac = pipeline._ustar_agreement(ctx.env)
+    assert frac < 0.1 and check_of(d, "coare_ustar_vs_umwm_ust")["ok"] and failing(d) == []                       # row 168: still not a gate
+    assert [x for x in d["notes"] if x.startswith("BRIEF 2.1 finding")] == [
+        f"BRIEF 2.1 finding: only {100 * frac:.1f} % of the {n} sea points have COARE u* within 20 % of UMWM ust; the brief asks 90 %"]
+    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, 0.95))
+    assert not [x for x in ingest_checks(ctx_for(tmp_path / "r2"))["notes"] if "BRIEF 2.1 finding" in x]
+
+
+def test_r8_m2_a_lab_store_with_a_step_over_a_day_inside_the_window_is_a_problem_and_an_empty_axis_is_not_a_traceback():
+    t0 = 1_677_693_600.0
+    day, h = 86400.0, 3600.0
+    far = pipeline._ocean_time_problem(np.array([t0, t0 + 6 * day]), (t0, t0 + 6 * day))                  # two snapshots six days apart: None before
+    assert far.startswith("its largest step inside the window is 144 h (from 2023-03-01 18:00 to 2023-03-07 18:00 UTC), more than the 24 h limit")
+    assert "straight line across it" in far and "shorter cadence" in far
+    hole = pipeline._ocean_time_problem(np.array([t0, t0 + 6 * h, t0 + 6 * day]), (t0, t0 + 6 * day))     # a 5.75-day hole: None before
+    assert hole.startswith("its largest step inside the window is 138 h (from 2023-03-02 00:00 to 2023-03-07 18:00 UTC)")
+    assert pipeline._ocean_time_problem(np.array([]), (t0, t0 + day)) == "the store has no finite times"      # ValueError before
+    assert pipeline._ocean_time_problem(np.array([np.nan, np.nan]), (t0, t0 + day)) == "the store has no finite times"
+    assert pipeline._ocean_time_problem(np.array([np.nan, t0, t0 + h, t0 + 6 * day]), (t0, t0 + h)) is None      # only the steps that serve the window count
+    assert pipeline._ocean_time_problem(np.array([t0 + 2 * day, t0]), (t0, t0 + 2 * day)).startswith("its largest step inside the window is 48 h")
+    for step in (3 * h, 6 * h, day):                                                                          # 3-hourly, 6-hourly and daily stores serve it
+        assert pipeline._ocean_time_problem(t0 + step * np.arange(0, 7 * day / step + 1), (t0, t0 + 6 * day)) is None
+    assert pipeline._ocean_time_problem(np.array([t0, t0 + 2 * day]), (t0, t0 + 2 * day), max_step_s=3 * day) is None
+    early = np.array([t0 - 30 * h, t0, t0 + 3 * h, t0 + 6 * h])        # a time exactly at the window start: the step before it does not count
+    assert pipeline._ocean_time_problem(early, (t0, t0 + 6 * h)) is None        # "step 30 h" with side="left"
+    assert pipeline._ocean_cadence(early, (t0, t0 + 6 * h)) == (3.0, 3.0)
+    assert pipeline._ocean_cadence(t0 + 6 * h * np.arange(9), (t0, t0 + 2 * day)) == (6.0, 6.0)
+    assert pipeline._ocean_cadence(np.array([t0]), (t0, t0)) == (0.0, 0.0)
+
+
+def test_r8_m2_a_stored_lab_ocean_with_a_36_hour_step_is_not_cached_and_a_daily_one_is(tmp_path, data):
+    from cafe.pm.env import hycom
+    box, window = (-2.0, 2.0, -167.0, -163.0), (T0, T1)
+    steps = hycom.gofs_steps(T0, T1)
+    one = _cadence_store(data.ocean_store, tmp_path / "one.zarr", (0, 12))                                    # 18Z and 06Z two days on: a 36 h step
+    ok = _cadence_store(data.ocean_store, tmp_path / "ok.zarr", (0, 8, 12))                                   # 24 h then 12 h
+    assert not pipeline._ocean_cached(one, box, steps, window)                                                # True before
+    assert pipeline._ocean_cached(ok, box, steps, window)
+    assert "36 h" in pipeline._ocean_time_problem(hycom.open_store(one).time.values, window)
+
+
+def test_r8_m2_the_ingest_records_the_ocean_time_cadence_for_gofs_and_for_a_lab_store(tmp_path, data_copy):
+    d = run_stage(pipeline.s_ingest, ctx_for(tmp_path / "a"), "ingest")
+    c = check_of(d, "ocean_time_cadence")
+    assert c["ok"] and c["value"] == 3.0 and c["limit"] == 24.0 and c["note"].startswith("median 3 h, largest 3 h ")
+    lab = _cadence_store(data_copy / "ocean" / "gofs_ci_fixture.zarr", data_copy / "ocean" / "lab6.zarr", range(0, 13, 2))
+    c = check_of(run_stage(pipeline.s_ingest, ctx_for(tmp_path / "b", mission=_lab_mission(tmp_path, lab)), "ingest"), "ocean_time_cadence")
+    assert c["ok"] and c["value"] == 6.0 and c["note"].startswith("median 6 h, largest 6 h ")
+    # only the steps that serve the window count: a 24 h step before its start and one after its end are not in it, the 3 h steps inside are
+    from cafe.pm.env import hycom
+    src = hycom.open_store(data_copy / "ocean" / "gofs_ci_fixture.zarr").load()
+    at = lambda i, t: src.isel(time=slice(i, i + 1)).assign_coords(time=[t])                          # noqa: E731
+    lead_and_tail = [at(0, T0 - 24 * 3600.0), *(at(i, src.time.values[i]) for i in range(13)), at(12, T1 + 24 * 3600.0)]
+    wide = data_copy / "ocean" / "lab_wide.zarr"
+    hycom.write_store((hycom._std(s) for s in lead_and_tail), wide, "in_situ", dict(source="lab HYCOM lab_wide.zarr"))
+    c = check_of(run_stage(pipeline.s_ingest, ctx_for(tmp_path / "c", mission=_lab_mission(tmp_path, wide)), "ingest"), "ocean_time_cadence")
+    assert c["ok"] and c["value"] == 3.0 and c["note"].startswith("median 3 h, largest 3 h ")         # 24.0 with the window (0.0, 1e12)
+
+
+@pytest.mark.parametrize("start,layout,covers", [
+    ("2023-03-01T12:30:00Z", None, False),                                                        # made by the old code, labelled 12:30 over the 12:00 files
+    ("2023-03-01T12:30:00Z", 2, True),
+    ("2023-03-01T12:00:00Z", None, True),                                                         # on the hour the labels are the same either way
+    ("2023-03-01T12:00:00Z", 2, True),
+])
+def test_r8_m33_an_orca_cache_of_the_old_hour_labelling_is_reused_only_for_a_window_that_starts_on_the_hour(start, layout, covers):
+    d = manifest(t0=start.replace("T", " ").rstrip("Z"), t1="2023-03-03 06:00:00")
+    if layout:
+        d["layout_version"] = layout
+    assert pipeline._orca_covers(d, config.utc(start), config.utc("2023-03-03T06:00:00Z"), *WANT) is covers
+
+
+def test_r8_m33_ingest_says_why_it_fetches_an_old_cache_for_a_window_that_starts_at_30(tmp_path, data_copy, monkeypatch):
+    raw = yaml.safe_load(MISSION_PATH.read_text())
+    raw["window"]["start"] = "2023-03-01T18:30:00Z"
+    for v in raw["vehicles"]:
+        if "deploy" in v:
+            v["deploy"]["time"] = "2023-03-01T18:30:00Z"
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(raw))
+    man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
+    old = json.loads(man.read_text())
+    assert old.pop("layout_version") == orca.LAYOUT_VERSION                                                       # the fixture is written by the current code
+    man.write_text(json.dumps(old))
+    monkeypatch.delenv("CAFE_OFFLINE")
+    monkeypatch.setattr(orca, "ingest", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("fetched again")))
+    log = []
+    with pytest.raises(RuntimeError, match="fetched again"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r", mission=tmp_path / "m.yaml", log=log.append), "ingest")
+    assert f"ingest: orca manifest {man} was made by older code (its hour labels are shifted for a window that starts at :30): fetching again" in log
+
+
+@pytest.mark.parametrize("spelling", ["seed : 5", '"seed": 5', "'seed': 5", "seed: 5   # the draw"])
+def test_r8_m34_run_seed_rewrites_the_saved_mission_whatever_the_spelling_of_seed(tmp_path, monkeypatch, spelling):
+    stub_stages(monkeypatch, [])
+    m = tmp_path / "m.yaml"
+    m.write_text(re.sub(r"(?m)^seed:.*$", spelling, MISSION_PATH.read_text()))
+    assert config.load_mission(m)["seed"] == 5
+    ctx = pipeline.run(m, "ci", 0, tmp_path / "run", log=[].append, seed=9)
+    assert config.load_mission(tmp_path / "run" / "mission.yaml")["seed"] == 9 == ctx.mission["seed"]               # 5 for the three odd spellings before
+    ctx = pipeline.run(m, "ci", 0, tmp_path / "run2", log=[].append)
+    assert (tmp_path / "run2" / "mission.yaml").read_bytes() == m.read_bytes()                                    # no override: the file itself

@@ -43,6 +43,13 @@ def wrap360(deg: ArrayLike) -> F:
     return np.mod(deg, 360.0)
 
 
+def wrap_about(deg: ArrayLike, centre: float) -> F:
+    """`deg` moved by a multiple of 360 to its image nearest `centre`: the frame of a box or a grid that may touch 0 E, where [0, 360) would cut it in
+    two. A value already within 180 of `centre` is returned unchanged (one addition of 0.0, no rounding)."""
+    d = np.asarray(deg, np.float64)
+    return d + 360.0 * np.round((centre - d) / 360.0)
+
+
 def vec_from_to(speed: ArrayLike, to_deg: ArrayLike) -> F:
     """(east, north) of a vector of magnitude `speed` heading `to_deg` (compass)."""
     r = np.radians(to_deg)

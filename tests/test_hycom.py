@@ -275,6 +275,12 @@ def test_std_fills_a_missing_surface_height_with_nan(truth):
     assert out.surf_el.shape == (1, 7, 9) and np.isnan(out.surf_el.values).all() and out.water_temp.dtype == np.float32
 
 
+def test_std_takes_lon_into_0_360_unless_the_caller_has_put_it_in_a_box_frame(truth):
+    ds = truth.isel(time=slice(0, 1)).assign_coords(lon=truth.lon.values - 360.0)
+    np.testing.assert_allclose(h._std(ds).lon.values, truth.lon.values)                                    # the GOFS and fixture callers: 0..360 as before
+    np.testing.assert_allclose(h._std(ds, wrap=False).lon.values, truth.lon.values - 360.0)                # a box next to 0 E keeps its neighbour at -0.5
+
+
 # ------------------------------------------------------------------ fetch: servers, deadlines, resume
 
 
@@ -842,3 +848,165 @@ def test_r7_m36_a_lab_file_whose_field_is_all_nan_is_refused_with_the_file_named
     f.assign(temp=f.temp * np.nan).to_netcdf(d / "nan.nc")
     with pytest.raises(ConfigError, match=r"nan\.nc: every value of water_temp is NaN after reading \(.*check the depth axis and the variable names\)"):
         h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
+
+
+# ---- review round 8: M-29 (a coarse lab grid is cut so that the store still brackets the box) and M-30 (snapshots go in by time)
+
+
+@pytest.mark.parametrize("step", [0.25, 0.5, 1.0])
+@pytest.mark.parametrize("wrap", [False, True])
+def test_r8_m29_the_cut_of_a_coarse_lab_grid_always_brackets_the_box_to_the_ingest_checks_tolerance(step, wrap):
+    import xarray as xr
+    box = s, n, w, e = (-0.12, 0.12, 179.84, 180.48)
+    bad = []
+    for off in np.linspace(0.0, step, 9)[:-1]:
+        lat = np.arange(-4.0, 4.0, step) + off
+        lon = 170.0 + np.arange(0.0, 20.0, step) + off
+        lon = np.where(lon > 180.0, lon - 360.0, lon) if wrap else lon                       # the lab file may write the dateline as -180..180
+        ds = xr.Dataset({"x": (("lat", "lon"), np.zeros((len(lat), len(lon))))}, coords=dict(lat=lat, lon=lon))
+        out = h._sub(ds, box)
+        la, lo = out.lat.values, out.lon.values
+        if not (la.min() <= s + 0.1 and la.max() >= n - 0.1 and lo.min() <= w + 0.1 and lo.max() >= e - 0.1):            # what pipeline._ocean_cached asks
+            bad.append(round(float(off), 3))
+        assert (np.diff(lo) > 0).all() and (np.diff(la) > 0).all() and lo.min() >= 0 and lo.max() < 360
+        assert la.min() >= s - 0.1 - step and la.max() <= n + 0.1 + step                      # at most one extra point per edge
+        assert lo.min() >= w - 0.1 - step and lo.max() <= e + 0.1 + step
+    assert bad == []                                                                         # for 0.5 and 1 deg, most offsets failed before
+
+
+def test_r8_m29_a_fine_grid_is_cut_as_before(tmp_path):
+    """The pad alone brackets a grid finer than 0.2 deg: the extra points are for coarse grids only (the fixture's 0.04 x 0.08 deg store has none)."""
+    import xarray as xr
+    lat, lon = np.arange(-1.0, 1.0, 0.04), 179.0 + np.arange(0.0, 3.0, 0.08)
+    ds = xr.Dataset({"x": (("lat", "lon"), np.zeros((len(lat), len(lon))))}, coords=dict(lat=lat, lon=lon))
+    out = h._sub(ds, (-0.12, 0.12, 179.84, 180.48))
+    assert out.lat.values.min() >= -0.22 and out.lat.values.max() <= 0.22 and out.lon.values.min() >= 179.74 and out.lon.values.max() <= 180.58
+    with pytest.raises(ValueError, match="no lab-HYCOM points"):
+        h._sub(ds, (40.0, 41.0, 10.0, 11.0))
+
+
+SEAM_BOXES = [(-0.12, 0.12, 0.3, 0.8),                       # within a grid step east of 0 E: the western neighbour lies across it (below 0)
+              (-0.12, 0.12, 359.2, 359.95)]                  # within a grid step west of 0 E: the eastern neighbour lies across it (above 360)
+
+
+@pytest.mark.parametrize("box", SEAM_BOXES)
+@pytest.mark.parametrize("step", [0.5, 1.0])
+@pytest.mark.parametrize("wrap", [False, True])
+def test_r8_m29_a_box_next_to_0_e_is_cut_with_the_neighbours_across_it_in_one_continuous_axis(box, step, wrap):
+    """`box360` refuses a box across 0 E, not one next to it, whose bracketing neighbour on a coarse grid lies across it. The store's lon axis is
+    continuous with the box (359.5 is stored as -0.5, 0.5 as 360.5), so it brackets the box in the frame `pipeline._ocean_cached` compares it in. Stored
+    mod 360 (the first version of this fix) the axis had a hole there, and a box 0.3 E failed the check for good."""
+    import xarray as xr
+    s, n, w, e = box
+    bad, across = [], 0
+    for off in np.linspace(0.0, step, 9)[:-1]:
+        lat = np.arange(-4.0, 4.0, step) + off
+        lon = np.arange(-5.0, 5.0, step) + off
+        lon = lon if wrap else np.mod(lon, 360.0)                                           # the lab file writes -180..180 or 0..360
+        ds = xr.Dataset({"x": (("lat", "lon"), np.zeros((len(lat), len(lon))))}, coords=dict(lat=lat, lon=lon))
+        out = h._sub(ds, box)                                                                # ValueError "no lab-HYCOM points" with the plain longitude
+        la, lo = out.lat.values, out.lon.values
+        if not (la.min() <= s + 0.1 and la.max() >= n - 0.1 and lo.min() <= w + 0.1 and lo.max() >= e - 0.1):            # what pipeline._ocean_cached asks
+            bad.append(round(float(off), 3))
+        assert (np.diff(lo) > 0).all() and (np.diff(lo) <= step + 1e-9).all()               # increasing, no hole
+        assert lo.min() >= w - 0.1 - step and lo.max() <= e + 0.1 + step                      # at most one extra point per edge, none from the far side
+        across += int(lo.min() < 0.0 or lo.max() > 360.0)
+    assert bad == [] and across > 0                                                          # and the offsets put a neighbour across 0 E
+
+
+@pytest.mark.parametrize("lon0,step,box,kept", [(-3.5, 1.0, (-0.12, 0.12, 0.3, 0.8), [-0.5, 0.5, 1.5]),               # 1 deg across 0 E: 359.5 and 1.5 beyond
+                                                (175.25, 1.5, (-0.12, 0.12, 179.84, 180.48), [179.75, 181.25])])   # 1.5 deg: 181.25 is beyond the 0.5 deg read
+def test_r8_m29_a_coarse_archv_grid_is_read_wide_enough_for_the_store_to_bracket_the_box(fx, tmp_path, lon0, step, box, kept):
+    """The archv reader cut 0.5 deg around the box before `_sub` asked for the neighbour beyond an edge, so a grid coarser than 0.4 deg left it nothing to
+    keep, and the one next to 0 E dropped the neighbour across it. Only the grid files are replaced: the fields are the fixture's 9 x 7."""
+    from cafe.pm import pipeline
+    d = tmp_path / "archv"
+    shutil.copytree(fx["archv_dir"], d)
+    plon, plat = np.tile(lon0 + step * np.arange(9.0), (7, 1)), np.tile((-3.0 + np.arange(7.0))[:, None], (1, 9))      # and 1 deg in latitude
+    (d / "regional.grid.b").write_text("    9    'idm   ' = x\n    7    'jdm   ' = y\nplon:  min,max =  0 1\nplat:  min,max =  0 1\n")
+    (d / "regional.grid.a").write_bytes(mk._rec_a(plon, 9, 7) + mk._rec_a(plat, 9, 7))
+    store = h.ingest_lab_hycom(d, box, tmp_path / "coarse.zarr", "in_situ", grid=d / "regional.grid", depth=fx["depth"])
+    lon = h.open_store(store).lon.values
+    assert pipeline._ocean_cached(store, box, fx["steps"], (fx["steps"][0], fx["steps"][-1]))              # False before: no neighbour beyond the edges
+    assert lon.tolist() == kept and h.open_store(store).lat.values.tolist() == [-1.0, 0.0, 1.0]
+
+
+def _seam_lab(fx, tmp_path, signed):
+    """The fixture's z-level snapshots with their longitudes replaced by a 1 deg grid across 0 E (-3.5 ... 4.5), written -180..180 or 0..360."""
+    import xarray as xr
+    d = tmp_path / ("signed" if signed else "unsigned")
+    d.mkdir()
+    lon = -3.5 + np.arange(9.0)
+    for f in sorted(fx["zlevel_dir"].glob("*.nc")):
+        xr.open_dataset(f).load().assign_coords(lon=lon if signed else np.mod(lon, 360.0)).to_netcdf(d / f.name)
+    return d
+
+
+@pytest.mark.parametrize("signed", [True, False])
+def test_r8_m29_a_lab_ocean_next_to_0_e_passes_the_ingest_check_and_every_reader_of_its_lon_agrees(fx, tmp_path, signed):
+    """End to end for a box at 0.3 to 0.8 E on a 1 deg lab grid (points at -0.5, 0.5, 1.5 ...): the store passes `_ocean_cached` (it did not, and the
+    advice to ingest again wrote the same store), and the readers of its lon take a query into the axis's own frame whatever convention it is given in."""
+    from cafe.pm import pipeline
+    from cafe.pm.env.ocean import Ocean, open_ocean
+    box = (-0.12, 0.12, 0.3, 0.8)
+    store = h.ingest_lab_hycom(_seam_lab(fx, tmp_path, signed), box, tmp_path / "seam.zarr", "in_situ")
+    lon = h.open_store(store).lon.values
+    assert lon.tolist() == [-0.5, 0.5, 1.5]
+    assert pipeline._ocean_cached(store, box, fx["steps"], (fx["steps"][0], fx["steps"][-1]))
+    oc, t = Ocean(store, None, lab=True), float(fx["steps"][0])
+    col = oc.ds.water_u.isel(time=0, depth=1, lat=3, lon=[0, 1]).values.astype(float)                       # lat 0.0, depth 10 m: the columns at -0.5 and 0.5
+    for q in (0.35, 360.35, -359.65):                                                                        # one place in three spellings
+        assert oc.inside(q, 0.0, t) and np.allclose(oc.current(q, 0.0, -10.0, t).value[0], col[0] + (col[1] - col[0]) * 0.85)
+    assert oc.inside(359.9, 0.0, t) and not oc.inside(2.0, 0.0, t) and not oc.inside(359.0, 0.0, t)        # -0.1 is in the axis, 2.0 and -1.0 are not
+    assert np.isfinite(oc.temperature(359.7, 0.0, -10.0, t).value)
+    assert oc.bounds()[:2] == (-0.5, 1.5)
+    oc2 = open_ocean(dict(source="lab_hycom", path=str(store)), tmp_path / "c", fetch_bathy=False)     # no box given: the store's extent
+    assert oc2.bathymetry(359.7, 0.0).value > 0
+    import xarray as xr
+    wide = xr.Dataset(coords=dict(lat=[-5.0, 5.0], lon=lon))                                  # the store's lon, with a latitude range that does not bind
+    margins = dict(pipeline.ocean_margins(wide, box, [("in", 0.5, 0.0), ("west", 359.9, 0.0)]))
+    assert margins["in"] == pytest.approx(1.0) and margins["west"] == pytest.approx(0.4)      # 359.9 is 0.4 inside the western edge, not 358 outside the east
+
+
+def _copies(fx, tmp_path, names):
+    """The fixture's z-level snapshots (12Z, 15Z, 18Z by time) copied to `names` (a list of (source index, new name))."""
+    d = tmp_path / "lab"
+    d.mkdir(parents=True)
+    src = sorted(fx["zlevel_dir"].glob("*.nc"))
+    for i, name in names:
+        shutil.copy(src[i], d / name)
+    return d
+
+
+def test_r8_m30_snapshots_go_into_the_store_by_time_not_by_file_name(fx, tmp_path):
+    d = _copies(fx, tmp_path, [(0, "snap_2.nc"), (1, "snap_1.nc"), (2, "snap_0.nc")])           # names sort the wrong way round
+    store = h.open_store(h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ"))
+    assert np.array_equal(store.time.values, mk.STEPS)                                          # strictly increasing; reversed before
+    ten = tmp_path / "ten"
+    ten.mkdir()
+    for i, name in ((0, "snap_9.nc"), (1, "snap_10.nc")):                                       # snap_10 sorts before snap_9
+        shutil.copy(sorted(fx["zlevel_dir"].glob("*.nc"))[i], ten / name)
+    assert np.array_equal(h.open_store(h.ingest_lab_hycom(ten, fx["box"], tmp_path / "y.zarr", "in_situ")).time.values, mk.STEPS[:2])
+
+
+def test_r8_m30_the_same_snapshot_twice_is_refused_naming_both_files(fx, tmp_path):
+    d = _copies(fx, tmp_path, [(0, "a.nc"), (1, "b.nc"), (0, "c.nc")])
+    with pytest.raises(ValueError, match=r"a\.nc and c\.nc are the same time \(2023-03-01T12:00:00Z UTC\); remove one"):
+        h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
+    assert not (tmp_path / "x.zarr").exists()                                                   # refused before anything is written
+    one = _copies(fx, tmp_path / "one", [(1, "only.nc")])
+    assert h.open_store(h.ingest_lab_hycom(one, fx["box"], tmp_path / "z.zarr", "in_situ")).sizes["time"] == 1
+
+
+def test_r8_m30_a_file_whose_time_cannot_be_read_is_left_to_the_reader_to_name(fx, tmp_path):
+    d = tmp_path / "lab"
+    d.mkdir()
+    (d / "bad.nc").write_text("not a netCDF")
+    assert h._snapshot_times(d / "bad.nc") == [] and h._snapshot_times(d / "missing.b") == []
+    with pytest.raises(ValueError, match="IO backends"):                                         # the reader's own error, not masked by the time pass
+        h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
+    undecoded = _copies(fx, tmp_path / "u", [(0, "u.nc")])
+    import xarray as xr
+    f = xr.open_dataset(undecoded / "u.nc").load()
+    f.assign_coords(time=np.arange(f.sizes["time"], dtype=float)).to_netcdf(undecoded / "u2.nc")
+    assert h._snapshot_times(undecoded / "u2.nc") == []

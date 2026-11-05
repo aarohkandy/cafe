@@ -10,7 +10,10 @@
 
 Store layout (written once, read many; never stream per Monte-Carlo member): dims (time, depth, lat, lon); time float64
 seconds since 1970-01-01 UTC; depth metres positive down; lat degrees north; **lon in [0, 360)** (GLBy's own convention),
-because the TEPEX box crosses 180 deg and [-180, 180) would split it; the Environment layer takes lon mod 360.
+because the TEPEX box crosses 180 deg and [-180, 180) would split it; the Environment layer takes lon mod 360. The one exception is a lab
+store whose box lies within a grid step of 0 E (`box360` refuses a box across it, but the points that bracket it can lie across): its axis is
+continuous with the box, so the neighbour across the seam is below 0 or above 360 (`_sub`), never wrapped back into a hole.
+Everything that reads the store's lon takes the query into the axis's own frame (`conventions.wrap_about`).
 Variables water_temp [degC, as the source wrote it], salinity [PSU], water_u / water_v [m/s east/north], surf_el [m],
 rho [kg/m3 in situ, TEOS-10], c [m/s, TEOS-10]; NaN under the seafloor. Attribute temperature_kind says what
 water_temp is; there is no default (hycom.org: GLBy writes in-situ, only the old GLBa wrote potential).
@@ -137,11 +140,12 @@ def add_teos(ds: Any, kind: str) -> Any:
 # ------------------------------------------------------------------ the Zarr store
 
 
-def _std(ds: Any) -> Any:
-    """A dataset with exactly the store's variables (surf_el, which has no depth, NaN if absent), float32, lon in [0, 360),
-    sorted, time in epoch s."""
+def _std(ds: Any, wrap: bool = True) -> Any:
+    """A dataset with exactly the store's variables (surf_el, which has no depth, NaN if absent), float32, lon in [0, 360) (`wrap` False: as given,
+    for a lon `_sub` has put in the frame of a box that touches 0 E), sorted, time in epoch s."""
     import xarray as xr
-    ds = ds.assign_coords(lon=np.mod(np.round(ds.lon.values.astype("float64"), 5), 360.0), lat=np.round(ds.lat.values.astype("float64"), 5))
+    lon = np.round(ds.lon.values.astype("float64"), 5)
+    ds = ds.assign_coords(lon=np.mod(lon, 360.0) if wrap else lon, lat=np.round(ds.lat.values.astype("float64"), 5))
     ds = ds.sortby("lon").sortby("lat")                # float64 decimals, not float32 noise: a query at 179.84 must be inside a grid that starts there
     out = xr.Dataset(coords=dict(time=("time", ds.time.values.astype("float64"), dict(units="seconds since 1970-01-01T00:00:00Z")),
                                  depth=("depth", ds.depth.values.astype("float64"), dict(units="m", positive="down")),
@@ -174,8 +178,8 @@ def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> 
     shutil.rmtree(tmp, ignore_errors=True)
     n = 0
     for ds in steps:
-        meta = dict(attrs, temperature_kind=kind, lon_convention="0..360 degrees east", depth_convention="metres, positive down",
-                    time_convention="float seconds since 1970-01-01 UTC; open with decode_times=False")
+        meta = dict(attrs, temperature_kind=kind, lon_convention="0..360 degrees east (continuous with the box where it touches 0 E)",
+                    depth_convention="metres, positive down", time_convention="float seconds since 1970-01-01 UTC; open with decode_times=False")
         _append(tmp, add_teos(ds, kind), n == 0, meta)
         n += 1
     if n == 0:
@@ -637,8 +641,9 @@ def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = 
     jj, ii = np.arange(len(lat)), np.arange(len(lon))
     if box is not None:
         s, n, w, e = box360(box)
-        ll = np.where(lon < w - 0.5, lon + 360.0, lon)       # points just west of the box stay west of it
-        jj, ii = np.where((lat >= s - 0.5) & (lat <= n + 0.5))[0], np.where((ll >= w - 0.5) & (ll <= e + 0.5))[0]
+        ll = cv.wrap_about(lon, 0.5 * (w + e))                # the frame of the box, as `_sub` cuts in: a neighbour across 0 E is below 0 or above 360
+        jj = np.flatnonzero(((lat >= s - 0.5) & (lat <= n + 0.5)) | _cut(lat, s, n))          # 0.5 deg around the box, and the bracket `_sub` will ask for
+        ii = np.flatnonzero(((ll >= w - 0.5) & (ll <= e + 0.5)) | _cut(ll, w, e))             # of a grid coarser than that
         if len(ii) == 0 or len(jj) == 0:
             raise ValueError(f"{path}: the grid has no points inside the box {box}")
     sel, ang = np.ix_(jj, ii), np.radians(g["pang"])
@@ -666,16 +671,53 @@ def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = 
 # ------------------------------------------------------------------ ingest
 
 
+def _cut(pos: Any, lo: float, hi: float, pad: float = 0.1) -> Any:
+    """Mask of the points of `pos` inside [lo - pad, hi + pad] and, so that the store always brackets the box whatever the grid (the ingest check wants
+    an edge within `pad` of the box edge), the nearest point beyond an edge when the nearest kept one lies more than `pad` inside it, or when none is
+    kept (a grid coarser than the box): then both neighbours, or nothing when the grid does not reach both sides. `pos` is in one frame with
+    `lo`, `hi` (`_sub` puts the longitudes there)."""
+    keep = (pos >= lo - pad) & (pos <= hi + pad)
+    mid = 0.5 * (lo + hi)
+    near, far = np.flatnonzero(~keep & (pos < mid)), np.flatnonzero(~keep & (pos >= mid))
+    below, above = (near[np.argmax(pos[near])] if len(near) else None), (far[np.argmin(pos[far])] if len(far) else None)
+    if not keep.any():
+        if below is not None and above is not None:
+            keep[[below, above]] = True
+        return keep
+    add_below, add_above = pos[keep].min() > lo + pad, pos[keep].max() < hi - pad
+    if below is not None and add_below:
+        keep[below] = True
+    if above is not None and add_above:
+        keep[above] = True
+    return keep
+
+
 def _sub(ds: Any, box: Any) -> Any:
-    """Cut a dataset to the box (lon taken mod 360, so across the dateline), padded by 0.1 deg."""
+    """Cut a dataset to the box, padded by 0.1 deg, plus the nearest point beyond an edge where the grid is too coarse for the pad to reach it
+    (`_cut`). The longitudes come back in the box's frame (`box360`'s west and east): the file's own convention does not matter, a box across the
+    dateline stays continuous, and a neighbour across 0 E (a box within a grid step of it) is below 0 or above 360 instead of wrapped into a hole."""
     s, n, w, e = box360(box)
-    lon = np.mod(ds.lon.values, 360.0)
-    ll = np.where(lon < w - 0.1, lon + 360.0, lon)
-    ds = ds.assign_coords(lon=ll).isel(lon=np.where((ll >= w - 0.1) & (ll <= e + 0.1))[0]).sortby("lat")
-    ds = ds.isel(lat=np.where((ds.lat.values >= s - 0.1) & (ds.lat.values <= n + 0.1))[0])
+    lon = cv.wrap_about(ds.lon.values, 0.5 * (w + e))
+    ds = ds.assign_coords(lon=lon).isel(lon=np.flatnonzero(_cut(lon, w, e))).sortby("lat")
+    ds = ds.isel(lat=np.flatnonzero(_cut(ds.lat.values, s, n)))
     if ds.sizes["lon"] == 0 or ds.sizes["lat"] == 0:
         raise ValueError(f"no lab-HYCOM points inside the box {box}")
-    return ds.assign_coords(lon=np.mod(ds.lon.values, 360.0))
+    return ds
+
+
+def _snapshot_times(label: pathlib.Path) -> list[float]:
+    """The epoch seconds of the time steps of one lab snapshot (a netCDF file or an archv stem), read without its fields; [] when they cannot be
+    read, which the reader then reports by name."""
+    import xarray as xr
+    try:
+        if label.suffix == ".nc":
+            with xr.open_dataset(label) as ds:
+                tc = _dim(ds[_pick(ds, "temp") or ""], "time") or ""
+                return [float(t) for t in ds[tc].values.astype("datetime64[s]").astype("int64")] if np.issubdtype(ds[tc].dtype, np.datetime64) else []
+        doc = read_b(str(label) + ".b")
+        return [model_day_to_epoch(doc["fields"][0]["day"], doc["header"].get("yrflag", 3))]
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return []
 
 
 def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any = None, grid: Any = None, depth: Any = None) -> pathlib.Path:
@@ -695,6 +737,15 @@ def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any =
         stems = [f.with_suffix("") if f.suffix in (".a", ".b") else f for f in files]
         gstem = pathlib.Path(grid) if grid else stems[0].parent / "regional.grid"
         reads, labels = [functools.partial(read_archv, s, gstem, temperature_kind, depth, box) for s in stems], stems
+    times = [_snapshot_times(lab) for lab in labels]
+    order = sorted(range(len(labels)), key=lambda i: (min(times[i], default=np.inf), i))        # by time, not by name (snap_10 sorts before snap_9)
+    reads, labels, times = [reads[i] for i in order], [labels[i] for i in order], [times[i] for i in order]
+    seen: dict[float, Any] = {}
+    for lab, ts in zip(labels, times, strict=True):
+        for t in ts:
+            if t in seen:
+                raise ValueError(f"{seen[t].name} and {lab.name} are the same time ({_iso(t)} UTC); remove one")
+            seen[t] = lab
     kinds: list[str] = []
 
     def steps() -> Iterator[Any]:
@@ -704,7 +755,7 @@ def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any =
             kinds.append(kind)
             if kind != kinds[0]:
                 raise ValueError(f"files disagree about temperature_kind: {sorted(set(kinds))}")
-            out = _std(_sub(ds, box))
+            out = _std(_sub(ds, box), wrap=False)
             for v in ("water_temp", "salinity", "water_u", "water_v"):          # a store of NaN is no ocean: the failure would show far away, in Axis or Ocean
                 for t, empty in zip(out.time.values, np.isnan(out[v].values).all(axis=(1, 2, 3)), strict=True):
                     if empty:

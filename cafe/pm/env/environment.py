@@ -71,17 +71,26 @@ class GriddedEnv:
                 raise ConfigError(f"environment cache file {store} cannot be read ({type(e).__name__}: {e}); delete {cache / 'orca'} and run "
                                   f"`python -m cafe.pm fetch --mission ...` again: only that part is downloaded again") from e
 
+        def axis(x: Any, name: str, store: str) -> Axis:
+            try:
+                return Axis(x, name)
+            except ValueError as e:                                       # a repeated, reversed or empty coordinate: the same advice as an unreadable file
+                from ..config import ConfigError
+                raise ConfigError(f"environment cache file {cache / 'orca' / store}: {e} (a repeated or reversed value); delete "
+                                  f"{cache / 'orca'} and run `python -m cafe.pm fetch --mission ...` again: only that part is downloaded again") from e
+
         w = load(cache / "orca" / "wrf.zarr")
         u = load(cache / "orca" / "umwm.zarr")
         self.wrf_src = f"WRF {w.attrs.get('TITLE', '').strip()} 12 km hourly ({w.attrs.get('source', '')})"
         self.umwm_src = f"UMWM hourly ({u.attrs.get('source', '')})"
-        self.tw = Axis(seconds(w.time.values), "time")
-        self.law, self.low = Axis(w.lat.values, "lat"), Axis(w.lon.values, "lon")
+        self.tw = axis(seconds(w.time.values), "time", "wrf.zarr")
+        self.law, self.low = axis(w.lat.values, "lat", "wrf.zarr"), axis(w.lon.values, "lon", "wrf.zarr")
         self.W = {k: w[k].values.astype("f8") for k in w.data_vars if w[k].dims == ("time", "lat", "lon")}
         self.Wstatic = {k: w[k].values.astype("f8") for k in w.data_vars if w[k].dims == ("lat", "lon")}
         rain = self.W["RAINNC"] + self.W["RAINC"]
         self.W["rain_mm_h"] = rain_rate_nodes(rain, self.tw.x)
-        self.tu, self.lau, self.lou = Axis(seconds(u.time.values), "time"), Axis(u.lat.values, "lat"), Axis(u.lon.values, "lon")
+        self.tu = axis(seconds(u.time.values), "time", "umwm.zarr")
+        self.lau, self.lou = axis(u.lat.values, "lat", "umwm.zarr"), axis(u.lon.values, "lon", "umwm.zarr")
         sea = u["seamask"].values > 0
         self.sea = sea                                                    # UMWM sea nodes (lat, lon): ingest's NaN-in-sea-cells check reads it
         self.U = {k: np.where(sea, u[k].values.astype("f8"), np.nan) for k in u.data_vars if u[k].dims == ("time", "lat", "lon")}

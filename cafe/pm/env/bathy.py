@@ -23,7 +23,7 @@ import numpy as np
 
 from .. import Tagged
 from ..config import assumptions as _assumptions
-from . import remote
+from . import conventions as cv, remote
 from .hycom import box360, open_store
 
 GEBCO_URL = "https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2026/ice_surface_elevation/netcdf/GEBCO_2026.nc"
@@ -44,7 +44,8 @@ def _relative(key: str, d: Any) -> Any:
 
 class Bathymetry:
     """Callable `b(lon, lat) -> Tagged` of water depth [m, positive down, 0 on land], bilinear in a regular lon/lat grid
-    (lon any convention, taken mod 360; the grid lies inside 0..360). `sigma` is a function of depth or an array like depth.
+    (lon any convention, taken to its image nearest the middle of the grid, which lies inside 0..360 except for a store cut across 0 E, see
+    `hycom._sub`). `sigma` is a function of depth or an array like depth.
     Attributes: source, resolution_m, tried (sources that failed before this one), bounds (lon_min, lon_max, lat_min, lat_max)."""
 
     def __init__(self, lon: Any, lat: Any, depth: Any, source: str, resolution_m: float, sigma: Any, tried: tuple[str, ...] = ()):
@@ -63,7 +64,7 @@ class Bathymetry:
             self._sigma = grid(np.asarray(sigma, float))
 
     def __call__(self, lon: Any, lat: Any) -> Tagged:
-        pts = np.stack(np.broadcast_arrays(np.asarray(lat, float), np.mod(np.asarray(lon, float), 360.0)), axis=-1)
+        pts = np.stack(np.broadcast_arrays(np.asarray(lat, float), cv.wrap_about(lon, 0.5 * (self.lon[0] + self.lon[-1]))), axis=-1)
         d = self._depth(pts.reshape(-1, 2)).reshape(pts.shape[:-1])
         if np.isnan(d).any():
             raise ValueError(f"{int(np.isnan(d).sum())} point(s) outside the {self.source} grid: lon {self.bounds[0]:.3f}..{self.bounds[1]:.3f} "
@@ -170,6 +171,11 @@ def cache_path(box: Any, cache_dir: Any) -> pathlib.Path:
     """Where `choose` keeps the GEBCO cut for `box`: cache_dir/gebco2026_<south>_<north>_<west>_<east>.npz."""
     s, n, w, e = box360(box)
     return pathlib.Path(cache_dir) / f"gebco2026_{s:g}_{n:g}_{w:g}_{e:g}.npz"
+
+
+def cached_cuts(cache_dir: Any) -> list[pathlib.Path]:
+    """The finished GEBCO cuts in `cache_dir` (the `cache_path` names, or hand-made ones), sorted; the `.part.npz` an interrupted fetch leaves is not one."""
+    return sorted(p for p in pathlib.Path(cache_dir).glob("gebco2026_*.npz") if not p.name.endswith(".part.npz"))
 
 
 def choose(box: Any, cache_dir: Any, gofs: Any = None, umwm: Any = None, fetch: bool = True, url: str = GEBCO_URL) -> Bathymetry:

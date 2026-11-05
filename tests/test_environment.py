@@ -582,3 +582,22 @@ def test_r7_m46_the_docstring_sizes_the_wrf_fields_in_float64_and_gives_the_meas
     doc = " ".join(E.__doc__.split())
     assert "6 days x 130 x 313 x 16 x 8 bytes = 0.76 GB in float64" in doc and "about 9 GB in memory, DECISIONS 267/270, measured" in doc
     assert "0.4 GB" not in doc
+
+
+# ---- review round 8, M-24: an axis that is not strictly increasing is a ConfigError naming the store, not a bare ValueError
+
+@pytest.mark.parametrize("store,dim", [("wrf.zarr", "time"), ("umwm.zarr", "time"), ("wrf.zarr", "lat"), ("umwm.zarr", "lon")])
+def test_r8_m24_a_repeated_or_reversed_axis_value_is_a_config_error_naming_the_store_and_the_fix(ci_env, tmp_path, store, dim):
+    import xarray as xr
+    from cafe.pm.config import ConfigError
+    d = _copy_cache(ci_env, tmp_path)
+    ds = xr.open_zarr(d / "orca" / store).load()
+    x = ds[dim].values.copy()
+    x[10] = x[9]                                                                                       # the 11th stamp equals the 10th
+    ds = ds.assign_coords({dim: x})
+    for v in ds.variables.values():
+        v.encoding.clear()
+    shutil.rmtree(d / "orca" / store)
+    ds.to_zarr(d / "orca" / store, mode="w")
+    with pytest.raises(ConfigError, match=rf"cache file .*{store}: axis {dim}: must be strictly increasing .*delete .*orca and run `python -m cafe.pm fetch"):
+        GriddedEnv(d, env_sigmas())                                                                    # a bare ValueError before

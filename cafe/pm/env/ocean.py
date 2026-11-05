@@ -4,7 +4,8 @@
     open_ocean(spec, cache) -> Ocean      spec: the mission's environment.ocean ({source: gofs31 | lab_hycom, path?})
 
 Query convention is the Environment protocol's: z in metres, positive UP (0 at the surface, -950 at a glider's apogee),
-lon in any convention, t in seconds since 1970. The store is (time, depth positive down, lat, lon 0..360); fields are
+lon in any convention, t in seconds since 1970. The store is (time, depth positive down, lat, lon 0..360, or continuous with a box that
+touches 0 E: `hycom._sub`; a query is moved into the axis's own frame by `_lon`); fields are
 loaded lazily, one variable at a time, as float32 (one variable over the TEPEX-C box is ~1.2 GB). Interpolation is
 `grid.interp`: linear in time (3-hourly GOFS), depth, lat and lon; below-seafloor levels are NaN and dropped.
 Uncertainties are not set here: the Stage-1 priors (current speed/direction) perturb the current in env.perturb.
@@ -61,9 +62,15 @@ class Ocean:
             self.f[name] = par.adopt(a)                                    # straight into shared memory when stage 1 runs workers: one field at a time
         return self.f[name]
 
+    def _lon(self, lon: Any) -> Any:
+        """`lon` (any convention) in the frame of the store's lon axis: its image nearest the axis's middle (0..360 for a store that does not touch
+        0 E, so as `wrap360` there; continuous across 0 E for one that does)."""
+        x = self.axes[3].x
+        return cv.wrap_about(lon, 0.5 * (x[0] + x[-1]))
+
     def inside(self, lon: Any, lat: Any, t: Any = None) -> Any:
         """Whether (lon, lat[, t]) is within the store's lat, lon and time axes: `interp` holds the edge value outside them, without a flag."""
-        x, la = cv.wrap360(np.asarray(lon, float)), np.asarray(lat, float)
+        x, la = self._lon(lon), np.asarray(lat, float)
         ok = (x >= self.axes[3].x[0]) & (x <= self.axes[3].x[-1]) & (la >= self.axes[2].x[0]) & (la <= self.axes[2].x[-1])
         if t is not None:
             ok &= (np.asarray(t) >= self.axes[0].x[0]) & (np.asarray(t) <= self.axes[0].x[-1])
@@ -76,7 +83,7 @@ class Ocean:
         return round(w0, 3), round(w1, 3), round(float(la[0]), 3), round(float(la[-1]), 3), round(float(tt[0]), 3), round(float(tt[-1]), 3)
 
     def _at(self, name: str, lon: Any, lat: Any, z: Any, t: Any) -> Any:
-        v, _ = interp(self._field(name), self.axes, [t, -np.asarray(z, float), lat, cv.wrap360(lon)])
+        v, _ = interp(self._field(name), self.axes, [t, -np.asarray(z, float), lat, self._lon(lon)])
         return v
 
     def current(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
@@ -106,5 +113,6 @@ def open_ocean(spec: dict[str, Any], cache: Any, mission_name: str | None = None
         return None
     lab = spec.get("source", "gofs31") != "gofs31"
     ds = hycom.open_store(path, lab=lab)
-    b = box or tuple(float(x) for x in (ds.lat.values[0], ds.lat.values[-1], ds.lon.values[0], ds.lon.values[-1]))
+    lo = (max(ds.lon.values[0], 0.0), min(ds.lon.values[-1], 360.0))                  # GEBCO and box360 have no 0 E seam
+    b = box or tuple(float(x) for x in (ds.lat.values[0], ds.lat.values[-1], *lo))
     return Ocean(path, bathy.choose(b, DATA / "bathy", gofs=path, umwm=umwm, fetch=fetch_bathy, url=gebco_url or bathy.GEBCO_URL), lab=lab)

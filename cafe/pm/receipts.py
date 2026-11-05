@@ -345,7 +345,7 @@ def _no_gebco(d: pathlib.Path) -> Callable[[], Any]:
 def jobs(slow: bool = False) -> list[tuple[str, Callable[[], Any]]]:
     """[(name, zero-argument function)]; each function records through cafe.receipts and returns anything (a str is kept as a note)."""
     d = data_root()
-    gebco, tao = next(iter(sorted((d / "bathy").glob("gebco2026_*.npz"))), None), d / "tao"      # the name `bathy.cache_path` writes, or a hand-made one
+    gebco, tao = next(iter(importlib.import_module("cafe.pm.env.bathy").cached_cuts(d / "bathy")), None), d / "tao"
     pm = "cafe.pm."
     sitl_groups = ("UAS sortie", "UAS SITL vs our controller")
     return [

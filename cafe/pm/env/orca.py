@@ -74,6 +74,9 @@ def _cdfmeta(hdr: remote.Header, names: list[str]) -> dict[str, dict[str, Any]]:
                     shape=hdr[2][k]["shape"]) for k in names}
 
 
+LAYOUT_VERSION = 2               # 2: the time axis is the files' own whole hours (`hours`); a manifest without it labels a window that starts at :30 with :30
+
+
 def stamp(t: dt.datetime) -> str:
     return t.strftime("%Y-%m-%d_%H:00:00")
 
@@ -351,7 +354,8 @@ def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any],
         sp.attrs.update(source=BASE, units_F="m^4 rad^-1 (wavenumber spectrum)", stride=SPEC_STRIDE)
         sp.to_zarr(out / "umwmspec.zarr", mode="w")
     parts = sorted((out / "hours").glob("*.npz"))
-    man = dict(base=BASE, t0=str(ts[0]), t1=str(ts[-1]), box=list(box) if box else None, hours=len(ts), hours3d=h3, wrf_index=dict(j=wg["j"], i=wg["i"]),
+    man = dict(base=BASE, layout_version=LAYOUT_VERSION, t0=str(ts[0]), t1=str(ts[-1]), box=list(box) if box else None, hours=len(ts), hours3d=h3,
+               wrf_index=dict(j=wg["j"], i=wg["i"]),
                umwm_index=dict(j=ug["j"], i=ug["i"]), wrf_attrs=wg["attrs"],
                parts={p.name: remote.sha256(p) for p in parts},
                bytes_fetched=int(sum(int(w["_bytes"]) for w in W)))
