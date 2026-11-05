@@ -45,7 +45,7 @@ def test_credibility_doc_has_no_claim_the_code_contradicts():
     doc = text("docs", "CREDIBILITY.md")
     assert "takes the better" not in doc and "are not read" not in doc and "applied by nothing" not in doc
     src = text("cafe", "pm", "stage3", "wallmodel.py")
-    assert "return max(float(json.loads(f.read_text())[\"err\"]) for f in fs)" in src[src.index("def stored_wall_error"):]
+    assert "return None if problems else max(float(d[\"err\"]) for d in recs)" in src[src.index("def stored_wall_error"):]
 
 
 def test_decisions_rows_are_numbered_without_gaps_or_repeats():

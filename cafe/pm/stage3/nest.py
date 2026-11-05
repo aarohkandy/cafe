@@ -251,11 +251,13 @@ def diverged(ser: dict[str, NDArray[Any]]) -> bool:
 
 def simulate(spec: NestSpec, u_env: UEnv, geom: Geom, p0: ArrayLike, params: Any, steps: int, chunk: int = 200, v0: ArrayLike = (0, 0, 0),
              traj: Traj = linear_track, state: State | None = None, on_chunk: Callable[[State, int], None] | None = None,
-             steps_hook: Callable[[int, float], float] | None = None, **kw: Any) -> tuple[State, dict[str, NDArray[Any]]]:
+             steps_hook: Callable[[int, float], float] | None = None, strict: bool = False, **kw: Any) -> tuple[State, dict[str, NDArray[Any]]]:
     """Run `steps` steps in jitted chunks. Returns (state, series dict of NumPy arrays over steps).
     steps_hook(done, elapsed_s) -> total steps: called after every chunk with the wall time since the start (compile included); the
     run goes on to min(steps, what it returns). Return a multiple of `chunk` (another chunk length is another compile). A chunk that
-    `diverged` ends the run there (the series is shorter than `steps`)."""
+    `diverged` ends the run there, and it is the last chunk of the series: the series is shorter than `steps`, or full length when the
+    blow-up was in the last chunk, so `diverged(series)` (not `len(series) < steps`) says whether the run diverged. With `strict` a diverged
+    run raises RuntimeError: for the callers whose number is a measurement (a receipt, a stored calibration), which a blown-up field is not."""
     state = state or init_state(spec, geom, u_env, p0, v0)
     chunks: list[dict[str, NDArray[Any]]] = []
     done, t_start = 0, time.perf_counter()
@@ -270,6 +272,8 @@ def simulate(spec: NestSpec, u_env: UEnv, geom: Geom, p0: ArrayLike, params: Any
         if on_chunk:
             on_chunk(state, done)
         if diverged(chunks[-1]):
+            if strict:
+                raise RuntimeError(f"the run diverged in the chunk ending at step {done} of {steps}: the flow went non-finite or past Mach 1")
             break
         if steps_hook:
             steps = min(steps, max(int(steps_hook(done, time.perf_counter() - t_start)), done))
@@ -387,7 +391,7 @@ def sphere_drag(re: float, d: int = 8, domain: tuple[float, ...] = (12, 6, 6), s
     geom = make_geom(solid, np.round(c), periodic=per, qdist=q, force_region=region)
     env = lambda x, y, z, t: jnp.stack([jnp.ones_like(x), jnp.zeros_like(x), jnp.zeros_like(x)])    # noqa: E731
     p0 = (np.round(c) + 0.5)
-    _, ser = simulate(spec, env, geom, p0, (jnp.asarray(p0, jnp.float32), jnp.zeros(3, jnp.float32)), steps)
+    _, ser = simulate(spec, env, geom, p0, (jnp.asarray(p0, jnp.float32), jnp.zeros(3, jnp.float32)), steps, strict=True)     # a stored Cd is a measurement
     cd = ser["F"][:, 0] / (0.5 * u_lat ** 2 * math.pi * d * d / 4)
     tail = cd[-steps // 5:]
     solid = body
@@ -483,6 +487,19 @@ def richardson(ds: ArrayLike, cds: ArrayLike) -> dict[str, Any]:
     return dict(cd_inf=float(cc[1] - b * dd[1] ** -p), p=float(p), ds=[float(x) for x in d])
 
 
+def stored_grids(tag: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """(the stored grids of the sphere run `tag`, finest last; the names of the files that cannot be read). A grid counts only with a numeric
+    `d` and `cd` (`lbm.read_stored`): a truncated or hand-edited file is named, never a KeyError in the refit floor or the receipts table."""
+    runs, bad = [], []
+    for f in sorted(SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")):
+        r = lbm.read_stored(f, ("d", "cd"))
+        if r is None:
+            bad.append(f.name)
+        else:
+            runs.append(r)
+    return sorted(runs, key=lambda r: r["d"]), bad
+
+
 def sphere_discretisation() -> tuple[float, str] | None:
     """The discretisation error of the native kernel on the stored sphere grid study: |Cd(finest grid) - Cd_inf| / |Cd_inf| with Cd_inf the
     Richardson extrapolation (`richardson`), the largest over the Reynolds numbers that have two or more stored grids. None when none has;
@@ -490,7 +507,7 @@ def sphere_discretisation() -> tuple[float, str] | None:
     pairs and of all grids differ by more than the finest grid's distance to the last) and what the extrapolated Cd is against Morrison."""
     worst: tuple[float, str] | None = None
     for tag, re in SPHERE_RUNS:
-        runs = sorted((json.loads(f.read_text()) for f in SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")), key=lambda r: r["d"])
+        runs, _ = stored_grids(tag)
         if len(runs) < 2:
             continue
         rc = richardson([r["d"] for r in runs], [r["cd"] for r in runs])
@@ -514,15 +531,17 @@ def sphere_receipts() -> list[dict[str, Any]]:
     g = "LBM native sphere"
     for tag, re in SPHERE_RUNS:
         ref = lbm.morrison(re)
-        runs = sorted((json.loads(f.read_text()) for f in SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")), key=lambda r: r["d"])
+        runs, bad = stored_grids(tag)
         plan = run_plan(tag)
+        for name in bad:
+            context(g, f"  study: {name} is unreadable (no numeric d and cd): left out, rerun it", math.nan, ref, "", plan["command"])
         for r in runs:
-            context(g, f"  study: Re={re:g}, d={r['d']}", r["cd"], ref, "", f"{r['shape']}, {r.get('seconds', 0) / 60:.0f} min")
+            context(g, f"  study: Re={re:g}, d={r['d']}", r["cd"], ref, "", f"{r.get('shape', '?')}, {r.get('seconds', 0) / 60:.0f} min")
         rec = None
         if len(runs) >= 2:
             rc = richardson([r["d"] for r in runs], [r["cd"] for r in runs])
             shas = {r.get("code_sha") for r in runs}                                  # a grid stored without a sha counts as stale (result_row says so)
-            stale = sorted(shas - {lbm.physics_sha(), None})
+            stale = sorted(str(x) for x in shas if x is not None and x != lbm.physics_sha())
             rec = dict(cd=rc["cd_inf"], ref=ref, code_sha=None if None in shas else stale[0] if stale else lbm.physics_sha())
             claim = f"Sphere Cd at Re={re:g}, Richardson-extrapolated from d={[int(x) for x in rc['ds']]} (order {rc['p']:.2f})"
         elif runs:

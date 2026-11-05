@@ -638,13 +638,36 @@ def eta_text(updates: float) -> str:
             f"~{f(NEST_RATE_BENCH)} at the 8-core benchmark rate")
 
 
+def _real(v: Any) -> bool:
+    """A finite real number: not a bool, a string, None, NaN or infinity."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def read_stored(f: pathlib.Path, numeric: tuple[str, ...] = ()) -> dict[str, Any] | None:
+    """A stored slow result as a dict; None when the file is missing, undecodable (a write cut short by a kill), not a JSON object, or lacks any of
+    the `numeric` fields as a finite real number (a bool, a string, null, NaN and infinity are not). The one reader of every stored receipt, so a
+    hand-edited or schema-changed file is a result that is not stored (a failed row) and never a KeyError or TypeError (round 9 M-4)."""
+    try:
+        d = json.loads(f.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    return d if all(_real(d.get(k)) for k in numeric) else None
+
+
 def result_row(group: str, claim: str, rec: dict[str, Any] | None, value_key: str, ref_key: str, tol: float, command: str, eta: str, source: str) -> None:
     """A required pass/fail row from a stored slow result. Stored and within `tol` of the reference: pass. Stored and outside: fail with
-    the measured error in the row. Not stored, stored without a `code_sha` (legacy or hand-transcribed) or stored by different code (its `code_sha`
-    differs from physics_sha()): FAIL, with the command and its run time in the note. Never a context row."""
+    the measured error in the row. Not stored, stored without a numeric `value_key` and `ref_key`, stored without a `code_sha` (legacy or
+    hand-transcribed) or stored by different code (its `code_sha` differs from physics_sha()): FAIL, with the command and its run time in
+    the note. Never a context row."""
     nan = float("nan")
     if rec is None:
         bracket(group, f"{claim} -- NOT STORED", nan, 0.0, 0.0, "", f"run: {command}   [{eta}]")
+        return
+    bad = [k for k in (value_key, ref_key) if not _real(rec.get(k))]
+    if bad:
+        bracket(group, f"{claim} -- STORED WITHOUT A NUMBER FOR {' AND '.join(bad)}", nan, 0.0, 0.0, "", f"rerun: {command}   [{eta}]")
         return
     ref = rec[ref_key]
     sha = rec.get("code_sha")
@@ -678,12 +701,12 @@ def receipts(backend: str = "jax") -> list[dict[str, Any]]:
     receipt(g, "Taylor-Green decay: fitted viscosity / analytic", t["ratio"], 1.0, 0.03, "", "exp(-4 nu k^2 t)")
     for tag, re in SPHERE_RUNS:
         f = slow_path(f"sphere_{tag}")
-        rec = json.loads(f.read_text()) if f.exists() else None
+        rec = read_stored(f)
         d = {"100": 8, "1000": 10, "1e4": 12}[tag]
         updates = float(np.prod([a * d for a in (12, 6, 6)])) * 30 * d / U_LAT_SPHERE
         result_row(g, f"Sphere Cd at Re={re:g}, XLB halfway bounce-back (staircase), d={rec.get('d', '?') if rec else d}", rec, "cd", "ref", 0.10,
                    f"python -m cafe.pm.stage3.lbm slow {tag} {d} 12 6 6", eta_text(updates),
-                   f"Morrison 2013; domain {rec['shape'] if rec else '?'}; staircase surface overpredicts ~1/d, see docstring")
+                   f"Morrison 2013; domain {rec.get('shape', '?') if rec else '?'}; staircase surface overpredicts ~1/d, see docstring")
     return [r for r in cr.OUT if r["group"] == g]
 
 
