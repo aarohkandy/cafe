@@ -3086,14 +3086,27 @@ def _repeat_wrf_stamp(cache, store="wrf.zarr"):
 
 
 def test_r8_m24_a_repeated_time_stamp_in_the_cached_wrf_fails_the_hourly_check_naming_the_store_instead_of_a_traceback(tmp_path, data_copy):
-    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "warm"), "ingest")                    # the surface layer is built once; the next ingest only checks
+    """The checks alone, on a cache whose surface layer is current. Since round 8's M-4c a changed WRF store is part of the derived layer's key, so
+    `s_ingest` after such an edit rebuilds the layer first (the next test); the self-checks still name the store when they meet the damage."""
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "warm"), "ingest")
     _repeat_wrf_stamp(data_copy / "cache" / "ci_fixture")
+    ctx = ctx_for(tmp_path / "r")
     with pytest.raises(ledger.StageFailed, match="time_axes_hourly_gap_free"):                      # a raw ValueError before
-        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+        with ledger.Ledger(ctx.run_dir, "ingest", ctx.hash) as L:
+            assert pipeline._ingest_checks(ctx, L, pipeline.ocean(ctx), pipeline.ocean_box(ctx.mission)) is False
     d = read_ledger(tmp_path / "r", "ingest")
     c = check_of(d, "time_axes_hourly_gap_free")
     assert not c["ok"] and "wrf.zarr" in c["note"] and "axis time: must be strictly increasing" in c["note"] and "delete" in c["note"]
     assert failing(d) == ["time_axes_hourly_gap_free"]                                              # the stage stops there
+
+
+def test_r8_merge_a_cached_wrf_damaged_after_a_good_ingest_is_a_config_error_naming_the_store_not_a_traceback(tmp_path, data_copy):
+    """A (M-4c) puts the tree hash of the cached WRF and UMWM stores in the derived layer's key, so a damaged store no longer meets a layer that is
+    still current: the ingest has to rebuild it and ends where E's other test says it does (exit 2 in the CLI)."""
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "warm"), "ingest")
+    _repeat_wrf_stamp(data_copy / "cache" / "ci_fixture")
+    with pytest.raises(config.ConfigError, match=r"environment cache file .*wrf\.zarr: axis time: must be strictly increasing .*delete"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
 
 
 def test_r8_m24_the_ingest_that_has_to_build_the_surface_layer_ends_in_a_config_error_naming_the_store(tmp_path, data_copy):
