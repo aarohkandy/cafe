@@ -495,9 +495,14 @@ def test_ledgers_only_audits_the_run_dirs_given_and_nothing_else(tmp_path, monke
     assert "AUDIT FAIL: run: stage ingest" in capsys.readouterr().out
 
 
-def test_make_ci_ends_with_the_ledger_audit_of_the_run_it_made():
+@pytest.mark.parametrize("level", [None, "1"])
+def test_make_ci_ends_with_the_ledger_audit_of_the_run_it_made(level, monkeypatch):
+    """Round 8 M-41: under `make audit` pytest inherits MAKELEVEL, and a nested make then prints "Entering/Leaving directory" after the command."""
     import subprocess
-    out = subprocess.run(["make", "-n", "ci"], cwd=audit.ROOT, capture_output=True, text=True, check=True).stdout.strip().splitlines()
+    monkeypatch.delenv("MAKELEVEL", raising=False)
+    if level:
+        monkeypatch.setenv("MAKELEVEL", level)
+    out = subprocess.run(["make", "--no-print-directory", "-n", "ci"], cwd=audit.ROOT, capture_output=True, text=True, check=True).stdout.strip().splitlines()
     assert out[-1] == "python -m cafe.pm.audit --ledgers-only runs/ci" and "--out runs/ci" in out[-2]
 
 
@@ -552,3 +557,59 @@ def test_run_keeps_the_tail_for_the_message_and_the_whole_output_in_the_log(tmp_
     log = (tmp_path / audit.LOG).read_text()
     assert rc == 0 and len(out) == 4000 and out.rstrip().endswith("end")
     assert "a" * 6000 in log and log.endswith("rc=0\n") and log.startswith(f"$ {sys.executable} -c")
+
+
+# ---- review round 8: M-4 (the tree hash of a directory input), M-23 (an unreadable ledger), M-40 (the lines a coverage gate misses)
+
+def _store_with_a_tree_hash(tmp_path, run):
+    from cafe.pm.env.remote import tree_sha256
+    store = zstore(tmp_path / "gofs.zarr", {"manifest_sha256": "a" * 64})
+    (store / "water_u" / "c").mkdir(parents=True)
+    (store / "water_u" / "c" / "0").write_bytes(b"\x01\x02\x03")
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(store, sha="a" * 64, tree=tree_sha256(store), kind="ocean store")
+        L.output(run / "report.out")
+    return store
+
+
+def test_r8_m4_a_directory_input_is_rehashed_over_every_file_and_a_changed_value_or_a_deleted_chunk_is_named(tmp_path):
+    """The manifest attribute is written at assembly and is not changed by later damage; the tree hash is."""
+    run = make_run(tmp_path)
+    store = _store_with_a_tree_hash(tmp_path, run)
+    assert audit.ledger_problems(run) == []
+    chunk = store / "water_u" / "c" / "0"
+    chunk.write_bytes(b"\x09\x09\x09")
+    probs = audit.ledger_problems(run)
+    assert len(probs) == 1 and f"run: stage report: input {store} changed since the stage ran (tree " in probs[0]
+    assert "delete it and run `fetch` again" in probs[0]
+    chunk.unlink()
+    assert any(f"input {store} changed since the stage ran (tree " in p for p in audit.ledger_problems(run))
+    chunk.write_bytes(b"\x01\x02\x03")
+    assert audit.ledger_problems(run) == []
+
+
+def test_r8_m23_an_unreadable_ledger_is_a_problem_naming_the_file_not_a_traceback(tmp_path):
+    run = make_run(tmp_path)
+    p = ledger_path(run, "stage1")
+    good = p.read_text()
+    for bad in (good[:200], "", "[1]"):
+        p.write_text(bad)
+        probs = audit.ledger_problems(run)
+        assert any(f"run: stage stage1: {p} is not valid JSON (" in x and "delete it and run the stage again" in x for x in probs), (bad, probs)
+        assert not any("chain broken" in x for x in probs)  # the next stage has nothing to chain to, as for a missing ledger
+    p.write_text(good)
+    assert audit.ledger_problems(run) == []
+
+
+def test_r8_m40_a_coverage_gate_of_100_names_the_files_and_lines_it_misses(tmp_path):
+    p = tmp_path / "coverage.json"
+    p.write_text(json.dumps({"files": {
+        "cafe/pm/physics/comms.py": {"summary": {"num_statements": 219, "covered_lines": 216}, "missing_lines": [273, 275, 287]},
+        "cafe/pm/physics/usv.py": {"summary": {"num_statements": 1639, "covered_lines": 1639}, "missing_lines": []},
+        "cafe/pm/a.py": {"summary": {"num_statements": 100, "covered_lines": 80}, "missing_lines": [1, 2, 3]}}}))
+    probs = audit.coverage_problems(p)
+    assert "coverage cafe/pm/physics: 99.8 % < 100 % (comms.py: 273, 275, 287)" in probs
+    assert not any(x.startswith("coverage cafe/pm:") for x in probs)                             # 98.8 % of 1958 statements is over the 90 % gate
+    p.write_text(json.dumps({"files": {"cafe/pm/a.py": {"summary": {"num_statements": 100, "covered_lines": 80}, "missing_lines": [1, 2, 3]}}}))
+    assert audit.coverage_problems(p) == ["coverage cafe/pm: 80.0 % < 90 %"]                      # a package gate under 100 % does not list lines

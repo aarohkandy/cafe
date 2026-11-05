@@ -42,6 +42,8 @@ pytest_add_cli_args = ["-p", "no:cacheprovider", "-m", "not network",
     "--deselect", "tests/test_uas.py::test_lockstep_machinery_answers_every_frame_once",
     "--deselect", "tests/test_uas.py::test_an_autopilot_that_never_arms_is_reported_and_fails_the_sitl_receipts",
     "--deselect", "tests/test_uas.py::test_an_autopilot_that_never_speaks_mavlink_is_reported",
-    "--deselect", "tests/test_uas.py::test_a_firmware_that_dies_is_reported"]
+    "--deselect", "tests/test_uas.py::test_a_firmware_that_dies_is_reported",
+    "--deselect", "tests/test_emulator.py::test_query_under_10_ms_and_format",
+    "--deselect", "tests/test_emulator.py::test_receipts_pass_and_fail_when_calibration_is_wrong"]
 pytest_add_cli_args_test_selection = ["tests/test_stats.py", "tests/test_comms.py", "tests/test_glider.py", "tests/test_uas.py", "tests/test_usv.py", "tests/test_dyn.py", "tests/test_perturb.py",
     "tests/test_stats_exact.py", "tests/test_comms_exact.py", "tests/test_uas_exact.py"]

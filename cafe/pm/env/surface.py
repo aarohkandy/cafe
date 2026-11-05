@@ -29,6 +29,7 @@ from .. import Tagged
 from . import coare, subgrid, waves
 from . import conventions as cv
 from .grid import Axis, interp
+from .remote import tree_sha256
 
 if TYPE_CHECKING:
     from .environment import GriddedEnv
@@ -54,14 +55,7 @@ def _coare_grid(env: GriddedEnv, ti: int) -> dict[str, Any]:
 DIGEST = "derived.digest.json"        # beside the store: {built_from, store_sha256}, what `build` made and from what
 
 
-def store_sha256(path: Any) -> str:
-    """sha256 over the relative path and bytes of every file of the zarr store at `path`, in path order."""
-    import hashlib
-    root = pathlib.Path(path)
-    h = hashlib.sha256()
-    for f in sorted(p for p in root.rglob("*") if p.is_file()):
-        h.update(f.relative_to(root).as_posix().encode() + b"\0" + f.read_bytes())
-    return h.hexdigest()
+store_sha256 = tree_sha256                                    # sha256 over the relative path and bytes of every file of the store (env/remote.py)
 
 
 def store_span(cache: Any) -> tuple[float, float]:

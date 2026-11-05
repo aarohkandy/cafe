@@ -165,7 +165,8 @@ class Emulator:
         return m
 
     def fit(self, df: pd.DataFrame | None = None, cal_frac: float = 0.2, holdout: float = 0.0, fresh: FreshDraw | None = None) -> None:
-        """Train on `df` (default: the stored table). Co-kriging is used only with >= 3 rows of fidelity 1 and >= 1 of 0.
+        """Train on `df` (default: the stored table). Co-kriging is used only with >= 3 rows of fidelity 1 and >= 1 of 0. The conformal calibration set is
+        `cal_frac` of the distinct feature points (`point_cols`), all their rows: replicates of a trained point are never scored against it.
 
         `holdout` > 0 first runs `holdout_report` on that fraction (with the `fresh` draw check, if given) and keeps it in `self.holdout` for the ledger.
         """
@@ -178,9 +179,17 @@ class Emulator:
         prim = np.flatnonzero(fid == 1) if self.multi_fidelity else np.arange(len(df))
         low = np.flatnonzero(fid == 0) if self.multi_fidelity else np.empty(0, int)
         rng = np.random.default_rng(self.seed)
-        perm = rng.permutation(prim)
-        n_cal = min(int(round(cal_frac * len(prim))), len(prim) - (3 if self.multi_fidelity else 2))
-        cal, tr = perm[:max(n_cal, 0)], perm[max(n_cal, 0):]
+        lead = 3 if self.multi_fidelity else 2
+        if self.point_cols:  # whole feature points, as `holdout_report` splits them (round 8 M-9): else a calibration row with a trained twin scores in-sample
+            point = df[self.point_cols].round(9).groupby(self.point_cols, sort=False, dropna=False).ngroup().to_numpy()[prim]
+            pts = rng.permutation(np.unique(point))
+            n_cal = max(min(max(int(round(cal_frac * len(pts))), 1), len(pts) - lead), 0)
+            is_cal = np.isin(point, pts[:n_cal])
+            cal, tr = prim[is_cal], prim[~is_cal]
+        else:
+            perm = rng.permutation(prim)
+            n_cal = min(int(round(cal_frac * len(prim))), len(prim) - lead)
+            cal, tr = perm[:max(n_cal, 0)], perm[max(n_cal, 0):]
         self.mu, self.sd = x_all.mean(0), np.where(x_all.std(0) > 0, x_all.std(0), 1.0)
         z = (x_all - self.mu) / self.sd
         self._tree = cKDTree(z)

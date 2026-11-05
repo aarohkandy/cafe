@@ -29,11 +29,13 @@ jobs:
       - name: make audit (code, tests, coverage gates)
         if: always()
         run: docker run --rm -u $(id -u):$(id -g) -e HOME=/tmp -v $PWD:/app -v $PWD/.work:/work:ro -w /app -e PYTHONPATH=/app -e CAFE_OFFLINE=1 cafe-pm make audit
-      # the audit prints only the tail of each failing step; its whole output is audit.log
+      # the audit prints only the tail of each failing step; its whole output is audit.log, and coverage.json holds the missed lines of the coverage gates
       - name: audit log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: audit-log
-          path: audit.log
+          path: |
+            audit.log
+            coverage.json
           if-no-files-found: warn

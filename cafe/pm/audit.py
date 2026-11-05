@@ -25,7 +25,7 @@ from __future__ import annotations
 import ast, datetime as dt, hashlib, importlib.metadata, json, pathlib, re, subprocess, sys, tomllib
 from typing import Any
 
-from .env.remote import sha256
+from .env.remote import sha256, tree_sha256
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STAGES = ["ingest", "hangar", "stage1", "windows", "stage3", "refit", "stage1b", "emulator", "report"]
@@ -75,15 +75,19 @@ def _store_attr(d: pathlib.Path, key: str) -> Any:
     return None
 
 
-def _dir_problems(run: str, st: str, f: pathlib.Path, recorded: str) -> list[str]:
-    """A directory input: a zarr store carries the sha256 of the parts manifest it was assembled from, which is what the ledger recorded
-    (the derived surface layer has none: its hash is over every file of the store)."""
-    if f.name == "derived.zarr":                                     # the surface layer: no manifest, the ledger recorded the hash of every file of the store
-        from .env.surface import store_sha256
-        return [] if store_sha256(f) == recorded else [f"{run}: stage {st}: input {f} (the derived surface layer) changed since the stage ran"]
+def _dir_problems(run: str, st: str, f: pathlib.Path, recorded: str | None, tree: str | None = None) -> list[str]:
+    """A directory input: a zarr store carries the sha256 of the parts manifest it was assembled from, which is what the ledger recorded; and,
+    when the ledger holds `tree_sha256`, the hash over every file of the store is recomputed (a changed value or a deleted chunk changes it, the
+    manifest attribute does not). The older derived surface layer ledgers have only that hash, in `recorded`."""
     have = _store_attr(f, "manifest_sha256")
-    if have is not None and have != recorded:
+    if recorded and have is not None and have != recorded and f.name != "derived.zarr":
         return [f"{run}: stage {st}: input {f} changed since the stage ran (store manifest {str(have)[:12]}, ledger {recorded[:12]})"]
+    if tree is not None:
+        now = tree_sha256(f)
+        return [] if now == tree else [f"{run}: stage {st}: input {f} changed since the stage ran (tree {now[:12]} against ledger {tree[:12]}): "
+                                       "delete it and run `fetch` again"]
+    if recorded and f.name == "derived.zarr":  # an older ledger: the surface layer has no manifest, the ledger recorded the hash of every file
+        return [] if tree_sha256(f) == recorded else [f"{run}: stage {st}: input {f} (the derived surface layer) changed since the stage ran"]
     return []
 
 
@@ -107,7 +111,14 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
             out.append(f"{run_dir.name}: stage {st}: no ledger")
             prev = None
             continue
-        d = json.loads(p.read_text())
+        try:
+            d = json.loads(p.read_text())
+            if not isinstance(d, dict):
+                raise ValueError("not a JSON object")
+        except (ValueError, OSError) as e:
+            out.append(f"{run_dir.name}: stage {st}: {p} is not valid JSON ({e}); delete it and run the stage again")
+            prev = None
+            continue
         if not d.get("ok"):
             out.append(f"{run_dir.name}: stage {st}: ok=false ({d.get('error')})")
         for c in d.get("checks", []):
@@ -115,8 +126,8 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
                 out.append(f"{run_dir.name}: stage {st}: self-check {c['name']} failed (value {c.get('value')}, limit {c.get('limit')})")
         for i in d.get("inputs", []):
             f = _resolve(i["ref"], run_dir)
-            if i.get("sha256") and f.is_dir():
-                out += _dir_problems(run_dir.name, st, f, i["sha256"])
+            if (i.get("sha256") or i.get("tree_sha256")) and f.is_dir():
+                out += _dir_problems(run_dir.name, st, f, i.get("sha256"), i.get("tree_sha256"))
             elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
                 out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
             if f.name == "manifest.json" and f.is_file() and "parts" in json.loads(f.read_text()):
@@ -184,17 +195,22 @@ def _run(cmd: list[str]) -> tuple[int, str]:
 
 
 def coverage_problems(cov_json: str | pathlib.Path) -> list[str]:
+    """The gates of `GATES` against coverage.json. A package gate of 100 % names the files and lines it misses (from `missing_lines`), so a gate
+    that differs between machines (a branch that runs only with Bellhop installed) says where."""
     d = json.loads(pathlib.Path(cov_json).read_text())
     out: list[str] = []
     for pref, gate in GATES.items():
         tot = cov = 0
+        miss: list[str] = []
         for f, v in d["files"].items():
             if f.startswith(pref + "/") or f == pref:
                 tot += v["summary"]["num_statements"]
                 cov += v["summary"]["covered_lines"]
+                if v.get("missing_lines"):
+                    miss.append(f"{f[len(pref) + 1:] or f}: {', '.join(map(str, v['missing_lines']))}")
         pct = 100.0 * cov / tot if tot else 100.0
         if pct + 1e-9 < gate:
-            out.append(f"coverage {pref}: {pct:.1f} % < {gate:.0f} %")
+            out.append(f"coverage {pref}: {pct:.1f} % < {gate:.0f} %" + (f" ({'; '.join(miss)})" if gate >= 100.0 and miss else ""))
     return out
 
 
@@ -244,10 +260,12 @@ def mutation_problems(root: pathlib.Path = ROOT) -> list[str]:
 
 OPTIONS = ("--code-only", "--ledgers-only", "--mutation-record")
 # The real-time tests (ArduCopter and its fake firmware bind sockets and wait on the wall clock): they fail under parallel load, so they run alone in the
-# second pass. The same five that pyproject.toml deselects for mutmut (tests/test_config_docs.py holds the two lists equal).
+# second pass. The same seven that pyproject.toml deselects for mutmut (tests/test_config_docs.py holds the two lists equal). The last two measure the
+# emulator's query time against BRIEF 2.7's 10 ms: beside parallel workers they read the load, not the code (round 8 M-5).
 SERIAL_TESTS = ("tests/test_uas.py::test_scrambled_motor_order_fails_the_sitl_receipts", "tests/test_uas.py::test_lockstep_machinery_answers_every_frame_once",
                 "tests/test_uas.py::test_an_autopilot_that_never_arms_is_reported_and_fails_the_sitl_receipts",
-                "tests/test_uas.py::test_an_autopilot_that_never_speaks_mavlink_is_reported", "tests/test_uas.py::test_a_firmware_that_dies_is_reported")
+                "tests/test_uas.py::test_an_autopilot_that_never_speaks_mavlink_is_reported", "tests/test_uas.py::test_a_firmware_that_dies_is_reported",
+                "tests/test_emulator.py::test_query_under_10_ms_and_format", "tests/test_emulator.py::test_receipts_pass_and_fail_when_calibration_is_wrong")
 
 
 def pytest_passes(workers: int) -> list[list[str]]:

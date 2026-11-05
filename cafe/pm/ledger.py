@@ -15,11 +15,12 @@ import datetime as dt, importlib.metadata, json, math, os, pathlib, platform, su
 from types import TracebackType
 from typing import Any, Literal
 
-from .env.remote import sha256
+from .env.remote import sha256, tree_sha256
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-DIST = {"sklearn": "scikit-learn"}                      # import name -> distribution name, where they differ (for libraries with no __version__)
-LIBS = ["numpy", "scipy", "xarray", "zarr", "h5py", "jax", "xlb", "gsw", "pycoare", "mannrs", "sklearn", "smt", "statsmodels"]
+DIST = {"sklearn": "scikit-learn", "yaml": "PyYAML"}  # import name -> distribution name, where they differ (for libraries with no __version__)
+LIBS = ["numpy", "scipy", "xarray", "zarr", "h5py", "jax", "xlb", "gsw", "pycoare", "mannrs", "sklearn", "smt", "statsmodels",
+        "pandas", "pyarrow", "arlpy", "yaml", "jsonschema", "netCDF4"]
 
 
 class StageFailed(RuntimeError):
@@ -67,7 +68,16 @@ def versions() -> dict[str, str | None]:
             out[m] = _version(m)
         except ImportError:
             out[m] = None
+    out["bellhop"] = bellhop()
     return out
+
+
+def bellhop() -> str:
+    """The sha256 of the `bellhop.exe` the acoustic links would use (`comms._bellhop_dir`), or "absent": installing it after a run changes the code
+    digest, so the Thorp-only stage 1 is not resumed as if Bellhop had been asked."""
+    from .physics import comms
+    d = comms._bellhop_dir()
+    return "absent" if d is None else sha256(pathlib.Path(d) / "bellhop.exe")
 
 
 def machine() -> dict[str, Any]:
@@ -92,9 +102,11 @@ class Ledger:
         self.dir.mkdir(parents=True, exist_ok=True)
         return self
 
-    def input(self, ref: Any, sha: str | None = None, **meta: Any) -> None:
+    def input(self, ref: Any, sha: str | None = None, tree: str | None = None, **meta: Any) -> None:
+        """`tree`: for a directory input (a zarr store), the sha256 over every file of it (`tree_sha256`), which `done` and the audit recompute."""
         p = pathlib.Path(str(ref))
-        self.d["inputs"].append(dict(ref=str(ref), sha256=sha or (sha256(p) if p.is_file() else None), **meta))
+        extra = {} if tree is None else dict(tree_sha256=tree)
+        self.d["inputs"].append(dict(ref=str(ref), sha256=sha or (sha256(p) if p.is_file() else None), **extra, **meta))
 
     def seed(self, name: str, value: Any) -> None:
         self.d["seeds"][name] = int(value)
@@ -159,7 +171,13 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
     p = pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json"
     if not p.exists():
         return None
-    d: dict[str, Any] = json.loads(p.read_text())
+    try:
+        d: dict[str, Any] = json.loads(p.read_text())
+        if not isinstance(d, dict):
+            raise ValueError("not a JSON object")
+    except (ValueError, OSError) as e:                                   # a half-written ledger (killed or full-disk run): the stage runs again
+        print(f"note: ledger {p} is unreadable ({e}): the stage runs again", file=sys.stderr)
+        return None
     if not d.get("ok") or d.get("config_hash") != config_hash:
         return None
     for o in d["outputs"]:
@@ -168,6 +186,8 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
     for i in d["inputs"]:
         f = pathlib.Path(i["ref"])
         if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
+            return None
+        if i.get("tree_sha256") and f.is_dir() and tree_sha256(f) != i["tree_sha256"]:       # a store: every file of it, not the manifest it was made from
             return None
     return d
 

@@ -193,3 +193,12 @@ def ci_full(ci_env):
     box = (-2.0, 2.0, -167.0, -163.0)                                  # (south, north, west, east): the mission box plus its 0.5 degree pad
     oc = ocean.Ocean(ci_env.ocean_store, bathy.choose(box, ci_env.data / "bathy", gofs=ci_env.ocean_store, fetch=False))
     return GriddedEnv(ci_env.cache, env_sigmas(), ocean=oc, subgrid=surface.SurfaceLayer(ci_env.cache))
+
+
+@pytest.fixture
+def emulator_speed_not_tested(monkeypatch):
+    """Round 8 M-5: `whatif.fit_class` refuses an emulator whose median query takes more than LIMITS["query_ms"] (10 ms, BRIEF 2.7). That is a fact
+    about the machine, not the logic a test names; a test of the logic takes this fixture so it passes on a loaded or slow host. The one measurement
+    of the speed is `test_query_under_10_ms_and_format` and the emulator receipt, which run alone (`audit.SERIAL_TESTS`)."""
+    from cafe.pm import whatif
+    monkeypatch.setitem(whatif.LIMITS, "query_ms", 1e9)

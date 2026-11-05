@@ -516,3 +516,31 @@ def test_the_holdout_draws_fresh_members_once_per_point_not_once_per_replicate(t
         return 0.5, 64
     h = em.holdout_report(df, fresh=fresh)
     assert len(asked) == E.FRESH_POINTS == 3 and len(set(asked)) == 3 and h["fresh"]["points"] == 3
+
+
+def _split_of_a_fit(em, df, monkeypatch):
+    """The feature rows `Emulator.fit` trains on and calibrates on (the GP itself is replaced by a stub: only the split is looked at)."""
+    seen = {}
+    monkeypatch.setattr(E.Emulator, "_krig", lambda self, x, y, lv: seen.update(tr=x))
+    monkeypatch.setattr(E.Emulator, "_gp", lambda self, t, x: (seen.update(cal=x), (np.zeros(len(x)), np.ones(len(x))))[1])
+    em.fit(df)
+    return {tuple(r.round(9)) for r in seen["tr"]}, {tuple(r.round(9)) for r in seen["cal"]}
+
+
+def test_the_conformal_calibration_set_is_whole_feature_points(tmp_path, monkeypatch):
+    """Round 8 M-9: `fit` split the rows, `holdout_report` the feature points, so with replicates (the base mission re-run under several seeds) 98 % of the
+    calibration rows had a training twin at the identical point, were scored in-sample, and made the shipped intervals narrower than the scored ones."""
+    base = E.synthetic_table(14, 1)
+    df = pd.concat([base.assign(p_fail=np.clip(base.p_fail + d, 0, 1)) for d in (0.0, 0.01, -0.01)], ignore_index=True)           # 14 points x 3 replicates
+    for seed in range(20):
+        em = E.Emulator(E.FEATURES, ["p_fail"], path=tmp_path / "t.parquet", seed=seed)
+        tr, cal = _split_of_a_fit(em, df, monkeypatch)
+        assert len(cal) == 3 and not cal & tr and len(tr) == 11                                      # round(0.2 x 14) = 3 points, all their rows
+        assert em.n_cal == 9 and em.n_train == 33
+
+
+def test_the_calibration_split_falls_back_to_rows_only_without_point_columns(tmp_path):
+    em = E.Emulator(E.FEATURES, ["p_fail", "t_fail_h"], path=tmp_path / "x.csv")
+    em.point_cols = []
+    em.fit(E.synthetic_table(12, 0))
+    assert em.n_cal == 2
