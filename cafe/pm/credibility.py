@@ -27,6 +27,7 @@ from typing import Any
 from . import config, pipeline
 from .audit import ledger_problems
 from .ledger import STAGES
+from .stage1 import NOT_EXERCISED
 from .stats import intervals, sampling
 
 ROOT = config.ROOT
@@ -306,6 +307,25 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     return out
 
 
+def _is_real(x: Any) -> bool:
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def _stored(f: pathlib.Path, keys: tuple[str, ...], optional: tuple[str, ...] = ()) -> tuple[dict[str, Any] | None, str]:
+    """(the stored receipt, "") when `f` is a JSON object whose `keys` (and the `optional` ones that are present) are finite real numbers (not bool, str,
+    None); else (None, why it cannot be a row).
+    A missing file is (None, "not stored"). A tolerant read for the report side: stage 3 judges the same files in wallmodel._read_receipt and a row here
+    must never raise on a hand-edited or older file (round 9, M-4)."""
+    if not f.is_file():
+        return None, "not stored"
+    try:
+        d = config.json_object(f)
+    except config.ConfigError:
+        return None, f"{f.name} is unreadable (rerun it)"
+    bad = [k for k in keys if not _is_real(d.get(k))] + [k for k in optional if k in d and not _is_real(d[k])]
+    return (None, f"{f.name} lacks a finite number for {', '.join(bad)} (rerun it)") if bad else (d, "")
+
+
 def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     """Slow-run receipts stored by cafe.pm.stage3: S and D only."""
     rec = data / "receipts"
@@ -321,9 +341,9 @@ def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
             else:
                 f, others = rec / f"{kind}_{tag}.json", []
                 missing = f"not run: {f.name} is not stored"
-            d = _json(f) if f.is_file() else None
+            d, why = _stored(f, ("cd",), ("ref",))
             if d is None:
-                out.append(_row(rid, case, f"{f}", None, None, None, missing))
+                out.append(_row(rid, case, f"{f}", None, None, None, missing if why == "not stored" else f"not run: {why}"))
                 continue
             if "ref" in d:
                 ref = float(d["ref"])
@@ -336,9 +356,10 @@ def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     plates = (("wm_flat_plate", "wall-modelled flat plate C_f vs ITTC-57", "ittc"), ("wm_channel", "wall-modelled channel C_f vs Dean 1978", "cf_dean"))
     for name, case, dk in plates:
         f = rec / f"{name}.json"
-        d = _json(f)
+        d, why = _stored(f, ("cf", dk))
         if d is None:
-            out.append(_row(f"wallmodel:{name}", case, f"{f}", None, None, None, f"not run: {f.name} is not stored"))
+            out.append(_row(f"wallmodel:{name}", case, f"{f}", None, None, None,
+                            f"not run: {f.name} is not stored" if why == "not stored" else f"not run: {why}"))
         else:
             out.append(_row(f"wallmodel:{name}", case, f"{f}", float(d["cf"]), float(d[dk]), None, "the run stores no U_num, U_input or U_D"))
     return out
@@ -598,6 +619,9 @@ def factor_table(f: Facts) -> list[dict[str, Any]]:
     return out
 
 
+NOT_EXERCISED_DETAIL = "the link was required at no moment in any member, so the run says nothing about it (verdict NOT EXERCISED)"
+
+
 def _far(e: dict[str, Any]) -> bool | None:
     """Whether a link's median distance to the ship is beyond ACOUSTIC_NEAR_KM: from the summary's `distance_km_median`, else from the share of the needed
     samples that are out of the modem's range (more than half of them: the median distance is beyond the range, which is longer than 3 km); None if neither."""
@@ -626,17 +650,22 @@ def sanity(f: Facts) -> dict[str, Any] | None:
         detail = ""
         if next((u.get("task", {}).get("mode") for u in (f.mission or {}).get("vehicles", []) if u["id"] == k), None) == "drift":
             agrees, detail = None, DRIFT_DETAIL                      # a drift glider swims a fixed heading: its GO is not agreement with the expectation
-        if x.get("distance"):
+        if v == NOT_EXERCISED:                                    # no moment required the link: neither agreement nor disagreement
+            agrees, detail = None, NOT_EXERCISED_DETAIL
+        elif x.get("distance"):
             d = e.get("distance_km_median")
             detail = ("the run holds no ship distance for this link" if far is None else
                       f"median distance to the ship {d:.0f} km" if d is not None else "most needed samples are out of the modem's range"
                       ) + (f", beyond {ACOUSTIC_NEAR_KM:g} km" if far else f", within {ACOUSTIC_NEAR_KM:g} km" if far is False else "")
         if k == "usv" and (e.get("speed") or {}).get("ratio_median") is not None:
-            detail = (f"speed over ground / mean 10 m wind along the track {e['speed']['ratio_median']:.3f} (median of the per-member ratios) "
-                      f"against Chiodi et al.'s "
-                      f"{USV_CHIODI_RATIO}: the calibration scenario differs from the mission (no current, uniform wind, sailing to a station); the westward "
-                      f"current lowers the mission ratio and the calibration may already include part of that effect, a possible double penalty that is "
-                      "not established")
+            sp = e["speed"]
+            shown = (f"speed over ground / mean wind at the anemometer height along the track {sp['ratio_anem_median']:.3f} (median of the per-member ratios; "
+                     f"{sp['ratio_median']:.3f} on the 10 m wind)" if sp.get("ratio_anem_median") is not None else
+                     f"speed over ground / mean 10 m wind along the track {sp['ratio_median']:.3f} (median of the per-member ratios; no ratio at the "
+                     "anemometer height in this summary, so part of the gap is the difference of the wind heights)")
+            detail = (f"{shown} against Chiodi et al.'s {USV_CHIODI_RATIO} (at the anemometer height): the calibration scenario differs from the "
+                      "mission (no current, uniform wind, sailing to a station); the westward current lowers the mission ratio and the calibration may "
+                      "already include part of that effect, a possible double penalty that is not established")
         rows.append(dict(id=k, expected=x["text"], allowed=x["allowed"], observed=v, k_fail=e["k_fail"], n=e["n"], agrees=agrees, detail=detail))
     return dict(mission=name, note=SANITY_NOTE, rows=rows)
 
@@ -660,7 +689,7 @@ a{color:var(--accent)}.card{background:var(--card);border:1px solid var(--line);
 .scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{border-bottom:1px solid var(--line);
 padding:.3rem .5rem;text-align:left;vertical-align:top}
 .badge{display:inline-block;padding:0 .5rem;border-radius:4px;border:2px solid currentColor;font-weight:700}.go{color:var(--go)}
-.nogo{color:var(--nogo)}.marginal{color:var(--marg)}.undecided{color:var(--muted)}
+.nogo{color:var(--nogo)}.marginal{color:var(--marg)}.undecided,.notexercised{color:var(--muted)}
 .warn{background:var(--warn);color:var(--warnfg);border-radius:6px;padding:.5rem .75rem;margin:.5rem 0}.big{font-size:1.1rem;font-weight:700}
 .muted{color:var(--muted)}.lk{font-size:.7rem;vertical-align:super;margin-left:.15rem;text-decoration:none}code{word-break:break-all}
 svg{width:100%;height:auto;background:var(--card);border:1px solid var(--line);border-radius:8px}svg text{fill:var(--fg);font-size:11px}

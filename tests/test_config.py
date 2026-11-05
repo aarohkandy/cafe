@@ -171,6 +171,25 @@ def test_in_box_plain_and_wrapped():
     assert config._in_box(-170.0, 0.0, w) and config._in_box(180.0, 5.0, w) and not config._in_box(-100.0, 0.0, w)
 
 
+def test_fmt_box_says_the_wrap_the_pad_and_the_hemisphere_and_the_refusals_use_it(tmp_path):
+    """Round 9 M-14: the box in a refusal was the dict repr. One helper, used by the config refusals (ship and point) and the what-if one."""
+    assert config.fmt_box(dict(lon_min=165.0, lon_max=-165.0, lat_min=-5.0, lat_max=5.0, pad_deg=2.0)) == \
+        "lon 165 E to 165 W (across the antimeridian), lat -5 to 5, pad 2 deg"
+    assert config.fmt_box(dict(lon_min=-170.0, lon_max=-160.5, lat_min=0.0, lat_max=7.5)) == "lon 170 W to 160.5 W, lat 0 to 7.5"
+    assert config.fmt_box(dict(lon_min=10.0, lon_max=20.0, lat_min=-5.0, lat_max=5.0)) == "lon 10 E to 20 E, lat -5 to 5"
+    d = yaml.safe_load((config.ROOT / "missions" / "ci_fixture.yaml").read_text())
+    d["ship"]["lon"] = 100.0
+    with pytest.raises(ConfigError) as e:
+        load_mission(write(tmp_path, d))
+    assert "lon_min" not in str(e.value) and "{" not in str(e.value) and "outside the mission box (lon 166.5 W to 163.5 W, lat -1.5 to 1.5" in str(e.value)
+    e2 = copy.deepcopy(d)
+    e2["ship"]["lon"] = -165.0
+    vehicle(e2, "glider_eq")["deploy"]["lon"] = 100.0
+    with pytest.raises(ConfigError) as e:
+        load_mission(write(tmp_path, e2))
+    assert "lon_min" not in str(e.value) and "{" not in str(e.value) and "outside the mission box (lon " in str(e.value)
+
+
 def test_load_platform_by_name_by_path_and_errors(tmp_path):
     assert load_platform("seaglider")["kind"] == "seaglider" and load_platform("seaglider")["params"]["length_m"]["value"] == 1.8
     custom = tmp_path / "mine.yaml"

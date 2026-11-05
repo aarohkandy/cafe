@@ -25,7 +25,8 @@ decided, that is wherever `stats.intervals.decided_region` at the stopper's conf
 inside GO, MARGINAL (0.10 to 0.40) or NO-GO. The rule for the verdicts that are undecided in both runs (a vehicle near a threshold at a quick budget
 cannot be decided): such a verdict may differ, but only within the interval logic. It is allowed when the two runs' P(fail) intervals at the stopper's
 confidence overlap, and then it is named in the row's detail ("uas: MARGINAL -> GO, undecided in both at n = 32"); when they do not overlap the two runs
-disagree about P(fail) itself and it is a problem, decided or not. A verdict decided in either run must be identical. P(fail) is judged
+disagree about P(fail) itself and it is a problem, decided or not. A verdict decided in either run must be identical. A link's verdict NOT EXERCISED
+(stage 1: required at no sample) is no estimate of P(fail), so it must be identical in both runs whatever the intervals say (round 9, M-17). P(fail) is judged
 by Newcombe's (1998, Stat. Med. 17:873, method 10) hybrid
 Wilson-score interval for the difference of the two proportions, `intervals.newcombe_diff`, which must contain 0 at a family-wise 95 %: Bonferroni over the
 vehicles and links compared, so each entry is judged at 1 - 0.05 / entries. (A new estimate inside the 90 % interval of an independent one fails about a
@@ -47,6 +48,7 @@ from typing import Any
 
 from . import budget, config, pipeline, receipts
 from .ledger import git_dirty, git_sha
+from .stage1 import NOT_EXERCISED
 from .stats import intervals, sequential
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -193,7 +195,7 @@ def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tupl
             bad += [f"{kind} {k}: {f} {g.get(f)!r} in the reference, {r.get(f)!r} now" for f in ("cls", "platform", "n") if g.get(f) != r.get(f)]
             if g.get("verdict") != r.get("verdict"):
                 (glo, ghi), (rlo, rhi) = _interval(g), _interval(r)
-                if _decided(g) or _decided(r):
+                if _decided(g) or _decided(r) or NOT_EXERCISED in (g.get("verdict"), r.get("verdict")):           # round 9, M-17: not a matter of sampling
                     bad.append(f"{kind} {k}: verdict {g.get('verdict')!r} in the reference, {r.get('verdict')!r} now")
                 elif glo > rhi or rlo > ghi:
                     bad.append(f"{kind} {k}: verdict {g['verdict']!r} in the reference, {r['verdict']!r} now; "

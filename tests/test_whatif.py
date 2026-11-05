@@ -116,6 +116,14 @@ def test_a_move_out_of_the_box_is_refused():
         whatif.apply(CI, {"uas": dict(dlat=2.0)})
 
 
+def test_the_refusal_of_a_move_out_of_the_box_names_the_box_in_words_not_as_a_dict():
+    """Round 9 M-14: the message carried the Python dict of the box (and left the antimeridian wrap unexplained)."""
+    with pytest.raises(whatif.Invalid) as e:
+        whatif.apply(CI, {GL: dict(dlon=-1.5)})
+    t = str(e.value)
+    assert "{" not in t and "lon_min" not in t and "outside the mission box (lon 166.5 W to 163.5 W, lat -1.5 to 1.5, pad 0.5 deg)" in t
+
+
 def test_a_uas_shift_moves_its_sorties_through_the_day_and_a_lower_duty_spaces_them():
     m = whatif.apply(CI, {"uas": dict(shift_h=-6.5, duty=0.5)})
     s = whatif.vehicle(m, "uas")["sorties"]

@@ -738,8 +738,15 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
                                                       f"floor {floor:.3f}): the sample cannot rank them, which is not the same as none mattering.")
 
 
+NOT_EXERCISED = "NOT EXERCISED"
+NOT_EXERCISED_NOTE = ("the link was required at no moment in any member, so no member could fail it: P(fail) = 0 here counts nothing, and "
+                      "no number of members changes that (round 9, M-17)")
+
+
 def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_certify: int) -> dict[str, Any]:
-    """Verdict, dominant failure mode, first time, sensitivity for every vehicle and link."""
+    """Verdict, dominant failure mode, first time, sensitivity for every vehicle and link. A link required at no sample in any member
+    (`need_count` summing to 0) has the verdict NOT EXERCISED, not GO: a pass fraction of 1.0 by default is no evidence (the vehicles have no analogue).
+    A link needed by some members only is graded on all of them, whatever its median `need_count_median` (that one decides `granularity_ok`)."""
     U = res["U"]
     out: dict[str, dict[str, Any]] = dict(vehicles={}, links={})
     for vid, r in res["vehicles"].items():
@@ -783,7 +790,10 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         nc = int(np.median(r["need_count"])) if "need_count" in r else None            # required samples per member: what the required fraction is resolved on
         rf = lk_ends[lid]["required_fraction"]
         bad = float(np.sum(r["n_invalid"])) / need if kind and need else None          # of the needed samples, how many the geometry alone decided
-        out["links"][lid] = dict(n=n, k_fail=int(f.sum()), verdict=intervals.verdict(int(f.sum()), n), method=r["method"],
+        v = intervals.verdict(int(f.sum()), n)
+        if nc is not None and need == 0:                                          # no member needed it (a median of 0 alone is not that: 10 members may have)
+            v = dict(v, verdict=NOT_EXERCISED, note=NOT_EXERCISED_NOTE)
+        out["links"][lid] = dict(n=n, k_fail=int(f.sum()), verdict=v, method=r["method"],
                                  frac_median=float(np.median(r["frac"])), frac_p10=float(np.percentile(r["frac"], 10)),
                                  margin_db_median=float(np.nanmedian(r["margin_db"])) if np.any(np.isfinite(r["margin_db"])) else None,
                                  margin_kind=r.get("margin_kind"), frac_beyond_horizon=bad if kind == "beyond_horizon" else None,
@@ -807,7 +817,8 @@ def _requantile(new: dict[str, Any], old: dict[str, Any], x: NDArray[Any]) -> ND
 def _speed(r: dict[str, Any], platform: str) -> dict[str, Any]:
     """USV speed against wind per member: mean speed over ground (path length / time since deploy), the mean wind along the track at 10 m and at
     the anemometer height, and the ratios; `calibration_ratio` is Chiodi et al.'s mean SOG / wind (at the anemometer height) the VPP bias is
-    calibrated to, in a scenario without current, in uniform wind, sailing to a station (usv.mean_sog), which the mission is not."""
+    calibrated to, in a scenario without current, in uniform wind, sailing to a station (usv.mean_sog), which the mission is not. So `ratio_anem_median`
+    is the like-for-like figure against it and `ratio_median` (per 10 m wind) a secondary one (round 9, M-7)."""
     sog, u10, wa = (np.asarray(r[k], float) for k in ("sog_ms", "u10_ms", "wind_anem_ms"))
     P = usv.load_platform(platform)
     stw = {} if "stw_ms" not in r else dict(stw_ms=np.asarray(r["stw_ms"], float).tolist(), stw_ms_median=float(np.median(r["stw_ms"])))   # an old run: none
