@@ -9,10 +9,23 @@ set -eu
 W=$HOME/cafe-worker; M=$W/.cafe-worker-owned
 case "$W" in /?*/cafe-worker) ;; *) echo "STOP: odd home folder '$W'"; exit 1 ;; esac
 ours() { [ -f "$M" ]; }
+mine() { case "$(readlink "/proc/$1/exe" 2>/dev/null)" in "$W"/*) return 0 ;; esac; return 1; }          # a live process whose program lives in our folder
 stop_ours() {           # by pid file, and only a process whose program lives in our folder: never by name, the account may be shared
   for f in "$W/ssh/sshd.pid" "$W/ts/tailscaled.pid"; do
-    [ -f "$f" ] || continue; p=$(cat "$f"); case "$(readlink "/proc/$p/exe" 2>/dev/null)" in "$W"/*) kill "$p" 2>/dev/null || true ;; esac
-  done; sleep 1
+    [ -f "$f" ] || continue; p=$(cat "$f"); ! mine "$p" || kill "$p" 2>/dev/null || true
+  done
+  for f in "$W/ssh/sshd.pid" "$W/ts/tailscaled.pid"; do         # wait until they are gone: the port, the socket and the folder are theirs until then (10 s at most)
+    [ -f "$f" ] || continue; p=$(cat "$f"); n=0
+    while mine "$p" && [ $n -lt 100 ]; do sleep 0.1; n=$((n+1)); done
+  done
+}
+others() {              # processes of ours (their program lives in our folder) besides the two daemons and sshd's per-connection children: a job, a tmux server
+  for e in /proc/[0-9]*/exe; do
+    p=${e#/proc/}; p=${p%/exe}; x=$(readlink "$e" 2>/dev/null) || continue
+    case "$x" in "$W/env/bin/sshd") continue ;; "$W"/*) ;; *) continue ;; esac
+    for f in "$W/ssh/sshd.pid" "$W/ts/tailscaled.pid"; do [ -f "$f" ] && [ "$(cat "$f")" = "$p" ] && continue 2; done
+    echo "  pid $p $x"
+  done
 }
 problems() {
   if [ -e "$W" ] && ! ours && [ -n "$(ls -A "$W" 2>/dev/null)" ]; then echo "STOP: $W exists and is not ours"; fi
@@ -32,7 +45,11 @@ case "${1:-}" in
     exit 0 ;;
   undo)
     ours || { echo "STOP: $W is not ours, nothing touched"; exit 1; }
-    stop_ours; "$W/bin/tailscale" --socket="$W/ts/sock" logout 2>/dev/null || true; rm -rf -- "$W"
+    o=$(others); [ -z "$o" ] || { echo "STOP: these run from $W, stop them first (nothing touched):"; echo "$o"; exit 1; }
+    # log out while tailscaled still serves the socket; if that fails the node key stays valid, so say it
+    T=; ! command -v timeout >/dev/null 2>&1 || T="timeout 10"
+    $T "$W/bin/tailscale" --socket="$W/ts/sock" logout || echo "WARNING: tailscale logout failed (rc $?): the node stays registered until orca-cafe is removed in the admin console"
+    stop_ours; rm -rf -- "$W"
     echo "removed $W; also remove device orca-cafe at https://login.tailscale.com/admin/machines"; exit 0 ;;
   "") ;;
   *) echo "usage: bash orca_setup.sh [check|undo]"; exit 2 ;;

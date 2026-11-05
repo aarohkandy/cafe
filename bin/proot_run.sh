@@ -4,6 +4,7 @@
 # The root filesystem and proot come from bin/orca_sync.sh. Not enforced here, unlike docker: PM_MEM and PM_SHM, and --cpus (PM_CPUS only sets CAFE_WORKERS), and /work being read-only.
 set -eu
 D="$1"; shift
+GRACE="${PM_STOP_GRACE:-10}"; case "$GRACE" in ''|*[!0-9]*) echo "PM_STOP_GRACE: whole seconds (default 10), not '$GRACE'" >&2; exit 2 ;; esac       # seconds between TERM and KILL when the job is stopped
 W="$HOME/cafe-worker"; C="$W/cafe"          # nothing outside ~/cafe-worker: the home folder is shared
 [ -x "$W/bin/proot" ] && [ -f "$W/root.done" ] && [ -x "$W/root/usr/bin/env" ] || { echo "no proot or root filesystem under $W: run bin/orca_sync.sh" >&2; exit 1; }
 [ -d "$C/$D" ] && [ -d "$C/pmdata" ] && [ -d "$C/data" ] || { echo "missing $C/$D, $C/pmdata or $C/data: run bin/orca_sync.sh" >&2; exit 1; }
@@ -11,17 +12,18 @@ W="$HOME/cafe-worker"; C="$W/cafe"          # nothing outside ~/cafe-worker: the
 free=$(df -Pk "$W" | awk 'NR==2{print int($4/1048576)}'); [ "$free" -ge "${CAFE_MIN_FREE_GB:-60}" ] || { echo "STOP: only $free GB free on the shared disk" >&2; exit 1; }
 mkdir -p "$C/tmp"
 # A run that was SIGKILLed (or lost to a container restart) leaves its run.* directory: each holds .pids (this wrapper, then its proot); one with no live pid is stale. Not a stale one without .pids: that is a run just starting.
+# Live = a /proc entry whose state is not Z: kill -0 is true for a zombie, which stays when the container's PID 1 does not reap orphans, and its directory would never be swept.
 for d in "$C"/tmp/run.*; do
   [ -f "$d/.pids" ] || continue; live=
-  for p in $(cat "$d/.pids"); do kill -0 "$p" 2>/dev/null && live=1; done
+  for p in $(cat "$d/.pids"); do st=$(sed 's/.*) //;s/ .*//' "/proc/$p/stat" 2>/dev/null) || :; [ -n "$st" ] && [ "$st" != Z ] && live=1; done
   [ -n "$live" ] || rm -rf "$d"
 done
 T=$(mktemp -d "$C/tmp/run.XXXXXX"); echo $$ > "$T/.pids"      # the container's /tmp, on the big disk (/ has 13 GB on orca); gone after the run, as with --rm
 # The job runs in the background, in its own process group (setsid), so that a signal to this wrapper stops it at once: proot itself ignores SIGTERM and dies of SIGKILL
-# without its tracees. The handler sends TERM to the group and KILL after 10 s, as docker stop does. A SIGKILLed wrapper cannot do this: its job runs on, and the sweep above removes its directory once it ends.
+# without its tracees. The handler sends TERM to the group and KILL after PM_STOP_GRACE (10) s, as docker stop does. A SIGKILLed wrapper cannot do this: its job runs on, and the sweep above removes its directory once it ends.
 P=; G=; command -v setsid >/dev/null 2>&1 && G=setsid
 trap 'rm -rf "$T"' EXIT
-stop() { [ -z "$P" ] || { kill -TERM "${G:+-}$P" 2>/dev/null || :; ( sleep 10; kill -KILL "${G:+-}$P" 2>/dev/null ) & K=$!; wait "$P" 2>/dev/null || :; kill "$K" 2>/dev/null || :; }; exit 143; }
+stop() { [ -z "$P" ] || { kill -TERM "${G:+-}$P" 2>/dev/null || :; ( sleep "$GRACE"; kill -KILL "${G:+-}$P" 2>/dev/null ) & K=$!; wait "$P" 2>/dev/null || :; kill "$K" 2>/dev/null || :; }; exit 143; }
 trap stop INT TERM HUP
 exec 3<&0                                          # a background job gets /dev/null for stdin unless told otherwise
 export PROOT_TMP_DIR="$T"

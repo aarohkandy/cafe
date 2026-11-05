@@ -1,11 +1,16 @@
 """On orca, a shared machine, the runners stay inside ~/cafe-worker. These read what bin/pmx.sh and pm.sh would send, with ssh and rsync replaced by loggers."""
+import ctypes
 import os
+import pathlib
+import shutil
+import signal
 import stat
 import subprocess
+import time
 
 import pytest
 
-from cafe.pm import config
+from cafe.pm import acceptance, audit, budget, config, report
 
 ROOT = config.ROOT
 
@@ -37,9 +42,37 @@ def test_nothing_is_sent_to_a_machine_without_our_marker(tmp_path, script):
     assert rc == 1 and "rsync" not in out and "true" not in out
 
 
-@pytest.mark.parametrize("name", [dict(PMX=".."), dict(PMX="../x"), dict(PMX="a/b"), dict(TM="../x")])
-def test_a_name_cannot_point_rsync_delete_or_a_log_outside(tmp_path, name):
-    rc, out = sent(tmp_path, "bin/pmx.sh", "true", PM_RUNTIME="proot", **name)
+@pytest.mark.parametrize("runtime", ["docker", "proot"])
+@pytest.mark.parametrize("name", [dict(PMX=".."), dict(PMX="../x"), dict(PMX="a/b"), dict(TM="../x"), dict(PMX="pmdata"), dict(PMX="data"), dict(PMX="pm"),
+                                  dict(PMX="tmp"), dict(PMX="pm_"), dict(PMX="pm_a/b"), dict(PMX="pm_a b"), dict(PMX="pm_a;x"),
+                                  dict(PMX="pm_a\n.."), dict(TM="a b"), dict(TM="a;x")])
+def test_a_name_cannot_point_rsync_delete_or_a_log_outside(tmp_path, name, runtime):
+    """M-28: PMX=pmdata (or data, pm, tmp) made `rsync --delete` empty the shared data; docker mode had no filter at all."""
+    rc, out = sent(tmp_path, "bin/pmx.sh", "true", PM_RUNTIME=runtime, **name)
+    assert rc == 2 and out == ""
+
+
+@pytest.mark.parametrize("runtime", ["docker", "proot"])
+@pytest.mark.parametrize("name, dest", [({}, "pm_x/"), (dict(PMX="pm_a"), "pm_a/"), (dict(PMX="pm_r9e-2_x"), "pm_r9e-2_x/"),
+                                       (dict(PMX="pm_a", TM="job_1-b"), "pm_a/")])
+def test_the_names_that_were_valid_still_sync_where_they_did(tmp_path, name, dest, runtime):
+    rc, out = sent(tmp_path, "bin/pmx.sh", "true", PM_RUNTIME=runtime, **name)
+    assert rc == 0 and f"/{dest}" in out
+
+
+@pytest.mark.parametrize("script, env", [("bin/pmx.sh", dict(PMX="pm_t")), ("bin/pmx.sh", dict(PMX="pm_t", TM="job")), ("pm.sh", {})])
+@pytest.mark.parametrize("grace, sent_as", [("60", "PM_STOP_GRACE=60 "), (None, "PM_STOP_GRACE=10 "), ("", "PM_STOP_GRACE=10 ")])
+def test_the_stop_grace_reaches_proot_run_on_the_worker(tmp_path, script, env, grace, sent_as):
+    """The wrapper on the worker read PM_STOP_GRACE, but the laptop's scripts never sent it: the 10 s default was all anyone got."""
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME="proot", **env, **({} if grace is None else {"PM_STOP_GRACE": grace}))
+    assert rc == 0 and sent_as + "sh $HOME/cafe-worker/cafe/" in out
+
+
+@pytest.mark.parametrize("script, env", [("bin/pmx.sh", dict(PMX="pm_t")), ("pm.sh", {})])
+@pytest.mark.parametrize("grace", ["1;x", "1 2", "-1", "x", "$(id)"])
+def test_a_stop_grace_that_is_not_whole_seconds_is_refused_before_anything_is_sent(tmp_path, script, env, grace):
+    """The value is pasted into the command line that the worker's shell parses, so it is checked here, not only by proot_run.sh."""
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME="proot", PM_STOP_GRACE=grace, **env)
     assert rc == 2 and out == ""
 
 
@@ -58,3 +91,409 @@ def test_the_worker_side_scripts_stay_inside_too():
     assert 'C="$W/cafe"' in run and "work/cafe" not in run
     copy = (ROOT / "bin/orca_sync.sh").read_text()
     assert "-C cafe-worker/cafe/$p" in copy and "-C work/cafe" not in copy
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------
+# The scripts that really run: ssh executes its command here, in a scratch HOME, as the remote login shell would; docker, tmux and tar are stand-ins.
+
+TOOLS = {
+    "ssh": '#!/bin/sh\nshift 3; cd "$HOME" || exit 1; exec sh -c "$*"\n',                                         # ssh -i KEY HOST CMD...
+    "rsync": '#!/bin/sh\necho "rsync $*" >> "$HOME/rsync.log"\n',
+    "docker": """#!/bin/sh
+case "$1" in
+  run) while [ "$1" != cafe-pm ]; do shift; done; shift; exec "$@" ;;
+  image) echo sha256:abc123 ;;
+  create) echo fakecid ;;
+  export) tar cf - -C "$FAKE_IMAGE" .; exit ${FAKE_EXPORT_RC:-0} ;;
+esac
+""",
+    "tmux": """#!/bin/sh
+S="$HOME/tmuxstate"; mkdir -p "$S"
+case "$1" in
+  new-session) shift; while [ "$1" != -s ]; do shift; done; ( : > "$S/$2"; sh -c "$3"; rm -f "$S/$2" ) </dev/null >/dev/null 2>&1 & ;;
+  has-session) [ -e "$S/${3#=}" ] ;;
+  ls) for f in "$S"/*; do [ -e "$f" ] && echo "$(basename "$f"): 1 windows (created now)"; done; exit 0 ;;
+esac
+""",
+}
+
+
+def live(tmp_path, *names, **extra):
+    """(home, env): `home` is the scratch HOME with the cafe-worker marker; PATH puts the stand-ins named in `names` first.
+    `tar` passes FAKE_TAR_RC for the call that makes an archive."""
+    home = tmp_path / "home"
+    (home / "cafe-worker").mkdir(parents=True, exist_ok=True)
+    (home / "cafe-worker" / ".cafe-worker-owned").write_text("")
+    tools = tmp_path / "tools"
+    tools.mkdir(exist_ok=True)
+    scripts = {n: TOOLS[n] for n in names}
+    scripts["tar"] = f'#!/bin/sh\n{shutil.which("tar")} "$@"; r=$?\ncase "$1" in -I) [ -z "$FAKE_TAR_RC" ] || exit $FAKE_TAR_RC ;; esac\nexit $r\n'
+    for n, body in scripts.items():
+        (tools / n).write_text(body)
+        (tools / n).chmod(stat.S_IRWXU)
+    return home, {"PATH": f"{tools}:{os.environ['PATH']}", "HOME": str(home), "PM_HOST": "worker", "PM_KEY": "k", **extra}
+
+
+def run(argv, env, cwd=ROOT, timeout=60):
+    return subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+
+
+# ---- M-34: a detached job is judged by its own session and its own exit code -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("runtime", ["docker", "proot"])
+@pytest.mark.parametrize("cmd, others, rc", [("false", ["rev9a_one", "rev9b_edge"], 1), ("true", [], 0), ("sleep 5", ["rev9a_one"], 0)])
+def test_a_detached_job_is_judged_by_its_own_session_and_exit_code(tmp_path, runtime, cmd, others, rc):
+    """M-34: `tmux ls | grep $TM` counted another session whose name contains $TM as success for a dead job,
+    and a job that ended at once, successfully, as a failure."""
+    home, env = live(tmp_path, "ssh", "rsync", "docker", "tmux", PM_RUNTIME=runtime, TM="rev9", PMX="pm_t")
+    (home / "tmuxstate").mkdir()
+    for o in others:
+        (home / "tmuxstate" / o).write_text("")                                      # sessions of someone else, alive, with rev9 in the name
+    if runtime == "proot":
+        (home / "cafe-worker" / "cafe" / "pm_t" / "bin").mkdir(parents=True)
+        (home / "cafe-worker" / "cafe" / "pm_t" / "bin" / "proot_run.sh").write_text('shift; exec "$@"\n')             # what the worker runs: the job itself
+    r = run(["sh", str(ROOT / "bin/pmx.sh"), *cmd.split()], env)
+    assert r.returncode == rc, r.stderr
+    assert ("ended: rc=1" in r.stderr) == (rc == 1)
+
+
+# ---- M-39: pm.sh and bin/pmx.sh sync with --delete and keep what the server wrote ------------------------------------------------------------------
+
+def server_outputs():
+    """Every path a job or a gate writes into the tree on the server, from the code that writes it."""
+    return [audit.MUTATION_FILE, audit.LOG, "coverage.json", ".coverage", ".coverage.host.1.x", audit.MUTATION_STATS, report.RECEIPTS_NAME,
+            "runs/quick/report.json",
+            "runs/acceptance/acceptance.json", str(acceptance.GOLDEN.relative_to(ROOT)), str(budget.THROUGHPUT.relative_to(ROOT)), "config/subgrid.json",
+            "emulator/train.parquet", "emulator/train.csv", ".hypothesis/x", ".pytest_cache/x", ".mypy_cache/x", ".ruff_cache/x", "report/tepex.json",
+            "checkpoints/x", "cache/x",
+            ".work/sitl/x"]
+
+
+@pytest.mark.parametrize("script, server_dir", [("pm.sh", "pm"), ("bin/pmx.sh", "pm_t")])
+def test_a_file_removed_from_the_tree_is_removed_on_the_server_and_what_the_server_wrote_stays(tmp_path, script, server_dir):
+    """M-39: pm.sh had no --delete, so a deleted test or module still ran on the server; bin/pmx.sh's --delete wiped outputs.
+    One list (bin/sync_filters) serves both."""
+    home, env = live(tmp_path, "ssh", "docker", PMX="pm_t")
+    src = tmp_path / "checkout"
+    for f in ("cafe/pm/kept.py", "tests/test_kept.py"):
+        (src / f).parent.mkdir(parents=True, exist_ok=True)
+        (src / f).write_text("local")
+    dest = home / "work" / "cafe" / server_dir
+    stale = ["cafe/pm/old.py", "tests/test_x.py", "docs/gone.md"]
+    for f in stale + server_outputs():
+        (dest / f).parent.mkdir(parents=True, exist_ok=True)
+        (dest / f).write_text("server")
+    (src / "config").mkdir()
+    (src / "config" / "throughput.json").write_text("local")                    # a tracked file in the checkout: the checkout's copy goes over, as always
+    r = run(["sh", str(ROOT / script), "true"], env, cwd=src)
+    assert r.returncode == 0, r.stderr
+    assert [f for f in stale if (dest / f).exists()] == []
+    assert [f for f in server_outputs() if f != "config/throughput.json" and (dest / f).read_text() != "server"] == []
+    assert (dest / "cafe/pm/kept.py").read_text() == "local" and (dest / "config/throughput.json").read_text() == "local"
+
+
+# ---- M-29, M-36: bin/orca_sync.sh -------------------------------------------------------------------------------------------------------------------
+
+def sync_world(tmp_path, **extra):
+    """A homebase and an orca that are both this scratch HOME: pmdata and data to copy, an image to export, proot already there."""
+    home, env = live(tmp_path, "ssh", "docker", ORCA_VIA="worker", ORCA_SRC="sh -c", ORCA_DST="sh -c", CAFE_MIN_FREE_GB="0",
+                     FAKE_IMAGE=str(tmp_path / "image"), **extra)
+    for d in ("bin", "dtmb5415", "bathy", "tao", "cache", "ocean"):
+        (home / "work/cafe/pmdata" / d).mkdir(parents=True)
+        (home / "work/cafe/pmdata" / d / "f").write_text(d)
+    (home / "work/cafe/data").mkdir(parents=True)
+    (home / "work/cafe/data/f").write_text("data")
+    (tmp_path / "image/usr/bin").mkdir(parents=True)
+    (tmp_path / "image/usr/bin/env").write_text("")
+    (tmp_path / "image/usr/bin/env").chmod(stat.S_IRWXU)
+    (tmp_path / "image/venv/lib").mkdir(parents=True)
+    (home / "cafe-worker/bin").mkdir()
+    (home / "cafe-worker/bin/proot").write_text("")
+    (home / "cafe-worker/bin/proot").chmod(stat.S_IRWXU)
+    return home, env
+
+
+def sync(env, *parts):
+    return run(["sh", str(ROOT / "bin/orca_sync.sh"), "100.1.2.3", *parts], env)
+
+
+@pytest.mark.parametrize("part", ["pmdata", "data"])
+def test_a_copy_whose_tar_failed_leaves_no_marker_and_a_whole_one_does(tmp_path, part):
+    """M-29: `tar cf - $dirs | gzip -1` reported gzip's status, so a missing directory gave a short valid archive, exit 0 and the .done marker."""
+    home, env = sync_world(tmp_path)
+    marker = home / f"cafe-worker/{part}.done"
+    if part == "pmdata":
+        shutil.rmtree(home / "work/cafe/pmdata/ocean")
+    else:
+        (home / "work/cafe/data/f").unlink()                                      # nothing arrives: an empty copy is not a copy
+    r = sync(env, part)
+    assert r.returncode != 0 and not marker.exists() and "== done" not in r.stdout
+    if part == "pmdata":
+        (home / "work/cafe/pmdata/ocean").mkdir()
+        (home / "work/cafe/pmdata/ocean/f").write_text("ocean")
+    else:
+        (home / "work/cafe/data/f").write_text("data")
+    r = sync(env, part)
+    assert r.returncode == 0 and marker.exists() and "== done" in r.stdout, r.stderr
+    assert (home / "cafe-worker/cafe" / part / ("ocean/f" if part == "pmdata" else "f")).exists()
+
+
+@pytest.mark.parametrize("rc, ok", [("1", True), ("2", False)])
+def test_gnu_tar_one_file_changed_is_tolerated_two_is_not(tmp_path, rc, ok):
+    home, env = sync_world(tmp_path, FAKE_TAR_RC=rc)
+    r = sync(env, "pmdata")
+    assert (r.returncode == 0) == ok and (home / "cafe-worker/pmdata.done").exists() == ok
+
+
+def test_a_stale_marker_does_not_survive_a_copy_that_is_cut(tmp_path):
+    home, env = sync_world(tmp_path)
+    (home / "cafe-worker/pmdata.done").write_text("")
+    shutil.rmtree(home / "work/cafe/pmdata/tao")
+    assert sync(env, "pmdata").returncode != 0 and not (home / "cafe-worker/pmdata.done").exists()
+
+
+@pytest.mark.parametrize("parts", [["pmdta"], ["pmdata/"], ["root", "dta"], ["data", "*"], ["Root"]])
+def test_an_unknown_part_name_stops_the_script_before_anything_is_touched(tmp_path, parts):
+    """M-36: `orca_sync.sh <ip> pmdta` copied nothing and printed `== done`."""
+    home, env = sync_world(tmp_path)
+    r = sync(env, *parts)
+    assert r.returncode == 1 and "unknown part" in r.stderr and "== " not in r.stdout
+    assert sorted(p.name for p in (home / "cafe-worker").iterdir()) == [".cafe-worker-owned", "bin"]
+
+
+def test_root_is_not_replaced_under_a_running_job_and_a_cut_export_is_no_root(tmp_path):
+    """M-36: `rm -rf root && mv root.new root` ran with no check for a job running from root. M-29: `docker export | gzip` hid a failed export."""
+    home, env = sync_world(tmp_path)
+    root = home / "cafe-worker/root"
+    r = sync(env, "root")                                                       # nothing runs: the first copy
+    assert r.returncode == 0 and (root / "usr/bin/env").exists() and (home / "cafe-worker/root.done").read_text() == "sha256:abc123", r.stderr
+    (root / "kept").write_text("")
+    (root / "bin").mkdir(exist_ok=True)
+    job = root / "bin" / "sleeper"
+    shutil.copy(shutil.which("sleep"), job)
+    p = subprocess.Popen([str(job), "60"])
+    try:
+        time.sleep(0.3)
+        r = sync(env, "root")
+        assert r.returncode == 1 and "a job of ours runs" in r.stderr and (root / "kept").exists()
+        r = sync(env)                                                           # no part named, image unchanged: nothing to do, nothing to refuse
+        assert r.returncode == 0 and "== root" not in r.stdout
+        r = sync({**env, "ORCA_FORCE": "1"}, "root")
+        assert r.returncode == 0 and not (root / "kept").exists()
+    finally:
+        p.kill()
+        p.wait()
+    (root / "kept").write_text("")
+    r = sync({**env, "FAKE_EXPORT_RC": "1"}, "root")
+    assert r.returncode != 0 and (root / "kept").exists()                       # the old root stays: the cut export was not swapped in
+
+
+# ---- M-37: bin/orca_setup.sh undo ---------------------------------------------------------------------------------------------------------------------
+
+def setup_world(tmp_path, logout="ok"):
+    """Our folder with a stub tailscale that records whether tailscaled still ran when it was asked to log out.
+    Daemons are copies of `sleep` or `sh` made in the folder (see `daemon`), so their program lives there."""
+    home, env = live(tmp_path)
+    w = home / "cafe-worker"
+    for d in ("bin", "ts", "ssh", "env/bin"):
+        (w / d).mkdir(parents=True, exist_ok=True)
+    (w / "bin/tailscale").write_text(
+        '#!/bin/sh\np=$(cat "$HOME/cafe-worker/ts/tailscaled.pid")\n'
+        'if [ -n "$(readlink /proc/$p/exe 2>/dev/null)" ]; then echo "$* daemon=up" >> "$HOME/calls.log"; else echo "$* daemon=down" >> "$HOME/calls.log"; fi\n'
+        + ('echo "logout: boom" >&2; exit 1\n' if logout == "fail" else "exit 0\n"))
+    (w / "bin/tailscale").chmod(stat.S_IRWXU)
+    return home, env, w
+
+
+def daemon(w, name, pidfile, *argv):
+    exe = w / name
+    shutil.copy(shutil.which("sleep") if not argv else shutil.which("sh"), exe)
+    p = subprocess.Popen([str(exe), *(argv or ("300",))], start_new_session=True)
+    (w / pidfile).write_text(str(p.pid))
+    return p
+
+
+def test_undo_logs_out_while_tailscaled_serves_and_waits_for_the_daemons_before_deleting(tmp_path):
+    """M-37: `stop_ours; tailscale logout 2>/dev/null || true; rm -rf` logged out against a socket nobody served, hid the failure,
+    and deleted after a fixed `sleep 1`."""
+    home, env, w = setup_world(tmp_path)
+    sshd = daemon(w, "env/bin/sshd", "ssh/sshd.pid")
+    slow = daemon(w, "bin/tailscaled", "ts/tailscaled.pid", "-c", 'trap "sleep 2; exit 0" TERM; while :; do sleep 1; done')
+    time.sleep(0.3)
+    try:
+        r = run(["bash", str(ROOT / "bin/orca_setup.sh"), "undo"], env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "logout daemon=up" in (home / "calls.log").read_text() and not w.exists()
+        assert sshd.poll() is not None and slow.poll() is not None              # gone before the folder was deleted, not still shutting down
+    finally:
+        for p in (sshd, slow):
+            p.kill()
+            p.wait()
+
+
+def test_undo_says_when_the_logout_failed(tmp_path):
+    home, env, w = setup_world(tmp_path, logout="fail")
+    r = run(["bash", str(ROOT / "bin/orca_setup.sh"), "undo"], env)
+    assert r.returncode == 0 and "boom" in r.stderr and "logout failed" in r.stdout and not w.exists()
+
+
+def test_undo_refuses_while_a_job_of_ours_runs_and_touches_nothing(tmp_path):
+    home, env, w = setup_world(tmp_path)
+    ts = daemon(w, "bin/tailscaled", "ts/tailscaled.pid")
+    (w / "cafe").mkdir()
+    shutil.copy(shutil.which("sleep"), w / "cafe/job")
+    job = subprocess.Popen([str(w / "cafe/job"), "300"], start_new_session=True)
+    time.sleep(0.3)
+    try:
+        r = run(["bash", str(ROOT / "bin/orca_setup.sh"), "undo"], env)
+        assert r.returncode == 1 and f"pid {job.pid} " in r.stdout and w.exists() and not (home / "calls.log").exists()
+        assert ts.poll() is None and job.poll() is None
+    finally:
+        for p in (ts, job):
+            p.kill()
+            p.wait()
+
+
+# ---- M-40: bin/proot_run.sh stops its job and sweeps what a killed wrapper left ------------------------------------------------------------------------
+
+def proot_world(tmp_path, **extra):
+    """A worker whose proot is a stand-in that ignores TERM and runs a child that does too."""
+    home, env = live(tmp_path, CAFE_MIN_FREE_GB="0", **extra)
+    w = home / "cafe-worker"
+    (w / "bin").mkdir()
+    (w / "bin/proot").write_text("#!/bin/sh\ntrap '' TERM\nsleep 300 &\nwait\n")
+    (w / "bin/proot").chmod(stat.S_IRWXU)
+    (w / "root/usr/bin").mkdir(parents=True)
+    (w / "root/usr/bin/env").write_text("")
+    (w / "root/usr/bin/env").chmod(stat.S_IRWXU)
+    (w / "root.done").write_text("x")
+    for d in ("app", "pmdata", "data"):
+        (w / "cafe" / d).mkdir(parents=True)
+    return w, env
+
+
+def group(pgid, zombies=False):
+    """pids of the live (not zombie, unless `zombies`) processes in process group `pgid`."""
+    out = []
+    for d in pathlib.Path("/proc").iterdir():
+        if d.name.isdigit():
+            try:
+                state, pgrp = (lambda t: (t[0], int(t[2])))(d.joinpath("stat").read_text().rsplit(")", 1)[1].split())
+            except (OSError, IndexError, ValueError):
+                continue
+            if pgrp == pgid and (state != "Z" or zombies):
+                out.append(int(d.name))
+    return out
+
+
+def start(w, env):
+    """(wrapper process, its run directory, the process group of its proot) once the proot runs."""
+    p = subprocess.Popen(["sh", str(ROOT / "bin/proot_run.sh"), "app", "x"], env=env, stdin=subprocess.DEVNULL, start_new_session=True)
+    t = time.time() + 15
+    while time.time() < t:
+        for d in (w / "cafe/tmp").glob("run.*"):
+            pids = (d / ".pids").read_text().split() if (d / ".pids").exists() else []
+            if len(pids) == 2 and int(pids[0]) == p.pid and group(int(pids[1])):
+                return p, d, int(pids[1])
+        time.sleep(0.05)
+    p.kill()
+    raise AssertionError("the job did not start")
+
+
+def reap(pids):
+    """The orphans of a killed wrapper come to this process (subreaper): reap them, as the init of a real machine does. `kill -0` is true for a zombie."""
+    for pid in pids:
+        try:
+            os.waitpid(pid, 0)
+        except ChildProcessError:
+            pass
+
+
+def dead(pgid, within=10):
+    t = time.time() + within
+    while group(pgid) and time.time() < t:
+        time.sleep(0.05)
+    return not group(pgid)
+
+
+@pytest.mark.parametrize("grace, low, high", [("1", 0.9, 8), (None, 9.5, 25)])
+def test_a_term_stops_the_whole_job_after_the_grace_and_removes_its_directory(tmp_path, grace, low, high):
+    """M-40: TERM to the group, KILL after 10 s (PM_STOP_GRACE): stated in ORCA_RUNNER.md and never run.
+    The stand-in proot ignores TERM, so only the KILL ends it."""
+    w, env = proot_world(tmp_path, **({"PM_STOP_GRACE": grace} if grace else {}))
+    p, d, pgid = start(w, env)
+    try:
+        t0 = time.time()
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=40) == 143
+        assert low <= time.time() - t0 < high
+        assert not d.exists() and dead(pgid)
+    finally:
+        p.kill()
+        p.wait()
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def test_a_killed_wrapper_leaves_its_job_and_directory_and_the_next_start_sweeps_only_when_the_job_has_ended(tmp_path):
+    w, env = proot_world(tmp_path, PM_STOP_GRACE="1")
+    ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)                                      # PR_SET_CHILD_SUBREAPER
+    groups, procs = [], []
+    try:
+        p1, d1, g1 = start(w, env)
+        groups.append(g1)
+        p1.kill()
+        p1.wait()
+        assert d1.exists() and group(g1)                                        # the job runs on, and so does its directory
+        p2, d2, g2 = start(w, env)                                              # a second job while the first still runs
+        groups.append(g2)
+        procs.append(p2)
+        assert d1.exists() and d2.exists()                                      # the live orphan's directory is not swept
+        p2.send_signal(signal.SIGTERM)
+        assert p2.wait(timeout=20) == 143 and not d2.exists() and d1.exists()
+        members = group(g1, zombies=True)
+        os.killpg(g1, signal.SIGKILL)
+        assert dead(g1)
+        reap(members)
+        p3, d3, g3 = start(w, env)                                              # the orphan has ended: the next start removes its directory
+        groups.append(g3)
+        procs.append(p3)
+        assert not d1.exists() and d3.exists()
+        p3.send_signal(signal.SIGTERM)
+        assert p3.wait(timeout=20) == 143 and not d3.exists()
+    finally:
+        for g in groups:
+            try:
+                os.killpg(g, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        for p in procs:
+            p.kill()
+            p.wait()
+
+
+def test_the_sweep_removes_the_directory_of_a_job_that_is_only_a_zombie(tmp_path):
+    """`kill -0` is true for a zombie, which a PID 1 that does not reap orphans leaves for good: the directory was then never swept."""
+    w, env = proot_world(tmp_path, PM_STOP_GRACE="1")
+    zombie = subprocess.Popen(["true"])                                          # exited, not waited for: a zombie of this process
+    t = time.time() + 10
+    while pathlib.Path(f"/proc/{zombie.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z" and time.time() < t:
+        time.sleep(0.02)
+    stale = w / "cafe/tmp/run.zombie"
+    stale.mkdir(parents=True)
+    (stale / ".pids").write_text(f"{zombie.pid} {zombie.pid}\n")
+    p, d, pgid = start(w, env)
+    try:
+        assert not stale.exists() and d.exists()
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=20) == 143
+    finally:
+        p.kill()
+        p.wait()
+        zombie.wait()
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

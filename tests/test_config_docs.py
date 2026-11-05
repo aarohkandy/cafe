@@ -303,3 +303,20 @@ def test_physics_12_1_gives_the_curved_against_plane_earth_difference_at_nulls()
     assert "26 dB for the UAS at the top of its profile (ht 2.2 m, hr 108.1 m)" in sec and "0.8 dB for a surface pair" in sec
     doc = text("cafe", "pm", "physics", "comms.py")
     assert "0.15 dB." not in doc and "26 dB" in doc
+
+
+def test_pm_sh_and_pmx_sh_read_one_filter_list_and_never_delete_what_they_exclude():
+    """M-39: pm.sh synced without --delete (a removed test still ran on the server) and each script would have had its own list of the outputs to keep."""
+    rules = text("bin", "sync_filters")
+    for script in (text("pm.sh"), text("bin", "pmx.sh")):
+        assert "--delete" in script and "--filter" in script and "sync_filters" in script
+        assert "--delete-excluded" not in script and "--exclude" not in script
+    for out in ("/runs/", "/config/throughput.json", "/config/subgrid.json", "/docs/mutation.json", "/mutants/", "/audit.log",
+                "/coverage.json", "/tests/golden/", "/report/"):
+        assert re.search(rf"^[-P] {re.escape(out)}$", rules, re.M), out
+
+
+def test_pmx_judges_a_detached_job_by_the_exact_session_name_or_an_rc_zero_log():
+    """M-34: line 20 was `tmux ls | grep $TM`, a substring match over every session on the box."""
+    pmx = text("bin", "pmx.sh")
+    assert "grep $TM" not in pmx and "has-session -t =$TM" in pmx and "grep -qx rc=0" in pmx
