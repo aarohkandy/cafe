@@ -1,7 +1,10 @@
 """bench/throughput.py `stage1()`: the per-class cost model written to config/throughput.json, run against a temporary copy of that file."""
 import json
+import os
 import pathlib
 import shutil
+import subprocess
+import sys
 
 import pytest
 
@@ -11,6 +14,7 @@ from cafe.pm.env import ocean as ocean_mod
 from tests.fixtures.ci_env import make as ci_make
 
 REAL = pathlib.Path(throughput.OUT)
+ROOT = REAL.parents[1]
 
 
 @pytest.fixture
@@ -232,3 +236,10 @@ def test_stage1_stores_the_sortie_minutes_the_uas_batch_flew_so_the_planner_can_
     assert out["uas"]["sortie_min"] == 40.0 and "sortie_min" not in out["glider"] and "sortie_min" not in out["usv"]
     from cafe.pm import budget
     assert budget.bench_sortie_rate(out["uas"]) == pytest.approx(40.0 / 1.5)
+
+
+def test_bench_all_stops_at_once_without_the_cache(tmp_path):
+    """M-55: `all` ran 10 minutes of OpenFOAM and LBM, wrote half of throughput.json, then ended on the stage-1 job's missing cache."""
+    env = {**os.environ, "CAFE_DATA": str(tmp_path), "PYTHONPATH": str(ROOT)}
+    r = subprocess.run([sys.executable, str(ROOT / "bench/throughput.py"), "all"], env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode != 0 and "no environment cache" in r.stderr and "cafe.pm fetch" in r.stderr

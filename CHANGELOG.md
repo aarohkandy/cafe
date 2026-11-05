@@ -2,6 +2,7 @@
 
 ## Unreleased (premission-step4)
 
+- `bench/throughput.py all` stops at once when the environment cache is missing; the BRIEF 2.1 finding never rounds a share up to the floor it misses; DECISIONS 459, 460.
 - `PM_RUNTIME=proot` for `bin/pmx.sh` and `pm.sh`, `bin/proot_run.sh`, `bin/orca_sync.sh`: run cafe jobs on a worker with no docker (orca); DECISIONS 458, `docs/ORCA_RUNNER.md`. Hardened after review: the job runs in its own process group and stops on TERM/INT/HUP, stale `run.*` temp directories are swept at start, `orca_sync.sh` checks the root filesystem itself and not only `root.done`, `bin/orca_suite.sh` runs the suite. All of it stays inside `~/cafe-worker` (the runners refuse otherwise), and `bin/orca_ready.sh` is the go check.
 
 Branch `premission-step4`, from `main`. Commits: `c184db4` throughput benchmark and planner, `2928de5` CAD uploads and fleet check, `ab376fd` quad at 2.5 ms and
@@ -37,7 +38,7 @@ Pipeline and tools
 - `python -m cafe.pm ingest-ocean` writes the lab's HYCOM (netCDF or archv `.a/.b`) into the store the mission names; `QUESTIONS_FOR_LAB.md` Q1 and Q8 give the commands and keys; `docs/RUNBOOK.md`, first draft (`d7a618b`).
 - `mypy --strict` reports 0 errors in `cafe/pm`; `pyproject.toml` sets `strict = true` and the audit's mypy step reads it. `type: ignore` is used only on third-party calls (warp, trimesh, jax.config, smt), each with its code and reason (`84db079`, DECISIONS 115).
 - `ledger.git_sha` falls back to `CAFE_GIT_SHA` in a copy without `.git` (`f48fde3`).
-- After round 8: (count pending). After round 7: 2,153 `def test_` and 2,598 collected cases, all passing, in 49 test files; redone at code freeze. 2,052 `def test_` and 2,481 collected cases, all passing, in 49 test files in `tests/` after round 6 (after round 5: 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files; 1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
+- After round 8: 2,912 at the round-8 gate. After round 7: 2,153 `def test_` and 2,598 collected cases, all passing, in 49 test files; redone at code freeze. 2,052 `def test_` and 2,481 collected cases, all passing, in 49 test files in `tests/` after round 6 (after round 5: 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files; 1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
 
 Environment
 

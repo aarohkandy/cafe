@@ -3370,6 +3370,11 @@ def test_r8_merge_the_stored_ustar_fraction_is_not_rounded_across_the_briefs_flo
     assert value == frac and bool(finding) == (value < pipeline.USTAR_AGREE_FRACTION) == (frac < 0.9)
 
 
+def test_r8_close_a_share_just_under_the_floor_does_not_read_as_the_floor():
+    """0.89996 was printed "only 90.0 %" beside "the brief asks 90 %", by the note and by credibility both."""
+    assert pipeline.ustar_percent(0.89996) == "89.9" and pipeline.ustar_percent(0.8) == "80.0" and pipeline.ustar_percent(0.8984) == "89.8"
+
+
 # ---- review round 8, lead item L0
 
 def test_r8_l0_a_truncated_derived_digest_or_zarr_json_is_a_layer_to_rebuild_not_a_traceback(tmp_path, data_copy):

@@ -18,7 +18,7 @@ so the current changes the apparent wind speed and angle and therefore the sail 
 answer afterwards (Sun et al. 2026 as quoted in BRIEF 2.4: current is not superposable; still-water VPPs overpredict SOG by
 30-35 %).  Because hull and keel only see the water and the sail only sees the air, the solution depends on the wind relative
 to the water, w - c, which is why the Stage-1 simulator reads the current-coupled speed from the still-water (TWS x TWA) table
-at the relative wind (`through_water_table`); `through_water` solves it directly and the two agree (tests, receipts).
+at the relative wind (`through_water_table`); `through_water` solves it directly, and docs/PHYSICS.md 10.1 gives how far the two differ.
 
 Textbook citations below are by author, year and title: chapter and equation numbers were not re-checked (formulas marked
 'recalled' were written from memory and are covered by the receipts and tests, not by a re-read of the source).

@@ -167,8 +167,8 @@ def _stage1(sizes, mission):
     pipeline.DATA = pathlib.Path(d)
     # the overnight profile only so that Context can plan whatever the stale throughput.json says: the bench uses its mission, classes and environment
     ctx = pipeline.Context(path, "overnight", 0, pathlib.Path(tempfile.mkdtemp(prefix="cafe_bench_run_")))
-    if not ci and not ctx.cache.is_dir():
-        raise SystemExit(f"stage1 bench: no environment cache at {ctx.cache}; run `python -m cafe.pm fetch --mission {mission}` first")
+    if not ci:
+        _need_cache(ctx, mission)
     m = ctx.mission
     days = (utc(m["window"]["end"]) - utc(m["window"]["start"])).total_seconds() / 86400
     pri, marg = s1.priors_for(m)
@@ -211,7 +211,23 @@ def _cpu():
         return platform.processor()
 
 
+def _need_cache(ctx, mission):
+    if not ctx.cache.is_dir():
+        raise SystemExit(f"stage1 bench: no environment cache at {ctx.cache}; run `python -m cafe.pm fetch --mission {mission}` first")
+
+
+def check_cache(mission):
+    """`all` ends with the stage-1 job: without the fetched cache, say so now, not after 10 minutes of OpenFOAM and with a half-written throughput.json."""
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sys.path.insert(0, str(root))
+    from cafe.pm import pipeline
+    pipeline.DATA = pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
+    _need_cache(pipeline.Context(root / mission, "overnight", 0, pathlib.Path(tempfile.mkdtemp(prefix="cafe_bench_run_"))), mission)
+
+
 if __name__ == "__main__":
+    if sys.argv[1] == "all":
+        check_cache((sys.argv[2:3] or [DEMO])[0])
     jobs = {"foam": lambda: foam(), "lbm": lambda: lbm(*(sys.argv[2:3] or ["cpu"])), "stage1": lambda: stage1(mission=(sys.argv[2:3] or [DEMO])[0])}
     for name in (list(jobs) if sys.argv[1] == "all" else [sys.argv[1]]):
         jobs[name]()

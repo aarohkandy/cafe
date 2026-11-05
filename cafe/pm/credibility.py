@@ -396,7 +396,7 @@ def _data_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     ust = next((c for c in L["checks"] if c["name"] == "coare_ustar_vs_umwm_ust"), None)             # absent in ledgers from before round 8's reading of it
     agree = None if ust is None else ust.get("value")
     if not bad and ust is not None and not (isinstance(agree, (int, float)) and agree >= pipeline.USTAR_AGREE_FRACTION):
-        got = f"only {100 * agree:.1f} %" if isinstance(agree, (int, float)) else "no fraction recorded for"
+        got = f"only {pipeline.ustar_percent(agree)} %" if isinstance(agree, (int, float)) else "no fraction recorded for"
         miss.append(f"BRIEF 2.1 finding: {got} of the sea points have COARE u* within 20 % of UMWM ust; the brief asks {pipeline.USTAR_AGREE_FRACTION:.0%}, "
                     "so the forcing is not shown to be consistent and the level stays at 1")
     elif not bad and L["checks"] and all(s.is_file() for s in schemas):

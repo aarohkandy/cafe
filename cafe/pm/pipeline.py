@@ -631,6 +631,11 @@ USTAR_AGREE_FRACTION = 0.90      # BRIEF 2.1: COARE u* within 20 % of UMWM ust a
 # credibility.py's Data pedigree reads this one, too; the ledger value is stored unrounded so that both sides judge the same number
 
 
+def ustar_percent(frac: float) -> str:
+    """A share under the BRIEF 2.1 floor for the finding's text: one decimal, never rounded up to the floor it is said to miss ("only 90.0 %")."""
+    return f"{min(100 * frac, 100 * USTAR_AGREE_FRACTION - 0.1):.1f}"
+
+
 def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float]:
     """COARE u* (the surface layer built at ingest) against UMWM's `ust` at the sample: (points, median |dif|/ust, fraction within 20 %)."""
     sl = env.subgrid
@@ -712,7 +717,7 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
             note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within 20 %; BRIEF 5.5 asks that the agreement is logged"
             if n else "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask")
     if n and frac < USTAR_AGREE_FRACTION:                                 # row 168: not a gate, but the finding BRIEF 2.1 asks for is made
-        L.note(f"BRIEF 2.1 finding: only {100 * frac:.1f} % of the {n} sea points have COARE u* within 20 % of UMWM ust; "
+        L.note(f"BRIEF 2.1 finding: only {ustar_percent(frac)} % of the {n} sea points have COARE u* within 20 % of UMWM ust; "
                f"the brief asks {100 * USTAR_AGREE_FRACTION:.0f} %")
     kind = None if oc is None else oc.ds.attrs.get("temperature_kind")
     gofs = m["environment"]["ocean"]["source"] == "gofs31"
