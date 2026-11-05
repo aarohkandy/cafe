@@ -14,6 +14,7 @@ import pytest
 import yaml
 from hypothesis import given, settings, strategies as st
 
+from cafe.pm import Tagged
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import uas
 
@@ -760,3 +761,98 @@ def test_r8_m38_the_sitl_physics_socket_binds_the_loopback_interface_only(tmp_pa
     with pytest.raises(RuntimeError, match="stop after bind"):
         uas.fly_sitl(AnalyticEnv(wind=(0.0, 0.0)), uas.steaming(), 0.0, origin=ORIGIN, plat=P, max_s=0.5, workdir=str(tmp_path / "wd"), instance=3)
     assert bound == [("127.0.0.1", 9002 + 10 * 3)]                                                       # ("0.0.0.0", ...) before
+
+
+# ------------------------------------------------------------------------------------------------ review round 9, M-3 and M-26
+class HoleWind(AnalyticEnv):
+    """A masked cell in the wind store: NaN east of `lon_hole` or, with `t_hole`, only at the lookups made in that window of seconds (lo, hi)."""
+
+    def __init__(self, lon_hole=np.inf, t_hole=None, **kw):
+        super().__init__(**kw)
+        self.lon_hole, self.t_hole = lon_hole, t_hole
+
+    def wind(self, lon, lat, z, t):
+        v = np.array(super().wind(lon, lat, z, t).value, float)
+        bad = np.broadcast_to(np.asarray(lon, float) > self.lon_hole, v.shape[:-1])
+        if self.t_hole is not None:
+            bad = bad | (self.t_hole[0] < float(np.max(t)) < self.t_hole[1])
+        return Tagged(np.where(bad[..., None], np.nan, v), "hole", 0.0, "assumed")
+
+
+def test_r9_m3_a_nan_wind_met_in_flight_is_no_current_data_and_the_vehicle_stays_finite():
+    """Before: the member met the hole, every flag stayed False but profile_incomplete, and soc_end, max_tilt_deg and the track were NaN. Member 0 flies east
+    into the hole (it is NaN from 111 m east of the ship), member 1 west, away from it: only member 0 is flagged, on a zero wind (the env's wind is 0 anyway,
+    so its flight is exactly the clean one)."""
+    hd = np.array([90.0, 270.0])
+    r = uas.fly_sortie(HoleWind(lon_hole=ORIGIN[0] + 0.001, wind=(0.0, 0.0)), uas.steaming(), 0.0, M=2, origin=ORIGIN, plat=fast_plat(), heading_deg=hd)
+    clean = fly(M=2, heading_deg=hd)
+    assert r["flags"]["no_current_data"].tolist() == [True, False] and r["failed"].tolist() == [True, False]
+    assert 0.0 < r["t_first"]["no_current_data"][0] < r["t_end"][0] and np.isnan(r["t_first"]["no_current_data"][1])
+    assert np.isfinite(r["soc_end"]).all() and np.isfinite(r["max_tilt_deg"]).all() and np.isfinite(r["track"]["pos_rel"]).all()
+    assert not any(r["flags"][k].any() for k in uas.FLAGS if k != "no_current_data")             # profile_incomplete too: the pattern was flown
+    assert np.array_equal(r["soc_end"], clean["soc_end"]) and np.array_equal(r["track"]["pos_rel"], clean["track"]["pos_rel"])
+    assert uas.FLAGS[-1] == "no_current_data"  # appended: the indices of the others (first_failure_mode) do not move
+
+
+def test_r9_m3_the_flag_is_sticky_and_stamped_at_the_end_of_the_first_block_with_a_hole():
+    """One lookup (t = 10 s, held for the next second) is NaN and every later one is finite: the 1 s held mean does not clear the flag."""
+    r = uas.fly_sortie(HoleWind(t_hole=(9.99, 10.01), wind=(0.0, 0.0)), uas.steaming(), 0.0, M=2, origin=ORIGIN, plat=fast_plat())
+    assert r["flags"]["no_current_data"].all() and np.allclose(r["t_first"]["no_current_data"], 10.05) and r["t_end"].min() > 20.0
+    assert r["failed"].all() and np.isfinite(r["soc_end"]).all()
+
+
+def test_r9_m3_a_hole_beyond_the_reach_of_the_sortie_does_not_flag_and_changes_nothing():
+    far = uas.fly_sortie(HoleWind(lon_hole=ORIGIN[0] + 0.5, wind=(0.0, 0.0)), uas.steaming(), 0.0, M=2, origin=ORIGIN, plat=fast_plat())
+    clean = fly(M=2)
+    assert not any(far["flags"][k].any() for k in uas.FLAGS) and not far["failed"].any()
+    assert np.array_equal(far["soc_end"], clean["soc_end"]) and np.array_equal(far["track"]["pos_rel"], clean["track"]["pos_rel"])
+
+
+def test_r9_m3_a_scrubbed_member_is_not_flagged_for_a_hole_it_never_flew_into():
+    plat = fast_plat()
+    plat["launch_rule"]["max_mean_wind_ms"] = 1.0
+    r = uas.fly_sortie(HoleWind(lon_hole=ORIGIN[0] - 1.0, wind=(-5.0, 0.0)), uas.steaming(), 0.0, M=2, origin=ORIGIN, plat=plat)  # NaN everywhere
+    assert r["scrubbed"].all() and not r["flags"]["no_current_data"].any() and not r["failed"].any()
+
+
+class AirHole(AnalyticEnv):
+    """No surface pressure east of 11 km from the origin, with a finite wind: the air state at a ship there is unknown."""
+
+    def air(self, lon, lat, t):
+        a = super().air(lon, lat, t)
+        bad = np.asarray(lon, float) > ORIGIN[0] + 0.1
+        a["psfc"] = Tagged(np.where(bad, np.nan, a["psfc"].value), "hole", 0.0, "assumed")
+        return a
+
+
+def test_r9_m3_no_air_state_at_the_ship_is_a_scrub_like_no_wind_there_not_a_nan_vehicle():
+    """Before: a NaN air density at the ship gave NaN soc_end and max_tilt_deg and `profile_incomplete` for a member that was never scrubbed. Member 1's ship is
+    50 km east, in the hole; member 0's is not, and flies as it does with no hole."""
+    ship = uas.steaming(pos0=np.array([[0.0, 0.0], [50e3, 0.0]]))
+    r = uas.fly_sortie(AirHole(wind=(0.0, 0.0)), ship, 0.0, M=2, origin=ORIGIN, plat=fast_plat())
+    clean = uas.fly_sortie(AnalyticEnv(wind=(0.0, 0.0)), ship, 0.0, M=2, origin=ORIGIN, plat=fast_plat())
+    assert r["scrubbed"].tolist() == [False, True] and r["launch"]["ok"].tolist() == [True, False]
+    assert np.isfinite(r["soc_end"]).all() and np.isfinite(r["max_tilt_deg"]).all() and not r["failed"].any()
+    assert r["soc_end"][0] == clean["soc_end"][0] and np.array_equal(r["track"]["pos_rel"][0], clean["track"]["pos_rel"][0])
+
+
+def test_r9_m26_fly_sitl_documents_the_dict_it_returns_not_fly_sortie_s(tmp_path, monkeypatch):
+    """The docstring said 'same fields as fly_sortie for one member'; the dict lacks t_first, wp_done, n_wp and more. Every key it returns is named in the
+    docstring, and so is every key of fly_sortie's that it lacks, as absent."""
+    from cafe import emulator
+    body = FAKE_HEAD + """
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 5760 + 10 * I)); srv.listen(1)
+for fc in range(0, 400):
+    ask(frame(fc, pwm=1100))
+"""
+    monkeypatch.setattr(emulator, "SITL_DIR", fake_sitl(tmp_path, body))
+    res = uas.fly_sitl(AnalyticEnv(wind=(0.0, 0.0)), uas.steaming(), 0.0, origin=ORIGIN, plat=P, max_s=0.5, workdir=str(tmp_path / "wd"))
+    doc = " ".join(uas.fly_sitl.__doc__.split())
+    assert "same fields as fly_sortie" not in doc
+    head, _, tail = doc.partition("There is no ")
+    assert all(k in head for k in (*res, *res["flags"], "sitl")), [k for k in (*res, *res["flags"]) if k not in head]
+    lacking = set(fly(M=1)) - set(res)
+    assert lacking and all(k in tail for k in lacking), [k for k in lacking if k not in tail]
+    assert set(res["flags"]) == {"battery_reserve", "wind_exceeds_airspeed", "attitude_exceedance", "lost_link"}
+    assert "not modelled" in doc and not res["flags"]["wind_exceeds_airspeed"].any() and not res["flags"]["lost_link"].any()

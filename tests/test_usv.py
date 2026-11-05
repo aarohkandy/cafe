@@ -842,7 +842,7 @@ def test_a_non_finite_current_is_a_labelled_failure_for_that_member_and_the_run_
     clean = sim(HoleEnv(wind=(-6.0, 0.0), current=(0.1, 0.0)), m=4)
     holed = sim(HoleEnv(holes=[1], wind=(-6.0, 0.0), current=(0.1, 0.0)), m=4)
     hc, hh, hz = clean.run(3 * HR, 60.0), holed.run(3 * HR, 60.0), sim(HoleEnv(wind=(-6.0, 0.0)), m=4).run(3 * HR, 60.0)
-    assert hh["fail"]["no_current_data"].tolist() == [False, True, False, False] and hh["first"]["no_current_data"][1] == 0.0
+    assert hh["fail"]["no_current_data"].tolist() == [False, True, False, False] and hh["first"]["no_current_data"][1] == 60.0  # step end (M-27)
     assert np.isnan(hh["first"]["no_current_data"][[0, 2, 3]]).all() and not hc["fail"]["no_current_data"].any()
     assert np.isfinite(hh["lon"]).all() and np.isfinite(hh["lat"]).all()
     assert all(np.array_equal(hh["fail"][k][[0, 2, 3]], hc["fail"][k][[0, 2, 3]]) for k in usv.FAILS if k != "no_current_data")      # no other mode
@@ -853,7 +853,7 @@ def test_a_non_finite_current_is_a_labelled_failure_for_that_member_and_the_run_
 def test_a_current_that_is_nan_everywhere_fails_every_member_the_way_the_gliders_no_flight_does():
     s = sim(AnalyticEnv(wind=(-6.0, 0.0), current=(np.nan, 0.0)), m=4)
     h = s.run(HR, 60.0)                                                           # IndexError before the fix
-    assert h["fail"]["no_current_data"].all() and np.all(h["first"]["no_current_data"] == 0.0) and np.isfinite(h["lon"]).all()
+    assert h["fail"]["no_current_data"].all() and np.all(h["first"]["no_current_data"] == 60.0) and np.isfinite(h["lon"]).all()
     zero = sim(AnalyticEnv(wind=(-6.0, 0.0)), m=4).run(HR, 60.0)                  # the step runs on a zero current: the same track and the same other modes
     assert np.array_equal(h["lon"], zero["lon"]) and all(np.array_equal(h["fail"][k], zero["fail"][k]) for k in usv.FAILS if k != "no_current_data")
 
@@ -877,7 +877,7 @@ def test_run_stops_at_the_last_whole_step_inside_the_time_it_was_given():
 def test_a_wave_state_that_is_not_a_number_fails_every_member_from_the_first_step_and_the_run_goes_on(kw):
     """M-1: Hs NaN alone gave NaN positions and no flag (a pass); Tp NaN gave an IndexError out of `_lin` (the UMWM sea mask makes all of them NaN together)."""
     h = sim(AnalyticEnv(wind=(-6.0, 0.0), **kw), m=4).run(3 * HR, 60.0)
-    assert h["fail"]["no_current_data"].all() and np.all(h["first"]["no_current_data"] == 0.0)
+    assert h["fail"]["no_current_data"].all() and np.all(h["first"]["no_current_data"] == 60.0)
     assert np.isfinite(h["lon"]).all() and np.isfinite(h["lat"]).all()
     tp0 = float(usv.tables(P)[1].tp[0])                                                    # the step runs on Hs 0, Tp the table's first, direction 0
     calm = sim(AnalyticEnv(wind=(-6.0, 0.0), hs=0.0, tp=tp0, wave_to=0.0), m=4).run(3 * HR, 60.0)
@@ -1156,3 +1156,55 @@ def test_r8_m43_the_heading_is_held_for_the_length_of_a_tack_even_when_a_replan_
     s.t_plan = -np.inf
     s.step(60.0)
     assert s.hd[0] != 123.0
+
+
+# ---- review round 9: M-27 (one stamp time for every flag of a step), M-13 (a repeated waypoint), M-22 (the mission defaults the model indexes)
+def test_r9_m27_no_current_data_is_stamped_at_the_end_of_the_step_whatever_the_hole_and_the_start_flag_stays_t0():
+    """Before: a wind hole gave `first` = t (60 s short of the insolation hole's value in the same step), the insolation hole t + dt."""
+    dt = 60.0
+    wind = sim(HoleEnv(holes=[1], field="wind", wind=(-6.0, 0.0)), m=3, start=(-165.0, -1.0))
+    sw = sim(SwEnv(t_bad=0.0, wind=(-6.0, 0.0)), m=3)
+    wave = sim(AnalyticEnv(wind=(-6.0, 0.0), hs=np.nan), m=3)
+    for s in (wind, sw, wave):
+        s.step(dt)
+    assert wind.first["no_current_data"][1] == dt and sw.first["no_current_data"].tolist() == [dt] * 3 and wave.first["no_current_data"].tolist() == [dt] * 3
+    s = sim(AnalyticEnv(wind=(-6.0, 0.0)), m=2, start=(np.array([-165.0, np.nan]), np.array([-1.0, -1.0])))
+    assert s.first["no_current_data"].tolist()[1] == 0.0  # a start position that is not finite: t0, on purpose (DECISIONS 356)
+    s.step(dt)
+    s.step(dt)
+    assert s.first["no_current_data"][1] == 0.0                                                # and a later hole does not move it
+
+
+def test_r9_m13_a_repeated_waypoint_is_one_waypoint_and_a_section_of_one_point_is_the_station():
+    """Before: `[A, A]` was a section with a zero-length leg (cross-track error 0, becalmed only) and `[A, B, B]` had a leg of length zero at its end."""
+    A, B = (-165.0, 0.0), (-165.0, 0.5)
+    env = AnalyticEnv(wind=(-6.0, 0.0), current=(0.0, 0.6))
+    twice = sim(env, wps=(A, A), m=2, start=A)
+    station = usv.USVSim(P, 2, env, A, 0.0, dict(mode="station", station=A), perturb=dict(vpp_bias=np.full(2, -0.3)))
+    assert twice.mode == "station" and len(twice.wps) == 1
+    h, hs = twice.run(6 * HR, 60.0), station.run(6 * HR, 60.0)
+    assert all(np.array_equal(h[k], hs[k]) for k in ("lon", "lat")) and all(np.array_equal(h["fail"][k], hs["fail"][k]) for k in usv.FAILS)
+    assert np.array_equal(twice.xte_max, station.xte_max) and twice.xte_max.max() > 0.0  # the distance from the point, as the station's track test sees it
+    ab, abb = sim(env, wps=(A, B), m=2), sim(env, wps=(A, B, B), m=2)
+    assert abb.mode == "section" and abb.wps.tolist() == ab.wps.tolist() == [list(A), list(B)]
+    assert sim(env, wps=(A, A, B, B, A), m=2).wps.tolist() == [list(A), list(B), list(A)]  # only a repeat next to its twin goes: A, B, A is a different section
+    assert np.array_equal(abb.run(3 * HR, 60.0)["lon"], ab.run(3 * HR, 60.0)["lon"])
+
+
+MISSION_KEYS = ["becalmed_after_h", "calm_sustain_s", "track_tolerance_km", "corridor_km", "wp_radius_m", "roll_limit_deg", "stall_sustain_s", "cap_cycles"]
+
+
+@pytest.mark.parametrize("key", MISSION_KEYS)
+def test_r9_m22_a_platform_without_a_mission_default_the_model_indexes_is_refused_at_load_naming_it(tmp_path, key):
+    """Before: it loaded, and `run` died in `USVSim.step` with a bare KeyError."""
+    raw = yaml.safe_load((usv.PLATFORMS / "saildrone_explorer.yaml").read_text())
+    del raw["mission_defaults"][key]
+    f = tmp_path / "boat.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=rf"boat\.yaml:mission_defaults: missing \['{key}'\]; add them"):
+        usv.load_platform(str(f))
+
+
+def test_r9_m22_the_table_names_exactly_the_mission_keys_of_the_shipped_file():
+    shipped = yaml.safe_load((usv.PLATFORMS / "saildrone_explorer.yaml").read_text())["mission_defaults"]
+    assert sorted(usv.MISSION_REQUIRED) == sorted(MISSION_KEYS) == sorted(shipped)

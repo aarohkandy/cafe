@@ -1,4 +1,5 @@
-"""Shared check of a platform file's parameters against the table of what its model reads (`REQUIRED` in glider, usv, uas)."""
+"""Shared by the vehicle models: the check of a platform file's parameters against the table of what its model reads (`REQUIRED` in glider, usv, uas),
+and the waypoint list a USV or glider is given."""
 
 from typing import Any, Callable
 
@@ -64,3 +65,10 @@ def check_params(table: dict[str, str], vals: dict[str, Any], where: str, ref: s
             raise ValueError(f"{where}.{k}: {v!r} must be a finite number{' ' + what if what else ''}{'; ' + HINTS[k] if k in HINTS else ''}")
         if a.ndim and not kind.startswith("list"):
             raise ValueError(f"{where}.{k}: {v!r} must be a number, got a list; give one value")
+
+
+def drop_repeats(wps: Any) -> Any:
+    """The waypoints (n, 2) with every point that equals the one before it removed (round 9, M-13). A leg of length zero has no direction: the USV's
+    cross-track error of it is 0 whatever the boat does, so a section of `[A, A]` ran with its track test off."""
+    w = np.asarray(wps, float).reshape(-1, 2)
+    return w[np.r_[True, np.any(w[1:] != w[:-1], axis=1)]] if len(w) else w

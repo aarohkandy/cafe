@@ -45,7 +45,7 @@ import numpy as np
 
 from ..env import conventions as cv
 from ..config import platform_doc as read_yaml
-from . import check_params
+from . import check_params, drop_repeats
 
 Arr = Any
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
@@ -77,6 +77,9 @@ REQUIRED: dict[str, dict[str, str]] = {
                       temp_ref="range:-5:50",                      mass_kg="pos<=1e4", volmax_cc="pos"),
     "slocum": dict(_COMMON, mg="pos<=1e4", Vg="pos", S="pos", AR="pos", aw="pos", ah="pos", Cd0="pos", Cd1="pos", epsilon="nonneg"),
 }
+# Every mission default the model indexes (`md["..."]`; a test reads the literals), for every kind and every mode: a mode's own keys are read only in it,
+# but the report and stage 3 read the platform's dive depth, and a platform file describes the vehicle, not one mission (round 9, M-22).
+MISSION_REQUIRED = dict(dive_depth_m="pos", station_tol_m="any", lost_hours="any", wp_radius_m="any", unreach_hours="any")
 OPTIONAL = ("rho_ref", "acoustic_modem")        # in the files, read by no model code
 
 
@@ -110,7 +113,7 @@ def load_platform(name: str) -> dict[str, Any]:
     check_params(REQUIRED[raw["kind"]], P, f"{path.name}:params", raw["kind"])
     P["kind"] = raw["kind"]
     P["mission_defaults"] = flat(raw["mission_defaults"], "mission_defaults")
-    check_params({}, P["mission_defaults"], f"{path.name}:mission_defaults", raw["kind"])
+    check_params(MISSION_REQUIRED, P["mission_defaults"], f"{path.name}:mission_defaults", raw["kind"])
     return P
 
 
@@ -273,7 +276,7 @@ class GliderSim:
         if self.mode == "station":
             self.wps = np.array([md["station"]], float)
         elif self.mode == "section":
-            self.wps = np.array(md["waypoints"], float).reshape(-1, 2)
+            self.wps = drop_repeats(md["waypoints"])                                            # round 9, M-13: a repeated point is one waypoint
             if len(self.wps) == 0:
                 raise ValueError("section mode needs waypoints")
         else:
