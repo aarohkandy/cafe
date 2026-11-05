@@ -3341,3 +3341,16 @@ def test_r8_m35_installing_bellhop_changes_the_code_digest_and_nothing_else_does
     assert installed != before
     (tmp_path / "bellhop.exe").write_bytes(b"build two")
     assert pipeline.code_digest() not in (before, installed)
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 8, merge: E's ledger value and K's reader
+
+@pytest.mark.parametrize("frac", [0.89996, 0.8999, 0.9, 0.90004])
+def test_r8_merge_the_stored_ustar_fraction_is_not_rounded_across_the_briefs_floor(tmp_path, monkeypatch, frac):
+    """E stored round(frac, 4), so 0.89996 was written as 0.9: credibility.py (value >= 0.90) passed it while the finding note (on the unrounded
+    fraction) fired. The value the ledger keeps and the note must be on the same side of the floor."""
+    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, frac))
+    d = ingest_checks(ctx_for(tmp_path / "r"))
+    value = check_of(d, "coare_ustar_vs_umwm_ust")["value"]
+    finding = [x for x in d["notes"] if x.startswith("BRIEF 2.1 finding")]
+    assert value == frac and bool(finding) == (value < pipeline.USTAR_AGREE_FRACTION) == (frac < 0.9)

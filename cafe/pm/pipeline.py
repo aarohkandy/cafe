@@ -599,7 +599,8 @@ def _forcing_range(env: GriddedEnv) -> tuple[int, str]:
     return total, "; ".join(notes) or "WRF 10 m wind speed and SST, UMWM swh and ust: all finite and inside the bounds of config/assumptions.yaml ingest.*"
 
 
-USTAR_AGREE_FRACTION = 0.90      # BRIEF 2.1: COARE u* within 20 % of UMWM ust at this share of the sea points; a lower share is a finding, not a gate (row 168)
+USTAR_AGREE_FRACTION = 0.90      # BRIEF 2.1: COARE u* within 20 % of UMWM ust at this share of the sea points; a lower share is a finding, not a gate (row 168).
+# credibility.py's Data pedigree reads this one; the ledger value is stored unrounded so that both sides judge the same number
 
 
 def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float]:
@@ -679,7 +680,7 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
             note="90th percentile of the relative error of the synthesised slope variance; the short-wave share is clipped (slope variance then off by "
                  f"more than 1 %) at {sp['mss_clipped']:.1%} of the points; {where}")
     n, med, frac = _ustar_agreement(env)
-    L.check("coare_ustar_vs_umwm_ust", n > 0 and bool(np.isfinite(med)), value=None if not n else round(frac, 4),
+    L.check("coare_ustar_vs_umwm_ust", n > 0 and bool(np.isfinite(med)), value=None if not n else frac,
             note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within 20 %; BRIEF 5.5 asks that the agreement is logged"
             if n else "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask")
     if n and frac < USTAR_AGREE_FRACTION:                                 # row 168: not a gate, but the finding BRIEF 2.1 asks for is made

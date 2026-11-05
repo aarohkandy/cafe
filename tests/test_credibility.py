@@ -964,3 +964,19 @@ def test_r8_m1_both_ingest_checks_present_and_passing_keep_level_two_and_absent_
     assert factors(run)["data_pedigree"]["level"] == 2                                       # 0.90 is the brief's floor, inclusive
     edit(d, lambda x: x["checks"].__setitem__(-1, dict(both[1], value=0.8999)))
     assert factors(run)["data_pedigree"]["level"] == 1
+
+
+def test_r8_merge_the_ustar_floor_is_the_pipelines_and_there_is_no_second_copy(run, monkeypatch):
+    from cafe.pm import pipeline
+    d = run / "checkpoints" / "ingest" / "ledger.json"
+
+    def record(value):
+        edit(d, lambda x: x.update(checks=[c for c in x["checks"] if c["name"] != "coare_ustar_vs_umwm_ust"]))
+        ingest_check(run, value=value)
+        return factors(run)["data_pedigree"]
+    assert not hasattr(cr, "USTAR_AGREE_MIN")
+    assert record(0.89996)["level"] == 1                                                     # E's ledger no longer rounds this up to 0.9
+    assert record(0.6)["level"] == 1
+    monkeypatch.setattr(pipeline, "USTAR_AGREE_FRACTION", 0.5)                               # the one constant moves both sides
+    assert record(0.6)["level"] == 2
+    assert any("asks 50%" in m for m in record(0.4)["missing"])
