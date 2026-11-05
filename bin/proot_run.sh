@@ -1,13 +1,14 @@
 #!/bin/sh
 # What `docker run ... cafe-pm <cmd>` in bin/pmx.sh does, for a worker with no docker (orca): the cafe-pm root filesystem under proot, same mounts, same environment.
-# Runs ON the worker, started by bin/pmx.sh or bin/pm.sh when PM_RUNTIME=proot:   sh proot_run.sh <dir under ~/work/cafe that becomes /app> <command and arguments>
+# Runs ON the worker, started by bin/pmx.sh or bin/pm.sh when PM_RUNTIME=proot:   sh proot_run.sh <dir under ~/cafe-worker/cafe that becomes /app> <command and arguments>
 # The root filesystem and proot come from bin/orca_sync.sh. Not enforced here, unlike docker: PM_MEM and PM_SHM, and --cpus (PM_CPUS only sets CAFE_WORKERS), and /work being read-only.
 set -eu
 D="$1"; shift
-W="$HOME/cafe-worker"; C="$HOME/work/cafe"
+W="$HOME/cafe-worker"; C="$W/cafe"          # nothing outside ~/cafe-worker: the home folder is shared
 [ -x "$W/bin/proot" ] && [ -f "$W/root.done" ] && [ -x "$W/root/usr/bin/env" ] || { echo "no proot or root filesystem under $W: run bin/orca_sync.sh" >&2; exit 1; }
 [ -d "$C/$D" ] && [ -d "$C/pmdata" ] && [ -d "$C/data" ] || { echo "missing $C/$D, $C/pmdata or $C/data: run bin/orca_sync.sh" >&2; exit 1; }
 [ "${PM_CPUS:-8}" -le 32 ] || echo "warning: PM_CPUS=${PM_CPUS} is above orca's 32 CPUs; the sum over all running jobs must stay at 32 or below, nothing here limits it" >&2
+free=$(df -Pk "$W" | awk 'NR==2{print int($4/1048576)}'); [ "$free" -ge "${CAFE_MIN_FREE_GB:-60}" ] || { echo "STOP: only $free GB free on the shared disk" >&2; exit 1; }
 mkdir -p "$C/tmp"
 # A run that was SIGKILLed (or lost to a container restart) leaves its run.* directory: each holds .pids (this wrapper, then its proot); one with no live pid is stale. Not a stale one without .pids: that is a run just starting.
 for d in "$C"/tmp/run.*; do
