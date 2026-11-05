@@ -27,12 +27,12 @@ if todo proot 'test -x cafe-worker/bin/proot'; then
 fi
 
 id=$($S 'docker image inspect -f {{.Id}} cafe-pm:latest' </dev/null)
-if todo root "test \"\$(cat cafe-worker/root.done 2>/dev/null)\" = $id"; then
+if todo root "test \"\$(cat cafe-worker/root.done 2>/dev/null)\" = $id && test -x cafe-worker/root/usr/bin/env && test -d cafe-worker/root/venv/lib"; then
   step "root $id"
   $D 'rm -rf cafe-worker/root.new && mkdir cafe-worker/root.new' </dev/null
   # dev/* is the container's own device nodes: proot binds the host's. Everything else extracts without root (--no-same-owner) and proot shows it owned by the user.
   $S 'c=$(docker create cafe-pm:latest true); trap "docker rm $c >/dev/null" EXIT; docker export $c | gzip -1' </dev/null | $D 'tar xzf - -C cafe-worker/root.new --no-same-owner --exclude="dev/*"'
-  $D 'cd cafe-worker && test -x root.new/usr/bin/env && test -d root.new/venv/lib && rm -rf root && mv root.new root' </dev/null || { echo "STOP: the root filesystem did not extract completely" >&2; exit 1; }
+  $D 'cd cafe-worker && test -x root.new/usr/bin/env && test -d root.new/venv/lib && rm -f root.done && rm -rf root && mv root.new root' </dev/null || { echo "STOP: the root filesystem did not extract completely" >&2; exit 1; }
   $D "printf %s $id > cafe-worker/root.done" </dev/null
 fi
 

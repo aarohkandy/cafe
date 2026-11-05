@@ -5,11 +5,24 @@
 set -eu
 D="$1"; shift
 W="$HOME/cafe-worker"; C="$HOME/work/cafe"
-[ -x "$W/bin/proot" ] && [ -x "$W/root/usr/bin/env" ] || { echo "no proot or root filesystem under $W: run bin/orca_sync.sh" >&2; exit 1; }
+[ -x "$W/bin/proot" ] && [ -f "$W/root.done" ] && [ -x "$W/root/usr/bin/env" ] || { echo "no proot or root filesystem under $W: run bin/orca_sync.sh" >&2; exit 1; }
 [ -d "$C/$D" ] && [ -d "$C/pmdata" ] && [ -d "$C/data" ] || { echo "missing $C/$D, $C/pmdata or $C/data: run bin/orca_sync.sh" >&2; exit 1; }
+[ "${PM_CPUS:-8}" -le 32 ] || echo "warning: PM_CPUS=${PM_CPUS} is above orca's 32 CPUs; the sum over all running jobs must stay at 32 or below, nothing here limits it" >&2
 mkdir -p "$C/tmp"
-T=$(mktemp -d "$C/tmp/run.XXXXXX")                 # the container's /tmp, on the big disk (/ has 13 GB on orca); gone after the run, as with --rm
-trap 'rm -rf "$T"' EXIT; trap 'exit 143' INT TERM HUP
+# A run that was SIGKILLed (or lost to a container restart) leaves its run.* directory: each holds .pids (this wrapper, then its proot); one with no live pid is stale. Not a stale one without .pids: that is a run just starting.
+for d in "$C"/tmp/run.*; do
+  [ -f "$d/.pids" ] || continue; live=
+  for p in $(cat "$d/.pids"); do kill -0 "$p" 2>/dev/null && live=1; done
+  [ -n "$live" ] || rm -rf "$d"
+done
+T=$(mktemp -d "$C/tmp/run.XXXXXX"); echo $$ > "$T/.pids"      # the container's /tmp, on the big disk (/ has 13 GB on orca); gone after the run, as with --rm
+# The job runs in the background, in its own process group (setsid), so that a signal to this wrapper stops it at once: proot itself ignores SIGTERM and dies of SIGKILL
+# without its tracees. The handler sends TERM to the group and KILL after 10 s, as docker stop does. A SIGKILLed wrapper cannot do this: its job runs on, and the sweep above removes its directory once it ends.
+P=; G=; command -v setsid >/dev/null 2>&1 && G=setsid
+trap 'rm -rf "$T"' EXIT
+stop() { [ -z "$P" ] || { kill -TERM "${G:+-}$P" 2>/dev/null || :; ( sleep 10; kill -KILL "${G:+-}$P" 2>/dev/null ) & K=$!; wait "$P" 2>/dev/null || :; kill "$K" 2>/dev/null || :; }; exit 143; }
+trap stop INT TERM HUP
+exec 3<&0                                          # a background job gets /dev/null for stdin unless told otherwise
 export PROOT_TMP_DIR="$T"
 ulimit -c 0                                        # --ulimit core=0
 B=; for f in /etc/resolv.conf /etc/hosts; do [ -e "$f" ] && B="$B -b $f"; done
@@ -17,8 +30,10 @@ B=; for f in /etc/resolv.conf /etc/hosts; do [ -e "$f" ] && B="$B -b $f"; done
 # LC_ALL: en_US.UTF-8 is missing in the image. PMIX_MCA_gds=hash: under proot Open MPI's PMIx shared-memory store fails at MPI_Init (PMIX_ERR_NOT_AVAILABLE in gds_shmem.c) and every
 # mpirun, so OpenFOAM's meshing and solving in parallel, aborts; docker with the same 64 MB /dev/shm is fine, so it is proot, not the small shm. (Not needed: btl_vader_single_copy_mechanism.)
 # shellcheck disable=SC2086
-"$W/bin/proot" -r "$W/root" -i "$(id -u):$(id -g)" -w /app -b /dev -b /proc -b /sys $B \
+$G "$W/bin/proot" -r "$W/root" -i "$(id -u):$(id -g)" -w /app -b /dev -b /proc -b /sys $B \
   -b "$T:/tmp" -b "$C/$D:/app" -b "$C/pmdata:/data" -b "$C/data:/work" \
   /usr/bin/env -i PATH=/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PYTHONUNBUFFERED=1 HOME=/tmp TMPDIR=/tmp LC_ALL=C.UTF-8 \
   PYTHONPATH=/app CAFE_DATA=/data CAFE_GIT_SHA="${CAFE_GIT_SHA:-}" CAFE_GIT_DIRTY="${CAFE_GIT_DIRTY:-0}" CAFE_WORKERS="${PM_CPUS:-8}" \
-  PMIX_MCA_gds=hash "$@"
+  PMIX_MCA_gds=hash "$@" <&3 3<&- &
+P=$!; echo "$P" >> "$T/.pids"
+wait "$P"
