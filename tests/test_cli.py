@@ -815,3 +815,12 @@ def test_r9_m9_plan_prints_the_other_machine_warning_after_the_plan_and_not_insi
     here["machine"]["cpus"] = os.cpu_count() or 1
     assert cli.main(["plan", "--mission", MISSION]) == 0
     assert "throughput.json was measured" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("machine", [["homebase"], "homebase", {"cpus": "8", "cpu": 3}])
+def test_r9_m9_a_throughput_file_with_a_malformed_machine_block_still_plans(machine, monkeypatch, capsys):
+    bad = dict(budget.throughput(), machine=machine)
+    monkeypatch.setattr(budget, "throughput", lambda *a, **k: bad)
+    assert cli.main(["plan", "--mission", MISSION]) == 0
+    out = capsys.readouterr()
+    assert "throughput.json was measured" not in out.out and "Traceback" not in out.err

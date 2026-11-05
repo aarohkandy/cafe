@@ -205,10 +205,9 @@ def _stage1(sizes, mission):
 
 
 def _cpu():
-    try:
-        return next(l.split(":", 1)[1].strip() for l in open("/proc/cpuinfo") if l.startswith("model name"))
-    except (OSError, StopIteration):
-        return platform.processor()
+    """`machine.cpu` as `budget.machine_warning` reads it back: one rule, `budget.cpu_model`."""
+    from cafe.pm import budget
+    return budget.cpu_model()
 
 
 def _need_cache(ctx, mission):

@@ -675,6 +675,24 @@ def test_r9_m9_the_bench_machine_is_compared_with_the_host_by_cpu_count_and_mode
     assert budget.machine_warning(t, dict(cpus=16)) is not None
 
 
+@pytest.mark.parametrize("machine", [[1], "homebase", 8, 1.5, True, [], {}, None])
+def test_r9_m9_a_machine_block_that_is_not_a_mapping_is_nothing_to_compare_and_not_a_traceback(machine):
+    """A hand-edited throughput.json: `"machine": "homebase"` or a list reached `.get` and ended `plan` and `run` in an AttributeError."""
+    assert budget.machine_warning({"machine": machine}, dict(cpus=8, cpu="Intel")) is None
+
+
+@pytest.mark.parametrize("block", [dict(cpus="8"), dict(cpus=8.0), dict(cpus=True), dict(cpus=0), dict(cpus=[8]), dict(cpu=5), dict(cpu=["AMD"]),
+                                   dict(cpus=None, cpu=None)])
+def test_r9_m9_a_cpu_count_or_model_of_the_wrong_type_is_not_compared_and_not_printed_as_a_difference(block):
+    """`{"cpus": "8"}` against a host of 8 CPUs used to say 'here it is 8 CPUs, not 8'."""
+    assert budget.machine_warning({"machine": dict(id="homebase", **block)}, dict(cpus=8, cpu="Intel")) is None
+
+
+def test_r9_m9_a_good_field_is_still_compared_beside_a_bad_one():
+    w = budget.machine_warning({"machine": dict(id="homebase", cpus="eight", cpu="AMD")}, dict(cpus=8, cpu="Intel"))
+    assert w is not None and "CPU model Intel, not AMD" in w and "CPUs, not" not in w
+
+
 def test_r9_m9_the_warning_is_never_in_the_plan_so_the_same_seed_on_two_machines_plans_and_reports_alike():
     """The plan's notes and describe() are in plan.json and in report.json (`machine.notes`, `machine.describe`), which acceptance compares between runs of one
     seed; a machine-dependent sentence there would differ between burst and orca (DECISIONS 290)."""

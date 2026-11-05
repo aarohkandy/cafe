@@ -118,25 +118,30 @@ def cpu_model() -> str:
         return platform.processor()
 
 
+def _is_count(x: Any) -> bool:
+    return isinstance(x, int) and not isinstance(x, bool) and x > 0
+
+
 def machine_warning(thr: dict[str, Any] | None = None, host: dict[str, Any] | None = None) -> str | None:
     """Why the rates in `thr` (config/throughput.json) may not be this machine's: its `machine` block (written by `make bench`) names another CPU
     count or CPU model than the host's. `host` is {"cpus": n, "cpu": model}; default this machine, read as the bench reads its own: `os.cpu_count()`
     (not `par.workers()`, which a docker --cpus quota or the memory cap lowers) and `cpu_model()`, so a limited container on the benchmarked box is
-    not warned. A key `host` leaves out is not compared. None when it matches or `thr` has no machine block.
+    not warned. A key `host` leaves out is not compared, nor one the `machine` block gives in the wrong type (cpus a
+    positive integer, cpu a string). None when it matches, when `thr` has no machine block or when that is not a mapping.
 
     Deliberately NOT one of the plan's `notes`: it depends on the machine the plan is made on, and the notes are in plan.json's `describe` and in
     report.json (`machine.notes`, `machine.describe`), which two runs of one seed on two machines must share (DECISIONS 290). `plan` prints it,
     `pipeline.run` logs it, and report.json may carry it only under `machine.machine` (acceptance.VOLATILE)."""
     thr = throughput() if thr is None else thr
     m = thr.get("machine")
-    if not m:
+    if not isinstance(m, dict) or not m:                                    # a hand-edited `"machine": "homebase"` or list: nothing to compare
         return None
     host = dict(cpus=os.cpu_count(), cpu=cpu_model()) if host is None else host
     n, cpu = host.get("cpus"), host.get("cpu")
     diff = []
-    if m.get("cpus") and n and m["cpus"] != n:
+    if _is_count(m.get("cpus")) and n and m["cpus"] != n:
         diff.append(f"{n} CPUs, not {m['cpus']}")
-    if m.get("cpu") and cpu and m["cpu"] != cpu:
+    if isinstance(m.get("cpu"), str) and m["cpu"] and cpu and m["cpu"] != cpu:
         diff.append(f"CPU model {cpu}, not {m['cpu']}")
     if not diff:
         return None
