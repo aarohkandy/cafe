@@ -36,7 +36,7 @@ Source: `cafe/pm/__init__.py`, `cafe/pm/env/conventions.py`. Tests: `tests/test_
 | z | metres, positive up, 0 at mean sea level. Depths are positive numbers named `depth`. The ocean store keeps depth positive down; the protocol converts (`ocean.py`: `-z`). |
 | Longitude | taken modulo 360 inside the code (the TEPEX-C box crosses 180); bounds are reported in [-180, 180). |
 | Provenance | every environment value is a `Tagged(value, source, uncertainty, kind)`, `kind` in `data`, `modelled`, `assumed`. `uncertainty` is a 1-sigma. |
-| Platform leaves | a number the models divide by, take a log of or exponentiate has a range checked at load (`physics.check_params` kinds `nonzero`, `ge1`, `<kind><=max` and `range:lo:hi`; the limit is in the loader's message), by `hangar` and `validate` too (review round 6, M-10). |
+| Platform leaves | a number the models divide by, take a log of or exponentiate has a range checked at load (`physics.check_params` kinds `nonzero`, `ge1`, `angle90`, `<kind><=max`, `range:lo:hi` and `int:lo:hi`; the limit is in the loader's message; round 8, L1: every angle, the glider and UAS masses, the cell count and the USV sizes and loads carry one), by `hangar` and `validate` too (review round 6, M-10). |
 
 Angle conversions, the only place angles become vectors (`conventions.py`):
 

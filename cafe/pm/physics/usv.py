@@ -102,18 +102,20 @@ STRINGS = ("radio_900mhz", "radio_2g4", "iridium_link")
 # ------------------------------------------------------------------ parameters
 
 # What the model reads from `params`, with the kind of value each must be (physics.check_params; see glider.REQUIRED). Includes the keys stage 1 and the
-# stage-3 windows read (antenna height, keel). Angles are bounded and the mass is 1 to 1e5 kg (round 8, M-28: the bounds are choices, each is in the refusal).
+# stage-3 windows read (antenna height, keel). Angles are bounded and the mass is 1 to 1e5 kg (round 8, M-28: the bounds are choices, each is in the
+# refusal); so are the size, area, metacentric height, battery, hotel load and heights (round 8, L1).
 REQUIRED = dict(
-    loa_m="pos", lwl_m="pos", beam_wl_m="pos", mass_kg="range:1:1e5", wetted_area_m2="pos", form_factor_k="nonneg", cr0="nonneg", cr_fr_ref="pos",
-    appendage_cda_m2="nonneg", heel_resist_c="pos", gm_m="pos", clr_depth_m="pos", kyy_frac="pos", kxx_roll_m="pos", roll_damping="nonneg",
-    wing_span_m="pos", wing_area_m2="pos", anemometer_m="pos", wing_cl_alpha_2d="pos", wing_stall_deg="angle90", wing_trim_deg="angle90", wing_cd0="nonneg",
+    loa_m="pos<=100", lwl_m="pos", beam_wl_m="pos", mass_kg="range:1:1e5", wetted_area_m2="pos", form_factor_k="nonneg", cr0="nonneg", cr_fr_ref="pos",
+    appendage_cda_m2="nonneg", heel_resist_c="pos", gm_m="pos<=10", clr_depth_m="pos", kyy_frac="range:0.05:1", kxx_roll_m="pos",
+    roll_damping="nonneg", wing_span_m="pos", wing_area_m2="pos<=100", anemometer_m="pos", wing_cl_alpha_2d="pos", wing_stall_deg="angle90",
+    wing_trim_deg="angle90", wing_cd0="nonneg",
     wing_oswald_e="pos", wing_ce_height_m="nonneg", wing_ce_x_m="any", heel_target_deg="angle90", trim_min_aws_ms="nonneg", min_awa_deg="range:0:180",
     keel_area_m2="pos", keel_span_m="pos", keel_t_c="pos", keel_stall_deg="angle90", keel_x_m="any", rudder_cl_max="pos", rudder_x_m="nonzero",
     rudder_area_m2="pos", rudder_span_m="pos", rudder_t_c="pos",
-    wind_area_front_m2="nonneg", wind_area_side_m2="nonneg", wind_cd_front="nonneg", wind_cd_side="nonneg", wind_height_m="pos",
+    wind_area_front_m2="nonneg", wind_area_side_m2="nonneg", wind_cd_front="nonneg", wind_cd_side="nonneg", wind_height_m="pos<=50",
     rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms="pos<=50", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos", chiodi_max_sog_ms="pos",
-    chiodi_max_wind_ms="pos", chiodi_band="nonneg", sun_overpredict_lo="nonneg", sun_overpredict_hi="nonneg", battery_wh="pos", solar_area_m2="nonneg",
-    solar_eff="unit", hotel_w="nonneg", soc0="unit", rf_antenna_height_m="nonneg", vpp_bias_mean="any", vpp_bias_sd="nonneg", current_z_m="any",
+    chiodi_max_wind_ms="pos", chiodi_band="nonneg", sun_overpredict_lo="nonneg", sun_overpredict_hi="nonneg", battery_wh="pos<=1e6", solar_area_m2="nonneg",
+    solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="nonneg<=50", vpp_bias_mean="any", vpp_bias_sd="nonneg", current_z_m="any",
     tack_time_s="nonneg", tack_speed_frac="unit", tack_horizon_s="pos", replan_s="pos",
 )
 MISSION_REQUIRED = dict(cap_cycles="ge1")       # the one mission default the model takes a log of (sqrt(2 ln N): N >= 1); the others only have to be finite

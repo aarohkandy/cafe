@@ -191,3 +191,73 @@ def test_r8_m25_an_empty_or_comment_only_platform_file_is_one_named_refusal_for_
         LOADERS[name].load_platform(str(f))
     assert cli.main(["hangar", "--platform", str(f)]) == 1
     assert "provenance FAILED" in capsys.readouterr().out
+
+
+# ---- review round 8, L1: the platform numbers that had only 'pos'/'nonneg' (an angle past 90 degrees, a fractional cell count, a 1e12 kg glider)
+def _leaf(group, key, value):
+    return lambda r: (r[group] if group else r["params"])[key].update(value=value)
+
+
+CASES_R8_L1 = [
+    ("seaglider", _leaf(None, "pitch_deg", 120.0), "params.pitch_deg", "above 0 and below 90"),
+    ("seaglider", _leaf(None, "pitch_deg", 1e6), "params.pitch_deg", "above 0 and below 90"),
+    ("slocum", _leaf(None, "pitch_deg", 120.0), "params.pitch_deg", "above 0 and below 90"),
+    ("seaglider", _leaf(None, "mass_kg", 1e12), "params.mass_kg", "at most 1e4"),
+    ("slocum", _leaf(None, "mg", 1e12), "params.mg", "at most 1e4"),
+    ("seaglider", _leaf(None, "rating_m", 1e7), "params.rating_m", "at most 11000"),
+    ("seaglider", _leaf(None, "length_m", 1e6), "params.length_m", "at most 20"),
+    ("seaglider", _leaf(None, "windage", 5.0), "params.windage", "at most 0.2"),
+    ("slocum", _leaf(None, "windage", 5.0), "params.windage", "at most 0.2"),
+    ("seaglider", _leaf(None, "reserve_frac", 0.99), "params.reserve_frac", "at most 0.5"),
+    ("quad_uas", _leaf("battery", "cells", 2.5), "battery.cells", "a whole number from 1 to 24"),
+    ("quad_uas", _leaf("battery", "cells", 1e6), "battery.cells", "a whole number from 1 to 24"),
+    ("quad_uas", _leaf("battery", "cells", 0), "battery.cells", "a whole number from 1 to 24"),
+    ("quad_uas", _leaf("airframe", "mass_kg", 1e9), "airframe.mass_kg", "at most 100"),
+    ("quad_uas", _leaf("battery", "energy_wh", 1e12), "battery.energy_wh", "at most 1e4"),
+    ("quad_uas", _leaf("battery", "v_nom_cell", 1000.0), "battery.v_nom_cell", "from 1 to 5"),
+    ("quad_uas", _leaf("battery", "peukert_exponent", 50.0), "battery.peukert_exponent", "from 1 to 2"),
+    ("quad_uas", _leaf("battery", "peukert_exponent", 0.5), "battery.peukert_exponent", "from 1 to 2"),
+    ("quad_uas", _leaf("battery", "reserve_frac", 0.99), "battery.reserve_frac", "at most 0.5"),
+    ("quad_uas", _leaf("limits", "max_tilt_deg", 120.0), "limits.max_tilt_deg", "above 0 and below 90"),
+    ("quad_uas", _leaf("limits", "tilt_exceedance_deg", 120.0), "limits.tilt_exceedance_deg", "above 0 and below 90"),
+    ("saildrone_explorer", _leaf(None, "loa_m", 1e6), "params.loa_m", "at most 100"),
+    ("saildrone_explorer", _leaf(None, "wing_area_m2", 1e9), "params.wing_area_m2", "at most 100"),
+    ("saildrone_explorer", _leaf(None, "gm_m", 1e6), "params.gm_m", "at most 10"),
+    ("saildrone_explorer", _leaf(None, "rf_antenna_height_m", 1e6), "params.rf_antenna_height_m", "at most 50"),
+    ("saildrone_explorer", _leaf(None, "battery_wh", 1e12), "params.battery_wh", "at most 1e6"),
+    ("saildrone_explorer", _leaf(None, "wind_height_m", 1e6), "params.wind_height_m", "at most 50"),
+    ("saildrone_explorer", _leaf(None, "hotel_w", 1e9), "params.hotel_w", "at most 1e4"),
+    ("saildrone_explorer", _leaf(None, "kyy_frac", 1e3), "params.kyy_frac", "from 0.05 to 1"),
+    ("saildrone_explorer", _leaf(None, "kyy_frac", 0.0), "params.kyy_frac", "from 0.05 to 1"),
+]
+
+
+@pytest.mark.parametrize("name,edit,field,bound", CASES_R8_L1, ids=[f"{c[0]}-{c[2]}-{i}" for i, c in enumerate(CASES_R8_L1)])
+def test_r8_l1_an_implausible_platform_number_is_refused_naming_the_field_and_its_bound(tmp_path, name, edit, field, bound):
+    path = copy_of(tmp_path, name, edit)
+    with pytest.raises(ValueError, match=rf"{re.escape(field)}: .* must be a finite number .*{re.escape(bound)}"):
+        LOADERS[name].load_platform(path)
+
+
+@pytest.mark.parametrize("name,edit", [
+    ("quad_uas", _leaf("battery", "cells", 24)), ("quad_uas", _leaf("battery", "cells", 1)), ("quad_uas", _leaf("battery", "cells", 4.0)),
+    ("seaglider", _leaf(None, "pitch_deg", 89.0)), ("saildrone_explorer", _leaf(None, "kyy_frac", 1.0)),
+    ("quad_uas", _leaf("battery", "peukert_exponent", 1.0)),
+], ids=["cells24", "cells1", "cells4.0", "pitch89", "kyy1", "peukert1"])
+def test_r8_l1_the_bound_itself_and_a_whole_number_written_with_a_dot_load(tmp_path, name, edit):
+    LOADERS[name].load_platform(copy_of(tmp_path, name, edit))
+
+
+def test_r8_l1_every_angle_in_a_shipped_platform_file_has_a_bounded_kind():
+    """The class: a key whose unit is degrees must not be left at 'pos'/'nonneg'/'any' (a pitch of 120 degrees flips the sign of the glide)."""
+    tables = {"seaglider": glider.REQUIRED["seaglider"], "slocum": glider.REQUIRED["slocum"], "saildrone_explorer": usv.REQUIRED}
+    for name, table in tables.items():
+        raw = yaml.safe_load((ROOT / "platforms" / f"{name}.yaml").read_text())
+        for k, leaf in raw["params"].items():
+            if leaf["unit"] == "deg" and k in table:
+                assert table[k] not in ("pos", "nonneg", "any"), f"{name}.params.{k} is an angle with kind {table[k]!r}"
+    raw = yaml.safe_load((ROOT / "platforms" / "quad_uas.yaml").read_text())
+    for g, table in uas.REQUIRED.items():
+        for k, leaf in raw[g].items():
+            if isinstance(leaf, dict) and leaf.get("unit") == "deg" and k in table:
+                assert table[k] not in ("pos", "nonneg", "any"), f"quad_uas.{g}.{k} is an angle with kind {table[k]!r}"

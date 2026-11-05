@@ -76,13 +76,13 @@ def check_provenance(node: Any, path: str = "") -> list[str]:
 # What the model reads, per group, with the kind of value each must be (physics.check_params; see glider.REQUIRED). `radio.rfd900x` and `link_2g4` are
 # not read here (stage 1 takes radios from platforms/radios.yaml).
 REQUIRED = {
-    "airframe": dict(mass_kg="pos", inertia_kgm2="list3:pos", motor_radius_m="pos", hotel_w="nonneg"),
+    "airframe": dict(mass_kg="pos<=100", inertia_kgm2="list3:pos", motor_radius_m="pos", hotel_w="nonneg"),
     "rotor": dict(thrust_max_n_each="pos", omega_max_rpm="pos", prop_diameter_m="pos", figure_of_merit="pos", motor_time_const_s="pos", esc_motor_eff="pos",
                   rho_ref_kgm3="pos", yaw_torque_ratio_priority="nonneg"),
     "aero": dict(d_x="pos", d_y="pos", d_z="nonneg"),
-    "battery": dict(energy_wh="pos", cells="pos", v_nom_cell="pos", peukert_exponent="pos", peukert_hours="pos", r_int_ohm="pos", ocv_soc="list:unit",
-                    ocv_cell_v="list:pos", cutoff_cell_v="pos", reserve_frac="frac"),
-    "limits": dict(max_tilt_deg="pos", tilt_exceedance_deg="pos", max_airspeed_ms="pos"),
+    "battery": dict(energy_wh="pos<=1e4", cells="int:1:24", v_nom_cell="range:1:5", peukert_exponent="range:1:2", peukert_hours="pos", r_int_ohm="pos",
+                    ocv_soc="list:unit", ocv_cell_v="list:pos", cutoff_cell_v="pos", reserve_frac="frac<=0.5"),
+    "limits": dict(max_tilt_deg="angle90", tilt_exceedance_deg="angle90", max_airspeed_ms="pos"),
     "controller": dict(pos_p="pos", vel_p="pos", vel_i="nonneg", vel_z_p="pos", vel_z_i="nonneg", accel_wp="pos", accel_z="pos", speed_up="pos",
                        speed_dn="pos", att_p="pos", rate_p="pos", yaw_slew_degs="pos", vel_i_max="nonneg"),
     "sortie": dict(duration_s="pos", levels_m="list:pos", leg_speed_ms="pos", leg_heading="other", rtl_height_m="nonneg", wp_radius_m="pos",

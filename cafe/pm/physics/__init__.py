@@ -27,9 +27,10 @@ def _rule(kind: str) -> tuple[str, Callable[[Any], Any]]:
         n, _, inner = kind[4:].partition(":")
         what, ok = _rule(inner)
         return f"{what} in every place of a list{' of ' + n if n else ''}", lambda a: ok(a) & (np.ndim(a) == 1) & (np.size(a) == int(n or np.size(a)))
-    if kind.startswith("range:"):
-        lo, hi = (float(x) for x in kind[6:].split(":"))
-        return f"from {lo:g} to {hi:g}", lambda a: (a >= lo) & (a <= hi)
+    if kind.startswith(("range:", "int:")):          # `int:lo:hi` is the same with a whole number (a count of cells; round 8, L1)
+        lo, hi = (float(x) for x in kind.partition(":")[2].split(":"))
+        whole = kind.startswith("int:")
+        return f"{'a whole number ' if whole else ''}from {lo:g} to {hi:g}", lambda a: (a >= lo) & (a <= hi) & (a == np.floor(a) if whole else True)
     name, _, mx = kind.partition("<=")
     what, ok = _RULES[name]
     return (f"{what} and at most {mx}", lambda a: ok(a) & (a <= float(mx))) if mx else (what, ok)
@@ -48,7 +49,8 @@ def _numeric(v: Any) -> Any:
 def check_params(table: dict[str, str], vals: dict[str, Any], where: str, ref: str) -> None:
     """Raise ValueError naming the file part `where`, the field and the fix when a key of `table` is missing, or when a numeric value is NaN, infinite
     or outside its kind (`pos` > 0, `nonneg` >= 0, `frac` [0, 1), `unit` [0, 1], `any` signed, `nonzero`, `ge1`, `angle90` (0, 90);
-    `<name><=max` adds a maximum, `range:lo:hi` is a closed interval, `list[n]:<kind>` a list; `other` only has to exist). A listed value is a
+    `<name><=max` adds a maximum, `range:lo:hi` is a closed interval, `int:lo:hi` the same for a whole number,
+    `list[n]:<kind>` a list; `other` only has to exist). A listed value is a
     single number unless its kind says `list`: a list for a number is refused (round 8, M-26). Numbers the table does not list must still be
     finite. `ref` names the shipped platform file that shows the layout."""
     if missing := [k for k in table if k not in vals]:
