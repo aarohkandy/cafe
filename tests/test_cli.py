@@ -771,3 +771,14 @@ def test_r8_m22_report_of_a_run_with_a_damaged_json_file_ends_in_an_error_line(t
     assert cli.main(["report", "--run", str(run)]) == 2
     err = capsys.readouterr().err
     assert err.startswith("error: ") and f"{pathlib.Path(rel).name}: not a JSON object" in err and "Traceback" not in err
+
+
+def test_r8_merge_the_roomy_machine_is_not_undone_by_a_tests_own_monkeypatch_undo(monkeypatch):
+    """C's autouse `roomy_machine` is what lets K's and every other batch's CLI tests reach the planner on a small machine; the tests that call
+    `monkeypatch.undo()` (the whatif ones) must keep it, and a test of the refusal itself still gets the memory it patches in."""
+    assert par.memory_gb() == 64.0
+    monkeypatch.setattr(par, "memory_gb", lambda: 2.0)
+    assert par.memory_gb() == 2.0
+    monkeypatch.undo()
+    assert par.memory_gb() == 64.0
+
