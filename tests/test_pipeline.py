@@ -817,6 +817,21 @@ def test_the_hourly_residual_series_are_the_ones_tao_compare_summarises(tmp_path
     assert np.isnan(pipeline._wind_residuals(wrf, moor)["T0N165W"][:, 1]).all()
 
 
+def test_r9_m32_the_hourly_residuals_lift_a_mooring_the_way_tao_compare_does_where_its_air_record_stops(tmp_path):
+    """Round 9 M-32: `_wind_residuals` held the last air state for the rest of the wind record, as `tao.compare` did; the lift is now one function."""
+    t = np.arange(0.0, 6 * 3600, 600.0)
+    at = np.array([0.0, 3600.0])
+    moor = {"M": dict(lat=0.0, lon=180.0, wind=dict(t=t, u=np.full(t.size, -5.9), v=np.full(t.size, 1.0), z=4.0),
+                      airt=dict(t=at, value=np.full(2, 304.0), z=3.0), rh=dict(t=at, value=np.full(2, 0.7), z=3.0),
+                      sst=dict(t=at, value=np.full(2, 301.0), z=1.0))}
+    hours = np.array([1800.0, 5 * 3600.0])
+    wrf = {"M": dict(t=hours, wind10=np.tile([-5.9, 1.0], (2, 1)), sst=np.full(2, 301.0))}
+    sp = float(np.hypot(-5.9, 1.0))
+    res = pipeline._wind_residuals(wrf, moor)["M"]
+    assert res[1, 0] == pytest.approx(sp - float(tao.wind_to_10m(sp, 4.0)), abs=1e-9)                      # 5 h: the neutral lift
+    assert abs(res[0, 0] - res[1, 0]) > 0.02 and np.mean(res[:, 0]) == pytest.approx(tao.compare(wrf, moor)["M"]["speed_bias"])      # 0.5 h: COARE, as compare
+
+
 def ar1_moorings(rng, n_moor=120, n_t=500, persistent=0.9, noise=1.4, tau=6.0, gaps=0.05):
     """Moorings with a known persistent error each (sd `persistent`) and AR(1) noise (sd `noise`, e-folding time `tau` hours), hourly, with gaps."""
     phi = np.exp(-1.0 / tau)
@@ -3146,6 +3161,27 @@ def test_r8_m1_a_land_cell_of_wrf_sst_is_not_judged_and_a_nan_is_counted_without
     assert _forcing_check(tmp_path / "a", lambda e: e.W["SST"].__setitem__((2, *land(e)), 0.0))["ok"]
     c = _forcing_check(tmp_path / "b", lambda e: e.W["U10"].__setitem__((1, 1, 1), np.nan))
     assert not c["ok"] and c["value"] == 1 and "UMWM" not in c["note"] and "1 values are not finite" in c["note"]
+
+
+@pytest.mark.parametrize("scale,share", [(1.2, 1.0), (0.85, 1.0), (1.3, 0.0), (0.75, 0.0)])
+def test_r9_m15_the_ustar_band_is_20_percent_of_umwm_ust_on_both_sides(tmp_path, monkeypatch, scale, share):
+    """Round 9 M-15: `r <= 0.5` for `r <= 0.2` left the tests green (they asserted 0 <= frac <= 1). UMWM ust set to the computed COARE u* times a
+    factor puts every sea point at |COARE - UMWM| / UMWM = |1 - f| / f: 0.167 and 0.176 are inside the band, 0.231 and 0.333 outside."""
+    assert pipeline.USTAR_AGREE_BAND == 0.2
+    ctx = ctx_for(tmp_path / "r")
+    env = ctx.env
+    real_waves, real_layer = env.waves, env.subgrid.surface_layer
+
+    def waves(lon, lat, t):
+        w = dict(real_waves(lon, lat, t))
+        u = real_layer(env, lon, lat, t)["ustar"]
+        w["ustar_umwm"] = u._replace(value=scale * np.asarray(u.value, float))
+        return w
+    monkeypatch.setattr(env, "waves", waves)
+    n, _, frac = pipeline._ustar_agreement(env)
+    assert n > 100 and frac == share
+    note = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")["note"]
+    assert f"{100 * share:.1f}% within 20 %" in note
 
 
 def test_r8_m1_a_ustar_agreement_below_the_briefs_90_percent_is_a_finding_in_the_ledger_and_not_a_failed_check(tmp_path, monkeypatch):

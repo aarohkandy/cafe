@@ -28,7 +28,8 @@ def write_nc(path, var, t, rng, qc, mode, depth=None, scale=1.0):
     ds = xr.Dataset(coords={"TIME": ("TIME", t.astype("datetime64[s]").astype("datetime64[ns]")), z: (z, np.array([1.0 if var == "SST" else 4.0], "f4"))})
     for nm in names:
         ds[nm] = (("TIME", z), (rng(nm, t) * scale).astype("f4")[:, None])
-    ds[qc_of + "_QC"] = (("TIME", z), np.full((n, 1), qc, "f4"))
+    if qc is not None:                                                       # None: a file without its flag variable
+        ds[qc_of + "_QC"] = (("TIME", z), np.full((n, 1), qc, "f4"))
     ds.to_netcdf(path)
 
 
@@ -189,13 +190,31 @@ def test_load_refuses_a_tampered_file(tree, tmp_path):
         tao.load_tao(out)
 
 
-def test_qc_without_a_flag_variable_keeps_everything(tmp_path):
+def test_r9_m31_a_file_without_its_qc_variable_is_refused_naming_file_and_variable(tmp_path):
+    """Round 9 M-31: a missing QC variable used to keep every sample, so a renamed or dropped variable switched the filter off without a word."""
     import xarray as xr
     t = _t(T0, T0 + 3600)
     ds = xr.Dataset(coords=dict(TIME=("TIME", t.astype("datetime64[s]").astype("datetime64[ns]")), DEPTH=("DEPTH", np.array([1.0], "f4"))))
     ds["SST"] = (("TIME", "DEPTH"), np.full((len(t), 1), 28.0, "f4"))
     ds.to_netcdf(tmp_path / "x.nc")
-    assert len(tao._series(tmp_path / "x.nc", "SST", "R", T0, T0 + 3600)["t"]) == len(t)
+    with pytest.raises(ValueError, match=r"x\.nc: variable SST_QC is missing"):
+        tao._series(tmp_path / "x.nc", "SST", "R", T0, T0 + 3600)
+    write_nc(tmp_path / "w.nc", "WIND", t, series, 5, "D")                                   # the wind's flags are WSPD_QC, not UWND_QC
+    assert len(tao._series(tmp_path / "w.nc", "WIND", "D", T0, T0 + 3600)["t"]) == len(t)
+    write_nc(tmp_path / "n.nc", "WIND", t, series, None, "D")
+    with pytest.raises(ValueError, match=r"n\.nc: variable WSPD_QC is missing"):
+        tao._series(tmp_path / "n.nc", "WIND", "D", T0, T0 + 3600)
+
+
+def test_r9_m31_fetch_picks_another_deployment_when_the_fuller_file_has_no_qc_variable(server, tmp_path):
+    t = Tree(server, tmp_path)
+    t.add("T2N165E", "DM100A-20230201", "D", "WIND", None)                                  # covers the whole window; unflagged, so it would score every sample
+    t.add("T2N165E", "DM100B-20230201", "R", "WIND", 1, a=T0, b=T0 + 3 * 86400)             # covers half of it, flagged good
+    man = json.loads(tao.fetch_tao((1, 3, 163, 167), T0, T1, tmp_path / "tao", t.publish()).read_text())
+    assert man["selected"]["T2N165E"]["WIND"] == "T2N165E/OS_T2N165E_DM100B-20230201_R_WIND_10min.nc"
+    bad = "T2N165E/OS_T2N165E_DM100A-20230201_D_WIND_10min.nc"
+    assert list(man["unusable"]) == [bad] and "variable WSPD_QC is missing" in man["unusable"][bad] and bad in man["files"]     # kept in the hashes, never used
+    assert len(tao.load_tao(tmp_path / "tao")["T2N165E"]["wind"]["t"]) == 3 * 144
 
 
 def test_waves_are_absent_for_tao_and_say_so(tree, tmp_path):
@@ -252,6 +271,34 @@ def test_bin_of_a_constant_is_the_constant_and_sparse_bins_are_nan(c, n):
     v = tao._bin(t, np.full_like(t, c), np.array([3600.0]))
     assert np.allclose(v, c)
     assert np.isnan(tao._bin(t, np.full_like(t, c), np.array([3600.0]), need=n + 7)).all()
+
+
+def test_r9_m30_the_bin_takes_half_an_hour_each_side_and_three_samples_by_default():
+    """Round 9 M-30: the defaults half=1800 and need=3 (BRIEF 5.4's +-30 min mean of at least 3 samples) were never exercised without arguments."""
+    tt = np.array([36000.0])
+    t = tt + np.array([-1800.0, -1200.0, -600.0, 0.0, 600.0, 1200.0, 1800.0])
+    v = np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 1000.0])
+    assert tao._bin(t, v, tt)[0] == pytest.approx(3.5)                                          # [tt - 1800, tt + 1800): the left end in, the right end out
+    assert np.isnan(tao._bin(tt + [0.0, 600.0], [1.0, 2.0], tt)).all()                          # two samples are too few ...
+    assert tao._bin(tt + [0.0, 600.0, 1200.0], [1.0, 2.0, 3.0], tt)[0] == pytest.approx(2.0)    # ... three are enough
+    assert np.isnan(tao._bin(t, np.array([1.0, np.nan, np.nan, 4.0, np.nan, np.nan, 7.0]), tt)).all()          # only valid samples count
+
+
+def day_start(offset_days):
+    return dt.datetime.fromtimestamp(T0 - T0 % 86400 + offset_days * 86400, dt.timezone.utc).strftime("%Y%m%d")
+
+
+def test_r9_m30_candidates_are_the_deployment_in_the_water_its_twins_within_ten_days_and_the_later_ones_that_start_in_the_window():
+    """Round 9 M-30: with `- 10 * 86400` replaced by `- 0` the A/B twin of a deployment was dropped and the tests stayed green."""
+    t0 = T0 - T0 % 86400                                                                         # a UTC midnight: the file dates are days
+    files = [dict(date=day_start(d), file=f"d{d}") for d in (-30, -14, -13, -12, -3, 2, 6, 7)]
+    got = [f["file"] for f in tao._candidates(files, t0, t0 + 6 * 86400)]
+    # latest start at or before t0 is -3; its twins reach back to -13 (exactly ten days is in); -14 and -30 are out;
+    # 2 and 6 (= t1) start in the window; 7 after it
+    assert got == ["d-13", "d-12", "d-3", "d2", "d6"]
+    on_t0 = [dict(date=day_start(d), file=f"d{d}") for d in (-12, -8, 0)]
+    assert [f["file"] for f in tao._candidates(on_t0, t0, t0 + 86400)] == ["d-8", "d0"]       # a file dated t0 is the one in the water: twins -10 days from it
+    assert [f["file"] for f in tao._candidates([dict(date=day_start(1), file="later")], t0, t0 + 2 * 86400)] == ["later"]       # none before t0: all up to t1
 
 
 def test_bin_ignores_nan_and_unsorted_input():
@@ -337,6 +384,61 @@ def test_compare_with_coare_uses_the_moorings_own_air_temperature_and_humidity()
     cl = tao.compare({"A": model_of(a, tt)}, {"A": a}, "log")["A"]["speed_bias"]
     cc = tao.compare({"A": model_of(a, tt)}, {"A": a}, "coare")["A"]["speed_bias"]
     assert -0.7 < cc < -0.3 and 0.0 < cc - cl < 0.3 and tao.compare({"A": model_of(a, tt)}, {"A": a})["A"]["speed_bias"] == cc
+
+
+def short_air_record(air_t=(0.0, 3600.0)):
+    """Round 9 M-32: wind every 10 min for 6 h at 4 m, but air temperature, humidity and SST only at the times `air_t` (s after T0), unstable air."""
+    a = moored(6.0, 100.0)
+    a["wind"] = dict(t=_t(T0, T0 + 6 * 3600), u=np.full(36, -5.9), v=np.full(36, 1.0), z=4.0)
+    at = T0 + np.array(air_t)
+    for k, x, z in (("airt", 304.0, 3.0), ("rh", 0.7, 3.0), ("sst", 301.0, 1.0)):
+        a[k] = dict(t=at, value=np.full(at.size, x), z=z)
+    return a
+
+
+def test_r9_m32_compare_lifts_with_the_neutral_profile_where_the_air_record_does_not_reach():
+    a = short_air_record()
+    sp = float(np.hypot(-5.9, 1.0))
+
+    def bias(secs, method):
+        return tao.compare({"A": dict(t=np.array([T0 + secs]), wind10=np.array([[-5.9, 1.0]]))}, {"A": a}, method)["A"]["speed_bias"]
+    assert abs(bias(1800.0, "auto") - bias(1800.0, "log")) > 0.02                          # inside the record the unstable air changes the lift ...
+    assert bias(5 * 3600.0, "auto") == pytest.approx(sp - float(tao.wind_to_10m(sp, 4.0)), abs=1e-9)      # ... at 5 h the neutral one, not 0-1 h held on
+    assert bias(5 * 3600.0, "coare") == bias(5 * 3600.0, "auto")
+
+
+@pytest.mark.parametrize("record,t_s,want", [((0.0, 3600.0), 3600.0 + tao.AIR_GAP_S, True), ((0.0, 3600.0), 3601.0 + tao.AIR_GAP_S, False),
+                                             ((0.0, 3600.0), -tao.AIR_GAP_S, True), ((0.0, 3600.0), -tao.AIR_GAP_S - 1.0, False),
+                                             ((0.0, 2 * 3600.0), 3600.0, True), ((0.0, 4 * 3600.0), 2 * 3600.0, False)])
+def test_r9_m32_the_air_state_is_used_up_to_the_gap_limit_from_the_nearest_sample_and_not_beyond(record, t_s, want):
+    air = tao._air_at(short_air_record(record), np.array([T0 + t_s]))
+    for k in ("t", "rh", "sst"):
+        assert bool(np.isfinite(air[k]).all()) is want
+    assert air["p"] == 101000.0 and air["lat"] == 0.0
+
+
+def test_r9_m32_the_air_state_is_interpolated_between_samples_and_an_empty_record_is_missing():
+    a = short_air_record()
+    a["airt"] = dict(t=T0 + np.array([0.0, 3600.0]), value=np.array([300.0, 302.0]), z=3.0)
+    assert tao._air_at(a, np.array([T0 + 900.0]))["t"] == pytest.approx([300.5])
+    a["rh"] = dict(t=np.empty(0), value=np.empty(0), z=3.0)
+    air = tao._air_at(a, np.array([T0, T0 + 900.0]))
+    assert np.isnan(air["rh"]).all() and np.isfinite(air["t"]).all()
+    tt = np.array([T0 + 900.0])
+    assert tao.compare({"A": dict(t=tt, wind10=np.array([[-5.9, 1.0]]))}, {"A": a})["A"]["speed_bias"] == pytest.approx(
+        tao.compare({"A": dict(t=tt, wind10=np.array([[-5.9, 1.0]]))}, {"A": a}, "log")["A"]["speed_bias"])        # no humidity: the neutral lift, not a crash
+
+
+def test_r9_m32_coare_lift_falls_back_to_the_neutral_one_only_where_the_air_state_is_missing():
+    sp, z = np.array([6.0, 6.0, 6.0]), 4.0
+    air = dict(t=np.array([304.0, np.nan, 304.0]), rh=np.array([0.7, 0.7, 0.7]), sst=np.array([301.0, 301.0, np.nan]), p=101000.0, lat=0.0)
+    got = tao.wind_to_10m(sp, z, "coare", air)
+    assert got[0] == pytest.approx(float(tao.wind_to_10m(6.0, z, "coare", {k: v[0] if k in "t rh sst" else v for k, v in air.items()})))
+    assert got[1] == got[2] == float(tao.wind_to_10m(6.0, z)) and abs(got[0] - got[1]) > 0.02
+    none = tao.wind_to_10m(sp, z, "coare", dict(air, t=np.full(3, np.nan)))
+    assert np.array_equal(none, tao.wind_to_10m(sp, z))
+    whole = dict(t=304.0, rh=0.7, sst=301.0, p=101000.0, lat=0.0)                              # scalars broadcast against the speeds, as before
+    assert tao.wind_to_10m(sp, z, "coare", whole) == pytest.approx(float(tao.wind_to_10m(6.0, z, "coare", whole)))
 
 
 # ------------------------------------------------------------------ receipts

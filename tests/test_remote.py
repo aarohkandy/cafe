@@ -458,3 +458,20 @@ def test_cdf1_reads_retry_a_truncated_body(cdf_file, server):
     hdr = remote.cdf1_header(u)                                          # the header fetch survives a cut body
     server.plan["t.nc"] = [("truncate", 4)]
     np.testing.assert_array_equal(remote.cdf1_read(u, "f", hdr), remote.cdf1_read(cdf_file, "f", hdr))
+
+
+def test_r9_m30_the_tree_hash_covers_the_names_of_the_files_and_the_empty_ones(tmp_path):
+    """Round 9 M-30: with the name left out of the hash a store whose chunk files were renamed, or got an empty file, kept its hash."""
+    def store(name, files):
+        d = tmp_path / name
+        for rel, data in files.items():
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_bytes(data)
+        return remote.tree_sha256(d)
+    base = store("a", {"c/0": b"xx", "c/1": b"yy"})
+    assert store("a2", {"c/0": b"xx", "c/1": b"yy"}) == base
+    assert store("renamed", {"c/0": b"xx", "c/2": b"yy"}) != base                       # the same bytes in the same order under another name
+    assert store("moved", {"d/0": b"xx", "d/1": b"yy"}) != base                         # ... and in another directory
+    assert store("empty", {"c/0": b"xx", "c/1": b"yy", "c/2": b""}) != base            # an added empty file
+    assert store("swapped", {"c/0": b"yy", "c/1": b"xx"}) != base
+    assert store("joined", {"c/0": b"xxyy"}) != base                                   # file boundaries are part of the hash
