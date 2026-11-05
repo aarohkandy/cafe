@@ -157,15 +157,6 @@ def _in_box(lon: float, lat: float, b: dict[str, float]) -> bool:
     return inlon and b["lat_min"] <= lat <= b["lat_max"]
 
 
-def fmt_box(b: dict[str, Any]) -> str:
-    """A mission box in words, for a message: "lon 165 E to 165 W (across the antimeridian), lat -5 to 5, pad 2 deg" (never the dict's repr)."""
-    def lon(x: float) -> str:
-        return f"{abs(x):g} {'E' if x >= 0 else 'W'}"
-    across = " (across the antimeridian)" if b["lon_min"] > b["lon_max"] else ""
-    pad = f", pad {b['pad_deg']:g} deg" if "pad_deg" in b else ""
-    return f"lon {lon(b['lon_min'])} to {lon(b['lon_max'])}{across}, lat {b['lat_min']:g} to {b['lat_max']:g}{pad}"
-
-
 ORCA_ROUTE = ("this build reads the atmosphere and the waves only from the orca run; the one working way to read another copy is the CAFE_ORCA "
               "environment variable (a directory or URL laid out like orca's files). Leave the key out")
 
