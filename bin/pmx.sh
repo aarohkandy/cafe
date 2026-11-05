@@ -10,6 +10,7 @@ R=work/cafe; L='$HOME/logs'; RP=; PRE=
 case ${D#pm_} in "$D"|''|*[!A-Za-z0-9_-]*) echo "PMX: pm_ and then letters, digits, _ or - only (not '$D')" >&2; exit 2 ;; esac
 case $TM in *[!A-Za-z0-9_-]*) echo "TM: letters, digits, _ and - only" >&2; exit 2 ;; esac
 if [ "${PM_RUNTIME:-docker}" = proot ]; then         # orca is shared: everything of ours stays inside ~/cafe-worker, and only where orca_setup.sh made that folder
+  case ${PM_STOP_GRACE:-10} in *[!0-9]*) echo "PM_STOP_GRACE: whole seconds (default 10), not '$PM_STOP_GRACE'" >&2; exit 2 ;; esac    # it is pasted into the remote command line
   $S "$H" test -f cafe-worker/.cafe-worker-owned || { echo "STOP: no cafe-worker of ours on $H: run bin/orca_setup.sh there" >&2; exit 1; }
   R=cafe-worker/cafe; L='$HOME/cafe-worker/logs'; RP=--rsync-path=cafe-worker/env/bin/rsync    # rsync and tmux come from orca_setup.sh
   PRE="PATH=\$HOME/cafe-worker/env/bin:\$PATH; export TMUX_TMPDIR=$L; "
@@ -17,7 +18,7 @@ fi
 rsync -az --delete --filter=". $(dirname "$0")/sync_filters" $RP -e "$S" ./ "$H:$R/$D/" || exit 1
 CMD="docker run --rm --ulimit core=0 --name ${TM:-pmx_$D} --hostname \$(hostname) -u \$(id -u):\$(id -g) --cpus ${PM_CPUS:-8} --memory ${PM_MEM:-28g} --shm-size ${PM_SHM:-16g} -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null) -e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo 1; else echo 0; fi) -v \$HOME/work/cafe/$D:/app -v \$HOME/work/cafe/pmdata:/data -v \$HOME/work/cafe/data:/work:ro -w /app cafe-pm $*"
 if [ "${PM_RUNTIME:-docker}" = proot ]; then
-  CMD="CAFE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null) CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo 1; else echo 0; fi) PM_CPUS=${PM_CPUS:-8} CAFE_MIN_FREE_GB=${CAFE_MIN_FREE_GB:-60} sh \$HOME/$R/$D/bin/proot_run.sh $D $*"
+  CMD="CAFE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null) CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo 1; else echo 0; fi) PM_CPUS=${PM_CPUS:-8} CAFE_MIN_FREE_GB=${CAFE_MIN_FREE_GB:-60} PM_STOP_GRACE=${PM_STOP_GRACE:-10} sh \$HOME/$R/$D/bin/proot_run.sh $D $*"
 fi
 if [ -n "$TM" ]; then
   $S "$H" "${PRE}mkdir -p \$HOME/$R/pmdata $L && tmux new-session -d -s $TM \"$CMD > $L/$TM.log 2>&1; echo rc=\\\$? >> $L/$TM.log\" && sleep 3 && if tmux has-session -t =$TM 2>/dev/null; then tmux ls | grep \"^$TM:\" || :; else tail -n 1 $L/$TM.log | grep -qx rc=0 && echo \"$TM: finished, rc=0\" || { echo \"$TM ended: \$(tail -n 1 $L/$TM.log)\" >&2; exit 1; }; fi"

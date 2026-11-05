@@ -60,6 +60,22 @@ def test_the_names_that_were_valid_still_sync_where_they_did(tmp_path, name, des
     assert rc == 0 and f"/{dest}" in out
 
 
+@pytest.mark.parametrize("script, env", [("bin/pmx.sh", dict(PMX="pm_t")), ("bin/pmx.sh", dict(PMX="pm_t", TM="job")), ("pm.sh", {})])
+@pytest.mark.parametrize("grace, sent_as", [("60", "PM_STOP_GRACE=60 "), (None, "PM_STOP_GRACE=10 "), ("", "PM_STOP_GRACE=10 ")])
+def test_the_stop_grace_reaches_proot_run_on_the_worker(tmp_path, script, env, grace, sent_as):
+    """The wrapper on the worker read PM_STOP_GRACE, but the laptop's scripts never sent it: the 10 s default was all anyone got."""
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME="proot", **env, **({} if grace is None else {"PM_STOP_GRACE": grace}))
+    assert rc == 0 and sent_as + "sh $HOME/cafe-worker/cafe/" in out
+
+
+@pytest.mark.parametrize("script, env", [("bin/pmx.sh", dict(PMX="pm_t")), ("pm.sh", {})])
+@pytest.mark.parametrize("grace", ["1;x", "1 2", "-1", "x", "$(id)"])
+def test_a_stop_grace_that_is_not_whole_seconds_is_refused_before_anything_is_sent(tmp_path, script, env, grace):
+    """The value is pasted into the command line that the worker's shell parses, so it is checked here, not only by proot_run.sh."""
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME="proot", PM_STOP_GRACE=grace, **env)
+    assert rc == 2 and out == ""
+
+
 def test_a_failed_copy_does_not_run_the_job_on_stale_code(tmp_path):
     rc, out = sent(tmp_path, "bin/pmx.sh", "true")
     assert rc == 0 and "work/cafe/pm_x/" in out and "docker run" in out          # docker keeps its paths
@@ -456,3 +472,28 @@ def test_a_killed_wrapper_leaves_its_job_and_directory_and_the_next_start_sweeps
         for p in procs:
             p.kill()
             p.wait()
+
+
+def test_the_sweep_removes_the_directory_of_a_job_that_is_only_a_zombie(tmp_path):
+    """`kill -0` is true for a zombie, which a PID 1 that does not reap orphans leaves for good: the directory was then never swept."""
+    w, env = proot_world(tmp_path, PM_STOP_GRACE="1")
+    zombie = subprocess.Popen(["true"])                                          # exited, not waited for: a zombie of this process
+    t = time.time() + 10
+    while pathlib.Path(f"/proc/{zombie.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z" and time.time() < t:
+        time.sleep(0.02)
+    stale = w / "cafe/tmp/run.zombie"
+    stale.mkdir(parents=True)
+    (stale / ".pids").write_text(f"{zombie.pid} {zombie.pid}\n")
+    p, d, pgid = start(w, env)
+    try:
+        assert not stale.exists() and d.exists()
+        p.send_signal(signal.SIGTERM)
+        assert p.wait(timeout=20) == 143
+    finally:
+        p.kill()
+        p.wait()
+        zombie.wait()
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass

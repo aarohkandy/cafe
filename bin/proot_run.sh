@@ -12,9 +12,10 @@ W="$HOME/cafe-worker"; C="$W/cafe"          # nothing outside ~/cafe-worker: the
 free=$(df -Pk "$W" | awk 'NR==2{print int($4/1048576)}'); [ "$free" -ge "${CAFE_MIN_FREE_GB:-60}" ] || { echo "STOP: only $free GB free on the shared disk" >&2; exit 1; }
 mkdir -p "$C/tmp"
 # A run that was SIGKILLed (or lost to a container restart) leaves its run.* directory: each holds .pids (this wrapper, then its proot); one with no live pid is stale. Not a stale one without .pids: that is a run just starting.
+# Live = a /proc entry whose state is not Z: kill -0 is true for a zombie, which stays when the container's PID 1 does not reap orphans, and its directory would never be swept.
 for d in "$C"/tmp/run.*; do
   [ -f "$d/.pids" ] || continue; live=
-  for p in $(cat "$d/.pids"); do kill -0 "$p" 2>/dev/null && live=1; done
+  for p in $(cat "$d/.pids"); do st=$(sed 's/.*) //;s/ .*//' "/proc/$p/stat" 2>/dev/null) || :; [ -n "$st" ] && [ "$st" != Z ] && live=1; done
   [ -n "$live" ] || rm -rf "$d"
 done
 T=$(mktemp -d "$C/tmp/run.XXXXXX"); echo $$ > "$T/.pids"      # the container's /tmp, on the big disk (/ has 13 GB on orca); gone after the run, as with --rm
