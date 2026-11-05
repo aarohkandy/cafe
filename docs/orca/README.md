@@ -12,7 +12,7 @@ Orca is the lab's Jupyter-style container, reached today only through the VS Cod
 | Tailscale login and SSH in from outside | Not tested |
 | The real `cafe-pm` image under proot | Not tested |
 | OpenFOAM `interFoam` in parallel under proot | Not tested; the biggest risk |
-| A runner that works without docker | Not written; `bin/pmx.sh` and `pm.sh` always call `docker run` |
+| A runner that works without docker | `PM_RUNTIME=proot` in `bin/pmx.sh` and `pm.sh`, rehearsed off orca; see [`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md) |
 
 ## What Orca is
 
@@ -76,7 +76,7 @@ Run it again after the container restarts; it restarts only our own `sshd` and `
 ## What is left before jobs can run
 
 1. Copy the image and the data onto Orca, streamed from homebase, whose disk has too little room for a temporary copy. About 18 GB in all: the image is 5 GB, `pmdata` 7.7 GB, `data` 5.4 GB.
-2. Write the proot path in the runner, keeping `PM_HOST` as the switch. It must also set `TMPDIR`, `LC_ALL` and the CPU count, and use `tmux` from `~/cafe-worker/env/bin`.
+2. Copy the image and data with `bin/orca_sync.sh`, then run the go check `bin/orca_ready.sh` ([`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md)).
 3. Run `interFoam` in parallel under proot. If MPI's fast shared-memory transport fails there, this is where it shows.
 4. Run the full suite and compare it with the burst VM.
 5. Only after that, ask the owner about deleting `burst-cafetest-rg`. Read `~/az_serv/docs/MONEY.md` first.

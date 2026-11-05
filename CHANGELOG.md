@@ -2,6 +2,8 @@
 
 ## Unreleased (premission-step4)
 
+- `PM_RUNTIME=proot` for `bin/pmx.sh` and `pm.sh`, `bin/proot_run.sh`, `bin/orca_sync.sh`: run cafe jobs on a worker with no docker (orca); DECISIONS 458, `docs/ORCA_RUNNER.md`. Hardened after review: the job runs in its own process group and stops on TERM/INT/HUP, stale `run.*` temp directories are swept at start, `orca_sync.sh` checks the root filesystem itself and not only `root.done`, `bin/orca_suite.sh` runs the suite. All of it stays inside `~/cafe-worker` (the runners refuse otherwise), and `bin/orca_ready.sh` is the go check.
+
 Branch `premission-step4`, from `main`. Commits: `c184db4` throughput benchmark and planner, `2928de5` CAD uploads and fleet check, `ab376fd` quad at 2.5 ms and
 TEOS-10 density, `9e0bdc7` the pre-mission pipeline, `3c75f38` orchestration tests, `bb68642` rain-lens persistence and the receipts command, `cc26eb6` slow-receipt times, `7a359dd` fetch of all inputs, ocean SDE, emulator and what-if, `84db079` mypy strict, `8a611df` ocean SDE as a position step and the sensitivity noise floor, `f48fde3` the acceptance command, free-surface hull windows and the DTMB three-grid study, `62688c3` same seed same report, `d7a618b` pressure outlet, faster pseudo-time march and `ingest-ocean`. Written 2026-10-29; brought up to `d7a618b` on 2026-10-30; review round 1 (`8ee5f50`) and round 2 added on 2026-10-31.
 Choices and numbers are in `DECISIONS.md`; the equations are in `docs/PHYSICS.md`; the credibility scoring is in `docs/CREDIBILITY.md`.
