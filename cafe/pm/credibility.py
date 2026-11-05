@@ -25,7 +25,8 @@ import re
 from typing import Any
 
 from . import config, pipeline
-from .audit import STAGES, ledger_problems
+from .audit import ledger_problems
+from .ledger import STAGES
 from .stats import intervals, sampling
 
 ROOT = config.ROOT

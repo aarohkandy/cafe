@@ -144,6 +144,11 @@ env.sigma.sst_k:
   unit: K
   why: WRF SST is frozen at 2023-03-01 (SST_UPDATE=0); 0.5 K is the order of 6-day SST change in the warm pool. The pipeline's ingest stage (pipeline._tao) replaces it with the RMSE of WRF SST against the TAO/TRITON SST of the moorings in the box (ingest/env_sigmas_fitted.json) when any mooring reports SST in the window; this value stands only without such moorings.
   replace_with: TAO SST residual (done by the ingest stage whenever the data exist).
+tao.air_gap_s:
+  value: 3600
+  unit: s
+  why: No source pins it down. How far from the nearest sample of a mooring's air temperature, humidity or SST record the COARE 4 m to 10 m wind lift still uses that record; beyond it the lift is the neutral one, so a record that stops is not held at its last value for hours of wind. 1 h is six 10-min samples. Review round 9 measured the cost of the choice on a 6 m/s wind - a 2 K air drift moves the speed bias by 0.023 m/s - so the result is not sensitive to it.
+  replace_with: A gap length taken from the gaps in the AIRT, RH and SST records of the real TAO download.
 bathy.gebco_rel_sigma:
   value: 0.05
   unit: "-"

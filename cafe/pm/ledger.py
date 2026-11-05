@@ -18,6 +18,8 @@ from typing import Any, Literal
 from .env.remote import sha256, tree_sha256
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+STAGES = ["ingest", "hangar", "stage1", "windows", "stage3", "refit", "stage1b", "emulator", "report"]       # also the names of a run's output directories
+RUN_DIRS = {"checkpoints", *STAGES}
 DIST = {"sklearn": "scikit-learn", "yaml": "PyYAML"}  # import name -> distribution name, where they differ (for libraries with no __version__)
 LIBS = ["numpy", "scipy", "xarray", "zarr", "h5py", "jax", "xlb", "gsw", "pycoare", "mannrs", "sklearn", "smt", "statsmodels",
         "pandas", "pyarrow", "arlpy", "yaml", "jsonschema", "netCDF4"]
@@ -173,8 +175,42 @@ def hashed(i: dict[str, Any]) -> bool:
     return bool(i.get("sha256") or i.get("tree_sha256")) and "://" not in str(i["ref"])
 
 
+def run_roots(d: dict[str, Any]) -> set[tuple[str, ...]]:
+    """Where the run that wrote ledger `d` lay: for each output it recorded (always inside the run), the path parts before each directory of the run's
+    layout (`RUN_DIRS`). `resolve` rebases a recorded path through the layout only when it starts with one of these, so a path outside the run that
+    happens to pass through a directory named like a stage (`/data/cache/report/x`) is not mistaken for the run's own."""
+    out: set[tuple[str, ...]] = set()
+    for o in d.get("outputs", []):
+        parts = pathlib.Path(o["path"]).parts
+        out |= {parts[:i] for i, part in enumerate(parts) if part in RUN_DIRS}
+    return out
+
+
+def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path, roots: set[tuple[str, ...]]) -> pathlib.Path:
+    """Where a path a ledger recorded is now. A run that was moved, copied or renamed keeps the absolute paths of where it ran, so a recorded path is
+    looked up under `run_dir` before where it was recorded, in this order: (1) through a directory named like `run_dir`, the rest of the path joined onto it;
+    (2) if the path lies under a place the run was (`roots`, from `run_roots` of the same ledger), from the first directory of the run's own layout in it
+    (`checkpoints` or a stage's output directory, `RUN_DIRS`), longest tail first, so `.../q9/stage3/windows/x` is tried as `stage3/windows/x` before
+    `windows/x`; (3) as recorded, for what lies outside the run (`/app/config/...`, the environment cache). Only a candidate that exists under `run_dir`
+    counts: a path the run lost is reported at the place it was recorded. A path with a `..` in it is never rebased."""
+    run_dir, p = pathlib.Path(run_dir), pathlib.Path(ref)
+    if ".." in p.parts:
+        return p
+    for i in range(len(p.parts) - 1, -1, -1):
+        if p.parts[i] == run_dir.name:
+            q = run_dir.joinpath(*p.parts[i + 1:])
+            if q.exists():
+                return q
+            break
+    for i, part in enumerate(p.parts):
+        if part in RUN_DIRS and p.parts[:i] in roots and run_dir.joinpath(*p.parts[i:]).exists():
+            return run_dir.joinpath(*p.parts[i:])
+    return p
+
+
 def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str, Any] | None:
-    """The stage's ledger if it finished cleanly with this config and its outputs and hashed inputs are present and unchanged on disk, else None."""
+    """The stage's ledger if it finished cleanly with this config and its outputs and hashed inputs are present and unchanged on disk, else None.
+    Recorded paths are read where `resolve` finds them, so a run copied under another name resumes against its own files."""
     p = pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json"
     if not p.exists():
         return None
@@ -187,11 +223,13 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
         return None
     if not d.get("ok") or d.get("config_hash") != config_hash:
         return None
+    roots = run_roots(d)
     for o in d["outputs"]:
-        if not pathlib.Path(o["path"]).is_file() or sha256(o["path"]) != o["sha256"]:
+        f = resolve(o["path"], run_dir, roots)
+        if not f.is_file() or sha256(f) != o["sha256"]:
             return None
     for i in d["inputs"]:
-        f = pathlib.Path(i["ref"])
+        f = resolve(i["ref"], run_dir, roots)
         if hashed(i) and not f.exists():                                          # a deleted store or file: the stage ran on data that is gone
             return None
         if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
@@ -200,3 +238,22 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
             return None
     return d
 
+
+def rerecord(run_dir: str | pathlib.Path, stage: str, written: list[pathlib.Path], code_digest: str | None) -> bool:
+    """After `report --run` rewrote a finished stage's outputs: the stage's ledger takes the new sha256 of each (an output it did not list is added) and
+    a note that says who re-rendered it, with which `git_sha` and `code_digest`; its checks, config hash and own `git_sha` stay what the stage recorded.
+    Without that ledger there is nothing to bring up to date (False)."""
+    p = pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json"
+    if not p.is_file():
+        return False
+    d = json.loads(p.read_text())
+    roots = run_roots(d)
+    outs = {resolve(o["path"], run_dir, roots).resolve(): o for o in d["outputs"]}
+    for w in written:
+        outs.setdefault(w.resolve(), dict(path=str(w)))["sha256"] = sha256(w)
+    d["outputs"] = list(outs.values())
+    d["notes"].append(f"re-rendered by report --run (git_sha {git_sha()}, code_digest {code_digest})")
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(clean(d), indent=1, allow_nan=False))
+    os.replace(tmp, p)
+    return True

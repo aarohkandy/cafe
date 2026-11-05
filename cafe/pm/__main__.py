@@ -191,6 +191,14 @@ def _report(run: pathlib.Path, open_it: bool) -> int:
         except Exception as e:                                          # noqa: BLE001  a broken cache must not stop the report
             print(f"note: environment not loaded ({type(e).__name__}: {e}); no environment section or reach map", file=sys.stderr)
     paths = report.write(run, m, plan, env=env)
+    bad = {k: v for k, v in report.self_checks(run).items() if v}                    # the stage's own checks on the new files, before they are recorded
+    if bad:
+        for k, v in bad.items():
+            print(f"error: re-rendered report fails {k}: {'; '.join(v[:5])}", file=sys.stderr)
+        print(f"error: the new files are in {run / 'report'} but the report ledger still records the old ones, so `audit` will say they changed; "
+              "fix the cause and run `report --run` again, or rerun the report stage", file=sys.stderr)
+        return 1
+    ledger.rerecord(run, "report", paths, ctx.code_digest)
     for p in paths:
         print(p)
     if open_it:

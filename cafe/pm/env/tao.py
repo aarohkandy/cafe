@@ -32,6 +32,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from typing import Any
 
+from ..config import assumptions as _assumptions
 from . import conventions as cv, orca, remote
 from .hycom import box360
 
@@ -49,6 +50,7 @@ GOOD = dict(D=(1, 2, 5), R=(1, 2))      # OceanSITES QC flags: 1 good, 2 probabl
 KAPPA, NU_AIR, G = 0.4, 1.5e-5, 9.80665
 CH1, CH2, UMAX = 0.0017, -0.0050, 19.0                  # Edson et al. 2013 Charnock slope/intercept and the wind above which alpha stops growing
 HALF_BIN_S, MIN_IN_BIN = 1800.0, 3
+AIR_GAP_S = float(_assumptions()["tao.air_gap_s"]["value"])      # unsourced: config/assumptions.yaml
 Arr = NDArray[np.floating[Any]]
 
 
@@ -141,7 +143,11 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
                 a, b = _coverage(p)
                 man["files"][key] = dict(mooring=name, var=var, mode=f["mode"], deployment=f["dep"], url=f["url"], bytes=p.stat().st_size,
                                          sha256=remote.sha256(p), time_start=a, time_end=b)
-                score = (len(_series(p, var, f["mode"], t0, t1)["t"]), f["mode"] == "D")
+                try:
+                    score = (len(_series(p, var, f["mode"], t0, t1)["t"]), f["mode"] == "D")
+                except ValueError as e:                                  # a file without its QC flags is no candidate; another deployment is picked
+                    man.setdefault("unusable", {})[key] = str(e)
+                    continue
                 if score[0] and (best is None or score > best[0]):
                     best = (score, key)
             if best:
@@ -172,7 +178,10 @@ def _series(path: Any, var: str, mode: str, t0: float, t1: float) -> dict[str, A
     with xr.open_dataset(path) as ds:
         t = ds.TIME.values.astype("datetime64[s]").astype("int64").astype("float64")
         vals = {n: ds[n].values.reshape(len(t), -1)[:, 0].astype(float) for n in names}
-        q = ds[qc_of + "_QC"].values.reshape(len(t), -1)[:, 0] if qc_of + "_QC" in ds else np.ones(len(t))
+        if qc_of + "_QC" not in ds:      # no flags is no proof of good data: a dropped variable must not switch the filter off
+            raise ValueError(f"{path}: variable {qc_of}_QC is missing, so no sample of {var} can be told good from bad; `fetch` skips such a file "
+                             "(a cache already built from it: delete its manifest.json and run `fetch` again)")
+        q = ds[qc_of + "_QC"].values.reshape(len(t), -1)[:, 0]
         z = float(ds["HEIGHT" if "HEIGHT" in ds else "DEPTH"].values.reshape(-1)[0])
     ok = (t >= t0) & (t <= t1) & np.isin(q, GOOD[mode]) & np.all([np.isfinite(v) for v in vals.values()], axis=0)
     return dict(t=t[ok], z=z, **{n: v[ok] for n, v in vals.items()})
@@ -243,10 +252,15 @@ def wind_to_10m(speed: ArrayLike, z: ArrayLike, method: str = "log", air: dict[s
     if air is None:
         raise ValueError("method='coare' needs air=dict(t, rh, sst, p, lat) (the mooring's own AIRT, RH, SST)")
     coare = importlib.import_module("cafe.pm.env.coare")
-    q = coare.qair(air["t"] - 273.15, air["p"], air["rh"])
-    res = coare.coare35(speed, z, air["t"], z, q, z, air["p"], air["sst"], 0.0, 370.0, air["lat"], jcool=0)
-    prof: Arr = coare.profile(res, 10.0)
-    return prof
+    shape = np.broadcast(speed, z, air["t"], air["rh"], air["sst"]).shape
+    sp, zz, ta, rh, sst, p, lat = (np.broadcast_to(np.asarray(x, float), shape) for x in (speed, z, air["t"], air["rh"], air["sst"], air["p"], air["lat"]))
+    ok = np.isfinite(ta) & np.isfinite(rh) & np.isfinite(sst)               # a sample without its air state gets the neutral lift, not a guessed one
+    out: Arr = np.array(wind_to_10m(sp, zz), dtype=float)
+    if ok.any():
+        q = coare.qair(ta[ok] - 273.15, p[ok], rh[ok])
+        res = coare.coare35(sp[ok], zz[ok], ta[ok], zz[ok], q, zz[ok], p[ok], sst[ok], 0.0, 370.0, lat[ok], jcool=0)
+        out[ok] = coare.profile(res, 10.0)
+    return out
 
 
 # ------------------------------------------------------------------ mooring vs model
@@ -266,6 +280,34 @@ def _bin(t: ArrayLike, v: ArrayLike, tt: Arr, half: float = HALF_BIN_S, need: in
 
 def _wrap(d: ArrayLike) -> Arr:
     return (np.asarray(d, float) + 180.0) % 360.0 - 180.0
+
+
+def _air_at(m: dict[str, Any], t: Arr) -> dict[str, Any]:
+    """The mooring's air temperature, humidity and SST at the wind times `t`, as `wind_to_10m(..., 'coare', air)` takes them: linear
+    interpolation between the samples of each record, NaN where the nearest sample of that record is more than AIR_GAP_S away (np.interp alone
+    holds the end value for ever, so a record that stops an hour into six hours of wind lifted the rest of the wind with its last air state)."""
+    air: dict[str, Any] = {}
+    for k, v in (("t", "airt"), ("rh", "rh"), ("sst", "sst")):
+        ts, x = np.asarray(m[v]["t"], float), np.asarray(m[v]["value"], float)
+        if not ts.size:
+            air[k] = np.full(t.shape, np.nan)
+            continue
+        i = np.searchsorted(ts, t)
+        near = np.minimum(np.abs(t - ts[np.minimum(i, ts.size - 1)]), np.abs(t - ts[np.maximum(i - 1, 0)]))
+        air[k] = np.where(near <= AIR_GAP_S, np.interp(t, ts, x), np.nan)
+    return dict(air, p=101000.0, lat=m["lat"])
+
+
+def wind10(m: dict[str, Any], method: str = "auto") -> tuple[Arr, Arr, Arr]:
+    """(t, u, v): the mooring's wind lifted to 10 m, sample by sample. `method` as for `compare`: 'coare' with `_air_at`, where it has all three
+    of air temperature, humidity and SST (any sample without them gets the neutral lift), 'log' neutral, 'auto' = coare for a mooring that reports
+    all three. The one place `compare` and the pipeline's wind-error fit (`pipeline._wind_residuals`) lift a mooring."""
+    t, u, v = (np.asarray(m["wind"][k], float) for k in ("t", "u", "v"))
+    sp = np.hypot(u, v)
+    use = method == "coare" or (method == "auto" and all(k in m for k in ("airt", "rh", "sst")))
+    s10 = wind_to_10m(sp, m["wind"]["z"], "coare" if use else "log", _air_at(m, t) if use else None)
+    k = np.where(sp > 0, s10 / np.where(sp > 0, sp, 1.0), 1.0)
+    return t, u * k, v * k
 
 
 def _stats(wv: Arr, tv: Arr, wsst: Arr | None = None, tsst: Arr | None = None, min_speed: float = 1.0) -> dict[str, Any]:
@@ -292,7 +334,7 @@ def compare(wrf: dict[str, Any], tao: dict[str, Any], method: str = "auto") -> d
     """Model minus mooring, per mooring and pooled ('ALL'), for the moorings in both.
     wrf: {mooring: dict(t [epoch s], wind10 (n, 2) east/north at 10 m, sst [K] optional (n,))}; tao: load_tao output.
     The mooring winds are lifted to 10 m (wind_to_10m; 'coare' with the mooring's air temperature, humidity and SST at the wind
-    times, 'log' neutral, 'auto' = coare where the mooring reports airt, rh and sst, else log), then the vector mean of the 10-min
+    times, 'log' neutral, 'auto' = coare where the mooring reports airt, rh and sst, else log; `wind10`), then the vector mean of the 10-min
     samples within +-30 min of each model time is taken (>= 3 samples).
     speed_bias/speed_rmse [m/s], vector_rmse [m/s] (RMS of |model - mooring| vectors), dir_bias_deg/dir_rmse_deg (meteorological
     direction FROM, model minus mooring, signed, wrapped to +-180; only where both speeds >= 1 m/s), sst_bias/sst_rmse [K]."""
@@ -302,16 +344,9 @@ def compare(wrf: dict[str, Any], tao: dict[str, Any], method: str = "auto") -> d
         m, w = tao[name], wrf[name]
         if "wind" not in m:
             continue
-        t, sp = m["wind"]["t"], np.hypot(m["wind"]["u"], m["wind"]["v"])
-        air: dict[str, Any] | None = None
-        use = method == "coare" or (method == "auto" and all(k in m for k in ("airt", "rh", "sst")))
-        if use:
-            air = {k: np.interp(t, m[v]["t"], m[v]["value"]) for k, v in (("t", "airt"), ("rh", "rh"), ("sst", "sst"))}
-            air.update(p=101000.0, lat=m["lat"])
-        s10 = wind_to_10m(sp, m["wind"]["z"], "coare" if use else "log", air)
-        k = np.where(sp > 0, s10 / np.where(sp > 0, sp, 1.0), 1.0)
+        t, u10, v10 = wind10(m, method)
         tt = np.asarray(w["t"], float)
-        tv = np.column_stack([_bin(t, m["wind"]["u"] * k, tt), _bin(t, m["wind"]["v"] * k, tt)])
+        tv = np.column_stack([_bin(t, u10, tt), _bin(t, v10, tt)])
         wsst = np.asarray(w["sst"], float) if w.get("sst") is not None else None
         tsst = _bin(m["sst"]["t"], m["sst"]["value"], tt) if "sst" in m else None
         res[name] = _stats(np.asarray(w["wind10"], float), tv, wsst, tsst)

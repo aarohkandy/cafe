@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from cafe.pm import audit
+from cafe.pm import audit, ledger
 from cafe.pm.env.remote import sha256
 from cafe.pm.ledger import Ledger
 
@@ -108,8 +108,49 @@ def test_relative_ledger_paths_chain_when_the_run_is_audited_by_absolute_path(tm
 def test_a_path_through_the_run_name_that_is_not_under_the_run_stays_where_it_was_recorded(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
-    assert audit._resolve("/elsewhere/run/gone.txt", run) == pathlib.Path("/elsewhere/run/gone.txt")
-    assert audit._resolve("/elsewhere/other/x", run) == pathlib.Path("/elsewhere/other/x")
+    assert ledger.resolve("/elsewhere/run/gone.txt", run, set()) == pathlib.Path("/elsewhere/run/gone.txt")
+    assert ledger.resolve("/elsewhere/other/x", run, set()) == pathlib.Path("/elsewhere/other/x")
+
+
+def make_laid_out_run(root):
+    """A run the way the pipeline lays it out: each stage's output in its own directory, one input outside the run, the ledgers chained."""
+    run = root / "q9"
+    ext = root / "config" / "limits.yaml"
+    ext.parent.mkdir(parents=True)
+    ext.write_text("a: 1")
+    prev = None
+    for st in audit.STAGES:
+        out = run / st / "out.json"
+        out.parent.mkdir(parents=True)
+        out.write_text(st)
+        with Ledger(run, st, "cfg") as L:
+            if prev is not None:
+                L.input(prev)
+            L.input(ext)
+            L.output(out)
+        prev = run / "checkpoints" / st / "ledger.json"
+    return run
+
+
+def test_r9_m19_a_copy_under_another_name_is_checked_against_its_own_files_with_the_original_present(tmp_path):
+    made = make_laid_out_run(tmp_path)
+    copy = tmp_path / "quick"
+    shutil.copytree(made, copy)
+    assert audit.ledger_problems(copy) == []                                       # was 8 x "chain broken", and the hashes were the original's
+    (copy / "stage3" / "out.json").write_text("tampered in the copy")
+    probs = audit.ledger_problems(copy)
+    assert len(probs) == 1 and f"stage stage3: output {copy / 'stage3' / 'out.json'} changed since the stage ran" in probs[0]
+    assert audit.ledger_problems(made) == []
+
+
+def test_r9_m19_a_copy_under_another_name_is_clean_with_the_original_removed(tmp_path):
+    made = make_laid_out_run(tmp_path)
+    copy = tmp_path / "quick"
+    shutil.copytree(made, copy)
+    shutil.rmtree(made)
+    assert audit.ledger_problems(copy) == []                                       # was "missing" lines for every output and input ledger
+    (copy / "report" / "out.json").unlink()
+    assert audit.ledger_problems(copy) != []                                       # a file the copy lost is still reported
 
 
 def zstore(path, attrs, name="zarr.json"):

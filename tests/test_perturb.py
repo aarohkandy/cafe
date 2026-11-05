@@ -59,6 +59,32 @@ def test_current_spread_matches_prior():
     assert abs(s.std() - PRI["current_speed_scale"]["value"] / np.sqrt(2)) < 0.03   # field half of the variance
 
 
+def test_r9_m15_current_direction_spread_is_the_prior_split_in_half_between_the_member_and_the_field():
+    """Round 9 M-15: dropping the /sqrt(2) of the field half left 33 tests green. The field half has sd prior / sqrt 2; with the member draw, the prior."""
+    M, cd = 2000, PRI["current_direction_bias"]["value"]
+    still = dict(PRI, current_speed_scale=dict(PRI["current_speed_scale"], value=0.0))                          # no speed field: the heading is all there is
+    heading = lambda v: np.arctan2(v[:, 1], v[:, 0])
+    v = PerturbedEnv(AnalyticEnv(current=(1.0, 0.0)), {}, list(range(M)), 3, still).current(np.zeros(M), np.zeros(M), 0.0, 0.0).value
+    assert np.allclose(np.hypot(v[:, 0], v[:, 1]), 1.0) and abs(heading(v).std() - np.radians(cd) / np.sqrt(2)) < 0.03        # radians
+    from scipy.stats import norm
+    z = cd * norm.ppf((np.arange(M) + 0.5) / M)                                                                  # the LHS draw, stratified
+    v = PerturbedEnv(AnalyticEnv(current=(1.0, 0.0)), dict(current_direction_bias=z), list(range(M)), 3, still).current(
+        np.zeros(M), np.zeros(M), 0.0, 0.0).value
+    assert abs(heading(v).std() - np.radians(cd)) < 0.03
+
+
+def test_r9_m15_wind_direction_spread_is_the_bias_and_the_fitted_noise_added_in_quadrature():
+    M, sd_b, sd_n = 2000, PRI["wind_direction_bias"]["value"], NOISE_PRI["wind_direction_noise"]["value"]
+    only = dict(PRI, wind_direction_noise=NOISE_PRI["wind_direction_noise"])                                       # no speed noise: the speed stays 5
+    from scipy.stats import norm
+    bias = sd_b * norm.ppf((np.arange(M) + 0.5) / M)
+    pe = PerturbedEnv(AnalyticEnv(wind=(0.0, 5.0)), dict(wind_direction_bias=bias), list(range(M)), 3, only, window=WIN)
+    v = pe.wind(np.zeros(M), np.zeros(M), 10.0, 7 * 3600.0).value
+    heading = np.degrees(np.arctan2(v[:, 0], v[:, 1]))                                                           # clockwise from north
+    assert np.allclose(np.hypot(*v.T), 5.0) and heading.std() == pytest.approx(np.hypot(sd_b, sd_n), rel=0.04)
+    assert abs(heading.mean()) < 1.5
+
+
 def test_waves_scaled():
     pe = _pe(dict(hs_scale=np.array([1, 2, 1, 1.0]), tp_bias=np.array([0, 0, -20, 1.0])))
     w = pe.waves(np.zeros(4), np.zeros(4), 0.0)

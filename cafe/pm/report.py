@@ -38,9 +38,9 @@ from numpy.typing import NDArray
 
 from . import budget, credibility
 from .config import json_object
-from .audit import STAGES
 from .stage1 import _classes, path_speed as _member_speeds
 from .env.remote import sha256
+from .ledger import STAGES
 from .stats import intervals, sequential
 
 SCHEMA = "cafe.pm.report/1"
@@ -1555,3 +1555,11 @@ def write(run_dir: str | pathlib.Path, mission: dict[str, Any], plan: dict[str, 
     j.write_text(json.dumps(rep, indent=1, allow_nan=False))
     h.write_text(render(rep))
     return [h, j, *cred]
+
+
+def self_checks(run_dir: str | pathlib.Path) -> dict[str, list[str]]:
+    """The two checks the report stage records, run on the files `write` left in `run_dir/report`: each name -> its problems (empty when it holds).
+    `s_report` ledgers them; `report --run` runs them before it re-records the report outputs."""
+    run = pathlib.Path(run_dir)
+    rep = json.loads((run / "report" / "report.json").read_text())
+    return dict(report_traceable=check_traceability(rep), report_html_matches_json=check_rendered(rep, (run / "report" / "index.html").read_text()))

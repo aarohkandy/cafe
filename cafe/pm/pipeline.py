@@ -34,12 +34,11 @@ from numpy.typing import NDArray
 from scipy.stats import chi2
 
 from . import budget, ledger, par, stage1
-from .audit import STAGES
 from .config import ConfigError, _yaml, assumptions, digest, env_sigmas, load_mission, utc
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.hycom import FetchError
 from .env.remote import sha256, tree_sha256
-from .ledger import Ledger
+from .ledger import STAGES, Ledger
 
 if TYPE_CHECKING:
     from .env.environment import GriddedEnv
@@ -628,7 +627,8 @@ def _forcing_range(env: GriddedEnv, oc: Any = None) -> tuple[int, str]:
 
 
 USTAR_AGREE_FRACTION = 0.90      # BRIEF 2.1: COARE u* within 20 % of UMWM ust at this share of the sea points; a lower share is a finding, not a gate (row 168)
-# credibility.py's Data pedigree reads this one, too; the ledger value is stored unrounded so that both sides judge the same number
+USTAR_AGREE_BAND = 0.2           # BRIEF 2.1: "within 20 %" is |COARE u* - UMWM ust| / ust <= this (the band the fraction above is the share inside of)
+# credibility.py's Data pedigree reads the fraction, too; the ledger value is stored unrounded so that both sides judge the same number
 
 
 def ustar_percent(frac: float) -> str:
@@ -637,7 +637,7 @@ def ustar_percent(frac: float) -> str:
 
 
 def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float]:
-    """COARE u* (the surface layer built at ingest) against UMWM's `ust` at the sample: (points, median |dif|/ust, fraction within 20 %)."""
+    """COARE u* (the surface layer built at ingest) against UMWM's `ust` at the sample: (points, median |dif|/ust, fraction within USTAR_AGREE_BAND)."""
     sl = env.subgrid
     assert sl is not None, "ingest builds the surface layer before this check"
     jj, ii, tis = _sea_sample(env)
@@ -651,7 +651,7 @@ def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float]:
         good = np.isfinite(a) & np.isfinite(b) & (b > 1e-3)
         rel += list(np.abs(a[good] - b[good]) / b[good])
     r = np.asarray(rel)
-    return int(r.size), float(np.median(r)) if r.size else float("nan"), float(np.mean(r <= 0.2)) if r.size else float("nan")
+    return int(r.size), float(np.median(r)) if r.size else float("nan"), float(np.mean(r <= USTAR_AGREE_BAND)) if r.size else float("nan")
 
 
 def _round_trip_errors(env: GriddedEnv, oc: Any) -> dict[str, float]:
@@ -714,10 +714,11 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
                  f"more than 1 %) at {sp['mss_clipped']:.1%} of the points; {where}")
     n, med, frac = _ustar_agreement(env)
     L.check("coare_ustar_vs_umwm_ust", n > 0 and bool(np.isfinite(med)), value=None if not n else frac,
-            note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within 20 %; BRIEF 5.5 asks that the agreement is logged"
+            note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within {100 * USTAR_AGREE_BAND:.0f} %; "
+                 "BRIEF 5.5 asks that the agreement is logged"
             if n else "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask")
     if n and frac < USTAR_AGREE_FRACTION:                                 # row 168: not a gate, but the finding BRIEF 2.1 asks for is made
-        L.note(f"BRIEF 2.1 finding: only {ustar_percent(frac)} % of the {n} sea points have COARE u* within 20 % of UMWM ust; "
+        L.note(f"BRIEF 2.1 finding: only {ustar_percent(frac)} % of the {n} sea points have COARE u* within {100 * USTAR_AGREE_BAND:.0f} % of UMWM ust; "
                f"the brief asks {100 * USTAR_AGREE_FRACTION:.0f} %")
     kind = None if oc is None else oc.ds.attrs.get("temperature_kind")
     gofs = m["environment"]["ocean"]["source"] == "gofs31"
@@ -738,16 +739,9 @@ def _wind_residuals(wrf: dict[str, Any], moor: dict[str, Any]) -> dict[str, NDAr
         m, w = moor[name], wrf[name]
         if "wind" not in m:
             continue
-        t, sp = m["wind"]["t"], np.hypot(m["wind"]["u"], m["wind"]["v"])
-        use = all(k in m for k in ("airt", "rh", "sst"))
-        air: dict[str, Any] | None = None
-        if use:
-            air = {k: np.interp(t, m[v]["t"], m[v]["value"]) for k, v in (("t", "airt"), ("rh", "rh"), ("sst", "sst"))}
-            air.update(p=101000.0, lat=m["lat"])
-        s10 = tao.wind_to_10m(sp, m["wind"]["z"], "coare" if use else "log", air)
-        k = np.where(sp > 0, s10 / np.where(sp > 0, sp, 1.0), 1.0)
+        t, u10, v10 = tao.wind10(m)                                       # the one lift `tao.compare` uses (coare where the mooring has its air state)
         tt = np.asarray(w["t"], float)
-        tv = np.column_stack([tao._bin(t, m["wind"]["u"] * k, tt), tao._bin(t, m["wind"]["v"] * k, tt)])
+        tv = np.column_stack([tao._bin(t, u10, tt), tao._bin(t, v10, tt)])
         wv = np.asarray(w["wind10"], float)
         ok = np.isfinite(wv).all(1) & np.isfinite(tv).all(1)
         ws, ts = cv.speed(wv), cv.speed(tv)
@@ -1447,11 +1441,8 @@ def s_report(ctx: Context, L: Ledger) -> None:
     paths = report.write(ctx.run_dir, ctx.mission, ctx.plan, env=ctx.env)
     for p in paths:
         L.output(p)
-    rep = json.loads(ctx.path("report", "report.json").read_text())
-    bad = report.check_traceability(rep)
-    L.check("report_traceable", not bad, value=len(bad), limit=0, note="; ".join(bad[:5]))
-    bad = report.check_rendered(rep, ctx.path("report", "index.html").read_text())
-    L.check("report_html_matches_json", not bad, value=len(bad), limit=0, note="; ".join(bad[:5]))
+    for name, bad in report.self_checks(ctx.run_dir).items():
+        L.check(name, not bad, value=len(bad), limit=0, note="; ".join(bad[:5]))
 
 
 FUNCS = dict(ingest=s_ingest, hangar=s_hangar, stage1=s_stage1, windows=s_windows, stage3=s_stage3, refit=s_refit,

@@ -2,6 +2,7 @@
 import datetime as dt
 import json
 import pathlib
+import shutil
 import subprocess
 
 import numpy as np
@@ -358,7 +359,6 @@ def test_r8_l0_a_deleted_hashed_input_breaks_done_but_a_url_and_an_unhashed_one_
     assert done(tmp_path, "ingest", "h1") is None
     src.write_text("v1")
     assert done(tmp_path, "ingest", "h1") is not None
-    import shutil
     shutil.rmtree(store)
     assert done(tmp_path, "ingest", "h1") is None
     assert ledger.hashed(dict(ref="s3://b/k", sha256="x")) is False and ledger.hashed(dict(ref="/x", sha256=None)) is False
@@ -377,3 +377,71 @@ def test_r8_l0_a_damaged_throughput_file_stops_the_ledger_with_the_config_error_
         ledger.machine()
     f.write_text('{"machine": {"id": "m1", "measured": "d"}}')
     assert ledger.machine()["bench_id"] == "m1"
+
+
+# ---- review round 9: M-19 (one resolver for a recorded path, used by audit and done), M-16 (report --run records what it rewrote)
+
+def laid_out(root, name):
+    """A run directory `root/name` whose report stage ledger records its output as the absolute path it was written to."""
+    run = root / name
+    out = run / "stage3" / "windows" / "w.json"
+    out.parent.mkdir(parents=True)
+    out.write_text("v1")
+    with Ledger(run, "stage3", "h1") as L:
+        L.output(out)
+    return run, out
+
+
+def test_r9_m19_resolve_rebases_on_the_run_layout_longest_tail_first(tmp_path):
+    run = tmp_path / "now"
+    (run / "stage3" / "windows").mkdir(parents=True)
+    (run / "windows").mkdir()
+    (run / "stage3" / "windows" / "x").write_text("a")
+    (run / "windows" / "x").write_text("b")
+    roots = {("/", "data", "runs", "q9")}
+    assert ledger.resolve("/data/runs/q9/stage3/windows/x", run, roots) == run / "stage3" / "windows" / "x"          # not windows/x
+    assert ledger.resolve("/data/runs/q9/windows/x", run, roots) == run / "windows" / "x"
+    assert ledger.resolve("/data/runs/now/windows/x", run, roots) == run / "windows" / "x"                           # the name first
+    assert ledger.resolve("/data/runs/q9/stage3/windows/gone", run, roots) == pathlib.Path("/data/runs/q9/stage3/windows/gone")   # nothing there: as recorded
+    assert ledger.resolve("/app/config/mission.yaml", run, roots) == pathlib.Path("/app/config/mission.yaml")       # outside the run
+
+
+def test_r9_l_resolve_leaves_a_path_outside_the_run_alone_even_through_a_directory_named_like_a_stage(tmp_path):
+    run = tmp_path / "quick"
+    (run / "report").mkdir(parents=True)
+    (run / "report" / "index.html").write_text("the run's")
+    (run / "secret").write_text("x")
+    roots = ledger.run_roots(dict(outputs=[dict(path="/data/runs/q9/report/index.html"), dict(path="/data/runs/q9/checkpoints/report/ledger.json")]))
+    assert ledger.resolve("/data/runs/q9/report/index.html", run, roots) == run / "report" / "index.html"
+    ext = pathlib.Path("/data/cache/report/index.html")
+    assert ledger.resolve(ext, run, roots) == ext                                                     # was <run>/report/index.html
+    assert ledger.resolve(ext, run, set()) == ext
+    assert ledger.resolve("/a/report/../secret", run, {("/", "a")}) == pathlib.Path("/a/report/../secret")      # never out of the run by `..`
+    assert ledger.resolve("/data/runs/q9/report/../report/index.html", run, roots) == pathlib.Path("/data/runs/q9/report/../report/index.html")
+
+
+def test_r9_m19_done_reads_a_copy_under_another_name_from_its_own_files(tmp_path):
+    run, out = laid_out(tmp_path, "q9")
+    copy = tmp_path / "quick"
+    shutil.copytree(run, copy)
+    assert done(copy, "stage3", "h1") is not None
+    (copy / "stage3" / "windows" / "w.json").write_text("v2")                      # the original is intact at the recorded path
+    assert done(copy, "stage3", "h1") is None                                      # was the original's hash: the stage was skipped on changed output
+    (copy / "stage3" / "windows" / "w.json").write_text("v1")
+    shutil.rmtree(run)
+    assert done(copy, "stage3", "h1") is not None                                  # was None: the recorded path was gone
+
+
+def test_r9_m16_rerecord_takes_the_new_hash_adds_a_note_and_leaves_the_checks(tmp_path):
+    run, out = laid_out(tmp_path, "q9")
+    before = json.loads((run / "checkpoints" / "stage3" / "ledger.json").read_text())
+    out.write_text("v2")
+    extra = run / "stage3" / "extra.json"
+    extra.write_text("new")
+    assert ledger.rerecord(run, "stage3", [out, extra], "dig1") is True
+    d = json.loads((run / "checkpoints" / "stage3" / "ledger.json").read_text())
+    assert [(o["path"], o["sha256"]) for o in d["outputs"]] == [(str(out), ledger.sha256(out)), (str(extra), ledger.sha256(extra))]
+    assert d["notes"] == [f"re-rendered by report --run (git_sha {ledger.git_sha()}, code_digest dig1)"]
+    assert (d["checks"], d["config_hash"], d["git_sha"], d["ok"]) == (before["checks"], before["config_hash"], before["git_sha"], True)
+    assert done(run, "stage3", "h1") is not None
+    assert ledger.rerecord(run, "stage1", [out], None) is False                    # no ledger for that stage: nothing to update
