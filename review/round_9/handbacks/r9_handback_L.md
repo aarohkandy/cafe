@@ -42,8 +42,8 @@ Tests: `tests/test_cli.py::test_r9_m16_report_run_leaves_the_report_ledger_match
 
 ## M-19 `audit` of a renamed or copied run; `done()` resumes against the original
 
-DECISIONS row (suggested 462): a path a ledger recorded is looked up by one function, `ledger.resolve(ref, run_dir)`, used by `audit.ledger_problems` (inputs,
-outputs, the chain test) and by `ledger.done` (outputs and inputs). Order: (1) through a directory named like `run_dir` (as before), (2) from the
+DECISIONS row (suggested 462): a path a ledger recorded is looked up by one function, `ledger.resolve(ref, run_dir, roots)`, used by `audit.ledger_problems` (inputs,
+outputs, the chain test) and by `ledger.done` (outputs and inputs). Order: (1) through a directory named like `run_dir` (as before), (2) if the path lies under a place the run was (`roots` = `ledger.run_roots(ledger_dict)`: the path parts before each layout directory in the ledger's own recorded outputs), from the
 first directory of the run's own layout in the recorded path (`checkpoints` or a stage's output directory, `ledger.RUN_DIRS`), longest tail first,
 joined onto `run_dir`, (3) as recorded. Only a candidate that exists under `run_dir` is taken. So a run copied or renamed (`cp -r runs/q9 runs/quick`)
 is audited and resumed against its own files, and the chain test no longer fails on the name. `STAGES` now lives in `ledger.py` (`audit.STAGES` is
@@ -62,9 +62,13 @@ cache) are read where they were recorded."
 Checked what could break, and how:
 - `_resolve`'s old callers: `audit.ledger_problems` (3 places) only; `done()` read the recorded absolute path. Both now call `resolve`. A run resumed at
   the path it was made at resolves exactly as before (step 1 matches). Relative `out` dirs (`runs/<m>/quick`) resolve through step 1 too.
-- Step 2 could take a wrong file if a recorded path OUTSIDE the run has a component named like a stage (`/lab/ingest/x.nc`) and the same tail exists under
-  the run. The pipeline's inputs outside the run live under the data directory (`orca`, `tao`, `cache/<mission>`, the GEBCO cut; read from the `L.input` calls in
-  `pipeline.py`), none with a stage-named component unless a mission is named like a stage. The existence requirement limits it to a coincidence.
+- Step 2 could take a wrong file if a recorded path OUTSIDE the run has a component named like a stage (`/data/cache/report/index.html`) and the same tail exists
+  under the run: an adversary proved it. FIXED (round 9, second pass): step 2 now applies only to a path under a root the same ledger's outputs name
+  (`run_roots`; outputs are always inside the run), and a recorded path containing `..` is never rebased (`/a/report/../secret` gave `<run>/report/../secret`).
+  `resolve` takes `roots` as a required argument; its three callers (`ledger.done`, `ledger.rerecord`, `audit.ledger_problems`) pass `run_roots(d)`; no other caller exists
+  (grep). Consequence: a ledger with no recorded output has no roots, so only step 1 (the name) rebases for it; every pipeline stage records at least one output.
+  Residual: an input outside the run whose path sits under the run's own original root and is named like a stage is still rebased (same shape as a run file).
+  Test: `tests/test_ledger.py::test_r9_l_resolve_leaves_a_path_outside_the_run_alone_even_through_a_directory_named_like_a_stage`.
 - RESIDUAL, not fixed: in a renamed copy, a file the copy has lost that the original still has is not rebased (the candidate must exist), so it is
   read from the recorded path, i.e. the original's. The brief asks for "require the rebased path to exist". The only alternative is to return the rebased
   path when it does not exist, which would report outside-run paths with a stage-like component as missing. Decide if you want it.
@@ -219,6 +223,10 @@ The unfixed code has no `ledger.resolve`, `rerecord` or `wind10`, so for M-16, M
 | M-30 | `_candidates` `lo <= day` to `<`, `day <= t1` to `<`, `day <= t0` to `<` | killed (3) |
 | M-30 | `MIN_IN_BIN` 1 (the finding's mutant), 2, 4 | killed (3) |
 | M-30 | `HALF_BIN_S` 3600, 900 | killed (2) |
+| M-32 (second pass) | `_air_at` near = left neighbour only (adversary's mutant) | killed by `..._nearest_sample_...[record6-6000.0-True]` (survived before) |
+| M-32 (second pass) | `_air_at` near = right neighbour only | killed by `[record7-1200.0-True]` |
+| M-19 (second pass) | `resolve` step 2 without the `roots` test (the adversary's collision) | killed by `test_r9_l_resolve_leaves_a_path_outside_the_run_alone...` |
+| M-19 (second pass) | `resolve` without the `..` guard | killed by the same test |
 
 First run: two mutants of mine survived and one did not apply; all three were my mutant's fault or a missing case, and were fixed and rerun: `M31 old default`
 (I had not removed the raise, so it changed nothing; the real old behaviour is the "no raise" row), `tree_sha256` NUL (test case added), `rerecord` wrong sha
@@ -233,6 +241,7 @@ On cafe-burst, 4 CPUs, in my own `pm_r9l` (removed at the end; no containers lef
 - Whole files, rc 0: `tests/test_ledger.py`, `test_audit.py`, `test_cli.py`, `test_tao.py`, `test_remote.py`, `test_perturb.py`, `test_ingest_fetch.py`, `test_surface.py` (407 tests, final
   code); `tests/test_pipeline.py`, `test_report.py`, `test_credibility.py` (530 results, all passed, rc 0, final code).
 - `cafe/pm/env/tao.py` coverage: 100 % from `tests/test_tao.py` alone (`--cov=cafe.pm.env.tao`), measured before the last message edit; the edit adds no branch.
+- Second pass (adversary's two findings): ruff and mypy clean; `tests/test_tao.py`, `test_ledger.py`, `test_audit.py` 172 passed rc 0; `test_pipeline.py` + `test_report.py` 445 passed rc 0.
 - NOT run: the full suite, `audit` (ruff, mypy, coverage gate over `cafe/pm`, the banned scan, the mutation record), `make mutation`. `audit.banned` was not run (it needs Python 3.11); instead the added lines of
   `git diff 91c9777 HEAD -- cafe tests config` were grepped with the `audit.BANNED` pattern: no match.
 - Not run on real data: nothing here was run against the q9 TAO cache or a real run directory (`report --run` needs about 20 GB; `cp -r` of a real run

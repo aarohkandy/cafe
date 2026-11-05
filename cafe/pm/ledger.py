@@ -175,13 +175,27 @@ def hashed(i: dict[str, Any]) -> bool:
     return bool(i.get("sha256") or i.get("tree_sha256")) and "://" not in str(i["ref"])
 
 
-def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path) -> pathlib.Path:
+def run_roots(d: dict[str, Any]) -> set[tuple[str, ...]]:
+    """Where the run that wrote ledger `d` lay: for each output it recorded (always inside the run), the path parts before each directory of the run's
+    layout (`RUN_DIRS`). `resolve` rebases a recorded path through the layout only when it starts with one of these, so a path outside the run that
+    happens to pass through a directory named like a stage (`/data/cache/report/x`) is not mistaken for the run's own."""
+    out: set[tuple[str, ...]] = set()
+    for o in d.get("outputs", []):
+        parts = pathlib.Path(o["path"]).parts
+        out |= {parts[:i] for i, part in enumerate(parts) if part in RUN_DIRS}
+    return out
+
+
+def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path, roots: set[tuple[str, ...]]) -> pathlib.Path:
     """Where a path a ledger recorded is now. A run that was moved, copied or renamed keeps the absolute paths of where it ran, so a recorded path is
     looked up under `run_dir` before where it was recorded, in this order: (1) through a directory named like `run_dir`, the rest of the path joined onto it;
-    (2) from the first directory of the run's own layout in it (`checkpoints` or a stage's output directory, `RUN_DIRS`), longest tail first, so
-    `.../q9/stage3/windows/x` is tried as `stage3/windows/x` before `windows/x`; (3) as recorded, for what lies outside the run (`/app/config/...`, the
-    environment cache). Only a candidate that exists under `run_dir` counts: a path the run lost is reported at the place it was recorded."""
+    (2) if the path lies under a place the run was (`roots`, from `run_roots` of the same ledger), from the first directory of the run's own layout in it
+    (`checkpoints` or a stage's output directory, `RUN_DIRS`), longest tail first, so `.../q9/stage3/windows/x` is tried as `stage3/windows/x` before
+    `windows/x`; (3) as recorded, for what lies outside the run (`/app/config/...`, the environment cache). Only a candidate that exists under `run_dir`
+    counts: a path the run lost is reported at the place it was recorded. A path with a `..` in it is never rebased."""
     run_dir, p = pathlib.Path(run_dir), pathlib.Path(ref)
+    if ".." in p.parts:
+        return p
     for i in range(len(p.parts) - 1, -1, -1):
         if p.parts[i] == run_dir.name:
             q = run_dir.joinpath(*p.parts[i + 1:])
@@ -189,7 +203,7 @@ def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path) -> pathlib.Pat
                 return q
             break
     for i, part in enumerate(p.parts):
-        if part in RUN_DIRS and run_dir.joinpath(*p.parts[i:]).exists():
+        if part in RUN_DIRS and p.parts[:i] in roots and run_dir.joinpath(*p.parts[i:]).exists():
             return run_dir.joinpath(*p.parts[i:])
     return p
 
@@ -209,12 +223,13 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
         return None
     if not d.get("ok") or d.get("config_hash") != config_hash:
         return None
+    roots = run_roots(d)
     for o in d["outputs"]:
-        f = resolve(o["path"], run_dir)
+        f = resolve(o["path"], run_dir, roots)
         if not f.is_file() or sha256(f) != o["sha256"]:
             return None
     for i in d["inputs"]:
-        f = resolve(i["ref"], run_dir)
+        f = resolve(i["ref"], run_dir, roots)
         if hashed(i) and not f.exists():                                          # a deleted store or file: the stage ran on data that is gone
             return None
         if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
@@ -232,7 +247,8 @@ def rerecord(run_dir: str | pathlib.Path, stage: str, written: list[pathlib.Path
     if not p.is_file():
         return False
     d = json.loads(p.read_text())
-    outs = {resolve(o["path"], run_dir).resolve(): o for o in d["outputs"]}
+    roots = run_roots(d)
+    outs = {resolve(o["path"], run_dir, roots).resolve(): o for o in d["outputs"]}
     for w in written:
         outs.setdefault(w.resolve(), dict(path=str(w)))["sha256"] = sha256(w)
     d["outputs"] = list(outs.values())

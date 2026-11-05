@@ -398,11 +398,26 @@ def test_r9_m19_resolve_rebases_on_the_run_layout_longest_tail_first(tmp_path):
     (run / "windows").mkdir()
     (run / "stage3" / "windows" / "x").write_text("a")
     (run / "windows" / "x").write_text("b")
-    assert ledger.resolve("/data/runs/q9/stage3/windows/x", run) == run / "stage3" / "windows" / "x"          # not windows/x
-    assert ledger.resolve("/data/runs/q9/windows/x", run) == run / "windows" / "x"
-    assert ledger.resolve("/data/runs/now/windows/x", run) == run / "windows" / "x"                           # the name first
-    assert ledger.resolve("/data/runs/q9/stage3/windows/gone", run) == pathlib.Path("/data/runs/q9/stage3/windows/gone")   # nothing there: as recorded
-    assert ledger.resolve("/app/config/mission.yaml", run) == pathlib.Path("/app/config/mission.yaml")       # outside the run
+    roots = {("/", "data", "runs", "q9")}
+    assert ledger.resolve("/data/runs/q9/stage3/windows/x", run, roots) == run / "stage3" / "windows" / "x"          # not windows/x
+    assert ledger.resolve("/data/runs/q9/windows/x", run, roots) == run / "windows" / "x"
+    assert ledger.resolve("/data/runs/now/windows/x", run, roots) == run / "windows" / "x"                           # the name first
+    assert ledger.resolve("/data/runs/q9/stage3/windows/gone", run, roots) == pathlib.Path("/data/runs/q9/stage3/windows/gone")   # nothing there: as recorded
+    assert ledger.resolve("/app/config/mission.yaml", run, roots) == pathlib.Path("/app/config/mission.yaml")       # outside the run
+
+
+def test_r9_l_resolve_leaves_a_path_outside_the_run_alone_even_through_a_directory_named_like_a_stage(tmp_path):
+    run = tmp_path / "quick"
+    (run / "report").mkdir(parents=True)
+    (run / "report" / "index.html").write_text("the run's")
+    (run / "secret").write_text("x")
+    roots = ledger.run_roots(dict(outputs=[dict(path="/data/runs/q9/report/index.html"), dict(path="/data/runs/q9/checkpoints/report/ledger.json")]))
+    assert ledger.resolve("/data/runs/q9/report/index.html", run, roots) == run / "report" / "index.html"
+    ext = pathlib.Path("/data/cache/report/index.html")
+    assert ledger.resolve(ext, run, roots) == ext                                                     # was <run>/report/index.html
+    assert ledger.resolve(ext, run, set()) == ext
+    assert ledger.resolve("/a/report/../secret", run, {("/", "a")}) == pathlib.Path("/a/report/../secret")      # never out of the run by `..`
+    assert ledger.resolve("/data/runs/q9/report/../report/index.html", run, roots) == pathlib.Path("/data/runs/q9/report/../report/index.html")
 
 
 def test_r9_m19_done_reads_a_copy_under_another_name_from_its_own_files(tmp_path):

@@ -409,7 +409,10 @@ def test_r9_m32_compare_lifts_with_the_neutral_profile_where_the_air_record_does
 
 @pytest.mark.parametrize("record,t_s,want", [((0.0, 3600.0), 3600.0 + tao.AIR_GAP_S, True), ((0.0, 3600.0), 3601.0 + tao.AIR_GAP_S, False),
                                              ((0.0, 3600.0), -tao.AIR_GAP_S, True), ((0.0, 3600.0), -tao.AIR_GAP_S - 1.0, False),
-                                             ((0.0, 2 * 3600.0), 3600.0, True), ((0.0, 4 * 3600.0), 2 * 3600.0, False)])
+                                             ((0.0, 2 * 3600.0), 3600.0, True), ((0.0, 4 * 3600.0), 2 * 3600.0, False),
+                                             ((0.0, 2 * 3600.0), 6000.0, True), ((0.0, 2 * 3600.0), 1200.0, True),   # near one neighbour only: either counts
+                                             ((0.0, 2.5 * 3600.0), 4500.0, False),      # beyond both
+                                             ((3600.0, 2 * 3600.0), 0.0, True), ((3600.0, 2 * 3600.0), -1.0, False)])   # before the first
 def test_r9_m32_the_air_state_is_used_up_to_the_gap_limit_from_the_nearest_sample_and_not_beyond(record, t_s, want):
     air = tao._air_at(short_air_record(record), np.array([T0 + t_s]))
     for k in ("t", "rh", "sst"):

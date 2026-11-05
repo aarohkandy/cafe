@@ -108,8 +108,8 @@ def test_relative_ledger_paths_chain_when_the_run_is_audited_by_absolute_path(tm
 def test_a_path_through_the_run_name_that_is_not_under_the_run_stays_where_it_was_recorded(tmp_path):
     run = tmp_path / "run"
     run.mkdir()
-    assert ledger.resolve("/elsewhere/run/gone.txt", run) == pathlib.Path("/elsewhere/run/gone.txt")
-    assert ledger.resolve("/elsewhere/other/x", run) == pathlib.Path("/elsewhere/other/x")
+    assert ledger.resolve("/elsewhere/run/gone.txt", run, set()) == pathlib.Path("/elsewhere/run/gone.txt")
+    assert ledger.resolve("/elsewhere/other/x", run, set()) == pathlib.Path("/elsewhere/other/x")
 
 
 def make_laid_out_run(root):

@@ -26,7 +26,7 @@ import ast, datetime as dt, hashlib, importlib.metadata, json, pathlib, re, subp
 from typing import Any
 
 from .env.remote import sha256, tree_sha256
-from .ledger import STAGES, hashed, resolve
+from .ledger import STAGES, hashed, resolve, run_roots
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BANNED = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError)\b|\bplaceholder\b|pytest\.skip|mark\.skip|skipif|xfail|\bskip\("
@@ -124,8 +124,9 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
         for c in d.get("checks", []):
             if not c["ok"]:
                 out.append(f"{run_dir.name}: stage {st}: self-check {c['name']} failed (value {c.get('value')}, limit {c.get('limit')})")
+        roots = run_roots(d)
         for i in d.get("inputs", []):
-            f = resolve(i["ref"], run_dir)
+            f = resolve(i["ref"], run_dir, roots)
             try:
                 if hashed(i) and not f.exists():                       # `done` re-runs the stage for the same reason
                     out.append(f"{run_dir.name}: stage {st}: input {f} is missing (the stage read it); restore it, or run `fetch` / the stage again")
@@ -138,12 +139,12 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
             except _Unreadable as e:                                    # the sha256 line above already said a damaged file changed
                 out.append(f"{run_dir.name}: stage {st}: input {e}; delete it and run `fetch` again")
         for o in d.get("outputs", []):
-            f = resolve(o["path"], run_dir)
+            f = resolve(o["path"], run_dir, roots)
             if not f.is_file():
                 out.append(f"{run_dir.name}: stage {st}: output {f} is missing")
             elif sha256(f) != o["sha256"]:
                 out.append(f"{run_dir.name}: stage {st}: output {f} changed since the stage ran")
-        if prev is not None and prev.resolve() not in {resolve(i["ref"], run_dir).resolve() for i in d.get("inputs", [])}:
+        if prev is not None and prev.resolve() not in {resolve(i["ref"], run_dir, roots).resolve() for i in d.get("inputs", [])}:
             out.append(f"{run_dir.name}: stage {st}: does not record the {STAGES[STAGES.index(st) - 1]} ledger as an input (chain broken)")
         prev = p
     return out
