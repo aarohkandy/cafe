@@ -187,11 +187,57 @@ The `tests/test_surface.py` mention in the finding needs nothing separate: `stor
 
 ## Mutants (detached throwaway worktree `cafe-r9l-mut` on commit 6c3e17e, run on cafe-burst in `pm_r9l_mut`)
 
-MUTANT_TABLE
+Each row: the mutant applied to the fixed code, the new test(s) run (`-x`), result. All 36 are KILLED (the test fails on the mutant, passes on the fixed code).
+The unfixed code has no `ledger.resolve`, `rerecord` or `wind10`, so for M-16, M-19, M-31 and M-32 the mutants that restore the old behaviour stand in for it (a test run on the base commit would fail on a missing name, which shows nothing).
+
+| finding | mutant | result |
+|---|---|---|
+| M-16 | `_report` without the `ledger.rerecord` call | killed |
+| M-16 | `if bad:` made `if False:` (no check gate) | killed |
+| M-16 | `rerecord` without the note | killed |
+| M-16 | `rerecord` records a wrong sha256 | killed |
+| M-19 | `resolve` without the layout step | killed (audit and ledger tests) |
+| M-19 | `resolve` takes the shortest tail first (`windows/x` for `stage3/windows/x`) | killed |
+| M-19 | `done()` reads recorded output paths | killed |
+| M-19 | `audit` reads recorded output paths | killed |
+| M-31 | no `ValueError` for a missing QC variable (the old all-good behaviour) | killed |
+| M-31 | `fetch_tao` does not catch it | killed |
+| M-32 | `near <= AIR_GAP_S` to `<` | killed |
+| M-32 | no gap limit (the old hold; compare test and pipeline test) | killed (both) |
+| M-32 | gap twice as long | killed |
+| M-32 | fallback only where airt and rh are missing (sst ignored) | killed |
+| M-32 | `_wind_residuals` lifts without the air state | killed |
+| M-15 | current direction field without `/ sqrt(2)` (the finding's mutant) | killed |
+| M-15 | member half of the direction without `/ sqrt(2)` | killed |
+| M-15 | wind direction noise halved | killed |
+| M-15 | u* band 0.5 (the finding's mutant) | killed |
+| M-15 | u* band 0.15 | killed |
+| M-15 | `r <= 0.5` literal in `_ustar_agreement` | killed |
+| M-30 | `tree_sha256` without the name update (the finding's mutant) | killed |
+| M-30 | `tree_sha256` without the NUL after the name | killed (case added after the first run let it survive) |
+| M-30 | `_candidates` `- 10 * 86400` to `- 0` (the finding's mutant), `- 9`, `- 11` | killed (3) |
+| M-30 | `_candidates` `lo <= day` to `<`, `day <= t1` to `<`, `day <= t0` to `<` | killed (3) |
+| M-30 | `MIN_IN_BIN` 1 (the finding's mutant), 2, 4 | killed (3) |
+| M-30 | `HALF_BIN_S` 3600, 900 | killed (2) |
+
+First run: two mutants of mine survived and one did not apply; all three were my mutant's fault or a missing case, and were fixed and rerun: `M31 old default`
+(I had not removed the raise, so it changed nothing; the real old behaviour is the "no raise" row), `tree_sha256` NUL (test case added), `rerecord` wrong sha
+(pattern typo). Throwaway worktree and burst directory removed.
+
 
 ## Verification
 
-VERIFICATION
+On cafe-burst, 4 CPUs, in my own `pm_r9l` (removed at the end; no containers left running, no tmux sessions):
+- `ruff check cafe/pm tests`: clean. `mypy cafe/pm` (strict): clean (checked before the last two small edits to a message and a test; the final commit changes only a
+  string in `tao.py`, a test file and the handback, and ruff was rerun after the string edit).
+- Whole files, rc 0: `tests/test_ledger.py`, `test_audit.py`, `test_cli.py`, `test_tao.py`, `test_remote.py`, `test_perturb.py`, `test_ingest_fetch.py`, `test_surface.py` (407 tests, final
+  code); `tests/test_pipeline.py`, `test_report.py`, `test_credibility.py` (530 results, all passed, rc 0, final code).
+- `cafe/pm/env/tao.py` coverage: 100 % from `tests/test_tao.py` alone (`--cov=cafe.pm.env.tao`), measured before the last message edit; the edit adds no branch.
+- NOT run: the full suite, `audit` (ruff, mypy, coverage gate over `cafe/pm`, the banned scan, the mutation record), `make mutation`. `audit.banned` was not run (it needs Python 3.11); instead the added lines of
+  `git diff 91c9777 HEAD -- cafe tests config` were grepped with the `audit.BANNED` pattern: no match.
+- Not run on real data: nothing here was run against the q9 TAO cache or a real run directory (`report --run` needs about 20 GB; `cp -r` of a real run
+  with the original present or removed was reproduced only on synthetic layout-shaped runs).
+
 
 ## Needs from other batches
 
