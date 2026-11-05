@@ -179,7 +179,8 @@ def _series(path: Any, var: str, mode: str, t0: float, t1: float) -> dict[str, A
         t = ds.TIME.values.astype("datetime64[s]").astype("int64").astype("float64")
         vals = {n: ds[n].values.reshape(len(t), -1)[:, 0].astype(float) for n in names}
         if qc_of + "_QC" not in ds:      # no flags is no proof of good data: a dropped variable must not switch the filter off
-            raise ValueError(f"{path}: variable {qc_of}_QC is missing, so no sample of {var} can be told good from bad; use another file")
+            raise ValueError(f"{path}: variable {qc_of}_QC is missing, so no sample of {var} can be told good from bad; `fetch` skips such a file "
+                             "(a cache already built from it: delete its manifest.json and run `fetch` again)")
         q = ds[qc_of + "_QC"].values.reshape(len(t), -1)[:, 0]
         z = float(ds["HEIGHT" if "HEIGHT" in ds else "DEPTH"].values.reshape(-1)[0])
     ok = (t >= t0) & (t <= t1) & np.isin(q, GOOD[mode]) & np.all([np.isfinite(v) for v in vals.values()], axis=0)

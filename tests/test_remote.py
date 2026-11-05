@@ -475,3 +475,4 @@ def test_r9_m30_the_tree_hash_covers_the_names_of_the_files_and_the_empty_ones(t
     assert store("empty", {"c/0": b"xx", "c/1": b"yy", "c/2": b""}) != base            # an added empty file
     assert store("swapped", {"c/0": b"yy", "c/1": b"xx"}) != base
     assert store("joined", {"c/0": b"xxyy"}) != base                                   # file boundaries are part of the hash
+    assert store("edge1", {"a": b"bX"}) != store("edge2", {"ab": b"X"})                # where the name ends and the bytes begin
