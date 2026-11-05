@@ -97,3 +97,15 @@ On cafe-burst (`pm_r9d`, removed afterwards), exit codes read from the logs:
 - The `uniform_flow_force` / `shear_layer_mass` decision (fail their own bound on NaN) is argued from the code, not tested with a real blow-up.
 - Whether NaN in a cut window's `timing.machine_dependent` (the ledger) breaks "same seed, identical report.json": not tested (the report reads none of it, by 186); the M-24 finding left this open too.
 - Mutation testing of the new branches (`make mutation`) was not run (hours); the one-regression-test-per-fix check was by the unfixed-code run above.
+
+## Follow-up after the adversary's pass (same branch, second commit)
+
+**`lbm._real` raised `OverflowError` on a huge integer literal** (a stored `{"err": 9999...(400 digits)}` loads as a Python int and `math.isfinite` cannot convert it). `read_stored` caught only `OSError` and `ValueError`, so the gate, `stale_wall_receipts`, `lbm.receipts`, `sphere_receipts` and `sphere_discretisation` crashed: the M-4 failure again. Fixed in the one shared place, `_real`: `OverflowError` is "not a number" (the file counts as not stored, a failed row). Every reader goes through `_real` (`read_stored`, `result_row`, `wallmodel._read_receipt`, `nest.stored_grids`), so no caller needed a change; swept `lbm.py`, `nest.py`, `wallmodel.py` for another `isfinite`/`float()` on stored data: none outside `_real` (`nest.py:249` is on arrays). Tests: `test_r9_m4_*_integer_too_large_for_a_float_*` (five plate fields, three channel fields, `cd` / `ref` in `read_stored` and `result_row`); all ten fail on ef0415a with `OverflowError: int too large to convert to float` and pass after. `credibility._stored_rows` (batch B) is a separate raw reader and is not changed here.
+
+Other items the adversary or the builder left, status:
+- `nest.simulate` still returns two values (deviation from M-24's fix, argued above). `nest.diverged(series)` is the same predicate. A 3-tuple is a mechanical change if the lead wants it.
+- The one assertion in `tests/test_config_docs.py` and the fixture in `test_both_stored_passing_receipts_clear_only_the_wall_model_row` changed in the first commit (listed above). The whole `tests/test_stage3.py` has now been rerun after both (rc=0).
+- RUNBOOK line 218 should say "round 9" next to rounds 7 and 8 for the stale `physics_sha()`: docs are the lead's, not edited here.
+- Not done, as before: full suite, audit, coverage of the new stage3 branches, mutation testing; `uniform_flow_force` / `shear_layer_mass` not tested with a real blow-up; `credibility._stored_rows` and `report.py`'s "cut at the time limit" wording (batch B); `lbm.main slow` and `nest.main slow` still write with `write_text`.
+
+Verified for the follow-up, on cafe-burst (`pm_r9d`, removed afterwards), exit codes from the logs: whole `tests/test_stage3.py` rc=0; `tests/test_lbm.py tests/test_config_docs.py tests/test_receipts.py tests/test_credibility.py tests/test_audit.py` rc=0; the ten new cases rc=0 (and all ten fail on ef0415a, a detached worktree, removed); `ruff check cafe/pm tests` clean; `mypy cafe/pm` clean, 54 files. `tests/test_nest.py` not rerun (nest.py unchanged in the follow-up).

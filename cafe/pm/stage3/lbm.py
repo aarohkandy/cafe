@@ -639,8 +639,12 @@ def eta_text(updates: float) -> str:
 
 
 def _real(v: Any) -> bool:
-    """A finite real number: not a bool, a string, None, NaN or infinity."""
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    """A finite real number: not a bool, a string, None, NaN or infinity, nor an integer too large for a float (json.loads gives a 400-digit literal
+    as an int, and math.isfinite raises OverflowError on it)."""
+    try:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    except OverflowError:
+        return False
 
 
 def read_stored(f: pathlib.Path, numeric: tuple[str, ...] = ()) -> dict[str, Any] | None:

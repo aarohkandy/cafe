@@ -2330,6 +2330,42 @@ def test_r9_m4_result_row_with_a_stored_record_lacking_a_number_is_a_failed_row_
     cr.OUT.clear()
 
 
+HUGE = "9" * 400                                                                                          # json.loads makes this an int no float holds
+
+
+@pytest.mark.parametrize("field", ["err", "cf", "re", "ittc", "yfrac"])
+def test_r9_m4_a_plate_field_holding_an_integer_too_large_for_a_float_is_unreadable_not_an_overflow(monkeypatch, tmp_path, field):
+    """M-4: math.isfinite raised OverflowError on a 400-digit integer literal; read_stored catches only OSError and ValueError."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    good = json.dumps(dict(_without(_stub_plate(), "force"), code_sha=lbm.physics_sha()))
+    wm.slow_path().write_text(re.sub(rf'"{field}": [^,}}]+', f'"{field}": {HUGE}', good))
+    assert f'"{field}": {HUGE}' in wm.slow_path().read_text()
+    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.01, code_sha=lbm.physics_sha())))
+    assert wm.stale_wall_receipts() == ["wm_flat_plate.json is unreadable (rerun it)"] and wm.stored_wall_error() is None
+
+
+@pytest.mark.parametrize("field", ["err", "cf", "cf_dean"])
+def test_r9_m4_a_channel_field_holding_an_integer_too_large_for_a_float_is_unreadable_not_an_overflow(monkeypatch, tmp_path, field):
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    wm.slow_path().write_text(json.dumps(dict(_without(_stub_plate(err=0.02), "force"), code_sha=lbm.physics_sha())))
+    good = json.dumps(dict(_stub_channel(err=0.01), code_sha=lbm.physics_sha()))
+    wm.channel_path().write_text(re.sub(rf'"{field}": [^,}}]+', f'"{field}": {HUGE}', good))
+    assert f'"{field}": {HUGE}' in wm.channel_path().read_text()
+    assert wm.stale_wall_receipts() == ["wm_channel.json is unreadable (rerun it)"] and wm.stored_wall_error() is None
+
+
+@pytest.mark.parametrize("key", ["cd", "ref"])
+def test_r9_m4_result_row_and_read_stored_treat_an_integer_too_large_for_a_float_as_no_number(tmp_path, key):
+    cr.OUT.clear()
+    rec = dict(cd=1.0, ref=1.0, code_sha=lbm.physics_sha())
+    (tmp_path / "r.json").write_text(json.dumps(rec).replace(f'"{key}": 1.0', f'"{key}": {HUGE}'))
+    assert lbm.read_stored(tmp_path / "r.json", ("cd", "ref")) is None
+    lbm.result_row("g", "claim", json.loads((tmp_path / "r.json").read_text()), "cd", "ref", 0.1, "cmd", "2 h", "src")
+    (row,) = cr.OUT
+    assert row["ok"] is False and f"STORED WITHOUT A NUMBER FOR {key}" in row["claim"]
+    cr.OUT.clear()
+
+
 def test_r9_m4_read_stored_and_the_sphere_grid_readers_name_a_damaged_file_instead_of_raising(monkeypatch, tmp_path):
     """M-4 siblings: nest.sphere_discretisation (the refit's default floor) and nest.sphere_receipts parsed nest_sphere_*.json raw."""
     monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
