@@ -155,16 +155,30 @@ def test_cache_with_altered_raster_is_refused(server, gebco, tmp_path):
 # ------------------------------------------------------------------ GOFS and UMWM
 
 
-def test_gofs_floor_is_the_deepest_valid_level_with_its_quantization(store):
+def test_gofs_floor_is_the_level_plus_half_a_spacing_with_the_uniform_sigma_and_the_last_level_is_a_lower_bound(store):
     g = b.from_gofs(store)
     assert "HYCOM GOFS" in g.source and g.resolution_m == pytest.approx(0.08 * b.M_PER_DEG, rel=1e-4)
     lon, lat = mk.LON, mk.LAT
-    assert np.isclose(g(lon[0], lat[0]).value, 0.0)                                # the all-land column
-    shallow = g(lon[4], lat[3])
-    assert np.isclose(shallow.value, 100.0) and np.isclose(shallow.uncertainty, 50.0 / np.sqrt(12.0))   # wet to 100 m; the next level is 150 m
-    deep = g(lon[5], lat[5])
-    assert np.isclose(deep.value, 1500.0) and np.isclose(deep.uncertainty, 0.0)                         # last level: nothing deeper to bracket it
+    assert np.isclose(g(lon[0], lat[0]).value, 0.0) and np.isclose(g(lon[0], lat[0]).uncertainty, 0.0)       # the all-land column
+    shallow = g(lon[4], lat[3])                                                  # wet to 100 m, not at 150 m: the floor is in [100, 150)
+    assert np.isclose(shallow.value, 125.0) and np.isclose(shallow.uncertainty, 50.0 / np.sqrt(12.0))
+    deep = g(lon[5], lat[5])                                                     # wet to the last level (1500 m here): the floor is below it, unbounded
+    assert np.isclose(deep.value, 1500.0) and np.isclose(deep.uncertainty, b.ASSUMED["gofs_open_level_sigma_m"]) and deep.uncertainty > 0
+    assert "lower bound" in g.source and "half a level spacing" in g.source
     assert np.isclose(g(0.5 * (lon[5] + lon[6]), lat[5]).value, 1500.0)
+    assert b.ASSUMED["gofs_open_level_sigma_m"] == 1000.0 and "gofs_open_level_sigma_m" in b.__doc__
+
+
+def test_gofs_node_wet_only_at_the_surface_level_is_water_not_land_for_the_report_mask(store, tmp_path):
+    from cafe.pm.env import hycom
+    ds = hycom.open_store(store).load()
+    i, j = 4, 3                                                                  # the node that is wet to 100 m in the fixture
+    ds["water_temp"][:, 1:, j, i] = np.nan                                       # now wet at the first level only
+    out = tmp_path / "surface.zarr"
+    ds.to_zarr(out, mode="w", consolidated=False)
+    got = b.from_gofs(out)(mk.LON[i], mk.LAT[j])
+    first = float(ds.depth.values[0])
+    assert got.value > 0.0 and np.isclose(got.value, first + (float(ds.depth.values[1]) - first) / 2.0)       # report.py reads value <= 0 as land
 
 
 def test_umwm_depth_is_a_12_km_grid():

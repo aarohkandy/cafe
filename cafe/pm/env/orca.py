@@ -314,30 +314,43 @@ def _drop_stale_parts(out: pathlib.Path, box: Box, h3: set[str]) -> None:
     write_json(cut, dict(box=list(box), hours3d=sorted(have | h3)))
 
 
+def _stack(parts: Iterable[pathlib.Path], keys: Iterable[str]) -> dict[str, NDArray[Any]]:
+    """For each of `keys`, the arrays of the per-hour `parts` stacked along a new first axis. Each part is closed as soon as it is read: a window of
+    720 hours holds 1,440 files, more than a container's descriptor limit (1,024) lets stay open."""
+    keys = list(keys)
+    cols: dict[str, list[NDArray[Any]]] = {k: [] for k in keys}
+    for p in parts:
+        with np.load(p) as z:
+            for k in keys:
+                cols[k].append(z[k])
+    return {k: np.stack(v) for k, v in cols.items()}
+
+
 def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any], ug: dict[str, Any], pts: dict[str, Any] | None,
              h3: list[str], box: Box | None = None) -> dict[str, Any]:
     import xarray as xr
     out = pathlib.Path(out)
     tt = np.array([np.datetime64(t.replace(tzinfo=None), "s") for t in ts])
     lat_w, lon_w = wg["XLAT"][:, 0].astype("f8"), lon360(wg["XLONG"][0, :]).astype("f8")
-    W = [np.load(out / "hours" / f"wrf_{stamp(t)}.npz") for t in ts]
-    ds = xr.Dataset({k: (("time", "lat", "lon"), np.stack([w[k] for w in W])) for k in WRF2D},
+    W = _stack([out / "hours" / f"wrf_{stamp(t)}.npz" for t in ts], [*WRF2D, "_bytes"])
+    ds = xr.Dataset({k: (("time", "lat", "lon"), W[k]) for k in WRF2D},
                     coords=dict(time=tt, lat=lat_w, lon=lon_w))
     for k in WRFSTATIC[2:]:
         ds[k] = (("lat", "lon"), wg[k])
     ds.attrs.update({k: str(v) for k, v in wg["attrs"].items()})
     ds.attrs["source"] = BASE
+    (out / "manifest.json").unlink(missing_ok=True)       # the stores below are rewritten one by one: until the new manifest is written there is none
     ds.to_zarr(out / "wrf.zarr", mode="w")
     if h3:
         T3 = [t for t in ts if stamp(t) in h3]
-        W3 = [np.load(out / "hours" / f"wrf_{stamp(t)}.npz") for t in T3]
+        W3 = _stack([out / "hours" / f"wrf_{stamp(t)}.npz" for t in T3], ("U3", "V3", "Z3", "TH3"))
         t3 = np.array([np.datetime64(t.replace(tzinfo=None), "s") for t in T3])
-        d3 = xr.Dataset({k: (("time", "lev", "lat", "lon"), np.stack([w[k] for w in W3])) for k in ("U3", "V3", "Z3", "TH3")},
+        d3 = xr.Dataset({k: (("time", "lev", "lat", "lon"), W3[k]) for k in ("U3", "V3", "Z3", "TH3")},
                         coords=dict(time=t3, lat=lat_w, lon=lon_w))
         d3.to_zarr(out / "wrf3d.zarr", mode="w")
-    U = [np.load(out / "hours" / f"umwm_{stamp(t)}.npz") for t in ts]
+    U = _stack([out / "hours" / f"umwm_{stamp(t)}.npz" for t in ts], UMWM2D)
     lat_u, lon_u = ug["lat"][:, 0].astype("f8"), lon360(ug["lon"][0, :]).astype("f8")
-    du = xr.Dataset({k: (("time", "lat", "lon"), np.stack([u[k] for u in U])) for k in UMWM2D},
+    du = xr.Dataset({k: (("time", "lat", "lon"), U[k]) for k in UMWM2D},
                     coords=dict(time=tt, lat=lat_u, lon=lon_u))
     du["seamask"] = (("lat", "lon"), ug["seamask"])
     du["depth"] = (("lat", "lon"), ug["depth"])
@@ -345,9 +358,9 @@ def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any],
     du.to_zarr(out / "umwm.zarr", mode="w")
     if pts is not None:
         ST = [t for t in ts if t.hour % 6 == 0]
-        S = [np.load(out / "hours" / f"spec_{stamp(t)}.npz") for t in ST]
-        sp = xr.Dataset(dict(F=(("time", "point", "th", "f"), np.stack([s["F"] for s in S])),
-                             k=(("time", "point", "f"), np.stack([s["k"] for s in S])),
+        S = _stack([out / "hours" / f"spec_{stamp(t)}.npz" for t in ST], ("F", "k"))
+        sp = xr.Dataset(dict(F=(("time", "point", "th", "f"), S["F"]),
+                             k=(("time", "point", "f"), S["k"]),
                              plon=(("point",), lon360(pts["lon"]).astype("f8")), plat=(("point",), pts["lat"].astype("f8"))),
                         coords=dict(time=np.array([np.datetime64(t.replace(tzinfo=None), "s") for t in ST]),
                                     f=pts["f"].astype("f8"), th=pts["th"].astype("f8")))
@@ -358,6 +371,6 @@ def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any],
                wrf_index=dict(j=wg["j"], i=wg["i"]),
                umwm_index=dict(j=ug["j"], i=ug["i"]), wrf_attrs=wg["attrs"],
                parts={p.name: remote.sha256(p) for p in parts},
-               bytes_fetched=int(sum(int(w["_bytes"]) for w in W)))
+               bytes_fetched=int(W["_bytes"].sum()))
     write_json(out / "manifest.json", man, indent=1, default=str)
     return man

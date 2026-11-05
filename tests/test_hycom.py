@@ -1010,3 +1010,91 @@ def test_r8_m30_a_file_whose_time_cannot_be_read_is_left_to_the_reader_to_name(f
     f = xr.open_dataset(undecoded / "u.nc").load()
     f.assign_coords(time=np.arange(f.sizes["time"], dtype=float)).to_netcdf(undecoded / "u2.nc")
     assert h._snapshot_times(undecoded / "u2.nc") == []
+
+
+# ---- review round 9: M-5 (a store path that is, holds or lies inside the lab's source directory deleted the source)
+
+def _lab_dir(fx, tmp_path):
+    d = _copies(fx, tmp_path / "work", [(0, "snap_0.nc"), (1, "snap_1.nc"), (2, "snap_2.nc")])
+    return d, sorted(p.name for p in d.iterdir())
+
+
+@pytest.mark.parametrize("where", ["same", "parent", "inside", "via_symlink", "tmp_sibling"])
+def test_r9_m5_a_store_that_is_holds_or_lies_inside_the_source_is_refused_and_the_source_survives(fx, tmp_path, where):
+    from cafe.pm.config import ConfigError
+    d, names = _lab_dir(fx, tmp_path)
+    link = tmp_path / "link"
+    link.symlink_to(d)
+    out = dict(same=d, parent=d.parent, inside=d / "lab.zarr", via_symlink=link, tmp_sibling=d)[where]
+    if where == "tmp_sibling":
+        d = d.rename(d.with_name("lab.zarr.tmp"))                       # the store lab.zarr would be built in lab.zarr.tmp, which is the source
+        names = sorted(p.name for p in d.iterdir())
+        out = d.with_name("lab.zarr")
+    with pytest.raises(ConfigError, match="would delete the source"):
+        h.ingest_lab_hycom(d, fx["box"], out, "in_situ")
+    assert sorted(p.name for p in d.iterdir()) == names                 # every snapshot still there, no store written beside them
+
+
+def test_r9_m5_a_single_source_file_is_refused_when_the_store_is_its_directory(fx, tmp_path):
+    from cafe.pm.config import ConfigError
+    d, names = _lab_dir(fx, tmp_path)
+    with pytest.raises(ConfigError, match="would delete the source"):
+        h.ingest_lab_hycom(d / "snap_0.nc", fx["box"], d, "in_situ")
+    assert sorted(p.name for p in d.iterdir()) == names
+
+
+def test_r9_m5_gofs_parts_are_protected_the_same_way(fx, tmp_path):
+    from cafe.pm.config import ConfigError
+    p = tmp_path / "parts"
+    shutil.copytree(fx["gofs_parts"], p)
+    before = sorted(x.name for x in p.iterdir())
+    with pytest.raises(ConfigError, match="would delete the source"):
+        h.assemble_gofs(p, mk.STEPS, p)
+    assert sorted(x.name for x in p.iterdir()) == before
+
+
+def test_r9_m5_a_non_empty_directory_that_is_no_zarr_store_is_not_replaced_but_an_old_store_and_an_empty_directory_are(fx, tmp_path):
+    from cafe.pm.config import ConfigError
+    d, _ = _lab_dir(fx, tmp_path)
+    keep = tmp_path / "ocean"
+    keep.mkdir()
+    (keep / "notes.txt").write_text("not a store")
+    with pytest.raises(ConfigError, match="no Zarr metadata or chunks"):
+        h.ingest_lab_hycom(d, fx["box"], keep, "in_situ")
+    assert (keep / "notes.txt").read_text() == "not a store"
+    empty = tmp_path / "empty.zarr"
+    empty.mkdir()
+    store = tmp_path / "again.zarr"
+    for out in (empty, store, store):                                   # an empty directory, then a fresh path, then the store just written
+        assert h.open_store(h.ingest_lab_hycom(d, fx["box"], out, "in_situ")).sizes["time"] == 3
+
+
+@pytest.mark.parametrize("damage", ["top_zarr_json", "all_metadata"])
+def test_r9_f_a_lab_store_that_lost_its_metadata_is_repaired_by_the_ingest_that_unreadable_tells_the_user_to_run(fx, tmp_path, damage):
+    from cafe.pm.config import ConfigError
+    d, _ = _lab_dir(fx, tmp_path)
+    store = tmp_path / "lab.zarr"
+    h.ingest_lab_hycom(d, fx["box"], store, "in_situ")
+    for f in [store / "zarr.json"] if damage == "top_zarr_json" else list(store.rglob("zarr.json")):
+        f.unlink()
+    with pytest.raises(ConfigError, match="ingest-ocean"):               # the advice: write the store again from the lab's source
+        h.open_store(store)
+    assert h.open_store(h.ingest_lab_hycom(d, fx["box"], store, "in_situ")).sizes["time"] == 3
+
+
+@pytest.mark.parametrize("kind", ["netcdf", "archv"])
+def test_r9_f_a_source_file_that_is_a_link_into_a_valid_store_is_refused_and_its_target_survives(fx, tmp_path, kind):
+    from cafe.pm.config import ConfigError
+    store = tmp_path / "lab.zarr"
+    h.ingest_lab_hycom(_lab_dir(fx, tmp_path)[0], fx["box"], store, "in_situ")      # a valid store (it has zarr.json)
+    src = tmp_path / "src"
+    shutil.copytree(fx["archv_dir"] if kind == "archv" else fx["zlevel_dir"], src)
+    snap = sorted(src.glob("*.a" if kind == "archv" else "*.nc"))[1:]               # all but one linked: the one real file must not hide the others
+    for f in snap:
+        shutil.move(f, store / f.name)
+        f.symlink_to(store / f.name)
+    kw = dict(depth=fx["depth"]) if kind == "archv" else {}
+    keep = sorted(p.name for p in store.iterdir())
+    with pytest.raises(ConfigError, match="would delete the source"):
+        h.ingest_lab_hycom(src, fx["box"], store, "in_situ", **kw)
+    assert sorted(p.name for p in store.iterdir()) == keep
