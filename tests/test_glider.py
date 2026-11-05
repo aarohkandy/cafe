@@ -612,3 +612,126 @@ def test_r7_m35_the_glider_loader_names_the_file_and_the_missing_blocks(tmp_path
     f.write_text("params: {}\nmission_defaults: {}\n")
     with pytest.raises(ValueError, match=r"typo\.yaml: missing \['kind'\]"):
         g.load_platform(str(f))
+
+
+# ---- review round 8: M-13, M-14, M-28 and the glider terms of M-43 -----------------------------------------------------
+def test_r8_m13_a_member_with_no_environment_at_its_start_does_not_remove_the_ballast_shift_of_the_others():
+    both, hole = sim(P=SL, M=2, lon=np.array([180.0, 180.0])), sim(P=SL, M=2, lon=np.array([180.0, np.nan]))
+    assert both.ballast_kg < -0.1 and hole.ballast_kg == pytest.approx(both.ballast_kg)                       # 0.0 before
+    assert hole.vbd_dive[0] == both.vbd_dive[0] and hole.vbd_climb[0] == both.vbd_climb[0]
+    assert sim(P=SL, M=1, lon=np.array([np.nan])).ballast_kg == 0.0                                          # none finite: no shift, no crash
+
+
+class NoWind(Strat):
+    def wind(self, lon, lat, z, t):
+        return Tagged(np.full(np.shape(lon) + (2,), np.nan), "hole", 0.0, "assumed")
+
+
+def test_r8_m14_a_hole_in_the_wind_at_a_surfacing_is_no_current_data_not_a_flight_model_failure():
+    def modes(e):
+        s = sim(M=8, e=e, mission=dict(mode="drift", heading_to=90.0))
+        s.run(0.3 * DAY)
+        return {k: int(v.sum()) for k, v in s.fail.items() if v.any()}, s
+    assert modes(NoWind(wind=(0.0, 0.0), current=(0.0, 0.0), current_profile=uni))[0] == {"no_current_data": 8}     # {'no_flight': 8} before
+    clean, s = modes(env())
+    assert clean == {} and np.isfinite(s.lon).all() and g.FAILS[-1] == "no_current_data"
+
+
+def test_r8_m28_a_negative_or_zero_dive_depth_is_refused_naming_the_field():
+    for bad in (-50.0, 0.0, float("nan")):
+        with pytest.raises(ValueError, match=r"dive_depth_m must be > 0, got"):
+            sim(mission=dict(mode="drift", dive_depth_m=bad))
+
+
+def test_r8_m43_the_battery_flag_fires_at_the_reserve_not_at_empty():
+    """`reserve_frac` removed from the flag: the fire time is a few percent early, which the old rel=0.2 comparison could not see (the factor is 0.10)."""
+    s = sim(battery_scale=np.array([0.02]))
+    for _ in range(20000):
+        s.step(60.0)
+        if s.fail["battery"][0]:
+            break
+    assert s.fail["battery"][0] and (1.0 - SG["reserve_frac"]) < s.E[0] / s.cap[0] < (1.0 - SG["reserve_frac"]) + 0.02
+
+
+def test_r8_m43_the_pilot_ballast_trigger_margin_is_the_whole_vbd_delta():
+    """`d` halved in the trigger: a delta of 1.2 x the smaller room to a pump limit needs a shift, 0.6 x does not."""
+    s0 = sim(mission=dict(mode="drift", vbd_delta_cc=0.0))
+    lo, hi = SG["vbd_min_cc"], SG["vbd_min_cc"] + SG["vbd_range_cc"]
+    room = min(s0.vbd_dive[0] - lo, hi - s0.vbd_climb[0])
+    assert room > 1.0 and s0.ballast_kg == 0.0
+    assert sim(mission=dict(mode="drift", vbd_delta_cc=1.2 * room)).ballast_kg != 0.0
+    assert sim(mission=dict(mode="drift", vbd_delta_cc=0.9 * room)).ballast_kg == 0.0
+
+
+def test_r8_m43_the_steering_reference_speed_is_that_at_mid_depth():
+    """`k = 5` -> the surface: the reference speed differs by the density and temperature change over 500 m."""
+    s = sim(mission=dict(mode="drift", dive_depth_m=500.0), lat=10.0)
+    rho, p, T = s._state(np.full(1, 250.0))
+    sd = g.flight(s.P, rho, p, T, s.vbd_dive, -s.P["pitch_deg"])
+    sa = g.flight(s.P, rho, p, T, s.vbd_climb, s.P["pitch_deg"])
+    uh = lambda r: float(r.speed[0] * np.cos(np.radians(r.glide_deg[0])))
+    assert s.uh_ref[0] == pytest.approx(0.5 * (uh(sd) + uh(sa)), rel=1e-9)
+    rho0, p0, T0 = s._state(np.zeros(1))
+    sd0 = g.flight(s.P, rho0, p0, T0, s.vbd_dive, -s.P["pitch_deg"])
+    assert abs(float(sd0.speed[0]) - float(sd.speed[0])) > 1e-4                                          # the test can tell the two depths apart
+
+
+def test_r8_m43_a_member_with_half_the_speed_scale_descends_at_half_the_rate():
+    s = sim(M=2, speed_scale=np.array([1.0, 0.5]))
+    s.step(60.0)
+    assert s.depth[0] > 0.1 and s.depth[1] == pytest.approx(0.5 * s.depth[0], rel=1e-9)
+
+
+def surface_minutes(P):
+    s = sim(P=P, mission=dict(mode="drift", heading_to=90.0))
+    h = s.run(1.2 * DAY)
+    ph = h["phase"][:, 0]
+    first = int(np.argmax(ph == g.ASC))
+    end = first + int(np.argmax(ph[first:] == g.SURF))
+    return int(np.argmax(ph[end:] != g.SURF))
+
+
+def test_r8_m43_the_surfacing_time_includes_the_data_bytes_over_the_iridium_rate():
+    """`bytes_per_dive / iridium_Bps` removed from `surf_s`: 50 000 B at 200 B/s is 250 s of a surfacing of 490 s."""
+    base, big = surface_minutes(SG), surface_minutes({**SG, "bytes_per_dive": 2 * SG["bytes_per_dive"]})
+    assert big - base == pytest.approx(SG["bytes_per_dive"] / SG["iridium_Bps"] / 60.0, abs=1.01)
+
+
+def test_r8_m43_the_attitude_energy_of_a_dive_is_in_the_battery_account():
+    """`attitude_J_per_dive` removed from `comm_J`: two boats that differ only in it differ by exactly that at the first surfacing."""
+    a, b = sim(), sim(P={**SG, "attitude_J_per_dive": SG["attitude_J_per_dive"] + 1.0e5})
+    for _ in range(3000):
+        a.step(60.0), b.step(60.0)
+        if a.phase[0] == g.SURF and a.t > 3600.0:
+            break
+    assert a.phase[0] == g.SURF and b.E[0] - a.E[0] == pytest.approx(1.0e5, rel=1e-9)
+
+
+def test_r8_m43_the_stall_speed_floors_the_glider_speed():
+    """`u_min_ms` -> 0: with the floor at 0.05 m/s, a state flying at 0.044 m/s is no steady solution and one at 0.135 m/s is."""
+    n = float(g.neutral_vbd_cc(SG, 1027.0, 0.0, 15.0))
+    Q = {**SG, "u_min_ms": 0.05}
+    slow, fast = (g.seaglider_steady(1027.0, 0.0, 15.0, n + e, SG["pitch_deg"], Q) for e in (10.0, 60.0))
+    assert not slow.ok and slow.speed == 0.0 and fast.ok and fast.speed == pytest.approx(0.1352, abs=1e-3)
+    assert g.seaglider_steady(1027.0, 0.0, 15.0, n + 10.0, SG["pitch_deg"], SG).speed == pytest.approx(0.0444, abs=1e-3)
+
+
+def test_r8_m43_the_slocum_flies_only_with_buoyancy_in_the_direction_of_its_pitch():
+    n = float(g.neutral_vbd_cc(SL, 1027.0, 0.0, 0.0))
+    up, down = (g.slocum_steady(1027.0, 0.0, 0.0, n + e, pitch, SL) for e, pitch in ((+150.0, 26.0), (-150.0, -26.0)))
+    assert up.ok and down.ok and up.glide_deg > 0 > down.glide_deg
+    assert not g.slocum_steady(1027.0, 0.0, 0.0, n - 150.0, 26.0, SL).ok and not g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, -26.0, SL).ok
+    assert down.glide_deg == pytest.approx(-up.glide_deg) and down.speed == pytest.approx(up.speed) and down.alpha_deg == pytest.approx(-up.alpha_deg)  # alpha follows the pitch's sign
+    assert g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, 59.0, SL).ok and not g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, 61.0, SL).ok     # the tabulated pitch range
+    assert not g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, 0.04, SL).ok
+
+
+def test_r8_m43_a_waypoint_inside_the_capture_radius_is_taken_and_one_outside_is_not():
+    """The advance rule's radius halved: a waypoint at 0.75 radius is taken at the first dive, one at 1.25 radius is not."""
+    r = SG["mission_defaults"]["wp_radius_m"]
+    mx, _ = g.metres_per_deg(0.0)
+    def idx(frac):
+        s = sim(M=1, mission=dict(mode="section", waypoints=[(180.0 - frac * r / float(mx), 0.0), (178.0, 0.0)]), lon=179.0 + 1.0)
+        s.step(60.0)
+        return int(s.wp_idx[0])
+    assert idx(0.75) == 1 and idx(1.25) == 0

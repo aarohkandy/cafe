@@ -58,7 +58,8 @@ UAS_ATTITUDE_NOTE_NO_PROFILE = ("Attitude exceedance cannot fire in this control
 MODE_TEXT = dict(profile_incomplete="a flown sortie returned (time limit or battery reserve) before its last pattern waypoint, so it did not deliver "
                                     "the full profile",
                  no_current_data="there was no finite wind, current or wave state at the vehicle's position (a land block, a masked cell or a hole in the sea "
-                                 "mask), or no finite insolation there, so its motion or its battery could not be computed",
+                                 "mask), or no finite insolation there, so its motion or its battery could not be computed; this is a hole in the input, "
+                                 "not a failure of the vehicle's flight model",
                  capsize_proxy="the roll peak passed the limit, or the wind relative to the water was above the polar's top (30 m/s: outside the model, "
                                "counted as a failure, not a pass)")
 SENS_SCOPE = ("These indices rank only the sampled columns (the member-wide biases and scales of the forcing and of the vehicle). The larger errors are "

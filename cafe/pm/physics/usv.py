@@ -83,14 +83,15 @@ from typing import Any, NamedTuple, cast
 import numpy as np
 
 from ..env import conventions as cv
-from ..config import _yaml as read_yaml
+from ..config import platform_doc as read_yaml
 from . import check_params
 
 Arr = Any
 G = 9.80665
 R_E = 6371008.8
-DV = 0.05                 # m/s, speed grid of the root search
+DV = 0.05                 # m/s, speed grid of the root search (the step actually used is cap / (nv - 1), which is DV when the cap is a multiple of it)
 N_IT = 48                 # fixed-point iterations for (beta, phi, depower, rudder); 24 left 58 cells at TWS 27-30 m/s off by up to 1.5 m/s (round 7, M-18)
+TWA = np.union1d(np.arange(0.0, 180.01, 2.5), np.arange(10.0, 20.01, 0.5))     # polar true wind angles [deg]: 0.5 from 10 to 20, where V steps (round 8, M-8)
 NH = 72                   # candidate headings
 FAILS = ("becalmed", "swept_off_track", "capsize_proxy", "wing_stall_calm", "wing_stall_angle", "battery", "no_current_data")
 MODES = ("section", "station")
@@ -101,13 +102,13 @@ STRINGS = ("radio_900mhz", "radio_2g4", "iridium_link")
 # ------------------------------------------------------------------ parameters
 
 # What the model reads from `params`, with the kind of value each must be (physics.check_params; see glider.REQUIRED). Includes the keys stage 1 and the
-# stage-3 windows read (antenna height, keel).
+# stage-3 windows read (antenna height, keel). Angles are bounded and the mass is 1 to 1e5 kg (round 8, M-28: the bounds are choices, each is in the refusal).
 REQUIRED = dict(
-    loa_m="pos", lwl_m="pos", beam_wl_m="pos", mass_kg="pos", wetted_area_m2="pos", form_factor_k="nonneg", cr0="nonneg", cr_fr_ref="pos",
+    loa_m="pos", lwl_m="pos", beam_wl_m="pos", mass_kg="range:1:1e5", wetted_area_m2="pos", form_factor_k="nonneg", cr0="nonneg", cr_fr_ref="pos",
     appendage_cda_m2="nonneg", heel_resist_c="pos", gm_m="pos", clr_depth_m="pos", kyy_frac="pos", kxx_roll_m="pos", roll_damping="nonneg",
-    wing_span_m="pos", wing_area_m2="pos", anemometer_m="pos", wing_cl_alpha_2d="pos", wing_stall_deg="pos", wing_trim_deg="pos", wing_cd0="nonneg",
-    wing_oswald_e="pos", wing_ce_height_m="nonneg", wing_ce_x_m="any", heel_target_deg="pos", trim_min_aws_ms="nonneg", min_awa_deg="nonneg",
-    keel_area_m2="pos", keel_span_m="pos", keel_t_c="pos", keel_stall_deg="pos", keel_x_m="any", rudder_cl_max="pos", rudder_x_m="nonzero",
+    wing_span_m="pos", wing_area_m2="pos", anemometer_m="pos", wing_cl_alpha_2d="pos", wing_stall_deg="angle90", wing_trim_deg="angle90", wing_cd0="nonneg",
+    wing_oswald_e="pos", wing_ce_height_m="nonneg", wing_ce_x_m="any", heel_target_deg="angle90", trim_min_aws_ms="nonneg", min_awa_deg="range:0:180",
+    keel_area_m2="pos", keel_span_m="pos", keel_t_c="pos", keel_stall_deg="angle90", keel_x_m="any", rudder_cl_max="pos", rudder_x_m="nonzero",
     rudder_area_m2="pos", rudder_span_m="pos", rudder_t_c="pos",
     wind_area_front_m2="nonneg", wind_area_side_m2="nonneg", wind_cd_front="nonneg", wind_cd_side="nonneg", wind_height_m="pos",
     rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms="pos<=50", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos", chiodi_max_sog_ms="pos",
@@ -152,20 +153,21 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
 
 def _digest(P: dict[str, Any]) -> str:
     nums = {k: v for k, v in P.items() if isinstance(v, (int, float))}
-    return hashlib.sha1(json.dumps({**nums, "N_IT": N_IT}, sort_keys=True).encode()).hexdigest()[:16]               # the tables depend on N_IT (round 7, M-18)
+    h = hashlib.sha1(json.dumps({**nums, "N_IT": N_IT}, sort_keys=True).encode())                                   # the tables depend on N_IT (round 7, M-18)
+    return hashlib.sha1(h.digest() + pathlib.Path(__file__).read_bytes()).hexdigest()[:16]                           # and on this file's code (round 8, M-36)
 
 
 # ------------------------------------------------------------------ small numerics
 
 def _lin(tab: Arr, axes: tuple[Arr, ...], pts: tuple[Arr, ...]) -> Arr:
-    """n-linear interpolation of `tab` (shape n1..nd[, F]) on uniform axes at broadcast points `pts`; clamped at the ends."""
+    """n-linear interpolation of `tab` (shape n1..nd[, F]) on strictly increasing axes (not necessarily uniform: round 8, M-8) at broadcast points
+    `pts`; clamped at the ends."""
     pts = np.broadcast_arrays(*[np.asarray(x, float) for x in pts])
     idx, w = [], []
     for ax, x in zip(axes, pts, strict=True):
-        t = np.clip((x - ax[0]) / (ax[1] - ax[0]), 0.0, len(ax) - 1.0)
-        i = np.minimum(np.floor(t).astype(int), len(ax) - 2)
+        i = np.clip(np.searchsorted(ax, x, side="right") - 1, 0, len(ax) - 2)
         idx.append(i)
-        w.append(t - i)
+        w.append(np.clip((x - ax[i]) / (ax[i + 1] - ax[i]), 0.0, 1.0))
     out = 0.0
     for corner in itertools.product((0, 1), repeat=len(axes)):
         wt = np.prod([wi if c else 1.0 - wi for c, wi in zip(corner, w, strict=True)], axis=0)
@@ -277,6 +279,7 @@ def _solve(P: dict[str, Any], wx: Arr, wy: Arr, cx: Arr, cy: Arr) -> dict[str, A
     cap = P["stw_cap_ms"]
     nv = int(round(cap / DV)) + 1
     Vg = np.linspace(0.0, cap, nv)
+    dv = cap / (nv - 1)                                   # the grid's own step: a cap off the DV grid used to give a polar above the cap (round 8, M-12)
     shape = np.broadcast(wx, wy, cx, cy).shape
     wx, wy, cx, cy = (np.asarray(a, float)[..., None] for a in (wx, wy, cx, cy))
     V = np.broadcast_to(Vg, shape + (nv,))
@@ -310,8 +313,8 @@ def _solve(P: dict[str, Any], wx: Arr, wy: Arr, cx: Arr, cy: Arr) -> dict[str, A
     awa = np.degrees(np.arctan2(np.abs(f["ay"]), -f["ax"]))
     scale = np.abs(f["fy"]) + np.abs(f["lk"]) + 1.0
     nres = np.abs(f["yaw"] + P["rudder_x_m"] * f["yr"]) / (np.abs(f["yaw"]) + np.abs(P["rudder_x_m"] * f["yr"]) + 1.0)
-    return dict(V=Vg[i0] + frac * DV, beta_deg=np.degrees(-at(beta, frac)), phi_deg=np.degrees(at(phi, frac)),
-                K=np.maximum((x0 - x1) / DV, 1.0), aws=at(f["aws"], frac), awa_deg=at(awa, frac), kd=at(kd, frac),
+    return dict(V=Vg[i0] + frac * dv, beta_deg=np.degrees(-at(beta, frac)), phi_deg=np.degrees(at(phi, frac)),
+                K=np.maximum((x0 - x1) / dv, 1.0), aws=at(f["aws"], frac), awa_deg=at(awa, frac), kd=at(kd, frac),
                 resid=at(np.abs(f["Y"]) / scale, frac), yaw_resid=at(nres, frac))
 
 
@@ -351,7 +354,7 @@ class WaveTab(NamedTuple):
 
 
 def _build_polar(P: dict[str, Any]) -> Polar:
-    tws, twa = np.arange(0.0, 30.01, 1.0), np.arange(0.0, 180.01, 2.5)
+    tws, twa = np.arange(0.0, 30.01, 1.0), TWA
     T, A = np.meshgrid(tws, twa, indexing="ij")
     g = np.radians(A)
     s = _solve(P, -T * np.cos(g), -T * np.sin(g), np.zeros_like(T), np.zeros_like(T))
@@ -683,6 +686,17 @@ def superposition_ratio(P: dict[str, Any], wind: float, current: float, against:
     return float(np.mean(still["stw"]) / np.mean(cpl["stw"])), float(np.mean(sog(still)) / np.mean(sog(cpl)))
 
 
+def table_gap(P: dict[str, Any], pol: Polar, n: int = 2000, seed: int = 8) -> Arr:
+    """|dV| [m/s] between the Stage-1 table and the direct current-coupled solve at `n` seeded random states: wind relative to the water 0 to 14 m/s,
+    current 0 to 1 m/s, any heading. Near the bow cone the speed falls from 0.55 m/s at 15 deg to 0 at 12.5 deg, which a coarse angle axis smears
+    (round 8, M-8)."""
+    rng = np.random.default_rng(seed)
+    cur = cv.vec_from_to(rng.uniform(0.0, 1.0, n), rng.uniform(0.0, 360.0, n))
+    wind = cur + cv.vec_from_to(rng.uniform(0.0, 14.0, n), rng.uniform(0.0, 360.0, n))
+    hd = rng.uniform(0.0, 360.0, n)
+    return np.abs(through_water(P, wind, cur, hd)["stw"] - through_water_table(P, pol, wind, cur, hd)["stw"])
+
+
 # mutation: not mutated. A receipt generator is the audit instrument, not the model: make receipts and the broken-physics tests grade it, and
 # its mutants are label, unit and source strings and widened tolerances, each costing a full receipt run.
 def receipts(P: dict[str, Any] | None = None) -> None:  # pragma: no mutate block
@@ -712,7 +726,7 @@ def receipts(P: dict[str, Any] | None = None) -> None:  # pragma: no mutate bloc
             "and the 5.4 m/s mean: the polar is capped at 3.3 m/s")
     bracket(grp, "no (TWS, TWA) in the polar exceeds the hull-speed cap", float(pol.f[..., 0].max()), 0.0, P["stw_cap_ms"] + 1e-9,
             "m/s", "Mazza et al. 2026 Part 1")
-    i, j = np.meshgrid([4, 8, 14], [16, 36, 56], indexing="ij")                    # TWS 4, 8, 14 m/s; TWA 40, 90, 140 deg
+    i, j = np.meshgrid([4, 8, 14], np.searchsorted(pol.twa, [40.0, 90.0, 140.0]), indexing="ij")        # TWS 4, 8, 14 m/s; TWA 40, 90, 140 deg
     v, lee, aws = pol.f[i, j, 0], np.radians(pol.f[i, j, 1]), pol.f[i, j, 4]
     g = np.radians(pol.twa[j])
     tri = np.hypot(-pol.tws[i] * np.cos(g) - v * np.cos(lee), -pol.tws[i] * np.sin(g) + v * np.sin(lee))
@@ -752,6 +766,10 @@ def receipts(P: dict[str, Any] | None = None) -> None:  # pragma: no mutate bloc
     err = np.abs(through_water(P, ww, cc, hh)["stw"] - through_water_table(P, pol, ww, cc, hh)["stw"])
     receipt(grp, "Stage-1 table == direct current-coupled solve (max |dV|)", float(err.max()), 0.0, 0.02, "m/s",
             "Galilean invariance (this module)", rel=False)
+    gap = table_gap(P, pol)
+    receipt(grp, "Stage-1 table == direct solve at 2000 seeded random states: fraction with |dV| > 0.2 m/s", float(np.mean(gap > 0.2)), 0.0, 0.0025, "-",
+            "Galilean invariance (this module); the speed steps from 0 to about 0.35 m/s at a true wind angle of 14 to 14.5 deg, so a cell there is "
+            "smeared whatever the axis: 0.45 % of states at 2.5 deg spacing, about 0.07 % at the 0.5 deg spacing used from 10 to 20 deg", rel=False)
     res = through_water(P, ww, cc, hh)["resid"]
     receipt(grp, "sway force balance residual at the root (max |Y| / force scale)", float(res.max()), 0.0, 0.05, "-",
             "4-DOF steady state: sum Y = 0", rel=False)

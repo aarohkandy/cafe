@@ -2079,3 +2079,9 @@ def test_r8_m47_a_single_candidate_is_all_1_candidate(run):
     report.write(run, m, plan)
     t = plain((run / "report" / "index.html").read_text())
     assert "All 1 candidate:" in t and "All 1 candidates" not in t
+
+
+# ---- review round 8, M-14: the mode text covers both vehicle classes and says it is the input, not the flight model
+def test_r8_m14_the_no_current_data_text_says_a_hole_in_the_input_not_a_flight_model_failure():
+    text = report.MODE_TEXT["no_current_data"]
+    assert "no finite wind, current or wave state" in text and "not a failure of the vehicle's flight model" in text

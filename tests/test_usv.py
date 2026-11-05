@@ -48,6 +48,11 @@ def sim(env, wps=((-165.0, -1.0), (-165.0, 1.0)), m=4, start=None, bias=-0.3, **
     return usv.USVSim(P, m, env, start or wps[0], 0.0, mis, perturb=dict(vpp_bias=np.full(m, bias)))
 
 
+def ia(deg):
+    """Column of the polar at the true wind angle `deg` (the angle axis is not uniform since round 8, M-8: 0.5 deg between 10 and 20)."""
+    return int(np.searchsorted(usv.tables(P)[0].twa, deg))
+
+
 def wind_to(speed, to_deg):
     return cv.vec_from_to(speed, to_deg)
 
@@ -190,11 +195,11 @@ def test_polar_is_physically_ordered():
     assert np.all(v >= 0) and np.all(v <= P["stw_cap_ms"] + 1e-9)
     assert np.all(v[0] == 0)                                                   # no wind, no speed
     assert np.all(v[:, 0] == 0)                                                # head to wind: in irons
-    assert np.all(v[3:15, 10:] > 0)
+    assert np.all(v[3:15, ia(25.0):] > 0)
     best = pol.twa[v[4:12].argmax(1)]
     assert np.all(best > 55) and np.all(best < 130)                            # fastest on a beam to broad reach
-    assert np.all(np.diff(v[:11, 40]) > 0)                                     # more wind, more speed (to 10 m/s, beam reach)
-    assert v[6, 72] < v[6, 40]                                                 # dead downwind is slower than a beam reach
+    assert np.all(np.diff(v[:11, ia(100.0)]) > 0)                                     # more wind, more speed (to 10 m/s, beam reach)
+    assert v[6, ia(180.0)] < v[6, ia(100.0)]                                                 # dead downwind is slower than a beam reach
 
 
 def test_leeway_is_to_leeward_and_small():
@@ -234,7 +239,7 @@ def test_heel_and_depower():
     heel, kd = pol.f[..., 2], pol.f[..., 6]
     assert np.all(heel <= P["heel_target_deg"] + 3.0)                          # the controller holds heel near its target
     # light air: full wing; gale close-hauled: depowered
-    assert kd[4, 40] == 1.0 and kd[25, 20] < 0.9
+    assert kd[4, ia(100.0)] == 1.0 and kd[25, ia(50.0)] < 0.9
     # heel follows from the moment balance Delta g GM sin(phi) = M_heel: half the GM, about twice the heel
     wind = wind_to(7.0, 180.0)
     h1 = usv.through_water(P, wind, np.zeros(2), 45.0)["heel_deg"]
@@ -277,7 +282,7 @@ def test_superposition_is_wrong_in_the_direction_sun_et_al_report():
 
 def test_cap_applies_to_the_biggest_gale():
     pol, _ = usv.tables(P)
-    assert np.isclose(pol.f[..., 0].max(), P["stw_cap_ms"]) and np.all(pol.f[20:, 40:60, 0] <= P["stw_cap_ms"] + 1e-9)
+    assert np.isclose(pol.f[..., 0].max(), P["stw_cap_ms"]) and np.all(pol.f[20:, ia(100.0):ia(150.0), 0] <= P["stw_cap_ms"] + 1e-9)
 
 
 # ------------------------------------------------------------------ tables and cache
@@ -1063,3 +1068,91 @@ def test_r7_m19_in_short_steep_head_seas_the_first_order_speed_is_credited_with_
     s = sim(AnalyticEnv(wind=(-6.0, 0.0), hs=2.0, tp=6.0, wave_to=180.0), m=1, bias=0.0)
     e = s._eval(np.array([[0.0]]), dict(wfrom=np.array([90.0]), tws=np.array([6.0]), hs=np.array([2.0]), tp=np.array([6.0]), wdir=np.array([180.0])))
     assert float(e["v"][0, 0]) == pytest.approx(v0 - r[-1] / k, abs=1e-6) and float(e["v"][0, 0]) == pytest.approx(0.573, abs=3e-3)
+
+
+# ---- review round 8, M-8: the Stage-1 table and the direct solve agree at random states, not only at five hand-picked ones
+GAP_ROW = "Stage-1 table == direct solve at 2000 seeded random states: fraction with |dV| > 0.2 m/s"
+
+
+def test_r8_m8_the_random_state_receipt_row_exists_and_the_refined_polar_passes_it():
+    row, pol = run_receipts()[GAP_ROW], usv.tables(P)[0]
+    assert row["ok"] and row["tol"] == 0.0025 and row["value"] == pytest.approx(float(np.mean(usv.table_gap(P, pol) > 0.2)))
+    assert row["value"] < 0.002                                                       # 2 of the 2000 states (0.45 % of states at 2.5 deg spacing)
+    cone = pol.twa[(pol.twa >= 10.0) & (pol.twa <= 20.0)]
+    assert np.diff(cone).max() == 0.5 and np.diff(pol.twa).max() == 2.5 and np.all(np.diff(pol.twa) > 0)
+
+
+def test_r8_m8_the_2_5_degree_axis_fails_the_random_state_row(fresh_tables, monkeypatch):
+    monkeypatch.setattr(usv, "TWA", np.arange(0.0, 180.01, 2.5))
+    row = run_receipts()[GAP_ROW]
+    assert not row["ok"] and row["value"] > 0.0025                                                   # 8 of 2000 = 0.4 %
+
+
+def test_r8_m8_lin_interpolates_on_a_non_uniform_axis_and_clamps():
+    ax = (np.array([0.0, 1.0, 1.5, 4.0]),)
+    tab = 3.0 * ax[0] + 1.0
+    x = np.array([-1.0, 0.25, 1.25, 2.75, 9.0])
+    assert np.allclose(usv._lin(tab, ax, (x,)), 3.0 * np.clip(x, 0.0, 4.0) + 1.0)
+
+
+# ---- review round 8, M-12: a cap that is not a multiple of the 0.05 m/s search step
+@pytest.mark.parametrize("cap", [3.33, 3.37, 0.04])
+def test_r8_m12_a_cap_off_the_search_grid_gives_a_polar_no_faster_than_the_cap(cap, fresh_tables):
+    pol = usv.tables({**P, "stw_cap_ms": cap})[0]
+    assert pol.f[..., 0].max() <= cap + 1e-9 and pol.f[..., 0].max() > 0.9 * cap      # the receipt's own bound (3.3303 > 3.33 before)
+
+
+def test_r8_m12_the_shipped_cap_is_a_multiple_of_the_step():
+    assert P["stw_cap_ms"] / (int(round(P["stw_cap_ms"] / usv.DV))) == pytest.approx(usv.DV, rel=1e-14)
+
+
+# ---- review round 8, M-36: the on-disk table key follows the code
+def test_r8_m36_the_table_cache_key_follows_the_source_of_the_module(monkeypatch):
+    a = usv._digest(P)
+    assert usv._digest(P) == a
+    monkeypatch.setattr(pathlib.Path, "read_bytes", lambda self: b"another version of usv.py")
+    assert usv._digest(P) != a
+
+
+# ---- review round 8, M-43: terms that move published outputs and no test noticed (mutants named in each docstring)
+def test_r8_m43_the_tack_penalty_keeps_an_upwind_station_run_to_tens_of_tacks():
+    """`pen` -> 0.0 gave 261 tacks in 24 h (27 with it); the old test asked for at least 3."""
+    km55 = 55e3 / 111320.0
+    mis = dict(mode="station", station=(-165.0, -1.0 + km55))
+    s = usv.USVSim(P, 8, AnalyticEnv(wind=(0.0, -6.0), hs=1.0), (-165.0, -1.0), 0.0, mis, perturb=dict(vpp_bias=np.full(8, -0.3)))
+    s.run(24 * HR, 60.0)
+    assert 3 <= s.n_tacks.max() <= 60
+
+
+def test_r8_m43_a_tack_slows_the_boat_by_the_stated_fraction():
+    """`tack_speed_frac` -> 1.0: the first tack step of two otherwise identical boats has speeds in the ratio of the fractions."""
+    env = AnalyticEnv(wind=(0.0, -6.0), hs=1.0)
+    mis, pb = dict(mode="station", station=(-165.0, 0.5)), dict(vpp_bias=np.array([-0.3]))
+    mk = lambda f: usv.USVSim({**P, "tack_speed_frac": f}, 1, env, (-165.0, -1.0), 0.0, mis, perturb=pb)
+    a, b = mk(1.0), mk(0.5)
+    for _ in range(1500):
+        a.step(60.0), b.step(60.0)
+        if a.n_tacks[0] > 0:
+            break
+    assert a.n_tacks[0] == b.n_tacks[0] == 1 and b.stw[0] == pytest.approx(0.5 * a.stw[0], rel=1e-9) and a.stw[0] > 0.3
+
+
+def test_r8_m43_the_keel_and_rudder_see_twice_the_geometric_aspect_ratio_and_the_leeway_follows():
+    """`ar = 2 span^2 / area` -> `span^2 / area` (free-surface image doubles the aspect ratio); leeway at 6 m/s true wind on the beam is 0.683 deg."""
+    assert usv._foil(P, "keel")[1] == pytest.approx(2.0 * P["keel_span_m"] ** 2 / P["keel_area_m2"]) == pytest.approx(6.3)
+    assert usv._foil(P, "rudder")[1] == pytest.approx(6.0) and usv._foil(P, "keel")[2] == pytest.approx(4.5975, abs=1e-3)
+    assert usv.through_water(P, np.array([-6.0, 0.0]), np.zeros(2), np.array([0.0]))["leeway_deg"][0] == pytest.approx(-0.6829, abs=2e-3)
+
+
+def test_r8_m43_the_heading_is_held_for_the_length_of_a_tack_even_when_a_replan_falls_inside_it():
+    """`self.hd = np.where(free, ...)` -> always: the branch is dead with the shipped numbers (replan 300 s, tack 120 s), so it is driven directly here."""
+    s = sim(AnalyticEnv(wind=(0.0, -6.0), hs=1.0), m=1)
+    s.hd[:] = 123.0
+    s.tack_until[:] = s.t + 100.0
+    s.t_plan = -np.inf
+    s.step(60.0)
+    assert s.hd[0] == 123.0
+    s.tack_until[:] = -np.inf
+    s.t_plan = -np.inf
+    s.step(60.0)
+    assert s.hd[0] != 123.0

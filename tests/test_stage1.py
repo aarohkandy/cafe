@@ -2114,3 +2114,43 @@ def test_r7_m27_merge_joins_the_heading_along_the_members_and_a_run_without_one_
     res = stage1.merge([batch(r)] * 2)
     assert res["vehicles"]["usv"]["heading"].shape == (7, 4) and np.array_equal(res["vehicles"]["usv"]["heading"][:, 2:], r["heading"], equal_nan=True)
     assert "heading" not in stage1.merge([batch({k: v for k, v in r.items() if k != "heading"})] * 2)["vehicles"]["usv"]
+
+
+# ---- review round 8, M-17: one fallback for the ship's RF antenna height, the platform's listed assumed input
+def test_r8_m17_the_ship_antenna_height_falls_back_to_the_uas_platforms_input_in_the_sortie_hook_and_in_the_mission_level_link(monkeypatch):
+    bare = dict(MISSION, ship=dict(id="ship", lon=-165.0, lat=0.0))
+    radio20 = dict(uas_plat()["radio"], ship_antenna_height_m=20.0)
+    assert stage1.ship_antenna_m(bare, radio20) == 20.0 and stage1.ship_antenna_m(MISSION, radio20) == 15.0 and stage1.ship_antenna_m(bare) == 10.0
+    out, _ = rf_scene(M=2, bad_samples=(0, 0))
+    t = TGRID[:3]
+    assert np.all(stage1._pos("ship", out, bare, t, radio20)[2] == 20.0) and np.all(stage1._pos("ship", out, MISSION, t, radio20)[2] == 15.0)
+    orig = uas.load_platform
+
+    def platform_with(m):
+        def load(name=None):
+            P = orig(name)
+            P["radio"] = dict(P["radio"], ship_antenna_height_m=m)
+            return P
+        return load
+    lk = link("usv-uas-rf", a="ship", b="uas")
+
+    def margin(mission, ship_m):
+        monkeypatch.setattr(uas, "load_platform", platform_with(ship_m))
+        return stage1.evaluate_link(lk, out, mission, flat_env(2), 2, 3, [0, 1])["margin_db"]
+    m20, m10 = margin(bare, 20.0), margin(bare, 10.0)
+    explicit = margin(dict(bare, ship=dict(bare["ship"], antenna_height_m=20.0)), 10.0)
+    assert np.array_equal(m20, explicit, equal_nan=True) and not np.array_equal(m20, m10, equal_nan=True)         # the literal 10 m ignored the platform's 20 m
+    assert np.array_equal(margin(MISSION, 20.0), margin(MISSION, 10.0), equal_nan=True)                  # the demo's own 15 m ignores the platform
+
+
+def test_r8_m17_the_sortie_hook_gives_the_link_budget_the_ship_antenna_of_the_platform_when_the_mission_has_none(monkeypatch):
+    seen = []
+    monkeypatch.setattr(comms, "rf_margin", lambda d, ht, hr, hs, radio: seen.append(hr) or np.ones(np.shape(d)))
+    P = uas_plat()
+    P["radio"] = dict(P["radio"], ship_antenna_height_m=20.0)
+    ts = np.array([T0 + 8 * 3600.0])
+    bare = dict(MISSION, ship=dict(id="ship", lon=-165.0, lat=0.0))
+    rel = np.zeros((2, 3))
+    for mission, expected in ((bare, 20.0), (MISSION, 15.0)):
+        stage1._uas_links(AnalyticEnv(hs=1.0), mission, (-165.0, 0.0), ts, P, 2)[0](float(ts[0]) + 10.0, rel)
+        assert seen[-1] == expected                                                                      # 10.0 for the bare mission before

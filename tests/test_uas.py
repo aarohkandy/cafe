@@ -721,3 +721,42 @@ def test_r7_m42_every_required_key_of_the_uas_platform_is_named_in_the_code_that
     src = "".join(f.read_text() for f in (pathlib.Path(uas.__file__).parents[1]).rglob("*.py"))
     unread = [(g, k) for g, table in uas.REQUIRED.items() for k in table if f'"{k}"' not in src and f"'{k}'" not in src]
     assert unread == [], unread
+
+
+# ---- review round 8: M-27 (t_end of a scrubbed member, an empty mission), M-38 (the physics socket is loopback only)
+def test_r8_m27_a_scrubbed_member_flew_for_zero_seconds_whatever_the_others_do():
+    def gust(t):
+        g = np.zeros((2, 3))
+        g[1, 0] = 6.0 if 300.0 <= t <= 400.0 else 0.0                                          # member 1 is scrubbed by a front
+        return g
+    r = fly(M=2, gust=gust)
+    assert list(r["scrubbed"]) == [False, True] and r["t_end"][1] == 0.0 and r["t_end"][0] > 100.0       # [t, t] before
+    assert fly(wind=(14.0, 0.0), M=2)["t_end"].tolist() == [0.0, 0.0]                                   # all scrubbed: as before
+
+
+def test_r8_m27_a_mission_with_no_launch_time_is_a_named_error():
+    with pytest.raises(ValueError, match="fly_mission needs at least one launch time"):
+        uas.fly_mission(AnalyticEnv(), uas.steaming(), [], M=3, origin=ORIGIN, plat=fast_plat())
+
+
+def test_r8_m38_the_sitl_physics_socket_binds_the_loopback_interface_only(tmp_path, monkeypatch):
+    import types
+    from cafe import emulator
+    monkeypatch.setattr(emulator, "SITL_DIR", fake_sitl(tmp_path, "pass\n"))
+    bound = []
+
+    class Rec:
+        def __init__(self, *a):
+            pass
+
+        def bind(self, addr):
+            bound.append(addr)
+            raise RuntimeError("stop after bind")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(uas, "socket", types.SimpleNamespace(AF_INET=2, SOCK_DGRAM=2, socket=Rec))
+    with pytest.raises(RuntimeError, match="stop after bind"):
+        uas.fly_sitl(AnalyticEnv(wind=(0.0, 0.0)), uas.steaming(), 0.0, origin=ORIGIN, plat=P, max_s=0.5, workdir=str(tmp_path / "wd"), instance=3)
+    assert bound == [("127.0.0.1", 9002 + 10 * 3)]                                                       # ("0.0.0.0", ...) before

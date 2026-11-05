@@ -542,3 +542,47 @@ def test_r8_m40_a_profile_that_ends_above_the_bottom_is_deepened_to_it(monkeypat
 def test_r8_m40_the_loss_is_minus_20_log10_of_the_first_field_row_and_floors_a_zero(monkeypatch, tmp_path):
     tl, _ = _run_with_a_fake_field(monkeypatch, tmp_path, Z, C, np.array([[0.5, 0.0], [9.0, 9.0]]))
     assert np.allclose(tl, [-20 * np.log10(0.5), 600.0])                                          # row 0 only; |p| floored at 1e-30
+
+
+# ---- review round 8: M-37 (PATH), M-49 (the curved against the plane-earth loss at nulls), M-43 (a retried Iridium message is later)
+def test_r8_m37_bellhop_directory_is_put_on_the_path_once_not_on_every_call(monkeypatch):
+    import arlpy.uwapm as pm
+    base = "/usr/bin" + __import__("os").pathsep + "/bin"
+    monkeypatch.setenv("PATH", base)
+    monkeypatch.setattr(c, "_bellhop_dir", lambda: "/opt/bellhop/bin")
+
+    def stop(*a, **k):
+        raise RuntimeError("stop before bellhop")
+    monkeypatch.setattr(pm, "create_env2d", stop)
+    lengths = []
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="stop before bellhop"):
+            c._run_bellhop(np.array([1000.0]), 9000.0, np.array([-5.0, -50.0]), np.array([1500.0, 1490.0]), 5.0, 5.0, 100.0)
+        lengths.append(len(__import__("os").environ["PATH"]))
+    assert lengths == [len(base) + len("/opt/bellhop/bin") + 1] * 3                  # +17 on the first call, 0 after (10 per call before)
+    monkeypatch.setenv("PATH", "/opt/bellhop/bin" + __import__("os").pathsep + base)
+    with pytest.raises(RuntimeError):
+        c._run_bellhop(np.array([1000.0]), 9000.0, np.array([-5.0, -50.0]), np.array([1500.0, 1490.0]), 5.0, 5.0, 100.0)
+    assert __import__("os").environ["PATH"] == "/opt/bellhop/bin" + __import__("os").pathsep + base
+
+
+def test_r8_m49_curved_and_plane_earth_losses_differ_by_tens_of_db_at_nulls_for_a_high_antenna_and_a_calm_sea():
+    d = np.arange(100.0, 2000.5, 1.0)
+
+    def gap(ht, hr, hs):
+        return float(np.abs(c.two_ray_loss_db(d, ht, hr, hs, F915) - c.two_ray_loss_db(d, ht, hr, hs, F915, a_eff=c.FLAT_A)).max())
+    assert gap(2.2, 108.1, 0.0) == pytest.approx(25.8, abs=0.5)                          # the UAS at the top of its profile: the docstring's 26 dB
+    assert gap(10.0, 18.1, 0.0) == pytest.approx(19.5, abs=0.5)
+    assert gap(2.2, 10.0, 0.0) < 1.0 and gap(10.0, 18.1, 3.0) < 0.5                       # a surface pair, or a rough sea: close
+    assert "0.15 dB." not in c.two_ray_loss_db.__doc__ and "26 dB" in c.two_ray_loss_db.__doc__
+
+
+def test_r8_m43_a_retried_iridium_message_arrives_one_failed_attempt_later_per_retry(monkeypatch):
+    """`first * fail_cost_s` removed from the session time: every success took the same time, retried or not."""
+    p = c._yaml("radios.yaml")["iridium"]["sbd"]
+    _yaml_with(monkeypatch, "sbd", p_success=0.5, session_setup_sigma=0.0)
+    ok, t = c.iridium_session(100, np.random.default_rng(11), 4000)
+    vals = np.unique(np.round(t[ok], 6))
+    first_try = vals.min()
+    assert len(vals) == p["max_attempts"] and np.allclose(vals - first_try, p["fail_cost_s"] * np.arange(p["max_attempts"]))
+    assert not ok.all() and np.allclose(t[~ok], p["max_attempts"] * p["fail_cost_s"])

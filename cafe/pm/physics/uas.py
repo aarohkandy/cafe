@@ -34,7 +34,7 @@ from jax import lax
 from numpy.typing import NDArray
 
 from ..env import conventions as cv
-from ..config import _yaml as read_yaml
+from ..config import platform_doc as read_yaml
 from . import check_params
 
 Arr = Any
@@ -76,16 +76,17 @@ def check_provenance(node: Any, path: str = "") -> list[str]:
 # What the model reads, per group, with the kind of value each must be (physics.check_params; see glider.REQUIRED). `radio.rfd900x` and `link_2g4` are
 # not read here (stage 1 takes radios from platforms/radios.yaml).
 REQUIRED = {
-    "airframe": dict(mass_kg="pos", inertia_kgm2="pos", motor_radius_m="pos", hotel_w="nonneg"),
+    "airframe": dict(mass_kg="pos", inertia_kgm2="list3:pos", motor_radius_m="pos", hotel_w="nonneg"),
     "rotor": dict(thrust_max_n_each="pos", omega_max_rpm="pos", prop_diameter_m="pos", figure_of_merit="pos", motor_time_const_s="pos", esc_motor_eff="pos",
                   rho_ref_kgm3="pos", yaw_torque_ratio_priority="nonneg"),
     "aero": dict(d_x="pos", d_y="pos", d_z="nonneg"),
-    "battery": dict(energy_wh="pos", cells="pos", v_nom_cell="pos", peukert_exponent="pos", peukert_hours="pos", r_int_ohm="nonneg", ocv_soc="unit",
-                    ocv_cell_v="pos", cutoff_cell_v="pos", reserve_frac="frac"),
+    "battery": dict(energy_wh="pos", cells="pos", v_nom_cell="pos", peukert_exponent="pos", peukert_hours="pos", r_int_ohm="pos", ocv_soc="list:unit",
+                    ocv_cell_v="list:pos", cutoff_cell_v="pos", reserve_frac="frac"),
     "limits": dict(max_tilt_deg="pos", tilt_exceedance_deg="pos", max_airspeed_ms="pos"),
     "controller": dict(pos_p="pos", vel_p="pos", vel_i="nonneg", vel_z_p="pos", vel_z_i="nonneg", accel_wp="pos", accel_z="pos", speed_up="pos",
                        speed_dn="pos", att_p="pos", rate_p="pos", yaw_slew_degs="pos", vel_i_max="nonneg"),
-    "sortie": dict(duration_s="pos", levels_m="pos", leg_speed_ms="pos", leg_heading="other", rtl_height_m="nonneg", wp_radius_m="pos", land_speed_ms="pos",
+    "sortie": dict(duration_s="pos", levels_m="list:pos", leg_speed_ms="pos", leg_heading="other", rtl_height_m="nonneg", wp_radius_m="pos",
+                   land_speed_ms="pos",
                    deck_height_m="nonneg", time_limit_factor="pos", min_profile_fraction="unit", hard_stop_factor="pos"),
     "launch_rule": dict(max_mean_wind_ms="pos", wind_check_height_m="pos", gust_lookahead_min="nonneg", gust_front_threshold_ms="pos"),
     "failure": dict(stuck_window_s="pos", stuck_closing_ms="nonneg", stuck_min_cmd_ms="nonneg"),
@@ -109,6 +110,12 @@ def load_platform(path: Optional[str] = None) -> dict[str, Any]:
         raise ValueError(f"{p.name}: missing {missing}; add them (see platforms/quad_uas.yaml for the layout)")
     for g, table in REQUIRED.items():
         check_params(table, P[g], f"{p.name}:{g}", "quad_uas")
+    soc, cell = np.asarray(P["battery"]["ocv_soc"], float), np.asarray(P["battery"]["ocv_cell_v"], float)             # round 8, M-26: interpolated on soc
+    if soc.size < 2 or np.any(np.diff(soc) <= 0):
+        raise ValueError(f"{p.name}:battery.ocv_soc: {P['battery']['ocv_soc']!r} must be at least two states of charge in strictly increasing order; "
+                         f"the cell voltage is interpolated on it")
+    if cell.size != soc.size:
+        raise ValueError(f"{p.name}:battery.ocv_cell_v: {cell.size} values for {soc.size} states of charge in ocv_soc; give one cell voltage for each")
     return P
 
 
@@ -561,7 +568,8 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
     -> dict: flags / t_first (s after launch) per FLAGS, scrubbed, failed, landed, ditched, energy_wh, soc_end, max_tilt_deg,
     max_dist_m, sat_s (seconds the horizontal-force demand was beyond the lean-angle clamp), demand_ratio_max (the largest demand / clamp), track
     (1 Hz positions relative to the ship: use them for links), launch (the weather gate's numbers), wp_done (M,) and n_wp: the waypoints reached
-    of the n_wp in the pattern (flag `profile_incomplete`: a flown sortie below sortie.min_profile_fraction of them, first at its end)."""
+    of the n_wp in the pattern (flag `profile_incomplete`: a flown sortie below sortie.min_profile_fraction of them, first at its end); t_end is the
+    seconds after launch the member stopped (0 for a scrubbed one)."""
     P = plat or load_platform()
     so = P["sortie"]
     if turb is not None and turb.shape[1] * DT_ENV < so["duration_s"] + 60.0:
@@ -585,6 +593,7 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
         out["flags"] = {k: v & gate["ok"] for k, v in out["flags"].items()}
         out["t_first"] = {k: np.where(out["flags"][k], v, np.nan) for k, v in out["t_first"].items()}
         out["sat_s"], out["demand_ratio_max"] = np.where(gate["ok"], out["sat_s"], 0.0), np.where(gate["ok"], out["demand_ratio_max"], 1.0)
+        out["t_end"] = np.where(gate["ok"], out["t_end"], 0.0)                              # a scrubbed member flew for 0 s, as when all are (round 8, M-27)
     else:
         z, zb = np.zeros(M), np.zeros(M, bool)
         out = dict(flags={k: zb.copy() for k in FLAGS}, t_first={k: np.full(M, np.nan) for k in FLAGS}, landed=zb.copy(), ditched=zb.copy(),
@@ -599,7 +608,9 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
 def fly_mission(env: Any, ship: Ship, launch_times: Arr, *, M: int, **kw: Any) -> dict[str, Any]:
     """N sorties (each starts on a full pack: the ship crew swaps it) -> dict(sorties=[fly_sortie results], mission=per-member roll-up):
     n_scrubbed / n_flown / n_failed / n_landed, flags (any sortie), t_first (earliest absolute time per flag), failed,
-    first_failure (time, mode index into FLAGS)."""
+    first_failure (time, mode index into FLAGS). An empty `launch_times` is a ValueError: the caller decides whether a mission with no launch is a mission."""
+    if np.size(launch_times) == 0:
+        raise ValueError("fly_mission needs at least one launch time")                           # round 8, M-27
     sorties = [fly_sortie(env, ship, float(t), M=M, **kw) for t in launch_times]
     flags = {k: np.any([s["flags"][k] for s in sorties], 0) for k in FLAGS}
     ta = {k: np.where(np.isnan(a := np.stack([s["t_first"][k] + s["t_launch"] for s in sorties])), np.inf, a).min(0) for k in FLAGS}
@@ -747,7 +758,7 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
     sd = pathlib.Path(emulator.SITL_DIR)
     defaults = ",".join([str(sd / "copter.parm"), str(sd / "copter-X.parm"), str(wd / "uas.parm")])
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", 9002 + 10 * inst))
+    sock.bind(("127.0.0.1", 9002 + 10 * inst))                          # loopback only: the firmware is started with --model JSON:127.0.0.1 (round 8, M-38)
     proc = subprocess.Popen([str(exe), "-w", "--model", "JSON:127.0.0.1", "-I", str(inst), "--sysid", str(inst + 1), "--home",
                              f"{SITL_HOME[1]:.7f},{SITL_HOME[0]:.7f},{so['deck_height_m']:.2f},0", "--defaults", defaults], cwd=wd,
                             stdout=open(wd / "sitl.out", "w"), stderr=subprocess.STDOUT)
