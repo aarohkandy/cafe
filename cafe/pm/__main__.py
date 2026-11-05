@@ -132,7 +132,8 @@ def main(argv: list[str] | None = None) -> int:
             return _whatif(a)
         if a.cmd == "validate":
             m = load_mission(a.mission)
-            print(f"{a.mission}: valid ({len(m['vehicles'])} vehicles, {len(m['links'])} links)")
+            nv, nl = len(m["vehicles"]), len(m["links"])
+            print(f"{a.mission}: valid ({nv} vehicle{'s' * (nv != 1)}, {nl} link{'s' * (nl != 1)})")
             go = round(1 - intervals.P_FAIL_GO, 12)
             if go > 0.75:                                                  # round 8, M-7: the interval term stays at 0.75, so it is looser than 1 - go
                 n0 = next(n for n in range(1, 100_000) if intervals.verdict(0, n)["verdict"] == "GO")

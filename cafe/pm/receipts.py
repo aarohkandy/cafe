@@ -292,12 +292,17 @@ def slow_group(group: str, minutes: int, scope: str, runner: Callable[[], Any], 
         p = store_path(group)
         why = f"no stored result at {p}"
         if p.is_file():
-            rec = json.loads(p.read_text())
-            if rec["code_digest"] == code_digest(scope):
-                tag = f"[stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}]"
-                R.OUT.extend(dict(d, source=f"{d.get('source', '')} {tag}") for d in rec["rows"])
-                return None
-            why = f"the stored result ({rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}) was made by different code"
+            from .config import ConfigError, json_object
+            try:
+                rec = json_object(p, "the command above writes it again")      # cut short by a killed or full-disk write: it was never a result
+            except ConfigError as e:
+                why = str(e)
+            else:
+                if rec["code_digest"] == code_digest(scope):
+                    tag = f"[stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}]"
+                    R.OUT.extend(dict(d, source=f"{d.get('source', '')} {tag}") for d in rec["rows"])
+                    return None
+                why = f"the stored result ({rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}) was made by different code"
         raise NotRun(f"not run on this code: `python -m cafe.pm receipts --slow --only {group}` (≈{minutes} min); {why}; digest = {SCOPES[scope]}")
     return job
 

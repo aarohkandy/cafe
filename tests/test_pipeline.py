@@ -3367,3 +3367,72 @@ def test_r8_merge_the_stored_ustar_fraction_is_not_rounded_across_the_briefs_flo
     value = check_of(d, "coare_ustar_vs_umwm_ust")["value"]
     finding = [x for x in d["notes"] if x.startswith("BRIEF 2.1 finding")]
     assert value == frac and bool(finding) == (value < pipeline.USTAR_AGREE_FRACTION) == (frac < 0.9)
+
+
+# ---- review round 8, lead item L0
+
+def test_r8_l0_a_truncated_derived_digest_or_zarr_json_is_a_layer_to_rebuild_not_a_traceback(tmp_path, data_copy):
+    """`_derived_current` read both files with a bare json.loads: a kill or a full disk right after surface.build left a file cut short, and every `run` and
+    `fetch` then ended in a JSONDecodeError."""
+    ctx = ctx_for(tmp_path / "a")
+    run_stage(pipeline.s_ingest, ctx, "ingest")
+    dg, zj = ctx.cache / surface.DIGEST, ctx.cache / "derived.zarr" / "zarr.json"
+    key = json.loads(dg.read_text())["built_from"]
+    assert pipeline._derived_current(ctx.cache, key) and pipeline._derived_current(ctx.cache)
+    for f in (dg, zj):
+        good = f.read_text()
+        for bad in (good[:60], "", "[1]"):
+            f.write_text(bad)
+            assert not pipeline._derived_current(ctx.cache, key)
+        f.write_text(good)
+    good = zj.read_text()
+    zj.write_text(good[:60])
+    assert not pipeline._derived_current(ctx.cache)                      # Context.env asks without a key: no surface layer, and the checks say rerun fetch
+    zj.write_text(good)
+    good = dg.read_text()
+    dg.write_text(good[:60])
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "b"), "ingest")      # ingest rebuilds the layer and writes the record whole
+    assert json.loads(dg.read_text())["built_from"] == key and pipeline._derived_current(ctx.cache, key)
+
+
+def test_r8_l0_the_forcing_check_covers_every_wrf_umwm_and_ocean_field_the_model_reads_and_each_bound_is_a_documented_assumption(tmp_path):
+    a = config.assumptions()
+    keys = {k for _, k, _ in pipeline.FORCING_WRF + pipeline.FORCING_UMWM + pipeline.FORCING_OCEAN}
+    assert {"air_temp_range_k", "current_range_ms", "salinity_range_psu", "wave_period_range_s", "rain_rate_max_mm_h"} <= keys
+    for k in keys:
+        e = a[f"ingest.{k}"]
+        assert e["why"].startswith("Gross-error bound, not a model of the weather") and e["unit"] and e["replace_with"], k
+    ctx = ctx_for(tmp_path / "r")
+    assert {v for _, _, v in pipeline.FORCING_WRF} <= set(ctx.env.W) and {v for _, _, v in pipeline.FORCING_UMWM} <= set(ctx.env.U)
+
+
+@pytest.mark.parametrize("k", [v for _, _, v in pipeline.FORCING_WRF])
+def test_r8_l0_one_wrf_value_of_1e6_in_any_field_fails_the_forcing_check_naming_the_field(tmp_path, k):
+    """M-1 bounded wind, SST, swh and ust only: T2, TSK, Q2, PSFC, SWDOWN, PBLH, HFX, LH, QFX, RAINC, RAINNC, GLW, UST and rain_mm_h at 1e6 passed."""
+    c = _forcing_check(tmp_path, lambda e: e.W[k].__setitem__((2, 3, 3), 1e6))
+    assert not c["ok"] and c["value"] == 1 and k in c["note"] and "the worst 1e+06" in c["note"], c
+
+
+@pytest.mark.parametrize("k", ["dwp", "mss", "wspd", "swh", "ust"])
+def test_r8_l0_one_umwm_value_of_1e6_at_a_sea_node_fails_the_forcing_check_naming_the_field(tmp_path, k):
+    c = _forcing_check(tmp_path, lambda e: e.U[k].__setitem__((3, *np.argwhere(e.sea)[0]), 1e6))
+    assert not c["ok"] and c["value"] == 1 and f"UMWM {k}" in c["note"] and "the worst 1e+06" in c["note"], c
+
+
+@pytest.mark.parametrize("var,absurd", [("water_u", 900.0), ("water_v", 900.0), ("water_temp", 900.0), ("salinity", 400.0)])
+def test_r8_l0_an_absurd_current_temperature_or_salinity_in_the_ocean_store_fails_the_forcing_check(tmp_path, var, absurd):
+    import xarray as xr
+    ctx = ctx_for(tmp_path / "r")
+    oc = pipeline.ocean(ctx)
+    oc.ds[var] = xr.full_like(oc.ds[var], absurd)
+    c = check_of(ingest_checks(ctx, oc), "forcing_in_physical_range")
+    assert not c["ok"] and c["value"] == oc.ds[var].size and f"ocean {var}: " in c["note"] and f"the worst {absurd:g}" in c["note"], c
+    oc.ds[var] = xr.full_like(oc.ds[var], np.inf)
+    assert not check_of(ingest_checks(ctx_for(tmp_path / "r2"), oc), "forcing_in_physical_range")["ok"]
+
+
+def test_r8_l0_nan_in_the_ocean_store_is_land_and_is_not_judged_by_the_range_check(tmp_path):
+    ctx = ctx_for(tmp_path / "r")
+    oc = pipeline.ocean(ctx)
+    assert np.isnan(oc.ds["water_u"].values).any()                       # the fixture's store has land
+    assert check_of(ingest_checks(ctx, oc), "forcing_in_physical_range")["ok"]

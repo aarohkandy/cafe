@@ -78,8 +78,8 @@ def assumed(name: str, config: Optional[pathlib.Path] = None) -> float:
     """An assumed relative uncertainty: config/assumptions.yaml key `dtmb5415.<name>` if present, else the default."""
     path = config or pathlib.Path(__file__).resolve().parents[2] / "config" / "assumptions.yaml"
     if path.exists():
-        import yaml
-        entry = (yaml.safe_load(path.read_text()) or {}).get(f"dtmb5415.{name}")
+        from cafe.pm.config import read_yaml
+        entry = (read_yaml(path) or {}).get(f"dtmb5415.{name}")
         if entry is not None:
             return float(entry["value"] if isinstance(entry, dict) else entry)
     return ASSUMED[name][0]

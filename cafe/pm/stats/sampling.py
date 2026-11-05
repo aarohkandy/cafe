@@ -13,7 +13,6 @@ import pathlib
 from typing import Any
 
 import numpy as np
-import yaml
 from scipy import stats
 
 PERTURBATIONS = pathlib.Path(__file__).resolve().parents[3] / "config" / "perturbations.yaml"
@@ -39,7 +38,8 @@ def marginal(spec: dict[str, Any]) -> Any:
 
 def load_perturbations(path: str | pathlib.Path | None = None) -> dict[str, dict[str, Any]]:
     """Read config/perturbations.yaml; every entry must carry value, unit, citation and kind: prior (sourced) or assumed."""
-    cfg: dict[str, dict[str, Any]] = yaml.safe_load(pathlib.Path(path or PERTURBATIONS).read_text())
+    from ..config import read_yaml                                  # the strict reader: a repeated key or a leading-zero number is refused, as in every stage
+    cfg: dict[str, dict[str, Any]] = read_yaml(path or PERTURBATIONS)
     for k, e in cfg.items():
         miss = {"value", "unit", "citation", "kind"} - e.keys()
         if miss or e["kind"] not in ("prior", "assumed"):              # assumed: no source, listed in the credibility report

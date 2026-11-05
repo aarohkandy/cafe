@@ -336,3 +336,44 @@ def test_r8_m35_the_versions_carry_bellhop_and_the_libraries_the_verdicts_depend
     assert ledger.versions()["bellhop"] == ledger.sha256(tmp_path / "bellhop.exe") != "absent"
     (tmp_path / "bellhop.exe").write_bytes(b"two")
     assert ledger.versions()["bellhop"] == ledger.sha256(tmp_path / "bellhop.exe")
+
+
+# ---- review round 8, lead item L0: an input that was hashed and is gone
+
+def test_r8_l0_a_deleted_hashed_input_breaks_done_but_a_url_and_an_unhashed_one_do_not(tmp_path):
+    """done() checked an input only if it still existed, so a store or file removed entirely was 'up to date' and the stage was resumed on data that is gone."""
+    store = tmp_path / "ocean.zarr"
+    (store / "water_u" / "c").mkdir(parents=True)
+    (store / "water_u" / "c" / "0").write_bytes(b"\x01")
+    (store / "zarr.json").write_text('{"attributes": {"manifest_sha256": "abc"}}')
+    src = tmp_path / "src.txt"
+    src.write_text("v1")
+    with Ledger(tmp_path, "ingest", "h1") as L:
+        L.input(store, sha="abc", tree=ledger.tree_sha256(store), kind="ocean store")
+        L.input(src)
+        L.input("https://example.org/remote.nc", sha="b" * 64)         # the hash of the bytes extracted from a URL: no path to look for
+        L.input(tmp_path / "never_there.txt")                          # recorded without a hash (it did not exist)
+    assert done(tmp_path, "ingest", "h1") is not None
+    src.unlink()
+    assert done(tmp_path, "ingest", "h1") is None
+    src.write_text("v1")
+    assert done(tmp_path, "ingest", "h1") is not None
+    import shutil
+    shutil.rmtree(store)
+    assert done(tmp_path, "ingest", "h1") is None
+    assert ledger.hashed(dict(ref="s3://b/k", sha256="x")) is False and ledger.hashed(dict(ref="/x", sha256=None)) is False
+    assert ledger.hashed(dict(ref="/x", tree_sha256="t")) is True
+
+
+def test_r8_l0_a_damaged_throughput_file_stops_the_ledger_with_the_config_error_not_a_json_traceback(tmp_path, monkeypatch):
+    """`machine()` (every Ledger's header) read config/throughput.json with a bare json.loads, the file budget.throughput now guards."""
+    from cafe.pm import config
+    root = tmp_path / "repo"
+    (root / "config").mkdir(parents=True)
+    f = root / "config" / "throughput.json"
+    monkeypatch.setattr(ledger, "ROOT", root)
+    f.write_text('{"machine": {"id": "x"')
+    with pytest.raises(config.ConfigError, match=r"throughput.json: not a JSON object .*make bench"):
+        ledger.machine()
+    f.write_text('{"machine": {"id": "m1", "measured": "d"}}')
+    assert ledger.machine()["bench_id"] == "m1"

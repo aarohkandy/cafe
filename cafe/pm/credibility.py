@@ -24,8 +24,6 @@ import pathlib
 import re
 from typing import Any
 
-import yaml
-
 from . import config, pipeline
 from .audit import STAGES, ledger_problems
 from .stats import intervals, sampling
@@ -191,7 +189,7 @@ def _prov(node: Any, path: str, file: str, out: list[dict[str, Any]]) -> None:
 def platform_items(root: pathlib.Path = ROOT) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for f in sorted((root / "platforms").glob("*.yaml")):
-        _prov(yaml.safe_load(f.read_text()), "", f"platforms/{f.name}", out)
+        _prov(config.read_yaml(f), "", f"platforms/{f.name}", out)
     return out
 
 
@@ -237,13 +235,13 @@ def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None) -
     items = []
     used = run_priors(run)
     fit = (_json(run / "ingest" / "env_sigmas_fitted.json") if run else None) or {}               # the TAO fit Context.env feeds back as the tagged sigmas
-    for k, e in (yaml.safe_load((root / "config" / "assumptions.yaml").read_text()) or {}).items():
+    for k, e in (config.read_yaml(root / "config" / "assumptions.yaml") or {}).items():
         got = fit.get(k.removeprefix("env.sigma.")) if k.startswith("env.sigma.") else None
         items.append(dict(id=f"assumptions.yaml:{k}", file="config/assumptions.yaml", kind="assumed" if got is None else "fitted",
                           value=repr(e.get("value")) if got is None else f"this run used {got:.3g} (fitted from the TAO comparison); "
                                                                          f"assumed {e.get('value')!r}",
                           unit=str(e.get("unit", "")), why=str(e.get("why", "")), replace_with=str(e.get("replace_with", ""))))
-    for k, e in (yaml.safe_load((root / "config" / "perturbations.yaml").read_text()) or {}).items():
+    for k, e in (config.read_yaml(root / "config" / "perturbations.yaml") or {}).items():
         assumed = e.get("kind") == "assumed" or "ASSUMED" in str(e.get("citation", ""))
         txt = dist_text(e)
         sampled = e.get("dist") in ("normal", "lognormal", "uniform")           # a fixed setting is not in the ensemble's priors
@@ -359,7 +357,7 @@ class Facts:
         self.run, self.root, self.data = run, root, data
         self.ledgers = {st: _json(run / "checkpoints" / st / "ledger.json") for st in STAGES}
         self.have = {st: d for st, d in self.ledgers.items() if d}
-        self.mission = yaml.safe_load((run / "mission.yaml").read_text()) if (run / "mission.yaml").is_file() else None
+        self.mission = config.read_yaml(run / "mission.yaml") if (run / "mission.yaml").is_file() else None
         self.s1b = _json(run / "stage1b" / "summary.json")
         self.s1 = _json(run / "stage1" / "summary.json")
         self.refit = _json(run / "refit" / "refit.json") or {}
@@ -368,7 +366,7 @@ class Facts:
         links = {lk["kind"] for lk in (self.mission or {}).get("links", [])}
         self.used = used | ({"radios"} if "rf" in links else set()) | ({"modems"} if "acoustic" in links else set())
         self.items = platform_items(root)
-        self.perts = yaml.safe_load((root / "config" / "perturbations.yaml").read_text()) or {}
+        self.perts = config.read_yaml(root / "config" / "perturbations.yaml") or {}
         self.vv = vv20_rows(data)
         why = subgrid_uncalibrated(run, root)
         sub = [] if why is None else [dict(SUBGRID_LIMITATION, text=why)]

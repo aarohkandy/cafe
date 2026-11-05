@@ -273,3 +273,26 @@ def test_r7_m2_a_truncated_chunk_of_the_derived_layer_is_a_config_error_naming_i
     (cache / "derived.zarr" / "zarr.json").write_text("{not json")
     with pytest.raises(ConfigError, match="cannot be read"):                                      # and an unreadable metadata file is the same advice
         S.SurfaceLayer(cache)
+
+
+def test_r8_l0_the_digest_record_is_written_whole_or_not_at_all(ci_env, tmp_path, monkeypatch):
+    """`build` wrote derived.digest.json in place: a kill or a full disk inside the write left a file cut short, which `_derived_current` then crashed on."""
+    import json
+    import pathlib
+    d = tmp_path / "cache"
+    for s in ("wrf.zarr", "umwm.zarr"):
+        shutil.copytree(ci_env.cache / "orca" / s, d / "orca" / s)
+    S.build(GriddedEnv(d, env_sigmas()), d, "key-1", log=lambda m: None)
+    before = (d / S.DIGEST).read_text()
+    real = pathlib.Path.write_text
+
+    def killed(self, data, *a, **k):
+        if self.name.startswith("derived.digest"):                                      # the record or the temporary file it is written through
+            real(self, data[:10], *a, **k)
+            raise OSError(28, "No space left on device")
+        return real(self, data, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "write_text", killed)
+    with pytest.raises(OSError):
+        S.build(GriddedEnv(d, env_sigmas()), d, "key-2", log=lambda m: None)
+    monkeypatch.undo()
+    assert (d / S.DIGEST).read_text() == before and json.loads(before)["built_from"] == "key-1"          # the old record, whole; the new store is not current

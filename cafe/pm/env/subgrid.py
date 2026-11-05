@@ -21,7 +21,6 @@ from typing import Any, NamedTuple
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
-import yaml
 
 from .. import Tagged
 from . import conventions as cv
@@ -54,7 +53,8 @@ def load_config(path: str | None = None) -> dict[str, Any]:
 
 @functools.lru_cache(maxsize=None)
 def _assumptions() -> dict[str, Any]:
-    out: dict[str, Any] = yaml.safe_load((_CFG_DIR / "assumptions.yaml").read_text())
+    from ..config import read_yaml
+    out: dict[str, Any] = read_yaml(_CFG_DIR / "assumptions.yaml")
     return out
 
 

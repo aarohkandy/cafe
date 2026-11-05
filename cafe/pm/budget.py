@@ -21,7 +21,7 @@ slice affords is not run (`les_windows`): it could only fail the viscosity_floor
 """
 from __future__ import annotations
 
-import json, math, os, pathlib
+import math, os, pathlib
 from collections import Counter
 from typing import Any
 
@@ -64,7 +64,8 @@ class PlanError(ValueError):
 
 
 def throughput(path: str | pathlib.Path = THROUGHPUT) -> dict[str, Any]:
-    return json.loads(pathlib.Path(path).read_text()) if pathlib.Path(path).exists() else {}
+    from .config import THROUGHPUT_FIX, json_object
+    return json_object(pathlib.Path(path), THROUGHPUT_FIX) if pathlib.Path(path).exists() else {}
 
 
 def member_cost(thr: dict[str, Any], cls: str) -> tuple[tuple[float, float], str]:

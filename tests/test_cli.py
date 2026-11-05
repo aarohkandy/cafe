@@ -10,6 +10,7 @@ import shutil
 import sys
 
 import pytest
+import yaml
 
 from cafe.pm import __main__ as cli, audit, budget, config, par, pipeline, whatif
 from cafe.pm.env import ocean as ocean_mod
@@ -65,6 +66,15 @@ def test_ingest_ocean_writes_the_lab_hycom_into_the_store_the_mission_names_and_
 def test_validate_reports_the_vehicles_and_links_of_a_valid_mission(capsys):
     assert cli.main(["validate", "--mission", MISSION]) == 0
     assert capsys.readouterr().out == f"{MISSION}: valid (4 vehicles, 3 links)\n"
+
+
+def test_r8_l0_validate_counts_one_vehicle_in_the_singular(tmp_path, capsys):
+    one = tmp_path / "one.yaml"
+    d = yaml.safe_load(pathlib.Path(MISSION).read_text())
+    d["vehicles"], d["links"] = d["vehicles"][:1], []
+    one.write_text(yaml.safe_dump(d))
+    assert cli.main(["validate", "--mission", str(one)]) == 0
+    assert capsys.readouterr().out == f"{one}: valid (1 vehicle, 0 links)\n"
 
 
 def test_a_mission_that_fails_validation_exits_2_with_the_reason_on_stderr(tmp_path, capsys):

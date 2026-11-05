@@ -2154,3 +2154,19 @@ def test_r8_m17_the_sortie_hook_gives_the_link_budget_the_ship_antenna_of_the_pl
     for mission, expected in ((bare, 20.0), (MISSION, 15.0)):
         stage1._uas_links(AnalyticEnv(hs=1.0), mission, (-165.0, 0.0), ts, P, 2)[0](float(ts[0]) + 10.0, rel)
         assert seen[-1] == expected                                                                      # 10.0 for the bare mission before
+
+
+def test_r8_l0_the_stage1_command_reports_a_damaged_file_of_the_run_as_an_error_line_and_exit_2(tmp_path, monkeypatch, capsys):
+    """`python -m cafe.pm.stage1` read refit.json, priors_fitted.json and sensitivity_cases.json with bare json.loads (a traceback)."""
+    from cafe.pm import pipeline
+    monkeypatch.setattr(pipeline, "Context", lambda *a, **k: types.SimpleNamespace(mission={}, env=None))
+    calls = []
+    monkeypatch.setattr(stage1, "sensitivity_case", lambda *a: calls.append(a) or {})
+    for sub, name in (("refit", "refit.json"), ("ingest", "priors_fitted.json"), ("stage1b", "sensitivity_cases.json")):
+        run = tmp_path / sub
+        (run / sub).mkdir(parents=True)
+        (run / sub / name).write_text('{"usv": {"used": tru')
+        assert stage1.main(["--mission", "m.yaml", "--run", str(run)]) == 2
+        err = capsys.readouterr().err
+        assert err.startswith("error: ") and str(run / sub / name) in err and "not a JSON object" in err, err
+    assert calls == []                                          # every file is read before the long computation starts

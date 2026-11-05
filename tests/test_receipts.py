@@ -624,3 +624,20 @@ def test_r8_m31_a_part_file_left_by_an_interrupted_gebco_fetch_is_not_the_cache(
     done = tmp_path / "bathy" / "gebco2026_-7_7_163_197.npz"
     done.write_bytes(b"")
     assert bathy.cached_cuts(tmp_path / "bathy") == [done] and dict(pr.jobs())["pm.env.bathy"] == {"cache": done}
+
+
+def test_r8_l0_a_stored_result_cut_short_is_a_fail_with_the_command_not_a_traceback(slowenv, monkeypatch):
+    """The stored result was read with a bare json.loads: a half-written file (a killed or full-disk run) ended `receipts` in a JSONDecodeError."""
+    run_group(monkeypatch, "pm.emulator", slow=True)
+    p = slowenv / "receipts" / "pm.emulator.json"
+    good = p.read_text()
+    for bad in (good[:40], "", "[1]"):
+        R.OUT.clear()
+        p.write_text(bad)
+        rows = run_group(monkeypatch, "pm.emulator", slow=False)
+        assert [(r["id"], r["kind"]) for r in rows] == [("pm.emulator:not_run", "fail")], bad
+        note = rows[0]["note"]
+        assert f"{p}: not a JSON object" in note and "(≈7 min)" in note and "python -m cafe.pm receipts --slow --only pm.emulator" in note
+    R.OUT.clear()
+    p.write_text(good)
+    assert [r["kind"] for r in run_group(monkeypatch, "pm.emulator", slow=False)] == ["pass"]

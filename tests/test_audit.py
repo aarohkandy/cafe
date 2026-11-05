@@ -613,3 +613,68 @@ def test_r8_m40_a_coverage_gate_of_100_names_the_files_and_lines_it_misses(tmp_p
     assert not any(x.startswith("coverage cafe/pm:") for x in probs)                             # 98.8 % of 1958 statements is over the 90 % gate
     p.write_text(json.dumps({"files": {"cafe/pm/a.py": {"summary": {"num_statements": 100, "covered_lines": 80}, "missing_lines": [1, 2, 3]}}}))
     assert audit.coverage_problems(p) == ["coverage cafe/pm: 80.0 % < 90 %"]                      # a package gate under 100 % does not list lines
+
+
+# ---- review round 8, lead item L0: a damaged JSON input is a line, a removed input is a line
+
+def _report_with_inputs(run, *inputs, **kw):
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        for i in inputs:
+            L.input(i, **kw)
+        L.output(run / "report.out")
+
+
+def test_r8_l0_a_truncated_orca_or_tao_manifest_is_a_problem_naming_the_file_not_a_traceback(tmp_path):
+    """M-23 guarded the ledger.json read only; any input named manifest.json was re-read with a bare json.loads (the TAO manifest, the orca cache's)."""
+    run = make_run(tmp_path)
+    man = tmp_path / "orca" / "manifest.json"
+    man.parent.mkdir()
+    good = json.dumps({"parts": {"a.npz": "0" * 64}, "pad": "x" * 6000})
+    man.write_text(good)
+    _report_with_inputs(run, man)
+    for bad in (good[:5000], "[1,2", "", "[1]"):                      # the first cut is a disk-full or killed write
+        man.write_text(bad)
+        probs = audit.ledger_problems(run)
+        assert any(f"run: stage report: input {man} is not valid JSON (" in x and "delete it and run `fetch` again" in x for x in probs), (bad, probs)
+    man.write_text(good)
+    assert audit.ledger_problems(run) == []
+
+
+def test_r8_l0_a_store_with_a_truncated_zarr_json_is_a_problem_naming_the_file_not_a_traceback(tmp_path):
+    run = make_run(tmp_path)
+    store = zstore(tmp_path / "gofs.zarr", {"manifest_sha256": "a" * 64})
+    _report_with_inputs(run, store, sha="a" * 64)
+    assert audit.ledger_problems(run) == []
+    for bad in ('{trunc', "", "[1]"):
+        (store / "zarr.json").write_text(bad)
+        probs = audit.ledger_problems(run)
+        assert probs and all(f"run: stage report: input {store / 'zarr.json'} is not valid JSON (" in x for x in probs), (bad, probs)
+
+
+def test_r8_l0_a_truncated_orca_part_manifest_is_a_problem_when_the_orca_check_reads_it(tmp_path):
+    man = tmp_path / "manifest.json"
+    man.write_text('{"parts": {"a": ')
+    with pytest.raises(audit._Unreadable, match="manifest.json is not valid JSON"):
+        audit._orca_problems("run", "ingest", man)
+
+
+def test_r8_l0_an_input_that_was_hashed_and_is_gone_is_a_problem_but_a_url_or_an_unhashed_one_is_not(tmp_path):
+    run = make_run(tmp_path)
+    src = tmp_path / "src.txt"
+    src.write_text("v1")
+    store = zstore(tmp_path / "gofs.zarr", {"manifest_sha256": "a" * 64})
+    from cafe.pm.env.remote import tree_sha256
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(src)
+        L.input(store, sha="a" * 64, tree=tree_sha256(store))
+        L.input("https://example.org/remote.nc", sha="b" * 64)       # a remote reference with the hash of the bytes extracted: no path to find
+        L.input(tmp_path / "never_there.txt")                        # recorded unhashed (it did not exist then)
+        L.output(run / "report.out")
+    assert audit.ledger_problems(run) == []
+    src.unlink()
+    shutil.rmtree(store)
+    probs = audit.ledger_problems(run)
+    assert sorted(probs) == sorted([f"run: stage report: input {src} is missing (the stage read it); restore it, or run `fetch` / the stage again",
+                                    f"run: stage report: input {store} is missing (the stage read it); restore it, or run `fetch` / the stage again"])

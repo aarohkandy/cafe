@@ -689,13 +689,13 @@ R8_M39 = [
      r'sorties/local_solar_time: YAML reads an unquoted HH:MM as a number \(840 = 14:00 as minutes\); put it in quotes, e.g. "14:00"'),
     (TIME, "local_solar_time: 14:00:00", r"sorties/local_solar_time: YAML reads an unquoted time as the number 50400; put it in quotes"),
     (LINK + "ship", LINK + "no", r"links/\d/b: YAML reads an unquoted no/yes/on/off as false; put it in quotes"),
-    ("radius_km: 5.0", "radius_km: 5e0", r"task/radius_km: the number is written in a form YAML reads as text \('5e0'\); write 5"),
+    ("radius_km: 5.0", 'radius_km: "5"', r"task/radius_km: the number is written in a form YAML reads as text \('5'\); write 5"),   # 5e0 is a number since L0
     ("radius_km: 5.0", "radius_km: five", r"task/radius_km: 'five' is not of type 'number'"),
 ]
 
 
-@pytest.mark.parametrize("old,new,msg", R8_M39, ids=["hhmm", "hhmmss", "no", "5e0", "text"])
-def test_r8_m39_an_unquoted_time_a_no_and_an_exponent_without_a_dot_say_why(tmp_path, old, new, msg):
+@pytest.mark.parametrize("old,new,msg", R8_M39, ids=["hhmm", "hhmmss", "no", "quoted", "text"])
+def test_r8_m39_an_unquoted_time_a_no_and_a_quoted_number_say_why(tmp_path, old, new, msg):
     with pytest.raises(ConfigError, match=msg):
         load_mission(unquoted(tmp_path, old, new))
 
@@ -747,3 +747,86 @@ def test_r8_m25_an_empty_platform_file_loads_as_nothing_and_a_scalar_document_is
         config.load_platform(str(scalar))
     with pytest.raises(ConfigError, match=r"the file is empty or not a mapping\); a platform file has `params:`"):
         config.platform_doc(str(empty))
+
+
+# ---- review round 8, lead item L0: one YAML reader for every file
+
+def test_r8_l0_an_exponent_without_a_dot_is_a_number_in_every_file_and_the_hint_names_a_spelling_that_loads(tmp_path):
+    """YAML 1.1 reads 1e-6, 5e0 and 1e+7 as text; M-11's hint said 'use 1e-6', which a platform file then refused as a string."""
+    from cafe.pm.physics import HINTS, uas
+    from cafe.pm.stats import sampling
+    f = tmp_path / "n.yaml"
+    f.write_text("a: 1e-6\nb: 5e0\nc: 1e+7\nd: -2E3\ne: 1_0e1\nf: '1e-6'\ng: 1.0e-6\nh: 1e\ni: e5\nj: 1e-6x\n")
+    got = config.read_yaml(f)
+    assert [got[k] for k in "abcdeg"] == [1e-6, 5.0, 1e7, -2000.0, 100.0, 1e-6] and all(type(got[k]) is float for k in "abcdeg")
+    assert got["f"] == "1e-6" and got["h"] == "1e" and got["i"] == "e5" and got["j"] == "1e-6x"                   # text stays text
+    plat = (config.ROOT / "platforms" / "quad_uas.yaml").read_text()
+    assert "{value: 0.10, unit: ohm" in plat
+    q = tmp_path / "q.yaml"
+    q.write_text(plat.replace("{value: 0.10, unit: ohm", "{value: 1e-6, unit: ohm"))
+    assert uas.load_platform(str(q))["battery"]["r_int_ohm"] == 1e-6                                       # refused as '1e-6' before
+    assert "1e-6" in HINTS["r_int_ohm"]
+    pt = tmp_path / "p.yaml"
+    pt.write_text((config.ROOT / "config" / "perturbations.yaml").read_text().replace("  lo: -0.35\n  hi: -0.30\n", "  lo: -3.5e-1\n  hi: -3e-1\n", 1))
+    assert sampling.load_perturbations(pt)["usv_vpp_bias_brief"]["hi"] == -0.30 and sampling.to_marginals(sampling.load_perturbations(pt))
+    m = load_mission(unquoted(tmp_path, "radius_km: 5.0", "radius_km: 5e0"))
+    assert any(v.get("task", {}).get("radius_km") == 5.0 for v in m["vehicles"])
+
+
+def test_r8_l0_no_module_reads_yaml_but_through_config_read_yaml():
+    """The sampling priors, the sub-grid assumptions, the credibility report and the conventions overlay read YAML with plain safe_load: a repeated key
+    (the later block won) or a leading-zero number passed there and was refused by config._yaml in another stage."""
+    pattern = re.compile(r"yaml\.(safe_)?load\(|__import__\(.yaml.\)")
+    hits = [str(f.relative_to(config.ROOT)) for f in (config.ROOT / "cafe" / "pm").rglob("*.py") if f.name != "config.py" and pattern.search(f.read_text())]
+    assert hits == []
+
+
+DUP = "usv_vpp_bias:\n  dist: uniform\n  lo: -0.5\n  hi: 0.5\n  value: 0.0\n  unit: x\n  citation: c\n  kind: prior\n"
+
+
+def test_r8_l0_a_repeated_key_or_an_octal_looking_number_is_refused_by_every_reader(tmp_path):
+    from cafe.pm import credibility, dtmb5415
+    from cafe.pm.env import conventions, subgrid
+    from cafe.pm.stats import sampling
+    pert = tmp_path / "perturbations.yaml"
+    pert.write_text((config.ROOT / "config" / "perturbations.yaml").read_text() + DUP)
+    with pytest.raises(ConfigError, match="duplicate key 'usv_vpp_bias'"):
+        sampling.load_perturbations(pert)
+    with pytest.raises(ConfigError, match="duplicate key 'usv_vpp_bias'"):
+        config._yaml(pert)                                                         # as before: the two readers agree now
+    octal = tmp_path / "o.yaml"
+    octal.write_text("dtmb5415.u_D_rel:\n  value: 010\n")
+    with pytest.raises(ConfigError, match="010 is read as octal 8"):
+        dtmb5415.assumed("u_D_rel", octal)
+    assump = tmp_path / "assumptions.yaml"
+    twice_x = "subgrid.x:\n  value: 1\n  unit: m\n  why: w\n  replace_with: r\nsubgrid.x:\n  value: 2\n"
+    assump.write_text((config.ROOT / "config" / "assumptions.yaml").read_text() + twice_x)
+    with pytest.raises(ConfigError, match="duplicate key 'subgrid.x'"):
+        config.read_yaml(assump)
+    twice = tmp_path / "twice.yaml"
+    twice.write_text("dtmb5415.u_D_rel:\n  value: 0.01\ndtmb5415.u_D_rel:\n  value: 0.02\n")
+    with pytest.raises(ConfigError, match="duplicate key 'dtmb5415.u_D_rel'"):
+        dtmb5415.assumed("u_D_rel", twice)
+    overlay = tmp_path / "overlay.yaml"
+    overlay.write_text("waves:\n  direction_convention: umwm\nwaves:\n  direction_convention: compass_from\n")
+    conventions._overlay_wave_convention.cache_clear()
+    with pytest.raises(ConfigError, match="duplicate key 'waves'"):
+        conventions._overlay_wave_convention(str(overlay))
+    root = tmp_path / "root"
+    (root / "config").mkdir(parents=True)
+    (root / "config" / "assumptions.yaml").write_text(assump.read_text())
+    (root / "config" / "perturbations.yaml").write_text(pert.read_text())
+    with pytest.raises(ConfigError, match="duplicate key"):
+        credibility.assumed_inputs(root=root, run=None)
+    sub = tmp_path / "cfg"
+    sub.mkdir()
+    (sub / "assumptions.yaml").write_text(assump.read_text())
+    old = subgrid._CFG_DIR
+    subgrid._assumptions.cache_clear()
+    try:
+        subgrid._CFG_DIR = sub
+        with pytest.raises(ConfigError, match="duplicate key 'subgrid.x'"):
+            subgrid._assumptions()
+    finally:
+        subgrid._CFG_DIR = old
+        subgrid._assumptions.cache_clear()

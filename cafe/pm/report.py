@@ -963,7 +963,13 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
 
 # ------------------------------------------------------------------------------------------------------ HTML (from the JSON only)
 
-SINGULAR = {"candidates": "candidate", "notches": "notch", "members": "member"}      # round 8, M-47: "1 candidates" read as a count of one
+def _singular(unit: str) -> str:
+    """`unit` for a count of one: its last word, when that is a plural noun (candidates, notches, members, rows, cores, runs, inputs, receipts,
+    samples, 'held-out points'), loses its s; m/s, s, ms, min, dB and the like are no plurals. A fraction (of anything) is no count. Round 8, M-47 and L0."""
+    head, _, last = unit.rpartition(" ")
+    if unit.startswith("fraction") or not re.fullmatch(r"[a-z]{4,}", last) or not last.endswith("s") or last.endswith("ss"):
+        return unit
+    return (head + " " if head else "") + (last[:-2] if last.endswith(("ches", "shes", "xes")) else last[:-1])
 
 
 def _txt(n: dict[str, Any]) -> str:
@@ -971,10 +977,10 @@ def _txt(n: dict[str, Any]) -> str:
         return str(n["utc"])
     unit = f" {n['unit']}" if n["unit"] not in ("", "-", "fraction") else ""
     if "values" in n:
-        return f"{len(n['values'])} values{unit}"
+        return f"{len(n['values'])} value{'s' * (len(n['values']) != 1)}{unit}"
     v = n["value"]
     if unit and v == 1 and not isinstance(v, bool):                                  # only a unit that is shown is made singular
-        unit = f" {SINGULAR.get(n['unit'], n['unit'])}"
+        unit = f" {_singular(n['unit'])}"
     return ("n/a" if v is None else f"{v:.4g}" if isinstance(v, float) else str(v)) + unit
 
 
@@ -1108,7 +1114,8 @@ def _physics_html(p: dict[str, Any]) -> str:
     if "passed" not in p:                                                  # not run, or stale: made by other code
         return f"<p class=warn>Model receipts (<code>{e(p['group'])}</code>): {e(p['status'])}. {e(p['reason'])}</p>"
     bad = f" Failing: {e('; '.join(p['failures']))}." if p["failures"] else ""
-    return (f"<p class={'warn' if p['failures'] else 'muted'}>Model receipts (<code>{e(p['group'])}</code>): {_n(p['passed'])} pass, {_n(p['failed'])} fail."
+    return (f"<p class={'warn' if p['failures'] else 'muted'}>Model receipts (<code>{e(p['group'])}</code>): "
+            f"{_n(p['passed'])} passed, {_n(p['failed'])} failed."
             f"{bad} They check the model that produced this verdict against references; they are not a check of the verdict.</p>")
 
 
@@ -1120,7 +1127,7 @@ def _drivers_html(v: dict[str, Any]) -> str:
              else "which mode failed first is not known (res.pkl is not available)")
     more = f"; share of the failed members by mode (a member can fail in several): {shares}" if shares else ""
     ld = v["left_data"]
-    left = (f"<p class=warn>{_n(ld['members'])} members left the downloaded data" + (f" at about {_n(ld['first'])}" if ld["first"] else "")
+    left = (f"<p class=warn>{_n(ld['members'])} left the downloaded data" + (f" at about {_n(ld['first'])}" if ld["first"] else "")
             + " (counted as failed): widen <code>box</code> or <code>pad_deg</code> and rerun.</p>") if ld else ""
     notes = "".join(f"<p class=muted><code>{e(m)}</code>: {e(t)}.</p>" for m, t in v.get("mode_notes", {}).items())
     return f"<p>What drives the failures: {first}{more}.</p>{left}{notes}"
@@ -1403,7 +1410,7 @@ def _emulator_html(m: dict[str, Any]) -> str:
                   f"(the held-out RMSE against the member-count targets, less their own "
                   f"Monte-Carlo noise {_n(a['noise_floor_rmse'])} in quadrature); coverage within {_n(a['limits']['coverage'])} of nominal "
                   f"{ok(a['coverage_ok'])}{_chance(a.get('coverage_chance_fail'))}; query {_n(a['query_ms'])} "
-                  f"&le; {_n(a['limits']['query_ms'])} {ok(a['query_ok'])}; {_n(a['rows'])} rows of this class.</p>")
+                  f"&le; {_n(a['limits']['query_ms'])} {ok(a['query_ok'])}; {_n(a['rows'])} of this class.</p>")
             if v["used"] is False:
                 h += f"<p class=warn><b>Not used for answers: Stage 1 answered instead.</b> {e(v['unused_reason'] or '')}</p>"
             h += ("<p class=muted>Fresh-draw check: " + (

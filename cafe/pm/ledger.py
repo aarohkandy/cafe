@@ -85,7 +85,8 @@ def machine() -> dict[str, Any]:
     stage-1 workers this process runs (`par.workers()`: the CPUs it may use, or CAFE_WORKERS, or the run's planned count)."""
     from . import par
     p = ROOT / "config" / "throughput.json"
-    m = json.loads(p.read_text()).get("machine", {}) if p.exists() else {}
+    from .config import THROUGHPUT_FIX, json_object
+    m = json_object(p, THROUGHPUT_FIX).get("machine", {}) if p.exists() else {}
     return dict(host=platform.node(), cpus=os.cpu_count(), workers=par.workers(), bench_id=m.get("id"), bench_measured=m.get("measured"))
 
 
@@ -166,8 +167,14 @@ def clean(x: Any) -> Any:
     return x if x is None or isinstance(x, (bool, int, str)) else clean(_jsonable(x))
 
 
+def hashed(i: dict[str, Any]) -> bool:
+    """A ledger input the stage hashed when it ran (a file or a store), so it has to be on disk for a resume or an audit to trust the ledger. A remote
+    reference (a URL) is no path: it stays out."""
+    return bool(i.get("sha256") or i.get("tree_sha256")) and "://" not in str(i["ref"])
+
+
 def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str, Any] | None:
-    """The stage's ledger if it finished cleanly with this config and its outputs and file inputs are unchanged on disk, else None."""
+    """The stage's ledger if it finished cleanly with this config and its outputs and hashed inputs are present and unchanged on disk, else None."""
     p = pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json"
     if not p.exists():
         return None
@@ -185,6 +192,8 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
             return None
     for i in d["inputs"]:
         f = pathlib.Path(i["ref"])
+        if hashed(i) and not f.exists():                                          # a deleted store or file: the stage ran on data that is gone
+            return None
         if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
             return None
         if i.get("tree_sha256") and f.is_dir() and tree_sha256(f) != i["tree_sha256"]:       # a store: every file of it, not the manifest it was made from

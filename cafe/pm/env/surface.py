@@ -19,7 +19,7 @@ Seawater expansion/contraction coefficients are TEOS-10 (gsw.alpha, gsw.beta) at
 """
 from __future__ import annotations
 
-import json, pathlib
+import json, os, pathlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -128,7 +128,9 @@ def build(env: GriddedEnv, cache: Any, built_from: str | None = None, log: Calla
     ds.attrs["layout_version"] = LAYOUT_VERSION
     ds.attrs["built_from"] = built_from
     ds.to_zarr(cache / "derived.zarr", mode="w")
-    (cache / DIGEST).write_text(json.dumps(dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1))
+    tmp = (cache / DIGEST).with_suffix(".tmp")                               # written whole or not at all, as the Ledger is: a kill cannot leave half a record
+    tmp.write_text(json.dumps(dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1))
+    os.replace(tmp, cache / DIGEST)
     log(f"surface layer: COARE on {nt} hours, warm layer max dT {np.nanmax(dT):.2f} K, Stokes fit check {fit}")
     return fit
 

@@ -410,3 +410,88 @@ ingest.ust_range_ms:
   unit: m/s
   why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any UMWM friction velocity at a sea node outside it (hurricane-force wind gives about 2 m/s)."
   replace_with: "The range the lab's domain and season can produce."
+ingest.air_temp_range_k:
+  value: [230.0, 330.0]
+  unit: K
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF 2 m air temperature in any grid cell outside it (the recorded air-temperature extremes are 184 K and 330 K)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.skin_temp_range_k:
+  value: [230.0, 345.0]
+  unit: K
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF skin temperature in any grid cell outside it (the hottest land skin temperature seen from satellites is about 344 K (the Lut desert))."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.q2_range_frac:
+  value: [0.0, 0.04]
+  unit: kg/kg
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF 2 m specific humidity in any grid cell outside it (air saturated at 35 degC holds about 0.037 kg/kg)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.psfc_range_pa:
+  value: [50000.0, 110000.0]
+  unit: Pa
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF surface pressure in any grid cell outside it (the recorded sea-level pressures are 87000 and 108400 Pa; the lower bound lets a domain hold terrain up to about 5 km)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.swdown_range_wm2:
+  value: [0.0, 1500.0]
+  unit: W/m2
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF downward shortwave flux in any grid cell outside it (the sunlight above the atmosphere is 1361 W/m2)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.glw_range_wm2:
+  value: [0.0, 700.0]
+  unit: W/m2
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF downward longwave flux in any grid cell outside it (a warm humid sky radiates about 450 W/m2; the demo cache holds 372 to 458)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.pblh_range_m:
+  value: [0.0, 6000.0]
+  unit: m
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF boundary-layer height in any grid cell outside it (boundary layers are not deeper than about 5 km; the demo cache holds 51 to 1221 m)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.hfx_range_wm2:
+  value: [-500.0, 1500.0]
+  unit: W/m2
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF surface sensible heat flux in any grid cell outside it (the demo cache holds -2 to 112 W/m2; a value beyond 1500 is a unit slip or the wrong run)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.lh_range_wm2:
+  value: [-500.0, 2000.0]
+  unit: W/m2
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF surface latent heat flux in any grid cell outside it (the demo cache holds 38 to 507 W/m2; a value beyond 2000 is a unit slip or the wrong run)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.qfx_range:
+  value: [-0.001, 0.001]
+  unit: kg/m2/s
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF surface moisture flux in any grid cell outside it (2000 W/m2 of latent heat is 0.0008 kg/m2/s of evaporation)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.rain_accum_range_mm:
+  value: [0.0, 5000.0]
+  unit: mm
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any WRF accumulated RAINC and RAINNC in any grid cell outside it (the demo cache holds under 200 mm over six days and the accumulation never decreases; 5 m is a unit slip or the wrong run)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.rain_rate_max_mm_h:
+  value: 500.0
+  unit: mm/h
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any rain rate derived from the accumulation in any grid cell outside it (a few hundred mm in an hour is the scale of the rainfall records)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.wave_period_range_s:
+  value: [0.0, 60.0]
+  unit: s
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any UMWM peak period at a sea node outside it (swell periods reach about 25 s; the demo cache holds 2.5 to 16 s)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.mss_range:
+  value: [0.0, 0.3]
+  unit: "-"
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any UMWM mean-square slope at a sea node outside it (the demo cache holds up to 0.043)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.current_range_ms:
+  value: [-5.0, 5.0]
+  unit: m/s
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any ocean current component (water_u, water_v) at a water cell and depth outside it (the strongest ocean currents are about 3 to 4 m/s; the demo store holds -1.1 to 1.2)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.water_temp_range_c:
+  value: [-3.0, 40.0]
+  unit: degC
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any ocean temperature at a water cell and depth outside it (sea water freezes at about -1.9 degC and no open water exceeds about 36 degC)."
+  replace_with: "The range the lab's domain and season can produce."
+ingest.salinity_range_psu:
+  value: [0.0, 45.0]
+  unit: psu
+  why: "Gross-error bound, not a model of the weather: the ingest check forcing_in_physical_range fails any ocean salinity at a water cell and depth outside it (open-ocean salinity is 30 to 40 psu and the Red Sea reaches about 41)."
+  replace_with: "The range the lab's domain and season can produce."

@@ -576,19 +576,38 @@ def _spectrum_errors(env: GriddedEnv) -> dict[str, float]:
                 mss_clipped=float(np.mean(np.asarray(mss_err) > 0.01)), n=len(tp_err))
 
 
-def _forcing_range(env: GriddedEnv) -> tuple[int, str]:
+# (label, key of config/assumptions.yaml `ingest.<key>`, where the values are read): a scalar bound is a maximum with 0 below it, a pair is [lo, hi]
+FORCING_WRF = [("WRF 2 m air temperature T2", "air_temp_range_k", "T2"), ("WRF skin temperature TSK", "skin_temp_range_k", "TSK"),
+               ("WRF 2 m humidity Q2", "q2_range_frac", "Q2"), ("WRF surface pressure PSFC", "psfc_range_pa", "PSFC"),
+               ("WRF SWDOWN", "swdown_range_wm2", "SWDOWN"), ("WRF GLW", "glw_range_wm2", "GLW"), ("WRF PBLH", "pblh_range_m", "PBLH"),
+               ("WRF HFX", "hfx_range_wm2", "HFX"), ("WRF LH", "lh_range_wm2", "LH"), ("WRF QFX", "qfx_range", "QFX"),
+               ("WRF RAINC", "rain_accum_range_mm", "RAINC"), ("WRF RAINNC", "rain_accum_range_mm", "RAINNC"),
+               ("WRF rain rate rain_mm_h", "rain_rate_max_mm_h", "rain_mm_h"), ("WRF UST", "ust_range_ms", "UST")]
+FORCING_UMWM = [("UMWM swh", "swh_range_m", "swh"), ("UMWM ust", "ust_range_ms", "ust"), ("UMWM dwp", "wave_period_range_s", "dwp"),
+                ("UMWM mss", "mss_range", "mss"), ("UMWM wspd", "wind_speed_max_ms", "wspd")]
+FORCING_OCEAN = [("ocean water_u", "current_range_ms", "water_u"), ("ocean water_v", "current_range_ms", "water_v"),
+                 ("ocean water_temp", "water_temp_range_c", "water_temp"), ("ocean salinity", "salinity_range_psu", "salinity")]
+
+
+def _forcing_range(env: GriddedEnv, oc: Any = None) -> tuple[int, str]:
     """-> (how many values of the forcing are not finite and inside the gross-error bounds of config/assumptions.yaml `ingest.*`, the note naming
-    each field with a value outside and its worst): WRF 10 m wind speed and SST (at water cells, by LANDMASK, when the cache has it), UMWM swh and
-    ust (at sea nodes). The bounds are not a model of the weather; a unit slip or the wrong run lands outside them."""
+    each field with a value outside and its worst): every WRF 2-D field the model reads (wind speed, SST at water cells by LANDMASK when the cache has it,
+    and `FORCING_WRF`), the UMWM fields at sea nodes (`FORCING_UMWM`) and, when there is an ocean store, its currents, temperature and salinity at
+    every water cell and depth (`FORCING_OCEAN`; NaN there is land, which `ocean_store_nan_mask` judges, so only a value that is finite and outside,
+    or infinite, counts). The bounds are not a model of the weather; a unit slip or the wrong run lands outside them."""
     a = assumptions()
-    wmax, (h0, h1), (s0, s1), (u0, u1) = (a[f"ingest.{k}"]["value"] for k in ("wind_speed_max_ms", "swh_range_m", "sst_range_k", "ust_range_ms"))
+
+    def bounds(key: str) -> tuple[float, float]:
+        v = a[f"ingest.{key}"]["value"]
+        return (0.0, float(v)) if isinstance(v, (int, float)) else (float(v[0]), float(v[1]))
     land = env.Wstatic.get("LANDMASK")
     water = np.ones(env.W["SST"].shape[1:], bool) if land is None else land < 0.5
-    fields = [("WRF U10/V10 wind speed", np.hypot(env.W["U10"], env.W["V10"]), None, 0.0, wmax, "m/s"),
-              ("UMWM swh", env.U["swh"], env.sea, h0, h1, "m"), ("WRF SST", env.W["SST"], water, s0, s1, "K"),
-              ("UMWM ust", env.U["ust"], env.sea, u0, u1, "m/s")]
+    fields = [("WRF U10/V10 wind speed", np.hypot(env.W["U10"], env.W["V10"]), None, bounds("wind_speed_max_ms"), "m/s"),
+              ("WRF SST", env.W["SST"], water, bounds("sst_range_k"), "K")]
+    fields += [(label, env.W[v], None, bounds(k), a[f"ingest.{k}"]["unit"]) for label, k, v in FORCING_WRF]
+    fields += [(label, env.U[v], env.sea, bounds(k), a[f"ingest.{k}"]["unit"]) for label, k, v in FORCING_UMWM]
     total, notes = 0, []
-    for name, v, where, lo, hi, unit in fields:
+    for name, v, where, (lo, hi), unit in fields:
         v = v if where is None else v[..., where]
         out = ~(np.isfinite(v) & (v >= lo) & (v <= hi))
         if out.any():
@@ -596,7 +615,16 @@ def _forcing_range(env: GriddedEnv) -> tuple[int, str]:
             total += int(out.sum())
             notes.append(f"{name}: {int(out.sum())} values outside [{lo:g}, {hi:g}] {unit}, the worst {f[np.argmax(np.maximum(lo - f, f - hi))]:.4g}" if f.size
                          else f"{name}: {int(out.sum())} values are not finite")
-    return total, "; ".join(notes) or "WRF 10 m wind speed and SST, UMWM swh and ust: all finite and inside the bounds of config/assumptions.yaml ingest.*"
+    for name, k, var in FORCING_OCEAN if oc is not None else []:
+        lo, hi = bounds(k)
+        v = oc.ds[var]
+        n = int(((v < lo) | (v > hi) | np.isinf(v)).sum())
+        if n:
+            vmin, vmax = float(v.min()), float(v.max())
+            total += n
+            notes.append(f"{name}: {n} values outside [{lo:g}, {hi:g}] {a[f'ingest.{k}']['unit']}, the worst {vmin if lo - vmin > vmax - hi else vmax:.4g}")
+    return total, "; ".join(notes) or ("every WRF and UMWM field the model reads and the ocean store's currents, temperature and salinity: "
+                                       "all finite and inside the bounds of config/assumptions.yaml ingest.*")
 
 
 USTAR_AGREE_FRACTION = 0.90      # BRIEF 2.1: COARE u* within 20 % of UMWM ust at this share of the sea points; a lower share is a finding, not a gate (row 168)
@@ -668,7 +696,7 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
     L.check("time_axes_hourly_gap_free", gap < 1.0, value=gap, limit=1.0, note="largest departure of a WRF or UMWM time step from 3600 s")
     nan = sum(int((np.isnan(a) & env.sea).sum()) for a in env.U.values()) + sum(int(np.isnan(a).sum()) for a in env.W.values())
     L.check("no_nan_in_sea_cells", nan == 0, value=nan, limit=0, note="NaN values in UMWM sea nodes and in the WRF fields")
-    bad, what = _forcing_range(env)
+    bad, what = _forcing_range(env, oc)
     L.check("forcing_in_physical_range", bad == 0, value=bad, limit=0, note=what)
     sp = _spectrum_errors(env)
     where = f"spectrum_from_params at {sp['n']} sampled sea points against the file's dwp / dwd / mss (Hs is forced to the file's swh, so it is not a test)"
@@ -837,14 +865,20 @@ def _derived_current(cache: pathlib.Path, key: str | None = None) -> bool:
     """derived.zarr exists and has the layout this code reads (surface.LAYOUT_VERSION). With `key` (the hash of the cache files and the code, see
     s_ingest) it also was built from exactly that and its files still hash to what `build` recorded beside it."""
     from .env import surface
-    p = cache / "derived.zarr" / "zarr.json"
-    if not (p.exists() and json.loads(p.read_text()).get("attributes", {}).get("layout_version") == surface.LAYOUT_VERSION):
+
+    def read(f: pathlib.Path) -> dict[str, Any] | None:                  # a file cut short by a kill or a full disk is as good as missing: the layer is rebuilt
+        try:
+            d = json.loads(f.read_text())
+        except (ValueError, OSError):
+            return None
+        return d if isinstance(d, dict) else None
+    z = read(cache / "derived.zarr" / "zarr.json")
+    if z is None or z.get("attributes", {}).get("layout_version") != surface.LAYOUT_VERSION:
         return False
     if key is None:
         return True
-    d = cache / surface.DIGEST
-    rec = json.loads(d.read_text()) if d.is_file() else {}
-    return bool(json.loads(p.read_text())["attributes"].get("built_from") == key and rec.get("built_from") == key
+    rec = read(cache / surface.DIGEST) or {}
+    return bool(z["attributes"].get("built_from") == key and rec.get("built_from") == key
                 and rec.get("store_sha256") == surface.store_sha256(cache / "derived.zarr"))
 
 
@@ -920,7 +954,7 @@ def s_hangar(ctx: Context, L: Ledger) -> None:
         except ValueError as e:
             err = str(e)
         L.check(f"provenance_{v['platform']}", not err, note=err)
-        rows[v["id"]] = dict(platform=v["platform"], cls=cls, file=str(p), assumed=_assumed(__import__("yaml").safe_load(p.read_text())))
+        rows[v["id"]] = dict(platform=v["platform"], cls=cls, file=str(p), assumed=_assumed(_yaml(p)))
     L.note("no Hangar CFD run: the baseline model coefficients are analytic (no vehicle CAD, QUESTIONS_FOR_LAB); no GCI, observed order or mesh quality exists "
            "to check; the cache key is each platform file's sha-256 (a ledger input)")
     L.output(_dump(rows, ctx.path("hangar", "hangar.json")))

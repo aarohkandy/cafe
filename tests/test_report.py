@@ -771,7 +771,7 @@ def test_each_verdict_cites_the_model_receipt_group_of_its_class_with_pass_and_f
     assert u["passed"]["receipt"] == r["id"] and u["passed"]["ledger"] == "runs/receipts.json" and rows["physics:pm.physics.glider"]["ok"]
     assert rep["traceability_problems"] == []                                               # a failed model receipt is shown, it does not break provenance
     t = plain((run / "report" / "index.html").read_text())
-    assert "Model receipts (pm.physics.usv): 1 receipts pass, 1 receipts fail. Failing: usv speed band." in t and "Model receipts (pm.physics.glider)" in t
+    assert "Model receipts (pm.physics.usv): 1 receipt passed, 1 receipt failed. Failing: usv speed band." in t and "Model receipts (pm.physics.glider)" in t
     assert report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
 
 
@@ -1339,7 +1339,7 @@ def test_left_data_members_get_a_sentence_with_the_time_and_the_fix():
     d = report._drivers(e, res, "g", ref, "src")
     assert d["left_data"]["members"]["value"] == 3 and d["left_data"]["first"]["value"] == 1.7e9 and set(d["mode_shares"]) == {"left_data", "swept_off_track"}
     h = report._drivers_html(dict(d, first_fail_mode="left_data"))
-    assert "members left the downloaded data at about" in h and "widen <code>box</code> or <code>pad_deg</code> and rerun" in h
+    assert "3 members left the downloaded data at about" in plain(h) and "widen <code>box</code> or <code>pad_deg</code> and rerun" in h
     assert report._drivers(e, None, "g", ref, "src")["left_data"]["first"] is None
     assert report._drivers(dict(k_fail=1, modes=dict(battery=1)), res, "g", ref, "src")["left_data"] is None
     assert "left the downloaded data" not in report._drivers_html(report._drivers(dict(k_fail=1, modes=dict(battery=1)), None, "g", ref, "src"))
@@ -2085,3 +2085,48 @@ def test_r8_m47_a_single_candidate_is_all_1_candidate(run):
 def test_r8_m14_the_no_current_data_text_says_a_hole_in_the_input_not_a_flight_model_failure():
     text = report.MODE_TEXT["no_current_data"]
     assert "no finite wind, current or wave state" in text and "not a failure of the vehicle's flight model" in text
+
+
+# ---- review round 8, lead item L0: a number node prints its own unit
+
+def test_r8_l0_a_sentence_after_a_number_node_does_not_repeat_the_unit_the_node_prints():
+    ref = dict(stage="stage1b", ledger="checkpoints/stage1b/ledger.json", receipt="stage1b:config:x")
+    first = dict(left_data=np.array([1.7e9] * 12))
+    for n in (12, 1):
+        e = dict(k_fail=n, modes=dict(left_data=n))
+        h = plain(report._drivers_html(dict(report._drivers(e, dict(vehicles=dict(g=dict(first=first))), "g", ref, "src"), first_fail_mode="left_data")))
+        want = "1 member left the downloaded data" if n == 1 else "12 members left the downloaded data"
+        assert want in h and "members members" not in h and "member members" not in h, h
+
+
+@pytest.mark.parametrize("rows,want", [(140, "140 rows of this class"), (1, "1 row of this class")])
+def test_r8_l0_the_emulator_acceptance_line_says_rows_once(run, rows, want):
+    m, plan = pm_run.make_run(run)
+    h = json.loads((run / "emulator" / "holdout.json").read_text())
+    h["glider_eq"].update(cls="glider", rows=rows, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03,
+                          acceptance=dict(rmse_ok=True, coverage_ok=True, query_ok=True))
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert want in t and "rows rows" not in t and "row rows" not in t
+
+
+def test_r8_l0_every_unit_a_count_of_one_can_carry_is_singular_and_the_rest_are_left_alone():
+    n = lambda v, u: dict(value=v, unit=u, utc=None)
+    plural = {"candidates": "candidate", "notches": "notch", "members": "member", "rows": "row", "runs": "run", "receipts": "receipt", "inputs": "input",
+              "samples": "sample", "cores": "core", "held-out points": "held-out point"}
+    for u, s in plural.items():
+        assert report._txt(n(1, u)) == f"1 {s}" and report._txt(n(2, u)) == f"2 {u}" and report._txt(n(1.0, u)) == f"1 {s}", u
+    others = ["s", "ms", "min", "h", "km", "dB", "m/s", "s/member/day", "s/batch/day", "cell-updates/s", "z-scored", "fraction of variance",
+              "fraction of the failed members", "cells per boundary-layer thickness", "s since 1970-01-01T00:00:00Z"]
+    for u in others:
+        assert report._txt(n(1, u)) == f"1 {u}", u
+    assert report._txt(dict(values=[[1, 2]], unit="deg", utc=None)) == "1 value deg" and report._txt(dict(values=[1, 2], unit="-", utc=None)) == "2 values"
+    # every unit a number node is built with in the code: either one of the above or no plural noun at all
+    import pathlib
+    units = set()
+    for f in (pathlib.Path(report.__file__).parent).rglob("*.py"):
+        units |= set(re.findall(r"\bnum\([^,()]+(?:\([^()]*\))?[^,()]*, *\"([^\"]*)\"", f.read_text()))
+    assert units, "the scan found no number node"
+    for u in units:
+        assert u in plural or u in others or u in ("", "-", "fraction", "dB") or report._singular(u) == u, u

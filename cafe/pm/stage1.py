@@ -845,8 +845,9 @@ def main(argv: list[str] | None = None) -> int:
     """python -m cafe.pm.stage1 --mission M --run DIR [--prior usv_vpp_bias_brief] [--members 32]: store sensitivity_case's result in
     DIR/stage1b/sensitivity_cases.json (replacing the entries of the same case), for the report to show next to the verdict. DIR is a finished
     run of M (its ingest cache, fitted priors and refit multipliers are used)."""
-    import argparse, json, pathlib
+    import argparse, json, pathlib, sys
     from . import pipeline
+    from .config import ConfigError, json_object
     ap = argparse.ArgumentParser(prog="python -m cafe.pm.stage1", description=main.__doc__)
     ap.add_argument("--mission", required=True)
     ap.add_argument("--run", required=True)
@@ -854,12 +855,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--members", type=int, default=32)
     a = ap.parse_args(argv)
     rd = pathlib.Path(a.run)
-    ctx = pipeline.Context(a.mission, "quick", 0, rd)
-    fp, rp = rd / "ingest" / "priors_fitted.json", rd / "refit" / "refit.json"
-    scales = {k: v for k, v in json.loads(rp.read_text()).items() if v["used"]} if rp.is_file() else None
-    new = sensitivity_case(ctx.mission, ctx.env, a.prior, a.members, json.loads(fp.read_text()) if fp.is_file() else None, scales or None)
     out = rd / "stage1b" / "sensitivity_cases.json"
-    old = json.loads(out.read_text()) if out.is_file() else {}
+    try:                                                                  # a damaged file of the run is an `error:` line and exit 2, as in `python -m cafe.pm`
+        ctx = pipeline.Context(a.mission, "quick", 0, rd)
+        fp, rp = rd / "ingest" / "priors_fitted.json", rd / "refit" / "refit.json"
+        scales = {k: v for k, v in json_object(rp).items() if v["used"]} if rp.is_file() else None
+        old = json_object(out, "delete it; this command writes it again") if out.is_file() else {}          # before the long part
+        new = sensitivity_case(ctx.mission, ctx.env, a.prior, a.members, json_object(fp) if fp.is_file() else None, scales or None)
+    except ConfigError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     for vid, cases in new.items():
         old[vid] = [c for c in old.get(vid, []) if c["case"] != cases[0]["case"]] + cases
     out.parent.mkdir(parents=True, exist_ok=True)

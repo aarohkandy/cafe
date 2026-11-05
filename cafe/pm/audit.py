@@ -26,6 +26,7 @@ import ast, datetime as dt, hashlib, importlib.metadata, json, pathlib, re, subp
 from typing import Any
 
 from .env.remote import sha256, tree_sha256
+from .ledger import hashed
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STAGES = ["ingest", "hangar", "stage1", "windows", "stage3", "refit", "stage1b", "emulator", "report"]
@@ -63,12 +64,27 @@ def _resolve(ref: str, run_dir: pathlib.Path) -> pathlib.Path:
     return p
 
 
+class _Unreadable(ValueError):
+    """A JSON file the audit has to read is damaged; the message names it. `ledger_problems` turns it into a problem line, not a traceback."""
+
+
+def _read_json(f: pathlib.Path) -> dict[str, Any]:
+    """The JSON object in `f`; a truncated or foreign file (a killed or full-disk write) is `_Unreadable`."""
+    try:
+        d = json.loads(f.read_text())
+        if not isinstance(d, dict):
+            raise ValueError("not a JSON object")
+    except (ValueError, OSError) as e:
+        raise _Unreadable(f"{f} is not valid JSON ({e})") from e
+    return d
+
+
 def _store_attr(d: pathlib.Path, key: str) -> Any:
     """A zarr store's group attribute (zarr 3 `zarr.json`, zarr 2 `.zattrs`), or None."""
     for name, path in (("zarr.json", ("attributes",)), (".zattrs", ())):
         f = d / name
         if f.is_file():
-            node: Any = json.loads(f.read_text())
+            node: Any = _read_json(f)
             for k in path:
                 node = node.get(k, {})
             return node.get(key)
@@ -94,7 +110,7 @@ def _dir_problems(run: str, st: str, f: pathlib.Path, recorded: str | None, tree
 def _orca_problems(run: str, st: str, man: pathlib.Path) -> list[str]:
     """The orca cache manifest names the sha256 of every per-hour part: re-hash the parts that are still there."""
     out: list[str] = []
-    for name, sha in json.loads(man.read_text()).get("parts", {}).items():
+    for name, sha in _read_json(man).get("parts", {}).items():
         part = man.parent / "hours" / name
         if part.is_file() and sha256(part) != sha:
             out.append(f"{run}: stage {st}: orca part {part} changed since the cache was assembled")
@@ -112,11 +128,9 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
             prev = None
             continue
         try:
-            d = json.loads(p.read_text())
-            if not isinstance(d, dict):
-                raise ValueError("not a JSON object")
-        except (ValueError, OSError) as e:
-            out.append(f"{run_dir.name}: stage {st}: {p} is not valid JSON ({e}); delete it and run the stage again")
+            d = _read_json(p)
+        except _Unreadable as e:
+            out.append(f"{run_dir.name}: stage {st}: {e}; delete it and run the stage again")
             prev = None
             continue
         if not d.get("ok"):
@@ -126,12 +140,17 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
                 out.append(f"{run_dir.name}: stage {st}: self-check {c['name']} failed (value {c.get('value')}, limit {c.get('limit')})")
         for i in d.get("inputs", []):
             f = _resolve(i["ref"], run_dir)
-            if (i.get("sha256") or i.get("tree_sha256")) and f.is_dir():
-                out += _dir_problems(run_dir.name, st, f, i.get("sha256"), i.get("tree_sha256"))
-            elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
-                out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
-            if f.name == "manifest.json" and f.is_file() and "parts" in json.loads(f.read_text()):
-                out += _orca_problems(run_dir.name, st, f)
+            try:
+                if hashed(i) and not f.exists():                       # `done` re-runs the stage for the same reason
+                    out.append(f"{run_dir.name}: stage {st}: input {f} is missing (the stage read it); restore it, or run `fetch` / the stage again")
+                elif (i.get("sha256") or i.get("tree_sha256")) and f.is_dir():
+                    out += _dir_problems(run_dir.name, st, f, i.get("sha256"), i.get("tree_sha256"))
+                elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
+                    out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
+                if f.name == "manifest.json" and f.is_file() and "parts" in _read_json(f):
+                    out += _orca_problems(run_dir.name, st, f)
+            except _Unreadable as e:                                    # the sha256 line above already said a damaged file changed
+                out.append(f"{run_dir.name}: stage {st}: input {e}; delete it and run `fetch` again")
         for o in d.get("outputs", []):
             f = _resolve(o["path"], run_dir)
             if not f.is_file():

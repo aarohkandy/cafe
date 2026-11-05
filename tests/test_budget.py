@@ -639,3 +639,14 @@ def test_the_nest_cap_and_the_memory_guard_use_the_native_kernels_300_bytes_per_
     with pytest.raises(PlanError, match="nest needs"):
         budget.memory_guard(gpu["les"]["max_cells"] * 1.01, budget.LES_BYTES_PER_CELL, 24.0)
     assert budget.memory_guard(gpu["les"]["max_cells"], budget.LES_BYTES_PER_CELL, 24.0) <= 0.85 * 24.0
+
+
+def test_r8_l0_a_damaged_throughput_file_is_a_config_error_naming_it_not_a_traceback(tmp_path):
+    """`throughput` was a bare json.loads: a truncated file raised JSONDecodeError and the valid JSON `[]` came back as a list where callers use a dict."""
+    f = tmp_path / "t.json"
+    for bad in ('{"stage1": {"uas":', "", "[]", "3"):
+        f.write_text(bad)
+        with pytest.raises(config.ConfigError, match=rf"{re.escape(str(f))}: not a JSON object .*make bench"):
+            budget.throughput(f)
+    f.write_text("{}")
+    assert budget.throughput(f) == {}

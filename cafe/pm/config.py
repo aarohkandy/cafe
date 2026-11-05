@@ -19,6 +19,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 SCHEMAS = ROOT / "cafe" / "schemas"
 PLATFORMS = ROOT / "platforms"
 CONFIG = ROOT / "config"
+THROUGHPUT_FIX = "`make bench` measures it again, or `git checkout config/throughput.json` restores the tracked one"
 
 
 class ConfigError(ValueError):
@@ -50,6 +51,8 @@ def _int(self: _Loader, node: Any) -> Any:
 
 
 _Loader.add_constructor("tag:yaml.org,2002:int", _int)
+# YAML 1.1 wants a dot in a float, so PyYAML reads 1e-6, 5e0 and 1e+7 as text; every file read through `read_yaml` takes them as numbers (round 8, L0)
+_Loader.add_implicit_resolver("tag:yaml.org,2002:float", re.compile(r"^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$"), list("-+0123456789"))
 
 
 def _yaml(path: str | pathlib.Path) -> Any:
@@ -66,6 +69,9 @@ def _yaml(path: str | pathlib.Path) -> Any:
         raise ConfigError(f"{path}: {e}") from e
     except yaml.YAMLError as e:
         raise ConfigError(f"{path}: not valid YAML ({e})") from e
+
+
+read_yaml = _yaml                                                       # the one YAML reader: every config, platform and mission file goes through it
 
 
 def platform_doc(path: str | pathlib.Path) -> Any:
@@ -97,7 +103,7 @@ def _is_float(v: str) -> bool:
 
 def _say(e: Any) -> str:
     """The schema's message, except for the slips a lab user makes first: YAML reads an unquoted timestamp as a time, an empty key as None,
-    an unquoted HH:MM as minutes, an unquoted no/yes/on/off as a boolean, and `5e0` as text."""
+    an unquoted HH:MM as minutes, an unquoted no/yes/on/off as a boolean, and a quoted number as text."""
     if e.validator == "type" and isinstance(e.instance, (dt.datetime, dt.date)):
         return f"an unquoted timestamp is read by YAML as a time; put it in quotes, e.g. \"{e.instance:%Y-%m-%dT%H:%M:%SZ}\""
     if e.validator == "type" and e.instance is None:
@@ -179,14 +185,15 @@ def table_provenance(doc: Any) -> list[str]:
     return bad
 
 
-def json_object(p: pathlib.Path) -> dict[str, Any]:
-    """A JSON object a run wrote and a command reads back; a corrupt file or any other JSON is a ConfigError (exit 2), not a traceback."""
+def json_object(p: pathlib.Path, fix: str = "`run` writes it, so run it again (--fresh)") -> dict[str, Any]:
+    """A JSON object a run wrote and a command reads back; a corrupt file or any other JSON is a ConfigError (exit 2), not a traceback. `fix` says
+    what makes the file again."""
     try:
         d = json.loads(p.read_text())
     except (ValueError, OSError) as e:                                   # JSONDecodeError and UnicodeDecodeError are ValueErrors
-        raise ConfigError(f"{p}: not a JSON object ({e}); `run` writes it, so run it again (--fresh)") from e
+        raise ConfigError(f"{p}: not a JSON object ({e}); {fix}") from e
     if not isinstance(d, dict):
-        raise ConfigError(f"{p}: not a JSON object (it holds {type(d).__name__}); `run` writes it, so run it again (--fresh)")
+        raise ConfigError(f"{p}: not a JSON object (it holds {type(d).__name__}); {fix}")
     return d
 
 

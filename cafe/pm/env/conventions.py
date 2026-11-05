@@ -25,9 +25,8 @@ WAVE_CONVENTIONS = ("umwm", "compass_from")
 
 @functools.lru_cache(maxsize=None)
 def _overlay_wave_convention(path: str) -> str:
-    import yaml
-    with open(path) as fh:
-        c = ((yaml.safe_load(fh) or {}).get("waves") or {}).get("direction_convention", "umwm")
+    from ..config import read_yaml
+    c = ((read_yaml(path) or {}).get("waves") or {}).get("direction_convention", "umwm")
     if c not in WAVE_CONVENTIONS:
         raise ValueError(f"{path}: waves.direction_convention is {c!r}, expected one of {WAVE_CONVENTIONS}")
     return str(c)
