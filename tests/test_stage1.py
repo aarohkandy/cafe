@@ -1685,6 +1685,22 @@ def test_the_link_summary_gives_the_required_samples_and_whether_the_fraction_ca
     assert stage1.summarize(merged({}, {}), names, MISSION, 73)["links"]["usv-uas-rf"]["need_count_median"] is None        # a batch without the counts says so
 
 
+def test_a_link_required_at_no_sample_has_the_verdict_not_exercised_and_no_other_link_changes():
+    """Round 9 M-17: need_count_median 0 gave GO with P(fail) 0, a pass by default. Only nc == 0 is NOT EXERCISED; the verdict dict keeps its numbers."""
+    names = list(stage1.priors_for(MISSION)[1])
+
+    def link(n):
+        res = merged({}, {})
+        res["links"]["usv-uas-rf"]["need_count"] = np.full(24, n)
+        return stage1.summarize(res, names, MISSION, 73)["links"]["usv-uas-rf"]
+    never, once, plenty = link(0), link(1), link(30)
+    assert never["verdict"]["verdict"] == stage1.NOT_EXERCISED == "NOT EXERCISED" and never["need_count_median"] == 0 and never["granularity_ok"] is False
+    assert (never["verdict"]["p_fail"], never["verdict"]["k_fail"], never["verdict"]["n"]) == (0.0, 0, 24) and "counts nothing" in never["verdict"]["note"]
+    assert once["verdict"]["verdict"] == plenty["verdict"]["verdict"] == "GO"
+    assert once["verdict"]["note"] == plenty["verdict"]["note"] != never["verdict"]["note"]
+    assert once["granularity_ok"] is False and plenty["granularity_ok"] is True         # one sample is coarse, not unexercised: still a graded verdict
+
+
 # ------------------------------------------------------------------------------------------------------------ review round 4 (batch V)
 
 class NanHsEnv(AnalyticEnv):

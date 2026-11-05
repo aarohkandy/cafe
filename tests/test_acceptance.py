@@ -740,6 +740,16 @@ def test_undecided_verdicts_may_move_only_while_their_intervals_overlap():
                                f"{lo:.3f} to {hi:.3f} and {lo2:.3f} to {hi2:.3f}, do not overlap" in b for b in bad)
 
 
+def test_r9_m17_a_link_that_turns_not_exercised_or_back_is_a_problem_even_when_both_runs_are_undecided():
+    """M-17: GO at 0 of 32 is undecided (the 95 % upper bound is 0.107), so GO -> NOT EXERCISED passed as a named note; it is not sampling noise."""
+    go, nx = summ({"x": ("GO", 0)}), summ({"x": ("NOT EXERCISED", 0)})
+    assert acc._decided(dict(k_fail=0, n=32)) is False
+    assert acc.compare(go, nx) == (["links x: verdict 'GO' in the reference, 'NOT EXERCISED' now"], [])
+    assert acc.compare(nx, go) == (["links x: verdict 'NOT EXERCISED' in the reference, 'GO' now"], [])
+    assert acc.compare(nx, nx) == ([], [])                                                       # the same verdict twice is no change
+    assert acc.compare(summ({"x": ("MARGINAL", 4)}), summ({"x": ("GO", 1)}))[0] == []         # the undecided rule for the other verdicts is as before
+
+
 def test_the_overlap_rule_is_symmetric():
     a, b = summ({"x": ("GO", 3)}), summ({"x": ("MARGINAL", 15)})
     assert len(acc.diff(a, b)) == len(acc.diff(b, a)) == 2                                    # the verdict and the P(fail) difference

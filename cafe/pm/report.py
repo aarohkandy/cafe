@@ -30,6 +30,7 @@ import pathlib
 import pickle
 import re
 import warnings
+from collections import Counter
 from collections.abc import Iterator
 from typing import Any
 
@@ -39,7 +40,7 @@ from numpy.typing import NDArray
 from . import budget, credibility
 from .config import json_object
 from .audit import STAGES
-from .stage1 import _classes, path_speed as _member_speeds
+from .stage1 import NOT_EXERCISED, _classes, path_speed as _member_speeds
 from .env.remote import sha256
 from .stats import intervals, sequential
 
@@ -62,6 +63,9 @@ MODE_TEXT = dict(profile_incomplete="a flown sortie returned (time limit or batt
                                  "not a failure of the vehicle's flight model",
                  capsize_proxy="the roll peak passed the limit, or the wind relative to the water was above the polar's top (30 m/s: outside the model, "
                                "counted as a failure, not a pass)")
+UAS_MODE_TEXT = dict(no_current_data="the wind at the aircraft's position in flight was not finite (a masked cell or a hole in the 3-D or 10 m wind field), so "
+                                     "its flight or its battery could not be computed from there on and the member is counted as failed; this is a hole in "
+                                     "the input, not a failure of the aircraft's flight model")
 SENS_SCOPE = ("These indices rank only the sampled columns (the member-wide biases and scales of the forcing and of the vehicle). The larger errors are "
               "per-member random streams that are not columns and are not ranked: the hourly wind error{wind}, half of the current error (the 100 km random "
               "field), the ocean SDE, the UAS turbulence and gusts, and the Iridium draws.")
@@ -264,7 +268,8 @@ def _undecided(lo: float, hi: float) -> str:
 
 def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     """The verdict block shared by a vehicle and a link. `region` is "GO", "MARGINAL" or "NO-GO" when the whole P(fail) interval of the stopper's confidence
-    (`sequential.STOP_CONF`) lies inside that verdict's range, else None and the verdict is not `decided`. `p_fail` carries the verdict's own interval
+    (`sequential.STOP_CONF`) lies inside that verdict's range, else None and the verdict is not `decided`; a link with the verdict NOT EXERCISED has region
+    None and is `decided` (more members cannot change it). `p_fail` carries the verdict's own interval
     (its `conf`); `stop_interval` is the stopper's, and `thresholds` the verdict cut-offs, each a traced node the sentences only restate."""
     v = e["verdict"]
     unc = dict(kind=f"{v['method']} interval", conf=v["conf"], lo=v["fail_lo"], hi=v["fail_hi"])
@@ -278,10 +283,11 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     d["thresholds"] = dict(go=num(intervals.P_FAIL_GO, "fraction", ref, "stats/intervals.py P_FAIL_GO"),
                            go_bound=num(1 - intervals.LO_SUCCESS_GO, "fraction", ref, "stats/intervals.py LO_SUCCESS_GO (1 - LO_SUCCESS_GO)"),
                            nogo=num(intervals.P_FAIL_NOGO, "fraction", ref, "stats/intervals.py P_FAIL_NOGO"))
-    d["region"] = intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF)
-    d["decided"] = d["region"] is not None
+    exercised = v["verdict"] != NOT_EXERCISED                       # a link never required: no member count decides it (region None, nothing more to say)
+    d["region"] = intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF) if exercised else None
+    d["decided"] = d["region"] is not None or not exercised
     d["undecided_statement"] = None if d["decided"] else _undecided(d["stop_interval"]["lo"]["value"], d["stop_interval"]["hi"]["value"])
-    if e["n"] < v["n_certify"]:
+    if e["n"] < v["n_certify"] and exercised:
         fail_lo = intervals.interval(e["k_fail"], e["n"], 0.95)[0]
         d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members (two-sided 95 % Wilson bound) are needed "
                                   f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, one-sided 95 %)." if fail_lo < 0.05 else
@@ -380,7 +386,7 @@ def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[
         first=None if t_left is None or not np.isfinite(t_left).any()
         else tnum(float(np.nanmin(t_left)), ref, f"stage1b/res.pkl vehicles.{vid}.first.left_data"))
     return dict(first_fail_mode=None if r is None else _first_mode(r), res_available=r is not None, mode_shares=shares, left_data=left,
-                mode_notes={m: MODE_TEXT[m] for m in e["modes"] if m in MODE_TEXT})
+                mode_notes={m: (UAS_MODE_TEXT if e.get("cls") == "uas" else {}).get(m) or MODE_TEXT[m] for m in e["modes"] if m in MODE_TEXT})
 
 
 def _cases(tr: Trace, vid: str, n: int) -> list[dict[str, Any]]:
@@ -460,13 +466,16 @@ def _opt(x: Any, unit: str, ref: dict[str, Any], src: str) -> dict[str, Any] | N
 
 
 def _speed_ratio(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any] | None:
-    """A USV's speed over ground (stage1.path_speed) against the mean 10 m wind along its track (median of the per-member ratios), next to Chiodi et al.'s 0.178
-    that the speed prior is calibrated to; None when the summary has no `speed` block (stage 1 writes it for a USV)."""
+    """A USV's speed over ground (stage1.path_speed) against the mean wind along its track (median of the per-member ratios) at the anemometer height, which is
+    the height of Chiodi et al.'s wind, next to their 0.178 that the speed prior is calibrated to, and at 10 m (`ratio`, secondary); `ratio_anem` is None for a
+    summary from before round 9, where the 10 m ratio stands in, labelled. None when the summary has no `speed` block (stage 1 writes it for a USV)."""
     sp = e.get("speed")
     if not sp or sp.get("ratio_median") is None:
         return None
     src += ".speed"
-    return dict(ratio=num(sp["ratio_median"], "-", ref, src + ".ratio_median"), sog=_opt(sp.get("sog_ms_median"), "m/s", ref, src + ".sog_ms_median"),
+    return dict(ratio=num(sp["ratio_median"], "-", ref, src + ".ratio_median"),
+                ratio_anem=_opt(sp.get("ratio_anem_median"), "-", ref, src + ".ratio_anem_median"),
+                sog=_opt(sp.get("sog_ms_median"), "m/s", ref, src + ".sog_ms_median"),
                 u10=_opt(sp.get("u10_ms_median"), "m/s", ref, src + ".u10_ms_median"),
                 chiodi=num(sp.get("calibration_ratio", CHIODI_RATIO), "-", ref, src + ".calibration_ratio"))
 
@@ -811,11 +820,28 @@ def _fresh(e: dict[str, Any], ref: dict[str, Any], s: str) -> dict[str, Any] | N
                 rmse_debiased=num(e["rmse_fresh_debiased"], "fraction", ref, s + ".rmse_fresh_debiased"))
 
 
+def _run_note(design: dict[str, Any] | None, plan: dict[str, Any] | None) -> str | None:
+    """What the variant runs did, from emulator/design.json (never a measured second: that file is hashed), as against `plan_note`, which is what the plan
+    said before the run: the variants that ran of those planned, the points per vehicle class they gave (the base mission plus the variants, less the
+    vehicle-variant pairs that were skipped) against what an emulator needs, and why the stage was cut short when it was. None without a design file."""
+    if design is None:
+        return None
+    ran, planned, skipped = len(design["variants"]), design.get("planned_variants"), design.get("skipped") or []
+    cls = (plan or {}).get("vehicle_classes") or {}
+    per_class = Counter(cls.values())
+    lost = Counter(cls.get(k["vehicle"]) for k in skipped)
+    points = {c: (ran + 1) * n - lost[c] for c, n in sorted(per_class.items())}
+    out = (f"{ran} variant run{'s' * (ran != 1)}{'' if planned is None else f' of the {planned} planned'} and the base mission" +
+           (f", {min(points.values())} points in the smallest vehicle class ({budget.EMULATOR_MIN_POINTS} are needed)" if points else ""))
+    killed = design.get("killed")
+    return out + (f"; {killed['reason']}" if killed else "") + "."
+
+
 def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Trace, plan: dict[str, Any] | None = None) -> dict[str, Any]:
     ep = budget.emulator_plan(plan) if plan else {}
     note = None if ep.get("trains", True) else str(ep["note"])                # the planner's "this budget gives N points per class, 100 are needed"
     if emu is None:
-        return dict(available=False, reason=NOT_PRESENT.format("emulator/holdout.json"), vehicles={}, plan_note=note)
+        return dict(available=False, reason=NOT_PRESENT.format("emulator/holdout.json"), vehicles={}, plan_note=note, run_note=None)
     ref = tr.ref("emulator", output="holdout.json")
     out = {}
     for vid, e in emu.items():
@@ -855,7 +881,7 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
                   variants=num(len(design["variants"]), "runs", dref, s), spent=num(design["spent_s"], "s", dref, s),
                   flip_spent=num(design["flip_spent_s"], "s", dref, s), rows_added=num(design["rows_added"], "rows", dref, s),
                   table_rows=num(design["table_rows"], "rows", dref, s), table=design["table"], stage1b_free=bool(design["stage1b_free"]))
-    return dict(available=True, vehicles=out, design=dd, plan_note=note)
+    return dict(available=True, vehicles=out, design=dd, plan_note=note, run_note=_run_note(design, plan))
 
 
 def _timing(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
@@ -999,15 +1025,16 @@ def _n(n: dict[str, Any] | None) -> str:
 
 
 def _badge(v: str) -> str:
-    return f'<span class="badge {v.lower().replace("-", "")}">{html.escape(v)}</span>'
+    return f'<span class="badge {re.sub("[^a-z]", "", v.lower())}">{html.escape(v)}</span>'
 
 
 def _undecided_badge(d: dict[str, Any]) -> str:
     """The badges of a verdict that is not decided: the stopping interval spans a threshold, and (a link only) the required fraction cannot be resolved on the
-    samples it is judged on (granularity; a link never required at all is the extreme case). The Verdicts table and the card both use this."""
+    samples it is judged on (granularity). A link never required at all has the verdict NOT EXERCISED, which says so itself (no second badge); a summary
+    from before round 9 has GO there and still gets the granularity badge. The Verdicts table and the card both use this."""
     g = d.get("granularity")
     return ("" if d["decided"] else f' <span class="badge undecided">undecided at n = {d["n"]["value"]}</span>') \
-        + ("" if g is None or g["ok"] else ' <span class="badge undecided">undecided: granularity</span>')
+        + ("" if g is None or g["ok"] or d["verdict"] == NOT_EXERCISED else ' <span class="badge undecided">undecided: granularity</span>')
 
 
 INTERVAL_SCOPE = ("This interval is the sampling error of {n} at fixed inputs: the fitted priors enter as their point values and the other assumed inputs "
@@ -1152,10 +1179,17 @@ def _speed_html(v: dict[str, Any]) -> str:
     sr, w3, au = v["speed_ratio"], v["wind3d"], v["authority"]
     out = ""
     if sr:
-        out += (f"<p class=muted>Speed over ground / mean 10 m wind along the track: median of the per-member ratios {_n(sr['ratio'])}"
-                + (f"; median speed over ground {_n(sr['sog'])} over median wind {_n(sr['u10'])} (the quotient of two medians is not the median ratio)"
+        anem = sr.get("ratio_anem")
+        head = (f"Speed over ground / mean wind at the anemometer height along the track (the height of Chiodi et al.'s wind): median of the per-member ratios "
+                f"{_n(anem)}; on the 10 m wind {_n(sr['ratio'])}" if anem else
+                f"Speed over ground / mean 10 m wind along the track: median of the per-member ratios {_n(sr['ratio'])}")
+        out += (f"<p class=muted>{head}"
+                + (f"; median speed over ground {_n(sr['sog'])} over median {'10 m ' if anem else ''}wind {_n(sr['u10'])} "
+                   "(the quotient of two medians is not the median ratio)"
                    if sr["sog"] and sr["u10"] else "") + f"; the speed prior is calibrated to Chiodi et al.'s "
-                f"{_n(sr['chiodi'])}, a scenario that differs from the mission (no current, uniform wind, sailing to a station). {USV_RATIO_NOTE}</p>")
+                f"{_n(sr['chiodi'])}, a scenario that differs from the mission (no current, uniform wind, sailing to a station). {USV_RATIO_NOTE}"
+                + ("" if anem else " This summary has no ratio at the anemometer height, so the 10 m ratio is shown against Chiodi's, which is taken at the "
+                   "anemometer height: part of the gap is the difference of the two wind heights.") + "</p>")
     if v["cls"] == "uas":
         pr = v.get("profile")
         if pr:
@@ -1194,7 +1228,8 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
         ch = f"<p class=warn>The verdict changed from {_badge(v['verdict_stage1'])} to {_badge(v['verdict'])} after the stage-3 refit.</p>"
     return (f"<div class=card><h3>{e(vid)} {_badge(v['verdict'])}{_undecided_badge(v)} <span class=muted>{e(v['cls'])}, {e(str(v['platform']))}</span></h3>"
             f"{_stat_html(v)}{_usv_bias_html(v)}{_physics_html(v['physics'])}{ch}"
-            f"<p>Dominant failure mode: <b>{e(str(v['dominant_mode']))}</b> (all modes: {modes}).<br>"
+            f"<p>Dominant failure mode: <b>{e('none (no member failed)' if v['dominant_mode'] is None else str(v['dominant_mode']))}</b> "
+            f"(all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
             f"{_task_html(v)}{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}"
             f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'], v['sensitivity'].get('quantity'))}{_fix_html(v['fix'])}"
@@ -1218,7 +1253,8 @@ def _granularity_html(g: dict[str, Any] | None) -> str:
         return ""
     if g["need_count"]["value"] == 0:
         return (f"<p class=warn>Required at no moment in the median member ({_n(g['need_count'])}): the link was not exercised, "
-                f"so its pass fraction says nothing (the mission allows {_n(g['allowed_miss'])} to be missed); this verdict is undecided: granularity.</p>")
+                f"so its pass fraction says nothing (the mission allows {_n(g['allowed_miss'])} to be missed) and the P(fail) above counts nothing; "
+                f"the verdict is {NOT_EXERCISED}, not GO.</p>")
     miss = f"; one missed sample is {_n(g['one_sample'])} of them and the mission allows {_n(g['allowed_miss'])} to be missed"
     return (f"<p class={'muted' if g['ok'] else 'warn'}>Each member's pass fraction is decided on {_n(g['need_count'])} "
             f"(the median number of required samples per member){miss}"
@@ -1291,8 +1327,9 @@ def _svg(m: dict[str, Any], reach: dict[str, Any]) -> str:
                  f'<title>ship</title></rect><text x="{x + 8:.1f}" y="{y + 14:.1f}">ship</text>')
     return (f'<svg viewBox="0 0 780 {(y1 - y0) * s + 60:.0f}" role=img aria-label="Mission map: ship, deploy points, tracks and stage-3 windows">'
             f'{"".join(g)}</svg><p class=muted>Thick line: median track over members. Thin lines: a few members (dashed: failed). '
-            "Square: ship. Dot: deploy point. Ring: stage-3 window. Shaded dashed outline: reach map (where the vehicle can get to within "
-            "the horizon, in the currents at the deploy time).</p>")
+            "Square: ship. Dot: deploy point. Ring: stage-3 window."
+            + (f" Shaded dashed outline: reach map (where the vehicle can get to within {reach['horizon']['value']:g} h of the deploy, in the currents at "
+               "the deploy time)." if rch else "") + "</p>")
 
 
 def _reach_html(r: dict[str, Any]) -> str:
@@ -1383,7 +1420,9 @@ def _chance(c: Any) -> str:
 
 def _emulator_html(m: dict[str, Any]) -> str:
     e = html.escape
-    note = f"<p class=warn>{e(m['plan_note'])}</p>" if m["plan_note"] else ""
+    note = f"<p class=warn>Plan: {e(m['plan_note'])}</p>" if m["plan_note"] else ""
+    if m.get("run_note"):
+        note += f"<p class=warn>This run: {e(m['run_note'])}</p>" if m["plan_note"] else f"<p class=muted>This run: {e(m['run_note'])}</p>"
     if not m["available"]:
         return f"<p class=warn>{e(m['reason'])}</p>{note}"
     h = note

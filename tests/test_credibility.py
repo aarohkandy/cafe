@@ -371,6 +371,44 @@ def test_stored_stage3_receipts_have_e_but_no_u_val(data):
     assert rows["lbm_sphere:Re1e4"]["note"] == "not run: lbm_sphere_1e4.json is not stored"
 
 
+@pytest.mark.parametrize("name, body, want", [
+    ("wm_flat_plate.json", dict(code_sha="x"), "lacks a finite number for cf, ittc"),
+    ("wm_flat_plate.json", dict(cf=None, ittc=0.003, err=0.1), "lacks a finite number for cf"),
+    ("wm_channel.json", dict(cf="abc", cf_dean=0.0062, err=0.06), "lacks a finite number for cf"),
+    ("wm_channel.json", dict(cf=0.0066, cf_dean=True), "lacks a finite number for cf_dean"),
+    ("wm_channel.json", dict(cf=float("nan"), cf_dean=0.0062), "lacks a finite number for cf"),
+    ("wm_channel.json", "[1, 2]", "is unreadable (rerun it)"),
+    ("wm_flat_plate.json", "{not json", "is unreadable (rerun it)"),
+    ("lbm_sphere_100.json", dict(ref=1.0), "lacks a finite number for cd"),
+    ("lbm_sphere_100.json", dict(cd=1.5, ref="x"), "lacks a finite number for ref"),
+    ("nest_sphere_100_d8.json", dict(d=8), "lacks a finite number for cd"),
+])
+def test_r9_m4_a_stored_receipt_with_a_missing_or_non_numeric_field_is_a_not_run_row_not_a_crash(data, name, body, want):
+    """M-4: float(d["cf"]) raised KeyError, TypeError or ValueError out of vv20_rows, and so out of the credibility page of the whole run."""
+    rec = data / "receipts"
+    rec.mkdir(parents=True)
+    (rec / name).write_text(body if isinstance(body, str) else json.dumps(body))
+    rows = {r["source"].rsplit("/", 1)[-1]: r for r in cr.vv20_rows(data)}
+    r = rows[name]
+    assert r["status"] == "not run" and r["S"] is None and r["note"].startswith("not run:") and want in r["note"] and name in r["note"]
+    good = rec / "wm_channel.json"
+    if name != "wm_channel.json":                                  # a good neighbour is still a row
+        good.write_text(json.dumps(dict(cf=0.0066, cf_dean=0.0062, err=0.06)))
+        assert next(x for x in cr.vv20_rows(data) if x["id"] == "wallmodel:wm_channel")["status"] == "run"
+
+
+def test_r9_m7_the_usv_sanity_row_compares_chiodi_with_the_anemometer_height_ratio_and_labels_the_fallback(run, data):
+    edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(speed=dict(ratio_median=0.129, ratio_anem_median=0.135)))
+    row = next(r for r in cr.build(run, REAL, data)["sanity"]["rows"] if r["id"] == "usv")
+    assert row["detail"].startswith("speed over ground / mean wind at the anemometer height along the track 0.135 (median of the per-member ratios; "
+                                    "0.129 on the 10 m wind) against Chiodi et al.'s 0.178 (at the anemometer height)")
+    assert "double penalty" in row["detail"]
+    edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(speed=dict(ratio_median=0.129)))
+    row = next(r for r in cr.build(run, REAL, data)["sanity"]["rows"] if r["id"] == "usv")
+    assert row["detail"].startswith("speed over ground / mean 10 m wind along the track 0.129")
+    assert "part of the gap is the difference of the wind heights" in row["detail"]
+
+
 def test_only_stored_rows_without_uncertainty_give_validation_level_one(run, data):
     rec = data / "receipts"
     rec.mkdir(parents=True)

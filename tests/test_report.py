@@ -2130,3 +2130,124 @@ def test_r8_l0_every_unit_a_count_of_one_can_carry_is_singular_and_the_rest_are_
     assert units, "the scan found no number node"
     for u in units:
         assert u in plural or u in others or u in ("", "-", "fraction", "dB") or report._singular(u) == u, u
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 9, batch B
+
+def _not_exercised(run, lid="usv-uas-rf"):
+    """The stage-1b summary of a link required at no moment, as stage1.summarize now writes it: the verdict NOT EXERCISED over the same numbers."""
+    def go(d):
+        e = d["summary"]["links"][lid]
+        e.update(need_count_median=0, granularity_ok=False, verdict=dict(e["verdict"], verdict=stage1.NOT_EXERCISED, note=stage1.NOT_EXERCISED_NOTE))
+    edit_json(run / "stage1b" / "summary.json", go)
+
+
+def test_r9_m17_a_not_exercised_link_is_badged_once_in_the_table_and_the_card_and_is_neither_undecided_nor_certifiable(run):
+    """M-17: the stage-1 verdict NOT EXERCISED is read by the badge (own class), the undecided logic, the card text and the sanity row, not shown as GO."""
+    m, plan = pm_run.make_run(run)
+    _not_exercised(run)
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    k = rep["links"]["usv-uas-rf"]
+    assert k["verdict"] == "NOT EXERCISED" and k["decided"] is True and k["region"] is None and k["undecided_statement"] is None
+    assert k["certify_statement"] is None and "counts nothing" in k["note"]
+    assert k["p_fail"]["value"] == 0.0                                             # the stored number is kept, only its reading changes
+    row = h[h.index("<a href='#v-usv-uas-rf'>"):].split("</tr>")[0]
+    card = h.split("<div id='v-usv-uas-rf'>")[1].split("<div id='v-")[0]
+    for part in (row, card):
+        assert part.count('<span class="badge notexercised">NOT EXERCISED</span>') == 1
+        assert "undecided" not in part and ">GO<" not in part                                    # no second badge for what the verdict already says
+    assert "the verdict is NOT EXERCISED, not GO" in plain(card) and "cannot be certified" not in plain(card)
+    sn = next(r for r in rep["sanity"]["rows"] if r["id"] == "usv-uas-rf")
+    assert sn["observed"] == "NOT EXERCISED" and sn["agrees"] is None and "required at no moment" in sn["detail"]
+    assert ".notexercised{" in h or ".notexercised," in h
+    assert rep["links"]["glider_eq-ship-acoustic"]["verdict"] != "NOT EXERCISED" and rep["vehicles"]["usv"]["verdict"] != "NOT EXERCISED"
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
+
+
+def test_r9_m17_the_credibility_page_reads_the_not_exercised_verdict_as_cannot_be_checked_not_as_a_disagreement(run):
+    m, plan = pm_run.make_run(run)
+    _not_exercised(run, "usv-shore-iridium")
+    row = next(r for r in credibility_mod.build(run, credibility_mod.ROOT)["sanity"]["rows"] if r["id"] == "usv-shore-iridium")
+    assert row["observed"] == "NOT EXERCISED" and row["agrees"] is None and "required at no moment" in row["detail"]
+
+
+def test_r9_m21_the_reach_caption_names_the_24_h_not_the_horizon_and_says_nothing_when_no_reach_is_drawn(run):
+    rep, h = reach_report(run, AnalyticEnv(current=(0.3, 0.0)))
+    t = plain(h)
+    assert "where the vehicle can get to within 24 h of the deploy, in the currents at the deploy time)" in t and "within the horizon" not in t
+    rep, h = reach_report(run.parent / "noenv", None)
+    assert "Shaded dashed outline" not in plain(h) and "the horizon" not in plain(h)
+
+
+def test_r9_m14_a_vehicle_no_member_failed_says_so_instead_of_none(run):
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    assert rep["vehicles"]["glider_2n"]["dominant_mode"] is None                                       # the stored value stays None
+    assert "Dominant failure mode: none (no member failed)" in t and "Dominant failure mode: None" not in t
+    assert "Dominant failure mode: station_lost" in t                                                  # a vehicle with failures is as before
+
+
+def test_r9_m7_the_usv_speed_ratio_is_compared_with_chiodi_at_the_anemometer_height_and_the_10_m_ratio_is_secondary(run):
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(
+        speed=dict(ratio_median=0.129, ratio_anem_median=0.135, sog_ms_median=0.55, u10_ms_median=5.1, calibration_ratio=0.96 / 5.4)))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    s = rep["vehicles"]["usv"]["speed_ratio"]
+    assert (s["ratio"]["value"], s["ratio_anem"]["value"]) == (0.129, 0.135) and s["ratio_anem"]["source"].endswith("speed.ratio_anem_median")
+    assert ("Speed over ground / mean wind at the anemometer height along the track (the height of Chiodi et al.'s wind): median of the per-member ratios "
+            "0.135; on the 10 m wind 0.129; median speed over ground 0.55 m/s over median 10 m wind 5.1 m/s") in t
+    assert "This summary has no ratio at the anemometer height" not in t
+    row = next(r for r in rep["sanity"]["rows"] if r["id"] == "usv")
+    assert "wind at the anemometer height along the track 0.135" in row["detail"] and "0.129 on the 10 m wind" in row["detail"] and "0.178" in row["detail"]
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+    run2 = run.parent / "older"                                                                        # a summary from before round 9: the 10 m ratio, labelled
+    m, plan = pm_run.make_run(run2)
+    edit_json(run2 / "stage1b" / "summary.json",
+              lambda d: d["summary"]["vehicles"]["usv"].update(speed=dict(ratio_median=0.129, sog_ms_median=0.55, u10_ms_median=5.1)))
+    report.write(run2, m, plan)
+    rep, t = load(run2), plain((run2 / "report" / "index.html").read_text())
+    assert rep["vehicles"]["usv"]["speed_ratio"]["ratio_anem"] is None and "median of the per-member ratios 0.129; median speed over ground" in t
+    assert "This summary has no ratio at the anemometer height, so the 10 m ratio is shown against Chiodi's" in t
+    assert "no ratio at the anemometer height in this summary" in next(r for r in rep["sanity"]["rows"] if r["id"] == "usv")["detail"]
+
+
+def _design(run, **kw):
+    p = run / "emulator" / "design.json"
+    edit_json(p, lambda d: d.update(kw))
+
+
+def test_r9_m10_the_emulator_section_says_what_ran_beside_what_was_planned(run):
+    """M-10: the plan said 7 points per class; the run was cut after 4 of 6 variants. Both are printed, the plan labelled, and the plan field is untouched."""
+    m, plan = pm_run.make_run(run)
+    note = budget.emulator_plan(plan)["note"]
+    why = "killed: the variant runs spent the emulator stage's whole wall-clock share (120 s) before variant v4 of 6"
+    _design(run, planned_variants=6, variants=[dict(variant=f"v{i}", mods={}, vehicles=[], skipped={}) for i in range(4)],
+            skipped=[dict(variant="v1", vehicle="usv", reason="x")], killed=dict(at_variant=4, planned=6, reason=why))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    e = rep["emulator"]
+    cls = plan["vehicle_classes"]
+    smallest = min(5 * n - (1 if k == "usv" else 0) for k, n in ((c, list(cls.values()).count(c)) for c in set(cls.values())))
+    assert e["plan_note"] == note
+    assert e["run_note"] == (f"4 variant runs of the 6 planned and the base mission, {smallest} points in the smallest vehicle class "
+                             f"({budget.EMULATOR_MIN_POINTS} are needed); {why}.")
+    assert f"Plan: {note}" in t and f"This run: {e['run_note']}" in t and "7 distinct" not in e["run_note"]
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+    assert report._run_note(None, plan) is None
+    assert report._run_note(dict(variants=[dict()]), None) == "1 variant run and the base mission."                      # no plan, no planned count, no kill
+
+
+def test_r9_m3_a_uas_no_current_data_mode_gets_the_uas_wording_and_the_other_classes_keep_theirs(run):
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "stage1b" / "summary.json", lambda d: [d["summary"]["vehicles"][v].update(modes=dict(no_current_data=4)) for v in ("usv", "uas")])
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    assert rep["vehicles"]["uas"]["mode_notes"] == dict(no_current_data=report.UAS_MODE_TEXT["no_current_data"])
+    assert rep["vehicles"]["usv"]["mode_notes"] == dict(no_current_data=report.MODE_TEXT["no_current_data"])
+    assert "the wind at the aircraft's position in flight was not finite" in t and "no finite insolation" in t
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].update(modes=dict(profile_incomplete=4)))
+    report.write(run, m, plan)
+    assert load(run)["vehicles"]["uas"]["mode_notes"] == dict(profile_incomplete=report.MODE_TEXT["profile_incomplete"])
