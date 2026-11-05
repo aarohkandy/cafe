@@ -238,3 +238,68 @@ def test_the_round_7_corrections_of_rows_213_and_281_are_in_the_rows():
     """M-7 and M-46: row 213 named the member blocks the code does not build, and row 281 dated a measurement after the commit that carries it."""
     assert "the block of batch members after the ones stage 1b used" in row(213) and "(k + 1) x batch" in row(213) and "(amended by 346 and 347)" in row(213)
     assert "2026-11-05" not in row(281).split(" | ")[1] and "the date is not recorded" in row(281)
+
+
+# ---- review round 8, documents (M-49, M-50, M-53, M-54, M-55, M-56)
+
+def _runbook_section(start, end):
+    rb = text("docs", "RUNBOOK.md")
+    return rb[rb.index(start):rb.index(end)]
+
+
+def test_the_runbook_names_every_mission_key_and_says_which_verdicts_to_trust():
+    """M-50: BRIEF exit condition 5 asks that the RUNBOOK alone lets a lab member define a mission and know which verdicts to trust; it named neither
+    `links`, `required_fraction`, `when`, `shore` nor `verdict`. Every top-level key and every `links` item key of the schema is named in step 3a."""
+    import json
+    schema = json.loads(text("cafe", "schemas", "mission.json"))
+    sec = _runbook_section("### 3a. Write your own mission", "## 4. Measure this machine")
+    keys = list(schema["properties"]) + list(schema["properties"]["links"]["items"]["properties"])
+    missing = [k for k in keys if f"`{k}`" not in sec and f"`{k}:" not in sec]
+    assert not missing, missing
+    assert "cafe/schemas/mission.json" in sec and "### 5a. Which verdicts to trust" in text("docs", "RUNBOOK.md")
+    trust = _runbook_section("### 5a. Which verdicts to trust", "## 6. With a GPU")
+    for phrase in ("GO, MARGINAL, NO-GO", "EMULATED", "rule-of-three", "credibility.html", "assumed"):
+        assert phrase in trust, phrase
+
+
+def test_the_runbook_does_not_say_the_planner_never_overruns_stage_1():
+    """M-53: the estimate is a lower bound (the code says so), and q8 ran 2.2 times over it (52.7 s planned, 117 s measured of a 900 s share)."""
+    rb = text("docs", "RUNBOOK.md")
+    assert "never overruns" not in rb
+    assert "q8 ran 2.2 times over it (52.7 s planned, 117 s measured, of a 900 s share)" in rb and "(270 s of 240 s)" in rb
+
+
+def test_every_package_in_requirements_txt_is_in_the_licence_file():
+    """M-54: docs/LICENSES.md left out ten of the fourteen pinned packages, among them pymavlink (LGPL-3.0), which cafe/pm/physics/uas.py imports."""
+    lic = text("docs", "LICENSES.md").lower()
+    names = [re.split(r"[=<>~]", ln)[0].strip() for ln in text("requirements.txt").splitlines() if ln.strip() and not ln.startswith("#")]
+    assert len(names) == 14 and [n for n in names if n.lower() not in lic] == []
+    assert "LGPL-3.0" in text("docs", "LICENSES.md") and "from pymavlink import mavutil" in text("cafe", "pm", "physics", "uas.py")
+
+
+def test_the_runbook_fetches_before_it_benches():
+    """M-55: the stage-1 part of `make bench` needs the fetched environment cache and ends in SystemExit without it, so the document fetches first."""
+    rb = text("docs", "RUNBOOK.md")
+    assert rb.index("## 3. Fetch the mission's data") < rb.index("## 4. Measure this machine")
+    assert "no environment cache" in text("bench", "throughput.py") and "pm python -m cafe.pm fetch --mission missions/tepex_c_demo.yaml" in rb
+    assert "(step 3 is the\n  fetch)" in rb and "| an input is not cached | step 3 |" in rb and "step 4 is the fetch" not in rb
+
+
+def test_the_runbook_says_to_commit_the_throughput_file_before_the_golden():
+    """M-56: `make bench` rewrites the tracked config/throughput.json, the wrapper then reports a dirty tree, and the golden is refused from one."""
+    bench = _runbook_section("## 4. Measure this machine", "## 5. Run the mission")
+    assert "**Commit the new `config/throughput.json`**" in bench and "git commit -am 'throughput of this machine'" in bench
+    assert "(commit the `config/throughput.json` of step 4 first)" in text("docs", "RUNBOOK.md")
+    assert re.search(r"^bench:.*\n(?:\t.*\n)+", text("Makefile"), re.M) and "throughput.json" in text("bench", "throughput.py")
+
+
+def test_physics_12_1_gives_the_curved_against_plane_earth_difference_at_nulls():
+    """M-49: "within 2 km it is the plane-earth result (0.15 dB)" held for single distances and the ship-to-USV geometry; at interference nulls the two
+    differ by 26 dB (UAS at 108.1 m over a calm sea), and the code's docstring says so too."""
+    sec = text("docs", "PHYSICS.md")
+    sec = sec[sec.index("### 12.1 RF: two-ray over the sea"):]
+    sec = sec[:sec.index("\n### ", 10)]
+    assert "Within 2 km it is the plane-earth result (0.15 dB)" not in sec
+    assert "26 dB for the UAS at the top of its profile (ht 2.2 m, hr 108.1 m)" in sec and "0.8 dB for a surface pair" in sec
+    doc = text("cafe", "pm", "physics", "comms.py")
+    assert "0.15 dB." not in doc and "26 dB" in doc

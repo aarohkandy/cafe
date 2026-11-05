@@ -12,6 +12,9 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    synthetic `.a/.b` and netCDF files built from GOFS values. Currents then come from the same model as the waves'
    forcing, and the current prior (±30 %) can be narrowed.
 
+   1a. **Longest step of the lab's ocean store inside the window** (review round 8, M-2). A lab store is accepted when its times cover the window with no step longer than 24 h between them
+   (`pipeline.OCEAN_MAX_STEP_S`); the ocean is interpolated linearly in time, so a longer step would make the current a straight line across it. *Default:* 24 h, so the daily mean of a reanalysis is accepted and a 36-hour step is refused with the step named. *If your model's output is sparser:* tell us the cadence and whether linear interpolation is acceptable; the limit is one constant (a code change).
+
 2. **Hourly wave spectra and Stokes drift.** The 6-hourly `restart/umwmrst_*.nc` spectra on orca are used (every
    6 h, every 3rd sea point). Could UMWM be re-output with `outspec > 0` at the mission waypoints and
    `stokes = .t.`? *Default:* real spectra at 00/06/12/18 Z, a DHH/JONSWAP spectrum fitted to `swh dwp dwd mwp mwd
@@ -43,7 +46,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    link pairs must hold and what outage is acceptable, and the go/no-go thresholds the PIs actually use.
    *Default:* `missions/tepex_c_demo.yaml` (brief section 6; GO at P(success) >= 0.9, NO-GO below 0.6).
    *If different:* edit the mission file: `verdict: {go: ..., nogo: ...}` is read by the verdict, the stopping rule and the what-if
-   search, and `validate` refuses values outside 0 < nogo < go <= 1 (GO also needs the Wilson lower bound on success >= min(0.75, go)); `python -m cafe.pm validate --mission <file>` checks it before a run.
+   search, and `validate` refuses values outside 0 < nogo < go <= 1 (GO also needs the Wilson lower bound on success >= min(0.75, go), and `validate` prints a note when `go` is above 0.75); `python -m cafe.pm validate --mission <file>` checks it before a run.
    Two parts of the mission definition are open (review round 3). (a) What does a drift glider have to do (heading, and what is its pass/fail criterion)? *Default:* it swims on the fixed
    `task.heading_to` written in the mission (the demo writes 0.0, due north) and can only fail by battery, depth or the seafloor, so its GO carries no mission criterion and the report says so.
    *If you give one:* use `mode: station` or `section` where the glider has a station or waypoints, or set `heading_to` to the intended heading; a success criterion for a drift glider needs a code change.
@@ -52,6 +55,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    (c) How long may a UAS sortie take, and what is the shortest acceptable flux profile (how many of the stacked levels must be flown)? (review round 4, M-1) *Default:* the demo asks for 20 min and four levels (a pattern of 8 waypoints);
    the return-to-ship timer ends a sortie at `duration_min` x `sortie.time_limit_factor` (1.0, assumed) = 1200 s, and a sortie that returns before its last waypoint is the failure `profile_incomplete` (`sortie.min_profile_fraction` 1.0, assumed).
    The nominal pattern takes 1127 s of flight, so it is complete only up to about 5.2 m/s of 10 m wind. *If your answer differs:* edit those two keys in `platforms/quad_uas.yaml`, and `sorties.duration_min` in the mission.
+   (d) Should the 90 % lower-bound term of GO follow `verdict.go`? (review round 8, M-7) Now it stays at 0.75 for any `go` above 0.75, so with `go: 0.99` nine members without a failure are GO (DECISIONS 68, 153). *Default:* no, as now; `validate` and the report's rule sentence say so. *If it should follow:* a decision, then a one-line change in `intervals.set_thresholds`.
 
 6. **The lab server.** GPU model(s) and VRAM, CPU cores, RAM, disk, OS, who administers it, and whether there is a
    user account with Docker. *Default:* designed for one 32–96 GB NVIDIA GPU + 32–64 cores; everything also runs

@@ -35,7 +35,7 @@ Pipeline and tools
 - `python -m cafe.pm ingest-ocean` writes the lab's HYCOM (netCDF or archv `.a/.b`) into the store the mission names; `QUESTIONS_FOR_LAB.md` Q1 and Q8 give the commands and keys; `docs/RUNBOOK.md`, first draft (`d7a618b`).
 - `mypy --strict` reports 0 errors in `cafe/pm`; `pyproject.toml` sets `strict = true` and the audit's mypy step reads it. `type: ignore` is used only on third-party calls (warp, trimesh, jax.config, smt), each with its code and reason (`84db079`, DECISIONS 115).
 - `ledger.git_sha` falls back to `CAFE_GIT_SHA` in a copy without `.git` (`f48fde3`).
-- After round 7: 2,153 `def test_` and 2,598 collected cases, all passing, in 49 test files; redone at code freeze. 2,052 `def test_` and 2,481 collected cases, all passing, in 49 test files in `tests/` after round 6 (after round 5: 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files; 1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
+- After round 8: (count pending). After round 7: 2,153 `def test_` and 2,598 collected cases, all passing, in 49 test files; redone at code freeze. 2,052 `def test_` and 2,481 collected cases, all passing, in 49 test files in `tests/` after round 6 (after round 5: 1,983 `def test_` and 2,364 collected cases, all passing, in 49 test files; 1,908 and 2,224 in 48 files after round 4 and the parallel stage 1; 1,822 and 2,122 in 47 files after round 3; 1,757 after round 2, 1,622 at `8ee5f50`, 1,368 at `d7a618b`; the count is redone at code freeze), with vendored reference terms (`tests/fixtures/pvs`, Fossen's PythonVehicleSimulator) and recorded fixtures for orca and HYCOM.
 
 Environment
 
@@ -402,6 +402,70 @@ Round 7 read the q7 quick run (`runs/q7`, code `8dc0ffc`) and the code at `7b748
   - L3: the planner's memory refusal advises "lower the per-cell memory (the native nest needs N B/cell)" instead of FluidX3D's "FP16 storage (55 B/cell)".
   - L4: `platforms/saildrone_explorer.yaml` `vpp_bias_sd` says its width is not an uncertainty of this model.
   - L5: a stage-3 window row's `heading_source` names what `track_heading` used.
+
+Review round 8 (`review/round_8/merged.md`: 56 findings, 0 critical, 6 major, 50 minor; 47 confirmed, 8 partly, 1 not confirmed; DECISIONS 393 to 447, plus the look-ahead fixes 448 to 456)
+
+Round 8 read the q8 quick run (`runs/q8`, code `0a0509c`) and the code at `9910a94`, with four reviewers (A and B over everything, C and D over the parts A and B did not cover) and the lead's three findings from the hosted CI runs (L-1 to L-3). Six batches fixed disjoint files (mission config and CLI, environment readers and ingest checks, ledger and audit and CI, credibility and report, vehicles and links, stage 3), each finding with a regression test that failed on the old code; the lead then fixed two sets of look-ahead findings at the shared reader or writer (the same defect in the sibling callers) and a document pass wrote the rest. The runners take the worker from `PM_HOST`. Every stored slow stage-3 result is stale again (`lbm.physics_sha()` changed), and the golden is re-based at code freeze.
+
+- Mission config and CLI (M-3, M-6, M-7, M-18, M-39, M-52; DECISIONS 395, 398, 399, 410, 431, 443):
+  - M-3: `whatif` refuses a `--mission` that differs from the run's own `mission.yaml` in any key but `seed`; a seed difference alone is a printed note.
+  - M-6: `report --run` no longer applies the stage-1 memory model (a finished run copied to an 8 GB machine was refused); the CLI tests no longer depend on the machine's memory.
+  - M-7: `validate` notes that a `go` above 0.75 leaves the interval term at 0.75 (nine members without a failure are GO); the report's rule sentence says "looser than 1 - go".
+  - M-18: the mission schema bounds `ship.antenna_height_m` (0.5 to 100 m) and `ship.transducer_depth_m` (0 to 100 m).
+  - M-39: mission errors explain an unquoted `HH:MM`, `no`/`yes`/`on`/`off` and a number written as text.
+  - M-52: `python -m cafe.pm audit` takes `--ledgers-only`.
+- Ingest checks, ocean and cache readers (M-1 ingest part, M-2, M-4, M-24, M-29, M-30, M-31, M-33, M-34; DECISIONS 393, 394, 396, 416, 421, 422, 423, 425, 426):
+  - M-1: the ingest check `forcing_in_physical_range` (gross-error bounds in `config/assumptions.yaml` `ingest.*`); a COARE/UMWM u* agreement below 90 % is a finding in the ledger.
+  - M-2: a lab ocean store with a step over 24 h inside the window is refused, an empty or all-NaN time axis gives a message, and the ledger records `ocean_time_cadence`.
+  - M-4: every directory input (the ocean store, the four assembled orca stores, the derived layer) is recorded with `tree_sha256` and rechecked by resume and the audit; the ingest check `ocean_store_nan_mask` catches a chunk deleted before the ingest.
+  - M-24: a non-increasing cached WRF or UMWM axis is a `ConfigError` naming the store, and the ingest records the failed hourly check.
+  - M-29: the lab ocean cut brackets the box whatever the grid spacing, and a store next to 0 E keeps one continuous longitude axis.
+  - M-30: lab snapshots are ingested in time order; a repeated snapshot is refused naming both files.
+  - M-31: the bathymetry receipts ignore the `.part.npz` of an interrupted GEBCO fetch.
+  - M-33: the orca manifest records `layout_version`; an old cache for a window that starts at :30 is fetched again.
+  - M-34: `run --seed` writes the saved `mission.yaml` with the seed replaced whatever its spelling.
+- Ledger, audit, CI and the tests of speed (M-5, M-23, M-35, M-40, M-41; DECISIONS 397, 415, 427, 432, 433):
+  - M-5: the emulator's logic tests no longer depend on the host's speed (fixture `emulator_speed_not_tested`); the two tests that measure the query time run alone in the audit's second pass (`SERIAL_TESTS` has 7 entries).
+  - M-23: an unreadable `ledger.json` is a stage not done (rerun) and an audit problem naming the file, not a traceback.
+  - M-35: Bellhop (its sha-256 or "absent") and the pandas, pyarrow, arlpy, yaml, jsonschema and netCDF4 versions are in the ledger and the code digest.
+  - M-40: `comms.py` lines 273, 275 and 287 are covered without Bellhop; the coverage gate names the files and lines it misses; CI uploads `coverage.json` with `audit.log`.
+  - M-41: the `make -n ci` test passes under `make audit` (`--no-print-directory`, for `MAKELEVEL` unset and 1).
+- Report, credibility and statistics (M-1 Data pedigree, M-9, M-10, M-16, M-19, M-20, M-21, M-22, M-45, M-46, M-47; DECISIONS 393, 401, 402, 408, 411, 412, 413, 414, 436, 437, 438):
+  - M-1: Data pedigree level 2 needs 90 % of the sea points to have COARE u* within 20 % of UMWM ust (BRIEF 2.1), else 1 with the number.
+  - M-9: the emulator's conformal calibration set is whole feature points, as the hold-out gate splits.
+  - M-10: the DTMB convergence rule is one function (`dtmb5415.unsettled`); a finest grid with no `converged` flag is not judged; the note names the causes.
+  - M-16: `anchor_margin_db` and `valid_range_factor` in `modems.yaml` are assumed-input leaves (`hangar --platform modems` says "2 of 2").
+  - M-19: the DTMB receipts show \|E\| <= U_val as "not judged" for a row whose finest grid has not converged.
+  - M-20: the USV speed-sampling sentence is computed from the prior.
+  - M-21: Results robustness ignores ranked parameters that have no permutation floor.
+  - M-22: `report --run` ends in an `error:` line (exit 2) for a damaged run JSON file.
+  - M-45, M-46: Verification 2 says the report does not run or read the tests; M&S management 3 says `make audit` runs ruff.
+  - M-47: "1 candidate", "1 notch", "1 member".
+- Vehicles, links and platform files (M-8, M-11, M-12, M-13, M-14, M-17, M-25, M-26, M-27, M-28, M-36, M-37, M-38, M-49; DECISIONS 400, 403, 404, 405, 406, 409, 417 to 420, 428 to 430, 440):
+  - M-8: the polar's true-wind-angle axis is 0.5 deg from 10 to 20 deg, and a receipt row compares the Stage-1 table with the direct solve at 2000 random states (0.07 % of 20 000 states still differ by more than 0.2 m/s, where the direct solve itself steps).
+  - M-11: a UAS battery `r_int_ohm` of 0 is refused (it gave NaN state with no flag).
+  - M-12: a `stw_cap_ms` off the 0.05 m/s search grid no longer gives a polar above the cap.
+  - M-13: a member with no environment at its start no longer cancels the glider ballast shift of the others.
+  - M-14: a glider's non-finite wind or current is `no_current_data`, not `no_flight`.
+  - M-17: the mission-level `usv-uas-rf` link takes the ship antenna height from the UAS platform's assumed input when the mission gives none.
+  - M-25, M-26, M-28: an empty platform file is one named refusal for every class; a list for a number, a reversed battery curve, a USV angle or mass out of range and a non-positive glider dive depth are refused naming the leaf.
+  - M-27: a scrubbed UAS member's `t_end` is 0; `fly_mission([])` is a named error.
+  - M-36: the USV table cache key includes the module source.
+  - M-37: `comms._run_bellhop` puts the Bellhop directory on `PATH` once.
+  - M-38: the SITL physics socket binds `127.0.0.1`.
+  - M-49: the curved against plane-earth two-ray statement gives the differences at interference nulls (up to 26 dB).
+- Stage 3 (M-15, M-32, M-48; DECISIONS 407, 424, 439):
+  - M-15: the `hull_fs` window row and the `hull_draft_m` assumption say that the free-surface hull displaces 2.0 t against the platform's 0.75 t (2.7 times).
+  - M-32: a truncated wall-model receipt is "stale" (the window fails with the rerun advice) instead of raising; the receipts are written atomically.
+  - M-48: the wing window's boundary layer and dx use the chord, not the span (dx 3.4 mm instead of 10.5 mm at 5 m/s).
+- Tests (M-42, M-43; DECISIONS 434, 435): tests that fail on the mutants that survived: five of round 7's fixes (the robustness rule three ways, the "not judged" filter, `lost_after_h`, the hold-out duplicates) and the USV tack penalty, tack slow-down, foil aspect ratio, nine glider terms, the Iridium retry cost and two stage-3 terms. M-44 was not confirmed (`default_harmonics` is pinned by `tests/test_stats_exact.py::test_default_harmonics_scale_with_the_member_count`) and has no fix and no DECISIONS row.
+- Documents (M-50, M-51, M-53, M-54, M-55, M-56; DECISIONS 441 to 447): RUNBOOK 3a "Write your own mission" and 5a "Which verdicts to trust"; the dropped `validate` for any file and `fetch --full` are recorded (M-51); the planner's estimate is a lower bound (M-53); LICENSES lists the ten missing packages, pymavlink under LGPL-3.0 (M-54); RUNBOOK fetches (step 3) before it benches (step 4) and says to commit `config/throughput.json` (M-55, M-56). RUNBOOK, PHYSICS (10.1, 12.1), CREDIBILITY, QUESTIONS_FOR_LAB 1a and 5 (d), STATUS and HANDOFF are updated for the rows above.
+- Look-ahead items (L0 and L1; DECISIONS 448 to 456):
+  - L0-1, L0-2, L0-5, L0-7: the audit names a truncated orca/TAO manifest or store `zarr.json`; a truncated `derived.digest.json` is rebuilt and written whole; a damaged `config/throughput.json`, receipt result or stage-1 command file is named in an error line; a stage whose hashed input was deleted reruns and the audit names it.
+  - L0-3, L0-8: YAML files take `1e-6`, `5e0` and `1e+7` as numbers; every YAML file is read through `config.read_yaml` (a repeated key or a leading-zero number is refused everywhere; a scan test keeps it so).
+  - L0-4: the ingest forcing check bounds 16 WRF fields, 5 UMWM fields and the ocean store's currents, temperature and salinity (17 new `ingest.*` bounds).
+  - L0-6: report and `validate` wording: "12 members left", "12 rows of this class", "1 row", "1 value", "1 vehicle", "1 receipt passed".
+  - L1: platform files refuse an implausible angle, a fractional or huge cell count and an absurd mass, energy, size or hotel load, each with its bound in the message (new `check_params` kind `int:lo:hi`). The second L1 finding (the M-47 singular covering 3 of 9 units) was already fixed by L0-6.
 
 ### Known issues
 

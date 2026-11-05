@@ -4,7 +4,14 @@ Written by the lead session when the user paused it to hand the work to another 
 
 ## 00. CURRENT STATE, 2026-11-04 ~22:10 UTC (read this first; older updates follow in section 0)
 
-The lead paused here at the user's request, mid round 8. Everything below is exact.
+The lead paused here at the user's request, mid round 8. Everything below is exact, except that **round 8 has since been fixed and merged** (the next block); the branch-by-branch list after it is history.
+
+### Round 8 is fixed and merged (update 2026-11-05)
+- **State.** The six batches (C, S, E, K, A, V) and the lead's look-ahead items L0 and L1 are merged on branch `r8-merged` (worktree `../cafe-r8m`); the documents are written from the hand-backs in `review/round_8/handbacks/`: DECISIONS 393 to 447 (one row per finding M-1 to M-56 in order; M-44 was not confirmed, so it has no row and a line in the CHANGELOG), 448 to 455 (L0's eight) and 456 (L1), the CHANGELOG "Review round 8" block, RUNBOOK (the fetch is now step 3 and the bench step 4; new 3a "Write your own mission" and 5a "Which verdicts to trust"), PHYSICS 10.1 and 12.1, CREDIBILITY, LICENSES, QUESTIONS_FOR_LAB 1a and 5 (d), STATUS. Test counts are pending (the gate has not run on the merged tree). Not merged into `premission-step4` yet, not pushed.
+- **The runners take the worker from `PM_HOST`.** `pm.sh` and `bin/pmx.sh` use the `~/.ssh/config` name in `PM_HOST` (default homebase; `PM_KEY` for the key), so the same command runs on homebase or on `cafe-burst`; `bin/worker_setup.sh` readies a machine from homebase and verifies its host key (trust on first contact only with `WORKER_TOFU=1`). Run tests with `PM_HOST=cafe-burst PMX=pm_<you> PM_CPUS=6 PM_MEM=16g bin/pmx.sh python -m pytest ...`.
+- **The burst VM `cafe-burst` (`burst-cafetest-rg` / `cafetest`) is approved to stay on during the wave** (owner, 2026-11-04). Its auto-shutdown (06:00 UTC daily) still deallocates it: on 2026-11-05 it had to be started again (`az vm start -g burst-cafetest-rg -n cafetest`) before the document tests could run (started 06:06 UTC; **it was left running** after that run, so deallocate it or let the 06:00 UTC auto-shutdown do it). Deallocate it when the wave's runs are done and delete the group when the loop ends (the rule above stands).
+- **The fix rule (the owner's, repeated):** a fix that moves a problem elsewhere is not a fix. Cluster findings by root cause; before changing a function list its callers and what the change could break, and check those too; one regression test per fix, shown failing on the unfixed code (a mutant in a throwaway detached worktree, never `git stash`); then a **look-ahead pass** (L0, L1) that looks for the same defect in the sibling callers, readers and writers, before the gate runs.
+- **Open before the gate.** `tests/test_ingest_fetch.py::test_everything_cached_means_nothing_is_fetched_and_every_input_is_recorded_with_its_sha` fails on the merged tree: line 60 asks every input for a `sha256`, and the assembled orca stores now carry a `tree_sha256` and no `sha256` (L0 saw it on `b20f282`; the assertion needs `or i.get("tree_sha256")`). `tests/test_whatif.py::test_a_uas_flip_is_answered_without_a_median_track` failed on an untouched checkout too (L0, L1). `docs/mutation.json` must be rebuilt (`tests/conftest.py` is part of `mutation_digest`, M-5). `usv.py`'s module docstring (lines 20-21) still says "the two agree" (PHYSICS 10.1 has the measured wording). M-55's second half (`bench/throughput.py all` failing at once without the cache) and BRIEF 148/246 (M-51) are not done; both are in DECISIONS 446 and 442.
 
 ### Where the loop is
 | Round | Findings (merged) | Major | State |
@@ -13,7 +20,7 @@ The lead paused here at the user's request, mid round 8. Everything below is exa
 | 5 | 26 | 6 | fixed `3c9c64d` |
 | 6 | 26 | 6 | fixed `8dc0ffc` |
 | 7 | 47 (four reviewers) | 14 | fixed `0a0509c`; q8 run, `e4b6210` |
-| 8 | 56 (four reviewers + lead L-1..L-3) | 6 | **fixes in progress** |
+| 8 | 56 (four reviewers + lead L-1..L-3) | 6 | **fixed and merged** on `r8-merged` (documents written; gate, q9 and the merge into `premission-step4` next) |
 No round has been clean yet. The user keeps the strict rule (two consecutive rounds with zero findings, minor included; they chose "A" again on 2026-11-04 after being told it may not converge). Demo verdicts unchanged since q5: glider_eq MARGINAL 15/64, glider_2n GO 0, USV NO-GO 60, UAS NO-GO 55.
 
 ### Round 8 fixes: branch by branch (all six branches pushed to GitHub; merge into `premission-step4`)

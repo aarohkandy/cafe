@@ -28,6 +28,13 @@ project's repository is what binds. "Linking" below means importing a library in
 | `pyconturb`, `pycoare`, `gliderflight`, `smt` | MIT, MIT, MIT, BSD-3-Clause | Permissive. |
 | `arlpy` | BSD 3-clause | Permissive. |
 | Capytaine | Apache-2.0 | Permissive. |
+| manifold3d 3.5.4 | Apache (the installed metadata's classifier "Apache Software License"; it does not name the version) | Permissive. |
+| networkx 3.7 | BSD-3-Clause | Permissive. |
+| `mapbox_earcut` 2.1.0 | ISC | Permissive. |
+| shapely 2.2.0, uvicorn 0.54.0 | BSD-3-Clause | Permissive. |
+| xarray 2026.9.0, `python-multipart` 0.0.32 | Apache-2.0 | Permissive. |
+| netCDF4 1.7.4, fastapi 0.142.4 | MIT | Permissive. |
+| `pymavlink` 2.4.50 | **LGPL-3.0** | Linked: `cafe/pm/physics/uas.py` imports it (`from pymavlink import mavutil`). A distributed image must carry the source offer and allow relinking. Using it inside the lab's own image is unaffected. |
 | `mannrs` 2.0.0 | **not stated in the installed package metadata** | Find the upstream licence before redistributing the wheel or code derived from it; using it internally in the lab image is unaffected. |
 
 ## Programs we run (copyleft; outputs are ours)
@@ -43,7 +50,7 @@ project's repository is what binds. "Linking" below means importing a library in
 
 1. Everything the lab runs internally (including with FluidX3D, if the lab accepts its licence for its use) needs no
    publication.
-2. Handing the container image to another organisation redistributes OpenFOAM, CalculiX, Gmsh, Bellhop and ArduPilot: ship
+2. Handing the container image to another organisation redistributes OpenFOAM, CalculiX, Gmsh, Bellhop and ArduPilot, and links pymavlink (LGPL-3.0): ship
    their source offers (the Dockerfile's package lists suffice for distro packages) and keep this file with the image.
 3. Handing it over with FluidX3D inside is not allowed for commercial or military recipients under the licence summarised
    above; cafe's default image does not contain it.
