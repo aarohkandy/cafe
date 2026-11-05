@@ -590,3 +590,47 @@ def test_r8_m33_the_manifest_records_the_layout_version_of_the_hour_labelling(or
     out = tmp_path / "out"
     man, _ = ingest(orca_env, out)
     assert man["layout_version"] == orca.LAYOUT_VERSION == json.loads((out / "manifest.json").read_text())["layout_version"] == 2
+
+
+# ---- review round 9: M-6 (assemble keeps every hourly part open) and M-38 (the stores are rewritten before the old manifest is dropped)
+
+def test_r9_m6_assemble_closes_each_part_so_a_30_day_window_fits_a_descriptor_limit_of_256(orca_env, tmp_path):
+    """1,440 parts (720 hours) under RLIMIT_NOFILE 256: every part open at once raised `OSError: Too many open files` (about 500 hours at 1,024)."""
+    import resource
+    import shutil
+    out, hrs = tmp_path / "out", 720
+    wg, ug = orca.wrf_grid(t(0), BOX), orca.umwm_grid(t(0), BOX)
+    ts = orca.hours(t(0), t(hrs - 1))
+    (out / "hours").mkdir(parents=True)
+    orca._save(out / "hours" / f"wrf_{orca.stamp(ts[0])}.npz", orca.wrf_hour(ts[0], wg))
+    orca._save(out / "hours" / f"umwm_{orca.stamp(ts[0])}.npz", orca.umwm_hour(ts[0], ug))
+    for x in ts[1:]:
+        for kind in ("wrf", "umwm"):
+            shutil.copy(out / "hours" / f"{kind}_{orca.stamp(ts[0])}.npz", out / "hours" / f"{kind}_{orca.stamp(x)}.npz")
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (256, hard))
+    try:
+        man = orca.assemble(out, ts, wg, ug, None, [], BOX)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+    assert man["hours"] == hrs and man["bytes_fetched"] == hrs * int(orca.wrf_hour(ts[0], wg)["_bytes"])
+    assert zarr(out, "wrf.zarr").sizes["time"] == hrs and zarr(out, "umwm.zarr").sizes["time"] == hrs
+
+
+def test_r9_m38_a_failed_assemble_leaves_no_manifest_so_the_half_rewritten_cache_is_never_trusted(orca_env, tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    ingest(orca_env, out)
+    assert orca.read_json(out / "manifest.json") is not None
+    real = xr.Dataset.to_zarr
+
+    def to_zarr(self, store=None, *a, **k):
+        if getattr(store, "name", "") == "umwm.zarr":
+            raise OSError("disk went away")
+        return real(self, store, *a, **k)
+    with monkeypatch.context() as m, pytest.raises(OSError, match="disk went away"):
+        m.setattr(xr.Dataset, "to_zarr", to_zarr)
+        ingest(orca_env, out)                                                      # all parts cached: only assemble runs; wrf.zarr is rewritten first
+    assert not (out / "manifest.json").exists() and orca.read_json(out / "manifest.json") is None
+    man, lines = ingest(orca_env, out)                                              # the parts were kept: re-assembly only, no fetch
+    assert lines[0] == "ingest: 7 parts, 7 cached, fetching 0 with 4 threads" and man["hours"] == 3
+    assert orca.read_json(out / "manifest.json")["parts"] == man["parts"]
