@@ -1208,3 +1208,27 @@ def test_r9_m22_a_platform_without_a_mission_default_the_model_indexes_is_refuse
 def test_r9_m22_the_table_names_exactly_the_mission_keys_of_the_shipped_file():
     shipped = yaml.safe_load((usv.PLATFORMS / "saildrone_explorer.yaml").read_text())["mission_defaults"]
     assert sorted(usv.MISSION_REQUIRED) == sorted(MISSION_KEYS) == sorted(shipped)
+
+
+def test_r9_a_repeating_section_whose_last_point_is_its_first_has_no_wrap_leg_of_length_zero():
+    """Before: `[A, B, A]` with `repeat` had the leg A -> A at its wrap (cross-track error 0, a capture at once); now it is `[A, B]` going round."""
+    A, B = (-165.0, 0.0), (-165.0, 0.5)
+    env = AnalyticEnv(wind=(-6.0, 0.0), current=(0.0, 0.0))
+    closed, open_ = sim(env, wps=(A, B, A), m=2, repeat=True), sim(env, wps=(A, B), m=2, repeat=True)
+    assert closed.wps.tolist() == open_.wps.tolist() == [list(A), list(B)]
+    assert sim(env, wps=(A, B, A), m=2).wps.tolist() == [list(A), list(B), list(A)]               # not repeating: the return to A is the last leg
+    assert sim(env, wps=(A, A), m=2, repeat=True).mode == "station"
+    assert np.array_equal(closed.run(3 * HR, 60.0)["lon"], open_.run(3 * HR, 60.0)["lon"])
+
+
+@pytest.mark.parametrize("key,bad", [("becalmed_after_h", 0.0), ("calm_sustain_s", -1.0), ("track_tolerance_km", 0.0), ("track_tolerance_km", 1000.5),
+                                     ("corridor_km", -5.0), ("wp_radius_m", 0.0), ("roll_limit_deg", 0.0), ("roll_limit_deg", 181.0),
+                                     ("stall_sustain_s", -1.0)])
+def test_r9_a_mission_default_out_of_its_range_is_refused_at_load_naming_it(tmp_path, key, bad):
+    """Before: the keys were kind 'any' (finite), so a negative corridor_km loaded."""
+    raw = yaml.safe_load((usv.PLATFORMS / "saildrone_explorer.yaml").read_text())
+    raw["mission_defaults"][key]["value"] = bad
+    f = tmp_path / "boat.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=rf"boat\.yaml:mission_defaults\.{key}: "):
+        usv.load_platform(str(f))

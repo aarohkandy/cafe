@@ -689,6 +689,7 @@ class _Sim1:
         self.soc, self.qah, self.ewh, self.volt = jnp.ones(1), jnp.zeros(1), jnp.zeros(1), prm["vref"]
         self.t, self.k, self.pe, self.sf, self.tilt, self.wind = 0.0, 0, jnp.zeros(1), jnp.array([[0.0], [0.0], [G0]]), 0.0, jnp.zeros((3, 1))
         self.pe_acc, self.n_acc, self.tilt_max = 0.0, 0, 0.0
+        self.hole = False                         # round 9: a wind vector that was not finite was met (flown as zero), as `simulate` does
         self.rec: list[Any] = []
         self.pos_en = np.array(home_en, float)
         self.hist: list[tuple[float, float, float, float]] = []                          # (t, roll, pitch, yaw) of the attitude we sent, every 50 ms
@@ -698,7 +699,10 @@ class _Sim1:
         cmd = u * self.prm["om_max"] * jnp.minimum(self.volt / self.prm["vref"], 1.0)
         if self.n_acc == 0:                                              # 50 ms: environment lookup, then battery for the last block
             pos = np.asarray(self.p) + np.array([[self.pos_en[0]], [self.pos_en[1]], [0.0]])
-            self.wind = jnp.asarray(self.wind_fn(self.k, self.t_launch + self.t, pos))
+            w = np.asarray(self.wind_fn(self.k, self.t_launch + self.t, pos), float)
+            bad = not np.isfinite(w).all()                               # zero keeps the state finite and keeps NaN out of the firmware's inputs
+            self.hole |= bad
+            self.wind = jnp.asarray(np.where(bad, 0.0, w))
         self.p, self.v, self.q, self.w, self.om, self.pe, self.sf, zbz = _dyn_jit(
             self.prm, self.p, self.v, self.q, self.w, self.om, cmd, self.wind, jnp.zeros((2, 1)), DT_PHYS)
         self.t += DT_PHYS
@@ -738,8 +742,9 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
     physics, wind/turbulence/gust from `env`/`turb`/`gust` (SIM_JSON ignores SIM_WIND_*). Lockstep on our timestamp, no SIM_SPEEDUP,
     so it runs in real time; run members in parallel with distinct `instance`. wp (W,3) ship-relative; default is the flux pattern.
     boot_s / patience_s: sim seconds allowed for the EKF to settle and for each of mode change, arming and take-off. Raises
-    SitlUnavailable when the binary is missing. -> NOT the fly_sortie dict: `flags` (arrays of one) holds only battery_reserve and attitude_exceedance
-    as flown, wind_exceeds_airspeed and lost_link as False (not modelled here), and no profile_incomplete or no_current_data; plus t_end, energy_wh,
+    SitlUnavailable when the binary is missing. -> NOT the fly_sortie dict: `flags` (arrays of one) holds only battery_reserve, attitude_exceedance
+    and no_current_data as flown (the last when a wind lookup was not finite: the firmware is given a zero wind from that lookup on), wind_exceeds_airspeed
+    and lost_link as False (not modelled here), and no profile_incomplete; plus t_end, energy_wh,
     soc_end, max_tilt_deg, landed, scrubbed, track (as fly_sortie's, but without phase) and sitl=dict(instance, messages, workdir, attitude).
     There is no t_first, wp_done, n_wp, ditched, airborne, failed, launch, max_dist_m, max_wind_ms, sat_s, demand_ratio_max or t_launch:
     no stage flies a SITL member (DECISIONS 310)."""
@@ -901,7 +906,8 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
         raise RuntimeError(f"SITL member failed: {box['err']}; autopilot said: {'; '.join(notes[-5:])}")
     soc, tilt = float(sim.soc[0]), math.degrees(sim.tilt_max)
     flags = dict(battery_reserve=np.array([soc < P["battery"]["reserve_frac"]]), wind_exceeds_airspeed=np.zeros(1, bool),
-                 attitude_exceedance=np.array([tilt > P["limits"]["tilt_exceedance_deg"]]), lost_link=np.zeros(1, bool))
+                 attitude_exceedance=np.array([tilt > P["limits"]["tilt_exceedance_deg"]]), lost_link=np.zeros(1, bool),
+                 no_current_data=np.array([sim.hole]))
     return dict(flags=flags, t_end=np.array([sim.t]), energy_wh=np.array([float(sim.ewh[0])]), soc_end=np.array([soc]),
                 max_tilt_deg=np.array([tilt]), landed=np.array([float(sim.p[2, 0]) < 0.3 and sim.t > 30.0]), scrubbed=np.zeros(1, bool),
                 track=dict(t=np.array(tr["t"]), pos_rel=np.array(tr["pos"])[None], soc=np.array(tr["soc"])[None], tilt_deg=np.array(tr["tilt"])[None],

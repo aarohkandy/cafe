@@ -768,3 +768,66 @@ def test_r9_m22_a_platform_without_a_mission_default_the_model_indexes_is_refuse
 def test_r9_m22_the_glider_table_names_exactly_the_mission_keys_of_the_shipped_files():
     for kind in ("seaglider", "slocum"):
         assert sorted(g.MISSION_REQUIRED) == sorted(yaml.safe_load((g.PLATFORMS / f"{kind}.yaml").read_text())["mission_defaults"])
+
+
+# ---- review round 9, batch C leftovers: a hole in the density, the SST or the depth is `no_current_data`, not a vehicle failure -----------------------------
+class HoleNorth(Strat):
+    """A masked cell: NaN density / SST / depth from `lat_hole` north (`what` names which)."""
+
+    def __init__(self, what, lat_hole=0.0, **kw):
+        super().__init__(**kw)
+        self.what, self.lat_hole = what, lat_hole
+
+    def _gap(self, v, lat):
+        return Tagged(np.where(np.asarray(lat, float) > self.lat_hole, np.nan, v.value), "hole", 0.0, "assumed")
+
+    def density(self, lon, lat, z, t):
+        v = super().density(lon, lat, z, t)
+        return self._gap(v, np.broadcast_to(lat, v.value.shape)) if self.what == "density" else v
+
+    def sst(self, lon, lat, t):
+        v = super().sst(lon, lat, t)
+        return self._gap(v, np.broadcast_to(lat, v.value.shape)) if self.what == "sst" else v
+
+    def depth(self, lon, lat):
+        v = super().depth(lon, lat)
+        return self._gap(v, np.broadcast_to(lat, v.value.shape)) if self.what == "depth" else v
+
+
+def failed_by(P, what, lat_hole, seconds):
+    s = sim(P=P, M=2, e=HoleNorth(what, lat_hole, wind=(0.0, 0.0), current=(0.0, 0.0), current_profile=uni), mission=dict(mode="drift", heading_to=0.0))
+    s.run(seconds)
+    assert np.isfinite([s.lon, s.lat, s.depth, s.E]).all()                                        # a labelled failure, never a NaN vehicle
+    return {k: int(v.sum()) for k, v in s.fail.items() if v.any()}
+
+
+@pytest.mark.parametrize("what,P", [("density", SG), ("density", SL), ("sst", SG)])
+def test_r9_a_hole_in_the_density_or_sst_met_in_flight_is_no_current_data_not_no_flight(what, P):
+    """Before: {'no_flight': 2} (the flight model had no density to work with). The slocum model does not read the SST: see the next test."""
+    assert failed_by(P, what, 0.005, 0.5 * DAY) == {"no_current_data": 2}
+
+
+def test_r9_an_sst_hole_under_a_slocum_that_does_not_read_it_is_no_failure():
+    assert failed_by(SL, "sst", 0.005, 0.5 * DAY) == {}
+
+
+def test_r9_a_hole_in_the_depth_at_the_start_of_a_dive_is_no_current_data_not_seafloor():
+    """Before: {'seafloor': 2}. A depth of 0 on land is still the sea floor (the protocol), only a depth that is not a number is a hole."""
+    assert failed_by(SG, "depth", -1.0, 0.1 * DAY) == {"no_current_data": 2}
+
+
+def test_r9_a_hole_in_the_depth_met_under_water_is_flagged_where_the_seafloor_test_could_not_see_it():
+    """Before: {} (`depth >= NaN` is False, and the next dive start is hours away): the sea-floor test was off over the hole and nothing said so."""
+    assert failed_by(SG, "depth", 0.003, 1800.0) == {"no_current_data": 2}
+
+
+@pytest.mark.parametrize("kind", ["seaglider", "slocum"])
+@pytest.mark.parametrize("key,bad", [("station_tol_m", 0.0), ("lost_hours", -1.0), ("wp_radius_m", 0.0), ("unreach_hours", -1.0)])
+def test_r9_a_mission_default_out_of_its_range_is_refused_at_load_naming_it(tmp_path, kind, key, bad):
+    """Before: the keys were kind 'any' (finite), so a capture radius of 0 (never reached) or negative hours loaded."""
+    raw = yaml.safe_load((g.PLATFORMS / f"{kind}.yaml").read_text())
+    raw["mission_defaults"][key]["value"] = bad
+    f = tmp_path / "glider.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=rf"glider\.yaml:mission_defaults\.{key}: "):
+        g.load_platform(str(f))

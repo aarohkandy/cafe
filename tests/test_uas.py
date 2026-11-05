@@ -854,5 +854,23 @@ for fc in range(0, 400):
     assert all(k in head for k in (*res, *res["flags"], "sitl")), [k for k in (*res, *res["flags"]) if k not in head]
     lacking = set(fly(M=1)) - set(res)
     assert lacking and all(k in tail for k in lacking), [k for k in lacking if k not in tail]
-    assert set(res["flags"]) == {"battery_reserve", "wind_exceeds_airspeed", "attitude_exceedance", "lost_link"}
+    assert set(res["flags"]) == {"battery_reserve", "wind_exceeds_airspeed", "attitude_exceedance", "lost_link", "no_current_data"}
     assert "not modelled" in doc and not res["flags"]["wind_exceeds_airspeed"].any() and not res["flags"]["lost_link"].any()
+
+
+def test_r9_fly_sitl_labels_a_wind_that_is_not_finite_and_gives_the_firmware_a_zero_wind(tmp_path, monkeypatch):
+    """Before: the NaN went into the physics and out to the firmware, soc_end and max_tilt_deg were NaN, and no flag said why."""
+    from cafe import emulator
+    body = FAKE_HEAD + """
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 5760 + 10 * I)); srv.listen(1)
+for fc in range(0, 400):
+    ask(frame(fc, pwm=1100))
+"""
+    monkeypatch.setattr(emulator, "SITL_DIR", fake_sitl(tmp_path, body))
+    res = {}
+    for name, env in (("hole", HoleWind(lon_hole=-np.inf, wind=(0.0, 0.0))), ("clean", AnalyticEnv(wind=(0.0, 0.0)))):
+        res[name] = uas.fly_sitl(env, uas.steaming(), 0.0, origin=ORIGIN, plat=P, max_s=0.5, workdir=str(tmp_path / name))
+    assert res["hole"]["flags"]["no_current_data"].tolist() == [True] and res["clean"]["flags"]["no_current_data"].tolist() == [False]
+    assert np.isfinite([res["hole"]["soc_end"], res["hole"]["max_tilt_deg"], res["hole"]["energy_wh"]]).all()
+    assert np.array_equal(res["hole"]["soc_end"], res["clean"]["soc_end"])                       # the env's wind is 0, so the zero wind is the clean flight

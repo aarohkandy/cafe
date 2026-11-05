@@ -133,3 +133,42 @@ Run on cafe-burst (`pm_r9c`), exit codes read from the log:
 - `python -m cafe.pm audit --code-only`: the banned-token and commented-code scans pass; its only problem is the missing stored mutation result (`docs/mutation.json`), as on any checkout without `make mutation`. **Not run: `make mutation`** (hours). The changed physics code (`uas.simulate` hole path, `usv._tf`, `drop_repeats`, `acoustic_link`) is in the mutation scope of physics, so the stored score needs a rerun at merge; the new tests were written to kill the obvious mutants (the stamp time, the argmax block index, the sticky flag, the phase mask, the `isfinite(rho)` term, the neighbour comparison).
 - `python -m ruff check` and `python -m mypy` (strict, 54 source files) clean.
 - mutants: the same new tests on a detached worktree at 91c9777: all new tests except the one "hole beyond the reach does not flag" negative control fail (`KeyError: 'no_current_data'`, `TypeError`, no `MISSION_REQUIRED`, wrong stamp time, `mode == 'section'`), pass on r9-c.
+
+
+---
+
+# Leftovers pass (second commit on r9-c)
+
+The seven items the first pass listed as left. Tests: `test_glider.py::test_r9_a_*` and `test_r9_an_*`, `test_usv.py::test_r9_a_*`, `test_uas.py::test_r9_fly_sitl_labels_*` (and `test_r9_m26_*` now pins five flags). Each new test fails on 90d27d6 (a detached worktree with only the test files copied in) and passes on r9-c; the one negative control (`test_r9_an_sst_hole_under_a_slocum...`) passes on both by design.
+
+## 1. Glider: a hole in the density, SST or depth is `no_current_data` (decided: done, not left to the lead)
+
+- `step`: a member in flight whose flight model failed (`~st.ok`) while the density or the temperature it was given is not finite is `no_current_data`; `no_flight` is only a flight that failed on finite inputs. The test is on the inputs the model got, so a Slocum (which does not read the SST) over an SST hole still flies and is not flagged, as before.
+- `_begin_dive`: a floor that is not finite is `no_current_data`; `seafloor` is the floor being too shallow (a depth of 0 on land is still the sea floor, per `protocol.depth`).
+- Sibling found by the sweep: the end-of-step `seafloor` test (`depth >= NaN` is False) was blind over a depth hole while under water, and said nothing until the next dive start, hours later or never. A member below the surface over a depth that is not finite is now `no_current_data`; a surfaced one is left to its next dive start.
+- Effect on real stores: a density that is NaN where `no_flight` fired before (below a store's own floor) is `no_current_data` now, so failure-mode counts move from `no_flight` to `no_current_data`, member by member; no member that passed fails (except the new mid-dive depth hole, which passed silently before) and none that failed passes.
+- `report.MODE_TEXT["no_current_data"]` (batch B's file, not edited here) lists "wind, current or wave state ... or insolation"; it should add "density, sea-surface temperature or water depth". The sentence ends "a hole in the input", which already holds.
+- **DECISIONS row (new).** A glider member whose flight model fails while the density or the temperature it was given is not finite, whose floor at the start of a dive is not finite, or that is under water over a floor that is not finite, is `no_current_data` (the glider's input hole, as the current and the wind of row 406); `no_flight` is only a failure on finite inputs and `seafloor` only a floor too shallow. | Review round 9, batch C leftover. **Extends 406** (current and wind) to the density, the SST and the depth. Counts of `no_flight` and `seafloor` on a store with holes become `no_current_data`.
+- **CHANGELOG.** Glider: a hole in the density, SST or water depth is `no_current_data`, not `no_flight` or `seafloor`; a depth hole met under water is flagged where it was silent (round 9).
+
+## 2. `fly_sitl` and a wind that is not finite
+
+Fixed in `_Sim1.step`, the one place the SITL physics reads the wind: a vector that is not finite is replaced by zero (as `simulate` does) and `_Sim1.hole` is set; `fly_sitl` returns it as `flags["no_current_data"]` (an array of one). The firmware no longer receives NaN. The docstring and `test_r9_m26_*` name the fifth flag. Nothing else reads a SITL result (`fly_sitl` is called only by `_sitl_receipts`, which reads `landed`, `track`, the energy and the attitude). DECISIONS 310 (no stage flies a SITL member) is unchanged. **CHANGELOG.** `fly_sitl` gives the firmware a zero wind for a wind lookup that is not finite and reports `no_current_data` (round 9).
+
+## 3. A repeating USV section whose last point equals its first
+
+`physics.drop_repeats(wps, cyclic=False)`: with `cyclic` a last point equal to the first goes too (its wrap leg has length zero and its capture is at once). `USVSim` passes `repeat` (read first now). `[A, B, A]` with `repeat` flies as `[A, B]` round and round (same positions, `test_r9_a_repeating_section...`); without `repeat` it is unchanged (the return to A is the last leg). Glider sections never repeat. **Amends the M-13 row**: "...and a repeating section's last point equal to its first".
+
+## 4. Ranges of the new mission-default keys
+
+USV: `becalmed_after_h` above 0 (the mission schema's `exclusiveMinimum`), `calm_sustain_s` and `stall_sustain_s` 0 or above (0: at once), `track_tolerance_km` above 0 and at most 1000 (the schema's maximum), `corridor_km` and `wp_radius_m` above 0, `roll_limit_deg` above 0 and at most 180. Glider: `station_tol_m` and `wp_radius_m` above 0 (a radius of 0 is never reached), `lost_hours` and `unreach_hours` 0 or above. Every shipped file passes (`test_the_shipped_platform_files_satisfy_their_loaders`); a file with a value outside is refused as `<file>:mission_defaults.<key>: ... must be a finite number <rule>`. **Amends the M-22 row** ("only presence is new; the values must be finite and no more" now reads: and in the stated range). The ranges are choices; each is in the refusal text.
+
+## 5. Not done
+
+- `make mutation` (hours): the stored physics score needs a rerun at merge (`uas.simulate`, `usv._tf`, `drop_repeats`, `acoustic_link`, `_Sim1.step`, the glider hole labels changed).
+- The full 75-minute suite. The touched files and the files that read them ran whole (below).
+- Batch A's `load_mission` duplicate-waypoint refusal and the `load_platform` suffix rule: the lead's, as asked.
+
+## Verification of the leftovers pass
+
+On cafe-burst (`pm_r9c`), exit codes from the logs: whole files `test_glider.py`, `test_usv.py`, `test_uas.py`, `test_uas_exact.py`, `test_comms.py`, `test_comms_exact.py`, `test_platform_required.py` (rc 0); the readers whole in one run (rc 0): `test_stage1.py`, `test_report.py`, `test_cli.py`, `test_config.py`, `test_config_docs.py`, `test_whatif.py`, `test_credibility.py`, `test_receipts.py`, `test_vv.py`, `test_reproducible.py`, `test_budget.py`, `test_pipeline.py`, `test_bench.py`, `test_acceptance.py`, `test_ledger.py`. After those runs only comments and a docstring wrap changed; the touched files (glider, usv, uas, uas_exact, platform_required, comms) ran again (rc 0). `ruff check cafe/pm tests` and `mypy cafe/pm` (strict, 54 files) clean. `audit --code-only`: the banned and commented-code scans pass; the one problem is the missing `docs/mutation.json`.

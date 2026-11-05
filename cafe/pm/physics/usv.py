@@ -119,10 +119,11 @@ REQUIRED = dict(
     solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="nonneg<=50", vpp_bias_mean="any", vpp_bias_sd="nonneg", current_z_m="any",
     tack_time_s="nonneg", tack_speed_frac="unit", tack_horizon_s="pos", replan_s="pos",
 )
-# Every mission default the model indexes (`md["..."]`; a test reads the literals). Present and finite; cap_cycles also takes a log of (sqrt(2 ln N): N >= 1).
+# Every mission default the model indexes (`md["..."]`; a test reads the literals). Present, finite and in range: a threshold or a width above 0, a sustain
+# time 0 or above (0: at once), track_tolerance_km up to the mission schema's 1000; cap_cycles also takes a log of (sqrt(2 ln N): N >= 1).
 # A mission may override any of them, but the report and stage 3 read the platform's own, so a file without one is refused at load (round 9, M-22).
-MISSION_REQUIRED = dict(becalmed_after_h="any", calm_sustain_s="any", track_tolerance_km="any", corridor_km="any", wp_radius_m="any", roll_limit_deg="any",
-                        stall_sustain_s="any", cap_cycles="ge1")
+MISSION_REQUIRED = dict(becalmed_after_h="pos", calm_sustain_s="nonneg", track_tolerance_km="pos<=1000", corridor_km="pos", wp_radius_m="pos",
+                        roll_limit_deg="pos<=180", stall_sustain_s="nonneg", cap_cycles="ge1")
 OPTIONAL = ("draft_nominal_m", "keel_depth_m", "iridium_antenna_height_m") + STRINGS      # read by no code
 
 
@@ -482,15 +483,15 @@ class USVSim:
         self.mode = md.get("mode", "section")
         if self.mode not in MODES:
             raise ValueError(f"mode {self.mode!r} not in {MODES}")
+        self.repeat = bool(md.get("repeat", False))
         if self.mode == "station":
             self.wps = np.array([md["station"]], float)
         else:
-            self.wps = drop_repeats(md["waypoints"])                              # round 9, M-13: [A, A] is the station A, not a section with no track test
+            self.wps = drop_repeats(md["waypoints"], self.repeat)                 # round 9, M-13: [A, A] is the station A, not a section with no track test
             if len(self.wps) == 0:
                 raise ValueError("section mode needs waypoints")
             if len(self.wps) == 1:
                 self.mode = "station"
-        self.repeat = bool(md.get("repeat", False))
         pt = perturb or {}
         bias = pt["vpp_bias"] if "vpp_bias" in pt else draw_vpp_bias(P, M, int(md.get("seed", 0)))
         self.fac = 1.0 + np.broadcast_to(np.asarray(bias, float), (M,)).copy()

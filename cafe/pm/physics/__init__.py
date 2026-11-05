@@ -67,8 +67,10 @@ def check_params(table: dict[str, str], vals: dict[str, Any], where: str, ref: s
             raise ValueError(f"{where}.{k}: {v!r} must be a number, got a list; give one value")
 
 
-def drop_repeats(wps: Any) -> Any:
+def drop_repeats(wps: Any, cyclic: bool = False) -> Any:
     """The waypoints (n, 2) with every point that equals the one before it removed (round 9, M-13). A leg of length zero has no direction: the USV's
-    cross-track error of it is 0 whatever the boat does, so a section of `[A, A]` ran with its track test off."""
+    cross-track error of it is 0 whatever the boat does, so a section of `[A, A]` ran with its track test off. `cyclic`: the list is flown round and
+    round, so a last point equal to the first is the same point twice and goes too (its wrap leg has length zero)."""
     w = np.asarray(wps, float).reshape(-1, 2)
-    return w[np.r_[True, np.any(w[1:] != w[:-1], axis=1)]] if len(w) else w
+    w = w[np.r_[True, np.any(w[1:] != w[:-1], axis=1)]] if len(w) else w
+    return w[:-1] if cyclic and len(w) > 1 and np.all(w[-1] == w[0]) else w
