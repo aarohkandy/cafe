@@ -3343,7 +3343,7 @@ def test_r8_m35_installing_bellhop_changes_the_code_digest_and_nothing_else_does
     assert pipeline.code_digest() not in (before, installed)
 
 
-# ---------------------------------------------------------------------------------------------------------------- review round 8, merge: E's ledger value and K's reader
+# ------------------------------------------------------------------------------------------------ review round 8, merge: E's ledger value, K's reader
 
 @pytest.mark.parametrize("frac", [0.89996, 0.8999, 0.9, 0.90004])
 def test_r8_merge_the_stored_ustar_fraction_is_not_rounded_across_the_briefs_floor(tmp_path, monkeypatch, frac):

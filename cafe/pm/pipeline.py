@@ -599,8 +599,8 @@ def _forcing_range(env: GriddedEnv) -> tuple[int, str]:
     return total, "; ".join(notes) or "WRF 10 m wind speed and SST, UMWM swh and ust: all finite and inside the bounds of config/assumptions.yaml ingest.*"
 
 
-USTAR_AGREE_FRACTION = 0.90      # BRIEF 2.1: COARE u* within 20 % of UMWM ust at this share of the sea points; a lower share is a finding, not a gate (row 168).
-# credibility.py's Data pedigree reads this one; the ledger value is stored unrounded so that both sides judge the same number
+USTAR_AGREE_FRACTION = 0.90      # BRIEF 2.1: COARE u* within 20 % of UMWM ust at this share of the sea points; a lower share is a finding, not a gate (row 168)
+# credibility.py's Data pedigree reads this one, too; the ledger value is stored unrounded so that both sides judge the same number
 
 
 def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float]:

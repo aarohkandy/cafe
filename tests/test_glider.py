@@ -721,8 +721,10 @@ def test_r8_m43_the_slocum_flies_only_with_buoyancy_in_the_direction_of_its_pitc
     up, down = (g.slocum_steady(1027.0, 0.0, 0.0, n + e, pitch, SL) for e, pitch in ((+150.0, 26.0), (-150.0, -26.0)))
     assert up.ok and down.ok and up.glide_deg > 0 > down.glide_deg
     assert not g.slocum_steady(1027.0, 0.0, 0.0, n - 150.0, 26.0, SL).ok and not g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, -26.0, SL).ok
-    assert down.glide_deg == pytest.approx(-up.glide_deg) and down.speed == pytest.approx(up.speed) and down.alpha_deg == pytest.approx(-up.alpha_deg)  # alpha follows the pitch's sign
-    assert g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, 59.0, SL).ok and not g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, 61.0, SL).ok     # the tabulated pitch range
+    assert down.glide_deg == pytest.approx(-up.glide_deg) and down.speed == pytest.approx(up.speed)
+    assert down.alpha_deg == pytest.approx(-up.alpha_deg)                                                                  # alpha follows the pitch's sign
+    assert g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, 59.0, SL).ok                                                      # the tabulated pitch range
+    assert not g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, 61.0, SL).ok
     assert not g.slocum_steady(1027.0, 0.0, 0.0, n + 150.0, 0.04, SL).ok
 
 
