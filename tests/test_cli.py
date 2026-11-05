@@ -706,3 +706,68 @@ def test_r8_m52_audit_forwards_ledgers_only_like_code_only(monkeypatch):
     monkeypatch.setattr(audit, "main", lambda argv: got.append(argv) or 0)
     assert cli.main(["audit", "--ledgers-only", "runs/a"]) == 0 and cli.main(["audit", "runs/b", "--code-only", "--ledgers-only"]) == 0
     assert got == [["runs/a", "--ledgers-only"], ["runs/b", "--code-only", "--ledgers-only"]]
+
+
+# ---- review round 8 (K batch)
+
+@pytest.fixture
+def default_thresholds():
+    yield
+    from cafe.pm.stats import intervals
+    intervals.set_thresholds(0.9, 0.6)                                                       # load_mission sets module state; leave the demo's
+
+
+def mission_with_go(tmp_path, go):
+    import yaml
+    d = yaml.safe_load(pathlib.Path(MISSION).read_text())
+    d["verdict"] = dict(d.get("verdict") or {}, go=go, nogo=0.5)
+    p = tmp_path / f"go{go}.yaml"
+    p.write_text(yaml.safe_dump(d))
+    return str(p)
+
+
+@pytest.mark.parametrize("go,n0", [(0.99, 9), (0.9, 9)])
+def test_r8_m7_validate_says_how_few_members_without_a_failure_are_go_when_go_is_above_the_interval_term(tmp_path, capsys, default_thresholds, go, n0):
+    assert cli.main(["validate", "--mission", mission_with_go(tmp_path, go)]) == 0
+    out, err = capsys.readouterr()
+    assert out.endswith("links)\n") and f"{n0} members without a failure are GO" in err
+    assert f"note: verdict.go {go:g}: GO needs the point estimate of P(success) >= {go:g} and the 90 % Wilson lower bound on success >= 0.75" in err
+    assert "(DECISIONS 68)" in err
+    assert "the stopper uses the 95 % bound against" in err
+
+
+def test_r8_m7_validate_prints_no_note_when_go_is_not_above_the_interval_term(tmp_path, capsys, default_thresholds):
+    assert cli.main(["validate", "--mission", mission_with_go(tmp_path, 0.7)]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_r8_m16_hangar_modems_counts_the_two_assumed_defaults(capsys):
+    assert cli.main(["hangar", "--platform", "modems"]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == "modems (modem table): provenance OK, 2 of 2 values assumed"
+    assert "defaults.anchor_margin_db = 3.0 dB  [ASSUMED: " in out and "defaults.valid_range_factor = 10.0 -  [ASSUMED: " in out
+
+
+def test_r8_m16_a_modem_default_without_a_source_or_an_assumed_why_fails_naming_it(tmp_path, capsys):
+    (tmp_path / "modems.yaml").write_text((config.PLATFORMS / "modems.yaml").read_text().replace("assumed: true, why:", "why:", 1))
+    assert cli.main(["hangar", "--platform", str(tmp_path / "modems.yaml")]) == 1
+    assert "table numbers without a source or an assumed+why: ['defaults.anchor_margin_db']" in capsys.readouterr().out
+
+
+CUTS = ["stage1b/summary.json", "refit/refit.json", "ingest/priors_fitted.json", "ingest/tao_compare.json", "stage3/windows.json", "windows/windows.json",
+        "emulator/flip.json", "checkpoints/ingest/ledger.json"]
+
+
+@pytest.mark.parametrize("rel", CUTS)
+@pytest.mark.parametrize("text", ['{"a": 1, "b', "[]"], ids=["truncated", "array"])
+def test_r8_m22_report_of_a_run_with_a_damaged_json_file_ends_in_an_error_line(tmp_path, capsys, monkeypatch, rel, text):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    assert cli.main(["report", "--run", str(run)]) == 0                                       # a finished run
+    capsys.readouterr()
+    (run / rel).parent.mkdir(parents=True, exist_ok=True)
+    (run / rel).write_text(text)
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and f"{pathlib.Path(rel).name}: not a JSON object" in err and "Traceback" not in err

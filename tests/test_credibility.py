@@ -184,7 +184,8 @@ def test_ms_management_needs_a_git_sha_and_seeds(tmp_path, data):
 def test_ms_management_level_three_needs_the_process_files(run, tmp_path):
     assert factors(run)["ms_management"]["level"] == 3
     t = factors(run)["ms_management"]["level_text"]                # M-20: only self-checks stand behind level 3
-    assert "audited by the tool" in t and "ruff configured (not run by the audit)" in t and "independent reference" not in t      # round 7, M-23
+    assert "audited by the tool" in t and "independent reference" not in t      # round 7, M-23
+    assert "`make audit` runs ruff; this report only checks that it is configured" in t and "not run by the audit" not in t      # round 8, M-46
     r = fake_root(tmp_path, 1, builders=False)
     assert factors(run, r)["ms_management"]["level"] == 2 and factors(run, r)["ms_management"]["level_text"] == cr.LEVELS[2]
     assert factors(run, fake_root(tmp_path / "x", 1, pyproject=False))["ms_management"]["level"] == 2
@@ -274,8 +275,8 @@ def write_dtmb(data, frs=("0.10", "0.20", "0.28", "0.41"), bias=1.005, recipe=dt
     root = data / "dtmb5415"
     root.mkdir(parents=True)
     for grid, k, cells in (("coarse", 1.02, 1.0e6), ("fine", bias, 8.0e6)):
-        speeds = {fr: dict(cells=cells, ct=dtmb5415.CT_REF[float(fr)] * k, ct_std=1e-6) for fr in frs}
-        d = dict(grid=grid, speeds=speeds)
+        speeds = {fr: dict(cells=cells, ct=dtmb5415.CT_REF[float(fr)] * k, ct_std=1e-6, **({"converged": True} if grid == "fine" else {})) for fr in frs}
+        d = dict(grid=grid, speeds=speeds)      # (round 8, M-10: a finest grid with no `converged` record is not judged, and the real files always have it)
         (root / f"run_{grid}.json").write_text(json.dumps(d if recipe is None else dict(d, recipe=recipe)))
 
 
@@ -760,7 +761,8 @@ def test_an_unconverged_finest_grid_leaves_the_row_not_judged_and_the_note_names
     assert ok["validated"] is True and "oscillating" in ok["note"] and "Fs = 3, p = 2 assumed" in ok["note"] and "not converged" not in ok["note"]
     for fr in ("0.20", "0.28", "0.41"):
         r = rows[f"dtmb5415:Fr{fr}"]
-        assert r["validated"] is None and r["not_judged"].startswith("not judged") and "finest grid not converged (iterative drift 0.0075 > 0.005)" in r["note"]
+        assert r["validated"] is None and r["not_judged"].startswith("not judged")
+        assert "finest grid not converged (iterative drift 0.0075 (limit 0.005))" in r["note"]
         assert "oscillating" in r["note"]
 
 
@@ -819,4 +821,146 @@ def test_a_refit_alone_earns_robustness_two_as_the_printed_rule_says(tmp_path, d
 def test_the_usv_speed_prior_width_is_not_an_uncertainty_of_the_model(run, data):      # round 7, M-15
     assert "not an uncertainty of this model" in yaml.safe_load((REAL / "config" / "perturbations.yaml").read_text())["usv_vpp_bias"]["citation"]
     u = factors(run)["uncertainty"]
-    assert any("sampled over 1.4 % only" in e["what"] and "usv_vpp_bias_brief" in e["what"] for e in u["evidence"])
+    # round 8, M-20: the figure is computed from the prior
+    assert any("sampled within +-1.4 % of the unbiased polar speed" in e["what"] and "usv_vpp_bias_brief" in e["what"] for e in u["evidence"])
+
+
+# ---------------------------------------------------------------------------------------------------------- round 8 (K batch)
+
+def ingest_check(run, **kw):
+    chk = dict(name="coare_ustar_vs_umwm_ust", ok=True, value=0.9876, limit=None, note="") | kw
+    edit(run / "checkpoints" / "ingest" / "ledger.json", lambda d: d["checks"].append(chk))
+
+
+def test_r8_m1_data_pedigree_two_needs_the_brief_ninety_percent_ustar_agreement(run):
+    d = run / "checkpoints" / "ingest" / "ledger.json"
+    ingest_check(run)
+    assert factors(run)["data_pedigree"]["level"] == 2                                      # q8's 0.9876
+    edit(d, lambda x: x.update(checks=[c for c in x["checks"] if c["name"] != "coare_ustar_vs_umwm_ust"]))
+    ingest_check(run, value=0.5)
+    f = factors(run)["data_pedigree"]
+    assert f["level"] == 1 and any("only 50.0 % of the sea points have COARE u* within 20 % of UMWM ust" in m and "asks 90%" in m for m in f["missing"])
+    write_tao(run)
+    assert factors(run)["data_pedigree"]["level"] == 1                  # a mooring comparison cannot lift a level the forcing check holds down
+    edit(d, lambda x: x.update(checks=[c for c in x["checks"] if c["name"] != "coare_ustar_vs_umwm_ust"]))
+    assert factors(run)["data_pedigree"]["level"] == 3                                       # no record (an older ledger): not held down
+
+
+def test_r8_m1_a_failed_physical_range_check_or_an_unrecorded_fraction_holds_data_pedigree_at_one(run):
+    ingest_check(run, value=None)
+    assert "no fraction recorded" in " ".join(factors(run)["data_pedigree"]["missing"]) and factors(run)["data_pedigree"]["level"] == 1
+    bad = [dict(name="forcing_in_physical_range", ok=False, value=1, limit=0, note="U10")]
+    edit(run / "checkpoints" / "ingest" / "ledger.json", lambda d: d.update(checks=bad))
+    f = factors(run)["data_pedigree"]
+    assert f["level"] == 1 and "forcing_in_physical_range" in f["missing"][0]
+
+
+def vrow(i, judged=True):
+    r = cr._row(f"r{i}", "c", "s", 1.0, 1.0, (0.01, 0.01, 0.01), "")
+    return r if judged else dict(r, validated=None, not_judged="not judged: the finest grid has not converged")
+
+
+class _Facts:
+    def __init__(self, rows):
+        self.vv = rows
+
+    def ev(self, what, f):
+        return dict(file=f, what=what)
+
+
+def test_r8_m42_validation_three_counts_four_judged_rows_beside_a_row_not_judged():
+    assert cr._validation(_Facts([vrow(i) for i in range(4)] + [vrow(9, judged=False)]))[0] == 3        # D-7: `judged = list(full)` gave 2
+    assert cr._validation(_Facts([vrow(i) for i in range(3)] + [vrow(9, judged=False)]))[0] == 2
+
+
+def sens_many(tmp_path, ranked, tests, entries):
+    """A run whose stage-1b summary has `entries` ensembles, `tests` of them with a permutation floor and the first `ranked` with a named parameter."""
+    d = sens_run(tmp_path, 0)
+    def put(s):
+        vs = s["summary"]["links"]
+        first = next(iter(vs.values()))
+        for i in range(entries - len(s["summary"]["vehicles"]) - len(vs)):
+            vs[f"extra{i}"] = json.loads(json.dumps(first))
+        for i, e in enumerate([*s["summary"]["vehicles"].values(), *vs.values()]):
+            e["sensitivity"].update(param="x" if i < ranked else None, noise_floor=0.118 if i < tests else None)
+    edit(d / "stage1b" / "summary.json", put)
+    return d
+
+
+@pytest.mark.parametrize("ranked,tests,entries,level", [(1, 3, 7, 1), (2, 5, 7, 2), (2, 2, 10, 2), (1, 7, 7, 1), (3, 7, 7, 2)],
+                         ids=["14-percent-by-luck", "2-of-5-is-2-percent", "10-entries-2-floors", "1-of-7", "3-of-7"])
+def test_r8_m42_the_robustness_rule_is_the_five_percent_level_over_the_tests_that_exist(tmp_path, data, ranked, tests, entries, level):
+    """D-2: `luck < 0.15` (1 of 3 is 14 %), the 10 % level (2 of 5 is 8 % by luck) and `tests = len(allv)` (2 of 10 entries is 8.6 %) each survived."""
+    assert factors(sens_many(tmp_path, ranked, tests, entries))["robustness"]["evidence_level"] == level
+
+
+def test_r8_m21_ranked_parameters_without_any_permutation_floor_are_not_clearly_above_chance(tmp_path, data):
+    r = factors(sens_many(tmp_path, 1, 0, 7))["robustness"]
+    assert r["evidence_level"] == 1 and any("without a permutation floor are not counted" in e["what"] for e in r["evidence"])
+
+
+def test_r8_m10_the_note_lists_the_cause_of_a_finest_grid_that_is_not_converged(data):
+    write_dtmb3(data, {"0.10": True, "0.20": True, "0.28": True, "0.41": True})
+    def cases(d):
+        d["speeds"]["0.20"].update(converged=False, drift=0.001, drift_parts=0.001, scatter=0.5, iters=3000)
+        d["speeds"]["0.28"].update(converged=False, drift=0.001, drift_parts=0.002, scatter=0.001, iters=500)
+        d["speeds"]["0.41"].pop("converged")
+    edit(data / "dtmb5415" / "run_fine.json", cases)
+    rows = {r["id"]: r for r in cr.vv20_rows(data)}
+    a, b, c = rows["dtmb5415:Fr0.20"], rows["dtmb5415:Fr0.28"], rows["dtmb5415:Fr0.41"]
+    assert "finest grid not converged (scatter 0.5 (limit 0.02))" in a["note"] and "drift 0.001 >" not in a["note"] and a["validated"] is None
+    assert "(fewer than 1000 iterations)" in b["note"] and b["not_judged"].startswith("not judged")
+    assert "finest grid not converged (no convergence record)" in c["note"] and c["validated"] is None and c["not_judged"]      # was judged: validated True
+    assert rows["dtmb5415:Fr0.10"]["validated"] is True
+
+
+def test_r8_m16_the_two_modem_defaults_are_assumed_inputs_with_the_same_numbers(data):
+    ids = {i["id"]: i for i in cr.assumed_inputs(REAL)}
+    for k, v in (("anchor_margin_db", "3.0"), ("valid_range_factor", "10.0")):
+        assert ids[f"modems.yaml:defaults.{k}"]["value"] == v and ids[f"modems.yaml:defaults.{k}"]["why"]
+    from cafe.pm.physics import comms
+    assert comms.acoustic_margin(4000.0, "benthos_atm960", "MF") == pytest.approx(3.0, abs=1e-9) and comms.valid_range_m("benthos_atm960", "MF") == 40000.0
+
+
+def test_r8_m20_the_usv_speed_sampling_sentence_is_computed_from_the_prior(run, data, tmp_path, monkeypatch):
+    u = factors(run)["uncertainty"]
+    what = next(e["what"] for e in u["evidence"] if "usv_vpp_bias_brief" in e["what"])
+    assert "within +-1.4 % of the unbiased polar speed" in what and "+-1.9 % of the speed flown" in what and "sampled over 1.4 % only" not in what
+    perts = yaml.safe_load((REAL / "config" / "perturbations.yaml").read_text())
+    perts["usv_vpp_bias"].update(lo=-0.30, hi=-0.20)
+    (tmp_path / "perts.yaml").write_text(yaml.safe_dump(perts))
+    monkeypatch.setattr(cr.sampling, "PERTURBATIONS", tmp_path / "perts.yaml")
+    what = next(e["what"] for e in factors(run)["uncertainty"]["evidence"] if "usv_vpp_bias_brief" in e["what"])
+    assert "within +-5.0 % of the unbiased polar speed" in what and "1.4 %" not in what and "+-6.7 % of the speed flown" in what
+
+
+def test_r8_m45_verification_two_says_it_does_not_run_or_read_the_tests(run):
+    v = factors(run)["verification"]
+    assert v["level"] == 2 and "does not run or read the tests" in v["level_text"] and "their results are not read here" in v["evidence"][1]["what"]
+
+
+def test_r8_m46_the_management_text_no_longer_says_the_audit_does_not_run_ruff(run):
+    m = factors(run)["ms_management"]
+    assert m["level"] == 3 and "not run by the audit" not in m["level_text"] and "`make audit` runs ruff" in m["level_text"]
+    assert "ruff configured (not run by the audit)" not in (REAL / "docs" / "CREDIBILITY.md").read_text()
+
+
+@pytest.mark.parametrize("name", ["summary.json", "refit.json", "tao_compare.json", "env_sigmas_fitted.json"])
+def test_r8_m22_a_truncated_run_json_is_a_config_error_naming_the_file(tmp_path, name):
+    p = tmp_path / name
+    p.write_text('{"a": 1, "b')
+    with pytest.raises(cr.config.ConfigError, match=rf"{name}: not a JSON object .*run it again"):
+        cr._json(p)
+    p.write_text("[]")
+    with pytest.raises(cr.config.ConfigError, match="it holds list"):
+        cr._json(p)
+
+
+def test_r8_m1_both_ingest_checks_present_and_passing_keep_level_two_and_absent_ones_are_accepted(run):
+    d = run / "checkpoints" / "ingest" / "ledger.json"
+    both = [dict(name="forcing_in_physical_range", ok=True, value=0, limit=0, note=""),
+            dict(name="coare_ustar_vs_umwm_ust", ok=True, value=0.90, limit=None, note="")]
+    edit(d, lambda x: x["checks"].extend(both))
+    assert factors(run)["data_pedigree"]["level"] == 2                                       # 0.90 is the brief's floor, inclusive
+    edit(d, lambda x: x["checks"].__setitem__(-1, dict(both[1], value=0.8999)))
+    assert factors(run)["data_pedigree"]["level"] == 1

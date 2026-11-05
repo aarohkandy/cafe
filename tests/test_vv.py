@@ -905,3 +905,43 @@ def test_prepare_with_a_fake_download_and_cli(tmp_path, monkeypatch, capsys):
     with pytest.raises(SystemExit) as e:
         runpy.run_module("cafe.pm.dtmb5415", run_name="__main__")
     assert e.value.code == 2
+
+
+# ---------------------------------------------------------------------------------------------------------- round 8 (M-10, M-19)
+
+def test_r8_m10_unsettled_is_the_one_convergence_rule():
+    assert dt.unsettled(1000, 0.005, 0.005, 0.02) == []                                              # every limit is inclusive; MIN_ITERS too
+    assert dt.unsettled(999, 0.0, 0.0, 0.0) == ["fewer than 1000 iterations"]
+    assert dt.unsettled(2000, 0.006, 0.0, 0.0) == ["iterative drift 0.006 (limit 0.005)"]
+    assert dt.unsettled(2000, 0.0, 0.007, 0.0) == ["pressure/viscous drift 0.007 (limit 0.005)"]
+    assert dt.unsettled(2000, 0.0, 0.0, 0.5) == ["scatter 0.5 (limit 0.02)"]
+    assert dt.unsettled(2000, math.nan, None, None) == ["iterative drift nan (limit 0.005)"] and dt.unsettled(None, None, None, None) == []
+    assert len(dt.unsettled(10, 1.0, 1.0, 1.0)) == 4
+
+
+def test_r8_m10_not_converged_reasons_reads_a_missing_flag_as_not_converged():
+    assert dt.not_converged_reasons(dict(converged=True, drift=0.5)) == []
+    assert dt.not_converged_reasons({}) == ["no convergence record"] and dt.not_converged_reasons(dict(converged=None)) == ["no convergence record"]
+    assert dt.not_converged_reasons(dict(converged=False, drift=0.001, drift_parts=0.001, scatter=0.5, iters=3000)) == ["scatter 0.5 (limit 0.02)"]
+    assert dt.not_converged_reasons(dict(converged=False)) == ["convergence limits not met (cause not stored)"]
+
+
+def edit_case(root, grid, fr, **kw):
+    f = root / f"run_{grid}.json"
+    j = json.loads(f.read_text())
+    j["speeds"][fr].update(kw)
+    f.write_text(json.dumps(j))
+
+
+def test_r8_m19_a_row_whose_finest_grid_has_not_converged_is_a_context_row_in_the_receipts(tmp_path):
+    root = stored(tmp_path, converging())
+    edit_case(root, "fine", "0.20", converged=False, scatter=0.5)
+    edit_case(root, "fine", "0.41", converged=None)
+    out = receipt_state()
+    dt.receipts(root)
+    judged = [x["claim"] for x in out if x.get("kind") == "bracket" and "|E| <= U_val" in x["claim"]]
+    assert judged == ["C_T Fr 0.10: |E| <= U_val (ASME V&V 20)", "C_T Fr 0.28: |E| <= U_val (ASME V&V 20)"]
+    skipped = [x for x in out if x.get("kind") == "context" and "is not judged" in x["claim"]]
+    assert [x["claim"].split(":")[0] for x in skipped] == ["C_T Fr 0.20", "C_T Fr 0.41"] and all(x["ok"] is None for x in skipped)
+    assert "scatter 0.5 (limit 0.02)" in skipped[0]["claim"] and "no convergence record" in skipped[1]["claim"]
+    assert len([x for x in out if x.get("kind") == "context" and "E =" in x["claim"]]) == 4                       # the E / U_val orientation rows stay

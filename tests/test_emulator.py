@@ -498,3 +498,21 @@ def test_threads_appending_to_one_table_lose_none(tmp_path):
     [t.start() for t in ts]
     [t.join(300) for t in ts]
     assert errs == [] and sorted(E.read_table(tmp_path / "t.parquet")["key"]) == sorted(f"{t}{i}" for t in "abcd" for i in range(5))
+
+
+def test_the_holdout_draws_fresh_members_once_per_point_not_once_per_replicate(tmp_path):
+    """Round 8 M-42 (D-8): replicates of one mission that differ in the noise columns only are one point; keying the de-duplication
+    on the features asked `fresh` three times for the same mission."""
+    base = E.synthetic_table(40, 1)
+    rng = np.random.default_rng(3)
+    df = base.loc[base.index.repeat(3)].reset_index(drop=True)                                     # replicates adjacent
+    df = df.assign(wind_mean=df.wind_mean + 0.01 * rng.normal(size=len(df)), hs_max=df.hs_max + 0.01 * rng.normal(size=len(df)))
+    cols = ["deploy_shift_h", "lon_shift_deg", "duty_cycle", "battery_wh"]
+    em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "t.parquet", seed=1, point_cols=cols)
+    asked = []
+
+    def fresh(row):
+        asked.append(tuple(row[cols].round(9)))
+        return 0.5, 64
+    h = em.holdout_report(df, fresh=fresh)
+    assert len(asked) == E.FRESH_POINTS == 3 and len(set(asked)) == 3 and h["fresh"]["points"] == 3
