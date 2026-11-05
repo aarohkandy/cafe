@@ -301,7 +301,7 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
                                steps_hook=wall_hook(steps, spec.chunk, wall, res["cells"], wlog))
     wlog["setup_s"] = pre
     n = len(ser["F"])
-    if n < steps and not wlog["killed"]:                                       # nest.simulate stopped at a chunk that diverged (non-finite or Mach > 1)
+    if nest.diverged(ser):                                                     # its last chunk blew up (non-finite or Mach > 1), the planned last too
         wlog.update(run_steps=n, diverged=True, diverged_at_step=n,
                     cut_reason=f"diverged after {n} of {steps} steps: the flow went non-finite or past Mach 1 inside a chunk "
                                f"of {spec.chunk} steps; the run stopped there")

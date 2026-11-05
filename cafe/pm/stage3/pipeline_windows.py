@@ -562,7 +562,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     except (ValueError, RuntimeError) as e:                                 # memory guard, empty body, no flow ...
         return dict(base, error=str(e)[:300], reasons=[str(e)[:300]], timing=dict(wall_s=time.perf_counter() - t0, wall_share_s=win_s))
     wl = r["wall"]
-    cut = wl["run_steps"] < wl["planned_steps"]                             # killed by the clock or diverged: where it stopped is machine-dependent
+    cut = wl["run_steps"] < wl["planned_steps"] or wl["diverged"]           # killed by the clock or diverged (even in the last chunk): machine-dependent
     left = None if win_s is None else win_s - (time.perf_counter() - t0)
     fea_took = 0.0
     if veh.extra.get("fea") and not sizes["fea"]["runs"]:                    # planned out: the reserve is below stage3.fea_min_s (a plan fact, cut or not)

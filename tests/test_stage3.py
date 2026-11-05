@@ -1065,12 +1065,13 @@ def test_both_stored_passing_receipts_clear_only_the_wall_model_row(no_wall_rece
     cheap(monkeypatch)
     wm.channel_path().parent.mkdir(parents=True, exist_ok=True)
     sha = lbm.physics_sha()                                                    # stored by the current code (round 7 M-8)
-    wm.channel_path().write_text(json.dumps(dict(err=0.03, code_sha=sha)))
+    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.03, code_sha=sha)))                          # (whole records: R9 M-4)
+    plate = lambda err: json.dumps(dict(_without(_stub_plate(err=err), "force"), code_sha=sha))                # noqa: E731
     row = lambda: [c for c in pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())["q"][0]["checks"] if c["name"] == "wall_model_receipt_error"][0]
     assert not row()["ok"]                                                     # the channel alone does not validate a hull
-    wm.slow_path().write_text(json.dumps(dict(err=0.165, code_sha=sha)))
+    wm.slow_path().write_text(plate(0.165))
     assert not row()["ok"]                                                     # nor does it hide a failing plate
-    wm.slow_path().write_text(json.dumps(dict(err=0.05, code_sha=sha)))
+    wm.slow_path().write_text(plate(0.05))
     out = pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())
     r = out["q"][0]
     assert [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]["ok"]
@@ -2269,3 +2270,204 @@ def test_the_wing_window_sizes_its_boundary_layer_on_the_chord_not_the_span(no_w
     coarse = W.window_resolution(wing, W.WindowSpec(velocity=(U, 0.0, 0.0), dx=0.0105))                      # the dx the span gave
     why = pw.why_failed([], coarse, {})
     assert len(why) == 1 and "resolution below the rule: 3.2 cells per boundary-layer thickness at dx = 0.0105 m" in why[0]
+
+
+# ------------------------------------------------------------------ review round 9, batch D: M-4, M-23, M-24
+def _without(rec, key):
+    return {k: v for k, v in rec.items() if k != key}
+
+
+PLATE_BAD = {"code_sha_only": lambda r: dict(code_sha=r["code_sha"]), "err_null": lambda r: dict(r, err=None), "err_text": lambda r: dict(r, err="x"),
+             "err_bool": lambda r: dict(r, err=True), "err_NaN": lambda r: dict(r, err=math.nan), "cf_missing": lambda r: _without(r, "cf"),
+             "re_text": lambda r: dict(r, re="1e6"), "yfrac_null": lambda r: dict(r, yfrac=None), "ittc_missing": lambda r: _without(r, "ittc")}
+
+
+@pytest.mark.parametrize("what", list(PLATE_BAD))
+def test_r9_m4_a_plate_receipt_without_a_number_where_the_code_reads_one_is_unreadable_not_a_crash(monkeypatch, tmp_path, what):
+    """M-4: {code_sha} alone, err null or text passed stale_wall_receipts and raised KeyError/TypeError out of stored_wall_error after the LES ran."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    plate = dict(_without(_stub_plate(), "force"), code_sha=lbm.physics_sha())
+    wm.slow_path().write_text(json.dumps(PLATE_BAD[what](plate)))
+    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.01, code_sha=lbm.physics_sha())))
+    assert wm.stale_wall_receipts() == ["wm_flat_plate.json is unreadable (rerun it)"] and wm.stored_wall_error() is None
+    monkeypatch.setattr(wm, "channel", lambda **k: _stub_channel())
+    plate_row = [r for r in wm.receipts() if "Flat plate" in r["claim"]][0]
+    assert plate_row["ok"] is False and "NOT STORED" in plate_row["claim"]
+
+
+@pytest.mark.parametrize("what", ["code_sha_only", "err_null", "err_text", "cf_dean_missing", "cf_NaN"])
+def test_r9_m4_a_channel_receipt_without_a_number_where_the_code_reads_one_is_unreadable_not_a_crash(monkeypatch, tmp_path, what):
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    wm.slow_path().write_text(json.dumps(dict(_without(_stub_plate(err=0.02), "force"), code_sha=lbm.physics_sha())))
+    chan = dict(_stub_channel(err=0.01), code_sha=lbm.physics_sha())
+    body = {"code_sha_only": {"code_sha": chan["code_sha"]}, "err_null": dict(chan, err=None), "err_text": dict(chan, err="x"),
+            "cf_dean_missing": _without(chan, "cf_dean"), "cf_NaN": dict(chan, cf=math.nan)}[what]
+    wm.channel_path().write_text(json.dumps(body))
+    assert wm.stale_wall_receipts() == ["wm_channel.json is unreadable (rerun it)"] and wm.stored_wall_error() is None
+
+
+def test_r9_m4_a_window_with_an_unreadable_receipt_fails_the_check_and_does_not_raise(monkeypatch, tmp_path):
+    """M-4, at the level the crash happened: run_window reads the receipt after the LES. A bad receipt is a failed wall_model_receipt_error row."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    wm.slow_path().write_text(json.dumps({"code_sha": lbm.physics_sha()}))
+    wm.channel_path().write_text(json.dumps(dict(_stub_channel(err=None), code_sha=lbm.physics_sha())))
+    sp = W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=200, box=(2.0, 0.8, 0.8), chunk=100)
+    r = W.run_window(HULL, sp, _uniform([0, 0, 0]))
+    row = [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]
+    assert not row["ok"] and math.isnan(row["value"])
+    assert row["problem"] == "wm_flat_plate.json is unreadable (rerun it); wm_channel.json is unreadable (rerun it)"
+    assert not r["ok"]
+
+
+@pytest.mark.parametrize("rec", [dict(cd=1.0), dict(ref=1.0), dict(cd=None, ref=1.0), dict(cd="1.0", ref=1.0), dict(cd=True, ref=1.0),
+                                 dict(cd=math.nan, ref=1.0), dict(cd=1.0, ref=math.inf)])
+def test_r9_m4_result_row_with_a_stored_record_lacking_a_number_is_a_failed_row_not_a_crash(rec):
+    """M-4 sibling: result_row read rec[ref_key] (and rec[value_key]) before it looked at the sha."""
+    cr.OUT.clear()
+    lbm.result_row("g", "claim", dict(rec, code_sha=lbm.physics_sha()), "cd", "ref", 0.1, "cmd", "2 h", "src")
+    (row,) = cr.OUT
+    assert row["ok"] is False and "STORED WITHOUT A NUMBER FOR" in row["claim"] and "rerun: cmd" in row["source"]
+    cr.OUT.clear()
+
+
+HUGE = "9" * 400                                                                                          # json.loads makes this an int no float holds
+
+
+@pytest.mark.parametrize("field", ["err", "cf", "re", "ittc", "yfrac"])
+def test_r9_m4_a_plate_field_holding_an_integer_too_large_for_a_float_is_unreadable_not_an_overflow(monkeypatch, tmp_path, field):
+    """M-4: math.isfinite raised OverflowError on a 400-digit integer literal; read_stored catches only OSError and ValueError."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    good = json.dumps(dict(_without(_stub_plate(), "force"), code_sha=lbm.physics_sha()))
+    wm.slow_path().write_text(re.sub(rf'"{field}": [^,}}]+', f'"{field}": {HUGE}', good))
+    assert f'"{field}": {HUGE}' in wm.slow_path().read_text()
+    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.01, code_sha=lbm.physics_sha())))
+    assert wm.stale_wall_receipts() == ["wm_flat_plate.json is unreadable (rerun it)"] and wm.stored_wall_error() is None
+
+
+@pytest.mark.parametrize("field", ["err", "cf", "cf_dean"])
+def test_r9_m4_a_channel_field_holding_an_integer_too_large_for_a_float_is_unreadable_not_an_overflow(monkeypatch, tmp_path, field):
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    wm.slow_path().write_text(json.dumps(dict(_without(_stub_plate(err=0.02), "force"), code_sha=lbm.physics_sha())))
+    good = json.dumps(dict(_stub_channel(err=0.01), code_sha=lbm.physics_sha()))
+    wm.channel_path().write_text(re.sub(rf'"{field}": [^,}}]+', f'"{field}": {HUGE}', good))
+    assert f'"{field}": {HUGE}' in wm.channel_path().read_text()
+    assert wm.stale_wall_receipts() == ["wm_channel.json is unreadable (rerun it)"] and wm.stored_wall_error() is None
+
+
+@pytest.mark.parametrize("key", ["cd", "ref"])
+def test_r9_m4_result_row_and_read_stored_treat_an_integer_too_large_for_a_float_as_no_number(tmp_path, key):
+    cr.OUT.clear()
+    rec = dict(cd=1.0, ref=1.0, code_sha=lbm.physics_sha())
+    (tmp_path / "r.json").write_text(json.dumps(rec).replace(f'"{key}": 1.0', f'"{key}": {HUGE}'))
+    assert lbm.read_stored(tmp_path / "r.json", ("cd", "ref")) is None
+    lbm.result_row("g", "claim", json.loads((tmp_path / "r.json").read_text()), "cd", "ref", 0.1, "cmd", "2 h", "src")
+    (row,) = cr.OUT
+    assert row["ok"] is False and f"STORED WITHOUT A NUMBER FOR {key}" in row["claim"]
+    cr.OUT.clear()
+
+
+def test_r9_m4_read_stored_and_the_sphere_grid_readers_name_a_damaged_file_instead_of_raising(monkeypatch, tmp_path):
+    """M-4 siblings: nest.sphere_discretisation (the refit's default floor) and nest.sphere_receipts parsed nest_sphere_*.json raw."""
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    (tmp_path / "a.json").write_text('{"cd": 1.2, "d"')
+    assert lbm.read_stored(tmp_path / "a.json") is None and lbm.read_stored(tmp_path / "missing.json") is None
+    (tmp_path / "a.json").write_text("[1]")
+    assert lbm.read_stored(tmp_path / "a.json") is None
+    (tmp_path / "a.json").write_text(json.dumps(dict(cd=1.2, d=8)))
+    assert lbm.read_stored(tmp_path / "a.json", ("cd", "d")) == dict(cd=1.2, d=8) and lbm.read_stored(tmp_path / "a.json", ("cd", "x")) is None
+    for d, cd in ((8, 1.3053), (12, 1.2087), (16, 1.1848)):
+        (tmp_path / f"nest_sphere_100_d{d}.json").write_text(json.dumps(dict(d=d, cd=cd)))
+    (tmp_path / "nest_sphere_100_d20.json").write_text('{"d": 20, "cd": 1.1')                               # a kill during the write
+    (tmp_path / "nest_sphere_100_d24.json").write_text(json.dumps(dict(d=24, cd=None)))                     # a schema change
+    runs, bad = nest.stored_grids("100")
+    assert [r["d"] for r in runs] == [8, 12, 16] and bad == ["nest_sphere_100_d20.json", "nest_sphere_100_d24.json"]
+    e, src = nest.sphere_discretisation()
+    assert e == pytest.approx(0.0153, abs=2e-4) and "[8, 12, 16]" in src
+    cr.OUT.clear()
+    rows = nest.sphere_receipts()
+    names = [r["claim"] for r in rows]
+    assert any("nest_sphere_100_d20.json is unreadable" in n for n in names) and any("nest_sphere_100_d24.json is unreadable" in n for n in names)
+    assert any("Richardson-extrapolated from d=[8, 12, 16]" in n for n in names)
+    cr.OUT.clear()
+
+
+def test_r9_m23_a_plate_stored_below_re_1e6_fails_the_gate_the_same_as_the_receipts_table(monkeypatch, tmp_path):
+    """M-23: the gate never read `re`, so a plate at Re_L 9.8e5 with a small error and the current sha cleared the check that the table fails."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(wm, "channel", lambda **k: _stub_channel())
+    plate = _without(_stub_plate(re=9.8e5, err=0.01), "force")
+    wm.slow_path().write_text(json.dumps(dict(plate, code_sha=lbm.physics_sha())))
+    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.01, code_sha=lbm.physics_sha())))
+    phrase = "wm_flat_plate.json is at Re_L 9.8e+05, below the 1e+06 the comparison needs (rerun it)"
+    assert wm.stale_wall_receipts() == [phrase] and wm.stored_wall_error() is None
+    spec = nest.NestSpec((20, 20, 20), 0.01, 1.0, 1e-6)
+    gate = [c for c in W.stage3_checks(_series(), spec, np.ones(300), 10, wm.stored_wall_error(), "; ".join(wm.stale_wall_receipts()))
+            if c["name"] == "wall_model_receipt_error"][0]
+    assert not gate["ok"] and gate["problem"] == phrase
+    assert "Re_L 9.8e+05" in pw.why_failed([gate], dict(delta_te=1.0, dx=0.1), {})[0]
+    table = [r for r in wm.receipts() if "Flat plate" in r["claim"]][0]
+    assert table["ok"] is False and "Re_L = 9.8e+05, below the 1e6 the comparison needs" in table["claim"]                  # the table and the gate agree
+    wm.slow_path().write_text(json.dumps(dict(plate, re=wm.PLATE_RE_MIN, code_sha=lbm.physics_sha())))                    # at the limit it counts
+    assert wm.stale_wall_receipts() == [] and wm.stored_wall_error() == 0.01
+    wm.slow_path().write_text(json.dumps(dict(plate, code_sha="OLD")))                                                     # stale code is said first
+    assert wm.stale_wall_receipts() == ["wm_flat_plate.json was stored by different code (rerun it)"]
+
+
+def _nan_in_the_last_chunk(monkeypatch, last):
+    """The real solver, with the force of the chunk that ends at step `last` made non-finite (a blow-up in the final chunk of a whole-chunk run)."""
+    real = nest.make_run
+
+    def make_run(*a, **k):
+        run = real(*a, **k)
+
+        def wrapped(state, geom, params):
+            st, ser = run(state, geom, params)
+            return (st, dict(ser, F=ser["F"] * jnp.nan)) if int(st.n) == last else (st, ser)
+        return wrapped
+    monkeypatch.setattr(nest, "make_run", make_run)
+
+
+def test_r9_m24_a_window_that_blows_up_in_its_last_chunk_is_flagged_diverged(monkeypatch, tmp_path):
+    """M-24: steps is a whole number of chunks, so a blow-up in the last chunk left a full-length series and `n < steps` stayed False."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    _nan_in_the_last_chunk(monkeypatch, 200)
+    sp = W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=200, box=(2.0, 0.8, 0.8), chunk=100)
+    r = W.run_window(HULL, sp, _uniform([0, 0, 0]))
+    w = r["wall"]
+    assert w["diverged"] and not w["killed"] and w["run_steps"] == w["diverged_at_step"] == w["planned_steps"] == 200 == r["steps_run"]
+    assert w["cut_reason"].startswith("diverged after 200 of 200 steps") and not r["ok"]
+
+
+def test_r9_m24_a_pipeline_window_that_blows_up_in_its_last_chunk_is_cut_and_runs_no_fea(no_wall_receipt, monkeypatch):
+    cheap(monkeypatch)
+    clean = pw.run(toy_g_ctx(no_wall_receipt, 2000.0), {"g": [WIN]}, FakeL())["g"][0]
+    planned = clean["resolution"]["planned_steps"]
+    assert clean["cut"] is False and planned % 100 == 0 and not math.isnan(clean["cd"])
+    _nan_in_the_last_chunk(monkeypatch, planned)
+    monkeypatch.setattr(pw, "_fea", lambda *a, **k: pytest.fail("the FEA ran on the wall pressure of a window that blew up"))
+    r = pw.run(toy_g_ctx(no_wall_receipt, 2000.0), {"g": [WIN]}, FakeL())["g"][0]
+    assert r["cut"] is True and not r["ok"] and r["usable_for_refit"] is False and r["cd"] is None and r["resolution"]["run_steps"] is None
+    assert r["resolution"]["cut_reason"].startswith("diverged: the flow went non-finite or past Mach 1") and r["fea"]["run"] is False
+    assert r["timing"]["machine_dependent"]["run_steps"] == planned                                    # the numbers (NaN here) are in the ledger, not the row
+    assert r["cl"] is None and "NaN" not in json.dumps(untimed({"g": [r]}), default=str)
+
+
+def test_r9_m24_the_wall_model_calibrations_and_the_sphere_store_refuse_a_diverged_run(monkeypatch, tmp_path):
+    """M-24, per caller: a flat plate, a channel or a sphere that blew up is no measurement, so none returns numbers (a NaN `err` used to be written
+    as the receipt) and the CLI writes no file. A window (above) is cut instead; the two bound-checked nest receipts fail their own bound on the NaN."""
+    monkeypatch.setattr(wm, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(wm, "CHANNEL_CI", dict(h=4, re_tau=100.0, u_tau=0.003, steps=200, span=4))
+    _nan_in_the_last_chunk(monkeypatch, 200)
+    with pytest.raises(RuntimeError, match="diverged in the chunk ending at step 200 of 200"):
+        wm.channel(h=4, re_tau=100.0, u_tau=0.003, steps=200, span=4, chunk=100)
+    with pytest.raises(RuntimeError, match="diverged in the chunk ending at step 200 of 200"):
+        wm.flat_plate(length=48, half=10, span=4, steps=200, nose=8, thick=1)
+    with pytest.raises(RuntimeError, match="diverged"):
+        wm.main(["channel"])
+    assert not wm.channel_path().exists() and not (tmp_path / "wm_channel.json.tmp").exists()
+    with pytest.raises(RuntimeError, match="diverged in the chunk ending at step 200 of 200"):
+        nest.sphere_drag(100.0, 4, (6, 3, 3), steps=200)
+    with pytest.raises(RuntimeError, match="diverged"):
+        nest.main(["slow", "100", "4", "6", "3", "3"])
+    assert not list(tmp_path.glob("nest_sphere_*"))

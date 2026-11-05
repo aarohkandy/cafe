@@ -243,7 +243,7 @@ def flat_plate(length: int = 192, nu_lat: float = 4e-5, half: int = 40, span: in
     """Two-sided streamlined flat plate (2 `thick` cells thick) in a uniform stream, wall-modelled on both faces, periodic
     in the span. Friction is the momentum exchange on the links of the flat part (nose and tail excluded), averaged over the
     last 40 % of the run, C_f = F / (rho U^2 L_m W) over both sides, compared with the ITTC-57 line averaged over the same
-    strip (ittc57_mean) at Re_x = U x / nu from the leading edge. Lattice units: dx = 1, u_lat = lbm.U_LAT."""
+    strip (ittc57_mean) at Re_x = U x / nu from the leading edge. Lattice units: dx = 1, u_lat = lbm.U_LAT. A run that diverges raises RuntimeError."""
     import jax.numpy as jnp
     from cafe.pm.stage3 import nest
     ul = lbm.U_LAT
@@ -259,7 +259,7 @@ def flat_plate(length: int = 192, nu_lat: float = 4e-5, half: int = 40, span: in
     env = inflow_turbulence(tu)
     p0 = np.array(shape) // 2 + 0.5
     params = (jnp.asarray(p0, jnp.float32), jnp.zeros(3, jnp.float32))
-    _, ser = nest.simulate(spec, env, geom, p0, params, steps)
+    _, ser = nest.simulate(spec, env, geom, p0, params, steps, strict=True)             # a diverged run is no calibration: it raises
     k = int(steps * 0.6)
     fx = ser["F"][k:, 0].mean()
     cf = float(fx / (ul ** 2 * (x2 - x1) * span))                            # F / (rho U^2 L W), rho = 1, both sides
@@ -281,7 +281,8 @@ def channel(h: int = 12, re_tau: float = 1000.0, u_tau: float = 0.003, steps: in
     at the 3rd cell. rans=True gives the whole channel the mixing-length eddy viscosity kappa u_tau y (1 - y/h) (a 1-D channel has no
     resolved turbulence to carry the stress); rans=False leaves Smagorinsky beyond the matching height.
     Receipts: the steady wall stress equals g h (momentum balance), bulk C_f vs Dean 1978, y+ and y/h of the matching point,
-    and the bounce-back tangential exchange as a fraction of the wall shear. Lattice units, dx = 1, nu_lat = h u_tau / Re_tau."""
+    and the bounce-back tangential exchange as a fraction of the wall shear. Lattice units, dx = 1, nu_lat = h u_tau / Re_tau.
+    A run that diverges raises RuntimeError."""
     import jax.numpy as jnp
     from cafe.pm.stage3 import nest
     ul = lbm.U_LAT
@@ -301,7 +302,7 @@ def channel(h: int = 12, re_tau: float = 1000.0, u_tau: float = 0.003, steps: in
         return jnp.stack([prof / ul, jnp.zeros_like(x), jnp.zeros_like(x)])
     p0 = np.array(shape) // 2 + 0.5
     params = (jnp.asarray(p0, jnp.float32), jnp.zeros(3, jnp.float32))
-    state, ser = nest.simulate(spec, env, geom, p0, params, steps, chunk=chunk)
+    state, ser = nest.simulate(spec, env, geom, p0, params, steps, chunk=chunk, strict=True)
     _, u = lbm.moments(state.f)
     ux = np.asarray(u[0])[:, 2:ny - 2, :]
     ub = float(ux.mean())
@@ -339,13 +340,14 @@ def channel_path() -> pathlib.Path:
     return SLOW_DIR / "wm_channel.json"
 
 
-def _read_receipt(f: pathlib.Path) -> dict[str, Any] | None:
-    """The stored receipt as a dict; None when the file is missing, undecodable (a write cut short by a kill) or not a JSON object."""
-    try:
-        d = json.loads(f.read_text())
-    except (OSError, ValueError):
-        return None
-    return d if isinstance(d, dict) else None
+PLATE_FIELDS = ("err", "cf", "re", "ittc", "yfrac")         # what the plate receipt's readers index; each must be a finite number (lbm.read_stored)
+CHANNEL_FIELDS = ("err", "cf", "cf_dean")                   # the channel's: the gate reads `err`, the credibility report `cf` and `cf_dean`
+
+
+def _read_receipt(f: pathlib.Path, fields: tuple[str, ...]) -> dict[str, Any] | None:
+    """The stored receipt as a dict; None when the file is missing, undecodable (a write cut short by a kill), not a JSON object, or without a
+    finite number in every one of `fields` (hand-edited, or from another schema): every reader then treats it as a receipt that cannot count."""
+    return lbm.read_stored(f, fields)
 
 
 def _write_receipt(f: pathlib.Path, obj: dict[str, Any]) -> None:
@@ -355,13 +357,13 @@ def _write_receipt(f: pathlib.Path, obj: dict[str, Any]) -> None:
     os.replace(tmp, f)
 
 
-def stale_wall_receipts() -> list[str]:
-    """The stored wall-model receipts that cannot count, one phrase each: not stored, stored without a `code_sha` (legacy or hand-written)
-    or stored by code other than lbm.physics_sha(), or unreadable (a truncated file). The same rule as lbm.result_row, so the receipts table
-    and the stage-3 gate agree."""
-    out = []
-    for f in (slow_path(), channel_path()):
-        d = _read_receipt(f)
+def _stored_receipts() -> tuple[list[str], list[dict[str, Any]]]:
+    """(one phrase for each stored wall-model receipt that cannot count, the receipts read). The phrases: not stored; unreadable (a truncated
+    file, or without a number where the code reads one); stored without a `code_sha` (legacy or hand-written); stored by code other than
+    lbm.physics_sha(); a plate run at Re_L below PLATE_RE_MIN, which `receipts()` also refuses to compare with ITTC-57. One read of each file."""
+    out, recs = [], []
+    for f, fields in ((slow_path(), PLATE_FIELDS), (channel_path(), CHANNEL_FIELDS)):
+        d = _read_receipt(f, fields)
         if not f.exists():
             out.append(f"{f.name} is not stored")
         elif d is None:
@@ -370,17 +372,25 @@ def stale_wall_receipts() -> list[str]:
             out.append(f"{f.name} was stored without a code sha (rerun it)")
         elif d["code_sha"] != lbm.physics_sha():
             out.append(f"{f.name} was stored by different code (rerun it)")
-    return out
+        elif f == slow_path() and d["re"] < PLATE_RE_MIN:
+            out.append(f"{f.name} is at Re_L {d['re']:.3g}, below the {PLATE_RE_MIN:g} the comparison needs (rerun it)")
+        else:
+            recs.append(d)
+    return out, recs
+
+
+def stale_wall_receipts() -> list[str]:
+    """The stored wall-model receipts that cannot count, one phrase each (`_stored_receipts`). The same rules as lbm.result_row and the plate
+    row of `receipts()`, so the receipts table and the stage-3 gate agree."""
+    return _stored_receipts()[0]
 
 
 def stored_wall_error() -> float | None:
     """Largest relative error of the stored wall-model receipts (flat plate vs ITTC-57, channel vs Dean), None unless both are stored by the
-    current code (`stale_wall_receipts` is empty). The channel alone cannot clear a window: the plate is the external developing boundary
+    current code and usable (`stale_wall_receipts` is empty). The channel alone cannot clear a window: the plate is the external developing boundary
     layer a hull sees, so windows.stage3_checks fails every window until both are current and within PLATE_TOL."""
-    fs = (slow_path(), channel_path())
-    if stale_wall_receipts():
-        return None
-    return max(float(json.loads(f.read_text())["err"]) for f in fs)
+    problems, recs = _stored_receipts()
+    return None if problems else max(float(d["err"]) for d in recs)
 
 
 def receipts(plate: dict[str, Any] | None = None, chan: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -404,7 +414,7 @@ def receipts(plate: dict[str, Any] | None = None, chan: dict[str, Any] | None = 
     bracket(g, "Channel: bounce-back tangential exchange / wall shear", c["bb_tangential_frac"], 0.0, 0.01, "", "specular reflection exchanges none")
     f = slow_path()
     if plate is None:
-        plate = _read_receipt(f)
+        plate = _read_receipt(f, PLATE_FIELDS)
     elif plate:                                                               # a run handed in was made by this code, just now
         plate = dict(plate, code_sha=lbm.physics_sha())
     ref = "ITTC-57: 0.075/(log10 Re - 2)^2, averaged over the same strip"
