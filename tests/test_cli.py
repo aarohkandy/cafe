@@ -35,6 +35,16 @@ def calls(monkeypatch):
     return seen
 
 
+@pytest.fixture(autouse=True)
+def roomy_machine():
+    """Review round 8, M-6: the CLI tests reach the planner as a side effect and must not depend on the memory of the machine they run on (the stage-1
+    model needs about 9 GB for the demo window). Its own MonkeyPatch, so a test that calls `monkeypatch.undo()` keeps it; the tests of the refusal itself
+    patch `par.memory_gb` to the value they are about."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(par, "memory_gb", lambda: 64.0)
+        yield
+
+
 def test_ingest_ocean_writes_the_lab_hycom_into_the_store_the_mission_names_and_refuses_a_gofs_mission(monkeypatch, tmp_path, capsys):
     import yaml
     from cafe.pm.env import hycom
@@ -649,3 +659,50 @@ def test_r7_m35_hangar_on_a_file_without_params_prints_provenance_failed_and_exi
     assert cli.main(["hangar", "--platform", str(f)]) == 1
     out = capsys.readouterr().out
     assert "provenance FAILED: boat.yaml: missing ['params', 'mission_defaults']" in out
+
+
+# ---- review round 8: M-3 (whatif against another mission than the run's), M-6 (report needs no stage-1 memory), M-52 (audit --ledgers-only)
+
+def test_r8_m3_whatif_refuses_a_mission_that_is_not_the_one_the_run_was_made_from(wi, tmp_path, capsys):
+    import yaml
+    m = yaml.safe_load(pathlib.Path(DEMO).read_text())
+    next(v for v in m["vehicles"] if v["id"] == "glider_eq")["deploy"]["lat"] = -2.0
+    edited = tmp_path / "edited.yaml"
+    edited.write_text(yaml.safe_dump(m))
+    assert cli.main(["whatif", "--mission", str(edited), "--run", str(wi.run), "--shift", "6h"]) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and not wi.seen                                                              # no before -> after pair, no answer asked for
+    assert f"is not the mission run {wi.run} was made from (differs in: vehicles)" in err and f"--mission {wi.run / 'mission.yaml'}" in err
+    assert cli.main(whatif_args(wi, "--shift", "6h")) == 0 and "->" in capsys.readouterr().out    # the run's own mission is the same file
+
+
+def test_r8_m3_a_seed_alone_is_a_note_and_a_run_without_its_mission_copy_is_as_before(wi, tmp_path, capsys):
+    import yaml
+    m = yaml.safe_load(pathlib.Path(DEMO).read_text())
+    m["seed"] = 12345
+    seeded = tmp_path / "seeded.yaml"
+    seeded.write_text(yaml.safe_dump(m))
+    old = yaml.safe_load((wi.run / "mission.yaml").read_text()).get("seed")
+    assert cli.main(["whatif", "--mission", str(seeded), "--run", str(wi.run), "--shift", "6h"]) == 0
+    assert f"note: the run used seed {old}, this file says 12345; the what-if draws use 12345" in capsys.readouterr().out
+    (wi.run / "mission.yaml").unlink()
+    m["vehicles"][0]["deploy"]["lat"] = -2.0
+    seeded.write_text(yaml.safe_dump(m))
+    assert cli.main(["whatif", "--mission", str(seeded), "--run", str(wi.run), "--shift", "6h"]) == 0          # nothing to compare with
+
+
+def test_r8_m6_report_of_a_finished_run_needs_no_memory_for_stage_1(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    monkeypatch.setattr(par, "memory_gb", lambda: 2.0)                                       # the planner's model needs about 9 GB for the demo window
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    assert cli.main(["report", "--run", str(run)]) == 0
+    assert capsys.readouterr().out.split()[0] == str(run / "report" / "index.html")
+    assert cli.main(["plan", "--mission", DEMO]) == 2 and "2 GB is available" in capsys.readouterr().err         # the planner's refusal itself is unchanged
+
+
+def test_r8_m52_audit_forwards_ledgers_only_like_code_only(monkeypatch):
+    got = []
+    monkeypatch.setattr(audit, "main", lambda argv: got.append(argv) or 0)
+    assert cli.main(["audit", "--ledgers-only", "runs/a"]) == 0 and cli.main(["audit", "runs/b", "--code-only", "--ledgers-only"]) == 0
+    assert got == [["runs/a", "--ledgers-only"], ["runs/b", "--code-only", "--ledgers-only"]]

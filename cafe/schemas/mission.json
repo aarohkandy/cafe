@@ -32,7 +32,8 @@
                                    "rain_lens": {"type": "boolean"}, "ocean_sde": {"type": "boolean"}}}}},
     "ship": {"type": "object", "required": ["id", "lon", "lat"], "additionalProperties": false,
              "properties": {"id": {"type": "string"}, "lon": {"$ref": "#/$defs/lon"}, "lat": {"$ref": "#/$defs/lat"},
-                            "antenna_height_m": {"type": "number", "minimum": 0}, "transducer_depth_m": {"type": "number", "minimum": 0}}},
+                            "antenna_height_m": {"type": "number", "minimum": 0.5, "maximum": 100, "description": "metres above the sea, 0.5 (a deck rail) to 100"},
+                            "transducer_depth_m": {"type": "number", "minimum": 0, "maximum": 100, "description": "metres below the sea, 0 to 100 (an over-the-side transducer on a cable)"}}},
     "shore": {"type": "object", "required": ["id"], "additionalProperties": false, "properties": {"id": {"type": "string"}}},
     "vehicles": {"type": "array", "minItems": 1, "maxItems": 64, "items": {
       "type": "object", "required": ["id", "platform"], "additionalProperties": false,
