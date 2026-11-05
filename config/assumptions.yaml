@@ -154,6 +154,11 @@ bathy.umwm_rel_sigma:
   unit: "-"
   why: UMWM's 12 km depth is a smoothed model input; 10 % stands for the smoothing over seamounts.
   replace_with: Not needed once GEBCO is cached.
+bathy.gofs_open_level_sigma_m:
+  value: 1000.0
+  unit: m
+  why: Where a GOFS node is wet down to the store's last level (5000 m) the seafloor is anywhere below it, and the store says nothing more; `from_gofs` reports 5000 m as a lower bound. Abyssal plains lie mostly 4000-6500 m and trenches reach 11000 m, so 1000 m, about the spread of the plains below the level, is a large 1-sigma that does not pretend to bound the depth.
+  replace_with: Not needed once GEBCO is cached (the GOFS floor is the second fallback).
 # --- stage 3 windows (cafe/pm/stage3/pipeline_windows.py): geometry and resolution numbers no platform yaml carries ---
 stage3.window_s:
   value: 10.0

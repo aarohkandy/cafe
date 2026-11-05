@@ -6,15 +6,17 @@ Fallback order (first that works wins; what failed is kept in `Bathymetry.tried`
      byte range (about 8 kB for the 34 deg TEPEX-C box); `fetch_gebco` asks for the rows in parallel, hashes the result and caches
      it as a small .npz. GEBCO's own download app has no scriptable interface and its OPeNDAP link (data.ceda.ac.uk "extract subset")
      is a human page; NOAA's ERDDAP only hosts GEBCO_2020.
-  2. HYCOM GOFS grid (the Zarr store of cafe.pm.env.hycom): depth of the deepest valid level, so the floor is that level or up to
-     one level spacing deeper, and never reported below 5000 m. 0.08 x 0.04 deg.
+  2. HYCOM GOFS grid (the Zarr store of cafe.pm.env.hycom): the floor lies in [deepest valid level, next level), so the depth is the
+     level plus half the spacing (sigma spacing / sqrt(12)); where the deepest valid level is the store's last (5000 m for GOFS) the floor
+     is unbounded below, and 5000 m is a lower bound with the large sigma `bathy.gofs_open_level_sigma_m`. 0.08 x 0.04 deg.
   3. UMWM `depth` (12 km), supplied by the caller from the umwmout file (cafe.pm.env.orca).
 Each answer says in `source` which one it is and how coarse it is.
 
 GEBCO: GEBCO Bathymetric Compilation Group 2026, The GEBCO_2026 Grid, doi:10.5285/4f68d5c7-45eb-f999-e063-7086abc036fa (file attribute).
 The 1-sigma uncertainties in ASSUMED are not published numbers; they are read from config/assumptions.yaml (bathy.*: value,
 unit, why, what replaces it): GEBCO deep-ocean depth from satellite-predicted bathymetry is good to a few percent, GOFS is
-the grid-level quantization (a uniform distribution over the level spacing, computed, not assumed), UMWM unknown.
+the grid-level quantization (a uniform distribution over the level spacing, computed, not assumed) except the open last level (an assumed
+sigma, bathy.gofs_open_level_sigma_m), UMWM unknown.
 """
 import concurrent.futures as cf, functools, hashlib, json, os, pathlib
 from typing import Any
@@ -28,7 +30,7 @@ from .hycom import box360, open_store
 
 GEBCO_URL = "https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2026/ice_surface_elevation/netcdf/GEBCO_2026.nc"
 GEBCO_RES_DEG = 1.0 / 240.0                          # 15 arc-seconds
-ASSUMED = {k: _assumptions()[f"bathy.{k}"]["value"] for k in ("gebco_rel_sigma", "umwm_rel_sigma")}   # unsourced: config/assumptions.yaml
+ASSUMED = {k: _assumptions()[f"bathy.{k}"]["value"] for k in ("gebco_rel_sigma", "umwm_rel_sigma", "gofs_open_level_sigma_m")}   # unsourced: config/assumptions.yaml
 ORDER = ("gebco", "gofs", "umwm")
 M_PER_DEG = 111_195.0                               # mean Earth radius 6371.0088 km (IUGG)
 
@@ -150,16 +152,20 @@ def from_gebco(path: Any) -> Bathymetry:
 
 
 def from_gofs(store: Any) -> Bathymetry:
-    """Depth of the deepest valid level at each node of a hycom Zarr store (any time); 0 where no level is valid (land). Capped by
-    the deepest level (5000 m for GOFS). sigma is the quantization of the floor into [level, next level): spacing / sqrt(12)."""
+    """Depth of the floor at each node of a hycom Zarr store (any time); 0 where no level is valid (land). Valid at level k and not at k+1 puts the
+    floor in [z_k, z_k+1): a uniform distribution, so depth = z_k + spacing / 2 and sigma = spacing / sqrt(12). Valid at the store's last level
+    (5000 m for GOFS) puts the floor anywhere below it: depth is that level, a lower bound, with the assumed sigma
+    `bathy.gofs_open_level_sigma_m`."""
     ds = open_store(store)
     wet = np.isfinite(ds.water_temp.values).any(axis=0)                   # (depth, lat, lon)
     z = ds.depth.values.astype(float)
     k = np.where(wet.any(0), wet.shape[0] - 1 - np.argmax(wet[::-1], axis=0), -1)
-    depth = np.where(k >= 0, z[np.maximum(k, 0)], 0.0)
-    sig = np.where(k >= 0, np.diff(z, append=z[-1])[np.maximum(k, 0)] / np.sqrt(12.0), 0.0)
+    kk, dz, open_ = np.maximum(k, 0), np.diff(z, append=z[-1]), k == len(z) - 1
+    depth = np.where(k < 0, 0.0, z[kk] + np.where(open_, 0.0, dz[kk] / 2.0))
+    sig = np.where(k < 0, 0.0, np.where(open_, ASSUMED["gofs_open_level_sigma_m"], dz[kk] / np.sqrt(12.0)))
     res = max(np.diff(ds.lon.values).max(), np.diff(ds.lat.values).max()) * M_PER_DEG
-    return Bathymetry(ds.lon.values, ds.lat.values, depth, "HYCOM GOFS 3.1 deepest valid level (the floor is at or below it)", res, sig)
+    return Bathymetry(ds.lon.values, ds.lat.values, depth,
+                      "HYCOM GOFS 3.1 deepest valid level plus half a level spacing (a lower bound where the last level is wet)", res, sig)
 
 
 def from_umwm(lon: Any, lat: Any, depth: Any) -> Bathymetry:
