@@ -3290,6 +3290,7 @@ def test_r8_m4c_the_assembled_orca_stores_are_tree_hashed_inputs_and_a_changed_o
     got = {pathlib.Path(i["ref"]).name: i for i in d["inputs"] if "tree_sha256" in i and i["ref"].startswith(str(orca_dir))}
     assert set(got) == {n for n in pipeline.ORCA_STORES if (orca_dir / n).is_dir()} and "wrf.zarr" in got and "umwm.zarr" in got
     assert all(i["tree_sha256"] == ledger.tree_sha256(orca_dir / n) for n, i in got.items())
+    assert all(i["sha256"] == i["tree_sha256"] for i in got.values())                 # data_consumed in the report lists sha256 only
     assert ledger.done(ctx.run_dir, "ingest", ctx.hash) is not None and [p for p in audit.ledger_problems(ctx.run_dir) if "wrf.zarr" in p] == []
     chunk = next(f for f in sorted((orca_dir / "wrf.zarr").rglob("*")) if f.is_file() and f.name != "zarr.json")
     chunk.write_bytes(chunk.read_bytes() + b"\0")

@@ -466,6 +466,7 @@ Round 8 read the q8 quick run (`runs/q8`, code `0a0509c`) and the code at `9910a
   - L0-4: the ingest forcing check bounds 16 WRF fields, 5 UMWM fields and the ocean store's currents, temperature and salinity (17 new `ingest.*` bounds).
   - L0-6: report and `validate` wording: "12 members left", "12 rows of this class", "1 row", "1 value", "1 vehicle", "1 receipt passed".
   - L1: platform files refuse an implausible angle, a fractional or huge cell count and an absurd mass, energy, size or hotel load, each with its bound in the message (new `check_params` kind `int:lo:hi`). The second L1 finding (the M-47 singular covering 3 of 9 units) was already fixed by L0-6.
+  - Gate on `r8-merged` (DECISIONS 457): the assembled orca stores carry `sha256` (= their tree hash) in the ingest ledger, so the report's `data_consumed` no longer lists them without one; the UAS what-if flip test no longer depends on the coverage gate's luck on 24 hold-out points.
 
 ### Known issues
 

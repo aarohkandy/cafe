@@ -506,8 +506,10 @@ def test_a_uas_flip_is_answered_without_a_median_track(tmp_path):
         rows.append(dict(f, p_fail=p, t_fail_h=10.0, cls="uas", n_members=512))
     em, info = whatif.fit_class(pd.DataFrame(rows), "uas", tmp_path / "t.parquet")
     assert em is not None
-    flips, _ = whatif.flip_search(CI, {"uas": dict(verdict="NO-GO", p_fail=0.8)}, {}, AnalyticEnv(), {"uas": (em, info)}, plan_for(CI), {}, {}, None, 5, 0.0,
-                                  lambda *_: None)
+    # `used=True`: this test is the track-free path. The BRIEF 2.7 gate has its own tests, and on 24 hold-out points it fails a sound emulator by chance
+    # (coverage_chance_fail is 0.5 here: 23 of 24 covered reads as 0.958 against 0.9 +- 0.05)
+    flips, _ = whatif.flip_search(CI, {"uas": dict(verdict="NO-GO", p_fail=0.8)}, {}, AnalyticEnv(), {"uas": (em, dict(info, used=True))}, plan_for(CI), {}, {},
+                                  None, 5, 0.0, lambda *_: None)
     b = flips["uas"]["best"]
     assert b["method"] == "EMULATED" and b["verdict"] != "NO-GO" and b["change"] == "launch the sorties 6 h later"
     # M-24: a whole day is the same time of day, not a candidate

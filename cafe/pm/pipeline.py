@@ -445,7 +445,7 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     L.input(man, kind="orca cache manifest")
     orca_trees = {n: tree_sha256(man.parent / n) for n in ORCA_STORES if (man.parent / n).is_dir()}  # the manifest lists the parts, not these
     for n, h in orca_trees.items():
-        L.input(man.parent / n, tree=h, kind="orca assembled store (tree_sha256 over every file of the store)")
+        L.input(man.parent / n, sha=h, tree=h, kind="orca assembled store (tree_sha256 over every file of the store)")
     L.input(store, sha=hycom.open_store(store).attrs.get("manifest_sha256"), tree=tree_sha256(store),
             kind="ocean store (sha256 of its parts manifest; tree_sha256 over every file of the store)")
     L.input(gebco, kind="GEBCO_2026 cut")
