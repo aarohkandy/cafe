@@ -1,0 +1,31 @@
+# rsync filter rules shared by pm.sh and bin/pmx.sh (both sync with --delete, so a file removed from the tree is removed on the server too). First match wins.
+# Never used with --delete-excluded: a "-" rule keeps a path out of the transfer AND out of the deletion, a "P" rule only out of the deletion.
+
+# never sent, never deleted
+- .git
+- __pycache__
+- site
+- checkpoints
+- cache
+
+# written on the server by a job or a gate, gitignored (Makefile RUNS, receipts, mutmut, the audit, coverage, the CI SITL build, the emulator table)
+- /runs/
+- /mutants/
+- /.mutmut-cache
+- /audit.log
+- /coverage.json
+- /.coverage*
+- /.hypothesis/
+- /.pytest_cache/
+- /.mypy_cache/
+- /.ruff_cache/
+- /emulator/train.*
+- /.work/
+
+# tracked, but rewritten on the server (make bench, make mutation, promote-calibration, acceptance --update-golden, the old report/): a copy that exists in the
+# checkout still goes over it, as before; one that exists only on the server is not deleted. Fetch them with ./pm.sh --pull before the next sync.
+P /config/throughput.json
+P /config/subgrid.json
+P /docs/mutation.json
+P /tests/golden/
+P /report/
