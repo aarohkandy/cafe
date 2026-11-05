@@ -45,7 +45,7 @@ import numpy as np
 
 from ..env import conventions as cv
 from ..config import platform_doc as read_yaml
-from . import check_params
+from . import check_params, drop_repeats
 
 Arr = Any
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
@@ -77,6 +77,10 @@ REQUIRED: dict[str, dict[str, str]] = {
                       temp_ref="range:-5:50",                      mass_kg="pos<=1e4", volmax_cc="pos"),
     "slocum": dict(_COMMON, mg="pos<=1e4", Vg="pos", S="pos", AR="pos", aw="pos", ah="pos", Cd0="pos", Cd1="pos", epsilon="nonneg"),
 }
+# Every mission default the model indexes (`md["..."]`; a test reads the literals), for every kind and every mode: a mode's own keys are read only in it,
+# but the report and stage 3 read the platform's dive depth, and a platform file describes the vehicle, not one mission (round 9, M-22). A tolerance or a
+# radius is above 0; the hours are 0 or above (0: at once).
+MISSION_REQUIRED = dict(dive_depth_m="pos", station_tol_m="pos", lost_hours="nonneg", wp_radius_m="pos", unreach_hours="nonneg")
 OPTIONAL = ("rho_ref", "acoustic_modem")        # in the files, read by no model code
 
 
@@ -110,7 +114,7 @@ def load_platform(name: str) -> dict[str, Any]:
     check_params(REQUIRED[raw["kind"]], P, f"{path.name}:params", raw["kind"])
     P["kind"] = raw["kind"]
     P["mission_defaults"] = flat(raw["mission_defaults"], "mission_defaults")
-    check_params({}, P["mission_defaults"], f"{path.name}:mission_defaults", raw["kind"])
+    check_params(MISSION_REQUIRED, P["mission_defaults"], f"{path.name}:mission_defaults", raw["kind"])
     return P
 
 
@@ -273,7 +277,7 @@ class GliderSim:
         if self.mode == "station":
             self.wps = np.array([md["station"]], float)
         elif self.mode == "section":
-            self.wps = np.array(md["waypoints"], float).reshape(-1, 2)
+            self.wps = drop_repeats(md["waypoints"])                                            # round 9, M-13: a repeated point is one waypoint
             if len(self.wps) == 0:
                 raise ValueError("section mode needs waypoints")
         else:
@@ -373,7 +377,9 @@ class GliderSim:
         floor = self.env.depth(self.lon, self.lat).value
         dd = np.minimum(np.minimum(self.target_depth, floor - P["seafloor_margin_m"]), P["rating_m"])
         can = dd >= P["min_dive_m"]
-        self._flag("seafloor", m & ~can)
+        hole = ~np.isfinite(floor)                                                            # round 9: no depth there is a hole in the input, not a sea floor
+        self._flag("no_current_data", m & hole)
+        self._flag("seafloor", m & ~can & ~hole)
         go = m & can
         if not go.any():
             return
@@ -431,7 +437,9 @@ class GliderSim:
             rho, p, T = self._state(self.depth)
             vbd = np.where(d0, self.vbd_dive, self.vbd_climb)
             st = flight(P, rho + self.rbias, p, T, vbd, np.where(d0, -P["pitch_deg"], P["pitch_deg"]))
-            self._flag("no_flight", fly & ~st.ok)
+            gap = ~(np.isfinite(rho) & np.isfinite(T))                                        # round 9: lost to a density or SST hole = a hole in the input
+            self._flag("no_current_data", fly & ~st.ok & gap)
+            self._flag("no_flight", fly & ~st.ok & ~gap)
             th = np.radians(st.glide_deg)
             uh_nom = st.speed * np.cos(th)
             sw = np.where(fly, st.w * self.scale, 0.0)
@@ -471,7 +479,9 @@ class GliderSim:
         # failures
         self._flag("battery", self.E > self.cap * (1.0 - P["reserve_frac"]))
         self._flag("overdepth", self.depth > P["rating_m"])
-        self._flag("seafloor", self.depth >= env.depth(self.lon, self.lat).value)
+        floor = env.depth(self.lon, self.lat).value
+        self._flag("no_current_data", (self.depth > 0.0) & ~np.isfinite(floor))              # round 9: under water over a depth hole the test below is blind
+        self._flag("seafloor", self.depth >= floor)
         if self.mode == "station":
             _, dist = self._target_vec()
             self.out_s = np.where(dist > self.md["station_tol_m"], self.out_s + dt, 0.0)

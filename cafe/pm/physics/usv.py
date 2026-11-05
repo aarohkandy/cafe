@@ -61,7 +61,8 @@ heading is chosen from 72 candidates to maximise velocity made good toward the a
 velocity (at the track angle heading - side * leeway) + surface current + Stokes drift; a tack or gybe costs
 V * t_tack of distance and is made only if the VMG gain over tack_horizon pays it back; speed is tack_speed_frac of the polar
 during the manoeuvre; on a section only headings that reduce the cross-track error are allowed outside the corridor.
-Failure flags (first occurrence in `first[name]`, epoch seconds): becalmed = the best through-water speed over all headings is
+Failure flags (first occurrence in `first[name]`, epoch seconds: the end of the step in which it first holds, t0 for a start position that is not
+finite): becalmed = the best through-water speed over all headings is
 below the current speed for becalmed_after_h (DECISION: the BRIEF's 'SOG < current' read as speed through water, because a
 drifting boat's SOG equals the current; `<=`, so a boat that cannot move in a zero current is becalmed too); swept_off_track;
 capsize_proxy (also: the wind relative to the water above the polar's top, 30 m/s, for stall_sustain_s: outside the model, so a failure);
@@ -84,7 +85,7 @@ import numpy as np
 
 from ..env import conventions as cv
 from ..config import platform_doc as read_yaml
-from . import check_params
+from . import check_params, drop_repeats
 
 Arr = Any
 G = 9.80665
@@ -118,7 +119,11 @@ REQUIRED = dict(
     solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="nonneg<=50", vpp_bias_mean="any", vpp_bias_sd="nonneg", current_z_m="any",
     tack_time_s="nonneg", tack_speed_frac="unit", tack_horizon_s="pos", replan_s="pos",
 )
-MISSION_REQUIRED = dict(cap_cycles="ge1")       # the one mission default the model takes a log of (sqrt(2 ln N): N >= 1); the others only have to be finite
+# Every mission default the model indexes (`md["..."]`; a test reads the literals). Present, finite and in range: a threshold or a width above 0, a sustain
+# time 0 or above (0: at once), track_tolerance_km up to the mission schema's 1000; cap_cycles also takes a log of (sqrt(2 ln N): N >= 1).
+# A mission may override any of them, but the report and stage 3 read the platform's own, so a file without one is refused at load (round 9, M-22).
+MISSION_REQUIRED = dict(becalmed_after_h="pos", calm_sustain_s="nonneg", track_tolerance_km="pos<=1000", corridor_km="pos", wp_radius_m="pos",
+                        roll_limit_deg="pos<=180", stall_sustain_s="nonneg", cap_cycles="ge1")
 OPTIONAL = ("draft_nominal_m", "keel_depth_m", "iridium_antenna_height_m") + STRINGS      # read by no code
 
 
@@ -473,19 +478,20 @@ class USVSim:
                  perturb: dict[str, Any] | None = None):
         P, M = self.P, self.M = params, int(members)
         self.env, self.t = env, float(t0)
+        self._tf = self.t  # the time a flag is stamped with: t0 until the first step (the start position)
         md = self.md = {**P["mission_defaults"], **mission}
         self.mode = md.get("mode", "section")
         if self.mode not in MODES:
             raise ValueError(f"mode {self.mode!r} not in {MODES}")
+        self.repeat = bool(md.get("repeat", False))
         if self.mode == "station":
             self.wps = np.array([md["station"]], float)
         else:
-            self.wps = np.array(md["waypoints"], float).reshape(-1, 2)
+            self.wps = drop_repeats(md["waypoints"], self.repeat)                 # round 9, M-13: [A, A] is the station A, not a section with no track test
             if len(self.wps) == 0:
                 raise ValueError("section mode needs waypoints")
             if len(self.wps) == 1:
                 self.mode = "station"
-        self.repeat = bool(md.get("repeat", False))
         pt = perturb or {}
         bias = pt["vpp_bias"] if "vpp_bias" in pt else draw_vpp_bias(P, M, int(md.get("seed", 0)))
         self.fac = 1.0 + np.broadcast_to(np.asarray(bias, float), (M,)).copy()
@@ -549,12 +555,13 @@ class USVSim:
 
     def _flag(self, name: str, mask: Arr) -> None:
         new = mask & ~self.fail[name]
-        self.first[name][new] = self.t
+        self.first[name][new] = self._tf
         self.fail[name] |= mask
 
     # ---- one step ------------------------------------------------------------------------------------------------
     def step(self, dt: float) -> None:
         P, md, M, t = self.P, self.md, self.M, self.t
+        self._tf = t + dt  # every flag of a step is stamped with its end, as the glider's (round 9, M-27)
         wind = self.env.wind(self.lon, self.lat, P["anemometer_m"], t).value
         cur = self.env.current(self.lon, self.lat, P["current_z_m"], t).value
         wav = self.env.waves(self.lon, self.lat, t)

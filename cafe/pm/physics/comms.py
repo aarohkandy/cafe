@@ -320,7 +320,7 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
     r, w, dz = np.broadcast_arrays(np.asarray(r, float), np.asarray(wind, float), np.asarray(dz, float))
     slant = np.hypot(r, dz)
     amb_db = _yaml("modems.yaml")["defaults"]["ambiguous_db"] if ambiguous_db is None else ambiguous_db
-    m_t = acoustic_margin(slant, modem, band, w, shipping, k)
+    m_t = np.asarray(acoustic_margin(slant, modem, band, w, shipping, k), float)  # 0-d array: a numpy scalar takes no item assignment (round 9, M-25)
     amb = np.abs(m_t) <= amb_db
     tl_b, tl_i = np.full(m_t.shape, np.nan), np.full(m_t.shape, np.nan)
     method = np.full(m_t.shape, "thorp", dtype=object)

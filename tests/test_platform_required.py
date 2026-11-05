@@ -261,3 +261,20 @@ def test_r8_l1_every_angle_in_a_shipped_platform_file_has_a_bounded_kind():
         for k, leaf in raw[g].items():
             if isinstance(leaf, dict) and leaf.get("unit") == "deg" and k in table:
                 assert table[k] not in ("pos", "nonneg", "any"), f"quad_uas.{g}.{k} is an angle with kind {table[k]!r}"
+
+
+# ---- review round 9, M-22: the mission defaults the models index are required by their loaders
+def test_r9_m22_every_mission_default_the_models_and_their_readers_index_is_in_a_loader_table():
+    """The class: a `md["key"]` that no table requires is a KeyError hours into a run on a hand-edited file. Read from the source, like the P[...] test."""
+    src = lambda *p: (ROOT / "cafe" / "pm" / pathlib.Path(*p)).read_text()
+    md = lambda text: set(re.findall(r'\bmd\["(\w+)"\]', text)) - {"station", "waypoints"}  # the mission's own geometry, which config.load_mission requires
+    assert md(src("physics", "glider.py")) <= set(glider.MISSION_REQUIRED), md(src("physics", "glider.py")) - set(glider.MISSION_REQUIRED)
+    assert md(src("physics", "usv.py")) <= set(usv.MISSION_REQUIRED), md(src("physics", "usv.py")) - set(usv.MISSION_REQUIRED)
+    both = set(glider.MISSION_REQUIRED) | set(usv.MISSION_REQUIRED)
+    for other in (("report.py",), ("stage1.py",), ("stage3", "pipeline_windows.py")):  # readers of the platform's own: P["mission_defaults"]["key"]
+        text = src(*other)
+        keys = set(re.findall(r'mission_defaults"\]\["(\w+)"\]', text)) | set(re.findall(r'"mission_defaults",\s*"(\w+)"', text))
+        assert keys <= both, (other, keys - both)
+    for name, mod in (("seaglider", glider), ("slocum", glider), ("saildrone_explorer", usv)):
+        raw = yaml.safe_load((ROOT / "platforms" / f"{name}.yaml").read_text())["mission_defaults"]
+        assert set(mod.MISSION_REQUIRED) == set(raw), (name, set(mod.MISSION_REQUIRED) ^ set(raw))

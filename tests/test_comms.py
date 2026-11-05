@@ -586,3 +586,14 @@ def test_r8_m43_a_retried_iridium_message_arrives_one_failed_attempt_later_per_r
     first_try = vals.min()
     assert len(vals) == p["max_attempts"] and np.allclose(vals - first_try, p["fail_cost_s"] * np.arange(p["max_attempts"]))
     assert not ok.all() and np.allclose(t[~ok], p["max_attempts"] * p["fail_cost_s"])
+
+
+def test_r9_m25_a_scalar_range_with_an_ambiguous_link_is_refined_like_an_array(monkeypatch):
+    """Before: `margin[amb] = ...` on a numpy scalar was a TypeError (a 60 dB window makes the 4.5 km link ambiguous)."""
+    _fake_bellhop(monkeypatch)
+    s = c.acoustic_link(4.5e3, ssp=(Z, C), ambiguous_db=60.0)
+    a = c.acoustic_link(np.array([4.5e3]), ssp=(Z, C), ambiguous_db=60.0)
+    assert s["method"][()] == "bellhop" and bool(s["ambiguous"]) and s["margin"].value.shape == ()
+    assert float(s["margin"].value) == pytest.approx(a["margin"].value[0]) and float(s["margin"].value) == pytest.approx(float(s["thorp_margin"]) - 7.0)
+    assert s["label"] == a["label"] == "Bellhop refined the ambiguous links" and s["margin"].source.endswith("+ Bellhop")
+    assert float(s["tl_bellhop_db"] - s["tl_bellhop_iso_db"]) == pytest.approx(7.0)
