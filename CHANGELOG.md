@@ -2,6 +2,12 @@
 
 ## Unreleased (premission-step4)
 
+- A link required at no sample in any member gets the verdict NOT EXERCISED instead of GO with P(fail) 0 (stage 1 summary, report badge, sanity table, acceptance diff); a link needed by some members stays graded whatever its median need; DECISIONS 461, round 9 M-17.
+- USV speed sanity: Chiodi's ratio is compared with the anemometer-height ratio, the 10 m one is secondary; DECISIONS 462, round 9 M-7.
+- Emulator section states what ran (variants, points, kill reason) beside the plan; DECISIONS 463, round 9 M-10.
+- Vehicle card: "Dominant failure mode: none (no member failed)" instead of "None"; reach-map caption names the 24 h horizon; report note for the UAS `no_current_data` mode; DECISIONS 464, round 9 M-14, M-21, M-3 (report half).
+- A mission box in a refusal reads "lon 165 E to 165 W (across the antimeridian), lat -5 to 5" instead of the dict (`config.fmt_box`); DECISIONS 465, round 9 M-14.
+- Credibility: a stored receipt with a missing or non-numeric field is a not-run row, not a traceback; DECISIONS 466, round 9 M-4 (credibility half).
 - `bench/throughput.py all` stops at once when the environment cache is missing; the BRIEF 2.1 finding never rounds a share up to the floor it misses; DECISIONS 459, 460.
 - `PM_RUNTIME=proot` for `bin/pmx.sh` and `pm.sh`, `bin/proot_run.sh`, `bin/orca_sync.sh`: run cafe jobs on a worker with no docker (orca); DECISIONS 458, `docs/ORCA_RUNNER.md`. Hardened after review: the job runs in its own process group and stops on TERM/INT/HUP, stale `run.*` temp directories are swept at start, `orca_sync.sh` checks the root filesystem itself and not only `root.done`, `bin/orca_suite.sh` runs the suite. All of it stays inside `~/cafe-worker` (the runners refuse otherwise), and `bin/orca_ready.sh` is the go check.
 

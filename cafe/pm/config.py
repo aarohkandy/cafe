@@ -138,6 +138,18 @@ def utc(s: str, where: str = "") -> dt.datetime:
         raise ConfigError(f"{where + ': ' if where else ''}{s!r} is not a calendar time ({e}); use YYYY-MM-DDTHH:MM:SSZ") from e
 
 
+def _lon_text(x: float) -> str:
+    return f"{abs(x):g} {'W' if x < 0 else 'E'}"
+
+
+def fmt_box(b: dict[str, float]) -> str:
+    """A mission box in words for a message: "lon 165 E to 165 W (across the antimeridian), lat -5 to 5, pad 2 deg" (never the dict). A box crosses the
+    antimeridian when lon_min is above lon_max (longitudes are in [-180, 180), as the schema has them)."""
+    wrap = " (across the antimeridian)" if b["lon_min"] > b["lon_max"] else ""
+    pad = f", pad {b['pad_deg']:g} deg" if "pad_deg" in b else ""
+    return f"lon {_lon_text(b['lon_min'])} to {_lon_text(b['lon_max'])}{wrap}, lat {b['lat_min']:g} to {b['lat_max']:g}{pad}"
+
+
 def _in_box(lon: float, lat: float, b: dict[str, float]) -> bool:
     lo, hi = b["lon_min"] % 360, b["lon_max"] % 360
     x = lon % 360
@@ -330,7 +342,8 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
     except ConfigError as e:
         raise ConfigError(f"{path}: {e}") from e
     if "ship" in m and not _in_box(m["ship"]["lon"], m["ship"]["lat"], m["box"]):
-        raise ConfigError(f"{path}: ship ({m['ship']['lon']}, {m['ship']['lat']}) is outside the mission box {m['box']}; widen the box or move the ship")
+        raise ConfigError(f"{path}: ship ({m['ship']['lon']}, {m['ship']['lat']}) is outside the mission box ({fmt_box(m['box'])}); "
+                          "widen the box or move the ship")
     nodes = set(ids) | {m.get("ship", {}).get("id"), m.get("shore", {}).get("id")} - {None}
     for v in m["vehicles"]:
         where = f"{path}: vehicles/{v['id']}"
@@ -353,7 +366,7 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
                 pts.append((v["task"]["lon"], v["task"]["lat"]))
             for lon, lat in pts:
                 if not _in_box(lon, lat, m["box"]):
-                    raise ConfigError(f"{where}: point ({lon}, {lat}) is outside the mission box {m['box']}; widen the box or move the point")
+                    raise ConfigError(f"{where}: point ({lon}, {lat}) is outside the mission box ({fmt_box(m['box'])}); widen the box or move the point")
         plat, cls = load_platform(v["platform"]), _check_platform(v, where)
         if cls == "glider" and "dive_depth_m" in v.get("task", {}):
             from .physics import glider

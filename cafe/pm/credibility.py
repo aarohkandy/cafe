@@ -618,7 +618,7 @@ def factor_table(f: Facts) -> list[dict[str, Any]]:
     return out
 
 
-NOT_EXERCISED_DETAIL = "the link was required at no moment in the median member, so the run says nothing about it (verdict NOT EXERCISED)"
+NOT_EXERCISED_DETAIL = "the link was required at no moment in any member, so the run says nothing about it (verdict NOT EXERCISED)"
 
 
 def _far(e: dict[str, Any]) -> bool | None:

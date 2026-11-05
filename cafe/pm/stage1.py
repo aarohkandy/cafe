@@ -739,13 +739,14 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
 
 
 NOT_EXERCISED = "NOT EXERCISED"
-NOT_EXERCISED_NOTE = ("the link was required at no moment in the median member, so no member could fail it: P(fail) = 0 here counts nothing, and "
+NOT_EXERCISED_NOTE = ("the link was required at no moment in any member, so no member could fail it: P(fail) = 0 here counts nothing, and "
                       "no number of members changes that (round 9, M-17)")
 
 
 def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_certify: int) -> dict[str, Any]:
-    """Verdict, dominant failure mode, first time, sensitivity for every vehicle and link. A link required at no sample in the median member
-    (`need_count_median` 0) has the verdict NOT EXERCISED, not GO: a pass fraction of 1.0 by default is no evidence (the vehicles have no analogue)."""
+    """Verdict, dominant failure mode, first time, sensitivity for every vehicle and link. A link required at no sample in any member
+    (`need_count` summing to 0) has the verdict NOT EXERCISED, not GO: a pass fraction of 1.0 by default is no evidence (the vehicles have no analogue).
+    A link needed by some members only is graded on all of them, whatever its median `need_count_median` (that one decides `granularity_ok`)."""
     U = res["U"]
     out: dict[str, dict[str, Any]] = dict(vehicles={}, links={})
     for vid, r in res["vehicles"].items():
@@ -790,7 +791,7 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         rf = lk_ends[lid]["required_fraction"]
         bad = float(np.sum(r["n_invalid"])) / need if kind and need else None          # of the needed samples, how many the geometry alone decided
         v = intervals.verdict(int(f.sum()), n)
-        if nc == 0:
+        if nc is not None and need == 0:                                          # no member needed it (a median of 0 alone is not that: 10 members may have)
             v = dict(v, verdict=NOT_EXERCISED, note=NOT_EXERCISED_NOTE)
         out["links"][lid] = dict(n=n, k_fail=int(f.sum()), verdict=v, method=r["method"],
                                  frac_median=float(np.median(r["frac"])), frac_p10=float(np.percentile(r["frac"], 10)),

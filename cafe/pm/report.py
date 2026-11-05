@@ -1248,13 +1248,14 @@ def _margin_html(k: dict[str, Any]) -> str:
     return out
 
 
-def _granularity_html(g: dict[str, Any] | None) -> str:
+def _granularity_html(g: dict[str, Any] | None, verdict: str = "") -> str:
     if g is None:
         return ""
     if g["need_count"]["value"] == 0:
-        return (f"<p class=warn>Required at no moment in the median member ({_n(g['need_count'])}): the link was not exercised, "
-                f"so its pass fraction says nothing (the mission allows {_n(g['allowed_miss'])} to be missed) and the P(fail) above counts nothing; "
-                f"the verdict is {NOT_EXERCISED}, not GO.</p>")
+        tail = (f"the P(fail) above counts nothing; the verdict is {NOT_EXERCISED}, not GO." if verdict == NOT_EXERCISED else
+                "the verdict is graded on the outcomes of all members, whichever of them needed the link.")        # a median of 0 is not "no member needed it"
+        return (f"<p class=warn>Required at no moment in the median member ({_n(g['need_count'])}): the link was not exercised in it, "
+                f"so its pass fraction says nothing (the mission allows {_n(g['allowed_miss'])} to be missed); {tail}</p>")
     miss = f"; one missed sample is {_n(g['one_sample'])} of them and the mission allows {_n(g['allowed_miss'])} to be missed"
     return (f"<p class={'muted' if g['ok'] else 'warn'}>Each member's pass fraction is decided on {_n(g['need_count'])} "
             f"(the median number of required samples per member){miss}"
@@ -1264,7 +1265,7 @@ def _granularity_html(g: dict[str, Any] | None) -> str:
 def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
     return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
-            f"{_granularity_html(k['granularity'])}"
+            f"{_granularity_html(k['granularity'], k['verdict'])}"
             f"<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
             f"median margin {_n(k['margin_db_median'])}{_margin_html(k)}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"

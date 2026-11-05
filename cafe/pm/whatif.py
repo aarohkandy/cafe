@@ -42,7 +42,7 @@ from numpy.typing import NDArray
 from scipy.stats import binom, qmc
 
 from . import budget, par, report, stage1
-from .config import ConfigError, _in_box, utc
+from .config import ConfigError, _in_box, fmt_box, utc
 from .emulator import Emulator, FreshDraw, locked, read_table, store_path, write_table
 from .env.environment import OutsideData
 from .stats import intervals
@@ -133,7 +133,7 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
                     t["waypoints"] = [[float(_wrap(a + dlon)), b + dlat] for a, b in t["waypoints"]]
             for lon, lat in _points(v, m.get("ship")):
                 if not _in_box(lon, lat, m["box"]):
-                    raise Invalid(f"{vid}: moving ({dlon:+g}, {dlat:+g}) deg puts ({lon:.2f}, {lat:.2f}) outside the mission box {m['box']}")
+                    raise Invalid(f"{vid}: moving ({dlon:+g}, {dlat:+g}) deg puts ({lon:.2f}, {lat:.2f}) outside the mission box ({fmt_box(m['box'])})")
         if duty != 1.0:
             if "base" in v:
                 v["sorties"]["every_days"] = _duty_days(float(v["sorties"].get("every_days", 1)), duty)

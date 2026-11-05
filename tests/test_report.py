@@ -2165,6 +2165,18 @@ def test_r9_m17_a_not_exercised_link_is_badged_once_in_the_table_and_the_card_an
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
 
 
+def test_r9_m17_a_link_with_a_median_need_of_zero_but_failures_keeps_its_graded_verdict_and_the_card_does_not_call_it_not_exercised(run):
+    """Adversary: 10 of 24 members need the link and fail, 14 never do (median need 0). The card must not say NOT EXERCISED for it."""
+    m, plan = pm_run.make_run(run)
+    set_link_fields(run, **{"usv-uas-rf": dict(need_count_median=0, granularity_ok=False)})
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["usv-uas-rf"].update(verdict=dict(
+        d["summary"]["links"]["usv-uas-rf"]["verdict"], verdict="NO-GO")))
+    report.write(run, m, plan)
+    card = plain((run / "report" / "index.html").read_text().split("<div id='v-usv-uas-rf'>")[1].split("<div id='v-")[0])
+    assert "Required at no moment in the median member (0 samples): the link was not exercised in it" in card
+    assert "graded on the outcomes of all members" in card and "NOT EXERCISED" not in card and "counts nothing" not in card
+
+
 def test_r9_m17_the_credibility_page_reads_the_not_exercised_verdict_as_cannot_be_checked_not_as_a_disagreement(run):
     m, plan = pm_run.make_run(run)
     _not_exercised(run, "usv-shore-iridium")
