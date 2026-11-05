@@ -34,12 +34,11 @@ from numpy.typing import NDArray
 from scipy.stats import chi2
 
 from . import budget, ledger, par, stage1
-from .audit import STAGES
 from .config import ConfigError, _yaml, assumptions, digest, env_sigmas, load_mission, utc
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.hycom import FetchError
 from .env.remote import sha256, tree_sha256
-from .ledger import Ledger
+from .ledger import STAGES, Ledger
 
 if TYPE_CHECKING:
     from .env.environment import GriddedEnv
@@ -1447,11 +1446,8 @@ def s_report(ctx: Context, L: Ledger) -> None:
     paths = report.write(ctx.run_dir, ctx.mission, ctx.plan, env=ctx.env)
     for p in paths:
         L.output(p)
-    rep = json.loads(ctx.path("report", "report.json").read_text())
-    bad = report.check_traceability(rep)
-    L.check("report_traceable", not bad, value=len(bad), limit=0, note="; ".join(bad[:5]))
-    bad = report.check_rendered(rep, ctx.path("report", "index.html").read_text())
-    L.check("report_html_matches_json", not bad, value=len(bad), limit=0, note="; ".join(bad[:5]))
+    for name, bad in report.self_checks(ctx.run_dir).items():
+        L.check(name, not bad, value=len(bad), limit=0, note="; ".join(bad[:5]))
 
 
 FUNCS = dict(ingest=s_ingest, hangar=s_hangar, stage1=s_stage1, windows=s_windows, stage3=s_stage3, refit=s_refit,

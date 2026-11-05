@@ -12,7 +12,7 @@ import sys
 import pytest
 import yaml
 
-from cafe.pm import __main__ as cli, audit, budget, config, par, pipeline, whatif
+from cafe.pm import __main__ as cli, audit, budget, config, ledger, par, pipeline, whatif
 from cafe.pm.env import ocean as ocean_mod
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider
@@ -243,6 +243,45 @@ def test_report_rerenders_a_finished_run(tmp_path, capsys, monkeypatch):
     printed = capsys.readouterr().out.split()
     assert printed[0] == str(run / "report" / "index.html") and printed[1] == str(run / "report" / "report.json") and len(printed) == 4
     assert all(pathlib.Path(p).is_file() for p in printed)
+
+
+def report_ledger_over_other_bytes(run):
+    """The report stage's ledger as if the stage had written different bytes than a re-render does (what a changed code or cache does)."""
+    assert cli.main(["report", "--run", str(run)]) == 0                                      # no report ledger yet: nothing to bring up to date
+    index = run / "report" / "index.html"
+    index.write_text(index.read_text() + "<!-- as the stage wrote it -->")
+    with ledger.Ledger(run, "report", "cfg") as L:
+        L.input(run / "checkpoints" / "emulator" / "ledger.json")
+        for p in ("index.html", "report.json", "credibility.html", "credibility.json"):
+            L.output(run / "report" / p)
+    return run / "checkpoints" / "report" / "ledger.json"
+
+
+def test_r9_m16_report_run_leaves_the_report_ledger_matching_what_it_wrote(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    led = report_ledger_over_other_bytes(run)
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 0
+    probs = [p for p in audit.ledger_problems(run) if "stage report" in p]
+    assert probs == []                                                           # was 1 x "output .../report/index.html changed since the stage ran"
+    d = json.loads(led.read_text())
+    assert len(d["notes"]) == 1 and d["notes"][0].startswith("re-rendered by report --run (git_sha ") and "code_digest " in d["notes"][0]
+
+
+def test_r9_m16_a_re_render_that_fails_a_report_check_exits_1_and_leaves_the_ledger_alone(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    led = report_ledger_over_other_bytes(run)
+    before = led.read_bytes()
+    capsys.readouterr()
+    monkeypatch.setattr(cli.report, "check_rendered", lambda rep, h: ["vehicles.uas.p_fail: '0.5' is not in the HTML"])
+    assert cli.main(["report", "--run", str(run)]) == 1
+    out, err = capsys.readouterr()
+    assert out == "" and "re-rendered report fails report_html_matches_json: vehicles.uas.p_fail" in err and "audit" in err
+    assert led.read_bytes() == before
 
 
 def test_report_of_a_directory_that_is_not_a_run_exits_2(tmp_path, capsys):
