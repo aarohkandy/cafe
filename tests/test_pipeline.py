@@ -3187,6 +3187,15 @@ def test_r8_m2_the_ingest_records_the_ocean_time_cadence_for_gofs_and_for_a_lab_
     lab = _cadence_store(data_copy / "ocean" / "gofs_ci_fixture.zarr", data_copy / "ocean" / "lab6.zarr", range(0, 13, 2))
     c = check_of(run_stage(pipeline.s_ingest, ctx_for(tmp_path / "b", mission=_lab_mission(tmp_path, lab)), "ingest"), "ocean_time_cadence")
     assert c["ok"] and c["value"] == 6.0 and c["note"].startswith("median 6 h, largest 6 h ")
+    # only the steps that serve the window count: a 24 h step before its start and one after its end are not in it, the 3 h steps inside are
+    from cafe.pm.env import hycom
+    src = hycom.open_store(data_copy / "ocean" / "gofs_ci_fixture.zarr").load()
+    at = lambda i, t: src.isel(time=slice(i, i + 1)).assign_coords(time=[t])                          # noqa: E731
+    lead_and_tail = [at(0, T0 - 24 * 3600.0), *(at(i, src.time.values[i]) for i in range(13)), at(12, T1 + 24 * 3600.0)]
+    wide = data_copy / "ocean" / "lab_wide.zarr"
+    hycom.write_store((hycom._std(s) for s in lead_and_tail), wide, "in_situ", dict(source="lab HYCOM lab_wide.zarr"))
+    c = check_of(run_stage(pipeline.s_ingest, ctx_for(tmp_path / "c", mission=_lab_mission(tmp_path, wide)), "ingest"), "ocean_time_cadence")
+    assert c["ok"] and c["value"] == 3.0 and c["note"].startswith("median 3 h, largest 3 h ")         # 24.0 with the window (0.0, 1e12)
 
 
 @pytest.mark.parametrize("start,layout,covers", [

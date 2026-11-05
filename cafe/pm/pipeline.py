@@ -492,7 +492,7 @@ def ocean_margins(ds: Any, sbox: tuple[float, float, float, float], pts: list[tu
     out = [("box south edge", float(s - la.min())), ("box north edge", float(la.max() - n)), ("box west edge", float(w - lo.min())),
            ("box east edge", float(lo.max() - e))]
     for label, lon, lat in pts:
-        x = float(cv.wrap360(lon))
+        x = float(cv.wrap_about(lon, 0.5 * (lo.min() + lo.max())))                 # in the frame of the store's axis (continuous across 0 E)
         out.append((label, float(min(lat - la.min(), la.max() - lat, x - lo.min(), lo.max() - x))))
     return out
 
