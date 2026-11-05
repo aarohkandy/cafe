@@ -70,7 +70,7 @@ def test_open_ocean_falls_back_to_the_gofs_floor_when_no_gebco_cache_matches(dat
     assert o.bathy.source.startswith("HYCOM GOFS 3.1 deepest valid level") and o.bathy.tried[0].startswith("gebco: FileNotFoundError")
     lon, lat = np.array([195.0, 196.75, 197.0]), np.array([0.0, -1.75, -1.75])                     # open sea, the atoll column, the wet-to-100-m column
     t = o.bathymetry(lon, lat)
-    assert np.allclose(t.value, [1000.0, 0.0, 110.0], atol=1e-6)               # last level 1000 (a lower bound), 0 (land), wet to 100 and not at 120: 100 + 20 / 2
+    assert np.allclose(t.value, [1000.0, 0.0, 110.0], atol=1e-6)               # last level 1000 (lower bound), land, wet to 100 not 120: 100 + 20 / 2
     assert np.allclose(t.uncertainty, [1000.0, 0.0, 20.0 / np.sqrt(12.0)], atol=1e-6)         # the open level's assumed sigma, land, spacing / sqrt(12)
 
 

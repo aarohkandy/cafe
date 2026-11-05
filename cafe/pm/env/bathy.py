@@ -30,7 +30,8 @@ from .hycom import box360, open_store
 
 GEBCO_URL = "https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2026/ice_surface_elevation/netcdf/GEBCO_2026.nc"
 GEBCO_RES_DEG = 1.0 / 240.0                          # 15 arc-seconds
-ASSUMED = {k: _assumptions()[f"bathy.{k}"]["value"] for k in ("gebco_rel_sigma", "umwm_rel_sigma", "gofs_open_level_sigma_m")}   # unsourced: config/assumptions.yaml
+# unsourced: config/assumptions.yaml
+ASSUMED = {k: _assumptions()[f"bathy.{k}"]["value"] for k in ("gebco_rel_sigma", "umwm_rel_sigma", "gofs_open_level_sigma_m")}
 ORDER = ("gebco", "gofs", "umwm")
 M_PER_DEG = 111_195.0                               # mean Earth radius 6371.0088 km (IUGG)
 
