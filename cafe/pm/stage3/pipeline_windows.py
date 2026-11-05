@@ -180,7 +180,7 @@ def usv_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, part: str) 
     c = P["wing_area_m2"] / P["wing_span_m"]
     wing = dict(type="plate", center=(0.0, 0.0, 0.0), size=(c, P["wing_span_m"], need(a, "usv.wing_t_c") * c))     # span along y: lift axis is body z
     return W.Vehicle(platform, "air", max(c, P["wing_span_m"]), [wing], ref_area=P["wing_area_m2"], hull=0,
-                     extra=dict(resolve_dim=c, part="wing"), rho=P["rho_air"])
+                     extra=dict(resolve_dim=c, part="wing", bl_length=c), rho=P["rho_air"])
 
 
 def uas_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str) -> W.Vehicle:
@@ -269,6 +269,11 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
                                     f"{P['wetted_area_m2']:.2f} m2); its Hangar reference is built on the window's own surface, so the multiplier "
                                     "is per unit of that surface")
         if part == "hull_fs":                                               # the VPP's whole hull resistance, upright (the window has no heel)
+            ra, rb, rc = veh.shapes[0]["radii"]                             # round 8 M-15: the displacement of the half ellipsoid below the waterline + keel
+            vol = 2.0 * math.pi / 3.0 * ra * rb * rc + math.prod(veh.shapes[1]["size"])
+            kin["wetted_area_note"] += (f"; it displaces {vol:.2f} m3 ({vol * rho_w:.0f} kg) against the platform's {P['mass_kg'] / rho_w:.2f} m3 "
+                                        f"({P['mass_kg']:.0f} kg), {vol * rho_w / P['mass_kg']:.1f} x, "
+                                        "so its wave-making resistance is for that larger displacement")
             r_hull = float(usv.hull_resistance(dict(P, wetted_area_m2=wetted), np.float64(stw), 0.0))
             return dict(kin, cd_h=_coef(r_hull + r_keel, rho_w, stw, veh.ref_area),
                         src="usv.hull_resistance (ITTC-57 friction x (1 + form_factor_k) + residuary cr0 (Fr / cr_fr_ref)^4 on the wetted area, upright) "
@@ -354,7 +359,7 @@ def fit_window(veh: W.Vehicle, speed: float, budget: float, a: dict[str, Any], m
     the memory wins over `min_cells_across`: a window that does not fit does not run)."""
     box = tuple(need(a, "box_bodies"))
     T, n = need(a, "window_s"), need(a, "cells_per_delta")
-    fine = lbm.les_resolution(veh.length, speed, W.nu_of(veh), (n,), box, T)["rows"][n]
+    fine = lbm.les_resolution(veh.length, speed, W.nu_of(veh), (n,), box, T, bl_length=W.bl_length(veh))["rows"][n]
     transits = need(a, "min_flow_throughs") * fine["shape"][0] / lbm.U_LAT
     short = fine["cells"] * transits / max(budget, 1.0)
     dx = fine["dx"] * max(1.0, short ** 0.25)
