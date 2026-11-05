@@ -170,10 +170,26 @@ def _append(zarr_path: Any, ds: Any, first: bool, attrs: dict[str, Any]) -> None
         ds.to_zarr(zarr_path, mode="a", append_dim="time", consolidated=False)
 
 
+def refuse_overlap(out_zarr: Any, source: Any) -> None:
+    """Raise a ConfigError when the store `out_zarr` (or its `.tmp` sibling) is `source`, holds it, or lies inside it. `write_store` removes the old
+    store and the temporary with rmtree, so such a store would delete the data it was made from. The paths are resolved first (symlinks, `..`)."""
+    from ..config import ConfigError
+    o, s = pathlib.Path(out_zarr).resolve(), pathlib.Path(source).resolve()
+    for q in (o, o.with_name(o.name + ".tmp")):
+        if q == s or q in s.parents or s in q.parents:
+            raise ConfigError(f"the store {out_zarr} and its source {source} are the same directory, or one holds the other: writing the store would delete "
+                              "the source. Name a store path of its own, outside the source directory")
+
+
 def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> pathlib.Path:
-    """steps: iterable of standardized one-time datasets (see _std). Adds rho/c, writes atomically (tmp dir, then rename)."""
+    """steps: iterable of standardized one-time datasets (see _std). Adds rho/c, writes atomically (tmp dir, then rename). An existing `out_zarr` is
+    replaced only when it is a Zarr store (has `zarr.json`, or `.zgroup` for version 2) or is empty: any other directory is refused before a step is read."""
+    from ..config import ConfigError
     kind_of(kind)
     out = pathlib.Path(out_zarr)
+    if out.is_dir() and any(out.iterdir()) and not ((out / "zarr.json").exists() or (out / ".zgroup").exists()):
+        raise ConfigError(f"{out} exists, is not empty and is not a Zarr store (no zarr.json): it would be deleted to make room for the store. "
+                          "Move it away or name another path")
     tmp = out.with_name(out.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
     n = 0
@@ -373,6 +389,7 @@ def assemble_gofs(pdir: Any, steps: Any, out_zarr: Any) -> pathlib.Path:
     """The parts in `pdir` (checked against manifest.json hashes) -> Zarr with rho and c. One time step in memory at a time."""
     import xarray as xr
     pdir = pathlib.Path(pdir)
+    refuse_overlap(out_zarr, pdir)                                           # the parts are hours of download; the store replaces its predecessor with rmtree
     man = json.loads((pdir / "manifest.json").read_text())
     for fn, rec in man["parts"].items():
         if _sha(pdir / fn) != rec["sha256"]:
@@ -727,6 +744,7 @@ def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any =
     never guessed. When a real lab file arrives this is the whole step:
         python -c "from cafe.pm.env.hycom import ingest_lab_hycom as i; i('PATH', (-7, 7, 163, -163), 'lab.zarr', 'in_situ')"."""
     p = pathlib.Path(path)
+    refuse_overlap(out_zarr, p)                                              # before any read: the ingest ends by removing the old store
     reads: list[Callable[[], tuple[Any, str]]]
     files = (sorted(p.glob("*.nc")) or sorted(p.glob("archv*.b"))) if p.is_dir() else [p]
     if not files:
