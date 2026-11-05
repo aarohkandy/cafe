@@ -59,3 +59,25 @@ None. M-5's guard sits in hycom.py, so `__main__.py` and `config.py` (batch A) n
 - The full 75-minute suite and the mutation run were not run; only the touched test files and the callers' files named in the final report.
 - No real 30-day orca fetch (the finding's own check did not run one either): the test uses 720 synthetic hours under a 256-descriptor limit.
 - A truncated store after a kill mid-write (M-38) was not reproduced, as in the finding.
+
+## Adversary follow-up on M-5 (second pass)
+
+Problem 1: `write_store`'s non-store refusal (no `zarr.json` / `.zgroup`) blocked the repair `hycom.unreadable` tells the user to run: a lab store that lost `zarr.json` could be neither read nor re-ingested. Fix at the one shared place: `write_store` now replaces an existing directory when it is empty or `looks_like_zarr(d)` (new, hycom.py): a mark file (`zarr.json`, `.zgroup`, `.zarray`, `.zattrs`) or a chunk directory `c` in the directory or in one of its subdirectories (the variables), so a store with its top `zarr.json` gone, or with every `zarr.json` gone but the chunks left, is replaced; a directory with neither is still refused (message: "holds no Zarr metadata or chunks"). The advice in `unreadable` is unchanged and now true. Test: `tests/test_hycom.py::test_r9_f_a_lab_store_that_lost_its_metadata_is_repaired_by_the_ingest_that_unreadable_tells_the_user_to_run` (two damages: top `zarr.json` only; all `zarr.json`): failed on 5cec4e5 with the ConfigError from `write_store`, passes now. The M-5 test that pins the refusal of a notes-only directory was amended only in its `match` string.
+
+Problem 2: a source whose files are symlinks into the store was refused only by luck (store without `zarr.json`). `refuse_overlap` was called with the source directory, whose `resolve()` does not follow the links inside it; with a valid store the links' targets were deleted by `rmtree`. Fix: `ingest_lab_hycom` now also calls `refuse_overlap(out_zarr, f)` for every file it will read (resolved, so the link target is compared), and for archv the `.a` and `.b` of each snapshot stem and of the grid stem. Test: `test_r9_f_a_source_file_that_is_a_link_into_a_valid_store_is_refused_and_its_target_survives` (netcdf and archv; the store is valid): "DID NOT RAISE" on 5cec4e5, passes now. Siblings swept: `assemble_gofs` takes a parts directory it lists itself and never reads linked files from elsewhere (its other `write_store` input); `write_store` has no other source.
+
+Hazard accepted: `looks_like_zarr` is a heuristic; a non-store directory that has a subdirectory with a `zarr.json` or a `c` directory in it is replaced. DECISIONS (amend the M-5 row `N`): "an existing store path is replaced when empty or when it holds Zarr metadata or chunks at the top or one level down; links among the source files are resolved before comparing".
+
+CHANGELOG: `ingest-ocean` can repair a lab store that lost `zarr.json` (the repair `open_store` names), and refuses a source file that is a link into the store (review round 9, M-5 follow-up).
+
+## The surface-only node (M-35, previously judged by reading)
+
+Checked by test: `tests/test_bathy.py::test_gofs_node_wet_only_at_the_surface_level_is_water_not_land_for_the_report_mask` makes a node wet at the first level only and asserts depth = first level + half the first spacing, which is above 0; `report.py:662` reads `value <= 0` as land, so the node is water. This test passes on r9-f; it was not run against the older code (it checks the M-35 behaviour, it is not a fix).
+
+## Verified in this pass
+
+On cafe-burst (pm_r9f): `tests/test_hycom.py`, `tests/test_bathy.py`, `tests/test_ocean.py`, `tests/test_ingest_fetch.py`, `tests/test_cli.py` pass (exit 0); `tests/test_pipeline.py -k ingest` passes; ruff on `cafe/pm tests` and mypy strict `cafe/pm` clean.
+
+## Still not done
+
+The items under "Not done / not verified" above stand (full suite, audit and mutation, a real 30-day orca fetch, a truncated store from a kill, the known limits: a store path that is a file; the constant 1000 m open-level sigma). `looks_like_zarr` and the new `refuse_overlap` calls were not mutation-tested.

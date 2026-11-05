@@ -169,6 +169,18 @@ def test_gofs_floor_is_the_level_plus_half_a_spacing_with_the_uniform_sigma_and_
     assert b.ASSUMED["gofs_open_level_sigma_m"] == 1000.0 and "gofs_open_level_sigma_m" in b.__doc__
 
 
+def test_gofs_node_wet_only_at_the_surface_level_is_water_not_land_for_the_report_mask(store, tmp_path):
+    from cafe.pm.env import hycom
+    ds = hycom.open_store(store).load()
+    i, j = 4, 3                                                                  # the node that is wet to 100 m in the fixture
+    ds["water_temp"][:, 1:, j, i] = np.nan                                       # now wet at the first level only
+    out = tmp_path / "surface.zarr"
+    ds.to_zarr(out, mode="w", consolidated=False)
+    got = b.from_gofs(out)(mk.LON[i], mk.LAT[j])
+    first = float(ds.depth.values[0])
+    assert got.value > 0.0 and np.isclose(got.value, first + (float(ds.depth.values[1]) - first) / 2.0)       # report.py reads value <= 0 as land
+
+
 def test_umwm_depth_is_a_12_km_grid():
     lon, lat = np.array([-170.0, -169.9]), np.array([0.0, 0.1])
     d = np.array([[4000.0, 4100.0], [4200.0, 4300.0]])

@@ -1059,7 +1059,7 @@ def test_r9_m5_a_non_empty_directory_that_is_no_zarr_store_is_not_replaced_but_a
     keep = tmp_path / "ocean"
     keep.mkdir()
     (keep / "notes.txt").write_text("not a store")
-    with pytest.raises(ConfigError, match="not a Zarr store"):
+    with pytest.raises(ConfigError, match="no Zarr metadata or chunks"):
         h.ingest_lab_hycom(d, fx["box"], keep, "in_situ")
     assert (keep / "notes.txt").read_text() == "not a store"
     empty = tmp_path / "empty.zarr"
@@ -1067,3 +1067,34 @@ def test_r9_m5_a_non_empty_directory_that_is_no_zarr_store_is_not_replaced_but_a
     store = tmp_path / "again.zarr"
     for out in (empty, store, store):                                   # an empty directory, then a fresh path, then the store just written
         assert h.open_store(h.ingest_lab_hycom(d, fx["box"], out, "in_situ")).sizes["time"] == 3
+
+
+@pytest.mark.parametrize("damage", ["top_zarr_json", "all_metadata"])
+def test_r9_f_a_lab_store_that_lost_its_metadata_is_repaired_by_the_ingest_that_unreadable_tells_the_user_to_run(fx, tmp_path, damage):
+    from cafe.pm.config import ConfigError
+    d, _ = _lab_dir(fx, tmp_path)
+    store = tmp_path / "lab.zarr"
+    h.ingest_lab_hycom(d, fx["box"], store, "in_situ")
+    for f in [store / "zarr.json"] if damage == "top_zarr_json" else list(store.rglob("zarr.json")):
+        f.unlink()
+    with pytest.raises(ConfigError, match="ingest-ocean"):               # the advice: write the store again from the lab's source
+        h.open_store(store)
+    assert h.open_store(h.ingest_lab_hycom(d, fx["box"], store, "in_situ")).sizes["time"] == 3
+
+
+@pytest.mark.parametrize("kind", ["netcdf", "archv"])
+def test_r9_f_a_source_file_that_is_a_link_into_a_valid_store_is_refused_and_its_target_survives(fx, tmp_path, kind):
+    from cafe.pm.config import ConfigError
+    store = tmp_path / "lab.zarr"
+    h.ingest_lab_hycom(_lab_dir(fx, tmp_path)[0], fx["box"], store, "in_situ")      # a valid store (it has zarr.json)
+    src = tmp_path / "src"
+    shutil.copytree(fx["archv_dir"] if kind == "archv" else fx["zlevel_dir"], src)
+    snap = sorted(src.glob("*.a" if kind == "archv" else "*.nc"))[1:]               # all but one linked: the one real file must not hide the others
+    for f in snap:
+        shutil.move(f, store / f.name)
+        f.symlink_to(store / f.name)
+    kw = dict(depth=fx["depth"]) if kind == "archv" else {}
+    keep = sorted(p.name for p in store.iterdir())
+    with pytest.raises(ConfigError, match="would delete the source"):
+        h.ingest_lab_hycom(src, fx["box"], store, "in_situ", **kw)
+    assert sorted(p.name for p in store.iterdir()) == keep

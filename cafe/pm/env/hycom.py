@@ -181,14 +181,23 @@ def refuse_overlap(out_zarr: Any, source: Any) -> None:
                               "the source. Name a store path of its own, outside the source directory")
 
 
+ZARR_MARKS = ("zarr.json", ".zgroup", ".zarray", ".zattrs")
+
+
+def looks_like_zarr(d: pathlib.Path) -> bool:
+    """True when the directory `d` holds Zarr metadata or chunks: a mark file or a chunk directory `c` in `d` or in one of its subdirectories (the
+    variables). A store that lost its top `zarr.json` (half copied, damaged) still has them, and is the thing `unreadable` says to write again."""
+    return any(any((q / m).exists() for m in ZARR_MARKS) or (q / "c").is_dir() for q in (d, *(c for c in d.iterdir() if c.is_dir())))
+
+
 def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> pathlib.Path:
     """steps: iterable of standardized one-time datasets (see _std). Adds rho/c, writes atomically (tmp dir, then rename). An existing `out_zarr` is
-    replaced only when it is a Zarr store (has `zarr.json`, or `.zgroup` for version 2) or is empty: any other directory is refused before a step is read."""
+    replaced only when it is empty or `looks_like_zarr` (a damaged store too, so ingest-ocean can repair it): any other directory is refused first."""
     from ..config import ConfigError
     kind_of(kind)
     out = pathlib.Path(out_zarr)
-    if out.is_dir() and any(out.iterdir()) and not ((out / "zarr.json").exists() or (out / ".zgroup").exists()):
-        raise ConfigError(f"{out} exists, is not empty and is not a Zarr store (no zarr.json): it would be deleted to make room for the store. "
+    if out.is_dir() and any(out.iterdir()) and not looks_like_zarr(out):
+        raise ConfigError(f"{out} exists, is not empty and holds no Zarr metadata or chunks: it would be deleted to make room for the store. "
                           "Move it away or name another path")
     tmp = out.with_name(out.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)
@@ -749,11 +758,15 @@ def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any =
     files = (sorted(p.glob("*.nc")) or sorted(p.glob("archv*.b"))) if p.is_dir() else [p]
     if not files:
         raise ValueError(f"{p} holds no *.nc and no archv*.b files")
+    for f in files:                                                          # a snapshot linked into the store goes with it: resolve() sees the target
+        refuse_overlap(out_zarr, f)
     if all(f.suffix == ".nc" for f in files):
         reads, labels = [functools.partial(read_lab_netcdf, f, temperature_kind, depth) for f in files], files
     else:
         stems = [f.with_suffix("") if f.suffix in (".a", ".b") else f for f in files]
         gstem = pathlib.Path(grid) if grid else stems[0].parent / "regional.grid"
+        for x, e in itertools.product((*stems, gstem), (".a", ".b")):               # the .a/.b pairs and the grid files, each possibly a link into the store
+            refuse_overlap(out_zarr, str(x) + e)
         reads, labels = [functools.partial(read_archv, s, gstem, temperature_kind, depth, box) for s in stems], stems
     times = [_snapshot_times(lab) for lab in labels]
     order = sorted(range(len(labels)), key=lambda i: (min(times[i], default=np.inf), i))        # by time, not by name (snap_10 sorts before snap_9)
