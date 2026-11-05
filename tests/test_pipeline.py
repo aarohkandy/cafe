@@ -452,6 +452,25 @@ def test_hangar_fails_on_a_platform_number_without_provenance(tmp_path, monkeypa
     assert json.loads((tmp_path / "r" / "hangar" / "hangar.json").read_text())["glider_1n"]["assumed"] == f.read_text().count("assumed: true")
 
 
+def test_r9_m1_a_platform_given_as_a_path_is_read_and_hashed_by_the_hangar_stage_whether_relative_or_absolute(tmp_path, monkeypatch):
+    """The stage rebuilt the file as PLATFORMS/<ref>.yaml, so `platform: platforms/seaglider.yaml` (which `validate` accepts) was a file-not-found after
+    ingest, and the ledger input was recorded with no hash."""
+    m = yaml.safe_load(MISSION_PATH.read_text())
+    eq = next(v for v in m["vehicles"] if v["id"] == "glider_eq")
+    eq["platform"] = "platforms/seaglider.yaml"
+    next(v for v in m["vehicles"] if v["id"] == "glider_1n")["platform"] = str(ROOT / "platforms" / "slocum.yaml")
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(m))
+    monkeypatch.chdir(ROOT)                                                  # a relative platform path is read from where the command runs
+    ctx = ctx_for(tmp_path / "r", mission=tmp_path / "m.yaml")
+    d = run_stage(pipeline.s_hangar, ctx, "hangar")
+    rows = json.loads((tmp_path / "r" / "hangar" / "hangar.json").read_text())
+    assert rows["glider_eq"]["file"] == "platforms/seaglider.yaml" and rows["glider_1n"]["file"] == str(ROOT / "platforms" / "slocum.yaml")
+    assert rows["glider_eq"]["assumed"] > 0 and check_of(d, "provenance_platforms/seaglider.yaml")["ok"]
+    by = {i["ref"]: i["sha256"] for i in d["inputs"]}
+    assert len(by["platforms/seaglider.yaml"]) == 64 and len(by[str(ROOT / "platforms" / "slocum.yaml")]) == 64
+    assert by["platforms/seaglider.yaml"] == hashlib.sha256((ROOT / "platforms" / "seaglider.yaml").read_bytes()).hexdigest()
+
+
 # ---------------------------------------------------------------------------------------------------------------- ingest
 
 def boom(*a, **k):
@@ -3442,3 +3461,38 @@ def test_r8_l0_nan_in_the_ocean_store_is_land_and_is_not_judged_by_the_range_che
     oc = pipeline.ocean(ctx)
     assert np.isnan(oc.ds["water_u"].values).any()                       # the fixture's store has land
     assert check_of(ingest_checks(ctx, oc), "forcing_in_physical_range")["ok"]
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 9, batch A
+
+def test_r9_m12_running_from_the_runs_own_mission_copy_into_its_own_directory_is_not_a_same_file_error(tmp_path, monkeypatch):
+    calls = []
+    stub_stages(monkeypatch, calls)
+    run = tmp_path / "run"
+    go(run)
+    copy = run / "mission.yaml"
+    before = copy.read_bytes()
+    log = []
+    pipeline.run(copy, "ci", 0, run, log=log.append)                         # RUNBOOK: --mission <run dir>/mission.yaml --out <run dir>
+    assert copy.read_bytes() == before and [m for m in log if "up to date" in m] != []
+    pipeline.run(copy, "ci", 0, run, log=log.append, seed=77)                # the same file with a new seed: rewritten, not left or crashed
+    assert yaml.safe_load(copy.read_text())["seed"] == 77 and config.load_mission(copy)["name"] == "ci_fixture"
+    assert yaml.safe_load(copy.read_text())["vehicles"] == yaml.safe_load(before)["vehicles"]
+    other = tmp_path / "other"
+    pipeline.run(copy, "ci", 0, other, log=log.append)                       # another directory still gets a byte copy
+    assert (other / "mission.yaml").read_text() == copy.read_text()
+
+
+def test_r9_m9_the_run_logs_the_other_machine_warning_after_the_plan_and_it_is_in_no_hashed_file(tmp_path, monkeypatch):
+    calls, log = [], []
+    stub_stages(monkeypatch, calls)
+    monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: "THIS HOST IS NOT THE BENCH")
+    ctx = go(tmp_path / "run", log)
+    assert log[0] == budget.describe(ctx.plan) and log[1] == "note: THIS HOST IS NOT THE BENCH"
+    run = tmp_path / "run"
+    files = [run / "plan.json", *(run / "checkpoints" / st / "ledger.json" for st in STAGES)]
+    assert all("NOT THE BENCH" not in f.read_text() for f in files)
+    monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: None)
+    quiet_log = []
+    go(tmp_path / "run2", quiet_log)
+    assert not [m for m in quiet_log if m.startswith("note:")] and ctx.hash == pipeline.Context(MISSION_PATH, "ci", 0, tmp_path / "run3", quiet).hash

@@ -21,7 +21,7 @@ slice affords is not run (`les_windows`): it could only fail the viscosity_floor
 """
 from __future__ import annotations
 
-import math, os, pathlib
+import math, os, pathlib, platform
 from collections import Counter
 from typing import Any
 
@@ -109,6 +109,41 @@ def measurement_warnings(thr: dict[str, Any], classes: dict[str, str], mission: 
     return sorted(out)
 
 
+def cpu_model() -> str:
+    """The CPU model as bench/throughput.py records it in `machine.cpu`: /proc/cpuinfo's first "model name", else `platform.processor()`."""
+    try:
+        with open("/proc/cpuinfo") as f:
+            return next(line.split(":", 1)[1].strip() for line in f if line.startswith("model name"))
+    except (OSError, StopIteration):
+        return platform.processor()
+
+
+def machine_warning(thr: dict[str, Any] | None = None, host: dict[str, Any] | None = None) -> str | None:
+    """Why the rates in `thr` (config/throughput.json) may not be this machine's: its `machine` block (written by `make bench`) names another CPU
+    count or CPU model than the host's. `host` is {"cpus": n, "cpu": model}; default this machine, read as the bench reads its own: `os.cpu_count()`
+    (not `par.workers()`, which a docker --cpus quota or the memory cap lowers) and `cpu_model()`, so a limited container on the benchmarked box is
+    not warned. A key `host` leaves out is not compared. None when it matches or `thr` has no machine block.
+
+    Deliberately NOT one of the plan's `notes`: it depends on the machine the plan is made on, and the notes are in plan.json's `describe` and in
+    report.json (`machine.notes`, `machine.describe`), which two runs of one seed on two machines must share (DECISIONS 290). `plan` prints it,
+    `pipeline.run` logs it, and report.json may carry it only under `machine.machine` (acceptance.VOLATILE)."""
+    thr = throughput() if thr is None else thr
+    m = thr.get("machine")
+    if not m:
+        return None
+    host = dict(cpus=os.cpu_count(), cpu=cpu_model()) if host is None else host
+    n, cpu = host.get("cpus"), host.get("cpu")
+    diff = []
+    if m.get("cpus") and n and m["cpus"] != n:
+        diff.append(f"{n} CPUs, not {m['cpus']}")
+    if m.get("cpu") and cpu and m["cpu"] != cpu:
+        diff.append(f"CPU model {cpu}, not {m['cpu']}")
+    if not diff:
+        return None
+    return (f"throughput.json was measured on {m.get('id', '?')} ({m.get('cpus', '?')} CPUs, {m.get('cpu', '?')}, {m.get('measured', '?')}); here it is "
+            f"{'; '.join(diff)}. The stage-1 costs and LES rates in the plan are that machine's: run `make bench` here to measure this one")
+
+
 def les_need(speed: float, length: float, fluid: str, a: dict[str, Any]) -> dict[str, float]:
     """The smallest LES window that reaches the physical lattice viscosity: lattice viscosity at fixed lattice speed is nu U_LAT / (U dx), so
     `stage3.nu_lat_floor` needs dx <= nu U_LAT / (U floor); the box of `stage3.box_bodies` body lengths at that dx, run for the shortest
@@ -181,7 +216,7 @@ def padded_area_deg2(mission: dict[str, Any]) -> float:
         return ENV_REF_DEG2_DAY / 6.0
     from .pipeline import padding
     pad = padding(mission)
-    w = (b["lon_max"] - b["lon_min"]) % 360.0 or 360.0
+    w = (b["lon_max"] - b["lon_min"]) % 360.0                           # load_mission refuses lon_min == lon_max, so 0 is not a full circle
     return float(min(360.0, w + 2 * pad) * min(180.0, b["lat_max"] - b["lat_min"] + 2 * pad))
 
 
@@ -268,6 +303,8 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         raise PlanError(f"--budget {budget!r}: choose one of {list(BUDGET_S)}")
     if gpus < 0:
         raise PlanError("--gpus must be >= 0")
+    if gpu_mem_gb is not None and not (math.isfinite(gpu_mem_gb) and gpu_mem_gb > 0):
+        raise PlanError(f"--gpu-mem-gb {gpu_mem_gb!r}: the device memory must be a positive number of GB (omit it to size nests without a memory guard)")
     thr = throughput() if thr is None else thr
     B = BUDGET_S[budget]
     days = window_days(mission)
@@ -344,7 +381,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
                       "sub-grid and refit stay uncalibrated" if nowhere else
                       "CPU fallback: native JAX lattice kernel at the resolution this budget affords on CPU; coefficients are the pooled "
                       "window coefficient over the vehicle's Hangar-model value"))
-    if gpus > 0 and gpu_mem_gb:
+    if gpus > 0 and gpu_mem_gb is not None:
         les["gpu_mem_gb"] = gpu_mem_gb
         les["max_cells"] = int(GPU_MEM_GUARD * gpu_mem_gb * 1e9 / LES_BYTES_PER_CELL)
     p: dict[str, Any] = dict(budget=budget, budget_s=B, gpus=gpus, days=days, n_max=n_max, n_min=n_min, batch=min(bs, n_max),

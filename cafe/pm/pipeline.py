@@ -945,12 +945,12 @@ def s_hangar(ctx: Context, L: Ledger) -> None:
     loader, which refuses a number without a source or an assumed + why. This stage runs no CFD, GCI or mesh study: no vehicle CAD exists here
     (QUESTIONS_FOR_LAB), so the "baseline model coefficients" Stage 1 and the refit start from are the analytic ones of the platform models
     (Seaglider force balance, `usv.hull_resistance`, the UAS drag area), not a RANS-with-GCI Hangar result."""
-    from .config import PLATFORMS
+    from .config import platform_path
     from .physics import glider, uas, usv
     loaders: dict[str, Callable[[str], Any]] = dict(glider=glider.load_platform, usv=usv.load_platform, uas=uas.load_platform)
     rows = {}
     for v in ctx.mission["vehicles"]:
-        p = PLATFORMS / f"{v['platform']}.yaml"
+        p = platform_path(v["platform"])
         L.input(p)
         cls = ctx.classes[v["id"]]
         try:
@@ -1471,14 +1471,19 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
         table = store_path(ctx.table)[0]
         if table.exists():
             read_table(table)  # a corrupt shared table stops the run here (ConfigError), not at the emulator stage after the others
+    dest = ctx.path("mission.yaml")
     if seed is None:
-        shutil.copy(ctx.mission_path, ctx.path("mission.yaml"))
+        if not (dest.exists() and os.path.samefile(ctx.mission_path, dest)):      # `--mission <run dir>/mission.yaml --out <run dir>` (RUNBOOK): it is the copy
+            shutil.copy(ctx.mission_path, dest)
     else:                                                                 # the copy is what `report` and `whatif` reload: it must carry the seed that was run,
-        # whatever the spelling of `seed` in the file (`seed : 5`, "seed": 5, a flow mapping); its comments are lost, the original is `plan.json`'s mission_path
-        ctx.path("mission.yaml").write_text(yaml.safe_dump(dict(_yaml(ctx.mission_path), seed=seed), sort_keys=False))
+        # whatever the spelling of `seed` in the file (`seed : 5`, "seed": 5, a flow mapping); its comments are lost, the original is `plan.json`'s
+        # mission_path. The same file is rewritten with the new seed (the text is read before the file is opened for writing)
+        dest.write_text(yaml.safe_dump(dict(_yaml(ctx.mission_path), seed=seed), sort_keys=False))
     if ctx.plan:
         _dump(ctx.plan, ctx.path("plan.json"))
         log(budget.describe(ctx.plan))
+        if warn := budget.machine_warning():                               # a log line only: in plan.json or the report it would differ between machines
+            log(f"note: {warn}")
     prev, redo = None, not resume
     n = int(ctx.plan.get("workers") or par.workers())                      # the planned count: the CPUs, or fewer when memory holds fewer
     log(f"workers: {n} (the CPUs this run may use, cut to what the memory holds; CAFE_WORKERS=N overrides)")

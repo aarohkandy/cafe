@@ -147,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
             mem = par.memory_gb()                                                     # the memory model of `run` (round 5, M-6)
             print(budget.describe(budget.plan(a.budget, a.gpus, m, gpu_mem_gb=_gpu_mem(a), vehicle_classes=stage1._classes(m), mem_gb=mem,
                                               env_gb=None if mem is None else budget.env_gb(m, pipeline.DATA / "cache" / m["name"]))))
+            if warn := budget.machine_warning():                                      # not in the plan: it differs between machines (budget.machine_warning)
+                print(f"note: {warn}")
         elif a.cmd in ("run", "fetch"):
             m = load_mission(a.mission)
             if getattr(a, "gpus", 0) > 0 and not a.assume_gpu and not pipeline.gpu_visible():

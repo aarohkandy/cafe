@@ -42,7 +42,7 @@ from numpy.typing import NDArray
 from scipy.stats import binom, qmc
 
 from . import budget, par, report, stage1
-from .config import ConfigError, _in_box, utc
+from .config import ConfigError, _in_box, fmt_box, utc
 from .emulator import Emulator, FreshDraw, locked, read_table, store_path, write_table
 from .env.environment import OutsideData
 from .stats import intervals
@@ -133,7 +133,7 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
                     t["waypoints"] = [[float(_wrap(a + dlon)), b + dlat] for a, b in t["waypoints"]]
             for lon, lat in _points(v, m.get("ship")):
                 if not _in_box(lon, lat, m["box"]):
-                    raise Invalid(f"{vid}: moving ({dlon:+g}, {dlat:+g}) deg puts ({lon:.2f}, {lat:.2f}) outside the mission box {m['box']}")
+                    raise Invalid(f"{vid}: moving ({dlon:+g}, {dlat:+g}) deg puts ({lon:.2f}, {lat:.2f}) outside the mission box ({fmt_box(m['box'])})")
         if duty != 1.0:
             if "base" in v:
                 v["sorties"]["every_days"] = _duty_days(float(v["sorties"].get("every_days", 1)), duty)
@@ -674,6 +674,8 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
     pri, marg = stage1.priors_for(mission, fitted)
     seed = int(mission["seed"])
     drop = list(ops.get("drop", []))
+    if drop and not [v for v in mission["vehicles"] if v["id"] not in drop]:        # (`apply` may return none: run_variant relies on it)
+        raise Invalid(f"--drop {', '.join(drop)} would leave no vehicles; a mission needs at least one (it has {[v['id'] for v in mission['vehicles']]})")
     mod = dict(shift_h=ops.get("shift_h", 0.0), dlon=ops.get("dlon", 0.0), dlat=ops.get("dlat", 0.0))
     live = [v["id"] for v in mission["vehicles"] if v["id"] not in drop and (only is None or v["id"] in only)]
     for vid in only or []:

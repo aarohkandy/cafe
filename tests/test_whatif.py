@@ -1161,3 +1161,41 @@ def test_r8_m5_the_emulator_logic_tests_do_not_depend_on_the_hosts_speed(tmp_pat
     monkeypatch.setitem(whatif.LIMITS, "query_ms", 10.0)                                      # the limit BRIEF 2.7 states: the same 50 ms query now misses it
     _, slow_info = whatif.fit_class(storm_table(), "glider", tmp_path / "t2.parquet")
     assert not slow_info["used"] and "query time" in slow_info["unused_reason"]
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 9, batch A
+
+def test_r9_m2_a_shared_yaml_dict_is_not_edited_twice_and_a_move_gives_each_vehicle_its_own_position(tmp_path):
+    import yaml
+    d = yaml.safe_load((ROOT / "missions" / "tepex_c_demo.yaml").read_text())
+    eq, two = (next(v for v in d["vehicles"] if v["id"] == i) for i in ("glider_eq", "glider_2n"))
+    eq["task"] = dict(eq["task"], dive_depth_m=500.0)
+    two["deploy"], two["task"] = eq["deploy"], eq["task"]
+    (tmp_path / "m.yaml").write_text(yaml.safe_dump(d))
+    assert "*id" in (tmp_path / "m.yaml").read_text()
+    m = config.load_mission(tmp_path / "m.yaml")
+    out = whatif.apply(m, {"glider_eq": dict(dlon=-1.0, shift_h=3.0, duty=0.5)})
+    a, b = whatif.vehicle(out, "glider_eq"), whatif.vehicle(out, "glider_2n")
+    assert a["deploy"]["lon"] == -171.0 and a["deploy"]["time"] == "2023-03-01T15:00:00Z" and a["task"]["dive_depth_m"] == 250.0
+    assert b["deploy"] == whatif.vehicle(m, "glider_2n")["deploy"] and b["task"]["dive_depth_m"] == 500.0         # untouched
+    both = whatif.apply(m, {"glider_eq": dict(dlon=-1.0), "glider_2n": dict(dlon=-1.0)})
+    assert [whatif.vehicle(both, i)["deploy"]["lon"] for i in ("glider_eq", "glider_2n")] == [-171.0, -171.0]       # -172 for both before
+    assert whatif.solo(m, "glider_eq")["vehicles"][0]["deploy"] is not m["vehicles"][0]["deploy"]
+
+
+def test_r9_m14_a_move_out_of_the_box_names_the_box_in_words():
+    with pytest.raises(whatif.Invalid) as e:
+        whatif.apply(DEMO, {"glider_eq": dict(dlon=20.0)})
+    msg = str(e.value)
+    assert "outside the mission box (lon 165 E to 165 W (across the antimeridian), lat -5 to 5, pad 2 deg)" in msg and "{" not in msg and "lon_min" not in msg
+
+
+def test_r9_m18_dropping_every_vehicle_is_refused_and_dropping_some_is_not():
+    m = copy.deepcopy(CI)
+    ids = [v["id"] for v in m["vehicles"]]
+    with pytest.raises(whatif.Invalid, match=r"--drop glider_eq, glider_1n, usv, uas would leave no vehicles; a mission needs at least one"):
+        whatif.answer(m, dict(drop=ids), {}, {}, ENV, {}, plan_for(m), None, None)
+    with pytest.raises(whatif.Invalid, match="would leave no vehicles"):
+        whatif.answer(storm_mission(), dict(drop=[GL], shift_h=6.0), {}, {}, ENV, {}, plan_for(STORM), None, None)
+    assert whatif.answer(m, dict(drop=ids[:-1]), {}, {}, ENV, {}, plan_for(m), None, None)["dropped"] == ids[:-1]
+    assert whatif.apply(m, drop=ids)["vehicles"] == []                    # `apply` itself still may: run_variant relies on it
