@@ -792,3 +792,35 @@ def test_r8_merge_the_roomy_machine_is_not_undone_by_a_tests_own_monkeypatch_und
     monkeypatch.undo()
     assert par.memory_gb() == 64.0
 
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 9, batch A
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-5", "0"])
+def test_r9_m11_a_gpu_memory_that_is_not_a_positive_number_is_an_error_line_and_exit_2_not_a_traceback(bad, capsys):
+    assert cli.main(["plan", "--mission", MISSION, "--gpus", "1", "--gpu-mem-gb", bad, "--assume-gpu"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: --gpu-mem-gb ") and "must be a positive number of GB" in err and "Traceback" not in err
+    assert cli.main(["plan", "--mission", MISSION, "--gpu-mem-gb", bad]) == 2                                                # no GPUs asked: still refused
+
+
+def test_r9_m9_plan_prints_the_other_machine_warning_after_the_plan_and_not_inside_it(monkeypatch, capsys):
+    import os
+    here = dict(budget.throughput(), machine=dict(id="elsewhere", cpu=budget.cpu_model(), cpus=(os.cpu_count() or 1) + 1, measured="2026-11-01"))
+    monkeypatch.setattr(budget, "throughput", lambda *a, **k: here)
+    assert cli.main(["plan", "--mission", MISSION]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[-1].startswith("note: throughput.json was measured on elsewhere (") and "make bench" in lines[-1]
+    assert not [x for x in lines[:-1] if "measured on elsewhere" in x]
+    here["machine"]["cpus"] = os.cpu_count() or 1
+    assert cli.main(["plan", "--mission", MISSION]) == 0
+    assert "throughput.json was measured" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("machine", [["homebase"], "homebase", {"cpus": "8", "cpu": 3}])
+def test_r9_m9_a_throughput_file_with_a_malformed_machine_block_still_plans(machine, monkeypatch, capsys):
+    bad = dict(budget.throughput(), machine=machine)
+    monkeypatch.setattr(budget, "throughput", lambda *a, **k: bad)
+    assert cli.main(["plan", "--mission", MISSION]) == 0
+    out = capsys.readouterr()
+    assert "throughput.json was measured" not in out.out and "Traceback" not in out.err

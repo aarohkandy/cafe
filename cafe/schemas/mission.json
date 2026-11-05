@@ -18,6 +18,7 @@
     "window": {"type": "object", "required": ["start", "end"], "additionalProperties": false,
                "properties": {"start": {"$ref": "#/$defs/time"}, "end": {"$ref": "#/$defs/time"}}},
     "box": {"type": "object", "required": ["lon_min", "lon_max", "lat_min", "lat_max"], "additionalProperties": false,
+            "description": "lon_min west edge, lon_max east edge (lon_min > lon_max is a box across the dateline); the two must differ, load_mission refuses a box with no width",
             "properties": {"lon_min": {"$ref": "#/$defs/lon"}, "lon_max": {"$ref": "#/$defs/lon"},
                            "lat_min": {"$ref": "#/$defs/lat"}, "lat_max": {"$ref": "#/$defs/lat"},
                            "pad_deg": {"type": "number", "minimum": 0, "maximum": 10,
@@ -26,7 +27,7 @@
       "properties": {
         "atmosphere": {"type": "object", "required": ["source"], "additionalProperties": false, "properties": {"source": {"const": "orca_uwincm"}}},
         "waves": {"type": "object", "required": ["source"], "additionalProperties": false, "properties": {"source": {"const": "orca_umwm"}}},
-        "ocean": {"type": "object", "required": ["source"], "additionalProperties": false, "properties": {"source": {"enum": ["gofs31", "lab_hycom"]}, "path": {"type": "string"}, "temperature_kind": {"enum": ["in_situ", "potential"]}}},
+        "ocean": {"type": "object", "required": ["source"], "additionalProperties": false, "properties": {"source": {"enum": ["gofs31", "lab_hycom"]}, "path": {"type": "string", "description": "lab_hycom: the lab's ingested HYCOM store. gofs31 (optional): where the fetch writes the store; it must end in .zarr (load_mission refuses another suffix)"}, "temperature_kind": {"enum": ["in_situ", "potential"]}}},
         "subgrid": {"type": "object", "additionalProperties": false,
                     "properties": {"turbulence": {"type": "boolean"}, "gust_fronts": {"type": "boolean"}, "warm_layer": {"type": "boolean"},
                                    "rain_lens": {"type": "boolean"}, "ocean_sde": {"type": "boolean"}}}}},
@@ -39,7 +40,7 @@
       "type": "object", "required": ["id", "platform"], "additionalProperties": false,
       "properties": {
         "id": {"type": "string", "pattern": "^[A-Za-z0-9_\\-]+$"},
-        "platform": {"type": "string", "description": "name of a file platforms/<name>.yaml, or a path to one"},
+        "platform": {"type": "string", "description": "name of a file platforms/<name>.yaml, or a path to one (config.platform_path: a value ending in .yaml or .yml is a path, anything else is a name)"},
         "deploy": {"$ref": "#/$defs/deploy"},
         "base": {"type": "string", "description": "UAS: id of the ship it launches from"},
         "task": {"type": "object", "required": ["mode"], "additionalProperties": false, "properties": {

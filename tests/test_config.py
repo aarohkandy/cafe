@@ -312,6 +312,14 @@ CASES = [
     ("required fraction 0", lambda d: d["links"][0].update(required_fraction=0), r"links/0/required_fraction"),
     ("one-point section", lambda d: vehicle(d, "usv")["task"].update(waypoints=[[-165.0, 0.0]]),
      r"vehicles/usv/task: mode 'section' needs at least two waypoints"),
+    ("r9_m13_two_identical_waypoints", lambda d: vehicle(d, "usv")["task"].update(waypoints=[[-165.0, 0.0], [-165.0, 0.0]]),
+     r"vehicles/usv/task/waypoints/1: \[-165.0, 0.0\] is the same point as waypoints/0; a leg of zero length"),
+    ("r9_m13_a_repeated_last_waypoint", lambda d: vehicle(d, "usv")["task"].update(waypoints=[[-165.0, -1.0], [-165.0, 1.0], [-165.0, 1.0]]),
+     r"vehicles/usv/task/waypoints/2: \[-165.0, 1.0\] is the same point as waypoints/1"),
+    ("r9_m20_equal_box_longitudes", lambda d: d["box"].update(lon_min=-165.0, lon_max=-165.0),
+     r"box.lon_min and box.lon_max are both -165.0: the box has no width"),
+    ("r9_m33_gofs_path_without_zarr", lambda d: d["environment"]["ocean"].update(path="/data/ocean/my_gofs"),
+     r"environment/ocean/path: '/data/ocean/my_gofs' does not end in .zarr; the GOFS fetch writes <name>.zarr"),
 ]
 
 
@@ -830,3 +838,68 @@ def test_r8_l0_a_repeated_key_or_an_octal_looking_number_is_refused_by_every_rea
     finally:
         subgrid._CFG_DIR = old
         subgrid._assumptions.cache_clear()
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 9, batch A
+
+def test_r9_m13_a_section_may_return_to_an_earlier_waypoint_and_a_station_task_keeps_its_waypoints(tmp_path):
+    load_mission(edit(tmp_path, lambda d: vehicle(d, "usv")["task"].update(waypoints=[[-165.0, -1.0], [-165.0, 1.0], [-165.0, -1.0]])))
+    load_mission(edit(tmp_path, lambda d: vehicle(d, "glider_2n")["task"].update(waypoints=[[-165.0, 1.0], [-165.0, 1.0]])))      # drift ignores them
+
+
+def test_r9_m20_a_box_across_the_dateline_is_not_empty_and_the_equal_longitudes_message_is_the_one_a_user_sees(tmp_path):
+    assert load_mission(DEMO)["box"]["lon_min"] > load_mission(DEMO)["box"]["lon_max"]
+    with pytest.raises(ConfigError, match=r"m.yaml: box.lon_min and box.lon_max are both 165.0: the box has no width and nothing fits in it;"):
+        load_mission(edit(tmp_path, lambda d: d["box"].update(lon_max=165.0)))
+
+
+def test_r9_m33_a_gofs_path_ending_in_zarr_loads_and_so_does_no_path(tmp_path):
+    for path in ("/data/ocean/my_gofs.zarr", "/data/ocean/gofs_run.v2.zarr"):
+        m = load_mission(edit(tmp_path, lambda d, path=path: d["environment"]["ocean"].update(path=path)))
+        assert m["environment"]["ocean"]["path"] == path
+    assert "path" not in load_mission(DEMO)["environment"]["ocean"]
+
+
+def test_r9_m2_a_yaml_alias_is_unshared_at_load_and_the_mission_hash_does_not_move(tmp_path):
+    d = doc()
+    eq, two = vehicle(d, "glider_eq"), vehicle(d, "glider_2n")
+    eq["task"] = dict(eq["task"], dive_depth_m=500.0)                          # a depth both glider platforms dive
+    two["deploy"], two["task"] = eq["deploy"], eq["task"]                      # one dict in two places: safe_dump writes an anchor and an alias
+    p = write(tmp_path, d)
+    assert "&id" in p.read_text() and "*id" in p.read_text()
+    m = load_mission(p)
+    a, b = vehicle(m, "glider_eq"), vehicle(m, "glider_2n")
+    assert a["deploy"] == b["deploy"] and a["deploy"] is not b["deploy"] and a["task"] is not b["task"]
+    plain = copy.deepcopy(d)
+    plain["vehicles"] = [dict(v, deploy=dict(v["deploy"]), task=dict(v["task"])) if "deploy" in v else v for v in plain["vehicles"]]
+    assert "&id" not in write(tmp_path, plain, "plain.yaml").read_text()
+    other = load_mission(tmp_path / "plain.yaml")
+    assert config.digest({k: v for k, v in m.items() if k != "_path"}) == config.digest({k: v for k, v in other.items() if k != "_path"})
+    walk, seen = [m], []
+    while walk:                                                                  # no list or mapping appears twice anywhere in the mission
+        n = walk.pop()
+        if isinstance(n, (dict, list)):
+            seen.append(id(n))
+            walk += list(n.values()) if isinstance(n, dict) else n
+    assert len(seen) == len(set(seen))
+
+
+def test_r9_m1_a_platform_given_as_a_path_resolves_to_that_path_and_a_name_to_platforms():
+    f = config.ROOT / "platforms" / "seaglider.yaml"
+    assert config.platform_path("seaglider") == f and config.platform_path(str(f)) == f and config.platform_path(f) == f
+    assert config.platform_path("platforms/seaglider.yaml") == pathlib.Path("platforms/seaglider.yaml")      # a path is kept as it is given
+    assert config.platform_path("mine.yml") == pathlib.Path("mine.yml")
+    assert config.platform_path("x.v2") == config.PLATFORMS / "x.v2.yaml"                                    # a dotted name is not a suffix
+    assert load_platform(str(f)) == load_platform("seaglider")
+
+
+def test_r9_m14_a_box_in_a_message_is_words_not_a_dict(tmp_path):
+    assert config.fmt_box(dict(lon_min=165.0, lon_max=-165.0, lat_min=-5.0, lat_max=5.0, pad_deg=2.0)) == \
+        "lon 165 E to 165 W (across the antimeridian), lat -5 to 5, pad 2 deg"
+    assert config.fmt_box(dict(lon_min=10.5, lon_max=20.0, lat_min=-5.0, lat_max=5.5)) == "lon 10.5 E to 20 E, lat -5 to 5.5"
+    with pytest.raises(ConfigError) as e:
+        load_mission(edit(tmp_path, lambda d: d["ship"].update(lon=100.0)))
+    assert "outside the mission box (lon 165 E to 165 W (across the antimeridian), lat -5 to 5, pad 2 deg)" in str(e.value)
+    with pytest.raises(ConfigError) as e:
+        load_mission(edit(tmp_path, lambda d: vehicle(d, "glider_eq")["deploy"].update(lon=100.0)))
+    assert "{" not in str(e.value) and "lon_min" not in str(e.value)

@@ -145,6 +145,15 @@ def _in_box(lon: float, lat: float, b: dict[str, float]) -> bool:
     return inlon and b["lat_min"] <= lat <= b["lat_max"]
 
 
+def fmt_box(b: dict[str, Any]) -> str:
+    """A mission box in words, for a message: "lon 165 E to 165 W (across the antimeridian), lat -5 to 5, pad 2 deg" (never the dict's repr)."""
+    def lon(x: float) -> str:
+        return f"{abs(x):g} {'E' if x >= 0 else 'W'}"
+    across = " (across the antimeridian)" if b["lon_min"] > b["lon_max"] else ""
+    pad = f", pad {b['pad_deg']:g} deg" if "pad_deg" in b else ""
+    return f"lon {lon(b['lon_min'])} to {lon(b['lon_max'])}{across}, lat {b['lat_min']:g} to {b['lat_max']:g}{pad}"
+
+
 ORCA_ROUTE = ("this build reads the atmosphere and the waves only from the orca run; the one working way to read another copy is the CAFE_ORCA "
               "environment variable (a directory or URL laid out like orca's files). Leave the key out")
 
@@ -297,6 +306,14 @@ def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None
                               f"use when: surfacing (not '{lk.get('when', 'always')}')")
 
 
+def _unshare(node: Any) -> Any:
+    """`node` rebuilt so that no list or mapping is one object in two places. YAML anchors and aliases (`deploy: &d {...}` ... `deploy: *d`) give two
+    vehicles the same dict, and a what-if edit of one (`whatif.apply`, the emulator's variants) would then edit both."""
+    if isinstance(node, dict):
+        return {k: _unshare(v) for k, v in node.items()}
+    return [_unshare(v) for v in node] if isinstance(node, list) else node
+
+
 def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str, Any]:
     """The checked mission. `set_verdict` sets the verdict cut-offs of `stats.intervals` (module state of the one mission a command runs); a mission
     loaded only to be read (the benchmark's, for its sortie-minutes) passes False and leaves them alone."""
@@ -314,6 +331,9 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
                           f"e.g. path: /data/ocean/lab_{m['name']}.zarr")
     if oc["source"] == "gofs31" and "temperature_kind" in oc:
         raise ConfigError(f"{path}: environment/ocean/temperature_kind: it belongs to the lab's HYCOM (source: lab_hycom) and GOFS 3.1 has its own; remove it")
+    if oc["source"] == "gofs31" and oc.get("path") and pathlib.Path(oc["path"]).suffix != ".zarr":
+        raise ConfigError(f"{path}: environment/ocean/path: {oc['path']!r} does not end in .zarr; the GOFS fetch writes <name>.zarr, so the check on this path "
+                          f"would fail after every download. Write {oc['path']}.zarr, or leave the path out (the default is DATA/ocean/gofs_{m['name']}.zarr)")
     ids = [v["id"] for v in m["vehicles"]]
     dup = {i for i in ids if ids.count(i) > 1}
     if dup:
@@ -324,13 +344,17 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
             raise ConfigError(f"{path}: ids must be unique across vehicles, ship and shore; '{i}' is used by {' and '.join(who)}; rename one")
     if not m["box"]["lat_min"] < m["box"]["lat_max"]:
         raise ConfigError(f"{path}: box.lat_min ({m['box']['lat_min']}) must be below box.lat_max ({m['box']['lat_max']}); swap them")
+    if (m["box"]["lon_max"] - m["box"]["lon_min"]) % 360.0 == 0:             # `_in_box`'s modulo: the same longitude twice is a strip with no width
+        raise ConfigError(f"{path}: box.lon_min and box.lon_max are both {m['box']['lon_min']}: the box has no width and nothing fits in it; "
+                          "give the west and east edges (a box across the dateline is lon_min 165, lon_max -165)")
     from .pipeline import ocean_box                                         # refuse here the box ingest would refuse
     try:
         ocean_box(m)
     except ConfigError as e:
         raise ConfigError(f"{path}: {e}") from e
     if "ship" in m and not _in_box(m["ship"]["lon"], m["ship"]["lat"], m["box"]):
-        raise ConfigError(f"{path}: ship ({m['ship']['lon']}, {m['ship']['lat']}) is outside the mission box {m['box']}; widen the box or move the ship")
+        raise ConfigError(f"{path}: ship ({m['ship']['lon']}, {m['ship']['lat']}) is outside the mission box ({fmt_box(m['box'])}); "
+                          "widen the box or move the ship")
     nodes = set(ids) | {m.get("ship", {}).get("id"), m.get("shore", {}).get("id")} - {None}
     for v in m["vehicles"]:
         where = f"{path}: vehicles/{v['id']}"
@@ -353,7 +377,7 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
                 pts.append((v["task"]["lon"], v["task"]["lat"]))
             for lon, lat in pts:
                 if not _in_box(lon, lat, m["box"]):
-                    raise ConfigError(f"{where}: point ({lon}, {lat}) is outside the mission box {m['box']}; widen the box or move the point")
+                    raise ConfigError(f"{where}: point ({lon}, {lat}) is outside the mission box ({fmt_box(m['box'])}); widen the box or move the point")
         plat, cls = load_platform(v["platform"]), _check_platform(v, where)
         if cls == "glider" and "dive_depth_m" in v.get("task", {}):
             from .physics import glider
@@ -395,18 +419,30 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
                               f"there is no pass/fail criterion other than battery, depth and seafloor")
         if task.get("mode") == "section" and len(task.get("waypoints", [])) < 2:
             raise ConfigError(f"{where}/task: mode 'section' needs at least two waypoints: [[lon, lat], [lon, lat], ...]")
+        wps = task.get("waypoints", []) if task.get("mode") == "section" else []
+        for i, (a, b) in enumerate(zip(wps, wps[1:], strict=False), 1):
+            if a == b:                                                       # (the schema keeps lon in [-180, 180): there is one spelling of a point)
+                raise ConfigError(f"{where}/task/waypoints/{i}: {list(b)} is the same point as waypoints/{i - 1}; a leg of zero length has no track to "
+                                  "hold, so the cross-track test would be silently off. Remove the repeat, or use mode: station to hold one point")
     _check_links(m, path, nodes)
     if not m["verdict"]["nogo"] < m["verdict"]["go"]:
         raise ConfigError(f"{path}: verdict.nogo ({m['verdict']['nogo']}) must be below verdict.go ({m['verdict']['go']})")
     if set_verdict:
         intervals.set_thresholds(m["verdict"]["go"], m["verdict"]["nogo"])
+    m = _unshare(m)
     m["_path"] = str(path)
     return m
 
 
+def platform_path(ref: str | pathlib.Path) -> pathlib.Path:
+    """The file a vehicle's `platform` names: a path as given when it ends in .yaml or .yml, else platforms/<ref>.yaml. The one rule; every consumer
+    of a platform reference (this loader, the hangar stage, the class loaders) resolves it here."""
+    p = pathlib.Path(ref)
+    return p if p.suffix in (".yaml", ".yml") else PLATFORMS / f"{ref}.yaml"
+
+
 def load_platform(name: str | pathlib.Path) -> dict[str, Any]:
-    p = pathlib.Path(name)
-    path = p if p.suffix in (".yaml", ".yml") else PLATFORMS / f"{name}.yaml"
+    path = platform_path(name)
     if not path.exists():
         have = sorted(x.stem + (" (table)" if x.stem in TABLES else "") for x in PLATFORMS.glob("*.yaml"))
         raise ConfigError(f"platform '{name}': no file {path}; available: {have}")

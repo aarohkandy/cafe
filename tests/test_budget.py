@@ -650,3 +650,87 @@ def test_r8_l0_a_damaged_throughput_file_is_a_config_error_naming_it_not_a_trace
             budget.throughput(f)
     f.write_text("{}")
     assert budget.throughput(f) == {}
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 9, batch A
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf"), -5.0, 0.0])
+@pytest.mark.parametrize("gpus", [0, 1])
+def test_r9_m11_a_device_memory_that_is_not_a_positive_number_is_refused_whatever_the_gpu_count(bad, gpus):
+    with pytest.raises(PlanError, match=r"--gpu-mem-gb .*: the device memory must be a positive number of GB"):
+        budget.plan("quick", gpus, MISSION, thr={}, vehicle_classes=CLASSES, gpu_mem_gb=bad)
+    assert budget.plan("quick", 1, MISSION, thr={}, vehicle_classes=CLASSES, gpu_mem_gb=0.001)["les"]["max_cells"] >= 0          # small is not zero
+
+
+def test_r9_m9_the_bench_machine_is_compared_with_the_host_by_cpu_count_and_model():
+    t = {"machine": dict(id="homebase", cpu="AMD EPYC 9V45", cpus=8, measured="2026-11-01")}
+    same = dict(cpus=8, cpu="AMD EPYC 9V45")
+    assert budget.machine_warning(t, same) is None and budget.machine_warning({}, same) is None            # no machine block: nothing to compare
+    w = budget.machine_warning(t, dict(cpus=32, cpu="AMD EPYC 9V45"))
+    assert w == ("throughput.json was measured on homebase (8 CPUs, AMD EPYC 9V45, 2026-11-01); here it is 32 CPUs, not 8. The stage-1 costs and LES rates "
+                 "in the plan are that machine's: run `make bench` here to measure this one")
+    assert "here it is CPU model Intel, not AMD EPYC 9V45." in budget.machine_warning(t, dict(cpus=8, cpu="Intel"))
+    assert "here it is 32 CPUs, not 8; CPU model Intel, not AMD EPYC 9V45." in budget.machine_warning(t, dict(cpus=32, cpu="Intel"))
+    assert budget.machine_warning(t, dict(cpus=8)) is None and budget.machine_warning(t, dict(cpus=8, cpu="")) is None      # a model the host does not give
+    assert budget.machine_warning(t, dict(cpus=16)) is not None
+
+
+@pytest.mark.parametrize("machine", [[1], "homebase", 8, 1.5, True, [], {}, None])
+def test_r9_m9_a_machine_block_that_is_not_a_mapping_is_nothing_to_compare_and_not_a_traceback(machine):
+    """A hand-edited throughput.json: `"machine": "homebase"` or a list reached `.get` and ended `plan` and `run` in an AttributeError."""
+    assert budget.machine_warning({"machine": machine}, dict(cpus=8, cpu="Intel")) is None
+
+
+@pytest.mark.parametrize("block", [dict(cpus="8"), dict(cpus=8.0), dict(cpus=True), dict(cpus=0), dict(cpus=[8]), dict(cpu=5), dict(cpu=["AMD"]),
+                                   dict(cpus=None, cpu=None)])
+def test_r9_m9_a_cpu_count_or_model_of_the_wrong_type_is_not_compared_and_not_printed_as_a_difference(block):
+    """`{"cpus": "8"}` against a host of 8 CPUs used to say 'here it is 8 CPUs, not 8'."""
+    assert budget.machine_warning({"machine": dict(id="homebase", **block)}, dict(cpus=8, cpu="Intel")) is None
+
+
+def test_r9_m9_a_good_field_is_still_compared_beside_a_bad_one():
+    w = budget.machine_warning({"machine": dict(id="homebase", cpus="eight", cpu="AMD")}, dict(cpus=8, cpu="Intel"))
+    assert w is not None and "CPU model Intel, not AMD" in w and "CPUs, not" not in w
+
+
+def test_r9_m9_the_warning_is_never_in_the_plan_so_the_same_seed_on_two_machines_plans_and_reports_alike():
+    """The plan's notes and describe() are in plan.json and in report.json (`machine.notes`, `machine.describe`), which acceptance compares between runs of one
+    seed; a machine-dependent sentence there would differ between burst and orca (DECISIONS 290)."""
+    t = thr(0.01, 0.001)
+    t["machine"] = dict(id="elsewhere", cpu="Nobody CPU", cpus=os_cpus() + 1, measured="2026-11-01")
+    assert budget.machine_warning(t) is not None
+    p = budget.plan("quick", 0, MISSION, thr=t, vehicle_classes=CLASSES)
+    assert "throughput.json was measured" not in json.dumps(p) and "throughput.json was measured" not in budget.describe(p)
+    assert budget.plan("quick", 0, MISSION, thr=t, vehicle_classes=CLASSES) == budget.plan("quick", 0, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)
+
+
+def os_cpus():
+    import os
+    return os.cpu_count() or 1
+
+
+def test_r9_m9_a_cpu_limited_container_on_the_benchmarked_box_is_not_warned(monkeypatch):
+    """The bench records `os.cpu_count()` and the /proc/cpuinfo model; docker --cpus, the affinity mask and CAFE_WORKERS change `par.workers()` only."""
+    t = {"machine": dict(id="here", cpu=budget.cpu_model(), cpus=os_cpus(), measured="2026-11-01")}
+    assert budget.machine_warning(t) is None
+    monkeypatch.setattr(par, "workers", lambda: 1)
+    monkeypatch.setattr(par, "_cgroup_cpus", lambda root="": 1)
+    monkeypatch.setenv("CAFE_WORKERS", "1")
+    assert budget.machine_warning(t) is None
+
+
+def test_r9_m9_the_cpu_model_is_the_first_model_name_of_proc_cpuinfo_else_the_processor(monkeypatch, tmp_path):
+    info = tmp_path / "cpuinfo"
+    info.write_text("processor\t: 0\nmodel name\t: Fancy CPU @ 3 GHz\nmodel name\t: second\n")
+    monkeypatch.setattr(budget, "open", lambda f, *a, **k: open(info, *a, **k), raising=False)                  # the module's own `open`
+    assert budget.cpu_model() == "Fancy CPU @ 3 GHz"
+    info.write_text("processor\t: 0\n")                                                                          # an arm board names no model
+    monkeypatch.setattr(budget.platform, "processor", lambda: "aarch64")
+    assert budget.cpu_model() == "aarch64"
+    monkeypatch.setattr(budget, "open", lambda f, *a, **k: open(tmp_path / "gone", *a, **k), raising=False)
+    assert budget.cpu_model() == "aarch64"
+
+
+def test_r9_m20_equal_box_longitudes_are_a_strip_with_no_width_in_the_budget_as_in_the_config():
+    flat = dict(DEMO_BOX, box=dict(lon_min=-165.0, lon_max=-165.0, lat_min=-5.0, lat_max=5.0, pad_deg=2.0))
+    assert budget.padded_area_deg2(flat) == 4 * 14                      # 0 + 2 x 2 deg wide, not the full circle it was read as

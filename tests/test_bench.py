@@ -176,14 +176,11 @@ def test_the_numbers_stage1_writes_are_the_ones_the_planner_reads(bench, monkeyp
     assert cost == pytest.approx((2.0 / 1.5, 1.0 / 1.5)) and source.startswith("measured (") and "load" in source
 
 
-def test_cpu_name_falls_back_to_the_platform_without_proc_cpuinfo(monkeypatch):
-    def refuse(*a, **k):
-        raise OSError("no /proc")
-    monkeypatch.setattr(throughput, "open", refuse, raising=False)
-    assert throughput._cpu() == throughput.platform.processor()
-    monkeypatch.setattr(throughput, "open", lambda *a, **k: iter(["vendor_id: x\n", "flags: y\n"]), raising=False)
-    assert throughput._cpu() == throughput.platform.processor()
-    monkeypatch.setattr(throughput, "open", lambda *a, **k: iter(["vendor_id: x\n", "model name\t: Example CPU 9000\n"]), raising=False)
+def test_cpu_name_is_the_one_the_planner_compares_with(monkeypatch):
+    """`machine.cpu` is written by the bench and read back by `budget.machine_warning`: one rule, `budget.cpu_model` (its /proc/cpuinfo and
+    `platform.processor()` cases are tested in test_budget)."""
+    from cafe.pm import budget
+    monkeypatch.setattr(budget, "cpu_model", lambda: "Example CPU 9000")
     assert throughput._cpu() == "Example CPU 9000"
 
 
