@@ -174,6 +174,12 @@ def test_a_file_removed_from_the_tree_is_removed_on_the_server_and_what_the_serv
     """M-39: pm.sh had no --delete, so a deleted test or module still ran on the server; bin/pmx.sh's --delete wiped outputs.
     One list (bin/sync_filters) serves both."""
     home, env = live(tmp_path, "ssh", "docker", PMX="pm_t")
+    # rsync's chmod fails under proot on orca's kernel 5.10 ("failed to set permissions ...: No such file or directory", even for `rsync -a /a/ /b/`;
+    # glibc's fchmodat falls back to /proc/self/fd, which proot probably cannot translate; not confirmed. The rehearsal on kernel 7.0 passed.) The test is
+    # about which files are sent and deleted, not their modes. --no-perms goes after the arguments, so that the script's -a does not switch it on again.
+    real = shutil.which("rsync")
+    (tmp_path / "tools" / "rsync").write_text(f'#!/bin/sh\ncase "$1" in --server*) exec {real} "$@" ;; esac\nexec {real} "$@" --no-perms\n')
+    (tmp_path / "tools" / "rsync").chmod(stat.S_IRWXU)
     src = tmp_path / "checkout"
     for f in ("cafe/pm/kept.py", "tests/test_kept.py"):
         (src / f).parent.mkdir(parents=True, exist_ok=True)
@@ -541,3 +547,116 @@ def test_l1_pm_sh_will_not_delete_the_files_of_the_checkout_that_owns_the_shared
     assert r.returncode == 0, r.stderr
     assert sorted(p.name for p in dest.iterdir()) == ["common.py"]                                                       # taken over: --delete as before
     assert run(["sh", str(ROOT / "pm.sh"), "true"], env, cwd=a).returncode == 1                                          # and now a is the other one
+
+
+# ---- bin/orca_watch.sh counts the failures of a -vv log (round 9 P-6)
+
+def watch_once(tmp_path, logs):
+    """Run the flight recorder for one look at the job logs `logs` ({name: text}) in a scratch HOME; returns the problems.log lines (one tuple each)."""
+    home, cg = tmp_path / "home", tmp_path / "cgroup"
+    (home / "cafe-worker/logs").mkdir(parents=True)
+    (home / "cafe-worker/.cafe-worker-owned").write_text("")
+    cg.mkdir()
+    (cg / "cpu.stat").write_text("usage_usec 0\nnr_throttled 0\n")
+    (cg / "memory.current").write_text("0\n")
+    (cg / "memory.events").write_text("oom_kill 0\n")
+    for name, text in logs.items():
+        (home / "cafe-worker/logs" / f"{name}.log").write_text(text)
+    r = subprocess.run(["sh", str(ROOT / "bin/orca_watch.sh")], cwd=tmp_path, capture_output=True, text=True, timeout=60,
+                       env={**os.environ, "HOME": str(home), "WATCH_SLEEP": "0", "WATCH_ONCE": "1", "WATCH_CGROUP": str(cg), "CAFE_MIN_FREE_GB": "0"})
+    assert r.returncode == 0, r.stderr
+    p = home / "cafe-worker/logs/watch/problems.log"
+    return [tuple(l.split("\t")[1:]) for l in p.read_text().splitlines()] if p.exists() else []
+
+
+def test_the_recorder_counts_the_failed_and_error_lines_of_a_vv_log_but_not_the_summary_that_repeats_them(tmp_path):
+    plain = ("tests/test_a.py::test_one PASSED                                    [ 20%]\n"
+             "tests/test_a.py::test_two FAILED                                    [ 40%]\n"
+             "tests/test_b.py::test_three[a b] ERROR                              [ 60%]\n"
+             "tests/test_b.py::test_four PASSED                                   [ 80%]\n"
+             "=========================== short test summary info ============================\n"
+             "FAILED tests/test_a.py::test_two - assert 1 == 2\n"
+             "ERROR tests/test_b.py::test_three[a b] - boom\n"
+             "rc=1\n")
+    xdist = ("[gw0] [ 25%] PASSED tests/test_a.py::test_one\n[gw1] [ 50%] FAILED tests/test_a.py::test_two\n[gw0] FAILED tests/test_b.py::test_x[1 2]\n"
+             "FAILED tests/test_a.py::test_two - assert 1 == 2\n")
+    clean = "tests/test_a.py::test_one PASSED  [100%]\nrc=0\n"
+    dots = "..F.E. [ 50%]\n"
+    got = dict(watch_once(tmp_path, {"plain": plain, "xdist": xdist, "clean": clean, "dots": dots}))
+    assert got == {"plain": "failed tests 2, error lines 0, rc=1", "xdist": "failed tests 2, error lines 0, still running",
+                   "dots": "failed tests 2, error lines 0, still running"}                      # a clean log with rc=0 is no problem; the dots still count
+
+
+# ---- orca-go P-18: proot returns the status of the last process of the job to end
+
+LAST_TRACEE = """#!/bin/sh
+# What proot does about the exit status (rehearsed on orca: `(sleep 3; exit 0) & exit 1` gives 0): run the command, wait for every process it left behind,
+# and answer with the status of the last one to end. The command comes after `/usr/bin/env -i VAR=value...`; its /tmp is $PROOT_TMP_DIR here.
+while [ "$1" != /usr/bin/env ]; do shift; done
+shift 2
+while case "$1" in [A-Z_]*=*) true ;; *) false ;; esac; do shift; done
+for a in "$@"; do set -- "$@" "$(printf '%s' "$a" | sed "s#/tmp/#$PROOT_TMP_DIR/#g")"; shift; done
+"$@"
+wait
+exit "${LAST_STATUS:-0}"
+"""
+
+
+@pytest.mark.parametrize("job, want", [("exit 3", 3), ("(sleep 1; exit 0) & exit 3", 3), ("(sleep 1; exit 7) & exit 3", 3), ("true", 0),
+                                       ("(sleep 1) & exit 0", 0)])
+def test_the_exit_status_of_a_job_is_its_own_not_that_of_a_child_that_outlives_it(tmp_path, job, want):
+    """The resource tracker of a spawned pool outlives the process and exits 0: a pytest run with a failure was rc=0 and the gate would have said ok."""
+    w, env = proot_world(tmp_path, LAST_STATUS="0")
+    (w / "bin/proot").write_text(LAST_TRACEE)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "sh", "-c", job], env)
+    assert r.returncode == want, r.stderr
+    assert not list((w / "cafe/tmp").glob("run.*"))
+
+
+
+@pytest.mark.parametrize("job, last, want", [("kill -9 $PPID", "0", 1), ("mkdir /tmp/.rc; exit 0", "0", 1), ("kill -9 $PPID", "137", 137)])
+def test_a_job_that_leaves_no_status_is_failed_when_proot_says_0_and_keeps_a_status_proot_gave(tmp_path, job, last, want):
+    """No status file, from a killed job shell or a full disk, must not fall back on proot's 0: that is the last process's status (P-18), so a dead job
+    read as passed."""
+    w, env = proot_world(tmp_path, LAST_STATUS=last)
+    (w / "bin/proot").write_text(LAST_TRACEE)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "sh", "-c", job], env)
+    assert r.returncode == want, r.stderr
+    assert ("left no exit status" in r.stderr) == (want == 1)
+
+
+# ---- orca-go P-20: the thread pools of a job sized to the 64 CPUs nproc shows, not to its PM_CPUS
+
+RECORD_ARGV = """#!/bin/sh
+printf '%s\\n' "$@" > "$HOME/argv"
+"""
+
+
+@pytest.mark.parametrize("threads", ["1", "2", "16"])
+def test_pm_threads_caps_the_blas_and_openmp_pools_of_the_job(tmp_path, threads):
+    """8 jobs of 2 CPUs were at 29 of 32 CPUs in the first minutes of a suite: numpy's BLAS started 64 threads per job (a probe on orca: 17 CPUs busy for
+    one matrix product, 1.9 with the cap)."""
+    w, env = proot_world(tmp_path, PM_THREADS=threads)
+    (w / "bin/proot").write_text(RECORD_ARGV)
+    run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    argv = (tmp_path / "home/argv").read_text().splitlines()
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        assert f"{var}={threads}" in argv
+    assert argv.index("/usr/bin/env") < argv.index(f"OMP_NUM_THREADS={threads}") < argv.index("/bin/sh")   # in the job's environment, before its command
+
+
+def test_without_pm_threads_the_environment_of_the_job_is_as_before(tmp_path):
+    """Pipeline runs keep their libraries' own pool sizes: a thread count can change the last bits of a sum."""
+    w, env = proot_world(tmp_path)
+    (w / "bin/proot").write_text(RECORD_ARGV)
+    run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    argv = (tmp_path / "home/argv").read_text()
+    assert "NUM_THREADS" not in argv and "CAFE_WORKERS=8" in argv
+
+
+@pytest.mark.parametrize("bad", ["0", "02", "x", "2;ls", "-1", "1.5"])
+def test_pm_threads_must_be_a_whole_number_from_one(tmp_path, bad):
+    w, env = proot_world(tmp_path, PM_THREADS=bad)
+    (w / "bin/proot").write_text(RECORD_ARGV)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    assert r.returncode == 2 and "PM_THREADS" in r.stderr and not (tmp_path / "home/argv").exists()

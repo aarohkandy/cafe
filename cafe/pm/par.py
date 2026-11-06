@@ -100,8 +100,17 @@ def resize(n: int) -> None:
         _active.n = n
 
 
+def _meminfo_gb(key: str) -> float | None:
+    """The GB /proc/meminfo reports for `key` (MemTotal, MemAvailable); None when unreadable."""
+    try:
+        return next(int(l.split()[1]) * 1024 / 1e9 for l in pathlib.Path("/proc/meminfo").read_text().splitlines() if l.startswith(key + ":"))
+    except (OSError, StopIteration, ValueError, IndexError):
+        return None
+
+
 def memory_gb() -> float | None:
-    """GB this process may use: the cgroup limit (v2 `memory.max`, v1 `memory.limit_in_bytes`) when there is one, else /proc/meminfo MemAvailable;
+    """GB this process may use: the cgroup limit (v2 `memory.max`, v1 `memory.limit_in_bytes`) when there is one, cut to the machine's MemTotal (a
+    cgroup can be given more than the machine has: orca's says 256 GiB on 251.6 GiB, round 9 P-5), else /proc/meminfo MemAvailable;
     None when neither can be read."""
     for f in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
         try:
@@ -109,11 +118,9 @@ def memory_gb() -> float | None:
         except (OSError, ValueError):                                   # absent, or "max"
             continue
         if b < 2 ** 60:                                                 # cgroup v1 spells unlimited as a number near 2**63
-            return b / 1e9
-    try:
-        return next(int(l.split()[1]) * 1024 / 1e9 for l in pathlib.Path("/proc/meminfo").read_text().splitlines() if l.startswith("MemAvailable:"))
-    except (OSError, StopIteration, ValueError, IndexError):
-        return None
+            total = _meminfo_gb("MemTotal")
+            return b / 1e9 if total is None else min(b / 1e9, total)
+    return _meminfo_gb("MemAvailable")
 
 
 def _mapped(path: str) -> Any:

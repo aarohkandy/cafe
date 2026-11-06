@@ -464,13 +464,13 @@ def test_potential_reading_changes_density_at_depth_only(fx, truth, tmp_path):
 
 def test_lab_netcdf_without_a_kind_refuses_and_attribute_or_argument_supplies_it(fx, tmp_path):
     with pytest.raises(ValueError, match="never guessed"):
-        h.read_lab_netcdf(next(fx["layered_dir"].glob("*.nc")))
-    ds, kind = h.read_lab_netcdf(next(fx["zlevel_dir"].glob("*.nc")))                  # carries the attribute
+        h.read_lab_netcdf(min(fx["layered_dir"].glob("*.nc")))
+    ds, kind = h.read_lab_netcdf(min(fx["zlevel_dir"].glob("*.nc")))                  # carries the attribute
     assert kind == "in_situ" and np.allclose(ds.depth.values, mk.DEPTH)
-    ds, kind = h.read_lab_netcdf(next(fx["layered_dir"].glob("*.nc")), "potential")
+    ds, kind = h.read_lab_netcdf(min(fx["layered_dir"].glob("*.nc")), "potential")
     assert kind == "potential" and len(ds.depth) == 40
     import xarray as xr
-    f = xr.open_dataset(next(fx["layered_dir"].glob("*.nc"))).load()
+    f = xr.open_dataset(min(fx["layered_dir"].glob("*.nc"))).load()
     f["temperature"].attrs["temperature_kind"] = "potential"
     f.to_netcdf(tmp_path / "var_attr.nc")
     assert h.read_lab_netcdf(tmp_path / "var_attr.nc")[1] == "potential"
@@ -480,7 +480,7 @@ def test_lab_netcdf_without_a_kind_refuses_and_attribute_or_argument_supplies_it
 
 def test_lab_netcdf_schema_names_every_problem(fx, tmp_path):
     import xarray as xr
-    f = xr.open_dataset(next(fx["layered_dir"].glob("*.nc"))).load()
+    f = xr.open_dataset(min(fx["layered_dir"].glob("*.nc"))).load()
     with pytest.raises(ValueError, match=r"hycom_netcdf\.json"):
         h.validate_netcdf(f.drop_vars(["salinity", "u-velocity"]))
     with pytest.raises(ValueError, match="hycom_netcdf"):
@@ -497,7 +497,7 @@ def test_lab_netcdf_schema_names_every_problem(fx, tmp_path):
 
 def test_lab_netcdf_structural_refusals_and_level_interpolation(fx, tmp_path):
     import xarray as xr
-    src = next(fx["zlevel_dir"].glob("*.nc"))
+    src = min(fx["zlevel_dir"].glob("*.nc"))
     f = xr.open_dataset(src).load()
     f.assign_coords(depth=-f.depth).to_netcdf(tmp_path / "neg.nc")
     with pytest.raises(ValueError, match="positive down"):
@@ -623,7 +623,7 @@ def test_ingest_inputs_directory_file_stem_and_conflicts(fx, truth, tmp_path):
     assert h.open_store(out).sizes["time"] == 1                                       # a .a path, grid found next to it
     out = h.ingest_lab_hycom(fx["archv_dir"] / "archv.2023_060_15.b", fx["box"], tmp_path / "two.zarr", "in_situ", depth=fx["depth"])
     assert h.open_store(out).time.values[0] == mk.STEPS[1]
-    out = h.ingest_lab_hycom(next(fx["zlevel_dir"].glob("*.nc")), fx["box"], tmp_path / "three.zarr")
+    out = h.ingest_lab_hycom(min(fx["zlevel_dir"].glob("*.nc")), fx["box"], tmp_path / "three.zarr")
     assert h.open_store(out).sizes["time"] == 1
     empty = tmp_path / "empty"
     empty.mkdir()
@@ -830,7 +830,7 @@ def test_r7_m24_the_steps_cover_the_window_and_an_aligned_window_gets_its_own():
 
 def test_r7_m36_a_z_level_file_listing_depth_deepest_first_reads_like_the_ordered_one(fx, tmp_path):
     import xarray as xr
-    src = next(fx["zlevel_dir"].glob("*.nc"))
+    src = min(fx["zlevel_dir"].glob("*.nc"))
     good, _ = h.read_lab_netcdf(src)
     xr.open_dataset(src).load().isel(depth=slice(None, None, -1)).to_netcdf(tmp_path / "rev.nc")
     rev, _ = h.read_lab_netcdf(tmp_path / "rev.nc")
@@ -844,7 +844,7 @@ def test_r7_m36_a_lab_file_whose_field_is_all_nan_is_refused_with_the_file_named
     from cafe.pm.config import ConfigError
     d = tmp_path / "lab"
     d.mkdir()
-    f = xr.open_dataset(next(fx["zlevel_dir"].glob("*.nc"))).load()
+    f = xr.open_dataset(min(fx["zlevel_dir"].glob("*.nc"))).load()
     f.assign(temp=f.temp * np.nan).to_netcdf(d / "nan.nc")
     with pytest.raises(ConfigError, match=r"nan\.nc: every value of water_temp is NaN after reading \(.*check the depth axis and the variable names\)"):
         h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
