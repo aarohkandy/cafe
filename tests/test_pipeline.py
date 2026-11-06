@@ -1458,12 +1458,12 @@ def fake_stage1(monkeypatch):
 GS = "glider/seaglider/144h"        # the emulator scope of glider_eq in the demo mission (class, platform, window length)
 
 
-def seed_table(path, n=140, bad=False, seed=0):
-    """Glider rows made by tests/test_whatif.storm_table (or pure noise when `bad`), in the scope of the demo's glider_eq: test data, as the pipeline never
-    trains on synthetic rows."""
+def seed_table(path, n=140, bad=False, seed=0, scope=GS):
+    """Glider rows made by tests/test_whatif.storm_table (or pure noise when `bad`), in `scope` (default: that of the demo's glider_eq; a test that runs
+    another mission passes that mission's own, `budget.emulator_scope`): test data, as the pipeline never trains on synthetic rows."""
     from cafe.pm import whatif
     from tests import test_whatif
-    df = test_whatif.storm_table(n, seed).assign(scope=GS)
+    df = test_whatif.storm_table(n, seed).assign(scope=scope)
     if bad:
         df["p_fail"] = np.random.default_rng(3).uniform(0, 1, n)
     whatif.add_rows(path, [dict(r, key=f"seed{i}", run_id="seed", mission="seed", variant="seed", n_members=512, code_digest=pipeline.code_digest())
