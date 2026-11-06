@@ -10,6 +10,7 @@ import yaml
 import cafe.pm
 from cafe.pm import credibility as cr
 from cafe.pm import dtmb5415
+from cafe.pm.stage1 import NOT_EXERCISED
 from tests.fixtures import pm_run
 
 REAL = cr.ROOT
@@ -746,6 +747,28 @@ def test_only_an_ensemble_that_leaves_5_percent_open_counts_as_short_of_n_certif
     edit(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(k_fail=0))
     u = factors(run, clean)["uncertainty"]
     assert u["evidence_level"] == 2 and "1 verdict(s) have n below n_certify" in " ".join(u["missing"])             # a zero-failure ensemble does
+
+
+def test_a_link_that_was_not_exercised_is_not_short_of_n_certify(tmp_path):
+    """Round 9, DECISIONS 526: a link no member needed (NOT EXERCISED, k_fail 0) has P(fail) 0 that counts nothing and no member count decides it, yet it was
+    listed among the 'verdict(s) have n below n_certify' and held the Uncertainty factor at level 2. A zero-failure vehicle still counts (the test above)."""
+    run = tmp_path / "run"
+    run.mkdir()
+    pm_run.make_run(run, M=48)
+    clean = fake_root(tmp_path / "root", sourced=3)
+
+    def one_link_not_exercised(d):
+        for e in (*d["summary"]["vehicles"].values(), *d["summary"]["links"].values()):
+            e["k_fail"] = 40                                                                                    # 40 of 48 failed: excluded, so not short
+        lk = next(iter(d["summary"]["links"].values()))
+        lk.update(k_fail=0, verdict=dict(lk["verdict"], verdict=NOT_EXERCISED))
+    edit(run / "stage1b" / "summary.json", one_link_not_exercised)
+    u = factors(run, clean)["uncertainty"]
+    assert not any("n below n_certify" in m for m in u["missing"]) and u["evidence_level"] == 3
+    edit(run / "stage1b" / "summary.json", lambda d: next(iter(d["summary"]["links"].values())).update(verdict=dict(
+        next(iter(d["summary"]["links"].values()))["verdict"], verdict="GO")))                                    # the same link graded GO is short
+    u = factors(run, clean)["uncertainty"]
+    assert u["evidence_level"] == 2 and "1 verdict(s) have n below n_certify" in " ".join(u["missing"])
 
 
 # ---------------------------------------------------------------------------------------------------------- review round 6 (batch S)

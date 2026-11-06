@@ -107,7 +107,8 @@ RULES = {
     "input_pedigree": "1 platform inputs carry provenance; 2 and at least half are sourced (not assumed, not recalled); "
                       "3 and at least 80 % are, and no perturbation prior is of kind assumed.",
     "uncertainty": "1 verdict intervals exist; 2 and the Latin-hypercube stratification checks passed; "
-                   "3 and every vehicle and link that leaves P(fail) < 5 % open (95 % Wilson lower bound on P(fail) below 5 %) has n >= n_certify, "
+                   "3 and every vehicle and link that leaves P(fail) < 5 % open (95 % Wilson lower bound on P(fail) below 5 %; "
+                   "a link with the verdict NOT EXERCISED is none, no member count decides it) has n >= n_certify, "
                    "and no perturbation prior is of kind assumed.",
     "robustness": "1 one ensemble ran; 2 and a first-order sensitivity clearly above chance exists (more ranked than the 5 % level allows by luck over "
                   "the report's tests), or a refit reran; "
@@ -555,7 +556,9 @@ def _uncertainty(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
         ev.append(f.ev(f"USV {usv_speed_sampling()}: the width of usv_vpp_bias is the published spread of VPP over-prediction, not an uncertainty "
                        "of this model; the stage-1b case usv_vpp_bias_brief is the sensitivity", "config/perturbations.yaml usv_vpp_bias"))
     # round 5, M-11: an ensemble whose 95 % Wilson lower bound on P(fail) is already 5 % or more excludes P(fail) < 5 %; no n certifies it, so it is not "short"
-    short = [e["n"] for e in ens if e["n"] < e["verdict"]["n_certify"] and intervals.wilson(e["k_fail"], e["n"], 0.95)[0] < 0.05]
+    # round 9, DECISIONS 526: nor is a link with the verdict NOT EXERCISED: no member count decides it (DECISIONS 477)
+    short = [e["n"] for e in ens if e["verdict"]["verdict"] != NOT_EXERCISED and e["n"] < e["verdict"]["n_certify"]
+             and intervals.wilson(e["k_fail"], e["n"], 0.95)[0] < 0.05]
     if lvl == 2 and not short and not f.assumed_perts():
         lvl = 3
     else:

@@ -535,6 +535,7 @@ Round 9 read the q9 quick run (`runs/q9`, code `08f05d7`, made on the 32-vCPU bu
   - A run made before this merge cannot be re-rendered at its original credibility levels (two new keys in `config/assumptions.yaml` change a hashed input of the stage-3 ledger); rerun it (DECISIONS 515).
 - Closing items after the merge (P-3, P-4; DECISIONS 525 and after):
   - P-3: the reach polygon's sector comes from the bearing rounded before the `% 360`, so a cell on a diagonal or an axis lands in the same sector whatever the last bit of `arctan2` is (the glider_eq corners no longer move between CPUs); DECISIONS 525.
+  - The Uncertainty factor of the credibility page no longer counts a NOT EXERCISED link among the verdicts with n below `n_certify`; DECISIONS 526 (amends 477).
 
 ### Known issues
 
