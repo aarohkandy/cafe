@@ -2186,6 +2186,20 @@ def test_r8_m17_the_sortie_hook_gives_the_link_budget_the_ship_antenna_of_the_pl
         assert seen[-1] == expected                                                                      # 10.0 for the bare mission before
 
 
+def test_r10_m5_the_stage1_command_reports_a_refit_entry_without_used_as_an_error_line_and_exit_2(tmp_path, monkeypatch, capsys):
+    """Valid JSON of the wrong shape was a KeyError traceback here while `report --run` and `whatif` already gave `error:` (round 10, M-5)."""
+    from cafe.pm import pipeline
+    monkeypatch.setattr(pipeline, "Context", lambda *a, **k: types.SimpleNamespace(mission={}, env=None))
+    calls = []
+    monkeypatch.setattr(stage1, "sensitivity_case", lambda *a: calls.append(a) or {})
+    (tmp_path / "refit").mkdir()
+    (tmp_path / "refit" / "refit.json").write_text('{"glider_eq": {}}')
+    assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and f"{tmp_path}: damaged or incomplete (KeyError: 'used')" in err, err
+    assert calls == []
+
+
 def test_r8_l0_the_stage1_command_reports_a_damaged_file_of_the_run_as_an_error_line_and_exit_2(tmp_path, monkeypatch, capsys):
     """`python -m cafe.pm.stage1` read refit.json, priors_fitted.json and sensitivity_cases.json with bare json.loads (a traceback)."""
     from cafe.pm import pipeline

@@ -3652,3 +3652,40 @@ def test_r9_m9_the_run_logs_the_other_machine_warning_after_the_plan_and_it_is_i
     quiet_led = {st: json.loads((tmp_path / "run2" / "checkpoints" / st / "ledger.json").read_text()) for st in STAGES}
     assert all(d["machine"]["warning"] is None for d in quiet_led.values())
     assert all(led[st]["config_hash"] == quiet_led[st]["config_hash"] for st in STAGES)           # what a resume compares does not see the warning
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 10, M-3
+
+DATELINE_T = (config.utc("2023-03-01T18:00:00Z"), config.utc("2023-03-03T06:00:00Z"))
+
+
+@pytest.mark.parametrize("cache, want, covers", [
+    ([150.0, 170.0, -8.0, 8.0], (162.5, -162.5, -7.5, 7.5), False),                     # the reviewer's case: 170 E is not 197.5 E (was True)
+    ([160.0, -160.0, -8.0, 8.0], (162.5, -162.5, -7.5, 7.5), True),                     # a dateline cache contains a dateline box
+    ([160.0, -160.0, -8.0, 8.0], (165.0, 170.0, -7.5, 7.5), True),                      # ... and a box inside it that does not wrap (was False: a refetch)
+    ([160.0, -160.0, -8.0, 8.0], (-170.0, -165.0, -7.5, 7.5), True),
+    ([160.0, -160.0, -8.0, 8.0], (150.0, 170.0, -7.5, 7.5), False),                     # sticks out to the west
+    ([160.0, -160.0, -8.0, 8.0], (170.0, -150.0, -7.5, 7.5), False),                    # sticks out to the east
+    ([160.0, 200.0, -8.0, 8.0], (162.5, -162.5, -7.5, 7.5), True),                      # the same arc written past 180
+    ([160.0, -160.0, -8.0, 8.0], (162.5, -162.5, -9.0, 7.5), False),                    # the latitude test is unchanged
+    ([-179.0, 179.0, -8.0, 8.0], (170.0, -170.0, -7.5, 7.5), False),                    # a cache of 358 deg does not hold the strip across the dateline
+    ([-190.0, 190.0, -8.0, 8.0], (170.0, -170.0, -7.5, 7.5), True),                     # 380 deg: the whole circle
+    ([160.0, -160.0, -8.0, 8.0], (-190.0, 190.0, -7.5, 7.5), False),                    # a wanted box of the whole circle is not inside 40 deg
+    ([-167.0, -163.0, -2.0, 2.0], (-167.0, -163.0, -2.0, 2.0), True),                   # the demo's fixture, equal edges
+])
+def test_r10_m3_an_orca_cache_is_compared_by_longitude_arc_not_by_raw_numbers(cache, want, covers):
+    d = manifest(box=cache)
+    assert pipeline._orca_covers(d, *DATELINE_T, want, []) is covers
+
+
+def test_r10_m25_the_fitted_bias_prior_says_that_its_mean_is_the_flipped_error(tmp_path, data):
+    """Round 10, M-25: the citation 'WRF minus 11 moorings' sat over a mean of the opposite sign, so a reader of priors_fitted.json alone got it backwards."""
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    tao_stage(ctx, t0, t1)
+    a = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())["ALL"]
+    fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
+    for key, err in (("wind_speed_bias", a["speed_bias"]), ("wind_direction_bias", a["dir_bias_deg"])):
+        assert fit[key]["mean"] == pytest.approx(-err)
+        c = fit[key]["citation"]
+        assert "mean = minus the 2-mooring mean error, i.e. mooring minus WRF" in c and "adds to WRF" in c and f"WRF minus mooring, {err:+.3g}" in c
+    assert "mooring minus WRF" not in fit["wind_speed_noise"]["citation"]                            # the noise entries have no signed mean

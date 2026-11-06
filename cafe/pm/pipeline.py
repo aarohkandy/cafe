@@ -207,6 +207,12 @@ def ocean_box(m: dict[str, Any]) -> tuple[float, float, float, float]:
     b = m["box"]
     pad = padding(m)
     box = (b["lat_min"] - pad, b["lat_max"] + pad, b["lon_min"] - pad, b["lon_max"] + pad)
+    if box[0] < -90.0 or box[1] > 90.0:                                  # round 10, M-8: the one function load_mission and the ingest both call
+        raise ConfigError(f"box {box}: the box with its pad of {pad:g} deg reaches {box[0] if box[0] < -90.0 else box[1]:g} deg latitude, beyond +-90: "
+                          "move the box edge away from the pole or lower box.pad_deg")
+    if (width := ((b["lon_max"] - b["lon_min"]) % 360.0 or 360.0) + 2 * pad) >= 360.0:        # box360 would take it modulo 360 and fetch a thin strip
+        raise ConfigError(f"box {box}: the box is {width:g} deg wide with its pad of {pad:g} deg, a full circle or more; the ocean fetch cannot cut "
+                          "that: narrow the box or lower box.pad_deg")
     try:
         hycom.box360(box)
     except ValueError as e:                                              # the only refusal left: load_mission checked south < north
@@ -530,8 +536,23 @@ def _orca_covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime, box: tuple
     """The orca manifest covers the window, its recorded box contains `box` (lon_min, lon_max, lat_min, lat_max; a manifest with no box was
     written before the box was recorded and cannot say) and it has every 3-D hour wanted, and it is not of the old layout (`_old_orca_layout`)."""
     b = d.get("box")
-    return bool(_covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and b[0] <= box[0] and b[1] >= box[1] and b[2] <= box[2] and b[3] >= box[3]
+    return bool(_covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and _lon_arc_covers(b[:2], box[:2]) and b[2] <= box[2] and b[3] >= box[3]
                 and {orca.stamp(h) for h in hours3d} <= set(d.get("hours3d", [])))
+
+
+def _lon_arc_covers(have: tuple[float, float] | list[float], want: tuple[float, float] | list[float]) -> bool:
+    """The longitude arc west -> east of `have` contains that of `want` (degrees; either may cross the dateline, i.e. west above east, or be padded past
+    180, and a width of 360 or more is the whole circle). Round 10, M-3: raw numbers said a cache ending at 170 E covered a box reaching 197.5 E."""
+    eps = 1e-9
+
+    def width(a: tuple[float, float] | list[float]) -> float:
+        w = a[1] - a[0]
+        return 360.0 if w >= 360.0 else w % 360.0
+
+    if width(have) >= 360.0 - eps:
+        return True
+    start = (want[0] - have[0]) % 360.0                                  # where the wanted west edge sits along the cached arc
+    return (0.0 if start > 360.0 - eps else start) + width(want) <= width(have) + eps
 
 
 def _sea_sample(env: GriddedEnv, n: int = 300) -> tuple[NDArray[np.intp], NDArray[np.intp], list[int]]:
@@ -827,7 +848,9 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
             L.note(f"no usable wind {key} at the moorings ({'dir' if key == 'direction' else 'speed'}_n {n_ok}): "
                    f"wind_{key}_bias/noise stay the perturbations.yaml priors")
             continue
-        fit[f"wind_{key}_bias"] = dict(dist="normal", mean=mean, value=value, unit=unit, citation=f"{cite}; {how}", kind="data")
+        flip = (f"mean = minus the {n}-mooring mean error, i.e. mooring minus WRF: the correction perturb.py adds to WRF (the error itself is WRF minus "
+                f"mooring, {-mean:+.3g} {unit})")                      # round 10, M-25: the sign of `mean` is the opposite of the data the citation names
+        fit[f"wind_{key}_bias"] = dict(dist="normal", mean=mean, value=value, unit=unit, citation=f"{cite}; {flip}; {how}", kind="data")
         if split is not None:
             fit[f"wind_{key}_bias"].update(value_hi95=split["persistent_hi95"], citation_hi95="95 % upper bound of the between-mooring variance, "
                                            f"{int(split['moorings']) - 1} degrees of freedom")
@@ -964,10 +987,17 @@ def s_hangar(ctx: Context, L: Ledger) -> None:
 
 
 def _assumed(node: Any) -> int:
-    """Number of leaves marked assumed: true in a parsed platform yaml."""
-    if isinstance(node, dict):
-        return int(node.get("assumed") is True) + sum(_assumed(v) for v in node.values())
-    return sum(_assumed(v) for v in node) if isinstance(node, list) else 0
+    """Number of provenance items marked assumed in a parsed platform yaml, counted as the credibility report counts them (`credibility._prov`: a leaf
+    `assumed: true` and an entry-level `assumed: "<sentence>"` alike; round 10, M-32), so `hangar` and credibility.json agree by construction."""
+    return sum(i["assumed"] for i in provenance(node))
+
+
+def provenance(node: Any, file: str = "") -> list[dict[str, Any]]:
+    """The provenance items of a parsed platform yaml: `credibility._prov`'s, parents before their children."""
+    from .credibility import _prov                                       # credibility imports this module
+    out: list[dict[str, Any]] = []
+    _prov(node, "", file, out)
+    return out
 
 
 def _lenient(env: Any) -> Any:

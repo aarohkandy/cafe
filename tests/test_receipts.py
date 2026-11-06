@@ -641,3 +641,30 @@ def test_r8_l0_a_stored_result_cut_short_is_a_fail_with_the_command_not_a_traceb
     R.OUT.clear()
     p.write_text(good)
     assert [r["kind"] for r in run_group(monkeypatch, "pm.emulator", slow=False)] == ["pass"]
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 10, M-24
+
+STORED = {"code_digest": f"{CURRENT}-pm", "date": "d", "host": "h", "git_sha": "abcdef0123456"}
+
+
+@pytest.mark.parametrize("record", [
+    {},                                                                          # was KeyError 'code_digest'
+    {"code_digest": f"{CURRENT}-pm"},                                            # the current digest but no date, host, git_sha, rows
+    {"code_digest": f"{CURRENT}-pm", "date": "d", "host": "h", "git_sha": 7, "rows": []},
+    {"code_digest": f"{CURRENT}-pm", "date": "d", "host": "h", "git_sha": "abcdef0123456", "rows": "not a list of rows"},
+    {"code_digest": "other-code", "date": "d", "host": "h"},                      # old code and a record without git_sha
+    # rows that `collect` cannot read (_row): were a KeyError there, after the rows had been added to the table
+    dict(STORED, rows=[{}]),
+    dict(STORED, rows=[{"id": "x"}]),
+    dict(STORED, rows=[{"group": "g", "claim": "c", "kind": "bracket", "value": 1.0}]),
+    dict(STORED, rows=[[], None]),
+], ids=["empty", "digest_only", "git_sha_not_text", "rows_not_rows", "other_code_and_no_git_sha",
+        "row_empty_dict", "row_without_keys", "bracket_without_bounds", "row_not_a_dict"])
+def test_r10_m24_a_stored_record_that_is_valid_json_of_the_wrong_shape_is_a_not_run_row_with_the_command(slowenv, monkeypatch, record):
+    (slowenv / "receipts").mkdir()
+    (slowenv / "receipts" / "pm.emulator.json").write_text(json.dumps(record))
+    rows = run_group(monkeypatch, "pm.emulator", slow=False)
+    assert [(r["id"], r["kind"]) for r in rows] == [("pm.emulator:not_run", "fail")]
+    assert rows[0]["note"].startswith("not run on this code: `python -m cafe.pm receipts --slow --only pm.emulator` (≈7 min)")
+    assert "is not a receipt record" in rows[0]["note"] and R.OUT == []

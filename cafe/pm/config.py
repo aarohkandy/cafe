@@ -7,8 +7,8 @@
 """
 from __future__ import annotations
 
-import datetime as dt, hashlib, json, math, os, pathlib, re
-from collections.abc import Hashable
+import contextlib, datetime as dt, hashlib, json, math, os, pathlib, re
+from collections.abc import Hashable, Iterator
 from typing import Any
 
 import yaml
@@ -207,6 +207,16 @@ def json_object(p: pathlib.Path, fix: str = "`run` writes it, so run it again (-
     if not isinstance(d, dict):
         raise ConfigError(f"{p}: not a JSON object (it holds {type(d).__name__}); {fix}")
     return d
+
+
+@contextlib.contextmanager
+def damaged_run_files(run: pathlib.Path) -> Iterator[None]:
+    """Round 10, M-5. A file of a finished run that is valid JSON but lacks a key, or holds another type where one is read, is the same damage as one that is
+    not JSON: a ConfigError (`error:`, exit 2), not a traceback. The original text stays in the message, so a bug in the code is not hidden by it."""
+    try:
+        yield
+    except (KeyError, TypeError) as e:
+        raise ConfigError(f"{run}: damaged or incomplete ({type(e).__name__}: {e}); run it again (--fresh)") from e
 
 
 def write_json(p: pathlib.Path, obj: Any, **kw: Any) -> None:
