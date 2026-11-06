@@ -21,7 +21,7 @@ Read these before changing anything, in this order:
 
 **Never run tests or pipelines on the laptop.** It has Python 3.9; the package needs 3.12 in the `cafe-pm` image on homebase.
 
-- `./pm.sh <cmd>` syncs to the shared `~/work/cafe/pm` (without `--delete`) and runs `<cmd>` in the image. Data is `~/work/cafe/pmdata`, mounted at `/data`.
+- `./pm.sh <cmd>` syncs to the shared `~/work/cafe/pm` with `--delete`, for the one checkout that owns it (`~/work/cafe/pm.owner` names it; a sync from another checkout is refused, `PM_TAKE=1` takes it over) and runs `<cmd>` in the image. Data is `~/work/cafe/pmdata`, mounted at `/data`.
 - `PMX=pm_<you> PM_CPUS=2 PM_MEM=8g bin/pmx.sh <cmd>` syncs with `--delete` to your own `~/work/cafe/pm_<you>`. Use this whenever another agent may be working.
   - `TM=<name>` runs it detached in tmux. The log goes to `~/logs/<name>.log` and ends with `rc=N`.
 - Both runners split their arguments on spaces. For anything with quotes or pipes, write a script, copy it over and run it:

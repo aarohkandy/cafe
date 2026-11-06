@@ -72,7 +72,7 @@ def foam(n=100, steps=40, warm=10):
             runs[np_] = rate
             print(f"pimpleFoam {n}^3 on {np_} core(s): {rate:.3g} cell-updates/s", flush=True)
     save("openfoam-pimpleFoam-les", dict(
-        backend="cpu", host=platform.node(), cpu=_cpu(), cells=n ** 3, steps_timed=steps - warm, measured=time.strftime("%Y-%m-%d"),
+        backend="cpu", host=platform.node(), cpu=_cpu(), cpus=os.cpu_count(), cells=n ** 3, steps_timed=steps - warm, measured=time.strftime("%Y-%m-%d"),
         cell_updates_per_s={str(k): v for k, v in runs.items()},
         per_device=runs[1], device="cpu core", node=max(runs.values()), devices_per_node=8,
         scaling_efficiency_1_to_8=runs[8] / (8 * runs[1]),
@@ -117,7 +117,7 @@ def lbm(device="cpu", n=128, steps=60, warm=10):
     dev = jax.devices()[0]
     print(f"JAX D3Q19 LBM {n}^3 on {dev}: {rate:.3g} cell-updates/s", flush=True)
     save(f"jax-lbm-d3q19-{device}", dict(
-        backend=device, host=platform.node(), cpu=_cpu(), device=str(dev.device_kind), cells=n ** 3, steps_timed=steps,
+        backend=device, host=platform.node(), cpu=_cpu(), cpus=os.cpu_count(), device=str(dev.device_kind), cells=n ** 3, steps_timed=steps,
         measured=time.strftime("%Y-%m-%d"), per_device=rate, node=rate, devices_per_node=1, jax=jax.__version__,
         note="single JAX process using every core it is given; float32, BGK + Smagorinsky, periodic streaming by roll"))
 
@@ -194,7 +194,8 @@ def _stage1(sizes, mission):
         out["uas"]["sortie_min"] = max(sortie.values())                         # what a UAS batch flew: the planner scales the UAS cost by sortie-minutes (M-5)
     for e in out.values():
         e.update(slope_resolved=e["s_per_member_day"] > 0,  # False: a batch costs the same whatever its size (the planner charges per batch only)
-                 measured=time.strftime("%Y-%m-%d"), host=platform.node(), cpus=os.cpu_count(), load_1min=load, load_1min_after=after, sizes=list(sizes),
+                 measured=time.strftime("%Y-%m-%d"), host=platform.node(), cpu=_cpu(), cpus=os.cpu_count(), load_1min=load,
+                 load_1min_after=after, sizes=list(sizes),
                  mission=mission, mission_name=m["name"], mission_days=days,
                  note="wall time of stage1.run_batch per vehicle, after a warm-up batch, faster of two; a + b*M per mission day")
     data = json.loads(OUT.read_text()) if OUT.exists() else {}

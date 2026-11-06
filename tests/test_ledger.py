@@ -9,7 +9,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from cafe.pm import ledger
+from cafe.pm import audit, ledger
 from cafe.pm.ledger import Ledger, StageFailed, done
 
 
@@ -419,7 +419,7 @@ def test_r9_m19_resolve_rebases_on_the_run_layout_longest_tail_first(tmp_path):
     assert ledger.resolve("/data/runs/q9/stage3/windows/x", run, roots) == run / "stage3" / "windows" / "x"          # not windows/x
     assert ledger.resolve("/data/runs/q9/windows/x", run, roots) == run / "windows" / "x"
     assert ledger.resolve("/data/runs/now/windows/x", run, roots) == run / "windows" / "x"                           # the name first
-    assert ledger.resolve("/data/runs/q9/stage3/windows/gone", run, roots) == pathlib.Path("/data/runs/q9/stage3/windows/gone")   # nothing there: as recorded
+    assert ledger.resolve("/data/runs/q9/stage3/windows/gone", run, roots) == run / "stage3" / "windows" / "gone"   # nothing there: in the run (L1)
     assert ledger.resolve("/app/config/mission.yaml", run, roots) == pathlib.Path("/app/config/mission.yaml")       # outside the run
 
 
@@ -462,3 +462,31 @@ def test_r9_m16_rerecord_takes_the_new_hash_adds_a_note_and_leaves_the_checks(tm
     assert (d["checks"], d["config_hash"], d["git_sha"], d["ok"]) == (before["checks"], before["config_hash"], before["git_sha"], True)
     assert done(run, "stage3", "h1") is not None
     assert ledger.rerecord(run, "stage1", [out], None) is False                    # no ledger for that stage: nothing to update
+
+
+def test_l1_machine_records_a_warning_for_an_entry_of_another_machine_when_the_machine_block_matches(monkeypatch, tmp_path):
+    from cafe.pm import budget
+    monkeypatch.setattr(ledger, "ROOT", tmp_path)
+    (tmp_path / "config").mkdir()
+    here = dict(cpus=os.cpu_count(), cpu=budget.cpu_model())
+    thr = {"machine": dict(id="bench", measured="2026-11-05", **here), "jax-lbm-d3q19-cpu": dict(cpus=999, cpu=here["cpu"], measured="2026-10-28")}
+    (tmp_path / "config" / "throughput.json").write_text(json.dumps(thr))
+    w = ledger.machine()["warning"]
+    assert w == budget.machine_warning(thr) and "jax-lbm-d3q19-cpu (999 CPUs" in w
+
+
+def test_l1_resolve_reports_a_lost_output_of_a_copy_in_the_copy_not_at_the_original(tmp_path):
+    """`cp -r runs/q9 runs/q9b` and a deleted output: the recorded path is the original's file, which exists with the right hash, so `done` returned the
+    ledger and the audit found nothing missing."""
+    run, out = laid_out(tmp_path, "q9")
+    copy = tmp_path / "q9b"
+    shutil.copytree(run, copy)
+    lost = copy / "stage3" / "windows" / "w.json"
+    lost.unlink()
+    roots = ledger.run_roots(json.loads((copy / "checkpoints" / "stage3" / "ledger.json").read_text()))
+    assert ledger.resolve(out, copy, roots) == lost                                                  # was the original's file
+    assert done(copy, "stage3", "h1") is None and done(run, "stage3", "h1") is not None
+    probs = audit.ledger_problems(copy)
+    assert any("stage stage3: output" in p and str(lost) in p and "is missing" in p for p in probs)
+    ext = pathlib.Path("/data/cache/stage3/x")
+    assert ledger.resolve(ext, copy, roots) == ext                                                   # outside the run's places: as recorded

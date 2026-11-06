@@ -2378,3 +2378,32 @@ def test_r9_m3_a_uas_member_that_meets_a_nan_wind_is_no_current_data_from_stage_
     assert "In this run 2 members also met a wind that was not finite in flight (no_current_data): their verdict rests on a hole in the input" in t
     quiet = plain(pm_run_page(run, m, plan, modes=dict(s["modes"], no_current_data=0), dominant="profile_incomplete"))
     assert "also met a wind that was not finite" not in quiet and "Attitude exceedance cannot fire" in quiet
+
+
+def test_l1_the_uas_attitude_statement_is_built_from_the_platform_the_vehicle_flies(run, tmp_path):
+    """Cluster 6 sibling: the sentence printed '35 deg', '42 deg' and 'below about 12 m/s' for any UAS platform, so a copy of quad_uas.yaml whose exceedance
+    is below its clamp still read 'cannot fire'."""
+    m, plan = pm_run.make_run(run)
+    f = tmp_path / "mine" / "quad_uas.yaml"
+    f.parent.mkdir()
+    text = (config.PLATFORMS / "quad_uas.yaml").read_text()
+    assert "{value: 42.0," in text and "{value: 12.0, unit: m/s, assumed: true,\n     why: \"operating limit" in text
+    f.write_text(text.replace("{value: 42.0,", "{value: 30.0,", 1))
+    for doc in (m, mission := yaml.safe_load((run / "mission.yaml").read_text())):
+        next(v for v in doc["vehicles"] if v["platform"] == "quad_uas")["platform"] = str(f)
+    (run / "mission.yaml").write_text(yaml.safe_dump(mission))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    lim = rep["vehicles"]["uas"]["uas_limits"]
+    assert (lim["tilt_clamp"]["value"], lim["tilt_exceedance"]["value"], "max_airspeed" in lim) == (35.0, 30.0, False)           # it can fire: no wind named
+    assert lim["tilt_exceedance"]["source"] == f"{f} limits.tilt_exceedance_deg"
+    assert "Attitude exceedance can fire in this platform (the tilt clamp, 35 deg, is not below the 30 deg exceedance)" in t and "cannot fire" not in t
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+    airspeed = "{value: %s, unit: m/s, assumed: true,\n     why: \"operating"
+    f.write_text(text.replace(airspeed % "12.0", airspeed % "9.0", 1))
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].pop("profile", None))
+    report.write(run, m, plan)
+    assert load(run)["vehicles"]["uas"]["uas_limits"]["max_airspeed"]["value"] == 9.0
+    t = plain((run / "report" / "index.html").read_text())
+    assert "(the tilt clamp, 35 deg, is below the 42 deg exceedance)" in t and "rests on battery alone below about 9 m/s of wind" in t
+    assert report.check_rendered(load(run), (run / "report" / "index.html").read_text()) == [] and load(run)["vehicles"]["usv"]["uas_limits"] is None

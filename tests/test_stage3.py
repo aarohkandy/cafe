@@ -2473,3 +2473,42 @@ def test_r9_m24_the_wall_model_calibrations_and_the_sphere_store_refuse_a_diverg
     with pytest.raises(RuntimeError, match="diverged"):
         nest.main(["slow", "100", "4", "6", "3", "3"])
     assert not list(tmp_path.glob("nest_sphere_*"))
+
+
+def _grid_study(tmp_path, **files):
+    """nest_sphere_100_d<d>.json for each (d, cd) pair; a dict value is the file's whole content."""
+    for d, v in ((8, 1.3053), (12, 1.2087), (16, 1.1848)):
+        (tmp_path / f"nest_sphere_100_d{d}.json").write_text(json.dumps(dict(d=d, cd=v, seconds=600.0, code_sha="abc", shape=[96, 48, 48])))
+    for name, doc in files.items():
+        (tmp_path / name).write_text(json.dumps(doc))
+
+
+@pytest.mark.parametrize("name, doc, why", [
+    ("nest_sphere_100_d20.json", dict(d=20, cd=1.18, seconds="12"), "seconds is a string"),
+    ("nest_sphere_100_d20.json", dict(d=20, cd=1.18, code_sha=["x"]), "code_sha is a list"),
+    ("nest_sphere_100_d20.json", dict(d=20, cd=1.18, code_sha={"x": 1}), "code_sha is an object"),
+    ("nest_sphere_100_d20.json", dict(d=0, cd=1.18), "d is not a resolution"),
+    ("nest_sphere_100_d20.json", dict(d=12, cd=1.19), "d repeats the file nest_sphere_100_d12.json"),
+])
+def test_l1_a_stored_sphere_grid_with_a_field_the_readers_cannot_use_is_named_and_left_out_not_a_traceback_or_a_nan(monkeypatch, tmp_path, name, doc, why):
+    """M-4 sibling: read_stored checked only d and cd, so seconds "12" ended sphere_receipts in a TypeError, an unhashable code_sha ended it in another,
+    and a second grid of one d made richardson NaN, which refit's max(assumed, nan) turned into the assumed floor with the study named in the text."""
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    _grid_study(tmp_path, **{name: doc})
+    runs, bad = nest.stored_grids("100")
+    assert [r["d"] for r in runs] == [8, 12, 16] and bad == [name], why
+    e, src = nest.sphere_discretisation()
+    assert math.isfinite(e) and "[8, 12, 16]" in src
+    cr.OUT.clear()
+    claims = [r["claim"] for r in nest.sphere_receipts()]
+    assert any(f"{name} is unreadable" in c for c in claims) and any("Richardson-extrapolated from d=[8, 12, 16]" in c for c in claims)
+    cr.OUT.clear()
+
+
+def test_l1_a_rerun_kept_beside_a_grid_is_no_grid_of_the_study_as_the_credibility_page_reads_it(monkeypatch, tmp_path):
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    _grid_study(tmp_path, **{"nest_sphere_100_d8_prev.json": dict(d=8, cd=1.4), "nest_sphere_100_d8.json.bak": dict(d=8, cd=1.4)})
+    runs, bad = nest.stored_grids("100")
+    assert [r["d"] for r in runs] == [8, 12, 16] and bad == [] and runs[0]["cd"] == 1.3053
+    e, _ = nest.sphere_discretisation()
+    assert e == pytest.approx(0.0153, abs=2e-4)

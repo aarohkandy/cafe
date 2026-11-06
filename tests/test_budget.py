@@ -734,3 +734,33 @@ def test_r9_m9_the_cpu_model_is_the_first_model_name_of_proc_cpuinfo_else_the_pr
 def test_r9_m20_equal_box_longitudes_are_a_strip_with_no_width_in_the_budget_as_in_the_config():
     flat = dict(DEMO_BOX, box=dict(lon_min=-165.0, lon_max=-165.0, lat_min=-5.0, lat_max=5.0, pad_deg=2.0))
     assert budget.padded_area_deg2(flat) == 4 * 14                      # 0 + 2 x 2 deg wide, not the full circle it was read as
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 9, batch L1
+
+def test_l1_the_machine_warning_compares_each_entry_with_its_own_cpus_and_model_not_only_the_machine_block():
+    """The `machine` block is only what the last `stage1` bench wrote: a stage-1 bench on burst after the lbm and stage-1 entries of homebase left the block
+    saying burst, and the warning on burst was None while the plan used homebase's rates."""
+    burst = dict(cpus=4, cpu="AMD EPYC")
+    t = {"machine": dict(id="burst", cpu="AMD EPYC", cpus=4, measured="2026-11-05"),
+         "jax-lbm-d3q19-cpu": dict(host="homebase", cpus=8, cpu="AMD EPYC", measured="2026-10-28"),
+         "openfoam-pimpleFoam-les": dict(host="6700c448c4f7", cpu="Intel Xeon", measured="2026-10-28"),
+         "stage1": {"glider": dict(host="burst", cpus=4, measured="2026-11-05"), "usv": dict(host="homebase", cpus=8, measured="2026-11-01")}}
+    w = budget.machine_warning(t, burst)
+    assert w is not None and w.startswith("entries measured on another machine: ")
+    assert "jax-lbm-d3q19-cpu (8 CPUs, AMD EPYC, 2026-10-28)" in w and "openfoam-pimpleFoam-les (? CPUs, Intel Xeon, 2026-10-28)" in w
+    assert "stage1/usv (8 CPUs, ?, 2026-11-01)" in w and "glider" not in w and "here it is 4 CPUs, AMD EPYC. The stage-1 costs" in w
+    assert budget.machine_warning(t, dict(cpus=8, cpu="AMD EPYC")) is not None                 # on homebase: the burst block and glider entry differ
+    ok = {"machine": t["machine"], "stage1": {"glider": t["stage1"]["glider"]}, "jax-lbm-d3q19-cpu": dict(cpus=4, cpu="AMD EPYC")}
+    assert budget.machine_warning(ok, burst) is None
+
+
+def test_l1_an_entry_that_differs_as_the_machine_block_does_is_not_said_twice_and_a_bad_entry_is_not_compared():
+    t = {"machine": dict(id="homebase", cpu="AMD", cpus=8, measured="2026-11-01"), "stage1": {"glider": dict(cpus=8), "usv": dict(cpus="eight")},
+         "x": [1], "jax-lbm-d3q19-cpu": dict(cpus=8, cpu="AMD"), "y": dict(cpu=5, cpus=True)}
+    w = budget.machine_warning(t, dict(cpus=4, cpu="AMD"))
+    assert w == ("throughput.json was measured on homebase (8 CPUs, AMD, 2026-11-01); here it is 4 CPUs, not 8. The stage-1 costs and LES rates in the plan "
+                 "are that machine's: run `make bench` here to measure this one")
+    t["jax-lbm-d3q19-cpu"] = dict(cpus=16, cpu="AMD")
+    assert "entries also measured on another machine: jax-lbm-d3q19-cpu (16 CPUs, AMD, ?)" in budget.machine_warning(t, dict(cpus=4, cpu="AMD"))
+    assert budget.machine_warning({"stage1": "x", "machine": "y"}, dict(cpus=4, cpu="AMD")) is None

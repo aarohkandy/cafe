@@ -240,3 +240,18 @@ def test_bench_all_stops_at_once_without_the_cache(tmp_path):
     env = {**os.environ, "CAFE_DATA": str(tmp_path), "PYTHONPATH": str(ROOT)}
     r = subprocess.run([sys.executable, str(ROOT / "bench/throughput.py"), "all"], env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode != 0 and "no environment cache" in r.stderr and "cafe.pm fetch" in r.stderr
+
+
+def test_l1_every_bench_entry_records_the_cpus_and_model_it_ran_on(tmp_path, monkeypatch, bench):
+    """`budget.machine_warning` compares each entry with the host, so the stage-1 entries, which had `cpus` and no `cpu`, and the lbm entry, which had
+    `cpu` and no `cpus`, carry both."""
+    from cafe.pm import budget
+    fake_batches(monkeypatch, {(s, v): 1.0 for s in (8, 32) for v in ("glider_eq", "glider_1n", "usv", "uas")})
+    throughput.stage1(mission=CI)
+    out = json.loads(bench.read_text())
+    assert all(e["cpus"] == os.cpu_count() and e["cpu"] == budget.cpu_model() for e in out["stage1"].values())
+    lbm_out = tmp_path / "lbm.json"
+    monkeypatch.setattr(throughput, "OUT", lbm_out)
+    throughput.lbm("cpu", n=8, steps=2, warm=1)
+    e = json.loads(lbm_out.read_text())["jax-lbm-d3q19-cpu"]
+    assert e["cpus"] == os.cpu_count() and e["cpu"] == budget.cpu_model()

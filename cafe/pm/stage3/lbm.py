@@ -639,17 +639,18 @@ def eta_text(updates: float) -> str:
             f"~{f(NEST_RATE_BENCH)} at the 8-core benchmark rate")
 
 
-def read_stored(f: pathlib.Path, numeric: tuple[str, ...] = ()) -> dict[str, Any] | None:
+def read_stored(f: pathlib.Path, numeric: tuple[str, ...] = (), optional: tuple[str, ...] = ()) -> dict[str, Any] | None:
     """A stored slow result as a dict; None when the file is missing, undecodable (a write cut short by a kill), not a JSON object, or lacks any of
-    the `numeric` fields as a finite real number (a bool, a string, null, NaN and infinity are not). The one reader of every stored receipt, so a
-    hand-edited or schema-changed file is a result that is not stored (a failed row) and never a KeyError or TypeError (round 9 M-4)."""
+    the `numeric` fields, or has one of the `optional` fields that is not, as a finite real number (a bool, a string, null, NaN and infinity are not).
+    The one reader of every stored receipt, so a hand-edited or schema-changed file is a result that is not stored (a failed row) and never a KeyError
+    or TypeError (round 9 M-4)."""
     try:
         d = json.loads(f.read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(d, dict):
         return None
-    return None if missing_numbers(d, numeric) else d
+    return None if missing_numbers(d, numeric, optional) else d
 
 
 def result_row(group: str, claim: str, rec: dict[str, Any] | None, value_key: str, ref_key: str, tol: float, command: str, eta: str, source: str) -> None:

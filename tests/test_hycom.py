@@ -1019,13 +1019,13 @@ def _lab_dir(fx, tmp_path):
     return d, sorted(p.name for p in d.iterdir())
 
 
-@pytest.mark.parametrize("where", ["same", "parent", "inside", "via_symlink", "tmp_sibling"])
+@pytest.mark.parametrize("where", ["same", "parent", "via_symlink", "tmp_sibling"])
 def test_r9_m5_a_store_that_is_holds_or_lies_inside_the_source_is_refused_and_the_source_survives(fx, tmp_path, where):
     from cafe.pm.config import ConfigError
     d, names = _lab_dir(fx, tmp_path)
     link = tmp_path / "link"
     link.symlink_to(d)
-    out = dict(same=d, parent=d.parent, inside=d / "lab.zarr", via_symlink=link, tmp_sibling=d)[where]
+    out = dict(same=d, parent=d.parent, via_symlink=link, tmp_sibling=d)[where]
     if where == "tmp_sibling":
         d = d.rename(d.with_name("lab.zarr.tmp"))                       # the store lab.zarr would be built in lab.zarr.tmp, which is the source
         names = sorted(p.name for p in d.iterdir())
@@ -1033,6 +1033,16 @@ def test_r9_m5_a_store_that_is_holds_or_lies_inside_the_source_is_refused_and_th
     with pytest.raises(ConfigError, match="would delete the source"):
         h.ingest_lab_hycom(d, fx["box"], out, "in_situ")
     assert sorted(p.name for p in d.iterdir()) == names                 # every snapshot still there, no store written beside them
+
+
+def test_l1_a_store_beside_the_lab_files_inside_their_directory_is_written_and_the_source_survives(fx, tmp_path):
+    """The refusal also fired when the store merely lay inside the source directory, which deletes nothing (write_store removes the store and its .tmp
+    sibling only, and the files are read from the directory itself): a lab that keeps lab.zarr beside its *.nc could not ingest."""
+    d, names = _lab_dir(fx, tmp_path)
+    for _ in range(2):                                                                  # the second run replaces the store it wrote beside the files
+        out = h.ingest_lab_hycom(d, fx["box"], d / "lab.zarr", "in_situ")
+        assert h.open_store(out).sizes["time"] == 3
+        assert sorted(p.name for p in d.iterdir()) == sorted([*names, "lab.zarr"])
 
 
 def test_r9_m5_a_single_source_file_is_refused_when_the_store_is_its_directory(fx, tmp_path):

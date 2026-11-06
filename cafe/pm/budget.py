@@ -122,31 +122,51 @@ def _is_count(x: Any) -> bool:
     return isinstance(x, int) and not isinstance(x, bool) and x > 0
 
 
+def _record_diff(rec: dict[str, Any], host: dict[str, Any]) -> list[str]:
+    """How a measured record's own `cpus` / `cpu` differ from the host's: a key either side leaves out is not compared, nor one of the wrong type
+    (cpus a positive integer, cpu a non-empty string)."""
+    n, cpu = host.get("cpus"), host.get("cpu")
+    diff = []
+    if _is_count(rec.get("cpus")) and n and rec["cpus"] != n:
+        diff.append(f"{n} CPUs, not {rec['cpus']}")
+    if isinstance(rec.get("cpu"), str) and rec["cpu"] and cpu and rec["cpu"] != cpu:
+        diff.append(f"CPU model {cpu}, not {rec['cpu']}")
+    return diff
+
+
 def machine_warning(thr: dict[str, Any] | None = None, host: dict[str, Any] | None = None) -> str | None:
     """Why the rates in `thr` (config/throughput.json) may not be this machine's: its `machine` block (written by `make bench`) names another CPU
-    count or CPU model than the host's. `host` is {"cpus": n, "cpu": model}; default this machine, read as the bench reads its own: `os.cpu_count()`
-    (not `par.workers()`, which a docker --cpus quota or the memory cap lowers) and `cpu_model()`, so a limited container on the benchmarked box is
-    not warned. A key `host` leaves out is not compared, nor one the `machine` block gives in the wrong type (cpus a
-    positive integer, cpu a string). None when it matches, when `thr` has no machine block or when that is not a mapping.
+    count or CPU model than the host's, or an entry (`openfoam-...`, `jax-lbm-...`, each `stage1` class) carries its own `cpus` / `cpu` that differ.
+    The block is only what the last `stage1` bench wrote, so the entries are compared too (round 9, L1); an entry the bench wrote without a `cpus`
+    (the older foam and lbm entries) is compared on its model alone. `host` is {"cpus": n, "cpu": model}; default this machine, read as the bench reads
+    its own: `os.cpu_count()` (not `par.workers()`, which a docker --cpus quota or the memory cap lowers) and `cpu_model()`, so a limited container on
+    the benchmarked box is not warned. A key `host` leaves out is not compared, nor one a record gives in the wrong type. The host name of an entry is
+    not compared (the foam bench runs in a container whose name is a hash). None when everything matches, when `thr` has no machine block or entry
+    with a count or model, or when the block is not a mapping.
 
     Deliberately NOT one of the plan's `notes`: it depends on the machine the plan is made on, and the notes are in plan.json's `describe` and in
     report.json (`machine.notes`, `machine.describe`), which two runs of one seed on two machines must share (DECISIONS 290). `plan` prints it,
     `pipeline.run` logs it, and report.json may carry it only under `machine.machine` (acceptance.VOLATILE)."""
     thr = throughput() if thr is None else thr
-    m = thr.get("machine")
-    if not isinstance(m, dict) or not m:                                    # a hand-edited `"machine": "homebase"` or list: nothing to compare
-        return None
     host = dict(cpus=os.cpu_count(), cpu=cpu_model()) if host is None else host
-    n, cpu = host.get("cpus"), host.get("cpu")
-    diff = []
-    if _is_count(m.get("cpus")) and n and m["cpus"] != n:
-        diff.append(f"{n} CPUs, not {m['cpus']}")
-    if isinstance(m.get("cpu"), str) and m["cpu"] and cpu and m["cpu"] != cpu:
-        diff.append(f"CPU model {cpu}, not {m['cpu']}")
-    if not diff:
+    m = thr.get("machine")
+    m = m if isinstance(m, dict) else {}                                    # a hand-edited `"machine": "homebase"` or list: nothing to compare
+    block = _record_diff(m, host)
+    s1 = thr.get("stage1")
+    entries = {k: v for k, v in thr.items() if k not in ("machine", "stage1") and isinstance(v, dict)}
+    entries.update({f"stage1/{c}": v for c, v in s1.items() if isinstance(v, dict)} if isinstance(s1, dict) else {})
+    other = [f"{k} ({e.get('cpus', '?')} CPUs, {e.get('cpu', '?')}, {e.get('measured', '?')})" for k, e in entries.items()
+             if _record_diff(e, host) not in ([], block)]                   # one that differs as the block does is that sentence already
+    if not block and not other:
         return None
-    return (f"throughput.json was measured on {m.get('id', '?')} ({m.get('cpus', '?')} CPUs, {m.get('cpu', '?')}, {m.get('measured', '?')}); here it is "
-            f"{'; '.join(diff)}. The stage-1 costs and LES rates in the plan are that machine's: run `make bench` here to measure this one")
+    said = []
+    if block:
+        said.append(f"throughput.json was measured on {m.get('id', '?')} ({m.get('cpus', '?')} CPUs, {m.get('cpu', '?')}, {m.get('measured', '?')}); "
+                    f"here it is {'; '.join(block)}")
+    if other:
+        said.append(f"{'entries also' if block else 'entries'} measured on another machine: {', '.join(other)}"
+                    + ("" if block else f"; here it is {host.get('cpus', '?')} CPUs, {host.get('cpu', '?')}"))
+    return f"{'; '.join(said)}. The stage-1 costs and LES rates in the plan are that machine's: run `make bench` here to measure this one"
 
 
 def les_need(speed: float, length: float, fluid: str, a: dict[str, Any]) -> dict[str, float]:

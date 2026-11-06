@@ -91,9 +91,10 @@ def machine() -> dict[str, Any]:
     from .budget import machine_warning
     p = ROOT / "config" / "throughput.json"
     from .config import THROUGHPUT_FIX, json_object
-    m = json_object(p, THROUGHPUT_FIX).get("machine", {}) if p.exists() else {}
+    thr = json_object(p, THROUGHPUT_FIX) if p.exists() else {}
+    m = thr.get("machine", {})
     return dict(host=platform.node(), cpus=os.cpu_count(), workers=par.workers(), bench_id=m.get("id"), bench_measured=m.get("measured"),
-                warning=machine_warning(dict(machine=m)))
+                warning=machine_warning(thr))
 
 
 class Ledger:
@@ -195,8 +196,10 @@ def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path, roots: set[tup
     looked up under `run_dir` before where it was recorded, in this order: (1) through a directory named like `run_dir`, the rest of the path joined onto it;
     (2) if the path lies under a place the run was (`roots`, from `run_roots` of the same ledger), from the first directory of the run's own layout in it
     (`checkpoints` or a stage's output directory, `RUN_DIRS`), longest tail first, so `.../q9/stage3/windows/x` is tried as `stage3/windows/x` before
-    `windows/x`; (3) as recorded, for what lies outside the run (`/app/config/...`, the environment cache). Only a candidate that exists under `run_dir`
-    counts: a path the run lost is reported at the place it was recorded. A path with a `..` in it is never rebased."""
+    `windows/x`; (3) as recorded, for what lies outside the run (`/app/config/...`, the environment cache). A candidate that exists under `run_dir` wins;
+    a path in the run's layout under a place the run was (2) that does not exist there is reported at its place in `run_dir`, the first (longest) candidate,
+    not as recorded, because the recorded one is the original run's file, which a copy must not borrow (round 9, L1). A path with a `..` in it is never
+    rebased."""
     run_dir, p = pathlib.Path(run_dir), pathlib.Path(ref)
     if ".." in p.parts:
         return p
@@ -206,10 +209,14 @@ def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path, roots: set[tup
             if q.exists():
                 return q
             break
+    lost = None
     for i, part in enumerate(p.parts):
-        if part in RUN_DIRS and p.parts[:i] in roots and run_dir.joinpath(*p.parts[i:]).exists():
-            return run_dir.joinpath(*p.parts[i:])
-    return p
+        if part in RUN_DIRS and p.parts[:i] in roots:
+            q = run_dir.joinpath(*p.parts[i:])
+            if q.exists():
+                return q
+            lost = lost or q
+    return lost or p
 
 
 def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str, Any] | None:

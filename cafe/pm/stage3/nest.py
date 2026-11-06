@@ -488,12 +488,18 @@ def richardson(ds: ArrayLike, cds: ArrayLike) -> dict[str, Any]:
 
 
 def stored_grids(tag: str) -> tuple[list[dict[str, Any]], list[str]]:
-    """(the stored grids of the sphere run `tag`, finest last; the names of the files that cannot be read). A grid counts only with a numeric
-    `d` and `cd` (`lbm.read_stored`): a truncated or hand-edited file is named, never a KeyError in the refit floor or the receipts table."""
-    runs, bad = [], []
-    for f in sorted(SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")):
-        r = lbm.read_stored(f, ("d", "cd"))
-        if r is None:
+    """(the stored grids of the sphere run `tag`, finest last; the names of the files that cannot count). The files are `nest_sphere_<tag>_d<cells>.json`
+    (a rerun kept beside one, `..._d8_prev.json`, is no grid of the study: the credibility page reads the same names). A grid counts only with a positive
+    numeric `d`, a numeric `cd` (`lbm.read_stored`), a numeric `seconds` if it has one, a text `code_sha` if it has one, and a `d` that no earlier file has
+    (two grids of one resolution would make the Richardson fit NaN): any other file is named, never a KeyError or TypeError in the refit floor or the
+    receipts table."""
+    pre = f"nest_sphere_{tag}_d"
+    files = sorted((int(f.name[len(pre):-len(".json")]), f) for f in SLOW_DIR.glob(pre + "*.json") if f.name[len(pre):-len(".json")].isdecimal())
+    runs: list[dict[str, Any]] = []
+    bad: list[str] = []
+    for _, f in files:
+        r = lbm.read_stored(f, ("d", "cd"), ("seconds",))
+        if r is None or r["d"] <= 0 or not isinstance(r.get("code_sha"), (str, type(None))) or any(r["d"] == g["d"] for g in runs):
             bad.append(f.name)
         else:
             runs.append(r)
@@ -534,7 +540,8 @@ def sphere_receipts() -> list[dict[str, Any]]:
         runs, bad = stored_grids(tag)
         plan = run_plan(tag)
         for name in bad:
-            context(g, f"  study: {name} is unreadable (no numeric d and cd): left out, rerun it", math.nan, ref, "", plan["command"])
+            context(g, f"  study: {name} is unreadable (it needs a positive numeric d, a numeric cd and seconds, a text code_sha and a d of its own): "
+                       "left out, rerun it", math.nan, ref, "", plan["command"])
         for r in runs:
             context(g, f"  study: Re={re:g}, d={r['d']}", r["cd"], ref, "", f"{r.get('shape', '?')}, {r.get('seconds', 0) / 60:.0f} min")
         rec = None

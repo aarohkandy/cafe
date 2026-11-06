@@ -52,10 +52,8 @@ STALE = "stale: made by other code"
 USV_RATIO_NOTE = ("The mission ratio is lowered by the westward current (in the demo mission it turns a beam reach into a close-hauled course, and the speed "
                   "through the water falls); the calibration may already include part of the current effect, a possible double penalty that is not "
                   "established.")
-UAS_ATTITUDE_NOTE = ("Attitude exceedance cannot fire in this controller model (the tilt clamp, 35 deg, is below the 42 deg exceedance), so the UAS verdict "
-                     "rests on the battery and on finishing the profile inside the time limit.")
-UAS_ATTITUDE_NOTE_NO_PROFILE = ("Attitude exceedance cannot fire in this controller model (the tilt clamp, 35 deg, is below the 42 deg exceedance), so the UAS "
-                                "verdict rests on battery alone below about 12 m/s of wind.")      # a summary from before the profile was counted
+UAS_ATTITUDE_TAIL = "so the UAS verdict rests on the battery and on finishing the profile inside the time limit."
+UAS_ATTITUDE_TAIL_NO_PROFILE = "so the UAS verdict rests on battery alone below about {v_air} of wind."         # a summary from before the profile was counted
 MODE_TEXT = dict(profile_incomplete="a flown sortie returned (time limit or battery reserve) before its last pattern waypoint, so it did not deliver "
                                     "the full profile",
                  no_current_data="there was no finite wind, current or wave state at the vehicle's position (a land block, a masked cell or a hole in the sea "
@@ -426,6 +424,7 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         profile=_profile(e.get("profile"), ref, src + ".profile"),
                         drift=_drift(task.get(vid, {}), e["cls"], mref, f"mission.yaml vehicles.{vid}.task.heading_to"),
                         usv_modes=_usv_modes(p, e["modes"], tr) if e["cls"] == "usv" else None,
+                        uas_limits=_uas_limits(p, tr, not e.get("profile")) if e["cls"] == "uas" else None,
                         verdict_stage1=before["verdict"]["verdict"] if before else None,
                         changed_by_refit=bool(before and before["verdict"]["verdict"] != e["verdict"]["verdict"]),
                         assumed_platform_inputs=num(cred["platform_assumed_counts"].get(pk, 0), "inputs", cred_ref, "credibility.json platform_assumed_counts"),
@@ -459,6 +458,36 @@ def _usv_modes(platform: str | None, modes: dict[str, Any], tr: Trace) -> dict[s
     return dict(trim_min_aws=num(v["trim_min_aws_ms"], "m/s", ref, src + " trim_min_aws_ms"),
                 calm_sustain=num(v["calm_sustain_s"] / 60.0, "min", ref, src + " calm_sustain_s"),
                 becalmed_after=num(v["becalmed_after_h"], "h", ref, src + " becalmed_after_h"))
+
+
+def _uas_limits(platform: str | None, tr: Trace, airspeed: bool) -> dict[str, Any] | None:
+    """The limits the UAS attitude statement rests on, from the platform file the vehicle flies (limits.max_tilt_deg, tilt_exceedance_deg and, for the
+    statement of a summary without the profile count that attitude exceedance cannot fire, which names it, max_airspeed_ms), as traced nodes; None when the file
+    cannot be read."""
+    try:
+        from .config import load_platform
+        li = load_platform(platform or "")["limits"]
+        v = {k: li[k]["value"] for k in ("max_tilt_deg", "tilt_exceedance_deg", "max_airspeed_ms")}
+    except (KeyError, TypeError, ValueError):
+        return None
+    airspeed = airspeed and v["max_tilt_deg"] < v["tilt_exceedance_deg"]
+    ref, src = tr.ref("ingest", label="platform"), config.platform_display(platform or "")
+    return dict(tilt_clamp=num(v["max_tilt_deg"], "deg", ref, src + " limits.max_tilt_deg"),
+                tilt_exceedance=num(v["tilt_exceedance_deg"], "deg", ref, src + " limits.tilt_exceedance_deg"),
+                **({"max_airspeed": num(v["max_airspeed_ms"], "m/s", ref, src + " limits.max_airspeed_ms")} if airspeed else {}))
+
+
+def _attitude_note(lim: dict[str, Any] | None, profile: bool) -> str:
+    """The UAS statement on attitude exceedance, built from the vehicle's own platform limits: the commanded horizontal force is clamped at the lean-angle
+    limit, so the exceedance flag can fire only if its threshold is below the clamp (PHYSICS, limitation L17)."""
+    if lim is None:
+        return "The UAS platform's tilt clamp and attitude exceedance could not be read, so this report does not say whether attitude exceedance can fire."
+    clamp, exc = lim["tilt_clamp"], lim["tilt_exceedance"]
+    if clamp["value"] >= exc["value"]:
+        return (f"Attitude exceedance can fire in this platform (the tilt clamp, {_n(clamp)}, is not below the {_n(exc)} exceedance), so the UAS verdict "
+                "also rests on it.")
+    tail = UAS_ATTITUDE_TAIL if profile else UAS_ATTITUDE_TAIL_NO_PROFILE.format(v_air=_n(lim["max_airspeed"]))
+    return f"Attitude exceedance cannot fire in this controller model (the tilt clamp, {_n(clamp)}, is below the {_n(exc)} exceedance), {tail}"
 
 
 def _opt(x: Any, unit: str, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
@@ -1201,7 +1230,7 @@ def _speed_html(v: dict[str, Any]) -> str:
             out += (f"<p>Median waypoints flown per sortie: {_n(pr['wp_done_median'])} of {_n(pr['n_wp'])}; share of the flown sorties that "
                     f"reached every waypoint: {_n(pr['complete_share'])} (a sortie that returns earlier did not deliver the full profile and fails as "
                     "<code>profile_incomplete</code>).</p>")
-        out += f"<p class=muted>{UAS_ATTITUDE_NOTE if pr else UAS_ATTITUDE_NOTE_NO_PROFILE}"
+        out += f"<p class=muted>{_attitude_note(v['uas_limits'], bool(pr))}"
         if (v["modes"].get("no_current_data") or {}).get("value"):
             out += (f" In this run {_n(v['modes']['no_current_data'])} also met a wind that was not finite in flight (<code>no_current_data</code>): "
                     "their verdict rests on a hole in the input, which the battery and the profile say nothing about.")

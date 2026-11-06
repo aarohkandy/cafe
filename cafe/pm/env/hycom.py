@@ -171,14 +171,16 @@ def _append(zarr_path: Any, ds: Any, first: bool, attrs: dict[str, Any]) -> None
 
 
 def refuse_overlap(out_zarr: Any, source: Any) -> None:
-    """Raise a ConfigError when the store `out_zarr` (or its `.tmp` sibling) is `source`, holds it, or lies inside it. `write_store` removes the old
-    store and the temporary with rmtree, so such a store would delete the data it was made from. The paths are resolved first (symlinks, `..`)."""
+    """Raise a ConfigError when the store `out_zarr` (or its `.tmp` sibling) is `source` or holds it. `write_store` removes the old store and the
+    temporary with rmtree, so such a store would delete the data it was made from. A store that merely lies inside a source directory deletes nothing
+    (the lab's files are read from the directory itself, not recursively, and each one is checked on its own against the store), so it is accepted. The
+    paths are resolved first (symlinks, `..`)."""
     from ..config import ConfigError
     o, s = pathlib.Path(out_zarr).resolve(), pathlib.Path(source).resolve()
     for q in (o, o.with_name(o.name + ".tmp")):
-        if q == s or q in s.parents or s in q.parents:
-            raise ConfigError(f"the store {out_zarr} and its source {source} are the same directory, or one holds the other: writing the store would delete "
-                              "the source. Name a store path of its own, outside the source directory")
+        if q == s or q in s.parents:
+            raise ConfigError(f"the store {out_zarr} and its source {source} are the same directory, or the store holds the source: "
+                              "writing the store would delete the source. Name a store path of its own")
 
 
 ZARR_MARKS = ("zarr.json", ".zgroup", ".zarray", ".zattrs")

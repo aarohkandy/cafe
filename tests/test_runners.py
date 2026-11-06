@@ -497,3 +497,27 @@ def test_the_sweep_removes_the_directory_of_a_job_that_is_only_a_zombie(tmp_path
             os.killpg(pgid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+
+
+# ---- round 9, L1: the shared pm/ has one owner --------------------------------------------------------------------------------------------------------
+
+def test_l1_pm_sh_will_not_delete_the_files_of_the_checkout_that_owns_the_shared_dir(tmp_path):
+    """M-39 sibling: with --delete, ./pm.sh from a second checkout removed the first one's new files under its running job."""
+    home, env = live(tmp_path, "ssh", "docker")
+    dest = home / "work" / "cafe" / "pm"
+    dest.mkdir(parents=True)
+    a, b = tmp_path / "lead", tmp_path / "other"
+    for src, files in ((a, ("common.py", "test_new.py")), (b, ("common.py",))):
+        src.mkdir()
+        for f in files:
+            (src / f).write_text(src.name)
+    assert run(["sh", str(ROOT / "pm.sh"), "true"], env, cwd=a).returncode == 0
+    r = run(["sh", str(ROOT / "pm.sh"), "true"], env, cwd=b)
+    assert r.returncode == 1 and "belongs to" in r.stderr and str(a.resolve()) in r.stderr
+    assert sorted(p.name for p in dest.iterdir()) == ["common.py", "test_new.py"] and (dest / "common.py").read_text() == "lead"      # nothing was sent
+    (a / "common.py").write_text("lead2")
+    assert run(["sh", str(ROOT / "pm.sh"), "true"], env, cwd=a).returncode == 0 and (dest / "common.py").read_text() == "lead2"      # the owner again
+    r = run(["sh", str(ROOT / "pm.sh"), "true"], {**env, "PM_TAKE": "1"}, cwd=b)
+    assert r.returncode == 0, r.stderr
+    assert sorted(p.name for p in dest.iterdir()) == ["common.py"]                                                       # taken over: --delete as before
+    assert run(["sh", str(ROOT / "pm.sh"), "true"], env, cwd=a).returncode == 1                                          # and now a is the other one
