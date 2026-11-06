@@ -139,8 +139,14 @@ def track_heading_source(res: dict[str, Any] | None, vid: str, t: float) -> str:
     return "stage-1 heading (circular median)" if _bow_heading(res, vid, t) is not None else "course over ground (no heading in res.pkl)"
 
 
-def _val(x: Any) -> NDArray[np.float64]:
-    return np.asarray(getattr(x, "value", x), float)
+def _val(x: Any, what: str, n: int | None = None) -> NDArray[np.float64]:
+    """The environment's value as an array, or a refusal with the `no_current_data` reason (stage 1's label for a hole) when the part this window
+    reads (the first `n` components, all without n) is not finite: a NaN would otherwise run through every comparison that is False and surface as a
+    wrong error (a current blamed on the wind, "becalmed") or as a case of NaN speeds (round 10, M-15)."""
+    a = np.asarray(getattr(x, "value", x), float)
+    if not np.isfinite(a if n is None else a[:n]).all():
+        raise ValueError(f"no_current_data: the environment gave no finite {what} at this window (a masked cell or a hole in the field)")
+    return a
 
 
 # ---------------------------------------------------------------------------------------------------- geometry, per class
@@ -202,9 +208,9 @@ def _coef(force: float, rho: float, v: float, area: float | None) -> float:
 def glider_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle, a: dict[str, Any], heading: float | None) -> dict[str, Any]:
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
     z = -need(a, "glider.window_depth_m")
-    cur = _val(env.current(lon, lat, z, t))[:2]
-    rho = float(_val(env.density(lon, lat, z, t)))
-    sst = float(_val(env.sst(lon, lat, t)))
+    cur = _val(env.current(lon, lat, z, t), "current", 2)[:2]
+    rho = float(_val(env.density(lon, lat, z, t), "density"))
+    sst = float(_val(env.sst(lon, lat, t), "sea surface temperature"))
     p = -z                                                                  # dbar ~ m
     T = float(glider._temp_c(P, sst, -z))
     pitch = -abs(P["pitch_deg"])                                            # descending leg
@@ -244,8 +250,8 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
     mesh the free-surface run uses (None: the platform's assumed wetted_area_m2). The platform's value stays what Stage 1 uses; both areas are
     in the case (`wetted_window_m2`, `wetted_platform_m2`) and `wetted_area_note` states the ratio."""
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
-    wind = _val(env.wind(lon, lat, P["anemometer_m"], t))[:2]
-    cur = _val(env.current(lon, lat, P["current_z_m"], t))[:2]
+    wind = _val(env.wind(lon, lat, P["anemometer_m"], t), "wind", 2)[:2]
+    cur = _val(env.current(lon, lat, P["current_z_m"], t), "current", 2)[:2]
     if heading is None:                                                     # downwind: the relative-flow direction of a boat with no steering
         heading = (compass(*wind) if np.hypot(*wind) > 1e-6 else 0.0)
     tw = usv.through_water(P, wind, cur, heading)
@@ -317,9 +323,10 @@ def uas_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
     min(limits.max_airspeed_ms, the speed at which d_x tilts the airframe to limits.max_tilt_deg), by slowing the leg (down to a hover).
     A wind beyond that for any ground speed is a refused window with the reason: the UAS would not be airborne."""
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
-    wind = _val(env.wind(lon, lat, need(a, "uas.window_altitude_m"), t))[:2]
+    wind = _val(env.wind(lon, lat, need(a, "uas.window_altitude_m"), t), "wind", 2)[:2]
     air = env.air(lon, lat, t)
-    rho = float(uas.air_density(float(_val(air["psfc"])), float(_val(air["T2"])), float(_val(air["q2"]))))
+    psfc, t2, q2 = (float(_val(air[k], what)) for k, what in (("psfc", "surface pressure"), ("T2", "2 m temperature"), ("q2", "2 m humidity")))
+    rho = float(uas.air_density(psfc, t2, q2))
     if heading is None:                                                     # into the wind: the relative flow is then along the body axis
         heading = (compass(-wind[0], -wind[1]) if np.hypot(*wind) > 1e-6 else 0.0)
     dx = P["aero"]["d_x"]
@@ -643,7 +650,7 @@ def _fs_gate(est: dict[str, Any], a: dict[str, Any], ctx: Context, left_s: float
     return False, (f"free-surface window not run: estimated {est['total_s'] / 60:.0f} min x {need(a, 'fs.margin')} margin = {need_s / 60:.0f} min "
                    f"({sum(est['cells'].values()):,.0f} cells on two grids, {est['iters']} iterations, {est['cores']} cores at {est['rate'] / 1e3:.0f}k "
                    f"cell-updates/s) against {max(left_s, 0) / 60:.1f} min left of the {plan['shares']['stage3'] * plan['budget_s'] / 60:.0f} min "
-                   f"stage-3 share; it would fit "
+                   f"stage-3 share; "
                    f"{freesurface.fitting_budget(queued_s + need_s, profile_stage3_s(ctx))}"), need_s
 
 

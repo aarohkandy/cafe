@@ -136,12 +136,15 @@ def estimate(cores: int, snappy_factor: float, cost_factor: float, mesh_s_per_ce
 
 
 def fitting_budget(need_s: float, stage3_s: dict[str, float]) -> str:
-    """Which `--budget` profile's own plan holds need_s of stage 3 (`stage3_s`: profile -> the stage-3 seconds that plan gives this mission, the
-    smallest budget first), or the plain statement that none does and what the largest gives."""
+    """The clause that ends the free-surface refusal: which `--budget` profile's own plan holds need_s of stage 3 (`stage3_s`: profile -> the
+    stage-3 seconds that plan gives this mission, the smallest budget first), or the plain statement that none does and what the largest plan
+    gives, or that no profile could be planned. The whole clause, so the caller adds nothing to it (round 10, M-33)."""
     for name, s in stage3_s.items():
         if s >= need_s:
-            return f"--budget {name} ({s / 60:.0f} min of stage 3 in that plan)"
-    return f"no --budget profile's plan holds it (the largest gives {next(reversed(stage3_s.values()), 0.0) / 60:.0f} min)"
+            return f"it would fit --budget {name} ({s / 60:.0f} min of stage 3 in that plan)"
+    if not stage3_s:
+        return "no --budget profile could be planned for this mission"
+    return f"no --budget profile's plan holds it (the largest plan gives {max(stage3_s.values()) / 60:.0f} min of stage 3)"
 
 
 # ---------------------------------------------------------------------------------------------------- the child

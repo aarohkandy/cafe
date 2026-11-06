@@ -327,12 +327,18 @@ def neq_ratio(tau_from: float, tau_to: float, r: int = 2) -> float:
 
 
 # ---------------------------------------------------------------------------------------------------- self-check helpers
+RUNNING_MEAN_BLOCKS = 5     # batch means, as windows.coefficients takes them (windows.blocks, nb = 5)
+
+
 def running_mean_ok(x: ArrayLike, tol: float = 0.02) -> tuple[bool, float]:
-    """BRIEF 5.5: the running mean over the last third of a series stays within `tol` of the last-third mean.
-    Returns (ok, max relative deviation)."""
+    """BRIEF 5.5: the running mean over the last third of a series stays within `tol` of the last-third mean. The running mean is of
+    RUNNING_MEAN_BLOCKS batch means of that third (round 10, M-2), so it judges the mean and not one sample: the first sample of a
+    stationary series with 5 % per-step noise is 5 % off its mean however long the run, and used to fail the 2 % limit. A drift of the
+    mean over the third is still seen. Returns (ok, max relative deviation)."""
     x = np.asarray(x, float)
     seg = x[-max(len(x) // 3, 2):]
-    rm = np.cumsum(seg) / np.arange(1, len(seg) + 1)
+    bm = np.array([p.mean() for p in np.array_split(seg, min(RUNNING_MEAN_BLOCKS, len(seg)))])
+    rm = np.cumsum(bm) / np.arange(1, len(bm) + 1)
     m = seg.mean()
     dev = float(np.abs(rm - m).max() / max(abs(m), 1e-30))
     return dev <= tol, dev

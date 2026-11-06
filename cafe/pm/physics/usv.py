@@ -32,8 +32,9 @@ Models (every constant is in platforms/saildrone_explorer.yaml with its source o
          tail holds the angle of attack at wing_trim_deg; above the heel target the controller depowers it (alpha -> k alpha).
          Heel reduces the projected area by cos(phi) (standard VPP practice, e.g. Kerwin 1978, MIT 78-11).
   Hull   ITTC-1957 correlation line C_F = 0.075 / (log10 Re - 2)^2 times (1 + k), plus a residuary term C_R = cr0 (Fr/Fr_ref)^4
-         on wetted area, plus (1 + c phi^2) for heel.  Hull speed 1.34 sqrt(L_ft) kn reproduces the 3.3 m/s cap (receipt); the
-         cap is applied as the top of the speed grid.
+         on wetted area, plus (1 + c phi^2) for heel.  The 3.3 m/s cap is the value quoted from Mazza et al. (2026), not an
+         independent hull speed: it equals 1.34 sqrt(LOA ft) kn for the 7 m LOA (receipt; with the assumed 6.5 m waterline length the
+         same formula gives 3.18 m/s, 3.5 % under, inside the receipt's 4 %).  The cap is applied as the top of the speed grid.
   Foils  Keel and rudder lift slope from Helmbold's low-aspect-ratio formula a = 2 pi AR / (2 + sqrt(4 + AR^2)) (Helmbold 1942;
          Hoerner & Borst 1975, Fluid-Dynamic Lift), AR doubled for the free-surface image, induced drag C_L^2 / (pi AR),
          profile drag 2 C_F (1 + 2 t/c + 60 (t/c)^4) on planform area (Hoerner 1965, Fluid-Dynamic Drag).
@@ -67,7 +68,8 @@ below the current speed for becalmed_after_h (DECISION: the BRIEF's 'SOG < curre
 drifting boat's SOG equals the current; `<=`, so a boat that cannot move in a zero current is becalmed too); swept_off_track;
 capsize_proxy (also: the wind relative to the water above the polar's top, 30 m/s, for stall_sustain_s: outside the model, so a failure);
 wing_stall_calm = apparent wind speed below the tail's authority (trim_min_aws_ms) for calm_sustain_s; wing_stall_angle = apparent wind angle
-inside the bow cone (min_awa_deg, not the wing's stall angle of attack wing_stall_deg, which only the polar uses) for stall_sustain_s; battery;
+inside the bow cone (min_awa_deg, not the wing's stall angle of attack wing_stall_deg, which only the polar uses) for stall_sustain_s, counted only
+while the apparent wind is at or above trim_min_aws_ms (below it the polar's angle is not a measurement and a calm is only a calm: round 10, M-10); battery;
 no_current_data = the environment gave no finite wind, current, wave state or shortwave value at the vehicle, or the start position was not finite
 (a land block, a masked cell, a hole in the sea mask): the step uses zero for that vector (Hs 0, Tp the first table period, direction 0, Stokes 0;
 0 W of sun) and the member is a
@@ -91,6 +93,7 @@ Arr = Any
 G = 9.80665
 R_E = 6371008.8
 DV = 0.05                 # m/s, speed grid of the root search (the step actually used is cap / (nv - 1), which is DV when the cap is a multiple of it)
+WAVE_U_MAX = 3.5          # m/s, the top of the added-resistance table's speed axis; _lin clamps beyond it, so the speed cap may not pass it (round 10, M-17)
 N_IT = 48                 # fixed-point iterations for (beta, phi, depower, rudder); 24 left 58 cells at TWS 27-30 m/s off by up to 1.5 m/s (round 7, M-18)
 TWA = np.union1d(np.arange(0.0, 180.01, 2.5), np.arange(10.0, 20.01, 0.5))     # polar true wind angles [deg]: 0.5 from 10 to 20, where V steps (round 8, M-8)
 NH = 72                   # candidate headings
@@ -114,10 +117,10 @@ REQUIRED = dict(
     keel_area_m2="pos", keel_span_m="pos", keel_t_c="pos", keel_stall_deg="angle90", keel_x_m="any", rudder_cl_max="pos", rudder_x_m="nonzero",
     rudder_area_m2="pos", rudder_span_m="pos", rudder_t_c="pos",
     wind_area_front_m2="nonneg", wind_area_side_m2="nonneg", wind_cd_front="nonneg", wind_cd_side="nonneg", wind_height_m="pos<=50",
-    rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms="pos<=50", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos", chiodi_max_sog_ms="pos",
-    chiodi_max_wind_ms="pos", chiodi_band="nonneg", sun_overpredict_lo="nonneg", sun_overpredict_hi="nonneg", battery_wh="pos<=1e6", solar_area_m2="nonneg",
-    solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="nonneg<=50", vpp_bias_mean="any", vpp_bias_sd="nonneg", current_z_m="any",
-    tack_time_s="nonneg", tack_speed_frac="unit", tack_horizon_s="pos", replan_s="pos",
+    rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms=f"pos<={WAVE_U_MAX}", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos",
+    chiodi_max_sog_ms="pos", chiodi_max_wind_ms="pos", chiodi_band="nonneg", sun_overpredict_lo="nonneg", sun_overpredict_hi="nonneg", battery_wh="pos<=1e6",
+    solar_area_m2="nonneg", solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="nonneg<=50", vpp_bias_mean="any",
+    vpp_bias_sd="nonneg", current_z_m="any", tack_time_s="nonneg", tack_speed_frac="unit", tack_horizon_s="pos", replan_s="pos",
 )
 # Every mission default the model indexes (`md["..."]`; a test reads the literals). Present, finite and in range: a threshold or a width above 0, a sustain
 # time 0 or above (0: at once), track_tolerance_km up to the mission schema's 1000; cap_cycles also takes a log of (sqrt(2 ln N): N >= 1).
@@ -358,12 +361,33 @@ class WaveTab(NamedTuple):
     g: Arr            # (nP, nC, nU): R_aw / Hs^2 [N/m^2]
 
 
-def _build_polar(P: dict[str, Any]) -> Polar:
+def _polar_states(P: dict[str, Any]) -> tuple[Arr, Arr, dict[str, Any]]:
+    """The polar's axes and the full `_solve` result on them (resid and yaw_resid included; `_build_polar` keeps seven of its layers)."""
     tws, twa = np.arange(0.0, 30.01, 1.0), TWA
     T, A = np.meshgrid(tws, twa, indexing="ij")
     g = np.radians(A)
-    s = _solve(P, -T * np.cos(g), -T * np.sin(g), np.zeros_like(T), np.zeros_like(T))
+    return tws, twa, _solve(P, -T * np.cos(g), -T * np.sin(g), np.zeros_like(T), np.zeros_like(T))
+
+
+def _build_polar(P: dict[str, Any]) -> Polar:
+    tws, twa, s = _polar_states(P)
     return Polar(tws, twa, np.stack([s["V"], s["beta_deg"], s["phi_deg"], s["K"], s["aws"], s["awa_deg"], s["kd"]], -1))
+
+
+def stall_map(P: dict[str, Any], moving: float = 0.2) -> dict[str, Any]:
+    """What the polar says about its own convergence over the whole 0 to 30 m/s table (round 10, M-13). `_solve` returns V = 0 where the
+    4-DOF balance has no positive-speed root (DECISIONS 358: a stall, not changed) and the residual of the balance with it; the polar keeps
+    neither. Returns cells; v0_cells (V exactly 0, the calm row included); weak_cells (0 < V <= `moving`) and unbalanced_weak (those whose sway or
+    yaw residual is above 0.05: the interpolation of a root next to a stall); moving_cells (V > `moving`) and max_resid_moving (their largest
+    residual); and stall_onset {TWA deg: the lowest TWS above 0 where V is 0 after the boat had been moving at a lower TWS}, a TWA that never
+    stalls after moving not in it."""
+    tws, twa, s = _polar_states(P)
+    v, res = s["V"], np.maximum(s["resid"], s["yaw_resid"])
+    mv, weak = v > moving, (v > 0.0) & (v <= moving)
+    after = np.maximum.accumulate(v > 0.05, axis=0) & (v == 0.0)
+    return dict(cells=int(v.size), v0_cells=int((v == 0.0).sum()), weak_cells=int(weak.sum()), unbalanced_weak=int((weak & (res > 0.05)).sum()),
+                moving_cells=int(mv.sum()), max_resid_moving=float(res[mv].max()),
+                stall_onset={float(a): float(tws[after[:, j]].min()) for j, a in enumerate(twa) if after[:, j].any()})
 
 
 def through_water_table(P: dict[str, Any], pol: Polar, wind_en: Arr, current_en: Arr, heading_to: Arr) -> dict[str, Any]:
@@ -414,7 +438,7 @@ def _bretschneider(w: Arr, tp: Arr) -> Arr:
 
 
 def _build_waves(P: dict[str, Any]) -> WaveTab:
-    tp, chi, u = np.linspace(3.0, 21.0, 19), np.linspace(0.0, 180.0, 13), np.linspace(0.0, 3.5, 8)
+    tp, chi, u = np.linspace(3.0, 21.0, 19), np.linspace(0.0, 180.0, 13), np.linspace(0.0, WAVE_U_MAX, 8)
     w = np.geomspace(0.25, 6.0, 120)
     _, _, raw = _strip(P, w[:, None, None], chi[None, :, None], u[None, None, :])
     s = _bretschneider(w[None, :], tp[:, None])                   # (nP, nW)
@@ -541,7 +565,7 @@ class USVSim:
 
     def _eval(self, hd: Arr, c: dict[str, Any]) -> dict[str, Any]:
         """Speed, track and state for headings hd (M, H) [deg]: polar at the wind relative to the water, minus R_aw / K, times the
-        VPP bias, capped at the hull speed."""
+        VPP bias, capped at the speed cap stw_cap_ms."""
         gam = np.mod(c["wfrom"][:, None] - hd + 180.0, 360.0) - 180.0
         f = _lin(self.pol.f, (self.pol.tws, self.pol.twa), (c["tws"][:, None], np.abs(gam)))
         v0, beta, phi, kk, aws, awa, _ = np.moveaxis(f, -1, 0)
@@ -626,7 +650,7 @@ class USVSim:
         self.acc["wind_out"] = np.where(c["tws"] > self.pol.tws[-1], self.acc["wind_out"] + dt, 0.0)
         self._flag("capsize_proxy", (peak > md["roll_limit_deg"]) | (self.acc["wind_out"] >= md["stall_sustain_s"]))
         for name, stalled, hold in (("wing_stall_calm", e1["aws"] < P["trim_min_aws_ms"], "calm_sustain_s"),
-                                    ("wing_stall_angle", e1["awa"] < P["min_awa_deg"], "stall_sustain_s")):
+                                    ("wing_stall_angle", (e1["awa"] < P["min_awa_deg"]) & (e1["aws"] >= P["trim_min_aws_ms"]), "stall_sustain_s")):
             self.acc[name] = np.where(stalled, self.acc[name] + dt, 0.0)
             self._flag(name, self.acc[name] >= md[hold])
         sw = self.env.air(self.lon, self.lat, t)["swdown"].value
@@ -713,7 +737,8 @@ def receipts(P: dict[str, Any] | None = None) -> None:  # pragma: no mutate bloc
     P = P or load_platform()
     grp, hours = "usv", 3600.0
     pol, wt = tables(P)
-    # ITTC-57 line and the hull-speed cap are closed forms
+    # ITTC-57 line and the speed cap are closed forms. The cap is the quoted Mazza et al. value; the formula below, with the quoted LOA, reproduces
+    # it (a waterline length would give 3.18 m/s: the label says LOA, and it must stay as it is)
     receipt(grp, "ITTC-1957 C_F at Re = 1e7", float(cf_ittc57(1e7)), 0.075 / 25.0, 1e-12,
             source="ITTC 1957: 0.075/(log10 Re - 2)^2")
     hull_speed = 1.34 * np.sqrt(P["loa_m"] / 0.3048) * 0.514444
