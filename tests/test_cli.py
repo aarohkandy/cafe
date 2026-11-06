@@ -16,6 +16,7 @@ from cafe.pm import __main__ as cli, audit, budget, config, ledger, par, pipelin
 from cafe.pm.env import ocean as ocean_mod
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider
+from cafe.pm.stats import intervals
 from tests.fixtures import pm_run
 from tests.fixtures.fakes import fake_module
 
@@ -805,7 +806,7 @@ def test_r8_m7_validate_prints_no_note_when_go_is_not_above_the_interval_term(tm
 def test_r8_m16_hangar_modems_counts_the_two_assumed_defaults(capsys):
     assert cli.main(["hangar", "--platform", "modems"]) == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[0] == "modems (modem table): provenance OK, 2 of 2 values assumed"
+    assert out.splitlines()[0] == "modems (modem table): provenance OK, 4 of 4 values assumed"  # M-32: with the 2 entries marked assumed (was 2 of 2)
     assert "defaults.anchor_margin_db = 3.0 dB  [ASSUMED: " in out and "defaults.valid_range_factor = 10.0 -  [ASSUMED: " in out
 
 
@@ -887,3 +888,136 @@ def test_r9_m9_a_throughput_file_with_a_malformed_machine_block_still_plans(mach
     assert cli.main(["plan", "--mission", MISSION]) == 0
     out = capsys.readouterr()
     assert "throughput.json was measured" not in out.out and "Traceback" not in out.err
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 10, M-5
+
+def _damaged_run(tmp_path, monkeypatch, damage):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    damage(run)
+    return run
+
+
+def _gone(*parts):
+    def damage(run):
+        target = run.joinpath(*parts)
+        shutil.rmtree(target) if target.is_dir() else target.unlink()
+    return damage
+
+
+def _write_json(*parts, obj):
+    return lambda run: run.joinpath(*parts).write_text(json.dumps(obj))
+
+
+@pytest.mark.parametrize("damage", [
+    _write_json("plan.json", obj={}),                                           # was KeyError 'gpus'
+    _gone("stage1b", "summary.json"),                                           # was FileNotFoundError ("run the stage1b stage first")
+    _gone("stage1b"),
+    _write_json("refit", "refit.json", obj={"glider_eq": {"reason": "no `used` key"}}),      # was KeyError 'used'
+], ids=["plan_without_keys", "no_stage1b_summary", "no_stage1b", "refit_without_used"])
+def test_r10_m5_a_finished_run_that_is_damaged_ends_in_an_error_line_and_exit_2(tmp_path, capsys, monkeypatch, damage):
+    run = _damaged_run(tmp_path, monkeypatch, damage)
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "Traceback" not in err and str(run) in err
+
+
+def test_r10_m5_whatif_reads_the_same_damaged_files_the_same_way(tmp_path, capsys, monkeypatch):
+    run = _damaged_run(tmp_path, monkeypatch, _write_json("refit", "refit.json", obj={"glider_eq": {"reason": "no `used` key"}}))
+    shutil.copy(run / "mission.yaml", tmp_path / "m.yaml")
+    cache = pipeline.Context(str(tmp_path / "m.yaml"), "quick", 0, run).cache
+    cache.mkdir(parents=True)
+    capsys.readouterr()
+    assert cli.main(["whatif", "--mission", str(tmp_path / "m.yaml"), "--run", str(run), "--drop", "usv"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "damaged or incomplete" in err and "'used'" in err
+
+
+def test_r10_m5_a_path_that_cannot_be_made_or_read_is_an_error_line_and_exit_2(tmp_path, capsys, monkeypatch):
+    a_file = tmp_path / "file"
+    a_file.write_text("x")
+    capsys.readouterr()
+    assert cli.main(["run", "--mission", MISSION, "--out", str(a_file)]) == 2                    # was FileExistsError
+    assert capsys.readouterr().err.startswith("error: ")
+    assert cli.main(["run", "--mission", MISSION, "--out", str(a_file / "sub")]) == 2            # was NotADirectoryError (/proc/x: FileNotFoundError)
+    assert capsys.readouterr().err.startswith("error: ")
+    assert cli.main(["receipts", "--broken", str(tmp_path / "nonexistent.yaml")]) == 2           # was FileNotFoundError
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "no such file" in err
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 10, M-7
+
+def _hand_edit_to_go(run):
+    p = run / "stage1b" / "summary.json"
+    d = json.loads(p.read_text())
+    v = d["summary"]["vehicles"]["usv"]
+    v["k_fail"] = 0
+    v["verdict"] = dict(v["verdict"], **intervals.verdict(0, v["n"]))
+    p.write_text(json.dumps(d))
+
+
+def test_r10_m7_a_hand_edited_summary_is_rendered_with_a_warning_above_the_verdicts(tmp_path, capsys, monkeypatch):
+    """usv NO-GO edited to GO (k_fail 0): exit 0, traceability clean, and nothing on the page said the ledger no longer matches the file."""
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    assert cli.main(["report", "--run", str(run)]) == 0
+    clean = json.loads((run / "report" / "report.json").read_text())
+    assert clean["ledger_problems"] == [] and "do not match its files" not in (run / "report" / "index.html").read_text()
+    _hand_edit_to_go(run)
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 0                              # a warning, not a failure: row 515 keeps older runs re-renderable
+    err = capsys.readouterr().err
+    rep = json.loads((run / "report" / "report.json").read_text())
+    assert rep["vehicles"]["usv"]["verdict"] == "GO" and rep["traceability_problems"] == []
+    assert any("summary.json changed since the stage ran" in p for p in rep["ledger_problems"])
+    assert "warning: " in err and "summary.json changed since the stage ran" in err
+    page = (run / "report" / "index.html").read_text()
+    assert "The ledgers of this run do not match its files" in page and page.index("do not match its files") < page.index("<h2>Verdicts</h2>")
+
+
+def test_r10_m7_a_summary_whose_verdict_disagrees_with_its_counts_ends_in_an_error_line(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    p = run / "stage1b" / "summary.json"
+    d = json.loads(p.read_text())
+    v = d["summary"]["vehicles"]["usv"]
+    v["verdict"]["k_fail"] = v["k_fail"] + 10                                       # was ignored: the page still showed the real count
+    p.write_text(json.dumps(d))
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and f"verdict.k_fail is {v['k_fail'] + 10} but k_fail is {v['k_fail']}" in err
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 10, M-32
+
+def test_r10_m32_hangar_counts_the_assumed_inputs_the_way_the_credibility_report_does(capsys, tmp_path):
+    """`hangar --platform modems` said '2 of 2 values assumed' where credibility.json lists 4: the two entries marked `assumed: "<sentence>"` were left out."""
+    from cafe.pm import credibility
+    for name in ("modems", "radios", "seaglider", "slocum", "saildrone_explorer", "quad_uas"):
+        want = [i for i in credibility.platform_items() if i["file"] == f"platforms/{name}.yaml"]
+        assert cli.main(["hangar", "--platform", name]) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert out[0].startswith(f"{name} ") and f"provenance OK, {sum(i['assumed'] for i in want)} of {len(want)} values assumed" in out[0], name
+        assert len(out) == 1 + len(want)
+    assert cli.main(["hangar", "--platform", "modems"]) == 0
+    out = capsys.readouterr().out
+    assert "modems.benthos_atm960 = None" in out and "modems.whoi_micromodem = None" in out and "ASSUMED: sl_db 190" in out
+
+
+def test_r10_m32_a_platform_file_with_an_entry_level_assumed_sentence_counts_it(capsys, tmp_path):
+    from cafe.pm import credibility
+    p = tmp_path / "parts.yaml"
+    p.write_text(yaml.safe_dump({"radios": {"r1": {"source": "a data sheet", "range_km": {"value": 5.0, "unit": "km", "source": "a data sheet"},
+                                                    "assumed": "gain 3 dBi, because the sheet gives none"}}}))
+    assert cli.main(["hangar", "--platform", str(p)]) == 0
+    first = capsys.readouterr().out.splitlines()[0]
+    items = credibility.platform_items(elsewhere=[str(p)])
+    mine = [i for i in items if i["file"] == str(p)]
+    assert f"provenance OK, {sum(i['assumed'] for i in mine)} of {len(mine)} values assumed" in first and sum(i["assumed"] for i in mine) == 1

@@ -122,11 +122,12 @@ def test_not_certifiable_below_n_certify(full):
     rep = full[4]
     kinds = set()
     for d in [*rep["vehicles"].values(), *rep["links"].values()]:
-        assert d["n"]["value"] == 48 < d["n_certify"]["value"] == 73
+        assert d["n"]["value"] == 48
         if intervals.interval(d["k_fail"]["value"], 48, 0.95)[0] < 0.05:                    # round 5, M-11: only one that leaves 5 % open is told to get more
-            assert "cannot be certified at n = 48" in d["certify_statement"] and "73 members" in d["certify_statement"]
+            assert d["n_certify"]["value"] == 73 and "cannot be certified at n = 48" in d["certify_statement"] and "73 members" in d["certify_statement"]
             kinds.add("open")
-        else:
+        else:                                                                               # round 10, M-4: and only that one has a member count at all
+            assert d["n_certify"] is None
             assert "excluded by this ensemble" in d["certify_statement"] and "cannot be certified" not in d["certify_statement"]
             kinds.add("excluded")
     assert kinds == {"open", "excluded"}
@@ -140,7 +141,9 @@ def test_certifiable_at_large_n(run):
     m, plan = pm_run.make_run(run, M=80)
     report.write(run, m, plan)
     rep = load(run)
-    assert all(d["certify_statement"] is None for d in rep["vehicles"].values())
+    for d in rep["vehicles"].values():    # round 10, M-4: an excluded P(fail) is said so at any n
+        assert d["certify_statement"] is None or ("excluded by this ensemble" in d["certify_statement"] and d["n_certify"] is None)
+    assert any(d["certify_statement"] is None for d in rep["vehicles"].values())
     assert "cannot be certified" not in (run / "report" / "index.html").read_text()
 
 
@@ -738,7 +741,7 @@ def test_map_without_ship_and_windows(run):
 
 
 def test_a_run_with_no_stage1b_summary_is_refused(tmp_path):
-    with pytest.raises(FileNotFoundError, match="stage1b/summary.json is not in the run directory; run the stage1b stage first"):
+    with pytest.raises(config.ConfigError, match=r"stage1b/summary.json is not in the run directory; this is not a finished run: rerun it \(--fresh\)"):
         report.write(tmp_path, {}, {})
 
 
@@ -1152,8 +1155,8 @@ CUT = dict(ok=False, cut=True, cut_reason="cut at the time limit: its wall-clock
 def test_a_window_cut_at_the_time_limit_withholds_its_numbers_so_two_cut_points_give_one_report(run, tmp_path):
     """M-5: the cut falls at a chunk boundary decided by the clock; its coefficients must not reach a hashed report."""
     out = []
-    for steps, cd in ((3500, 1.962), (3200, 1.7)):
-        d = tmp_path / f"r{steps}"
+    for i, (steps, cd) in enumerate(((3500, 1.962), (3200, 1.7))):
+        d = tmp_path / f"cut{i}"       # no digits of the numbers: the page now names a changed file (M-7)
         d.mkdir()
         m, plan = pm_run.make_run(d)
         md = dict(CUT["timing"]["machine_dependent"], cd=cd, run_steps=steps)
@@ -2258,9 +2261,10 @@ def test_a_not_exercised_links_card_has_no_certifying_sentence_and_the_other_car
     card = plain(h.split("<div id='v-usv-uas-rf'>")[1].split("<div id='v-")[0])
     assert "certifying" not in card and "Wilson bound)" not in card and re.search(r"\d+ members failed of \d+ members\.", card)   # ends after n
     assert rep["links"]["usv-uas-rf"]["n_certify"] is None
-    other = plain(h.split("<div id='v-glider_eq-ship-acoustic'>")[1].split("<div id='v-")[0])
+    other = plain(h.split("<div id='v-glider_2n'>")[1].split("<div id='v-")[0])  # round 10, M-4: a card that leaves P(fail) < 5 % open (0 of 48)
     assert f"certifying P(fail) < 5 % needs {intervals.n_certify()} members, two-sided 95 % Wilson bound)" in other
-    assert rep["links"]["glider_eq-ship-acoustic"]["n_certify"]["value"] == intervals.n_certify()
+    assert rep["vehicles"]["glider_2n"]["n_certify"]["value"] == intervals.n_certify()
+    assert rep["links"]["glider_eq-ship-acoustic"]["n_certify"] is None                              # 12 of 48 excludes it: no count to ask for
     assert rep["traceability_problems"] == [] and report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
 
 
@@ -2510,3 +2514,163 @@ def test_l1_the_uas_attitude_statement_is_built_from_the_platform_the_vehicle_fl
     t = plain((run / "report" / "index.html").read_text())
     assert "(the tilt clamp, 35 deg, is below the 42 deg exceedance)" in t and "rests on battery alone below about 9 m/s of wind" in t
     assert report.check_rendered(load(run), (run / "report" / "index.html").read_text()) == [] and load(run)["vehicles"]["usv"]["uas_limits"] is None
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 10, M-9
+
+def test_r10_m9_a_run_without_windows_json_says_so_where_the_stage_3_markers_would_be(run):
+    """The windows stage always writes windows/windows.json ({} when there are none); a run without it lost the map labels, the 'worst windows' forcing
+    lines and every window's time, and the report said nothing."""
+    m, plan = pm_run.make_run(run)
+    (run / "windows" / "windows.json").unlink()
+    report.write(run, m, plan)
+    rep, h = load(run), plain((run / "report" / "index.html").read_text())
+    say = "windows/windows.json is not in the run directory"
+    assert say in rep["map"]["windows_missing"] and say in rep["environment"]["forcing_missing"]
+    assert rep["map"]["windows"] == {} and rep["environment"]["forcing_at_windows"] == {}
+    ws = [w for ws in rep["stage3"]["vehicles"].values() for w in ws]
+    assert ws and all(w["t"] is None and say in w["t_missing"] for w in ws)
+    assert f"Stage-3 window positions are not shown: {say}" in h and f"Forcing at the worst windows is not shown: {say}" in h
+    assert h.count(f"Time not shown: {say}") == len(ws)
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+
+
+def test_r10_m9_a_run_with_an_empty_windows_json_is_not_called_damaged(run):
+    m, plan = pm_run.make_run(run)
+    (run / "windows" / "windows.json").write_text("{}")
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    assert rep["map"]["windows_missing"] is None and rep["environment"]["forcing_missing"] is None
+    assert all(w["t"] is None and "windows/windows.json has 0 window(s)" in w["t_missing"] for ws in rep["stage3"]["vehicles"].values() for w in ws)
+    assert "positions are not shown" not in h and "worst windows is not shown" not in h and "Time not shown: windows/windows.json is not" not in h
+
+
+def test_r10_m9_an_intact_run_has_no_missing_windows_note(run):
+    m, plan = pm_run.make_run(run)
+    report.write(run, m, plan)
+    rep = load(run)
+    assert rep["map"]["windows_missing"] is None and rep["environment"]["forcing_missing"] is None
+    ws = [w for ws in rep["stage3"]["vehicles"].values() for w in ws]
+    assert ws and all((w["t"] is None) == (w["t_missing"] is not None) for w in ws) and any(w["t"] is not None for w in ws)  # a stage-3 row beyond the windows
+    assert all("is not in the run directory" not in (w["t_missing"] or "") for w in ws)
+
+
+def span(path, text):
+    """A number as `report._n` prints it for the node at `path` of report.json (round 10, M-27)."""
+    return f'<span class=n>{text}<a class=lk title="t" data-path="{path}">L</a><a class=lk href="#r">R</a></span>'
+
+
+def test_r10_m27_a_card_that_stops_printing_a_number_the_others_print_is_found_though_the_text_is_on_the_page():
+    """Round 10, M-27: every node was searched as a token in the whole page, so a card that stopped printing "0 members" passed while 28 others printed it.
+    The span carries the node's path; a shape printed for one vehicle is asked for all of them."""
+    zero = dict(value=0, unit="members")
+    rep = dict(vehicles=dict(x=dict(n=dict(zero), m=dict(value=7, unit="members")), y=dict(n=dict(zero)), z=dict(n=dict(zero))))
+    page = span("vehicles.x.n", "0 members") + span("vehicles.y.n", "0 members") + span("vehicles.z.n", "0 members") + span("vehicles.x.m", "7 members")
+    assert report.check_rendered(rep, page) == []
+    assert report.check_rendered(rep, page.replace(span("vehicles.y.n", "0 members"), "")) == ["vehicles.y.n: '0 members' is not in the HTML"]
+    assert report.check_rendered(rep, span("vehicles.x.n", "0 members") + span("vehicles.x.m", "7 members") + " 0 members 0 members") != []
+    assert report.check_rendered(rep, page.replace("7 members", "8 members")) == ["vehicles.x.m: '7 members' is not in the HTML"]      # the old rule
+    assert report.check_rendered(rep, page + span("vehicles.y.n vehicles.q.n", "0 members")) == []                                    # one node, two paths
+    assert report.check_rendered(rep, "0 members 7 members") == []                                    # no span names a path: nothing to compare (the old rule)
+
+
+def test_r10_m27_every_number_node_of_a_rendered_report_is_printed_under_its_own_path_where_its_shape_is_printed(full):
+    run, _, _, _, rep = full
+    h = (run / "report" / "index.html").read_text()
+    assert report.check_rendered(rep, h) == []
+    count = {}
+    for _, ps in report.PRINTED.findall(h):
+        for p in ps.split(" "):
+            count[p] = count.get(p, 0) + 1
+    shapes = {}
+    for p in count:
+        shapes.setdefault(report.INSTANCE.sub("*", p), []).append(p)
+    first = next(m for m in report.PRINTED.finditer(h)
+                 if " " not in m.group(2) and count[m.group(2)] == 1 and len(shapes[report.INSTANCE.sub("*", m.group(2))]) > 1)
+    path = first.group(2)
+    dropped = h[:first.start()] + h[first.end():]                                                  # the span loses its text
+    assert [p.split(":")[0] for p in report.check_rendered(rep, dropped)] == [path]
+
+
+def test_r10_m4_an_ensemble_that_excludes_p_fail_below_5_percent_has_no_member_count_to_ask_for():
+    """Round 10, M-4: six cards said 'certifying P(fail) < 5 % needs 73 members' and, four lines later, 'no number of members certifies it'."""
+    d = stat_block(15, 64)                                                    # Wilson lower bound 0.15: P(fail) < 5 % is excluded
+    assert d["n_certify"] is None and "excluded by this ensemble" in d["certify_statement"] and "cannot be certified" not in d["certify_statement"]
+    t = plain(report._stat_html(d))
+    assert "needs" not in t and "certifying" not in t and "excluded by this ensemble" in t
+    d = stat_block(40, 100)                                                   # n above n_certify: it was silent, with the parenthesis
+    assert d["n_certify"] is None and "excluded by this ensemble" in d["certify_statement"]
+    assert "certifying" not in plain(report._stat_html(d))
+    d = stat_block(0, 64)                                                     # an open one keeps both
+    assert d["n_certify"]["value"] == 73 and "cannot be certified at n = 64" in d["certify_statement"]
+    assert "certifying P(fail) < 5 % needs 73 members" in plain(report._stat_html(d))
+    d = stat_block(2, 80)
+    assert d["n_certify"]["value"] == 73 and d["certify_statement"] is None
+
+
+def test_r10_m4_no_card_of_a_full_report_asks_for_members_and_denies_that_members_help(full):
+    run, _, _, _, rep = full
+    cards = re.split(r"<div id='v-", (run / "report" / "index.html").read_text())[1:]
+    assert len(cards) == len(rep["vehicles"]) + len(rep["links"])
+    for card in map(plain, cards):
+        assert not ("certifying P(fail) < 5 % needs" in card and "no number of members certifies it" in card)
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 10, M-7, M-21
+
+@pytest.mark.parametrize("field, value, words", [("k_fail", 70, "verdict.k_fail is 70 but k_fail is 15"), ("n", 65, "verdict.n is 65 but n is 64"),
+                                                ("p_fail", float("nan"), "verdict.p_fail is not a finite number"),
+                                                ("fail_hi", float("inf"), "verdict.fail_hi is not a finite number")])
+def test_r10_m7_a_verdict_that_disagrees_with_its_counts_or_is_not_finite_is_refused(field, value, words):
+    ref = dict(stage="stage1b", receipt="r", ledger="l")
+    e = dict(n=64, k_fail=15, verdict=dict(intervals.verdict(15, 64), **{field: value}))
+    with pytest.raises(config.ConfigError, match=words):
+        report._stat(e, ref, "stage1b/summary.json vehicles.usv")
+    report._stat(dict(n=64, k_fail=15, verdict=intervals.verdict(15, 64)), ref, "src")                    # the consistent one is fine
+
+
+def test_r10_m21_the_limits_the_report_prints_are_the_ones_the_gate_judges_against(run, monkeypatch):
+    from cafe.pm import whatif
+    monkeypatch.setitem(whatif.LIMITS, "rmse", 0.04)
+    monkeypatch.setitem(whatif.LIMITS, "coverage", 0.07)
+    monkeypatch.setitem(whatif.LIMITS, "query_ms", 12.5)
+    m, plan = pm_run.make_run(run)
+    h = json.loads((run / "emulator" / "holdout.json").read_text())
+    h["glider_eq"].update(cls="glider", rows=140, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03,
+                          acceptance=dict(rmse_ok=False, coverage_ok=True, query_ok=True), coverage_chance_fail=0.42)
+    h["glider_eq"]["rmse"]["t_fail_h"], h["glider_eq"]["coverage"]["t_fail_h"] = 3.0, 0.88
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    lim = load(run)["emulator"]["vehicles"]["glider_eq"]["acceptance"]["limits"]
+    assert (lim["rmse"]["value"], lim["coverage"]["value"], lim["query_ms"]["value"]) == (0.04, 0.07, 12.5)
+
+
+# ---------------------------------------------------------------------------------------------------------- review round 10, M-16
+
+def test_r10_m16_overdepth_is_explained_from_the_measured_peak_depth():
+    """A Seaglider ordered to 1000 m (its rating, which the loader accepts) overshoots by about 7 m at the first apogee and fails overdepth in every member:
+    right under the model, but nothing said that it was the vehicle's own overshoot and not a fault of another kind."""
+    v = {"id": "g", "platform": "seaglider", "task": {"dive_depth_m": 1000.0}}
+    depth = np.array([[0.0, 990.0, 0.0], [0.0, 1007.4, 0.0], [0.0, np.nan, 500.0]])
+    r = dict(first=dict(overdepth=np.array([np.nan, 7200.0, np.nan])), depth=depth)
+    note = report._overdepth_note(v, r)
+    assert note.startswith("the depth passed the platform's rating_m (1000 m): the ordered dive depth (1000 m) plus the apogee overshoot")
+    assert "the measured peak depth of the members that failed this way was 1007.4 m, 7.4 m past the order" in note
+    assert "not a fault of the mission of another kind" in note
+    no_member = dict(first=dict(overdepth=np.full(3, np.nan)), depth=depth)
+    assert "measured peak" not in report._overdepth_note(v, None) and "measured peak" not in report._overdepth_note(v, no_member)
+    assert "rating_m (" not in report._overdepth_note(dict(v, platform="no_such_platform"), None)
+
+
+def test_r10_m16_a_glider_that_failed_overdepth_carries_the_explanation_in_its_card(run):
+    m, plan = pm_run.make_run(run)
+    p = run / "stage1b" / "summary.json"
+    d = json.loads(p.read_text())
+    e = d["summary"]["vehicles"]["glider_eq"]
+    e["modes"], e["dominant"] = {"overdepth": e["k_fail"]}, "overdepth"
+    p.write_text(json.dumps(d))
+    report.write(run, m, plan)
+    rep, h = load(run), plain((run / "report" / "index.html").read_text())
+    note = rep["vehicles"]["glider_eq"]["mode_notes"]["overdepth"]
+    assert "plus the apogee overshoot" in note and f"overdepth: {note}." in h
+    assert "overdepth" not in rep["vehicles"]["glider_2n"]["mode_notes"] and "overdepth" not in rep["vehicles"]["usv"]["mode_notes"]

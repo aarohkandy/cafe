@@ -825,6 +825,7 @@ def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.
                 note="Levels run 0-4 (BRIEF 5.4). The rule behind each level is this tool's reading of the factor, not the text of NASA-STD-7009B, "
                      "which was not re-read. Level 4 is never awarded automatically.",
                 levels=LEVELS, factors=factor_table(f), vv20=f.vv, limitations=f.limitations, sanity=sanity(f), assumed_inputs=items,
+                ledger_problems=f.problems,
                 platform_assumed_counts={s: sum(1 for i in items if i["file"] == lab and i["kind"] == "assumed") for s, lab in sorted(labels.items())})
 
 

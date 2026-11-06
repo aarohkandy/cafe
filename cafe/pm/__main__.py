@@ -24,7 +24,7 @@ import argparse, os, pathlib, sys, webbrowser
 from typing import Any
 
 from . import acceptance, audit, budget, ledger, par, pipeline, report, stage1, whatif
-from .config import ConfigError, json_object as _json_object, load_mission
+from .config import ConfigError, damaged_run_files as _run_files, json_object as _json_object, load_mission
 from .stats import intervals
 
 
@@ -169,6 +169,9 @@ def main(argv: list[str] | None = None) -> int:
     except ledger.StageFailed as e:                                      # a stage's self-check failed: the message names it and the ledger has the detail
         print(f"error: {e}", file=sys.stderr)
         return 1
+    except OSError as e:                                                 # round 10, M-5: a named path (--out, --run, ...) that cannot be made or read
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     return 0
 
 
@@ -184,14 +187,17 @@ def _report(run: pathlib.Path, open_it: bool) -> int:
     if not (run / "plan.json").is_file():
         raise ConfigError(f"{run}: no plan.json; this is not a finished run directory (run `python -m cafe.pm run` first)")
     plan = _json_object(run / "plan.json")
-    ctx = pipeline.Context(run / "mission.yaml", None, plan["gpus"], run, hash_budget=plan["budget"])         # no plan: no stage-1 memory model
-    env = None
-    if ctx.cache.is_dir():
-        try:
-            env = ctx.env
-        except Exception as e:                                          # noqa: BLE001  a broken cache must not stop the report
-            print(f"note: environment not loaded ({type(e).__name__}: {e}); no environment section or reach map", file=sys.stderr)
-    paths = report.write(run, m, plan, env=env)
+    with _run_files(run):
+        ctx = pipeline.Context(run / "mission.yaml", None, plan["gpus"], run, hash_budget=plan["budget"])         # no plan: no stage-1 memory model
+        env = None
+        if ctx.cache.is_dir():
+            try:
+                env = ctx.env
+            except Exception as e:                                      # noqa: BLE001  a broken cache must not stop the report
+                print(f"note: environment not loaded ({type(e).__name__}: {e}); no environment section or reach map", file=sys.stderr)
+        paths = report.write(run, m, plan, env=env)
+    for problem in _json_object(run / "report" / "report.json").get("ledger_problems", []):       # round 10, M-7: a warning, not a failure (DECISIONS 515)
+        print(f"warning: {problem}", file=sys.stderr)
     bad = {k: v for k, v in report.self_checks(run).items() if v}                    # the stage's own checks on the new files, before they are recorded
     if bad:
         for k, v in bad.items():
@@ -242,19 +248,11 @@ def _hangar(name: str) -> int:
     except ValueError as e:
         print(f"{name} ({cls}): provenance FAILED: {e}")
         return 1
-    leaves: list[tuple[str, dict[str, Any]]] = []
-
-    def walk(node: Any, path: str) -> None:
-        if isinstance(node, dict) and "value" in node:
-            leaves.append((path, node))
-        elif isinstance(node, dict):
-            for k, v in node.items():
-                walk(v, f"{path}.{k}" if path else k)
-    walk(raw, "")
-    print(f"{name} ({cls}): provenance OK, {pipeline._assumed(raw)} of {len(leaves)} values assumed")
-    for path, n in leaves:
-        why = "ASSUMED: " + str(n.get("why", "")) if n.get("assumed") is True else "source: " + str(n.get("source", ""))
-        print(f"  {path} = {n['value']} {n.get('unit', '')}  [{why[:110]}]")
+    items = pipeline.provenance(raw, name)                                       # the items credibility.json counts (round 10, M-32)
+    print(f"{name} ({cls}): provenance OK, {sum(i['assumed'] for i in items)} of {len(items)} values assumed")
+    for i in items:
+        why = "ASSUMED: " + i["why"] if i["assumed"] else "source: " + i["source"]
+        print(f"  {i['path']} = {i['value']} {i['unit']}  [{why[:110]}]")
     return 0
 
 
@@ -277,18 +275,19 @@ def _whatif(a: argparse.Namespace) -> int:
     if not ctx.cache.is_dir():
         raise ConfigError(f"no environment cache at {ctx.cache}: run `python -m cafe.pm fetch --mission {a.mission}` first")
     base, tracks, scales, fitted = {}, {}, None, None
-    if (run / "stage1b" / "summary.json").is_file():
-        base = {k: v["verdict"] for k, v in _json_object(run / "stage1b" / "summary.json")["summary"]["vehicles"].items()}
-        res, why = report._load_res(run, report.Trace(run))
-        tracks = {k: whatif.track_points(r, m) for k, r in (res or {"vehicles": {}})["vehicles"].items() if r["class"] != "uas"}
-        rf = run / "refit" / "refit.json"
-        scales = {k: r for k, r in _json_object(rf).items() if r["used"]} if rf.is_file() else None
-        pf = run / "ingest" / "priors_fitted.json"
-        fitted = _json_object(pf) if pf.is_file() else None
-        if res is None:
-            print(f"note: {why}; every changed vehicle goes to Stage 1")
-    else:
-        print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {a.budget} budget")
+    with _run_files(run):
+        if (run / "stage1b" / "summary.json").is_file():
+            base = {k: v["verdict"] for k, v in _json_object(run / "stage1b" / "summary.json")["summary"]["vehicles"].items()}
+            res, why = report._load_res(run, report.Trace(run))
+            tracks = {k: whatif.track_points(r, m) for k, r in (res or {"vehicles": {}})["vehicles"].items() if r["class"] != "uas"}
+            rf = run / "refit" / "refit.json"
+            scales = {k: r for k, r in _json_object(rf).items() if r["used"]} if rf.is_file() else None
+            pf = run / "ingest" / "priors_fitted.json"
+            fitted = _json_object(pf) if pf.is_file() else None
+            if res is None:
+                print(f"note: {why}; every changed vehicle goes to Stage 1")
+        else:
+            print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {a.budget} budget")
     cls = set(stage1._classes(m).values())
     ems = whatif.train(pipeline.emulator_table(), cls)
     ans = whatif.answer(m, ops, base, tracks, ctx.env, ems, ctx.plan, fitted, scales, only=a.vehicle)

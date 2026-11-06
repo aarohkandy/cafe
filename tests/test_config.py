@@ -954,3 +954,26 @@ def test_stored_receipt_problem_is_one_rule_for_the_sha_and_the_plate_re_and_ask
     assert config.stored_receipt_problem(p, low, "now", plate=True) == config.plate_re_problem(p, low)
     assert config.stored_receipt_problem(p, low, "now") is None                                   # only a plate is judged by Re_L
     assert config.stored_receipt_problem(p, dict(low, code_sha="old"), "now", plate=True) == "p.json was stored by different code (rerun it)"
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 10, M-8
+
+@pytest.mark.parametrize("lat_min, lat_max, words", [(88.0, 89.9, r"reaches 91.9 deg latitude, beyond \+-90"),
+                                                   (-89.9, -88.0, r"reaches -91.9 deg latitude, beyond \+-90")])
+def test_r10_m8_a_padded_box_beyond_90_degrees_latitude_is_refused_at_validation(tmp_path, lat_min, lat_max, words):
+    with pytest.raises(ConfigError, match=rf"m.yaml: box \(.*\): the box with its pad of 2 deg {words}.*box.pad_deg"):
+        load_mission(edit(tmp_path, lambda d: d["box"].update(lat_min=lat_min, lat_max=lat_max)))
+
+
+def test_r10_m8_a_box_that_the_pad_makes_a_full_circle_is_refused_where_it_used_to_become_a_thin_strip(tmp_path):
+    """lon -179.9 .. 179.9 with a pad of 2 is 363.8 deg wide; box360 took that modulo 360 and fetched 3.8 deg."""
+    with pytest.raises(ConfigError, match=r"m.yaml: box \(.*\): the box is 363.8 deg wide with its pad of 2 deg, a full circle or more"):
+        load_mission(edit(tmp_path, lambda d: d["box"].update(lon_min=-179.9, lon_max=179.9)))
+    with pytest.raises(ConfigError, match=r"is 360 deg wide with its pad of 10 deg"):
+        load_mission(edit(tmp_path, lambda d: d["box"].update(lon_min=-170.0, lon_max=170.0, pad_deg=10.0)))
+
+
+def test_r10_m8_the_demo_a_box_reaching_exactly_90_degrees_and_a_wide_box_that_fits_still_load(tmp_path):
+    load_mission(DEMO)
+    load_mission(edit(tmp_path, lambda d: d["box"].update(lat_min=-88.0, lat_max=88.0)))                  # -90 and 90 exactly are fine
+    load_mission(edit(tmp_path, lambda d: d["box"].update(lon_min=165.0, lon_max=-165.0, pad_deg=2.0)))   # the dateline box: 30 + 4 deg

@@ -38,7 +38,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import budget, config, credibility
-from .config import json_object
+from .config import ConfigError, json_object
 from .stage1 import NOT_EXERCISED, _classes, path_speed as _member_speeds
 from .env.remote import sha256
 from .ledger import STAGES
@@ -72,6 +72,7 @@ PHYSICS = dict(glider="pm.physics.glider", usv="pm.physics.usv", uas="pm.physics
 SENSITIVITY = "sensitivity_cases.json"             # stage1b/: {vid: [{case, k_fail, n, verdict, note}]}, written by whoever runs a case
 FORCING = {"glider": ("surface current speed", "m/s"), "usv": ("significant wave height", "m"), "uas": ("10 m wind speed", "m/s")}
 NOT_PRESENT = "{} is not in the run directory"
+NO_WINDOWS = NOT_PRESENT.format("windows/windows.json")      # round 10, M-9: the windows stage always writes it ({} for none)
 
 
 def _jl(p: pathlib.Path) -> Any:
@@ -270,11 +271,19 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     None and is `decided` (more members cannot change it). `p_fail` carries the verdict's own interval
     (its `conf`); `stop_interval` is the stopper's, and `thresholds` the verdict cut-offs, each a traced node the sentences only restate."""
     v = e["verdict"]
+    for key in ("n", "k_fail"):                                     # round 10, M-7: a verdict that disagrees with its own counts was edited or is damaged
+        if key in v and v[key] != e[key]:
+            raise ConfigError(f"{src}: verdict.{key} is {v[key]} but {key} is {e[key]}: the summary was edited or is damaged; run it again (--fresh)")
+    nonfinite = [k for k in ("p_fail", "fail_lo", "fail_hi") if not isinstance(v[k], (int, float)) or not math.isfinite(v[k])]
+    if nonfinite:
+        raise ConfigError(f"{src}: verdict.{', verdict.'.join(nonfinite)} is not a finite number: the summary was edited or is damaged; run it again (--fresh)")
     exercised = v["verdict"] != NOT_EXERCISED                       # a link never required: no member count decides it (region None, nothing more to say)
+    fail_lo = intervals.interval(e["k_fail"], e["n"], 0.95)[0]
+    open_ = exercised and fail_lo < 0.05                            # round 10, M-4: only an ensemble that leaves P(fail) < 5 % open has a count to ask for
     unc = dict(kind=f"{v['method']} interval", conf=v["conf"], lo=v["fail_lo"], hi=v["fail_hi"])
     d: dict[str, Any] = dict(verdict=v["verdict"], p_fail=num(v["p_fail"], "fraction", ref, src, unc), n=num(e["n"], "members", ref, src),
                              k_fail=num(e["k_fail"], "members", ref, src), note=v["note"], certify_statement=None,
-                             n_certify=num(v["n_certify"], "members", ref, src) if exercised else None)    # not a target for such a link (526, 533)
+                             n_certify=num(v["n_certify"], "members", ref, src) if open_ else None)    # no target when excluded or NOT EXERCISED (533)
     lo, hi, method = intervals.interval(e["k_fail"], e["n"], sequential.STOP_CONF)
     sunc = dict(kind=f"{method} interval bound", conf=sequential.STOP_CONF)
     where = src + " (stats.intervals.interval at stats.sequential.STOP_CONF)"
@@ -285,11 +294,11 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     d["region"] = intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF) if exercised else None
     d["decided"] = d["region"] is not None or not exercised
     d["undecided_statement"] = None if d["decided"] else _undecided(d["stop_interval"]["lo"]["value"], d["stop_interval"]["hi"]["value"])
-    if e["n"] < v["n_certify"] and exercised:
-        fail_lo = intervals.interval(e["k_fail"], e["n"], 0.95)[0]
+    if exercised and not open_:
+        d["certify_statement"] = f"P(fail) < 5 % is excluded by this ensemble (lower 95 % bound {fail_lo:.2f}): no number of members certifies it."
+    elif open_ and e["n"] < v["n_certify"]:
         d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members (two-sided 95 % Wilson bound) are needed "
-                                  f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, one-sided 95 %)." if fail_lo < 0.05 else
-                                  f"P(fail) < 5 % is excluded by this ensemble (lower 95 % bound {fail_lo:.2f}): no number of members certifies it.")
+                                  f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, one-sided 95 %).")
     return d
 
 
@@ -372,7 +381,28 @@ def _first_mode(r: dict[str, Any]) -> str | None:
     return None if best is None else best[0]
 
 
-def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[str, Any], src: str) -> dict[str, Any]:
+def _overdepth_note(v: dict[str, Any], r: dict[str, Any] | None) -> str:
+    """Round 10, M-16: what the glider failure mode `overdepth` is. The loader accepts an ordered dive depth up to rating_m, and the vehicle sinks on past the
+    order while its pump runs (platform `apogee_overshoot`), so an order within about 7 m of the rating fails in every member; the verdict is right under the
+    model, and this says which kind of failure it is, with the peak depth measured in the members that failed this way."""
+    from .physics import glider
+    try:
+        rating: float | None = glider.load_platform(v["platform"])["rating_m"]
+    except (KeyError, TypeError, ValueError):
+        rating = None
+    ordered = _dive_depth(v)
+    text = ("the depth passed the platform's rating_m" + ("" if rating is None else f" ({rating:g} m)") + f": the ordered dive depth ({ordered:g} m) plus the "
+            "apogee overshoot (the glider keeps sinking while the buoyancy pump runs, platform apogee_overshoot) exceeded it")
+    if r is not None and "overdepth" in r.get("first", {}):
+        hit = np.isfinite(np.asarray(r["first"]["overdepth"], float))
+        d = np.asarray(r["depth"], float)[:, hit] if hit.any() else np.empty((0, 0))
+        if d.size and np.isfinite(d).any():
+            peak = float(np.nanmax(d))
+            text += f"; the measured peak depth of the members that failed this way was {peak:.1f} m, {peak - ordered:.1f} m past the order"
+    return text + "; this is the vehicle's own overshoot at that order, not a fault of the mission of another kind"
+
+
+def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[str, Any], src: str, overdepth: str | None = None) -> dict[str, Any]:
     """What drives a vehicle's failures: the mode of the first failure (from res.pkl, None without it) and each mode's share of the failed members."""
     k = e["k_fail"]
     shares = {m: num(n / k, "fraction of the failed members", ref, f"{src}.modes / k_fail") for m, n in e["modes"].items()} if k else {}
@@ -384,7 +414,8 @@ def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[
         first=None if t_left is None or not np.isfinite(t_left).any()
         else tnum(float(np.nanmin(t_left)), ref, f"stage1b/res.pkl vehicles.{vid}.first.left_data"))
     return dict(first_fail_mode=None if r is None else _first_mode(r), res_available=r is not None, mode_shares=shares, left_data=left,
-                mode_notes={m: (UAS_MODE_TEXT if e.get("cls") == "uas" else {}).get(m) or MODE_TEXT[m] for m in e["modes"] if m in MODE_TEXT})
+                mode_notes={m: (UAS_MODE_TEXT if e.get("cls") == "uas" else {}).get(m) or MODE_TEXT[m] for m in e["modes"] if m in MODE_TEXT}
+                | ({"overdepth": overdepth} if overdepth and "overdepth" in e["modes"] else {}))
 
 
 def _cases(tr: Trace, vid: str, n: int) -> list[dict[str, Any]]:
@@ -404,8 +435,9 @@ def _cases(tr: Trace, vid: str, n: int) -> list[dict[str, Any]]:
 def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str, Any], cred: dict[str, Any], tr: Trace, cred_ref: dict[str, Any],
               flip: dict[str, Any] | None = None, res: dict[str, Any] | None = None) -> dict[str, Any]:
     ref = tr.ref("stage1b", check="lhs_stratified", output="summary.json")
-    plat = {v["id"]: v["platform"] for v in mission["vehicles"]}
-    task = {v["id"]: v.get("task", {}) for v in mission["vehicles"]}
+    veh = {v["id"]: v for v in mission["vehicles"]}
+    plat = {i: v["platform"] for i, v in veh.items()}
+    task = {i: v.get("task", {}) for i, v in veh.items()}
     mref = tr.ref("ingest", label="mission")
     out = {}
     for vid, e in s1b["summary"]["vehicles"].items():
@@ -417,7 +449,9 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         dominant_mode=e["dominant"], modes={k: num(n, "members", ref, f"{src}.modes") for k, n in e["modes"].items()},
                         first_fail=tnum(e["first_fail_t"], ref, f"{src}.first_fail_t"), median_fail=tnum(e["median_fail_t"], ref, f"{src}.median_fail_t"),
                         sensitivity=_sens(e, ref, f"{src}.sensitivity (stats.sensitivity, EASI first-order)"), top3=_top3(e, ref, src),
-                        fix=_fix(flip, vid, tr), physics=tr.physics(e["cls"]), cases=_cases(tr, vid, e["n"]), **_drivers(e, res, vid, ref, src),
+                        fix=_fix(flip, vid, tr), physics=tr.physics(e["cls"]), cases=_cases(tr, vid, e["n"]),
+                        **_drivers(e, res, vid, ref, src, _overdepth_note(veh[vid], ((res or {}).get("vehicles") or {}).get(vid))
+                                   if e["cls"] == "glider" and "overdepth" in e["modes"] else None),
                         speed_ratio=_speed_ratio(e, ref, src),
                         wind3d=_opt(e.get("wind3d_fraction"), "fraction of the sortie records", ref, src + ".wind3d_fraction"),
                         authority=_authority(e.get("authority"), ref, src + ".authority"),
@@ -601,7 +635,7 @@ def _map(mission: dict[str, Any], res: dict[str, Any] | None, why: str, wins: di
     c = lo + ((hi - lo) % 360.0) / 2
     ref = tr.ref("stage1b", output="res.pkl")
     box = vals([lo, hi, b["lat_min"], b["lat_max"]], "deg", cfg, "mission.yaml box (lon_min, lon_max, lat_min, lat_max)")
-    out: dict[str, Any] = dict(available=True, box=box, ship=None, vehicles={}, windows={})
+    out: dict[str, Any] = dict(available=True, box=box, ship=None, vehicles={}, windows={}, windows_missing=NO_WINDOWS if wins is None else None)
     if "ship" in mission:
         out["ship"] = vals([mission["ship"]["lon"], mission["ship"]["lat"]], "deg", cfg, "mission.yaml ship (lon, lat)")
     deploy = {v["id"]: v["deploy"] for v in mission["vehicles"] if "deploy" in v}
@@ -741,7 +775,7 @@ def _env(mission: dict[str, Any], env: Any, res: dict[str, Any] | None, wins: di
                  forcing=num(w["stress"], unit, wref, f"{src}[{i}].stress (queried by the windows stage)", basis=w["basis"]),
                  failed_at=[tnum(x, wref, f"{src}[{i}].failed_at") for x in w.get("failed_at", [])])
             for i, w in enumerate(ws)])
-    out: dict[str, Any] = dict(forcing_at_windows=forcing if wins else {}, vehicles={})
+    out: dict[str, Any] = dict(forcing_at_windows=forcing if wins else {}, forcing_missing=NO_WINDOWS if wins is None else None, vehicles={})
     if env is None or res is None:
         no_env = ("The report was not given an Environment and res.pkl holds positions and flags only, so wind, Hs and current along the tracks "
                   "cannot be queried here; this section shows only the forcing the windows stage recorded at the worst moments.")
@@ -812,13 +846,14 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             else:
                 why = NOT_PRESENT.format("refit/refit.json") if refit is None else "no refit entry for this vehicle"
             at = (wins or {}).get(vid, [])
+            t_why = NO_WINDOWS if wins is None else f"windows/windows.json has {len(at)} window(s) for {vid}, none for W{i + 1}" if i >= len(at) else None
             rows.append(dict(
                 label=f"W{i + 1}", ok=bool(w.get("ok")), error=w.get("error"), used_in_refit=used, not_used_because=why, cut=cut, reasons=reasons,
                 cut_statement=(DIVERGED_STATEMENT if div else CUT_STATEMENT) if cut else None, diverged=div,
                 cells_per_delta=None if cut or not (w.get("resolution") or {}).get("cells_per_delta") else
                 num(w["resolution"]["cells_per_delta"], "cells per boundary-layer thickness", r3, src + ".resolution.cells_per_delta"),
                 nu_raised=(w.get("resolution") or {}).get("nu_floored"),
-                t=tnum(at[i]["t"], wref, "windows/windows.json") if i < len(at) else None,
+                t=tnum(at[i]["t"], wref, "windows/windows.json") if i < len(at) else None, t_missing=t_why,
                 checks=[] if cut else [dict(name=c["name"], ok=bool(c["ok"]), value=num(c["value"], "", r3, src + ".checks"),
                                             limit=num(c["limit"], "", r3, src + ".checks"), note=c.get("note", "")) for c in w.get("checks", [])],
                 coefficients={} if cut else {k: num(w[k], "-", r3, f"{src}.{k}") for k in ("cd", "cd_spread", "cd_hangar", "cl") if w.get(k) is not None}))
@@ -899,6 +934,7 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
                  coverage={k: num(x, "fraction", ref, s + ".coverage") for k, x in e["coverage"].items()}, cls=e.get("cls"), acceptance=None,
                  coverage_raw_p={k: num(x, "fraction", ref, s + ".coverage_raw_p") for k, x in (e.get("coverage_raw_p") or {}).items()} or None)
         if "acceptance" in e:
+            from .whatif import LIMITS                                          # round 10, M-21: what the gate judged against (whatif imports report)
 
             def lim(v: Any, u: str) -> dict[str, Any]:
                 return num(v, u, ref, "cafe/pm/whatif.py LIMITS (BRIEF 2.7 acceptance)")
@@ -911,7 +947,8 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
                                    fresh=_fresh(e, ref, s), draws=e.get("draws"),
                                    rows=num(e["rows"], "rows", ref, s + ".rows"),
                                    coverage_chance_fail=_opt(e.get("coverage_chance_fail"), "fraction", ref, s + ".coverage_chance_fail"),
-                                   limits=dict(rmse=lim(0.05, "fraction"), coverage=lim(0.05, "fraction"), query_ms=lim(10.0, "ms")))
+                                   limits=dict(rmse=lim(LIMITS["rmse"], "fraction"), coverage=lim(LIMITS["coverage"], "fraction"),
+                                               query_ms=lim(LIMITS["query_ms"], "ms")))
         d["used"], d["unused_reason"] = e.get("used"), e.get("unused_reason")
         out[vid] = d
     dd = None
@@ -996,7 +1033,7 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
     cred = json_object(run / "report" / "credibility.json")
     s1b = _jl(run / "stage1b" / "summary.json")
     if s1b is None:
-        raise FileNotFoundError(f"{run / 'stage1b' / 'summary.json'}: {NOT_PRESENT.format('stage1b/summary.json')}; run the stage1b stage first")
+        raise ConfigError(f"{run / 'stage1b' / 'summary.json'}: {NOT_PRESENT.format('stage1b/summary.json')}; this is not a finished run: rerun it (--fresh)")
     res, why = _load_res(run, tr)
     files = (("windows", "windows.json"), ("stage3", "windows.json"), ("refit", "refit.json"), ("emulator", "holdout.json"), ("emulator", "flip.json"),
              ("emulator", "design.json"))
@@ -1026,6 +1063,7 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
                           switches=s1b["summary"].get("subgrid_switches"))          # {name: {on, defaulted}}; None for a summary from before round 5, M-7
     rep["receipts"] = sorted(tr.rows.values(), key=lambda r: r["id"])
     rep["traceability_problems"] = check_traceability(rep)
+    rep["ledger_problems"] = list(cred.get("ledger_problems", []))               # round 10, M-7: what `audit --ledgers-only` would say of the files read above
     return rep
 
 
@@ -1056,13 +1094,18 @@ def _rid(receipt: str) -> str:
     return "r-" + re.sub(r"[^A-Za-z0-9]+", "-", receipt)
 
 
+_PATHS: dict[int, list[str]] = {}               # id of a node of the report being rendered -> its path(s) in report.json; filled by `render` while it runs
+
+
 def _n(n: dict[str, Any] | None) -> str:
     """A number as text plus links to its ledger (L) and to its row of the receipts table (R)."""
     if n is None:
         return "n/a"
     tip = f"{n['stage']}: {n['source']}" + ("" if n["uncertainty"] is None else f"; uncertainty {json.dumps(n['uncertainty'])}")
     href = f' href="../{html.escape(n["ledger"])}"' if n["ledger"].startswith("checkpoints/") else ""          # a model-receipt table is not in the run
-    return (f'<span class=n>{html.escape(_txt(n))}<a class=lk{href} title="{html.escape(tip)}">L</a>'
+    where = _PATHS.get(id(n))                                                    # round 10, M-27: the report.json path(s) of this node, for `check_rendered`
+    at = f' data-path="{html.escape(" ".join(where))}"' if where else ""
+    return (f'<span class=n>{html.escape(_txt(n))}<a class=lk{href} title="{html.escape(tip)}"{at}>L</a>'
             f'<a class=lk href="#{_rid(n["receipt"])}" title="{html.escape(n["receipt"])}">R</a></span>')
 
 
@@ -1400,12 +1443,14 @@ def _map_html(m: dict[str, Any], reach: dict[str, Any]) -> str:
     tracks = "".join(f"<li>{e(v)}: median track {_n(d['median'])}" + "".join(f"; {e(x['label'])} {_n(x['track'])}" for x in d["members"])
                      for v, d in m["vehicles"].items())
     wins = "".join(f"<li>{e(v)} {w['label']}: {_n(w['t'])} at {_n(w['position'])}" for v, ws in m["windows"].items() for w in ws)
-    return f"{_svg(m, reach)}<ul>{tracks}</ul><p>Mission box {_n(m['box'])}; ship {_n(m['ship'])}.</p><ul>{wins}</ul>{_reach_html(reach)}"
+    gone = f"<p class=warn>Stage-3 window positions are not shown: {e(m['windows_missing'])}.</p>" if m.get("windows_missing") else ""
+    return f"{_svg(m, reach)}<ul>{tracks}</ul><p>Mission box {_n(m['box'])}; ship {_n(m['ship'])}.</p>{gone}<ul>{wins}</ul>{_reach_html(reach)}"
 
 
 def _env_html(env: dict[str, Any]) -> str:
     e = html.escape
     h = f"<p>{e(env['how'])}</p>" if "how" in env else ""
+    h += f"<p class=warn>Forcing at the worst windows is not shown: {e(env['forcing_missing'])}.</p>" if env.get("forcing_missing") else ""
     for vid, d in env["vehicles"].items():
         if not d.get("available", True):                                  # older reports have no flag; round 7, M-11
             h += f"<p class=warn><b>{e(vid)}</b>: {e(d['reason'])}.</p>"
@@ -1432,7 +1477,8 @@ def _window_html(w: dict[str, Any]) -> str:
     why = "".join(f"<li>{e(x)}" for x in w["reasons"])
     return (f"<div class=card><b>{w['label']}</b> {state}; {use}"
             + (f". Reason: {e(str(w['error']))}" if w["error"] else "")
-            + (f". At {_n(w['t'])}" if w["t"] else "") + (f". Coefficients: {co}" if co else "")
+            + (f". At {_n(w['t'])}" if w["t"] else f". Time not shown: {e(w['t_missing'])}" if w.get("t_missing") else "")
+            + (f". Coefficients: {co}" if co else "")
             + (f"<p class=warn>{e(w['cut_statement'])}</p>" if w["cut"] else "")
             + f"<p class=muted>Cells per boundary-layer thickness: {_n(w['cells_per_delta'])} (BRIEF 2.6: 5 to 10); lattice viscosity raised: {raised}.</p>"
             + (f"<ul>{why}</ul>" if why else "")
@@ -1584,6 +1630,18 @@ def _sanity_html(sn: dict[str, Any]) -> str:
 
 
 def render(rep: dict[str, Any]) -> str:
+    """The page of `rep`. Every number node is printed through `_n`, which tags its span with the node's path in `rep` (what `check_rendered` reads back)."""
+    _PATHS.clear()
+    for kind, path, node in _walk(rep):
+        if kind == "node":
+            _PATHS.setdefault(id(node), []).append(path)
+    try:
+        return _render(rep)
+    finally:
+        _PATHS.clear()
+
+
+def _render(rep: dict[str, Any]) -> str:
     e = html.escape
     m = rep["mission"]
     rows = "".join(f"<tr><td><a href='#v-{e(i)}'>{e(i)}</a><td>{_badge(d['verdict'])}{_undecided_badge(d)}<td>{_n(d['p_fail'])}<td>{_n(d['n'])}"
@@ -1593,6 +1651,9 @@ def render(rep: dict[str, Any]) -> str:
     tr = (f"<p class=warn>Traceability problems: {e('; '.join(bad))}</p>" if bad
           else "<p class=muted>Traceability check: every number links to a receipt, which is a hashed ledger output, a ledger check, "
                "or a group of model receipts. A link is provenance, not a pass.</p>")
+    tr += (f"<p class=warn>The ledgers of this run do not match its files, so the numbers below may not be what the stages produced (<code>python -m cafe.pm "
+           f"audit --ledgers-only</code> lists them): {e('; '.join(rep['ledger_problems'][:5]))}"
+           f"{' and ' + str(len(rep['ledger_problems']) - 5) + ' more' if len(rep['ledger_problems']) > 5 else ''}.</p>" if rep["ledger_problems"] else "")
     tr += f"<p class=warn>{e(rep['subgrid']['statement'])}</p>" if rep["subgrid"]["statement"] else ""
     tr += f"<p class=muted>Sub-grid calibration used by the stages after stage 3: {e(rep['subgrid']['source'])}.</p>"
     sw = rep["subgrid"].get("switches")
@@ -1629,9 +1690,28 @@ def _token(text: str) -> re.Pattern[str]:
     return re.compile(r"(?<![\w.\-])" + re.escape(html.escape(text)) + r"(?!\w|\.\d)")
 
 
+PRINTED = re.compile(r'<span class=n>([^<]*)<a class=lk[^>]* data-path="([^"]*)"')
+INSTANCE = re.compile(r"(?:(?<=vehicles\.)|(?<=links\.)|(?<=windows\.)|(?<=forcing_at_windows\.)|(?<=refit\.))[^.\[]+|\[\d+\]")     # an id or index
+
+
 def check_rendered(rep: dict[str, Any], html_text: str) -> list[str]:
-    """Every number node's text is in the page as a whole token (the HTML is rendered from the JSON; this catches a section that drops a number)."""
-    return [f"{p}: {_txt(o)!r} is not in the HTML" for k, p, o in _walk(rep) if k == "node" and not _token(_txt(o)).search(html_text)]
+    """The HTML is rendered from the JSON; this catches a section that drops a number. Every number node's text is in the page as a whole token. And `_n`
+    tags each span with the node's path in report.json (round 10, M-27: presence alone let a card that stopped printing "0 members" pass because 28
+    others print it), so a node must also be printed under its own path when the page prints that shape of path for another vehicle, link or window
+    (`vehicles.*.modes.battery`). A shape the page prints nowhere is not asked for: a few nodes are in report.json only (the drawn map's deploy points)."""
+    printed: dict[str, set[str]] = {}
+    for text, paths in PRINTED.findall(html_text):
+        for p in html.unescape(paths).split(" "):
+            printed.setdefault(p, set()).add(html.unescape(text))
+    shapes = {INSTANCE.sub("*", p) for p in printed}
+    bad = []
+    for kind, path, node in _walk(rep):
+        if kind != "node":
+            continue
+        t = _txt(node)
+        if not _token(t).search(html_text) or (INSTANCE.sub("*", path) in shapes and t not in printed.get(path, ())):
+            bad.append(f"{path}: {t!r} is not in the HTML")
+    return bad
 
 
 def write(run_dir: str | pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env: Any = None) -> list[pathlib.Path]:
