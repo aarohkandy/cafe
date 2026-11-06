@@ -1,7 +1,9 @@
 """cafe.pm.shares: the test files split into K shares for bin/proot_suite.sh."""
 import pathlib
 import runpy
+import subprocess
 import sys
+import tomllib
 
 import pytest
 
@@ -32,6 +34,32 @@ def test_the_test_files_are_those_pytest_collects_sorted(tmp_path):
     (root / "tests" / "sub" / "test_c.py").write_text("")
     assert shares.test_files(root) == ["tests/sub/test_c.py", "tests/test_a.py", "tests/test_b.py"]
     assert shares.test_files(pathlib.Path(audit.ROOT)) and all(f.startswith("tests/test_") for f in shares.test_files(audit.ROOT))
+
+
+def test_m29_pytest_and_the_shares_collect_the_same_files_a_name_ending_test_is_neither(tmp_path):
+    """M-29: pytest's default python_files also takes *_test.py; shares globbed test_*.py only, so such a file ran in no share
+    and the coverage gate did not see it fail."""
+    root = tree(tmp_path, {"test_a.py": 1, "x_test.py": 1})
+    (root / "tests" / "test_a.py").write_text("def test_a():\n    pass\n")
+    (root / "tests" / "x_test.py").write_text("def test_x():\n    assert False\n")
+    (root / "pyproject.toml").write_text((audit.ROOT / "pyproject.toml").read_text())
+    r = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-p", "no:cacheprovider"], cwd=root, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    collected = sorted({l.split("::")[0] for l in r.stdout.splitlines() if "::" in l})
+    assert collected == shares.test_files(root) == ["tests/test_a.py"]
+    assert shares.PYTHON_FILES == tomllib.loads((audit.ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]["python_files"]
+
+
+def test_m29_the_time_of_a_real_time_test_is_not_counted_for_its_file(tmp_path):
+    """M-29: the first suite's junit file holds the time of the tests that now run alone, which made test_uas.py and test_emulator.py look heavy."""
+    first = audit.SERIAL_TESTS[0]
+    f, name = first.split("::")
+    j = junit(tmp_path / "j.xml", [(f[:-3].replace("/", "."), 100)])
+    assert shares.file_seconds([j], [f]) == {f: 100.0}                                   # a test of the file that is not a real-time one counts
+    other = tmp_path / "k.xml"
+    other.write_text(f'<testsuites><testsuite><testcase classname="{f[:-3].replace("/", ".")}" name="{name}" time="500"/>'
+                     f'<testcase classname="{f[:-3].replace("/", ".")}" name="test_other" time="2"/></testsuite></testsuites>')
+    assert shares.file_seconds([other], [f]) == {f: 2.0}
 
 
 def test_seconds_are_summed_per_file_a_class_counts_for_its_module_and_a_later_junit_replaces_an_earlier(tmp_path):

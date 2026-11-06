@@ -269,3 +269,40 @@ def test_pm_entry_picks_the_worker_script_for_proot_only_and_the_docker_command_
     (tmp_path / "sent.log").unlink(missing_ok=True)
     rc2, docker2, _ = sent(tmp_path, "bin/pmx.sh", "true", PMX="pm_t")
     assert rc == rc2 == 0 and docker == docker2 and "docker run" in docker and "proot" not in docker             # docker: the same command with or without it
+
+
+# ---- round 10 M-28: a tag must not be one of the suite's own log names
+
+BAD_TAGS = ["a_s2", "a_s10", "a_s3_s1", "a_serial", "a_shares", "a_audit", "go1_s02"]
+OK_TAGS = ["a_s", "a_sx", "a_s2x", "a_s2_x", "s2", "serial", "a_ser"]
+
+
+@pytest.mark.parametrize("tag", BAD_TAGS)
+def test_m28_proot_suite_refuses_a_tag_that_is_a_log_name_of_another_tag(tmp_path, tag):
+    """M-28: with the tag a_s2 beside a, the P-30 sweep of tag a (K=1) deleted a_s2.log, the main log whose rc= line a waiter reads."""
+    home, env, log = world(tmp_path)
+    logs = home / "cafe-worker/logs"
+    logs.mkdir(parents=True)
+    (logs / "a_s2.log").write_text("rc=0\n")
+    r = suite(env, "pm_t", "1", tag)
+    assert r.returncode == 2 and "tag" in r.stderr and calls(log) == []
+    assert (logs / "a_s2.log").read_text() == "rc=0\n"
+
+
+@pytest.mark.parametrize("tag", OK_TAGS)
+def test_m28_a_tag_that_is_no_log_name_still_runs(tmp_path, tag):
+    home, env, log = world(tmp_path)
+    r = suite(env, "pm_t", "1", tag)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("tag", BAD_TAGS)
+def test_m28_the_gate_refuses_the_same_tags_before_anything_is_sent(tmp_path, tag):
+    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag)
+    assert (rc, out) == (2, "") and "tag" in err
+
+
+@pytest.mark.parametrize("tag", OK_TAGS)
+def test_m28_the_gate_still_sends_the_others(tmp_path, tag):
+    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag)
+    assert rc == 0 and f"tmux new-session -d -s {tag} " in out, err

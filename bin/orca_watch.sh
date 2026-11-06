@@ -30,7 +30,9 @@ while :; do
         "$(awk '/MemAvailable/{printf "%.0f",$2/1048576}' /proc/meminfo)" "$(cut -d' ' -f1 /proc/loadavg)" "$free_gb" \
         "$(stat_of oom_kill $G/memory.events)" "$(TMUX_TMPDIR=$HOME/$L cafe-worker/env/bin/tmux ls 2>/dev/null | wc -l)" >> "$W/timeline.tsv"
     u0=$u1
-    [ "$free_gb" -lt $((FLOOR + 40)) ] && [ -z "$low" ] && { low=1; note disk "only $free_gb GB free on the shared disk (jobs refuse under $FLOOR)"; }
+    # One note per dip: latched while low, cleared once the disk is 5 GB above the line (a value hovering at it must not write a snap a minute onto a nearly full disk).
+    if [ "$free_gb" -lt $((FLOOR + 40)) ]; then [ -n "$low" ] || { low=1; note disk "only $free_gb GB free on the shared disk (jobs refuse under $FLOOR)"; }
+    elif [ "$free_gb" -ge $((FLOOR + 45)) ]; then low=; fi
     for f in "$L"/*.log; do
         [ -f "$f" ] && [ ! -L "$f" ] || continue
         n=$(basename "$f" .log)
@@ -40,9 +42,12 @@ while :; do
         fails=$((fails + $(grep -acE '^(tests/.* (FAILED|ERROR)( +\[ *[0-9]+%\])?|\[gw[0-9]+\] (\[ *[0-9]+%\] )?(FAILED|ERROR) tests/.*)$' "$f")))
         errs=$(grep -acE '^(error:|Traceback )' "$f")
         rc=$(tail -n 1 "$f" | grep -ax 'rc=[0-9]*')
-        now="$fails $errs $rc"; was=$(cat "$W/state/$n" 2>/dev/null)
-        [ "$now" = "$was" ] && continue
-        echo "$now" > "$W/state/$n"
+        now="$fails $errs $rc"; seen=$now
+        # A finished log (rc= line) also carries its mtime: bin/pmx.sh rewrites the log of a rerun in place (same inode), so a rerun that ends with the same counts, between two looks, is a new run.
+        [ -z "$rc" ] || seen="$now $(stat -c %Y "$f")"
+        was=$(cat "$W/state/$n" 2>/dev/null)
+        [ "$seen" = "$was" ] && continue
+        echo "$seen" > "$W/state/$n"
         case "$now" in "0 0 "|"0 0 rc=0") ;; *) note "$n" "failed tests $fails, error lines $errs, ${rc:-still running}" ;; esac
     done
     [ -z "${WATCH_ONCE-}" ] || break

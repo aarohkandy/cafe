@@ -9,15 +9,19 @@ the lightest share. Every test file is in exactly one share.
 """
 from __future__ import annotations
 
-import pathlib, sys
+import pathlib, sys, tomllib
 import xml.etree.ElementTree as ET
 
 from .audit import ROOT, SERIAL_TESTS
 
+# pytest's own setting, so that the shares and `pytest tests` collect the same files: a pattern of its own here
+# would leave a file out of every share (round 10 M-29)
+PYTHON_FILES: list[str] = tomllib.loads((ROOT / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]["python_files"]
+
 
 def test_files(root: pathlib.Path = ROOT) -> list[str]:
-    """Every test file under tests/, as pytest collects them, relative to `root`, sorted."""
-    return sorted(str(f.relative_to(root)) for f in (root / "tests").rglob("test_*.py") if "__pycache__" not in f.parts)
+    """Every test file under tests/, as pytest collects them (`python_files` of pyproject.toml), relative to `root`, sorted."""
+    return sorted({str(f.relative_to(root)) for p in PYTHON_FILES for f in (root / "tests").rglob(p) if "__pycache__" not in f.parts})
 
 
 def file_seconds(junit: list[pathlib.Path], files: list[str]) -> dict[str, float]:
@@ -30,7 +34,7 @@ def file_seconds(junit: list[pathlib.Path], files: list[str]) -> dict[str, float
             m = tc.get("classname", "")
             while m and m not in mods:
                 m = m.rpartition(".")[0]                      # tests.test_a.TestClass -> tests.test_a
-            if m:
+            if m and f"{mods[m]}::{tc.get('name')}" not in SERIAL_TESTS:       # those run alone, not in a share (an old junit file may still hold their time)
                 one[mods[m]] = one.get(mods[m], 0.0) + float(tc.get("time", 0))
         out.update(one)
     return out
