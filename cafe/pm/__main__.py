@@ -104,7 +104,8 @@ def main(argv: list[str] | None = None) -> int:
         "The same-seed check is exact equality."))
     p.add_argument("--mission", required=True)
     p.add_argument("--gpus", type=int, default=0)
-    p.add_argument("--out", required=True, help="where the runs, receipts and acceptance.json go (each run in its own subdirectory, removed first; a directory that holds runs acceptance did not make is refused)")
+    p.add_argument("--out", required=True, help="where the runs, receipts and acceptance.json go (each run in its own subdirectory, removed first; "
+                                                 "a directory that holds runs acceptance did not make is refused)")
     p.add_argument("--golden", default=str(acceptance.GOLDEN))
     p.add_argument("--update-golden", action="store_true", help="write the golden from the quick run; that check then fails until it is rerun without this")
     p.add_argument("--skip-overnight", action="store_true", help="rehearsal only: the overnight check fails ('not run')")
