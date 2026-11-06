@@ -21,7 +21,6 @@ import json
 import math
 import os
 import pathlib
-import re
 from typing import Any, Iterable
 
 from . import config, pipeline
@@ -351,63 +350,71 @@ def _stored(f: pathlib.Path, keys: tuple[str, ...], optional: tuple[str, ...] = 
     return (None, f"{f.name} lacks a finite number for {', '.join(bad)} (rerun it)") if bad else (d, "")
 
 
-def _refused(files: list[pathlib.Path], keys: tuple[str, ...], optional: tuple[str, ...] = (), plate: bool = False) -> str | None:
-    """The phrase for the first of `files` that stage 3 refuses to count (`config.stored_receipt_problem`, the gate's own rule: no code sha, another
-    code's, or a plate below Re_L 1e6), else None. A file `_stored` cannot read is left out, as the gate leaves out an unreadable grid; the caller has
-    its own row for that. Stage 3 is imported only now: its physics sha is the cost of the check (round 9, DECISIONS 527)."""
+def _refused(recs: list[tuple[str, dict[str, Any]]], plate: bool = False) -> str | None:
+    """The phrase for the first of `recs` (file name, receipt already read) that stage 3 refuses to count (`config.stored_receipt_problem`, the gate's own
+    rule: no code sha, another code's, or a plate below Re_L 1e6), else None. Stage 3 is imported only now: its physics sha is the cost of the check
+    (round 9, DECISIONS 527)."""
     from .stage3 import lbm
-    for q in files:
-        d, _ = _stored(q, keys, optional)
-        if d is not None and (problem := config.stored_receipt_problem(q.name, d, lbm.physics_sha(), plate)):
-            return problem
-    return None
+    sha = lbm.physics_sha()
+    return next((p for n, d in recs if (p := config.stored_receipt_problem(n, d, sha, plate))), None)
 
 
 def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
-    """Slow-run receipts stored by cafe.pm.stage3: S and D only. A receipt the stage-3 gate refuses (`_refused`) is a "not run" row with the gate's phrase."""
+    """Slow-run receipts stored by cafe.pm.stage3: S and D only. A receipt the stage-3 gate refuses (`_refused`) is a "not run" row with the gate's phrase.
+    The sphere rows are read by the gate's own readers (`nest.stored_study` for the native grids, `lbm.result_row`'s two numbers for the XLB run): a file the
+    gate leaves out or fails is never a row here (P-27, DECISIONS 528)."""
     rec = data / "receipts"
     out = []
-    morrison = None
     for kind, label in (("nest_sphere", "native LBM sphere Cd"), ("lbm_sphere", "XLB sphere Cd")):
         for tag, re_ in (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4)):
             rid, case = f"{kind}:Re{tag}", f"{label} at Re = {re_:g} vs Morrison 2013"
-            if kind == "nest_sphere":                         # one file per resolution, nest_sphere_<tag>_d<cells>.json: the finest is the row
-                found = sorted(((int(m.group(1)), q) for q in rec.glob(f"nest_sphere_{tag}_d*.json") if (m := re.search(r"_d(\d+)\.json$", q.name))))
-                f, others = (found[-1][1], [str(d) for d, _ in found[:-1]]) if found else (rec / f"nest_sphere_{tag}_d*.json", [])
-                files = [q for _, q in found]                 # the gate judges the whole grid study: one grid it refuses refuses the row
-                missing = f"not run: no nest_sphere_{tag}_d*.json under {rec}"
+            if kind == "nest_sphere":                         # one file per resolution, nest_sphere_<tag>_d<cells>.json: the finest the gate counts
+                pattern, missing = f"nest_sphere_{tag}_d*.json", f"not run: no nest_sphere_{tag}_d*.json under {rec}"
+                if not any(rec.glob(pattern)):
+                    out.append(_row(rid, case, f"{rec / pattern}", None, None, None, missing))
+                    continue
+                from .stage3 import lbm, nest
+                grids, bad = nest.stored_study(tag, rec)
+                if not grids and not bad:                     # only a kept rerun (..._prev.json): no grid at all
+                    out.append(_row(rid, case, f"{rec / pattern}", None, None, None, missing))
+                    continue
+                if not grids:
+                    why = (_stored(bad[0], ("d", "cd"), ("seconds",))[1]
+                           or f"{bad[0].name} is no grid of the study (it needs a positive d of its own and a text code_sha; rerun it)")
+                    out.append(_row(rid, case, f"{bad[0]}", None, None, None, f"not run: {why}"))
+                    continue
+                f, d = grids[-1]
+                if refused := _refused([(q.name, g) for q, g in grids]):           # the gate judges the whole study: one grid it refuses refuses the row
+                    out.append(_row(rid, case, f"{f}", None, None, None, f"not run: {refused}"))
+                    continue
+                ref = float(lbm.morrison(re_))                # the gate compares the grids with Morrison, whatever a file says (nest.sphere_receipts)
+                also = f" (d = {' and '.join(str(int(g['d'])) for _, g in grids[:-1])} also stored)" if len(grids) > 1 else ""
+                left = f"; left out as the gate leaves them out: {', '.join(q.name for q in bad)}" if bad else ""
             else:
-                f, others = rec / f"{kind}_{tag}.json", []
-                files = [f]
-                missing = f"not run: {f.name} is not stored"
-            d, why = _stored(f, ("cd",), ("ref",))
-            if d is None:
-                out.append(_row(rid, case, f"{f}", None, None, None, missing if why == "not stored" else f"not run: {why}"))
-                continue
-            if refused := _refused(files, ("cd",), ("ref",)):
-                out.append(_row(rid, case, f"{f}", None, None, None, f"not run: {refused}"))
-                continue
-            if "ref" in d:
-                ref = float(d["ref"])
-            else:
-                from .stage3 import lbm
-                morrison = morrison or lbm.morrison
-                ref = float(morrison(re_))
-            also = f" (d = {' and '.join(others)} also stored)" if others else ""
-            out.append(_row(rid, case, f"{f}", float(d["cd"]), ref, None, f"d = {d.get('d', '?')} cells{also}; the run stores no U_num, U_input or U_D"))
+                f = rec / f"{kind}_{tag}.json"
+                x, why = _stored(f, ("cd", "ref"))            # lbm.result_row fails a run without a number for either, so the page has no Morrison fallback
+                if x is None:
+                    note = f"{f.name} is not stored" if why == "not stored" else why
+                    out.append(_row(rid, case, f"{f}", None, None, None, f"not run: {note}"))
+                    continue
+                if refused := _refused([(f.name, x)]):
+                    out.append(_row(rid, case, f"{f}", None, None, None, f"not run: {refused}"))
+                    continue
+                d, ref, also, left = x, float(x["ref"]), "", ""
+            out.append(_row(rid, case, f"{f}", float(d["cd"]), ref, None, f"d = {d.get('d', '?')} cells{also}; the run stores no U_num, U_input or U_D{left}"))
     plates = (("wm_flat_plate", "wall-modelled flat plate C_f vs ITTC-57", "ittc", config.PLATE_FIELDS),
               ("wm_channel", "wall-modelled channel C_f vs Dean 1978", "cf_dean", config.CHANNEL_FIELDS))
     for name, case, dk, fields in plates:
         f = rec / f"{name}.json"
-        d, why = _stored(f, fields)                                              # every field stage 3 requires of the receipt, not only the two read here
-        if d is not None:                                                        # the gate's rule: the current code's sha, a plate at Re_L 1e6 or more
-            why = _refused([f], fields, (), name == "wm_flat_plate") or why
-            d = None if why else d
-        if d is None:
+        r, why = _stored(f, fields)                                              # every field stage 3 requires of the receipt, not only the two read here
+        if r is not None:                                                        # the gate's rule: the current code's sha, a plate at Re_L 1e6 or more
+            why = _refused([(f.name, r)], name == "wm_flat_plate") or why
+            r = None if why else r
+        if r is None:
             out.append(_row(f"wallmodel:{name}", case, f"{f}", None, None, None,
                             f"not run: {f.name} is not stored" if why == "not stored" else f"not run: {why}"))
         else:
-            out.append(_row(f"wallmodel:{name}", case, f"{f}", float(d["cf"]), float(d[dk]), None, "the run stores no U_num, U_input or U_D"))
+            out.append(_row(f"wallmodel:{name}", case, f"{f}", float(r["cf"]), float(r[dk]), None, "the run stores no U_num, U_input or U_D"))
     return out
 
 

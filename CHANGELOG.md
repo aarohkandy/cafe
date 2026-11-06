@@ -538,6 +538,9 @@ Round 9 read the q9 quick run (`runs/q9`, code `08f05d7`, made on the 32-vCPU bu
   - The Uncertainty factor of the credibility page no longer counts a NOT EXERCISED link among the verdicts with n below `n_certify`; DECISIONS 526 (amends 477).
   - The credibility page counts a stored sphere or wall-model receipt only as stage 3 does: a receipt with no `code_sha`, or another code's, is a "not run" row with the gate's phrase (`config.stored_receipt_problem`, one rule for both); the stored receipts read "not run" until `make receipts --slow` on the frozen code; DECISIONS 527 (amends 464, 502).
   - P-4 answered with no code change: no verdict depends on the emulator's variant count; the flip search's budget does (P-25, the lead's call). `review/orca/PROBLEMS.md`.
+  - P-4's closing sentence narrowed (P-28): no stage 1b vehicle or link verdict depends on the emulator's variant count, but the flip search does, through its budget (P-25) and through whether an emulator trains when the table plus the variants straddle 100 points; no code, `review/orca/PROBLEMS.md`.
+  - The credibility page reads a stored sphere receipt through the gate's own readers (`nest.stored_study`, the XLB `cd` and `ref`), so a row is "run" exactly when stage 3 counts a result; DECISIONS 528 (amends 527), P-27.
+  - `bin/pmx.sh` with `TM=`: `tmux kill-session` now ends the log with `rc=143` (the pane shell passes the hang-up to the job and writes its status) instead of leaving no `rc=` line; DECISIONS 529, P-26.
 
 ### Known issues
 

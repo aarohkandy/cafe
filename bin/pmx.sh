@@ -1,6 +1,6 @@
 #!/bin/sh
 # Like ./pm.sh but syncs (with --delete) to a private ~/work/cafe/$PMX so it never touches the shared ~/work/cafe/pm. Run from the cafe checkout.
-# TM=<name>: run detached in tmux session <name>, output to ~/logs/<name>.log, exit code appended as "rc=N". After 3 s the session must exist (exact name) or the log must already end in rc=0, else exit 1.
+# TM=<name>: run detached in tmux session <name>, output to ~/logs/<name>.log, exit code appended as "rc=N" (also after `tmux kill-session`: the HUP is passed to the job and its own status, 143, is written; P-26). After 3 s the session must exist (exact name) or the log must already end in rc=0, else exit 1.
 # What the sync keeps on the server (outputs of jobs and gates): bin/sync_filters, shared with pm.sh.
 # Worker: PM_HOST=<ssh host> (default homebase; an ~/.ssh/config name such as cafe-burst carries its own jump), PM_KEY=<ssh key>. bin/worker_setup.sh readies one.
 # PM_ENTRY=proot_suite.sh (with PM_RUNTIME=proot): the worker script that runs, instead of proot_run.sh, with the dir name first as for it (bin/orca_gate.sh).
@@ -23,7 +23,7 @@ if [ "${PM_RUNTIME:-docker}" = proot ]; then
   CMD="CAFE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null) CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo 1; else echo 0; fi) PM_CPUS=${PM_CPUS:-8} CAFE_MIN_FREE_GB=${CAFE_MIN_FREE_GB:-60} PM_STOP_GRACE=${PM_STOP_GRACE:-10} sh \$HOME/$R/$D/bin/${PM_ENTRY:-proot_run.sh} $D $*"
 fi
 if [ -n "$TM" ]; then
-  $S "$H" "${PRE}mkdir -p \$HOME/$R/pmdata $L && tmux new-session -d -s $TM \"$CMD > $L/$TM.log 2>&1; echo rc=\\\$? >> $L/$TM.log\" && sleep 3 && if tmux has-session -t =$TM 2>/dev/null; then tmux ls | grep \"^$TM:\" || :; else tail -n 1 $L/$TM.log | grep -qx rc=0 && echo \"$TM: finished, rc=0\" || { echo \"$TM ended: \$(tail -n 1 $L/$TM.log)\" >&2; exit 1; }; fi"
+  $S "$H" "${PRE}mkdir -p \$HOME/$R/pmdata $L && tmux new-session -d -s $TM \"trap 'kill -HUP \\\$p 2>/dev/null; wait \\\$p; echo rc=\\\$? >> $L/$TM.log; exit' HUP; $CMD > $L/$TM.log 2>&1 & p=\\\$!; wait \\\$p; echo rc=\\\$? >> $L/$TM.log\" && sleep 3 && if tmux has-session -t =$TM 2>/dev/null; then tmux ls | grep \"^$TM:\" || :; else tail -n 1 $L/$TM.log | grep -qx rc=0 && echo \"$TM: finished, rc=0\" || { echo \"$TM ended: \$(tail -n 1 $L/$TM.log)\" >&2; exit 1; }; fi"
 else
   $S "$H" "${PRE}mkdir -p \$HOME/$R/pmdata && $CMD"
 fi

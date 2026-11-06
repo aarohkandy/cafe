@@ -157,6 +157,52 @@ def test_a_detached_job_is_judged_by_its_own_session_and_exit_code(tmp_path, run
     assert ("ended: rc=1" in r.stderr) == (rc == 1)
 
 
+@pytest.mark.parametrize("runtime", ["docker", "proot"])
+def test_p26_a_job_stopped_by_kill_session_still_ends_its_log_with_rc(tmp_path, runtime):
+    """P-26: `tmux kill-session` hangs up the pane's shell, which died before its trailing `echo rc=$?`: the log of a stopped job had no rc= line, so a
+    wait loop on it never ended. The pane shell is run here as tmux runs it (its own session) and hung up as tmux does: the HUP goes to the shell, and
+    when the shell is gone the kernel hangs up its foreground group. The log must end in rc=N, the job's own status (a HUP kills the stand-in: 129)."""
+    home, env = live(tmp_path, "ssh", "rsync", "docker", PM_RUNTIME=runtime, TM="p26", PMX="pm_t")
+    (home / "tmuxstate").mkdir()
+    (tmp_path / "tools" / "tmux").write_text('#!/bin/sh\ncase "$1" in\n  new-session) shift; while [ "$1" != -s ]; do shift; done;\n'
+                                             '    printf %s "$3" > "$HOME/pane_cmd" ;;\n  has-session) exit 0 ;;\nesac\n')
+    (tmp_path / "tools" / "tmux").chmod(stat.S_IRWXU)
+    job = tmp_path / "job.sh"
+    job.write_text("echo up\nexec sleep 60\n")
+    if runtime == "proot":
+        (home / "cafe-worker" / "cafe" / "pm_t" / "bin").mkdir(parents=True)
+        (home / "cafe-worker" / "cafe" / "pm_t" / "bin" / "proot_run.sh").write_text('shift; exec "$@"\n')
+    assert run(["sh", str(ROOT / "bin/pmx.sh"), "sh", str(job)], env).returncode == 0
+    log = home / ("cafe-worker/logs" if runtime == "proot" else "logs") / "p26.log"
+    pane = subprocess.Popen(["sh", "-c", (home / "pane_cmd").read_text()], env=env, cwd=home, start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            if log.exists() and "up" in log.read_text():
+                break
+            time.sleep(0.1)
+        assert log.read_text().startswith("up")
+        pane.send_signal(signal.SIGHUP)                                                  # tmux hangs up the shell
+        try:
+            pane.wait(timeout=2)
+            os.killpg(pane.pid, signal.SIGHUP)                                           # the shell is gone: the kernel hangs up the foreground group
+        except subprocess.TimeoutExpired:
+            pane.wait(timeout=20)
+        except ProcessLookupError:
+            pass
+        for _ in range(100):
+            if log.read_text().rstrip("\n").rsplit("\n", 1)[-1].startswith("rc="):
+                break
+            time.sleep(0.1)
+        assert log.read_text().rstrip("\n").rsplit("\n", 1)[-1] == "rc=129"
+    finally:
+        try:
+            os.killpg(pane.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        pane.wait()
+
+
 def real_rsync_without_modes(tmp_path):
     """Put the real rsync first on PATH with --no-perms: its chmod fails under proot on orca's kernel 5.10 ("failed to set permissions ...: No such file or
     directory", even for `rsync -a /a/ /b/`; glibc's fchmodat goes through /proc/self/fd, which proot cannot translate: orca-go P-16). The tests that use it

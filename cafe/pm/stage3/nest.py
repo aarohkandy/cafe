@@ -487,23 +487,30 @@ def richardson(ds: ArrayLike, cds: ArrayLike) -> dict[str, Any]:
     return dict(cd_inf=float(cc[1] - b * dd[1] ** -p), p=float(p), ds=[float(x) for x in d])
 
 
-def stored_grids(tag: str) -> tuple[list[dict[str, Any]], list[str]]:
-    """(the stored grids of the sphere run `tag`, finest last; the names of the files that cannot count). The files are `nest_sphere_<tag>_d<cells>.json`
-    (a rerun kept beside one, `..._d8_prev.json`, is no grid of the study: the credibility page reads the same names). A grid counts only with a positive
+def stored_study(tag: str, slow_dir: pathlib.Path | None = None) -> tuple[list[tuple[pathlib.Path, dict[str, Any]]], list[pathlib.Path]]:
+    """(the stored grids of the sphere run `tag` with their files, finest last; the files that cannot count). The files are `nest_sphere_<tag>_d<cells>.json`
+    in `slow_dir` (default SLOW_DIR; a rerun kept beside one, `..._d8_prev.json`, is no grid of the study). A grid counts only with a positive
     numeric `d`, a numeric `cd` (`lbm.read_stored`), a numeric `seconds` if it has one, a text `code_sha` if it has one, and a `d` that no earlier file has
-    (two grids of one resolution would make the Richardson fit NaN): any other file is named, never a KeyError or TypeError in the refit floor or the
-    receipts table."""
+    (two grids of one resolution would make the Richardson fit NaN): any other file is left out, never a KeyError or TypeError in the refit floor or the
+    receipts table. The one reader of the study: the gate (`stored_grids`) and the credibility page (`credibility._stored_rows`, P-27) both use it."""
+    slow_dir = SLOW_DIR if slow_dir is None else slow_dir
     pre = f"nest_sphere_{tag}_d"
-    files = sorted((int(f.name[len(pre):-len(".json")]), f) for f in SLOW_DIR.glob(pre + "*.json") if f.name[len(pre):-len(".json")].isdecimal())
-    runs: list[dict[str, Any]] = []
-    bad: list[str] = []
+    files = sorted((int(f.name[len(pre):-len(".json")]), f) for f in slow_dir.glob(pre + "*.json") if f.name[len(pre):-len(".json")].isdecimal())
+    runs: list[tuple[pathlib.Path, dict[str, Any]]] = []
+    bad: list[pathlib.Path] = []
     for _, f in files:
         r = lbm.read_stored(f, ("d", "cd"), ("seconds",))
-        if r is None or r["d"] <= 0 or not isinstance(r.get("code_sha"), (str, type(None))) or any(r["d"] == g["d"] for g in runs):
-            bad.append(f.name)
+        if r is None or r["d"] <= 0 or not isinstance(r.get("code_sha"), (str, type(None))) or any(r["d"] == g["d"] for _, g in runs):
+            bad.append(f)
         else:
-            runs.append(r)
-    return sorted(runs, key=lambda r: r["d"]), bad
+            runs.append((f, r))
+    return sorted(runs, key=lambda fr: fr[1]["d"]), bad
+
+
+def stored_grids(tag: str) -> tuple[list[dict[str, Any]], list[str]]:
+    """(the stored grids of the sphere run `tag`, finest last; the names of the files that cannot count): `stored_study` without the files."""
+    runs, bad = stored_study(tag)
+    return [r for _, r in runs], [f.name for f in bad]
 
 
 def sphere_discretisation() -> tuple[float, str] | None:

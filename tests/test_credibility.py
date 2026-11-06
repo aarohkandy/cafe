@@ -1182,3 +1182,42 @@ def test_r9_one_stale_grid_of_the_native_sphere_study_refuses_its_row_as_the_gat
     assert r["status"] == "not run" and r["note"] == "not run: nest_sphere_100_d8.json was stored by different code (rerun it)"
     (rec / "nest_sphere_100_d8.json").write_text(json.dumps(dict(cd=1.6, d=8, code_sha=now)))
     assert next(x for x in cr.vv20_rows(data) if x["id"] == "nest_sphere:Re100")["status"] == "run"
+
+
+# the gate: lbm.result_row fails an XLB run without a number for ref; nest.stored_grids counts a grid only with a positive d and a text sha
+@pytest.mark.parametrize("files, status, want", [
+    ({"lbm_sphere_100.json": dict(cd=1.087)}, "not run", "lbm_sphere_100.json lacks a finite number for ref"),
+    ({"lbm_sphere_100.json": dict(cd=1.087, ref=1.087)}, "run", "d = ? cells"),
+    ({"nest_sphere_100_d8.json": dict(cd=1.09)}, "not run", "nest_sphere_100_d8.json lacks a finite number for d"),
+    ({"nest_sphere_100_d8.json": dict(cd=1.09, d=0)}, "not run", "nest_sphere_100_d8.json is no grid of the study"),
+    ({"nest_sphere_100_d8.json": dict(cd=1.09, d=8, code_sha=["x"])}, "not run", "nest_sphere_100_d8.json is no grid of the study"),
+    ({"nest_sphere_100_d8.json": dict(cd=1.09, d=8, ref="x")}, "run", "d = 8 cells"),                                       # the gate never reads a grid's ref
+    ({"nest_sphere_100_d8.json": dict(cd=1.09, d=8), "nest_sphere_100_d16.json": dict(cd=1.01, d=8, code_sha="OLD")}, "run",   # d16 repeats d = 8:
+     "left out as the gate leaves them out: nest_sphere_100_d16.json"),                                                    # so its stale sha refuses nothing
+])
+def test_p27_the_page_reads_a_sphere_receipt_through_the_gates_readers_so_it_shows_what_the_gate_counts(data, monkeypatch, files, status, want):
+    """P-27: the page re-derived the gate's rule for the sphere receipts and differed from it on files stage 3 leaves out or fails: an XLB run without a
+    `ref` (the gate fails it; the page fell back on Morrison), a grid without a `d` or with d = 0 (the gate counts none; the page showed `d = ? cells`),
+    a grid with a stray `ref` (the gate never reads it; the page refused the row) or one whose `d` repeats an earlier grid's (the gate leaves it out; the
+    page let its stale sha refuse the row). A row is "run" exactly when the gate counts a result, and shows the gate's number."""
+    from cafe import receipts as rcp
+    from cafe.pm.stage3 import lbm, nest
+    rec = data / "receipts"
+    rec.mkdir(parents=True)
+    monkeypatch.setattr(nest, "SLOW_DIR", rec)
+    for name, body in files.items():
+        (rec / name).write_text(json.dumps(dict({"code_sha": lbm.physics_sha()}, **body)))
+    rows = {r["id"]: r for r in cr.vv20_rows(data)}
+    if any(n.startswith("lbm") for n in files):
+        rcp.OUT.clear()
+        lbm.result_row("g", "x", lbm.read_stored(rec / "lbm_sphere_100.json"), "cd", "ref", 0.10, "cmd", "eta", "src")
+        assert (rows["lbm_sphere:Re100"]["status"] == "run") == bool(rcp.OUT[-1]["ok"])                       # the gate passes it, or fails it, with the page
+        rcp.OUT.clear()
+        row = rows["lbm_sphere:Re100"]
+    else:
+        counted, _ = nest.stored_grids("100")
+        row = rows["nest_sphere:Re100"]
+        assert (row["status"] == "run") == bool(counted)
+        if counted:
+            assert row["S"] == counted[-1]["cd"] and row["D"] == pytest.approx(lbm.morrison(100.0))              # the finest counted grid, against Morrison
+    assert row["status"] == status and want in row["note"]
