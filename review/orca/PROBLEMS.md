@@ -19,6 +19,7 @@ Comparison code: orca at 91c9777, burst at 08f05d7. Only documents differ betwee
 | P-7 | 11-05 16:58 | The plan on orca uses homebase's `throughput.json`, so planned times are wrong here. | Stage 1 planned 52.7 s, ran 176 s; emulator share 240 s, ran 380 s | `make bench` on orca once it is the main machine. M-9 adds the warning. |
 | P-8 | 11-05 16:33 | Free space on the shared disk keeps falling, and not from us: we hold 18 GB. | 685 GB, 568 GB, 459 GB, 458 GB | `timeline.tsv` tracks it. The recorder logs a problem under 100 GB; jobs refuse under 60 GB. Tell the owner if it drops fast. |
 | P-23 | 11-06 04:40 | The shared disk reports 100 % used (201 TB) with 401 GB free. The fall has slowed: 445 GB at 19:11, 415 GB at 03:11, about 4 GB an hour, and we hold 17 GB. | `timeline.tsv` | Not ours. The recorder logs under 100 GB and jobs refuse under 60 GB. At this pace that is days away; a fast drop goes to the owner. |
+| P-24 | 11-06 05:20 | Step 6 of the merge, on orca: 3 of 389 tests of `test_runners.py test_proot_suite.py test_shares.py test_audit.py test_par.py test_cli.py` failed with P-16's "failed to set permissions": the round 9 tests `test_l1_pm_sh_will_not_delete_...` and `test_l2_a_file_the_server_wrote_...` (2) run the real rsync without P-16's `--no-perms` wrapper, which only the M-39 test had inline. | `logs/cm1.log` (551 s, 386 passed) | Put the wrapper in one helper and use it in all three; rerun on orca. |
 
 ## Answered
 
