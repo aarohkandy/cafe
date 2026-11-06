@@ -157,6 +157,15 @@ def test_a_detached_job_is_judged_by_its_own_session_and_exit_code(tmp_path, run
     assert ("ended: rc=1" in r.stderr) == (rc == 1)
 
 
+def real_rsync_without_modes(tmp_path):
+    """Put the real rsync first on PATH with --no-perms: its chmod fails under proot on orca's kernel 5.10 ("failed to set permissions ...: No such file or
+    directory", even for `rsync -a /a/ /b/`; glibc's fchmodat goes through /proc/self/fd, which proot cannot translate: orca-go P-16). The tests that use it
+    are about which files are sent and deleted, not their modes. --no-perms goes after the arguments, so that the script's -a does not switch it on again."""
+    real = shutil.which("rsync")
+    (tmp_path / "tools" / "rsync").write_text(f'#!/bin/sh\ncase "$1" in --server*) exec {real} "$@" ;; esac\nexec {real} "$@" --no-perms\n')
+    (tmp_path / "tools" / "rsync").chmod(stat.S_IRWXU)
+
+
 # ---- M-39: pm.sh and bin/pmx.sh sync with --delete and keep what the server wrote ------------------------------------------------------------------
 
 def server_outputs():
@@ -174,12 +183,7 @@ def test_a_file_removed_from_the_tree_is_removed_on_the_server_and_what_the_serv
     """M-39: pm.sh had no --delete, so a deleted test or module still ran on the server; bin/pmx.sh's --delete wiped outputs.
     One list (bin/sync_filters) serves both."""
     home, env = live(tmp_path, "ssh", "docker", PMX="pm_t")
-    # rsync's chmod fails under proot on orca's kernel 5.10 ("failed to set permissions ...: No such file or directory", even for `rsync -a /a/ /b/`;
-    # glibc's fchmodat falls back to /proc/self/fd, which proot probably cannot translate; not confirmed. The rehearsal on kernel 7.0 passed.) The test is
-    # about which files are sent and deleted, not their modes. --no-perms goes after the arguments, so that the script's -a does not switch it on again.
-    real = shutil.which("rsync")
-    (tmp_path / "tools" / "rsync").write_text(f'#!/bin/sh\ncase "$1" in --server*) exec {real} "$@" ;; esac\nexec {real} "$@" --no-perms\n')
-    (tmp_path / "tools" / "rsync").chmod(stat.S_IRWXU)
+    real_rsync_without_modes(tmp_path)
     src = tmp_path / "checkout"
     for f in ("cafe/pm/kept.py", "tests/test_kept.py"):
         (src / f).parent.mkdir(parents=True, exist_ok=True)
@@ -203,6 +207,7 @@ def test_l2_a_file_the_server_wrote_inside_a_protected_directory_survives_when_t
     """Round 9 L2: `P /tests/golden/` and `P /report/` match the directory entry only. The checkout has both directories, so rsync recurses into them and a
     golden file with a new name or a report page written on the server was deleted by the next sync."""
     home, env = live(tmp_path, "ssh", "docker", PMX="pm_t")
+    real_rsync_without_modes(tmp_path)
     src = tmp_path / "checkout"
     dest = home / "work" / "cafe" / server_dir
     for d, tracked in (("tests/golden", "a.json"), ("report", "build.py")):
@@ -530,6 +535,7 @@ def test_the_sweep_removes_the_directory_of_a_job_that_is_only_a_zombie(tmp_path
 def test_l1_pm_sh_will_not_delete_the_files_of_the_checkout_that_owns_the_shared_dir(tmp_path):
     """M-39 sibling: with --delete, ./pm.sh from a second checkout removed the first one's new files under its running job."""
     home, env = live(tmp_path, "ssh", "docker")
+    real_rsync_without_modes(tmp_path)
     dest = home / "work" / "cafe" / "pm"
     dest.mkdir(parents=True)
     a, b = tmp_path / "lead", tmp_path / "other"
