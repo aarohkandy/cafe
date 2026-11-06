@@ -1,5 +1,7 @@
 # Handback: orca-go
 
+Merged into r9-merged. The text below is the hand-back as written; its DECISIONS rows 467 to 474 are rows 517 to 524 in `DECISIONS.md` (467 to 474 there are other rows), and the text under "Text for the lead to merge" and the two passes after it is applied in DECISIONS, CHANGELOG, `docs/ORCA_RUNNER.md`, `docs/RUNBOOK.md` and `review/orca/PROBLEMS.md`.
+
 Branch `orca-go` in /Users/aaroh/Downloads/everything/cafe-orcago, from bff7c46 (round 9 merged) plus 83335a6 and e39d02c cherry-picked (orca_watch; as c0d1dd7 and 8456cec). Nothing pushed. DECISIONS.md, CHANGELOG.md and docs/ are untouched: their text is below.
 review/orca/PROBLEMS.md in this branch is the 83335a6 version; the P-11..P-15 rows live only in premission-step4's working tree, so the lead merges that file, and adds the rows at the end of this one.
 
