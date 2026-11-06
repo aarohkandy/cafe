@@ -13,7 +13,7 @@ outputs are unchanged. Stage products live next to the ledgers:
     run_dir/stage3/windows.json           window coefficients, checks, FEA utilization
     run_dir/refit/refit.json              Stage-1 multipliers from the windows (or why none were used)
     run_dir/stage1b/summary.json, res.pkl the rerun with the refit multipliers (a copy of stage 1 when nothing was refit)
-    run_dir/emulator/holdout.json         per vehicle: its class's emulator hold-out scores and acceptance, or why it is not trained
+    run_dir/emulator/holdout.json         per vehicle: its emulator scope's hold-out scores and acceptance, or why it is not trained
     run_dir/emulator/flip.json            per non-GO vehicle: the smallest mission change that flips the verdict (emulator-first), what was tried
     run_dir/emulator/design.json          the variant runs added to the training table (and those skipped, with why) and the budget they used
     run_dir/emulator/train_input.parquet  the training table as the emulator stage found it, minus this run's own rows: what the emulator trains on
@@ -1305,9 +1305,9 @@ def s_stage1b(ctx: Context, L: Ledger) -> None:
 def s_emulator(ctx: Context, L: Ledger) -> None:
     """The mission-level emulator (BRIEF 2.7): train on the training table as this stage found it (copied into the run and named as a ledger
     input, minus this run's own earlier rows) plus this run's per-vehicle Stage-1 rows and the rows of a few mission variants (deploy shifts,
-    small moves, lower duty), fit one emulator per vehicle class when that is enough rows, score it on a 20 % hold-out, and search for the
-    smallest change that flips each verdict that is not GO. Then append this run's rows to the shared table, after training, so that two
-    runs from the same table make the same emulator. The number of variants is the plan's (plan.json emulator); the clock is only a kill
+    small moves, lower duty), fit one emulator per scope (vehicle class, platform, window length) when that is enough rows, score it on a 20 %
+    hold-out, and search for the smallest change that flips each verdict that is not GO. Then append this run's rows to the shared table, after
+    training, so that two runs from the same table make the same emulator. The number of variants is the plan's (plan.json emulator); the clock is only a kill
     that stops the variants at the stage's whole share. A variant that leaves the environment data is skipped, with the reason.
     Writes emulator/train_input, holdout.json, flip.json and design.json."""
     import pandas as pd
@@ -1392,37 +1392,37 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
             return None
         n_fresh.append(time.perf_counter() - a)
         return m["p_fail"], m["n"]
-    ems = whatif.train(ctx.table, [r["class"] for r in res["vehicles"].values()], df=train_df, fresh=fresh)
+    ems = whatif.train(ctx.table, whatif.scopes(ctx.mission), df=train_df, fresh=fresh)
     if n_fresh:
         L.note(f"fresh-draw hold-out check: {len(n_fresh)} held-out variant point(s) re-run on members used nowhere else, "
                f"{sum(n_fresh):.0f} s (not part of the hashed output)")
-    out = {vid: ems[r["class"]][1] for vid, r in res["vehicles"].items()}
-    for cls, (em, info) in ems.items():
+    out = {vid: ems[whatif.scope_of(ctx.mission, vid, r["class"])][1] for vid, r in res["vehicles"].items()}
+    for sc, (em, info) in ems.items():
         if em is None:
-            L.note(f"emulator for {cls} not trained (trained: false): {info['reason']}")
+            L.note(f"emulator for {sc} not trained (trained: false): {info['reason']}")
             continue
         a, h = info["acceptance"], info["rmse"]["p_fail"]
         fr = (f"; against {info['fresh_points']} held-out point(s) re-run on fresh members: {info['rmse_fresh']:.3f} as observed, "
               f"{info['rmse_fresh_debiased']:.3f} less their noise {info['noise_floor_fresh']:.3f}; the larger is judged" if info["fresh_points"] else
               "; no held-out point could be re-run on fresh members (none of this run's variants is among them), so only the in-sample score is judged")
         # BRIEF 2.7 acceptance is a statistical draw on 20 to 28 held-out points (a calibrated emulator misses the coverage gate by chance with
-        # `coverage_chance_fail`), not a test of the code: noted here and in holdout.json, never a check that aborts the run. A class that missed is not used.
+        # `coverage_chance_fail`), not a test of the code: noted here and in holdout.json, never a check that aborts the run. A scope that missed is not used.
         met = {True: "met", False: "MISSED"}
-        L.note(f"emulator {cls}: BRIEF 2.7 RMSE {met[a['rmse_ok']]}: {info['rmse_gate']:.3f} against the limit {whatif.LIMITS['rmse']}; "
+        L.note(f"emulator {sc}: BRIEF 2.7 RMSE {met[a['rmse_ok']]}: {info['rmse_gate']:.3f} against the limit {whatif.LIMITS['rmse']}; "
                f"held-out RMSE of P(fail) "
                f"against the true P(fail): {h:.3f} as observed, less the targets' own Monte-Carlo noise {info['noise_floor_rmse']:.3f} in quadrature{fr}")
-        L.note(f"emulator {cls}: BRIEF 2.7 coverage {met[a['coverage_ok']]}: {info['coverage']['p_fail']:.3f} against {info['nominal']:.2f} +- "
+        L.note(f"emulator {sc}: BRIEF 2.7 coverage {met[a['coverage_ok']]}: {info['coverage']['p_fail']:.3f} against {info['nominal']:.2f} +- "
                f"{whatif.LIMITS['coverage']}; a calibrated emulator misses this by chance with probability {info['coverage_chance_fail']:.3f} on "
                f"{info['n_test']} held-out points")
-        L.note(f"emulator {cls}: BRIEF 2.7 query time {met[a['query_ok']]}: {info['query_ms']:.2f} ms against the limit {whatif.LIMITS['query_ms']} ms")
+        L.note(f"emulator {sc}: BRIEF 2.7 query time {met[a['query_ok']]}: {info['query_ms']:.2f} ms against the limit {whatif.LIMITS['query_ms']} ms")
         if not info["used"]:
-            L.note(f"emulator {cls} not used for answers: {info['unused_reason']}")
-        L.check(f"emulator_training_points_{cls}", info["points"] >= whatif.MIN_ROWS, value=info["points"], limit=whatif.MIN_ROWS,
-                note=f"distinct feature points the {cls} emulator trained on ({info['rows']} rows)")
-        row = next(r for r in rows if r["cls"] == cls)
+            L.note(f"emulator {sc} not used for answers: {info['unused_reason']}")
+        L.check(f"emulator_training_points_{sc}", info["points"] >= whatif.MIN_ROWS, value=info["points"], limit=whatif.MIN_ROWS,
+                note=f"distinct feature points the {sc} emulator trained on ({info['rows']} rows)")
+        row = next(r for r in rows if r["scope"] == sc)
         x = pd.Series({k: float(row[k]) for k in em.features})
         far = em.query(x + 1e6)
-        L.check(f"emulator_range_guard_{cls}", far["status"] == "out_of_range", value=em.distance(x), limit=em.threshold,
+        L.check(f"emulator_range_guard_{sc}", far["status"] == "out_of_range", value=em.distance(x), limit=em.threshold,
                 note="a mission 1e6 units from every training row is refused; value is this run's own baseline mission's nearest-neighbour "
                      "distance, limit the calibrated threshold")
     L.output(_dump(out, ctx.path("emulator", "holdout.json")))

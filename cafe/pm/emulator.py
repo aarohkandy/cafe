@@ -35,8 +35,16 @@ from .config import ConfigError
 from .stats import intervals
 
 NN_QUANTILE = 0.99
+LIMITS = dict(rmse=0.05, coverage=0.05, query_ms=10.0)          # BRIEF 2.7 acceptance: the one copy; `whatif` (the gate) and `receipts()` read it
+COVERAGE_DUST = 1e-9                   # a coverage that is k / n is on the +- limit when it is mathematically so: `abs(17 / 20 - 0.9) <= 0.05` is False
+#                                        in floats (steps of coverage are at least 1 / n, so this admits no real miss)
 FRESH_POINTS = 3                       # held-out points re-estimated on fresh member draws (round 3 M-4)
 FreshDraw = Callable[[pd.Series], "tuple[float, int] | None"]
+
+
+def coverage_band(nominal: float, tol: float) -> tuple[float, float]:
+    """The hold-out coverages BRIEF 2.7 accepts, nominal +- tol, inclusive: the one rule of the what-if gate, its chance figure and the receipt."""
+    return nominal - tol - COVERAGE_DUST, nominal + tol + COVERAGE_DUST
 
 
 def _conformal_q(scores: np.ndarray, alpha: float) -> float:
@@ -373,17 +381,17 @@ def receipts(n: int = 500, seed: int = 3) -> list[dict[str, Any]]:
     em = Emulator(FEATURES, TARGETS, path="emulator/_receipt.csv", seed=seed)
     rep = em.holdout_report(df)
     em.fit(df)
-    R.bracket(g, "held-out RMSE of P(fail) (20 % held out)", rep["rmse"]["p_fail"], 0.0, 0.05, "P",
+    R.bracket(g, "held-out RMSE of P(fail) (20 % held out)", rep["rmse"]["p_fail"], 0.0, LIMITS["rmse"], "P",
               "BRIEF 2.7 acceptance")
-    R.bracket(g, "conformal coverage at 90 % nominal, P(fail) (20 % held out)", rep["coverage"]["p_fail"], 0.85, 0.95,
-              "fraction", "BRIEF 2.7: within +-5 % of nominal; Lei et al. 2018")
+    R.bracket(g, "conformal coverage at 90 % nominal, P(fail) (20 % held out)", rep["coverage"]["p_fail"],
+              *coverage_band(rep["nominal"], LIMITS["coverage"]), "fraction", "BRIEF 2.7: within +-5 % of nominal; Lei et al. 2018")
     x = df.iloc[0][FEATURES]
     ts = []
     for _ in range(50):
         t0 = time.perf_counter()
         em.query(x)
         ts.append(time.perf_counter() - t0)
-    R.bracket(g, "median query time", 1e3 * float(np.median(ts)), 0.0, 10.0, "ms", "BRIEF 2.7 acceptance")
+    R.bracket(g, "median query time", 1e3 * float(np.median(ts)), 0.0, LIMITS["query_ms"], "ms", "BRIEF 2.7 acceptance")
     far = x.copy()
     far["wind_mean"] = 40.0
     R.bracket(g, "far-off mission distance / calibrated threshold", em.distance(far) / em.threshold, 1.0, 1e9, "",

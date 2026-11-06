@@ -144,6 +144,35 @@ def test_receipts_pass_and_fail_when_calibration_is_wrong(monkeypatch):
     R.OUT.clear()
 
 
+def test_the_receipts_read_the_brief_2_7_limits_the_what_if_gate_reads(monkeypatch):
+    """Round 10 M-6, the RC-2 sibling of M-21: `receipts()` carried its own 0.05, 0.85 to 0.95 and 10 ms beside `whatif.LIMITS`, so a limit changed in the one
+    place still passed the other."""
+    from cafe import receipts as R
+    from cafe.pm import whatif
+
+    rmse, cover, query = ("held-out RMSE of P(fail) (20 % held out)", "conformal coverage at 90 % nominal, P(fail) (20 % held out)", "median query time")
+    monkeypatch.setitem(whatif.LIMITS, "query_ms", 1e9)
+    R.OUT.clear()
+    good = {r["claim"]: r for r in E.receipts()}
+    assert all(r["ok"] for r in good.values()) and good[cover]["value"] != 0.9
+    monkeypatch.setitem(whatif.LIMITS, "rmse", 1e-9)
+    monkeypatch.setitem(whatif.LIMITS, "coverage", abs(good[cover]["value"] - 0.9) / 2)
+    monkeypatch.setitem(whatif.LIMITS, "query_ms", 0.0)
+    R.OUT.clear()
+    assert [r["claim"] for r in E.receipts() if not r["ok"]] == [rmse, cover, query]
+    R.OUT.clear()
+
+
+@pytest.mark.parametrize("nominal, tol", [(0.9, 0.05), (0.8, 0.05), (0.7, 0.1), (0.95, 0.05)])
+def test_coverage_band_holds_exactly_the_counts_inside_nominal_plus_or_minus_tol(nominal, tol):
+    """Round 10 M-6: `nominal - tol` is not the decimal edge in floats (0.7 - 0.1 is 0.6000000000000001, so 4 of 5 fell out of the band 0.6 to 0.8)."""
+    from fractions import Fraction as Fr
+    lo, hi = E.coverage_band(nominal, tol)
+    for n in range(5, 101):
+        exact = [k for k in range(n + 1) if abs(Fr(k, n) - Fr(str(nominal))) <= Fr(str(tol))]
+        assert [k for k in range(n + 1) if lo <= k / n <= hi] == exact, (n, nominal, tol)
+
+
 # ---- conformal and transforms --------------------------------------------------------------------------------------
 @given(st.lists(st.floats(0, 100, allow_nan=False), min_size=1, max_size=200), st.floats(0.01, 0.5))
 def test_conformal_q_guarantee_and_monotone(scores, alpha):

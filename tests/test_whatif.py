@@ -52,6 +52,7 @@ def storm_mission(hours=60):
 
 
 STORM = storm_mission()
+GSC, USC, UASC = whatif.scope_of(STORM, GL), whatif.scope_of(CI, "usv"), whatif.scope_of(CI, "uas")      # the emulator scopes (class, platform, window length)
 ENV = StormEnv(T0 + 20 * 3600.0)
 PRI = stage1.priors_for(STORM)
 TRACK = (np.linspace(T0, T0 + 60 * 3600.0, 24), np.full(24, -165.5), np.zeros(24))          # where the glider sits: on station
@@ -72,7 +73,7 @@ def storm_table(n=140, seed=0, noise=0.02):
         m2 = whatif.apply(STORM, {GL: mod})
         f = {**whatif.params(m2, GL, "glider"), **whatif.env_stats(ENV, *whatif.shift_track(TRACK, mod, m2))}
         p = float(np.clip((0.85 if f["cur_p90"] > 0.3 else 0.03) + rng.normal(0, noise), 0.0, 1.0))
-        rows.append(dict(f, p_fail=p, t_fail_h=20.0 if p > 0.5 else 60.0, mode_station_lost=p, cls="glider", n_members=512, fidelity=0, vehicle=GL))
+        rows.append(dict(f, p_fail=p, t_fail_h=20.0 if p > 0.5 else 60.0, mode_station_lost=p, cls="glider", scope=GSC, n_members=512, fidelity=0, vehicle=GL))
     return pd.DataFrame(rows)
 
 
@@ -80,9 +81,17 @@ def storm_table(n=140, seed=0, noise=0.02):
 def storm_em(tmp_path_factory):
     with pytest.MonkeyPatch.context() as mp:                                # the speed of this host is not what these tests are about (round 8 M-5)
         mp.setitem(whatif.LIMITS, "query_ms", 1e9)
-        em, info = whatif.fit_class(storm_table(), "glider", tmp_path_factory.mktemp("em") / "train.parquet")
+        em, info = whatif.fit_class(storm_table(), "glider", GSC, tmp_path_factory.mktemp("em") / "train.parquet")
     assert em is not None, info
     return em, info
+
+
+def shifted(h, flight_d):
+    """How `whatif.candidates` words a deploy shift of a glider whose flight is `flight_d` days (CI: 1.5, STORM: 2.5): the change, then what it does to the
+    flight (round 10 M-11)."""
+    new = flight_d - h / 24
+    return (f"deploy {abs(h):g} h {'later' if h > 0 else 'earlier'} (flies {new:g} d instead of {flight_d:g} d: P(fail) is over the "
+            f"{'shorter' if h > 0 else 'longer'} flight, not like for like with the baseline's)")
 
 
 # ---------------------------------------------------------------------------------------------------------------- mission changes
@@ -256,6 +265,7 @@ def synthetic_rows(variant="base", fid=None, meta=META):
 
 def test_one_row_per_vehicle_with_features_targets_and_metadata():
     rows = synthetic_rows(fid={"glider_eq": 1})
+    assert [r["scope"] for r in rows] == ["glider/seaglider/144h", "glider/slocum/144h", "usv/saildrone_explorer/144h", "uas/quad_uas/144h"]
     assert [r["vehicle"] for r in rows] == ["glider_eq", "glider_2n", "usv", "uas"] and [r["cls"] for r in rows] == ["glider", "glider", "usv", "uas"]
     g, u = rows[0], rows[3]
     assert g["fidelity"] == 1 and rows[1]["fidelity"] == 0 and g["n_members"] == 48 and g["key"] == whatif.row_key(g)
@@ -285,7 +295,8 @@ def test_a_row_key_ignores_the_run_and_the_code_and_follows_the_mission_vehicle_
     key = whatif.row_key(r)
     assert len(key) == 16 and int(key, 16) >= 0 and whatif.row_key(dict(r, run_id="r9", git_sha="z", code_digest="z", p_fail=0.123)) == key
     assert whatif.row_key(dict(r, lon=r["lon"] + 1e-12)) == key                                           # 9 significant digits
-    for change in (dict(mission="other"), dict(vehicle="glider_2n"), dict(variant="v0"), dict(lon=r["lon"] + 1e-3), dict(dive_depth_m=r["dive_depth_m"] + 1)):
+    for change in (dict(mission="other"), dict(scope="glider/seaglider/192h"), dict(vehicle="glider_2n"), dict(variant="v0"), dict(lon=r["lon"] + 1e-3),
+                   dict(dive_depth_m=r["dive_depth_m"] + 1)):
         assert whatif.row_key(dict(r, **change)) != key, change
 
 
@@ -322,23 +333,23 @@ def test_a_variant_that_does_not_fit_is_shrunk_and_finally_dropped():
 # ---------------------------------------------------------------------------------------------------------------- fit and score
 
 def test_too_few_rows_say_how_many_there_are_and_how_many_are_needed(tmp_path):
-    em, info = whatif.fit_class(storm_table(30), "glider", tmp_path / "t.parquet")
-    assert em is None and info["trained"] is False and info["rows"] == 30 and "30 glider rows" in info["reason"] and "100 are needed" in info["reason"]
-    em, info = whatif.fit_class(storm_table(30), "usv", tmp_path / "t.parquet")
-    assert info["rows"] == 0 and "0 usv rows" in info["reason"]
+    em, info = whatif.fit_class(storm_table(30), "glider", GSC, tmp_path / "t.parquet")
+    assert em is None and info["trained"] is False and info["rows"] == 30 and f"30 {GSC} rows" in info["reason"] and "100 are needed" in info["reason"]
+    em, info = whatif.fit_class(storm_table(30), "usv", USC, tmp_path / "t.parquet")
+    assert info["rows"] == 0 and f"0 {USC} rows" in info["reason"]
 
 
 def test_rows_with_no_failures_have_nothing_to_learn(tmp_path):
     df = storm_table(120)
     df["p_fail"] = 0.0
-    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
-    assert em is None and info["reason"] == "P(fail) is 0.000 in all 120 glider rows: nothing to learn"
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet")
+    assert em is None and info["reason"] == "P(fail) is 0.000 in all 120 glider rows: nothing to learn".replace("glider", GSC)
 
 
 def test_rows_with_missing_features_are_left_out(tmp_path):
     df = storm_table(110)
     df.loc[:15, "wind_mean"] = np.nan
-    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet")
     assert em is None and info["rows"] == 94
 
 
@@ -358,42 +369,42 @@ def test_a_trained_emulator_reports_its_holdout_and_acceptance(storm_em):
 def test_acceptance_is_judged_against_the_briefs_limits(tmp_path, monkeypatch):
     df = storm_table(140)
     monkeypatch.setattr(whatif, "LIMITS", dict(rmse=1e-9, coverage=1e-9, query_ms=1e-9))
-    _, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    _, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet")
     assert info["trained"] and info["acceptance"] == dict(rmse_ok=False, coverage_ok=False, query_ok=False)
 
 
 def test_a_deliberately_bad_emulator_misses_the_rmse_acceptance(tmp_path):
     df = storm_table(140)
     df["p_fail"] = np.random.default_rng(3).uniform(0, 1, len(df))                                              # no relation to any feature
-    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet")
     assert info["trained"] and info["rmse"]["p_fail"] > 0.2 and info["acceptance"]["rmse_ok"] is False
     assert info["noise_floor_rmse"] > 0.0
 
 
 def test_train_fits_each_class_from_the_stored_table(tmp_path):
-    out = whatif.train(tmp_path / "none.parquet", ["glider", "usv", "glider"])
-    assert set(out) == {"glider", "usv"} and all(e is None and not i["trained"] and "0 " in i["reason"] for e, i in out.values())
+    out = whatif.train(tmp_path / "none.parquet", {GSC: "glider", USC: "usv"})
+    assert set(out) == {GSC, USC} and all(e is None and not i["trained"] and "0 " in i["reason"] for e, i in out.values())
     path = tmp_path / "train.parquet"
     whatif.add_rows(path, [dict(r, key=f"k{i}", run_id="r", code_digest="d1") for i, r in enumerate(storm_table(120).to_dict("records"))])
-    out = whatif.train(path, ["glider", "usv"], code_digest="d1")
-    assert out["glider"][0] is not None and out["glider"][1]["trained"] and out["usv"][0] is None
-    out = whatif.train(path, ["glider"], code_digest="d2")
-    assert out["glider"][0] is None and out["glider"][1]["stale_rows"] == 120 and "; 120 rows made by other code are left out" in out["glider"][1]["reason"]
+    out = whatif.train(path, {GSC: "glider", USC: "usv"}, code_digest="d1")
+    assert out[GSC][0] is not None and out[GSC][1]["trained"] and out[USC][0] is None
+    out = whatif.train(path, {GSC: "glider"}, code_digest="d2")
+    assert out[GSC][0] is None and out[GSC][1]["stale_rows"] == 120 and "; 120 rows made by other code are left out" in out[GSC][1]["reason"]
 
 
 def test_train_defaults_to_the_digest_of_this_checkouts_code(tmp_path):
     from cafe.pm import pipeline
     df = storm_table(120).assign(code_digest=pipeline.code_digest())
-    assert whatif.train(tmp_path / "none.parquet", ["glider"], df=df)["glider"][1]["trained"]
-    assert not whatif.train(tmp_path / "none.parquet", ["glider"], df=df.assign(code_digest="superseded"))["glider"][1]["trained"]
+    assert whatif.train(tmp_path / "none.parquet", {GSC: "glider"}, df=df)[GSC][1]["trained"]
+    assert not whatif.train(tmp_path / "none.parquet", {GSC: "glider"}, df=df.assign(code_digest="superseded"))[GSC][1]["trained"]
 
 
 def test_replicates_of_one_mission_do_not_reach_the_row_gate(tmp_path):
     """M-8: 25 reruns of the demo reached 100 rows with one design point."""
     df = pd.concat([storm_table(30)] * 5, ignore_index=True)
-    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet")
     assert em is None and info["rows"] == 150 and info["points"] == 30
-    assert info["reason"] == ("150 glider rows in the training table, 100 are needed (a 20 % hold-out must score 90 % coverage); "
+    assert info["reason"] == (f"150 {GSC} rows in the training table, 100 are needed (a 20 % hold-out must score 90 % coverage); "
                               "only 30 of them are distinct feature points")
 
 
@@ -401,16 +412,16 @@ def test_rows_made_by_other_code_stay_in_the_table_but_are_not_trained_on(tmp_pa
     """M-8: rows from superseded physics were trained on; the table keeps them, the fit leaves them out."""
     df = storm_table(140).assign(code_digest="old")
     df.loc[:119, "code_digest"] = "new"
-    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet", "new")
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet", "new")
     assert em is not None and info["trained"]
     assert info["rows"] == 120 and info["stale_rows"] == 20 and info["points"] == 120
-    em, info = whatif.fit_class(df.iloc[:30], "glider", tmp_path / "t.parquet", "new")
-    assert em is None and info["reason"].startswith("30 glider rows in the training table, 100 are needed")
-    em, info = whatif.fit_class(df.iloc[120:], "glider", tmp_path / "t.parquet", "new")
+    em, info = whatif.fit_class(df.iloc[:30], "glider", GSC, tmp_path / "t.parquet", "new")
+    assert em is None and info["reason"].startswith(f"30 {GSC} rows in the training table, 100 are needed")
+    em, info = whatif.fit_class(df.iloc[120:], "glider", GSC, tmp_path / "t.parquet", "new")
     assert em is None and info["rows"] == 0 and info["stale_rows"] == 20 and "; 20 rows made by other code are left out" in info["reason"]
-    em, info = whatif.fit_class(df.drop(columns="code_digest"), "glider", tmp_path / "t.parquet", "new")
+    em, info = whatif.fit_class(df.drop(columns="code_digest"), "glider", GSC, tmp_path / "t.parquet", "new")
     assert em is None and info["rows"] == 0 and info["stale_rows"] == 140                             # no digest: not shown to be current
-    em, info = whatif.fit_class(df.drop(columns="code_digest"), "glider", tmp_path / "t.parquet")
+    em, info = whatif.fit_class(df.drop(columns="code_digest"), "glider", GSC, tmp_path / "t.parquet")
     assert info["rows"] == 140 and info["stale_rows"] == 0
 
 
@@ -419,9 +430,9 @@ def test_rows_made_by_other_code_stay_in_the_table_but_are_not_trained_on(tmp_pa
 def test_candidates_are_single_changes_in_cost_order():
     c = whatif.candidates(CI, GL)
     assert [x["cost"] for x in c] == sorted(x["cost"] for x in c) and len(c) == 8 + 8 + 2
-    assert {x["change"] for x in c} >= {"deploy 6 h later", "deploy 48 h earlier", "move 0.5 deg west", "move 1 deg north",
+    assert {x["change"] for x in c} >= {shifted(6, 1.5), shifted(-48, 1.5), "move 0.5 deg west", "move 1 deg north",
                                         "dive 25 % shallower (950 m to 712.5 m)"}
-    assert next(x for x in c if x["change"] == "deploy 24 h later")["cost"] == 4.0 and next(x for x in c if x["change"] == "move 1 deg east")["cost"] == 2.0
+    assert next(x for x in c if x["change"] == shifted(24, 1.5))["cost"] == 4.0 and next(x for x in c if x["change"] == "move 1 deg east")["cost"] == 2.0
     assert len(whatif.candidates(CI, "usv")) == 16 and len(whatif.candidates(CI, "uas")) == 14
     assert all(len(x["mod"]) == 1 for x in c)
 
@@ -440,25 +451,25 @@ def test_emulate_says_why_it_cannot_answer(storm_em):
 
 def test_the_emulated_flip_search_finds_the_24_h_shift_that_avoids_the_storm(storm_em):
     em, _ = storm_em
-    flips, spent = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=0.9)}, {GL: TRACK}, ENV, {"glider": (em, {})}, plan_for(STORM), *PRI, None, 5,
+    flips, spent = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=0.9)}, {GL: TRACK}, ENV, {GSC: (em, {})}, plan_for(STORM), *PRI, None, 5,
                                       100.0, lambda *_: None)
     f = flips[GL]
     assert spent == 0.0 and f["found"] and f["emulator"] and f["target"] == "GO or MARGINAL"
     b = f["best"]
-    assert b["change"] == "deploy 24 h later" and b["method"] == "EMULATED" and b["verdict"] == "GO" and b["p_fail"] < 0.1 and b["cost"] == 4.0
+    assert b["change"] == shifted(24, 2.5) and b["method"] == "EMULATED" and b["verdict"] == "GO" and b["p_fail"] < 0.1 and b["cost"] == 4.0
     assert b["distance"] <= b["threshold"] and b["lo"] <= b["p_fail"] <= b["hi"]
     by = {t["change"]: t for t in f["tried"]}
-    assert len(f["tried"]) == 18 and by["deploy 12 h later"]["verdict"] == "NO-GO" and by["deploy 6 h later"]["verdict"] == "NO-GO"
-    assert by["deploy 6 h earlier"]["method"] == "not evaluated" and "outside the window" in by["deploy 6 h earlier"]["reason"]
-    assert by["deploy 48 h later"]["verdict"] == "GO" and by["dive 25 % shallower (950 m to 712.5 m)"]["reason"] == "out of range"
+    assert len(f["tried"]) == 18 and by[shifted(12, 2.5)]["verdict"] == "NO-GO" and by[shifted(6, 2.5)]["verdict"] == "NO-GO"
+    assert by[shifted(-6, 2.5)]["method"] == "not evaluated" and "outside the window" in by[shifted(-6, 2.5)]["reason"]
+    assert by[shifted(48, 2.5)]["verdict"] == "GO" and by["dive 25 % shallower (950 m to 712.5 m)"]["reason"] == "out of range"
     assert by["move 0.5 deg east"]["method"] == "EMULATED"
 
 
 def test_a_marginal_vehicle_must_reach_go_and_a_go_vehicle_is_left_alone(storm_em):
     em, _ = storm_em
     marg = {GL: dict(verdict="MARGINAL", p_fail=0.2), "other": dict(verdict="GO", p_fail=0.0)}
-    flips, _ = whatif.flip_search(STORM, marg, {GL: TRACK}, ENV, {"glider": (em, {})}, plan_for(STORM), *PRI, None, 5, 100.0, lambda *_: None)
-    assert set(flips) == {GL} and flips[GL]["target"] == "GO" and flips[GL]["best"]["change"] == "deploy 24 h later"
+    flips, _ = whatif.flip_search(STORM, marg, {GL: TRACK}, ENV, {GSC: (em, {})}, plan_for(STORM), *PRI, None, 5, 100.0, lambda *_: None)
+    assert set(flips) == {GL} and flips[GL]["target"] == "GO" and flips[GL]["best"]["change"] == shifted(24, 2.5)
 
 
 def test_stage_1_answers_what_the_emulator_cannot_and_finds_the_same_flip(monkeypatch):
@@ -471,7 +482,7 @@ def test_stage_1_answers_what_the_emulator_cannot_and_finds_the_same_flip(monkey
     f = flips[GL]
     assert f["found"] and not f["emulator"] and spent > 0.0
     b = f["best"]
-    assert b["method"] == "Stage 1" and b["n"] == 16 and b["change"] in ("deploy 24 h later", "deploy 12 h later") and b["verdict"] in ("GO", "MARGINAL")
+    assert b["method"] == "Stage 1" and b["n"] == 16 and b["change"] in (shifted(24, 2.5), shifted(12, 2.5)) and b["verdict"] in ("GO", "MARGINAL")
     ran = [t for t in f["tried"] if t["method"] == "Stage 1"]
     assert ran and ran[-1] is b and all(t["verdict"] == "NO-GO" for t in ran[:-1]) and log[0].startswith(f"flip search {GL}: {b['change']} (Stage 1)")
     assert [t["cost"] for t in ran] == sorted(t["cost"] for t in ran)                                             # nearest first
@@ -495,7 +506,7 @@ def test_stage_1_runs_only_what_the_emulator_left(storm_em, monkeypatch):
     em, _ = storm_em
     pri, marg = stage1.priors_for(STORM)
     monkeypatch.setattr(whatif, "measure", lambda *a, **k: pytest.fail("Stage 1 must not run when the emulator found a flip"))
-    flips, spent = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=1.0)}, {GL: TRACK}, ENV, {"glider": (em, {})}, plan_for(STORM), pri, marg, None,
+    flips, spent = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=1.0)}, {GL: TRACK}, ENV, {GSC: (em, {})}, plan_for(STORM), pri, marg, None,
                                       5, 1e6,
                                       lambda *_: None)
     assert flips[GL]["found"] and spent == 0.0
@@ -511,12 +522,12 @@ def test_a_uas_flip_is_answered_without_a_median_track(tmp_path):
         m2 = whatif.apply(CI, {"uas": mod})
         f = {**whatif.params(m2, "uas", "uas"), **whatif.env_stats(AnalyticEnv(), *whatif.uas_track(m2, "uas"))}
         p = float(np.clip(0.8 - 0.1 * (f["deploy_h"] - first) + rng.normal(0, 0.02), 0, 1))
-        rows.append(dict(f, p_fail=p, t_fail_h=10.0, cls="uas", n_members=512))
-    em, info = whatif.fit_class(pd.DataFrame(rows), "uas", tmp_path / "t.parquet")
+        rows.append(dict(f, p_fail=p, t_fail_h=10.0, cls="uas", scope=UASC, n_members=512))
+    em, info = whatif.fit_class(pd.DataFrame(rows), "uas", UASC, tmp_path / "t.parquet")
     assert em is not None
     # `used=True`: this test is the track-free path. The BRIEF 2.7 gate has its own tests, and on 24 hold-out points it fails a sound emulator by chance
     # (coverage_chance_fail is 0.5 here: 23 of 24 covered reads as 0.958 against 0.9 +- 0.05)
-    flips, _ = whatif.flip_search(CI, {"uas": dict(verdict="NO-GO", p_fail=0.8)}, {}, AnalyticEnv(), {"uas": (em, dict(info, used=True))}, plan_for(CI), {}, {},
+    flips, _ = whatif.flip_search(CI, {"uas": dict(verdict="NO-GO", p_fail=0.8)}, {}, AnalyticEnv(), {UASC: (em, dict(info, used=True))}, plan_for(CI), {}, {},
                                   None, 5, 0.0, lambda *_: None)
     b = flips["uas"]["best"]
     assert b["method"] == "EMULATED" and b["verdict"] != "NO-GO" and b["change"] == "launch the sorties 6 h later"
@@ -556,7 +567,7 @@ def test_a_change_whose_track_leaves_the_data_is_invalid_not_a_crash(storm_em):
 def test_the_flip_search_marks_a_candidate_that_leaves_the_data_and_goes_on(storm_em):
     em, _ = storm_em
     pri, marg = stage1.priors_for(STORM)
-    flips, _ = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=0.9)}, {GL: TRACK}, EdgeEnv(T0 + 20 * 3600.0), {"glider": (em, {})},
+    flips, _ = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=0.9)}, {GL: TRACK}, EdgeEnv(T0 + 20 * 3600.0), {GSC: (em, {})},
                                   plan_for(STORM), pri, marg, None, 5, 1e6, lambda *_: None)
     f = flips[GL]
     off = [t for t in f["tried"] if "leaves the environment data" in t["reason"]]
@@ -658,10 +669,10 @@ def ask(ops, ems, base=BASE, tracks=None, plan=None, **kw):
 
 def test_an_emulated_what_if_carries_the_distance_and_the_interval(storm_em):
     em, info = storm_em
-    r = ask(dict(shift_h=24.0), {"glider": (em, info)})["vehicles"][GL]
+    r = ask(dict(shift_h=24.0), {GSC: (em, info)})["vehicles"][GL]
     assert r["method"] == "EMULATED" and r["verdict"] == "GO" and r["p_fail"] < 0.1 and r["lo"] <= r["p_fail"] <= r["hi"] and r["distance"] <= r["threshold"]
     assert r["base"] == BASE[GL]
-    now = ask(dict(shift_h=6.0), {"glider": (em, info)})["vehicles"][GL]
+    now = ask(dict(shift_h=6.0), {GSC: (em, info)})["vehicles"][GL]
     assert now["method"] == "EMULATED" and now["verdict"] == "NO-GO"
 
 
@@ -672,17 +683,17 @@ def test_an_emulator_that_missed_the_acceptance_does_not_answer_the_what_if_and_
     """Follow-up to round 4 M-3: `used: False` in the class's info means no emulator for the answer, and the reason names the gate."""
     em, info = storm_em
     missed = dict(info, used=False, unused_reason=MISSED)
-    r = ask(dict(shift_h=24.0), {"glider": (em, missed)})["vehicles"][GL]
+    r = ask(dict(shift_h=24.0), {GSC: (em, missed)})["vehicles"][GL]
     assert r["method"] == "Stage 1" and r["why"] == MISSED and r["verdict"] == "GO" and r["n"] == 16
-    assert ask(dict(shift_h=24.0), {"glider": (em, dict(info, used=True))})["vehicles"][GL]["method"] == "EMULATED"
-    assert ask(dict(shift_h=24.0), {"glider": (em, info)})["vehicles"][GL]["method"] == "EMULATED"          # an info without the key (older code) still answers
+    assert ask(dict(shift_h=24.0), {GSC: (em, dict(info, used=True))})["vehicles"][GL]["method"] == "EMULATED"
+    assert ask(dict(shift_h=24.0), {GSC: (em, info)})["vehicles"][GL]["method"] == "EMULATED"          # an info without the key (older code) still answers
 
 
 def test_an_emulator_that_missed_the_acceptance_does_not_answer_the_flip_search_and_stage_1_does(storm_em, monkeypatch):
     em, info = storm_em
     monkeypatch.setattr(whatif, "FALLBACK_K", 20)
     pri, marg = stage1.priors_for(STORM)
-    ems = {"glider": (em, dict(info, used=False, unused_reason=MISSED))}
+    ems = {GSC: (em, dict(info, used=False, unused_reason=MISSED))}
     flips, spent = whatif.flip_search(STORM, {GL: dict(verdict="NO-GO", p_fail=1.0)}, {GL: TRACK}, ENV, ems, plan_for(STORM), pri, marg, None, 5, 1e6,
                                       lambda *_: None)
     f = flips[GL]
@@ -692,7 +703,7 @@ def test_an_emulator_that_missed_the_acceptance_does_not_answer_the_flip_search_
 
 def test_the_what_if_falls_back_to_stage_1_out_of_range_and_says_why(storm_em):
     em, info = storm_em
-    r = ask(dict(shift_h=24.0, dlon=-0.5), {"glider": (em, info)}, tracks={})["vehicles"][GL]
+    r = ask(dict(shift_h=24.0, dlon=-0.5), {GSC: (em, info)}, tracks={})["vehicles"][GL]
     assert r["method"] == "Stage 1" and r["why"] == "no track" and r["n"] == 16 and r["verdict"] == "GO" and r["p_fail"] == 0.0
     r = ask(dict(shift_h=24.0), {})["vehicles"][GL]
     assert r["method"] == "Stage 1" and r["why"] == "no emulator" and r["verdict"] == "GO" and r["lo"] == 0.0 and r["hi"] < 0.2
@@ -701,7 +712,7 @@ def test_the_what_if_falls_back_to_stage_1_out_of_range_and_says_why(storm_em):
     far_plan = plan_for(far)
     em2 = copy.copy(em)
     em2.threshold = 0.0
-    out = ask(far_ops, {"glider": (em2, info)}, plan=far_plan)["vehicles"][GL]
+    out = ask(far_ops, {GSC: (em2, info)}, plan=far_plan)["vehicles"][GL]
     assert out["why"] == "out of range" and out["method"] == "Stage 1"
 
 
@@ -777,7 +788,7 @@ def test_the_uas_candidates_leave_out_whole_day_shifts_and_the_others_keep_them(
     assert not [c for c in uas if "24 h" in c or "48 h" in c] and "launch the sorties 12 h later" in uas
     for c in whatif.candidates(CI, "uas"):
         whatif.apply(CI, {"uas": c["mod"]})                                              # none of them is invalid for being the baseline
-    assert "deploy 48 h earlier" in [c["change"] for c in whatif.candidates(CI, GL)]
+    assert shifted(-48, 1.5) in [c["change"] for c in whatif.candidates(CI, GL)]
 
 
 def test_a_lower_uas_duty_rounds_the_period_up_to_whole_days_and_says_so():
@@ -946,7 +957,7 @@ def fresh_binomial(truth, members=16, seed=7):
 
 def test_with_independent_noise_the_debiased_rmse_is_the_error_against_the_truth_and_the_fresh_check_agrees(tmp_path):
     obs, truth = known_p_table()
-    em, info = whatif.fit_class(obs, "glider", tmp_path / "t.parquet", fresh=fresh_binomial(truth))
+    em, info = whatif.fit_class(obs, "glider", GSC, tmp_path / "t.parquet", fresh=fresh_binomial(truth))
     assert em is not None and info["fresh_points"] == 3 and info["fresh_n_members"] == 16
     new = storm_table(300, 99, noise=0.0)                                               # the error against the true P(fail) on missions the emulator never saw
     err = float(np.sqrt(np.mean((em.predict(new[em.features])["p_fail"]["value"] - new["p_fail"].to_numpy()) ** 2)))
@@ -961,11 +972,11 @@ def test_when_the_training_targets_share_their_draws_the_fresh_check_reads_large
     shared = lambda d: 0.25 * (d["deploy_h"] / 45.0 - 0.5)                               # the error the shared members make, a smooth function of the mission
     # many members, so the targets' own noise is small beside the shared error
     obs, truth = known_p_table(members=256, shift=shared)
-    em, info = whatif.fit_class(obs, "glider", tmp_path / "t.parquet", fresh=fresh_binomial(truth, members=256))
+    em, info = whatif.fit_class(obs, "glider", GSC, tmp_path / "t.parquet", fresh=fresh_binomial(truth, members=256))
     assert info["fresh_points"] == 3
     assert info["rmse_fresh_debiased"] > info["rmse_debiased"] + 0.04, (info["rmse_fresh_debiased"], info["rmse_debiased"])
     assert info["rmse_gate"] == info["rmse_fresh_debiased"]
-    ok = whatif.fit_class(obs, "glider", tmp_path / "t2.parquet")[1]
+    ok = whatif.fit_class(obs, "glider", GSC, tmp_path / "t2.parquet")[1]
     # without the check, only the in-sample score is judged
     assert ok["fresh_points"] == 0 and "rmse_fresh_debiased" not in ok and ok["rmse_gate"] == ok["rmse_debiased"]
 
@@ -975,7 +986,7 @@ def test_the_coverage_gate_reads_the_calibration_scale_and_the_raw_p_number_is_r
     calibrated emulator reads 0.71 here and the old gate (|coverage - 0.90| <= 0.05) rejected it; the conformal guarantee is on the clipped logit."""
     obs, _ = known_p_table()
     assert obs["p_fail"].isin([0.0, 1.0]).mean() > 0.2
-    em, info = whatif.fit_class(obs, "glider", tmp_path / "t.parquet")
+    em, info = whatif.fit_class(obs, "glider", GSC, tmp_path / "t.parquet")
     raw = info["coverage_raw_p"]["p_fail"]
     assert set(info["coverage_raw_p"]) == {"p_fail"} and raw < 0.8 and info["coverage"]["p_fail"] > raw + 0.1
     assert abs(raw - info["nominal"]) > whatif.LIMITS["coverage"]                                       # the number the old gate used would have failed it
@@ -992,7 +1003,7 @@ def test_snapshot_of_a_corrupt_shared_table_is_a_config_error_naming_the_file_an
     with pytest.raises(ConfigError, match=f"training table {t} cannot be read"):
         whatif.snapshot(t, tmp_path / "s" / "train_input", "r1")
     with pytest.raises(ConfigError, match="cannot be read"):
-        whatif.train(t, ["glider"])
+        whatif.train(t, {GSC: "glider"})
     assert t.read_bytes() == content
 
 
@@ -1003,9 +1014,9 @@ def test_the_fresh_check_skips_rows_it_cannot_re_run_and_stops_at_three(tmp_path
     def fresh(row):
         seen.append(row["deploy_h"])
         return None if len(seen) % 2 else (0.5, 16)                                         # every other held-out point is a row of another run
-    _, info = whatif.fit_class(obs, "glider", tmp_path / "t.parquet", fresh=fresh)
+    _, info = whatif.fit_class(obs, "glider", GSC, tmp_path / "t.parquet", fresh=fresh)
     assert info["fresh_points"] == 3 and len(seen) == 6 and len(set(seen)) == 6              # one call per distinct held-out point, the rest never asked
-    _, none = whatif.fit_class(obs, "glider", tmp_path / "t.parquet", fresh=lambda row: None)
+    _, none = whatif.fit_class(obs, "glider", GSC, tmp_path / "t.parquet", fresh=lambda row: None)
     assert none["fresh_points"] == 0 and none["rmse_gate"] == none["rmse_debiased"]
 
 
@@ -1129,13 +1140,13 @@ def test_replicates_of_one_mission_are_one_feature_point_whatever_their_environm
     noisy = ("wind_mean", "wind_p90", "hs_mean", "cur_p90")
     df = pd.concat([base.assign(**{c: base[c] * (1 + 0.05 * rng.normal(size=len(base))) for c in noisy}) for _ in range(4)], ignore_index=True)
     assert len(df) == 120 and len(df[whatif.BASE + whatif.TASK["glider"]].round(9).drop_duplicates()) == 120
-    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet")
     assert em is None and info["rows"] == 120 and info["points"] == 30 and "only 30 of them are distinct feature points" in info["reason"]
 
 
 def test_the_emulator_of_a_class_is_fitted_on_the_mission_columns_as_its_points(tmp_path):
     df = pd.concat([storm_table(110, seed=3).assign(**{"wind_mean": lambda d, i=i: d["wind_mean"] + 0.01 * i}) for i in range(2)], ignore_index=True)
-    em, info = whatif.fit_class(df, "glider", tmp_path / "t.parquet")
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet")
     assert em is not None and em.point_cols == whatif.key_cols("glider") == whatif.BASE[:3] + whatif.TASK["glider"]
     assert info["rows"] == 220 and info["points"] == 110
 
@@ -1163,11 +1174,11 @@ def test_r8_m5_the_emulator_logic_tests_do_not_depend_on_the_hosts_speed(tmp_pat
         now[0] += 0.05
         return now[0]
     monkeypatch.setattr(whatif, "time", types.SimpleNamespace(perf_counter=slow))
-    em, info = whatif.fit_class(storm_table(), "glider", tmp_path / "t.parquet")
+    em, info = whatif.fit_class(storm_table(), "glider", GSC, tmp_path / "t.parquet")
     assert whatif.LIMITS["query_ms"] == 1e9 and info["query_ms"] == pytest.approx(50.0)
     assert em is not None and info["used"] and info["unused_reason"] is None and info["acceptance"]["query_ok"]
     monkeypatch.setitem(whatif.LIMITS, "query_ms", 10.0)                                      # the limit BRIEF 2.7 states: the same 50 ms query now misses it
-    _, slow_info = whatif.fit_class(storm_table(), "glider", tmp_path / "t2.parquet")
+    _, slow_info = whatif.fit_class(storm_table(), "glider", GSC, tmp_path / "t2.parquet")
     assert not slow_info["used"] and "query time" in slow_info["unused_reason"]
 
 
@@ -1207,3 +1218,114 @@ def test_r9_m18_dropping_every_vehicle_is_refused_and_dropping_some_is_not():
         whatif.answer(storm_mission(), dict(drop=[GL], shift_h=6.0), {}, {}, ENV, {}, plan_for(STORM), None, None)
     assert whatif.answer(m, dict(drop=ids[:-1]), {}, {}, ENV, {}, plan_for(m), None, None)["dropped"] == ids[:-1]
     assert whatif.apply(m, drop=ids)["vehicles"] == []                    # `apply` itself still may: run_variant relies on it
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 10: M-1, M-6, M-11
+
+LONG = storm_mission(96)                                                  # the same glider, task and deploy over a 96 h window instead of 60 h
+
+
+def test_the_scope_is_the_class_the_platform_and_the_length_of_the_window_and_a_variant_keeps_it():
+    """Round 10 M-1: P(fail) is over the whole window, and nothing in the feature vector held its length or the platform."""
+    assert GSC == "glider/seaglider/60h" and whatif.scope_of(LONG, GL) == "glider/seaglider/96h" and whatif.scope_of(CI, "glider_1n") == "glider/slocum/36h"
+    assert whatif.scope_of(whatif.apply(STORM, {GL: dict(shift_h=24.0, dlon=-0.5, duty=0.75)}), GL) == GSC                    # no variant changes it
+    assert whatif.scopes(DEMO) == {"glider/seaglider/144h": "glider", "glider/slocum/144h": "glider", "usv/saildrone_explorer/144h": "usv",
+                                   "uas/quad_uas/144h": "uas"}
+
+
+def test_rows_of_another_window_length_are_not_pooled_and_the_refusal_says_so(tmp_path):
+    """Round 10 M-1: 110 rows of a 60 h window and 60 of a 96 h window were one function of 170 points, and the 96 h missions trained on the 60 h ones."""
+    long_rows = storm_table(60, seed=4).assign(scope=whatif.scope_of(LONG, GL))
+    df = pd.concat([storm_table(110, seed=3), long_rows], ignore_index=True)
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet")
+    assert em is not None and info["rows"] == 110 and info["points"] == 110 and info["other_scope_rows"] == 60 and info["scope"] == GSC
+    em, info = whatif.fit_class(df, "glider", whatif.scope_of(LONG, GL), tmp_path / "t.parquet")
+    assert em is None and info["rows"] == 60 and info["points"] == 60 and info["other_scope_rows"] == 110
+    assert info["reason"] == ("60 glider/seaglider/96h rows in the training table, 100 are needed (a 20 % hold-out must score 90 % coverage); "
+                              "110 glider rows of other platforms or window lengths are not pooled with them, since P(fail) over another window or platform "
+                              "is another function")
+    other_platform = storm_table(110, seed=5).assign(scope="glider/slocum/60h")
+    _, info = whatif.fit_class(pd.concat([storm_table(30), other_platform], ignore_index=True), "glider", GSC, tmp_path / "t.parquet")
+    assert info["rows"] == 30 and info["other_scope_rows"] == 110 and not info["trained"]
+
+
+def test_train_fits_one_emulator_per_scope_and_a_query_is_answered_from_its_own_only(tmp_path, storm_em):
+    em, info = storm_em
+    scopes = {GSC: "glider", whatif.scope_of(LONG, GL): "glider"}
+    df = pd.concat([storm_table(120), storm_table(120, seed=9).assign(scope=whatif.scope_of(LONG, GL))], ignore_index=True).assign(code_digest="d1")
+    out = whatif.train(tmp_path / "none.parquet", scopes, df=df, code_digest="d1")
+    assert set(out) == set(scopes) and all(i["trained"] and i["rows"] == 120 for _, i in out.values())
+    assert out[GSC][1]["scope"] == GSC and out[whatif.scope_of(LONG, GL)][1]["other_scope_rows"] == 120
+    allowed = {sc: (e, dict(i, used=True)) for sc, (e, i) in out.items()}                                   # (the gates are not what this test is about)
+    assert whatif.usable(allowed, GSC)[0] is out[GSC][0] and whatif.usable(allowed, whatif.scope_of(LONG, GL))[0] is out[whatif.scope_of(LONG, GL)][0]
+    assert out[GSC][0] is not out[whatif.scope_of(LONG, GL)][0]
+    assert whatif.usable({GSC: (em, info)}, whatif.scope_of(LONG, GL)) == (None, None)             # an emulator of another scope is no emulator for this one
+    r = whatif.answer(LONG, dict(shift_h=24.0), BASE, {GL: TRACK}, ENV, {GSC: (em, info)}, plan_for(LONG), None, None)["vehicles"][GL]
+    assert r["method"] == "Stage 1" and r["why"] == "no emulator"                                           # the 60 h emulator does not answer a 96 h flight
+    assert ask(dict(shift_h=24.0), {GSC: (em, info)})["vehicles"][GL]["method"] == "EMULATED"             # and still answers its own
+
+
+def test_a_table_made_before_the_scope_column_is_left_out_and_says_so_instead_of_failing(tmp_path):
+    """Round 10 M-1: older rows have no scope; they stay in the table, are not trained on, and new rows are appended beside them."""
+    old = storm_table(150).drop(columns="scope")
+    em, info = whatif.fit_class(old, "glider", GSC, tmp_path / "t.parquet")
+    assert em is None and info["rows"] == 0 and info["unscoped_rows"] == 150
+    assert info["reason"] == (f"0 {GSC} rows in the training table, 100 are needed (a 20 % hold-out must score 90 % coverage); "
+                              "150 glider rows made before rows carried a scope are left out")
+    path = tmp_path / "train.parquet"
+    whatif.add_rows(path, [dict(r, key=f"o{i}", run_id="r", code_digest="d1") for i, r in enumerate(old.to_dict("records"))])
+    both, _ = whatif.add_rows(path, [dict(r, key=f"n{i}", run_id="r2", code_digest="d1") for i, r in enumerate(storm_table(120, seed=8).to_dict("records"))])
+    assert len(both) == 270 and both["scope"].isna().sum() == 150
+    em, info = whatif.train(path, {GSC: "glider"}, code_digest="d1")[GSC]
+    assert em is not None and info["trained"] and info["rows"] == 120 and info["unscoped_rows"] == 150
+
+
+@pytest.mark.parametrize("n", [20, 40, 60, 100])
+def test_the_coverage_gate_and_the_chance_figure_are_one_rule_with_the_edges_inside(n):
+    """Round 10 M-6: abs(17 / 20 - 0.9) <= 0.05 is False in floats while 19 / 20 passes; the chance figure counted both inside."""
+    from fractions import Fraction
+    exact = [k for k in range(n + 1) if Fraction(85, 100) <= Fraction(k, n) <= Fraction(95, 100)]
+    got = [k for k in range(n + 1) if whatif._coverage_in(k / n, 0.9)]
+    assert got == exact and exact[0] / n >= 0.85 and exact[-1] / n <= 0.95
+    inside = binom_pmf_sum(n, exact)
+    assert whatif._chance_miss(n, 0.9) == pytest.approx(1 - inside, abs=1e-12)
+    assert not whatif._coverage_in((exact[0] - 1) / n, 0.9) and not whatif._coverage_in((exact[-1] + 1) / n, 0.9)           # a real miss is still a miss
+
+
+def binom_pmf_sum(n, ks, p=0.9):
+    return sum(math.comb(n, k) * p ** k * (1 - p) ** (n - k) for k in ks)
+
+
+def test_a_hold_out_coverage_of_17_of_20_passes_the_gate_and_the_receipt_bracket_agrees(tmp_path, monkeypatch):
+    """Round 10 M-6: 17 of 20 failed `abs(cov - 0.9) <= 0.05` by 4e-17; the chance figure said it was inside. the emulator receipt brackets the same edge with
+    the same `coverage_band` the gate uses."""
+    from cafe import receipts as R
+    from cafe.pm.emulator import Emulator, coverage_band
+    real = Emulator.holdout_report
+    for hits, ok in ((17, True), (19, True), (16, False)):
+        monkeypatch.setattr(Emulator, "holdout_report", lambda self, *a, h=hits, **k: dict(real(self, *a, **k), n_test=20, coverage={"p_fail": h / 20}))
+        _, info = whatif.fit_class(storm_table(110, seed=hits), "glider", GSC, tmp_path / "t.parquet")
+        assert info["acceptance"]["coverage_ok"] is ok and info["n_test"] == 20, hits
+        assert info["coverage_chance_fail"] == pytest.approx(1 - binom_pmf_sum(20, (17, 18, 19)), abs=1e-12)
+        n0 = len(R.OUT)
+        R.bracket("t", "c", hits / 20, *coverage_band(0.9, whatif.LIMITS["coverage"]))
+        assert R.OUT[n0]["ok"] is ok
+        del R.OUT[n0:]
+
+
+def test_a_deploy_shift_of_a_glider_says_it_flies_a_different_time_in_every_line_that_shows_it():
+    """Round 10 M-11: `--shift 48h` printed MARGINAL -> MARGINAL beside a flight 2 d shorter, with nothing to say the two P(fail) are over different
+    exposures. The window end stays; a UAS keeps its sorties inside the window and a move or a duty changes no exposure."""
+    t_end = whatif._window(CI)[1]
+    v = whatif.vehicle(CI, GL)                                                   # deployed 2023-03-01 18Z, window end 03-03 06Z: 1.5 d
+    note = "flies 1 d instead of 1.5 d: P(fail) is over the shorter flight, not like for like with the baseline's"
+    assert whatif.flight_note(v, 12.0, t_end) == note
+    assert whatif.flight_note(v, -12.0, t_end) == "flies 2 d instead of 1.5 d: P(fail) is over the longer flight, not like for like with the baseline's"
+    assert whatif.flight_note(v, 0.0, t_end) is None and whatif.flight_note(whatif.vehicle(CI, "uas"), 12.0, t_end) is None
+    assert whatif.describe(dict(shift_h=12.0), v, t_end) == f"deploy 12 h later ({note})"
+    assert whatif.describe(dict(shift_h=12.0), v) == "deploy 12 h later" and whatif.describe(dict(dlon=0.5), v, t_end) == "move 0.5 deg east"
+    assert [c["change"] for c in whatif.candidates(CI, GL) if c["mod"] == dict(shift_h=12.0)] == [f"deploy 12 h later ({note})"]
+    assert not [c for c in whatif.candidates(CI, "uas") if "flies" in c["change"]]
+    r = ask(dict(shift_h=24.0), {})["vehicles"][GL]
+    assert r["flight"] == "flies 1.5 d instead of 2.5 d: P(fail) is over the shorter flight, not like for like with the baseline's"
+    assert ask(dict(dlon=0.0, dlat=0.5), {})["vehicles"][GL]["flight"] is None

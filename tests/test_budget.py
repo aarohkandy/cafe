@@ -108,8 +108,10 @@ def test_the_plan_says_when_the_emulator_cannot_train_at_this_budget():
     assert "cannot train at this budget" in em["note"] and "0 of 6 variants" in em["note"]
     cheap = budget.plan("quick", GPU, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)          # 6 variants + the base: 7 points of the 100
     ec = budget.emulator_plan(cheap)
-    assert not ec["trains"] and ec["variants_no_refit"] == 6 and ec["points_per_class"] == dict(glider=7, uas=7, usv=7) and ec["note"] in cheap["notes"]
-    assert "this budget gives 7 distinct points per vehicle class in one run" in ec["note"] and "100 are needed" in ec["note"]
+    assert not ec["trains"] and ec["variants_no_refit"] == 6 and ec["note"] in cheap["notes"]
+    assert ec["points_per_scope"] == {"glider/?/144h": 7, "uas/?/144h": 7, "usv/?/144h": 7}
+    assert "this budget gives 7 distinct points per emulator scope (vehicle class, platform, window length) in one run" in ec["note"]
+    assert "100 are needed" in ec["note"]
     assert "will not train from this run alone" in ec["note"]
 
 
@@ -118,15 +120,32 @@ def test_a_long_budget_sizes_the_variants_to_reach_the_minimum_points_when_the_s
     big = budget.plan("overnight", GPU, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)
     e = budget.emulator_plan(big)
     need = math.ceil(100 * budget.EMULATOR_POINTS_MARGIN) - 1                                # 1 vehicle per class: (variants + 1) points
-    assert e["max_variants"] == need == 119 and e["variants_no_refit"] == 119 and e["trains"] and e["points_per_class"]["usv"] == 120
+    assert e["max_variants"] == need == 119 and e["variants_no_refit"] == 119 and e["trains"] and e["points_per_scope"]["usv/?/144h"] == 120
     assert not any("emulator" in n for n in big["notes"])
-    two = budget.emulator_plan(dict(big, vehicle_classes=dict(g1="glider", g2="glider")))             # two vehicles per class: half as many variants
-    assert two["max_variants"] == 59 and two["points_per_class"] == dict(glider=120)
+    gs = "glider/seaglider/144h"
+    two = budget.emulator_plan(dict(big, vehicle_scopes=dict(g1=gs, g2=gs)))                     # two vehicles per scope: half as many variants
+    assert two["max_variants"] == 59 and two["points_per_scope"] == {gs: 120}
+    old = budget.emulator_plan(dict(big, vehicle_scopes=None, vehicle_classes=dict(g1="glider", g2="glider")))           # a plan made before scopes: per class
+    assert old["max_variants"] == 59 and old["points_per_scope"] == dict(glider=120)
     dear = budget.plan("overnight", GPU, MISSION, thr=thr(60.0, 0.1), vehicle_classes=CLASSES)          # a variant costs more than the share holds 119 of
     d = budget.emulator_plan(dear)
     assert 0 < d["variants_no_refit"] < 119 and not d["trains"] and d["note"] in dear["notes"]
     assert f"{d['variants_no_refit'] + 1} distinct points" in d["note"]
     assert budget.emulator_plan(dict(big, member_cost={}))["trains"] is False                         # nothing priced: no variants, one point
+
+
+def test_the_emulator_plan_counts_points_per_scope_so_two_platforms_of_one_class_do_not_add_up():
+    """Round 10 M-1: the plan counted per class, so the demo's seaglider and Slocum counted as 2 points per variant; an emulator is trained on one platform
+    and one window length only, so each has 1."""
+    demo = config.load_mission(budget.ROOT / "missions" / "tepex_c_demo.yaml")
+    p = budget.plan("quick", GPU, demo, thr=thr(0.01, 0.001), vehicle_classes=stage1._classes(demo))
+    assert p["vehicle_scopes"] == {"glider_eq": "glider/seaglider/144h", "glider_2n": "glider/slocum/144h", "usv": "usv/saildrone_explorer/144h",
+                                   "uas": "uas/quad_uas/144h"}
+    e = budget.emulator_plan(p)
+    assert e["points_per_scope"] == dict.fromkeys(sorted(set(p["vehicle_scopes"].values())), 7) and e["variants_no_refit"] == 6
+    long = config.load_mission(budget.ROOT / "missions" / "tepex_c_demo.yaml")
+    long["window"]["end"] = "2023-03-09T12:00:00Z"
+    assert budget.emulator_scope(long, "glider_eq", "glider") == "glider/seaglider/192h" != budget.emulator_scope(demo, "glider_eq", "glider")
 
 
 def test_an_unresolved_slope_is_said_in_the_source_and_costs_a_batch_the_same_whatever_its_size():

@@ -289,8 +289,7 @@ def _whatif(a: argparse.Namespace) -> int:
             print(f"note: {why}; every changed vehicle goes to Stage 1")
     else:
         print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {a.budget} budget")
-    cls = set(stage1._classes(m).values())
-    ems = whatif.train(pipeline.emulator_table(), cls)
+    ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m))
     ans = whatif.answer(m, ops, base, tracks, ctx.env, ems, ctx.plan, fitted, scales, only=a.vehicle)
     what = [f"{ops['shift_h']:+g} h" if a.shift else "", f"{ops['dlon']:+g} deg lon, {ops['dlat']:+g} deg lat" if a.move else "",
             f"drop {', '.join(a.drop)}" if a.drop else ""]
@@ -304,6 +303,8 @@ def _whatif(a: argparse.Namespace) -> int:
             how = "unchanged"
         iv = f" ({r['lo']:.3f} to {r['hi']:.3f})" if "lo" in r else ""
         print(f"{vid}: {r['base']['verdict']} (P(fail) {r['base']['p_fail']:.3f}) -> {r['verdict']} (P(fail) {r['p_fail']:.3f}){iv}  [{how}]")
+        if r.get("flight"):
+            print(f"  note: {vid} {r['flight']}")
     for vid, why in ans.get("unchanged", {}).items():
         print(f"{vid}: unchanged ({why})")
     if ans["dropped"]:

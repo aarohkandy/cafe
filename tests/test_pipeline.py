@@ -1455,11 +1455,15 @@ def fake_stage1(monkeypatch):
     return calls
 
 
+GS = "glider/seaglider/144h"        # the emulator scope of glider_eq in the demo mission (class, platform, window length)
+
+
 def seed_table(path, n=140, bad=False, seed=0):
-    """Glider rows made by tests/test_whatif.storm_table (or pure noise when `bad`): test data, as the pipeline never trains on synthetic rows."""
+    """Glider rows made by tests/test_whatif.storm_table (or pure noise when `bad`), in the scope of the demo's glider_eq: test data, as the pipeline never
+    trains on synthetic rows."""
     from cafe.pm import whatif
     from tests import test_whatif
-    df = test_whatif.storm_table(n, seed)
+    df = test_whatif.storm_table(n, seed).assign(scope=GS)
     if bad:
         df["p_fail"] = np.random.default_rng(3).uniform(0, 1, n)
     whatif.add_rows(path, [dict(r, key=f"seed{i}", run_id="seed", mission="seed", variant="seed", n_members=512, code_digest=pipeline.code_digest())
@@ -1573,10 +1577,10 @@ def test_the_emulator_is_not_trained_on_a_few_rows_and_the_stage_still_passes(tm
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     out = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())
     assert set(out) == {"glider_eq", "glider_2n", "usv", "uas"} and all(not v["trained"] for v in out.values())
-    assert out["glider_eq"]["reason"].startswith("2 glider rows in the training table") and out["glider_eq"]["rows"] == 2
-    assert out["usv"]["cls"] == "usv" and out["glider_eq"] == out["glider_2n"]
+    assert out["glider_eq"]["reason"].startswith(f"1 {GS} rows in the training table") and out["glider_eq"]["rows"] == 1
+    assert out["usv"]["cls"] == "usv" and out["glider_eq"]["scope"] == GS and out["glider_2n"]["scope"] == "glider/slocum/144h"    # one emulator per platform
     assert [c["name"] for c in d["checks"]] == ["emulator_rows_appended"] and all(c["ok"] for c in d["checks"])
-    assert any("not trained (trained: false)" in n and "glider" in n for n in d["notes"]) and len([n for n in d["notes"] if "not trained" in n]) == 3
+    assert any("not trained (trained: false)" in n and GS in n for n in d["notes"]) and len([n for n in d["notes"] if "not trained" in n]) == 4
     flip = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]
     assert set(flip) == {"usv", "uas"}                                                                         # the two vehicles that are not GO
 
@@ -1601,11 +1605,12 @@ def test_a_trained_emulator_is_scored_and_held_to_the_briefs_acceptance(tmp_path
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     out = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())
     g = out["glider_eq"]
-    assert g["trained"] and g["cls"] == "glider" and g["rows"] == 142 and g["n_test"] == 28 and g["rmse"]["p_fail"] <= 0.05 and not out["usv"]["trained"]
-    assert out["glider_2n"] == g and g["acceptance"] == dict(rmse_ok=True, coverage_ok=True, query_ok=True)
+    assert g["trained"] and g["cls"] == "glider" and g["rows"] == 141 and g["n_test"] == 28 and g["rmse"]["p_fail"] <= 0.05 and not out["usv"]["trained"]
+    assert not out["glider_2n"]["trained"] and out["glider_2n"]["scope"] == "glider/slocum/144h"              # another platform: another function, not pooled
+    assert g["scope"] == GS and g["acceptance"] == dict(rmse_ok=True, coverage_ok=True, query_ok=True)
     assert g["used"] is True and g["unused_reason"] is None
     assert not [c for c in d["checks"] if c["name"].startswith(("emulator_rmse", "emulator_coverage", "emulator_query"))]
-    notes = [n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7")]
+    notes = [n for n in d["notes"] if n.startswith(f"emulator {GS}: BRIEF 2.7")]
     assert [n.split(":")[1].strip() for n in notes] == ["BRIEF 2.7 RMSE met", "BRIEF 2.7 coverage met", "BRIEF 2.7 query time met"]
     assert "Monte-Carlo noise" in notes[0]
 
@@ -1616,13 +1621,13 @@ def test_a_trained_emulator_that_misses_the_acceptance_is_noted_not_used_and_doe
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     d = run_stage(pipeline.s_emulator, ctx, "emulator")                                                  # no StageFailed
     assert not [c for c in d["checks"] if c["name"].startswith(("emulator_rmse", "emulator_coverage", "emulator_query"))]
-    assert all(c["ok"] for c in d["checks"]) and {"emulator_training_points_glider", "emulator_range_guard_glider"} <= {c["name"] for c in d["checks"]}
-    rm = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 RMSE"))
-    assert rm.startswith("emulator glider: BRIEF 2.7 RMSE MISSED: 0.") and "against the limit 0.05" in rm
-    cov = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 coverage "))
+    assert all(c["ok"] for c in d["checks"]) and {f"emulator_training_points_{GS}", f"emulator_range_guard_{GS}"} <= {c["name"] for c in d["checks"]}
+    rm = next(n for n in d["notes"] if n.startswith(f"emulator {GS}: BRIEF 2.7 RMSE"))
+    assert rm.startswith(f"emulator {GS}: BRIEF 2.7 RMSE MISSED: 0.") and "against the limit 0.05" in rm
+    cov = next(n for n in d["notes"] if n.startswith(f"emulator {GS}: BRIEF 2.7 coverage "))
     assert "misses this by chance with probability" in cov and "held-out points" in cov
-    why = "the glider emulator missed BRIEF 2.7 acceptance (RMSE"
-    assert any(n.startswith(f"emulator glider not used for answers: {why}") and n.endswith("so Stage 1 answers") for n in d["notes"])
+    why = f"the {GS} emulator missed BRIEF 2.7 acceptance (RMSE"
+    assert any(n.startswith(f"emulator {GS} not used for answers: {why}") and n.endswith("so Stage 1 answers") for n in d["notes"])
     g = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())["glider_eq"]
     assert g["trained"] and g["used"] is False and g["unused_reason"].startswith(why) and g["acceptance"]["rmse_ok"] is False
     flip = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]
@@ -1639,9 +1644,9 @@ def test_a_missed_coverage_gate_alone_completes_the_run_with_a_note_that_gives_t
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     assert not [c for c in d["checks"] if c["name"].startswith("emulator_coverage")]
-    n = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 coverage MISSED: "))
-    assert re.fullmatch(r"emulator glider: BRIEF 2\.7 coverage MISSED: 0\.\d{3} against 0\.90 \+- 0\.0; a calibrated emulator misses this by chance with "
-                        r"probability 1\.000 on 28 held-out points", n), n
+    n = next(n for n in d["notes"] if n.startswith(f"emulator {GS}: BRIEF 2.7 coverage MISSED: "))
+    assert re.fullmatch(re.escape(f"emulator {GS}: ") + r"BRIEF 2\.7 coverage MISSED: 0\.\d{3} against 0\.90 \+- 0\.0; a calibrated emulator misses "
+                        r"this by chance with probability 1\.000 on 28 held-out points", n), n
     g = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())["glider_eq"]
     assert g["used"] is False and "(coverage)" in g["unused_reason"]
 
@@ -1657,15 +1662,15 @@ def test_the_emulator_trains_on_the_table_as_the_stage_found_it_and_this_runs_ro
     a = cheap_plan(synthetic_ctx(tmp_path, 48, "a"), 10.0)  # no budget for variants: the two glider rows of the run
     run_stage(pipeline.s_emulator, a, "emulator")
     snap = whatif.read_table(a.run_dir / "emulator" / "train_input.parquet")
-    assert snap.equals(start) and holdout_rows(a) == 142                                                       # 140 from the table + glider_eq + glider_2n
+    assert snap.equals(start) and holdout_rows(a) == 141                          # 140 from the table + glider_eq (glider_2n is another platform)
     assert len(whatif.read_table(table)) == 144                                                                # appended after the fit
     run_stage(pipeline.s_emulator, a, "emulator")  # the same run again: its own rows are not training data
-    assert len(whatif.read_table(a.run_dir / "emulator" / "train_input.parquet")) == 140 and holdout_rows(a) == 142
+    assert len(whatif.read_table(a.run_dir / "emulator" / "train_input.parquet")) == 140 and holdout_rows(a) == 141
     assert len(whatif.read_table(table)) == 144                                                                # replaced, not doubled
     b = cheap_plan(synthetic_ctx(tmp_path, 48, "b"), 10.0)                                                     # another run on the table as it is now
     run_stage(pipeline.s_emulator, b, "emulator")
     assert len(whatif.read_table(b.run_dir / "emulator" / "train_input.parquet")) == 144       # a's four rows are in the snapshot ...
-    assert holdout_rows(b) == 142                                                              # ... and b's rows (same mission, same keys) replace them
+    assert holdout_rows(b) == 141                                                              # ... and b's rows (same mission, same keys) replace them
 
 
 def test_a_row_another_run_appends_while_the_stage_runs_does_not_reach_this_runs_emulator(tmp_path, table, fake_stage1, monkeypatch):
@@ -1681,7 +1686,8 @@ def test_a_row_another_run_appends_while_the_stage_runs_does_not_reach_this_runs
     monkeypatch.setattr(whatif, "train", train)
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48), 10.0)
     run_stage(pipeline.s_emulator, ctx, "emulator")
-    assert seen == [144] and "other|glider|base" in set(whatif.read_table(table)["key"]) and holdout_rows(ctx) == 142       # 140 + the run's four rows, not 145
+    assert seen == [144] and "other|glider|base" in set(whatif.read_table(table)["key"])
+    assert holdout_rows(ctx) == 141                                                                           # 140 + the run's glider_eq row, not 145
 
 
 def test_the_emulator_table_is_the_option_then_the_environment_then_the_shared_data_tree(tmp_path, monkeypatch):
@@ -1760,12 +1766,13 @@ def test_the_flip_search_on_the_ci_mission_does_not_crash_when_a_moved_track_lea
     from cafe.pm.env.environment import OutsideData
     from tests import test_whatif
     ctx = ctx_for(tmp_path / "r")
-    em, _ = whatif.fit_class(test_whatif.storm_table(), "glider", tmp_path / "t.parquet")
+    em, _ = whatif.fit_class(test_whatif.storm_table(), "glider", test_whatif.GSC, tmp_path / "t.parquet")
     trk = (np.linspace(T0, T1, 24), np.full(24, -166.8), np.zeros(24))
     with pytest.raises(OutsideData):
         whatif.env_stats(ctx.env, *whatif.shift_track(trk, dict(dlon=-0.5), ctx.mission))                      # what the flip search used to run into
     pri, marg = stage1.priors_for(ctx.mission)
-    flips, _ = whatif.flip_search(ctx.mission, {"glider_eq": dict(verdict="NO-GO", p_fail=0.9)}, {"glider_eq": trk}, ctx.env, {"glider": (em, {})}, ctx.plan,
+    ems = {whatif.scope_of(ctx.mission, "glider_eq"): (em, {})}
+    flips, _ = whatif.flip_search(ctx.mission, {"glider_eq": dict(verdict="NO-GO", p_fail=0.9)}, {"glider_eq": trk}, ctx.env, ems, ctx.plan,
                                   pri, marg, None, int(ctx.mission["seed"]), 1e6, quiet)
     tried = flips["glider_eq"]["tried"]
     west = [t for t in tried if "west" in t["change"] and "leaves the environment data" in t["reason"]]
@@ -1816,7 +1823,7 @@ def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, tab
     """Round 3 M-4: every variant runs members of its own and the hold-out's fresh-draw check runs blocks after the variants'; round 7 M-7: all of them
     after the 48 members stage 1b used."""
     from cafe.pm import whatif
-    seed_table(table, n=100)                                         # 100 rows + this run's glider rows: just enough distinct points to train
+    seed_table(table, n=101)         # 101 rows + this run's glider_eq rows (base and three variants): enough points, and a variant row falls in the hold-out
     monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)                  # share 20 s: three variants
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
@@ -1830,7 +1837,7 @@ def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, tab
     fresh_blocks = [m for m in later if m[0] >= 16 * (3 + n_var)]
     assert len(fresh_blocks) == h["fresh_points"] and len({m[0] for m in fresh_blocks}) == len(fresh_blocks)         # each fresh draw its own unused block
     assert h["fresh_points"] == 0 or (h["rmse_gate"] >= h["rmse_debiased"] and h["rmse_gate"] >= h["rmse_fresh_debiased"])
-    note = next(n for n in d["notes"] if n.startswith("emulator glider: BRIEF 2.7 RMSE"))
+    note = next(n for n in d["notes"] if n.startswith(f"emulator {GS}: BRIEF 2.7 RMSE"))
     assert ("point(s) re-run on fresh members:" in note) == bool(h["fresh_points"])
     assert ("only the in-sample score is judged" in note) == (not h["fresh_points"])
     assert h["fresh_points"] >= 1, "no variant row landed in the hold-out: the fresh-draw wiring is not exercised"
@@ -1841,7 +1848,7 @@ def test_a_held_out_point_whose_fresh_rerun_leaves_the_environment_data_is_left_
     no fresh number for the point, and the check goes on without it (here for every point: the in-sample score alone is judged, as the note says)."""
     from cafe.pm import whatif
     from cafe.pm.env.environment import OutsideData
-    seed_table(table, n=100)
+    seed_table(table, n=101)
     monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
     fake = stage1.run_batch
     refused = []
@@ -2055,7 +2062,7 @@ def test_the_emulator_stage_adds_rows_for_the_run_and_is_not_trained_yet(ci_runs
     assert set(f.holdout) == set(CLASSES)
     for vid, h in f.holdout.items():
         assert h["trained"] is False and h["cls"] == CLASSES[vid]
-        assert h["reason"].endswith(f"{whatif.MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage)")
+        assert f"{whatif.MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage)" in h["reason"] and h["scope"].startswith(CLASSES[vid])
     df = whatif.read_table(pipeline.DATA / "emulator" / "train.parquet")
     assert set(df["vehicle"]) == set(CLASSES) and (df["n_members"] == 8).all() and set(df["mission"]) == {"ci_fixture"}
     assert np.isfinite(df[whatif.BASE]).all().all()
@@ -2736,9 +2743,9 @@ def test_a_trained_emulator_also_records_its_training_points_and_refuses_a_far_m
     monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
-    pts = check_of(d, "emulator_training_points_glider")
+    pts = check_of(d, f"emulator_training_points_{GS}")
     assert pts["ok"] and pts["limit"] == whatif.MIN_ROWS and pts["value"] >= whatif.MIN_ROWS
-    g = check_of(d, "emulator_range_guard_glider")
+    g = check_of(d, f"emulator_range_guard_{GS}")
     assert g["ok"] and g["value"] <= g["limit"] and "1e6 units" in g["note"]
 
 
@@ -2749,7 +2756,7 @@ def test_an_emulator_that_answers_a_mission_far_outside_its_training_rows_fails_
     real = emulator.Emulator.query
     monkeypatch.setattr(emulator.Emulator, "query", lambda self, x, alpha=0.1: dict(real(self, x, alpha), status="ok"))
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
-    with pytest.raises(ledger.StageFailed, match="emulator_range_guard_glider"):
+    with pytest.raises(ledger.StageFailed, match=re.escape(f"emulator_range_guard_{GS}")):
         run_stage(pipeline.s_emulator, ctx, "emulator")
 
 
