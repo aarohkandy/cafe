@@ -313,6 +313,29 @@ def test_convergence_and_mass_helpers():
     assert nest.mass_drift({"mass": np.array([100.0, 100.0, 100.5])}) == pytest.approx(0.005)
 
 
+def test_r10_m2_the_running_mean_judges_the_mean_not_one_sample():
+    """BRIEF 5.5. The running mean used to restart at the first sample of the last third, so its deviation was at least that sample's own noise: a
+    stationary series with 5 % per-step noise failed 4 seeds in 5 (seed 0: 0.040) however long the run. A real drift still fails."""
+    n = 3000
+    for seed in range(5):
+        noisy = 1.0 + 0.05 * np.random.default_rng(seed).standard_normal(n)
+        ok, dev = nest.running_mean_ok(noisy)
+        assert ok and dev < 0.02, (seed, dev)
+        e = np.random.default_rng(seed).standard_normal(n) * 0.02 * np.sqrt(1 - 0.95 ** 2)            # AR(1), rho 0.95, 2 % marginal sd
+        ar = np.empty(n)
+        ar[0] = 0.0
+        for i in range(1, n):
+            ar[i] = 0.95 * ar[i - 1] + e[i]
+        assert nest.running_mean_ok(1.0 + ar)[0], seed
+    drift = np.ones(n)
+    drift[-n // 3:] = np.linspace(1.0, 1.06, n // 3)                                                    # the mean moves 3 % either side of its centre
+    ok, dev = nest.running_mean_ok(drift)
+    assert not ok and 0.02 < dev < 0.03
+    assert not nest.running_mean_ok(drift + 0.05 * np.random.default_rng(0).standard_normal(n))[0]     # and it is seen through the noise too
+    assert nest.running_mean_ok(np.ones(n)) == (True, 0.0)
+    assert nest.running_mean_ok([1.0, 1.0, 1.0, 1.0, 1.0, 1.0])[0] and nest.running_mean_ok([2.0, 1.0])[1] > 0.02          # a series shorter than the blocks
+
+
 # ------------------------------------------------------------------ curved walls (Bouzidi) and the native sphere
 def test_ellipsoid_wall_distance_for_a_sphere():
     shape = (24, 24, 24)

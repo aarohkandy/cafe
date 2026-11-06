@@ -915,6 +915,28 @@ def test_hangar_numbers_are_the_vehicles_own_models(no_wall_receipt, monkeypatch
 
 
 
+def test_r10_m15_a_hole_in_the_weather_is_a_no_data_reason_in_every_class_and_a_true_calm_is_still_a_calm(no_wall_receipt, monkeypatch):
+    """A NaN used to run through every comparison that is False: a UAS case of NaN speeds, a NaN into fit_window ("cannot convert float NaN to
+    integer"), a current blamed on the wind as "becalmed". Stage 1 calls the hole `no_current_data`; the window now says it before it computes."""
+    a, nan, nan2 = pw.assumptions(), math.nan, (math.nan, math.nan)
+    Pg, Pu, Pq = pg.load_platform("seaglider"), pu.load_platform("saildrone_explorer"), uas.load_platform()
+    vg, vu, vq = pw.glider_vehicle(Pg, a, "seaglider", 500.0), pw.usv_vehicle(Pu, a, "saildrone_explorer", "hull"), pw.uas_vehicle(Pq, a, "quad_uas")
+    calls = dict(glider=lambda c: pw.glider_case(c, WIN, Pg, vg, a, 90.0), usv=lambda c: pw.usv_case(c, WIN, Pu, vu, a, 0.0, "hull"),
+                 uas=lambda c: pw.uas_case(c, WIN, Pq, vq, a, None))
+    for cls, what, kw in (("glider", "current", dict(current=nan2)), ("glider", "density", dict(rho=nan)), ("glider", "sea surface temperature", dict(sst=nan)),
+                          ("usv", "wind", dict(wind=nan2)), ("usv", "current", dict(current=nan2)),
+                          ("uas", "wind", dict(wind=nan2)), ("uas", "2 m temperature", dict(sst=nan))):
+        with pytest.raises(ValueError, match=f"^no_current_data: the environment gave no finite {what} at this window"):
+            calls[cls](fake_ctx(no_wall_receipt, env=AnalyticEnv(**kw)))
+    # through the window run: the row says so, for each class, instead of a NaN case or another error
+    cheap(monkeypatch)
+    out = pw.run(fake_ctx(no_wall_receipt, env=AnalyticEnv(wind=nan2)), {"g": [WIN], "u": [WIN], "q": [WIN]}, FakeL())
+    assert "error" not in out["g"][0]                                                                          # the glider reads no wind
+    assert all(r["error"].startswith("no_current_data: the environment gave no finite wind") and not r["ok"] for r in out["u"] + out["q"])
+    # a read value that is a number stays accepted, and a calm (zeros) is a calm, not a hole
+    assert "becalmed" in pw.run(fake_ctx(no_wall_receipt, env=AnalyticEnv(wind=(0.0, 0.0), current=(0.0, 0.0))), {"u": [WIN]}, FakeL())["u"][0]["error"]
+
+
 def uas_case_at(tmp_path, wind, heading=None):
     ctx = fake_ctx(tmp_path, env=AnalyticEnv(wind=wind, current=(0.3, 0.1)))
     a, P = pw.assumptions(), uas.load_platform()
@@ -1689,10 +1711,27 @@ def test_the_estimate_is_cells_x_iterations_over_the_rate_times_the_measured_fac
 
 def test_the_smallest_budget_profile_whose_plan_holds_the_estimate_is_named():
     prof = {"ci": 360.0, "quick": 360.0, "4h": 4320.0, "overnight": 10800.0}
-    assert fs.fitting_budget(300, prof) == "--budget ci (6 min of stage 3 in that plan)" and fs.fitting_budget(361, prof).startswith("--budget 4h")
-    assert fs.fitting_budget(5000, prof) == "--budget overnight (180 min of stage 3 in that plan)"
-    assert fs.fitting_budget(11000, prof) == "no --budget profile's plan holds it (the largest gives 180 min)"
-    assert fs.fitting_budget(1, {}) == "no --budget profile's plan holds it (the largest gives 0 min)"
+    assert fs.fitting_budget(300, prof) == "it would fit --budget ci (6 min of stage 3 in that plan)"
+    assert fs.fitting_budget(361, prof).startswith("it would fit --budget 4h")
+    assert fs.fitting_budget(5000, prof) == "it would fit --budget overnight (180 min of stage 3 in that plan)"
+    assert fs.fitting_budget(11000, prof) == "no --budget profile's plan holds it (the largest plan gives 180 min of stage 3)"
+    assert fs.fitting_budget(1, {}) == "no --budget profile could be planned for this mission"       # not "the largest gives 0 min" (round 10, M-33)
+
+
+def test_r10_m33_the_refusal_is_one_sentence_whether_a_profile_holds_the_case_or_none_does(monkeypatch):
+    """Through `_fs_gate`: the sentence used to join "it would fit " to the none clause ("it would fit no --budget profile's plan holds it (the largest
+    gives 0 min)") and called the figure "the largest" whatever it was."""
+    a = pw.assumptions()
+    est = dict(total_s=36000.0, cells=dict(coarse=1e6, fine=3e6), iters=100, cores=6, rate=1e6)
+    ctx = SimpleNamespace(plan=dict(shares=dict(stage3=0.5), budget_s=120.0))
+    monkeypatch.setattr(pw, "profile_stage3_s", lambda c: {"quick": 60.0, "overnight": 10800.0})
+    fits, why, held = pw._fs_gate(est, a, ctx, 36.0, 0.0)
+    assert not fits and held == pytest.approx(36000.0 * a["fs.margin"]) and "would fit no" not in why
+    assert why.endswith("stage-3 share; no --budget profile's plan holds it (the largest plan gives 180 min of stage 3)")
+    est["total_s"] = 3000.0
+    assert pw._fs_gate(est, a, ctx, 36.0, 0.0)[1].endswith("stage-3 share; it would fit --budget overnight (180 min of stage 3 in that plan)")
+    monkeypatch.setattr(pw, "profile_stage3_s", lambda c: {})
+    assert pw._fs_gate(est, a, ctx, 36.0, 0.0)[1].endswith("stage-3 share; no --budget profile could be planned for this mission")
 
 
 def test_review_round_6_m14_each_profile_is_judged_by_its_own_plan_not_by_the_running_plans_share(monkeypatch):
@@ -1705,8 +1744,8 @@ def test_review_round_6_m14_each_profile_is_judged_by_its_own_plan_not_by_the_ru
     s = pw.profile_stage3_s(ctx)
     assert s["quick"] == 0.0 and s["4h"] == 0.0 and 100 * 60 < s["overnight"] < budget.SHARE["stage3"] * budget.BUDGET_S["overnight"]
     assert list(s) == sorted(s, key=budget.BUDGET_S.get)
-    assert fs.fitting_budget(117 * 60, s) == f"--budget overnight ({s['overnight'] / 60:.0f} min of stage 3 in that plan)"
-    assert fs.fitting_budget(36000, s) == f"no --budget profile's plan holds it (the largest gives {s['overnight'] / 60:.0f} min)"
+    assert fs.fitting_budget(117 * 60, s) == f"it would fit --budget overnight ({s['overnight'] / 60:.0f} min of stage 3 in that plan)"
+    assert fs.fitting_budget(36000, s) == f"no --budget profile's plan holds it (the largest plan gives {s['overnight'] / 60:.0f} min of stage 3)"
     real = budget.plan
 
     def refuse_ci(name, *args, **kw):

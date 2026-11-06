@@ -901,7 +901,8 @@ def usv_file(tmp_path, group, key, value):
 @pytest.mark.parametrize("group,key,value", [
     ("mission_defaults", "cap_cycles", 0.0), ("mission_defaults", "cap_cycles", -1.0), ("mission_defaults", "cap_cycles", 0.5),
     ("params", "rudder_area_m2", 0.0), ("params", "rudder_area_m2", -1.0), ("params", "rudder_span_m", 0.0), ("params", "rudder_span_m", -1.0),
-    ("params", "rudder_t_c", 0.0), ("params", "rudder_x_m", 0.0), ("params", "stw_cap_ms", 1e12), ("params", "stw_cap_ms", 51.0)])
+    ("params", "rudder_t_c", 0.0), ("params", "rudder_x_m", 0.0), ("params", "stw_cap_ms", 1e12), ("params", "stw_cap_ms", 51.0),
+    ("params", "stw_cap_ms", 3.6)])
 def test_the_usv_loader_refuses_a_leaf_the_simulator_would_divide_by_or_take_a_log_of(tmp_path, group, key, value):
     with pytest.raises(ValueError, match=rf"saildrone_explorer\.yaml:{group}\.{key}: .* must be a finite number"):
         usv.load_platform(usv_file(tmp_path, group, key, value))
@@ -909,7 +910,7 @@ def test_the_usv_loader_refuses_a_leaf_the_simulator_would_divide_by_or_take_a_l
 
 def test_the_usv_loader_still_takes_the_shipped_values_and_the_stated_edges(tmp_path):
     assert usv.load_platform()["stw_cap_ms"] == 3.3
-    assert usv.load_platform(usv_file(tmp_path, "params", "stw_cap_ms", 50.0))["stw_cap_ms"] == 50.0
+    assert usv.load_platform(usv_file(tmp_path, "params", "stw_cap_ms", usv.WAVE_U_MAX))["stw_cap_ms"] == usv.WAVE_U_MAX
     assert usv.load_platform(usv_file(tmp_path, "mission_defaults", "cap_cycles", 1.0))["mission_defaults"]["cap_cycles"] == 1.0
 
 
@@ -1232,3 +1233,41 @@ def test_r9_a_mission_default_out_of_its_range_is_refused_at_load_naming_it(tmp_
     f.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError, match=rf"boat\.yaml:mission_defaults\.{key}: "):
         usv.load_platform(str(f))
+
+
+# ---- review round 10, M-10: a calm is only a calm
+def test_r10_m10_in_a_calm_the_bow_cone_is_not_counted_so_wing_stall_angle_needs_an_apparent_wind_of_trim_min_aws_ms():
+    """In a calm (apparent wind under trim_min_aws_ms) the polar's apparent wind angle is the sign of a zero, and wing_stall_angle was counted beside
+    wing_stall_calm for some wind directions (DECISIONS 217: a calm is a calm): 0.5 m/s blowing toward 210 deg, 0.3 m/s toward 180 deg, for a boat
+    bound north. Above trim_min_aws_ms the cone still counts."""
+    for speed, to_deg in ((0.5, 210.0), (0.3, 180.0)):
+        calm = sim(AnalyticEnv(wind=tuple(wind_to(speed, to_deg))), m=2)
+        calm.run(2 * HR, 60.0)
+        assert calm.fail["wing_stall_calm"].all() and not calm.fail["wing_stall_angle"].any() and calm.acc["wing_stall_angle"].max() == 0.0
+        assert 0.5 <= first_h(calm, "wing_stall_calm") < 0.6
+    brisk = usv.USVSim(dict(P, min_awa_deg=180.0), 2, AnalyticEnv(wind=(-6.0, 0.0)), (-165.0, -1.0), 0.0,
+                       dict(mode="section", waypoints=[(-165.0, -1.0), (-165.0, 1.0)]), perturb=dict(vpp_bias=np.full(2, -0.3)))
+    brisk.run(2 * HR, 60.0)
+    assert brisk.fail["wing_stall_angle"].all() and not brisk.fail["wing_stall_calm"].any()
+
+
+# ---- review round 10, M-13: where the polar is stalled or not balanced, over the whole 0 to 30 m/s table
+def test_r10_m13_every_cell_that_moves_is_balanced_and_the_stalled_cells_are_counted_per_wind_angle():
+    """The polar keeps V, not the residual of the balance. Over the whole table every cell with V above 0.2 m/s balances to 2.1e-4; the cells with
+    V = 0 (no positive-speed root: DECISIONS 358) are counted, and so is the lowest wind speed at which each wind angle stalls after moving."""
+    m = usv.stall_map(P)
+    assert m["cells"] == 2759 == m["v0_cells"] + m["weak_cells"] + m["moving_cells"]
+    assert m["max_resid_moving"] < 5e-4 and m["v0_cells"] == 658 and m["weak_cells"] == 56
+    assert m["unbalanced_weak"] == 12                                      # roots next to a stall; 8 of them at TWS 1 m/s, TWA 14.5 to 18
+    on = m["stall_onset"]
+    assert (on[15.0], on[30.0], on[45.0]) == (17.0, 26.0, 30.0) and max(on) == 45.0 and len(on) == 22        # upwind and close-reach only
+    best = usv.tables(P)[0].f[..., 0].max(1)
+    assert best[14] > 0.98 * P["stw_cap_ms"] and (best[15:] >= P["stw_cap_ms"] - 1e-9).all()        # the best heading is at the cap from 15 m/s
+
+
+# ---- review round 10, M-17: the added-resistance table ends at the speed cap's limit
+def test_r10_m17_the_speed_cap_cannot_pass_the_top_of_the_added_resistance_table(tmp_path):
+    assert usv._build_waves(P).u[-1] == usv.WAVE_U_MAX and usv.load_platform()["stw_cap_ms"] <= usv.WAVE_U_MAX
+    assert usv.load_platform(usv_file(tmp_path, "params", "stw_cap_ms", usv.WAVE_U_MAX))["stw_cap_ms"] == usv.WAVE_U_MAX
+    with pytest.raises(ValueError, match=r"stw_cap_ms: 4.0 must be a finite number .*at most 3.5"):
+        usv.load_platform(usv_file(tmp_path, "params", "stw_cap_ms", 4.0))
