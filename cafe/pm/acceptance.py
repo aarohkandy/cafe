@@ -89,6 +89,30 @@ def refuse_wiped_mission(mission: str, out: pathlib.Path, names: tuple[str, ...]
                                          "(a run's own copy is <run dir>/mission.yaml)")
 
 
+MARKER = ".cafe_acceptance"                                                                            # in --out: acceptance claimed the directory
+OWN_FILES = ("acceptance.json", "acceptance.txt", "emulator_table.parquet", "receipts_broken.json", "receipts_wave_direction.json",
+             "receipts_broken.log")                                                                    # names only `run` writes into --out
+
+
+def claim_out(out: pathlib.Path, names: tuple[str, ...]) -> None:
+    """Acceptance removes only what it made itself (round 10, M-12). `out` is marked on first use, before anything is removed, so a run killed half-way
+    is rerunnable. An unmarked `out` that already holds out/<name>, out/<name>_fetch or either log for a name in `names` (or is itself a run: plan.json,
+    checkpoints/) is somebody's: ConfigError, nothing touched. `run_one` calls it for the one site that deletes, `run` for every name before hour one.
+    An unmarked `out` that holds one of OWN_FILES and is not itself a run was made by an acceptance run from before the marker existed (the Makefile's
+    runs/acceptance after an upgrade): it is marked and replaced as before, so `make acceptance` needs no hand step."""
+    if (out / MARKER).is_file():
+        return
+    itself = [out / "plan.json", out / "checkpoints"]
+    mine = [p for n in names for p in (out / n, out / f"{n}_fetch", out / f"{n}.log", out / f"{n}_fetch.log")] + itself
+    held = [p.name for p in mine if os.path.lexists(p)]
+    earlier = any((out / f).is_file() for f in OWN_FILES) and not any(os.path.lexists(p) for p in itself)
+    if held and not earlier:
+        raise config.ConfigError(f"--out {out} holds {', '.join(held)}, and acceptance replaces those on every run; use an empty directory or a new one "
+                                 f"(`make acceptance` uses runs/acceptance), or move them away and acceptance will mark {out} as its own")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / MARKER).write_text("made by `python -m cafe.pm acceptance`; the runs in this directory are replaced on every run\n")
+
+
 def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.Path, seed: int | None = None,
             table: pathlib.Path | None = None) -> dict[str, Any]:
     """A fresh run in out/name with its own emulator table out/name/emulator_table/train.parquet: a copy of `table` (the pristine shared table),
@@ -96,6 +120,7 @@ def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.P
     `fetch` runs first, into out/<name>_fetch; only `run` is timed. -> {name, mission, budget, gpus, seed, dir, log, rc, wall_s, limit_s, report (report.json
     or None), fetch_rc, fetch_wall_s, cold_fetch (the fetch's ingest ledger says it downloaded), ingest_s (the run's own ingest stage)}."""
     refuse_wiped_mission(mission, out, (name,))
+    claim_out(out, (name,))
     d = out / name
     shutil.rmtree(d, ignore_errors=True)
     out.mkdir(parents=True, exist_ok=True)
@@ -369,7 +394,7 @@ def run(mission: str, gpus: int, out: pathlib.Path, golden: pathlib.Path = GOLDE
     """-> (check rows, exit code)."""
     seed = int(config.load_mission(mission)["seed"])
     refuse_wiped_mission(mission, out, RUN_NAMES)
-    out.mkdir(parents=True, exist_ok=True)
+    claim_out(out, RUN_NAMES)
     rows: list[dict[str, Any]] = []
 
     def step(r: dict[str, Any]) -> dict[str, Any]:

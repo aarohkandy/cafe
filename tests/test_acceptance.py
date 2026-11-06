@@ -104,6 +104,7 @@ def test_the_wall_clock_limits_are_the_budgets(monkeypatch, tmp_path):
 def test_run_one_starts_clean_names_the_run_and_reads_its_report(monkeypatch, tmp_path):
     out, seen = tmp_path / "o", []
     (out / "quick").mkdir(parents=True)
+    (out / acc.MARKER).write_text("")                                                                  # acceptance's own earlier run (M-12 of round 10)
     (out / "quick" / "stale.txt").write_text("from an earlier run")
 
     def execute(argv, env, log, timeout):
@@ -545,6 +546,117 @@ def test_l0_a_mission_inside_a_run_directory_acceptance_removes_is_refused_befor
     assert f.calls == [] and last.exists() and (out / "quick" / "mission.yaml").exists()                # nothing ran, nothing removed
     for fine in (MISSION, str(out / "mission.yaml"), str(out / "quick_other" / "mission.yaml"), str(out.parent / "o2" / "quick" / "mission.yaml")):
         acc.refuse_wiped_mission(fine, out, acc.RUN_NAMES)                                              # a prefix of the name or of the path is not inside it
+
+
+def user_runs(out, *names, extra=()):
+    """A directory a user keeps results in: out/<name>/report.json for each name, and the files of `extra`."""
+    for n in names:
+        (out / n).mkdir(parents=True)
+        (out / n / "report.json").write_text(f"{n}: a result that took hours")
+    for e in extra:
+        (out / e).write_text("mine")
+
+
+@pytest.mark.parametrize("held", ["quick", "quick_fetch", "quick.log", "quick_fetch.log", "plan.json", "checkpoints"])
+def test_r10_m12_run_one_refuses_an_out_that_holds_somebody_elses_run_and_removes_nothing(monkeypatch, tmp_path, held):
+    """Round 10, M-12: `--out runs` removed the user's runs/quick (and wrote over quick.log). Both rmtree sites (out/<name>, out/<name>_fetch), both logs and an
+    out that is itself a run are refused when acceptance has not marked the directory, before any subprocess starts."""
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / held).mkdir() if held in ("quick", "quick_fetch", "checkpoints") else (out / held).write_text("mine")
+    (out / "overnight").mkdir()
+    (out / "overnight" / "report.json").write_text("ten hours")
+    monkeypatch.setattr(acc, "_execute", lambda *a, **k: pytest.fail("a subprocess started"))
+    with pytest.raises(config.ConfigError, match=rf"--out .* holds {held}\b"):
+        acc.run_one(MISSION, "quick", "ci", 0, out)
+    assert (out / held).exists() and (out / "overnight" / "report.json").read_text() == "ten hours" and not (out / acc.MARKER).exists()
+    if held == "quick":
+        user_runs(tmp_path / "p", "quick")                                                             # and its files, not only the directory
+        with pytest.raises(config.ConfigError):
+            acc.run_one(MISSION, "quick", "ci", 0, tmp_path / "p")
+        assert (tmp_path / "p" / "quick" / "report.json").read_text() == "quick: a result that took hours"
+
+
+def test_r10_m12_run_refuses_before_the_first_run_when_only_a_later_run_name_is_taken(monkeypatch, tmp_path):
+    """`run` asks for every name at once: the user's overnight result is protected before the quick run starts, not after it."""
+    out = tmp_path / "o"
+    user_runs(out, "overnight", "4h", extra=("quick_seed.log",))
+    f = Fake(tmp_path, monkeypatch)
+    with pytest.raises(config.ConfigError) as e:
+        acc.run(MISSION, 1, out, golden_for(tmp_path), log=lambda s: None)
+    assert "holds quick_seed.log, overnight, 4h," in str(e.value)
+    assert f.calls == [] and (out / "overnight" / "report.json").is_file() and (out / "4h" / "report.json").is_file() and not (out / acc.MARKER).exists()
+
+
+def test_r10_m12_a_first_run_marks_the_directory_and_a_rerun_replaces_only_its_own_runs(monkeypatch, tmp_path):
+    out = tmp_path / "fresh" / "nested"                                                                # does not exist yet
+    monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: 0)
+    acc.run_one(MISSION, "quick", "ci", 0, out)
+    assert (out / acc.MARKER).is_file() and (out / "quick" / "emulator_table").is_dir()
+    (out / "quick" / "stale.txt").write_text("this run's own leftovers")
+    (out / "quick_fetch").mkdir()
+    (out / "quick_fetch" / "stale.txt").write_text("this run's own leftovers")
+    acc.run_one(MISSION, "quick", "ci", 0, out)                                                        # the rerun: replaced, no refusal
+    assert [p.name for p in (out / "quick").iterdir()] == ["emulator_table"] and not (out / "quick_fetch").exists()
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    acc.run_one(MISSION, "quick", "ci", 0, empty)                                                      # an empty directory is claimed
+    assert (empty / acc.MARKER).is_file()
+
+
+def test_r10_m12_a_directory_with_other_files_is_claimed_but_the_other_files_stay(monkeypatch, tmp_path):
+    out = tmp_path / "o"
+    user_runs(out, "mine", "overnight_old", extra=("notes.txt",))
+    monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: 0)
+    acc.run_one(MISSION, "quick", "ci", 0, out)
+    assert (out / "notes.txt").read_text() == "mine" and (out / "mine" / "report.json").is_file() and (out / "overnight_old" / "report.json").is_file()
+
+
+def test_r10_m12_a_run_killed_after_the_mark_is_rerunnable(monkeypatch, tmp_path):
+    """The marker is written before the first rmtree: an interrupted first run leaves a directory the second run accepts."""
+    out = tmp_path / "o"
+
+    def killed(argv, env, log, timeout):
+        (out / "quick").mkdir(exist_ok=True)
+        (out / "quick" / "half.txt").write_text("half a run")
+        raise KeyboardInterrupt
+    monkeypatch.setattr(acc, "_execute", killed)
+    with pytest.raises(KeyboardInterrupt):
+        acc.run_one(MISSION, "quick", "ci", 0, out)
+    monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: 0)
+    acc.run_one(MISSION, "quick", "ci", 0, out)
+    assert not (out / "quick" / "half.txt").exists() and (out / acc.MARKER).is_file()
+
+
+@pytest.mark.parametrize("own", acc.OWN_FILES)
+def test_r10_m12_an_out_from_before_the_marker_is_claimed_not_refused(monkeypatch, tmp_path, own):
+    """`make acceptance` after an upgrade: runs/acceptance holds an earlier acceptance run (quick, its logs, a file only `run` writes) and no marker.
+    It is marked and replaced, not refused with exit 2 (the owner would have had to touch the marker by hand before the 11 h run)."""
+    out = tmp_path / "runs" / "acceptance"
+    user_runs(out, "quick", "overnight", extra=(own, "quick.log"))
+    monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: 0)
+    acc.run_one(MISSION, "quick", "ci", 0, out)
+    assert (out / acc.MARKER).is_file() and not (out / "quick" / "report.json").exists() and (out / own).is_file()
+
+
+@pytest.mark.parametrize("itself", ["plan.json", "checkpoints"])
+def test_r10_m12_an_out_that_is_itself_a_run_is_refused_even_with_an_acceptance_file(monkeypatch, tmp_path, itself):
+    out = tmp_path / "o"
+    user_runs(out, "quick", extra=("acceptance.json",))
+    (out / itself).mkdir() if itself == "checkpoints" else (out / itself).write_text("mine")
+    monkeypatch.setattr(acc, "_execute", lambda *a, **k: pytest.fail("a subprocess started"))
+    with pytest.raises(config.ConfigError, match=rf"holds quick, {itself}"):
+        acc.run_one(MISSION, "quick", "ci", 0, out)
+    assert (out / "quick" / "report.json").is_file() and not (out / acc.MARKER).exists()
+
+
+def test_r10_m12_the_mission_refusal_still_comes_first(monkeypatch, tmp_path):
+    out = tmp_path / "o"
+    user_runs(out, "quick")
+    m = out / "quick" / "mission.yaml"
+    shutil.copy(MISSION, m)
+    with pytest.raises(config.ConfigError, match="which acceptance removes before it runs"):
+        acc.run_one(str(m), "quick", "ci", 0, out)
 
 
 def test_l0_run_names_are_every_directory_run_makes(monkeypatch, tmp_path):
