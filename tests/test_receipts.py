@@ -10,7 +10,7 @@ import yaml
 
 from cafe import receipts as R
 from cafe.pm import __main__ as cli, receipts as pr
-from cafe.pm.env import conventions as cv
+from cafe.pm.env import conventions as cv, tao
 
 BROKEN = pr.ROOT / "tests" / "fixtures" / "broken" / "wave_direction.yaml"
 
@@ -346,11 +346,11 @@ def test_stored_data_directories_are_passed_only_when_they_exist(tmp_path, monke
     monkeypatch.setattr(pr, "_call", lambda mod, fn="receipts", **kw: kw)
     j = dict(pr.jobs())
     assert j["pm.env.tao"] == {"out_dir": None} and callable(j["pm.env.bathy"])        # round 7, M-39: no raster -> the job that says so
-    (tmp_path / "tao").mkdir()
+    tao.cache_dir(tmp_path).mkdir(parents=True)
     (tmp_path / "bathy").mkdir()
     (tmp_path / "bathy" / "gebco2026_tepex_c.npz").write_bytes(b"")
     j = dict(pr.jobs())
-    assert j["pm.env.tao"] == {"out_dir": tmp_path / "tao"} and j["pm.env.bathy"] == {"cache": tmp_path / "bathy" / "gebco2026_tepex_c.npz"}
+    assert j["pm.env.tao"] == {"out_dir": tao.cache_dir(tmp_path)} and j["pm.env.bathy"] == {"cache": tmp_path / "bathy" / "gebco2026_tepex_c.npz"}
 
 
 def test_call_resolves_the_module_function_lazily():

@@ -16,7 +16,7 @@ def test_generator_refuses_a_directory_that_holds_something_else(tmp_path):
 
 
 def test_tao_files_load_with_their_bad_samples_dropped(ci_env):
-    d = ci_env.data / "tao"
+    d = tao.cache_dir(ci_env.data)
     t0, t1 = ci_env.hours[[0, -1]]
     assert tao.verify(d) == 6
     m = tao.load_tao(d, t0, t1)
@@ -29,7 +29,7 @@ def test_tao_files_load_with_their_bad_samples_dropped(ci_env):
 
 def test_mooring_comparison_recovers_the_injected_three_percent_low_bias(ci_full, ci_env):
     t0, t1 = ci_env.hours[[0, -1]]
-    moor = tao.load_tao(ci_env.data / "tao", t0, t1)
+    moor = tao.load_tao(tao.cache_dir(ci_env.data), t0, t1)
     wrf = {}
     for name, m in moor.items():
         lo, la = np.full(ci_env.hours.size, m["lon"]), np.full(ci_env.hours.size, m["lat"])

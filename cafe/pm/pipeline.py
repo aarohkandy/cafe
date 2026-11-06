@@ -359,7 +359,7 @@ def _tao_cached(tdir: pathlib.Path, box: tuple[float, float, float, float], t0: 
     m = orca.read_json(mp)
     if m is None:                                                         # empty or truncated: the files are fetched again and the manifest rewritten
         return False
-    if m.get("selection") != tao.SELECTION:                               # another rule (no field: rounds 1-9): select again; files that hash are kept
+    if m.get("selection") != tao.SELECTION:                               # another rule (a copy of an older cache put here by hand): select again
         return False
     s, n, w, e = hycom.box360(box)
     if not (m["t0"] <= t0 and m["t1"] >= t1 and m["box"][0] <= s and m["box"][1] >= n and m["box"][2] <= w and m["box"][3] >= e):
@@ -420,7 +420,11 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
 
     if orca_covers():
         ctx.log(f"ingest: orca cache {man.parent} covers the window, the box and the 3-D hours")
-    tdir, spec = DATA / "tao", m["environment"]["ocean"]
+    tdir, spec = tao.cache_dir(DATA), m["environment"]["ocean"]
+    older = DATA / "tao"
+    old_tao = ("" if (tdir / "manifest.json").is_file() or not (older / "manifest.json").is_file() else
+               f" (the cache in {older} was selected by an older rule and stays as it is for the runs that read it; this code fills {tdir}: "
+               "one run with network access)")
     gebco = bathy.cache_path(sbox, ocean_mod.DATA / "bathy")
     store = ocean_mod.store_path(spec, m["name"])
     steps = hycom.gofs_steps(t0.timestamp(), t1.timestamp())
@@ -438,7 +442,7 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
         hycom.fetch_gofs(sbox, t0.timestamp(), t1.timestamp(), store.parent, deadline_s=GOFS_DEADLINE_S, ncss=hycom.NCSS, dods=hycom.DODS,
                          name=store.stem)
     got = [_need(ctx, L, "orca", "the orca WRF/UMWM cache for the window", orca_covers, fetch_orca),
-           _need(ctx, L, "tao", "the TAO/TRITON moorings for the box and window", lambda: _tao_cached(tdir, sbox, t0.timestamp(), t1.timestamp()),
+           _need(ctx, L, "tao", "the TAO/TRITON moorings for the box and window" + old_tao, lambda: _tao_cached(tdir, sbox, t0.timestamp(), t1.timestamp()),
                  lambda: tao.fetch_tao(sbox, t0.timestamp(), t1.timestamp(), tdir, base=tao.BASE)),
            _need(ctx, L, "gebco", "the GEBCO_2026 cut for the box", lambda: _gebco_cached(gebco),
                  lambda: bathy.fetch_gebco(sbox, gebco, bathy.GEBCO_URL)),
@@ -811,7 +815,7 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     (`wind_speed_noise`, `wind_direction_noise`), written to ingest/priors_fitted.json; without moorings the perturbations.yaml priors stand
     and the ledger says so. With fewer than two moorings the split is not defined: the whole hourly misfit is then the persistent sd."""
     from .env import tao
-    tdir = DATA / "tao"
+    tdir = tao.cache_dir(DATA)
     if not (tdir / "manifest.json").is_file():
         L.note(f"no TAO/TRITON download at {tdir}: wind priors stay the perturbations.yaml defaults (run `make fetch`)")
         return

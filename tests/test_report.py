@@ -909,7 +909,7 @@ def test_check_rendered_matches_whole_numeric_tokens():
 def stage3_with_a_window_not_run(run, msg):
     p = run / "stage3" / "windows.json"
     d = json.loads(p.read_text())
-    d["usv"].append(dict(ok=False, error=msg, checks=[]))
+    d["usv"].append(dict({k: d["usv"][0][k] for k in ("t", "lon", "lat")}, part="hull_fs", ok=False, error=msg, checks=[]))   # the row `_base` writes
     p.write_text(json.dumps(d))
 
 
@@ -923,7 +923,7 @@ def test_a_window_that_was_not_run_shows_its_reason_not_an_empty_list(run):
     w = rep["stage3"]["vehicles"]["usv"][1]
     assert w["error"] == msg and w["not_used_because"] == msg and w["checks"] == [] and w["ok"] is False
     t = plain(h)
-    assert f"W2 did not run; not used in the refit: {msg}. Reason: {msg}" in t and "failed self-checks: ." not in t
+    assert f"W1 hull_fs did not run; not used in the refit: {msg}. Reason: {msg}" in t and "failed self-checks: ." not in t
     assert rep["stage3"]["vehicles"]["glider_eq"][0]["error"] is None
 
 
@@ -2573,8 +2573,33 @@ def test_r10_m9_an_intact_run_has_no_missing_windows_note(run):
     rep = load(run)
     assert rep["map"]["windows_missing"] is None and rep["environment"]["forcing_missing"] is None
     ws = [w for ws in rep["stage3"]["vehicles"].values() for w in ws]
-    assert ws and all((w["t"] is None) == (w["t_missing"] is not None) for w in ws) and any(w["t"] is not None for w in ws)  # a stage-3 row beyond the windows
-    assert all("is not in the run directory" not in (w["t_missing"] or "") for w in ws)
+    assert ws and all(w["t"] is not None and w["t_missing"] is None for w in ws)
+    assert "Time not shown" not in (run / "report" / "index.html").read_text()
+
+
+def test_l0_a_stage_3_row_takes_the_time_of_its_window_not_of_the_window_at_its_index(run):
+    """A window has several rows (the USV: hull, wing and free-surface hull; `pipeline_windows` writes them in that order), so the row index is not the window
+    index: W2 and W3 of a one-window USV were 'Time not shown: windows/windows.json has 1 window(s) for usv, none for W2', and with two windows the wing of
+    window 1 read the time of window 2."""
+    m, plan = pm_run.make_run(run)
+    wins = json.loads((run / "windows" / "windows.json").read_text())
+    st3 = json.loads((run / "stage3" / "windows.json").read_text())
+    two = [dict(wins["glider_eq"][0], t=wins["glider_eq"][0]["t"] + 7200.0, lon=-168.5), wins["glider_eq"][1]]
+    wins["usv"] = two
+    (run / "windows" / "windows.json").write_text(json.dumps(wins))
+    parts = ("hull", "wing", "hull_fs")
+    st3["usv"] = [dict(st3["usv"][0], part=p, **{k: w[k] for k in ("t", "lon", "lat")}) for w in two for p in parts]
+    (run / "stage3" / "windows.json").write_text(json.dumps(st3))
+    report.write(run, m, plan)
+    rows = load(run)["stage3"]["vehicles"]["usv"]
+    assert [w["t"]["value"] for w in rows] == [w["t"] for w in two for _ in parts] and all(w["t_missing"] is None for w in rows)
+    assert [w["label"] for w in rows] == [f"W{k} {p}" for k in (1, 2) for p in parts]
+    assert "Time not shown" not in (run / "report" / "index.html").read_text()
+    st3["usv"][2]["t"] += 1.0                                                      # a row that matches no window says so instead of borrowing another's time
+    (run / "stage3" / "windows.json").write_text(json.dumps(st3))
+    report.write(run, m, plan)
+    odd = load(run)["stage3"]["vehicles"]["usv"][2]
+    assert odd["t"] is None and odd["label"] == "row 3" and "none at the time and place of this row" in odd["t_missing"]
 
 
 def span(path, text):

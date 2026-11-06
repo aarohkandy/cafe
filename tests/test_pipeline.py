@@ -760,7 +760,7 @@ def test_tao_writes_the_comparison_and_the_fitted_wind_priors(tmp_path, data):
     c = check_of(d, "tao_moorings_compared")
     assert c["ok"] and c["value"] == 2 and c["limit"] == 1 and len(d["notes"]) == 2 and d["notes"][0].startswith("env sigmas fitted")
     assert d["notes"][1].startswith("wind error split: speed persistent ") and "short-lived" in d["notes"][1] and "direction persistent " in d["notes"][1]
-    assert any(i["ref"].endswith("tao/manifest.json") and i["sha256"] for i in d["inputs"])
+    assert any(i["ref"].endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"])
     assert {pathlib.Path(o["path"]).name for o in d["outputs"]} == {"tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json"}
 
 
@@ -780,7 +780,7 @@ def test_without_a_tao_download_the_default_priors_stand_and_the_ledger_says_so(
     shutil.rmtree(data_copy / "tao")
     ctx = ctx_for(tmp_path / "r", record=False)
     d = tao_stage(ctx, ctx.env.tw.x[0], ctx.env.tw.x[-1])
-    assert d["notes"] == [f"no TAO/TRITON download at {data_copy / 'tao'}: wind priors stay the perturbations.yaml defaults (run `make fetch`)"]
+    assert d["notes"] == [f"no TAO/TRITON download at {tao.cache_dir(data_copy)}: wind priors stay the perturbations.yaml defaults (run `make fetch`)"]
     assert d["checks"] == [] and d["outputs"] == [] and d["inputs"] == [] and not (ctx.run_dir / "ingest").exists()
 
 
@@ -807,7 +807,7 @@ def test_with_fewer_than_two_moorings_the_whole_hourly_misfit_is_the_persistent_
 
 
 def tao_inputs(ctx, t0, t1):
-    moor = tao.load_tao(pipeline.DATA / "tao", t0, t1)
+    moor = tao.load_tao(tao.cache_dir(pipeline.DATA), t0, t1)
     hours = np.arange(t0, t1 + 1, 3600.0)
     wrf = {}
     for name, m in moor.items():
@@ -931,7 +931,7 @@ def test_the_tao_fit_also_sets_the_sst_and_t2_sigmas_that_the_environment_is_tag
     assert fit["sst_k"] == pytest.approx(cmp["ALL"]["sst_rmse"]) and fit["sst_k"] != prior[0] and 0.0 < fit["t2_k"] != prior[1]
     # T2: pooled RMSE of WRF T2 against the AIRT of the moorings that report it (T0N165W only), computed independently
     hours = np.arange(t0, t1 + 1, 3600.0)
-    m = tao.load_tao(pipeline.DATA / "tao", t0, t1)["T0N165W"]
+    m = tao.load_tao(tao.cache_dir(pipeline.DATA), t0, t1)["T0N165W"]
     lo, la = np.full(hours.size, m["lon"]), np.full(hours.size, m["lat"])
     r = ctx.env.air(lo, la, hours)["T2"].value - tao._bin(m["airt"]["t"], m["airt"]["value"], hours)
     assert fit["t2_k"] == pytest.approx(np.sqrt(np.mean(r[np.isfinite(r)] ** 2)))
@@ -2913,7 +2913,7 @@ def test_r6_m8_an_unreadable_orca_manifest_offline_fails_the_check_naming_the_co
 
 
 def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
-    tdir = data_copy / "tao"
+    tdir = tao.cache_dir(data_copy)
     mp = tdir / "manifest.json"
     m = config.load_mission(MISSION_PATH)
     box, t0, t1 = pipeline.ocean_box(m), config.utc(m["window"]["start"]).timestamp(), config.utc(m["window"]["end"]).timestamp()
@@ -2927,7 +2927,7 @@ def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
 def test_r10_a_tao_cache_made_under_another_selection_rule_is_not_cached(data_copy):
     """Round 10, M-19 follow-up: the per-variable selection changes which files a cache holds, but `_tao_cached` accepted a manifest of the old rule (files
     hash, window and box cover), so an old cache kept its old selection for ever. The manifest names its rule; any other (or none) is fetched again."""
-    tdir = data_copy / "tao"
+    tdir = tao.cache_dir(data_copy)
     mp = tdir / "manifest.json"
     m = config.load_mission(MISSION_PATH)
     box, t0, t1 = pipeline.ocean_box(m), config.utc(m["window"]["start"]).timestamp(), config.utc(m["window"]["end"]).timestamp()
@@ -2946,7 +2946,7 @@ def test_l0_a_tao_cache_whose_selected_file_lost_its_qc_variable_is_not_cached(d
     a variable dropped later) passed, and `load_tao` raised a bare ValueError hours into the ingest."""
     import xarray as xr
     from cafe.pm.env import remote
-    tdir = data_copy / "tao"
+    tdir = tao.cache_dir(data_copy)
     mp = tdir / "manifest.json"
     m = config.load_mission(MISSION_PATH)
     box, t0, t1 = pipeline.ocean_box(m), config.utc(m["window"]["start"]).timestamp(), config.utc(m["window"]["end"]).timestamp()

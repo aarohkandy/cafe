@@ -354,8 +354,8 @@ def write_bathy(directory, m):
 
 
 def write_tao(directory, m):
-    """tao/manifest.json and OceanSITES-style 10-minute files for two moorings, as tao.load_tao reads them: the wind is the fixture wind
-    scaled to the 4 m sensor height, 3 % low with 0.25 m/s of noise, a few samples flagged bad; SST at 1 m; air temperature and humidity."""
+    """manifest.json (in `tao.cache_dir`) and OceanSITES-style 10-minute files for two moorings, as tao.load_tao reads them: the wind is the fixture
+    wind scaled to the 4 m sensor height, 3 % low with 0.25 m/s of noise, a few samples flagged bad; SST at 1 m; air temperature and humidity."""
     import xarray as xr
     d = pathlib.Path(directory)
     rng = np.random.default_rng(NOISE_SEED)
@@ -410,7 +410,7 @@ def make(target, mission=MISSION, log=lambda *a: None):
     write_orca(cache / "orca", m)
     store = write_ocean(target / "ocean" / f"gofs_{m['name']}.zarr", m)
     write_bathy(target / "bathy", m)
-    write_tao(target / "tao", m)
+    write_tao(tao.cache_dir(target), m)
     surface.build(GriddedEnv(cache, env_sigmas()), cache, log=log)
     mb = sum(f.stat().st_size for f in target.rglob("*") if f.is_file()) / 1e6
     return types.SimpleNamespace(data=target, cache=cache, mission=m, mission_path=pathlib.Path(mission), ocean_store=store,

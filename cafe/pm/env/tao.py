@@ -42,6 +42,13 @@ FILES = "/fileServer/"
 VARS = ("WIND", "SST", "AIRT", "RH")
 # The rule `_candidates` picks files by, written to the manifest: 1 = one window over all files (rounds 1-9), 2 = per variable and resolution (round 10, M-19)
 SELECTION = 2
+
+
+def cache_dir(data: Any) -> pathlib.Path:
+    """Where the cache of the current `SELECTION` rule lives: <data>/tao/s<SELECTION>. A run ledger hashes `manifest.json` of the cache it read, so a
+    rule change that rewrote the one shared manifest in place made every earlier run in the data directory fail its ledger audit. The manifest of
+    an older rule (<data>/tao/manifest.json, rounds 1-9) is never touched again; its files are the ones it names, in <data>/tao/<mooring>/."""
+    return pathlib.Path(data) / "tao" / f"s{SELECTION}"
 # file code -> (NetCDF variables, the variable whose _QC applies). RELH is in percent although its units attribute says '1' (2023 means: 78-87)
 NC = dict(WIND=(("UWND", "VWND"), "WSPD"), SST=(("SST",), "SST"), AIRT=(("AIRT",), "AIRT"), RH=(("RELH",), "RELH"))
 WAVE_VARS = ("WAVE", "WAVES", "HS", "SWH", "WVHT", "HSIG", "WVPD", "WDIR_WAVE")

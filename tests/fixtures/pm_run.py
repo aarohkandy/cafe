@@ -97,13 +97,15 @@ def check_row(name, value, limit, ok, **kw):
     return dict(name=name, value=float(value), limit=limit, ok=bool(ok), **kw)
 
 
-def stage3_rows(vehicle_ids):
+def stage3_rows(vehicle_ids, wins):
+    """A row per part of a window, as the stage writes it: it carries its window's t, lon and lat (`_base`); uas has two rows for its one window."""
     rows = {}
     for vid in vehicle_ids:
-        good = dict(ok=True, cd=1.1, cd_spread=0.05, cd_hangar=1.0, cl=None, checks=[check_row("mach_max", 0.05, 0.1, True),
+        at = [dict(part="body", **{k: w[k] for k in ("t", "lon", "lat")}) for w in wins[vid]]
+        good = dict(at[0], ok=True, cd=1.1, cd_spread=0.05, cd_hangar=1.0, cl=None, checks=[check_row("mach_max", 0.05, 0.1, True),
                     check_row("nest_shift_count", 3, float("inf"), True, note="whole-cell shifts")])
         bad = dict(good, ok=False, cd=1.2, checks=[check_row("mach_max", 0.4, 0.1, False), check_row("courant_max", 0.1, 0.3, True)])
-        rows[vid] = [good, bad] if vid == "uas" else [dict(good, cd=1.05), dict(good, cd=1.15)] if vid == "glider_eq" else [good]
+        rows[vid] = [good, bad] if vid == "uas" else [dict(good, cd=1.05), dict(good, cd=1.15, **at[1])] if vid == "glider_eq" else [good]
     return rows
 
 
@@ -168,7 +170,7 @@ def make_run(run, *, budget_name="quick", thr=None, git="abc1234", ledgers=True,
                        failed_at=[T0 + 3600.0 * 14] if i == 0 else [])
                   for i in range(2 if vid == "glider_eq" else 1)] for vid in vids}
     out["windows"] = [_write(run / "windows" / "windows.json", wins)]
-    rows = stage3_rows(vids)
+    rows = stage3_rows(vids, wins)
     if stage3:
         out["stage3"] = [_write(run / "stage3" / "windows.json", rows)]
     if refit:

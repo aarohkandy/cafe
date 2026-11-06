@@ -56,7 +56,7 @@ def test_everything_cached_means_nothing_is_fetched_and_every_input_is_recorded_
     gebco = bathy.cache_path(BOX, data.data / "bathy")
     assert by[gebco.name]["sha256"] == remote.sha256(gebco)
     assert by["manifest.json"]["sha256"]                                               # the orca cache manifest, then TAO's below
-    assert any(i["ref"].endswith("tao/manifest.json") and i["sha256"] for i in d["inputs"])
+    assert any(i["ref"].endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"])
     assert all(i["sha256"] or i["ref"].startswith("https://") for i in d["inputs"])    # only the remote orca base has no hash
 
 
@@ -72,6 +72,21 @@ def test_offline_missing_data_fails_the_check_with_the_exact_command_and_downloa
         run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
     c = check_of(read_ledger(tmp_path / "r", "ingest"), f"{name}_present")
     assert not c["ok"] and "CAFE_OFFLINE" in c["note"] and f"`{CMD}`" in c["note"]
+
+
+def test_l0_offline_with_only_a_cache_of_an_older_selection_rule_fails_the_check_and_says_which_cache_stays(tmp_path, data_copy, monkeypatch):
+    """A cache of rounds 1-9 (`tao/manifest.json`, no `selection`) cannot be used offline: the new rule picks files from the catalog. The check says so and
+    names the cache that stays, instead of the bare 'not cached'."""
+    forbid_downloads(monkeypatch)
+    shutil.rmtree(tao.cache_dir(data_copy))
+    legacy = data_copy / "tao" / "manifest.json"
+    legacy.parent.mkdir(exist_ok=True)
+    legacy.write_text(json.dumps(dict(box=[-2.0, 2.0, 193.0, 197.0], t0=0.0, t1=1.0, files={}, selected={})))
+    with pytest.raises(ledger.StageFailed, match="tao_present"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    note = check_of(read_ledger(tmp_path / "r", "ingest"), "tao_present")["note"]
+    assert "CAFE_OFFLINE" in note and f"`{CMD}`" in note and f"{data_copy / 'tao'} was selected by an older rule" in note
+    assert legacy.is_file()
 
 
 def test_offline_missing_orca_fails_before_anything_else_is_read(tmp_path, data_copy, monkeypatch):
@@ -146,7 +161,7 @@ def test_l0_a_damaged_ocean_store_gets_the_advice_of_the_missions_source_not_of_
 
 
 def test_a_tao_download_is_cached_only_if_it_covers_the_box_and_window_and_every_file_hashes(data_copy):
-    t = data_copy / "tao"
+    t = tao.cache_dir(data_copy)
     s, e = T0 + 1, T1 - 1
     assert pipeline._tao_cached(t, BOX, s, e)
     assert not pipeline._tao_cached(t, BOX, T0 - 7200.0, e) and not pipeline._tao_cached(t, BOX, s, T1 + 7200.0)         # window
@@ -282,6 +297,21 @@ def network(data, data_copy, tmp_path, monkeypatch):
     server.close()
 
 
+def test_l0_fetching_under_a_new_tao_selection_rule_leaves_the_manifest_an_earlier_run_hashed_as_it_was(tmp_path, network):
+    """Review round 10: the cache directory was shared by every selection rule, so the first run of a new rule rewrote the `tao/manifest.json` that earlier
+    runs' ledgers hash, and their audit failed ('input ... changed since the stage ran'). The rule has its own directory (`tao.cache_dir`)."""
+    root = network["root"]
+    legacy = root / "tao" / "manifest.json"
+    legacy.parent.mkdir()
+    legacy.write_text(json.dumps(dict(source="rounds 1-9", box=[-2.0, 2.0, 193.0, 197.0], t0=0.0, t1=1.0, files={}, selected={})))
+    was = legacy.read_bytes()
+    d = run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    assert check_of(d, "tao_present")["ok"] and legacy.read_bytes() == was
+    new = tao.cache_dir(root) / "manifest.json"
+    assert json.loads(new.read_text())["selection"] == tao.SELECTION and new.parent == root / "tao" / f"s{tao.SELECTION}"
+    assert any(i["ref"] == str(new) for i in d["inputs"]) and not any(i["ref"] == str(legacy) for i in d["inputs"])
+
+
 def test_a_fresh_ingest_downloads_gofs_tao_and_gebco_then_a_second_one_downloads_nothing(tmp_path, network, data):
     srv, ncss, root = network["server"], network["ncss"], network["root"]
     ctx = ctx_for(tmp_path / "r")
@@ -306,9 +336,9 @@ def test_a_fresh_ingest_downloads_gofs_tao_and_gebco_then_a_second_one_downloads
     assert bathy.from_gebco(g)(195.0, 0.0).value == pytest.approx(bathy.from_gebco(network["gebco_src"])(195.0, 0.0).value)
     assert next(i for i in d["inputs"] if i["ref"] == str(g))["sha256"] == remote.sha256(g)
     # TAO: the files of the two moorings, hashed in the manifest
-    man = json.loads((root / "tao" / "manifest.json").read_text())
-    assert set(man["selected"]) == {"T0N165W", "T2S165W"} and tao.verify(root / "tao") == len(man["files"]) == 6
-    assert any(i["ref"].endswith("tao/manifest.json") and i["sha256"] for i in d["inputs"])
+    man = json.loads((tao.cache_dir(root) / "manifest.json").read_text())
+    assert set(man["selected"]) == {"T0N165W", "T2S165W"} and tao.verify(tao.cache_dir(root)) == len(man["files"]) == 6
+    assert any(i["ref"].endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"])
     assert check_of(d, "tao_moorings_compared")["ok"]
     # the second ingest finds everything cached and good: not one more request
     n_ncss, n_srv = len(ncss.log), len(srv.log)

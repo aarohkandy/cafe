@@ -846,14 +846,17 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             else:
                 why = NOT_PRESENT.format("refit/refit.json") if refit is None else "no refit entry for this vehicle"
             at = (wins or {}).get(vid, [])
-            t_why = NO_WINDOWS if wins is None else f"windows/windows.json has {len(at)} window(s) for {vid}, none for W{i + 1}" if i >= len(at) else None
+            wi = next((j for j, a in enumerate(at) if all(a.get(x) == w.get(x) for x in ("t", "lon", "lat"))), None)   # the row's window, not its index
+            label = f"row {i + 1}" if wi is None else f"W{wi + 1}" + (f" {w['part']}" if w.get("part") else "")        # a window has several rows (parts)
+            t_why = (NO_WINDOWS if wins is None else None if wi is not None
+                     else f"windows/windows.json has {len(at)} window(s) for {vid}, none at the time and place of this row")
             rows.append(dict(
-                label=f"W{i + 1}", ok=bool(w.get("ok")), error=w.get("error"), used_in_refit=used, not_used_because=why, cut=cut, reasons=reasons,
+                label=label, ok=bool(w.get("ok")), error=w.get("error"), used_in_refit=used, not_used_because=why, cut=cut, reasons=reasons,
                 cut_statement=(DIVERGED_STATEMENT if div else CUT_STATEMENT) if cut else None, diverged=div,
                 cells_per_delta=None if cut or not (w.get("resolution") or {}).get("cells_per_delta") else
                 num(w["resolution"]["cells_per_delta"], "cells per boundary-layer thickness", r3, src + ".resolution.cells_per_delta"),
                 nu_raised=(w.get("resolution") or {}).get("nu_floored"),
-                t=tnum(at[i]["t"], wref, "windows/windows.json") if i < len(at) else None, t_missing=t_why,
+                t=None if wi is None else tnum(at[wi]["t"], wref, f"windows/windows.json {vid}[{wi}].t"), t_missing=t_why,
                 checks=[] if cut else [dict(name=c["name"], ok=bool(c["ok"]), value=num(c["value"], "", r3, src + ".checks"),
                                             limit=num(c["limit"], "", r3, src + ".checks"), note=c.get("note", "")) for c in w.get("checks", [])],
                 coefficients={} if cut else {k: num(w[k], "-", r3, f"{src}.{k}") for k in ("cd", "cd_spread", "cd_hangar", "cl") if w.get(k) is not None}))
