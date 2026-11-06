@@ -99,14 +99,20 @@ def _files(name: str, base: str) -> list[dict[str, Any]]:
 
 def _candidates(files: list[dict[str, Any]], t0: float, t1: float) -> list[dict[str, Any]]:
     """Files of the deployment in the water at t0 (latest start <= t0, and the ones within 10 days before it, which are its A/B
-    twins) and every later deployment that starts before t1: the only ones that can overlap [t0, t1]."""
+    twins) and every later deployment that starts before t1: the only ones that can overlap [t0, t1]. The deployment in the water is
+    found per variable and resolution (D and R of one pair share it: the twin rule and the mode tie-break), so a sensor re-deployed
+    later than the others, or an hourly file, does not move the window of another variable (round 10, M-19)."""
 
     def day(f: dict[str, Any]) -> float:
         return dt.datetime.strptime(f["date"], "%Y%m%d").replace(tzinfo=dt.timezone.utc).timestamp()
 
-    before = [day(f) for f in files if day(f) <= t0]
-    lo = (max(before) - 10 * 86400) if before else -np.inf
-    return [f for f in files if lo <= day(f) <= t1]
+    out: list[dict[str, Any]] = []
+    for key in dict.fromkeys((f["var"], f["res"]) for f in files):
+        mine = [f for f in files if (f["var"], f["res"]) == key]
+        before = [day(f) for f in mine if day(f) <= t0]
+        lo = (max(before) - 10 * 86400) if before else -np.inf
+        out += [f for f in mine if lo <= day(f) <= t1]
+    return out
 
 
 def _coverage(path: Any) -> tuple[float, float]:

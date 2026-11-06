@@ -28,7 +28,7 @@ def truth(fx):
 
 class Ncss:
     """Stand-in for ncss.hycom.org and tds.hycom.org: /ncss/<dataset>/<year>?var=..&time_start=..&time_end=.. returns a NetCDF cut
-    from the fixture parts. mode: 'ok' | 'hang' (sleeps 60 s) | 'error' (HTTP 500) | 'html' (200, not NetCDF) | 'shift' (data + 1).
+    from the fixture parts. mode: 'ok' | 'hang' (sleeps 60 s) | 'error' (HTTP 500) | 'html' (200, not NetCDF) | 'shift' (data + 1) | 'nan' (every value NaN).
     fail: datasets that always answer 500."""
 
     def __init__(self, parts_dir):
@@ -83,6 +83,8 @@ class Ncss:
             a = a.isel(time=slice(0, 0))
         if self.mode == "shift":
             a = a + 1.0
+        if self.mode == "nan":
+            a = a * np.nan
         out = io.BytesIO()
         a.to_netcdf(out)
         return out.getvalue()
@@ -407,6 +409,34 @@ def test_check_node_reads_the_server_value_back(fx, ncss, tmp_path):
     assert h.check_node(fx["gofs_zarr"], nodes, ncss.base, 60, tmp_path) == 0.0
     ncss.mode = "shift"
     assert abs(h.check_node(fx["gofs_zarr"], nodes, ncss.base, 60, tmp_path) - 1.0) < 1e-4       # a store that disagrees is caught
+
+
+def _store_with_nan_at(h_open, node):
+    """h.open_store that returns the store with water_temp masked at `node` (it, iz, ij, ii)."""
+    it, iz, ij, ii = node
+
+    def open_store(*a, **k):
+        ds = h_open(*a, **k).load()
+        ds["water_temp"][dict(time=it, depth=iz, lat=ij, lon=ii)] = np.nan
+        return ds
+    return open_store
+
+
+@pytest.mark.parametrize("store_nan, server, want", [(False, "nan", np.inf), (True, "ok", np.inf), (True, "nan", 0.0)],
+                         ids=["server-all-NaN", "store-NaN", "both-NaN-agree"])
+def test_r10_m20_a_node_masked_on_one_side_only_is_infinitely_far_and_on_both_sides_agrees(fx, ncss, tmp_path, monkeypatch, store_nan, server, want):
+    """Round 10 M-20: `max(worst, nan)` keeps worst, so a NaN store value, an all-NaN server answer and the two together all returned 0.0, the
+    value of a store that agrees. NaN on both sides (below the sea floor) stays 0.0."""
+    nodes = [(0, 3, 2, 4)]
+    ncss.mode = server
+    if store_nan:
+        monkeypatch.setattr(h, "open_store", _store_with_nan_at(h.open_store, nodes[0]))
+    assert h.check_node(fx["gofs_zarr"], nodes, ncss.base, 60, tmp_path) == want
+
+
+def test_r10_m20_a_masked_node_is_not_hidden_behind_an_agreeing_one(fx, ncss, tmp_path, monkeypatch):
+    monkeypatch.setattr(h, "open_store", _store_with_nan_at(h.open_store, (0, 3, 2, 4)))
+    assert h.check_node(fx["gofs_zarr"], [(2, 6, 4, 7), (0, 3, 2, 4)], ncss.base, 60, tmp_path) == np.inf
 
 
 # ------------------------------------------------------------------ lab readers
