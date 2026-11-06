@@ -278,3 +278,18 @@ def test_r9_m22_every_mission_default_the_models_and_their_readers_index_is_in_a
     for name, mod in (("seaglider", glider), ("slocum", glider), ("saildrone_explorer", usv)):
         raw = yaml.safe_load((ROOT / "platforms" / f"{name}.yaml").read_text())["mission_defaults"]
         assert set(mod.MISSION_REQUIRED) == set(raw), (name, set(mod.MISSION_REQUIRED) ^ set(raw))
+
+
+@pytest.mark.parametrize("name", ["seaglider", "slocum", "saildrone_explorer", "quad_uas"])
+def test_r9_m1_every_class_loader_resolves_a_platform_reference_by_config_platform_path(tmp_path, monkeypatch, name):
+    """glider and usv took any dotted name for a path (`foo.v2` -> not found) and uas looked beside its own constant: one rule now, config.platform_path.
+    A copy named <name>.v2.yaml in the platforms directory is the name `<name>.v2`; a file ending in .yml is a path."""
+    plat = tmp_path / "platforms"
+    plat.mkdir()
+    (plat / f"{name}.v2.yaml").write_text((ROOT / "platforms" / f"{name}.yaml").read_text())
+    monkeypatch.setattr("cafe.pm.config.PLATFORMS", plat)
+    want = LOADERS[name].load_platform(str(ROOT / "platforms" / f"{name}.yaml"))
+    assert LOADERS[name].load_platform(f"{name}.v2") == want
+    yml = tmp_path / "mine.yml"
+    yml.write_text((plat / f"{name}.v2.yaml").read_text())
+    assert LOADERS[name].load_platform(str(yml)) == want

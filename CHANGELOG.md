@@ -8,6 +8,9 @@
 - Vehicle card: "Dominant failure mode: none (no member failed)" instead of "None"; reach-map caption names the 24 h horizon; report note for the UAS `no_current_data` mode; DECISIONS 464, round 9 M-14, M-21, M-3 (report half).
 - A mission box in a refusal reads "lon 165 E to 165 W (across the antimeridian), lat -5 to 5" instead of the dict (`config.fmt_box`); DECISIONS 465, round 9 M-14.
 - Credibility: a stored receipt with a missing or non-numeric field is a not-run row, not a traceback; DECISIONS 466, round 9 M-4 (credibility half).
+- A vehicle's `platform` given as a path or a dotted name is read by one rule (`config.platform_path`) by the glider, USV and UAS loaders, the report and the credibility page; DECISIONS 467, round 9 M-1.
+- The report says when `throughput.json` was measured on another machine (`machine.machine.warning`, one HTML note); DECISIONS 468, round 9 M-9.
+- Credibility reads a stored wall-model receipt by the fields and the rule stage 3 uses; a UAS card says what a `no_current_data` verdict rests on; a diverged window is called diverged; DECISIONS 466, 469, round 9 M-4, M-3, M-24.
 - `bench/throughput.py all` stops at once when the environment cache is missing; the BRIEF 2.1 finding never rounds a share up to the floor it misses; DECISIONS 459, 460.
 - `PM_RUNTIME=proot` for `bin/pmx.sh` and `pm.sh`, `bin/proot_run.sh`, `bin/orca_sync.sh`: run cafe jobs on a worker with no docker (orca); DECISIONS 458, `docs/ORCA_RUNNER.md`. Hardened after review: the job runs in its own process group and stops on TERM/INT/HUP, stale `run.*` temp directories are swept at start, `orca_sync.sh` checks the root filesystem itself and not only `root.done`, `bin/orca_suite.sh` runs the suite. All of it stays inside `~/cafe-worker` (the runners refuse otherwise), and `bin/orca_ready.sh` is the go check.
 

@@ -1322,6 +1322,7 @@ def test_a_clock_so_slow_that_the_slice_is_spent_kills_the_window_and_the_row_sa
     assert not killed["ok"] and killed["cut"] and killed["reasons"][0].startswith(f"killed: its wall-clock slice was spent before the {planned} planned steps")
     assert killed["resolution"]["run_steps"] is None and killed["timing"]["machine_dependent"]["run_steps"] == 100     # where it stopped is machine-dependent
     assert killed["resolution"]["planned_steps"] == planned                              # it was sized exactly as before; only its end changed
+    assert killed["resolution"]["diverged"] is False                                     # the report says which of the two cut it (M-24)
     assert not never["ok"] and never["cd"] is None and never["reasons"][0].startswith("killed before it started: the stage-3 wall-clock share was spent")
     assert not killed["fea"]["run"] and killed["fea"]["reason"].startswith("not run: the LES window was cut")
     over = [n for n in L.notes if n.startswith("stage 3 took ")]           # the stage says it overran, as a note: not a check that fails the stage
@@ -2449,6 +2450,7 @@ def test_r9_m24_a_pipeline_window_that_blows_up_in_its_last_chunk_is_cut_and_run
     assert r["cut"] is True and not r["ok"] and r["usable_for_refit"] is False and r["cd"] is None and r["resolution"]["run_steps"] is None
     assert r["resolution"]["cut_reason"].startswith("diverged: the flow went non-finite or past Mach 1") and r["fea"]["run"] is False
     assert r["timing"]["machine_dependent"]["run_steps"] == planned                                    # the numbers (NaN here) are in the ledger, not the row
+    assert r["resolution"]["diverged"] is True                                                         # the report says "diverged", not "cut at the time limit"
     assert r["cl"] is None and "NaN" not in json.dumps(untimed({"g": [r]}), default=str)
 
 

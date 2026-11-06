@@ -84,7 +84,7 @@ from typing import Any, NamedTuple, cast
 import numpy as np
 
 from ..env import conventions as cv
-from ..config import platform_doc as read_yaml
+from ..config import platform_doc as read_yaml, platform_path
 from . import check_params, drop_repeats
 
 Arr = Any
@@ -130,9 +130,7 @@ OPTIONAL = ("draft_nominal_m", "keel_depth_m", "iridium_antenna_height_m") + STR
 def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
     """platforms/<name>.yaml (or a path) -> flat dict of values plus 'kind' and 'mission_defaults'.
     Refuses a leaf without value, unit and either a source or assumed: true with a why (same rule as glider.load_platform)."""
-    path = pathlib.Path(name)
-    if not path.suffix:
-        path = PLATFORMS / f"{name}.yaml"
+    path = platform_path(name)                                         # the one rule for a name or a path (config.platform_path)
     raw = read_yaml(path)                                              # duplicate keys and octal numbers refused (round 5, M-18)
 
     if missing := [k for k in ("kind", "params", "mission_defaults") if k not in raw]:                          # round 7, M-35

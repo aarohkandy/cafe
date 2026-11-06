@@ -209,6 +209,26 @@ def json_object(p: pathlib.Path, fix: str = "`run` writes it, so run it again (-
     return d
 
 
+def finite_real(v: Any) -> bool:
+    """A finite real number: not a bool, a string, None, NaN or infinity, nor an integer too large for a float (json.loads gives a 400-digit literal as an
+    int, and math.isfinite raises OverflowError on it)."""
+    try:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    except OverflowError:
+        return False
+
+
+def missing_numbers(d: dict[str, Any], numeric: tuple[str, ...], optional: tuple[str, ...] = ()) -> list[str]:
+    """The keys of a stored result that the code reads as numbers and that are not finite reals: each of `numeric`, and each of `optional` that is
+    present. The one rule of every reader of a stored receipt (stage 3's `lbm.read_stored` and the credibility report): a hand-edited or schema-changed
+    file is a result that is not stored, never a KeyError or a TypeError (round 9, M-4)."""
+    return [k for k in numeric if not finite_real(d.get(k))] + [k for k in optional if k in d and not finite_real(d[k])]
+
+
+PLATE_FIELDS = ("err", "cf", "re", "ittc", "yfrac")         # what the wall-model plate receipt's readers index; each must be a finite number (missing_numbers)
+CHANNEL_FIELDS = ("err", "cf", "cf_dean")                   # the channel's: stage 3's gate reads `err`, the credibility report `cf` and `cf_dean`
+
+
 def _leaf_problems(node: Any, path: str = "") -> list[str]:
     from .physics.uas import check_provenance
     if isinstance(node, dict) and "value" in node:
@@ -442,6 +462,16 @@ def platform_path(ref: str | pathlib.Path) -> pathlib.Path:
     of a platform reference (this loader, the hangar stage, the class loaders) resolves it here."""
     p = pathlib.Path(ref)
     return p if p.suffix in (".yaml", ".yml") else PLATFORMS / f"{ref}.yaml"
+
+
+def platform_display(ref: str | pathlib.Path) -> str:
+    """`platform_path(ref)` as a label for a report: relative to the repo when the file is in it (a name and `platforms/<name>.yaml` give the same
+    text), else the path as given."""
+    p = platform_path(ref)
+    try:
+        return p.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return str(p)
 
 
 def load_platform(name: str | pathlib.Path) -> dict[str, Any]:

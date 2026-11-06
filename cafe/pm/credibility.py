@@ -22,7 +22,7 @@ import math
 import os
 import pathlib
 import re
-from typing import Any
+from typing import Any, Iterable
 
 from . import config, pipeline
 from .audit import ledger_problems
@@ -93,7 +93,8 @@ USV_CHIODI_RATIO = 0.178          # Chiodi et al. (2021) mean SOG / mean wind, 0
 ACOUSTIC_NEAR_KM = 3.0            # BRIEF section 6: a glider acoustic link is GO within this distance of the ship, NO-GO beyond it
 
 RULES = {
-    "data_pedigree": "1 ingest ledger names its inputs; 2 and every ingest self-check passed, the COARE u* is within 20 % of the UMWM ust at 90 % of the "
+    "data_pedigree": "1 ingest ledger names its inputs; 2 and every ingest self-check passed, the COARE u* is within "
+                     f"{100 * pipeline.USTAR_AGREE_BAND:.0f} % of the UMWM ust at {100 * pipeline.USTAR_AGREE_FRACTION:.0f} % of the "
                      "sea points (BRIEF 2.1) and the wrfout/umwmout schemas exist; "
                      "3 and the WRF wind and SST were compared with TAO/TRITON moorings for this mission, with pooled wind RMSE within the brief's prior sd "
                      "(2.0 m/s, 15 deg); the comparison also sets the wind priors, so it is not independent of the run.",
@@ -188,11 +189,39 @@ def _prov(node: Any, path: str, file: str, out: list[dict[str, Any]]) -> None:
         _prov(v, f"{path}.{k}" if path else str(k), file, out)
 
 
-def platform_items(root: pathlib.Path = ROOT) -> list[dict[str, Any]]:
+def platform_shipped(ref: str, root: pathlib.Path = ROOT) -> bool:
+    """Whether a platform reference (a name or a path, config.platform_path) is one of root/platforms/*.yaml."""
+    p = config.platform_path(ref)
+    return p.suffix == ".yaml" and p.parent.resolve() in {(root / "platforms").resolve(), config.PLATFORMS.resolve()}
+
+
+def platform_key(ref: str, root: pathlib.Path = ROOT) -> str:
+    """What names a platform in `Facts.used`, `platform_assumed_counts` and the report's anchor: the file's stem when it is one of root/platforms/*.yaml
+    (a name, or a path to one of them), else the reference as given (a file elsewhere has no stem of its own: two directories can hold a seaglider.yaml)."""
+    return config.platform_path(ref).stem if platform_shipped(ref, root) else str(ref)
+
+
+def platform_label(key: str, shipped: bool) -> str:
+    """The `file` of a platform's items: platforms/<stem>.yaml for a key that is a stem, the path as given otherwise."""
+    return f"platforms/{key}.yaml" if shipped else key
+
+
+def platform_items(root: pathlib.Path = ROOT, elsewhere: Iterable[str] = ()) -> list[dict[str, Any]]:
+    """The provenance leaves of root/platforms/*.yaml (key: the stem) and of each platform file given by a path outside it, `elsewhere` (key: the path
+    as given; a file that is not there is left out: the run's hangar stage fails on it)."""
     out: list[dict[str, Any]] = []
-    for f in sorted((root / "platforms").glob("*.yaml")):
-        _prov(config.read_yaml(f), "", f"platforms/{f.name}", out)
+    for path, label, key in [(f, platform_label(f.stem, True), f.stem) for f in sorted((root / "platforms").glob("*.yaml"))] + \
+                            [(config.platform_path(r), r, r) for r in sorted(set(elsewhere))]:
+        if path.is_file():
+            part: list[dict[str, Any]] = []
+            _prov(config.read_yaml(path), "", label, part)
+            out += [dict(i, key=key) for i in part]
     return out
+
+
+def plat_anchor(key: str) -> str:
+    """The html id of a platform's table in credibility.html (an id has no white space)."""
+    return "plat-" + "_".join(key.split())
 
 
 def dist_text(e: dict[str, Any]) -> str:
@@ -231,9 +260,9 @@ def run_priors(run: pathlib.Path | None) -> dict[str, Any]:
     return {}
 
 
-def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None) -> list[dict[str, Any]]:
+def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None, elsewhere: Iterable[str] = ()) -> list[dict[str, Any]]:
     """The full list: every assumptions.yaml key, every perturbation prior (kind prior or assumed) as its distribution, with what this run drew
-    when that differs (a TAO-fitted prior), every platform leaf marked assumed."""
+    when that differs (a TAO-fitted prior), every platform leaf marked assumed (`elsewhere`: the platform files given by a path outside platforms/)."""
     items = []
     used = run_priors(run)
     fit = (_json(run / "ingest" / "env_sigmas_fitted.json") if run else None) or {}               # the TAO fit Context.env feeds back as the tagged sigmas
@@ -251,10 +280,10 @@ def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None) -
             txt += f"; this run drew {_used(used[k])} (fitted)"
         items.append(dict(id=f"perturbations.yaml:{k}", file="config/perturbations.yaml", kind="assumed" if assumed else "prior",
                           value=txt, unit=str(e.get("unit", "")), why=str(e.get("citation", "")), replace_with=""))
-    for it in platform_items(root):
+    for it in platform_items(root, elsewhere):
         if it["assumed"]:
-            items.append(dict(id=f"{it['file'].split('/')[-1]}:{it['path']}", file=it["file"], kind="assumed", value=it["value"], unit=it["unit"],
-                              why=it["why"], replace_with=""))
+            items.append(dict(id=f"{it['file'].split('/')[-1]}:{it['path']}", file=it["file"], key=it["key"], kind="assumed", value=it["value"],
+                              unit=it["unit"], why=it["why"], replace_with=""))
     for i, it in enumerate(items):
         it["anchor"] = f"A{i}"
     return items
@@ -307,10 +336,6 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     return out
 
 
-def _is_real(x: Any) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
-
-
 def _stored(f: pathlib.Path, keys: tuple[str, ...], optional: tuple[str, ...] = ()) -> tuple[dict[str, Any] | None, str]:
     """(the stored receipt, "") when `f` is a JSON object whose `keys` (and the `optional` ones that are present) are finite real numbers (not bool, str,
     None); else (None, why it cannot be a row).
@@ -322,7 +347,7 @@ def _stored(f: pathlib.Path, keys: tuple[str, ...], optional: tuple[str, ...] = 
         d = config.json_object(f)
     except config.ConfigError:
         return None, f"{f.name} is unreadable (rerun it)"
-    bad = [k for k in keys if not _is_real(d.get(k))] + [k for k in optional if k in d and not _is_real(d[k])]
+    bad = config.missing_numbers(d, keys, optional)                                     # the rule of lbm.read_stored (stage 3's reader of the same files)
     return (None, f"{f.name} lacks a finite number for {', '.join(bad)} (rerun it)") if bad else (d, "")
 
 
@@ -353,10 +378,11 @@ def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
                 ref = float(morrison(re_))
             also = f" (d = {' and '.join(others)} also stored)" if others else ""
             out.append(_row(rid, case, f"{f}", float(d["cd"]), ref, None, f"d = {d.get('d', '?')} cells{also}; the run stores no U_num, U_input or U_D"))
-    plates = (("wm_flat_plate", "wall-modelled flat plate C_f vs ITTC-57", "ittc"), ("wm_channel", "wall-modelled channel C_f vs Dean 1978", "cf_dean"))
-    for name, case, dk in plates:
+    plates = (("wm_flat_plate", "wall-modelled flat plate C_f vs ITTC-57", "ittc", config.PLATE_FIELDS),
+              ("wm_channel", "wall-modelled channel C_f vs Dean 1978", "cf_dean", config.CHANNEL_FIELDS))
+    for name, case, dk, fields in plates:
         f = rec / f"{name}.json"
-        d, why = _stored(f, ("cf", dk))
+        d, why = _stored(f, fields)                                              # every field stage 3 requires of the receipt, not only the two read here
         if d is None:
             out.append(_row(f"wallmodel:{name}", case, f"{f}", None, None, None,
                             f"not run: {f.name} is not stored" if why == "not stored" else f"not run: {why}"))
@@ -384,10 +410,12 @@ class Facts:
         self.s1 = _json(run / "stage1" / "summary.json")
         self.refit = _json(run / "refit" / "refit.json") or {}
         self.problems = [p for p in ledger_problems(run) if "stage report" not in p and ": no ledger" not in p]
-        used = {v["platform"] for v in (self.mission or {}).get("vehicles", [])}
+        self.refs = refs = {v["platform"] for v in (self.mission or {}).get("vehicles", [])}
         links = {lk["kind"] for lk in (self.mission or {}).get("links", [])}
-        self.used = used | ({"radios"} if "rf" in links else set()) | ({"modems"} if "acoustic" in links else set())
-        self.items = platform_items(root)
+        tables = ({"radios"} if "rf" in links else set()) | ({"modems"} if "acoustic" in links else set())
+        self.used = {platform_key(r, root): platform_label(platform_key(r, root), platform_shipped(r, root)) for r in refs} | \
+                    {t: platform_label(t, True) for t in tables}                                    # key -> the `file` of its items
+        self.items = platform_items(root, [r for r in refs if not platform_shipped(r, root)])
         self.perts = config.read_yaml(root / "config" / "perturbations.yaml") or {}
         self.vv = vv20_rows(data)
         why = subgrid_uncalibrated(run, root)
@@ -419,8 +447,8 @@ def _data_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     agree = None if ust is None else ust.get("value")
     if not bad and ust is not None and not (isinstance(agree, (int, float)) and agree >= pipeline.USTAR_AGREE_FRACTION):
         got = f"only {pipeline.ustar_percent(agree)} %" if isinstance(agree, (int, float)) else "no fraction recorded for"
-        miss.append(f"BRIEF 2.1 finding: {got} of the sea points have COARE u* within 20 % of UMWM ust; the brief asks {pipeline.USTAR_AGREE_FRACTION:.0%}, "
-                    "so the forcing is not shown to be consistent and the level stays at 1")
+        miss.append(f"BRIEF 2.1 finding: {got} of the sea points have COARE u* within {100 * pipeline.USTAR_AGREE_BAND:.0f} % of UMWM ust; "
+                    f"the brief asks {pipeline.USTAR_AGREE_FRACTION:.0%}, so the forcing is not shown to be consistent and the level stays at 1")
     elif not bad and L["checks"] and all(s.is_file() for s in schemas):
         lvl = 2
         ev.append(f.ev(f"{len(L['checks'])} ingest self-checks passed; schemas present", "cafe/schemas/wrfout.json, cafe/schemas/umwmout.json"))
@@ -493,14 +521,14 @@ def _validation(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
 
 
 def _input_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
-    its = [i for i in f.items if pathlib.Path(i["file"]).stem in f.used and (i["assumed"] or i["sourced"])]
+    its = [i for i in f.items if i["key"] in f.used and (i["assumed"] or i["sourced"])]
     if not its:
         return 0, [], ["no platform file with provenance fields is used by this mission (or mission.yaml is missing)"]
     good = sum(1 for i in its if i["sourced"] and not i["assumed"] and not i["recalled"])
     frac = good / len(its)
     ap = f.assumed_perts()
     ev = [f.ev(f"{good} of {len(its)} platform inputs sourced and not recalled ({frac:.0%}); {sum(i['assumed'] for i in its)} assumed, "
-               f"{sum(i['recalled'] for i in its)} recalled", ", ".join(sorted(f"platforms/{u}.yaml" for u in f.used)))]
+               f"{sum(i['recalled'] for i in its)} recalled", ", ".join(sorted(f.used.values())))]
     miss = [f"{len(its) - good} platform inputs are assumed or cited from memory (listed in this report)"]
     if ap:
         miss.append(f"perturbation prior(s) of kind assumed: {ap}")
@@ -749,8 +777,8 @@ def _render(c: dict[str, Any]) -> str:
              "every platform input marked assumed. "
              "A verdict that depends on one carries the assumed badge in the mission report.</p>")
     for file in sorted({i["file"] for i in c["assumed_inputs"]}):
-        stem = pathlib.Path(file).stem
-        h.append(f"<h3 id='plat-{e(stem)}'>{e(file)}</h3><div class=scroll><table><tr><th>Input<th>Kind<th>Value<th>Why<th>Replace with</tr>")
+        key = next((x["key"] for x in c["assumed_inputs"] if x["file"] == file and "key" in x), pathlib.Path(file).stem)
+        h.append(f"<h3 id='{e(plat_anchor(key))}'>{e(file)}</h3><div class=scroll><table><tr><th>Input<th>Kind<th>Value<th>Why<th>Replace with</tr>")
         for i in (x for x in c["assumed_inputs"] if x["file"] == file):
             h.append(f"<tr id='{i['anchor']}'><td><code>{e(i['id'])}</code><td>{e(i['kind'])}<td>{e(i['value'])} {e(i['unit'])}"
                      f"<td>{e(i['why'])}<td>{e(i['replace_with'])}</tr>")
@@ -762,13 +790,13 @@ def _render(c: dict[str, Any]) -> str:
 
 def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.Path | None = None) -> dict[str, Any]:
     f = Facts(pathlib.Path(run_dir), root, data or data_root())
-    items = assumed_inputs(root, f.run)
+    items = assumed_inputs(root, f.run, [r for r in f.refs if not platform_shipped(r, root)])
+    labels = {p.stem: platform_label(p.stem, True) for p in (root / "platforms").glob("*.yaml")} | f.used          # key -> the `file` of its items
     return dict(schema="cafe.pm.credibility/1", run=f.run.name,
                 note="Levels run 0-4 (BRIEF 5.4). The rule behind each level is this tool's reading of the factor, not the text of NASA-STD-7009B, "
                      "which was not re-read. Level 4 is never awarded automatically.",
                 levels=LEVELS, factors=factor_table(f), vv20=f.vv, limitations=f.limitations, sanity=sanity(f), assumed_inputs=items,
-                platform_assumed_counts={s: sum(1 for i in items if i["file"] == f"platforms/{s}.yaml" and i["kind"] == "assumed")
-                                         for s in sorted(p.stem for p in (root / "platforms").glob("*.yaml"))})
+                platform_assumed_counts={s: sum(1 for i in items if i["file"] == lab and i["kind"] == "assumed") for s, lab in sorted(labels.items())})
 
 
 def _clean(x: Any) -> Any:

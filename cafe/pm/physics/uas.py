@@ -34,7 +34,7 @@ from jax import lax
 from numpy.typing import NDArray
 
 from ..env import conventions as cv
-from ..config import platform_doc as read_yaml
+from ..config import platform_doc as read_yaml, platform_path
 from . import check_params
 
 Arr = Any
@@ -96,8 +96,7 @@ REQUIRED = {
 
 def load_platform(path: Optional[str] = None) -> dict[str, Any]:
     """quad_uas.yaml as nested dicts of plain values (provenance stripped after it is checked)."""
-    p = pathlib.Path(path or PLATFORM)
-    p = p if p.suffix in (".yaml", ".yml") else PLATFORM.parent / f"{p}.yaml"         # a platform name, like the other loaders take
+    p = platform_path(path or PLATFORM)                                # a name or a path, like the other loaders take (config.platform_path)
     doc = read_yaml(p)                                                 # duplicate keys and octal numbers refused (round 5, M-18)
     bad = check_provenance(doc)
     if bad:

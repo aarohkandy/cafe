@@ -592,7 +592,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
         why = (f"diverged: the flow went non-finite or past Mach 1 inside a chunk of {chunk} steps of the {wl['planned_steps']} planned; the run stopped "
                "there and the rest of its slice went to the next window" if wl["diverged"] else
                f"killed: its wall-clock slice was spent before the {wl['planned_steps']} planned steps were done")
-        resolution["cut_reason"] = why
+        resolution.update(cut_reason=why, diverged=bool(wl["diverged"]))        # the report says which of the two cut the run (round 9, M-24)
         timing["machine_dependent"] = dict(run_steps=wl["run_steps"], cut_reason=wl["cut_reason"], cells_per_s=wl["cells_per_s"], cd=float(r["cd"]),
                                            cd_spread=float(r["cd_spread"]), cl=float(r["cl"]), cl_spread=float(r["cl_spread"]), checks=list(r["checks"]))
         timing["wall_s"] = time.perf_counter() - t0

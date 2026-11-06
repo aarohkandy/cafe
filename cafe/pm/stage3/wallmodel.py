@@ -41,6 +41,7 @@ from scipy import ndimage
 import jax
 import jax.numpy as jnp
 
+from cafe.pm import config
 from cafe.pm.stage3 import lbm
 
 KAPPA, B_LOG = 0.41, 5.2
@@ -340,8 +341,7 @@ def channel_path() -> pathlib.Path:
     return SLOW_DIR / "wm_channel.json"
 
 
-PLATE_FIELDS = ("err", "cf", "re", "ittc", "yfrac")         # what the plate receipt's readers index; each must be a finite number (lbm.read_stored)
-CHANNEL_FIELDS = ("err", "cf", "cf_dean")                   # the channel's: the gate reads `err`, the credibility report `cf` and `cf_dean`
+PLATE_FIELDS, CHANNEL_FIELDS = config.PLATE_FIELDS, config.CHANNEL_FIELDS     # the credibility report applies the same lists to the same files (round 9, M-4)
 
 
 def _read_receipt(f: pathlib.Path, fields: tuple[str, ...]) -> dict[str, Any] | None:

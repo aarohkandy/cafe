@@ -41,6 +41,7 @@ import jax.numpy as jnp
 from cafe.planner import boundary_layer
 import cafe.receipts as cr
 from cafe.receipts import receipt, bracket
+from ..config import finite_real, missing_numbers
 
 # ---------------------------------------------------------------------------------------------------- D3Q19 (native)
 _AX = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
@@ -638,15 +639,6 @@ def eta_text(updates: float) -> str:
             f"~{f(NEST_RATE_BENCH)} at the 8-core benchmark rate")
 
 
-def _real(v: Any) -> bool:
-    """A finite real number: not a bool, a string, None, NaN or infinity, nor an integer too large for a float (json.loads gives a 400-digit literal
-    as an int, and math.isfinite raises OverflowError on it)."""
-    try:
-        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-    except OverflowError:
-        return False
-
-
 def read_stored(f: pathlib.Path, numeric: tuple[str, ...] = ()) -> dict[str, Any] | None:
     """A stored slow result as a dict; None when the file is missing, undecodable (a write cut short by a kill), not a JSON object, or lacks any of
     the `numeric` fields as a finite real number (a bool, a string, null, NaN and infinity are not). The one reader of every stored receipt, so a
@@ -657,7 +649,7 @@ def read_stored(f: pathlib.Path, numeric: tuple[str, ...] = ()) -> dict[str, Any
         return None
     if not isinstance(d, dict):
         return None
-    return d if all(_real(d.get(k)) for k in numeric) else None
+    return None if missing_numbers(d, numeric) else d
 
 
 def result_row(group: str, claim: str, rec: dict[str, Any] | None, value_key: str, ref_key: str, tol: float, command: str, eta: str, source: str) -> None:
@@ -669,7 +661,7 @@ def result_row(group: str, claim: str, rec: dict[str, Any] | None, value_key: st
     if rec is None:
         bracket(group, f"{claim} -- NOT STORED", nan, 0.0, 0.0, "", f"run: {command}   [{eta}]")
         return
-    bad = [k for k in (value_key, ref_key) if not _real(rec.get(k))]
+    bad = [k for k in (value_key, ref_key) if not finite_real(rec.get(k))]
     if bad:
         bracket(group, f"{claim} -- STORED WITHOUT A NUMBER FOR {' AND '.join(bad)}", nan, 0.0, 0.0, "", f"rerun: {command}   [{eta}]")
         return

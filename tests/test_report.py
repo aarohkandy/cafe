@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 import yaml
 
-from cafe.pm import budget, config, report, stage1
+from cafe.pm import acceptance, budget, config, report, stage1
 from cafe.pm import credibility as credibility_mod
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.stats import intervals
@@ -1164,6 +1164,24 @@ def test_a_cut_row_as_the_stage_writes_it_gives_the_same_report_as_one_that_stil
         assert w["cut_statement"] == report.CUT_STATEMENT and w["reasons"] == CUT["reasons"]
 
 
+def test_r9_m24_a_window_that_diverged_is_called_diverged_not_cut_at_the_time_limit(run):
+    """The statement and the state line said 'cut at the time limit' for every cut window; a window that blew up in its last chunk (or before) was not
+    cut by the clock. The row's resolution says which (`diverged`, written by the stage with `cut_reason`)."""
+    m, plan = pm_run.make_run(run)
+    row = dict(CUT, cd=None, cl=None, cd_spread=None, timing=None, checks=[], reasons=["diverged: the flow went non-finite or past Mach 1 inside a chunk"],
+               resolution=dict(cells_per_delta=0.6, nu_floored=True, run_steps=None, planned_steps=4300, diverged=True,
+                               cut_reason="diverged: the flow went non-finite or past Mach 1 inside a chunk"))
+    windows(run, "glider_eq", row)
+    windows(run, "glider_2n", dict(row, resolution=dict(row["resolution"], diverged=False)))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    d, k = rep["stage3"]["vehicles"]["glider_eq"][0], rep["stage3"]["vehicles"]["glider_2n"][0]
+    assert d["diverged"] is True and d["cut_statement"] == report.DIVERGED_STATEMENT and "time limit" not in d["cut_statement"]
+    assert k["diverged"] is False and k["cut_statement"] == report.CUT_STATEMENT
+    assert "diverged and was cut" in t and "window diverged (the flow went non-finite or past Mach 1) before its planned steps were done" in t
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+
+
 def test_a_killed_window_that_passes_every_check_says_it_was_cut_not_that_nothing_was_recorded(run):
     """M-9: a window with all checks ok and `cut` has ok False, no failed check and no error: the page said 'no check or error recorded'."""
     m, plan = pm_run.make_run(run)
@@ -2263,3 +2281,81 @@ def test_r9_m3_a_uas_no_current_data_mode_gets_the_uas_wording_and_the_other_cla
     edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].update(modes=dict(profile_incomplete=4)))
     report.write(run, m, plan)
     assert load(run)["vehicles"]["uas"]["mode_notes"] == dict(profile_incomplete=report.MODE_TEXT["profile_incomplete"])
+
+
+def test_r9_m1_a_platform_given_as_a_path_is_labelled_counted_and_linked_in_the_report(run, tmp_path):
+    """The USV block's source was `platforms/<platform>.yaml` with the whole path spliced in, and its count of assumed inputs and its link to the
+    credibility table were looked up under the path (0 and a dead anchor)."""
+    m, plan = pm_run.make_run(run)
+    f = tmp_path / "mine" / "saildrone_explorer.yaml"
+    f.parent.mkdir()
+    f.write_text((config.PLATFORMS / "saildrone_explorer.yaml").read_text())
+    for doc in (m, mission := yaml.safe_load((run / "mission.yaml").read_text())):
+        next(v for v in doc["vehicles"] if v["platform"] == "saildrone_explorer")["platform"] = str(f)
+    (run / "mission.yaml").write_text(yaml.safe_dump(mission))
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(modes=dict(wing_stall_calm=9)))
+    report.write(run, m, plan)
+    u = load(run)["vehicles"]["usv"]
+    assert u["usv_modes"]["trim_min_aws"]["source"] == f"{f} trim_min_aws_ms"
+    assert u["assumed_platform_inputs"]["value"] > 20 and u["assumed_anchor"] == f"credibility.html#{credibility_mod.plat_anchor(str(f))}"
+    assert f"id='{credibility_mod.plat_anchor(str(f))}'" in (run / "report" / "credibility.html").read_text()
+    inside = config.PLATFORMS / "saildrone_explorer.yaml"                                  # in the repo: the same label however it is given
+    assert config.platform_display("saildrone_explorer") == "platforms/saildrone_explorer.yaml" == config.platform_display(str(inside))
+
+
+def test_r9_m9_the_report_says_when_the_rates_are_another_machines_and_only_in_the_volatile_place(run, monkeypatch):
+    """throughput.json measured on another CPU count or model: the machine block now says so (report.json machine.machine, which acceptance.VOLATILE
+    leaves out of the comparison of two runs, and one note in the HTML). plan.json and the stage ledgers stay free of it: two machines must agree on them."""
+    m, plan = pm_run.make_run(run)
+    monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: "throughput.json was measured on bench (8 CPUs); here it is 32 CPUs, not 8")
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    assert rep["machine"]["machine"]["warning"] == "throughput.json was measured on bench (8 CPUs); here it is 32 CPUs, not 8"
+    assert "<b>Note:</b> throughput.json was measured on bench (8 CPUs); here it is 32 CPUs, not 8." in h
+    assert "was measured on bench" not in json.dumps(rep["machine"]["notes"]) + (run / "plan.json").read_text()
+    assert all("was measured on bench" not in (run / "checkpoints" / st / "ledger.json").read_text() for st in report.STAGES[:-1])
+    monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: None)
+    report.write(run, m, plan)
+    quiet = load(run)
+    assert quiet["machine"]["machine"]["warning"] is None and "<b>Note:</b>" not in (run / "report" / "index.html").read_text()
+    assert "machine.machine" in acceptance.VOLATILE                                       # what two runs of one seed on two machines may differ in
+
+
+def pm_run_page(run, m, plan, **uas_edit):
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].update(**uas_edit))
+    report.write(run, m, plan)
+    return (run / "report" / "index.html").read_text()
+
+
+class NanWind(AnalyticEnv):
+    """A masked wind store everywhere but within 100 m of the ship at (-165, 0): the launch check at the ship passes, the aircraft meets NaN in flight."""
+
+    def wind(self, lon, lat, z, t):
+        v = super().wind(lon, lat, z, t)
+        far = np.hypot(np.asarray(lon, float) + 165.0, np.asarray(lat, float)) > 0.001
+        return type(v)(np.where(far[..., None], np.nan, np.asarray(v.value, float)), v.source, v.uncertainty, v.kind)
+
+
+def test_r9_m3_a_uas_member_that_meets_a_nan_wind_is_no_current_data_from_stage_1_to_the_report(run):
+    """The flag existed in the physics, but stage 1 and the report had to carry it: fly two real UAS members in a NaN wind, merge, summarise, put the
+    summary in a run and read the page. The mode is counted, is the dominant one, and is explained as a hole in the aircraft's wind (not the sea-mask text of
+    the surface vehicles); the attitude note no longer says the verdict rests on the battery and the profile alone."""
+    from tests.test_stage1 import uas_inputs
+    v, P, mission, t0, T, X = uas_inputs()
+    r = stage1._run_uas(v, P, NanWind(), 2, X, t0, T, mission, 1, [0, 1])
+    assert r["fail"]["no_current_data"].all() and np.isfinite(r["first"]["no_current_data"]).all()
+    res = stage1.merge([dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"uas": dict(r, **{"class": "uas"})})])
+    s = stage1.summarize(res, ["a"], mission, 2)["vehicles"]["uas"]
+    assert s["modes"]["no_current_data"] == 2 and s["dominant"] == "no_current_data" and s["k_fail"] == 2
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].update(modes=s["modes"], dominant=s["dominant"]))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    u = rep["vehicles"]["uas"]
+    assert u["dominant_mode"] == "no_current_data" and u["modes"]["no_current_data"]["value"] == 2
+    assert u["mode_notes"]["no_current_data"] == report.UAS_MODE_TEXT["no_current_data"] != report.MODE_TEXT["no_current_data"]
+    assert "no_current_data: the wind at the aircraft's position in flight was not finite" in t and "a land block" not in t.split("no_current_data:")[1][:300]
+    assert "a hole in the input" in t and report.check_traceability(rep) == []
+    assert "In this run 2 members also met a wind that was not finite in flight (no_current_data): their verdict rests on a hole in the input" in t
+    quiet = plain(pm_run_page(run, m, plan, modes=dict(s["modes"], no_current_data=0), dominant="profile_incomplete"))
+    assert "also met a wind that was not finite" not in quiet and "Attitude exceedance cannot fire" in quiet

@@ -352,7 +352,7 @@ def test_stored_stage3_receipts_have_e_but_no_u_val(data):
     (rec / "nest_sphere_100_d12.json").write_text(json.dumps(dict(cd=1.4, d=12, shape=[10, 6, 6])))
     (rec / "lbm_sphere_100.json").write_text(json.dumps(dict(cd=1.5, ref=1.087, d=12)))
     (rec / "lbm_sphere_1000.json").write_text(json.dumps(dict(cd=0.6, ref=0.47)))
-    (rec / "wm_flat_plate.json").write_text(json.dumps(dict(cf=0.0035, ittc=0.0030, re=1e6, err=0.17)))
+    (rec / "wm_flat_plate.json").write_text(json.dumps(dict(cf=0.0035, ittc=0.0030, re=1e6, err=0.17, yfrac=0.1)))
     (rec / "wm_channel.json").write_text(json.dumps(dict(cf=0.0066, cf_dean=0.0062, err=0.06)))
     rows = {r["id"]: r for r in cr.vv20_rows(data)}
     from cafe.pm.stage3 import lbm
@@ -372,11 +372,11 @@ def test_stored_stage3_receipts_have_e_but_no_u_val(data):
 
 
 @pytest.mark.parametrize("name, body, want", [
-    ("wm_flat_plate.json", dict(code_sha="x"), "lacks a finite number for cf, ittc"),
-    ("wm_flat_plate.json", dict(cf=None, ittc=0.003, err=0.1), "lacks a finite number for cf"),
+    ("wm_flat_plate.json", dict(code_sha="x"), "lacks a finite number for err, cf, re, ittc, yfrac"),
+    ("wm_flat_plate.json", dict(cf=None, ittc=0.003, err=0.1, re=1e6, yfrac=0.1), "lacks a finite number for cf "),
     ("wm_channel.json", dict(cf="abc", cf_dean=0.0062, err=0.06), "lacks a finite number for cf"),
-    ("wm_channel.json", dict(cf=0.0066, cf_dean=True), "lacks a finite number for cf_dean"),
-    ("wm_channel.json", dict(cf=float("nan"), cf_dean=0.0062), "lacks a finite number for cf"),
+    ("wm_channel.json", dict(cf=0.0066, cf_dean=True, err=0.06), "lacks a finite number for cf_dean"),
+    ("wm_channel.json", dict(cf=float("nan"), cf_dean=0.0062, err=0.06), "lacks a finite number for cf "),
     ("wm_channel.json", "[1, 2]", "is unreadable (rerun it)"),
     ("wm_flat_plate.json", "{not json", "is unreadable (rerun it)"),
     ("lbm_sphere_100.json", dict(ref=1.0), "lacks a finite number for cd"),
@@ -1018,3 +1018,58 @@ def test_r8_merge_the_ustar_floor_is_the_pipelines_and_there_is_no_second_copy(r
     monkeypatch.setattr(pipeline, "USTAR_AGREE_FRACTION", 0.5)                               # the one constant moves both sides
     assert record(0.6)["level"] == 2
     assert any("asks 50%" in m for m in record(0.4)["missing"])
+
+
+def test_r9_m1_a_platform_given_as_a_path_is_counted_and_keyed_whether_it_is_in_platforms_or_not(run, data, tmp_path, monkeypatch):
+    """`platform: /somewhere/saildrone_explorer.yaml`: the credibility page matched platforms by stem under platforms/, so the file was 'not used' and its
+    assumed inputs were nowhere. A path into platforms/ is the platform of that name; a file elsewhere is keyed by the path as given (its stem is not its
+    own: a directory of copies has a seaglider.yaml each), listed with its own assumed inputs, and has its own anchor."""
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    (other / "saildrone_explorer.yaml").write_text((REAL / "platforms" / "saildrone_explorer.yaml").read_text())
+    path = str(other / "saildrone_explorer.yaml")
+    mission = yaml.safe_load((run / "mission.yaml").read_text())
+    usv = next(v for v in mission["vehicles"] if v["platform"] == "saildrone_explorer")
+    usv["platform"] = path
+    (run / "mission.yaml").write_text(yaml.safe_dump(mission))
+    c = cr.build(run, REAL, data)
+    n = c["platform_assumed_counts"]["saildrone_explorer"]
+    assert n > 20 and c["platform_assumed_counts"][path] == n
+    assert {i["file"] for i in c["assumed_inputs"]} >= {"platforms/saildrone_explorer.yaml", path}
+    ped = next(f for f in c["factors"] if f["factor"] == "input_pedigree")
+    assert path in ped["evidence"][0]["file"] and "no platform file" not in " ".join(ped["missing"])
+    assert f"id='{cr.plat_anchor(path)}'" in cr._render(c)
+    inside = str(REAL / "platforms" / "slocum.yaml")                                       # a path into platforms/ is the platform of that stem
+    assert cr.platform_key(inside) == cr.platform_key("slocum") == "slocum" and cr.platform_key(path) == path
+    monkeypatch.chdir(REAL)
+    assert cr.platform_key("platforms/slocum.yaml") == "slocum"
+
+
+GOOD_PLATE = dict(err=0.1, cf=0.0035, re=1e6, ittc=0.003, yfrac=0.1, code_sha="x")
+GOOD_CHANNEL = dict(err=0.06, cf=0.0066, cf_dean=0.0062, code_sha="x")
+
+
+@pytest.mark.parametrize("name, body", [
+    ("wm_flat_plate", GOOD_PLATE), ("wm_flat_plate", {k: v for k, v in GOOD_PLATE.items() if k != "yfrac"}),
+    ("wm_flat_plate", dict(GOOD_PLATE, re=None)), ("wm_flat_plate", dict(GOOD_PLATE, err="x")), ("wm_flat_plate", dict(GOOD_PLATE, cf=10 ** 400)),
+    ("wm_channel", GOOD_CHANNEL), ("wm_channel", {k: v for k, v in GOOD_CHANNEL.items() if k != "err"}), ("wm_channel", dict(GOOD_CHANNEL, cf_dean=10 ** 400)),
+])
+def test_r9_m4_the_credibility_page_and_stage_3_read_a_stored_wall_model_receipt_by_one_rule(data, name, body):
+    """stage 3 refused a receipt without `yfrac` or `err` and the page drew a row from it (it checked only cf and the reference); a 400-digit integer
+    was an OverflowError there. The page now asks for the fields stage 3 asks for, by the same test."""
+    from cafe.pm.stage3 import wallmodel
+    rec = data / "receipts"
+    rec.mkdir(parents=True)
+    (rec / f"{name}.json").write_text(json.dumps(body))
+    fields = wallmodel.PLATE_FIELDS if name == "wm_flat_plate" else wallmodel.CHANNEL_FIELDS
+    counts = wallmodel._read_receipt(rec / f"{name}.json", fields) is not None
+    assert counts == (next(r for r in cr.vv20_rows(data) if r["id"] == f"wallmodel:{name}")["status"] == "run")
+    assert counts == (body in (GOOD_PLATE, GOOD_CHANNEL))
+
+
+def test_r9_m15_the_ustar_finding_names_the_band_the_ingest_check_used(run, monkeypatch):
+    """The ingest check judges COARE u* against UMWM ust within pipeline.USTAR_AGREE_BAND; the page spelled '20 %' by hand beside it."""
+    monkeypatch.setattr(cr.pipeline, "USTAR_AGREE_BAND", 0.35)
+    ingest_check(run, value=0.5)
+    f = factors(run)["data_pedigree"]
+    assert any("have COARE u* within 35 % of UMWM ust" in m for m in f["missing"]) and not any("within 20 %" in m for m in f["missing"])

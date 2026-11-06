@@ -37,7 +37,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from . import budget, credibility
+from . import budget, config, credibility
 from .config import json_object
 from .stage1 import NOT_EXERCISED, _classes, path_speed as _member_speeds
 from .env.remote import sha256
@@ -414,6 +414,7 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
         src = f"stage1b/summary.json summary.vehicles.{vid}"
         before = ((s1 or {}).get("summary") or {}).get("vehicles", {}).get(vid)
         p = plat.get(vid)
+        pk = credibility.platform_key(p) if p else ""                                          # the key credibility files its counts under
         out[vid] = dict(cls=e["cls"], platform=p, **_stat(e, ref, src + ".verdict (stats.intervals.verdict)"),
                         dominant_mode=e["dominant"], modes={k: num(n, "members", ref, f"{src}.modes") for k, n in e["modes"].items()},
                         first_fail=tnum(e["first_fail_t"], ref, f"{src}.first_fail_t"), median_fail=tnum(e["median_fail_t"], ref, f"{src}.median_fail_t"),
@@ -427,8 +428,8 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         usv_modes=_usv_modes(p, e["modes"], tr) if e["cls"] == "usv" else None,
                         verdict_stage1=before["verdict"]["verdict"] if before else None,
                         changed_by_refit=bool(before and before["verdict"]["verdict"] != e["verdict"]["verdict"]),
-                        assumed_platform_inputs=num(cred["platform_assumed_counts"].get(p, 0), "inputs", cred_ref, "credibility.json platform_assumed_counts"),
-                        assumed_anchor=f"credibility.html#plat-{p}")
+                        assumed_platform_inputs=num(cred["platform_assumed_counts"].get(pk, 0), "inputs", cred_ref, "credibility.json platform_assumed_counts"),
+                        assumed_anchor=f"credibility.html#{credibility.plat_anchor(pk)}")
     return out
 
 
@@ -454,7 +455,7 @@ def _usv_modes(platform: str | None, modes: dict[str, Any], tr: Trace) -> dict[s
         v = {k: pl[g][k]["value"] for g, k in (("mission_defaults", "calm_sustain_s"), ("mission_defaults", "becalmed_after_h"), ("params", "trim_min_aws_ms"))}
     except (KeyError, TypeError, ValueError):
         return None
-    ref, src = tr.ref("ingest", label="platform"), f"platforms/{platform}.yaml"
+    ref, src = tr.ref("ingest", label="platform"), config.platform_display(platform or "")
     return dict(trim_min_aws=num(v["trim_min_aws_ms"], "m/s", ref, src + " trim_min_aws_ms"),
                 calm_sustain=num(v["calm_sustain_s"] / 60.0, "min", ref, src + " calm_sustain_s"),
                 becalmed_after=num(v["becalmed_after_h"], "h", ref, src + " becalmed_after_h"))
@@ -763,6 +764,7 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
         for i, w in enumerate(ws):
             src = f"stage3/windows.json {vid}[{i}]"
             cut = bool(w.get("cut"))                                      # a window cut at the time limit: its numbers depend on the clock, so none is read
+            div = cut and bool((w.get("resolution") or {}).get("diverged"))      # ... or one that diverged in its last chunk (the same withholding)
             failed = [c["name"] for c in w.get("checks", []) if not c["ok"]]
             reasons = [str(x) for x in w.get("reasons", [])]
             used = bool(rv and rv.get("used") and w.get("ok"))
@@ -771,7 +773,7 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             elif not w.get("ok"):
                 parts = ["failed self-checks: " + ", ".join(failed)] if failed else []
                 why = "; ".join(parts + reasons + ([w["error"]] if w.get("error") and w["error"] not in reasons else [])
-                                or (["cut at the time limit"] if cut else [])) or "no check or error recorded"
+                                or ([DIVERGED_REASON if div else "cut at the time limit"] if cut else [])) or "no check or error recorded"
             elif rv is not None:
                 why = rv.get("reason") or "the refit did not use this vehicle"
             else:
@@ -779,7 +781,7 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             at = (wins or {}).get(vid, [])
             rows.append(dict(
                 label=f"W{i + 1}", ok=bool(w.get("ok")), error=w.get("error"), used_in_refit=used, not_used_because=why, cut=cut, reasons=reasons,
-                cut_statement=CUT_STATEMENT if cut else None,
+                cut_statement=(DIVERGED_STATEMENT if div else CUT_STATEMENT) if cut else None, diverged=div,
                 cells_per_delta=None if cut or not (w.get("resolution") or {}).get("cells_per_delta") else
                 num(w["resolution"]["cells_per_delta"], "cells per boundary-layer thickness", r3, src + ".resolution.cells_per_delta"),
                 nu_raised=(w.get("resolution") or {}).get("nu_floored"),
@@ -797,6 +799,8 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
 
 
 CUT_STATEMENT = "window cut at the time limit: its coefficients are withheld"
+DIVERGED_REASON = "diverged (the flow went non-finite or past Mach 1)"
+DIVERGED_STATEMENT = f"window {DIVERGED_REASON} before its planned steps were done: its coefficients are withheld"
 
 
 def _les_reach(plan: dict[str, Any]) -> dict[str, Any]:
@@ -923,7 +927,8 @@ def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str,
                 wall_s={st: num(L["wall_s"], "s", tr.ref(st), f"checkpoints/{st}/ledger.json wall_s") for st, L in live.items()},
                 timing=_timing(plan, tr, pref), git_sha=sorted({L["git_sha"] for L in live.values()}), versions=(first or {}).get("versions", {}),
                 report_stage="report stage: written after this table, so its wall time and code are not in it",
-                machine=None if first is None else dict(host=first["machine"]["host"], bench_id=first["machine"]["bench_id"], cpus=cpus))
+                machine=None if first is None else dict(host=first["machine"]["host"], bench_id=first["machine"]["bench_id"], cpus=cpus,
+                                                        warning=budget.machine_warning()))        # VOLATILE with the rest of machine.machine
 
 
 def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
@@ -1197,6 +1202,9 @@ def _speed_html(v: dict[str, Any]) -> str:
                     f"reached every waypoint: {_n(pr['complete_share'])} (a sortie that returns earlier did not deliver the full profile and fails as "
                     "<code>profile_incomplete</code>).</p>")
         out += f"<p class=muted>{UAS_ATTITUDE_NOTE if pr else UAS_ATTITUDE_NOTE_NO_PROFILE}"
+        if (v["modes"].get("no_current_data") or {}).get("value"):
+            out += (f" In this run {_n(v['modes']['no_current_data'])} also met a wind that was not finite in flight (<code>no_current_data</code>): "
+                    "their verdict rests on a hole in the input, which the battery and the profile say nothing about.")
         if au:
             out += (f" Horizontal-force demand beyond the lean-angle clamp: {_n(au['clamp_s_median'])} per sortie (median; largest {_n(au['clamp_s_max'])}), "
                     f"demand / clamp {_n(au['demand_ratio_median'])} (median), {_n(au['demand_ratio_max'])} (largest).")
@@ -1379,8 +1387,8 @@ def _window_html(w: dict[str, Any]) -> str:
                  for c in w["checks"])
     co = ", ".join(f"{e(k)} {_n(x)}" for k, x in w["coefficients"].items())
     use = "used in the refit" if w["used_in_refit"] else f"not used in the refit: {e(str(w['not_used_because']))}"
-    state = ("passed its self-checks" if w["ok"] else "was cut at the time limit" if w["cut"] else "failed its self-checks" if w["checks"]
-             else "did not run" if w["error"] else "failed with no check recorded")
+    state = ("passed its self-checks" if w["ok"] else ("diverged and was cut" if w["diverged"] else "was cut at the time limit") if w["cut"]
+             else "failed its self-checks" if w["checks"] else "did not run" if w["error"] else "failed with no check recorded")
     raised = "n/a" if w["nu_raised"] is None else "yes" if w["nu_raised"] else "no"
     why = "".join(f"<li>{e(x)}" for x in w["reasons"])
     return (f"<div class=card><b>{w['label']}</b> {state}; {use}"
@@ -1482,6 +1490,7 @@ def _machine_html(m: dict[str, Any]) -> str:
     ver = ", ".join(f"{e(k)} {e(str(v))}" for k, v in m["versions"].items())
     mc = m["machine"]
     where = f"{e(str(mc['host']))}, {_n(mc['cpus'])}, bench id {e(str(mc['bench_id']))}" if mc else "unknown"
+    warn = f"<p><b>Note:</b> {e(mc['warning'])}.</p>" if mc and mc.get("warning") else ""
     plan = "; ".join(f"{e(k)} {_n(n)}" for k, n in m["plan"].items())
     tm = m.get("timing") or {}
     s1, vr = tm.get("stage1"), tm.get("variants")
@@ -1501,7 +1510,7 @@ def _machine_html(m: dict[str, Any]) -> str:
             f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div><p class=muted>{e(m['report_stage'])}.</p>{ing}"
             f"<p>Plan: {plan}. ArduCopter SITL is not part of the pipeline; it runs only as the slow receipts (<code>UAS SITL vs our controller</code>, "
             f"<code>UAS sortie</code>), so the ensemble is pure physics.</p>{took}"
-            f"<p>Code: git {e(', '.join(m['git_sha']))}. Machine: {where}.</p><p class=muted>{ver}</p>")
+            f"<p>Code: git {e(', '.join(m['git_sha']))}. Machine: {where}.</p>{warn}<p class=muted>{ver}</p>")
 
 
 def _assumed_html(a: dict[str, Any]) -> str:
