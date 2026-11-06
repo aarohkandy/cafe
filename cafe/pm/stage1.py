@@ -858,7 +858,7 @@ def main(argv: list[str] | None = None) -> int:
     run of M (its ingest cache, fitted priors and refit multipliers are used)."""
     import argparse, json, pathlib, sys
     from . import pipeline
-    from .config import ConfigError, json_object
+    from .config import ConfigError, damaged_run_files, json_object
     ap = argparse.ArgumentParser(prog="python -m cafe.pm.stage1", description=main.__doc__)
     ap.add_argument("--mission", required=True)
     ap.add_argument("--run", required=True)
@@ -868,11 +868,12 @@ def main(argv: list[str] | None = None) -> int:
     rd = pathlib.Path(a.run)
     out = rd / "stage1b" / "sensitivity_cases.json"
     try:                                                                  # a damaged file of the run is an `error:` line and exit 2, as in `python -m cafe.pm`
-        ctx = pipeline.Context(a.mission, "quick", 0, rd)
-        fp, rp = rd / "ingest" / "priors_fitted.json", rd / "refit" / "refit.json"
-        scales = {k: v for k, v in json_object(rp).items() if v["used"]} if rp.is_file() else None
-        old = json_object(out, "delete it; this command writes it again") if out.is_file() else {}          # before the long part
-        new = sensitivity_case(ctx.mission, ctx.env, a.prior, a.members, json_object(fp) if fp.is_file() else None, scales or None)
+        with damaged_run_files(rd):                                       # round 10, M-5: valid JSON without a key it reads is the same damage
+            ctx = pipeline.Context(a.mission, "quick", 0, rd)
+            fp, rp = rd / "ingest" / "priors_fitted.json", rd / "refit" / "refit.json"
+            scales = {k: v for k, v in json_object(rp).items() if v["used"]} if rp.is_file() else None
+            old = json_object(out, "delete it; this command writes it again") if out.is_file() else {}          # before the long part
+            new = sensitivity_case(ctx.mission, ctx.env, a.prior, a.members, json_object(fp) if fp.is_file() else None, scales or None)
     except ConfigError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2

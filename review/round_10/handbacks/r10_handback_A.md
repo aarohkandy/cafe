@@ -9,7 +9,7 @@ in the five files named below. Docs (DECISIONS, CHANGELOG, RUNBOOK, PHYSICS, STA
 |---|---|---|
 | M-5 | `__main__.main` (`except OSError` -> `error:` rc 2); `config.damaged_run_files` (KeyError/TypeError -> ConfigError), used in `__main__._report` and `__main__._whatif`; `report.build` raises ConfigError for a missing `stage1b/summary.json` | `test_cli.py::test_r10_m5_*` (3 tests, 6 cases) |
 | M-9 | `report._map`, `_env`, `_stage3` (`NO_WINDOWS`); `_map_html`, `_env_html`, `_window_html` | `test_report.py::test_r10_m9_*` (3) |
-| M-24 | `receipts.slow_group` | `test_receipts.py::test_r10_m24_*` (5 cases) |
+| M-24 | `receipts.slow_group` | `test_receipts.py::test_r10_m24_*` (9 cases) |
 | M-4 | `report._stat` (one `open_` test) | `test_report.py::test_r10_m4_*` (2) |
 | M-27 | `report._n` (tags every span with `data-path`), `report.render`, `report.check_rendered` | `test_report.py::test_r10_m27_*` (2) |
 | M-7 | `credibility.build` (`ledger_problems`), `report.build`/`_render` (page line), `__main__._report` (stderr `warning:`), `report._stat` (counts and finiteness) | `test_cli.py::test_r10_m7_*` (2), `test_report.py::test_r10_m7_*` (4 cases) |
@@ -33,6 +33,8 @@ Not touched: `audit.py` (not needed: `ledger_problems` already reaches the repor
   `FileNotFoundError` in `receipts.run`; `test_receipts test_acceptance` then passed). `ruff check cafe/pm tests` clean, `mypy cafe/pm` clean (strict), `audit.banned()` returns `[]`.
 - Not run: `test_stage3.py` and the rest of the suite (they read `config.json_object`, which did not change); no coverage run; no mutation run.
 
+Follow-up (two adversary findings: M-24 rows without keys, M-5 `stage1.py`). Failing before, shown: the two changed test files on a detached worktree of `80f2974`: `test_r10_m5_the_stage1_command_...` fails with `KeyError: 'used'` (stage1.py:873); `test_r10_m24_...[row_empty_dict]`, `[row_without_keys]`, `[bracket_without_bounds]` fail with `KeyError: 'reference'` / `'lo'` (receipts.py:81, :75); `[row_not_a_dict]` passes before and after on purpose (control). After: all pass. Whole files `test_receipts test_stage1 test_acceptance test_audit` (`-n 2 --dist loadfile`, orca): rc=0. `ruff check cafe/pm tests` clean, `mypy cafe/pm` clean.
+
 ## Per finding
 
 ### M-5  Damaged or unwritable paths give tracebacks where sister cases give `error:` (rc 2)
@@ -54,7 +56,7 @@ the run". The "exit code 2 and `error: ...`" row (RUNBOOK 266) can add "or a pat
 What could break, checked. Callers of the changed raise sites: `report.build`/`report.write` are called by `pipeline.s_report`, `__main__._report`, tests only; nothing catches `FileNotFoundError` from them (grepped `except.*FileNotFoundError|OSError` in `cafe/pm`:
 only `acceptance.py:355`, for `receipts.run`). The OSError catch in `main` changes rc 1 -> 2 for an OSError escaping any command (`acceptance`, `ingest-ocean`, `fetch`); the wait scripts read "rc != 0", not the value. The test that pinned the old exception
 type (`test_a_run_with_no_stage1b_summary_is_refused`) was changed to the new type and message; no assertion was weakened.
-RC-1 siblings. `__main__._whatif` covered. `stage1.py:873` (`python -m cafe.pm.stage1` sensitivity command: `{k: v for ... if v["used"]}`) has the same unguarded `v["used"]` inside a `try ... except ConfigError`; it is batch B's file and was not touched
+RC-1 siblings. `__main__._whatif` covered. `stage1.py:873` (`python -m cafe.pm.stage1` sensitivity command: `{k: v for ... if v["used"]}`) had the same unguarded `v["used"]` inside a `try ... except ConfigError`: fixed in the follow-up (below): the try body of `stage1.main` is now inside `with config.damaged_run_files(rd):`; test `test_stage1.py::test_r10_m5_the_stage1_command_reports_a_refit_entry_without_used_as_an_error_line_and_exit_2`. (The edit is in batch B's file, a 5-line change in `main`; expect a trivial merge.)
 (see "needs from other batches"). `credibility.py:173, 346` and `dtmb5415.py:541` read through `json_object`/tolerant readers and are called inside `report.write` (covered) or already catch `ConfigError`.
 
 ### M-9  A run without `windows/windows.json` renders a report that drops the stage-3 markers silently
@@ -73,6 +75,8 @@ The fixture in `pm_run.make_run` has a stage-3 row beyond its windows.json entri
 What changed. `receipts.slow_group` reads `date`, `host`, `git_sha`, `code_digest` and builds the tagged rows into locals inside `try ... except (KeyError, TypeError, AttributeError, ValueError)` before it touches `R.OUT`; on failure the reason is
 "the stored result at <p> is not a receipt record (missing or wrong-typed fields); the command above writes it again" and the shared `NotRun` row with the command follows. The five shapes tested: `{}`, digest only, `git_sha` not text, `rows` not rows,
 old digest and no `git_sha`.
+
+Follow-up (adversary: a row that is a dict without its keys still ended in `KeyError` in `collect`). `slow_group` now also runs `_row(group, d, {})`, the one function `collect` reads a stored row with, over every tagged row inside the same `try`, before `R.OUT` is extended; a row `_row` cannot read (no `reference`/`tol`/`kind`, a bracket without `lo`/`hi`, a non-dict) makes the record "not a receipt record". Four more cases in the same parametrized test: `[{}]`, `[{"id": "x"}]`, a bracket row without bounds, `[[], None]`. Callers: `_row` is only called from `collect` and now `slow_group`; it is not changed.
 DECISIONS row. "A stored slow receipt that is valid JSON but not a receipt record (a field missing or of the wrong type) is a `not_run` row with its command, like a damaged file; nothing is added to the table from it." Completes and amends 452.
 CHANGELOG. "A stored slow receipt of the wrong shape gives the 'not run' row with its command, not a KeyError; DECISIONS <n>."
 What could break, checked. `slow_group` is the only reader of these files (`app.fea`, `pm.physics.uas.slow`, `pm.emulator`); `_save` cannot write the bad shape. A good record still extends `R.OUT` with the same `source` text (the tag text is unchanged).
@@ -190,8 +194,7 @@ Several tests fail on the old code partly because a new name is missing (`report
 
 ## Needs from other batches
 
-- Batch B (`stage1.py`): `python -m cafe.pm.stage1` (sensitivity command, line ~873) reads `refit.json` with `v["used"]` inside `try ... except ConfigError`; wrap that block in `with config.damaged_run_files(rd):` (or add `except (KeyError, TypeError)`) so a refit entry without `used` is
-  an `error:` line. Same defect as M-5, same helper.
+- Batch B (`stage1.py`): done in the follow-up (see M-5 above); nothing left, but `stage1.main` changed in this branch, so merge with that in mind.
 - Batch D (`env/hycom.py`): optional defence in depth: `box360` refuses a raw width of more than 360 (`e - w > 360 + 1e-9`); after M-8 nothing reachable from a mission needs it. Its pinned 95-degree latitude tolerance (`test_hycom.py:132`) is not affected.
 - Batch F (`acceptance.py`): nothing needed; note that `acceptance.check_broken` depends on `receipts.run` raising `FileNotFoundError` for a missing `--broken` file (kept).
 - Batch F (docs): the DECISIONS rows and CHANGELOG lines above; RUNBOOK sentences named per finding (M-5 troubleshooting row, report paragraph for M-7, mission box for M-8, glider depth for M-16); PHYSICS 483-493 for M-25; DECISIONS 515 now reads "prints no extra line" falsely (M-7).
