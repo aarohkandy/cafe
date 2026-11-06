@@ -155,6 +155,20 @@ def test_the_second_run_with_a_tag_balances_by_the_junit_of_the_first_and_drops_
     assert not (shards / ".pid").exists()
 
 
+def test_a_smaller_k_removes_the_old_logs_of_the_shares_beyond_it_of_this_tag_only(tmp_path):
+    """P-30: after K=12, a run with K=8 left t1_s9.log to t1_s12.log, each ending rc=0, and a wait loop on rc= in t1_s*.log ended at once."""
+    home, env, _ = world(tmp_path)
+    assert suite(env, "pm_t", "3", "t1").returncode == 0
+    logs = home / "cafe-worker/logs"
+    others = ["t1_s3_s5.log", "t2_s9.log", "t1_audit.log", "t1_sx.log", "t1_s.log"]    # t1_s3's share 5, t2's, the audit log, names that are no share's
+    for n in ["t1_s9.log", "t1_s12.log", *others]:
+        (logs / n).write_text("boom\nrc=0\n")
+    r = suite(env, "pm_t", "2", "t1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(p.name for p in logs.iterdir()) == sorted(["t1_s1.log", "t1_s2.log", "t1_serial.log", "t1_shares.log", *others])    # s3, s9 and s12 are gone
+    assert all(p.read_text().endswith("rc=0\n") for p in logs.iterdir())
+
+
 @pytest.mark.parametrize("args", [("pm_t", "17", "t"), ("pm_t", "0", "t"), ("pm_t", "08", "t"), ("pm_t", "x", "t"), ("pm_t", "2", "a/b"), ("pm_t", "2", ""),
                                   ("pm_t", "2", "t", "--cove"), ("pm_t", "2", "t", "--cov", "x"), ("pmdata", "2", "t"), ("pm_", "2", "t"), ("pm_a/b", "2", "t"),
                                   ("pm_t", "2"), ()])

@@ -1540,6 +1540,38 @@ def test_the_sensitivity_line_prints_the_sentence_stage_1_wrote_for_the_case_tha
     assert report.check_rendered(load(run), (run / "report" / "index.html").read_text()) == []
 
 
+def test_an_older_summary_without_the_sensitivity_sentence_names_the_parameter_and_its_index(run):
+    """The old wording for a ranked outcome: no `text` in the summary, a named parameter, so the line is `<param> (S1 x)`."""
+    m, plan = pm_run.make_run(run)
+    param = json.loads((run / "stage1b" / "summary.json").read_text())["summary"]["vehicles"]["usv"]["sensitivity"]["param"]
+    assert param is not None
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"]["sensitivity"].pop("text"))
+    report.write(run, m, plan)
+    h = (run / "report" / "index.html").read_text()
+    assert f"Most sensitive to: <code>{param}</code> (S1 " in h and re.search(rf"Most sensitive to: {param} \(S1 [0-9.]+ fraction of variance\)\.", plain(h))
+    assert report.check_rendered(load(run), h) == []
+
+
+def test_a_platform_file_without_the_limits_or_clocks_the_statements_rest_on_leaves_them_out_and_says_so(run, tmp_path):
+    """`load_platform` returns {} for an empty file: the USV's calm-weather clocks and the UAS's tilt limits cannot be read, so the clocks are not
+    shown and the attitude statement says it cannot say whether exceedance can fire (it never invents the numbers)."""
+    m, plan = pm_run.make_run(run)
+    empty = tmp_path / "empty.yaml"
+    empty.write_text("# no keys\n")
+    mission = yaml.safe_load((run / "mission.yaml").read_text())
+    for doc in (m, mission):
+        for v in doc["vehicles"]:
+            if v["id"] in ("usv", "uas"):
+                v["platform"] = str(empty)
+    (run / "mission.yaml").write_text(yaml.safe_dump(mission))
+    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(modes=dict(wing_stall_calm=9, becalmed=2)))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    assert rep["vehicles"]["usv"]["usv_modes"] is None and rep["vehicles"]["uas"]["uas_limits"] is None
+    assert "The UAS platform's tilt clamp and attitude exceedance could not be read, so this report does not say whether attitude exceedance can fire." in t
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+
+
 def test_a_link_decided_on_too_few_samples_is_undecided_granularity_and_the_others_print_their_sample_count(run):
     """Round 3 M-5: a 20 min sortie gave 6 to 12 samples per member, so required_fraction 0.95 meant every sample."""
     m, plan = pm_run.make_run(run)
@@ -2216,6 +2248,22 @@ def test_r9_m17_a_not_exercised_link_is_badged_once_in_the_table_and_the_card_an
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, h) == []
 
 
+def test_a_not_exercised_links_card_has_no_certifying_sentence_and_the_other_cards_keep_theirs(run):
+    """DECISIONS 526: n_certify is not a target for a NOT EXERCISED link, and `_stat` withholds its certify_statement; the card still said 'certifying P(fail)
+    < 5 % needs 73 members'. The number is not in the report.json of such a link either, so that `check_rendered` does not ask the page for it."""
+    m, plan = pm_run.make_run(run)
+    _not_exercised(run)
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    card = plain(h.split("<div id='v-usv-uas-rf'>")[1].split("<div id='v-")[0])
+    assert "certifying" not in card and "Wilson bound)" not in card and re.search(r"\d+ members failed of \d+ members\.", card)   # ends after n
+    assert rep["links"]["usv-uas-rf"]["n_certify"] is None
+    other = plain(h.split("<div id='v-glider_eq-ship-acoustic'>")[1].split("<div id='v-")[0])
+    assert f"certifying P(fail) < 5 % needs {intervals.n_certify()} members, two-sided 95 % Wilson bound)" in other
+    assert rep["links"]["glider_eq-ship-acoustic"]["n_certify"]["value"] == intervals.n_certify()
+    assert rep["traceability_problems"] == [] and report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
+
+
 def test_r9_m17_a_link_with_a_median_need_of_zero_but_failures_keeps_its_graded_verdict_and_the_card_does_not_call_it_not_exercised(run):
     """Adversary: 10 of 24 members need the link and fail, 14 never do (median need 0). The card must not say NOT EXERCISED for it."""
     m, plan = pm_run.make_run(run)
@@ -2301,6 +2349,28 @@ def test_r9_m10_the_emulator_section_says_what_ran_beside_what_was_planned(run):
     assert report.check_traceability(rep) == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
     assert report._run_note(None, plan) is None
     assert report._run_note(dict(variants=[dict()]), None) == "1 variant run and the base mission."                      # no plan, no planned count, no kill
+
+
+def test_the_run_note_states_the_points_of_the_smallest_class_from_the_holdout_file_where_it_holds_them(run):
+    """P-29: the note counted (variants + 1) x vehicles of this run, so a shared table that already held rows (the emulator trained on 100 points, or the
+    reverse) showed a number that was not the one the emulator saw."""
+    m, plan = pm_run.make_run(run)
+    _design(run, planned_variants=2, variants=[dict(variant=f"v{i}", mods={}, vehicles=[], skipped={}) for i in range(2)], skipped=[], killed=None)
+    cls = list(plan["vehicle_classes"].values())
+    own = report._run_note(json.loads((run / "emulator" / "design.json").read_text()), plan)
+    assert own == (f"2 variant runs of the 2 planned and the base mission, {3 * min(map(cls.count, set(cls)))} points in the smallest vehicle class "
+                   f"({budget.EMULATOR_MIN_POINTS} are needed).")      # this run's own: (2 + 1) x the vehicles of the class
+    edit_json(run / "emulator" / "holdout.json", lambda d: (d["glider_eq"].update(points=131, cls="glider"), d["usv"].update(points=87, cls="usv")))
+    report.write(run, m, plan)
+    rep, t = load(run), plain((run / "report" / "index.html").read_text())
+    want = f"2 variant runs of the 2 planned and the base mission, 87 points in the smallest vehicle class ({budget.EMULATOR_MIN_POINTS} are needed)."
+    assert rep["emulator"]["run_note"] == want and f"This run: {want}" in t
+    edit_json(run / "emulator" / "holdout.json", lambda d: d["usv"].pop("points"))    # an older file, or no points for a class: this run's own
+    report.write(run, m, plan)
+    assert load(run)["emulator"]["run_note"] == own
+    design = json.loads((run / "emulator" / "design.json").read_text())
+    assert report._run_note(design, None, dict(a=dict(points=5))) == (f"2 variant runs of the 2 planned and the base mission, 5 points in the smallest "
+                                                                      f"vehicle class ({budget.EMULATOR_MIN_POINTS} are needed).")
 
 
 def test_r9_m3_a_uas_no_current_data_mode_gets_the_uas_wording_and_the_other_classes_keep_theirs(run):

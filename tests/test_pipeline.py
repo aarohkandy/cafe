@@ -1546,6 +1546,28 @@ def test_variant_count_is_capped_by_the_budget_name_and_the_clock_is_only_a_kill
     assert any(n.startswith("killed:") for n in d["notes"])
 
 
+def test_the_flip_search_gets_the_same_budget_when_the_clock_kills_the_variants_as_in_a_full_run(tmp_path, table, fake_stage1, monkeypatch):
+    """P-25: the budget was `share - len(variants) * est`, so a kill at variant 2 of 3 handed the search the time of the variant it never ran."""
+    from cafe.pm import whatif
+    budgets, ran, real = [], [], whatif.flip_search
+    monkeypatch.setattr(whatif, "flip_search", lambda *a, **k: (budgets.append(a[10]), real(*a, **k))[1])
+    run_variant = whatif.run_variant
+    monkeypatch.setattr(whatif, "run_variant", lambda *a, **k: (ran.append(a[-2]), run_variant(*a, **k))[1])
+    full = cheap_plan(synthetic_ctx(tmp_path, 48, "full", unused_refit=True), 100.0)                           # share 20 s, 4 s a variant, 3 planned
+    run_stage(pipeline.s_emulator, full, "emulator")
+    assert ran == ["v0", "v1", "v2"] and budgets == [20.0 - 3 * 4.0]
+    ran.clear()
+    cut = cheap_plan(synthetic_ctx(tmp_path, 48, "cut", unused_refit=True), 100.0)
+    monkeypatch.setattr(pipeline, "time", types.SimpleNamespace(time=time.time, perf_counter=lambda: 1e6 if len(ran) >= 2 else 0.0))  # gone after v1
+    d = run_stage(pipeline.s_emulator, cut, "emulator")
+    design = json.loads((cut.run_dir / "emulator" / "design.json").read_text())
+    assert ran == ["v0", "v1"] and design["killed"]["at_variant"] == 2 and design["planned_variants"] == 3
+    assert budgets == [8.0, 8.0]                                                                              # not 20 - 2 x 4 = 12
+    assert design["spent_s"] == 2 * 4.0 and design["variant_s"] == 4.0                                          # what ran is still what is charged and reported
+    assert (1 - whatif.TRAIN_FRAC) * design["share_s"] - 1e-9 <= budgets[1] <= design["share_s"]   # never negative: the variants take at most TRAIN_FRAC of it
+    assert any(n.startswith("killed:") for n in d["notes"])
+
+
 def test_the_emulator_is_not_trained_on_a_few_rows_and_the_stage_still_passes(tmp_path, table, fake_stage1):
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
@@ -1812,6 +1834,30 @@ def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, tab
     assert ("point(s) re-run on fresh members:" in note) == bool(h["fresh_points"])
     assert ("only the in-sample score is judged" in note) == (not h["fresh_points"])
     assert h["fresh_points"] >= 1, "no variant row landed in the hold-out: the fresh-draw wiring is not exercised"
+
+
+def test_a_held_out_point_whose_fresh_rerun_leaves_the_environment_data_is_left_out_of_the_fresh_check_not_a_crash(tmp_path, table, fake_stage1, monkeypatch):
+    """The fresh-draw re-run of a held-out variant row is a stage-1 batch of the changed mission: when that leaves the cached data (`whatif.Invalid`) there is
+    no fresh number for the point, and the check goes on without it (here for every point: the in-sample score alone is judged, as the note says)."""
+    from cafe.pm import whatif
+    from cafe.pm.env.environment import OutsideData
+    seed_table(table, n=100)
+    monkeypatch.setattr(whatif, "LIMITS", dict(rmse=0.05, coverage=0.5, query_ms=1e9))
+    fake = stage1.run_batch
+    refused = []
+
+    def run_batch(mission, env, members, seed, pri, marg, scales=None):
+        if members[0] >= 16 * 6:                                       # the blocks after the 48 members of stage 1b and the three variants: the fresh draws
+            refused.append(members[0])
+            raise OutsideData("wind: (-171.20, 0.90) at 2023-03-02 06:00Z is outside the cached data")
+        return fake(mission, env, members, seed, pri, marg, scales)
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    h = json.loads((ctx.run_dir / "emulator" / "holdout.json").read_text())["glider_eq"]
+    assert refused and h["trained"] and h["fresh_points"] == 0           # every fresh re-run was refused, none counted
+    assert any("no held-out point could be re-run on fresh members" in n for n in d["notes"])
+    assert not any(n.startswith("fresh-draw hold-out check:") for n in d["notes"])
 
 
 # ---------------------------------------------------------------------------------------------------------------- report
@@ -3156,6 +3202,28 @@ def test_r8_m24_a_repeated_time_stamp_in_the_cached_wrf_fails_the_hourly_check_n
     c = check_of(d, "time_axes_hourly_gap_free")
     assert not c["ok"] and "wrf.zarr" in c["note"] and "axis time: must be strictly increasing" in c["note"] and "delete" in c["note"]
     assert failing(d) == ["time_axes_hourly_gap_free"]                                              # the stage stops there
+
+
+def test_an_ingest_that_cannot_build_the_environment_over_a_current_layer_stops_at_the_failed_check_before_tao_and_the_replan(tmp_path, data_copy, monkeypatch):
+    """`_ingest_checks` returns False when the environment cannot be built, and `s_ingest` then ends there: no TAO fetch, no replan on a cache that is
+    not usable. Here the layer is current when the ingest looks (so it is not rebuilt) and the span of its hourly fields is refused when the
+    environment is built from it (`Context.env` raises the ConfigError that `_ingest_checks` records)."""
+    run_stage(pipeline.s_ingest, ctx_for(tmp_path / "warm"), "ingest")
+    asked = []
+
+    def span_problem(cache, window):
+        asked.append(1)
+        return None if len(asked) == 1 else "its hourly fields end before the window"
+    monkeypatch.setattr(pipeline, "_derived_span_problem", span_problem)
+    monkeypatch.setattr(pipeline, "_tao", lambda *a, **k: pytest.fail("the TAO step ran after the ingest checks stopped the stage"))
+    ctx = ctx_for(tmp_path / "r")
+    monkeypatch.setattr(ctx, "replan", lambda: pytest.fail("the plan was redone on a cache that cannot be used"))
+    with pytest.raises(ledger.StageFailed, match="time_axes_hourly_gap_free"):
+        run_stage(pipeline.s_ingest, ctx, "ingest")
+    d = read_ledger(tmp_path / "r", "ingest")
+    assert failing(d) == ["time_axes_hourly_gap_free"] and len(asked) == 2
+    assert "its hourly fields end before the window" in check_of(d, "time_axes_hourly_gap_free")["note"]
+    assert [pathlib.Path(o["path"]).name for o in d["outputs"]] == [surface.DIGEST]                               # `L.output(man)` is after the stop
 
 
 def test_r8_merge_a_cached_wrf_damaged_after_a_good_ingest_is_a_config_error_naming_the_store_not_a_traceback(tmp_path, data_copy):

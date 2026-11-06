@@ -1425,7 +1425,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     L.output(_dump(out, ctx.path("emulator", "holdout.json")))
     tracks = {vid: whatif.track_points(r, ctx.mission) for vid, r in res["vehicles"].items() if r["class"] != "uas"}
     flips, fspent = whatif.flip_search(ctx.mission, {vid: summ[vid]["verdict"] for vid in summ}, tracks, ctx.env, ems, ctx.plan, pri, marg, scales, seed,
-                                       share - spent, ctx.log)
+                                       share - n_var * est, ctx.log)       # the planned variants, not those that ran (P-25)
     L.note(f"flip search: {sum(f['found'] for f in flips.values())} of {len(flips)} non-GO vehicles flip; {fspent:.0f} s of Stage 1 (planned cost)")
     L.output(_dump(dict(vehicles=flips), ctx.path("emulator", "flip.json")))
     L.output(_dump(dict(share_s=share, variant_s=est, variant_planned_s=est, variant_s_source=sizes["variant_s_source"], variants=variants,

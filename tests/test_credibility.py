@@ -1194,6 +1194,7 @@ def test_r9_one_stale_grid_of_the_native_sphere_study_refuses_its_row_as_the_gat
     ({"nest_sphere_100_d8.json": dict(cd=1.09, d=8, ref="x")}, "run", "d = 8 cells"),                                       # the gate never reads a grid's ref
     ({"nest_sphere_100_d8.json": dict(cd=1.09, d=8), "nest_sphere_100_d16.json": dict(cd=1.01, d=8, code_sha="OLD")}, "run",   # d16 repeats d = 8:
      "left out as the gate leaves them out: nest_sphere_100_d16.json"),                                                    # so its stale sha refuses nothing
+    ({"nest_sphere_100_d8_prev.json": dict(cd=1.09, d=8)}, "not run", "not run: no nest_sphere_100_d*.json under"),    # only a rerun kept beside a grid
 ])
 def test_p27_the_page_reads_a_sphere_receipt_through_the_gates_readers_so_it_shows_what_the_gate_counts(data, monkeypatch, files, status, want):
     """P-27: the page re-derived the gate's rule for the sphere receipts and differed from it on files stage 3 leaves out or fails: an XLB run without a

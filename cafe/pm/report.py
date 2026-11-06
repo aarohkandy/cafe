@@ -270,10 +270,11 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     None and is `decided` (more members cannot change it). `p_fail` carries the verdict's own interval
     (its `conf`); `stop_interval` is the stopper's, and `thresholds` the verdict cut-offs, each a traced node the sentences only restate."""
     v = e["verdict"]
+    exercised = v["verdict"] != NOT_EXERCISED                       # a link never required: no member count decides it (region None, nothing more to say)
     unc = dict(kind=f"{v['method']} interval", conf=v["conf"], lo=v["fail_lo"], hi=v["fail_hi"])
     d: dict[str, Any] = dict(verdict=v["verdict"], p_fail=num(v["p_fail"], "fraction", ref, src, unc), n=num(e["n"], "members", ref, src),
-                             k_fail=num(e["k_fail"], "members", ref, src), n_certify=num(v["n_certify"], "members", ref, src), note=v["note"],
-                             certify_statement=None)
+                             k_fail=num(e["k_fail"], "members", ref, src), note=v["note"], certify_statement=None,
+                             n_certify=num(v["n_certify"], "members", ref, src) if exercised else None)    # not a target for such a link (526, 533)
     lo, hi, method = intervals.interval(e["k_fail"], e["n"], sequential.STOP_CONF)
     sunc = dict(kind=f"{method} interval bound", conf=sequential.STOP_CONF)
     where = src + " (stats.intervals.interval at stats.sequential.STOP_CONF)"
@@ -281,7 +282,6 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     d["thresholds"] = dict(go=num(intervals.P_FAIL_GO, "fraction", ref, "stats/intervals.py P_FAIL_GO"),
                            go_bound=num(1 - intervals.LO_SUCCESS_GO, "fraction", ref, "stats/intervals.py LO_SUCCESS_GO (1 - LO_SUCCESS_GO)"),
                            nogo=num(intervals.P_FAIL_NOGO, "fraction", ref, "stats/intervals.py P_FAIL_NOGO"))
-    exercised = v["verdict"] != NOT_EXERCISED                       # a link never required: no member count decides it (region None, nothing more to say)
     d["region"] = intervals.decided_region(e["k_fail"], e["n"], sequential.STOP_CONF) if exercised else None
     d["decided"] = d["region"] is not None or not exercised
     d["undecided_statement"] = None if d["decided"] else _undecided(d["stop_interval"]["lo"]["value"], d["stop_interval"]["hi"]["value"])
@@ -857,10 +857,12 @@ def _fresh(e: dict[str, Any], ref: dict[str, Any], s: str) -> dict[str, Any] | N
                 rmse_debiased=num(e["rmse_fresh_debiased"], "fraction", ref, s + ".rmse_fresh_debiased"))
 
 
-def _run_note(design: dict[str, Any] | None, plan: dict[str, Any] | None) -> str | None:
+def _run_note(design: dict[str, Any] | None, plan: dict[str, Any] | None, emu: dict[str, Any] | None = None) -> str | None:
     """What the variant runs did, from emulator/design.json (never a measured second: that file is hashed), as against `plan_note`, which is what the plan
-    said before the run: the variants that ran of those planned, the points per vehicle class they gave (the base mission plus the variants, less the
-    vehicle-variant pairs that were skipped) against what an emulator needs, and why the stage was cut short when it was. None without a design file."""
+    said before the run: the variants that ran of those planned, the points of the smallest vehicle class against what an emulator needs, and why the stage
+    was cut short when it was. The points are those `emu` (emulator/holdout.json) holds, the distinct feature points `whatif.fit_class` counted in the
+    whole training table, whether or not the class trained (P-29); without them (no file, or an older one) this run's own: the base mission plus the
+    variants, less the vehicle-variant pairs that were skipped. None without a design file."""
     if design is None:
         return None
     ran, planned, skipped = len(design["variants"]), design.get("planned_variants"), design.get("skipped") or []
@@ -868,8 +870,10 @@ def _run_note(design: dict[str, Any] | None, plan: dict[str, Any] | None) -> str
     per_class = Counter(cls.values())
     lost = Counter(cls.get(k["vehicle"]) for k in skipped)
     points = {c: (ran + 1) * n - lost[c] for c, n in sorted(per_class.items())}
+    held = [e.get("points") for e in (emu or {}).values()]
+    smallest = min(held) if held and all(type(n) is int for n in held) else min(points.values(), default=None)
     out = (f"{ran} variant run{'s' * (ran != 1)}{'' if planned is None else f' of the {planned} planned'} and the base mission" +
-           (f", {min(points.values())} points in the smallest vehicle class ({budget.EMULATOR_MIN_POINTS} are needed)" if points else ""))
+           (f", {smallest} points in the smallest vehicle class ({budget.EMULATOR_MIN_POINTS} are needed)" if smallest is not None else ""))
     killed = design.get("killed")
     return out + (f"; {killed['reason']}" if killed else "") + "."
 
@@ -918,7 +922,7 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
                   variants=num(len(design["variants"]), "runs", dref, s), spent=num(design["spent_s"], "s", dref, s),
                   flip_spent=num(design["flip_spent_s"], "s", dref, s), rows_added=num(design["rows_added"], "rows", dref, s),
                   table_rows=num(design["table_rows"], "rows", dref, s), table=design["table"], stage1b_free=bool(design["stage1b_free"]))
-    return dict(available=True, vehicles=out, design=dd, plan_note=note, run_note=_run_note(design, plan))
+    return dict(available=True, vehicles=out, design=dd, plan_note=note, run_note=_run_note(design, plan, emu))
 
 
 def _timing(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
@@ -1090,8 +1094,10 @@ def _usv_bias_html(v: dict[str, Any]) -> str:
 def _stat_html(d: dict[str, Any]) -> str:
     u = d["p_fail"]["uncertainty"]
     si, th = d["stop_interval"], d["thresholds"]
+    nc = d["n_certify"]                                               # None for a NOT EXERCISED link: no member count certifies it (DECISIONS 533)
+    cert = "" if nc is None else f" (certifying P(fail) &lt; 5 % needs {_n(nc)}, two-sided 95 % Wilson bound)"
     h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g} (the verdict's own level); "
-         f"{_n(d['k_fail'])} failed of {_n(d['n'])} (certifying P(fail) &lt; 5 % needs {_n(d['n_certify'])}, two-sided 95 % Wilson bound).</p>"
+         f"{_n(d['k_fail'])} failed of {_n(d['n'])}{cert}.</p>"
          f"<p class=muted>{INTERVAL_SCOPE.format(n=_n(d['n']))}</p>"
          f"<p class=muted>Stopping rule: the {si['lo']['uncertainty']['conf']:.0%} {html.escape(si['lo']['uncertainty']['kind'].replace(' bound', ''))} "
          f"on P(fail) is {_n(si['lo'])} to {_n(si['hi'])}; verdict rule: GO when P(fail) is at most {_n(th['go'])} and the "

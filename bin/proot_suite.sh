@@ -40,6 +40,13 @@ job() {
 }
 export PM_CPUS=2 PM_THREADS=2          # PM_THREADS: BLAS and OpenMP pools of a job at its 2 CPUs, not orca's 64 (bin/proot_run.sh; P-20)
 rm -f "$SH"/.coverage* "$SH"/serial.xml
+# A smaller K than the last run under this tag: its logs <tag>_s<K+1>.log and up still end rc=0 and would end a reader's wait loop at once (P-30). Only this tag's: the part after
+# "<tag>_s" must be all digits and above K (tag a must not touch the logs of tag a_s3, "a_s3_s1.log").
+for x in "$LOGS/${TAG}"_s[0-9]*.log; do
+    [ -f "$x" ] || continue; i=${x##*/"${TAG}"_s}; i=${i%.log}
+    case $i in ''|*[!0-9]*) continue ;; esac
+    [ "$i" -gt "$K" ] && rm -f "$x"
+done
 # A job passes only if its exit status AND its junit file say so: a pytest process was seen to end with rc=0 after "1 failed" (round 9, orca-go P-18). $1 name, $2 exit status, $3 junit file.
 verdict() {
     if [ "$2" -ne 0 ]; then BAD="$BAD $1(rc=$2)"; return; fi

@@ -110,6 +110,21 @@ def test_an_adopted_object_holds_its_large_arrays_once_as_shared_read_only_maps(
     assert par.adopt(small) is small
 
 
+def test_a_task_blob_maps_an_adopted_file_again_without_counting_it_and_the_file_outlives_that_map(monkeypatch):
+    """A worker unpickles a task's adopted map with `_mapped`: the same file, read-only, not a reference the parent's `_release` waits for."""
+    monkeypatch.setenv("CAFE_WORKERS", "2")
+    big = np.arange(par.SHARE_MIN_BYTES // 8 + 1, dtype=float)
+    got = par.adopt(dict(big=big))
+    path, refs = got["big"].filename, dict(par._refs)
+    back = pickle.loads(par.dumps(got))
+    assert isinstance(back["big"], np.memmap) and back["big"].filename == path and np.array_equal(back["big"], big) and not back["big"].flags.writeable
+    assert par._refs == refs                                           # only `_owned` (a parent's map) counts
+    del back
+    gc.collect()
+    assert pathlib.Path(path).exists() and par._refs == refs           # the file goes with the last parent's map, not with a worker's
+
+
+
 def test_a_shared_file_name_is_never_reused_when_an_array_id_is(monkeypatch):
     """The name came from len(_shared): an array that died and whose id a new array got kept the entry count, so the new array was written over
     the old one's file while a queued task still named it (an 8-worker q4 batch read a wrong environment, 0.66 degrees off from the first record)."""

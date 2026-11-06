@@ -541,6 +541,12 @@ Round 9 read the q9 quick run (`runs/q9`, code `08f05d7`, made on the 32-vCPU bu
   - P-4's closing sentence narrowed (P-28): no stage 1b vehicle or link verdict depends on the emulator's variant count, but the flip search does, through its budget (P-25) and through whether an emulator trains when the table plus the variants straddle 100 points; no code, `review/orca/PROBLEMS.md`.
   - The credibility page reads a stored sphere receipt through the gate's own readers (`nest.stored_study`, the XLB `cd` and `ref`), so a row is "run" exactly when stage 3 counts a result; DECISIONS 528 (amends 527), P-27.
   - `bin/pmx.sh` with `TM=`: `tmux kill-session` now ends the log with `rc=143` (the pane shell passes the hang-up to the job and writes its status) instead of leaving no `rc=` line; DECISIONS 529, P-26.
+- Round 10 pre-work (P-25, P-29, P-30 and the twelve uncovered statements; DECISIONS 530 to 534):
+  - P-25: the flip search's budget is `share - planned_variants * est`, so a stage cut short by the clock gets the search of a full run; DECISIONS 530.
+  - P-29: the run note's points in the smallest vehicle class are those `emulator/holdout.json` holds (the real training table), the old count only without them; DECISIONS 531.
+  - P-30: `bin/proot_suite.sh` removes this tag's logs `<tag>_s<i>.log` of shares beyond K at the start of a run; DECISIONS 532.
+  - The card of a NOT EXERCISED link no longer prints the certifying parenthesis (`n_certify` is null in `report.json` for it); DECISIONS 533 (amends 526).
+  - Tests for the twelve statements the gate of `e06879c` left uncovered (`credibility.py`, `par.py`, `pipeline.py`, `report.py`); none deleted, no pragma; DECISIONS 534.
 
 ### Known issues
 
