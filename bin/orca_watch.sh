@@ -6,7 +6,8 @@
 # Start: TMUX_TMPDIR=$HOME/cafe-worker/logs cafe-worker/env/bin/tmux new-session -d -s watch 'sh cafe-worker/bin/orca_watch.sh'
 # Stop:  TMUX_TMPDIR=$HOME/cafe-worker/logs cafe-worker/env/bin/tmux kill-session -t watch
 cd || exit 1
-L=cafe-worker/logs; W=$L/watch; G=/sys/fs/cgroup; FLOOR=${CAFE_MIN_FREE_GB:-60}
+# WATCH_SLEEP (seconds between looks, 60), WATCH_ONCE (one look, then exit) and WATCH_CGROUP (/sys/fs/cgroup) are for tests/test_runners.py.
+L=cafe-worker/logs; W=$L/watch; G=${WATCH_CGROUP:-/sys/fs/cgroup}; FLOOR=${CAFE_MIN_FREE_GB:-60}
 [ -f cafe-worker/.cafe-worker-owned ] || { echo "no cafe-worker of ours here" >&2; exit 1; }
 mkdir -p "$W/state"
 [ -s "$W/timeline.tsv" ] || printf 'utc\tcpus\tthrottled\tmem_gb\tavail_gb\tload1\tdisk_free_gb\tooms\ttmux\n' > "$W/timeline.tsv"
@@ -21,7 +22,7 @@ note() { printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$1" "$2" >> "$W/problems.lo
 
 u0=$(stat_of usage_usec $G/cpu.stat); low=
 while :; do
-    sleep 60
+    sleep "${WATCH_SLEEP:-60}"
     u1=$(stat_of usage_usec $G/cpu.stat)
     free_gb=$(df -Pk . | awk 'NR==2{print int($4/1048576)}')
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$(awk -v a="$u0" -v b="$u1" 'BEGIN{printf "%.1f",(b-a)/6e7}')" \
@@ -34,7 +35,9 @@ while :; do
         [ -f "$f" ] && [ ! -L "$f" ] || continue
         n=$(basename "$f" .log)
         case "$n" in *[!A-Za-z0-9_-]*) continue ;; esac                 # the names bin/pmx.sh allows
-        fails=$(grep -aE '^[.sxFE]+ *(\[ *[0-9]+%\])?$' "$f" | tr -cd 'FE' | wc -c)
+        fails=$(grep -aE '^[.sxFE]+ *(\[ *[0-9]+%\])?$' "$f" | tr -cd 'FE' | wc -c)                # -q dots
+        # -vv lines, one per test as it ends: "tests/x.py::t FAILED [ 40%]", or under xdist "[gw3] [ 40%] FAILED tests/x.py::t". Not the summary's "FAILED tests/x.py::t - reason".
+        fails=$((fails + $(grep -acE '^(tests/.* (FAILED|ERROR)( +\[ *[0-9]+%\])?|\[gw[0-9]+\] (\[ *[0-9]+%\] )?(FAILED|ERROR) tests/.*)$' "$f")))
         errs=$(grep -acE '^(error:|Traceback )' "$f")
         rc=$(tail -n 1 "$f" | grep -ax 'rc=[0-9]*')
         now="$fails $errs $rc"; was=$(cat "$W/state/$n" 2>/dev/null)
@@ -42,4 +45,5 @@ while :; do
         echo "$now" > "$W/state/$n"
         case "$now" in "0 0 "|"0 0 rc=0") ;; *) note "$n" "failed tests $fails, error lines $errs, ${rc:-still running}" ;; esac
     done
+    [ -z "${WATCH_ONCE-}" ] || break
 done
