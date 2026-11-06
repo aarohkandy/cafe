@@ -36,14 +36,26 @@ def calls(monkeypatch):
     return seen
 
 
+def _roomy():
+    """`par.memory_gb` answers 64 GB while a test of this module runs, and the real function afterwards. A test's own `monkeypatch` is set up before this
+    (the autouse fixtures of conftest.py ask for it) and so is torn down after it: if the test patched `par.memory_gb` too, that patch puts back what it saw,
+    which is this fixture's answer, for every later test of the process (test_par.py's memory test saw 64.0 once the shares of bin/proot_suite.sh ran
+    test_cli.py first). So what is left behind forwards to the real function once the test is over."""
+    real, over = par.memory_gb, []
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(par, "memory_gb", lambda: real() if over else 64.0)
+        try:
+            yield
+        finally:
+            over.append(True)
+
+
 @pytest.fixture(autouse=True)
 def roomy_machine():
     """Review round 8, M-6: the CLI tests reach the planner as a side effect and must not depend on the memory of the machine they run on (the stage-1
     model needs about 9 GB for the demo window). Its own MonkeyPatch, so a test that calls `monkeypatch.undo()` keeps it; the tests of the refusal itself
     patch `par.memory_gb` to the value they are about."""
-    with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(par, "memory_gb", lambda: 64.0)
-        yield
+    yield from _roomy()
 
 
 def test_ingest_ocean_writes_the_lab_hycom_into_the_store_the_mission_names_and_refuses_a_gofs_mission(monkeypatch, tmp_path, capsys):
@@ -831,6 +843,18 @@ def test_r8_merge_the_roomy_machine_is_not_undone_by_a_tests_own_monkeypatch_und
     monkeypatch.undo()
     assert par.memory_gb() == 64.0
 
+
+def test_the_roomy_machine_leaves_the_real_memory_function_behind_even_when_the_test_patched_it_too(monkeypatch):
+    """Round 9 (orca-go): the test's monkeypatch is torn down after the fixture and put `par.memory_gb` back to the fixture's 64 GB answer."""
+    monkeypatch.setattr(par, "memory_gb", lambda: 7.0)                     # stands for the real function this fixture finds
+    fixture = _roomy()
+    next(fixture)
+    assert par.memory_gb() == 64.0
+    test_patch = pytest.MonkeyPatch()
+    test_patch.setattr(par, "memory_gb", lambda: 2.0)                      # the test patches it on top of the fixture ...
+    fixture.close()                                                        # ... the fixture is torn down first ...
+    test_patch.undo()                                                      # ... and the test's patch puts back what it saw
+    assert par.memory_gb() == 7.0
 
 
 # ---------------------------------------------------------------------------------------------------------------- round 9, batch A

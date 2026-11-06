@@ -139,8 +139,10 @@ def test_a_tao_download_is_cached_only_if_it_covers_the_box_and_window_and_every
     for box in ((-3.0, 2.0, -167.0, -163.0), (-2.0, 3.0, -167.0, -163.0), (-2.0, 2.0, -168.0, -163.0), (-2.0, 2.0, -167.0, -162.0)):
         assert not pipeline._tao_cached(t, box, s, e)
     assert not pipeline._tao_cached(data_copy / "nowhere", BOX, s, e)
-    victim = next(t.glob("T0N165W/*.nc"))
-    victim.write_bytes(victim.read_bytes()[:-1] + b"\0")
+    victim = min(t.glob("T0N165W/*.nc"))                                           # not next(): the first of the listing is the file system's choice
+    was = victim.read_bytes()
+    victim.write_bytes(was[:-1] + bytes([was[-1] ^ 0xFF]))                         # flipped: the file always changes (a constant may be the byte it has)
+    assert victim.read_bytes() != was
     assert not pipeline._tao_cached(t, BOX, s, e)                                                          # a changed file
 
 
