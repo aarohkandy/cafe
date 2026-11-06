@@ -1,5 +1,6 @@
 """cafe.pm.audit: broken ledgers, banned tokens and commented-out code are all caught; rulers and prose are not."""
 import json
+import os
 import pathlib
 import runpy
 import shutil
@@ -350,6 +351,53 @@ def test_main_runs_ruff_mypy_pytest_and_the_coverage_gates(tmp_path, monkeypatch
     assert audit.main([]) == 1 and "AUDIT FAIL: pytest:\npytest output" in capsys.readouterr().out
 
 
+def pytest_done_root(tmp_path, monkeypatch, age):
+    """A repo in miniature for --pytest-done: cafe/pm/a.py, and a coverage.json that is `age` seconds older (negative: newer) than it."""
+    (tmp_path / "cafe" / "pm" / "__pycache__").mkdir(parents=True)
+    src, pyc = tmp_path / "cafe" / "pm" / "a.py", tmp_path / "cafe" / "pm" / "__pycache__" / "a.pyc"
+    src.write_text("x = 1\n")
+    pyc.write_bytes(b"")
+    os.utime(src, (1_000_000, 1_000_000))
+    os.utime(pyc, (3_000_000, 3_000_000))                                                  # running the tests writes bytecode: it must not count
+    if age is not None:
+        cov(tmp_path, {"cafe/pm/a.py": (10, 10)})
+        os.utime(tmp_path / "coverage.json", (1_000_000 - age, 1_000_000 - age))
+    monkeypatch.setattr(audit, "banned", lambda: [])
+    monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
+    monkeypatch.setattr(audit, "ROOT", tmp_path)
+
+
+def test_pytest_done_runs_everything_but_pytest_and_needs_a_coverage_json_made_after_the_code(tmp_path, monkeypatch, capsys):
+    """The suite can run elsewhere in pieces (bin/proot_suite.sh); the audit then must not read as a pass without those tests having run on this code."""
+    calls = []
+    monkeypatch.setattr(audit, "_run", lambda cmd: calls.append(cmd[0]) or (0, ""))
+    pytest_done_root(tmp_path, monkeypatch, age=-5)
+    assert audit.main(["--pytest-done"]) == 0 and calls == ["ruff", "mypy"]              # no pytest pass, and a fresh coverage.json is read for the gates
+    assert "audit: 0 problem(s)" in capsys.readouterr().out
+    cov(tmp_path, {"cafe/pm/a.py": (10, 1)})
+    os.utime(tmp_path / "coverage.json", (2_000_000, 2_000_000))
+    assert audit.main(["--pytest-done"]) == 1 and "coverage cafe/pm: 10.0 % < 90 %" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("age, said", [(None, "no coverage.json"), (5, "coverage.json is older than cafe/pm/a.py")])
+def test_pytest_done_fails_without_a_coverage_json_or_with_one_older_than_the_code(tmp_path, monkeypatch, capsys, age, said):
+    monkeypatch.setattr(audit, "_run", lambda cmd: (0, ""))
+    pytest_done_root(tmp_path, monkeypatch, age=age)
+    assert audit.main(["--pytest-done"]) == 1
+    assert f"AUDIT FAIL: pytest-done: {said}" in capsys.readouterr().out
+
+
+def test_pytest_done_takes_no_other_option_and_the_full_audit_still_runs_pytest(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(audit, "_run", lambda cmd: pytest.fail("a step ran"))
+    for other in ("--code-only", "--ledgers-only", "--mutation-record"):
+        assert audit.main(["--pytest-done", other]) == 2 and "--pytest-done takes no other option" in capsys.readouterr().out
+    calls = []
+    monkeypatch.setattr(audit, "_run", lambda cmd: calls.append(cmd) or (0, ""))
+    pytest_done_root(tmp_path, monkeypatch, age=None)
+    audit.main([])
+    assert sum("pytest" in c for c in calls) == 2                                          # without the option nothing changed
+
+
 def test_audit_mypy_step_reads_pyproject_and_fails_on_a_strict_only_error(tmp_path, monkeypatch):
     """`_run(["mypy"])` picks up [tool.mypy] from the project root: an unannotated def passes plain mypy and fails strict."""
     (tmp_path / "pyproject.toml").write_text((audit.ROOT / "pyproject.toml").read_text())
@@ -569,7 +617,7 @@ def test_review_round_6_m20_a_wrong_path_or_option_is_refused_before_any_step_ru
     assert audit.main(["/nonexistent"]) == 2
     assert "error: /nonexistent is not a run directory (the run directories are runs/quick, runs/overnight, runs/4h)" in capsys.readouterr().out
     assert audit.main(["--ledger-only", str(make_run(tmp_path))]) == 2
-    assert "error: unknown option --ledger-only (--code-only, --ledgers-only, --mutation-record)" in capsys.readouterr().out
+    assert "error: unknown option --ledger-only (--code-only, --ledgers-only, --mutation-record, --pytest-done)" in capsys.readouterr().out
     monkeypatch.setattr(audit, "banned", lambda: [])
     monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
     assert audit.main(["--ledgers-only", str(make_run(tmp_path / "ok"))]) == 0                  # a good run directory and a known option still go through

@@ -1,6 +1,6 @@
 """`make audit`: the run proves itself and the repo carries no unfinished work.
 
-    python -m cafe.pm.audit [run_dir ...] [--code-only | --ledgers-only]
+    python -m cafe.pm.audit [run_dir ...] [--code-only | --ledgers-only | --pytest-done]
 
 1. Ledgers: every stage of every run dir has checkpoints/<stage>/ledger.json with ok=true and zero failed checks; every
    input and output still hashes to what the ledger recorded; each stage's inputs include the previous stage's
@@ -16,7 +16,9 @@
    code or tests, or scores < 0.85, naming the command that refreshes it.
 Exit 0 only if all pass; prints every failure. `--code-only` skips ruff, mypy and pytest; `--ledgers-only` checks only the ledgers of the run dirs
 given (what `make ci` ends with, on the run it just made: the mutation record and the banned-token scan are the business of `make audit`,
-and a clean checkout has no docs/mutation.json yet).
+and a clean checkout has no docs/mutation.json yet). `--pytest-done` is the whole audit except running pytest: for a suite run elsewhere in pieces
+(`bin/proot_suite.sh --cov` on orca, which writes coverage.json), it still runs ruff, mypy and the scans and gates, and fails if coverage.json is missing or
+older than the newest file under cafe/pm, so it cannot pass without tests having run on this code. It takes no other option.
 
     python -m cafe.pm.audit --mutation-record     (called by `make mutation`: writes docs/mutation.json from mutants/mutmut-cicd-stats.json)
 """
@@ -264,7 +266,7 @@ def mutation_problems(root: pathlib.Path = ROOT) -> list[str]:
     return []
 
 
-OPTIONS = ("--code-only", "--ledgers-only", "--mutation-record")
+OPTIONS = ("--code-only", "--ledgers-only", "--mutation-record", "--pytest-done")
 # The real-time tests (ArduCopter and its fake firmware bind sockets and wait on the wall clock): they fail under parallel load, so they run alone in the
 # second pass. The same seven that pyproject.toml deselects for mutmut (tests/test_config_docs.py holds the two lists equal). The last two measure the
 # emulator's query time against BRIEF 2.7's 10 ms: beside parallel workers they read the load, not the code (round 8 M-5).
@@ -282,6 +284,17 @@ def pytest_passes(workers: int) -> list[list[str]]:
             base + ["--cov-append", "--cov-report=json:coverage.json", *SERIAL_TESTS]]
 
 
+def coverage_stale(root: pathlib.Path = ROOT) -> list[str]:
+    """Problems with coverage.json as the receipt that pytest ran on this code: absent, or older than the newest file under cafe/pm."""
+    cov = root / "coverage.json"
+    if not cov.is_file():
+        return ["pytest-done: no coverage.json: run the suite with coverage first (bin/proot_suite.sh <dir> <K> <tag> --cov)"]
+    newest = max((f for f in (root / "cafe" / "pm").rglob("*") if f.is_file() and "__pycache__" not in f.parts), key=lambda f: f.stat().st_mtime, default=None)
+    if newest is not None and newest.stat().st_mtime > cov.stat().st_mtime:
+        return [f"pytest-done: coverage.json is older than {newest.relative_to(root)}: the tests did not run on this code"]
+    return []
+
+
 def main(argv: list[str]) -> int:
     bad = [a for a in argv if a.startswith("--") and a not in OPTIONS]
     if bad:
@@ -291,12 +304,16 @@ def main(argv: list[str]) -> int:
         if not a.startswith("--") and not pathlib.Path(a).is_dir():
             print(f"error: {a} is not a run directory (the run directories are runs/quick, runs/overnight, runs/4h)")
             return 2
+    if "--pytest-done" in argv and any(a.startswith("--") and a != "--pytest-done" for a in argv):
+        print("error: --pytest-done takes no other option (it is the whole audit except pytest)")
+        return 2
     if "--mutation-record" in argv:
         (ROOT / MUTATION_FILE).write_text(json.dumps(mutation_record(ROOT), indent=1) + "\n")
         print(f"wrote {MUTATION_FILE}")
         return 0
     ledgers_only = "--ledgers-only" in argv
     code_only = "--code-only" in argv or ledgers_only
+    pytest_done = "--pytest-done" in argv
     runs = [a for a in argv if not a.startswith("--")]
     problems: list[str] = []
     for r in runs:
@@ -312,17 +329,20 @@ def main(argv: list[str]) -> int:
         rc, out = _run(["mypy"])
         if rc:
             problems.append("mypy:\n" + out)
-        from . import par
-        for cmd in pytest_passes(par.workers()):
-            rc, out = _run(cmd)
-            if rc:
-                problems.append("pytest:\n" + out)
+        if pytest_done:
+            problems += coverage_stale(ROOT)
+        else:
+            from . import par
+            for cmd in pytest_passes(par.workers()):
+                rc, out = _run(cmd)
+                if rc:
+                    problems.append("pytest:\n" + out)
         if (ROOT / "coverage.json").exists():
             problems += coverage_problems(ROOT / "coverage.json")
     for p in problems:
         print("AUDIT FAIL:", p)
     if not code_only:
-        print(f"the whole output of ruff, mypy and pytest is in {LOG}")
+        print(f"the whole output of ruff and mypy{'' if pytest_done else ' and pytest'} is in {LOG}")
     print(f"audit: {len(problems)} problem(s)")
     return 1 if problems else 0
 
