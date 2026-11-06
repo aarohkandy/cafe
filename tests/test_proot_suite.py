@@ -15,6 +15,7 @@ ROOT = config.ROOT
 STUB = r"""#!/bin/sh
 # stands for bin/proot_run.sh: `proot_run.sh <dir> <command...>`. Logs the call; the shares step really runs (paths of /data mapped to pmdata).
 D=$1; shift
+[ -z "${FAKE_PARTIAL:-}" ] || printf 'half a line'
 n=$(echo "$*" | sed -n 's#.*@/data/shards/[^/]*/\(s[0-9]*\|serial\)\.args.*#\1#p')
 echo "$*" >> "$HOME/calls.log"
 [ -z "$n" ] || echo "start $n $(date +%s.%N)" >> "$HOME/calls.log"
@@ -171,6 +172,12 @@ def test_a_missing_marker_or_directory_or_a_tag_that_is_running_is_refused(tmp_p
     assert suite(env, "pm_t", "2", "u").returncode == 1
 
 
+def test_the_rc_line_of_a_log_is_a_line_of_its_own_even_when_the_job_left_half_a_line(tmp_path):
+    home, env, log = world(tmp_path)
+    assert suite({**env, "FAKE_PARTIAL": "1"}, "pm_t", "2", "t1").returncode == 0
+    assert (home / "cafe-worker/logs/t1_s1.log").read_text() == "half a line\nrc=0\n"
+
+
 def test_a_term_to_the_suite_reaches_every_job_and_ends_it_with_143(tmp_path):
     home, env, log = world(tmp_path)
     p = subprocess.Popen(["sh", str(ROOT / "bin/proot_suite.sh"), "pm_t", "3", "t1"], env={**env, "FAKE_SLEEP": "30"}, stdout=subprocess.PIPE,
@@ -186,6 +193,7 @@ def test_a_term_to_the_suite_reaches_every_job_and_ends_it_with_143(tmp_path):
         p.kill()
         p.wait()
     assert sorted(l for l in calls(log) if l.startswith("term")) == ["term s1", "term s2", "term s3"]
+    assert (home / "cafe-worker/logs/t1_s1.log").read_text().endswith("rc=143\n")
     assert not any(l.startswith("start serial") for l in calls(log)) and not (home / "cafe-worker/cafe/pmdata/shards/t1/.pid").exists()
 
 

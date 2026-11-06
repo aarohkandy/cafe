@@ -34,6 +34,7 @@ job() {
     ( sh "$R/bin/proot_run.sh" "$D" "$@" > "$LOGS/$n.log" 2>&1 &
       p=$!; trap 'kill -TERM $p 2>/dev/null' INT TERM HUP
       while :; do wait $p; r=$?; kill -0 $p 2>/dev/null || break; done          # a signal ends `wait` early: wait again until the job has really ended
+      [ -z "$(tail -c 1 "$LOGS/$n.log")" ] || echo >> "$LOGS/$n.log"          # a stopped job leaves half a line: rc=N must be a line of its own (orca_watch reads it so)
       echo "rc=$r" >> "$LOGS/$n.log"; exit $r ) &
     PIDS="$PIDS $!"
 }
