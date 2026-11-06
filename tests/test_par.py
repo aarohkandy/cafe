@@ -246,6 +246,23 @@ def test_memory_is_the_cgroup_limit_else_what_the_host_has_available_else_unknow
         assert par.memory_gb() is None
 
 
+def test_a_cgroup_limit_above_the_machines_memory_is_cut_to_it_and_the_plan_follows(monkeypatch):
+    """Round 9 P-5: on orca the cgroup says 256 GiB (274.9 GB) on a machine of 251.6 GiB (270.2 GB), and `workers_by_memory` was 295."""
+    v2, v1, info = "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes", "/proc/meminfo"
+    total = 263817216                                                                                   # kB
+    fake_files(monkeypatch, {v2: "274877906944\n", v1: OSError(), info: f"MemTotal:       {total} kB\nMemAvailable:   200000000 kB\n"})
+    assert par.memory_gb() == pytest.approx(total * 1024 / 1e9) and par.memory_gb() < 274.9
+    from cafe.pm import budget
+    mission = dict(window=dict(start="2023-03-01T12:00:00Z", end="2023-03-07T12:00:00Z"))
+    here = budget.plan("quick", 0, mission, thr={}, mem_gb=par.memory_gb(), env_gb=9.0)["workers_by_memory"]
+    cgroup = budget.plan("quick", 0, mission, thr={}, mem_gb=274.877906944, env_gb=9.0)["workers_by_memory"]
+    assert here == int((total * 1024 / 1e9 - 9.0) // budget.WORKER_GB) and here < cgroup
+    fake_files(monkeypatch, {v2: "274877906944\n", v1: OSError(), info: OSError()})                     # no MemTotal to cut it to: the limit stands
+    assert par.memory_gb() == pytest.approx(274.877906944)
+    fake_files(monkeypatch, {v2: OSError(), v1: "8589934592", info: f"MemTotal:       {total} kB\n"})      # a limit below the machine's memory is the limit
+    assert par.memory_gb() == pytest.approx(8.589934592)
+
+
 def test_a_full_directory_is_a_named_error_and_not_a_bare_errno_28(monkeypatch, tmp_path):
     """M-6: SHM_MIN_FREE was looked at once, for the first file; a long window filled /dev/shm part-way through the later arrays."""
     monkeypatch.setattr(par, "_dir", tmp_path)
