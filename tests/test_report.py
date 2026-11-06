@@ -590,6 +590,39 @@ def test_the_reach_map_is_drawn_only_with_a_map(run):
     assert rep["map"]["available"] is False and rep["reach"]["available"] and "Map not drawn" in h and "<polygon" not in h
 
 
+@pytest.mark.parametrize("shift", ["ulp up", "ulp down", "+1e-11 deg", "-1e-11 deg", "+1e-13 deg", "-1e-13 deg"])
+def test_the_reach_polygon_does_not_move_when_a_bearing_changes_in_its_last_bit(monkeypatch, shift):
+    """P-3: a cell exactly on a diagonal or an axis has a bearing that is a multiple of 15 degrees, and `ang // 15` flipped on the last bit of arctan2
+    (135.00000000000003 is sector 9, 134.99999999999997 sector 8): the same cell, one ulp apart, gave another polygon (a corner moved 0.048 degrees between
+    two CPUs). A cell on the north axis can land at 359.99999999999 or at 1e-13 and, rounded after the % 360, at sector 24, which no sector holds. Every cell
+    whose bearing is a multiple of 15 degrees is given it moved as `shift` says; the polygon and the range must be those of the unshifted run."""
+    from cafe import reach as legacy
+    env, v = AnalyticEnv(current=(0.0, 0.0)), dict(deploy=dict(lat=0.0, lon=-170.0, time="2026-01-01T00:00:00Z"))
+    ref = dict(stage="s", receipt="r", ledger="l")
+
+    def one() -> dict:
+        return report._reach_one(legacy, env, v, "glider", 0.1, 24.0, 0.1, ref, "src", "how", ref)    # at 0.1 m/s 8 sectors end on a diagonal or an axis cell
+    want = one()
+    real = np.arctan2
+    o = np.arange(-20, 21)
+    ideal = np.degrees(real(o[None, :] + 0 * o[:, None], o[:, None] + 0 * o[None, :]))           # the bearing of the grid's integer offsets (north = row)
+    on = np.abs(ideal / 15.0 - np.round(ideal / 15.0)) < 1e-9
+    mult = 15.0 * np.round(ideal / 15.0)
+    moved = {"ulp up": lambda m: np.nextafter(np.radians(m), np.inf), "ulp down": lambda m: np.nextafter(np.radians(m), -np.inf)}.get(
+        shift, lambda m: np.radians(m + float(shift.split()[0])))
+
+    def shifted(y, x):
+        a = real(y, x)
+        return np.where(on, moved(mult), a) if np.shape(a) == (41, 41) else a
+    monkeypatch.setattr(np, "arctan2", shifted)
+    got = one()
+    p, q = np.array(want["polygon"]["values"]), np.array(got["polygon"]["values"])
+    assert (p != np.array([-170.0, 0.0])).any(1).all()                                   # every one of the 24 sectors holds a cell
+    assert q.shape == p.shape == (24, 2) and (q != np.array([-170.0, 0.0])).any(1).all()  # none was lost to sector 24
+    assert np.allclose(p, q, rtol=0, atol=1e-9)                                           # the same cells (the bearing itself moves 1e-14 degree)
+    assert got["max_range_km"]["value"] == want["max_range_km"]["value"]
+
+
 # ---------------------------------------------------------------------------------------------------------- broken on purpose
 
 def test_traceability_catches_a_missing_receipt(full):

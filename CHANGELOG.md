@@ -533,6 +533,8 @@ Round 9 read the q9 quick run (`runs/q9`, code `08f05d7`, made on the 32-vCPU bu
   - `fly_sitl` scrubs a ship with no air state (`uas.air_at_ship`); the TAO cache check opens the selected files, so a file that lost its QC variable is fetched again; an unreadable ocean store gets the advice of its mission's source (`ocean.is_lab`); `acceptance` refuses a `--mission` inside a directory it removes.
   - The report's UAS attitude statement is built from the vehicle's own platform file; a copied run missing an output no longer borrows the original's file (`ledger.resolve`); `refuse_overlap` accepts a store inside the source directory; `bin/sync_filters` protects what the server wrote inside `tests/golden/` and `report/` (`P ...***`).
   - A run made before this merge cannot be re-rendered at its original credibility levels (two new keys in `config/assumptions.yaml` change a hashed input of the stage-3 ledger); rerun it (DECISIONS 515).
+- Closing items after the merge (P-3, P-4; DECISIONS 525 and after):
+  - P-3: the reach polygon's sector comes from the bearing rounded before the `% 360`, so a cell on a diagonal or an axis lands in the same sector whatever the last bit of `arctan2` is (the glider_eq corners no longer move between CPUs); DECISIONS 525.
 
 ### Known issues
 

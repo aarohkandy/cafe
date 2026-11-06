@@ -707,9 +707,13 @@ def _reach_one(legacy: Any, env: Any, v: dict[str, Any], cls: str, speed: float,
     ok = tt <= hours * 3600.0
     ang = np.degrees(np.arctan2(EE, NN)) % 360.0
     rad = np.hypot(NN, EE)
+    # The sector comes from the bearing rounded to 1e-9 degree BEFORE the % 360 (rounded after, 359.99999999999 gives 360.0 and sector 24, which is no
+    # sector at all): a cell on a diagonal has a bearing that is a multiple of 15 degrees, and `ang // 15` flipped on the last bit of arctan2 (P-3).
+    # `th`, the bearing a vertex is drawn at, keeps ang.
+    sec = (np.round(np.degrees(np.arctan2(EE, NN)), 9) % 360.0) // (360.0 / nb)
     far, th = np.zeros(nb), np.zeros(nb)
     for k in range(nb):                                                              # the farthest reachable cell of each 15-degree sector, at its own bearing
-        m = ok & (ang // (360.0 / nb) == k)
+        m = ok & (sec == k)
         if m.any():
             i = np.argmax(np.where(m, rad, -1.0))
             far[k], th[k] = rad.ravel()[i], np.radians(ang.ravel()[i])
