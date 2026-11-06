@@ -1032,3 +1032,9 @@ def test_r10_m32_a_platform_file_with_an_entry_level_assumed_sentence_counts_it(
     items = credibility.platform_items(elsewhere=[str(p)])
     mine = [i for i in items if i["file"] == str(p)]
     assert f"provenance OK, {sum(i['assumed'] for i in mine)} of {len(mine)} values assumed" in first and sum(i["assumed"] for i in mine) == 1
+
+
+def test_r10_f_the_acceptance_out_help_says_a_directory_of_foreign_runs_is_refused(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["acceptance", "--help"])
+    assert "a directory that holds runs acceptance did not make is refused" in " ".join(capsys.readouterr().out.split())

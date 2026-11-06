@@ -73,6 +73,8 @@ def box360(box: Any) -> Box:
     s, n, w, e = (float(x) for x in box)
     if s >= n:
         raise ValueError(f"box south {s} must be below north {n}")
+    if e - w > 360.0 + 1e-9:                                             # round 10, M-3 sibling: modulo 360 it would become a thin strip, fetched silently
+        raise ValueError(f"box {box} is {e - w:g} degrees wide, more than the whole circle")
     span = (e - w) % 360.0 or 360.0
     w = w % 360.0
     if w + span > 360.0 + 1e-9:

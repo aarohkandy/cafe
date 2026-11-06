@@ -1138,3 +1138,10 @@ def test_r9_f_a_source_file_that_is_a_link_into_a_valid_store_is_refused_and_its
     with pytest.raises(ConfigError, match="would delete the source"):
         h.ingest_lab_hycom(src, fx["box"], store, "in_situ", **kw)
     assert sorted(p.name for p in store.iterdir()) == keep
+
+
+@pytest.mark.parametrize("box", [(-1, 1, -180, 181), (-1, 1, 10, 371), (-1, 1, -5, 400)])
+def test_r10_box360_refuses_a_box_wider_than_the_circle_instead_of_taking_it_modulo_360(box):
+    with pytest.raises(ValueError, match="more than the whole circle"):
+        h.box360(box)
+    assert h.box360((-1, 1, 0, 360))[2:] == (0.0, 360.0)                                    # exactly 360 wide stays valid
