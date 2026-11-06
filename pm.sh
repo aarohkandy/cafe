@@ -4,7 +4,7 @@
 # written on the server (runs/, checkpoints/, config/throughput.json, docs/mutation.json, ...) are listed in bin/sync_filters, shared with bin/pmx.sh, and survive; copy them back with ./pm.sh --pull.
 # The shared pm/ has one owner at a time: the checkout that last synced it is recorded in ~/$R/pm.owner (host:path), and a sync from any other checkout is refused (it would --delete the
 # owner's files under a running job). Another agent uses bin/pmx.sh with its own pm_<name>; PM_TAKE=1 makes this checkout the owner.
-# Defaults on this path, the lead's whole-box one: PM_CPUS=8, PM_MEM=28g, PM_SHM=16g (bin/pmx.sh, the path of every other agent, defaults to PM_CPUS=2 and PM_MEM=8g). PM_THREADS=<n> (proot only) caps the job's BLAS and OpenMP pools (bin/proot_run.sh).
+# Defaults on this path, the lead's whole-box one: PM_CPUS=8, PM_MEM=28g, PM_SHM=16g (bin/pmx.sh, the path of every other agent, defaults to PM_CPUS=2 and PM_MEM=12g). PM_THREADS=<n> (proot only) caps the job's BLAS and OpenMP pools (bin/proot_run.sh).
 # PM_RUNTIME=proot: for a worker with no docker (orca): the same job under proot (bin/proot_run.sh), not docker, with ~/cafe-worker/cafe for ~/work/cafe; bin/orca_sync.sh readies one.
 H="${PM_HOST:-azureuser@100.108.213.121}"; K="${PM_KEY:-$HOME/.ssh/homebase_ed25519}"; S="ssh -i $K"
 R=work/cafe; RP=; PRE=

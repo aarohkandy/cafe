@@ -1,7 +1,7 @@
 #!/bin/sh
 # Like ./pm.sh but syncs (with --delete) to a private ~/work/cafe/$PMX so it never touches the shared ~/work/cafe/pm. Run from the cafe checkout.
 # TM=<name>: run detached in tmux session <name>, output to ~/logs/<name>.log, exit code appended as "rc=N" (also after `tmux kill-session`: the HUP is passed to the job and its own status, 143, is written; P-26). After 3 s the session must exist (exact name) or the log must already end in rc=0, else exit 1.
-# Defaults on this path: PM_CPUS=2 and PM_MEM=8g (docker's --cpus and --memory; under proot PM_CPUS only sets CAFE_WORKERS), PM_SHM=16g. The whole-box 8 CPUs and 28g are pm.sh's, the lead's path; ask for more here with PM_CPUS=<n> PM_MEM=<n>g.
+# Defaults on this path: PM_CPUS=2 and PM_MEM=12g (docker's --cpus and --memory; under proot PM_CPUS only sets CAFE_WORKERS), PM_SHM=16g. The whole-box 8 CPUs and 28g are pm.sh's, the lead's path; ask for more here with PM_CPUS=<n> PM_MEM=<n>g. 12g is the least that plans the demo mission (stage 1 needs its environment, about 9 GB, plus 0.9 GB a worker, and plan refuses below that: M-31); tests/test_runners.py checks every documented demo command against it.
 # PM_THREADS=<n> (proot only) goes to bin/proot_run.sh, which caps the job's BLAS and OpenMP pools at n threads; unset, they size themselves to the worker's 64 CPUs, not to PM_CPUS (P-20).
 # What the sync keeps on the server (outputs of jobs and gates): bin/sync_filters, shared with pm.sh.
 # Worker: PM_HOST=<ssh host> (default homebase; an ~/.ssh/config name such as cafe-burst carries its own jump), PM_KEY=<ssh key>. bin/worker_setup.sh readies one.
@@ -18,7 +18,7 @@ if [ "${PM_RUNTIME:-docker}" = proot ]; then         # orca is shared: everythin
   PRE="PATH=\$HOME/cafe-worker/env/bin:\$PATH; export TMUX_TMPDIR=$L; "
 fi
 rsync -az --delete --filter=". $(dirname "$0")/sync_filters" $RP -e "$S" ./ "$H:$R/$D/" || exit 1
-CMD="docker run --rm --ulimit core=0 --name ${TM:-pmx_$D} --hostname \$(hostname) -u \$(id -u):\$(id -g) --cpus ${PM_CPUS:-2} --memory ${PM_MEM:-8g} --shm-size ${PM_SHM:-16g} -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null) -e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo 1; else echo 0; fi) -v \$HOME/work/cafe/$D:/app -v \$HOME/work/cafe/pmdata:/data -v \$HOME/work/cafe/data:/work:ro -w /app cafe-pm $*"
+CMD="docker run --rm --ulimit core=0 --name ${TM:-pmx_$D} --hostname \$(hostname) -u \$(id -u):\$(id -g) --cpus ${PM_CPUS:-2} --memory ${PM_MEM:-12g} --shm-size ${PM_SHM:-16g} -e HOME=/tmp -e PYTHONPATH=/app -e CAFE_DATA=/data -e CAFE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null) -e CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo 1; else echo 0; fi) -v \$HOME/work/cafe/$D:/app -v \$HOME/work/cafe/pmdata:/data -v \$HOME/work/cafe/data:/work:ro -w /app cafe-pm $*"
 if [ "${PM_RUNTIME:-docker}" = proot ]; then
   CMD="CAFE_GIT_SHA=$(git rev-parse HEAD 2>/dev/null) CAFE_GIT_DIRTY=$(if [ -n "$(git status --porcelain 2>/dev/null)" ]; then echo 1; else echo 0; fi) PM_CPUS=${PM_CPUS:-2} ${PM_THREADS:+PM_THREADS=$PM_THREADS }CAFE_MIN_FREE_GB=${CAFE_MIN_FREE_GB:-60} PM_STOP_GRACE=${PM_STOP_GRACE:-10} sh \$HOME/$R/$D/bin/${PM_ENTRY:-proot_run.sh} $D $*"
 fi

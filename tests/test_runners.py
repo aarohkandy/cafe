@@ -2,6 +2,7 @@
 import ctypes
 import os
 import pathlib
+import re
 import shutil
 import signal
 import stat
@@ -121,12 +122,50 @@ def test_m23_proot_run_refuses_a_cpu_count_that_is_not_a_number_when_started_by_
     assert r.returncode == 2 and "PM_CPUS" in r.stderr
 
 
-@pytest.mark.parametrize("runtime, script, cpus, mem", [("docker", "bin/pmx.sh", "2", "8g"), ("docker", "pm.sh", "8", "28g")])
-def test_m31_the_docker_defaults_are_two_cpus_and_8g_on_the_pmx_path_and_the_whole_box_on_pm_sh(tmp_path, runtime, script, cpus, mem):
+@pytest.mark.parametrize("runtime, script, cpus, mem", [("docker", "bin/pmx.sh", "2", "12g"), ("docker", "pm.sh", "8", "28g")])
+def test_m31_the_docker_defaults_are_two_cpus_and_12g_on_the_pmx_path_and_the_whole_box_on_pm_sh(tmp_path, runtime, script, cpus, mem):
     rc, out = sent(tmp_path, script, "true")
     assert rc == 0 and f"--cpus {cpus} --memory {mem} --shm-size 16g" in out
     rc, out = sent(tmp_path, script, "true", PM_CPUS="6", PM_MEM="24g", PM_SHM="4g")
     assert rc == 0 and "--cpus 6 --memory 24g --shm-size 4g" in out                      # a number asked for is what is sent
+
+
+def docker_gb(size):
+    """What `par.memory_gb()` reads in a container started with `--memory <size>`: the cgroup limit in bytes over 1e9."""
+    n, unit = re.fullmatch(r"(\d+)([kmg]?)b?", size.lower()).groups()
+    return int(n) * 1024 ** ("", "k", "m", "g").index(unit) / 1e9
+
+
+def documented_demo_runs():
+    """(file, line, budget, PM_MEM named on the line or None) of every command in the documents that runs the demo mission through bin/pmx.sh."""
+    out = []
+    for f in ("CLAUDE.md", "HANDOFF.md", *sorted(str(p.relative_to(ROOT)) for p in (ROOT / "docs").glob("*.md"))):
+        for n, line in enumerate((ROOT / f).read_text().splitlines(), 1):
+            if "bin/pmx.sh" in line and "missions/tepex_c_demo.yaml" in line:
+                mem = re.search(r"PM_MEM=(\w+)", line)
+                out.append((f, n, re.search(r"--budget (\w+)", line).group(1), mem and mem.group(1)))
+    return out
+
+
+def test_m31_every_documented_demo_run_through_pmx_sh_gets_the_memory_the_plan_needs(tmp_path):
+    """M-31: the 8g default made the quick demo of CLAUDE.md refuse to start (plan needs the 9 GB environment plus 0.9 GB for a worker)."""
+    runs = documented_demo_runs()
+    assert any(f == "CLAUDE.md" and m is None for f, _, _, m in runs)              # the one that names no PM_MEM, and so takes the default
+    default = re.search(r"--memory (\S+)", sent(tmp_path, "bin/pmx.sh", "true")[1]).group(1)
+    mission = config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml")
+    for f, n, b, mem in runs:
+        try:
+            budget.plan(b, 0, mission, thr={}, mem_gb=docker_gb(mem or default))
+        except budget.PlanError as e:
+            assert "is available" not in str(e), f"{f}:{n}: --memory {mem or default} is below what the plan needs: {e}"
+
+
+def test_m31_the_memory_check_sees_a_default_below_the_floor():
+    """The check above can fail: 8g (the old default) is refused by plan, 12g is not."""
+    mission = config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml")
+    with pytest.raises(budget.PlanError, match="is available"):
+        budget.plan("quick", 0, mission, thr={}, mem_gb=docker_gb("8g"))
+    budget.plan("quick", 0, mission, thr={}, mem_gb=docker_gb("12g"))
 
 
 @pytest.mark.parametrize("script, env, cpus", [("bin/pmx.sh", dict(PMX="pm_t"), "2"), ("bin/pmx.sh", dict(PMX="pm_t", TM="job"), "2"), ("pm.sh", {}, "8")])
