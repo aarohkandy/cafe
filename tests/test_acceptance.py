@@ -628,6 +628,28 @@ def test_r10_m12_a_run_killed_after_the_mark_is_rerunnable(monkeypatch, tmp_path
     assert not (out / "quick" / "half.txt").exists() and (out / acc.MARKER).is_file()
 
 
+@pytest.mark.parametrize("own", acc.OWN_FILES)
+def test_r10_m12_an_out_from_before_the_marker_is_claimed_not_refused(monkeypatch, tmp_path, own):
+    """`make acceptance` after an upgrade: runs/acceptance holds an earlier acceptance run (quick, its logs, a file only `run` writes) and no marker.
+    It is marked and replaced, not refused with exit 2 (the owner would have had to touch the marker by hand before the 11 h run)."""
+    out = tmp_path / "runs" / "acceptance"
+    user_runs(out, "quick", "overnight", extra=(own, "quick.log"))
+    monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: 0)
+    acc.run_one(MISSION, "quick", "ci", 0, out)
+    assert (out / acc.MARKER).is_file() and not (out / "quick" / "report.json").exists() and (out / own).is_file()
+
+
+@pytest.mark.parametrize("itself", ["plan.json", "checkpoints"])
+def test_r10_m12_an_out_that_is_itself_a_run_is_refused_even_with_an_acceptance_file(monkeypatch, tmp_path, itself):
+    out = tmp_path / "o"
+    user_runs(out, "quick", extra=("acceptance.json",))
+    (out / itself).mkdir() if itself == "checkpoints" else (out / itself).write_text("mine")
+    monkeypatch.setattr(acc, "_execute", lambda *a, **k: pytest.fail("a subprocess started"))
+    with pytest.raises(config.ConfigError, match=rf"holds quick, {itself}"):
+        acc.run_one(MISSION, "quick", "ci", 0, out)
+    assert (out / "quick" / "report.json").is_file() and not (out / acc.MARKER).exists()
+
+
 def test_r10_m12_the_mission_refusal_still_comes_first(monkeypatch, tmp_path):
     out = tmp_path / "o"
     user_runs(out, "quick")
