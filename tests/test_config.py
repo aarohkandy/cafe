@@ -942,3 +942,15 @@ def test_l0_write_json_replaces_a_file_whole_or_not_at_all(tmp_path, monkeypatch
     config.write_json(f, {"b": float("nan")}, default=float, allow_nan=True)
     assert config.plate_re_problem("p.json", dict(re=9.8e5)) == "p.json is at Re_L 9.8e+05, below the 1e+06 the comparison needs (rerun it)"
     assert config.plate_re_problem("p.json", dict(re=config.PLATE_RE_MIN)) is None
+
+
+def test_stored_receipt_problem_is_one_rule_for_the_sha_and_the_plate_re_and_asks_the_sha_first():
+    """DECISIONS 527: what the stage-3 gate and the credibility page both ask of a stored slow receipt."""
+    p = "p.json"
+    assert config.stored_receipt_problem(p, dict(re=1e6), "now") == "p.json was stored without a code sha (rerun it)"
+    assert config.stored_receipt_problem(p, dict(re=1e6, code_sha="old"), "now") == "p.json was stored by different code (rerun it)"
+    assert config.stored_receipt_problem(p, dict(re=1e6, code_sha="now"), "now", plate=True) is None
+    low = dict(re=9.8e5, code_sha="now")
+    assert config.stored_receipt_problem(p, low, "now", plate=True) == config.plate_re_problem(p, low)
+    assert config.stored_receipt_problem(p, low, "now") is None                                   # only a plate is judged by Re_L
+    assert config.stored_receipt_problem(p, dict(low, code_sha="old"), "now", plate=True) == "p.json was stored by different code (rerun it)"

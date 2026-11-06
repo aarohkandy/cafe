@@ -346,17 +346,17 @@ def test_validation_with_a_failing_row_stays_at_two(run, data):
 
 
 def test_stored_stage3_receipts_have_e_but_no_u_val(data):
-    rec = data / "receipts"
-    rec.mkdir(parents=True)
-    (rec / "nest_sphere_100_d8.json").write_text(json.dumps(dict(cd=1.6, d=8, shape=[7, 4, 4])))
-    (rec / "nest_sphere_100_d16.json").write_text(json.dumps(dict(cd=1.2, d=16, shape=[14, 8, 8])))               # stage 3 stores one file per resolution
-    (rec / "nest_sphere_100_d12.json").write_text(json.dumps(dict(cd=1.4, d=12, shape=[10, 6, 6])))
-    (rec / "lbm_sphere_100.json").write_text(json.dumps(dict(cd=1.5, ref=1.087, d=12)))
-    (rec / "lbm_sphere_1000.json").write_text(json.dumps(dict(cd=0.6, ref=0.47)))
-    (rec / "wm_flat_plate.json").write_text(json.dumps(dict(cf=0.0035, ittc=0.0030, re=1e6, err=0.17, yfrac=0.1)))
-    (rec / "wm_channel.json").write_text(json.dumps(dict(cf=0.0066, cf_dean=0.0062, err=0.06)))
-    rows = {r["id"]: r for r in cr.vv20_rows(data)}
     from cafe.pm.stage3 import lbm
+    rec, sha = data / "receipts", dict(code_sha=lbm.physics_sha())        # DECISIONS 527: the page counts a receipt as stage 3 does: the current sha
+    rec.mkdir(parents=True)
+    (rec / "nest_sphere_100_d8.json").write_text(json.dumps(dict(cd=1.6, d=8, shape=[7, 4, 4], **sha)))
+    (rec / "nest_sphere_100_d16.json").write_text(json.dumps(dict(cd=1.2, d=16, shape=[14, 8, 8], **sha)))       # stage 3 stores one file per resolution
+    (rec / "nest_sphere_100_d12.json").write_text(json.dumps(dict(cd=1.4, d=12, shape=[10, 6, 6], **sha)))
+    (rec / "lbm_sphere_100.json").write_text(json.dumps(dict(cd=1.5, ref=1.087, d=12, **sha)))
+    (rec / "lbm_sphere_1000.json").write_text(json.dumps(dict(cd=0.6, ref=0.47, **sha)))
+    (rec / "wm_flat_plate.json").write_text(json.dumps(dict(cf=0.0035, ittc=0.0030, re=1e6, err=0.17, yfrac=0.1, **sha)))
+    (rec / "wm_channel.json").write_text(json.dumps(dict(cf=0.0066, cf_dean=0.0062, err=0.06, **sha)))
+    rows = {r["id"]: r for r in cr.vv20_rows(data)}
     n = rows["nest_sphere:Re100"]
     assert n["D"] == pytest.approx(lbm.morrison(100.0)) and n["E"] == pytest.approx(1.2 - lbm.morrison(100.0))
     assert "d = 16 cells (d = 8 and 12 also stored)" in n["note"]
@@ -394,7 +394,8 @@ def test_r9_m4_a_stored_receipt_with_a_missing_or_non_numeric_field_is_a_not_run
     assert r["status"] == "not run" and r["S"] is None and r["note"].startswith("not run:") and want in r["note"] and name in r["note"]
     good = rec / "wm_channel.json"
     if name != "wm_channel.json":                                  # a good neighbour is still a row
-        good.write_text(json.dumps(dict(cf=0.0066, cf_dean=0.0062, err=0.06)))
+        from cafe.pm.stage3 import lbm
+        good.write_text(json.dumps(dict(cf=0.0066, cf_dean=0.0062, err=0.06, code_sha=lbm.physics_sha())))
         assert next(x for x in cr.vv20_rows(data) if x["id"] == "wallmodel:wm_channel")["status"] == "run"
 
 
@@ -411,9 +412,10 @@ def test_r9_m7_the_usv_sanity_row_compares_chiodi_with_the_anemometer_height_rat
 
 
 def test_only_stored_rows_without_uncertainty_give_validation_level_one(run, data):
+    from cafe.pm.stage3 import lbm
     rec = data / "receipts"
     rec.mkdir(parents=True)
-    (rec / "lbm_sphere_100.json").write_text(json.dumps(dict(cd=1.5, ref=1.087)))
+    (rec / "lbm_sphere_100.json").write_text(json.dumps(dict(cd=1.5, ref=1.087, code_sha=lbm.physics_sha())))
     v = factors(run)["validation"]
     assert v["level"] == 1 and "no comparison stored U_num, U_input and U_D" in v["missing"][0]
 
@@ -514,7 +516,8 @@ def test_write_produces_valid_json_and_a_static_html_page(run, data):
 def test_the_page_shows_vv_rows_with_and_without_uncertainty(run, data):
     write_dtmb(data, frs=("0.28",))
     (data / "receipts").mkdir()
-    (data / "receipts" / "lbm_sphere_100.json").write_text(json.dumps(dict(cd=1.5, ref=1.087)))
+    from cafe.pm.stage3 import lbm
+    (data / "receipts" / "lbm_sphere_100.json").write_text(json.dumps(dict(cd=1.5, ref=1.087, code_sha=lbm.physics_sha())))
     cr.write(run)
     h = (run / "report" / "credibility.html").read_text()
     assert "not assessable (U_val not stored)" in h and "<td>yes<td>" in h
@@ -1080,10 +1083,10 @@ GOOD_CHANNEL = dict(err=0.06, cf=0.0066, cf_dean=0.0062, code_sha="x")
 def test_r9_m4_the_credibility_page_and_stage_3_read_a_stored_wall_model_receipt_by_one_rule(data, name, body):
     """stage 3 refused a receipt without `yfrac` or `err` and the page drew a row from it (it checked only cf and the reference); a 400-digit integer
     was an OverflowError there. The page now asks for the fields stage 3 asks for, by the same test."""
-    from cafe.pm.stage3 import wallmodel
+    from cafe.pm.stage3 import lbm, wallmodel
     rec = data / "receipts"
     rec.mkdir(parents=True)
-    (rec / f"{name}.json").write_text(json.dumps(body))
+    (rec / f"{name}.json").write_text(json.dumps(dict(body, code_sha=lbm.physics_sha())))      # the current sha: the sha rule has its own test (DECISIONS 527)
     fields = wallmodel.PLATE_FIELDS if name == "wm_flat_plate" else wallmodel.CHANNEL_FIELDS
     counts = wallmodel._read_receipt(rec / f"{name}.json", fields) is not None
     assert counts == (next(r for r in cr.vv20_rows(data) if r["id"] == f"wallmodel:{name}")["status"] == "run")
@@ -1129,3 +1132,53 @@ def test_l0_a_damaged_dtmb_run_file_is_a_not_run_row_that_names_it_not_a_traceba
     rows = [r for r in cr.vv20_rows(data) if r["id"].startswith("dtmb")]
     assert len(rows) == 4 and all(r["status"] == "not run" and "run_coarse.json is unreadable (rerun the grid)" in r["note"] for r in rows)
     assert factors(run)["validation"]["level"] == 0
+
+
+@pytest.mark.parametrize("sha, want", [
+    (None, "was stored without a code sha (rerun it)"), ("OLDCODE", "was stored by different code (rerun it)"), ("current", None)])
+def test_r9_the_page_counts_a_stored_receipt_only_when_the_current_code_made_it_as_stage_3_does(data, run, monkeypatch, sha, want):
+    """DECISIONS 527 (502 left it as the owner's call): stage 3 refuses a receipt with no `code_sha` or another code's, and the credibility page drew a row
+    from it, against 464's claim that it never shows one stage 3 refuses. Every kind of stored receipt on the page (wall-model plate and channel, XLB sphere,
+    native sphere grids) is now a "not run" row with the gate's phrase, one rule (`config.stored_receipt_problem`), and is no comparison that ran."""
+    from cafe.pm.stage3 import lbm, wallmodel
+    rec = data / "receipts"
+    rec.mkdir(parents=True)
+    monkeypatch.setattr(wallmodel, "SLOW_DIR", rec)
+    sha = lbm.physics_sha() if sha == "current" else sha
+    body = {} if sha is None else dict(code_sha=sha)
+    files = {"wm_flat_plate.json": dict(cf=0.0040, re=1e6, ittc=0.0041, err=0.025, yfrac=0.95), "wm_channel.json": dict(GOOD_CHANNEL),
+             "lbm_sphere_100.json": dict(cd=1.5, ref=1.087), "nest_sphere_100_d16.json": dict(cd=1.2, d=16), "nest_sphere_100_d8.json": dict(cd=1.6, d=8)}
+    for name, d in files.items():
+        d.pop("code_sha", None)
+        (rec / name).write_text(json.dumps(dict(d, **body)))
+    rows = {r["id"]: r for r in cr.vv20_rows(data)}
+    ids = ("wallmodel:wm_flat_plate", "wallmodel:wm_channel", "lbm_sphere:Re100", "nest_sphere:Re100")
+    if want is None:
+        assert all(rows[i]["status"] == "run" for i in ids) and wallmodel.stale_wall_receipts() == []
+        return
+    for i, name in zip(ids, ("wm_flat_plate.json", "wm_channel.json", "lbm_sphere_100.json", "nest_sphere_100_d8.json"), strict=True):
+        assert rows[i]["status"] == "not run" and rows[i]["S"] is None and rows[i]["note"] == f"not run: {name} {want}"    # the study names its first grid
+    assert wallmodel.stale_wall_receipts() == [f"wm_flat_plate.json {want}", f"wm_channel.json {want}"]            # the gate's phrases, word for word
+    assert [rows[i]["note"] for i in ids[:2]] == [f"not run: {p}" for p in wallmodel.stale_wall_receipts()]
+    assert factors(run)["validation"]["level"] == 0                                                              # nothing ran
+    from cafe import receipts as rcp
+    rcp.OUT.clear()                                                                          # lbm.result_row, the sphere gate, refuses the same two
+    lbm.result_row("g", "sphere", dict(cd=1.5, ref=1.087, **body), "cd", "ref", 0.10, "cmd", "eta", "src")
+    tail = "STORED WITHOUT A CODE SHA (legacy or transcribed)" if sha is None else "STORED BY DIFFERENT CODE"
+    assert rcp.OUT[-1]["ok"] is False and rcp.OUT[-1]["claim"].endswith(tail)
+    rcp.OUT.clear()
+
+
+def test_r9_one_stale_grid_of_the_native_sphere_study_refuses_its_row_as_the_gate_does(data):
+    """`nest.sphere_receipts` gives a study with any grid made by other code the verdict 'stored by different code'; the page's row shows the finest grid
+    but is a "not run" row too, naming the grid."""
+    from cafe.pm.stage3 import lbm
+    rec = data / "receipts"
+    rec.mkdir(parents=True)
+    now = lbm.physics_sha()
+    (rec / "nest_sphere_100_d8.json").write_text(json.dumps(dict(cd=1.6, d=8, code_sha="OLDCODE")))
+    (rec / "nest_sphere_100_d16.json").write_text(json.dumps(dict(cd=1.2, d=16, code_sha=now)))
+    r = next(x for x in cr.vv20_rows(data) if x["id"] == "nest_sphere:Re100")
+    assert r["status"] == "not run" and r["note"] == "not run: nest_sphere_100_d8.json was stored by different code (rerun it)"
+    (rec / "nest_sphere_100_d8.json").write_text(json.dumps(dict(cd=1.6, d=8, code_sha=now)))
+    assert next(x for x in cr.vv20_rows(data) if x["id"] == "nest_sphere:Re100")["status"] == "run"

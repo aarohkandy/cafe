@@ -246,6 +246,18 @@ def plate_re_problem(name: str, d: dict[str, Any]) -> str | None:
     return None
 
 
+def stored_receipt_problem(name: str, d: dict[str, Any], current_sha: str, plate: bool = False) -> str | None:
+    """Why a stored slow-run receipt `d` (a JSON object already read with its numbers checked) cannot count, or None: stored without a `code_sha` (legacy
+    or hand-written), stored by code other than `current_sha` (`lbm.physics_sha()`, which the caller passes: config cannot import stage 3), or, for the
+    flat plate (`plate`), run below PLATE_RE_MIN (`plate_re_problem`). The one rule of the stage-3 gate (`wallmodel._stored_receipts`) and of the credibility
+    page's rows of stored receipts (`credibility._stored_rows`), so a receipt stage 3 refuses is never shown as a result (round 9, DECISIONS 527)."""
+    if d.get("code_sha") is None:
+        return f"{name} was stored without a code sha (rerun it)"
+    if d["code_sha"] != current_sha:
+        return f"{name} was stored by different code (rerun it)"
+    return plate_re_problem(name, d) if plate else None
+
+
 def _leaf_problems(node: Any, path: str = "") -> list[str]:
     from .physics.uas import check_provenance
     if isinstance(node, dict) and "value" in node:

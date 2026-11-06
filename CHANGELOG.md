@@ -536,6 +536,7 @@ Round 9 read the q9 quick run (`runs/q9`, code `08f05d7`, made on the 32-vCPU bu
 - Closing items after the merge (P-3, P-4; DECISIONS 525 and after):
   - P-3: the reach polygon's sector comes from the bearing rounded before the `% 360`, so a cell on a diagonal or an axis lands in the same sector whatever the last bit of `arctan2` is (the glider_eq corners no longer move between CPUs); DECISIONS 525.
   - The Uncertainty factor of the credibility page no longer counts a NOT EXERCISED link among the verdicts with n below `n_certify`; DECISIONS 526 (amends 477).
+  - The credibility page counts a stored sphere or wall-model receipt only as stage 3 does: a receipt with no `code_sha`, or another code's, is a "not run" row with the gate's phrase (`config.stored_receipt_problem`, one rule for both); the stored receipts read "not run" until `make receipts --slow` on the frozen code; DECISIONS 527 (amends 464, 502).
 
 ### Known issues
 

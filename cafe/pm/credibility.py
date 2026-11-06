@@ -351,8 +351,20 @@ def _stored(f: pathlib.Path, keys: tuple[str, ...], optional: tuple[str, ...] = 
     return (None, f"{f.name} lacks a finite number for {', '.join(bad)} (rerun it)") if bad else (d, "")
 
 
+def _refused(files: list[pathlib.Path], keys: tuple[str, ...], optional: tuple[str, ...] = (), plate: bool = False) -> str | None:
+    """The phrase for the first of `files` that stage 3 refuses to count (`config.stored_receipt_problem`, the gate's own rule: no code sha, another
+    code's, or a plate below Re_L 1e6), else None. A file `_stored` cannot read is left out, as the gate leaves out an unreadable grid; the caller has
+    its own row for that. Stage 3 is imported only now: its physics sha is the cost of the check (round 9, DECISIONS 527)."""
+    from .stage3 import lbm
+    for q in files:
+        d, _ = _stored(q, keys, optional)
+        if d is not None and (problem := config.stored_receipt_problem(q.name, d, lbm.physics_sha(), plate)):
+            return problem
+    return None
+
+
 def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
-    """Slow-run receipts stored by cafe.pm.stage3: S and D only."""
+    """Slow-run receipts stored by cafe.pm.stage3: S and D only. A receipt the stage-3 gate refuses (`_refused`) is a "not run" row with the gate's phrase."""
     rec = data / "receipts"
     out = []
     morrison = None
@@ -362,13 +374,18 @@ def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
             if kind == "nest_sphere":                         # one file per resolution, nest_sphere_<tag>_d<cells>.json: the finest is the row
                 found = sorted(((int(m.group(1)), q) for q in rec.glob(f"nest_sphere_{tag}_d*.json") if (m := re.search(r"_d(\d+)\.json$", q.name))))
                 f, others = (found[-1][1], [str(d) for d, _ in found[:-1]]) if found else (rec / f"nest_sphere_{tag}_d*.json", [])
+                files = [q for _, q in found]                 # the gate judges the whole grid study: one grid it refuses refuses the row
                 missing = f"not run: no nest_sphere_{tag}_d*.json under {rec}"
             else:
                 f, others = rec / f"{kind}_{tag}.json", []
+                files = [f]
                 missing = f"not run: {f.name} is not stored"
             d, why = _stored(f, ("cd",), ("ref",))
             if d is None:
                 out.append(_row(rid, case, f"{f}", None, None, None, missing if why == "not stored" else f"not run: {why}"))
+                continue
+            if refused := _refused(files, ("cd",), ("ref",)):
+                out.append(_row(rid, case, f"{f}", None, None, None, f"not run: {refused}"))
                 continue
             if "ref" in d:
                 ref = float(d["ref"])
@@ -383,8 +400,8 @@ def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     for name, case, dk, fields in plates:
         f = rec / f"{name}.json"
         d, why = _stored(f, fields)                                              # every field stage 3 requires of the receipt, not only the two read here
-        if d is not None and name == "wm_flat_plate":
-            why = config.plate_re_problem(f.name, d) or why                      # a plate below Re_L 1e6 is no comparison with ITTC-57 (round 9, L0)
+        if d is not None:                                                        # the gate's rule: the current code's sha, a plate at Re_L 1e6 or more
+            why = _refused([f], fields, (), name == "wm_flat_plate") or why
             d = None if why else d
         if d is None:
             out.append(_row(f"wallmodel:{name}", case, f"{f}", None, None, None,

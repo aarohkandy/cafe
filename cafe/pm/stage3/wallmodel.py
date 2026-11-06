@@ -366,12 +366,8 @@ def _stored_receipts() -> tuple[list[str], list[dict[str, Any]]]:
             out.append(f"{f.name} is not stored")
         elif d is None:
             out.append(f"{f.name} is unreadable (rerun it)")
-        elif d.get("code_sha") is None:
-            out.append(f"{f.name} was stored without a code sha (rerun it)")
-        elif d["code_sha"] != lbm.physics_sha():
-            out.append(f"{f.name} was stored by different code (rerun it)")
-        elif f == slow_path() and (low := config.plate_re_problem(f.name, d)):
-            out.append(low)
+        elif problem := config.stored_receipt_problem(f.name, d, lbm.physics_sha(), f == slow_path()):       # the credibility page's rule too
+            out.append(problem)
         else:
             recs.append(d)
     return out, recs
