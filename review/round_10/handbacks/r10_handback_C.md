@@ -7,7 +7,7 @@ Evidence (all on orca, PM_HOST=cafe-orca, PM_CPUS=2):
 - Demo, quick budget, 0 GPUs, run `r10c_demo` against the committed baseline `q10` (same commit 6c352ef): verdicts for glider_eq, glider_2n, usv, uas identical; USV `first_fail_t` 1677682860.0 and `median_fail_t` 1677714450.0 identical; USV modes identical except `wing_stall_angle` 14 -> 12 (M-10). `wing_stall_calm` 30, `becalmed` 22, `swept_off_track` 54, `capsize_proxy` 0 unchanged. (The run directory was removed afterwards.)
 - Each new test fails on the unfixed code (detached worktree at 6c352ef with the new test files copied in, removed afterwards): M-2 `(0, 0.0400)` (seed 0 fails at dev 0.0401, as the finding says); M-33 "would fit no --budget profile's plan holds it (the largest gives 180 min)"; M-15 DID NOT RAISE; M-10 `wing_stall_angle` true beside `wing_stall_calm`; M-17 `WAVE_U_MAX` missing and a cap of 3.6 not refused. M-13's test is for the new `usv.stall_map` (no unfixed counterpart: it is a report of the table, not a fix).
 - ruff (cafe/pm tests) clean; mypy strict (cafe/pm, 55 files) clean.
-- Whole files tests/test_nest.py, tests/test_stage3.py, tests/test_usv.py: see the last section for the result.
+- Whole files tests/test_nest.py, tests/test_stage3.py, tests/test_usv.py, run together on the committed code fa0fdcc (after the M-13 assertion fix): rc=0, 358 passed, 0 failed (orca, PM_CPUS=2, log r10c_files). ruff (cafe/pm tests) and mypy strict (55 files) clean on the same tree.
 
 ## M-2  `nest.running_mean_ok` judges the mean (BATCH-MEANS)
 
@@ -91,3 +91,14 @@ Doc sentence: PHYSICS.md:648 'hull-speed cap 1.34 sqrt(L_ft) kn = 3.3 m/s' -> 's
 - Batch F (docs): all DECISIONS rows, CHANGELOG lines and doc sentences above (PHYSICS.md:648, :662, :688 unchanged, :957, 10.1; RUNBOOK.md:264 for M-33 and the window-reason row for M-15; BRIEF.md untouched, the reading is the DECISIONS rows for M-2 and M-14; CREDIBILITY limitations for M-14; the yaml `why` of `min_awa_deg` for M-10 if the lead wants it).
 - The re-based golden / table digest: any edit of usv.py moves `usv._digest` (file bytes); run-level hashes of tables built by the old file are stale once. Batch A's `report`/`credibility` code that quotes the q10 USV mode shares (30 calm, 14 angle) will read 30 and 12 after a new run.
 - Nothing needed from batches A, B, D, E for the code. Batch B's `whatif`/`emulator` do not read `stw_cap_ms`, `running_mean_ok`, `_val` or `fitting_budget` (grep).
+
+## Follow-up pass (items left open by the first pass)
+
+- Whole-file rerun after the M-13 assertion fix: done, see Evidence (rc=0, 358 passed). This was the only open verification.
+- M-13 check false on the table (V > 0.05): a flaw in the finding's check, not in the code; the test uses V > 0.2 and counts the 56 weak cells (12 with residual above 0.05, 8 at TWS 1 m/s, TWA 14.5 to 18). The 'best heading at the cap from 14' is 3.26 at 14 and at the cap from 15; the test pins 15. No code change.
+- M-13 Stage 1 stall flag and residual layer: not done by the lead's decision in the batch text (no table layer, no solver change); the flag was optional in the finding. Not a problem.
+- M-10 angle clock reset below trim_min_aws_ms: this is the finding's own 'cleaner alternative' (`wing_stall_angle &= aws >= trim_min_aws_ms`, a calm is only a calm, DECISIONS 217), and the clock uses the same `where(stalled, acc + dt, 0)` as the calm clock. A mixed sequence (calm in the cone, then wind in the cone) is therefore governed by the calm hold, then by a fresh angle hold. Left as is: it is the stated decision, and holding the clock instead of resetting it would be a new rule. The demo shows no verdict or first-failure change. The yaml `why` strings for `min_awa_deg` and `trim_min_aws_ms` are a document for the docs step.
+- M-10 test winds (0.5 m/s toward 210 deg, 0.3 m/s toward 150 to 240 deg): the defect depends on the bearing, so the test uses the bearings that reproduce it; it fails on the unfixed code. Not a problem.
+- M-2 limits (AR(1) at 2 % marginal sd; 5 % ramp now passes at 0.0195; real LBM drag not measured; GPU refit and golden may change): stated limit of the batch-means definition, in the M-2 section above; no CPU test refers to a refit count. The owner's call if a stricter limit or a burn-in is wanted.
+- M-17 CREDIBILITY sentence on the Tp 3 to 21 s clamp: optional, a document for the docs step, the finding shows no Tp under 3 s underestimate.
+- DECISIONS, CHANGELOG, RUNBOOK, PHYSICS, BRIEF, CREDIBILITY, yaml: handed to batch F as instructed. The `usv._digest` re-base (any edit of usv.py moves it) is the lead's.
