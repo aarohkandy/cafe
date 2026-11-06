@@ -48,6 +48,6 @@ Tests (fail on the unfixed `claim_out`, pass after): `test_r10_m12_an_out_from_b
 
 For the docs step, add to the RUNBOOK sentence: "A `runs/acceptance` from an earlier version is marked on the next run and replaced; nothing to do by hand." The CHANGELOG line need not change. DECISIONS 535: add "or holds a file only `run` writes (`OWN_FILES`) and is not itself a run: an earlier acceptance run, claimed".
 
-Verified: `tests/test_acceptance.py` whole file on orca (see the line below), `ruff check cafe/pm tests` clean, `mypy cafe/pm` clean (55 files). Not run: the whole suite, `audit`.
+Verified: `tests/test_acceptance.py` whole file on orca: rc=0, 94 passed, `ruff check cafe/pm tests` clean, `mypy cafe/pm` clean (55 files). Not run: the whole suite, `audit`.
 
 Not problems (lead's decisions or documents): M-34 and M-36 (documents, not touched by design); the `__main__.py:107` help text (another batch's file, listed above); the unguarded `run` output files and a user's later `quick` in a marked dir (stated decisions above).
