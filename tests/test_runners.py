@@ -572,7 +572,8 @@ def test_the_exit_status_of_a_job_is_its_own_not_that_of_a_child_that_outlives_i
 
 @pytest.mark.parametrize("job, last, want", [("kill -9 $PPID", "0", 1), ("mkdir /tmp/.rc; exit 0", "0", 1), ("kill -9 $PPID", "137", 137)])
 def test_a_job_that_leaves_no_status_is_failed_when_proot_says_0_and_keeps_a_status_proot_gave(tmp_path, job, last, want):
-    """No status file, from a killed job shell or a full disk, must not fall back on proot's 0: that is the last process's status (P-18), so a dead job read as passed."""
+    """No status file, from a killed job shell or a full disk, must not fall back on proot's 0: that is the last process's status (P-18), so a dead job
+    read as passed."""
     w, env = proot_world(tmp_path, LAST_STATUS=last)
     (w / "bin/proot").write_text(LAST_TRACEE)
     r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "sh", "-c", job], env)
