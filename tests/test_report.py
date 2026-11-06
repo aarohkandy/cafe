@@ -2210,6 +2210,10 @@ def test_r10_m1_a_holdout_file_without_scopes_still_reads_per_class_and_a_plan_w
     cls = list(plan["vehicle_classes"].values())
     note = report._run_note(json.loads((run / "emulator" / "design.json").read_text()), old)
     assert f"{3 * min(map(cls.count, set(cls)))} points in the smallest emulator scope" in note
+    two = dict(plan, vehicle_classes=dict(a="glider", b="glider"), vehicle_scopes=dict(a="glider/seaglider/144h", b="glider/slocum/144h"))
+    design = json.loads((run / "emulator" / "design.json").read_text())
+    assert "3 points in the smallest emulator scope" in report._run_note(design, two)                  # two platforms of one class: 3 each, not 6
+    assert "6 points in the smallest emulator scope" in report._run_note(design, dict(two, vehicle_scopes=None))
 
 
 def test_r8_l0_every_unit_a_count_of_one_can_carry_is_singular_and_the_rest_are_left_alone():
