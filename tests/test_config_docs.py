@@ -312,8 +312,9 @@ def test_pm_sh_and_pmx_sh_read_one_filter_list_and_never_delete_what_they_exclud
         assert "--delete" in script and "--filter" in script and "sync_filters" in script
         assert "--delete-excluded" not in script and "--exclude" not in script
     for out in ("/runs/", "/config/throughput.json", "/config/subgrid.json", "/docs/mutation.json", "/mutants/", "/audit.log",
-                "/coverage.json", "/tests/golden/", "/report/"):
+                "/coverage.json", "/tests/golden/***", "/report/***"):
         assert re.search(rf"^[-P] {re.escape(out)}$", rules, re.M), out
+    assert not re.search(r"^P .*/$", rules, re.M), "a P rule on a directory needs the *** form"
 
 
 def test_pmx_judges_a_detached_job_by_the_exact_session_name_or_an_rc_zero_log():

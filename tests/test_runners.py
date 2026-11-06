@@ -192,6 +192,26 @@ def test_a_file_removed_from_the_tree_is_removed_on_the_server_and_what_the_serv
     assert (dest / "cafe/pm/kept.py").read_text() == "local" and (dest / "config/throughput.json").read_text() == "local"
 
 
+@pytest.mark.parametrize("script, server_dir", [("pm.sh", "pm"), ("bin/pmx.sh", "pm_t")])
+def test_l2_a_file_the_server_wrote_inside_a_protected_directory_survives_when_the_checkout_has_that_directory_too(tmp_path, script, server_dir):
+    """Round 9 L2: `P /tests/golden/` and `P /report/` match the directory entry only. The checkout has both directories, so rsync recurses into them and a
+    golden file with a new name or a report page written on the server was deleted by the next sync."""
+    home, env = live(tmp_path, "ssh", "docker", PMX="pm_t")
+    src = tmp_path / "checkout"
+    dest = home / "work" / "cafe" / server_dir
+    for d, tracked in (("tests/golden", "a.json"), ("report", "build.py")):
+        (src / d).mkdir(parents=True)
+        (src / d / tracked).write_text("local")
+        (dest / d / "deeper").mkdir(parents=True)
+        (dest / d / "from_server.txt").write_text("server")
+        (dest / d / "deeper" / "x").write_text("server")
+    r = run(["sh", str(ROOT / script), "true"], env, cwd=src)
+    assert r.returncode == 0, r.stderr
+    for d, tracked in (("tests/golden", "a.json"), ("report", "build.py")):
+        assert (dest / d / "from_server.txt").read_text() == "server" and (dest / d / "deeper" / "x").read_text() == "server", d
+        assert (dest / d / tracked).read_text() == "local", d
+
+
 # ---- M-29, M-36: bin/orca_sync.sh -------------------------------------------------------------------------------------------------------------------
 
 def sync_world(tmp_path, **extra):
