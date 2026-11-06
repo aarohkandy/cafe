@@ -541,3 +541,30 @@ def test_the_recorder_counts_the_failed_and_error_lines_of_a_vv_log_but_not_the_
     got = dict(watch_once(tmp_path, {"plain": plain, "xdist": xdist, "clean": clean, "dots": dots}))
     assert got == {"plain": "failed tests 2, error lines 0, rc=1", "xdist": "failed tests 2, error lines 0, still running",
                    "dots": "failed tests 2, error lines 0, still running"}                      # a clean log with rc=0 is no problem; the dots still count
+
+
+# ---- orca-go P-18: proot returns the status of the last process of the job to end
+
+LAST_TRACEE = """#!/bin/sh
+# What proot does about the exit status (rehearsed on orca: `(sleep 3; exit 0) & exit 1` gives 0): run the command, wait for every process it left behind,
+# and answer with the status of the last one to end. The command comes after `/usr/bin/env -i VAR=value...`; its /tmp is $PROOT_TMP_DIR here.
+while [ "$1" != /usr/bin/env ]; do shift; done
+shift 2
+while case "$1" in [A-Z_]*=*) true ;; *) false ;; esac; do shift; done
+for a in "$@"; do set -- "$@" "$(printf '%s' "$a" | sed "s#/tmp/#$PROOT_TMP_DIR/#g")"; shift; done
+"$@"
+wait
+exit "${LAST_STATUS:-0}"
+"""
+
+
+@pytest.mark.parametrize("job, want", [("exit 3", 3), ("(sleep 1; exit 0) & exit 3", 3), ("(sleep 1; exit 7) & exit 3", 3), ("true", 0),
+                                       ("(sleep 1) & exit 0", 0)])
+def test_the_exit_status_of_a_job_is_its_own_not_that_of_a_child_that_outlives_it(tmp_path, job, want):
+    """The resource tracker of a spawned pool outlives the process and exits 0: a pytest run with a failure was rc=0 and the gate would have said ok."""
+    w, env = proot_world(tmp_path, LAST_STATUS="0")
+    (w / "bin/proot").write_text(LAST_TRACEE)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "sh", "-c", job], env)
+    assert r.returncode == want, r.stderr
+    assert not list((w / "cafe/tmp").glob("run.*"))
+

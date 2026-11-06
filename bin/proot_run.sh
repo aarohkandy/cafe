@@ -37,6 +37,11 @@ $G "$W/bin/proot" -r "$W/root" -i "$(id -u):$(id -g)" -w /app -b /dev -b /proc -
   -b "$T:/tmp" -b "$C/$D:/app" -b "$C/pmdata:/data" -b "$C/data:/work" \
   /usr/bin/env -i PATH=/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PYTHONUNBUFFERED=1 HOME=/tmp TMPDIR=/tmp LC_ALL=C.UTF-8 \
   PYTHONPATH=/app CAFE_DATA=/data CAFE_GIT_SHA="${CAFE_GIT_SHA:-}" CAFE_GIT_DIRTY="${CAFE_GIT_DIRTY:-0}" CAFE_WORKERS="${PM_CPUS:-8}" \
-  PMIX_MCA_gds=hash "$@" <&3 3<&- &
+  PMIX_MCA_gds=hash /bin/sh -c '"$@"; r=$?; echo $r > /tmp/.rc; exit $r' sh "$@" <&3 3<&- &
 P=$!; echo "$P" >> "$T/.pids"
-wait "$P"
+# proot returns the exit status of the LAST process of the job to end, not of its first (rehearsed: `(sleep 3; exit 0) & exit 1` gives 0). A child that outlives the job, such as
+# the resource tracker that multiprocessing starts for spawned workers, made a failed pytest or pipeline run read rc=0. So the job writes its own status to its /tmp (= $T) and that is the exit status here;
+# a job that was killed writes none, and then proot's status stands.
+r=0; wait "$P" || r=$?
+c=; if [ -f "$T/.rc" ]; then read -r c < "$T/.rc" || :; case "$c" in ''|*[!0-9]*) ;; *) r=$c ;; esac; fi
+exit "$r"
