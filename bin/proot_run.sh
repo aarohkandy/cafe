@@ -5,6 +5,7 @@
 set -eu
 D="$1"; shift
 GRACE="${PM_STOP_GRACE:-10}"; case "$GRACE" in ''|*[!0-9]*) echo "PM_STOP_GRACE: whole seconds (default 10), not '$GRACE'" >&2; exit 2 ;; esac       # seconds between TERM and KILL when the job is stopped
+case "${PM_CPUS:-8}" in 0*|*[!0-9]*) echo "PM_CPUS: a whole number from 1, not '$PM_CPUS'" >&2; exit 2 ;; esac       # also checked on the laptop (bin/pm_checks.sh); this one is for a run by hand
 W="$HOME/cafe-worker"; C="$W/cafe"          # nothing outside ~/cafe-worker: the home folder is shared
 [ -x "$W/bin/proot" ] && [ -f "$W/root.done" ] && [ -x "$W/root/usr/bin/env" ] || { echo "no proot or root filesystem under $W: run bin/orca_sync.sh" >&2; exit 1; }
 [ -d "$C/$D" ] && [ -d "$C/pmdata" ] && [ -d "$C/data" ] || { echo "missing $C/$D, $C/pmdata or $C/data: run bin/orca_sync.sh" >&2; exit 1; }

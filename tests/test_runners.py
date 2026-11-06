@@ -76,6 +76,71 @@ def test_a_stop_grace_that_is_not_whole_seconds_is_refused_before_anything_is_se
     assert rc == 2 and out == ""
 
 
+BOTH = [("bin/pmx.sh", dict(PMX="pm_t")), ("pm.sh", {})]
+
+
+@pytest.mark.parametrize("script, env", BOTH)
+@pytest.mark.parametrize("var, value, runtime", [
+    *[("PM_CPUS", v, r) for v in ("2,", "2;x", "0", "1.5", "-1", "$(id)", "2 3", "02") for r in ("docker", "proot")],
+    *[("CAFE_MIN_FREE_GB", v, "proot") for v in ("1;echo INJ", "0", "6 0", "x")],
+    *[("PM_THREADS", v, "proot") for v in ("2;x", "0", "2 2")],
+    *[(n, v, "docker") for n in ("PM_MEM", "PM_SHM") for v in ("8g;x", "g", "0g", "8 g", "8gb;x", "$(id)")]])
+def test_m23_a_number_pasted_into_the_remote_command_line_is_refused_before_anything_is_sent(tmp_path, script, env, var, value, runtime):
+    """M-23: PM_CPUS='2;x' ran `x` on the worker and '2,' became CAFE_WORKERS=2,; only PM_STOP_GRACE and PM_ENTRY had been checked."""
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME=runtime, **env, **{var: value})
+    assert rc == 2 and out == ""
+
+
+@pytest.mark.parametrize("runtime", ["docker", "proot"])
+@pytest.mark.parametrize("tm", ["x", "-x", "_x", "-", "a b", "a;x"])
+def test_m23_a_name_that_tmux_or_docker_refuses_is_refused_here(tmp_path, tm, runtime):
+    """M-23: TM=x passed the character test and docker then refused the name; a leading '-' is an option to tmux."""
+    rc, out = sent(tmp_path, "bin/pmx.sh", "true", PM_RUNTIME=runtime, PMX="pm_t", TM=tm)
+    assert rc == 2 and out == ""
+
+
+@pytest.mark.parametrize("script, env", BOTH)
+@pytest.mark.parametrize("runtime", ["docker", "proot"])
+@pytest.mark.parametrize("extra", [{}, dict(PM_CPUS="2"), dict(PM_CPUS="16"), dict(PM_CPUS=""), dict(PM_MEM="8g", PM_SHM="512m", PM_CPUS="4"),
+                                   dict(PM_MEM="28G"), dict(PM_MEM="8gb", PM_SHM="64MB"), dict(PM_MEM="8192"), dict(CAFE_MIN_FREE_GB="1"),
+                                   dict(PM_THREADS="2")])
+def test_m23_what_was_valid_is_still_sent(tmp_path, script, env, runtime, extra):
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME=runtime, **env, **extra)
+    assert rc == 0 and "rsync" in out
+
+
+@pytest.mark.parametrize("tm", ["ab", "a1", "1a", "job_1-b", "q10"])
+def test_m23_a_two_character_name_with_a_letter_or_digit_first_is_a_tmux_session(tmp_path, tm):
+    rc, out = sent(tmp_path, "bin/pmx.sh", "true", PM_RUNTIME="proot", PMX="pm_t", TM=tm)
+    assert rc == 0 and f"tmux new-session -d -s {tm} " in out
+
+
+def test_m23_proot_run_refuses_a_cpu_count_that_is_not_a_number_when_started_by_hand(tmp_path):
+    home, env = live(tmp_path)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "pm_t", "true"], {**env, "PM_CPUS": "2,"})
+    assert r.returncode == 2 and "PM_CPUS" in r.stderr
+
+
+@pytest.mark.parametrize("runtime, script, cpus, mem", [("docker", "bin/pmx.sh", "2", "8g"), ("docker", "pm.sh", "8", "28g")])
+def test_m31_the_docker_defaults_are_two_cpus_and_8g_on_the_pmx_path_and_the_whole_box_on_pm_sh(tmp_path, runtime, script, cpus, mem):
+    rc, out = sent(tmp_path, script, "true")
+    assert rc == 0 and f"--cpus {cpus} --memory {mem} --shm-size 16g" in out
+    rc, out = sent(tmp_path, script, "true", PM_CPUS="6", PM_MEM="24g", PM_SHM="4g")
+    assert rc == 0 and "--cpus 6 --memory 24g --shm-size 4g" in out                      # a number asked for is what is sent
+
+
+@pytest.mark.parametrize("script, env, cpus", [("bin/pmx.sh", dict(PMX="pm_t"), "2"), ("bin/pmx.sh", dict(PMX="pm_t", TM="job"), "2"), ("pm.sh", {}, "8")])
+def test_m31_the_proot_default_is_two_cpus_on_the_pmx_path_and_eight_on_pm_sh_and_pm_threads_is_passed_on_only_when_set(tmp_path, script, env, cpus):
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME="proot", **env)
+    assert rc == 0 and f"PM_CPUS={cpus} CAFE_MIN_FREE_GB=60 " in out and "PM_THREADS" not in out
+    (tmp_path / "sent.log").unlink()
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME="proot", PM_CPUS="3", PM_THREADS="3", **env)
+    assert rc == 0 and "PM_CPUS=3 PM_THREADS=3 CAFE_MIN_FREE_GB=60 " in out
+    (tmp_path / "sent.log").unlink()
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME="docker", PM_THREADS="3", **env)
+    assert rc == 0 and "PM_THREADS" not in out                                           # docker sizes nothing by it
+
+
 def test_a_failed_copy_does_not_run_the_job_on_stale_code(tmp_path):
     rc, out = sent(tmp_path, "bin/pmx.sh", "true")
     assert rc == 0 and "work/cafe/pm_x/" in out and "docker run" in out          # docker keeps its paths
@@ -712,3 +777,123 @@ def test_pm_threads_must_be_a_whole_number_from_one(tmp_path, bad):
     (w / "bin/proot").write_text(RECORD_ARGV)
     r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
     assert r.returncode == 2 and "PM_THREADS" in r.stderr and not (tmp_path / "home/argv").exists()
+
+
+# ---- round 10 M-30: bin/orca_ready.sh takes the caller's PMX and names its marker for it; only a name of ours fails the last check
+
+def ready_world(tmp_path):
+    """(home, cwd, env): a scratch worker HOME that passes the completeness check, and a scratch checkout whose bin/pmx.sh is a stand-in that logs its PMX."""
+    home, env = live(tmp_path, "ssh")
+    w = home / "cafe-worker"
+    for f in ("bin/proot", "root.done", "pmdata.done", "data.done", "env/bin/rsync", "env/bin/tmux"):
+        (w / f).parent.mkdir(parents=True, exist_ok=True)
+        (w / f).write_text("")
+    cwd = tmp_path / "checkout"
+    (cwd / "bin").mkdir(parents=True)
+    for n in ("orca_ready.sh", "pm_checks.sh"):
+        shutil.copy(ROOT / "bin" / n, cwd / "bin" / n)
+    (cwd / "bin" / "pmx.sh").write_text('#!/bin/sh\necho "PMX=$PMX PM_CPUS=$PM_CPUS" >> "$HOME/cafe-worker/pmx.log"\n'
+                                        'sleep 1\n[ -z "$LEAK" ] || touch "$HOME/$LEAK"\n')
+    (cwd / "bin" / "pmx.sh").chmod(stat.S_IRWXU)
+    return home, cwd, {**env, "CAFE_MIN_FREE_GB": "1", "PM_HOST": "worker"}
+
+
+@pytest.mark.parametrize("given, name", [({}, "pm_ready"), (dict(PMX="pm_mine"), "pm_mine")])
+def test_m30_the_go_check_uses_the_callers_pmx_and_a_start_marker_of_that_name(tmp_path, given, name):
+    """M-30: `export PMX=pm_ready` overrode the caller's, so the documented PMX=pm_<you> did nothing and two checks synced onto one directory with --delete."""
+    home, cwd, env = ready_world(tmp_path)
+    r = run(["sh", "bin/orca_ready.sh"], {**env, **given}, cwd=cwd)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (home / "cafe-worker" / "pmx.log").read_text() == f"PMX={name} PM_CPUS=2\n" * 2
+    assert sorted(p.name for p in (home / "cafe-worker").glob(".ready_start*")) == [f".ready_start_{name}"]
+    assert r.stdout.rstrip().endswith("orca-ready")
+
+
+def test_m30_a_change_outside_cafe_worker_fails_the_check_only_when_its_name_is_ours(tmp_path):
+    """M-30: on the shared account any other user's file at depth 2 that was newer than the marker failed the check."""
+    home, cwd, env = ready_world(tmp_path)
+    r = run(["sh", "bin/orca_ready.sh"], {**env, "LEAK": "somebody_elses_file"}, cwd=cwd)
+    assert r.returncode == 0 and "warning" in r.stdout and "./somebody_elses_file" in r.stdout and r.stdout.rstrip().endswith("orca-ready")
+    for ours in ("cafe_leak", "pm_leak", "pmx_leak"):
+        r = run(["sh", "bin/orca_ready.sh"], {**env, "LEAK": ours}, cwd=cwd)
+        assert r.returncode == 1 and "STOP" in r.stderr and f"./{ours}" in r.stderr and "orca-ready" not in r.stdout
+
+
+@pytest.mark.parametrize("given", [dict(PMX="pm_a;touch pwned"), dict(PMX="pmdata"), dict(CAFE_MIN_FREE_GB="1;touch pwned"),
+                                   dict(PM_STOP_GRACE="1;touch pwned")])
+def test_m30_what_is_pasted_into_the_ssh_command_lines_is_checked_first(tmp_path, given):
+    home, cwd, env = ready_world(tmp_path)
+    r = run(["sh", "bin/orca_ready.sh"], {**env, **given}, cwd=cwd)
+    assert r.returncode == 2 and not (home / "pwned").exists() and not list((home / "cafe-worker").glob(".ready_start*"))
+
+
+# ---- round 10 M-26: orca_watch.sh notes a second dip of the disk and a rerun that fails the same way
+
+def watch_home(tmp_path):
+    """(home, env): a scratch HOME and cgroup for orca_watch.sh, and a fake df whose free space is the next line of $HOME/free_seq (500 GB when it is empty)."""
+    home, cg, tools = tmp_path / "home", tmp_path / "cgroup", tmp_path / "tools"
+    (home / "cafe-worker/logs").mkdir(parents=True, exist_ok=True)
+    (home / "cafe-worker/.cafe-worker-owned").write_text("")
+    cg.mkdir(exist_ok=True)
+    tools.mkdir(exist_ok=True)
+    (cg / "cpu.stat").write_text("usage_usec 0\nnr_throttled 0\n")
+    (cg / "memory.current").write_text("0\n")
+    (cg / "memory.events").write_text("oom_kill 0\n")
+    (tools / "df").write_text('#!/bin/sh\ncase "$*" in\n  *-Pk*) v=$(head -n 1 "$HOME/free_seq" 2>/dev/null); sed -i 1d "$HOME/free_seq" 2>/dev/null\n'
+                              '    echo "Filesystem 1K-blocks Used Available Use% Mounted"\n'
+                              '    echo "x 1 1 $(( ${v:-500} * 1048576 )) 1% /" ;;\n  *) echo x ;;\nesac\n')
+    # ends the endless loop after the last value
+    (tools / "sleep").write_text('#!/bin/sh\n[ -e "$HOME/stop_when_empty" ] && [ ! -s "$HOME/free_seq" ] && kill $PPID\nexit 0\n')
+    for n in ("df", "sleep"):
+        (tools / n).chmod(stat.S_IRWXU)
+    return home, {**os.environ, "PATH": f"{tools}:{os.environ['PATH']}", "HOME": str(home), "WATCH_SLEEP": "0", "WATCH_CGROUP": str(cg),
+                  "CAFE_MIN_FREE_GB": "10"}
+
+
+def problems(home):
+    p = home / "cafe-worker/logs/watch/problems.log"
+    return [tuple(l.split("\t")[1:]) for l in p.read_text().splitlines()] if p.exists() else []
+
+
+def test_m26_the_disk_note_is_written_again_when_the_disk_recovers_and_falls_but_not_while_it_hovers(tmp_path):
+    """M-26: `low` was never cleared, so the second dip of a watch left only a timeline row. The line is FLOOR 10 + 40 = 50 GB; recovery needs 55."""
+    home, env = watch_home(tmp_path)
+    (home / "free_seq").write_text("".join(f"{g}\n" for g in (60, 45, 45, 52, 49, 54, 40, 55, 48, 48)))
+    (home / "stop_when_empty").write_text("")
+    subprocess.run(["sh", str(ROOT / "bin/orca_watch.sh")], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+    got = problems(home)
+    assert [g[0] for g in got] == ["disk", "disk"]            # 45 first; 52, 49, 54 and 40 are the same dip; 55 clears it; 48 is the second
+    assert got[0][1].startswith("only 45 GB") and got[1][1].startswith("only 48 GB")
+    assert len(list((home / "cafe-worker/logs/watch").glob("snap_*_disk.txt"))) >= 1
+    assert len((home / "cafe-worker/logs/watch/timeline.tsv").read_text().splitlines()) == 11      # header and a row per look: the loop ran to the end
+
+
+def look(home, env, text, mtime):
+    """One look of the recorder at job log j, which has just been rewritten in place (as the shell's `>` of bin/pmx.sh does)."""
+    f = home / "cafe-worker/logs/j.log"
+    f.write_text(text)
+    os.utime(f, (mtime, mtime))
+    r = subprocess.run(["sh", str(ROOT / "bin/orca_watch.sh")], capture_output=True, text=True, timeout=60, env={**env, "WATCH_ONCE": "1"})
+    assert r.returncode == 0, r.stderr
+    return problems(home)
+
+
+def test_m26_a_rerun_that_fails_in_the_same_way_between_two_looks_is_noted_again(tmp_path):
+    """M-26: a rerun rewrites the log in place; its counts equalled the last look's, so the state comparison hid it."""
+    home, env = watch_home(tmp_path)
+    bad = "..F.E. [ 50%]\nrc=1\n"
+    note = ("j", "failed tests 2, error lines 0, rc=1")
+    assert look(home, env, bad, 1_000_000) == [note]
+    assert look(home, env, bad, 1_000_000) == [note]                                  # looked at again, unchanged: no second note
+    assert look(home, env, bad, 1_000_900) == [note, note]                            # the same text, written by a later run
+    ok = "tests/a.py::t PASSED\nrc=0\n"
+    assert look(home, env, ok, 1_002_000) == [note, note] and look(home, env, ok, 1_003_000) == [note, note]      # a passing rerun adds nothing
+
+
+@pytest.mark.parametrize("tm", ["a_s2", "a_serial", "a_shares", "a_audit"])
+def test_m28_a_job_name_that_is_a_log_of_the_suite_is_refused_under_proot_only(tmp_path, tm):
+    """M-28: the sweep of tag a deletes a_s<i>.log; a plain TM job of that name has its log in the same folder."""
+    rc, out = sent(tmp_path, "bin/pmx.sh", "true", PM_RUNTIME="proot", PMX="pm_t", TM=tm)
+    assert rc == 2 and out == ""
+    rc, out = sent(tmp_path, "bin/pmx.sh", "true", PM_RUNTIME="docker", PMX="pm_t", TM=tm)
+    assert rc == 0 and "rsync" in out

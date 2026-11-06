@@ -13,7 +13,7 @@ set -u
 [ $# -eq 3 ] || { [ $# -eq 4 ] && [ "$4" = --cov ]; } || { echo "usage: sh proot_suite.sh <dir> <K> <tag> [--cov]" >&2; exit 2; }
 D=$1; K=$2; TAG=$3; COV=${4:-}
 case ${D#pm_} in "$D"|''|*[!A-Za-z0-9_-]*) echo "dir: pm_ and then letters, digits, _ or - only (not '$D')" >&2; exit 2 ;; esac
-case $TAG in ''|*[!A-Za-z0-9_-]*) echo "tag: letters, digits, _ and - only" >&2; exit 2 ;; esac
+. "$(dirname "$0")/pm_checks.sh"; pm_tag "$TAG"                                   # the same rule bin/orca_gate.sh applies before it sends anything
 case $K in ''|0*|*[!0-9]*) echo "K: a whole number from 1 to 16, not '$K'" >&2; exit 2 ;; esac
 [ "$K" -le 16 ] || { echo "K=$K jobs of 2 CPUs is above orca's 32 CPUs (K at most 16)" >&2; exit 2; }
 W="$HOME/cafe-worker"; C="$W/cafe"; R="$C/$D"; LOGS="$W/logs"; SH="$C/pmdata/shards/$TAG"; DS="/data/shards/$TAG"      # DS: the same folder, as the job sees it
@@ -41,7 +41,7 @@ job() {
 export PM_CPUS=2 PM_THREADS=2          # PM_THREADS: BLAS and OpenMP pools of a job at its 2 CPUs, not orca's 64 (bin/proot_run.sh; P-20)
 rm -f "$SH"/.coverage* "$SH"/serial.xml
 # A smaller K than the last run under this tag: its logs <tag>_s<K+1>.log and up still end rc=0 and would end a reader's wait loop at once (P-30). Only this tag's: the part after
-# "<tag>_s" must be all digits and above K (tag a must not touch the logs of tag a_s3, "a_s3_s1.log").
+# "<tag>_s" must be all digits and above K (tag a must not touch the logs of tag a_s3, "a_s3_s1.log"). pm_tag refuses a tag that is itself such a log name (a_s2 beside a), and a TM of one under proot (bin/pm_checks.sh).
 for x in "$LOGS/${TAG}"_s[0-9]*.log; do
     [ -f "$x" ] || continue; i=${x##*/"${TAG}"_s}; i=${i%.log}
     case $i in ''|*[!0-9]*) continue ;; esac

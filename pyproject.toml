@@ -1,5 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+python_files = ["test_*.py"]            # the one definition of a test file: cafe/pm/shares.py reads it too
 addopts = "-q --strict-markers"
 markers = ["network: needs orca/HYCOM/TAO over the internet (skipped offline by CAFE_OFFLINE=1)", "slow: > 60 s"]
 
