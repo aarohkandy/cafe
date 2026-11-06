@@ -548,6 +548,58 @@ Round 9 read the q9 quick run (`runs/q9`, code `08f05d7`, made on the 32-vCPU bu
   - The card of a NOT EXERCISED link no longer prints the certifying parenthesis (`n_certify` is null in `report.json` for it); DECISIONS 533 (amends 526).
   - Tests for the twelve statements the gate of `e06879c` left uncovered (`credibility.py`, `par.py`, `pipeline.py`, `report.py`); none deleted, no pragma; DECISIONS 534.
 
+Review round 10 (`review/round_10/merged.md`: 37 findings, 0 critical, 3 major, 34 minor; 20 confirmed, 16 partly, 1 not confirmed; DECISIONS 535 to 570, plus the look-ahead fixes 571 to 573)
+
+Round 10 read the q10 quick run (`runs/q10`, code `8b870a6`, made on orca with `PM_CPUS=6`; its verdicts are those of oq9 and of q5 to q9: glider_eq MARGINAL 15 of 64, glider_2n GO 0, USV NO-GO 60, UAS NO-GO 55) and the code, with four reviewers (A and B over everything, B also following the RUNBOOK and ORCA_RUNNER word for word; C over the vehicle physics and stage 3 line by line; D over the environment readers, the report, the credibility page, the receipts, the runner scripts and whether round 9's tests fail on mutants of their fixes); each finding was checked by an independent verifier against `a470119`. Six batches fixed disjoint files (CLI, pipeline and report; the what-if emulator; vehicle physics and stage 3; environment readers; runner scripts; the acceptance guard and the documents) and each finding has a regression test shown failing on the old code. The lead then fixed the same defect in the sibling callers and readers (look-ahead items L0 and the merge needs). One reviewer's slip is the incident of the round: a `bin/pmx.sh` call without `PM_HOST`, `PM_RUNTIME` and `PMX` ran a demo on homebase at 8 CPUs (M-31); `~/work/cafe/pm_x` there is left for the owner to remove. Every edit of `cafe/pm/physics/usv.py` moved `usv._digest` (it hashes the file's bytes) once, and M-2 changed `cafe/pm/stage3/nest.py`, so `lbm.physics_sha()` is another value again and every stored slow stage-3 result is stale (RUNBOOK step 7). Test counts and the gate are pending (the gate has not run on the merged tree).
+
+- CLI, pipeline, report, receipts (M-3, M-4, M-5, M-7, M-8, M-9, M-16, M-21, M-24, M-25, M-27, M-32; DECISIONS 537, 538, 539, 541, 542, 543, 550, 555, 558, 559, 561, 566):
+  - M-5: any `OSError` ends a command in `error: ...` and exit 2; `report --run` and `whatif` name a damaged or incomplete run file in an `error:` line (exit 2) instead of a KeyError or FileNotFoundError traceback (`config.damaged_run_files`); the `stage1` sensitivity command likewise.
+  - M-9: the report says when `windows/windows.json` is missing instead of dropping the stage-3 markers.
+  - M-24: a stored slow receipt of the wrong shape is the "not run" row with its command, not a KeyError.
+  - M-4: a card that excludes P(fail) below 5 % no longer says how many members would certify it.
+  - M-27: `report_html_matches_json` finds a card that stops printing a number the other cards print (`data-path` on every number span).
+  - M-7: `report --run` and the report page warn when the ledgers do not match the files (`ledger_problems`); a summary whose verdict disagrees with its counts, or whose P(fail) is not finite, is refused.
+  - M-21: the emulator limits in the report follow `whatif.LIMITS`.
+  - M-3: the orca cache check compares longitudes as arcs, so a box across the antimeridian is covered or not correctly.
+  - M-8: a mission box that the pad pushes past a pole or around the globe is refused at load.
+  - M-25: the fitted wind-bias citation states the sign of its mean.
+  - M-32: `hangar` counts assumed inputs the way the credibility report does (modems: 4, was 2).
+  - M-16: the report says an overdepth failure is the glider's own apogee overshoot, with the measured peak depth.
+- What-if emulator (M-1, M-6, M-11; DECISIONS 535, 540, 545):
+  - M-1: one emulator per scope (vehicle class, platform, window length); rows of another window or platform are not pooled; the plan counts points per scope (`points_per_scope`); older tables' unscoped rows are left out and named.
+  - M-6: the coverage gate and the chance figure beside it are one rule (17 of 20 hold-out points passes; at 20 points a calibrated emulator failed with probability 0.4446 where 0.2545 was printed); the BRIEF 2.7 limits have one copy in `emulator.py`, which the receipt reads.
+  - M-11: a deploy shift of a glider or USV says it flies a different time, in the candidate text, in `answer()` and in the CLI.
+- Vehicle physics and stage 3 (M-2, M-10, M-13, M-14, M-15, M-17, M-18, M-33; DECISIONS 536, 544, 547, 548, 549, 551, 552, 567):
+  - M-2: `force_running_mean_dev` judges the running mean of five batch means of the last third, so a converged series with per-step noise above 2 % no longer fails as "no convergence" (BRIEF 5.5 read as "the mean has converged").
+  - M-15: a hole in the weather at a window gives the reason `no_current_data` naming the field, in the three vehicle classes.
+  - M-33: the free-surface refusal reads as one sentence; the largest plan's minutes are labelled and an empty plan list is stated.
+  - M-10: USV `wing_stall_angle` no longer counts while the apparent wind is under `trim_min_aws_ms` (a calm is only `wing_stall_calm`); demo mode shares 14 to 12 angle, verdicts and first-failure time unchanged.
+  - M-13: `usv.stall_map` and its test count the polar's stalled and weak cells and the lowest stalling wind per wind angle over the whole 0 to 30 m/s table (658 of 2759 cells at V = 0).
+  - M-17: a platform `stw_cap_ms` above 3.5 m/s (the added-resistance table's top speed) is refused at load.
+  - M-18, M-14: documents and docstrings only (the 3.3 m/s cap is the quoted Mazza et al. value for LOA; BRIEF 5.5's mass conservation is read per step, no total-mass check).
+- Environment readers (M-19, M-20, M-22; DECISIONS 553, 554, 556):
+  - M-19: TAO deployment selection is per variable and resolution, so a mooring whose SST was re-deployed later no longer loses its wind from the prior fit; the manifest records its selection rule (`tao.SELECTION`) and an older cache is fetched again.
+  - M-20: `hycom.check_node` no longer passes a node that is NaN on one side only (`inf`); NaN on both sides still agrees.
+  - M-22: documented, not built: a UMWM hour is its file name (row 14 amended; QUESTIONS_FOR_LAB 2a asks whether `umwmout` files are stamped at the start or the end of the hour).
+- Runner scripts (M-23, M-26, M-28, M-29, M-30, M-31; DECISIONS 557, 560, 562, 563, 564, 565):
+  - M-23: `bin/pm_checks.sh` (new): `pm.sh`, `bin/pmx.sh` and `bin/orca_ready.sh` refuse a `PM_CPUS`, `PM_MEM`, `PM_SHM`, `PM_THREADS`, `CAFE_MIN_FREE_GB` or `TM` that is not plain, before anything is sent (exit 2); a decimal `PM_CPUS` such as `1.5` is no longer accepted.
+  - M-31: `bin/pmx.sh` defaults to `PM_CPUS=2 PM_MEM=12g` (was 8 and 28g; 12g is the least that plans the demo mission; `pm.sh` unchanged); `PM_THREADS` is passed through `pmx.sh` and `pm.sh` to `proot_run.sh`.
+  - M-30: `bin/orca_ready.sh` runs under the caller's `PMX` (default `pm_ready`), has a marker per `PMX`, and fails its last step only for a changed path with a name of ours, else warns.
+  - M-26: `bin/orca_watch.sh` notes a second dip of the disk after a recovery and a rerun that fails with the same counts (the state of a finished log carries its mtime); the first look after this change writes one extra note per failing finished log.
+  - M-28: a gate tag or proot `TM` that ends `_s<digits>`, `_serial`, `_shares` or `_audit` is refused (exit 2); one rule in `bin/pm_checks.sh`.
+  - M-29: `pyproject.toml` sets `python_files = ["test_*.py"]` and `cafe/pm/shares.py` reads it; the weight of a test file leaves out the real-time tests that run alone.
+- Acceptance guard and documents (M-12, M-34, M-35, M-36; DECISIONS 546, 568, 569, 570):
+  - M-12: `acceptance --out DIR` no longer removes a directory it did not make: `--out` is marked `.cafe_acceptance` on first use, and an unmarked `--out` that holds `quick`, `overnight`, `4h` and the rest (or their `.log` files, or is itself a run) is refused with exit 2 before anything is removed; a `runs/acceptance` from before the marker is claimed.
+  - M-34: RUNBOOK step 1: about 15 days of the demo mission with its shipped `pad_deg` 2.0 fit 32 GB, about 10 days with the default pad.
+  - M-35: RUNBOOK troubleshooting says which entry point prints "error: unknown option" and what a directory without `mission.yaml` gets.
+  - M-36: STATUS gives the ensemble size per budget (n_max 16, 64, 256, 512; n_min 8, 32, 73, 73).
+- M-37 was not confirmed (`remote.download` calls `size()` first, which refuses a server that ignores Range) and has no fix and no DECISIONS row.
+- Look-ahead items (L0 and the merge needs; DECISIONS 571 to 573):
+  - The TAO cache of the current selection rule lives in `<data>/tao/s2` (`tao.cache_dir`): the first run on this code fetches TAO again (network needed once, also for a machine that runs with `CAFE_OFFLINE`), and the older cache and the ledgers that hash it are left as they were; DECISIONS 571. The same ledger-against-manifest problem for a cache that grows (a wider box or window) is open as P-32.
+  - Report: a stage-3 row takes the time of its own window and is labelled `W<k> <part>`; "Time not shown" no longer appears on a USV with one window; DECISIONS 572.
+  - `hycom.box360` refuses a box wider than the circle; the `acceptance --out` help names the foreign-runs refusal; DECISIONS 573.
+- Pending at the gate: the test counts; re-store the slow stage-3 results (`nest.py` changed, so `lbm.physics_sha()` did) and `receipts --slow`; one online `fetch` on each data directory (TAO is selected again, above); `make bench` on each machine used and `make mutation` at code freeze as before (`physics/usv.py` changed).
+
 ### Known issues
 
 Each was checked against the committed code at `d7a618b` on 2026-10-30 before it was listed. Line numbers are those of `d7a618b`; the working tree also holds uncommitted edits to `cafe/pm/physics/*.py`, `stats/intervals.py` and `audit.py`, which were not read as part of this entry.

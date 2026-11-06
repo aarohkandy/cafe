@@ -222,7 +222,8 @@ def test_the_usv_speed_prior_says_its_width_is_not_an_uncertainty_of_this_model(
 def test_the_runbook_says_what_fits_in_memory_and_that_the_figure_is_the_models():
     """M-38: a 30-day window is refused on a 32 GB machine on a figure that rests on one measured 6-day point; the RUNBOOK says so."""
     rb = text("docs", "RUNBOOK.md")
-    assert "About 15 days of the demo box fit 32 GB" in rb and "(`pad_deg`)" in rb
+    assert "About 15 days of the demo mission (its shipped `pad_deg` 2.0, 8 workers) fit 32 GB" in rb and "(`pad_deg`)" in rb      # round 10, M-34: said "demo box", pad-agnostic
+    assert "with the default pad about 10 days do" in rb
     assert "The memory figure is the model's (linear from one measured 6-day point), not a measurement." in rb
 
 

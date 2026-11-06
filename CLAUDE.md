@@ -22,9 +22,9 @@ Read these before changing anything, in this order:
 **Never run tests or pipelines on the laptop.** It has Python 3.9; the package needs 3.12 in the `cafe-pm` image on homebase.
 
 - `./pm.sh <cmd>` syncs to the shared `~/work/cafe/pm` with `--delete`, for the one checkout that owns it (`~/work/cafe/pm.owner` names it; a sync from another checkout is refused, `PM_TAKE=1` takes it over) and runs `<cmd>` in the image. Data is `~/work/cafe/pmdata`, mounted at `/data`.
-- `PMX=pm_<you> PM_CPUS=2 PM_MEM=8g bin/pmx.sh <cmd>` syncs with `--delete` to your own `~/work/cafe/pm_<you>`. Use this whenever another agent may be working. `PMX` must start with `pm_` (anything else is refused with exit 2); `pm.sh` and `bin/pmx.sh` share one exclude list for what the server writes, `bin/sync_filters`.
+- `PMX=pm_<you> PM_CPUS=2 bin/pmx.sh <cmd>` syncs with `--delete` to your own `~/work/cafe/pm_<you>`. Use this whenever another agent may be working. The defaults on this path are `PM_CPUS=2` and `PM_MEM=12g` (12g is the least that plans the demo mission); `./pm.sh` keeps the whole box, 8 and 28g. `PM_CPUS` must be a whole number (`1.5` is refused), and `PM_MEM`, `PM_SHM`, `PM_THREADS`, `CAFE_MIN_FREE_GB` and `TM` are checked the same way by `bin/pm_checks.sh`: anything not plain exits 2 with nothing sent. `PMX` must start with `pm_` (anything else is refused with exit 2); `pm.sh` and `bin/pmx.sh` share one exclude list for what the server writes, `bin/sync_filters`.
 - The orca worker (no docker; shared with another person, so write only inside `~/cafe-worker`): `PM_HOST=cafe-orca PM_RUNTIME=proot` in front of `bin/pmx.sh`. The whole suite is `PM_HOST=cafe-orca PMX=pm_<you> bin/orca_gate.sh <K> <tag> [--cov]`: K jobs of 2 CPUs, about 55 min with coverage (reuse one tag; `docs/ORCA_RUNNER.md`).
-  - `TM=<name>` runs it detached in tmux. The log goes to `~/logs/<name>.log` and ends with `rc=N`.
+  - `TM=<name>` runs it detached in tmux. The log goes to `~/logs/<name>.log` and ends with `rc=N`. A gate tag, and under proot a `TM`, may not end in `_s<digits>`, `_serial`, `_shares` or `_audit` (they are the suite's job-log names).
 - Both runners split their arguments on spaces. For anything with quotes or pipes, write a script, copy it over and run it:
   `scp -i ~/.ssh/homebase_ed25519 x.sh azureuser@100.108.213.121:work/cafe/pmdata/` then `bin/pmx.sh sh /data/x.sh`.
 - pytest's summary line is suppressed (`-q -q`). Read the result from the exit code, or count the result characters on the progress lines only: `grep -aE "^[.sxFE]+ *(\[ *[0-9]+%\])?$" log | sed "s/ *\[.*//" | tr -d "\n" | fold -w1 | sort | uniq -c`. A looser `^[.sxFE]` also counts traceback lines that start with `E` (round 4 read 2,250 passed for a real 2,196).
@@ -32,6 +32,7 @@ Read these before changing anything, in this order:
   - **The full suite** takes about 75 min on 6 CPUs. Run single files with `-k` while you work.
   - **`python -m cafe.pm audit [<run>]`** runs ruff, mypy and the whole suite with coverage (two passes since round 6: xdist by file, then the real-time tests), plus the banned scan, the mutation record and the ledgers of any run given. `--code-only` *skips* ruff, mypy and pytest (only the scans and ledgers); `--ledgers-only` checks only the ledgers.
   - **A quick demo run:** `bin/pmx.sh python -m cafe.pm run --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out /data/runs/<name> --fresh`, about 5 min.
+    That time is for 6 CPUs; the default through `bin/pmx.sh` is 2 CPUs and 12g, so ask for 6 CPUs and 24g of memory (`PM_CPUS` and `PM_MEM`) when the box is free.
 - The SITL ArduCopter test in `tests/test_uas.py` depends on real time and fails now and then. Rerun it before believing a failure.
 
 ## The bar for a change

@@ -21,6 +21,13 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    mss` in between, Stokes drift integrated from that spectrum. *If yes:* hourly spectra replace the fit and the
    Stokes term becomes data instead of modelled (report badge changes from MODELLED to DATA).
 
+   2a. **Are the `umwmout_YYYY-MM-DD_HH:MM:SS.nc` files stamped at the start or the end of the hour?** (review round 10, M-22) A UMWM file carries no
+   time in its content (no global attributes, no time variable), so the hour in its name is the only label, and WRF's files are checked against their
+   `Times`. If an output is stamped at the end of an averaging period, the waves are shifted by that period against the wind and nothing flags it.
+   *Default:* the hour in a file's name is its valid hour (the waves of `umwmout_..._12:00:00` are those at 12 Z, the same instant as the WRF file of that name).
+   *If they are end-stamped:* every UMWM field is one hour late against WRF, and the read in `orca.umwm_hour` has to take the file one hour later (a code
+   change); a content cross-check (UMWM `wspd` against WRF 10 m speed by lag) would then be worth building (DECISIONS 556).
+
 3. **`SST_UPDATE = 0`.** Was the frozen 1 March SST intentional? Is there a run with `sf_ocean_physics` or coupled
    SST? *Default:* frozen WRF SST + the COARE warm-layer model, enabled and badged MODELLED; the TAO comparison
    quantifies the frozen-SST error. *If a coupled run exists:* lay its files out like orca's WRF files and re-point `CAFE_ORCA` at them (the mission file has no atmosphere

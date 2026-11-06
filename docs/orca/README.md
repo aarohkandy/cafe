@@ -76,7 +76,7 @@ Run it again after the container restarts; it restarts only our own `sshd` and `
 ## What is left before jobs can run
 
 1. Copy the image and the data onto Orca, streamed from homebase, whose disk has too little room for a temporary copy. About 18 GB in all: the image is 5 GB, `pmdata` 7.7 GB, `data` 5.4 GB.
-2. Copy the image and data with `bin/orca_sync.sh`, then run the go check `bin/orca_ready.sh` ([`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md)).
+2. Copy the image and data with `bin/orca_sync.sh`, then run the go check `PMX=pm_<you> PM_HOST=cafe-orca sh bin/orca_ready.sh` (default `pm_ready`; use your own `PMX` when another agent may run the check; the last step lists, as a warning, anything else that changed under `~` while it ran, because the account is shared) ([`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md)).
 3. Run `interFoam` in parallel under proot. If MPI's fast shared-memory transport fails there, this is where it shows.
 4. Run the full suite and compare it with the burst VM.
 5. Only after that, ask the owner about deleting `burst-cafetest-rg`. Read `~/az_serv/docs/MONEY.md` first.
