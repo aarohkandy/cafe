@@ -99,7 +99,7 @@ Estimates, not measurements.
 
 ## Undo
 
-On Orca, `bash /tmp/cafe_orca_setup.sh undo` stops our two processes and deletes `~/cafe-worker`, and refuses if that folder is not marked as ours. Then remove the device `orca-cafe` at https://login.tailscale.com/admin/machines.
+On Orca, `bash /tmp/cafe_orca_setup.sh undo` refuses while a job of ours runs from `~/cafe-worker` (stop it first; sshd's own connection handlers do not count), logs out of Tailscale while tailscaled still runs (a failed logout is printed, not hidden), stops our two processes, waits until both are gone and deletes `~/cafe-worker`, and refuses if that folder is not marked as ours. Then remove the device `orca-cafe` at https://login.tailscale.com/admin/machines.
 
 ## The test scripts
 

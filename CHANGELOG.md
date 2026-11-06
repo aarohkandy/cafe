@@ -2,15 +2,6 @@
 
 ## Unreleased (premission-step4)
 
-- A link required at no sample in any member gets the verdict NOT EXERCISED instead of GO with P(fail) 0 (stage 1 summary, report badge, sanity table, acceptance diff); a link needed by some members stays graded whatever its median need; DECISIONS 461, round 9 M-17.
-- USV speed sanity: Chiodi's ratio is compared with the anemometer-height ratio, the 10 m one is secondary; DECISIONS 462, round 9 M-7.
-- Emulator section states what ran (variants, points, kill reason) beside the plan; DECISIONS 463, round 9 M-10.
-- Vehicle card: "Dominant failure mode: none (no member failed)" instead of "None"; reach-map caption names the 24 h horizon; report note for the UAS `no_current_data` mode; DECISIONS 464, round 9 M-14, M-21, M-3 (report half).
-- A mission box in a refusal reads "lon 165 E to 165 W (across the antimeridian), lat -5 to 5" instead of the dict (`config.fmt_box`); DECISIONS 465, round 9 M-14.
-- Credibility: a stored receipt with a missing or non-numeric field is a not-run row, not a traceback; DECISIONS 466, round 9 M-4 (credibility half).
-- A vehicle's `platform` given as a path or a dotted name is read by one rule (`config.platform_path`) by the glider, USV and UAS loaders, the report and the credibility page; DECISIONS 467, round 9 M-1.
-- The report says when `throughput.json` was measured on another machine (`machine.machine.warning`, one HTML note); DECISIONS 468, round 9 M-9.
-- Credibility reads a stored wall-model receipt by the fields and the rule stage 3 uses; a UAS card says what a `no_current_data` verdict rests on; a diverged window is called diverged; DECISIONS 466, 469, round 9 M-4, M-3, M-24.
 - `bench/throughput.py all` stops at once when the environment cache is missing; the BRIEF 2.1 finding never rounds a share up to the floor it misses; DECISIONS 459, 460.
 - `PM_RUNTIME=proot` for `bin/pmx.sh` and `pm.sh`, `bin/proot_run.sh`, `bin/orca_sync.sh`: run cafe jobs on a worker with no docker (orca); DECISIONS 458, `docs/ORCA_RUNNER.md`. Hardened after review: the job runs in its own process group and stops on TERM/INT/HUP, stale `run.*` temp directories are swept at start, `orca_sync.sh` checks the root filesystem itself and not only `root.done`, `bin/orca_suite.sh` runs the suite. All of it stays inside `~/cafe-worker` (the runners refuse otherwise), and `bin/orca_ready.sh` is the go check.
 
@@ -479,6 +470,62 @@ Round 8 read the q8 quick run (`runs/q8`, code `0a0509c`) and the code at `9910a
   - L0-6: report and `validate` wording: "12 members left", "12 rows of this class", "1 row", "1 value", "1 vehicle", "1 receipt passed".
   - L1: platform files refuse an implausible angle, a fractional or huge cell count and an absurd mass, energy, size or hotel load, each with its bound in the message (new `check_params` kind `int:lo:hi`). The second L1 finding (the M-47 singular covering 3 of 9 units) was already fixed by L0-6.
   - Gate on `r8-merged` (DECISIONS 457): the assembled orca stores carry `sha256` (= their tree hash) in the ingest ledger, so the report's `data_consumed` no longer lists them without one; the UAS what-if flip test no longer depends on the coverage gate's luck on 24 hold-out points.
+
+Review round 9 (`review/round_9/merged.md`: 40 findings, 0 critical, 6 major, 34 minor; 37 confirmed, 3 partly, 0 not confirmed; DECISIONS 461 to 500, plus the look-ahead fixes 501 to 516)
+
+Round 9 read the q9 quick run (`runs/q9`, code `08f05d7`, made on the 32-vCPU burst VM) and the code, with four reviewers (A and B over everything, C over the vehicle physics and stage 3 line by line, D over the environment readers, the report, the credibility page, the receipts and the DTMB study); each finding was checked by an independent verifier against `c1dd8cd`. Six batches fixed disjoint files (mission input and CLI, report and credibility, vehicle physics, stage 3, runner scripts, environment stores; batch A's ledger, audit, TAO and test-strength half was done on its own branch) and each finding has a regression test shown failing on the old code. The lead then fixed the same defect in the sibling callers, readers and writers (look-ahead items L0, L1, L2, and the batches' own leftovers). The verdicts of q9 are those of q5 to q7 (glider_eq MARGINAL, glider_2n GO, USV NO-GO, UAS NO-GO). Every stored slow stage-3 result is stale again (`lbm.physics_sha()` changed), and the golden and `docs/mutation.json` are made at code freeze. The test count is pending: the gate has not run on the merged tree.
+
+- Mission input and CLI (M-1, M-2, M-9, M-11, M-12, M-13, M-14, M-18, M-20, M-33; DECISIONS 461, 462, 469, 471, 472, 473, 474, 478, 480, 493):
+  - M-1: `platform: platforms/x.yaml` (or an absolute path) works through `run`: one rule, `config.platform_path`, in the loaders, the hangar stage (the file is now a hashed ledger input), the report label and the credibility keys.
+  - M-2: a YAML alias between two vehicles is unshared at load (a `whatif` or emulator variant moved both); the mission hash does not change.
+  - M-9: `plan` and `run` say when `config/throughput.json` was measured on another CPU count or model (an entry's own CPUs too, L1-1); the report prints the warning the run recorded.
+  - M-11: `--gpu-mem-gb` must be a positive number (nan, inf, negative and 0 were a traceback or a silent no-guard plan).
+  - M-12: `run --mission <run dir>/mission.yaml --out <run dir>` is not a `SameFileError`.
+  - M-13: `validate` refuses a section with two equal consecutive waypoints, and the USV and glider constructors drop a repeated waypoint (a USV section of one point is the station).
+  - M-14: a mission box in a message reads "lon 165 E to 165 W (across the antimeridian), lat -5 to 5, pad 2 deg" (`config.fmt_box`), not a dict.
+  - M-18: `whatif --drop` of every vehicle is refused.
+  - M-20: a box with `lon_min == lon_max` is refused as empty.
+  - M-33: a `gofs31` `ocean.path` must end in `.zarr`.
+- Ledger, audit, TAO and tests (M-15, M-16, M-19, M-30, M-31, M-32; DECISIONS 475, 476, 479, 490, 491, 492):
+  - M-16: `report --run` re-runs the report's two self-checks on the files it wrote and records them in the report ledger (a failed check exits 1 and leaves the ledger); `audit` no longer fails after a re-render.
+  - M-19: `audit` and the resume check read a copied or renamed run's own files (`ledger.resolve`); `cp -r runs/q9 runs/quick` no longer gives "chain broken" and a tampered copy is caught.
+  - M-31: a TAO file without its `_QC` variable is refused, `fetch` picks another deployment and lists the refused file under `unusable`.
+  - M-32: the COARE wind lift of a mooring uses air temperature, humidity and SST only within `tao.air_gap_s` (3600 s, `config/assumptions.yaml`) of a sample, else the neutral lift; one function (`tao.wind10`) for `tao.compare` and the fit.
+  - M-15, M-30: tests for the current-direction and wind-direction spread, the 20 % u* band (`pipeline.USTAR_AGREE_BAND`), the TAO deployment window and `_bin` defaults, and the store hash names; each fails on the mutant it names.
+- Report and credibility (M-7, M-10, M-17, M-21, and the report halves of M-3, M-4, M-14; DECISIONS 467, 470, 477, 481):
+  - M-7: the USV speed sentence compares Chiodi's 0.178 with the mission ratio at the anemometer height (0.135 in q9, 24 % short), the 10 m ratio (0.129) is secondary.
+  - M-10: the emulator section says what ran ("This run:") beside the plan ("Plan:").
+  - M-17: a link needed by no member gets the verdict NOT EXERCISED, not GO (report badge, sanity table, acceptance diff).
+  - M-21: the reach-map caption names the 24 h horizon.
+  - A vehicle with no failed member reads "Dominant failure mode: none (no member failed)"; a UAS card says what a `no_current_data` verdict rests on; a stored receipt with a missing or non-numeric field is a "not run" row.
+- Vehicle physics (M-3, M-22, M-25, M-26, M-27; DECISIONS 463, 482, 485, 486, 487, 501):
+  - M-3: a UAS met by a wind that is not finite in flight is a labelled `no_current_data` failure and flies on zero wind (it was a silent NaN vehicle); a ship with no finite air state scrubs the launch; `fly_sitl` does the same.
+  - M-22: a glider or USV platform file must carry every `mission_defaults` key its model reads, each in range, or it is refused naming the file and the key.
+  - M-25: `comms.acoustic_link` takes a scalar range with an ambiguous Bellhop link.
+  - M-26: `fly_sitl`'s docstring states the dict it returns.
+  - M-27: USV `no_current_data` is stamped with the end of the step like every other flag.
+  - Leftover: a glider hole in the density, SST or water depth is `no_current_data`, not `no_flight` or `seafloor`.
+- Stage 3 (M-4, M-23, M-24; DECISIONS 464, 483, 484, 502, 504, 514):
+  - M-4: a stored wall-model receipt, sphere result or sphere grid without a number where the code reads one is a failed row or a failed gate check naming the file, not a `KeyError`.
+  - M-23: the gate fails a stored flat plate below Re_L 1e6, as the table does.
+  - M-24: a window that blows up in its last chunk is cut (diverged), runs no FEA and withholds its coefficients; the wall-model and sphere calibrations raise on a diverged run instead of storing it.
+- Runner scripts (M-28, M-29, M-34, M-36, M-37, M-39, M-40; DECISIONS 488, 489, 494, 496, 497, 499, 500, 510, 516):
+  - M-28: `bin/pmx.sh` refuses a `PMX` that is not `pm_<letters, digits, _, ->` and a `TM` with other characters (`PMX=pmdata`, `data`, `pm`, `tmp`, `../x` made `rsync --delete` empty shared data).
+  - M-34: `TM=` judges a detached job by its exact tmux session or an `rc=0` log.
+  - M-39: `pm.sh` syncs with `--delete`; `pm.sh` and `bin/pmx.sh` share one list of server-written outputs, `bin/sync_filters`; the shared `pm` has one owning checkout (`pm.owner`, `PM_TAKE=1`).
+  - M-29, M-36, M-37: `bin/orca_sync.sh` marks a part done only after it arrived, stops on an unknown part name and does not replace the root under a running job (`ORCA_FORCE=1`); `orca_setup.sh undo` logs out before stopping tailscaled, refuses under a running job and waits for the daemons.
+  - M-40: `PM_STOP_GRACE` sets the TERM-to-KILL wait (default 10 s) and reaches the worker; tests for the stop and the stale-directory sweep, which now reads a zombie as gone.
+- Environment stores (M-5, M-6, M-35, M-38; DECISIONS 465, 466, 495, 498, 513):
+  - M-5: `ingest-ocean` refuses a store that is or holds the lab's source (links resolved) and a non-empty directory that is not a Zarr store; a lab store that lost its `zarr.json` can be repaired by the ingest.
+  - M-6, M-38: `orca.assemble` closes each hourly part as it reads it (a window of 21 days or more no longer ends in `Too many open files`) and removes the old manifest before it rewrites the stores.
+  - M-35: `bathy.from_gofs` puts the floor at the deepest valid level plus half a spacing, and a node wet to 5000 m is a lower bound with the assumed sigma `bathy.gofs_open_level_sigma_m` (1000 m, new in `config/assumptions.yaml`).
+- Documents (M-8; DECISIONS 468, 444): the RUNBOOK and row 444 say that the overrun ratios are per machine (q8 on homebase 2.2 times and 12 %, q9 on the 32-vCPU VM 4.2 times and 2.05 times; re-measure with `make bench`); the 45 % and the 2.2 stay.
+- Look-ahead items (L0, L1, L2; DECISIONS 502 to 516):
+  - The credibility page refuses a flat-plate receipt below Re_L 1e6 as stage 3 does (`config.plate_re_problem`); a cut-short `run_<grid>.json` is a named "not run" row and the DTMB, sphere and `hydro.json` files are written through a temporary (`config.write_json`); the stored sphere grid study names and leaves out a grid it cannot use.
+  - The report names the machine the run was on: the other-machine warning is recorded in each stage ledger where the stage ran.
+  - `fly_sitl` scrubs a ship with no air state (`uas.air_at_ship`); the TAO cache check opens the selected files, so a file that lost its QC variable is fetched again; an unreadable ocean store gets the advice of its mission's source (`ocean.is_lab`); `acceptance` refuses a `--mission` inside a directory it removes.
+  - The report's UAS attitude statement is built from the vehicle's own platform file; a copied run missing an output no longer borrows the original's file (`ledger.resolve`); `refuse_overlap` accepts a store inside the source directory; `bin/sync_filters` protects what the server wrote inside `tests/golden/` and `report/` (`P ...***`).
+  - A run made before this merge cannot be re-rendered at its original credibility levels (two new keys in `config/assumptions.yaml` change a hashed input of the stage-3 ledger); rerun it (DECISIONS 515).
 
 ### Known issues
 

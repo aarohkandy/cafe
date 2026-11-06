@@ -1,12 +1,20 @@
-# HANDOFF: state of the TEPEX-C pre-mission simulator (current state: section 00, 2026-11-04; older history below)
+# HANDOFF: state of the TEPEX-C pre-mission simulator (current state: section 00, 2026-11-05; older history below)
 
 Written by the lead session when the user paused it to hand the work to another agent. Read `CLAUDE.md` first (how to run things, the bar for a change, the money rule), then this file.
 
-## 00. CURRENT STATE, 2026-11-04 ~22:10 UTC (read this first; older updates follow in section 0)
+## 00. CURRENT STATE, 2026-11-05 (read this first; older updates follow in section 0)
 
-The lead paused here at the user's request, mid round 8. Everything below is exact, except that **round 8 has since been fixed and merged** (the next block); the branch-by-branch list after it is history.
+The lead paused here at the user's request, mid round 8. Everything below is exact, except that **round 8, and then round 9, have since been fixed and merged** (the next blocks); the branch-by-branch list after it is history.
 
-### Round 8 is closed, round 9 is next (update 2026-11-05 ~11:30 UTC)
+### Round 9 is fixed and merged, the gate has not run (update 2026-11-05)
+- **State.** Round 9 (`review/round_9/merged.md`: 40 findings, 0 critical, 6 major, 34 minor; 37 confirmed, 3 partly) is fixed and merged on branch `r9-merged` (worktree `../cafe-r9m`): the batches A to F, batch L (the second half of A: M-15, M-16, M-19, M-30, M-31, M-32), the batches' own follow-ups and the lead's look-ahead items L0, L1, L2. The documents are written from the hand-backs in `review/round_9/handbacks/`: DECISIONS 461 to 500 (one row per finding M-1 to M-40 in order) and 501 to 516 (the look-ahead fixes), the CHANGELOG "Review round 9" block, RUNBOOK, ORCA_RUNNER, PHYSICS, CREDIBILITY, QUESTIONS_FOR_LAB and STATUS. **Gate result pending; test counts pending.** `r9-merged` is cut from `91c9777`: `premission-step4` has gone on (the orca problem-log commits), so it is not merged into `premission-step4` and not pushed. The batch worktrees `../cafe-r9a` to `../cafe-r9l` and the throwaway `../cafe-r9m-mut` (detached) still exist: remove them when the merge is done.
+- **Checked on the burst VM, not gated:** each batch ran its touched files whole, ruff and mypy clean; nobody ran the 75-minute suite, `audit` with coverage, `make mutation` (the changed physics code needs a rerun of the stored score: `uas.simulate`, `usv._tf`, `physics.drop_repeats`, `acoustic_link`, `_Sim1.step`, the glider hole labels) or a q10 run.
+- **Before the gate, from the hand-backs.** Re-store the slow stage-3 results (`lbm.physics_sha()` changed again, RUNBOOK 7) and re-measure `config/throughput.json` with `make bench` on each machine used (q9 ran on the 32-vCPU VM with homebase's rates: stage 1 took 4.2 times its plan, DECISIONS 468, and the entries of the file carry no `cpus`/`cpu` until the next bench, DECISIONS 509). The first `./pm.sh` on homebase after the merge deletes server-only files in `~/work/cafe/pm` that `bin/sync_filters` does not list, and claims the directory for whoever runs it (`pm.owner`): `ls ~/work/cafe/pm` and run it once from the lead's checkout first (DECISIONS 499, 510). `CLAUDE.md` still lacks two round 9 notes (that `pm.sh` and `bin/pmx.sh` share the exclude list `bin/sync_filters`, and that `PMX` must start with `pm_`); this documents pass did not edit it.
+- **Open and decided later by the owner:** `credibility._uncertainty` still counts a NOT EXERCISED link among the verdicts with n below `n_certify` (DECISIONS 477); the credibility page does not look at a wall-model receipt's `code_sha`, the stage-3 gate does (DECISIONS 502); a run made before this merge cannot be re-rendered at its original credibility levels (DECISIONS 515); a tracked golden is still to be re-based at code freeze; `lbm.main slow` and `nest.main slow` now write through a temporary, `orca.write_json` and `hycom._write_json` are still their own copies of the atomic writer.
+- **Orca:** no real cafe job has moved there, and none starts until the owner says go. Everything of round 9's orca-script work (M-29, M-36, M-37, M-40) was tested with stand-ins and a fake proot, never the real orca (`docs/ORCA_RUNNER.md`, "Round 9 rehearsals").
+- **Next:** review the merge, take `premission-step4` into it (or the other way round), run the gate, commit, then q10 (the quick run on the round-9 code) and round 10. No round has been clean yet: round 9 found 40.
+
+### Round 8 is closed (update 2026-11-05 ~11:30 UTC; round 9 followed above)
 - **Gate green on `594bade`:** 2,912 tests, coverage 99.949 %, ruff and mypy clean; the only audit failure is the expected `docs/mutation.json`. Round 8 and the orca runner are merged on `premission-step4` and pushed. All round-8 worktrees are removed.
 - **Orca is connected and passed its go check on the real machine, but no real job has moved there.** The owner said to wait (2026-11-05, "lets wait till tmrw"): do not start cafe jobs on orca until they say go. `docs/ORCA_RUNNER.md` has the sequence; everything of ours stays inside `~/cafe-worker`. The laptop ssh name is `cafe-orca`. If orca's container restarts, the owner reruns `bin/orca_setup.sh`.
 - Burst VM auto-shutdown still fires at 06:00 UTC daily; a job crossing it dies. `az vm start -g burst-cafetest-rg -n cafetest` brings it back.
@@ -26,6 +34,7 @@ The lead paused here at the user's request, mid round 8. Everything below is exa
 | 6 | 26 | 6 | fixed `8dc0ffc` |
 | 7 | 47 (four reviewers) | 14 | fixed `0a0509c`; q8 run, `e4b6210` |
 | 8 | 56 (four reviewers + lead L-1..L-3) | 6 | **fixed, merged and gated** (`594bade`, then the orca runner) |
+| 9 | 40 (four reviewers) | 6 | **fixed and merged on `r9-merged`; gate pending** (q9 was the quick run on the round-8 code, `08f05d7`) |
 No round has been clean yet. The user keeps the strict rule (two consecutive rounds with zero findings, minor included; they chose "A" again on 2026-11-04 after being told it may not converge). Demo verdicts unchanged since q5: glider_eq MARGINAL 15/64, glider_2n GO 0, USV NO-GO 60, UAS NO-GO 55.
 
 ### Round 8 fixes: branch by branch (all six branches pushed to GitHub; merge into `premission-step4`)

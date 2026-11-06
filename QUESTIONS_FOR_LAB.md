@@ -40,6 +40,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    (d) Do the range limits the loaders enforce fit your vehicles? (review round 6, M-9 and M-10) The limits are bounds of the model that we chose, not datasheet values: a platform leaf outside its range
    (for example `stw_cap_ms` above 50 m/s, `gravity` above 20, `rudder_x_m` 0, Seaglider `hd_s` outside -0.9 to 0) is refused at load, and a mission with `dive_depth_m` outside 1 to 2000 m (for a glider, outside its
    `min_dive_m` to `rating_m`), `radius_km` outside 0.01 to 1000 or `lost_after_h` above 720 is refused by `validate`, each message naming the field and the limit.
+   Since review round 9 (M-22) a glider or USV file must also carry every `mission_defaults` key its model reads, each in a range we chose: USV `becalmed_after_h` and `corridor_km` above 0, `calm_sustain_s` and `stall_sustain_s` 0 or above, `track_tolerance_km` above 0 and at most 1000, `wp_radius_m` above 0, `roll_limit_deg` above 0 and at most 180; glider `dive_depth_m`, `station_tol_m` and `wp_radius_m` above 0, `lost_hours` and `unreach_hours` 0 or above.
    *Default:* those limits. *If a real vehicle or mission is outside one:* tell us the number, and the limit in `cafe/schemas/mission.json` or the platform's `REQUIRED` table is widened (a code change).
 
 5. **Mission definition.** Deployment windows, waypoints, station-keeping tolerance, surfacing schedule, which
@@ -111,7 +112,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
 
 14. **Does Chiodi et al.'s 0.178 include currents?** The Saildrone speed prior is calibrated to the mean speed over ground / mean wind of Chiodi et al.
     (0.96 m/s over 5.4 m/s). That ratio was observed in real ocean currents, while the calibration scenario of the tool has none. In the q5 run the
-    ensemble's median ratio is 0.129 (0.135 at the anemometer height); in the nominal diagnosis scenario of review round 2 (not the ensemble) it was 0.120, and the
+    ensemble's median ratio is 0.135 at the anemometer height, the height Chiodi's 0.178 is defined at (0.129 per 10 m wind; review round 9, M-7); in the nominal diagnosis scenario of review round 2 (not the ensemble) it was 0.120, and the
     westward current alone lowered it from 0.186 to 0.150 by turning a beam reach into a close-hauled course. If the 0.178 already contains the effect of currents, the tool penalises the current twice. Which is it, and if you have the
     underlying Saildrone tracks, what was the current along them?
     *Default:* assume the 0.178 does not include currents; the prior stays as calibrated, the report prints the mission ratio beside it, and
