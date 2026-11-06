@@ -2305,20 +2305,39 @@ def test_r9_m1_a_platform_given_as_a_path_is_labelled_counted_and_linked_in_the_
 
 def test_r9_m9_the_report_says_when_the_rates_are_another_machines_and_only_in_the_volatile_place(run, monkeypatch):
     """throughput.json measured on another CPU count or model: the machine block now says so (report.json machine.machine, which acceptance.VOLATILE
-    leaves out of the comparison of two runs, and one note in the HTML). plan.json and the stage ledgers stay free of it: two machines must agree on them."""
+    leaves out of the comparison of two runs, and one note in the HTML). plan.json and the notes stay free of it: two machines must agree on them. The
+    warning is the run's own, read from the ingest ledger (round 9, L0), so the report no longer looks at the host that renders it."""
     m, plan = pm_run.make_run(run)
-    monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: "throughput.json was measured on bench (8 CPUs); here it is 32 CPUs, not 8")
+    ing = run / "checkpoints" / "ingest" / "ledger.json"
+    edit_json(ing, lambda d: d["machine"].update(warning="throughput.json was measured on bench (8 CPUs); here it is 32 CPUs, not 8"))
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
     assert rep["machine"]["machine"]["warning"] == "throughput.json was measured on bench (8 CPUs); here it is 32 CPUs, not 8"
     assert "<b>Note:</b> throughput.json was measured on bench (8 CPUs); here it is 32 CPUs, not 8." in h
     assert "was measured on bench" not in json.dumps(rep["machine"]["notes"]) + (run / "plan.json").read_text()
-    assert all("was measured on bench" not in (run / "checkpoints" / st / "ledger.json").read_text() for st in report.STAGES[:-1])
-    monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: None)
+    edit_json(ing, lambda d: d["machine"].update(warning=None))
     report.write(run, m, plan)
     quiet = load(run)
     assert quiet["machine"]["machine"]["warning"] is None and "<b>Note:</b>" not in (run / "report" / "index.html").read_text()
     assert "machine.machine" in acceptance.VOLATILE                                       # what two runs of one seed on two machines may differ in
+
+
+def test_l0_the_report_names_the_machine_the_run_was_on_not_the_one_that_renders_it(run, monkeypatch):
+    """Round 9, M-9 sibling: `report --run` on a machine other than the run's compared throughput.json with the renderer: a run made on the benchmarked
+    box got 'here it is 32 CPUs' when re-rendered on a bigger one, and a run made on another box lost its warning when re-rendered on the benchmarked one."""
+    m, plan = pm_run.make_run(run)
+    ing = run / "checkpoints" / "ingest" / "ledger.json"
+    monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: "THIS HOST IS NOT THE BENCH")           # what the rendering host would say
+    edit_json(ing, lambda d: d["machine"].update(warning=None))                                          # the run itself matched its bench
+    report.write(run, m, plan)
+    assert load(run)["machine"]["machine"]["warning"] is None and "THIS HOST" not in (run / "report" / "index.html").read_text()
+    monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: None)                                 # the rendering host matches the bench
+    edit_json(ing, lambda d: d["machine"].update(warning="the run was on another machine"))
+    report.write(run, m, plan)
+    assert load(run)["machine"]["machine"]["warning"] == "the run was on another machine"
+    edit_json(ing, lambda d: d["machine"].pop("warning"))                                                # a ledger from before the field: unknown, not a guess
+    report.write(run, m, plan)
+    assert load(run)["machine"]["machine"]["warning"] is None
 
 
 def pm_run_page(run, m, plan, **uas_edit):

@@ -187,6 +187,22 @@ def _series(path: Any, var: str, mode: str, t0: float, t1: float) -> dict[str, A
     return dict(t=t[ok], z=z, **{n: v[ok] for n, v in vals.items()})
 
 
+def unusable_selected(out_dir: Any) -> list[str]:
+    """The files out_dir/manifest.json selects that `load_tao` would refuse to read (`_series` raises ValueError: no QC variable), as "key: why".
+    `fetch_tao` never selects such a file; a cache built before that, or a file whose variable was dropped later, still hashes to its manifest, so the
+    cache check asks this too and fetches again instead of failing hours later in the ingest (round 9, M-31 sibling)."""
+    out = pathlib.Path(out_dir)
+    man = json.loads((out / "manifest.json").read_text())
+    bad = []
+    for sel in man["selected"].values():
+        for var, key in sel.items():
+            try:
+                _series(out / key, var, man["files"][key]["mode"], man["t0"], man["t1"])
+            except ValueError as e:
+                bad.append(f"{key}: {e}")
+    return bad
+
+
 def load_tao(out_dir: Any, t0: Any = None, t1: Any = None) -> dict[str, dict[str, Any]]:
     """{mooring: dict(lat, lon, wind=dict(t, u, v, z), sst=dict(t, value [K], z), airt=dict(t, value [K], z), rh=dict(t, value [0..1], z))}
     from the files fetch_tao selected; verifies the SHA-256 of every file it reads. Variables a mooring lacks are absent."""

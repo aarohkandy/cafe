@@ -2871,6 +2871,30 @@ def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
         assert pipeline._tao_cached(tdir, box, t0, t1) is False
 
 
+def test_l0_a_tao_cache_whose_selected_file_lost_its_qc_variable_is_not_cached(data_copy):
+    """Round 9, M-31 sibling: the cache check hashed the files but never opened them, so a selected file without its QC variable (a cache built before M-31, or
+    a variable dropped later) passed, and `load_tao` raised a bare ValueError hours into the ingest."""
+    import xarray as xr
+    from cafe.pm.env import remote
+    tdir = data_copy / "tao"
+    mp = tdir / "manifest.json"
+    m = config.load_mission(MISSION_PATH)
+    box, t0, t1 = pipeline.ocean_box(m), config.utc(m["window"]["start"]).timestamp(), config.utc(m["window"]["end"]).timestamp()
+    assert pipeline._tao_cached(tdir, box, t0, t1) is True
+    man = json.loads(mp.read_text())
+    key = next(k for sel in man["selected"].values() for k in sel.values())
+    with xr.open_dataset(tdir / key) as ds:
+        ds = ds.load()
+    ds.drop_vars([v for v in ds if str(v).endswith("_QC")]).to_netcdf(tdir / key)
+    man["files"][key]["sha256"] = remote.sha256(tdir / key)
+    mp.write_text(json.dumps(man))
+    assert tao.verify(tdir) == len(man["files"])                                                       # it still hashes to its manifest
+    assert pipeline._tao_cached(tdir, box, t0, t1) is False
+    assert [u.split(":")[0] for u in tao.unusable_selected(tdir)] == [key]
+    with pytest.raises(ValueError, match="_QC is missing"):
+        tao.load_tao(tdir)
+
+
 def test_r6_m8_a_corrupt_umwm_zarr_json_is_a_config_error_naming_the_file_and_the_fix(data_copy):
     cache = data_copy / "cache" / "ci_fixture"
     (cache / "orca" / "umwm.zarr" / "zarr.json").write_text("{garbage")
@@ -3526,9 +3550,13 @@ def test_r9_m9_the_run_logs_the_other_machine_warning_after_the_plan_and_it_is_i
     ctx = go(tmp_path / "run", log)
     assert log[0] == budget.describe(ctx.plan) and log[1] == "note: THIS HOST IS NOT THE BENCH"
     run = tmp_path / "run"
-    files = [run / "plan.json", *(run / "checkpoints" / st / "ledger.json" for st in STAGES)]
-    assert all("NOT THE BENCH" not in f.read_text() for f in files)
+    assert "NOT THE BENCH" not in (run / "plan.json").read_text()
+    led = {st: json.loads((run / "checkpoints" / st / "ledger.json").read_text()) for st in STAGES}
+    assert all(d["machine"]["warning"] == "THIS HOST IS NOT THE BENCH" for d in led.values())      # round 9, L0: the run's own record, read back by the report
     monkeypatch.setattr(budget, "machine_warning", lambda *a, **k: None)
     quiet_log = []
     go(tmp_path / "run2", quiet_log)
     assert not [m for m in quiet_log if m.startswith("note:")] and ctx.hash == pipeline.Context(MISSION_PATH, "ci", 0, tmp_path / "run3", quiet).hash
+    quiet_led = {st: json.loads((tmp_path / "run2" / "checkpoints" / st / "ledger.json").read_text()) for st in STAGES}
+    assert all(d["machine"]["warning"] is None for d in quiet_led.values())
+    assert all(led[st]["config_hash"] == quiet_led[st]["config_hash"] for st in STAGES)           # what a resume compares does not see the warning

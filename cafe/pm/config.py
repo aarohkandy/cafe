@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import datetime as dt, hashlib, json, math, pathlib, re
+import datetime as dt, hashlib, json, math, os, pathlib, re
 from collections.abc import Hashable
 from typing import Any
 
@@ -209,6 +209,14 @@ def json_object(p: pathlib.Path, fix: str = "`run` writes it, so run it again (-
     return d
 
 
+def write_json(p: pathlib.Path, obj: Any, **kw: Any) -> None:
+    """`obj` as JSON in `p` through a sibling temporary and os.replace: a run killed mid-write leaves the old file, never half of a new one that
+    `json_object` and the other readers of a stored result would then have to refuse (round 9, L0; the writer of every slow-run receipt)."""
+    tmp = p.with_name(p.name + ".tmp")
+    tmp.write_text(json.dumps(obj, **kw))
+    os.replace(tmp, p)
+
+
 def finite_real(v: Any) -> bool:
     """A finite real number: not a bool, a string, None, NaN or infinity, nor an integer too large for a float (json.loads gives a 400-digit literal as an
     int, and math.isfinite raises OverflowError on it)."""
@@ -227,6 +235,15 @@ def missing_numbers(d: dict[str, Any], numeric: tuple[str, ...], optional: tuple
 
 PLATE_FIELDS = ("err", "cf", "re", "ittc", "yfrac")         # what the wall-model plate receipt's readers index; each must be a finite number (missing_numbers)
 CHANNEL_FIELDS = ("err", "cf", "cf_dean")                   # the channel's: stage 3's gate reads `err`, the credibility report `cf` and `cf_dean`
+PLATE_RE_MIN = 1e6                                          # ITTC-57 is a turbulent correlation: a plate run below this Re_L is not compared with it
+
+
+def plate_re_problem(name: str, d: dict[str, Any]) -> str | None:
+    """Why a stored flat-plate receipt `d` (read by `missing_numbers` over PLATE_FIELDS, so `re` is a finite number) cannot count: it was run below
+    PLATE_RE_MIN. The one rule of the stage-3 gate (`wallmodel._stored_receipts`) and the credibility page (round 9, L0)."""
+    if d["re"] < PLATE_RE_MIN:
+        return f"{name} is at Re_L {d['re']:.3g}, below the {PLATE_RE_MIN:g} the comparison needs (rerun it)"
+    return None
 
 
 def _leaf_problems(node: Any, path: str = "") -> list[str]:

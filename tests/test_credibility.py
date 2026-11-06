@@ -1073,3 +1073,36 @@ def test_r9_m15_the_ustar_finding_names_the_band_the_ingest_check_used(run, monk
     ingest_check(run, value=0.5)
     f = factors(run)["data_pedigree"]
     assert any("have COARE u* within 35 % of UMWM ust" in m for m in f["missing"]) and not any("within 20 %" in m for m in f["missing"])
+
+
+def test_l0_the_page_refuses_a_plate_receipt_below_the_minimum_re_as_stage_3_does(data, run, monkeypatch):
+    """Round 9, M-23 sibling: stage 3 refused a plate at Re_L 9.8e5 (ITTC-57 is a turbulent correlation) and the page drew a C_f-vs-ITTC row from it, which
+    also lifted Validation from 0 to 1. Both read the file through config.plate_re_problem now; at the limit itself it counts."""
+    from cafe.pm.stage3 import lbm, wallmodel
+    rec = data / "receipts"
+    rec.mkdir(parents=True)
+    monkeypatch.setattr(wallmodel, "SLOW_DIR", rec)
+    plate = dict(cf=0.0040, re=9.8e5, ittc=0.0041, err=0.025, yfrac=0.95, code_sha=lbm.physics_sha())
+    (rec / "wm_flat_plate.json").write_text(json.dumps(plate))
+    (rec / "wm_channel.json").write_text(json.dumps(dict(GOOD_CHANNEL, code_sha=lbm.physics_sha())))
+    gate = wallmodel.stale_wall_receipts()
+    assert gate == ["wm_flat_plate.json is at Re_L 9.8e+05, below the 1e+06 the comparison needs (rerun it)"]
+    rows = {r["id"]: r for r in cr.vv20_rows(data)}
+    assert rows["wallmodel:wm_flat_plate"]["status"] == "not run" and rows["wallmodel:wm_flat_plate"]["note"] == f"not run: {gate[0]}"
+    assert rows["wallmodel:wm_flat_plate"]["S"] is None and rows["wallmodel:wm_channel"]["status"] == "run"
+    (rec / "wm_channel.json").unlink()
+    assert factors(run)["validation"]["level"] == 0                                               # the refused plate is the only comparison: none ran
+    (rec / "wm_flat_plate.json").write_text(json.dumps(dict(plate, re=wallmodel.PLATE_RE_MIN)))
+    assert next(r for r in cr.vv20_rows(data) if r["id"] == "wallmodel:wm_flat_plate")["status"] == "run"
+    assert wallmodel.stale_wall_receipts() == ["wm_channel.json is not stored"]
+
+
+@pytest.mark.parametrize("damage", ['{"grid": "coarse", "recipe": "x", "speeds": {"0.28": {"ct": 0.00', "[]", '{"recipe": "x"}'])
+def test_l0_a_damaged_dtmb_run_file_is_a_not_run_row_that_names_it_not_a_traceback(run, data, damage):
+    """Round 9, M-4 sibling: json.loads(...).get in dtmb5415 stopped Facts, so the report stage, `report --run` and the page, on a file `run_grid` left
+    cut short."""
+    write_dtmb(data)
+    (data / "dtmb5415" / "run_coarse.json").write_text(damage)
+    rows = [r for r in cr.vv20_rows(data) if r["id"].startswith("dtmb")]
+    assert len(rows) == 4 and all(r["status"] == "not run" and "run_coarse.json is unreadable (rerun the grid)" in r["note"] for r in rows)
+    assert factors(run)["validation"]["level"] == 0

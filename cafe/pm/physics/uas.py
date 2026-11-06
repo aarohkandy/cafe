@@ -453,6 +453,16 @@ def wind_ref(env: Any, ship: Ship, origin: XY, t: float, height: float, M: int) 
     return np.broadcast_to(np.asarray(env.wind(lon, lat, height, t).value, float), (M, 2))
 
 
+def air_at_ship(env: Any, lon: Arr, lat: Arr, t: float) -> tuple[np.ndarray, np.ndarray]:
+    """(air density [kg/m3], finite) at the ship from `env.air`: where the air state is not finite (a hole in the weather there) the density is the
+    finite 1.0, so a batch stays finite, and `finite` is False: that member has no launch weather and is scrubbed. The one reading of the air at the ship
+    for `fly_sortie` and `fly_sitl` (round 9, M-3 and its sibling)."""
+    air = env.air(lon, lat, t)
+    rho = air_density(np.asarray(air["psfc"].value, float), np.asarray(air["T2"].value, float), np.asarray(air["q2"].value, float))
+    ok = np.isfinite(rho)
+    return np.where(ok, rho, 1.0), ok
+
+
 def launch_check(env: Any, ship: Ship, t_launch: float, P: dict[str, Any], M: int, origin: XY = (0.0, 0.0), gust: Optional[Ship] = None) -> dict[str, Any]:
     """Weather gate: scrub if the mean wind at flight height over the sortie exceeds the limit, or a gust front is active at
     the ship within `gust_lookahead_min` of launch. -> dict(ok (M,), wind_ms (M,), front (M,), wind_vec (M,2))."""
@@ -585,10 +595,9 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
     gate = launch_check(env, ship, t_launch, P, M, origin, gust)
     sp = _ship_at(ship, t_launch, M)
     lon, lat = lonlat(origin, sp[0], sp[1])
-    air = env.air(lon, lat, t_launch)
-    rho = air_density(np.asarray(air["psfc"].value, float), np.asarray(air["T2"].value, float), np.asarray(air["q2"].value, float))
-    gate["ok"] = gate["ok"] & np.isfinite(rho)  # round 9, M-3: no air state at the ship is no launch weather, as no wind there is
-    prm = derive(P, M, np.where(np.isfinite(rho), rho, 1.0), scale, fault)         # (a scrubbed member's density is not read; finite so the batch stays so)
+    rho, air_ok = air_at_ship(env, lon, lat, t_launch)
+    gate["ok"] = gate["ok"] & air_ok            # round 9, M-3: no air state at the ship is no launch weather, as no wind there is
+    prm = derive(P, M, rho, scale, fault)       # (a scrubbed member's density is not read; finite so the batch stays so)
     hd = np.asarray(heading_deg if heading_deg is not None else (cv.to_deg(-gate["wind_vec"]) if so["leg_heading"] == "upwind" else so["leg_heading"]), float)
     pat = flux_pattern(P, np.broadcast_to(hd, (M,))) if wp is None else np.asarray(wp, float)
     yaw0 = np.radians(90.0 - np.broadcast_to(hd, (M,)))                                   # compass -> math angle
@@ -743,7 +752,9 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
     boot_s / patience_s: sim seconds allowed for the EKF to settle and for each of mode change, arming and take-off. Raises
     SitlUnavailable when the binary is missing. -> NOT the fly_sortie dict: `flags` (arrays of one) holds only battery_reserve, attitude_exceedance
     and no_current_data as flown (the last when a wind lookup was not finite: the firmware is given a zero wind from that lookup on), wind_exceeds_airspeed
-    and lost_link as False (not modelled here), and no profile_incomplete; plus t_end, energy_wh,
+    and lost_link as False (not modelled here), and no profile_incomplete; a ship with no finite air state
+    is scrubbed as in fly_sortie (`scrubbed` True, nothing flown, the firmware not started), and with the default waypoints a wind at the ship that is
+    not finite points the pattern as in still air and sets no_current_data; plus t_end, energy_wh,
     soc_end, max_tilt_deg, landed, scrubbed, track (as fly_sortie's, but without phase) and sitl=dict(instance, messages, workdir, attitude).
     There is no t_first, wp_done, n_wp, ditched, airborne, failed, launch, max_dist_m, max_wind_ms, sat_s, demand_ratio_max or t_launch:
     no stage flies a SITL member (DECISIONS 310)."""
@@ -759,13 +770,21 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
     so = P["sortie"]
     ship0 = np.asarray(ship(t_launch), float).reshape(-1)[:2]
     lon0, lat0 = lonlat(origin, ship0[0], ship0[1])
-    air = env.air(np.atleast_1d(lon0), np.atleast_1d(lat0), t_launch)
-    rho = air_density(float(np.ravel(air["psfc"].value)[0]), float(np.ravel(air["T2"].value)[0]), float(np.ravel(air["q2"].value)[0]))
-    prm = derive(P, 1, rho, {k: np.asarray(v)[member] if np.ndim(v) else v for k, v in (scale or {}).items()})
+    rho, ok = air_at_ship(env, np.atleast_1d(lon0), np.atleast_1d(lat0), t_launch)
+    prm = derive(P, 1, rho[:1], {k: np.asarray(v)[member] if np.ndim(v) else v for k, v in (scale or {}).items()})
+    hole = False
     if wp is None:
         w0 = wind_ref(env, ship, origin, t_launch, so["deck_height_m"] + 30.0, 1)
-        wp = flux_pattern(P, cv.to_deg(-w0))[:, :, 0]
+        hole = not np.isfinite(w0).all()                    # the default pattern points upwind: with no wind at the ship it points as in still air, and says so
+        wp = flux_pattern(P, cv.to_deg(-np.where(np.isfinite(w0), w0, 0.0)))[:, :, 0]
     wp = np.asarray(wp, float)
+    if not ok.all():                      # round 9 sibling of M-3: no launch weather is a scrub, as in fly_sortie; the firmware is never started
+        z = np.zeros(1)
+        return dict(flags={k: np.zeros(1, bool) for k in ("battery_reserve", "wind_exceeds_airspeed", "attitude_exceedance", "lost_link", "no_current_data")},
+                    t_end=z, energy_wh=z, soc_end=np.ones(1), max_tilt_deg=z, landed=np.zeros(1, bool), scrubbed=np.ones(1, bool),
+                    track=dict(t=np.zeros(0), pos_rel=np.zeros((1, 0, 3)), soc=np.zeros((1, 0)), tilt_deg=np.zeros((1, 0)), ewh=np.zeros((1, 0))),
+                    sitl=dict(instance=instance, messages=["scrubbed: no finite air state at the ship; the firmware was not started"],
+                              workdir=workdir, attitude=np.zeros((0, 7))))
     t1 = None if turb is None else turb[member:member + 1]
     g1 = None if gust is None else (lambda t: np.asarray(gust(t), float)[member][None])
     wfn = make_wind(env, origin, so["deck_height_m"], t1, g1)
@@ -781,6 +800,7 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
                              f"{SITL_HOME[1]:.7f},{SITL_HOME[0]:.7f},{so['deck_height_m']:.2f},0", "--defaults", defaults], cwd=wd,
                             stdout=open(wd / "sitl.out", "w"), stderr=subprocess.STDOUT)
     sim = _Sim1(P, prm, wfn, ship0, motor_map, t_launch)
+    sim.hole |= hole
     cap = max_s if max_s is not None else so["duration_s"] * so["hard_stop_factor"]
     stop = threading.Event()
     notes: list[str] = []

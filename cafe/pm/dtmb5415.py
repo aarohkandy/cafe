@@ -46,7 +46,7 @@ from scipy.interpolate import BSpline
 
 from cafe import cfd
 from cafe import receipts as rc
-from cafe.pm import vv
+from cafe.pm import config, vv
 
 _cfd: Any = cfd        # cafe.cfd is untyped and this module patches some of its globals; going through Any keeps both quiet
 
@@ -242,7 +242,7 @@ def prepare(root: pathlib.Path, opener: Callable[[str], Any] = urllib.request.ur
     mesh = build_hull(read_iges(fetch_igs(root / MEMBER, opener=opener)), **kw)
     mesh.export(root / "hull.stl")
     h = hydrostatics(mesh)
-    (root / "hydro.json").write_text(json.dumps(h, indent=1))
+    config.write_json(root / "hydro.json", h, indent=1)
     return h
 
 
@@ -490,7 +490,9 @@ def run_grid(root: pathlib.Path, grid: str, max_iters: int = MAX_ITERS, log: Cal
     (run_<grid>.json) and a restart does not repeat it. Disk is checked before every case. A file stamped with another RECIPE is refused."""
     h = json.loads((root / "hydro.json").read_text())
     f = root / f"run_{grid}.json"
-    out = json.loads(f.read_text()) if f.exists() else dict(grid=grid, recipe=RECIPE, S=h["wetted_area"], surf_level=SURF_LEVEL, speeds={})
+    out = dict(grid=grid, recipe=RECIPE, S=h["wetted_area"], surf_level=SURF_LEVEL, speeds={}) if not f.exists() else read_run(f)
+    if out is None:
+        raise ValueError(f"{f} cannot be read as a run (cut short by a kill, or not made by this code); move it aside and run the grid again")
     if out.get("recipe") != RECIPE:
         raise ValueError(f"{f} was made by recipe {out.get('recipe')!r}, not {RECIPE!r}; move it aside rather than mix the two")
     for fr in frs:
@@ -500,7 +502,7 @@ def run_grid(root: pathlib.Path, grid: str, max_iters: int = MAX_ITERS, log: Cal
         check_disk(root)
         c = out["speeds"][key] = _case(solver, root, grid, h, fr, max_iters, log, out["surf_level"])
         out["surf_level"] = c["surf_level"]              # a level snappy could not do stays down for the later speeds of this grid
-        f.write_text(json.dumps(out, indent=1))
+        config.write_json(f, out, indent=1)
         log(f"{grid} Fr {key}: C_T {c['ct']:.5g} (reference {CT_REF[fr]:.5g}), {c['cells']} cells, y+ {c['y_plus']}, "
             f"{c['iters']} iterations, converged {c['converged']}, viscous C_T {c['ct_viscous']}")
     out["tree_gb"] = tree_gb(root)
@@ -531,16 +533,45 @@ def discretization(values: Sequence[float], cells: Sequence[float], levels: Sequ
     return max(vv.gci_two_grid(values[0], values[1], r21), (max(values) - min(values)) / 2 / abs(values[0])), r21, f"Fs = 3, p = 2 assumed: {why}"
 
 
-def _runs(root: pathlib.Path) -> dict[str, dict[str, Any]]:
-    """{grid: run_<grid>.json} of the files made by this RECIPE; a file of another recipe is not read (see `stale_files`)."""
-    runs = {g: json.loads(f.read_text()) for g in GRID_ORDER if (f := root / f"run_{g}.json").exists()}
-    return {g: r for g, r in runs.items() if r.get("recipe") == RECIPE}
+def read_run(f: pathlib.Path) -> dict[str, Any] | None:
+    """A run_<grid>.json as a dict; None when it cannot be one: undecodable (`run_grid` cut short by a kill), not a JSON object, or without a
+    `speeds` mapping. The one reader of these files (`run_grid`, `_runs`, `stale_files`), so a damaged file is a run that is not there and never a
+    JSONDecodeError or AttributeError in the report stage (round 9, L0; the same rule as M-4's wall-model receipts)."""
+    try:
+        d = config.json_object(f)
+    except config.ConfigError:
+        return None
+    return d if isinstance(d.get("speeds"), dict) else None
+
+
+def _stale(root: pathlib.Path) -> dict[str, str]:
+    """{name: why} of the run_<grid>.json files under `root` that cannot count: unreadable, or made by another recipe (or none)."""
+    out = {}
+    for g in GRID_ORDER:
+        if (f := root / f"run_{g}.json").exists():
+            r = read_run(f)
+            if r is None:
+                out[f.name] = "is unreadable (rerun the grid)"
+            elif r.get("recipe") != RECIPE:
+                out[f.name] = f"was made by recipe {r.get('recipe')}, not {RECIPE}"
+    return out
 
 
 def stale_files(root: pathlib.Path) -> list[str]:
-    """Names of the run_<grid>.json files under `root` made by another recipe (or none): `tabulate` and `receipts` skip them, as `run_grid`
-    refuses to extend them; a v3 grid mixed with a v4 one is a different experiment."""
-    return [f.name for g in GRID_ORDER if (f := root / f"run_{g}.json").exists() and json.loads(f.read_text()).get("recipe") != RECIPE]
+    """Names of the run_<grid>.json files under `root` that `tabulate` and `receipts` skip: made by another recipe (or none), as `run_grid`
+    refuses to extend them (a v3 grid mixed with a v4 one is a different experiment), or unreadable."""
+    return list(_stale(root))
+
+
+def stale_notes(root: pathlib.Path) -> list[str]:
+    """`stale_files`, each with its reason: "run_fine.json was made by recipe v3, not v4"."""
+    return [f"{n} {why}" for n, why in _stale(root).items()]
+
+
+def _runs(root: pathlib.Path) -> dict[str, dict[str, Any]]:
+    """{grid: run_<grid>.json} of the readable files made by this RECIPE; any other is not read (see `stale_files`)."""
+    runs = {g: read_run(root / f"run_{g}.json") for g in GRID_ORDER}
+    return {g: r for g, r in runs.items() if r is not None and r.get("recipe") == RECIPE}
 
 
 def tabulate(root: pathlib.Path) -> dict[float, vv.Vv20]:
@@ -615,7 +646,8 @@ def receipts(root: Optional[pathlib.Path] = None) -> str:
                        "resistance history, settle()")
             n += 1
     stale = stale_files(root)
-    skipped = f", {len(stale)} file(s) of another recipe skipped ({', '.join(stale)})" if stale else ""
+    kind = "of another recipe or unreadable" if any("unreadable" in w for w in _stale(root).values()) else "of another recipe"
+    skipped = f", {len(stale)} file(s) {kind} skipped ({', '.join(stale)})" if stale else ""
     return f"DTMB 5415: geometry receipts + {len(rows)} Froude rows + {n} cases checked for y+ and convergence{skipped}"
 
 

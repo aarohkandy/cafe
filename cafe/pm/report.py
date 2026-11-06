@@ -928,7 +928,7 @@ def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str,
                 timing=_timing(plan, tr, pref), git_sha=sorted({L["git_sha"] for L in live.values()}), versions=(first or {}).get("versions", {}),
                 report_stage="report stage: written after this table, so its wall time and code are not in it",
                 machine=None if first is None else dict(host=first["machine"]["host"], bench_id=first["machine"]["bench_id"], cpus=cpus,
-                                                        warning=budget.machine_warning()))        # VOLATILE with the rest of machine.machine
+                                                        warning=first["machine"].get("warning")))   # the run's, from its ledger (older: none); VOLATILE
 
 
 def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:

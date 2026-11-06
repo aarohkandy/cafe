@@ -84,12 +84,16 @@ def bellhop() -> str:
 
 def machine() -> dict[str, Any]:
     """Which benchmarked machine this is: the `machine` block of config/throughput.json written by bench/, plus the host, its CPU count and the
-    stage-1 workers this process runs (`par.workers()`: the CPUs it may use, or CAFE_WORKERS, or the run's planned count)."""
+    stage-1 workers this process runs (`par.workers()`: the CPUs it may use, or CAFE_WORKERS, or the run's planned count), and `warning`: why that
+    block's rates may not be this host's (`budget.machine_warning`), or None. It is judged here, once, on the host that runs the stage, so a later
+    `report --run` on another machine reads what the run saw instead of comparing throughput.json with the machine that renders (round 9, L0)."""
     from . import par
+    from .budget import machine_warning
     p = ROOT / "config" / "throughput.json"
     from .config import THROUGHPUT_FIX, json_object
     m = json_object(p, THROUGHPUT_FIX).get("machine", {}) if p.exists() else {}
-    return dict(host=platform.node(), cpus=os.cpu_count(), workers=par.workers(), bench_id=m.get("id"), bench_measured=m.get("measured"))
+    return dict(host=platform.node(), cpus=os.cpu_count(), workers=par.workers(), bench_id=m.get("id"), bench_measured=m.get("measured"),
+                warning=machine_warning(dict(machine=m)))
 
 
 class Ledger:

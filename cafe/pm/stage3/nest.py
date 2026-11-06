@@ -40,7 +40,7 @@ from jax.scipy.ndimage import map_coordinates
 
 import cafe.receipts as cr
 from cafe.receipts import bracket
-from cafe.pm import budget
+from cafe.pm import budget, config
 from cafe.pm.stage3 import lbm, wallmodel as wm
 
 UEnv = Callable[[jax.Array, jax.Array, jax.Array, Any], jax.Array]       # coarse velocity u(x, y, z, t) -> (3, ...)
@@ -569,7 +569,7 @@ def main(argv: list[str]) -> int:
         if need:
             r["needs_d"] = need
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
-        sphere_path(tag, d).write_text(json.dumps(r, default=float))
+        config.write_json(sphere_path(tag, d), r, default=float)
         print(json.dumps({k: v for k, v in r.items() if k != "history"}, default=float))
         return 0
     receipts()

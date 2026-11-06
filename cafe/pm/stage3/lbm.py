@@ -41,7 +41,7 @@ import jax.numpy as jnp
 from cafe.planner import boundary_layer
 import cafe.receipts as cr
 from cafe.receipts import receipt, bracket
-from ..config import finite_real, missing_numbers
+from ..config import finite_real, missing_numbers, write_json
 
 # ---------------------------------------------------------------------------------------------------- D3Q19 (native)
 _AX = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
@@ -722,7 +722,7 @@ def main(argv: list[str]) -> int:
         r.pop("history", None)
         r["code_sha"] = sha0
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
-        slow_path(f"sphere_{argv[1]}").write_text(json.dumps(r, default=float))
+        write_json(slow_path(f"sphere_{argv[1]}"), r, default=float)
         print(json.dumps(r, default=float))
         return 0
     if cmd == "memory":

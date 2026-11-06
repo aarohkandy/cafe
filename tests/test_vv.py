@@ -785,6 +785,37 @@ def test_run_files_of_another_recipe_are_not_tabulated_or_receipted_and_are_list
     assert dt.stale_files(tmp_path / "nothing") == []
 
 
+@pytest.mark.parametrize("damage", ['{"grid": "fine", "recipe": "x", "speeds": {"0.28": {"ct": 0.00', "[]", '{"recipe": "x"}', '{"speeds": []}'])
+def test_l0_a_damaged_run_file_is_skipped_and_named_never_a_traceback_and_run_grid_will_not_extend_it(foam, tmp_path, damage):
+    """Round 9, M-4 sibling: run_grid wrote run_<grid>.json with write_text, so a kill mid-write left the text above, and `_runs`, `stale_files` and so the
+    report stage died on json.loads(...).get (JSONDecodeError, AttributeError). One tolerant reader now; the file counts as not there and is named."""
+    root = stored(tmp_path, converging())
+    (root / "run_fine.json").write_text(damage)
+    assert dt.read_run(root / "run_fine.json") is None and dt.read_run(root / "run_medium.json") is not None
+    assert dt.stale_files(root) == ["run_fine.json"] and dt.stale_notes(root) == ["run_fine.json is unreadable (rerun the grid)"]
+    assert len(dt.tabulate(root)) == 4 and list(dt._runs(root)) == ["medium", "coarse"] and set(dt.row_notes(root)) == set(dt.CT_REF)
+    out = receipt_state()
+    assert "1 file(s) of another recipe or unreadable skipped (run_fine.json)" in dt.receipts(root) and not [x for x in out if x["claim"].startswith("fine Fr")]
+    with pytest.raises(ValueError, match="cannot be read as a run"):
+        dt.run_grid(root, "fine", 1000, print, fake_solver(foam=foam))
+    assert (root / "run_fine.json").read_text() == damage                                      # nothing overwritten
+
+
+def test_l0_run_grid_writes_through_a_temporary_so_a_kill_keeps_the_old_file(foam, tmp_path, monkeypatch):
+    root = prepared(tmp_path)
+    dt.run_grid(root, "fine", 1000, print, fake_solver(foam=foam), frs=(0.28,))
+    old = (root / "run_fine.json").read_text()
+    orig = pathlib.Path.write_text
+
+    def cut(self, text, *a, **k):                                                              # the process dies halfway through the write
+        orig(self, text[:20], *a, **k)
+        raise OSError("killed")
+    monkeypatch.setattr(pathlib.Path, "write_text", cut)
+    with pytest.raises(OSError, match="killed"):
+        dt.run_grid(root, "fine", 1000, print, fake_solver(foam=foam), frs=(0.28, 0.10))
+    assert (root / "run_fine.json").read_text() == old and dt.read_run(root / "run_fine.json") is not None
+
+
 def receipt_state():
     rc.OUT.clear()
     return rc.OUT

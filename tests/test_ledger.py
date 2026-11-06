@@ -1,6 +1,7 @@
 """cafe.pm.ledger: a stage proves what it read, ran and wrote; a tampered output or a failed check is caught."""
 import datetime as dt
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -233,6 +234,22 @@ def test_machine_reads_the_bench_block_when_present(monkeypatch, tmp_path):
     assert m["bench_id"] == "az_serv" and m["bench_measured"] == "2026-10-29" and m["cpus"] >= 1
     (tmp_path / "config" / "throughput.json").write_text("{}")
     assert ledger.machine()["bench_id"] is None
+
+
+def test_l0_machine_records_the_other_machine_warning_where_the_stage_ran(monkeypatch, tmp_path):
+    """The warning is judged where the stage runs and kept in its ledger (the report reads it back): None without a bench block or when it matches."""
+    from cafe.pm import budget
+    monkeypatch.setattr(ledger, "ROOT", tmp_path)
+    assert ledger.machine()["warning"] is None
+    (tmp_path / "config").mkdir()
+    block = {"machine": {"id": "bench", "cpus": 999, "cpu": budget.cpu_model(), "measured": "2026-10-29"}}
+    (tmp_path / "config" / "throughput.json").write_text(json.dumps(block))
+    w = ledger.machine()["warning"]
+    assert w == budget.machine_warning(block) and f"{os.cpu_count()} CPUs, not 999" in w
+    block["machine"]["cpus"] = os.cpu_count()
+    (tmp_path / "config" / "throughput.json").write_text(json.dumps(block))
+    assert ledger.machine()["warning"] is None
+    assert Ledger(tmp_path, "s", "h").d["machine"]["warning"] is None
 
 
 def test_git_sha_falls_back_to_the_environment_when_the_copy_has_no_git(monkeypatch, tmp_path):

@@ -922,3 +922,23 @@ def test_r9_m14_a_box_in_a_message_is_words_not_a_dict(tmp_path):
     with pytest.raises(ConfigError) as e:
         load_mission(edit(tmp_path, lambda d: vehicle(d, "glider_eq")["deploy"].update(lon=100.0)))
     assert "{" not in str(e.value) and "lon_min" not in str(e.value)
+
+
+def test_l0_write_json_replaces_a_file_whole_or_not_at_all(tmp_path, monkeypatch):
+    """Round 9, M-4 sibling: the writer of every slow-run receipt. A write cut short leaves the old file; none is left behind as a temporary afterwards."""
+    f = tmp_path / "r.json"
+    config.write_json(f, {"a": 1}, indent=1)
+    assert config.json_object(f) == {"a": 1} and not (tmp_path / "r.json.tmp").exists()
+    orig = pathlib.Path.write_text
+
+    def cut(self, text, *a, **k):
+        orig(self, text[:3], *a, **k)
+        raise OSError("killed")
+    monkeypatch.setattr(pathlib.Path, "write_text", cut)
+    with pytest.raises(OSError, match="killed"):
+        config.write_json(f, {"a": 2})
+    assert config.json_object(f) == {"a": 1}
+    monkeypatch.undo()
+    config.write_json(f, {"b": float("nan")}, default=float, allow_nan=True)
+    assert config.plate_re_problem("p.json", dict(re=9.8e5)) == "p.json is at Re_L 9.8e+05, below the 1e+06 the comparison needs (rerun it)"
+    assert config.plate_re_problem("p.json", dict(re=config.PLATE_RE_MIN)) is None

@@ -131,6 +131,20 @@ def test_an_ocean_store_is_cached_only_if_it_has_every_step_spans_the_box_and_ma
     assert attrs["manifest_sha256"] != hycom.open_store(copy).attrs["manifest_sha256"] and pipeline._ocean_cached(copy, BOX, steps)
 
 
+@pytest.mark.parametrize("name, window, advice", [("mystore.zarr", False, "delete .*mystore.zarr.* fetch --mission"),
+                                                  ("gofs_lab.zarr", True, "restore .*gofs_lab.zarr.* the pipeline cannot download it")])
+def test_l0_a_damaged_ocean_store_gets_the_advice_of_the_missions_source_not_of_its_file_name(data, tmp_path, name, window, advice):
+    """Round 9, M-33 sibling: `_ocean_cached` opened the store without the mission's source, so a gofs31 store at a custom .zarr path was called the lab's
+    ('the pipeline cannot download it') and a lab store that happened to start with 'gofs' was called fetchable."""
+    store = tmp_path / name
+    shutil.copytree(data.ocean_store, store)
+    (store / "zarr.json").write_text("{trunc")
+    steps = hycom.gofs_steps(T0, T1)
+    with pytest.raises(pipeline.ConfigError, match=advice):
+        pipeline._ocean_cached(store, BOX, steps, (steps[0], steps[-1]) if window else None)
+    assert ocean_mod.is_lab(dict(source="lab_hycom")) is True and ocean_mod.is_lab(dict(source="gofs31")) is False and ocean_mod.is_lab({}) is False
+
+
 def test_a_tao_download_is_cached_only_if_it_covers_the_box_and_window_and_every_file_hashes(data_copy):
     t = data_copy / "tao"
     s, e = T0 + 1, T1 - 1

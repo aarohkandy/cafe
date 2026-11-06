@@ -327,7 +327,7 @@ def wm_kappa() -> float:
 PLATE_SLOW: dict[str, Any] = dict(length=400, nu_lat=1.5e-5, half=48, span=8, nose=16, thick=1, steps=30000, tu=0.03)
 SLOW_DIR = pathlib.Path(os.environ.get("CAFE_DATA", "/data")) / "receipts"
 PLATE_TOL = 0.10
-PLATE_RE_MIN = 1e6            # ITTC-57 is a turbulent correlation: a plate run below this Re_L is not compared with it
+PLATE_RE_MIN = config.PLATE_RE_MIN      # ITTC-57 is a turbulent correlation: a plate run below this Re_L is not compared with it
 PLATE_COMMAND = "python -m cafe.pm.stage3.wallmodel slow"
 PLATE_ETA = "about 1.8 h on 2 CPUs (measured at length 384; 4 % more cells at 400), ~1 GB"
 CHANNEL_CI: dict[str, Any] = dict(h=12, re_tau=1000.0, u_tau=0.0026, steps=150000, span=4)      # ~15 s
@@ -352,9 +352,7 @@ def _read_receipt(f: pathlib.Path, fields: tuple[str, ...]) -> dict[str, Any] | 
 
 def _write_receipt(f: pathlib.Path, obj: dict[str, Any]) -> None:
     """Through a sibling temporary and os.replace: a run killed mid-write leaves the old receipt, never half of a new one (round 8 M-32)."""
-    tmp = f.with_name(f.name + ".tmp")
-    tmp.write_text(json.dumps(obj, default=float))
-    os.replace(tmp, f)
+    config.write_json(f, obj, default=float)
 
 
 def _stored_receipts() -> tuple[list[str], list[dict[str, Any]]]:
@@ -372,8 +370,8 @@ def _stored_receipts() -> tuple[list[str], list[dict[str, Any]]]:
             out.append(f"{f.name} was stored without a code sha (rerun it)")
         elif d["code_sha"] != lbm.physics_sha():
             out.append(f"{f.name} was stored by different code (rerun it)")
-        elif f == slow_path() and d["re"] < PLATE_RE_MIN:
-            out.append(f"{f.name} is at Re_L {d['re']:.3g}, below the {PLATE_RE_MIN:g} the comparison needs (rerun it)")
+        elif f == slow_path() and (low := config.plate_re_problem(f.name, d)):
+            out.append(low)
         else:
             recs.append(d)
     return out, recs

@@ -1,5 +1,6 @@
 """Moving nest: shifts, refill, sponge, zero spurious force, mass conservation, vmap over vehicles, coupling helpers."""
 import json
+import pathlib
 
 import numpy as np
 import pytest
@@ -119,6 +120,23 @@ def test_run_plan_and_gpu_command_and_memory_guard(monkeypatch):
     monkeypatch.setattr(lbm, "device_memory_bytes", lambda: 1e6)
     with pytest.raises(lbm.MemoryGuardError):
         nest.sphere_drag(100.0, 8)
+
+
+def test_l0_a_nest_sphere_receipt_is_written_through_a_temporary_so_a_kill_keeps_the_old_one(monkeypatch, tmp_path):
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(lbm, "physics_sha", lambda: "sha-now")
+    monkeypatch.setattr(nest, "sphere_drag", lambda re, d, dom, lateral: dict(cd=1.1, d=d, shape=(1, 2, 3), history=np.ones(3), steps=3))
+    old = json.dumps(dict(cd=0.5, code_sha="old"))
+    nest.sphere_path("100", 16).write_text(old)
+    orig = pathlib.Path.write_text
+
+    def cut(self, text, *a, **k):
+        orig(self, text[:10], *a, **k)
+        raise OSError("killed")
+    monkeypatch.setattr(pathlib.Path, "write_text", cut)
+    with pytest.raises(OSError, match="killed"):
+        nest.main(["slow", "100", "16", "14", "8", "8"])
+    assert nest.sphere_path("100", 16).read_text() == old
 
 
 def test_nest_cli(monkeypatch, tmp_path, capsys):

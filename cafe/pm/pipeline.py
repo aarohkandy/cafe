@@ -334,7 +334,7 @@ def _ocean_cached(path: pathlib.Path, box: tuple[float, float, float, float], st
     (`window` given) has the cadence of the lab's files, so it must cover the window with no step over a day instead (`_ocean_time_problem`)."""
     if not path.exists():
         return False
-    ds = hycom.open_store(path)
+    ds = hycom.open_store(path, lab=window is not None)                  # `window` is given for a lab store only (ocean.is_lab)
     s, n, w, e = hycom.box360(box)
     ok = bool((np.isin(steps, ds.time.values).all() if window is None else _ocean_time_problem(ds.time.values, window) is None)
               and ds.lat.values.min() <= s + 0.1 and ds.lat.values.max() >= n - 0.1
@@ -344,7 +344,7 @@ def _ocean_cached(path: pathlib.Path, box: tuple[float, float, float, float], st
 
 
 def _tao_cached(tdir: pathlib.Path, box: tuple[float, float, float, float], t0: float, t1: float) -> bool:
-    """TAO manifest covers the box and window and every file still hashes to it (tao.verify)."""
+    """TAO manifest covers the box and window, every file still hashes to it (tao.verify) and `load_tao` can read each selected one."""
     from .env import tao
     mp = tdir / "manifest.json"
     if not mp.is_file():
@@ -359,7 +359,7 @@ def _tao_cached(tdir: pathlib.Path, box: tuple[float, float, float, float], t0: 
         tao.verify(tdir)
     except ValueError:
         return False
-    return True
+    return not tao.unusable_selected(tdir)             # a selected file load_tao would refuse (no QC variable): fetch again, not fail later
 
 
 def _gebco_cached(path: pathlib.Path) -> bool:
@@ -415,11 +415,12 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     gebco = bathy.cache_path(sbox, ocean_mod.DATA / "bathy")
     store = ocean_mod.store_path(spec, m["name"])
     steps = hycom.gofs_steps(t0.timestamp(), t1.timestamp())
-    window = None if spec["source"] == "gofs31" else (t0.timestamp(), t1.timestamp())         # a lab store must cover it; GOFS must have every step
+    lab = ocean_mod.is_lab(spec)
+    window = (t0.timestamp(), t1.timestamp()) if lab else None                 # a lab store must cover it; GOFS must have every step
     short = None                                                         # which edge of the window a lab store that exists does not reach
     if window and store.exists():
         with contextlib.suppress(ConfigError):                           # a damaged store is `_ocean_cached`'s to report
-            short = _ocean_time_problem(hycom.open_store(store).time.values, window)
+            short = _ocean_time_problem(hycom.open_store(store, lab=lab).time.values, window)
 
     def fetch_ocean() -> None:
         if spec["source"] != "gofs31":
@@ -445,18 +446,18 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     orca_trees = {n: tree_sha256(man.parent / n) for n in ORCA_STORES if (man.parent / n).is_dir()}  # the manifest lists the parts, not these
     for n, h in orca_trees.items():
         L.input(man.parent / n, sha=h, tree=h, kind="orca assembled store (tree_sha256 over every file of the store)")
-    L.input(store, sha=hycom.open_store(store).attrs.get("manifest_sha256"), tree=tree_sha256(store),
+    L.input(store, sha=hycom.open_store(store, lab=lab).attrs.get("manifest_sha256"), tree=tree_sha256(store),
             kind="ocean store (sha256 of its parts manifest; tree_sha256 over every file of the store)")
     L.input(gebco, kind="GEBCO_2026 cut")
     L.check("orca_hours_cover_window", d["hours"] >= want, value=d["hours"], limit=want)
-    med, big = _ocean_cadence(hycom.open_store(store).time.values, (t0.timestamp(), t1.timestamp()))
+    med, big = _ocean_cadence(hycom.open_store(store, lab=lab).time.values, (t0.timestamp(), t1.timestamp()))
     L.check("ocean_time_cadence", big <= OCEAN_MAX_STEP_S / 3600.0, value=round(big, 3), limit=OCEAN_MAX_STEP_S / 3600.0,
             note=f"median {med:g} h, largest {big:g} h between the ocean store's steps that serve the window; linear interpolation in time between steps")
-    holes = ocean_store_nan_mask(hycom.open_store(store))
+    holes = ocean_store_nan_mask(hycom.open_store(store, lab=lab))
     L.check("ocean_store_nan_mask", holes == 0, value=holes, limit=0,
             note="cells whose NaN pattern at the surface level differs between time steps or between water_u, water_v, water_temp and salinity "
                  "(a land/sea mask does not move; a deleted chunk reads as NaN)")
-    key = digest(dict(orca=sha256(man), ocean=hycom.open_store(store).attrs.get("manifest_sha256"), gebco=sha256(gebco), orca_stores=orca_trees,
+    key = digest(dict(orca=sha256(man), ocean=hycom.open_store(store, lab=lab).attrs.get("manifest_sha256"), gebco=sha256(gebco), orca_stores=orca_trees,
                       code=ctx.code_digest))
     if not (_derived_current(ctx.cache, key) and _derived_span_problem(ctx.cache, ctx.window_s()) is None):      # about a minute; every code edit rebuilds it
         shutil.rmtree(ctx.cache / "derived.zarr", ignore_errors=True)

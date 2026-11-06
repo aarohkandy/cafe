@@ -33,6 +33,12 @@ def store_path(spec: dict[str, Any], mission_name: str | None) -> pathlib.Path:
     return DATA / "ocean" / f"gofs_{mission_name}.zarr"
 
 
+def is_lab(spec: dict[str, Any]) -> bool:
+    """The mission's ocean store is the lab's HYCOM (source other than gofs31), which the pipeline cannot download: the one rule of `open_ocean`, the
+    ingest stage and the advice of an unreadable store (`hycom.unreadable`), whatever the store is called (round 9, M-33 sibling)."""
+    return bool(spec.get("source", "gofs31") != "gofs31")
+
+
 class Ocean:
     def __init__(self, path: Any, bathymetry: bathy.Bathymetry | None = None, lab: bool | None = None):
         self.path, self.lab = pathlib.Path(path), lab                      # lab: the store is the lab's HYCOM (see hycom.unreadable)
@@ -111,7 +117,7 @@ def open_ocean(spec: dict[str, Any], cache: Any, mission_name: str | None = None
     path = store_path(spec, mission_name or pathlib.Path(cache).name)
     if not path.exists():
         return None
-    lab = spec.get("source", "gofs31") != "gofs31"
+    lab = is_lab(spec)
     ds = hycom.open_store(path, lab=lab)
     lo = (max(ds.lon.values[0], 0.0), min(ds.lon.values[-1], 360.0))                  # GEBCO and box360 have no 0 E seam
     b = box or tuple(float(x) for x in (ds.lat.values[0], ds.lat.values[-1], *lo))

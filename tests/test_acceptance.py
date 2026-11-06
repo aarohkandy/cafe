@@ -524,6 +524,35 @@ def test_run_orders_the_runs_and_gives_the_other_seed_plus_one(monkeypatch, tmp_
     assert any(m.startswith("PASS  run_quick:") for m in log)
 
 
+def test_l0_a_mission_inside_a_run_directory_acceptance_removes_is_refused_before_anything_is_deleted(monkeypatch, tmp_path):
+    """Round 9, M-12 sibling: run_one removed out/<name> and out/<name>_fetch before its subprocesses read --mission, so `acceptance --mission
+    <out>/quick/mission.yaml` deleted its own mission and failed with 'file not found'; and a mission in a later run's directory would have gone after hours."""
+    out = tmp_path / "o"
+    monkeypatch.setattr(acc, "_execute", lambda *a, **k: pytest.fail("a subprocess started"))
+    for sub in ("quick", "quick_fetch"):
+        m = out / sub / "mission.yaml"
+        m.parent.mkdir(parents=True)
+        shutil.copy(MISSION, m)
+        with pytest.raises(config.ConfigError, match=rf"inside {m.parent}, which acceptance removes"):
+            acc.run_one(str(m), "quick", "ci", 0, out)
+        assert m.exists()
+    last = out / "4h" / "mission.yaml"
+    last.parent.mkdir()
+    shutil.copy(MISSION, last)
+    f = Fake(tmp_path, monkeypatch)
+    with pytest.raises(config.ConfigError, match="inside .*4h"):
+        acc.run(str(last), 0, out, golden_for(tmp_path), log=lambda s: None)
+    assert f.calls == [] and last.exists() and (out / "quick" / "mission.yaml").exists()                # nothing ran, nothing removed
+    for fine in (MISSION, str(out / "mission.yaml"), str(out / "quick_other" / "mission.yaml"), str(out.parent / "o2" / "quick" / "mission.yaml")):
+        acc.refuse_wiped_mission(fine, out, acc.RUN_NAMES)                                              # a prefix of the name or of the path is not inside it
+
+
+def test_l0_run_names_are_every_directory_run_makes(monkeypatch, tmp_path):
+    f = Fake(tmp_path, monkeypatch)
+    acc.run(MISSION, 1, tmp_path / "o", golden_for(tmp_path), log=lambda s: None)
+    assert [c[0] for c in f.calls] == list(acc.RUN_NAMES)
+
+
 def test_with_no_gpu_there_is_no_4h_run(monkeypatch, tmp_path):
     f = Fake(tmp_path, monkeypatch)
     rows, rc = acc.run(MISSION, 0, tmp_path / "o", golden_for(tmp_path), log=lambda s: None)

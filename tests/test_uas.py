@@ -836,6 +836,35 @@ def test_r9_m3_no_air_state_at_the_ship_is_a_scrub_like_no_wind_there_not_a_nan_
     assert r["soc_end"][0] == clean["soc_end"][0] and np.array_equal(r["track"]["pos_rel"][0], clean["track"]["pos_rel"][0])
 
 
+def test_l0_fly_sitl_scrubs_a_ship_with_no_air_state_as_fly_sortie_does_and_never_starts_the_firmware(tmp_path, monkeypatch):
+    """Round 9, M-3 sibling: fly_sitl read the air at the ship without fly_sortie's guard, so a hole gave energy_wh and soc_end NaN with every flag False."""
+    from cafe import emulator
+    marker = tmp_path / "started"
+    monkeypatch.setattr(emulator, "SITL_DIR", fake_sitl(tmp_path, f"open({str(marker)!r}, 'w').write('x')\n"))
+    ship = uas.steaming(pos0=np.array([[50e3, 0.0]]))                                    # 50 km east of the origin: in AirHole's hole
+    res = uas.fly_sitl(AirHole(wind=(0.0, 0.0)), ship, 0.0, origin=ORIGIN, plat=P, max_s=0.5, workdir=str(tmp_path / "wd"))
+    sortie = uas.fly_sortie(AirHole(wind=(0.0, 0.0)), ship, 0.0, M=1, origin=ORIGIN, plat=fast_plat())
+    assert res["scrubbed"].tolist() == [True] == sortie["scrubbed"].tolist() and not marker.exists()
+    assert np.isfinite([res["energy_wh"], res["soc_end"], res["max_tilt_deg"], res["t_end"]]).all() and not any(f.any() for f in res["flags"].values())
+    assert res["track"]["pos_rel"].shape == (1, 0, 3) and "no finite air state" in res["sitl"]["messages"][0]
+
+
+def test_l0_fly_sitl_points_the_default_pattern_as_in_still_air_when_the_wind_at_the_ship_is_a_hole(tmp_path, monkeypatch):
+    from cafe import emulator
+    body = FAKE_HEAD + """
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 5760 + 10 * I)); srv.listen(1)
+for fc in range(0, 400):
+    ask(frame(fc, pwm=1100))
+"""
+    monkeypatch.setattr(emulator, "SITL_DIR", fake_sitl(tmp_path, body))
+    seen = []
+    real = uas.flux_pattern
+    monkeypatch.setattr(uas, "flux_pattern", lambda Pl, hd: (seen.append(np.asarray(hd, float)), real(Pl, hd))[1])
+    res = uas.fly_sitl(HoleWind(lon_hole=-np.inf, wind=(0.0, 0.0)), uas.steaming(), 0.0, origin=ORIGIN, plat=P, max_s=0.5, workdir=str(tmp_path / "wd"))
+    assert np.isfinite(seen[0]).all() and res["flags"]["no_current_data"].tolist() == [True] and res["scrubbed"].tolist() == [False]
+
+
 def test_r9_m26_fly_sitl_documents_the_dict_it_returns_not_fly_sortie_s(tmp_path, monkeypatch):
     """The docstring said 'same fields as fly_sortie for one member'; the dict lacks t_first, wp_done, n_wp and more. Every key it returns is named in the
     docstring, and so is every key of fly_sortie's that it lacks, as absent."""

@@ -1,6 +1,7 @@
 """LBM backends, resolution rule, memory model, receipts: each check next to a test that breaks the physics."""
 import json
 import os
+import pathlib
 
 import numpy as np
 import pytest
@@ -424,6 +425,23 @@ def test_sphere_drag_falls_with_reynolds_number_and_les_branch_runs():
     assert lo["cd"] > hi["cd"] > 0 and lo["ref"] > hi["ref"]
     les = lbm.sphere("jax", 1000.0, d=6, domain=(8, 4, 4), steps=300, progress=lambda t, c: None)
     assert np.isfinite(les["cd"]) and len(les["history"]) > 10
+
+
+def test_l0_a_slow_sphere_receipt_is_written_through_a_temporary_so_a_kill_keeps_the_old_one(monkeypatch, tmp_path):
+    """Round 9, M-4 sibling: write_text cut short by a kill left a file every reader had to refuse; the old receipt stays until the new one is whole."""
+    monkeypatch.setattr(lbm, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(lbm, "sphere", lambda *a, **k: dict(cd=1.0, ref=1.0, seconds=1.0, shape=(1,), history=[1.0]))
+    old = json.dumps(dict(cd=0.5, code_sha="old"))
+    (tmp_path / "lbm_sphere_1e4.json").write_text(old)
+    orig = pathlib.Path.write_text
+
+    def cut(self, text, *a, **k):
+        orig(self, text[:10], *a, **k)
+        raise OSError("killed")
+    monkeypatch.setattr(pathlib.Path, "write_text", cut)
+    with pytest.raises(OSError, match="killed"):
+        lbm.main(["slow", "1e4", "8", "10", "6", "6", "--backend", "jax"])
+    assert (tmp_path / "lbm_sphere_1e4.json").read_text() == old
 
 
 def test_cli_plumbing(monkeypatch, tmp_path, capsys):

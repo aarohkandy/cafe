@@ -314,8 +314,7 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
         return [_row("dtmb5415", "DTMB 5415 C_T", "cafe/pm/dtmb5415.py", None, None, None, f"not run: cafe.pm.dtmb5415 cannot be imported ({e})")]
     root = data / "dtmb5415"
     rows, notes = dtmb5415.tabulate(root), dtmb5415.row_notes(root)
-    stale = dtmb5415.stale_files(root)                                         # files of another recipe: tabulate skips them, this says why
-    why = "; ".join(f"{n} was made by recipe {(_json(root / n) or {}).get('recipe')}, not {dtmb5415.RECIPE}" for n in stale)
+    why = "; ".join(dtmb5415.stale_notes(root))                                # files tabulate skips (another recipe, or unreadable): this says why
     out = []
     for fr in dtmb5415.CT_REF:
         src = f"{root}/run_coarse.json + run_fine.json"
@@ -383,6 +382,9 @@ def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     for name, case, dk, fields in plates:
         f = rec / f"{name}.json"
         d, why = _stored(f, fields)                                              # every field stage 3 requires of the receipt, not only the two read here
+        if d is not None and name == "wm_flat_plate":
+            why = config.plate_re_problem(f.name, d) or why                      # a plate below Re_L 1e6 is no comparison with ITTC-57 (round 9, L0)
+            d = None if why else d
         if d is None:
             out.append(_row(f"wallmodel:{name}", case, f"{f}", None, None, None,
                             f"not run: {f.name} is not stored" if why == "not stored" else f"not run: {why}"))

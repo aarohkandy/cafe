@@ -74,12 +74,28 @@ def _execute(argv: list[str], env: dict[str, str], log: pathlib.Path, timeout: f
             return 124
 
 
+RUN_NAMES = ("quick", "quick_same", "quick_seed", "overnight", "4h")                                   # the run directories `run` makes in --out
+
+
+def refuse_wiped_mission(mission: str, out: pathlib.Path, names: tuple[str, ...]) -> None:
+    """ConfigError when `mission` lies inside out/<name> or out/<name>_fetch for a name in `names`: `run_one` removes both before its subprocesses read
+    the mission, so a run's own mission.yaml would be gone (and fetch would say `file not found`). `run` asks for every run name at once, so a mission
+    in the directory of the last run is refused before the first one starts, not after hours (round 9, M-12 sibling)."""
+    m = pathlib.Path(mission).resolve()
+    for n in names:
+        for d in (out / n, out / f"{n}_fetch"):
+            if m.is_relative_to(d.resolve()):
+                raise config.ConfigError(f"--mission {mission} is inside {d}, which acceptance removes before it runs; copy the mission out of {out} "
+                                         "(a run's own copy is <run dir>/mission.yaml)")
+
+
 def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.Path, seed: int | None = None,
             table: pathlib.Path | None = None) -> dict[str, Any]:
     """A fresh run in out/name with its own emulator table out/name/emulator_table/train.parquet: a copy of `table` (the pristine shared table),
     or none yet when `table` is None, so no run sees another's rows and none appends to the shared table.
     `fetch` runs first, into out/<name>_fetch; only `run` is timed. -> {name, mission, budget, gpus, seed, dir, log, rc, wall_s, limit_s, report (report.json
     or None), fetch_rc, fetch_wall_s, cold_fetch (the fetch's ingest ledger says it downloaded), ingest_s (the run's own ingest stage)}."""
+    refuse_wiped_mission(mission, out, (name,))
     d = out / name
     shutil.rmtree(d, ignore_errors=True)
     out.mkdir(parents=True, exist_ok=True)
@@ -352,6 +368,7 @@ def run(mission: str, gpus: int, out: pathlib.Path, golden: pathlib.Path = GOLDE
         log: Callable[[str], None] = print) -> tuple[list[dict[str, Any]], int]:
     """-> (check rows, exit code)."""
     seed = int(config.load_mission(mission)["seed"])
+    refuse_wiped_mission(mission, out, RUN_NAMES)
     out.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, Any]] = []
 
