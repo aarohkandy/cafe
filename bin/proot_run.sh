@@ -8,6 +8,9 @@ GRACE="${PM_STOP_GRACE:-10}"; case "$GRACE" in ''|*[!0-9]*) echo "PM_STOP_GRACE:
 W="$HOME/cafe-worker"; C="$W/cafe"          # nothing outside ~/cafe-worker: the home folder is shared
 [ -x "$W/bin/proot" ] && [ -f "$W/root.done" ] && [ -x "$W/root/usr/bin/env" ] || { echo "no proot or root filesystem under $W: run bin/orca_sync.sh" >&2; exit 1; }
 [ -d "$C/$D" ] && [ -d "$C/pmdata" ] && [ -d "$C/data" ] || { echo "missing $C/$D, $C/pmdata or $C/data: run bin/orca_sync.sh" >&2; exit 1; }
+# PM_THREADS (default unset: the job's libraries size their thread pools to the 64 CPUs `nproc` shows, as under docker) caps BLAS and OpenMP pools at that many threads. proot_suite.sh sets it to its jobs' PM_CPUS:
+# 8 jobs of "2 CPUs" were at 29 of orca's 32 CPUs in the first minutes (orca-go P-20). Pipeline runs leave it unset: thread counts can change the last bits of a sum.
+THREADS=; case "${PM_THREADS:-}" in '') ;; 0*|*[!0-9]*) echo "PM_THREADS: a whole number of threads from 1, not '$PM_THREADS'" >&2; exit 2 ;; *) THREADS="OMP_NUM_THREADS=$PM_THREADS OPENBLAS_NUM_THREADS=$PM_THREADS MKL_NUM_THREADS=$PM_THREADS" ;; esac
 [ "${PM_CPUS:-8}" -le 32 ] || echo "warning: PM_CPUS=${PM_CPUS} is above orca's 32 CPUs; the sum over all running jobs must stay at 32 or below, nothing here limits it" >&2
 free=$(df -Pk "$W" | awk 'NR==2{print int($4/1048576)}'); [ "$free" -ge "${CAFE_MIN_FREE_GB:-60}" ] || { echo "STOP: only $free GB free on the shared disk" >&2; exit 1; }
 mkdir -p "$C/tmp"
@@ -37,7 +40,7 @@ $G "$W/bin/proot" -r "$W/root" -i "$(id -u):$(id -g)" -w /app -b /dev -b /proc -
   -b "$T:/tmp" -b "$C/$D:/app" -b "$C/pmdata:/data" -b "$C/data:/work" \
   /usr/bin/env -i PATH=/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PYTHONUNBUFFERED=1 HOME=/tmp TMPDIR=/tmp LC_ALL=C.UTF-8 \
   PYTHONPATH=/app CAFE_DATA=/data CAFE_GIT_SHA="${CAFE_GIT_SHA:-}" CAFE_GIT_DIRTY="${CAFE_GIT_DIRTY:-0}" CAFE_WORKERS="${PM_CPUS:-8}" \
-  PMIX_MCA_gds=hash /bin/sh -c '"$@"; r=$?; echo $r > /tmp/.rc; exit $r' sh "$@" <&3 3<&- &
+  PMIX_MCA_gds=hash $THREADS /bin/sh -c '"$@"; r=$?; echo $r > /tmp/.rc; exit $r' sh "$@" <&3 3<&- &
 P=$!; echo "$P" >> "$T/.pids"
 # proot returns the exit status of the LAST process of the job to end, not of its first (rehearsed: `(sleep 3; exit 0) & exit 1` gives 0). A child that outlives the job, such as
 # the resource tracker that multiprocessing starts for spawned workers, made a failed pytest or pipeline run read rc=0. So the job writes its own status to its /tmp (= $T) and that is the exit status here;

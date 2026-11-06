@@ -125,3 +125,8 @@ Add `--pytest-done` (only for `python -m cafe.pm.audit`, like `--mutation-record
 - `tests/test_proot_suite.py` and the recorder test read `/proc` and use GNU `sed` and `ps`: they run on orca and homebase, not on the laptop (which cannot run the suite anyway).
 - `audit --pytest-done` compares `coverage.json` with `cafe/pm` only, as asked; a change to `tests/` after the coverage run is not noticed.
 - Logs kept on orca for the comparison: `~/cafe-worker/logs/keep_go1/` (first K=8 run: logs and junit), `keep_go1cov/` (the `--cov` run), `sig_*.log`; the junit of the last run is in `pmdata/shards/go1/`. `pm_go2` (the last run's synced checkout, 29 MB) is removed with this hand-back; the burst VM's `pm_go` and my scratch scripts are removed.
+
+
+# Second pass (orca-go, 2026-11-05 evening)
+
+- P-20, now fixed. Probe on orca (`numpy` 1500x1500 products, a jax jit product, a scipy svd, in one process under proot): 22.7 CPU-seconds in 1.3 s wall (17 CPUs busy, 416 threads) with nothing set; 2.0 in 1.1 s with `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `MKL_NUM_THREADS` at 2; adding `XLA_FLAGS=--xla_cpu_multi_thread_eigen=false` changed nothing more. So the BLAS pools are the cause, not XLA's. Fix: `bin/proot_run.sh` takes `PM_THREADS` (unset by default: pipeline runs are unchanged, since a thread count can change the last bits of a sum) and puts the three variables into the job's environment; `bin/proot_suite.sh` sets it to its jobs' 2. Tests: `test_pm_threads_*` (tests/test_runners.py) and `test_every_job_gets_its_cpus_as_its_thread_cap`; 10 of the 11 fail on a1... a05dff8 (the one that passes there is the unset case), all 11 pass after. Log of the unfixed run: scratchpad `p20_unfixed.log`.

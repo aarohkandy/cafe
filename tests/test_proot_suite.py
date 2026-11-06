@@ -18,6 +18,7 @@ D=$1; shift
 [ -z "${FAKE_PARTIAL:-}" ] || printf 'half a line'
 n=$(echo "$*" | sed -n 's#.*@/data/shards/[^/]*/\(s[0-9]*\|serial\)\.args.*#\1#p')
 echo "$*" >> "$HOME/calls.log"
+echo "${PM_CPUS:-unset} ${PM_THREADS:-unset}" >> "$HOME/threads.log"
 [ -z "$n" ] || echo "start $n $(date +%s.%N)" >> "$HOME/calls.log"
 trap 'kill $(jobs -p) 2>/dev/null; echo "term $n" >> "$HOME/calls.log"; exit 143' TERM
 case "$*" in *"${FAKE_FAIL:-no match at all}"*) echo "boom"; exit 1 ;; esac
@@ -80,6 +81,14 @@ def test_k_shares_run_at_once_each_one_pytest_process_with_its_own_junit_log_and
     every = [l for i in (1, 2, 3) for l in (shards / f"s{i}.args").read_text().splitlines() if not l.startswith("--")]
     assert sorted(every) == sorted(f"tests/{p.name}" for p in (ROOT / "tests").glob("test_*.py"))                        # every test file in exactly one share
     assert (shards / "serial.args").read_text().splitlines() == list(audit.SERIAL_TESTS)
+
+
+def test_every_job_gets_its_cpus_as_its_thread_cap(tmp_path):
+    """Orca-go P-20: 8 jobs of 2 CPUs were at 29 of 32 CPUs because each library started a pool for the 64 CPUs nproc shows."""
+    home, env, log = world(tmp_path)
+    assert suite({**env, "PM_THREADS": "9"}, "pm_t", "3", "t1", "--cov").returncode == 0   # one the caller set is not passed on
+    seen = (home / "threads.log").read_text().splitlines()
+    assert len(seen) == 1 + 3 + 1 + 1 and set(seen) == {"2 2"}                                                           # shares step, 3 shares, serial, audit
 
 
 def test_a_failed_job_is_named_the_others_and_the_serial_tests_still_run_and_the_exit_is_nonzero(tmp_path):

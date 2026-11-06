@@ -38,7 +38,7 @@ job() {
       echo "rc=$r" >> "$LOGS/$n.log"; exit $r ) &
     PIDS="$PIDS $!"
 }
-export PM_CPUS=2
+export PM_CPUS=2 PM_THREADS=2          # PM_THREADS: BLAS and OpenMP pools of a job at its 2 CPUs, not orca's 64 (bin/proot_run.sh; P-20)
 rm -f "$SH"/.coverage* "$SH"/serial.xml
 # A job passes only if its exit status AND its junit file say so: a pytest process was seen to end with rc=0 after "1 failed" (round 9, orca-go P-18). $1 name, $2 exit status, $3 junit file.
 verdict() {

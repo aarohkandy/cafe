@@ -579,3 +579,40 @@ def test_a_job_that_leaves_no_status_is_failed_when_proot_says_0_and_keeps_a_sta
     r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "sh", "-c", job], env)
     assert r.returncode == want, r.stderr
     assert ("left no exit status" in r.stderr) == (want == 1)
+
+
+# ---- orca-go P-20: the thread pools of a job sized to the 64 CPUs nproc shows, not to its PM_CPUS
+
+RECORD_ARGV = """#!/bin/sh
+printf '%s\\n' "$@" > "$HOME/argv"
+"""
+
+
+@pytest.mark.parametrize("threads", ["1", "2", "16"])
+def test_pm_threads_caps_the_blas_and_openmp_pools_of_the_job(tmp_path, threads):
+    """8 jobs of 2 CPUs were at 29 of 32 CPUs in the first minutes of a suite: numpy's BLAS started 64 threads per job (a probe on orca: 17 CPUs busy for
+    one matrix product, 1.9 with the cap)."""
+    w, env = proot_world(tmp_path, PM_THREADS=threads)
+    (w / "bin/proot").write_text(RECORD_ARGV)
+    run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    argv = (tmp_path / "home/argv").read_text().splitlines()
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        assert f"{var}={threads}" in argv
+    assert argv.index("/usr/bin/env") < argv.index(f"OMP_NUM_THREADS={threads}") < argv.index("/bin/sh")   # in the job's environment, before its command
+
+
+def test_without_pm_threads_the_environment_of_the_job_is_as_before(tmp_path):
+    """Pipeline runs keep their libraries' own pool sizes: a thread count can change the last bits of a sum."""
+    w, env = proot_world(tmp_path)
+    (w / "bin/proot").write_text(RECORD_ARGV)
+    run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    argv = (tmp_path / "home/argv").read_text()
+    assert "NUM_THREADS" not in argv and "CAFE_WORKERS=8" in argv
+
+
+@pytest.mark.parametrize("bad", ["0", "02", "x", "2;ls", "-1", "1.5"])
+def test_pm_threads_must_be_a_whole_number_from_one(tmp_path, bad):
+    w, env = proot_world(tmp_path, PM_THREADS=bad)
+    (w / "bin/proot").write_text(RECORD_ARGV)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    assert r.returncode == 2 and "PM_THREADS" in r.stderr and not (tmp_path / "home/argv").exists()
