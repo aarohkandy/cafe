@@ -362,8 +362,8 @@ def write_tao(directory, m):
     t0, t1 = _epoch(_hours(m)[0]) - 3600.0, _epoch(_hours(m)[-1]) + 3600.0
     t = np.arange(t0, t1 + 1, 600.0)
     tt = (t * 1e9).astype("int64").astype("datetime64[ns]")
-    man = dict(source="synthetic ci_env fixture", box=list(hycom.box360((-2.0, 2.0, 193.0, 197.0))), t0=t0, t1=t1, files={}, selected={}, positions={},
-               waves=dict(checked=len(MOORINGS), matches=[]))
+    man = dict(source="synthetic ci_env fixture", selection=tao.SELECTION, box=list(hycom.box360((-2.0, 2.0, 193.0, 197.0))), t0=t0, t1=t1,
+               files={}, selected={}, positions={}, waves=dict(checked=len(MOORINGS), matches=[]))
     for name, variables in MOORINGS.items():
         lat, lon = tao.mooring_position(name)
         u, v = wind10(lon, lat, t)

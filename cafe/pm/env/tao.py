@@ -40,6 +40,8 @@ BASE = "https://dods.ndbc.noaa.gov/thredds"
 CATALOG = "/catalog/oceansites/DATA/"
 FILES = "/fileServer/"
 VARS = ("WIND", "SST", "AIRT", "RH")
+# The rule `_candidates` picks files by, written to the manifest: 1 = one window over all files (rounds 1-9), 2 = per variable and resolution (round 10, M-19)
+SELECTION = 2
 # file code -> (NetCDF variables, the variable whose _QC applies). RELH is in percent although its units attribute says '1' (2023 means: 78-87)
 NC = dict(WIND=(("UWND", "VWND"), "WSPD"), SST=(("SST",), "SST"), AIRT=(("AIRT",), "AIRT"), RH=(("RELH",), "RELH"))
 WAVE_VARS = ("WAVE", "WAVES", "HS", "SWH", "WVHT", "HSIG", "WVPD", "WDIR_WAVE")
@@ -134,7 +136,8 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
     out.mkdir(parents=True, exist_ok=True)
     mpath = out / "manifest.json"
     old = (orca.read_json(mpath) or {}).get("files", {})                 # an empty or truncated manifest is no record: every file is checked again
-    man: dict[str, Any] = dict(source=base + CATALOG, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={}, waves=dict(checked=0, matches=[]))
+    man: dict[str, Any] = dict(source=base + CATALOG, selection=SELECTION, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={},
+                               waves=dict(checked=0, matches=[]))
     for name, lat, lon in moorings(box, base):
         listing = _files(name, base)
         man["waves"]["checked"] += len(listing)

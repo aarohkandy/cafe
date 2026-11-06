@@ -322,6 +322,7 @@ def test_r10_m19_fetch_keeps_the_wind_of_a_mooring_whose_sst_was_redeployed_late
     man = json.loads(tao.fetch_tao((1, 3, 163, 167), T0, T1, tmp_path / "tao", t.publish()).read_text())
     assert man["selected"]["T2N165E"] == {"WIND": "T2N165E/OS_T2N165E_DM100A-20230101_D_WIND_10min.nc",
                                           "SST": "T2N165E/OS_T2N165E_DM200A-20230220_D_SST_10min.nc"}
+    assert man["selection"] == tao.SELECTION == 2                     # the rule that picked them is on the manifest (a cache of the old rule is told apart)
 
 
 def test_bin_ignores_nan_and_unsorted_input():

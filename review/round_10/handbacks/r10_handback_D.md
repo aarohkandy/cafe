@@ -82,12 +82,40 @@ Checked what could break, and how:
   is executed by the new tests, but the 100 % coverage of `env` was not measured here.
 
 
+## Follow-up pass (items the first pass left)
+
+1. Stale TAO cache (was "needs from lead"; fixed). `pipeline._tao_cached` accepted a manifest made under the old selection rule, so a cache kept its
+   old selection for ever (M-19's fix moved the problem into the cache). Root: the manifest did not say which rule picked its files. Now
+   `tao.SELECTION` (= 2) is written by `fetch_tao` as `selection` in `manifest.json`, and `_tao_cached` returns False for any other value or none
+   (every manifest of rounds 1-9). The re-fetch re-hashes the files already on disk (`remote.download(url, p, sha)` returns an existing file whose
+   hash matches without a request) and downloads only what the new rule adds; it needs the catalog, so with CAFE_OFFLINE set an old cache now fails
+   `tao_present` naming `python -m cafe.pm fetch` (q10's TAO cache is in that case; it needs one online `fetch`). The ci_env fixture manifest
+   (`tests/fixtures/ci_env/make.py write_tao`) writes the field. Other consumers of the manifest (`verify`, `load_tao`, `unusable_selected`,
+   `waves_available`, receipts.py, the ledger input hash) do not read `selection`; siblings: no other cache in pipeline.py is keyed by a selection
+   rule (orca: `_drop_stale_parts`; ocean store: `manifest_sha256`). Test: `tests/test_pipeline.py::test_r10_a_tao_cache_made_under_another_selection_rule_is_not_cached`
+   (rule-1, rule-3, null and no-field manifests are not cached; the current one is) and one assert added to the M-19 fetch test (`fetch_tao` writes
+   it). Shown failing with the check removed from `_tao_cached` (throwaway detached worktree, removed): `assert True is False`.
+   DECISIONS row (suggested 537): "The TAO manifest records the rule that selected its files (`selection`, tao.SELECTION). `pipeline._tao_cached`
+   accepts only the current one, so a cache selected under an older rule (no field = rounds 1-9, before M-19's per-variable windows) is fetched again;
+   files that hash are kept, only the catalog and the missing files are downloaded. Bump SELECTION whenever `_candidates` or the pick in `fetch_tao`
+   changes which files a manifest holds. Amends 490 and 506." CHANGELOG: an older TAO cache is fetched again once (needs network), not kept with
+   its old selection.
+2. `audit --code-only` "no docs/mutation.json": not a defect. docs/ORCA_RUNNER.md (gate section) and audit.py's own header say a clean checkout has
+   none and `audit(rc=1)` for that one problem is expected until `make mutation` stores it. Nothing to fix.
+3. Mutation and coverage: mutation (hours, homebase or burst, not allowed here) is not run; the lead's full gate does it. Coverage measured on orca over tests/test_tao.py, test_hycom.py,
+   test_ingest_fetch.py, test_ci_env.py, test_pipeline.py, test_reproducible.py (468 passed, rc=0): hycom.py 100 %; tao.py 79 % overall from those files alone
+   (the rest is covered by other files, not run), with every line of `_candidates`, the `selection=` line of `fetch_tao` and `_tao_cached` executed.
+   The 100 % gate of env and the mutation score are for the lead's full gate.
+4. Not measured, cannot be here: whether the real NDBC catalog dates variables of one deployment differently (no catalog offline; the fixture's
+   download count, 8, is unchanged).
+5. M-22: a lead decision whose documented-assumption option is handed to the docs step (sentence below); not a problem to fix in code.
+   M-37: "not confirmed, do nothing unless the lead wants the defence-in-depth check" (batch text): not a problem; nothing done.
+
 ## Needs from other batches
 
 - Lead / F: PHYSICS.md:458 sentence above (M-20).
-- Lead: `pipeline._tao_cached` accepts a TAO cache made under the old selection. If the owner wants q10's or any earlier cache re-selected, delete
-  its `tao/manifest.json` (the files stay; `fetch_tao` re-hashes and re-fetches only what is missing). I did not touch pipeline.py (not in this
-  batch's files); a rule-version field in the manifest would be a separate change.
+- Lead: DECISIONS 537 and the CHANGELOG line of the follow-up pass; run one online `fetch` for q10 (and any older data dir) to re-select its TAO files.
+  pipeline.py (`_tao_cached`) was touched outside the batch's file list because the stale cache is M-19's own consequence.
 - Nothing needed from A, B, C, E, F in code.
 
 ## M-22 and M-37 (no code, as assigned)

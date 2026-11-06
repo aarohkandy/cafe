@@ -2917,6 +2917,23 @@ def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
         assert pipeline._tao_cached(tdir, box, t0, t1) is False
 
 
+def test_r10_a_tao_cache_made_under_another_selection_rule_is_not_cached(data_copy):
+    """Round 10, M-19 follow-up: the per-variable selection changes which files a cache holds, but `_tao_cached` accepted a manifest of the old rule (files
+    hash, window and box cover), so an old cache kept its old selection for ever. The manifest names its rule; any other (or none) is fetched again."""
+    tdir = data_copy / "tao"
+    mp = tdir / "manifest.json"
+    m = config.load_mission(MISSION_PATH)
+    box, t0, t1 = pipeline.ocean_box(m), config.utc(m["window"]["start"]).timestamp(), config.utc(m["window"]["end"]).timestamp()
+    man = json.loads(mp.read_text())
+    assert man["selection"] == tao.SELECTION and pipeline._tao_cached(tdir, box, t0, t1) is True
+    for other in (tao.SELECTION - 1, tao.SELECTION + 1, None):
+        mp.write_text(json.dumps({**man, "selection": other}))
+        assert pipeline._tao_cached(tdir, box, t0, t1) is False
+    del man["selection"]                                                                       # a manifest of rounds 1-9 has no field
+    mp.write_text(json.dumps(man))
+    assert pipeline._tao_cached(tdir, box, t0, t1) is False
+
+
 def test_l0_a_tao_cache_whose_selected_file_lost_its_qc_variable_is_not_cached(data_copy):
     """Round 9, M-31 sibling: the cache check hashed the files but never opened them, so a selected file without its QC variable (a cache built before M-31, or
     a variable dropped later) passed, and `load_tao` raised a bare ValueError hours into the ingest."""
