@@ -1,4 +1,4 @@
-"""Mission-level emulator: training rows from Stage 1, the per-class emulators, the flip search and the what-if answer (BRIEF 2.5, 2.7, 2.9).
+"""Mission-level emulator: training rows from Stage 1, the per-scope emulators, the flip search and the what-if answer (BRIEF 2.5, 2.7, 2.9).
 
 One row per vehicle per Stage-1 run is appended to `$CAFE_DATA/emulator/train.parquet`:
 
@@ -7,13 +7,16 @@ One row per vehicle per Stage-1 run is appended to `$CAFE_DATA/emulator/train.pa
                current along the ensemble-median track (a UAS: at the ship at its sortie times)
     targets    p_fail, t_fail_h (median hours from start to the first failure among failed members; the exposure length when none
                failed, i.e. right-censored), mode_<name> (fraction of members that failed in that mode)
-    metadata   cls, vehicle, mission, variant, key (a hash of mission, class, vehicle, variant and the features: a rerun of the same mission
-               replaces its rows, whichever directory it ran in), run_id, n_members, fidelity (0 = Stage 1, 1 = Stage-1b rerun with the stage-3
-               refit), git_sha, code_digest
+    metadata   cls, scope (`budget.emulator_scope`: class, platform and window length), vehicle, mission, variant, key (a hash of mission, scope,
+               class, vehicle, variant and the features: a rerun of the same mission replaces its rows, whichever directory it ran in), run_id,
+               n_members, fidelity (0 = Stage 1, 1 = Stage-1b rerun with the stage-3 refit), git_sha, code_digest
 
-Vehicles of different classes have different features and failure modes, so there is one emulator (cafe.pm.emulator.Emulator, GP plus split
-conformal) per class, fitted on the rows of that class made by the current code (`code_digest`; older rows stay in the table). It is trained
-only from `MIN_ROWS` distinct feature points; below that `trained` is False and says why.
+P(fail) is over the whole window and a variant never changes the window or the platform, so no feature carries either. Vehicles of different
+classes also have different features and failure modes. There is therefore one emulator (cafe.pm.emulator.Emulator, GP plus split conformal) per
+scope, fitted on the rows of that scope made by the current code (`code_digest`; older rows stay in the table), and a query is answered only from
+the emulator of its own scope: rows of another window length or platform are another function and are never pooled. A row of a table made before
+the `scope` column is of no scope and is left out (it is counted in `unscoped_rows`). It is trained only from `MIN_ROWS` distinct feature points;
+below that `trained` is False and says why.
 
 A "mission change" is a dict per vehicle: shift_h (deploy later; a UAS: its daily sorties later in the day), dlon/dlat in degrees (a UAS
 moves with its ship) and duty (<= 1: glider dive depth x duty, UAS every_days / duty rounded up to whole days). `apply` makes the changed
@@ -51,13 +54,17 @@ Track = tuple[NDArray[Any], NDArray[Any], NDArray[Any]]                    # (t,
 BASE = ["deploy_h", "lon", "lat", "wind_mean", "wind_p90", "hs_mean", "hs_p90", "cur_mean", "cur_p90"]
 TASK = dict(glider=["dive_depth_m", "radius_km", "lost_after_h"], usv=["track_tolerance_km", "becalmed_after_h"],
             uas=["every_days", "duration_min", "max_mean_wind_ms"])
-MIN_ROWS = budget.EMULATOR_MIN_POINTS     # distinct feature points per class (budget.py holds it with the plan that sizes the variants):
+MIN_ROWS = budget.EMULATOR_MIN_POINTS     # distinct feature points per scope (budget.py holds it with the plan that sizes the variants):
 #                                   with a 20 % hold-out that is 20 test points, enough to say anything of 90 % coverage. Never lowered to make a run train.
 MODES_MAX = 4                     # failure modes with their own GP (most variable first); the others stay in the table
 LIMITS = dict(rmse=0.05, coverage=0.05, query_ms=10.0)          # BRIEF 2.7 acceptance
 SHIFTS, MOVES, DUTIES = (6.0, 12.0, 24.0, 48.0), (0.5, 1.0), (0.75, 0.5)
 FALLBACK_K = 3                    # Stage-1 candidates tried, nearest first, when the emulator cannot answer
 TRAIN_FRAC = budget.TRAIN_FRAC    # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
+
+
+COVERAGE_DUST = 1e-9              # a coverage that is k / n is on the +- limit when it is mathematically so: `abs(17 / 20 - 0.9) <= 0.05` is False in floats
+#                                   (steps of coverage are at least 1 / n, so this admits no real miss)
 
 
 class Invalid(ConfigError):
@@ -71,6 +78,16 @@ def vehicle(mission: dict[str, Any], vid: str) -> dict[str, Any]:
     if v is None:
         raise Invalid(f"no vehicle {vid!r} in the mission ({[x['id'] for x in mission['vehicles']]})")
     return v
+
+
+def scope_of(mission: dict[str, Any], vid: str, cls: str | None = None) -> str:
+    """The emulator scope of one vehicle of the mission (`budget.emulator_scope`); `cls` is looked up when not given."""
+    return budget.emulator_scope(mission, vid, cls or stage1._classes(mission)[vid])
+
+
+def scopes(mission: dict[str, Any]) -> dict[str, str]:
+    """{scope: vehicle class} of every vehicle of the mission: the emulators `train` fits."""
+    return {budget.emulator_scope(mission, vid, cls): cls for vid, cls in stage1._classes(mission).items()}
 
 
 def _wrap(lon: Any) -> Any:
@@ -162,8 +179,18 @@ def solo(mission: dict[str, Any], vid: str) -> dict[str, Any]:
     return m
 
 
-def describe(mod: dict[str, Any], v: dict[str, Any] | None = None) -> str:
-    """The change in words."""
+def flight_note(v: dict[str, Any], shift_h: float, t_end: float) -> str | None:
+    """What a deploy shift does to the exposure: a glider or USV deployed `shift_h` later still flies to the window's end, so it flies a shorter time, and
+    its P(fail) (the fraction failing at any time) is over that flight, not the baseline's. None for no shift or a UAS (its sorties stay in the window)."""
+    if not shift_h or "base" in v:
+        return None
+    old = (t_end - utc(v["deploy"]["time"]).timestamp()) / 86400.0
+    new = old - shift_h / 24.0
+    return f"flies {new:g} d instead of {old:g} d: P(fail) is over the {'shorter' if shift_h > 0 else 'longer'} flight, not like for like with the baseline's"
+
+
+def describe(mod: dict[str, Any], v: dict[str, Any] | None = None, t_end: float | None = None) -> str:
+    """The change in words. With the window end `t_end`, a deploy shift of a glider or USV also says what it does to the flight (`flight_note`)."""
     h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
     what = "launch the sorties" if v is not None and "base" in v else "deploy"
     out: list[str] = []
@@ -172,6 +199,7 @@ def describe(mod: dict[str, Any], v: dict[str, Any] | None = None) -> str:
     for d, pos, neg in ((dlon, "east", "west"), (dlat, "north", "south")):
         if d:
             out.append(f"move {abs(d):g} deg {pos if d > 0 else neg}")
+    note = flight_note(v, h, t_end) if v is not None and t_end is not None else None
     if duty != 1.0:
         if v is not None and "base" in v:
             x = float(v["sorties"].get("every_days", 1))
@@ -180,7 +208,7 @@ def describe(mod: dict[str, Any], v: dict[str, Any] | None = None) -> str:
         else:
             d0 = (v or {}).get("task", {}).get("dive_depth_m")
             out.append(f"dive {100 * (1 - duty):.0f} % shallower" + (f" ({d0:g} m to {d0 * duty:g} m)" if d0 else ""))
-    return " and ".join(out) or "no change"
+    return " and ".join(out) + (f" ({note})" if note else "") if out else "no change"
 
 
 # ------------------------------------------------------------------------------------------------------ features and rows
@@ -274,10 +302,10 @@ def targets(r: dict[str, Any]) -> dict[str, Any]:
 
 
 def row_key(row: dict[str, Any]) -> str:
-    """The identity of a training row: mission, class, vehicle, variant and the features, to 9 significant digits. A rerun of the same mission
+    """The identity of a training row: mission, scope, class, vehicle, variant and the features, to 9 significant digits. A rerun of the same mission
     gives the same key whichever directory it ran in, so it replaces its predecessor instead of counting as new data."""
     feats = {k: float(f"{row[k]:.9g}") for k in BASE + TASK[row["cls"]]}
-    ident = [row.get("mission", ""), row["cls"], row["vehicle"], row["variant"], feats]
+    ident = [row.get("mission", ""), row["scope"], row["cls"], row["vehicle"], row["variant"], feats]
     return hashlib.sha256(json.dumps(ident, sort_keys=True).encode()).hexdigest()[:16]
 
 
@@ -288,7 +316,7 @@ def vehicle_rows(mission: dict[str, Any], res: dict[str, Any], env: Any, fidelit
     for vid, r in res["vehicles"].items():
         cls = r["class"]
         trk = uas_track(mission, vid) if cls == "uas" else track_points(r, mission)
-        row = dict(**params(mission, vid, cls), **env_stats(env, *trk), **targets(r), cls=cls, vehicle=vid, variant=variant,
+        row = dict(**params(mission, vid, cls), **env_stats(env, *trk), **targets(r), cls=cls, scope=scope_of(mission, vid, cls), vehicle=vid, variant=variant,
                    n_members=int(len(stage1.failed(r))), fidelity=int(fidelity.get(vid, 0)), **meta)
         rows.append(dict(row, key=row_key(row)))
     return rows
@@ -385,9 +413,12 @@ def design(mission: dict[str, Any], n: int, seed: int) -> list[dict[str, Any]]:
 
 # ------------------------------------------------------------------------------------------------------ fit and score
 
-def _clean(df: pd.DataFrame, cls: str) -> pd.DataFrame:
+def _clean(df: pd.DataFrame, cls: str, scope: str) -> pd.DataFrame:
+    """The complete rows of one class in one scope. A table made before the `scope` column has no rows of any scope."""
     need = BASE + TASK[cls] + ["p_fail", "t_fail_h"]
-    d = df[df["cls"] == cls].reindex(columns=sorted(set(df.columns) | set(need)))                  # a table of other classes has no columns of this one
+    d = df[df["cls"] == cls]
+    d = d[d["scope"] == scope] if "scope" in d else d.iloc[:0]
+    d = d.reindex(columns=sorted(set(df.columns) | set(need)))                                     # a table of other classes has no columns of this one
     for c in [c for c in d if c.startswith("mode_")]:
         d[c] = d[c].fillna(0.0)
     return d.dropna(subset=need).reset_index(drop=True)
@@ -405,28 +436,49 @@ def key_cols(cls: str) -> list[str]:
     return BASE[:3] + TASK[cls]
 
 
-def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = None, fresh: FreshDraw | None = None) -> tuple[Emulator | None, dict[str, Any]]:
-    """Fit the emulator of one vehicle class on its rows and score it on a 20 % hold-out (split by distinct feature point, see
-    `Emulator.holdout_report`; a point is the mission-defining columns, `key_cols`). With `code_digest`, rows made by other code (or by code
-    of unknown digest) stay in the table but are not trained on.
+def _coverage_in(cov: Any, nominal: float) -> Any:
+    """Whether a hold-out coverage is within BRIEF 2.7's +-LIMITS["coverage"] of the nominal: the one rule of the gate and of the chance figure."""
+    return np.abs(cov - nominal) <= LIMITS["coverage"] + COVERAGE_DUST
+
+
+def _chance_miss(n_test: int, nominal: float) -> float:
+    """The probability that a calibrated emulator's hold-out hit count, Binomial(n_test, nominal), is outside the coverage gate. On 20 to 30 points that
+    alone misses the +-0.05 gate often."""
+    k = np.arange(n_test + 1)
+    return float(binom.pmf(k[~_coverage_in(k / max(n_test, 1), nominal)], n_test, nominal).sum())
+
+
+def fit_class(df: pd.DataFrame, cls: str, scope: str, path: Any, code_digest: str | None = None,
+              fresh: FreshDraw | None = None) -> tuple[Emulator | None, dict[str, Any]]:
+    """Fit the emulator of one scope (a vehicle class on one platform and window length, `budget.emulator_scope`) on its rows and score it on a
+    20 % hold-out (split by distinct feature point, see `Emulator.holdout_report`; a point is the mission-defining columns, `key_cols`). With
+    `code_digest`, rows made by other code (or by code of unknown digest) stay in the table but are not trained on.
     With `fresh` (see `Emulator.holdout_report`) the hold-out also scores the emulator against P(fail) re-estimated on fresh members, and the RMSE
     gate uses the larger of the two debiased RMSEs.
-    The `MIN_ROWS` gate counts distinct feature points, so reruns of one mission cannot reach it. -> (Emulator | None, info for holdout.json)."""
-    d = _clean(df, cls)
+    The `MIN_ROWS` gate counts distinct feature points of the scope, so reruns of one mission cannot reach it, nor can rows of another window length or
+    platform. -> (Emulator | None, info for holdout.json)."""
+    d = _clean(df, cls, scope)
+    of_cls = df[df["cls"] == cls]
+    sc = of_cls["scope"] if "scope" in of_cls else pd.Series(np.nan, index=of_cls.index, dtype=object)
+    unscoped, elsewhere = int(sc.isna().sum()), int((sc.notna() & (sc != scope)).sum())
     stale = 0
     if code_digest is not None:
         keep = (d["code_digest"] == code_digest).to_numpy() if "code_digest" in d else np.zeros(len(d), bool)
         stale = int((~keep).sum())
         d = d[keep].reset_index(drop=True)
     points = int(len(d[key_cols(cls)].round(9).drop_duplicates()))
-    info: dict[str, Any] = dict(trained=False, cls=cls, rows=int(len(d)), points=points, stale_rows=stale, used=False)
+    info: dict[str, Any] = dict(trained=False, cls=cls, scope=scope, rows=int(len(d)), points=points, stale_rows=stale, unscoped_rows=unscoped,
+                                other_scope_rows=elsewhere, used=False)
     if points < MIN_ROWS:
         more = f"; only {points} of them are distinct feature points" if points < len(d) else ""
         old = f"; {stale} rows made by other code are left out" if stale else ""
-        why = f"{len(d)} {cls} rows in the training table, {MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage){more}{old}"
+        pooled = (f"; {elsewhere} {cls} rows of other platforms or window lengths are not pooled with them, since P(fail) over another window or platform is "
+                  "another function" if elsewhere else "")
+        legacy = f"; {unscoped} {cls} rows made before rows carried a scope are left out" if unscoped else ""
+        why = f"{len(d)} {scope} rows in the training table, {MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage){more}{old}{pooled}{legacy}"
         return None, dict(info, reason=why, unused_reason=why)
     if np.ptp(d["p_fail"]) == 0:
-        why = f"P(fail) is {d['p_fail'].iloc[0]:.3f} in all {len(d)} {cls} rows: nothing to learn"
+        why = f"P(fail) is {d['p_fail'].iloc[0]:.3f} in all {len(d)} {scope} rows: nothing to learn"
         return None, dict(info, reason=why, unused_reason=why)
     modes = [c for c in d.columns if c.startswith("mode_") and d[c].std() > 0]
     modes = sorted(modes, key=lambda c: -d[c].std())[:MODES_MAX]
@@ -453,30 +505,28 @@ def fit_class(df: pd.DataFrame, cls: str, path: Any, code_digest: str | None = N
         fresh_info = dict(fresh_points=fr["points"], fresh_n_members=fr["n_members"], rmse_fresh=fr["rmse"], noise_floor_fresh=ffloor,
                           rmse_fresh_debiased=float(np.sqrt(max(fr["rmse"] ** 2 - ffloor ** 2, 0.0))))
     gate = max(deb, fresh_info.get("rmse_fresh_debiased", 0.0))
-    acc = dict(rmse_ok=bool(gate <= LIMITS["rmse"]), coverage_ok=bool(abs(h["coverage"]["p_fail"] - h["nominal"]) <= LIMITS["coverage"]),
+    acc = dict(rmse_ok=bool(gate <= LIMITS["rmse"]), coverage_ok=bool(_coverage_in(h["coverage"]["p_fail"], h["nominal"])),
                query_ok=bool(q <= LIMITS["query_ms"]))
     missed = [n for n, ok in (("RMSE", acc["rmse_ok"]), ("coverage", acc["coverage_ok"]), ("query time", acc["query_ok"])) if not ok]
-    # a calibrated emulator's held-out hit count is Binomial(n_test, nominal); on 20 to 30 points that alone misses the +-0.05 gate often
-    k = np.arange(h["n_test"] + 1)
-    chance = float(binom.pmf(k[np.abs(k / max(h["n_test"], 1) - h["nominal"]) > LIMITS["coverage"] + 1e-12], h["n_test"], h["nominal"]).sum())
+    chance = _chance_miss(h["n_test"], h["nominal"])
     return em, dict(info, trained=True, n_train=h["n_train"], n_test=h["n_test"], nominal=h["nominal"], rmse=h["rmse"], coverage=h["coverage"],
                     coverage_raw_p=h["coverage_raw_p"], coverage_chance_fail=chance, used=not missed,
-                    unused_reason=f"the {cls} emulator missed BRIEF 2.7 acceptance ({', '.join(missed)}), so Stage 1 answers" if missed else None,
+                    unused_reason=f"the {scope} emulator missed BRIEF 2.7 acceptance ({', '.join(missed)}), so Stage 1 answers" if missed else None,
                     query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, rmse_gate=gate, **fresh_info,
                     draws=DRAWS, acceptance=acc, threshold=em.threshold, multi_fidelity=em.multi_fidelity)
 
 
-def train(table: Any, classes: Any, path: Any = None, df: pd.DataFrame | None = None, code_digest: str | None = None,
+def train(table: Any, scopes: dict[str, str], path: Any = None, df: pd.DataFrame | None = None, code_digest: str | None = None,
           fresh: FreshDraw | None = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
-    """Fit the emulator of each class in `classes` from the stored table (all runs, all missions), or from `df` when given (the pipeline
-    trains on a snapshot of the table, not on whatever the table holds by now). Only rows made by the current code are trained on:
+    """Fit the emulator of each scope in `scopes` ({scope: class}, see `scopes`) from the stored table (all runs, all missions), or from `df` when
+    given (the pipeline trains on a snapshot of the table, not on whatever the table holds by now). Only rows made by the current code are trained on:
     `code_digest` (default: this checkout's, `pipeline.code_digest`); superseded rows stay in the file."""
     from . import pipeline
     p, _ = store_path(table)
     if df is None:
         df = read_table(p) if p.exists() else pd.DataFrame(columns=["cls"] + BASE)
     cd = code_digest or pipeline.code_digest()
-    return {c: fit_class(df, c, path or table, cd, fresh) for c in sorted(set(classes))}
+    return {sc: fit_class(df, cls, sc, path or table, cd, fresh) for sc, cls in sorted(scopes.items())}
 
 
 def snapshot(table: Any, dest: Any, run_id: str) -> tuple[pd.DataFrame, pathlib.Path]:
@@ -501,10 +551,10 @@ def with_rows(df: pd.DataFrame, rows: list[dict[str, Any]]) -> pd.DataFrame:
 
 # ------------------------------------------------------------------------------------------------------ flip search
 
-def usable(ems: dict[str, tuple[Emulator | None, dict[str, Any]]], cls: str) -> tuple[Emulator | None, str | None]:
-    """(the class's emulator, None) when it may answer; (None, why) when there is none or it missed BRIEF 2.7 acceptance (`used` False in its info):
-    Stage 1 answers then, and `why` is the reason to show beside the old "no emulator"."""
-    em, info = ems.get(cls) or (None, {})
+def usable(ems: dict[str, tuple[Emulator | None, dict[str, Any]]], scope: str) -> tuple[Emulator | None, str | None]:
+    """(the scope's emulator, None) when it may answer; (None, why) when there is none or it missed BRIEF 2.7 acceptance (`used` False in its info):
+    Stage 1 answers then, and `why` is the reason to show beside the old "no emulator". Only the emulator of the query's own scope is looked at."""
+    em, info = ems.get(scope) or (None, {})
     if em is None or info.get("used", True):
         return em, info.get("unused_reason")
     return None, info.get("unused_reason")
@@ -519,7 +569,7 @@ def candidates(mission: dict[str, Any], vid: str) -> list[dict[str, Any]]:
     if "base" in v or "dive_depth_m" in v["task"]:
         out += [dict(mod=dict(duty=f), cost=(1 - f) / 0.25) for f in DUTIES]
     for c in out:
-        c["change"] = describe(c["mod"], v)
+        c["change"] = describe(c["mod"], v, _window(mission)[1])
     return sorted(out, key=lambda c: c["cost"])
 
 
@@ -590,7 +640,7 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
         used = 0.0
         cls = stage1._classes(solo(mission, vid))[vid]
         want = ("GO",) if base["verdict"] == "MARGINAL" else ("GO", "MARGINAL")
-        em, no_em = usable(ems, cls)
+        em, no_em = usable(ems, scope_of(mission, vid, cls))
         tried: list[dict[str, Any]] = []
         left: list[tuple[int, dict[str, Any]]] = []
         for c in candidates(mission, vid):
@@ -697,13 +747,14 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
         if b is None:
             b = measure(mission, vid, env, plan, pri, marg, scales, seed)
             b = dict(verdict=b["verdict"], p_fail=b["p_fail"])
-        em, no_em = usable(ems, cls)
+        em, no_em = usable(ems, scope_of(m2, vid, cls))
         a = predict(em, m2, vid, cls, tracks.get(vid), mod, env)
+        flight = flight_note(vehicle(mission, vid), mod["shift_h"], _window(mission)[1])
         if a["status"] == "ok":
-            out[vid] = dict(base=b, method="EMULATED", **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")})
+            out[vid] = dict(base=b, method="EMULATED", flight=flight, **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")})
         else:
             why = no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " ")
-            out[vid] = dict(base=b, method="Stage 1", why=why, **_stage1(m2, vid, env, plan, fitted, scales))
+            out[vid] = dict(base=b, method="Stage 1", why=why, flight=flight, **_stage1(m2, vid, env, plan, fitted, scales))
     gone = [k["id"] for k in mission["links"] if k["a"] in drop or k["b"] in drop]
     return dict(vehicles=out, dropped=drop, links_removed=gone, unchanged=unchanged)
 

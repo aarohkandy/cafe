@@ -37,7 +37,7 @@ SITL = {"ci": 0, "quick": 0, "4h": 0, "overnight": 0}                # ArduCopte
 SHARE = dict(stage1=0.45, stage3=0.30, stage1b=0.15, emulator=0.05)   # stage 1b is a copy (free) when no window passes: its share goes to the emulator
 EMULATOR_VARIANTS = {"ci": 2, "quick": 6, "4h": 24, "overnight": 48}   # most mission variants (a batch of every vehicle each) per run ...
 EMULATOR_REACH = ("4h", "overnight")                                   # ... except on these, where the cap is the count that reaches EMULATOR_MIN_POINTS
-EMULATOR_MIN_POINTS = 100         # distinct feature points per vehicle class the emulator needs to train (whatif.MIN_ROWS reads this)
+EMULATOR_MIN_POINTS = 100         # distinct feature points per emulator scope (`emulator_scope`) the emulator needs to train (whatif.MIN_ROWS reads this)
 EMULATOR_POINTS_MARGIN = 1.2      # variants are sized for this many times the minimum (a skipped variant or a repeated point still leaves enough)
 TRAIN_FRAC = 0.7                  # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
 STAGE3_PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}     # the native-LBM parts of a window, one slice of the share each
@@ -233,6 +233,14 @@ def window_days(mission: dict[str, Any]) -> float:
     return (utc(mission["window"]["end"]) - utc(mission["window"]["start"])).total_seconds() / 86400
 
 
+def emulator_scope(mission: dict[str, Any], vid: str, cls: str) -> str:
+    """What an emulator is a function of: the vehicle class, the platform and the length of the window, as "glider/seaglider/144h". The features say
+    nothing of these (a variant never changes the window or the platform) and P(fail) is over the whole window, so rows of another scope are another
+    function and are neither trained on nor queried from (whatif._clean). A vehicle the mission does not list has platform "?"."""
+    plat = next((str(v.get("platform", "?")) for v in mission.get("vehicles", []) if v["id"] == vid), "?")
+    return f"{cls}/{plat}/{window_days(mission) * 24:g}h"
+
+
 def padded_area_deg2(mission: dict[str, Any]) -> float:
     """deg^2 of the box ingest downloads (`pipeline.padding` on each side; longitude wraps at 180, so 165 to -165 is 30 deg wide). A mission with no
     `box` (a bare window) is taken as the demo's 14 x 34 deg, the one box the model was measured on."""
@@ -413,7 +421,8 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
              stage1_s=stage1_wall_s(dict(timing, batch=min(bs, n_max)), n_max), stage1_share_s=share1, workers=W, workers_by_cpu=cpu, workers_by_memory=by_mem,
              mem_gb=mem_gb, env_gb=None if mem_gb is None else env, stage1_s_basis=STAGE1_S_BASIS, tasks=tasks,
              sitl_members=SITL[budget], member_cost={k: dict(s_per_batch_day=c[0], s_per_member_day=c[1], source=s) for k, (c, s) in costs.items()},
-             les=les, refit_iterations=0 if budget == "ci" else 2, notes=notes, certify_possible=n_max >= 73, shares=shares, vehicle_classes=dict(classes))
+             les=les, refit_iterations=0 if budget == "ci" else 2, notes=notes, certify_possible=n_max >= 73, shares=shares, vehicle_classes=dict(classes),
+             vehicle_scopes={vid: emulator_scope(mission, vid, c) for vid, c in classes.items()})
     em = emulator_plan(p)
     if not em["trains"]:
         p["notes"].append(em["note"])
@@ -469,29 +478,30 @@ def emulator_plan(p: dict[str, Any]) -> dict[str, Any]:
     the measured per-vehicle costs), the variants may use `TRAIN_FRAC` of the stage's share, and at most EMULATOR_VARIANTS[budget] (on
     `EMULATOR_REACH` budgets: the count that gives the smallest class `EMULATOR_MIN_POINTS` x `EMULATOR_POINTS_MARGIN` points). Two answers
     because the share is bigger by stage 1b's when no vehicle was refit (the rerun was a copy): `variants_refit`, `variants_no_refit`.
-    A variant adds one feature point per vehicle, so a class of n vehicles has (variants + 1) n points after one run (`points_per_class`, best
-    case); `trains` is False, with the numbers in `note`, when that is under `EMULATOR_MIN_POINTS` for any class: the run alone cannot train an
-    emulator, rows must accumulate over runs of one code digest (whatif.add_rows) or the budget must be bigger."""
+    A variant adds one feature point per vehicle, so a scope of n vehicles has (variants + 1) n points after one run (`points_per_scope`, best
+    case; a scope is `emulator_scope`: vehicles of one class, platform and window length, which is all one emulator is trained on; a plan made
+    before `vehicle_scopes` counts per class); `trains` is False, with the numbers in `note`, when that is under `EMULATOR_MIN_POINTS` for any
+    scope: the run alone cannot train an emulator, rows must accumulate over runs of one code digest (whatif.add_rows) or the budget must be bigger."""
     est = batch_cost_s(p)
-    per_class = Counter(p.get("vehicle_classes", {}).values())
-    smallest = min(per_class.values(), default=1)
+    per_scope = Counter((p.get("vehicle_scopes") or p.get("vehicle_classes", {})).values())
+    smallest = min(per_scope.values(), default=1)
     cap = max(math.ceil(EMULATOR_MIN_POINTS * EMULATOR_POINTS_MARGIN / smallest) - 1, 0) if p["budget"] in EMULATOR_REACH else EMULATOR_VARIANTS[p["budget"]]
 
     def n(free: bool) -> int:
         return int(min(cap, TRAIN_FRAC * emulator_share_s(p, free) // est)) if est > 0 else 0       # (a denormal est: // is inf)
     refit, no_refit = n(False), n(True)
     best = max(refit, no_refit)
-    points = {c: (best + 1) * k for c, k in sorted(per_class.items())} or {"": best + 1}
+    points = {c: (best + 1) * k for c, k in sorted(per_scope.items())} or {"": best + 1}
     short = {c: v for c, v in points.items() if v < EMULATOR_MIN_POINTS}
     avail = f"{TRAIN_FRAC:.0%} of a {emulator_share_s(p, True):.0f} s emulator share"
     note = (f"the emulator cannot train at this budget: one mission variant costs {est:.0f} s of stage 1 and the variants may use {avail}, so "
             f"{best} of {cap} variants run" if best == 0 else
-            f"this budget gives {min(points.values())} distinct points per vehicle class in one run ({best} variants of {est:.0f} s + the base mission, "
-            f"{avail}), {EMULATOR_MIN_POINTS} are needed: the emulator will not train from this run alone; rows accumulate in the training table "
-            "across runs of the same code digest")
+            f"this budget gives {min(points.values())} distinct points per emulator scope (vehicle class, platform, window length) in one run "
+            f"({best} variants of {est:.0f} s + the base mission, {avail}), {EMULATOR_MIN_POINTS} are needed: the emulator will not train from "
+            "this run alone; rows accumulate in the training table across runs of the same code digest")
     return dict(variant_s=est, variant_s_source="the planner's estimate from the measured per-vehicle costs (plan.json member_cost)",
                 share_s=dict(refit=emulator_share_s(p, False), no_refit=emulator_share_s(p, True)), train_fraction=TRAIN_FRAC,
-                max_variants=cap, variants_refit=refit, variants_no_refit=no_refit, min_points=EMULATOR_MIN_POINTS, points_per_class=points,
+                max_variants=cap, variants_refit=refit, variants_no_refit=no_refit, min_points=EMULATOR_MIN_POINTS, points_per_scope=points,
                 trains=not short, note=note)
 
 

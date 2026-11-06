@@ -859,21 +859,21 @@ def _fresh(e: dict[str, Any], ref: dict[str, Any], s: str) -> dict[str, Any] | N
 
 def _run_note(design: dict[str, Any] | None, plan: dict[str, Any] | None, emu: dict[str, Any] | None = None) -> str | None:
     """What the variant runs did, from emulator/design.json (never a measured second: that file is hashed), as against `plan_note`, which is what the plan
-    said before the run: the variants that ran of those planned, the points of the smallest vehicle class against what an emulator needs, and why the stage
+    said before the run: the variants that ran of those planned, the points of the smallest emulator scope against what an emulator needs, and why the stage
     was cut short when it was. The points are those `emu` (emulator/holdout.json) holds, the distinct feature points `whatif.fit_class` counted in the
-    whole training table, whether or not the class trained (P-29); without them (no file, or an older one) this run's own: the base mission plus the
-    variants, less the vehicle-variant pairs that were skipped. None without a design file."""
+    whole training table for the scope, whether or not it trained (P-29); without them (no file, or an older one) this run's own: the base mission plus the
+    variants, less the vehicle-variant pairs that were skipped, per scope (per class in a plan made before scopes). None without a design file."""
     if design is None:
         return None
     ran, planned, skipped = len(design["variants"]), design.get("planned_variants"), design.get("skipped") or []
-    cls = (plan or {}).get("vehicle_classes") or {}
+    cls = (plan or {}).get("vehicle_scopes") or (plan or {}).get("vehicle_classes") or {}
     per_class = Counter(cls.values())
     lost = Counter(cls.get(k["vehicle"]) for k in skipped)
     points = {c: (ran + 1) * n - lost[c] for c, n in sorted(per_class.items())}
     held = [e.get("points") for e in (emu or {}).values()]
     smallest = min(held) if held and all(type(n) is int for n in held) else min(points.values(), default=None)
     out = (f"{ran} variant run{'s' * (ran != 1)}{'' if planned is None else f' of the {planned} planned'} and the base mission" +
-           (f", {smallest} points in the smallest vehicle class ({budget.EMULATOR_MIN_POINTS} are needed)" if smallest is not None else ""))
+           (f", {smallest} points in the smallest emulator scope ({budget.EMULATOR_MIN_POINTS} are needed)" if smallest is not None else ""))
     killed = design.get("killed")
     return out + (f"; {killed['reason']}" if killed else "") + "."
 
@@ -888,7 +888,8 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
     for vid, e in emu.items():
         s = f"emulator/holdout.json {vid}"
         if not e.get("trained"):
-            out[vid] = dict(trained=False, reason=e.get("reason", "no reason recorded"), **({"rows": num(e["rows"], "rows", ref, s)} if "rows" in e else {}))
+            out[vid] = dict(trained=False, reason=e.get("reason", "no reason recorded"), **({"scope": e["scope"]} if e.get("scope") else {}),
+                            **({"rows": num(e["rows"], "rows", ref, s)} if "rows" in e else {}))
             continue
 
         def unit(k: str) -> str:
@@ -896,7 +897,8 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
 
         d = dict(trained=True, n_train=num(e["n_train"], "members", ref, s), n_test=num(e["n_test"], "members", ref, s),
                  nominal=num(e["nominal"], "fraction", ref, s), rmse={k: num(x, unit(k), ref, s + ".rmse") for k, x in e["rmse"].items()},
-                 coverage={k: num(x, "fraction", ref, s + ".coverage") for k, x in e["coverage"].items()}, cls=e.get("cls"), acceptance=None,
+                 coverage={k: num(x, "fraction", ref, s + ".coverage") for k, x in e["coverage"].items()}, cls=e.get("cls"), scope=e.get("scope"),
+                 acceptance=None,
                  coverage_raw_p={k: num(x, "fraction", ref, s + ".coverage_raw_p") for k, x in (e.get("coverage_raw_p") or {}).items()} or None)
         if "acceptance" in e:
 
@@ -1476,14 +1478,15 @@ def _emulator_html(m: dict[str, Any]) -> str:
     h = note
     for vid, v in m["vehicles"].items():
         if not v["trained"]:
-            h += f"<p><b>{e(vid)}</b>: not trained. {e(v['reason'])}" + (f" ({_n(v['rows'])} of this class.)" if "rows" in v else "") + "</p>"
+            of = f" ({_n(v['rows'])} of this {'scope' if v.get('scope') else 'class'}.)" if "rows" in v else ""
+            h += f"<p><b>{e(vid)}</b>: not trained. {e(v['reason'])}{of}</p>"
             continue
         raw = v["coverage_raw_p"] or {}
         sc = "; ".join(f"{e(k)} RMSE {_n(x)}, "
                        + (f"coverage on the calibration scale (clipped logit) {_n(v['coverage'][k])}; on the raw P scale {_n(raw[k])}, where a target of "
                           "exactly 0 or 1 cannot be inside the interval" if k in raw else f"coverage {_n(v['coverage'][k])}")
                        + f" (nominal {_n(v['nominal'])})" for k, x in v["rmse"].items())
-        kind = f" ({e(v['cls'])} emulator)" if v["cls"] else ""
+        kind = f" ({e(v['scope'] or v['cls'])} emulator)" if v["scope"] or v["cls"] else ""
         h += f"<p><b>{e(vid)}</b>{kind}: trained on {_n(v['n_train'])}, scored on {_n(v['n_test'])} held-out; {sc}.</p>"
         a = v["acceptance"]
         if a:
@@ -1497,7 +1500,7 @@ def _emulator_html(m: dict[str, Any]) -> str:
                   f"(the held-out RMSE against the member-count targets, less their own "
                   f"Monte-Carlo noise {_n(a['noise_floor_rmse'])} in quadrature); coverage within {_n(a['limits']['coverage'])} of nominal "
                   f"{ok(a['coverage_ok'])}{_chance(a.get('coverage_chance_fail'))}; query {_n(a['query_ms'])} "
-                  f"&le; {_n(a['limits']['query_ms'])} {ok(a['query_ok'])}; {_n(a['rows'])} of this class.</p>")
+                  f"&le; {_n(a['limits']['query_ms'])} {ok(a['query_ok'])}; {_n(a['rows'])} of this {'scope' if v.get('scope') else 'class'}.</p>")
             if v["used"] is False:
                 h += f"<p class=warn><b>Not used for answers: Stage 1 answered instead.</b> {e(v['unused_reason'] or '')}</p>"
             h += ("<p class=muted>Fresh-draw check: " + (

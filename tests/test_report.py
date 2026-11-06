@@ -2182,16 +2182,34 @@ def test_r8_l0_a_sentence_after_a_number_node_does_not_repeat_the_unit_the_node_
         assert want in h and "members members" not in h and "member members" not in h, h
 
 
-@pytest.mark.parametrize("rows,want", [(140, "140 rows of this class"), (1, "1 row of this class")])
+@pytest.mark.parametrize("rows,want", [(140, "140 rows of this scope"), (1, "1 row of this scope")])
 def test_r8_l0_the_emulator_acceptance_line_says_rows_once(run, rows, want):
     m, plan = pm_run.make_run(run)
     h = json.loads((run / "emulator" / "holdout.json").read_text())
-    h["glider_eq"].update(cls="glider", rows=rows, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03,
+    h["glider_eq"].update(cls="glider", scope="glider/seaglider/144h", rows=rows, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03,
                           acceptance=dict(rmse_ok=True, coverage_ok=True, query_ok=True))
     (run / "emulator" / "holdout.json").write_text(json.dumps(h))
     report.write(run, m, plan)
     t = plain((run / "report" / "index.html").read_text())
     assert want in t and "rows rows" not in t and "row rows" not in t
+
+
+def test_r10_m1_a_holdout_file_without_scopes_still_reads_per_class_and_a_plan_without_scopes_counts_per_class(run):
+    """Round 10 M-1: runs made before emulator scopes pooled by class; their files say class, and say nothing of a scope that was not there."""
+    m, plan = pm_run.make_run(run)
+    h = json.loads((run / "emulator" / "holdout.json").read_text())
+    h["glider_eq"].update(cls="glider", rows=140, query_ms=1.5, noise_floor_rmse=0.07, rmse_debiased=0.03,
+                          acceptance=dict(rmse_ok=True, coverage_ok=True, query_ok=True))
+    h["glider_eq"].pop("scope", None)
+    (run / "emulator" / "holdout.json").write_text(json.dumps(h))
+    report.write(run, m, plan)
+    t = plain((run / "report" / "index.html").read_text())
+    assert "(glider emulator)" in t and "140 rows of this class" in t and "of this scope" not in t
+    _design(run, planned_variants=2, variants=[dict(variant=f"v{i}", mods={}, vehicles=[], skipped={}) for i in range(2)], skipped=[], killed=None)
+    old = dict(plan, vehicle_scopes=None)
+    cls = list(plan["vehicle_classes"].values())
+    note = report._run_note(json.loads((run / "emulator" / "design.json").read_text()), old)
+    assert f"{3 * min(map(cls.count, set(cls)))} points in the smallest emulator scope" in note
 
 
 def test_r8_l0_every_unit_a_count_of_one_can_carry_is_singular_and_the_rest_are_left_alone():
@@ -2340,10 +2358,10 @@ def test_r9_m10_the_emulator_section_says_what_ran_beside_what_was_planned(run):
     report.write(run, m, plan)
     rep, t = load(run), plain((run / "report" / "index.html").read_text())
     e = rep["emulator"]
-    cls = plan["vehicle_classes"]
-    smallest = min(5 * n - (1 if k == "usv" else 0) for k, n in ((c, list(cls.values()).count(c)) for c in set(cls.values())))
+    cls = plan["vehicle_scopes"]
+    smallest = min(5 * n - (1 if k.startswith("usv") else 0) for k, n in ((c, list(cls.values()).count(c)) for c in set(cls.values())))
     assert e["plan_note"] == note
-    assert e["run_note"] == (f"4 variant runs of the 6 planned and the base mission, {smallest} points in the smallest vehicle class "
+    assert e["run_note"] == (f"4 variant runs of the 6 planned and the base mission, {smallest} points in the smallest emulator scope "
                              f"({budget.EMULATOR_MIN_POINTS} are needed); {why}.")
     assert f"Plan: {note}" in t and f"This run: {e['run_note']}" in t and "7 distinct" not in e["run_note"]
     assert report.check_traceability(rep) == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
@@ -2351,26 +2369,26 @@ def test_r9_m10_the_emulator_section_says_what_ran_beside_what_was_planned(run):
     assert report._run_note(dict(variants=[dict()]), None) == "1 variant run and the base mission."                      # no plan, no planned count, no kill
 
 
-def test_the_run_note_states_the_points_of_the_smallest_class_from_the_holdout_file_where_it_holds_them(run):
+def test_the_run_note_states_the_points_of_the_smallest_scope_from_the_holdout_file_where_it_holds_them(run):
     """P-29: the note counted (variants + 1) x vehicles of this run, so a shared table that already held rows (the emulator trained on 100 points, or the
     reverse) showed a number that was not the one the emulator saw."""
     m, plan = pm_run.make_run(run)
     _design(run, planned_variants=2, variants=[dict(variant=f"v{i}", mods={}, vehicles=[], skipped={}) for i in range(2)], skipped=[], killed=None)
-    cls = list(plan["vehicle_classes"].values())
+    cls = list(plan["vehicle_scopes"].values())
     own = report._run_note(json.loads((run / "emulator" / "design.json").read_text()), plan)
-    assert own == (f"2 variant runs of the 2 planned and the base mission, {3 * min(map(cls.count, set(cls)))} points in the smallest vehicle class "
-                   f"({budget.EMULATOR_MIN_POINTS} are needed).")      # this run's own: (2 + 1) x the vehicles of the class
+    assert own == (f"2 variant runs of the 2 planned and the base mission, {3 * min(map(cls.count, set(cls)))} points in the smallest emulator scope "
+                   f"({budget.EMULATOR_MIN_POINTS} are needed).")      # this run's own: (2 + 1) x the vehicles of the scope
     edit_json(run / "emulator" / "holdout.json", lambda d: (d["glider_eq"].update(points=131, cls="glider"), d["usv"].update(points=87, cls="usv")))
     report.write(run, m, plan)
     rep, t = load(run), plain((run / "report" / "index.html").read_text())
-    want = f"2 variant runs of the 2 planned and the base mission, 87 points in the smallest vehicle class ({budget.EMULATOR_MIN_POINTS} are needed)."
+    want = f"2 variant runs of the 2 planned and the base mission, 87 points in the smallest emulator scope ({budget.EMULATOR_MIN_POINTS} are needed)."
     assert rep["emulator"]["run_note"] == want and f"This run: {want}" in t
     edit_json(run / "emulator" / "holdout.json", lambda d: d["usv"].pop("points"))    # an older file, or no points for a class: this run's own
     report.write(run, m, plan)
     assert load(run)["emulator"]["run_note"] == own
     design = json.loads((run / "emulator" / "design.json").read_text())
     assert report._run_note(design, None, dict(a=dict(points=5))) == (f"2 variant runs of the 2 planned and the base mission, 5 points in the smallest "
-                                                                      f"vehicle class ({budget.EMULATOR_MIN_POINTS} are needed).")
+                                                                      f"emulator scope ({budget.EMULATOR_MIN_POINTS} are needed).")
 
 
 def test_r9_m3_a_uas_no_current_data_mode_gets_the_uas_wording_and_the_other_classes_keep_theirs(run):

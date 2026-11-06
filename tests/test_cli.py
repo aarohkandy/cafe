@@ -480,6 +480,17 @@ def test_whatif_prints_the_verdict_with_its_badge_distance_or_stage_1_n(wi, caps
     assert out[4] == "dropped glider_2n; links removed: glider_2n-ship-acoustic. Other vehicles are unaffected: Stage-1 vehicles do not interact."
 
 
+def test_whatif_says_under_the_line_what_a_deploy_shift_did_to_the_flight(wi, capsys, monkeypatch):
+    """Round 10 M-11: `--shift 48h` printed MARGINAL (0.234) -> MARGINAL (0.125) for a glider that then flew 4 days, not 6, with nothing to say so."""
+    note = "flies 4 d instead of 6 d: P(fail) is over the shorter flight, not like for like with the baseline's"
+    r = dict(base=dict(verdict="MARGINAL", p_fail=0.234), method="Stage 1", why="no emulator", p_fail=0.125, lo=0.1, hi=0.2, verdict="MARGINAL", n=32)
+    monkeypatch.setattr(whatif, "answer", lambda *a, **k: dict(vehicles={"glider_eq": dict(r, flight=note), "usv": dict(r, flight=None)}, dropped=[],
+                                                              links_removed=[]))
+    cli.main(whatif_args(wi, "--shift", "48h"))
+    out = capsys.readouterr().out.splitlines()
+    assert out[2] == f"  note: glider_eq {note}" and len(out) == 4 and out[3].startswith("usv: ")
+
+
 def test_whatif_without_links_removed_says_none(wi, capsys, monkeypatch):
     monkeypatch.setattr(whatif, "answer", lambda *a, **k: dict(vehicles={}, dropped=["usv"], links_removed=[]))
     cli.main(whatif_args(wi, "--drop", "usv"))
@@ -491,8 +502,8 @@ def test_whatif_takes_the_baseline_the_tracks_and_the_refit_from_the_run(wi):
     s = wi.seen
     summ = json.loads((wi.run / "stage1b" / "summary.json").read_text())["summary"]["vehicles"]
     assert s["base"] == {k: v["verdict"] for k, v in summ.items()} and set(s["tracks"]) == {"glider_eq", "glider_2n", "usv"}
-    assert set(s["scales"]) == {"glider_eq"} and s["fitted"] is None and s["ems"].keys() == {"glider", "usv", "uas"}
-    assert all(t[0].shape == t[1].shape == t[2].shape and len(t[0]) > 0 for t in s["tracks"].values()) and not s["ems"]["glider"][1]["trained"]
+    assert set(s["scales"]) == {"glider_eq"} and s["fitted"] is None and s["ems"].keys() == set(whatif.scopes(config.load_mission(DEMO)))
+    assert all(t[0].shape == t[1].shape == t[2].shape and len(t[0]) > 0 for t in s["tracks"].values()) and not s["ems"]["glider/seaglider/144h"][1]["trained"]
     (wi.run / "ingest").mkdir(exist_ok=True)
     (wi.run / "ingest" / "priors_fitted.json").write_text(json.dumps({"wind_speed_bias": {"dist": "normal", "mean": 0.1, "value": 1.0}}))
     (wi.run / "refit" / "refit.json").unlink()
