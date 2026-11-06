@@ -40,6 +40,8 @@ BASE = "https://dods.ndbc.noaa.gov/thredds"
 CATALOG = "/catalog/oceansites/DATA/"
 FILES = "/fileServer/"
 VARS = ("WIND", "SST", "AIRT", "RH")
+# The rule `_candidates` picks files by, written to the manifest: 1 = one window over all files (rounds 1-9), 2 = per variable and resolution (round 10, M-19)
+SELECTION = 2
 # file code -> (NetCDF variables, the variable whose _QC applies). RELH is in percent although its units attribute says '1' (2023 means: 78-87)
 NC = dict(WIND=(("UWND", "VWND"), "WSPD"), SST=(("SST",), "SST"), AIRT=(("AIRT",), "AIRT"), RH=(("RELH",), "RELH"))
 WAVE_VARS = ("WAVE", "WAVES", "HS", "SWH", "WVHT", "HSIG", "WVPD", "WDIR_WAVE")
@@ -99,14 +101,20 @@ def _files(name: str, base: str) -> list[dict[str, Any]]:
 
 def _candidates(files: list[dict[str, Any]], t0: float, t1: float) -> list[dict[str, Any]]:
     """Files of the deployment in the water at t0 (latest start <= t0, and the ones within 10 days before it, which are its A/B
-    twins) and every later deployment that starts before t1: the only ones that can overlap [t0, t1]."""
+    twins) and every later deployment that starts before t1: the only ones that can overlap [t0, t1]. The deployment in the water is
+    found per variable and resolution (D and R of one pair share it: the twin rule and the mode tie-break), so a sensor re-deployed
+    later than the others, or an hourly file, does not move the window of another variable (round 10, M-19)."""
 
     def day(f: dict[str, Any]) -> float:
         return dt.datetime.strptime(f["date"], "%Y%m%d").replace(tzinfo=dt.timezone.utc).timestamp()
 
-    before = [day(f) for f in files if day(f) <= t0]
-    lo = (max(before) - 10 * 86400) if before else -np.inf
-    return [f for f in files if lo <= day(f) <= t1]
+    out: list[dict[str, Any]] = []
+    for key in dict.fromkeys((f["var"], f["res"]) for f in files):
+        mine = [f for f in files if (f["var"], f["res"]) == key]
+        before = [day(f) for f in mine if day(f) <= t0]
+        lo = (max(before) - 10 * 86400) if before else -np.inf
+        out += [f for f in mine if lo <= day(f) <= t1]
+    return out
 
 
 def _coverage(path: Any) -> tuple[float, float]:
@@ -128,7 +136,8 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
     out.mkdir(parents=True, exist_ok=True)
     mpath = out / "manifest.json"
     old = (orca.read_json(mpath) or {}).get("files", {})                 # an empty or truncated manifest is no record: every file is checked again
-    man: dict[str, Any] = dict(source=base + CATALOG, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={}, waves=dict(checked=0, matches=[]))
+    man: dict[str, Any] = dict(source=base + CATALOG, selection=SELECTION, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={},
+                               waves=dict(checked=0, matches=[]))
     for name, lat, lon in moorings(box, base):
         listing = _files(name, base)
         man["waves"]["checked"] += len(listing)

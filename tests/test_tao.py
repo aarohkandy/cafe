@@ -291,14 +291,38 @@ def day_start(offset_days):
 def test_r9_m30_candidates_are_the_deployment_in_the_water_its_twins_within_ten_days_and_the_later_ones_that_start_in_the_window():
     """Round 9 M-30: with `- 10 * 86400` replaced by `- 0` the A/B twin of a deployment was dropped and the tests stayed green."""
     t0 = T0 - T0 % 86400                                                                         # a UTC midnight: the file dates are days
-    files = [dict(date=day_start(d), file=f"d{d}") for d in (-30, -14, -13, -12, -3, 2, 6, 7)]
+    files = [dict(date=day_start(d), file=f"d{d}", var="WIND", res="10min") for d in (-30, -14, -13, -12, -3, 2, 6, 7)]
     got = [f["file"] for f in tao._candidates(files, t0, t0 + 6 * 86400)]
     # latest start at or before t0 is -3; its twins reach back to -13 (exactly ten days is in); -14 and -30 are out;
     # 2 and 6 (= t1) start in the window; 7 after it
     assert got == ["d-13", "d-12", "d-3", "d2", "d6"]
-    on_t0 = [dict(date=day_start(d), file=f"d{d}") for d in (-12, -8, 0)]
+    on_t0 = [dict(date=day_start(d), file=f"d{d}", var="WIND", res="10min") for d in (-12, -8, 0)]
     assert [f["file"] for f in tao._candidates(on_t0, t0, t0 + 86400)] == ["d-8", "d0"]       # a file dated t0 is the one in the water: twins -10 days from it
-    assert [f["file"] for f in tao._candidates([dict(date=day_start(1), file="later")], t0, t0 + 2 * 86400)] == ["later"]       # none before t0: all up to t1
+    later = [dict(date=day_start(1), file="later", var="WIND", res="10min")]
+    assert [f["file"] for f in tao._candidates(later, t0, t0 + 2 * 86400)] == ["later"]       # none before t0: all up to t1
+
+
+def test_r10_m19_the_deployment_in_the_water_is_found_per_variable_and_resolution():
+    """Round 10 M-19: a sensor re-deployed after the wind sensor (SST dated 20230220, WIND 20230101, t0 1 March) moved the one window for every
+    variable to 10 Feb, so the only wind file in the water was never a candidate. The hourly twin of a 10-minute file must not move it either."""
+    t0 = T0 - T0 % 86400
+    f = lambda var, d, res="10min", mode="D": dict(date=day_start(d), file=f"{var}{res}{mode}{d}", var=var, res=res, mode=mode)
+    wind, sst = f("WIND", -59), f("SST", -9)
+    assert [x["file"] for x in tao._candidates([wind, sst], t0, t0 + 6 * 86400)] == [wind["file"], sst["file"]]
+    hourly = f("WIND", -2, res="hourly")                                                          # a later hourly file: not the 10-minute wind's start
+    assert wind in tao._candidates([wind, hourly], t0, t0 + 6 * 86400)
+    twin = [f("SST", -9, mode="D"), f("SST", -15, mode="R"), f("SST", -30, mode="R")]               # D and R of one variable still share the window
+    assert [x["file"] for x in tao._candidates(twin, t0, t0 + 86400)] == [twin[0]["file"], twin[1]["file"]]
+
+
+def test_r10_m19_fetch_keeps_the_wind_of_a_mooring_whose_sst_was_redeployed_later(server, tmp_path):
+    t = Tree(server, tmp_path)
+    t.add("T2N165E", "DM100A-20230101", "D", "WIND", 5)
+    t.add("T2N165E", "DM200A-20230220", "D", "SST", 5)
+    man = json.loads(tao.fetch_tao((1, 3, 163, 167), T0, T1, tmp_path / "tao", t.publish()).read_text())
+    assert man["selected"]["T2N165E"] == {"WIND": "T2N165E/OS_T2N165E_DM100A-20230101_D_WIND_10min.nc",
+                                          "SST": "T2N165E/OS_T2N165E_DM200A-20230220_D_SST_10min.nc"}
+    assert man["selection"] == tao.SELECTION == 2                     # the rule that picked them is on the manifest (a cache of the old rule is told apart)
 
 
 def test_bin_ignores_nan_and_unsorted_input():

@@ -805,7 +805,8 @@ def ingest_lab_hycom(path: Any, box: Any, out_zarr: Any, temperature_kind: Any =
 
 def check_node(store: Any, nodes: Any, ncss: str = NCSS, deadline_s: float = 300.0, work: Any = None) -> float:
     """Read-back receipt: for each (it, iz, ij, ii) node of the store, fetch water_temp at that node from the NCSS server and
-    return the largest |server - store| [degC]. Needs the network (or a server standing in for it)."""
+    return the largest |server - store| [degC]. A node masked (NaN) on both sides agrees; masked on one side only, it is `inf`: callers
+    compare the result with a tolerance, never `== 0`. Needs the network (or a server standing in for it)."""
     import xarray as xr
     ds = open_store(store)
     work = pathlib.Path(work or pathlib.Path(store).parent)
@@ -815,9 +816,13 @@ def check_node(store: Any, nodes: Any, ncss: str = NCSS, deadline_s: float = 300
         t, z, la, lo = (float(ds[k].values[i]) for k, i in (("time", it), ("depth", iz), ("lat", ij), ("lon", ii)))
         f = work / f"check_{it}_{iz}_{ij}_{ii}.nc"
         _child(["_ncss", ncss_url("ts3z", ("water_temp",), (la - 0.01, la + 0.01, lo - 0.02, lo + 0.02), t, t, ncss) + f"&vertCoord={z}", f], deadline_s)
-        got = xr.open_dataset(f).water_temp.squeeze().values
+        got = np.atleast_1d(xr.open_dataset(f).water_temp.squeeze().values)
         want = float(ds.water_temp.isel(time=it, depth=iz, lat=ij, lon=ii).values)
-        worst = max(worst, abs(float(np.nanmean(got)) - want))
+        none = bool(np.isnan(got).all())                       # no value at all (or an empty answer): a masked node, e.g. below the sea floor
+        if none and np.isnan(want):                            # masked on both sides: they agree
+            continue
+        # one side masked, the other not, is the largest disagreement there is: max(0, nan) would keep 0.0 and pass the check (round 10, M-20)
+        worst = max(worst, np.inf if none or np.isnan(want) else abs(float(np.nanmean(got)) - want))
     return worst
 
 

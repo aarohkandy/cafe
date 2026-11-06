@@ -344,13 +344,16 @@ def _ocean_cached(path: pathlib.Path, box: tuple[float, float, float, float], st
 
 
 def _tao_cached(tdir: pathlib.Path, box: tuple[float, float, float, float], t0: float, t1: float) -> bool:
-    """TAO manifest covers the box and window, every file still hashes to it (tao.verify) and `load_tao` can read each selected one."""
+    """TAO manifest was made under the current selection rule (tao.SELECTION), covers the box and window, every file still hashes to it
+    (tao.verify) and `load_tao` can read each selected one."""
     from .env import tao
     mp = tdir / "manifest.json"
     if not mp.is_file():
         return False
     m = orca.read_json(mp)
     if m is None:                                                         # empty or truncated: the files are fetched again and the manifest rewritten
+        return False
+    if m.get("selection") != tao.SELECTION:                               # another rule (no field: rounds 1-9): select again; files that hash are kept
         return False
     s, n, w, e = hycom.box360(box)
     if not (m["t0"] <= t0 and m["t1"] >= t1 and m["box"][0] <= s and m["box"][1] >= n and m["box"][2] <= w and m["box"][3] >= e):
