@@ -46,7 +46,8 @@ from scipy.stats import binom, qmc
 
 from . import budget, par, report, stage1
 from .config import ConfigError, _in_box, fmt_box, utc
-from .emulator import Emulator, FreshDraw, locked, read_table, store_path, write_table
+from .emulator import LIMITS as LIMITS                          # the BRIEF 2.7 limits live in emulator.py (receipts() reads them too); this is the same dict
+from .emulator import Emulator, FreshDraw, coverage_band, locked, read_table, store_path, write_table
 from .env.environment import OutsideData
 from .stats import intervals
 
@@ -57,14 +58,9 @@ TASK = dict(glider=["dive_depth_m", "radius_km", "lost_after_h"], usv=["track_to
 MIN_ROWS = budget.EMULATOR_MIN_POINTS     # distinct feature points per scope (budget.py holds it with the plan that sizes the variants):
 #                                   with a 20 % hold-out that is 20 test points, enough to say anything of 90 % coverage. Never lowered to make a run train.
 MODES_MAX = 4                     # failure modes with their own GP (most variable first); the others stay in the table
-LIMITS = dict(rmse=0.05, coverage=0.05, query_ms=10.0)          # BRIEF 2.7 acceptance
 SHIFTS, MOVES, DUTIES = (6.0, 12.0, 24.0, 48.0), (0.5, 1.0), (0.75, 0.5)
 FALLBACK_K = 3                    # Stage-1 candidates tried, nearest first, when the emulator cannot answer
 TRAIN_FRAC = budget.TRAIN_FRAC    # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
-
-
-COVERAGE_DUST = 1e-9              # a coverage that is k / n is on the +- limit when it is mathematically so: `abs(17 / 20 - 0.9) <= 0.05` is False in floats
-#                                   (steps of coverage are at least 1 / n, so this admits no real miss)
 
 
 class Invalid(ConfigError):
@@ -438,7 +434,8 @@ def key_cols(cls: str) -> list[str]:
 
 def _coverage_in(cov: Any, nominal: float) -> Any:
     """Whether a hold-out coverage is within BRIEF 2.7's +-LIMITS["coverage"] of the nominal: the one rule of the gate and of the chance figure."""
-    return np.abs(cov - nominal) <= LIMITS["coverage"] + COVERAGE_DUST
+    lo, hi = coverage_band(nominal, LIMITS["coverage"])
+    return (cov >= lo) & (cov <= hi)
 
 
 def _chance_miss(n_test: int, nominal: float) -> float:

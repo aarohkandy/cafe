@@ -1297,10 +1297,10 @@ def binom_pmf_sum(n, ks, p=0.9):
 
 
 def test_a_hold_out_coverage_of_17_of_20_passes_the_gate_and_the_receipt_bracket_agrees(tmp_path, monkeypatch):
-    """Round 10 M-6: 17 of 20 failed `abs(cov - 0.9) <= 0.05` by 4e-17; the chance figure said it was inside. emulator.receipts brackets the same edge with
-    0.85 and 0.95, which a count over n compares exactly (a correctly rounded quotient is the literal)."""
+    """Round 10 M-6: 17 of 20 failed `abs(cov - 0.9) <= 0.05` by 4e-17; the chance figure said it was inside. the emulator receipt brackets the same edge with
+    the same `coverage_band` the gate uses."""
     from cafe import receipts as R
-    from cafe.pm.emulator import Emulator
+    from cafe.pm.emulator import Emulator, coverage_band
     real = Emulator.holdout_report
     for hits, ok in ((17, True), (19, True), (16, False)):
         monkeypatch.setattr(Emulator, "holdout_report", lambda self, *a, h=hits, **k: dict(real(self, *a, **k), n_test=20, coverage={"p_fail": h / 20}))
@@ -1308,7 +1308,7 @@ def test_a_hold_out_coverage_of_17_of_20_passes_the_gate_and_the_receipt_bracket
         assert info["acceptance"]["coverage_ok"] is ok and info["n_test"] == 20, hits
         assert info["coverage_chance_fail"] == pytest.approx(1 - binom_pmf_sum(20, (17, 18, 19)), abs=1e-12)
         n0 = len(R.OUT)
-        R.bracket("t", "c", hits / 20, 0.85, 0.95)
+        R.bracket("t", "c", hits / 20, *coverage_band(0.9, whatif.LIMITS["coverage"]))
         assert R.OUT[n0]["ok"] is ok
         del R.OUT[n0:]
 
