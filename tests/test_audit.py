@@ -2,6 +2,7 @@
 import json
 import os
 import pathlib
+import platform
 import runpy
 import shutil
 import sys
@@ -845,6 +846,20 @@ def test_p32_without_the_cache_directory_a_run_in_its_own_place_is_told_and_a_co
     assert any("manifest_copy.json changed since the stage ran" in x for x in probs) and not any("Traceback" in x for x in probs)
 
 
+def test_p41_a_ledger_written_on_another_machine_with_no_cache_directory_gives_the_note_and_no_problem(tmp_path, capsys):
+    """`_same_place` is False for a host that is not this one even when the run lies where its ledger says: the cache directory it recorded is not this
+    machine's to judge (found by the gate's coverage.json: the branch had no test)."""
+    cache, _ = _orca_cache(tmp_path)
+    run = _run_with_manifest_copy(tmp_path, cache / "manifest.json")
+    shutil.rmtree(cache)
+    gone = f"run: stage report: cache directory {cache} is missing (the stage read manifest_copy.json from it); run `fetch` again"
+    assert audit.ledger_problems(run) == [gone]                                       # this machine, this place: a deleted cache is a problem
+    edit(run, "report", lambda d: d["machine"].update(host=platform.node() + "-elsewhere"))
+    capsys.readouterr()
+    assert audit.ledger_problems(run) == []
+    assert f"note: run: stage report: cache directory {cache} is not here; the files manifest_copy.json names were not compared" in capsys.readouterr().err
+
+
 def test_p32_a_cache_path_recorded_relative_is_judged_where_it_was_not_where_the_audit_runs(tmp_path, monkeypatch):
     """`shared` was stored as given: a data directory that was relative when the run was made was read against the audit's cwd (no directory, no check)."""
     cache, _ = _orca_cache(tmp_path)
@@ -992,3 +1007,98 @@ def test_lb0_the_other_readers_of_the_audit_say_a_damaged_file_is_a_problem(tmp_
     assert audit.main(["--mutation-record"]) == 2 and f"error: {audit.MUTATION_STATS} cannot be used" in capsys.readouterr().out
     (root / audit.MUTATION_STATS).write_text("{}")
     assert audit.main(["--mutation-record"]) == 2 and "KeyError" in capsys.readouterr().out
+
+
+# ---- round 11, P-34: the stores a later run rewrites whole are told from damage, not blamed on the earlier run
+
+REBUILT = "the bytes this run read were replaced by a later fetch, and this run can no longer be re-checked against them"
+
+
+def _run_with_shared_stores(tmp_path):
+    """A run whose report stage recorded, as ingest does, an orca store (tree hash, and the copy of the orca manifest it was assembled with in
+    `ingest/orca_manifest.json`) and an ocean store (the `manifest_sha256` it carries, and its tree hash)."""
+    from cafe.pm.env.remote import tree_sha256
+    run = make_run(tmp_path)
+    cache = tmp_path / "cache" / "orca"
+    orca = zstore(cache / "wrf.zarr", {"source": "x"})
+    (orca / "WSPD").mkdir()
+    (orca / "WSPD" / "0").write_bytes(b"one")
+    (cache / "manifest.json").write_text(json.dumps({"hours": 2, "parts": {}}))
+    ocean = zstore(tmp_path / "ocean" / "gofs_x.zarr", {"manifest_sha256": "a" * 64})
+    (ocean / "water_u").mkdir()
+    (ocean / "water_u" / "0").write_bytes(b"one")
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.snapshot(cache / "manifest.json", run / "ingest" / "orca_manifest.json", kind="orca cache manifest")
+        L.input(orca, sha=tree_sha256(orca), tree=tree_sha256(orca))
+        L.input(ocean, sha="a" * 64, tree=tree_sha256(ocean))
+        L.output(run / "report.out")
+    return run, orca, ocean
+
+
+def _rewrite_orca(orca, chunk=b"two"):
+    """What a later `orca.assemble` does: the stores whole, then the manifest."""
+    (orca / "WSPD" / "0").write_bytes(chunk)
+    (orca.parent / "manifest.json").write_text(json.dumps({"hours": 3, "parts": {}}))
+
+
+def _rewrite_ocean(ocean, manifest="b" * 64, chunk=b"two"):
+    """What a later `fetch_gofs` does: the store whole, with the hash of the parts manifest it was made from."""
+    (ocean / "zarr.json").write_text(json.dumps({"attributes": {"manifest_sha256": manifest}}))
+    (ocean / "water_u" / "0").write_bytes(chunk)
+
+
+def test_p34_orca_and_ocean_stores_rewritten_by_a_later_run_are_a_note_and_never_the_advice_to_delete(tmp_path, capsys):
+    run, orca, ocean = _run_with_shared_stores(tmp_path)
+    assert audit.ledger_problems(run) == []
+    assert capsys.readouterr().err == ""
+    _rewrite_orca(orca)
+    _rewrite_ocean(ocean)
+    assert audit.ledger_problems(run) == []                                           # was: input .../wrf.zarr changed ... delete it and run `fetch` again
+    err = capsys.readouterr().err
+    assert sorted(err.splitlines()) == sorted(f"note: run: stage report: input {s}: {REBUILT} (what the run made is checked by its own ledgers)"
+                                              for s in (orca, ocean))
+    assert "delete" not in err
+
+
+def test_p34_a_store_changed_with_no_later_rebuild_is_still_a_problem_and_still_says_to_fetch_again(tmp_path):
+    run, orca, ocean = _run_with_shared_stores(tmp_path)
+    (orca / "WSPD" / "0").write_bytes(b"edited")                                      # the manifest is the one the run kept: nobody assembled again
+    (ocean / "water_u" / "0").write_bytes(b"edited")                                  # the attribute is the one the ledger has: nobody fetched again
+    probs = audit.ledger_problems(run)
+    assert sorted(x.split(" changed")[0] for x in probs) == sorted(f"run: stage report: input {s}" for s in (orca, ocean))
+    assert all("(tree " in x and "delete it and run `fetch` again" in x for x in probs)
+
+
+def test_p34_a_rebuild_is_judged_by_what_the_run_kept_and_without_it_the_change_stays_a_problem(tmp_path, capsys):
+    """Same-key damage after a rebuild cannot be told, but a copy that is gone or a manifest that is gone is no evidence of a rebuild."""
+    run, orca, ocean = _run_with_shared_stores(tmp_path)
+    _rewrite_orca(orca)
+    _rewrite_ocean(ocean, manifest="a" * 64)                                          # this ocean store has the key the run recorded: bytes only
+    assert [x.split(" changed")[0] for x in audit.ledger_problems(run)] == [f"run: stage report: input {ocean}"]
+    kept = run / "ingest" / "orca_manifest.json"
+    was = kept.read_bytes()
+    kept.unlink()
+    assert any(f"input {orca} changed since the stage ran (tree " in x for x in audit.ledger_problems(run))
+    kept.write_bytes(was)
+    (orca.parent / "manifest.json").unlink()                                          # an assemble that was cut short: the stores are half new
+    assert any(f"input {orca} changed since the stage ran (tree " in x for x in audit.ledger_problems(run))
+
+
+def test_p34_a_ledger_without_the_tree_hash_keeps_the_manifest_line_for_an_ocean_store(tmp_path):
+    run = make_run(tmp_path)
+    ocean = zstore(tmp_path / "gofs.zarr", {"manifest_sha256": "a" * 64})
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(ocean, sha="a" * 64)
+        L.output(run / "report.out")
+    (ocean / "zarr.json").write_text(json.dumps({"attributes": {"manifest_sha256": "b" * 64}}))
+    assert [x for x in audit.ledger_problems(run) if "store manifest bbbbbbbbbbbb, ledger aaaaaaaaaaaa" in x]
+
+
+def test_p34_the_derived_layer_rebuilt_by_a_later_run_gets_the_same_note(tmp_path, capsys):
+    run, store = _run_with_a_derived_layer(tmp_path)
+    capsys.readouterr()
+    _rebuild(store, "key-2")
+    assert audit.ledger_problems(run) == []
+    assert f"note: run: stage report: input {store}: {REBUILT}" in capsys.readouterr().err

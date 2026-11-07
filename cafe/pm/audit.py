@@ -136,18 +136,28 @@ def _shared_problems(run: str, st: str, snap: pathlib.Path, shared: pathlib.Path
 DERIVED_RECORD = "derived.digest.json"        # what `surface.build` writes beside the store and ingest copies into the run: {built_from, store_sha256}
 
 
-def _rebuilt_by_a_later_run(run_dir: pathlib.Path, f: pathlib.Path) -> bool:
-    """True for the derived surface layer `f` when the store now in the cache was built from another key than the one this run's ingest recorded
-    (`<run>/ingest/derived.digest.json`, `built_from`). The key holds the code digest, so any code change followed by a run in the same data directory
-    rebuilds the one shared store in place; its bytes then differ from what an earlier run read, and nothing the earlier run made changed (its own outputs are
-    hashed on their own, and its stages checked the layer when they ran). A store with the key the run recorded and other bytes is damaged, and is not this."""
-    if f.name != "derived.zarr":
-        return False
+def _rebuilt_by_a_later_run(run_dir: pathlib.Path, f: pathlib.Path, i: dict[str, Any]) -> bool:
+    """True when the shared store `f` (ledger input `i`) holds other bytes than this run read because a later run wrote it again, which it does whole and in
+    place: nothing the earlier run made changed (its own outputs are hashed on their own, its stages checked the derived layer when they ran). What tells a
+    rebuild from damage is what the run or the store itself kept; with none of it the answer is False, and the changed bytes are a problem.
+    - the derived surface layer: the key it was built from (`built_from`) against the one `<run>/ingest/derived.digest.json` recorded. The key holds the code
+      digest, so any code change followed by a run in the same data directory rebuilds it;
+    - the ocean store (`hycom.fetch_gofs`): its own `manifest_sha256`, which only a fetch writes, against the one the ledger recorded (a ledger with the tree
+      hash only; an older one keeps the manifest line);
+    - the four orca stores (`orca.assemble`): the shared manifest, which it rewrites after them, against the copy this run kept (`ingest/orca_manifest.json`).
+    A store with the same key and other bytes is damaged, and is not this."""
     try:
-        mine, now = _read_json(run_dir / "ingest" / DERIVED_RECORD).get("built_from"), _store_attr(f, "built_from")
+        if f.name == "derived.zarr":
+            mine, now = _read_json(run_dir / "ingest" / DERIVED_RECORD).get("built_from"), _store_attr(f, "built_from")
+            return isinstance(mine, str) and isinstance(now, str) and mine != now
+        if not i.get("tree_sha256"):
+            return False
+        if (recorded := i.get("sha256")) and (have := _store_attr(f, "manifest_sha256")) is not None:
+            return bool(have != recorded)
+        kept, shared = run_dir / "ingest" / "orca_manifest.json", f.parent / "manifest.json"
+        return kept.is_file() and shared.is_file() and sha256(kept) != sha256(shared)
     except _Unreadable:
         return False
-    return isinstance(mine, str) and isinstance(now, str) and mine != now
 
 
 def _stage_problems(run_dir: pathlib.Path, st: str, d: dict[str, Any], prev: pathlib.Path | None, out: list[str]) -> None:
@@ -165,8 +175,12 @@ def _stage_problems(run_dir: pathlib.Path, st: str, d: dict[str, Any], prev: pat
             if hashed(i) and not f.exists():                       # `done` re-runs the stage for the same reason
                 out.append(f"{run_dir.name}: stage {st}: input {f} is missing (the stage read it); restore it, or run `fetch` / the stage again")
             elif (i.get("sha256") or i.get("tree_sha256")) and f.is_dir():
-                if not _rebuilt_by_a_later_run(run_dir, f):
-                    out += _dir_problems(run_dir.name, st, f, i.get("sha256"), i.get("tree_sha256"))
+                changed = _dir_problems(run_dir.name, st, f, i.get("sha256"), i.get("tree_sha256"))
+                if changed and _rebuilt_by_a_later_run(run_dir, f, i):      # not damage, and not a problem of this run: said once, on stderr, as P-39's note
+                    print(f"note: {run_dir.name}: stage {st}: input {f}: the bytes this run read were replaced by a later fetch, and this run can no longer be "
+                          "re-checked against them (what the run made is checked by its own ledgers)", file=sys.stderr)
+                else:
+                    out += changed
             elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
                 out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
             if i.get("shared") and f.is_file():                      # a copy of a shared cache manifest: the files it names, not the shared one

@@ -157,7 +157,8 @@ def _share(a: np.ndarray) -> str:
         i = next(_names)
         path = str(_dir / f"{i}.npy")
         if shutil.disk_usage(_dir).free < a.nbytes:                      # SHM_MIN_FREE is looked at once, for the directory; a long window outgrows it later
-            raise OSError(f"{_dir} is full after {i} arrays: raise --shm-size (RUNBOOK 1) or free the disk")
+            from .config import ResourceError                         # as `env_count` does: config is not imported by a worker that never needs it
+            raise ResourceError(f"{_dir} is full after {i} arrays: raise --shm-size (RUNBOOK 1) or free the disk")
     np.save(path, a)
     return path
 

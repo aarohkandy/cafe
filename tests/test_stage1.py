@@ -2214,3 +2214,17 @@ def test_r8_l0_the_stage1_command_reports_a_damaged_file_of_the_run_as_an_error_
         err = capsys.readouterr().err
         assert err.startswith("error: ") and str(run / sub / name) in err and "not a JSON object" in err, err
     assert calls == []                                          # every file is read before the long computation starts
+
+
+def test_p37_the_stage1_command_reports_a_full_shared_memory_as_an_error_line_and_exit_2(tmp_path, monkeypatch, capsys):
+    from cafe.pm import par, pipeline
+    monkeypatch.setattr(pipeline, "Context", lambda *a, **k: types.SimpleNamespace(mission={}, env=None))
+    monkeypatch.setattr(par, "_dir", tmp_path)
+    monkeypatch.setattr(par.shutil, "disk_usage", lambda d: types.SimpleNamespace(free=10))
+    monkeypatch.setattr(stage1, "sensitivity_case", lambda *a: par._share(np.zeros(100)))
+    assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith(f"error: {tmp_path} is full after ") and err.endswith("raise --shm-size (RUNBOOK 1) or free the disk\n") and err.count("\n") == 1
+    monkeypatch.setattr(stage1, "sensitivity_case", lambda *a: (_ for _ in ()).throw(OSError("killed")))
+    with pytest.raises(OSError, match="killed"):
+        stage1.main(["--mission", "m.yaml", "--run", str(tmp_path)])

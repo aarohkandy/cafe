@@ -1095,3 +1095,29 @@ def test_lb0_report_of_a_run_whose_report_ledger_is_json_of_the_wrong_shape_is_a
     capsys.readouterr()
     assert cli.main(["report", "--run", str(run)]) == 2
     assert "damaged or incomplete (KeyError: 'outputs')" in capsys.readouterr().err
+
+
+def test_p37_the_programs_own_resource_errors_are_one_error_line_and_exit_2_but_a_bare_oserror_is_not(monkeypatch, tmp_path, capsys):
+    """par.py's 'is full after N arrays: raise --shm-size' and dtmb5415's 'only N GB free under ...' were bare OSErrors without a `filename`: after LB0 they
+    were a traceback, though the message names the remedy. One exception type (`config.ResourceError`, an OSError) is the rule, and any other OSError that
+    names no path the user gave keeps its traceback."""
+    import numpy as np
+    from cafe.pm import dtmb5415
+    out = tmp_path / "o"
+    monkeypatch.setattr(par, "_dir", tmp_path)
+    monkeypatch.setattr(par.shutil, "disk_usage", lambda d: type("U", (), {"free": 10})())
+
+    def full(*a, **k):
+        par._share(np.zeros(100))
+
+    def small(*a, **k):
+        dtmb5415.check_disk(tmp_path, 1e9)
+    for raiser, remedy in ((full, "raise --shm-size (RUNBOOK 1) or free the disk"), (small, "GB free under")):
+        monkeypatch.setattr(pipeline, "run", raiser)
+        assert cli.main(["run", "--mission", MISSION, "--out", str(out)]) == 2
+        err = capsys.readouterr().err
+        assert err.startswith("error: ") and remedy in err and err.count("\n") == 1 and "Traceback" not in err
+    monkeypatch.setattr(pipeline, "run", lambda *a, **k: (_ for _ in ()).throw(OSError("is full after 3 arrays")))
+    with pytest.raises(OSError, match="is full after 3 arrays"):
+        cli.main(["run", "--mission", MISSION, "--out", str(out)])
+    assert capsys.readouterr().err == ""

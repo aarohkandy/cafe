@@ -372,6 +372,28 @@ def test_lb0_a_derived_layer_rebuilt_on_other_code_leaves_the_audit_of_an_earlie
     assert len(probs) == 1 and "derived.zarr changed since the stage ran" in probs[0]
 
 
+def test_p34_orca_stores_assembled_again_by_a_later_run_leave_an_earlier_audit_clean_and_a_damaged_one_does_not(tmp_path, data_copy, monkeypatch, capsys):
+    """P-34 (orca stores): `orca.assemble` rewrites wrf.zarr, wrf3d.zarr, umwm.zarr and umwmspec.zarr whole, then the manifest. The audit of an earlier run
+    said 'input .../wrf.zarr changed since the stage ran ... delete it and run `fetch` again', which would delete a good store. The run's own copy of the
+    manifest (ingest/orca_manifest.json) tells the rewrite (the shared manifest is another one now) from damage (it is the one the run kept)."""
+    forbid_downloads(monkeypatch)
+    cache = data_copy / "cache" / "ci_fixture" / "orca"
+    man, wrf = cache / "manifest.json", cache / "wrf.zarr"
+    run = tmp_path / "r"
+    run_stage(pipeline.s_ingest, ctx_for(run), "ingest")
+    chunk = next(f for f in sorted(wrf.rglob("*")) if f.is_file() and f.name != "zarr.json")
+    chunk.write_bytes(chunk.read_bytes() + b"\0")                                           # damage: the manifest is still the one the run kept
+    probs = ingest_problems(run)
+    assert len(probs) == 1 and f"input {wrf} changed since the stage ran (tree " in probs[0] and "delete it and run `fetch` again" in probs[0]
+    used = json.loads(man.read_text())
+    man.write_text(json.dumps(dict(used, hours=used["hours"] + 1)))                          # a later assemble: its stores, then its manifest
+    capsys.readouterr()
+    assert ingest_problems(run) == []
+    err = capsys.readouterr().err
+    assert f"note: r: stage ingest: input {wrf}: the bytes this run read were replaced by a later fetch" in err
+    assert "delete" not in err
+
+
 def test_p32_a_grown_tao_cache_leaves_the_audit_of_an_earlier_run_clean_and_a_changed_or_lost_file_does_not(tmp_path, network):
     """P-32, TAO: a wider box or window rewrites `tao/s2/manifest.json` (`fetch_tao` is called when `_tao_cached` says the cache does not cover it)."""
     root = network["root"]

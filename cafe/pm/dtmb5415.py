@@ -298,11 +298,11 @@ YPLUS_FO = """    yPlus { type yPlus; libs (fieldFunctionObjects); patches (hull
 
 
 def check_disk(path: pathlib.Path, min_free_gb: float = MIN_FREE_GB) -> float:
-    """Free disk (GB) under path; raises OSError below min_free_gb."""
+    """Free disk (GB) under path; raises config.ResourceError (an OSError) below min_free_gb."""
     path.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(path).free / 1e9
     if free < min_free_gb:
-        raise OSError(f"only {free:.1f} GB free under {path}; a DTMB 5415 case needs {min_free_gb} GB")
+        raise config.ResourceError(f"only {free:.1f} GB free under {path}; a DTMB 5415 case needs {min_free_gb} GB")
     return free
 
 
@@ -658,7 +658,11 @@ def main(argv: list[str]) -> int:
         print(json.dumps(prepare(root), indent=1))
     elif cmd == "run":
         frs = tuple(float(x) for x in argv[3].split(",")) if len(argv) > 3 else ORDER
-        print(json.dumps(run_grid(root, argv[1], int(argv[2]) if len(argv) > 2 else MAX_ITERS, frs=frs), indent=1))
+        try:
+            print(json.dumps(run_grid(root, argv[1], int(argv[2]) if len(argv) > 2 else MAX_ITERS, frs=frs), indent=1))
+        except config.ResourceError as e:                       # not enough disk: the message names the remedy, as in `python -m cafe.pm` (exit 2)
+            print(f"error: {e}", file=sys.stderr)
+            return 2
     elif cmd == "report":
         print(vv.format_table(list(tabulate(root).values())))
         print(receipts(root))

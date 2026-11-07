@@ -284,8 +284,10 @@ def test_a_full_directory_is_a_named_error_and_not_a_bare_errno_28(monkeypatch, 
     monkeypatch.setattr(par, "_names", itertools.count(7))
     monkeypatch.setattr(par.shutil, "disk_usage", lambda d: types.SimpleNamespace(free=10))
     a = np.zeros(100)
-    with pytest.raises(OSError, match=rf"{tmp_path} is full after 7 arrays: raise --shm-size \(RUNBOOK 1\) or free the disk"):
+    with pytest.raises(config.ResourceError, match=rf"{tmp_path} is full after 7 arrays: raise --shm-size \(RUNBOOK 1\) or free the disk") as e:
         par._share(a)
+    back = pickle.loads(pickle.dumps(e.value))                                                          # a worker's error crosses the process boundary
+    assert isinstance(e.value, OSError) and type(back) is config.ResourceError and str(back) == str(e.value)
     assert list(tmp_path.iterdir()) == []
     monkeypatch.setattr(par.shutil, "disk_usage", lambda d: types.SimpleNamespace(free=a.nbytes))
     assert pathlib.Path(par._share(a)).name == "8.npy"                                                  # exactly enough room is enough

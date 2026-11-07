@@ -17,7 +17,7 @@ import trimesh
 from hypothesis import given, settings, strategies as st
 
 from cafe import cfd, receipts as rc
-from cafe.pm import dtmb5415 as dt
+from cafe.pm import config, dtmb5415 as dt
 from cafe.pm import vv
 
 # ------------------------------------------------------------------ Celik et al. 2008, Table 1
@@ -378,8 +378,9 @@ def test_assumed_reads_config_overrides(tmp_path):
 
 def test_disk_guard_and_tree_size(tmp_path):
     assert dt.check_disk(tmp_path / "new", 0.0) > 0
-    with pytest.raises(OSError, match="GB free"):
+    with pytest.raises(config.ResourceError, match="GB free") as e:
         dt.check_disk(tmp_path, 1e9)
+    assert isinstance(e.value, OSError)
     (tmp_path / "x").write_bytes(b"0" * 1000)
     assert dt.tree_gb(tmp_path) == pytest.approx(1e-6, rel=0.5)
 
@@ -976,3 +977,15 @@ def test_r8_m19_a_row_whose_finest_grid_has_not_converged_is_a_context_row_in_th
     assert [x["claim"].split(":")[0] for x in skipped] == ["C_T Fr 0.20", "C_T Fr 0.41"] and all(x["ok"] is None for x in skipped)
     assert "scatter 0.5 (limit 0.02)" in skipped[0]["claim"] and "no convergence record" in skipped[1]["claim"]
     assert len([x for x in out if x.get("kind") == "context" and "E =" in x["claim"]]) == 4                       # the E / U_val orientation rows stay
+
+
+def test_p37_too_little_disk_for_a_dtmb5415_run_is_one_error_line_and_exit_2_and_other_failures_keep_their_traceback(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
+    monkeypatch.setattr(dt, "run_grid", lambda *a, **k: dt.check_disk(tmp_path, 1e9))
+    assert dt.main(["run", "fine"]) == 2
+    out, err = capsys.readouterr()
+    assert out == "" and err.startswith("error: only ") and err.count("\n") == 1
+    assert err.endswith(f"GB free under {tmp_path}; a DTMB 5415 case needs 1000000000.0 GB\n")
+    monkeypatch.setattr(dt, "run_grid", lambda *a, **k: (_ for _ in ()).throw(OSError("killed")))
+    with pytest.raises(OSError, match="killed"):
+        dt.main(["run", "fine"])

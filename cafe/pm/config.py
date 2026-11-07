@@ -26,6 +26,12 @@ class ConfigError(ValueError):
     """A file the user wrote is wrong; the message says where and how to fix it."""
 
 
+class ResourceError(OSError):
+    """The machine is too small or out of room (disk, shared memory), and the message names the remedy. The program's own raise of it is an `error:` line
+    and exit 2 in every command (`python -m cafe.pm`, `.stage1`, `.dtmb5415`), as for a mission that does not fit the budget; an OSError that is not this and
+    names no path the user gave keeps its traceback."""
+
+
 class _Loader(yaml.SafeLoader):                                         # type: ignore[misc]
     """SafeLoader that refuses what YAML 1.1 accepts silently: a repeated mapping key (the later value wins) and a leading-zero integer (octal)."""
 
