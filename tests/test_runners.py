@@ -900,6 +900,23 @@ def test_r11_m18_a_worker_that_is_a_command_is_refused_before_worker_setup_reach
     assert r.returncode == 2 and not log.exists()
 
 
+@pytest.mark.parametrize("key", ["$(touch {home}/pwned)", "`touch {home}/pwned`", "k;touch {home}/pwned", "k touch {home}/pwned",
+                                 "-oProxyCommand=x", "$HOMEx", "$HOME", "$HOME/k'x"])
+def test_r11_m18_a_key_that_is_a_command_is_refused_before_worker_setup_reaches_homebase(tmp_path, key):
+    """Round 11 M-18 sibling: the key argument was pasted unchecked beside the address, so `$(touch ...)` in it ran on homebase."""
+    home, env, log = setup_machine(tmp_path, 100 * 1048576)
+    ssh_log = log_ssh(tmp_path)
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host", key.format(home=home)], env)
+    assert r.returncode == 2 and "key path" in r.stderr and not ssh_log.exists() and not (home / "pwned").exists()
+
+
+@pytest.mark.parametrize("key", [[], ["$HOME/.ssh/k_1-a.pem"], ["/home/u/.ssh/k"], ["~/.ssh/k"]])
+def test_r11_m18_a_key_path_is_still_sent(tmp_path, key):
+    home, env, log = setup_machine(tmp_path, 100 * 1048576)
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host", *key], env)
+    assert r.returncode == 0 and "rsync" in log.read_text(), r.stderr
+
+
 def setup_machine(tmp_path, kb, ps_rc=0):
     """(home, env, log): worker_setup.sh with ssh running here, `df` reporting `kb` free, `docker ps` ending `ps_rc`; sudo, rsync, docker load log to `log`."""
     home, env = live(tmp_path, "ssh", "tmux")

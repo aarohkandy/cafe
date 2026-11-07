@@ -6,8 +6,8 @@
 # the provider's console. Re-running is safe. Then run jobs on it with:  export PM_HOST=<user@host>   (if only homebase reaches it, an ~/.ssh/config entry with ProxyJump and PM_HOST=<that name>)
 set -eu
 W="${1:?usage: sh bin/worker_setup.sh <user@host> [key, as a path on homebase]}"; KEY="${2:-\$HOME/.ssh/burst_ed25519}"
-. "$(dirname "$0")/pm_checks.sh"          # W is pasted into the script homebase runs: a ';' or a space in it is a command there (round 11 M-18)
-case $W in *@*) pm_user "the user of the worker" "${W%%@*}" ;; esac; pm_host "the host of the worker" "${W#*@}"
+. "$(dirname "$0")/pm_checks.sh"          # W and KEY are pasted into the script homebase runs: a ';' or a space in it is a command there (round 11 M-18)
+case $W in *@*) pm_user "the user of the worker" "${W%%@*}" ;; esac; pm_host "the host of the worker" "${W#*@}"; pm_key "the key path" "$KEY"
 O="${WORKER_TOFU:+-o StrictHostKeyChecking=accept-new}"
 H="${PM_HOME_HOST:-azureuser@100.108.213.121}"; K="${PM_KEY:-$HOME/.ssh/homebase_ed25519}"
 ssh -i "$K" "$H" sh -s <<EOF

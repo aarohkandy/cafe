@@ -6,6 +6,9 @@ pm_num() { case $2 in ''|0*|*[!0-9]*) pm_bad "$1: a whole number from 1, not '$2
 # empty and not starting with '-' (ssh would read it as an option). It lands unquoted in a command line on homebase, where a ';' or a space is a command (round 11 M-18).
 pm_host() { case $2 in ''|-*|*[!A-Za-z0-9.:-]*) pm_bad "$1: an IP address or host name (letters, digits, '.', '-' and ':'), not '$2'" ;; esac; }       # $1 name, $2 value
 pm_user() { case $2 in ''|-*|*[!A-Za-z0-9._-]*) pm_bad "$1: a login name (letters, digits, '.', '_' and '-'), not '$2'" ;; esac; }                                  # the user of user@host
+# The key path of bin/worker_setup.sh, pasted unquoted into the same script as the address: letters, digits, '.', '_', '-', '/' and '~', optionally led by the literal $HOME/ (its default, which homebase expands),
+# not empty and not starting with '-'. A '$(' or a ';' in it is a command on homebase (round 11 M-18 sibling).
+pm_key() { _pm_k=${2#\$HOME/}; case $2 in ''|-*) _pm_k=-: ;; esac; case $_pm_k in *[!A-Za-z0-9._/~-]*) pm_bad "$1: a path (letters, digits, '.', '_', '-', '/' and '~'; a leading \$HOME/ is fine), not '$2'" ;; esac; }
 pm_size() { _pm_n=${2%[bB]}; case ${_pm_n%[kmgKMG]} in ''|0*|*[!0-9]*) pm_bad "$1: a whole number from 1, then k, m, g, kb, mb or gb if you like (8g), not '$2'" ;; esac; }       # docker's --memory, --shm-size
 # A tag (or TM) T names a log T.log in the worker's one flat logs folder, and the suite's jobs write T_s<i>.log, T_serial.log, T_shares.log and T_audit.log beside it: a name that is itself
 # one of those (a_s2 beside the tag a) would share its log with another tag's job, and the P-30 sweep of a's stale share logs would delete it (round 10 M-28).
