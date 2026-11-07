@@ -847,6 +847,18 @@ def check_node(store: Any, nodes: Any, ncss: str = NCSS, deadline_s: float = 300
 # ------------------------------------------------------------------ receipts
 
 
+def _worst_abs(a: Any, b: Any, rel: bool = False, skip: Any = None) -> tuple[float, int]:
+    """Largest |a - b| (or |a / b - 1|) over the cells finite on both sides, and how many cells that is. A cell finite on one side only is
+    the largest disagreement there is, as in `check_node` (M-20): the result is `inf`, never the maximum over the survivors (round 10, LB1).
+    skip: cells not compared at all (the destaggered edge of an archv current, which the reader drops on purpose)."""
+    a, b = np.asarray(a, float), np.asarray(b, float)
+    keep = np.ones(a.shape, bool) if skip is None else ~skip
+    ok = np.isfinite(a) & np.isfinite(b) & keep
+    if ((np.isfinite(a) != np.isfinite(b)) & keep).any():
+        return np.inf, int(ok.sum())
+    return float(np.max(np.abs(a[ok] / b[ok] - 1) if rel else np.abs(a[ok] - b[ok]))), int(ok.sum())
+
+
 def receipts() -> bool:
     """TEOS-10 check values (GSW toolbox's own check cast), in-situ vs potential at depth, and both lab readers against the
     GOFS-layout store they were encoded from (synthetic fixture, tests/fixtures/hycom)."""
@@ -858,9 +870,8 @@ def receipts() -> bool:
     g = "Ocean (HYCOM / TEOS-10)"
     src = "GSW check cast (gsw_cv_v3_0.npz; McDougall & Barker 2011): SP, t, p -> rho, sound speed"
     for name, got, want, tol in (("in-situ density", r["rho"], cvals["rho"], 2e-7), ("sound speed", r["c"], cvals["sound_speed"], 2e-7)):
-        ok = np.isfinite(got) & np.isfinite(want)
-        receipt(g, f"{name} from SP, in-situ t, depth vs GSW check values: max relative error over {ok.sum()} points",
-                float(np.max(np.abs(got[ok] / want[ok] - 1))), 0.0, tol, "", src, rel=False)
+        err, n = _worst_abs(got, want, rel=True)
+        receipt(g, f"{name} from SP, in-situ t, depth vs GSW check values: max relative error over {n} points", err, 0.0, tol, "", src, rel=False)
     # 1000 m, equatorial Pacific: in situ is warmer than potential by the adiabatic lapse (~0.1 K); reading in-situ as potential
     # makes the water that much too warm and the density ~0.01 kg/m3 too small
     ins, pot = teos10(35.0, 4.4, 1000.0, 0.0, 180.0, "in_situ"), teos10(35.0, 4.4, 1000.0, 0.0, 180.0, "potential")
@@ -878,9 +889,13 @@ def receipts() -> bool:
             got = open_store(out)
             for v in ("water_temp", "salinity", "water_u", "water_v", "rho", "c"):
                 a, b = want[v].values, got[v].values
-                m = np.isfinite(a) & np.isfinite(b)
-                receipt(g, f"lab HYCOM {lbl} -> store: {v} vs the GOFS values it was encoded from, max abs error over {m.sum()} cells",
-                        float(np.abs(a[m] - b[m]).max()), 0.0, 5e-5, "", "float32 re-encoding round trip; destaggering drops the last column/row", rel=False)
+                edge = np.zeros(a.shape, bool)                  # archv: the C-grid currents lose their last column and row
+                if "grid" in extra and v in ("water_u", "water_v"):
+                    edge[..., -1], edge[..., -1, :] = True, True
+                err, n = _worst_abs(a, b, skip=edge)
+                receipt(g, f"lab HYCOM {lbl} -> store: {v} vs the GOFS values it was encoded from, max abs error over {n} cells",
+                        err, 0.0, 5e-5, "", "float32 re-encoding round trip; archv water_u, water_v: the destaggered last column/row is not compared",
+                        rel=False)
     return True
 
 

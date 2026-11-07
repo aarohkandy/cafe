@@ -710,6 +710,36 @@ def _failing(monkeypatch_fn):
     return [r["claim"] for r in R.OUT if r["ok"] is False]
 
 
+def test_lb1_a_cell_lost_on_one_side_fails_the_lab_round_trip_receipts_and_the_check_cast(monkeypatch):
+    """Round 10 look-ahead LB1: `receipts` took the maximum error over the cells finite on both sides, so a cell the ingest lost (finite in the
+    GOFS values, NaN in the store) left the max at 0 and the row read PASS with one cell fewer in its label (M-20 fixed `check_node` only)."""
+    real_open = h.open_store
+
+    def lossy(path, *a, **k):
+        ds = real_open(path, *a, **k)
+        if pathlib.Path(path).name in ("per-.zarr", "arch.zarr"):       # the stores `receipts` ingests, not the GOFS values it compares them with
+            ds = ds.load()
+            ds["water_temp"][dict(time=0, depth=0, lat=0, lon=1)] = np.nan
+        return ds
+    monkeypatch.setattr(h, "open_store", lossy)
+    bad = _failing(lambda: None)
+    assert any("water_temp" in c and "hybrid layers" in c for c in bad) and any("water_temp" in c and "archv" in c for c in bad)
+    assert len(bad) == 2                                                # salinity, u, v, rho and c lost nothing
+
+    real_teos, first = h.teos10, []
+
+    def lossy_teos(*a, **k):
+        r = real_teos(*a, **k)
+        if not first:                                                   # the check cast is the first call
+            first.append(1)
+            r["rho"] = np.array(r["rho"], float)
+            r["rho"][0] = np.nan
+        return r
+    monkeypatch.setattr(h, "open_store", real_open)
+    monkeypatch.setattr(h, "teos10", lossy_teos)
+    assert any(c.startswith("in-situ density") for c in _failing(lambda: None))
+
+
 def test_reading_in_situ_as_potential_fails_the_density_receipts(monkeypatch):
     import gsw
     bad = _failing(lambda: monkeypatch.setattr(gsw, "CT_from_t", lambda sa, t, p: gsw.CT_from_pt(sa, t)))

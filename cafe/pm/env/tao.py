@@ -225,6 +225,33 @@ def unusable_selected(out_dir: Any) -> list[str]:
     return bad
 
 
+def wind_gap(out_dir: Any, name: str, t0: Any = None, t1: Any = None) -> str:
+    """Why `load_tao` returns no wind for the mooring `name` of the manifest: no WIND file of its catalog overlaps the window, or what each WIND file it
+    has says in the window: the QC flags it carries against the ones that count (GOOD), or that it is unusable. For the ingest ledger, so that a mooring
+    left out of the comparison is told from a drop in the code (round 10, LB1)."""
+    import xarray as xr
+    out = pathlib.Path(out_dir)
+    man = json.loads((out / "manifest.json").read_text())
+    a, b = (man["t0"] if t0 is None else t0), (man["t1"] if t1 is None else t1)
+    keys = sorted(k for k, r in man["files"].items() if r["mooring"] == name and r["var"] == "WIND")
+    if not keys:
+        return "no WIND file overlaps the window"
+    why = []
+    for key in keys:
+        mode = man["files"][key]["mode"]
+        label = f"{key.split('/')[-1]} ({'delayed' if mode == 'D' else 'real-time'} mode)"
+        if key in man.get("unusable", {}):
+            why.append(f"{label}: unusable, {man['unusable'][key]}")
+            continue
+        with xr.open_dataset(out / key) as ds:
+            t = ds.TIME.values.astype("datetime64[s]").astype("int64").astype("float64")
+            q = ds[NC["WIND"][1] + "_QC"].values.reshape(len(t), -1)[:, 0]
+        flags = sorted({int(x) for x in q[(t >= a) & (t <= b)]})
+        why.append(f"{label}: " + (f"QC flags {', '.join(map(str, flags))} in the window, none of the good ones {', '.join(map(str, GOOD[mode]))}"
+                                   if flags else "no sample in the window"))
+    return "; ".join(why)
+
+
 def load_tao(out_dir: Any, t0: Any = None, t1: Any = None) -> dict[str, dict[str, Any]]:
     """{mooring: dict(lat, lon, wind=dict(t, u, v, z), sst=dict(t, value [K], z), airt=dict(t, value [K], z), rh=dict(t, value [0..1], z))}
     from the files fetch_tao selected; verifies the SHA-256 of every file it reads. Variables a mooring lacks are absent."""

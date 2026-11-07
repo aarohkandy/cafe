@@ -107,6 +107,11 @@ def _whole_days(h: float) -> bool:
     return bool(h) and int(round(h * 60)) % 1440 == 0
 
 
+def _deploy_in_window(t: float, window: tuple[float, float]) -> bool:
+    """A deploy time `apply` accepts: inside the window and at least an hour before its end. `flight_note` asks the same question (round 10, LB1)."""
+    return window[0] <= t < window[1] - 3600.0
+
+
 def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Sequence[str] = ()) -> dict[str, Any]:
     """A copy of the mission with the changes `mods` = {vid: dict(shift_h, dlon, dlat, duty)} and the vehicles `drop` (with their links) removed."""
     m = copy.deepcopy(mission)
@@ -129,7 +134,7 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
             v["sorties"]["local_solar_time"] = f"{tot // 60:02d}:{tot % 60:02d}"
         elif h:
             t = utc(v["deploy"]["time"]).timestamp() + 3600.0 * h
-            if not t0 <= t < t1 - 3600.0:
+            if not _deploy_in_window(t, (t0, t1)):
                 raise Invalid(f"{vid}: deploying {h:+g} h gives {_iso(t)}, outside the window {m['window']['start']} .. {m['window']['end']}")
             v["deploy"]["time"] = _iso(t)
         if dlon or dlat:
@@ -175,18 +180,22 @@ def solo(mission: dict[str, Any], vid: str) -> dict[str, Any]:
     return m
 
 
-def flight_note(v: dict[str, Any], shift_h: float, t_end: float) -> str | None:
+def flight_note(v: dict[str, Any], shift_h: float, window: tuple[float, float]) -> str | None:
     """What a deploy shift does to the exposure: a glider or USV deployed `shift_h` later still flies to the window's end, so it flies a shorter time, and
-    its P(fail) (the fraction failing at any time) is over that flight, not the baseline's. None for no shift or a UAS (its sorties stay in the window)."""
+    its P(fail) (the fraction failing at any time) is over that flight, not the baseline's. None for no shift, a UAS (its sorties stay in the window) or
+    a shift `apply` refuses (a deploy outside the window has no flight to describe: round 10, LB1)."""
     if not shift_h or "base" in v:
         return None
-    old = (t_end - utc(v["deploy"]["time"]).timestamp()) / 86400.0
+    t = utc(v["deploy"]["time"]).timestamp()
+    if not _deploy_in_window(t + 3600.0 * shift_h, window):
+        return None
+    old = (window[1] - t) / 86400.0
     new = old - shift_h / 24.0
     return f"flies {new:g} d instead of {old:g} d: P(fail) is over the {'shorter' if shift_h > 0 else 'longer'} flight, not like for like with the baseline's"
 
 
-def describe(mod: dict[str, Any], v: dict[str, Any] | None = None, t_end: float | None = None) -> str:
-    """The change in words. With the window end `t_end`, a deploy shift of a glider or USV also says what it does to the flight (`flight_note`)."""
+def describe(mod: dict[str, Any], v: dict[str, Any] | None = None, window: tuple[float, float] | None = None) -> str:
+    """The change in words. With the mission `window` (start, end), a deploy shift of a glider or USV also says what it does to the flight (`flight_note`)."""
     h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
     what = "launch the sorties" if v is not None and "base" in v else "deploy"
     out: list[str] = []
@@ -195,7 +204,7 @@ def describe(mod: dict[str, Any], v: dict[str, Any] | None = None, t_end: float 
     for d, pos, neg in ((dlon, "east", "west"), (dlat, "north", "south")):
         if d:
             out.append(f"move {abs(d):g} deg {pos if d > 0 else neg}")
-    note = flight_note(v, h, t_end) if v is not None and t_end is not None else None
+    note = flight_note(v, h, window) if v is not None and window is not None else None
     if duty != 1.0:
         if v is not None and "base" in v:
             x = float(v["sorties"].get("every_days", 1))
@@ -566,7 +575,7 @@ def candidates(mission: dict[str, Any], vid: str) -> list[dict[str, Any]]:
     if "base" in v or "dive_depth_m" in v["task"]:
         out += [dict(mod=dict(duty=f), cost=(1 - f) / 0.25) for f in DUTIES]
     for c in out:
-        c["change"] = describe(c["mod"], v, _window(mission)[1])
+        c["change"] = describe(c["mod"], v, _window(mission))
     return sorted(out, key=lambda c: c["cost"])
 
 
@@ -746,7 +755,7 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
             b = dict(verdict=b["verdict"], p_fail=b["p_fail"])
         em, no_em = usable(ems, scope_of(m2, vid, cls))
         a = predict(em, m2, vid, cls, tracks.get(vid), mod, env)
-        flight = flight_note(vehicle(mission, vid), mod["shift_h"], _window(mission)[1])
+        flight = flight_note(vehicle(mission, vid), mod["shift_h"], _window(mission))
         if a["status"] == "ok":
             out[vid] = dict(base=b, method="EMULATED", flight=flight, **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")})
         else:

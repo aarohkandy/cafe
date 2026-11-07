@@ -1109,7 +1109,7 @@ def _n(n: dict[str, Any] | None) -> str:
     tip = f"{n['stage']}: {n['source']}" + ("" if n["uncertainty"] is None else f"; uncertainty {json.dumps(n['uncertainty'])}")
     href = f' href="../{html.escape(n["ledger"])}"' if n["ledger"].startswith("checkpoints/") else ""          # a model-receipt table is not in the run
     where = _PATHS.get(id(n))                                                    # round 10, M-27: the report.json path(s) of this node, for `check_rendered`
-    at = f' data-path="{html.escape(" ".join(where))}"' if where else ""
+    at = f' data-path="{html.escape(json.dumps(where))}"' if where else ""          # a JSON list: a link id may hold any character, a space included
     return (f'<span class=n>{html.escape(_txt(n))}<a class=lk{href} title="{html.escape(tip)}"{at}>L</a>'
             f'<a class=lk href="#{_rid(n["receipt"])}" title="{html.escape(n["receipt"])}">R</a></span>')
 
@@ -1708,7 +1708,7 @@ def check_rendered(rep: dict[str, Any], html_text: str) -> list[str]:
     (`vehicles.*.modes.battery`). A shape the page prints nowhere is not asked for: a few nodes are in report.json only (the drawn map's deploy points)."""
     printed: dict[str, set[str]] = {}
     for text, paths in PRINTED.findall(html_text):
-        for p in html.unescape(paths).split(" "):
+        for p in json.loads(html.unescape(paths)):
             printed.setdefault(p, set()).add(html.unescape(text))
     shapes = {INSTANCE.sub("*", p) for p in printed}
     bad = []

@@ -906,6 +906,28 @@ def test_check_rendered_matches_whole_numeric_tokens():
     assert report.check_rendered(rep, "0 members, 0.25 .") == []
 
 
+def _printed_page(rep, skip=()):
+    """The spans `render` writes for the `p_fail` of each link of `rep` (its path table filled the way `render` fills it), without those in `skip`."""
+    report._PATHS.clear()
+    try:
+        for kind, path, node in report._walk(rep):
+            if kind == "node":
+                report._PATHS.setdefault(id(node), []).append(path)
+        return "".join(report._n(d["p_fail"]) for k, d in rep["links"].items() if k not in skip)
+    finally:
+        report._PATHS.clear()
+
+
+def test_lb1_a_link_id_with_a_space_is_found_under_its_own_path():
+    """Round 10 look-ahead LB1: `data-path` joined a node's paths with a space and `check_rendered` split them on one, so a link `usv uas-rf` next to a
+    normal link was 'not in the HTML' although the page printed it, and `report` exited 1 on its own self-check."""
+    node = dict(value=3, unit="members", stage="s", source="x", uncertainty=None, ledger="checkpoints/s.json", receipt="r")
+    rep = dict(links={"a": dict(p_fail=dict(node)), "usv uas-rf": dict(p_fail=dict(node)), 'q"<b>': dict(p_fail=dict(node))})
+    assert report.check_rendered(rep, _printed_page(rep)) == []
+    lost = report.check_rendered(rep, _printed_page(rep, skip=("usv uas-rf",)))          # guard: "3 members" is on the page, only the path rule sees it
+    assert lost == ["links.usv uas-rf.p_fail: '3 members' is not in the HTML"]
+
+
 def test_check_rendered_looks_at_number_nodes_only_a_bare_number_is_the_traceability_checks():
     """A number outside a node ("bare") is `check_traceability`'s to refuse; the rendered-page check does not ask for it in the HTML."""
     rep = dict(a=dict(value=0, unit="members"), loose=7, rows=[3, dict(value=0.25, unit="fraction")])
@@ -2614,8 +2636,9 @@ def test_l0_a_stage_3_row_takes_the_time_of_its_window_not_of_the_window_at_its_
 
 
 def span(path, text):
-    """A number as `report._n` prints it for the node at `path` of report.json (round 10, M-27)."""
-    return f'<span class=n>{text}<a class=lk title="t" data-path="{path}">L</a><a class=lk href="#r">R</a></span>'
+    """A number as `report._n` prints it for the node at `path` of report.json (round 10, M-27); several paths, separated by a space here, are a JSON list
+    in the attribute (round 10, LB1)."""
+    return f'<span class=n>{text}<a class=lk title="t" data-path="{html.escape(json.dumps(path.split(" ")))}">L</a><a class=lk href="#r">R</a></span>'
 
 
 def test_r10_m27_a_card_that_stops_printing_a_number_the_others_print_is_found_though_the_text_is_on_the_page():
@@ -2638,14 +2661,15 @@ def test_r10_m27_every_number_node_of_a_rendered_report_is_printed_under_its_own
     assert report.check_rendered(rep, h) == []
     count = {}
     for _, ps in report.PRINTED.findall(h):
-        for p in ps.split(" "):
+        for p in json.loads(html.unescape(ps)):
             count[p] = count.get(p, 0) + 1
     shapes = {}
     for p in count:
         shapes.setdefault(report.INSTANCE.sub("*", p), []).append(p)
+    one = {m.start(): json.loads(html.unescape(m.group(2))) for m in report.PRINTED.finditer(h)}
     first = next(m for m in report.PRINTED.finditer(h)
-                 if " " not in m.group(2) and count[m.group(2)] == 1 and len(shapes[report.INSTANCE.sub("*", m.group(2))]) > 1)
-    path = first.group(2)
+                 if len(one[m.start()]) == 1 and count[one[m.start()][0]] == 1 and len(shapes[report.INSTANCE.sub("*", one[m.start()][0])]) > 1)
+    path = one[first.start()][0]
     dropped = h[:first.start()] + h[first.end():]                                                  # the span loses its text
     assert [p.split(":")[0] for p in report.check_rendered(rep, dropped)] == [path]
 

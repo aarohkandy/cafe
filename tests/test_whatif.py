@@ -86,9 +86,12 @@ def storm_em(tmp_path_factory):
     return em, info
 
 
-def shifted(h, flight_d):
+def shifted(h, flight_d=None):
     """How `whatif.candidates` words a deploy shift of a glider whose flight is `flight_d` days (CI: 1.5, STORM: 2.5): the change, then what it does to the
-    flight (round 10 M-11)."""
+    flight (round 10 M-11). Without `flight_d`, the shift is one `apply` refuses (both missions open at the deploy time, so every shift earlier): the
+    change alone, no flight (round 10 LB1)."""
+    if flight_d is None:
+        return f"deploy {abs(h):g} h {'later' if h > 0 else 'earlier'}"
     new = flight_d - h / 24
     return (f"deploy {abs(h):g} h {'later' if h > 0 else 'earlier'} (flies {new:g} d instead of {flight_d:g} d: P(fail) is over the "
             f"{'shorter' if h > 0 else 'longer'} flight, not like for like with the baseline's)")
@@ -430,7 +433,7 @@ def test_rows_made_by_other_code_stay_in_the_table_but_are_not_trained_on(tmp_pa
 def test_candidates_are_single_changes_in_cost_order():
     c = whatif.candidates(CI, GL)
     assert [x["cost"] for x in c] == sorted(x["cost"] for x in c) and len(c) == 8 + 8 + 2
-    assert {x["change"] for x in c} >= {shifted(6, 1.5), shifted(-48, 1.5), "move 0.5 deg west", "move 1 deg north",
+    assert {x["change"] for x in c} >= {shifted(6, 1.5), shifted(-48), "move 0.5 deg west", "move 1 deg north",
                                         "dive 25 % shallower (950 m to 712.5 m)"}
     assert next(x for x in c if x["change"] == shifted(24, 1.5))["cost"] == 4.0 and next(x for x in c if x["change"] == "move 1 deg east")["cost"] == 2.0
     assert len(whatif.candidates(CI, "usv")) == 16 and len(whatif.candidates(CI, "uas")) == 14
@@ -460,7 +463,7 @@ def test_the_emulated_flip_search_finds_the_24_h_shift_that_avoids_the_storm(sto
     assert b["distance"] <= b["threshold"] and b["lo"] <= b["p_fail"] <= b["hi"]
     by = {t["change"]: t for t in f["tried"]}
     assert len(f["tried"]) == 18 and by[shifted(12, 2.5)]["verdict"] == "NO-GO" and by[shifted(6, 2.5)]["verdict"] == "NO-GO"
-    assert by[shifted(-6, 2.5)]["method"] == "not evaluated" and "outside the window" in by[shifted(-6, 2.5)]["reason"]
+    assert by[shifted(-6)]["method"] == "not evaluated" and "outside the window" in by[shifted(-6)]["reason"]
     assert by[shifted(48, 2.5)]["verdict"] == "GO" and by["dive 25 % shallower (950 m to 712.5 m)"]["reason"] == "out of range"
     assert by["move 0.5 deg east"]["method"] == "EMULATED"
 
@@ -788,7 +791,7 @@ def test_the_uas_candidates_leave_out_whole_day_shifts_and_the_others_keep_them(
     assert not [c for c in uas if "24 h" in c or "48 h" in c] and "launch the sorties 12 h later" in uas
     for c in whatif.candidates(CI, "uas"):
         whatif.apply(CI, {"uas": c["mod"]})                                              # none of them is invalid for being the baseline
-    assert shifted(-48, 1.5) in [c["change"] for c in whatif.candidates(CI, GL)]
+    assert shifted(-48) in [c["change"] for c in whatif.candidates(CI, GL)]
 
 
 def test_a_lower_uas_duty_rounds_the_period_up_to_whole_days_and_says_so():
@@ -1316,16 +1319,41 @@ def test_a_hold_out_coverage_of_17_of_20_passes_the_gate_and_the_receipt_bracket
 def test_a_deploy_shift_of_a_glider_says_it_flies_a_different_time_in_every_line_that_shows_it():
     """Round 10 M-11: `--shift 48h` printed MARGINAL -> MARGINAL beside a flight 2 d shorter, with nothing to say the two P(fail) are over different
     exposures. The window end stays; a UAS keeps its sorties inside the window and a move or a duty changes no exposure."""
-    t_end = whatif._window(CI)[1]
+    window = whatif._window(CI)
     v = whatif.vehicle(CI, GL)                                                   # deployed 2023-03-01 18Z, window end 03-03 06Z: 1.5 d
     note = "flies 1 d instead of 1.5 d: P(fail) is over the shorter flight, not like for like with the baseline's"
-    assert whatif.flight_note(v, 12.0, t_end) == note
-    assert whatif.flight_note(v, -12.0, t_end) == "flies 2 d instead of 1.5 d: P(fail) is over the longer flight, not like for like with the baseline's"
-    assert whatif.flight_note(v, 0.0, t_end) is None and whatif.flight_note(whatif.vehicle(CI, "uas"), 12.0, t_end) is None
-    assert whatif.describe(dict(shift_h=12.0), v, t_end) == f"deploy 12 h later ({note})"
-    assert whatif.describe(dict(shift_h=12.0), v) == "deploy 12 h later" and whatif.describe(dict(dlon=0.5), v, t_end) == "move 0.5 deg east"
+    assert whatif.flight_note(v, 12.0, window) == note
+    earlier = copy.deepcopy(CI)                                                  # a window that opens 12 h sooner: the deploy 12 h earlier is inside it
+    earlier["window"]["start"] = whatif._iso(window[0] - 12 * 3600.0)
+    longer = "flies 2 d instead of 1.5 d: P(fail) is over the longer flight, not like for like with the baseline's"
+    assert whatif.flight_note(v, -12.0, whatif._window(earlier)) == longer
+    assert whatif.flight_note(v, -12.0, window) is None                          # CI opens at the deploy: `apply` refuses it (LB1)
+    assert whatif.flight_note(v, 0.0, window) is None and whatif.flight_note(whatif.vehicle(CI, "uas"), 12.0, window) is None
+    assert whatif.describe(dict(shift_h=12.0), v, window) == f"deploy 12 h later ({note})"
+    assert whatif.describe(dict(shift_h=12.0), v) == "deploy 12 h later" and whatif.describe(dict(dlon=0.5), v, window) == "move 0.5 deg east"
     assert [c["change"] for c in whatif.candidates(CI, GL) if c["mod"] == dict(shift_h=12.0)] == [f"deploy 12 h later ({note})"]
     assert not [c for c in whatif.candidates(CI, "uas") if "flies" in c["change"]]
     r = ask(dict(shift_h=24.0), {})["vehicles"][GL]
     assert r["flight"] == "flies 1.5 d instead of 2.5 d: P(fail) is over the shorter flight, not like for like with the baseline's"
     assert ask(dict(dlon=0.0, dlat=0.5), {})["vehicles"][GL]["flight"] is None
+
+
+def test_lb1_a_deploy_shift_that_apply_refuses_is_not_described_as_a_flight():
+    """Round 10 look-ahead LB1: a glider deployed 30 h before the window's end got `deploy 48 h later (flies -0.75 d instead of 1.25 d ...)` in the
+    flip table's tried rows, beside the reason `apply` refused it. A note is written only for a deploy `apply` accepts (one rule, `_deploy_in_window`)."""
+    m = copy.deepcopy(CI)
+    window = whatif._window(m)
+    whatif.vehicle(m, GL)["deploy"]["time"] = whatif._iso(window[1] - 30 * 3600.0)
+    accepted = {}
+    for c in whatif.candidates(m, GL):
+        h = c["mod"].get("shift_h")
+        if not h:
+            continue
+        try:
+            whatif.apply(m, {GL: c["mod"]})
+            accepted[h] = True
+        except whatif.Invalid:
+            accepted[h] = False
+        assert ("flies" in c["change"]) == accepted[h], c["change"]
+    assert accepted == {6.0: True, 12.0: True, 24.0: True, 48.0: False, -6.0: True, -12.0: False, -24.0: False, -48.0: False}      # window start 03-01 18Z
+    assert whatif.flight_note(whatif.vehicle(m, GL), 48.0, window) is None and whatif.flight_note(whatif.vehicle(m, GL), 24.0, window) is not None

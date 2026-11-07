@@ -764,6 +764,40 @@ def test_tao_writes_the_comparison_and_the_fitted_wind_priors(tmp_path, data):
     assert {pathlib.Path(o["path"]).name for o in d["outputs"]} == {"tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json"}
 
 
+def test_lb1_a_mooring_left_out_of_the_comparison_is_named_with_its_reason(tmp_path, data_copy):
+    """Round 10 look-ahead LB1: a mooring with no QC-good wind in the window had no `wind` key and simply was not counted: `tao_moorings_compared`
+    moved from 11 to 14 and the fitted prior width by 5x between two downloads with no line in the ledger to say which moorings were out or why."""
+    import xarray as xr
+    from cafe.pm.env import remote
+    tdir = tao.cache_dir(data_copy)
+    man = json.loads((tdir / "manifest.json").read_text())
+    key = next(k for k, r in man["files"].items() if r["mooring"] == "T2S165W" and r["var"] == "WIND")
+    with xr.open_dataset(tdir / key) as ds:
+        ds = ds.load()
+    ds["WSPD_QC"][:] = 3                                                           # every sample flagged "bad": nothing is good
+    ds.to_netcdf(tdir / key)
+    man["files"][key]["sha256"] = remote.sha256(tdir / key)
+    man["selected"]["T2S165W"].pop("WIND")
+    man["selected"]["T1N165W"], man["positions"]["T1N165W"] = {}, [1.0, 195.0]     # in the grid, no file at all
+    man["selected"]["T5N170W"], man["positions"]["T5N170W"] = {}, [5.0, 190.0]     # outside the grid
+    (tdir / "manifest.json").write_text(json.dumps(man))
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    d = tao_stage(ctx, t0, t1)
+    gap = f"{pathlib.Path(key).name} (delayed mode): QC flags 3 in the window, none of the good ones 1, 2, 5"
+    assert d["notes"][0] == ("4 moorings in the TAO manifest, 1 compared; left out: T1N165W (no WIND file overlaps the window); "
+                             f"T2S165W ({gap}); T5N170W (outside the environment's grid)")
+    assert check_of(d, "tao_moorings_compared")["value"] == 1
+    man["unusable"] = {key: "no QC variable"}                                      # the other two forms of the same answer
+    (tdir / "manifest.json").write_text(json.dumps(man))
+    assert tao.wind_gap(tdir, "T2S165W") == f"{pathlib.Path(key).name} (delayed mode): unusable, no QC variable"
+    del man["unusable"]
+    (tdir / "manifest.json").write_text(json.dumps(man))
+    assert tao.wind_gap(tdir, "T2S165W", t1 + 86400.0, t1 + 2 * 86400.0).endswith("(delayed mode): no sample in the window")
+    man["files"][key]["mode"] = "R"
+    (tdir / "manifest.json").write_text(json.dumps(man))
+    assert tao.wind_gap(tdir, "T2S165W", t0, t1).endswith("(real-time mode): QC flags 3 in the window, none of the good ones 1, 2")
+
+
 def test_the_fitted_wind_prior_removes_the_model_bias_and_stage1_accepts_it(tmp_path, data):
     ctx, t0, t1 = tao_ctx(tmp_path)
     tao_stage(ctx, t0, t1)

@@ -832,6 +832,9 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     cmp = tao.compare(wrf, moor)
     n = len([k for k in cmp if k != "ALL"])
     L.check("tao_moorings_compared", n > 0, value=n, limit=1, note="moorings with usable wind in the window")
+    left = {k: "outside the environment's grid" if k not in wrf else tao.wind_gap(tdir, k, t0, t1) for k in moor if k not in cmp}      # round 10, LB1
+    if left:
+        L.note(f"{len(moor)} moorings in the TAO manifest, {n} compared; left out: " + "; ".join(f"{k} ({why})" for k, why in sorted(left.items())))
     L.output(_dump(cmp, ctx.path("ingest", "tao_compare.json")))
     if not n:
         return                                                           # the failed check above stops the stage
