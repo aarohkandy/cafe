@@ -1,0 +1,58 @@
+# Round 11, reviewer D (readers in env/, report.py, credibility.py, receipts.py, acceptance.py, tests/golden; hostile missions run for real)
+
+Commit `778d8b6` (worktree HEAD `095c094`, documents only). All runs on orca (`PM_HOST=cafe-orca PM_RUNTIME=proot`, 2 CPUs, a scratch copy `pm_rev11_d*`), from a detached worktree. Hostile missions: the demo with a 30-day window and with 20 vehicles and with 1 vehicle (plan, with `par.memory_gb` patched to 28 GB for the memory refusals), 45 invalid or odd mission files through `validate`, a synthetic calm (zero wind, TAO included) through a whole `--budget ci` run, 1-vehicle and 20-vehicle whole `--budget ci` runs on the synthetic fixture, 16 corrupted copies of the q11 run through `report --run`, the golden check against 8 x 2 x up to 64 edited copies of q11's summary, and the real orca cache read across the antimeridian.
+
+What held (so it is not re-checked): the 30-day window at 28 GB refuses with the stated message ("stage 1 needs about 45 GB for the environment of a 30-day window and 0.9 GB per worker, and 28 GB is available ...", exit 2); the RUNBOOK's memory figures (22.5 / 32.7 GB for 15 / 17 days, 45 GB for 30 days with the shipped pad, 141.8 GB with the default pad) recompute from `budget.py`; 45 odd or invalid missions (vehicle outside the box, lat 89, lon 180, deploy before or after the window, zero-length window, NaN pad, negative seed, duplicate ids, name `..`, ...) all end in `error:` and exit 2 or are accepted deliberately; the real cache read at lon 179.5 .. -179.5, +-180, 197 and -163 is continuous (wind and Hs differ by less than 0.01 m/s and 0.01 m across 180); a 1-vehicle fixture run and a 20-vehicle fixture run complete with empty `traceability_problems` and `ledger_problems`; 12 of 16 corrupted run directories give a clean `error:` line.
+
+### D-1. A pooled TAO comparison with no direction samples or no SST samples crashes the credibility report with a bare TypeError, ending the run after every stage has finished
+severity: major
+lane: robustness
+where: cafe/pm/credibility.py:491 (`float(pooled["dir_rmse_deg"])`) and :493-494 (`float(pooled['dir_bias_deg'])`, `float(pooled.get('sst_bias', math.nan))`); written by cafe/pm/env/tao.py:378-392 (`_stats`: NaN when `fast` is empty or no mooring has an SST sample) via pipeline.py:839 (`tao_compare.json`, NaN saved as null); called first in cafe/pm/report.py:1727 (`credibility.write(run)`), so nothing of the report is written
+reproduction:
+1. Real data, no new fixture: q11's `ingest/tao_compare.json` has 5 of 14 moorings with `sst_n` 0 and `sst_bias` null (T2N170W, T2N180W, T2S170W, T2S180W, T5S170W). Any mission whose box holds only such moorings has `ALL.sst_n` 0, `ALL.sst_bias` null. Copy the q11 run, set `ALL.sst_bias`, `ALL.sst_rmse` to null and run `python -m cafe.pm report --run <copy>`: `error: <copy>: damaged or incomplete (TypeError: float() argument must be a string or a real number, not 'NoneType'); run it again (--fresh)` (exit 2). Same with `ALL.dir_rmse_deg`, `ALL.dir_bias_deg` null (no sample where both speeds are at least 1 m/s). The call chain to the TypeError is `credibility.build(run)` -> `factor_table` -> `_data_pedigree` (traced with a script that calls `credibility.build` on the copy: `File ".../credibility.py", line 494 ... float(pooled.get('sst_bias', math.nan))`).
+2. In a real `run` there is no such wrapper: with a calm synthetic environment (tests/fixtures/ci_env/make.py with `wind10` returning 0 and `sea_state` a constant 0.05 m sea, TAO winds 0 too; `--budget ci`; the ingest ust check bypassed, see D-2) every stage ran (stage 1 38 s, stage 3, stage 1b, emulator 65 s) and the report stage ended with a raw traceback `File "/app/cafe/pm/credibility.py", line 491, in _data_pedigree ... TypeError: float() argument must be a string or a real number, not 'NoneType'`, `rc=1`, no report.json or index.html (tao_compare.json: `"dir_n": 0, "dir_bias_deg": null, "dir_rmse_deg": null` for both moorings).
+why it matters: the pipeline writes the null itself, so a valid run on valid input ends without a report; `report --run` then tells the user the directory is damaged and to rerun with `--fresh`, which reproduces the same crash after the same hours.
+
+### D-2. A calm (zero-wind) window cannot pass the ingest, and the failed check names the wrong cause
+severity: minor
+lane: robustness
+where: cafe/pm/pipeline.py:681 (`good = ... & (b > 1e-3)` in `_ustar_agreement`), :746-749 (`L.check("coare_ustar_vs_umwm_ust", n > 0 and ...)`, note "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask")
+reproduction: the ci fixture with `wind10` and TAO winds zero and UMWM `ust` = 0 (so every sea node has `ust` 0): `python -m cafe.pm run --mission missions/ci_fixture.yaml --budget ci --gpus 0` ends `error: stage ingest: self-checks failed: coare_ustar_vs_umwm_ust: no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask`, exit 1. The box has 1 200 sea nodes; what is empty is the set of nodes with `ust` above 1e-3 m/s. With that one check bypassed in-process the rest of the zero-wind run completes through stage 1b (USV NO-GO, becalmed 16 of 16; gliders and UAS GO), which is what the BRIEF 5.6 robustness list asks to see.
+why it matters: BRIEF 5.6 lists zero wind as an input the tool must handle; here it is refused, and the advice (widen the box) cannot help. A count of nodes dropped by the `ust` filter, and the check treated as "nothing to compare" when all of them are calm, would be honest.
+
+### D-3. The golden check passes a doubling of glider_eq's P(fail) and never reads the stored `p_fail` or `conf`
+severity: minor
+lane: statistics, honesty
+where: cafe/pm/acceptance.py:198-206 (`summary` keeps `p_fail` and `conf`), :231-262 (`compare` reads `verdict`, `k_fail`, `n`, `cls`, `platform`, `mission`, `seed` only; `p_fail` appears only inside an error string), :310-311 (`check_golden` row)
+reproduction: `acceptance.summary` of q11's report.json (8 entries, n 64), then `acceptance.compare(S, S_edited)` with the verdict recomputed by `intervals.verdict` for the edited count (script `scratch_d/acc3.py` of the review worktree; output below). The largest change in k_fail that raises no problem (only a note, "undecided in both"): glider_eq 18/64 (0.281) -> 33/64 (0.516) or down to 6/64 (0.094); glider_2n and usv-shore-iridium 0/64 -> 6/64 (0.094); uas 55/64 (0.859) -> 42/64 (0.656); usv 62/64 -> 52/64 (0.812); usv-uas-rf and the two acoustic links 64/64 -> 56/64 (0.875). Also: `conf` 0.9 -> 0.5 and `p_fail` 0.281 -> 0.1 in an entry whose k_fail and n are unchanged give zero problems and zero notes. Tampering with `environment`, `map`, `reach` or `credibility` of report.json leaves `summary` equal (those are only covered by the same-seed check, which needs two full quick runs).
+why it matters: the Bonferroni-corrected Newcombe test at 8 entries allows a 20 to 24 point swing of P(fail) at n = 64, so a regression in the glider model that doubles the failure rate against the same seed and cache is accepted; two stored fields are dead. Same machine and same seed should be exactly equal (the repo says so in P-2), and the golden could say so while keeping the tolerance for other machines.
+
+### D-4. `damaged_run_files` relabels any KeyError or TypeError of the code as a damaged run directory
+severity: minor
+lane: documentation, robustness
+where: cafe/pm/config.py:218-225 (`damaged_run_files`: "The original text stays in the message, so a bug in the code is not hidden by it" but the advice is always `run it again (--fresh)`), used by cafe/pm/__main__.py `report` and others
+reproduction: D-1 point 1 (the run directory is whole; the code raised TypeError on a value that the same code wrote). Also `{"n": 0}` is not caught (D-5) while `k_fail` NaN is, so the wrapper's line between damage and bug is by exception type, not by evidence.
+why it matters: the user is told to rerun a multi-hour job to cure a defect that the rerun reproduces.
+
+### D-5. `report --run` on a summary with n = 0 ends in a ZeroDivisionError traceback
+severity: minor
+lane: robustness
+where: cafe/pm/stats/intervals.py:57 (`wilson`: `p = k / n`), reached through cafe/pm/report.py:271-286 (`_stat` checks `verdict.k_fail == k_fail`, finiteness, but not `n >= 1`)
+reproduction: copy q11, edit `stage1b/summary.json` so that `summary.vehicles.glider_eq.n` is 0, run `python -m cafe.pm report --run <copy>`: `ZeroDivisionError: division by zero` at intervals.py:57 (traceback, not `error:`). The same file with `k_fail` NaN gets the clean `ConfigError` of `_stat`.
+why it matters: only a hand-edited file does this; the neighbouring damage cases are all handled, this one escapes by one missing `n >= 1` test.
+
+### D-6. The synthetic CI environment cannot build any box but its own, so no test takes a dateline (or any other) mission through the ingest
+severity: minor
+lane: reproducibility, tests
+where: tests/fixtures/ci_env/make.py:60 (`OLAT, OLON` fixed at 192.5 to 197.5 E), :64 (`MOORINGS`), :365 (TAO manifest box fixed `(-2, 2, 193, 197)`), :276-286 (`_hours3d`)
+reproduction: copy `missions/ci_fixture.yaml` to a mission with box `lon_min 178.5, lon_max -178.5` (ship, glider, USV moved to +-179), build the fixture with `make.make` and run `--budget ci --gpus 0` with `CAFE_OFFLINE=1`: ingest fails `orca_present`, `tao_present` and `ocean_store_present` "is not cached". Causes found: (a) the fixture's ocean store covers 192.5 to 197.5 E whatever the mission box, and the TAO manifest box is fixed; (b) `_hours3d` returns the launch hour and the next, `{01:00, 02:00}`, for a launch at 01:56 Z (ship at 179 W, 20 min sortie), while `pipeline._sortie_hours` returns `{01:00, 02:00, 03:00}`, so `_orca_covers` is False. (b) is a fixture error, not a pipeline error; (a) means the dateline paths of the ocean store, TAO cache and GEBCO cut (`hycom.box360`, `bathy.fetch_gebco`'s two column runs, `_lon_arc_covers`) are exercised only by the real demo box and by unit tests of single functions. What I could check directly on the real cache: the orca readers (`GriddedEnv.u10`, `waves`, `inside`) at lon 179.5, 179.99, 180, -180, -179.99, 180.01, -179.5 are continuous and `inside`.
+why it matters: the brief's "box on the dateline" robustness case has no end-to-end test other than the demo itself, which is the only mission that crosses 180.
+
+### D-7. The "20-vehicle memory refusal" does not exist; a 20-vehicle mission plans and runs
+severity: minor
+lane: documentation
+where: cafe/pm/pipeline.py:1500 (docstring: "a mission no budget can run (30 days, 20 vehicles)"), cafe/pm/budget.py:348-373 (the only memory term is environment + workers)
+reproduction: `python -m cafe.pm plan --mission <demo with 20 vehicles: each of the four ids five times, one link per original link on the _0 copies> --budget quick --gpus 0` with `par.memory_gb` = 28: plans (stage 1 "about 502 s", 32..64 members in batches of 32, 2 workers), same at `--budget ci` ("about 224 s"); `run --budget ci` on the 20-vehicle synthetic fixture (same shape, 16 members) ends `RC 0` with 20 vehicle verdicts, 4 link verdicts, `traceability_problems` and `ledger_problems` empty, report stage 11 s. The 30-day case refuses only on memory (28 GB), at `--budget quick` with the orca machine's 270 GB it plans too.
+why it matters: the spawn line for this lane expects both refusals; only the 30-day one is real. The docstring names a refusal for 20 vehicles that no code produces; if memory grows with the fleet (result arrays, per-vehicle environment queries) the planner has no term for it.
+
+total: 7 findings (0 critical, 1 major, 6 minor)
