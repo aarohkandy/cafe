@@ -21,7 +21,7 @@ slice affords is not run (`les_windows`): it could only fail the viscosity_floor
 """
 from __future__ import annotations
 
-import math, os, pathlib, platform
+import hashlib, math, os, pathlib, platform
 from collections import Counter
 from typing import Any
 
@@ -233,11 +233,27 @@ def window_days(mission: dict[str, Any]) -> float:
     return (utc(mission["window"]["end"]) - utc(mission["window"]["start"])).total_seconds() / 86400
 
 
+def platform_label(ref: Any) -> str:
+    """What a vehicle's `platform` is, for the emulator scope: the file's name when it is one of the repo's `platforms/*.yaml` (however it is written,
+    `seaglider` or `platforms/seaglider.yaml`; `pipeline.code_digest` hashes those, so a change to one starts a new set of rows), else the file's stem and
+    the first 12 hex digits of the sha-256 of its content (a platform file of the lab's own is hashed by nothing else, so an edited one is another
+    function). A reference that names no file keeps the text it was given; `load_platform` is the one that refuses it."""
+    from .config import PLATFORMS, platform_path
+    f = platform_path(ref).resolve()
+    if f.parent == PLATFORMS.resolve():
+        return f.stem
+    try:
+        return f"{f.stem}@{hashlib.sha256(f.read_bytes()).hexdigest()[:12]}"
+    except OSError:
+        return str(ref)
+
+
 def emulator_scope(mission: dict[str, Any], vid: str, cls: str) -> str:
     """What an emulator is a function of: the vehicle class, the platform and the length of the window, as "glider/seaglider/144h". The features say
     nothing of these (a variant never changes the window or the platform) and P(fail) is over the whole window, so rows of another scope are another
-    function and are neither trained on nor queried from (whatif._clean). A vehicle the mission does not list has platform "?"."""
-    plat = next((str(v.get("platform", "?")) for v in mission.get("vehicles", []) if v["id"] == vid), "?")
+    function and are neither trained on nor queried from (whatif._clean). A platform is named by its file (`platform_label`), not by the string the
+    mission wrote. A vehicle the mission does not list has platform "?"."""
+    plat = next((platform_label(v["platform"]) if v.get("platform") else "?" for v in mission.get("vehicles", []) if v["id"] == vid), "?")
     return f"{cls}/{plat}/{window_days(mission) * 24:g}h"
 
 

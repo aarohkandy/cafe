@@ -246,19 +246,23 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
         return None
     if not d.get("ok") or d.get("config_hash") != config_hash:
         return None
-    roots = run_roots(d)
-    for o in d["outputs"]:
-        f = resolve(o["path"], run_dir, roots)
-        if not f.is_file() or sha256(f) != o["sha256"]:
-            return None
-    for i in d["inputs"]:
-        f = resolve(i["ref"], run_dir, roots)
-        if hashed(i) and not f.exists():                                          # a deleted store or file: the stage ran on data that is gone
-            return None
-        if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
-            return None
-        if i.get("tree_sha256") and f.is_dir() and tree_sha256(f) != i["tree_sha256"]:       # a store: every file of it, not the manifest it was made from
-            return None
+    try:
+        roots = run_roots(d)
+        for o in d["outputs"]:
+            f = resolve(o["path"], run_dir, roots)
+            if not f.is_file() or sha256(f) != o["sha256"]:
+                return None
+        for i in d["inputs"]:
+            f = resolve(i["ref"], run_dir, roots)
+            if hashed(i) and not f.exists():                                      # a deleted store or file: the stage ran on data that is gone
+                return None
+            if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
+                return None
+            if i.get("tree_sha256") and f.is_dir() and tree_sha256(f) != i["tree_sha256"]:       # a store: every file of it, not the manifest it was made from
+                return None
+    except (KeyError, TypeError, AttributeError) as e:                       # valid JSON of the wrong shape: as a half-written ledger, the stage runs again
+        print(f"note: ledger {p} is damaged or incomplete ({type(e).__name__}: {e}): the stage runs again", file=sys.stderr)
+        return None
     return d
 
 

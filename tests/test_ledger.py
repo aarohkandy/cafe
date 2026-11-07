@@ -514,3 +514,22 @@ def test_p32_a_snapshot_is_the_input_the_stage_read_and_a_resume_ignores_what_a_
     assert done(run, "ingest", "h") is not None                                              # was None with the shared file as the input
     dest.write_text("edited")
     assert done(run, "ingest", "h") is None
+
+
+# ---- look-ahead batch LB0, RC-1 sibling: a ledger that is valid JSON of the wrong shape
+
+@pytest.mark.parametrize("edit", [lambda d: d.pop("outputs"), lambda d: d.pop("inputs"), lambda d: d.update(outputs=[{"sha256": "x"}]),
+                                  lambda d: d.update(inputs=[{"sha256": "x"}]), lambda d: d.update(outputs="x"), lambda d: d.update(inputs=5)],
+                         ids=["no_outputs", "no_inputs", "output_without_path", "input_without_ref", "outputs_a_string", "inputs_a_number"])
+def test_lb0_a_ledger_of_the_wrong_shape_is_a_stage_not_done_and_says_so(tmp_path, capsys, edit):
+    """`done` read `d["outputs"]` and `o["path"]` bare: a hand-edited or foreign ledger that is valid JSON ended `run` in a KeyError or TypeError, where
+    one that is not JSON runs the stage again (M-23)."""
+    run_stage(tmp_path)
+    p = tmp_path / "checkpoints" / "stage1" / "ledger.json"
+    good = json.loads(p.read_text())
+    assert done(tmp_path, "stage1", "h1") is not None
+    d = json.loads(json.dumps(good))
+    edit(d)
+    p.write_text(json.dumps(d))
+    assert done(tmp_path, "stage1", "h1") is None
+    assert f"ledger {p} is damaged or incomplete" in capsys.readouterr().err

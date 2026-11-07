@@ -513,7 +513,10 @@ def promote_calibration(run: str | pathlib.Path, path: str | pathlib.Path | None
     src, led = run / "stage3" / "subgrid_calibration.json", run / "checkpoints" / "stage3" / "ledger.json"
     if not src.is_file() or not led.is_file():
         raise ValueError(f"{run}: no stage3/subgrid_calibration.json (or no stage-3 ledger): that run did not calibrate the sub-grid layer")
-    cal = dict(json.loads(src.read_text()),
+    block = json.loads(src.read_text())
+    if not isinstance(block, dict):
+        raise ValueError(f"{src}: not a JSON object (it holds {type(block).__name__}); run the stage that writes it again")
+    cal = dict(block,
                source_run=f"{run} (promoted {dt.date.today().isoformat()}, stage-3 ledger sha256 {hashlib.sha256(led.read_bytes()).hexdigest()[:12]})")
     write_calibration(cal, path)
     return cal

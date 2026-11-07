@@ -10,6 +10,7 @@ import pytest
 
 from cafe.pm import audit, ledger
 from cafe.pm.env.remote import sha256
+from cafe.pm.env import surface
 from cafe.pm.ledger import Ledger
 
 
@@ -852,3 +853,122 @@ def test_p32_a_ledger_without_a_copy_keeps_the_old_check_on_the_shared_manifest(
     assert audit.ledger_problems(run) == []
     (cache / "manifest.json").write_text(json.dumps({"hours": 3, "parts": parts}))
     assert audit.ledger_problems(run) == [f"run: stage report: input {cache / 'manifest.json'} changed since the stage ran"]
+
+
+# ---- look-ahead batch LB0
+
+def _run_with_a_derived_layer(tmp_path, key="key-1"):
+    """A run whose report stage read a derived surface layer in the cache, with the record ingest leaves of it (`ingest/derived.digest.json`)."""
+    run = make_run(tmp_path)
+    store = zstore(tmp_path / "cache" / "derived.zarr", {"built_from": key})
+    (store / "ustar").mkdir()
+    (store / "ustar" / "0").write_bytes(b"one")
+    rec = run / "ingest" / surface.DIGEST
+    rec.parent.mkdir(exist_ok=True)
+    rec.write_text(json.dumps(dict(built_from=key, store_sha256=surface.store_sha256(store))))
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(store, sha=surface.store_sha256(store), tree=surface.store_sha256(store), kind="derived surface layer")
+        L.output(run / "report.out")
+    return run, store
+
+
+def _rebuild(store, key, chunk=b"two"):
+    """What a later run's ingest does to the one shared store when its key changed: whole new bytes under another `built_from`."""
+    (store / "zarr.json").write_text(json.dumps({"attributes": {"built_from": key}}))
+    (store / "ustar" / "0").write_bytes(chunk)
+
+
+def test_lb0_a_derived_layer_rebuilt_from_another_key_by_a_later_run_is_not_a_problem_of_the_earlier_run(tmp_path):
+    """P-34 (derived layer): the key holds the code digest, so after any code change the next run in the data directory rebuilt the one shared store in
+    place and the audit of every earlier run said 'input .../derived.zarr changed since the stage ran ... delete it and run `fetch` again', which cannot
+    clear it (the rebuild has the new key) and which the report turned into 'the numbers may not be what the stages produced'."""
+    run, store = _run_with_a_derived_layer(tmp_path)
+    assert audit.ledger_problems(run) == []
+    _rebuild(store, "key-2")
+    assert audit.ledger_problems(run) == []
+
+
+def test_lb0_a_derived_layer_edited_under_the_key_the_run_recorded_is_still_a_problem(tmp_path):
+    run, store = _run_with_a_derived_layer(tmp_path)
+    _rebuild(store, "key-1", b"edited")                                       # the same key, other bytes: damage, not a rebuild
+    probs = audit.ledger_problems(run)
+    assert len(probs) == 1 and f"input {store} changed since the stage ran (tree " in probs[0]
+
+
+@pytest.mark.parametrize("record", ["missing", "not_json", "no_key", "key_not_text"])
+def test_lb0_without_the_runs_record_of_its_key_a_changed_derived_layer_is_still_a_problem(tmp_path, record):
+    """What the run recorded is the only thing that tells a rebuild from damage: where it is missing or unusable the old check stands."""
+    run, store = _run_with_a_derived_layer(tmp_path)
+    rec = run / "ingest" / surface.DIGEST
+    if record == "missing":
+        rec.unlink()
+    else:
+        rec.write_text({"not_json": "{cut", "no_key": "{}", "key_not_text": '{"built_from": 5}'}[record])
+    _rebuild(store, "key-2")
+    assert any(f"input {store} changed since the stage ran" in p for p in audit.ledger_problems(run))
+
+
+def test_lb0_only_the_derived_layer_gets_the_rebuild_pass(tmp_path):
+    """Another store with a `built_from` of its own that differs is not excused by the record of the derived layer."""
+    run, store = _run_with_a_derived_layer(tmp_path)
+    other = tmp_path / "cache" / "other.zarr"
+    zstore(other, {"built_from": "key-1"})
+    (other / "x").write_bytes(b"1")
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.input(other, sha=surface.store_sha256(other), tree=surface.store_sha256(other))
+        L.output(run / "report.out")
+    assert audit.ledger_problems(run) == []
+    (other / "zarr.json").write_text(json.dumps({"attributes": {"built_from": "key-2"}}))
+    assert any(f"input {other} changed since the stage ran" in p for p in audit.ledger_problems(run))
+
+
+@pytest.mark.parametrize("edit", [
+    lambda d: d["checks"].append({"name": "a"}),
+    lambda d: d.update(inputs=[{"sha256": "x"}]),
+    lambda d: d.update(inputs="x"),
+    lambda d: d.update(outputs=[{"sha256": "x"}]),
+    lambda d: d.update(checks=5),
+    lambda d: d.update(outputs=None),
+], ids=["check_without_ok", "input_without_ref", "inputs_a_string", "output_without_path", "checks_a_number", "outputs_none"])
+def test_lb0_a_ledger_that_is_json_of_the_wrong_shape_is_a_problem_line_not_a_traceback(tmp_path, capsys, edit):
+    """RC-1 sibling: only a ledger that is not JSON was a line; `audit --ledgers-only`, the command the report's warning names, ended in a KeyError."""
+    run = make_run(tmp_path)
+    p = ledger_path(run, "stage1")
+    d = json.loads(p.read_text())
+    edit(d)
+    p.write_text(json.dumps(d))
+    probs = audit.ledger_problems(run)
+    assert any(f"stage stage1: ledger {p} is damaged or incomplete" in x for x in probs)
+    assert not any("chain broken" in x for x in probs)                            # the next stage has nothing to chain to, as for a missing ledger
+    assert audit.main(["--ledgers-only", str(run)]) == 1 and "AUDIT FAIL" in capsys.readouterr().out
+
+
+def test_lb0_the_other_readers_of_the_audit_say_a_damaged_file_is_a_problem(tmp_path, monkeypatch, capsys):
+    cov = tmp_path / "coverage.json"
+    for bad in ("{cut", "[1]", "{}", '{"files": {"cafe/pm/a.py": {}}}', '{"files": 5}'):
+        cov.write_text(bad)
+        probs = audit.coverage_problems(cov)
+        assert len(probs) == 1 and probs[0].startswith(f"coverage: {cov} is damaged or incomplete"), bad
+    root = mut_root(tmp_path)
+    store(root, monkeypatch)
+    mut = root / audit.MUTATION_FILE
+    good = mut.read_text()
+    assert audit.mutation_problems(root) == []
+    for bad in ("{cut", "[1]"):
+        mut.write_text(bad)
+        probs = audit.mutation_problems(root)
+        assert len(probs) == 1 and f"mutation: {audit.MUTATION_FILE} is damaged or incomplete" in probs[0], bad
+    rec = json.loads(good)
+    del rec["total"]
+    mut.write_text(json.dumps(rec))
+    assert "is damaged or incomplete (KeyError" in audit.mutation_problems(root)[0]
+    mut.write_text(json.dumps(dict(rec, total="x", killed=1)))
+    assert "is damaged or incomplete" in audit.mutation_problems(root)[0]
+    monkeypatch.setattr(audit, "ROOT", root)                                       # `--mutation-record` from mutmut's counts that are cut short
+    (root / audit.MUTATION_STATS).write_text("{cut")
+    capsys.readouterr()
+    assert audit.main(["--mutation-record"]) == 2 and f"error: {audit.MUTATION_STATS} cannot be used" in capsys.readouterr().out
+    (root / audit.MUTATION_STATS).write_text("{}")
+    assert audit.main(["--mutation-record"]) == 2 and "KeyError" in capsys.readouterr().out

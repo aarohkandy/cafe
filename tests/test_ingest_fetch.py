@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from cafe.pm import audit, ledger, pipeline
-from cafe.pm.env import bathy, hycom, ocean as ocean_mod, orca, remote, tao
+from cafe.pm.env import bathy, hycom, ocean as ocean_mod, orca, remote, surface, tao
 from tests.conftest import Server
 from tests import test_pipeline as tp
 from tests.test_pipeline import MISSION_PATH, T0, T1, check_of, ctx_for, read_ledger, run_stage
@@ -349,6 +349,27 @@ def test_p32_a_grown_orca_cache_leaves_the_audit_of_an_earlier_run_clean_and_a_c
     assert ingest_problems(run) == []                                                        # an absent part is no problem, as before
     snap.write_text(snap.read_text() + " ")                                                 # the copy itself is hashed
     assert any(f"input {snap} changed since the stage ran" in x for x in ingest_problems(run))
+
+
+def test_lb0_a_derived_layer_rebuilt_on_other_code_leaves_the_audit_of_an_earlier_run_clean_and_a_damaged_one_does_not(tmp_path, data_copy, monkeypatch):
+    """P-34 (derived layer), the case that reached the report: the layer's key holds the code digest, so the first run after any code change rebuilt the one
+    shared `cache/<mission>/derived.zarr` in place and every earlier run in the data directory read 'input .../derived.zarr changed since the stage ran ...
+    run `fetch` again' (and its report opened with 'the numbers may not be what the stages produced'), an advice that rebuilds with the new key and cannot
+    clear it."""
+    forbid_downloads(monkeypatch)
+    first, second = ctx_for(tmp_path / "a"), ctx_for(tmp_path / "b")
+    run_stage(pipeline.s_ingest, first, "ingest")
+    key_a = json.loads((first.cache / surface.DIGEST).read_text())["built_from"]
+    second.code_digest = "another code digest"                                              # what any edit to cafe/ does to ctx.code_digest
+    run_stage(pipeline.s_ingest, second, "ingest")
+    key_b = json.loads((first.cache / surface.DIGEST).read_text())["built_from"]
+    assert key_a != key_b and json.loads((tmp_path / "a" / "ingest" / surface.DIGEST).read_text())["built_from"] == key_a
+    assert ingest_problems(tmp_path / "a") == []                                           # was: input .../derived.zarr changed since the stage ran
+    assert ingest_problems(tmp_path / "b") == []
+    chunk = next(f for f in sorted((first.cache / "derived.zarr" / "ustar").rglob("*")) if f.is_file() and f.name != "zarr.json")
+    chunk.write_bytes(chunk.read_bytes()[:-1] + bytes([chunk.read_bytes()[-1] ^ 0xFF]))      # damage under the key run b recorded
+    probs = ingest_problems(tmp_path / "b")
+    assert len(probs) == 1 and "derived.zarr changed since the stage ran" in probs[0]
 
 
 def test_p32_a_grown_tao_cache_leaves_the_audit_of_an_earlier_run_clean_and_a_changed_or_lost_file_does_not(tmp_path, network):

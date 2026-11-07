@@ -1628,6 +1628,8 @@ def test_the_usv_block_states_the_two_calm_clocks_when_either_calm_mode_occurred
     assert (u["trim_min_aws"]["value"], u["calm_sustain"]["value"], u["becalmed_after"]["value"]) == (1.5, 30.0, 6.0)
     assert "wing_stall_calm fires when the apparent wind stays below 1.5 m/s for 30 min" in t
     assert "becalmed only after 6 h of being unable to stem the current" in t
+    assert ("wing_stall_angle is the apparent wind inside the bow cone while the apparent wind speed is at or above 1.5 m/s "
+            "(below it only wing_stall_calm counts)") in t                 # M-10: the gate on the speed is part of the definition
     assert "wing_stall_calm: 9" in t and "wing_stall_angle: 4" in t and rep["vehicles"]["glider_eq"]["usv_modes"] is None
     edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["usv"].update(modes=dict(swept_off_track=5)))
     report.write(run, m, plan)

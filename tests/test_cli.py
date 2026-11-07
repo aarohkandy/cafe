@@ -1038,3 +1038,60 @@ def test_r10_f_the_acceptance_out_help_says_a_directory_of_foreign_runs_is_refus
     with pytest.raises(SystemExit):
         cli.main(["acceptance", "--help"])
     assert "a directory that holds runs acceptance did not make is refused" in " ".join(capsys.readouterr().out.split())
+
+
+# ---------------------------------------------------------------------------------------------------------------- look-ahead batch LB0
+
+def test_lb0_an_oserror_about_a_file_the_user_did_not_name_keeps_its_traceback(monkeypatch, tmp_path, capsys):
+    """M-5 caught every OSError of the dispatch, so a stage's own (the emulator table's `.lock` in a directory that is not writable, ENOSPC on a cache) was
+    relabelled `error:` with exit 2, the RUNBOOK's 'a path you named', and its traceback was gone."""
+    out = tmp_path / "o"
+    for exc in (PermissionError(13, "Permission denied", "/shared/emulator/train.parquet.lock"), FileNotFoundError(2, "No such file", "/cache/x.npz"),
+                OSError(28, "No space left on device", str(tmp_path / "elsewhere" / "ingest.json")), ConnectionError("no route")):
+        def broken(*a, exc=exc, **k):
+            raise exc
+        monkeypatch.setattr(pipeline, "run", broken)
+        with pytest.raises(type(exc)):
+            cli.main(["run", "--mission", MISSION, "--out", str(out)])
+    assert capsys.readouterr().err == ""
+
+
+def test_lb0_an_oserror_about_a_path_that_was_given_is_still_an_error_line_and_exit_2(monkeypatch, tmp_path, capsys):
+    out, table = tmp_path / "o", tmp_path / "table.parquet"
+    for exc, args in ((FileExistsError(17, "File exists", str(out)), ["--out", str(out)]),
+                      (PermissionError(13, "Permission denied", str(out / "ingest" / "a.json")), ["--out", str(out)]),     # under the --out
+                      (PermissionError(13, "Permission denied", str(table)), ["--out", str(out), "--emulator-table", str(table)]),
+                      (OSError(2, "gone", "runs/ci_fixture/quick/mission.yaml"), [])):                                         # the default run directory
+        monkeypatch.setattr(pipeline, "run", lambda *a, exc=exc, **k: (_ for _ in ()).throw(exc))
+        monkeypatch.chdir(tmp_path)
+        assert cli.main(["run", "--mission", MISSION, *args]) == 2, exc
+        assert capsys.readouterr().err.startswith("error: ")
+    monkeypatch.setattr(pipeline, "run", lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "Permission denied", str(table) + ".lock")))
+    with pytest.raises(PermissionError):                                          # the lock beside the named table is not the table
+        cli.main(["run", "--mission", MISSION, "--out", str(out), "--emulator-table", str(table)])
+
+
+def test_lb0_promote_calibration_of_a_file_that_is_not_a_json_object_is_an_error_line(tmp_path, capsys):
+    run = tmp_path / "quick"
+    (run / "stage3").mkdir(parents=True)
+    (run / "checkpoints" / "stage3").mkdir(parents=True)
+    (run / "checkpoints" / "stage3" / "ledger.json").write_text("{}")
+    for bad in ("5", "[1]", "null", "{cut"):
+        (run / "stage3" / "subgrid_calibration.json").write_text(bad)
+        assert cli.main(["promote-calibration", "--run", str(run)]) == 2, bad
+        assert capsys.readouterr().err.startswith("error: ")
+
+
+def test_lb0_report_of_a_run_whose_report_ledger_is_json_of_the_wrong_shape_is_an_error_line(tmp_path, capsys, monkeypatch):
+    """`report --run` re-records the report ledger after it renders: a ledger without `outputs` ended in a KeyError (one cut short already gave `error:`)."""
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    led = report_ledger_over_other_bytes(run)
+    good = led.read_text()
+    d = json.loads(good)
+    del d["outputs"]
+    led.write_text(json.dumps(d))
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    assert "damaged or incomplete (KeyError: 'outputs')" in capsys.readouterr().err

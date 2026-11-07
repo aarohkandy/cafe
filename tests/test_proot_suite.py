@@ -180,19 +180,19 @@ def test_wrong_arguments_are_refused_before_anything_runs(tmp_path, args):
 
 def test_a_missing_marker_or_directory_or_a_tag_that_is_running_is_refused(tmp_path):
     home, env, log = world(tmp_path)
-    assert suite(env, "pm_none", "2", "t").returncode == 1
-    (home / "cafe-worker/cafe/pmdata/shards/t").mkdir(parents=True)
+    assert suite(env, "pm_none", "2", "tg").returncode == 1
+    (home / "cafe-worker/cafe/pmdata/shards/tg").mkdir(parents=True)
     sleeper = subprocess.Popen(["sleep", "30"])
     try:
-        (home / "cafe-worker/cafe/pmdata/shards/t/.pid").write_text(str(sleeper.pid))
-        r = suite(env, "pm_t", "2", "t")
-        assert r.returncode == 1 and f"tag t is running (pid {sleeper.pid})" in r.stderr and not log.exists()
+        (home / "cafe-worker/cafe/pmdata/shards/tg/.pid").write_text(str(sleeper.pid))
+        r = suite(env, "pm_t", "2", "tg")
+        assert r.returncode == 1 and f"tag tg is running (pid {sleeper.pid})" in r.stderr and not log.exists()
     finally:
         sleeper.kill()
         sleeper.wait()
-    assert suite(env, "pm_t", "2", "t").returncode == 0                                                           # a pid that is gone does not block
+    assert suite(env, "pm_t", "2", "tg").returncode == 0                                                           # a pid that is gone does not block
     (home / "cafe-worker/.cafe-worker-owned").unlink()
-    assert suite(env, "pm_t", "2", "u").returncode == 1
+    assert suite(env, "pm_t", "2", "ug").returncode == 1
 
 
 def test_the_rc_line_of_a_log_is_a_line_of_its_own_even_when_the_job_left_half_a_line(tmp_path):
@@ -306,3 +306,27 @@ def test_m28_the_gate_refuses_the_same_tags_before_anything_is_sent(tmp_path, ta
 def test_m28_the_gate_still_sends_the_others(tmp_path, tag):
     rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag)
     assert rc == 0 and f"tmux new-session -d -s {tag} " in out, err
+
+
+# ---- look-ahead batch LB0: the tag rule is the TM rule
+
+SHORT_TAGS = ["a", "9", "-x", "_x", "-"]
+
+
+@pytest.mark.parametrize("tag", SHORT_TAGS)
+def test_lb0_the_gate_and_the_suite_refuse_the_tags_pmx_would_refuse_as_a_tm(tmp_path, tag):
+    """`orca_gate.sh` exports the tag as TM and `pmx.sh` needs 2 or more characters, the first a letter or digit: `pm_tag` let `a`, `-x` and `_x` through
+    and the gate stopped in `pmx.sh` with a message about TM. All three scripts now refuse it with one rule, before anything is sent."""
+    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag)
+    assert (rc, out) == (2, "") and err.startswith("tag: 2 or more of letters, digits, _ and -, the first a letter or digit")
+    home, env, log = world(tmp_path)
+    r = suite(env, "pm_t", "1", tag)
+    assert r.returncode == 2 and r.stderr.startswith("tag: 2 or more") and calls(log) == []
+
+
+def test_lb0_a_tm_and_a_tag_go_through_one_rule(tmp_path):
+    for tm in ("a", "-x", "_x"):
+        rc, out, err = sent(tmp_path, "bin/pmx.sh", "true", PMX="pm_t", TM=tm)
+        assert (rc, out) == (2, "") and err.startswith("TM: 2 or more of letters, digits, _ and -, the first a letter or digit"), tm
+    rc, out, err = sent(tmp_path, "bin/pmx.sh", "true", PMX="pm_t", TM="ab")
+    assert rc == 0, err

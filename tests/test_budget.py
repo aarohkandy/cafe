@@ -783,3 +783,33 @@ def test_l1_an_entry_that_differs_as_the_machine_block_does_is_not_said_twice_an
     t["jax-lbm-d3q19-cpu"] = dict(cpus=16, cpu="AMD")
     assert "entries also measured on another machine: jax-lbm-d3q19-cpu (16 CPUs, AMD, ?)" in budget.machine_warning(t, dict(cpus=4, cpu="AMD"))
     assert budget.machine_warning({"stage1": "x", "machine": "y"}, dict(cpus=4, cpu="AMD")) is None
+
+
+def test_lb0_the_emulator_scope_names_a_platform_by_its_file_and_its_content(tmp_path, monkeypatch):
+    """RC-3 sibling: the scope held the string the mission wrote for the platform. A platform file of the lab's own (a path) is hashed by nothing else, so
+    an edited one kept the rows made with the old values; and `seaglider` and `platforms/seaglider.yaml` were two scopes that never pooled."""
+    demo = config.load_mission(budget.ROOT / "missions" / "tepex_c_demo.yaml")
+    sea = budget.ROOT / "platforms" / "seaglider.yaml"
+    by_path = json.loads(json.dumps(demo))
+    for v in by_path["vehicles"]:
+        if v["id"] == "glider_eq":
+            v["platform"] = "platforms/seaglider.yaml"
+    monkeypatch.chdir(budget.ROOT)
+    assert budget.emulator_scope(by_path, "glider_eq", "glider") == budget.emulator_scope(demo, "glider_eq", "glider") == "glider/seaglider/144h"
+    lab = tmp_path / "lab_glider.yaml"
+    lab.write_text(sea.read_text())
+    mine = json.loads(json.dumps(demo))
+    next(v for v in mine["vehicles"] if v["id"] == "glider_eq")["platform"] = str(lab)
+    first = budget.emulator_scope(mine, "glider_eq", "glider")
+    assert first.startswith("glider/lab_glider@") and first.endswith("/144h") and first != budget.emulator_scope(demo, "glider_eq", "glider")
+    assert budget.emulator_scope(mine, "glider_eq", "glider") == first                       # the same content, the same scope
+    lab.write_text(sea.read_text().replace("pump_eta", "pump_eta_edited", 1))
+    edited = budget.emulator_scope(mine, "glider_eq", "glider")
+    assert edited != first                                                                    # an edit is another function
+    (tmp_path / "copy").mkdir()
+    (tmp_path / "copy" / "lab_glider.yaml").write_bytes(lab.read_bytes())
+    next(v for v in mine["vehicles"] if v["id"] == "glider_eq")["platform"] = str(tmp_path / "copy" / "lab_glider.yaml")
+    assert budget.emulator_scope(mine, "glider_eq", "glider") == edited                       # the same file elsewhere is the same function
+    next(v for v in mine["vehicles"] if v["id"] == "glider_eq")["platform"] = str(tmp_path / "gone.yaml")
+    assert budget.emulator_scope(mine, "glider_eq", "glider") == f"glider/{tmp_path / 'gone.yaml'}/144h"      # no file: the text as given
+    assert budget.emulator_scope(demo, "nobody", "glider") == "glider/?/144h"

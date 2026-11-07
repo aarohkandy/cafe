@@ -1145,3 +1145,42 @@ def test_r10_box360_refuses_a_box_wider_than_the_circle_instead_of_taking_it_mod
     with pytest.raises(ValueError, match="more than the whole circle"):
         h.box360(box)
     assert h.box360((-1, 1, 0, 360))[2:] == (0.0, 360.0)                                    # exactly 360 wide stays valid
+
+
+@pytest.mark.parametrize("metadata", ["kept", "all_lost"])
+def test_lb0_a_directory_of_other_stores_is_not_a_store_to_replace_and_every_store_in_it_survives(fx, tmp_path, metadata):
+    """RC-10 sibling: `looks_like_zarr` looked one level down for Zarr marks, so a plain folder holding a complete store counted as a damaged store and
+    `ingest-ocean` with the folder as `environment.ocean.path` deleted every store and file in it. The store has a variable named `c` (the sound speed),
+    which also looked like a chunk directory."""
+    from cafe.pm.config import ConfigError
+    d, _ = _lab_dir(fx, tmp_path)
+    parent = tmp_path / "ocean"
+    parent.mkdir()
+    other = parent / "other_mission.zarr"
+    h.ingest_lab_hycom(d, fx["box"], other, "in_situ")
+    (parent / "NOTES.txt").write_text("keep me")
+    if metadata == "all_lost":                                                    # the stores inside are damaged themselves: still not the folder's to delete
+        for f in list(other.rglob("zarr.json")):
+            f.unlink()
+    before = sorted(str(p.relative_to(parent)) for p in parent.rglob("*"))
+    assert not h.looks_like_zarr(parent)
+    with pytest.raises(ConfigError, match="no Zarr metadata or chunks"):
+        h.ingest_lab_hycom(d, fx["box"], parent, "in_situ")
+    assert sorted(str(p.relative_to(parent)) for p in parent.rglob("*")) == before and (parent / "NOTES.txt").read_text() == "keep me"
+
+
+@pytest.mark.parametrize("damage", ["none", "top_zarr_json", "all_metadata", "top_gone_arrays_cut"])
+def test_lb0_a_store_and_its_damaged_forms_are_still_recognised(fx, tmp_path, damage):
+    d, _ = _lab_dir(fx, tmp_path)
+    store = tmp_path / "lab.zarr"
+    h.ingest_lab_hycom(d, fx["box"], store, "in_situ")
+    if damage == "top_zarr_json":
+        (store / "zarr.json").unlink()
+    elif damage == "all_metadata":
+        for f in list(store.rglob("zarr.json")):
+            f.unlink()
+    elif damage == "top_gone_arrays_cut":                                          # the group's file gone, the arrays' files cut short: the chunks tell
+        (store / "zarr.json").unlink()
+        for f in list(store.rglob("zarr.json")):
+            f.write_text("{cut")
+    assert h.looks_like_zarr(store)

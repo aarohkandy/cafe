@@ -10,13 +10,16 @@ pm_shape() {
   case $1 in *_serial|*_shares|*_audit) _pm_ok= ;; *_s*) case ${1##*_s} in ''|*[!0-9]*) ;; *) _pm_ok= ;; esac ;; esac       # ${1##*_s}: what follows the last _s
   [ -n "$_pm_ok" ] || pm_bad "$2: not a name ending _s<digits>, _serial, _shares or _audit, which are the suite's job logs (not '$1')"
 }
-pm_tag() { case $1 in ''|*[!A-Za-z0-9_-]*) pm_bad "tag: letters, digits, _ and - only (not '$1')" ;; esac; pm_shape "$1" tag; }
+# A name that becomes a tmux session, a log and (docker) a container: 2 or more of letters, digits, _ and -, the first a letter or digit (a leading '-' is an option to tmux; a lone 'x' is no name for docker).
+# The tag of a gate is also TM (bin/orca_gate.sh exports it to bin/pmx.sh), so both go through this one rule.
+pm_word() { case $2 in ''|[!A-Za-z0-9]*|?|*[!A-Za-z0-9_-]*) pm_bad "$1: 2 or more of letters, digits, _ and -, the first a letter or digit (not '$2')" ;; esac; }       # $1 what it is, $2 the name
+pm_tag() { pm_word tag "$1"; pm_shape "$1" tag; }
 # PMX and TM name a directory that rsync --delete empties, a log file, a tmux session and a docker container. PMX: pm_ and a plain name (never pmdata, data, pm, tmp, .. or a path).
 # TM: docker names start with a letter or digit and have 2 or more characters (a leading '-' is an option to tmux; a lone 'x' is no name for docker); under proot it is a gate's log name too (pm_shape).
 pm_names() {
   _pm_d=${PMX:-pm_x}
   case ${_pm_d#pm_} in "$_pm_d"|''|*[!A-Za-z0-9_-]*) pm_bad "PMX: pm_ and then letters, digits, _ or - only (not '$_pm_d')" ;; esac
-  case ${TM-} in '') ;; [!A-Za-z0-9]*|?|*[!A-Za-z0-9_-]*) pm_bad "TM: 2 or more of letters, digits, _ and -, the first a letter or digit (not '$TM')" ;; esac
+  [ -z "${TM-}" ] || pm_word TM "$TM"
   [ -z "${TM-}" ] || [ "${PM_RUNTIME:-docker}" != proot ] || pm_shape "$TM" TM
 }
 # What the job's command line carries; PM_RUNTIME decides which of them it does.

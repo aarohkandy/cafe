@@ -130,6 +130,58 @@ def _shared_problems(run: str, st: str, snap: pathlib.Path, shared: pathlib.Path
     return out
 
 
+DERIVED_RECORD = "derived.digest.json"        # what `surface.build` writes beside the store and ingest copies into the run: {built_from, store_sha256}
+
+
+def _rebuilt_by_a_later_run(run_dir: pathlib.Path, f: pathlib.Path) -> bool:
+    """True for the derived surface layer `f` when the store now in the cache was built from another key than the one this run's ingest recorded
+    (`<run>/ingest/derived.digest.json`, `built_from`). The key holds the code digest, so any code change followed by a run in the same data directory
+    rebuilds the one shared store in place; its bytes then differ from what an earlier run read, and nothing the earlier run made changed (its own outputs are
+    hashed on their own, and its stages checked the layer when they ran). A store with the key the run recorded and other bytes is damaged, and is not this."""
+    if f.name != "derived.zarr":
+        return False
+    try:
+        mine, now = _read_json(run_dir / "ingest" / DERIVED_RECORD).get("built_from"), _store_attr(f, "built_from")
+    except _Unreadable:
+        return False
+    return isinstance(mine, str) and isinstance(now, str) and mine != now
+
+
+def _stage_problems(run_dir: pathlib.Path, st: str, d: dict[str, Any], prev: pathlib.Path | None, out: list[str]) -> None:
+    """The problems of one stage's ledger `d`, appended to `out`. A ledger that is valid JSON of the wrong shape raises KeyError, TypeError
+    or AttributeError here, which `ledger_problems` turns into a problem line."""
+    if not d.get("ok"):
+        out.append(f"{run_dir.name}: stage {st}: ok=false ({d.get('error')})")
+    for c in d.get("checks", []):
+        if not c["ok"]:
+            out.append(f"{run_dir.name}: stage {st}: self-check {c['name']} failed (value {c.get('value')}, limit {c.get('limit')})")
+    roots = run_roots(d)
+    for i in d.get("inputs", []):
+        f = resolve(i["ref"], run_dir, roots)
+        try:
+            if hashed(i) and not f.exists():                       # `done` re-runs the stage for the same reason
+                out.append(f"{run_dir.name}: stage {st}: input {f} is missing (the stage read it); restore it, or run `fetch` / the stage again")
+            elif (i.get("sha256") or i.get("tree_sha256")) and f.is_dir():
+                if not _rebuilt_by_a_later_run(run_dir, f):
+                    out += _dir_problems(run_dir.name, st, f, i.get("sha256"), i.get("tree_sha256"))
+            elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
+                out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
+            if i.get("shared") and f.is_file():                      # a copy of a shared cache manifest: the files it names, not the shared one
+                out += _shared_problems(run_dir.name, st, f, pathlib.Path(i["shared"]))
+            elif f.name == "manifest.json" and f.is_file() and "parts" in _read_json(f):
+                out += _orca_problems(run_dir.name, st, f)
+        except _Unreadable as e:                                    # the sha256 line above already said a damaged file changed
+            out.append(f"{run_dir.name}: stage {st}: input {e}; delete it and run `fetch` again")
+    for o in d.get("outputs", []):
+        f = resolve(o["path"], run_dir, roots)
+        if not f.is_file():
+            out.append(f"{run_dir.name}: stage {st}: output {f} is missing")
+        elif sha256(f) != o["sha256"]:
+            out.append(f"{run_dir.name}: stage {st}: output {f} changed since the stage ran")
+    if prev is not None and prev.resolve() not in {resolve(i["ref"], run_dir, roots).resolve() for i in d.get("inputs", [])}:
+        out.append(f"{run_dir.name}: stage {st}: does not record the {STAGES[STAGES.index(st) - 1]} ledger as an input (chain broken)")
+
+
 def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
     run_dir = pathlib.Path(run_dir)
     out: list[str] = []
@@ -146,35 +198,12 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
             out.append(f"{run_dir.name}: stage {st}: {e}; delete it and run the stage again")
             prev = None
             continue
-        if not d.get("ok"):
-            out.append(f"{run_dir.name}: stage {st}: ok=false ({d.get('error')})")
-        for c in d.get("checks", []):
-            if not c["ok"]:
-                out.append(f"{run_dir.name}: stage {st}: self-check {c['name']} failed (value {c.get('value')}, limit {c.get('limit')})")
-        roots = run_roots(d)
-        for i in d.get("inputs", []):
-            f = resolve(i["ref"], run_dir, roots)
-            try:
-                if hashed(i) and not f.exists():                       # `done` re-runs the stage for the same reason
-                    out.append(f"{run_dir.name}: stage {st}: input {f} is missing (the stage read it); restore it, or run `fetch` / the stage again")
-                elif (i.get("sha256") or i.get("tree_sha256")) and f.is_dir():
-                    out += _dir_problems(run_dir.name, st, f, i.get("sha256"), i.get("tree_sha256"))
-                elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
-                    out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
-                if i.get("shared") and f.is_file():                      # a copy of a shared cache manifest: the files it names, not the shared one
-                    out += _shared_problems(run_dir.name, st, f, pathlib.Path(i["shared"]))
-                elif f.name == "manifest.json" and f.is_file() and "parts" in _read_json(f):
-                    out += _orca_problems(run_dir.name, st, f)
-            except _Unreadable as e:                                    # the sha256 line above already said a damaged file changed
-                out.append(f"{run_dir.name}: stage {st}: input {e}; delete it and run `fetch` again")
-        for o in d.get("outputs", []):
-            f = resolve(o["path"], run_dir, roots)
-            if not f.is_file():
-                out.append(f"{run_dir.name}: stage {st}: output {f} is missing")
-            elif sha256(f) != o["sha256"]:
-                out.append(f"{run_dir.name}: stage {st}: output {f} changed since the stage ran")
-        if prev is not None and prev.resolve() not in {resolve(i["ref"], run_dir, roots).resolve() for i in d.get("inputs", [])}:
-            out.append(f"{run_dir.name}: stage {st}: does not record the {STAGES[STAGES.index(st) - 1]} ledger as an input (chain broken)")
+        try:
+            _stage_problems(run_dir, st, d, prev, out)
+        except (KeyError, TypeError, AttributeError) as e:          # valid JSON of the wrong shape (a hand edit, other code): a line, not a traceback
+            out.append(f"{run_dir.name}: stage {st}: ledger {p} is damaged or incomplete ({type(e).__name__}: {e}); delete it and run the stage again")
+            prev = None
+            continue
         prev = p
     return out
 
@@ -232,7 +261,14 @@ def _run(cmd: list[str]) -> tuple[int, str]:
 def coverage_problems(cov_json: str | pathlib.Path) -> list[str]:
     """The gates of `GATES` against coverage.json. A package gate of 100 % names the files and lines it misses (from `missing_lines`), so a gate
     that differs between machines (a branch that runs only with Bellhop installed) says where."""
-    d = json.loads(pathlib.Path(cov_json).read_text())
+    try:
+        d = _read_json(pathlib.Path(cov_json))
+        return _coverage_gates(d)
+    except (_Unreadable, KeyError, TypeError, AttributeError) as e:         # a truncated or foreign file is a failed gate, not a traceback
+        return [f"coverage: {cov_json} is damaged or incomplete ({type(e).__name__}: {e}); run the suite with coverage again"]
+
+
+def _coverage_gates(d: dict[str, Any]) -> list[str]:
     out: list[str] = []
     for pref, gate in GATES.items():
         tot = cov = 0
@@ -272,7 +308,7 @@ def mutation_score(r: dict[str, int]) -> float:
 
 def mutation_record(root: pathlib.Path = ROOT) -> dict[str, Any]:
     """The result `make mutation` stores, from the counts `mutmut export-cicd-stats` wrote to mutants/mutmut-cicd-stats.json."""
-    counts = json.loads((root / MUTATION_STATS).read_text())
+    counts = _read_json(root / MUTATION_STATS)
     rec: dict[str, Any] = {k: counts[k] for k in ("killed", "survived", "timeout", "no_tests", "suspicious", "skipped", "segfault", "total")}
     rec.update(score=round(mutation_score(rec), 4), code_digest=mutation_digest(root), tests=mutation_tests(root), sources=MUTATED,
                date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), mutmut=importlib.metadata.version("mutmut"))
@@ -284,10 +320,18 @@ def mutation_problems(root: pathlib.Path = ROOT) -> list[str]:
     path = root / MUTATION_FILE
     if not path.is_file():
         return [f"mutation: no stored result at {MUTATION_FILE}: run {MUTATION_CMD}"]
-    rec = json.loads(path.read_text())
+    # a truncated or foreign file is a failed gate, not a traceback
+    damaged = "mutation: " + MUTATION_FILE + " is damaged or incomplete ({}: {}): run " + MUTATION_CMD
+    try:
+        rec = _read_json(path)
+    except _Unreadable as e:
+        return [damaged.format(type(e).__name__, e)]
     if rec.get("code_digest") != mutation_digest(root):
         return [f"mutation: the stored result ({rec.get('date')}) was made by different physics/stats code or tests: run {MUTATION_CMD}"]
-    score = mutation_score(rec)                        # recomputed from the counts: an edited `score` field proves nothing
+    try:
+        score = mutation_score(rec)                    # recomputed from the counts: an edited `score` field proves nothing
+    except (KeyError, TypeError) as e:
+        return [damaged.format(type(e).__name__, e)]
     if score + 1e-9 < MUTATION_MIN:
         return [f"mutation: {rec['killed']}/{rec['total']} mutants killed = {score:.1%} < {MUTATION_MIN:.0%}: add tests, then {MUTATION_CMD}"]
     return []
@@ -335,7 +379,12 @@ def main(argv: list[str]) -> int:
         print("error: --pytest-done takes no other option (it is the whole audit except pytest)")
         return 2
     if "--mutation-record" in argv:
-        (ROOT / MUTATION_FILE).write_text(json.dumps(mutation_record(ROOT), indent=1) + "\n")
+        try:
+            rec = mutation_record(ROOT)
+        except (_Unreadable, KeyError, TypeError, OSError) as e:           # mutmut's counts are missing, truncated or not what it writes
+            print(f"error: {MUTATION_STATS} cannot be used ({type(e).__name__}: {e}): run `make mutation`")
+            return 2
+        (ROOT / MUTATION_FILE).write_text(json.dumps(rec, indent=1) + "\n")
         print(f"wrote {MUTATION_FILE}")
         return 0
     ledgers_only = "--ledgers-only" in argv

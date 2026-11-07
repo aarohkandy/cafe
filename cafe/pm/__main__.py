@@ -171,9 +171,24 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     except OSError as e:                                                 # round 10, M-5: a named path (--out, --run, ...) that cannot be made or read
+        if not _names_a_path_given(e, a):
+            raise                                                        # the program's own file (the emulator table's lock, a cache): a traceback, exit 1
         print(f"error: {e}", file=sys.stderr)
         return 2
     return 0
+
+
+DEFAULT_OUT = pathlib.Path("runs")                                       # where `run`, `whatif`, `report` and `receipts` write when no path is given
+
+
+def _names_a_path_given(e: OSError, a: argparse.Namespace) -> bool:
+    """True when the file `e` names is one of the paths on the command line (or lies under one, or under the default `runs/`): a bad input, exit 2. An
+    OSError of a stage (the emulator table's `.lock`, a cache file) is not the user's to fix and keeps its traceback. A raise with no `filename` is
+    not told apart, so the code that raises an OSError about a path it was given sets it."""
+    values = [v for x in vars(a).values() for v in (x if isinstance(x, list) else [x])]
+    given = [pathlib.Path(os.path.abspath(v)) for v in values if isinstance(v, (str, os.PathLike)) and str(v)] + [pathlib.Path(os.path.abspath(DEFAULT_OUT))]
+    named = [pathlib.Path(os.path.abspath(f)) for f in (e.filename, e.filename2) if isinstance(f, (str, os.PathLike)) and str(f)]
+    return any(g == n or g in n.parents for g in given for n in named)
 
 
 def _gpu_mem(a: argparse.Namespace) -> float | None:
@@ -206,7 +221,8 @@ def _report(run: pathlib.Path, open_it: bool) -> int:
         print(f"error: the new files are in {run / 'report'} but the report ledger still records the old ones, so `audit` will say they changed; "
               "fix the cause and run `report --run` again, or rerun the report stage", file=sys.stderr)
         return 1
-    ledger.rerecord(run, "report", paths, ctx.code_digest)
+    with _run_files(run):                                                # the report ledger can be valid JSON of the wrong shape
+        ledger.rerecord(run, "report", paths, ctx.code_digest)
     for p in paths:
         print(p)
     if open_it:

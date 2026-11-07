@@ -487,6 +487,21 @@ def test_receipts_pass_and_each_can_fail(tree, tmp_path):
     assert len(hashed) == 1 and hashed[0]["ok"] and "of 8" in hashed[0]["claim"]
 
 
+def test_lb0_the_hash_receipt_counts_the_files_of_every_cache_it_is_given_and_one_changed_file_stops_it(tree, tmp_path):
+    """The receipts job passes the older rule's cache and the current one's together (receipts.jobs): one row, the files of both."""
+    base = tree.publish()
+    a, b = tmp_path / "a", tmp_path / "b"
+    tao.fetch_tao(BOX, T0, T1, a, base)
+    tao.fetch_tao(BOX, T0, T1, b, base)
+    R.OUT.clear()
+    assert tao.receipts([a, b])
+    hashed = [r for r in R.OUT if "SHA-256" in r["claim"]]
+    assert len(hashed) == 1 and hashed[0]["ok"] and "of 16" in hashed[0]["claim"]
+    (b / next(iter(json.loads((b / "manifest.json").read_text())["files"]))).write_bytes(b"x")
+    with pytest.raises(ValueError, match="differ from the manifest"):
+        tao.receipts([a, b])
+
+
 def _fails(patch, out_dir=None):
     R.OUT.clear()
     patch()

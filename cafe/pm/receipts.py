@@ -33,7 +33,7 @@ on this machine, proves nothing about the overlay; what `make broken` and the CI
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, hashlib, importlib, io, json, math, os, pathlib, platform, re, tempfile, time
+import contextlib, datetime as dt, errno, hashlib, importlib, io, json, math, os, pathlib, platform, re, tempfile, time
 from collections.abc import Callable
 from typing import Any
 
@@ -360,7 +360,7 @@ def jobs(slow: bool = False) -> list[tuple[str, Callable[[], Any]]]:
     """[(name, zero-argument function)]; each function records through cafe.receipts and returns anything (a str is kept as a note)."""
     d = data_root()
     gebco = next(iter(importlib.import_module("cafe.pm.env.bathy").cached_cuts(d / "bathy")), None)
-    tao = importlib.import_module("cafe.pm.env.tao").cache_dir(d)
+    tao = importlib.import_module("cafe.pm.env.tao").caches(d)
     pm = "cafe.pm."
     sitl_groups = ("UAS sortie", "UAS SITL vs our controller")
     return [
@@ -377,7 +377,7 @@ def jobs(slow: bool = False) -> list[tuple[str, Callable[[], Any]]]:
         ("pm.env.wave_direction", wave_direction_receipts),
         ("pm.env.subgrid", _call(pm + "env.subgrid")),
         ("pm.env.hycom", _call(pm + "env.hycom")),
-        ("pm.env.tao", _call(pm + "env.tao", out_dir=tao if tao.is_dir() else None)),
+        ("pm.env.tao", _call(pm + "env.tao", out_dir=tao or None)),
         ("pm.env.bathy", _call(pm + "env.bathy", cache=gebco) if gebco else _no_gebco(d)),
         ("pm.stats.intervals", _call(pm + "stats.intervals")),
         ("pm.emulator", slow_group("pm.emulator", 35, "pm", _call(pm + "emulator"), slow)),
@@ -453,7 +453,7 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
     base: dict[str, str] = {}
     if broken:
         if not pathlib.Path(broken).is_file():
-            raise FileNotFoundError(f"broken configuration {broken}: no such file")
+            raise FileNotFoundError(errno.ENOENT, f"broken configuration {broken}: no such file", str(broken))
     try:
         if broken:
             os.environ.pop(cv.OVERLAY_ENV, None)

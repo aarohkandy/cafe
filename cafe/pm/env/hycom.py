@@ -188,10 +188,26 @@ def refuse_overlap(out_zarr: Any, source: Any) -> None:
 ZARR_MARKS = ("zarr.json", ".zgroup", ".zarray", ".zattrs")
 
 
+def _chunks_dir(c: pathlib.Path) -> bool:
+    """`c` is the chunk directory of a Zarr 3 array: it holds chunk keys (numbers) and nothing else. A variable named `c` in a group (the sound speed of
+    the ocean store) is a directory too, but it holds a `zarr.json` or its own chunk directory `c`."""
+    return c.is_dir() and any(c.iterdir()) and all(re.fullmatch(r"[0-9.]+", q.name) for q in c.iterdir())
+
+
+def _is_array(q: pathlib.Path) -> bool:
+    """`q` is one Zarr array: v2 metadata, v3 metadata that says array, or (metadata lost) a chunk directory."""
+    try:
+        meta = json.loads((q / "zarr.json").read_text()).get("node_type") if (q / "zarr.json").is_file() else None
+    except (OSError, ValueError, AttributeError):
+        meta = None
+    return (q / ".zarray").exists() or meta == "array" or (meta is None and _chunks_dir(q / "c"))
+
+
 def looks_like_zarr(d: pathlib.Path) -> bool:
-    """True when the directory `d` holds Zarr metadata or chunks: a mark file or a chunk directory `c` in `d` or in one of its subdirectories (the
-    variables). A store that lost its top `zarr.json` (half copied, damaged) still has them, and is the thing `unreadable` says to write again."""
-    return any(any((q / m).exists() for m in ZARR_MARKS) or (q / "c").is_dir() for q in (d, *(c for c in d.iterdir() if c.is_dir())))
+    """True when the directory `d` is a Zarr store, or the remains of one: a mark file in `d` itself (the group's metadata), or one of its subdirectories
+    is an array of the store (its variables; a store that lost its top `zarr.json`, or all its metadata, still has them, and is the thing `unreadable`
+    says to write again). A directory that holds other stores is not one: each of them is a group, not an array, so replacing it would delete them."""
+    return any((d / m).exists() for m in ZARR_MARKS) or any(_is_array(c) for c in d.iterdir() if c.is_dir())
 
 
 def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> pathlib.Path:

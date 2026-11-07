@@ -49,6 +49,12 @@ def cache_dir(data: Any) -> pathlib.Path:
     rule change that rewrote the one shared manifest in place made every earlier run in the data directory fail its ledger audit. The manifest of
     an older rule (<data>/tao/manifest.json, rounds 1-9) is never touched again; its files are the ones it names, in <data>/tao/<mooring>/."""
     return pathlib.Path(data) / "tao" / f"s{SELECTION}"
+
+
+def caches(data: Any) -> list[pathlib.Path]:
+    """Every TAO cache under `data` that has a manifest: the older rule's (<data>/tao, rounds 1-9) and the current one's. Earlier runs' ledgers hash
+    the older files, so what checks the downloads' integrity (`receipts`) looks at both."""
+    return [d for d in (pathlib.Path(data) / "tao", cache_dir(data)) if (d / "manifest.json").is_file()]
 # file code -> (NetCDF variables, the variable whose _QC applies). RELH is in percent although its units attribute says '1' (2023 means: 78-87)
 NC = dict(WIND=(("UWND", "VWND"), "WSPD"), SST=(("SST",), "SST"), AIRT=(("AIRT",), "AIRT"), RH=(("RELH",), "RELH"))
 WAVE_VARS = ("WAVE", "WAVES", "HS", "SWH", "WVHT", "HSIG", "WVPD", "WDIR_WAVE")
@@ -396,7 +402,7 @@ def compare(wrf: dict[str, Any], tao: dict[str, Any], method: str = "auto") -> d
 def receipts(out_dir: Any = None) -> bool:
     """(1) the roughness law behind the neutral wind lift vs COARE 3.5's own drag coefficient, (2) the lift's size, with the
     stability-aware COARE lift for context, (3) compare() recovers a known speed/direction/SST error injected into a copy of a
-    series, (4) with out_dir (a real download): every file's SHA-256 matches its manifest entry."""
+    series, (4) with out_dir (a real download, or a list of them): every file's SHA-256 matches its manifest entry."""
     from cafe.receipts import bracket, context, receipt
     g = "TAO / TRITON moorings"
     coare = importlib.import_module("cafe.pm.env.coare")
@@ -434,7 +440,7 @@ def receipts(out_dir: Any = None) -> bool:
             "injected", rel=True)
     receipt(g, "compare(): SST bias recovered from a model 0.4 K warm", r["sst_bias"], 0.4, 1e-6, "K", "injected", rel=True)
     if out_dir is not None:
-        n = verify(out_dir)
+        n = sum(verify(d) for d in ([out_dir] if isinstance(out_dir, (str, os.PathLike)) else out_dir))
         receipt(g, f"TAO files whose SHA-256 differs from the manifest (of {n})", 0.0, 0.0, 0.0, "", "manifest.json written at download", rel=False)
     return True
 

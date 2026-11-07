@@ -1311,7 +1311,8 @@ def _task_html(v: dict[str, Any]) -> str:
         out += (f"<p class=muted>Calm-weather modes: <code>wing_stall_calm</code> fires when the apparent wind stays below {_n(u['trim_min_aws'])} for "
                 f"{_n(u['calm_sustain'])} (a calm leaves the wing untrimmed and the vehicle without drive); <code>becalmed</code> only after "
                 f"{_n(u['becalmed_after'])} of being unable to stem the current. The two clocks differ on purpose. "
-                "<code>wing_stall_angle</code> is the apparent wind inside the bow cone.</p>")
+                "<code>wing_stall_angle</code> is the apparent wind inside the bow cone while the apparent wind speed is at or above "
+                f"{_n(u['trim_min_aws'])} (below it only <code>wing_stall_calm</code> counts).</p>")
     return out
 
 

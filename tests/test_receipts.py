@@ -347,10 +347,11 @@ def test_stored_data_directories_are_passed_only_when_they_exist(tmp_path, monke
     j = dict(pr.jobs())
     assert j["pm.env.tao"] == {"out_dir": None} and callable(j["pm.env.bathy"])        # round 7, M-39: no raster -> the job that says so
     tao.cache_dir(tmp_path).mkdir(parents=True)
+    (tao.cache_dir(tmp_path) / "manifest.json").write_text("{}")
     (tmp_path / "bathy").mkdir()
     (tmp_path / "bathy" / "gebco2026_tepex_c.npz").write_bytes(b"")
     j = dict(pr.jobs())
-    assert j["pm.env.tao"] == {"out_dir": tao.cache_dir(tmp_path)} and j["pm.env.bathy"] == {"cache": tmp_path / "bathy" / "gebco2026_tepex_c.npz"}
+    assert j["pm.env.tao"] == {"out_dir": [tao.cache_dir(tmp_path)]} and j["pm.env.bathy"] == {"cache": tmp_path / "bathy" / "gebco2026_tepex_c.npz"}
 
 
 def test_call_resolves_the_module_function_lazily():
@@ -668,3 +669,22 @@ def test_r10_m24_a_stored_record_that_is_valid_json_of_the_wrong_shape_is_a_not_
     assert [(r["id"], r["kind"]) for r in rows] == [("pm.emulator:not_run", "fail")]
     assert rows[0]["note"].startswith("not run on this code: `python -m cafe.pm receipts --slow --only pm.emulator` (≈7 min)")
     assert "is not a receipt record" in rows[0]["note"] and R.OUT == []
+
+
+def test_lb0_the_tao_receipt_checks_every_cache_with_a_manifest_the_older_rule_included(tmp_path, monkeypatch):
+    """The TAO cache moved to <data>/tao/s2 (L0) and `jobs` passed `out_dir` only when that directory existed: on a machine that still held the rounds 1-9
+    download (<data>/tao/manifest.json) the integrity row ('files whose SHA-256 differs') was dropped with no note, and those files are what the earlier
+    runs' ledgers hash."""
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
+    monkeypatch.setattr(pr, "_call", lambda mod, fn="receipts", **kw: kw)
+    older, current = tmp_path / "tao", tao.cache_dir(tmp_path)
+    assert dict(pr.jobs())["pm.env.tao"] == {"out_dir": None}
+    older.mkdir()
+    (older / "manifest.json").write_text("{}")
+    assert dict(pr.jobs())["pm.env.tao"] == {"out_dir": [older]}                            # only the older rule's download
+    current.mkdir()
+    assert dict(pr.jobs())["pm.env.tao"] == {"out_dir": [older]}                            # a directory with no manifest is no cache
+    (current / "manifest.json").write_text("{}")
+    assert dict(pr.jobs())["pm.env.tao"] == {"out_dir": [older, current]}
+    older.joinpath("manifest.json").unlink()
+    assert dict(pr.jobs())["pm.env.tao"] == {"out_dir": [current]}
