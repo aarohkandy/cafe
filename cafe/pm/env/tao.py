@@ -182,10 +182,11 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
     return mpath
 
 
-def verify(out_dir: Any) -> int:
-    """Re-hash every file in out_dir/manifest.json. Returns how many matched; ValueError lists the missing/changed ones."""
+def verify(out_dir: Any, man: dict[str, Any] | None = None) -> int:
+    """Re-hash every file in out_dir/manifest.json (or in `man`, a parsed copy of it, which a run takes so that what it verifies is what it recorded).
+    Returns how many matched; ValueError lists the missing/changed ones."""
     out = pathlib.Path(out_dir)
-    man = json.loads((out / "manifest.json").read_text())
+    man = json.loads((out / "manifest.json").read_text()) if man is None else man
     bad = [k for k, r in man["files"].items() if not (out / k).exists() or remote.sha256(out / k) != r["sha256"]]
     if bad:
         raise ValueError(f"{len(bad)} of {len(man['files'])} TAO files differ from the manifest SHA-256 (or are missing): {bad[:5]}; "
@@ -225,13 +226,13 @@ def unusable_selected(out_dir: Any) -> list[str]:
     return bad
 
 
-def wind_gap(out_dir: Any, name: str, t0: Any = None, t1: Any = None) -> str:
+def wind_gap(out_dir: Any, name: str, t0: Any = None, t1: Any = None, man: dict[str, Any] | None = None) -> str:
     """Why `load_tao` returns no wind for the mooring `name` of the manifest: no WIND file of its catalog overlaps the window, or what each WIND file it
     has says in the window: the QC flags it carries against the ones that count (GOOD), or that it is unusable. For the ingest ledger, so that a mooring
-    left out of the comparison is told from a drop in the code (round 10, LB1)."""
+    left out of the comparison is told from a drop in the code (round 10, LB1). `man`: the parsed manifest copy, as for `verify`."""
     import xarray as xr
     out = pathlib.Path(out_dir)
-    man = json.loads((out / "manifest.json").read_text())
+    man = json.loads((out / "manifest.json").read_text()) if man is None else man
     a, b = (man["t0"] if t0 is None else t0), (man["t1"] if t1 is None else t1)
     keys = sorted(k for k, r in man["files"].items() if r["mooring"] == name and r["var"] == "WIND")
     if not keys:
@@ -252,12 +253,13 @@ def wind_gap(out_dir: Any, name: str, t0: Any = None, t1: Any = None) -> str:
     return "; ".join(why)
 
 
-def load_tao(out_dir: Any, t0: Any = None, t1: Any = None) -> dict[str, dict[str, Any]]:
+def load_tao(out_dir: Any, t0: Any = None, t1: Any = None, man: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
     """{mooring: dict(lat, lon, wind=dict(t, u, v, z), sst=dict(t, value [K], z), airt=dict(t, value [K], z), rh=dict(t, value [0..1], z))}
-    from the files fetch_tao selected; verifies the SHA-256 of every file it reads. Variables a mooring lacks are absent."""
+    from the files fetch_tao selected; verifies the SHA-256 of every file it reads. Variables a mooring lacks are absent. `man`: the parsed manifest
+    copy a run recorded (`Ledger.snapshot`); only the manifest comes from it, the files are read under `out_dir`."""
     out = pathlib.Path(out_dir)
-    man = json.loads((out / "manifest.json").read_text())
-    verify(out)
+    man = json.loads((out / "manifest.json").read_text()) if man is None else man
+    verify(out, man)
     a, b = (man["t0"] if t0 is None else t0), (man["t1"] if t1 is None else t1)
     res: dict[str, dict[str, Any]] = {}
     for name, sel in man["selected"].items():

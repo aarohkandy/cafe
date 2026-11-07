@@ -1915,8 +1915,9 @@ def test_the_report_stage_reads_every_stage_product_and_checks_traceability(tmp_
     monkeypatch.setenv("CAFE_DATA", str(tmp_path / "nodata"))
     ctx = report_ctx(tmp_path)
     d = run_stage(pipeline.s_report, ctx, "report")
-    refs = {pathlib.Path(i["ref"]).relative_to(ctx.run_dir).as_posix() for i in d["inputs"]}
+    refs = {i["ref"] if i["ref"] in ledger.RUN_ROOT_FILES else pathlib.Path(i["ref"]).relative_to(ctx.run_dir).as_posix() for i in d["inputs"]}
     assert {"stage1b/summary.json", "refit/refit.json", "stage3/windows.json", "windows/windows.json", "emulator/holdout.json"} <= refs
+    assert {"mission.yaml", "plan.json"} <= refs                          # round 11, M-2: by their bare names, so a renamed run still finds them
     assert all(i["sha256"] for i in d["inputs"])
     names = {pathlib.Path(o["path"]).relative_to(ctx.run_dir).as_posix() for o in d["outputs"]}
     assert {"report/index.html", "report/report.json"} <= names
@@ -1987,7 +1988,8 @@ def ci_runs(data, tmp_path_factory):
     for st in STAGES[STAGES.index("windows"):]:
         shutil.rmtree(run / "checkpoints" / st)
     pipeline.run(MISSION_PATH, "ci", 0, run, log=log2.append)
-    yield types.SimpleNamespace(run=run, first=first, log1=log1, log2=log2, rows=rows)
+    yield types.SimpleNamespace(run=run, first=first, log1=log1, log2=log2, rows=rows,
+                              memory_gb=par.memory_gb)       # (the real reading, as plan.json recorded it)
     mp.undo()
 
 
@@ -2157,7 +2159,10 @@ def test_the_second_report_and_the_audit_follow_the_final_stage_1b(ci_runs):
     assert json.loads((run / "emulator" / "holdout.json").read_text()).keys() == set(CLASSES)
 
 
-def test_rerunning_a_finished_pipeline_changes_nothing(ci_runs):
+def test_rerunning_a_finished_pipeline_changes_nothing(ci_runs, monkeypatch):
+    """(Under the memory reading the runs were made with: plan.json records it, the report stage hashes plan.json since round 11, M-2, and the
+    module's autouse fixture would otherwise make the machine's memory unknown for this test only, a plan.json that differs and a report that reruns.)"""
+    monkeypatch.setattr(par, "memory_gb", ci_runs.memory_gb)
     run, log = ci_runs.run, []
     before = {st: (run / "checkpoints" / st / "ledger.json").read_bytes() for st in STAGES}
     pipeline.run(MISSION_PATH, "ci", 0, run, log=log.append)
@@ -2360,19 +2365,33 @@ def test_a_file_with_no_usable_peak_period_fails_the_spectrum_checks_with_no_num
 
 def test_a_file_with_no_swh_in_any_sea_cell_fails_the_spectrum_checks_instead_of_passing_them(tmp_path):
     ctx = ctx_for(tmp_path / "r")
-    ctx.env.U["swh"][:] = 0.0
+    ctx.env.U["swh"][:] = np.nan                                  # the parameters are missing: an NaN `<=` limit is False, and it must not pass
     assert not check_of(ingest_checks(ctx), "spectrum_peak_period_vs_file")["ok"]
+
+
+def test_r11_m6_a_calm_sea_passes_the_spectrum_checks_with_no_value_and_says_why(tmp_path):
+    """Zero swh at every sea node is a calm, not a missing file: the checks had no point to compare and failed all three."""
+    ctx = ctx_for(tmp_path / "r")
+    ctx.env.U["swh"][:] = 0.0
+    checks = ingest_checks(ctx)
+    for name in ("spectrum_peak_period_vs_file", "spectrum_direction_vs_file", "spectrum_mss_vs_file"):
+        c = check_of(checks, name)
+        assert c["ok"] and c["value"] is None and "a calm sea" in c["note"] and "not assessable" in c["note"]
+    ctx.env.U["swh"][:] = 1.0
+    ctx.env.U["swh"][0, ...] = 0.0                                 # some points calm and the rest with a swell: judged on the rest, as before
+    assert "calm" not in check_of(ingest_checks(ctx), "spectrum_peak_period_vs_file")["note"]
 
 
 def test_coare_ustar_is_compared_with_umwm_ust_and_the_agreement_is_logged(tmp_path):
     ctx = ctx_for(tmp_path / "r")
-    n, med, frac = pipeline._ustar_agreement(ctx.env)
+    n, med, frac, _ = pipeline._ustar_agreement(ctx.env)
     assert n > 100 and 0 <= frac <= 1 and med >= 0
     c = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")
     assert c["ok"] and c["value"] == pytest.approx(frac, abs=1e-4) and f"{n} sampled sea points" in c["note"]
-    ctx.env.U["ust"][:] = 0.0                                                                   # no usable ust at all: there is nothing to compare
+    ctx.env.U["ust"][:] = 0.0                                                                   # a calm: there is nothing to compare, which is no failure (M-6)
     c = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")
-    assert not c["ok"] and c["value"] is None
+    assert c["ok"] and c["value"] is None and "have UMWM ust at or below 0.001 m/s (a calm)" in c["note"] and "no sea nodes" not in c["note"]
+    assert pipeline._ustar_agreement(ctx.env)[0] == 0 and pipeline._ustar_agreement(ctx.env)[3] > 100
 
 
 @pytest.mark.parametrize("source,kind,ok", [("gofs31", "in_situ", True), ("gofs31", "potential", False), ("lab_hycom", "potential", True),
@@ -3347,7 +3366,7 @@ def test_r9_m15_the_ustar_band_is_20_percent_of_umwm_ust_on_both_sides(tmp_path,
         w["ustar_umwm"] = u._replace(value=scale * np.asarray(u.value, float))
         return w
     monkeypatch.setattr(env, "waves", waves)
-    n, _, frac = pipeline._ustar_agreement(env)
+    n, _, frac, _ = pipeline._ustar_agreement(env)
     assert n > 100 and frac == share
     note = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")["note"]
     assert f"{100 * share:.1f}% within 20 %" in note
@@ -3357,11 +3376,11 @@ def test_r8_m1_a_ustar_agreement_below_the_briefs_90_percent_is_a_finding_in_the
     ctx = ctx_for(tmp_path / "r")
     ctx.env.U["ust"] *= 0.1                                                                                       # UMWM friction velocity a tenth of COARE's
     d = ingest_checks(ctx)
-    n, _, frac = pipeline._ustar_agreement(ctx.env)
+    n, _, frac, _ = pipeline._ustar_agreement(ctx.env)
     assert frac < 0.1 and check_of(d, "coare_ustar_vs_umwm_ust")["ok"] and failing(d) == []                       # row 168: still not a gate
     assert [x for x in d["notes"] if x.startswith("BRIEF 2.1 finding")] == [
         f"BRIEF 2.1 finding: only {100 * frac:.1f} % of the {n} sea points have COARE u* within 20 % of UMWM ust; the brief asks 90 %"]
-    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, 0.95))
+    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, 0.95, 100))
     assert not [x for x in ingest_checks(ctx_for(tmp_path / "r2"))["notes"] if "BRIEF 2.1 finding" in x]
 
 
@@ -3568,7 +3587,7 @@ def test_r8_m35_installing_bellhop_changes_the_code_digest_and_nothing_else_does
 def test_r8_merge_the_stored_ustar_fraction_is_not_rounded_across_the_briefs_floor(tmp_path, monkeypatch, frac):
     """E stored round(frac, 4), so 0.89996 was written as 0.9: credibility.py (value >= 0.90) passed it while the finding note (on the unrounded
     fraction) fired. The value the ledger keeps and the note must be on the same side of the floor."""
-    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, frac))
+    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, frac, 100))
     d = ingest_checks(ctx_for(tmp_path / "r"))
     value = check_of(d, "coare_ustar_vs_umwm_ust")["value"]
     finding = [x for x in d["notes"] if x.startswith("BRIEF 2.1 finding")]
@@ -3706,6 +3725,8 @@ DATELINE_T = (config.utc("2023-03-01T18:00:00Z"), config.utc("2023-03-03T06:00:0
     ([-190.0, 190.0, -8.0, 8.0], (170.0, -170.0, -7.5, 7.5), True),                     # 380 deg: the whole circle
     ([160.0, -160.0, -8.0, 8.0], (-190.0, 190.0, -7.5, 7.5), False),                    # a wanted box of the whole circle is not inside 40 deg
     ([-167.0, -163.0, -2.0, 2.0], (-167.0, -163.0, -2.0, 2.0), True),                   # the demo's fixture, equal edges
+    ([150.0, 170.0, -8.0, 8.0], (150.0 - 1e-13, 170.0, -7.5, 7.5), True),         # round 11, M-24: a west edge a float's dust below the cached one is it,
+    ([150.0, 170.0, -8.0, 8.0], (150.0 - 1e-6, 170.0, -7.5, 7.5), False),         # ... and one a millionth of a degree below it is not (the tolerance is 1e-9)
 ])
 def test_r10_m3_an_orca_cache_is_compared_by_longitude_arc_not_by_raw_numbers(cache, want, covers):
     d = manifest(box=cache)

@@ -33,7 +33,7 @@ import datetime as dt, hashlib, json, pathlib, shutil, sys, types
 
 import numpy as np
 
-from cafe.pm import stage1
+from cafe.pm import pipeline, stage1
 from cafe.pm.config import env_sigmas, load_mission, utc
 from cafe.pm.env import hycom, orca, remote, tao
 
@@ -57,11 +57,10 @@ THETA = -np.pi + 2 * np.pi * (np.arange(32) + 0.5) / 32                      # U
 DF = FREQ * np.gradient(np.log(FREQ))
 DTH = 2 * np.pi / THETA.size
 SPREAD_S = 6                                       # cos^(2 s) spreading
-OLAT, OLON = np.arange(-2.5, 2.5001, 0.25), np.arange(192.5, 197.5001, 0.25)
 ODEPTH = np.array([0.0, 5, 10, 20, 30, 40, 50, 60, 80, 100, 120, 150, 200, 300, 500, 700, 1000])
 SHALLOW_LEVELS = 10                                # the neighbour column of the atoll is wet at the first 10 levels (to 100 m)
 BATHY_STEP = 0.05
-MOORINGS = {"T0N165W": ("WIND", "SST", "AIRT", "RH"), "T2S165W": ("WIND", "SST")}
+MOORING_VARIABLES = (("WIND", "SST", "AIRT", "RH"), ("WIND", "SST"))        # of the first and the second mooring
 NOISE_SEED = 20230301
 
 
@@ -242,10 +241,26 @@ def _epoch(t):
 
 
 def _mission_box(m):
-    """(lon_min, lon_max, lat_min, lat_max) the pipeline's ingest asks orca for: the mission box plus its pad."""
+    """(lon_min, lon_max, lat_min, lat_max) the pipeline's ingest asks orca for: the mission box plus its pad (`pipeline.padding`)."""
     b = m["box"]
-    p = b.get("pad_deg", 0.0)
+    p = pipeline.padding(m)
     return b["lon_min"] - p, b["lon_max"] + p, b["lat_min"] - p, b["lat_max"] + p
+
+
+def _ocean_axes(m):
+    """(lat, lon east 0..360) axes of the synthetic GOFS store: the ocean box (`pipeline.ocean_box`, through `hycom.box360`, so a box across 180 is
+    one run of longitudes) with half a degree to spare. For the default box: -2.5 to 2.5 and 192.5 to 197.5."""
+    s, n, w, e = hycom.box360(pipeline.ocean_box(m))
+    return np.arange(s - 0.5, n + 0.5 + 1e-4, 0.25), np.arange(w - 0.5, e + 0.5 + 1e-4, 0.25)
+
+
+def _moorings(m):
+    """{TAO name: variables} for two moorings in the ocean box: one at its centre and one on its southern edge (for the default box T0N165W and
+    T2S165W). Names are the integer degrees, as OceanSITES writes them."""
+    s, n, w, e = hycom.box360(pipeline.ocean_box(m))
+    lon, lats = int(round((w + e) / 2)) % 360, (int(round((s + n) / 2)), int(np.ceil(s)))
+    west = lon > 180
+    return {f"T{abs(la)}{'N' if la >= 0 else 'S'}{360 - lon if west else lon}{'W' if west else 'E'}": v for la, v in zip(lats, MOORING_VARIABLES, strict=True)}
 
 
 def _grids(m):
@@ -273,17 +288,12 @@ def _spec_points(ug):
     return dict(x=np.arange(len(j)), lon=lon - 360.0 * (lon >= 180.0), lat=ug["lat"][j, i], f=FREQ, th=THETA)
 
 
-def _hours3d(m, ts):
-    """The hours orca.ingest reads in 3-D: the hour of every UAS sortie launch and the next one (pipeline._sortie_hours)."""
-    t0, t1 = _epoch(ts[0]), _epoch(ts[-1])
+def _hours3d(m):
+    """The hours orca.ingest reads in 3-D: the pipeline's own `_sortie_hours` of every UAS (the hours of each sortie from its launch to the hour after its
+    hard stop), so the fixture and the ingest cannot disagree about which hours the cache has to hold (round 11, M-17)."""
+    t0, t1 = utc(m["window"]["start"]), utc(m["window"]["end"])
     cls = stage1._classes(m)
-    out = set()
-    for v in m["vehicles"]:
-        if cls[v["id"]] == "uas":
-            for t in stage1.launch_times(v["sorties"], m["ship"]["lon"], t0, t1, 60.0 * v["sorties"].get("duration_min", 20)):
-                h = dt.datetime.fromtimestamp(np.floor(t / 3600) * 3600, dt.timezone.utc).replace(tzinfo=None)
-                out |= {h, h + dt.timedelta(hours=1)}
-    return sorted(out)
+    return sorted({h for v in m["vehicles"] if cls[v["id"]] == "uas" for h in pipeline._sortie_hours(v, m["ship"]["lon"], t0, t1)})
 
 
 def write_orca(out, m):
@@ -294,7 +304,7 @@ def write_orca(out, m):
     wg, ug = _grids(m)
     la, lo = wg["XLAT"].astype(float), wg["XLONG"].astype(float) % 360.0
     land = ug["seamask"] == 0
-    h3 = _hours3d(m, ts)
+    h3 = _hours3d(m)
     pts = _spec_points(ug)
     for t in ts:
         s, te = orca.stamp(t), _epoch(t)
@@ -315,19 +325,23 @@ def write_orca(out, m):
 
 def write_ocean(path, m):
     """ocean/gofs_<mission>.zarr through hycom.write_store (TEOS-10 rho and c are added by the real writer)."""
+    OLAT, OLON = _ocean_axes(m)
     t0, t1 = _epoch(_hours(m)[0]), _epoch(_hours(m)[-1])
     steps = np.arange(np.floor(t0 / hycom.STEP_S) * hycom.STEP_S, np.ceil(t1 / hycom.STEP_S) * hycom.STEP_S + 1, hycom.STEP_S)
     import xarray as xr
     jl, il = int(np.argmin(np.abs(OLAT - ATOLL[1]))), int(np.argmin(np.abs(OLON - ATOLL[0])))      # nearest ocean node to the atoll
+    atoll = OLAT[0] <= ATOLL[1] <= OLAT[-1] and OLON[0] <= ATOLL[0] <= OLON[-1]                      # (a box elsewhere has no atoll to leave holes for)
 
     def one(t):
         z, la, lo = ODEPTH[:, None, None], OLAT[None, :, None], OLON[None, None, :]
         T, S, U, V = (np.broadcast_to(a, (ODEPTH.size, OLAT.size, OLON.size)).copy() for a in ocean(z, la, lo, t))
         e = np.broadcast_to(surf_el(OLAT)[:, None], (OLAT.size, OLON.size)).copy()
         for a in (T, S, U, V):
-            a[:, jl, il] = np.nan
-            a[SHALLOW_LEVELS:, jl, il + 1] = np.nan
-        e[jl, il] = np.nan
+            if atoll:
+                a[:, jl, il] = np.nan
+                a[SHALLOW_LEVELS:, jl, il + 1] = np.nan
+        if atoll:
+            e[jl, il] = np.nan
         ds = xr.Dataset({k: (("time", "depth", "lat", "lon"), a[None]) for k, a in (("water_temp", T), ("salinity", S), ("water_u", U), ("water_v", V))},
                         coords=dict(time=("time", [t]), depth=("depth", ODEPTH), lat=("lat", OLAT), lon=("lon", OLON)))
         ds["surf_el"] = (("time", "lat", "lon"), e[None])
@@ -339,9 +353,7 @@ def write_ocean(path, m):
 
 def write_bathy(directory, m):
     """A fetch_gebco-format cache for the box ocean() asks bathy.choose for, so no download is tried. The doi field says it is synthetic."""
-    b = m["box"]
-    p = b.get("pad_deg", 0.0)
-    s, n, w, e = hycom.box360((b["lat_min"] - p, b["lat_max"] + p, b["lon_min"] - p, b["lon_max"] + p))
+    s, n, w, e = hycom.box360(pipeline.ocean_box(m))
     lon = np.arange(w - 0.25, e + 0.25 + 1e-9, BATHY_STEP)
     lat = np.arange(s - 0.25, n + 0.25 + 1e-9, BATHY_STEP)
     elev = np.ascontiguousarray(np.round(-seafloor(lon[None, :], lat[:, None])).astype("<i2"))
@@ -362,9 +374,10 @@ def write_tao(directory, m):
     t0, t1 = _epoch(_hours(m)[0]) - 3600.0, _epoch(_hours(m)[-1]) + 3600.0
     t = np.arange(t0, t1 + 1, 600.0)
     tt = (t * 1e9).astype("int64").astype("datetime64[ns]")
-    man = dict(source="synthetic ci_env fixture", selection=tao.SELECTION, box=list(hycom.box360((-2.0, 2.0, 193.0, 197.0))), t0=t0, t1=t1,
-               files={}, selected={}, positions={}, waves=dict(checked=len(MOORINGS), matches=[]))
-    for name, variables in MOORINGS.items():
+    moorings = _moorings(m)
+    man = dict(source="synthetic ci_env fixture", selection=tao.SELECTION, box=list(hycom.box360(pipeline.ocean_box(m))), t0=t0, t1=t1,
+               files={}, selected={}, positions={}, waves=dict(checked=len(moorings), matches=[]))
+    for name, variables in moorings.items():
         lat, lon = tao.mooring_position(name)
         u, v = wind10(lon, lat, t)
         lift = np.log(4.0 / 1e-4) / np.log(10.0 / 1e-4)

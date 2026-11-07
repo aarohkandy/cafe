@@ -959,7 +959,9 @@ def test_stored_receipt_problem_is_one_rule_for_the_sha_and_the_plate_re_and_ask
 # ---------------------------------------------------------------------------------------------------------------- review round 10, M-8
 
 @pytest.mark.parametrize("lat_min, lat_max, words", [(88.0, 89.9, r"reaches 91.9 deg latitude, beyond \+-90"),
-                                                   (-89.9, -88.0, r"reaches -91.9 deg latitude, beyond \+-90")])
+                                                   (-89.9, -88.0, r"reaches -91.9 deg latitude, beyond \+-90"),
+                                                   (80.0, 88.5, r"reaches 90.5 deg latitude, beyond \+-90"),             # round 11, M-24: just past the limit,
+                                                   (-88.5, -80.0, r"reaches -90.5 deg latitude, beyond \+-90")])
 def test_r10_m8_a_padded_box_beyond_90_degrees_latitude_is_refused_at_validation(tmp_path, lat_min, lat_max, words):
     with pytest.raises(ConfigError, match=rf"m.yaml: box \(.*\): the box with its pad of 2 deg {words}.*box.pad_deg"):
         load_mission(edit(tmp_path, lambda d: d["box"].update(lat_min=lat_min, lat_max=lat_max)))
@@ -977,3 +979,73 @@ def test_r10_m8_the_demo_a_box_reaching_exactly_90_degrees_and_a_wide_box_that_f
     load_mission(DEMO)
     load_mission(edit(tmp_path, lambda d: d["box"].update(lat_min=-88.0, lat_max=88.0)))                  # -90 and 90 exactly are fine
     load_mission(edit(tmp_path, lambda d: d["box"].update(lon_min=165.0, lon_max=-165.0, pad_deg=2.0)))   # the dateline box: 30 + 4 deg
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 11, M-14, M-15
+
+@pytest.mark.parametrize("i, field, value, kind", [(3, "radio", "rfd900x", "iridium"), (3, "modem", "benthos_atm960_mf", "iridium"),
+                                                   (1, "radio", "rfd900x", "acoustic"), (0, "modem", "benthos_atm960_mf", "rf"),
+                                                   (1, "radio", "nonsense", "acoustic")])
+def test_r11_m15_a_link_field_its_kind_never_reads_is_refused(tmp_path, i, field, value, kind):
+    """`radio: rfd900x` on the Iridium link and `modem` on the rf link printed 'valid' and were ignored (row 154: a key that is accepted must be read)."""
+    with pytest.raises(ConfigError, match=f"links/{doc()['links'][i]['id']}/{field}: a {kind} link does not read '{field}'"):
+        load_mission(edit(tmp_path, lambda d: d["links"][i].update({field: value})))
+
+
+@pytest.mark.parametrize("name, ok", [("Benthos_ATM960", True), ("BENTHOS_ATM960_MF", True), ("benthos_atm960_Lf", True), ("whoi_micromodem_Long_10K", True),
+                                      ("whoi_micromodem", False), ("benthos_atm960_xx", False)])
+def test_r11_m14_the_loader_accepts_exactly_the_modem_names_stage_1_resolves(tmp_path, name, ok):
+    """`modem: Benthos_ATM960` loaded and ended stage 1 in KeyError 'Benthos_ATM960'; `whoi_micromodem` (no MF band) in KeyError 'MF'."""
+    from cafe.pm.physics import comms
+    resolved = comms.resolve_modem(name)
+    assert (resolved is not None) == ok
+    if ok:
+        key, band = resolved
+        assert band in comms._yaml("modems.yaml")["modems"][key]["bands"]
+        assert load_mission(edit(tmp_path, lambda d: d["links"][1].update(modem=name)))["links"][1]["modem"] == name
+    else:
+        with pytest.raises(ConfigError, match=r"links/glider_eq-ship-acoustic/modem: '" + name + "' is not in platforms/modems.yaml"):
+            load_mission(edit(tmp_path, lambda d: d["links"][1].update(modem=name)))
+
+
+def test_r11_m14_a_bare_key_means_its_default_band_and_a_modem_with_none_says_which_bands_it_has(tmp_path):
+    from cafe.pm.physics import comms
+    assert comms.resolve_modem("benthos_atm960") == ("benthos_atm960", "MF") == comms.resolve_modem("Benthos_ATM960_mf")
+    with pytest.raises(ConfigError, match=r"the modem has the bands \['long_10k', 'short_25k'\] and none is its default"):
+        load_mission(edit(tmp_path, lambda d: d["links"][1].update(modem="whoi_micromodem")))
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 11, M-25 (siblings)
+
+def a_platform_file(tmp_path, name, fn):
+    """platforms/<name>.yaml copied to tmp_path and changed by `fn`; its path is what a mission's `platform:` may name."""
+    d = yaml.safe_load((config.PLATFORMS / f"{name}.yaml").read_text())
+    fn(d)
+    p = tmp_path / f"{name}_odd.yaml"
+    p.write_text(yaml.safe_dump(d))
+    return p
+
+
+@pytest.mark.parametrize("vid, name, change, kind", [("glider_eq", "seaglider", lambda d: d.update(params=5), "AttributeError"),
+                                                     ("glider_eq", "seaglider", lambda d: d.update(mission_defaults=[1]), "AttributeError"),
+                                                     ("glider_eq", "seaglider", lambda d: d.update(kind=["seaglider"]), "TypeError"),
+                                                     ("usv", "saildrone_explorer", lambda d: d.update(params=[1]), "AttributeError")])
+def test_r11_m25_a_platform_file_of_the_wrong_shape_is_a_config_error_not_a_traceback(tmp_path, vid, name, change, kind):
+    """`_check_platform` caught only ValueError and KeyError, and the glider and USV loaders raise AttributeError (`.items()` of a section that is not a
+    mapping) and TypeError (an unhashable `kind`): `validate` ended in a traceback for a platform file named by its path."""
+    p = a_platform_file(tmp_path, name, change)
+    with pytest.raises(ConfigError, match=rf"vehicles/{vid}/platform: .* does not load as a (glider|usv) platform \({kind}: "):
+        load_mission(edit(tmp_path, lambda d: vehicle(d, vid).update(platform=str(p))))
+
+
+def test_r11_m25_a_class_loader_that_raises_a_key_error_is_a_config_error_too(tmp_path, monkeypatch):
+    """No file of the shipped layout is known to make the class loaders raise KeyError (each key is checked before it is read), so the member of the tuple
+    is held by a loader that does."""
+    from cafe.pm.physics import glider
+
+    def lacking(name):
+        raise KeyError("rating_m")
+
+    monkeypatch.setattr(glider, "load_platform", lacking)
+    with pytest.raises(ConfigError, match=r"vehicles/glider_\w+/platform: 'seaglider' does not load as a glider platform \(KeyError: 'rating_m'\)"):
+        load_mission(DEMO)

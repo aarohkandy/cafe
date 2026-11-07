@@ -185,7 +185,10 @@ def thorp_db_per_km(f_khz: FA) -> F:
     return cast(F, 0.11 * f2 / (1 + f2) + 44 * f2 / (4100 + f2) + 2.75e-4 * f2 + 0.003)
 
 
-def acoustic_tl_db(r_m: FA, f_khz: FA, k: float = 1.5) -> F:
+SPREADING_K = 1.5        # Stojanovic 2007 practical spreading (1 cylindrical, 2 spherical): a constant of the code, not a table entry (round 11, M-16)
+
+
+def acoustic_tl_db(r_m: FA, f_khz: FA, k: float = SPREADING_K) -> F:
     """Stojanovic path loss 10 log A = k 10 log10(r/1 m) + r_km 10 log a(f) [dB]; k=1 cylindrical, 2 spherical."""
     r = np.maximum(r_m, 1.0)
     return 10 * k * np.log10(r) + thorp_db_per_km(f_khz) * r / 1e3
@@ -208,12 +211,31 @@ def band_noise_db(f_lo: float, f_hi: float, wind: FA, shipping: float = 0.5, n: 
     return 10 * np.log10(np.trapezoid(psd, f * 1e3, axis=-1))
 
 
+def modem_names() -> dict[str, tuple[str, str]]:
+    """Every name a link's `modem` may take, lowercase, with the (modems.yaml key, band) it means: `<key>_<band>` for each band, and the bare `<key>` for
+    the modem's default band: its only band, else MF where it has one (the name the demo's early missions used), else none (round 11, M-14). The one
+    table the mission loader and stage 1 both resolve through."""
+    names: dict[str, tuple[str, str]] = {}
+    for key, m in _yaml("modems.yaml")["modems"].items():
+        bands = list(m["bands"])
+        names.update({f"{key}_{b}".lower(): (key, b) for b in bands})
+        default = bands[0] if len(bands) == 1 else "MF" if "MF" in bands else None
+        if default is not None:
+            names.setdefault(key.lower(), (key, default))
+    return names
+
+
+def resolve_modem(name: str) -> tuple[str, str] | None:
+    """(modems.yaml key, band) a link's `modem` names, any case, or None when it names no modem band (see `modem_names`)."""
+    return modem_names().get(name.lower())
+
+
 def _band(modem: str, band: str) -> dict[str, Any]:
     return cast(dict[str, Any], _yaml("modems.yaml")["modems"][modem]["bands"][band])
 
 
 @functools.lru_cache(None)
-def implementation_loss_db(modem: str, band: str, k: float = 1.5) -> float:
+def implementation_loss_db(modem: str, band: str, k: float = SPREADING_K) -> float:
     """Everything the budget does not model (multipath, platform noise, directivity, detector, true SL) in dB. Derived so
     the budget reproduces the vendor's published range at the reference conditions with anchor_margin_db to spare
     (modems.yaml defaults); bands with no published range copy another band's value (`implementation_loss_like`)."""
@@ -235,7 +257,7 @@ def valid_range_m(modem: str, band: str) -> float:
     return float(_yaml("modems.yaml")["defaults"]["valid_range_factor"]["value"] * b["range_km"] * 1e3)
 
 
-def acoustic_margin(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: FA = 5.0, shipping: float = 0.5, k: float = 1.5,
+def acoustic_margin(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: FA = 5.0, shipping: float = 0.5, k: float = SPREADING_K,
                     tl_extra: FA = 0.0) -> F:
     """Thorp-budget margin [dB] = SL - TL - NL(band, wind) - SNR_req - implementation loss (+ tl_extra dB of extra
     transmission loss, e.g. Bellhop excess). r [m] range, wind [m/s] the WRF 10 m wind at the receiver."""
@@ -303,7 +325,7 @@ def bellhop_tl(r_m: ArrayLike, f_khz: float, z: ArrayLike, c: ArrayLike, tx_dept
 
 
 def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: FA = 5.0, ssp: tuple[FA, F] | None = None,
-                  shipping: float = 0.5, k: float = 1.5, tx_depth: float = 1.0, rx_depth: float = 5.0, water_depth: float = 4000.0,
+                  shipping: float = 0.5, k: float = SPREADING_K, tx_depth: float = 1.0, rx_depth: float = 5.0, water_depth: float = 4000.0,
                   ambiguous_db: float | None = None, dz: FA = 0.0) -> dict[str, Any]:
     """Margin for every horizontal range r [m]. The path the Thorp budget sees is the slant range hypot(r, dz), dz [m] the vertical
     separation of the two ends (0: both at the same depth). The Thorp budget decides every link whose margin is outside +-ambiguous_db

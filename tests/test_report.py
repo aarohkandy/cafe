@@ -1393,10 +1393,19 @@ def test_the_uas_block_says_attitude_exceedance_cannot_fire_and_prints_the_autho
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
 
 
+def set_link_counts(run, link, k_fail):
+    """A link's stored verdict as stage 1 writes it for `k_fail` failures: the report refuses a verdict that its counts do not give (round 11, M-2)."""
+    def fn(d):
+        e = d["summary"]["links"][link]
+        e["k_fail"] = k_fail
+        e["verdict"] = intervals.verdict(k_fail, e["n"], e["verdict"]["conf"])
+    edit_json(run / "stage1b" / "summary.json", fn)
+
+
 def test_the_acoustic_sanity_row_carries_the_ships_distance_to_the_page(run):
     m, plan = pm_run.make_run(run)
     set_link_fields(run, **{"glider_eq-ship-acoustic": dict(distance_km_median=555.0)})
-    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["glider_eq-ship-acoustic"]["verdict"].update(verdict="NO-GO"))
+    set_link_counts(run, "glider_eq-ship-acoustic", 40)                                       # NO-GO
     report.write(run, m, plan)
     rep, t = load(run), plain((run / "report" / "index.html").read_text())
     row = next(r for r in rep["sanity"]["rows"] if r["id"] == "glider_eq-ship-acoustic")
@@ -2327,8 +2336,7 @@ def test_r9_m17_a_link_with_a_median_need_of_zero_but_failures_keeps_its_graded_
     """Adversary: 10 of 24 members need the link and fail, 14 never do (median need 0). The card must not say NOT EXERCISED for it."""
     m, plan = pm_run.make_run(run)
     set_link_fields(run, **{"usv-uas-rf": dict(need_count_median=0, granularity_ok=False)})
-    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["usv-uas-rf"].update(verdict=dict(
-        d["summary"]["links"]["usv-uas-rf"]["verdict"], verdict="NO-GO")))
+    set_link_counts(run, "usv-uas-rf", 40)                                                    # NO-GO
     report.write(run, m, plan)
     card = plain((run / "report" / "index.html").read_text().split("<div id='v-usv-uas-rf'>")[1].split("<div id='v-")[0])
     assert "Required at no moment in the median member (0 samples): the link was not exercised in it" in card
@@ -2756,3 +2764,40 @@ def test_r10_m16_a_glider_that_failed_overdepth_carries_the_explanation_in_its_c
     note = rep["vehicles"]["glider_eq"]["mode_notes"]["overdepth"]
     assert "plus the apogee overshoot" in note and f"overdepth: {note}." in h
     assert "overdepth" not in rep["vehicles"]["glider_2n"]["mode_notes"] and "overdepth" not in rep["vehicles"]["usv"]["mode_notes"]
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 11, M-25 (siblings)
+
+def _raises_value_error(*a, **k):
+    raise ValueError("platform file damaged")
+
+
+# what the platform loader gives or does: a mapping without the key (KeyError), no mapping at all (TypeError), a refusal (ValueError)
+LOADER_FAILS = [pytest.param(lambda *a, **k: {}, id="KeyError"), pytest.param(lambda *a, **k: None, id="TypeError"),
+                pytest.param(_raises_value_error, id="ValueError")]
+
+
+@pytest.mark.parametrize("loader", LOADER_FAILS)
+def test_r11_m25_the_overdepth_note_goes_on_without_the_rating_when_the_platform_will_not_read(monkeypatch, loader):
+    from cafe.pm.physics import glider
+    monkeypatch.setattr(glider, "load_platform", loader)
+    note = report._overdepth_note({"id": "g", "platform": "seaglider", "task": {"dive_depth_m": 1000.0}}, None)
+    assert note.startswith("the depth passed the platform's rating_m: the ordered dive depth (1000 m) plus the apogee overshoot")
+
+
+@pytest.mark.parametrize("loader", LOADER_FAILS)
+def test_r11_m25_the_usv_clocks_are_none_when_the_platform_will_not_read(monkeypatch, loader):
+    monkeypatch.setattr(config, "load_platform", loader)
+    assert report._usv_modes("saildrone_explorer", {"becalmed": 1}, None) is None
+
+
+@pytest.mark.parametrize("loader", LOADER_FAILS)
+def test_r11_m25_the_uas_limits_are_none_when_the_platform_will_not_read(monkeypatch, loader):
+    monkeypatch.setattr(config, "load_platform", loader)
+    assert report._uas_limits("quad_uas", None, False) is None
+
+
+@pytest.mark.parametrize("loader", LOADER_FAILS)
+def test_r11_m25_a_glider_dive_depth_is_500_m_when_the_platform_will_not_read(monkeypatch, loader):
+    monkeypatch.setattr(config, "load_platform", loader)
+    assert report._dive_depth({"platform": "seaglider"}) == 500.0

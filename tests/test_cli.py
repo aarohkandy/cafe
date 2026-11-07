@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from cafe.pm import __main__ as cli, audit, budget, config, ledger, par, pipeline, whatif
+from cafe.pm.config import ConfigError, damaged_run_files
 from cafe.pm.env import ocean as ocean_mod
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider
@@ -418,6 +419,26 @@ def test_hangar_reports_a_platform_without_provenance_and_an_unknown_platform(ca
     assert "platform 'no_such_boat': no file" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("change, said", [(lambda d: d.update(params=5), "AttributeError: 'int' object has no attribute 'items'"),
+                                          (lambda d: d.update(kind=["seaglider"]), "TypeError: unhashable type: 'list'")])
+def test_r11_m25_hangar_says_a_platform_file_of_the_wrong_shape_failed_the_check_and_does_not_traceback(tmp_path, capsys, change, said):
+    """`_hangar` caught only ValueError; the glider loader raises AttributeError and TypeError for these files (round 11, M-25)."""
+    d = yaml.safe_load((config.PLATFORMS / "seaglider.yaml").read_text())
+    change(d)
+    p = tmp_path / "odd.yaml"
+    p.write_text(yaml.safe_dump(d))
+    assert cli.main(["hangar", "--platform", str(p)]) == 1
+    assert capsys.readouterr().out == f"{p} (glider): provenance FAILED: {said}\n"
+
+
+def test_r11_m25_hangar_says_a_key_error_of_a_class_loader_failed_the_check_too(capsys, monkeypatch):
+    def lacking(name):
+        raise KeyError("rating_m")
+    monkeypatch.setattr(glider, "load_platform", lacking)
+    assert cli.main(["hangar", "--platform", "seaglider"]) == 1
+    assert capsys.readouterr().out == "seaglider (glider): provenance FAILED: KeyError: 'rating_m'\n"
+
+
 # ---------------------------------------------------------------------------------------------------------------- whatif
 
 DEMO = str(config.ROOT / "missions" / "tepex_c_demo.yaml")
@@ -516,7 +537,24 @@ def test_whatif_without_a_finished_run_says_so_and_runs_everything_in_stage_1(wi
     assert cli.main(["whatif", "--mission", DEMO, "--run", str(tmp_path / "none"), "--shift", "6h", "--budget", "ci"]) == 0
     assert wi.seen["base"] == {} and wi.seen["tracks"] == {} and wi.seen["scales"] is None
     note = f"note: no finished run at {tmp_path / 'none'}: the baseline and every changed vehicle are run in Stage 1 at the ci budget"
-    assert note in capsys.readouterr().out
+    out, err = capsys.readouterr()
+    assert note in out
+    assert ("without the TAO-fitted priors (the perturbations.yaml defaults stand) and the refit multipliers that the report's P(fail) uses "
+            "(there is no finished run)") in err
+
+
+def test_r11_m3_whatif_says_which_priors_a_finished_run_without_the_fit_files_is_answered_with(wi, capsys):
+    """Round 11, M-3: baselines 0.312 / 0.781 / 0.625 against the report's 0.281 / 0.969 / 0.859, and nothing said that the priors were not the report's."""
+    cli.main(whatif_args(wi, "--shift", "6h"))                                    # the fixture run has refit.json and no priors_fitted.json
+    err = capsys.readouterr().err
+    assert "(the run has no priors_fitted.json)" in err and "refit.json" not in err
+    (wi.run / "refit" / "refit.json").unlink()
+    cli.main(whatif_args(wi, "--shift", "6h"))
+    assert "(the run has no priors_fitted.json and no refit.json)" in capsys.readouterr().err
+    (wi.run / "ingest").mkdir(exist_ok=True)
+    (wi.run / "ingest" / "priors_fitted.json").write_text(json.dumps({"wind_speed_bias": {"dist": "normal", "mean": 0.1, "value": 1.0}}))
+    cli.main(whatif_args(wi, "--shift", "6h"))
+    assert "(the run has no refit.json)" in capsys.readouterr().err
 
 
 def test_whatif_does_not_trust_a_res_pkl_that_changed(wi, capsys):
@@ -960,6 +998,21 @@ def test_r10_m5_a_path_that_cannot_be_made_or_read_is_an_error_line_and_exit_2(t
     assert err.startswith("error: ") and "no such file" in err
 
 
+def test_r11_m20_a_missing_broken_file_names_its_path_once_and_prints_no_errno(tmp_path, capsys):
+    """`receipts --broken /nonexistent` printed `error: [Errno 2] broken configuration /nonexistent: no such file: '/nonexistent'`."""
+    missing = str(tmp_path / "nonexistent.yaml")
+    assert cli.main(["receipts", "--broken", missing]) == 2
+    err = capsys.readouterr().err
+    assert err == f"error: broken configuration: no such file: {missing}\n" and err.count(missing) == 1 and "Errno" not in err
+
+
+@pytest.mark.parametrize("exc, text", [(PermissionError(13, "Permission denied", "/x/y"), "Permission denied: /x/y"),
+                                       (OSError(18, "Invalid cross-device link", "/a", None, "/b"), "Invalid cross-device link: /a -> /b"),
+                                       (OSError("no file in it"), "no file in it"), (OSError(5, "Input/output error"), "[Errno 5] Input/output error")])
+def test_r11_m20_an_os_error_for_a_named_path_is_the_reason_and_the_path_once(exc, text):
+    assert config.os_error_text(exc) == text
+
+
 # ---------------------------------------------------------------------------------------------------------------- review round 10, M-7
 
 def _hand_edit_to_go(run):
@@ -1004,6 +1057,57 @@ def test_r10_m7_a_summary_whose_verdict_disagrees_with_its_counts_ends_in_an_err
     assert cli.main(["report", "--run", str(run)]) == 2
     err = capsys.readouterr().err
     assert err.startswith("error: ") and f"verdict.k_fail is {v['k_fail'] + 10} but k_fail is {v['k_fail']}" in err
+
+
+def _edited_summary(tmp_path, monkeypatch, edit):
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    p = run / "stage1b" / "summary.json"
+    d = json.loads(p.read_text())
+    edit(d["summary"])
+    p.write_text(json.dumps(d))
+    return run
+
+
+@pytest.mark.parametrize("k, n", [(0, 0), (99, 64)])
+def test_r11_m5_report_of_a_summary_with_counts_that_are_not_counts_ends_in_an_error_line(tmp_path, capsys, monkeypatch, k, n):
+    """n = 0 ended in a ZeroDivisionError from `intervals.wilson` (k_fail beyond n in a ValueError): a traceback, not `error:` and exit 2."""
+    def edit(s):
+        s["vehicles"]["glider_eq"].update(k_fail=k, n=n)
+    run = _edited_summary(tmp_path, monkeypatch, edit)
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "glider_eq" in err and "not a count" in err and "--fresh" in err
+
+
+def test_r11_m5_report_of_a_sensitivity_case_with_n_zero_ends_in_an_error_line(tmp_path, capsys, monkeypatch):
+    run = _edited_summary(tmp_path, monkeypatch, lambda s: None)
+    (run / "stage1b" / "sensitivity_cases.json").write_text(json.dumps({"glider_eq": [dict(case="c", k_fail=0, n=0, verdict="GO", note="")]}))
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    assert "sensitivity_cases.json glider_eq[0]" in capsys.readouterr().err
+
+
+def test_r11_m2_report_refuses_a_verdict_that_the_loaded_cut_offs_do_not_give(tmp_path, capsys, monkeypatch):
+    """Edit mission.yaml's cut-offs after a run: the stored verdicts were decided under the old ones, and the report printed both side by side."""
+    run = _edited_summary(tmp_path, monkeypatch, lambda s: None)
+    m = run / "mission.yaml"
+    text = m.read_text()
+    assert "verdict: {go: 0.9, nogo: 0.6}" in text
+    m.write_text(text.replace("verdict: {go: 0.9, nogo: 0.6}", "verdict: {go: 0.2, nogo: 0.1}"))
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "under the mission's cut-offs" in err and "mission.yaml or the summary was edited" in err
+
+
+def test_r11_m7_the_damaged_run_advice_says_what_to_do_when_a_fresh_run_gives_the_same_error(tmp_path):
+    want = r"damaged or incomplete \(KeyError: 'x'\); run it again \(--fresh\); if that gives the same error, it is a bug: report it"
+    with pytest.raises(ConfigError, match=want):
+        with damaged_run_files(tmp_path):
+            {}["x"]
 
 
 # ---------------------------------------------------------------------------------------------------------------- review round 10, M-32
@@ -1121,3 +1225,21 @@ def test_p37_the_programs_own_resource_errors_are_one_error_line_and_exit_2_but_
     with pytest.raises(OSError, match="is full after 3 arrays"):
         cli.main(["run", "--mission", MISSION, "--out", str(out)])
     assert capsys.readouterr().err == ""
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 11, M-25
+
+def test_r11_m25_a_type_error_in_a_run_file_read_is_damage_as_a_key_error_is(tmp_path):
+    with pytest.raises(ConfigError, match=r"damaged or incomplete \(TypeError: 'NoneType' object is not subscriptable\)"):
+        with damaged_run_files(tmp_path):
+            _ = {}.get("x")["y"]
+
+
+def test_r11_m25_an_os_error_that_names_a_path_given_only_as_its_second_file_is_the_users(tmp_path):
+    """`_names_a_path_given` looks at `filename` and `filename2`: a rename or a link names the path that was given second."""
+    import argparse
+    given = argparse.Namespace(out=str(tmp_path / "out"))
+    inside = OSError(18, "Invalid cross-device link", str(tmp_path / "elsewhere" / "a"), None, str(tmp_path / "out" / "x"))     # os.rename(<ours>, <given>)
+    assert cli._names_a_path_given(inside, given)
+    elsewhere = OSError(18, "Invalid cross-device link", str(tmp_path / "elsewhere" / "a"), None, str(tmp_path / "elsewhere" / "b"))
+    assert not cli._names_a_path_given(elsewhere, given)

@@ -23,7 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import budget, par
-from .config import load_platform, platform_class, utc
+from .config import ConfigError, load_platform, platform_class, utc
 from .env import conventions as cv, subgrid
 from .env.environment import OutsideData
 from .env.perturb import PerturbedEnv
@@ -632,8 +632,10 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
             method = f"two-ray over a 4/3-radius earth with divergence (Kerr), {lk['radio']} (Ament sea roughness, modelled)"
             margin_kind, invalid_kind = "RF link margin, dB", "beyond_horizon"
         else:
-            reg = comms._yaml("modems.yaml")["modems"]                        # "<modem>_<band>" as named in modems.yaml
-            modem, band = next(((k, bd) for k, v in reg.items() for bd in v["bands"] if lk["modem"].lower() == f"{k}_{bd}".lower()), (lk["modem"], "MF"))
+            if (named := comms.resolve_modem(lk["modem"])) is None:           # the mission loader refuses it; a link built by hand gets the same words
+                raise ConfigError(f"link {lk['id']}: modem '{lk['modem']}' is not a modems.yaml key with a default band or <key>_<band> "
+                                  f"({sorted(comms.modem_names())})")
+            modem, band = named
             dz = np.abs(A[3] - B[3])
             wind = np.hypot(*np.moveaxis(np.asarray(env.wind(lonA.T, latA.T, 10.0, tt.T).value, float), -1, 0)).T          # the member's own wind, as for Hs
             margin, method = _acoustic(modem, band, d, dz, wind, need, A, B, t, env)

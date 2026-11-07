@@ -561,3 +561,117 @@ def test_lb0_a_ledger_of_the_wrong_shape_is_a_stage_not_done_and_says_so(tmp_pat
     p.write_text(json.dumps(d))
     assert done(tmp_path, "stage1", "h1") is None
     assert f"ledger {p} is damaged or incomplete" in capsys.readouterr().err
+
+
+# ---- review round 11, M-8 and M-21
+
+def orca_run(tmp_path):
+    """A run whose ingest read the orca part `hours/wrf_A.npz` and kept the copy of the cache manifest that names it; -> (run, cache dir, part, snapshot)."""
+    cache = tmp_path / "cache" / "orca"
+    (cache / "hours").mkdir(parents=True)
+    part, man = cache / "hours" / "wrf_A.npz", cache / "manifest.json"
+    part.write_bytes(b"what the run read")
+    man.write_text(json.dumps({"parts": {part.name: sha256(part)}}))
+    run = tmp_path / "run"
+    out = run / "ingest" / "o.json"
+    out.parent.mkdir(parents=True)
+    out.write_text("o")
+    snap = run / "ingest" / "orca_manifest.json"
+    with Ledger(run, "ingest", "h") as L:
+        L.snapshot(man, snap, kind="cache manifest")
+        L.output(out)
+    return run, cache, part, snap
+
+
+def test_r11_m8_a_part_a_later_ingest_refetched_under_the_same_name_is_a_rewrite_and_a_hand_edit_is_a_change(tmp_path, capsys):
+    """`_drop_stale_parts` unlinks the parts cut for another box or without a new 3-D hour and the ingest fetches them again: the earlier run's audit said
+    'changed since the stage ran' (and the report opened with a red banner) for a cache doing what it does."""
+    from cafe.pm.env import orca
+    run, cache, part, snap = orca_run(tmp_path)
+    man = cache / "manifest.json"
+    orca._drop_stale_parts(cache, (-2.0, 2.0, 193.0, 197.0), set())                           # no cut.json: another box, every part goes
+    assert not part.exists()
+    part.write_bytes(b"refetched, other bytes")
+    man.write_text(json.dumps({"parts": {part.name: sha256(part)}}))                         # the later ingest's manifest vouches for them
+    copy = json.loads(snap.read_text())
+    changes, rewrites = ledger.shared_diff(copy, cache)
+    assert changes == [] and [r[0] for r in rewrites] == [part]
+    assert ledger.shared_changes(copy, cache) and done(run, "ingest", "h") is None            # a resume still reads the part again
+    assert audit._shared_problems("run", "ingest", snap, man, True) == []
+    assert "refetched by a later ingest" in capsys.readouterr().err
+    part.write_bytes(b"edited by hand")                                                     # the manifest does not vouch for this one
+    changes, rewrites = ledger.shared_diff(copy, cache)
+    assert [c[0] for c in changes] == [part] and rewrites == []
+    (probs,) = audit._shared_problems("run", "ingest", snap, man, True)
+    assert f"input {part} changed since the stage ran" in probs
+
+
+def test_r11_m8_a_part_the_live_manifest_does_not_list_or_lists_with_the_old_sha_is_a_change(tmp_path):
+    run, cache, part, snap = orca_run(tmp_path)
+    copy = json.loads(snap.read_text())
+    part.write_bytes(b"other bytes")
+    for live in ({"parts": {}}, {"parts": {part.name: copy["parts"][part.name]}}, {}, None):
+        (cache / "manifest.json").write_text(json.dumps(live))
+        assert [c[0] for c in ledger.shared_diff(copy, cache)[0]] == [part], live
+    (cache / "manifest.json").write_text("not json")
+    assert [c[0] for c in ledger.shared_diff(copy, cache)[0]] == [part]
+
+
+def test_r11_m21_a_run_that_read_orca_parts_only_is_not_resumed_once_the_cache_directory_is_gone(tmp_path):
+    """A manifest copy naming only `parts` has nothing `shared_changes` reports for a missing directory: `done`'s own `is_dir()` is what stops the resume
+    on a deleted store (DECISIONS 575)."""
+    run, cache, part, snap = orca_run(tmp_path)
+    assert "files" not in json.loads(snap.read_text()) and done(run, "ingest", "h") is not None
+    shutil.rmtree(cache)
+    assert ledger.shared_changes(json.loads(snap.read_text()), cache) == [] and done(run, "ingest", "h") is None
+
+
+@pytest.mark.parametrize("body, kind", [("not json", "JSONDecodeError"), ("[1]", "AttributeError"), ('{"parts": 5}', "AttributeError")])
+def test_r11_m25_a_copied_cache_manifest_that_is_not_a_manifest_is_a_stage_not_done_with_the_reason(tmp_path, capsys, body, kind):
+    """`done` catches KeyError, TypeError, AttributeError and ValueError: a copy whose hash is the ledger's but that is not JSON (ValueError) or not a
+    mapping (AttributeError) reaches `shared_changes`, and each of the two types has to be in the tuple."""
+    run, cache, part, snap = orca_run(tmp_path)
+    snap.write_text(body)
+    with Ledger(run, "ingest", "h2") as L:
+        L.input(snap, shared=str(cache / "manifest.json"))                       # hashed now: the copy is as the ledger has it
+        L.output(run / "ingest" / "o.json")
+    assert done(run, "ingest", "h2") is None
+    err = capsys.readouterr().err
+    assert "is damaged or incomplete (" in err and kind in err and "the stage runs again" in err
+
+
+def test_r11_m9_snapshot_returns_the_parsed_copy_it_recorded(tmp_path):
+    """The stage takes what it reads of a shared manifest from the copy it recorded, not from a second read of the shared file."""
+    shared = tmp_path / "manifest.json"
+    shared.write_text('{"parts": {"a": "1"}, "hours": 3}')
+    run = tmp_path / "run"
+    dest = run / "ingest" / "m.json"
+    dest.parent.mkdir(parents=True)
+    with Ledger(run, "ingest", "h") as L:
+        got = L.snapshot(shared, dest, kind="cache manifest")
+        shared.write_text('{"parts": {}, "hours": 99}')                                      # another run rewrites it right after
+    assert got == {"parts": {"a": "1"}, "hours": 3} == json.loads(dest.read_text())
+
+
+def test_r11_m2_a_report_stage_that_recorded_the_runs_mission_and_plan_is_not_done_once_either_changed(tmp_path):
+    """The report stage hashes `mission.yaml` and `plan.json` by their bare names: a resume with another plan (the machine's memory, a different CPU
+    count) reruns the report, which prints that plan, and reuses every other stage."""
+    run = tmp_path / "run"
+    (run / "report").mkdir(parents=True)
+    (run / "mission.yaml").write_text("seed: 1\n")
+    (run / "plan.json").write_text('{"workers": 2}')
+    out = run / "report" / "index.html"
+    out.write_text("<p>report</p>")
+    with Ledger(run, "report", "h") as L:
+        for n in ledger.RUN_ROOT_FILES:
+            L.input(n, sha=sha256(run / n))
+        L.output(out)
+    assert done(run, "report", "h") is not None
+    (run / "plan.json").write_text('{"workers": 3}')
+    assert done(run, "report", "h") is None
+    (run / "plan.json").write_text('{"workers": 2}')
+    (run / "mission.yaml").write_text("seed: 2\n")
+    assert done(run, "report", "h") is None
+    (run / "mission.yaml").write_text("seed: 1\n")
+    assert done(run, "report", "h") is not None
+    assert ledger.resolve("plan.json", tmp_path / "copy", set()) == tmp_path / "copy" / "plan.json"

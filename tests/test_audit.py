@@ -353,49 +353,89 @@ def test_main_runs_ruff_mypy_pytest_and_the_coverage_gates(tmp_path, monkeypatch
     assert audit.main([]) == 1 and "AUDIT FAIL: pytest:\npytest output" in capsys.readouterr().out
 
 
-def pytest_done_root(tmp_path, monkeypatch, age):
-    """A repo in miniature for --pytest-done: cafe/pm/a.py, and a coverage.json that is `age` seconds older (negative: newer) than it."""
+def pytest_done_root(tmp_path, monkeypatch, receipt=True, coverage=True):
+    """A repo in miniature for --pytest-done: cafe/pm/a.py and tests/test_a.py, a coverage.json, and the receipt of a suite that passed on them."""
     (tmp_path / "cafe" / "pm" / "__pycache__").mkdir(parents=True)
-    src, pyc = tmp_path / "cafe" / "pm" / "a.py", tmp_path / "cafe" / "pm" / "__pycache__" / "a.pyc"
-    src.write_text("x = 1\n")
-    pyc.write_bytes(b"")
-    os.utime(src, (1_000_000, 1_000_000))
-    os.utime(pyc, (3_000_000, 3_000_000))                                                  # running the tests writes bytecode: it must not count
-    if age is not None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "cafe" / "pm" / "a.py").write_text("x = 1\n")
+    (tmp_path / "tests" / "test_a.py").write_text("def test_a():\n    pass\n")
+    (tmp_path / "cafe" / "pm" / "__pycache__" / "a.pyc").write_bytes(b"")             # running the tests writes bytecode: it must not count
+    if coverage:
         cov(tmp_path, {"cafe/pm/a.py": (10, 10)})
-        os.utime(tmp_path / "coverage.json", (1_000_000 - age, 1_000_000 - age))
+    if coverage and receipt:
+        audit.write_pytest_receipt(tmp_path)
     monkeypatch.setattr(audit, "banned", lambda: [])
     monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
     monkeypatch.setattr(audit, "ROOT", tmp_path)
 
 
-def test_pytest_done_runs_everything_but_pytest_and_needs_a_coverage_json_made_after_the_code(tmp_path, monkeypatch, capsys):
+def test_pytest_done_runs_everything_but_pytest_and_needs_the_receipt_of_a_suite_that_passed_on_this_code(tmp_path, monkeypatch, capsys):
     """The suite can run elsewhere in pieces (bin/proot_suite.sh); the audit then must not read as a pass without those tests having run on this code."""
     calls = []
     monkeypatch.setattr(audit, "_run", lambda cmd: calls.append(cmd[0]) or (0, ""))
-    pytest_done_root(tmp_path, monkeypatch, age=-5)
-    assert audit.main(["--pytest-done"]) == 0 and calls == ["ruff", "mypy"]              # no pytest pass, and a fresh coverage.json is read for the gates
+    pytest_done_root(tmp_path, monkeypatch)
+    assert audit.main(["--pytest-done"]) == 0 and calls == ["ruff", "mypy"]              # no pytest pass, and a receipted coverage.json is read for the gates
     assert "audit: 0 problem(s)" in capsys.readouterr().out
     cov(tmp_path, {"cafe/pm/a.py": (10, 1)})
-    os.utime(tmp_path / "coverage.json", (2_000_000, 2_000_000))
+    audit.write_pytest_receipt(tmp_path)
     assert audit.main(["--pytest-done"]) == 1 and "coverage cafe/pm: 10.0 % < 90 %" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("age, said", [(None, "no coverage.json"), (5, "coverage.json is older than cafe/pm/a.py")])
-def test_pytest_done_fails_without_a_coverage_json_or_with_one_older_than_the_code(tmp_path, monkeypatch, capsys, age, said):
+def edit_keeping_mtime(path, text):
+    t = path.stat().st_mtime_ns
+    path.write_text(text)
+    os.utime(path, ns=(t, t))                                                              # what `rsync -a` leaves of a file edited during the run
+
+
+@pytest.mark.parametrize("how, said", [
+    ("no coverage", "no coverage.json"),
+    ("no receipt", "no coverage.receipt.json: nothing says the suite passed"),
+    ("code edited", "cafe/pm or tests differ from the code the suite ran on"),
+    ("test edited", "cafe/pm or tests differ from the code the suite ran on"),
+    ("code edited, older mtime", "cafe/pm or tests differ from the code the suite ran on"),
+    ("other coverage", "coverage.json is not the one the suite's receipt was written for"),
+    ("receipt says failed", "does not say the suite passed"),
+    ("receipt damaged", "is not valid JSON"),
+])
+def test_r11_m10_pytest_done_fails_without_a_passed_suite_on_this_exact_code(tmp_path, monkeypatch, capsys, how, said):
+    """A file edited after the run with its time set back (rsync -a) passed `coverage_stale`, as did a coverage.json written by a suite that failed."""
     monkeypatch.setattr(audit, "_run", lambda cmd: (0, ""))
-    pytest_done_root(tmp_path, monkeypatch, age=age)
+    pytest_done_root(tmp_path, monkeypatch, receipt=how != "no receipt", coverage=how != "no coverage")
+    src, test, rec = tmp_path / "cafe" / "pm" / "a.py", tmp_path / "tests" / "test_a.py", tmp_path / audit.PYTEST_RECEIPT
+    if how == "code edited":
+        src.write_text("x = 2\n")
+    elif how == "test edited":
+        test.write_text("def test_a():\n    assert False\n")
+    elif how == "code edited, older mtime":
+        edit_keeping_mtime(src, "x = 2\n")
+    elif how == "other coverage":
+        cov(tmp_path, {"cafe/pm/a.py": (10, 9)})
+    elif how == "receipt says failed":
+        rec.write_text(json.dumps(dict(json.loads(rec.read_text()), suite_ok=False)))
+    elif how == "receipt damaged":
+        rec.write_text("{not json")
     assert audit.main(["--pytest-done"]) == 1
-    assert f"AUDIT FAIL: pytest-done: {said}" in capsys.readouterr().out
+    assert said in capsys.readouterr().out
+
+
+def test_r11_m10_the_receipt_is_written_only_by_its_own_option_for_a_coverage_json_that_is_there(tmp_path, monkeypatch, capsys):
+    pytest_done_root(tmp_path, monkeypatch, receipt=False, coverage=False)
+    assert audit.main(["--pytest-receipt"]) == 2 and "no coverage.json" in capsys.readouterr().out and not (tmp_path / audit.PYTEST_RECEIPT).exists()
+    cov(tmp_path, {"cafe/pm/a.py": (10, 10)})
+    assert audit.main(["--pytest-receipt", "--code-only"]) == 2 and "takes no other option" in capsys.readouterr().out
+    assert audit.main(["--pytest-receipt"]) == 0 and "wrote coverage.receipt.json" in capsys.readouterr().out
+    rec = json.loads((tmp_path / audit.PYTEST_RECEIPT).read_text())
+    assert rec["suite_ok"] is True and rec["code_digest"] == audit.suite_digest(tmp_path) and rec["coverage_sha256"] == sha256(tmp_path / "coverage.json")
+    assert audit.coverage_stale(tmp_path) == []
 
 
 def test_pytest_done_takes_no_other_option_and_the_full_audit_still_runs_pytest(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(audit, "_run", lambda cmd: pytest.fail("a step ran"))
-    for other in ("--code-only", "--ledgers-only", "--mutation-record"):
+    for other in ("--code-only", "--ledgers-only", "--mutation-record", "--pytest-receipt"):
         assert audit.main(["--pytest-done", other]) == 2 and "--pytest-done takes no other option" in capsys.readouterr().out
     calls = []
     monkeypatch.setattr(audit, "_run", lambda cmd: calls.append(cmd) or (0, ""))
-    pytest_done_root(tmp_path, monkeypatch, age=None)
+    pytest_done_root(tmp_path, monkeypatch, receipt=False, coverage=False)
     audit.main([])
     assert sum("pytest" in c for c in calls) == 2                                          # without the option nothing changed
 
@@ -619,7 +659,7 @@ def test_review_round_6_m20_a_wrong_path_or_option_is_refused_before_any_step_ru
     assert audit.main(["/nonexistent"]) == 2
     assert "error: /nonexistent is not a run directory (the run directories are runs/quick, runs/overnight, runs/4h)" in capsys.readouterr().out
     assert audit.main(["--ledger-only", str(make_run(tmp_path))]) == 2
-    assert "error: unknown option --ledger-only (--code-only, --ledgers-only, --mutation-record, --pytest-done)" in capsys.readouterr().out
+    assert "error: unknown option --ledger-only (--code-only, --ledgers-only, --mutation-record, --pytest-done, --pytest-receipt)" in capsys.readouterr().out
     monkeypatch.setattr(audit, "banned", lambda: [])
     monkeypatch.setattr(audit, "mutation_problems", lambda root: [])
     assert audit.main(["--ledgers-only", str(make_run(tmp_path / "ok"))]) == 0                  # a good run directory and a known option still go through
@@ -1102,3 +1142,84 @@ def test_p34_the_derived_layer_rebuilt_by_a_later_run_gets_the_same_note(tmp_pat
     _rebuild(store, "key-2")
     assert audit.ledger_problems(run) == []
     assert f"note: run: stage report: input {store}: {REBUILT}" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 11, M-2
+
+def make_recorded_run(tmp_path):
+    """make_run with what the report stage records since round 11: the run's mission.yaml and plan.json by their bare names."""
+    run = make_run(tmp_path)
+    (run / "mission.yaml").write_text("verdict: {go: 0.9, nogo: 0.6}\n")
+    (run / "plan.json").write_text('{"workers": 2}')
+    p = ledger_path(run, "report")
+    d = json.loads(p.read_text())
+    d["inputs"] += [dict(ref=n, sha256=sha256(run / n)) for n in ledger.RUN_ROOT_FILES]
+    p.write_text(json.dumps(d))
+    return run
+
+
+@pytest.mark.parametrize("name, text", [("mission.yaml", "verdict: {go: 0.2, nogo: 0.1}\n"), ("plan.json", '{"workers": 2} ')])
+def test_r11_m2_an_edit_of_the_runs_mission_or_plan_is_an_audit_problem(tmp_path, name, text):
+    run = make_recorded_run(tmp_path)
+    assert audit.ledger_problems(run) == []
+    (run / name).write_text(text)
+    assert any(f"stage report: input {run / name} changed since the stage ran" in p for p in audit.ledger_problems(run))
+
+
+def test_r11_m2_a_copy_of_the_run_finds_its_own_mission_and_plan(tmp_path):
+    run = make_recorded_run(tmp_path / "a")
+    copy = tmp_path / "b" / "run"
+    shutil.copytree(run, copy)
+    assert audit.ledger_problems(copy) == []
+    (copy / "plan.json").write_text("{}")
+    assert any(f"input {copy / 'plan.json'} changed" in p for p in audit.ledger_problems(copy))
+    assert audit.ledger_problems(run) == []                                           # the original is not borrowed for the copy's file
+    assert ledger.resolve("plan.json", tmp_path / "renamed", set()) == tmp_path / "renamed" / "plan.json"      # by its bare name, whatever the run is called
+
+
+def test_r11_m2_a_run_from_before_the_record_is_clean_and_the_audit_says_what_it_cannot_see(tmp_path, capsys):
+    run = make_run(tmp_path)
+    assert audit.ledger_problems(run) == [] and audit.root_files_unrecorded(run)
+    assert not audit.root_files_unrecorded(make_recorded_run(tmp_path / "x"))
+    capsys.readouterr()
+    assert audit.main(["--ledgers-only", str(run)]) == 0
+    assert "records neither mission.yaml nor plan.json" in capsys.readouterr().out
+
+
+def test_r11_m25_a_ledger_whose_machine_block_is_not_a_mapping_is_a_damaged_line_not_a_traceback(tmp_path):
+    """`_same_place` calls `.get` on the ledger's `machine`; of the three types `ledger_problems` catches this is the AttributeError one."""
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "manifest.json").write_text("{}")
+    run = make_run(tmp_path)
+    snap = run / "ingest" / "m.json"
+    snap.parent.mkdir(exist_ok=True)
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.snapshot(cache / "manifest.json", snap)
+        L.output(run / "report.out")
+    assert audit.ledger_problems(run) == []
+    edit(run, "report", lambda d: d.update(machine="x"))
+    probs = audit.ledger_problems(run)
+    assert len(probs) == 1 and "stage report: ledger" in probs[0] and "is damaged or incomplete (AttributeError" in probs[0]
+
+
+def test_r11_m25_a_coverage_file_with_a_summary_that_is_not_a_mapping_is_a_damaged_line_too(tmp_path):
+    """The other three types of `coverage_problems`' tuple are cases of test_lb0_...; a `summary` of 5 is the TypeError one."""
+    cov = tmp_path / "coverage.json"
+    cov.write_text('{"files": {"cafe/pm/a.py": {"summary": 5}}}')
+    probs = audit.coverage_problems(cov)
+    assert len(probs) == 1 and probs[0].startswith(f"coverage: {cov} is damaged or incomplete (TypeError")
+
+
+@pytest.mark.parametrize("ledger_text", ['{"inputs": 5}', '{"inputs": null}', "{cut", "[1]", None])
+def test_r11_m25_a_report_ledger_that_cannot_be_read_is_not_a_run_from_before_the_record(tmp_path, ledger_text):
+    """`root_files_unrecorded` is a note about a readable ledger; an unreadable one (`ledger_problems` names it), a missing one and one whose `inputs` is no
+    list say nothing."""
+    run = make_run(tmp_path)
+    p = ledger_path(run, "report")
+    if ledger_text is None:
+        p.unlink()
+    else:
+        p.write_text(ledger_text)
+    assert audit.root_files_unrecorded(run) is False

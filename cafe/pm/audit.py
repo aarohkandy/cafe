@@ -28,7 +28,7 @@ import ast, datetime as dt, hashlib, importlib.metadata, json, pathlib, platform
 from typing import Any
 
 from .env.remote import sha256, tree_sha256
-from .ledger import STAGES, hashed, resolve, run_roots, shared_changes
+from .ledger import RUN_ROOT_FILES, STAGES, hashed, resolve, run_roots, shared_diff
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BANNED = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError)\b|\bplaceholder\b|pytest\.skip|mark\.skip|skipif|xfail|\bskip\("
@@ -117,8 +117,9 @@ def _shared_problems(run: str, st: str, snap: pathlib.Path, shared: pathlib.Path
     """`snap` is the copy of a shared cache manifest the stage used (`Ledger.snapshot`; `shared` is where it came from). The shared manifest is no part
     of the check: it is rewritten when a later run grows the cache (a wider box or window, another 3-D hour) and a window outside the cached one replaces
     it, which changes nothing the run read. What the run read is the files the copy names, so each of them still has to lie in the cache directory with the
-    hash the copy has (`ledger.shared_changes`, which `done` uses too). Where the cache directory is not there, `here` (the run is on the machine and in the
-    place it was made: `_same_place`) makes that a problem, a deleted or moved cache; a copied run has nothing to compare with, and says so on stderr."""
+    hash the copy has (`ledger.shared_diff`; `done` asks `ledger.shared_changes`, its union). Where the cache directory is not there, `here` (the run
+    is on the machine and in the place it was made: `_same_place`) makes that a problem, a deleted or moved cache; a copied run has nothing to compare
+    with, and says so on stderr. A part a later ingest refetched, which the live manifest vouches for, is a note on stderr too (round 11, M-8)."""
     root = shared.parent
     if not root.is_dir():
         if here:
@@ -126,7 +127,11 @@ def _shared_problems(run: str, st: str, snap: pathlib.Path, shared: pathlib.Path
         print(f"note: {run}: stage {st}: cache directory {root} is not here; the files {snap.name} names were not compared", file=sys.stderr)
         return []
     out: list[str] = []
-    for f, sha, now in shared_changes(_read_json(snap), root):
+    changes, rewrites = shared_diff(_read_json(snap), root)
+    for f, was, new in rewrites:                                    # round 11, M-8: refetched by a later ingest, as the cache's manifest says: a note
+        print(f"note: {run}: stage {st}: input {f}: the part this run read was refetched by a later ingest (the cache manifest lists the new bytes, "
+              f"sha256 {new[:12]} against {was[:12]} in {snap.name}); this run can no longer be re-checked against it", file=sys.stderr)
+    for f, sha, now in changes:
         out.append(f"{run}: stage {st}: input {f} is missing (the stage read it, {snap.name} lists it); run `fetch` again" if now is None else
                    f"{run}: stage {st}: input {f} changed since the stage ran (sha256 {now[:12]} against {sha[:12]} in {snap.name}): "
                    "the cache file was edited, or rebuilt by a later run")
@@ -354,7 +359,7 @@ def mutation_problems(root: pathlib.Path = ROOT) -> list[str]:
     return []
 
 
-OPTIONS = ("--code-only", "--ledgers-only", "--mutation-record", "--pytest-done")
+OPTIONS = ("--code-only", "--ledgers-only", "--mutation-record", "--pytest-done", "--pytest-receipt")
 # The real-time tests (ArduCopter and its fake firmware bind sockets and wait on the wall clock): they fail under parallel load, so they run alone in the
 # second pass. The same seven that pyproject.toml deselects for mutmut (tests/test_config_docs.py holds the two lists equal). The last two measure the
 # emulator's query time against BRIEF 2.7's 10 ms: beside parallel workers they read the load, not the code (round 8 M-5).
@@ -372,14 +377,59 @@ def pytest_passes(workers: int) -> list[list[str]]:
             base + ["--cov-append", "--cov-report=json:coverage.json", *SERIAL_TESTS]]
 
 
+def root_files_unrecorded(run_dir: str | pathlib.Path) -> bool:
+    """True for a run whose report ledger exists and names neither `mission.yaml` nor `plan.json` as an input: made before round 11, so an edit of either is
+    not seen by `ledger_problems` (the report refuses a verdict that its cut-offs do not give, which covers the mission file)."""
+    try:
+        d = _read_json(pathlib.Path(run_dir) / "checkpoints" / "report" / "ledger.json")
+        return not any(isinstance(i, dict) and i.get("ref") in RUN_ROOT_FILES for i in d.get("inputs", []))
+    except (_Unreadable, TypeError):  # no or damaged ledger, or `inputs` not a list: `ledger_problems` says so
+        return False
+
+
+PYTEST_RECEIPT = "coverage.receipt.json"        # beside coverage.json: {code_digest, coverage_sha256, suite_ok, date}, written only for a suite that passed
+
+
+def suite_digest(root: pathlib.Path = ROOT) -> str:
+    """sha256 over the code the suite measures and the tests it runs (every .py under cafe/pm and tests), by path and content, so that a file edited after
+    the run is seen whatever its modification time says (rsync -a sets it back; round 11, M-10)."""
+    h = hashlib.sha256()
+    for d in ("cafe/pm", "tests"):
+        for f in sorted(f for f in (root / d).rglob("*.py") if "__pycache__" not in f.parts):
+            h.update(str(f.relative_to(root)).encode() + b"\0" + f.read_bytes())
+    return h.hexdigest()
+
+
+def write_pytest_receipt(root: pathlib.Path = ROOT) -> dict[str, Any]:
+    """The receipt that the suite passed on the code as it is now: the digest of that code and the sha256 of the coverage.json written with it.
+    bin/proot_suite.sh writes it when every job passed; after a suite run by hand the person who saw it pass writes it
+    (`python -m cafe.pm.audit --pytest-receipt`)."""
+    rec: dict[str, Any] = dict(code_digest=suite_digest(root), coverage_sha256=sha256(root / "coverage.json"), suite_ok=True,
+                               date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+    (root / PYTEST_RECEIPT).write_text(json.dumps(rec, indent=1) + "\n")
+    return rec
+
+
 def coverage_stale(root: pathlib.Path = ROOT) -> list[str]:
-    """Problems with coverage.json as the receipt that pytest ran on this code: absent, or older than the newest file under cafe/pm."""
+    """Problems with coverage.json as the receipt that pytest ran on this code: absent; no receipt that the suite passed (`coverage json` writes the file
+    whether the tests passed or not); a receipt for other code (a source or test file differs in content, whatever its modification time) or for another
+    coverage.json."""
     cov = root / "coverage.json"
     if not cov.is_file():
         return ["pytest-done: no coverage.json: run the suite with coverage first (bin/proot_suite.sh <dir> <K> <tag> --cov)"]
-    newest = max((f for f in (root / "cafe" / "pm").rglob("*") if f.is_file() and "__pycache__" not in f.parts), key=lambda f: f.stat().st_mtime, default=None)
-    if newest is not None and newest.stat().st_mtime > cov.stat().st_mtime:
-        return [f"pytest-done: coverage.json is older than {newest.relative_to(root)}: the tests did not run on this code"]
+    try:
+        rec = _read_json(root / PYTEST_RECEIPT) if (root / PYTEST_RECEIPT).is_file() else None
+    except _Unreadable as e:
+        return [f"pytest-done: {e}; run the suite again"]
+    if rec is None:
+        return [f"pytest-done: no {PYTEST_RECEIPT}: nothing says the suite passed (bin/proot_suite.sh writes it when every job passes; after a suite you ran "
+                "by hand and saw pass, `python -m cafe.pm.audit --pytest-receipt`)"]
+    if rec.get("suite_ok") is not True:
+        return [f"pytest-done: {PYTEST_RECEIPT} does not say the suite passed"]
+    if rec.get("code_digest") != suite_digest(root):
+        return ["pytest-done: cafe/pm or tests differ from the code the suite ran on (the receipt's digest): the tests did not run on this code"]
+    if rec.get("coverage_sha256") != sha256(cov):
+        return ["pytest-done: coverage.json is not the one the suite's receipt was written for"]
     return []
 
 
@@ -395,6 +445,16 @@ def main(argv: list[str]) -> int:
     if "--pytest-done" in argv and any(a.startswith("--") and a != "--pytest-done" for a in argv):
         print("error: --pytest-done takes no other option (it is the whole audit except pytest)")
         return 2
+    if "--pytest-receipt" in argv:
+        if argv != ["--pytest-receipt"]:
+            print("error: --pytest-receipt takes no other option or run directory")
+            return 2
+        if not (ROOT / "coverage.json").is_file():
+            print("error: no coverage.json: run the suite with coverage first, and write the receipt only for a suite you saw pass")
+            return 2
+        write_pytest_receipt(ROOT)
+        print(f"wrote {PYTEST_RECEIPT}")
+        return 0
     if "--mutation-record" in argv:
         try:
             rec = mutation_record(ROOT)
@@ -411,6 +471,8 @@ def main(argv: list[str]) -> int:
     problems: list[str] = []
     for r in runs:
         problems += ledger_problems(r)
+        if root_files_unrecorded(r):
+            print(f"note: {r}: the report ledger records neither mission.yaml nor plan.json (a run from before round 11): an edit of either is not seen here")
     if not ledgers_only:
         problems += banned()
         problems += mutation_problems(ROOT)

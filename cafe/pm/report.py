@@ -278,6 +278,12 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     if nonfinite:
         raise ConfigError(f"{src}: verdict.{', verdict.'.join(nonfinite)} is not a finite number: the summary was edited or is damaged; run it again (--fresh)")
     exercised = v["verdict"] != NOT_EXERCISED                       # a link never required: no member count decides it (region None, nothing more to say)
+    if exercised:                                                   # round 11, M-2: the stored verdict is what these counts give under the cut-offs now loaded
+        again = intervals.verdict(e["k_fail"], e["n"], v["conf"])["verdict"]
+        if again != v["verdict"]:
+            raise ConfigError(f"{src}: the verdict is {v['verdict']} but {e['k_fail']} failures of {e['n']} members give {again} under the mission's cut-offs "
+                              f"(GO from success {1 - intervals.P_FAIL_GO:.3g}, NO-GO below {1 - intervals.P_FAIL_NOGO:.3g}): mission.yaml or the summary was "
+                              "edited or is damaged; run it again (--fresh)")
     fail_lo = intervals.interval(e["k_fail"], e["n"], 0.95)[0]
     open_ = exercised and fail_lo < 0.05                            # round 10, M-4: only an ensemble that leaves P(fail) < 5 % open has a count to ask for
     unc = dict(kind=f"{v['method']} interval", conf=v["conf"], lo=v["fail_lo"], hi=v["fail_hi"])
@@ -427,6 +433,7 @@ def _cases(tr: Trace, vid: str, n: int) -> list[dict[str, Any]]:
     out = []
     for i, c in enumerate(stored):
         src = f"stage1b/{SENSITIVITY} {vid}[{i}]"
+        credibility.check_counts(c["k_fail"], c["n"], src)
         out.append(dict(case=c["case"], verdict=c["verdict"], note=c.get("note", ""), paired=c["n"] == n, k_fail=num(c["k_fail"], "members", ref, src),
                         n=num(c["n"], "members", ref, src), p_fail=num(c["k_fail"] / c["n"], "fraction", ref, src + " (k_fail / n)")))
     return out
@@ -1039,6 +1046,7 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
     s1b = _jl(run / "stage1b" / "summary.json")
     if s1b is None:
         raise ConfigError(f"{run / 'stage1b' / 'summary.json'}: {NOT_PRESENT.format('stage1b/summary.json')}; this is not a finished run: rerun it (--fresh)")
+    credibility.check_summary(s1b)
     res, why = _load_res(run, tr)
     files = (("windows", "windows.json"), ("stage3", "windows.json"), ("refit", "refit.json"), ("emulator", "holdout.json"), ("emulator", "flip.json"),
              ("emulator", "design.json"))

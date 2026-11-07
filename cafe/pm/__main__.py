@@ -24,7 +24,7 @@ import argparse, os, pathlib, sys, webbrowser
 from typing import Any
 
 from . import acceptance, audit, budget, ledger, par, pipeline, report, stage1, whatif
-from .config import ConfigError, ResourceError, damaged_run_files as _run_files, json_object as _json_object, load_mission
+from .config import ConfigError, ResourceError, damaged_run_files as _run_files, json_object as _json_object, load_mission, os_error_text
 from .stats import intervals
 
 
@@ -173,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     except OSError as e:                                                 # round 10, M-5: a named path (--out, --run, ...) that cannot be made or read
         if not _names_a_path_given(e, a):
             raise                                                        # the program's own file (the emulator table's lock, a cache): a traceback, exit 1
-        print(f"error: {e}", file=sys.stderr)
+        print(f"error: {os_error_text(e)}", file=sys.stderr)
         return 2
     return 0
 
@@ -262,8 +262,8 @@ def _hangar(name: str) -> int:
             loader.load_platform(name)
         elif bad := table_provenance(raw):
             raise ValueError(f"table numbers without a source or an assumed+why: {bad}")
-    except ValueError as e:
-        print(f"{name} ({cls}): provenance FAILED: {e}")
+    except (ValueError, KeyError, TypeError, AttributeError) as e:  # as config._check_platform: a file of the wrong shape fails the check
+        print(f"{name} ({cls}): provenance FAILED: {e if isinstance(e, ValueError) else f'{type(e).__name__}: {e}'}")
         return 1
     items = pipeline.provenance(raw, name)                                       # the items credibility.json counts (round 10, M-32)
     print(f"{name} ({cls}): provenance OK, {sum(i['assumed'] for i in items)} of {len(items)} items assumed")
@@ -271,6 +271,18 @@ def _hangar(name: str) -> int:
         why = "ASSUMED: " + i["why"] if i["assumed"] else "source: " + i["source"]
         print(f"  {i['path']} = {i['value']} {i['unit']}  [{why[:110]}]")
     return 0
+
+
+def _model_note(finished: bool, fitted: bool, refit_file: bool) -> str | None:
+    """Why a what-if baseline can differ from the P(fail) in the run's report: that is made with the TAO-fitted priors and the refit multipliers, and a
+    what-if with no finished run, or with a run that lacks either file, uses perturbations.yaml as it stands (round 11, M-3). None when both were read.
+    A run with no moorings legitimately has no priors_fitted.json."""
+    files = ([] if fitted else ["priors_fitted.json"]) + ([] if refit_file else ["refit.json"])
+    if not files:
+        return None
+    made = ([] if fitted else ["the TAO-fitted priors (the perturbations.yaml defaults stand)"]) + ([] if refit_file else ["the refit multipliers"])
+    why = f"the run has no {' and no '.join(files)}" if finished else "there is no finished run"
+    return f"note: this what-if is made without {' and '.join(made)} that the report's P(fail) uses ({why}), so a baseline can differ from it"
 
 
 def _whatif(a: argparse.Namespace) -> int:
@@ -303,8 +315,11 @@ def _whatif(a: argparse.Namespace) -> int:
             fitted = _json_object(pf) if pf.is_file() else None
             if res is None:
                 print(f"note: {why}; every changed vehicle goes to Stage 1")
+            if line := _model_note(True, pf.is_file(), rf.is_file()):
+                print(line, file=sys.stderr)                 # stderr: the lines on stdout are the answer, which scripts read by position
         else:
             print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {a.budget} budget")
+            print(_model_note(False, False, False), file=sys.stderr)
     ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m))
     ans = whatif.answer(m, ops, base, tracks, ctx.env, ems, ctx.plan, fitted, scales, only=a.vehicle)
     what = [f"{ops['shift_h']:+g} h" if a.shift else "", f"{ops['dlon']:+g} deg lon, {ops['dlat']:+g} deg lat" if a.move else "",

@@ -7,6 +7,7 @@ bathymetry, the stand-in THREDDS tree of tests/test_tao.py, and an NCSS stand-in
 import http.server
 import io
 import json
+import pathlib
 import shutil
 import threading
 import urllib.parse
@@ -351,6 +352,31 @@ def test_p32_a_grown_orca_cache_leaves_the_audit_of_an_earlier_run_clean_and_a_c
     assert any(f"input {snap} changed since the stage ran" in x for x in ingest_problems(run))
 
 
+def test_r11_m9_the_ingest_takes_what_it_reads_of_the_orca_and_tao_manifests_from_the_copy_it_recorded(tmp_path, data_copy, monkeypatch):
+    """The stage read the shared orca manifest, then copied it, then read it again for the key of the derived layer; the TAO stage copied it and then
+    loaded from the shared file. A fetch of another run between the reads makes the recorded copy differ from what the stage used."""
+    forbid_downloads(monkeypatch)
+    man_o = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
+    man_t = tao.cache_dir(data_copy) / "manifest.json"
+    hours = json.loads(man_o.read_text())["hours"]
+    real = ledger.copy_manifest
+
+    def swapped(src, dest):
+        if pathlib.Path(src) == man_o:                                                  # another run grows the cache just before the copy ...
+            man_o.write_text(json.dumps(dict(json.loads(man_o.read_text()), hours=hours + 7)))
+        got = real(src, dest)
+        if pathlib.Path(src) == man_t:                                                  # ... and rewrites the TAO manifest just after it
+            man_t.write_text(json.dumps(dict(json.loads(man_t.read_text()), selected={})))
+        return got
+    monkeypatch.setattr(ledger, "copy_manifest", swapped)
+    run = tmp_path / "r"
+    d = run_stage(pipeline.s_ingest, ctx_for(run), "ingest")
+    copy = json.loads((run / "ingest" / "orca_manifest.json").read_text())
+    assert copy["hours"] == hours + 7 and check_of(d, "orca_hours_cover_window")["value"] == copy["hours"]
+    kept = json.loads((run / "ingest" / "tao_manifest.json").read_text())
+    assert kept["selected"] and check_of(d, "tao_moorings_compared")["ok"]
+
+
 def test_lb0_a_derived_layer_rebuilt_on_other_code_leaves_the_audit_of_an_earlier_run_clean_and_a_damaged_one_does_not(tmp_path, data_copy, monkeypatch):
     """P-34 (derived layer), the case that reached the report: the layer's key holds the code digest, so the first run after any code change rebuilt the one
     shared `cache/<mission>/derived.zarr` in place and every earlier run in the data directory read 'input .../derived.zarr changed since the stage ran ...
@@ -466,3 +492,19 @@ def test_a_fresh_ingest_downloads_gofs_tao_and_gebco_then_a_second_one_downloads
     n_ncss, n_srv = len(ncss.log), len(srv.log)
     run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r2"), "ingest")
     assert len(ncss.log) == n_ncss and len(srv.log) == n_srv
+
+
+def test_r11_m25_a_gebco_cut_without_its_attrs_or_with_its_zip_cut_short_is_not_cached(data_copy):
+    """`_gebco_cached` names four errors: a missing file (OSError) and a changed raster (ValueError) are tested above; a cut that lacks a member is a
+    KeyError, and one cut short is a BadZipFile, which is not an OSError or a ValueError."""
+    p = bathy.cache_path(BOX, data_copy / "bathy")
+    was = p.read_bytes()
+    assert pipeline._gebco_cached(p)
+    z = dict(np.load(p))
+    del z["attrs"]
+    np.savez_compressed(p, **z)
+    assert not pipeline._gebco_cached(p)
+    p.write_bytes(was[: len(was) // 2])
+    assert not pipeline._gebco_cached(p)
+    p.write_bytes(was)
+    assert pipeline._gebco_cached(p)
