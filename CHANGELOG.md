@@ -598,7 +598,8 @@ Round 10 read the q10 quick run (`runs/q10`, code `8b870a6`, made on orca with `
   - The TAO cache of the current selection rule lives in `<data>/tao/s2` (`tao.cache_dir`): the first run on this code fetches TAO again (network needed once, also for a machine that runs with `CAFE_OFFLINE`), and the older cache and the ledgers that hash it are left as they were; DECISIONS 571. The same ledger-against-manifest problem for a cache that grows (a wider box or window) is open as P-32.
   - Report: a stage-3 row takes the time of its own window and is labelled `W<k> <part>`; "Time not shown" no longer appears on a USV with one window; DECISIONS 572.
   - `hycom.box360` refuses a box wider than the circle; the `acceptance --out` help names the foreign-runs refusal; DECISIONS 573.
-- Pending at the gate: the test counts; re-store the slow stage-3 results (`nest.py` changed, so `lbm.physics_sha()` did) and `receipts --slow`; one online `fetch` on each data directory (TAO is selected again, above); `make bench` on each machine used and `make mutation` at code freeze as before (`physics/usv.py` changed).
+- Gate on `4c95c40`: 3,649 collected and passed; 3,642 in 8 shares, 7 real-time, each id once, 0 failed, 0 skipped, 55 min; coverage 99.993 % of 14,347 statements, 1 missed (`report.py` 1716); the only audit failure is `docs/mutation.json`. The gate agent and five of the six look-ahead lenses died on a network outage; the gate's own run finished and the lead counted it from the junit files.
+- Still pending: re-store the slow stage-3 results (`nest.py` changed, so `lbm.physics_sha()` did) and `receipts --slow`; one online `fetch` on each data directory (TAO is selected again, above); `make bench` on each machine used and `make mutation` at code freeze as before (`physics/usv.py` changed).
 
 ### Known issues
 
