@@ -788,7 +788,8 @@ def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] |
     noise: the pooled sd of the residuals about each mooring's own mean; tau_h: its e-folding time from the lag-1 autocorrelation rho of those
     residuals (0 when rho <= 0, rho capped at 0.999).
     persistent_hi95: the same with the between-mooring variance at its 95 % one-sided upper bound ((k - 1) var / chi2_0.05(k - 1)): the data cannot
-    exclude a persistent sd that large (with 11 moorings the point estimate can sit at the floor of 0 and the bound is still several tenths of a m/s).
+    exclude a persistent sd that large (with the 11 moorings of the demo window in the TAO cache of 29 Oct 2026 the between-mooring part sat at the floor of
+    0, the sd was 0.110 m/s and the bound 0.461; with the 14 of the cache of 6 Nov, after NOAA added delayed-mode files, they are 0.569 and 0.957 m/s).
     None when fewer than two moorings have 3 or more samples (the dispersion between moorings is then not defined)."""
     kept = [x for x in series.values() if np.isfinite(x).sum() >= 3]
     if len(kept) < 2:

@@ -478,7 +478,7 @@ model - mooring:  samples within +-30 min of each hourly model time, vector mean
     speed bias, speed RMSE, vector RMSE; direction bias (FROM, signed, wrapped to +-180, only where both speeds >= 1 m/s); SST bias and RMSE
 ```
 
-Fit on the real window (2023-03-01..07, lead's log): 11 moorings, 1492 hourly pairs.
+Fit on the real window (2023-03-01..07, lead's log): 11 moorings, 1492 hourly pairs (the TAO cache of 29 Oct 2026, the fit of q5 to q10; the cache of 6 Nov has 14 moorings with wind, see after the priors below).
 
 | Quantity (WRF minus TAO) | Bias | RMSE |
 |---|---|---|
@@ -487,7 +487,7 @@ Fit on the real window (2023-03-01..07, lead's log): 11 moorings, 1492 hourly pa
 | SST | -0.11 K | 0.26 K |
 
 Fitted Stage-1 priors (`pipeline._tao`, written to `ingest/priors_fitted.json`, read by `stage1.priors_for`). The mean is the correction that removes the model bias (sign flipped): `mean` is minus the mooring-mean error, that is mooring minus WRF, the correction `perturb.py` adds to WRF, while the error itself is WRF minus mooring (+0.62 m/s and -7.2 deg in the table above); the citation in `priors_fitted.json` says so (review round 10, M-25). Superseded first form, the
-round-1 prior (the whole residual sd as a member-wide bias): `N(-0.62, 1.33) m/s` and `N(+7.2, 23.7) deg`. The current fit (DECISIONS 182, 209) on the real window (the demo's `priors_fitted.json`):
+round-1 prior (the whole residual sd as a member-wide bias): `N(-0.62, 1.33) m/s` and `N(+7.2, 23.7) deg`. The current fit (DECISIONS 182, 209) on the real window with those 11 moorings (the demo's `priors_fitted.json` of q5; q10 gave -0.610, 0.110, 1.284 m/s and 6.41 h, +7.21, 2.63, 22.2 deg and 11.1 h):
 
 ```
 wind_speed_bias      ~ N(-0.616, 0.113) m/s      persistent part only
@@ -495,6 +495,17 @@ wind_direction_bias  ~ N(+7.21,  2.63)  deg
 wind_speed_noise     sd 1.283 m/s,  tau 6.43 h   per-member stationary AR(1) about each mooring's own mean
 wind_direction_noise sd 22.2 deg,   tau 11.1 h
 ```
+
+The same fit on the cache of 6 Nov 2026 (q10lb, `6c1fde7`, DECISIONS 589): NOAA had added delayed-mode files (created 5 Nov) for T5N180W, T5S165E and T5S170W, so 14 moorings have a QC-good wind in the window, and it had regenerated the three files of T5S180W.
+
+```
+wind_speed_bias      ~ N(-0.469, 0.569) m/s      95 % upper bound of the persistent sd 0.957
+wind_direction_bias  ~ N(+6.24,  5.25)  deg      95 % upper bound 12.15
+wind_speed_noise     sd 1.461 m/s,  tau 5.52 h
+wind_direction_noise sd 24.6 deg,   tau 8.63 h
+```
+
+The persistent sd is 5 times the 11-mooring one, and one mooring decides it: T5S165E has a speed bias of -1.482 m/s where the others have +0.07 to +1.14, and without it (13 moorings) the sd is 0.155. It is a property of 6 days and 11 to 14 moorings (limitation L19), not a measured spread. The environment sigma `sst_k` went from 0.259 to 0.303 K with the two new SST records (T5S165E, T5N180W), which changes nothing in stage 1. The fit code is the same for both: q10's priors on the code of `6c1fde7` give q10's counts (`review/round_10/moved_numbers.md`).
 
 Review round 2 (M-1, DECISIONS 182) found the round-1 prior wide, not conservative: the whole residual sd, hourly scatter included, became a member-wide persistent bias held for six days,
 because `PerturbedEnv` had no time-varying wind error term, and the data support a persistent part about three times smaller (the 11 per-mooring time-mean speed biases have mean

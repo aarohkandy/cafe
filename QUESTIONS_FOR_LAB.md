@@ -77,7 +77,9 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
 
    7a. **Should the persistent wind prior be its 95 % upper bound?** The TAO fit gives a persistent wind-speed sd of 0.113 m/s from 11 moorings in
    one 6-day regime, a boundary estimate (the sampling variance of a mooring mean, about 0.15, is as large as the variance between the 11 moorings, 0.14, so the true spread
-   is estimated as 0 and the 0.113 is only the uncertainty of the mean of 11 moorings).
+   is estimated as 0 and the 0.113 is only the uncertainty of the mean of 11 moorings). On the TAO cache of 6 Nov 2026, which holds delayed-mode files NOAA added on 5 Nov,
+   14 moorings have a wind in the window and the same fit gives 0.569 m/s (95 % upper bound 0.957; direction 5.25 deg, bound 12.15): the figure depends on which moorings
+   exist, and one mooring (T5S165E) decides it (0.155 without it).
    Its one-sided 95 % upper bound is about 0.5 m/s (`value_hi95` in `ingest/priors_fitted.json`; the literature prior was 2.0 m/s), and regime-to-regime
    bias outside the six days is not sampled. *Default:* the point estimate stays the prior (BRIEF 5.2); the report prints both, and `docs/CREDIBILITY.md`
    lists the question as L19. *If the bound should replace it:* a decision, then a small code change in `pipeline._tao` (write the bound as `value`).
