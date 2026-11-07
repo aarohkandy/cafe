@@ -740,6 +740,17 @@ class _Sim1:
                                 battery=dict(voltage=volt, current=float(self.pe[0]) / volt))) + "\n").encode()
 
 
+def _ship_rel(ship: Ship, t_launch: float, ship0: Arr, t: float) -> Arr:
+    """(3,) east, north, 0 of the ship `t` seconds after the launch, relative to where it was at the launch: the frame of `_Sim1.p`
+    (which starts at zero) and of the firmware's home. The waypoints are added to it (round 11, M-13: the ship's absolute position was)."""
+    return np.append(np.asarray(ship(t_launch + t), float).reshape(-1)[:2] - ship0, 0.0)
+
+
+def _reached(pos: Arr, tgt: Arr, tol_h: float, tol_v: float) -> bool:
+    """The vehicle `pos` and the target `tgt`, both launch-relative (east, north, up), are within tol_h horizontally and tol_v vertically."""
+    return bool(math.hypot(*(np.asarray(pos, float)[:2] - np.asarray(tgt, float)[:2])) < tol_h and abs(pos[2] - tgt[2]) < tol_v)
+
+
 # mutation: not mutated. The driver of the external ArduCopter firmware: only a real binary reaches it, and its tests run wall-clock sockets
 # that fail on a loaded host, so a mutant run would score the load, not the tests.
 def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), plat: Optional[dict[str, Any]] = None, wp: Arr = None, turb: Arr = None,
@@ -857,12 +868,12 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
             def goto(rel: Arr, tol_h: float, tol_v: float, limit_s: float) -> None:
                 t_end = sim.t + limit_s
                 while sim.t < t_end and not stop.is_set():
-                    tgt = np.append(np.asarray(ship(t_launch + sim.t), float)[:2], 0.0) + rel
-                    lo, la = lonlat(SITL_HOME, tgt[0] - ship0[0], tgt[1] - ship0[1])      # the firmware lives around its own home
+                    tgt = _ship_rel(ship, t_launch, ship0, sim.t) + rel                  # launch-relative, like sim.p
+                    lo, la = lonlat(SITL_HOME, tgt[0], tgt[1])                           # the firmware lives around its own home
                     m.mav.set_position_target_global_int_send(0, m.target_system, m.target_component, 6, 0b0000111111111000,
                                                               int(la * 1e7), int(lo * 1e7), float(tgt[2]), 0, 0, 0, 0, 0, 0, 0, 0)
                     pos = np.asarray(sim.p)[:, 0]
-                    if math.hypot(*(pos[:2] - tgt[:2])) < tol_h and abs(pos[2] - tgt[2]) < tol_v:
+                    if _reached(pos, tgt, tol_h, tol_v):
                         return
                     wait_sim(0.5)
 
@@ -910,7 +921,7 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
                     last_rec = sim.t
                     p = np.asarray(sim.p)[:, 0]
                     tr["t"].append(sim.t)
-                    tr["pos"].append(p - np.append(np.asarray(ship(t_launch + sim.t), float)[:2], 0.0))
+                    tr["pos"].append(p - _ship_rel(ship, t_launch, ship0, sim.t))
                     tr["soc"].append(float(sim.soc[0]))
                     tr["tilt"].append(math.degrees(sim.tilt))
                     tr["ewh"].append(float(sim.ewh[0]))

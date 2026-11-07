@@ -244,9 +244,11 @@ def links(solid: jax.Array) -> jax.Array:
 def bounce_back(f_post: jax.Array, f_streamed: jax.Array, link: jax.Array, rho: jax.Array, u_wall: ArrayLike, fmask: jax.Array | None = None,
                 qdist: float | jax.Array = 0.5) -> tuple[jax.Array, jax.Array]:
     """Bounce-back with a moving wall (Ladd 1994): f_qbar(x) = f_q^+(x) - 6 w_q rho (c_q . u_w), wall halfway along the link.
-    qdist: wall distance along each link as a fraction of the link, scalar 0.5 (halfway, staircase) or a (19, nx, ny, nz) array
-    for a curved wall, then Bouzidi, Firdaouss & Lallemand (2001, Phys. Fluids 13, 3452) linear interpolation:
-    q < 1/2: f_qbar = 2q f_q^+(x) + (1-2q) f_q^+(x - c_q);  q >= 1/2: f_qbar = f_q^+(x)/(2q) + (2q-1)/(2q) f_qbar^+(x).
+    qdist: wall distance along each link as a fraction of the link: a scalar (0.5 = halfway, staircase; another scalar is that distance on
+    every link) or a (19, nx, ny, nz) array for a curved wall, then Bouzidi, Firdaouss & Lallemand (2001, Phys. Fluids 13, 3452) linear interpolation:
+    q < 1/2: f_qbar = 2q f_q^+(x) + (1-2q) f_q^+(x - c_q) - 6 w rho (c.u_w);
+    q >= 1/2: f_qbar = [f_q^+(x) - 6 w rho (c.u_w)]/(2q) + (2q-1)/(2q) f_qbar^+(x): the wall term takes the 1/(2q) too, so a
+    wall moving with the fluid at q > 1/2 exerts no force (it is exact at q = 1/2 only without the factor).
     u_wall: (3,) for a rigid wall, or a (3, nx, ny, nz) field (the wall model sets a slip velocity per wall cell).
     Returns (f_new, F): F is the momentum-exchange force on the wall, sum over the links in `fmask` (default: all) of
     c_q (f_q^+ + f_qbar_new) (Mei et al. 2002 for the curved case). For a flat halfway wall and a fluid cell moving at u_1 the
@@ -254,12 +256,14 @@ def bounce_back(f_post: jax.Array, f_streamed: jax.Array, link: jax.Array, rho: 
     uw = jnp.asarray(u_wall, jnp.float32)
     uw = uw.reshape((3,) + (1,) * rho.ndim) if uw.ndim == 1 else uw
     cu = jnp.tensordot(Cj, uw, axes=(1, 0))
-    if isinstance(qdist, float):
+    wall: float | jax.Array = 1.0
+    if isinstance(qdist, (int, float)) and qdist == 0.5:          # the plain halfway wall, by value: another scalar is that distance on every link
         reflected = f_post
     else:
-        q = jnp.clip(qdist, 1e-3, 1.0)
+        q = jnp.clip(jnp.asarray(qdist, jnp.float32), 1e-3, 1.0)
         reflected = jnp.where(q < 0.5, 2 * q * f_post + (1 - 2 * q) * f_streamed, f_post / (2 * q) + (2 * q - 1) / (2 * q) * f_post[OPPj])
-    out = reflected - 6 * _wshape(f_post) * rho[None] * cu                   # population sent back along qbar
+        wall = jnp.where(q >= 0.5, 1 / (2 * q), 1.0)         # Bouzidi: the whole q >= 1/2 expression, wall term too, is divided by 2q
+    out = reflected - 6 * _wshape(f_post) * rho[None] * cu * wall            # population sent back along qbar
     f_new = jnp.where(link[OPPj], out[OPPj], f_streamed)
     F = jnp.einsum("qd,q->d", Cj, jnp.where(link if fmask is None else fmask, f_post + out, 0.0).sum(tuple(range(1, f_post.ndim))))
     return f_new, F
