@@ -516,6 +516,34 @@ def test_p32_a_snapshot_is_the_input_the_stage_read_and_a_resume_ignores_what_a_
     assert done(run, "ingest", "h") is None
 
 
+def test_p32_a_resume_notices_that_a_file_the_copy_names_changed_or_the_cache_is_gone(tmp_path):
+    """`done` hashed the copy only, so a TAO file replaced after the run (the manifest rewritten with its new hash) still resumed the stale ingest."""
+    tdir = tmp_path / "cache" / "s2"
+    (tdir / "M").mkdir(parents=True)
+    f = tdir / "M" / "w.nc"
+    f.write_bytes(b"one")
+    man = tdir / "manifest.json"
+    man.write_text(json.dumps({"files": {"M/w.nc": {"sha256": sha256(f)}}}))
+    run = tmp_path / "run"
+    out = run / "ingest" / "o.json"
+    out.parent.mkdir(parents=True)
+    out.write_text("o")
+    with Ledger(run, "ingest", "h") as L:
+        L.snapshot(man, run / "ingest" / "m.json", kind="cache manifest")
+        L.output(out)
+    assert done(run, "ingest", "h") is not None
+    (tdir / "M" / "new.nc").write_bytes(b"x")                                                # the cache grew: still done
+    man.write_text(json.dumps({"files": {"M/w.nc": {"sha256": sha256(f)}, "M/new.nc": {"sha256": "x"}}}))
+    assert done(run, "ingest", "h") is not None
+    f.write_bytes(b"two")                                                                    # a file the run read was replaced, the manifest rewritten to match
+    man.write_text(json.dumps({"files": {"M/w.nc": {"sha256": sha256(f)}}}))
+    assert done(run, "ingest", "h") is None
+    f.write_bytes(b"one")
+    assert done(run, "ingest", "h") is not None
+    shutil.rmtree(tdir)                                                                      # the cache directory is gone
+    assert done(run, "ingest", "h") is None
+
+
 # ---- look-ahead batch LB0, RC-1 sibling: a ledger that is valid JSON of the wrong shape
 
 @pytest.mark.parametrize("edit", [lambda d: d.pop("outputs"), lambda d: d.pop("inputs"), lambda d: d.update(outputs=[{"sha256": "x"}]),

@@ -778,7 +778,8 @@ def _run_with_manifest_copy(tmp_path, man, copy_to="report/manifest_copy.json"):
     with Ledger(run, "report", "cfg") as L:
         L.input(ledger_path(run, "emulator"))
         L.snapshot(man, run / copy_to, kind="cache manifest")
-        L.output(run / "report.out")
+        (run / "report" / "r.out").write_text("r")                                    # an output in the run's layout: where `_same_place` finds the run
+        L.output(run / "report" / "r.out")
     return run
 
 
@@ -827,14 +828,33 @@ def test_p32_a_tao_file_that_is_gone_or_changed_fails_naming_it_and_a_new_manife
     assert audit.ledger_problems(run) == [f"run: stage report: input {f} is missing (the stage read it, manifest_copy.json lists it); run `fetch` again"]
 
 
-def test_p32_without_the_cache_directory_the_copy_in_the_run_is_all_there_is_to_check(tmp_path):
+def test_p32_without_the_cache_directory_a_run_in_its_own_place_is_told_and_a_copied_one_is_checked_by_its_copy(tmp_path, capsys):
+    """A deleted or moved cache directory used to audit clean for the run that read it (nothing else hashes the TAO files)."""
     cache, _ = _orca_cache(tmp_path)
     run = _run_with_manifest_copy(tmp_path, cache / "manifest.json")
+    copy = tmp_path / "elsewhere" / "run"
+    shutil.copytree(run, copy)
     shutil.rmtree(cache)
-    assert audit.ledger_problems(run) == []                                           # a run copied to a machine with no cache
-    (run / "report" / "manifest_copy.json").write_text('{"parts": {')
-    probs = audit.ledger_problems(run)
+    gone = f"run: stage report: cache directory {cache} is missing (the stage read manifest_copy.json from it); run `fetch` again"
+    assert audit.ledger_problems(run) == [gone]
+    capsys.readouterr()
+    assert audit.ledger_problems(copy) == []                                          # copied: the machine and place differ from what the ledger says
+    assert f"note: run: stage report: cache directory {cache} is not here" in capsys.readouterr().err
+    (copy / "report" / "manifest_copy.json").write_text('{"parts": {')
+    probs = audit.ledger_problems(copy)
     assert any("manifest_copy.json changed since the stage ran" in x for x in probs) and not any("Traceback" in x for x in probs)
+
+
+def test_p32_a_cache_path_recorded_relative_is_judged_where_it_was_not_where_the_audit_runs(tmp_path, monkeypatch):
+    """`shared` was stored as given: a data directory that was relative when the run was made was read against the audit's cwd (no directory, no check)."""
+    cache, _ = _orca_cache(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    run = _run_with_manifest_copy(tmp_path, pathlib.Path("cache/orca/manifest.json"))
+    assert json.loads(ledger_path(run, "report").read_text())["inputs"][-1]["shared"] == str(cache / "manifest.json")
+    monkeypatch.chdir(run)
+    assert audit.ledger_problems(run) == []
+    (cache / "hours" / "wrf_a.npz").write_bytes(b"edited")
+    assert any(f"input {cache / 'hours' / 'wrf_a.npz'} changed since the stage ran" in x for x in audit.ledger_problems(run))
 
 
 def test_p32_a_damaged_copy_beside_a_cache_is_a_problem_naming_the_copy_not_a_traceback(tmp_path):

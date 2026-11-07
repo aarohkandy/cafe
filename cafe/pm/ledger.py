@@ -119,14 +119,14 @@ class Ledger:
     def snapshot(self, src: str | pathlib.Path, dest: str | pathlib.Path, **meta: Any) -> None:
         """A shared cache manifest (TAO, orca) is rewritten in place whenever a later run grows or replaces the cache, so a ledger that hashed it made every
         earlier run's audit say "input changed" (review round 10, P-32). The stage copies the bytes it read into the run (`dest`, atomically) and records
-        the copy as the input, with `shared` = where it came from; the audit checks the copy by hash and the files it names against the shared cache
+        the copy as the input, with `shared` = where it came from (absolute); the audit checks the copy by hash and the files it names against the shared cache
         (`audit._shared_problems`), not the shared manifest. A run directory then carries the manifest the run used."""
         dest = pathlib.Path(dest)
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp = dest.with_name(dest.name + ".part")
         shutil.copyfile(src, tmp)
         os.replace(tmp, dest)
-        self.input(dest, shared=str(src), **meta)
+        self.input(dest, shared=os.path.abspath(src), **meta)       # absolute: a relative one is read against the cwd of whoever audits or resumes later
 
     def seed(self, name: str, value: Any) -> None:
         self.d["seeds"][name] = int(value)
@@ -231,6 +231,23 @@ def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path, roots: set[tup
     return lost or p
 
 
+def shared_changes(man: dict[str, Any], root: pathlib.Path) -> list[tuple[pathlib.Path, str, str | None]]:
+    """What a cache manifest copy `man` (`Ledger.snapshot`) names that is no longer in the cache directory `root` as the run read it, as (file, recorded
+    sha256, sha256 now, None for a file that is gone). An orca per-hour part (`parts`, `hours/<name>`) counts only when it is there and different: the
+    assembled stores that were read are inputs of their own. A TAO file (`files`, `<mooring>/<name>`) counts when it is gone too. The shared manifest is not
+    read: a later run rewrites it (a wider box, another window) without touching these files. The one comparison `done` and `audit` both make."""
+    want = {**{f"hours/{n}": h for n, h in man.get("parts", {}).items()}, **{k: r["sha256"] for k, r in man.get("files", {}).items()}}
+    out: list[tuple[pathlib.Path, str, str | None]] = []
+    for key, sha in want.items():
+        f = root / key
+        if f.is_file():
+            if (now := sha256(f)) != sha:
+                out.append((f, sha, now))
+        elif key in man.get("files", {}):
+            out.append((f, sha, None))
+    return out
+
+
 def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str, Any] | None:
     """The stage's ledger if it finished cleanly with this config and its outputs and hashed inputs are present and unchanged on disk, else None.
     Recorded paths are read where `resolve` finds them, so a run copied under another name resumes against its own files."""
@@ -260,7 +277,11 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
                 return None
             if i.get("tree_sha256") and f.is_dir() and tree_sha256(f) != i["tree_sha256"]:       # a store: every file of it, not the manifest it was made from
                 return None
-    except (KeyError, TypeError, AttributeError) as e:                       # valid JSON of the wrong shape: as a half-written ledger, the stage runs again
+            if i.get("shared") and f.is_file():                              # a copy of a shared cache manifest: the files it names, as the audit asks
+                root = pathlib.Path(i["shared"]).parent
+                if not root.is_dir() or shared_changes(json.loads(f.read_text()), root):
+                    return None
+    except (KeyError, TypeError, AttributeError, ValueError) as e:        # valid JSON of the wrong shape: as a half-written ledger, the stage runs again
         print(f"note: ledger {p} is damaged or incomplete ({type(e).__name__}: {e}): the stage runs again", file=sys.stderr)
         return None
     return d
