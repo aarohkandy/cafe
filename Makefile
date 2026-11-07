@@ -7,7 +7,7 @@ PY      ?= python
 MUTMUT  ?= $(PY) -m mutmut
 MUT_CPUS ?= 3
 
-.PHONY: install bench fetch run quick overnight ci receipts audit mutation acceptance broken report clean-runs
+.PHONY: install bench fetch quick overnight ci receipts audit mutation acceptance broken report
 
 install:            ## the pipeline image (docker) - the only supported install
 	docker build -t cafe . && docker build -f Dockerfile.pm -t cafe-pm .

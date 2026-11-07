@@ -323,3 +323,10 @@ def test_pmx_judges_a_detached_job_by_the_exact_session_name_or_an_rc_zero_log()
     """M-34: line 20 was `tmux ls | grep $TM`, a substring match over every session on the box."""
     pmx = text("bin", "pmx.sh")
     assert "grep $TM" not in pmx and "has-session -t =$TM" in pmx and "grep -qx rc=0" in pmx
+
+
+def test_r11_m32_every_phony_make_target_has_a_rule():
+    """Round 11 M-32: `run` and `clean-runs` were listed as phony and defined nowhere, so `make clean-runs` printed "Nothing to be done" and exit 0."""
+    mk = text("Makefile")
+    names = re.search(r"^\.PHONY:(.*)$", mk, re.M).group(1).split()
+    assert names and [n for n in names if not re.search(rf"^{re.escape(n)}:", mk, re.M)] == []

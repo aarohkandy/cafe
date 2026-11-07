@@ -1,7 +1,8 @@
 #!/bin/sh
 # The go check for orca, from the checkout: PM_HOST=cafe-orca sh bin/orca_ready.sh       (2 CPUs, about 5 min; stops at the first thing wrong)
-# The worker is complete, a job runs, parallel OpenFOAM works (the biggest risk under proot), and nothing of ours landed outside ~/cafe-worker: a changed path there fails the check
-# only if its name is ours (cafe*, pm_*, pmx_*); the account is shared, so any other change is listed as a warning.
+# The worker is complete, a job runs, parallel OpenFOAM works (the biggest risk under proot), and nothing of ours landed outside ~/cafe-worker, looked at to depth 2 of $HOME: a new or removed
+# entry or a changed directory there fails the check only if its name is ours (cafe*, pm_*, pmx_*); the account is shared, so any other change is listed as a warning. A file rewritten deeper
+# down, a new entry four levels down and anything outside $HOME are not seen (a deeper find over a large shared home is slow and would list other people's paths).
 # PMX=pm_<you> (default pm_ready) names the directory it syncs onto with --delete and its start marker: two checks under one PMX would empty each other's directory.
 set -eu
 H="${PM_HOST:-cafe-orca}"; K="${PM_KEY:-$HOME/.ssh/homebase_ed25519}"; S="ssh -i $K"
@@ -14,7 +15,7 @@ cd; W=cafe-worker; echo "ssh-home=$HOME"
 for f in bin/proot root.done pmdata.done data.done env/bin/rsync env/bin/tmux; do [ -e $W/$f ] || { echo "STOP: $W/$f is missing: run bin/orca_sync.sh" >&2; exit 1; }; done
 free=$(df -Pk . | awk 'NR==2{print int($4/1048576)}'); [ "$free" -ge "$1" ] || { echo "STOP: only $free GB free on the shared disk" >&2; exit 1; }
 echo "free=${free}GB ours=$(du -sh $W 2>/dev/null | cut -f1) load=$(cut -d' ' -f1-3 /proc/loadavg)"
-ps -eo user:12,pcpu,comm --sort=-pcpu | head -6
+ps -eo pcpu,comm --sort=-pcpu | head -6                          # process names only, not accounts or command lines (the account is shared)
 touch "$W/.ready_start_$2"
 EOF
 bin/pmx.sh python -c "'from cafe.pm import par; print(\"workers\", par.workers(), \"memory_gb\", par.memory_gb())'"

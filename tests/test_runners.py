@@ -866,6 +866,106 @@ def test_m30_what_is_pasted_into_the_ssh_command_lines_is_checked_first(tmp_path
     assert r.returncode == 2 and not (home / "pwned").exists() and not list((home / "cafe-worker").glob(".ready_start*"))
 
 
+# ---- round 11 M-18, M-19, M-33: the address check, orca_ready.sh's ps, worker_setup.sh's disk and docker group, the usage line
+
+def log_ssh(tmp_path):
+    """Make the stand-in ssh of `live` note every call in ssh.log (it is not created when ssh is never called); returns that path."""
+    log = tmp_path / "ssh.log"
+    (tmp_path / "tools" / "ssh").write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n' + TOOLS["ssh"].split("\n", 1)[1])
+    return log
+
+
+@pytest.mark.parametrize("ip", ["x;id", "1.2.3.4 id", "1.2.3.4 ", " 1.2.3.4", "-oProxyCommand=x", "$(id)", "a'b", "1.2.3.4\nid"])
+def test_r11_m18_an_address_that_is_a_command_is_refused_before_orca_sync_sends_anything(tmp_path, ip):
+    """Round 11 M-18: `sh bin/orca_sync.sh 'x;id' root` ran an ssh on homebase with the bad address before anything checked it."""
+    home, env = sync_world(tmp_path)
+    log = log_ssh(tmp_path)
+    r = run(["sh", str(ROOT / "bin/orca_sync.sh"), ip, "root"], env)
+    assert r.returncode == 2 and "orca address" in r.stderr and not log.exists() and r.stdout == ""
+
+
+@pytest.mark.parametrize("ip", ["100.64.1.2", "fd7a:115c:a1e0::1", "orca.tail1234.ts.net", "orca"])
+def test_r11_m18_ipv4_ipv6_and_dns_names_are_still_sent(tmp_path, ip):
+    home, env = sync_world(tmp_path)
+    r = run(["sh", str(ROOT / "bin/orca_sync.sh"), ip], env)
+    assert r.returncode == 0 and "== done" in r.stdout, r.stderr
+
+
+@pytest.mark.parametrize("w", ["u@h;id", "u@h id", "u;id@h", "u@-oProxyCommand=x", "@host", "u@", "-u@h", "$(id)@h", ""])
+def test_r11_m18_a_worker_that_is_a_command_is_refused_before_worker_setup_reaches_homebase(tmp_path, w):
+    """Round 11 M-18 sibling: worker_setup.sh pastes its first argument into the script homebase runs."""
+    home, env = live(tmp_path, "ssh")
+    log = log_ssh(tmp_path)
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), w], env)
+    assert r.returncode == 2 and not log.exists()
+
+
+@pytest.mark.parametrize("key", ["$(touch {home}/pwned)", "`touch {home}/pwned`", "k;touch {home}/pwned", "k touch {home}/pwned",
+                                 "-oProxyCommand=x", "$HOMEx", "$HOME", "$HOME/k'x"])
+def test_r11_m18_a_key_that_is_a_command_is_refused_before_worker_setup_reaches_homebase(tmp_path, key):
+    """Round 11 M-18 sibling: the key argument was pasted unchecked beside the address, so `$(touch ...)` in it ran on homebase."""
+    home, env, log = setup_machine(tmp_path, 100 * 1048576)
+    ssh_log = log_ssh(tmp_path)
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host", key.format(home=home)], env)
+    assert r.returncode == 2 and "key path" in r.stderr and not ssh_log.exists() and not (home / "pwned").exists()
+
+
+@pytest.mark.parametrize("key", [[], ["$HOME/.ssh/k_1-a.pem"], ["/home/u/.ssh/k"], ["~/.ssh/k"]])
+def test_r11_m18_a_key_path_is_still_sent(tmp_path, key):
+    home, env, log = setup_machine(tmp_path, 100 * 1048576)
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host", *key], env)
+    assert r.returncode == 0 and "rsync" in log.read_text(), r.stderr
+
+
+def setup_machine(tmp_path, kb, ps_rc=0):
+    """(home, env, log): worker_setup.sh with ssh running here, `df` reporting `kb` free, `docker ps` ending `ps_rc`; sudo, rsync, docker load log to `log`."""
+    home, env = live(tmp_path, "ssh", "tmux")
+    log = tmp_path / "setup.log"
+    tools = tmp_path / "tools"
+    stubs = {"df": f'#!/bin/sh\necho Filesystem\necho "/dev/x 1 1 {kb} 1% /"\n',
+             "sudo": f'#!/bin/sh\necho "sudo $*" >> "{log}"\n',
+             "rsync": f'#!/bin/sh\necho "rsync $*" >> "{log}"\n',
+             "docker": f'#!/bin/sh\ncase "$1" in ps) exit {ps_rc} ;; load) echo "docker load" >> "{log}" ;; esac\n'}
+    for n, body in stubs.items():
+        (tools / n).write_text(body)
+        (tools / n).chmod(stat.S_IRWXU)
+    return home, env, log
+
+
+def test_r11_m19_worker_setup_checks_the_25_gb_it_says_it_needs_before_installing_or_copying(tmp_path):
+    home, env, log = setup_machine(tmp_path, 24 * 1048576)
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host"], env)
+    assert r.returncode == 1 and "only 24 GB free" in r.stderr and "25 GB needed" in r.stderr and not log.exists()
+    home, env, log = setup_machine(tmp_path, 25 * 1048576)
+    run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host"], env)
+    assert "rsync" in log.read_text()
+
+
+def test_r11_m19_worker_setup_stops_after_adding_the_login_to_the_docker_group(tmp_path):
+    """Round 11 M-19: it went on to `docker load` in the session that does not have the group yet, and failed there."""
+    home, env, log = setup_machine(tmp_path, 100 * 1048576, ps_rc=1)
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host"], env)
+    assert r.returncode == 1 and "Log out of it and run this again" in r.stderr
+    assert log.read_text().startswith("sudo usermod -aG docker") and "rsync" not in log.read_text() and "docker load" not in log.read_text()
+
+
+def test_r11_m19_the_go_check_lists_process_names_and_no_accounts(tmp_path):
+    """Round 11 M-19: `ps -eo user:12,pcpu,comm` printed the account of every busy process on the shared machine."""
+    home, cwd, env = ready_world(tmp_path)
+    (tmp_path / "tools" / "ps").write_text('#!/bin/sh\necho "$*" >> "$HOME/ps.args"\necho "  %CPU COMMAND"\n')
+    (tmp_path / "tools" / "ps").chmod(stat.S_IRWXU)
+    r = run(["sh", "bin/orca_ready.sh"], env, cwd=cwd)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (home / "ps.args").read_text() == "-eo pcpu,comm --sort=-pcpu\n"
+    assert "depth 2" in (ROOT / "bin/orca_ready.sh").read_text()
+
+
+def test_r11_m33_run_premissions_usage_line_names_every_budget_the_command_accepts():
+    """Round 11 M-33: the usage line left out `ci`."""
+    usage = (ROOT / "bin/run_premission").read_text().splitlines()[1]
+    assert re.search(r"--budget <([a-z0-9|]+)>", usage).group(1).split("|") == list(budget.BUDGET_S)
+
+
 # ---- round 10 M-26: orca_watch.sh notes a second dip of the disk and a rerun that fails the same way
 
 def watch_home(tmp_path):
