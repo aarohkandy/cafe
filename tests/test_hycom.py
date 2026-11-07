@@ -1254,6 +1254,29 @@ def test_m22_a_folder_of_a_zarr_2_store_that_lost_all_its_metadata_is_still_not_
     assert not h.looks_like_zarr(parent)
 
 
+def test_m22_a_zarr_3_store_with_the_dot_chunk_key_separator_is_a_store_and_a_folder_of_them_is_not(fx, tmp_path):
+    """Zarr 3 can write its chunk keys as `c.0.0.0.0` in the array's own directory (separator `.`), not under a directory `c/`. The code writes the
+    default `/` only, so this is a foreign store. With its metadata it is a store (`zarr.json` says array); a folder holding it is not. With every
+    `zarr.json` gone, no variable has a chunk directory `c/` and the store is not recognised, and neither is the folder that holds it: nothing is
+    deleted. (A variable named `c` has the chunk file `c/c.0.0.0.0`: there is no `c/c`, so it has no chunk directory.)"""
+    import xarray as xr
+    src = tmp_path / "v3.zarr"
+    h.ingest_lab_hycom(_lab_dir(fx, tmp_path)[0], fx["box"], src, "in_situ")
+    ds = xr.open_zarr(src, decode_times=False, consolidated=False).load()
+    for v in ds.variables.values():
+        v.encoding = {}
+    parent = tmp_path / "ocean"
+    store = parent / "ocean.zarr"
+    parent.mkdir()
+    ds.to_zarr(store, mode="w", zarr_format=3, consolidated=False,
+               encoding={v: dict(chunk_key_encoding=dict(name="default", separator=".")) for v in ds.data_vars})
+    assert (store / "c" / "zarr.json").is_file() and not (store / "c" / "c").exists() and any(q.name.startswith("c.") for q in (store / "c").iterdir())
+    assert h.looks_like_zarr(store) and not h.looks_like_zarr(parent)
+    for f in list(store.rglob("zarr.json")):
+        f.unlink()
+    assert not h.looks_like_zarr(parent)
+
+
 @pytest.mark.parametrize("mark", ["zarr.json", ".zgroup", ".zarray", ".zattrs"])         # written out: ZARR_MARKS itself is what a mutant changes
 def test_m22_each_zarr_mark_alone_makes_the_directory_a_store(tmp_path, mark):
     assert set(h.ZARR_MARKS) == {"zarr.json", ".zgroup", ".zarray", ".zattrs"}
