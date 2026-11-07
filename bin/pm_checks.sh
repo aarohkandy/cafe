@@ -1,7 +1,11 @@
-# Sourced (`. bin/pm_checks.sh`) by pm.sh, bin/pmx.sh, bin/orca_ready.sh, bin/orca_gate.sh and bin/proot_suite.sh: the one place that decides what a name or a number pasted into a command line may be.
+# Sourced (`. bin/pm_checks.sh`) by pm.sh, bin/pmx.sh, bin/orca_ready.sh, bin/orca_gate.sh, bin/proot_suite.sh, bin/orca_sync.sh and bin/worker_setup.sh: the one place that decides what a name or a number pasted into a command line may be.
 # They reach a shell on the worker (and docker's argument list), so a ';' or a space in one is a command there. Each function exits the calling script with status 2 before anything is sent.
 pm_bad() { echo "$1" >&2; exit 2; }
 pm_num() { case $2 in ''|0*|*[!0-9]*) pm_bad "$1: a whole number from 1, not '$2'" ;; esac; }                           # $1 name, $2 value
+# A machine's address as a script argument (the orca IP of bin/orca_sync.sh, the host of bin/worker_setup.sh's user@host): an IPv4 or IPv6 address or a DNS name, so letters, digits, '.', '-' and ':' only, not
+# empty and not starting with '-' (ssh would read it as an option). It lands unquoted in a command line on homebase, where a ';' or a space is a command (round 11 M-18).
+pm_host() { case $2 in ''|-*|*[!A-Za-z0-9.:-]*) pm_bad "$1: an IP address or host name (letters, digits, '.', '-' and ':'), not '$2'" ;; esac; }       # $1 name, $2 value
+pm_user() { case $2 in ''|-*|*[!A-Za-z0-9._-]*) pm_bad "$1: a login name (letters, digits, '.', '_' and '-'), not '$2'" ;; esac; }                                  # the user of user@host
 pm_size() { _pm_n=${2%[bB]}; case ${_pm_n%[kmgKMG]} in ''|0*|*[!0-9]*) pm_bad "$1: a whole number from 1, then k, m, g, kb, mb or gb if you like (8g), not '$2'" ;; esac; }       # docker's --memory, --shm-size
 # A tag (or TM) T names a log T.log in the worker's one flat logs folder, and the suite's jobs write T_s<i>.log, T_serial.log, T_shares.log and T_audit.log beside it: a name that is itself
 # one of those (a_s2 beside the tag a) would share its log with another tag's job, and the P-30 sweep of a's stale share logs would delete it (round 10 M-28).

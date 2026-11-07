@@ -8,6 +8,7 @@
 # CAFE_MIN_FREE_GB (default 60, as in bin/orca_setup.sh) is the room orca must have. For a rehearsal without orca: ORCA_VIA=<ssh name of a host with docker and the image> ORCA_SRC='sh -c' ORCA_DST='docker exec -i <container> sh -c' (arguments split on spaces).
 set -eu
 IP="${1:?usage: sh bin/orca_sync.sh <orca tailnet IP> [proot] [root] [pmdata] [data]}"; shift
+. "$(dirname "$0")/pm_checks.sh"; pm_host "the orca address" "$IP"          # IP is pasted unquoted into a command line on homebase: exit 2 before anything is sent
 set -f; for x in $*; do case $x in proot|root|pmdata|data) ;; *) echo "STOP: unknown part '$x' (proot root pmdata data)" >&2; exit 1 ;; esac; done; set +f
 VIA="${ORCA_VIA:-azureuser@100.108.213.121}"; K="${PM_KEY:-$HOME/.ssh/homebase_ed25519}"
 O="${ORCA_TOFU:+-o StrictHostKeyChecking=accept-new}"
