@@ -455,7 +455,8 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     d = json.loads(man.read_text())
     want = int((t1 - t0).total_seconds() // 3600) + 1
     L.input(d["base"], sha=None, kind="remote", note="orca UWIN-CM run (byte-range reads; per-hour npz cache)")
-    L.input(man, kind="orca cache manifest")
+    orca_snap = ctx.path("ingest", "orca_manifest.json")
+    L.snapshot(man, orca_snap, kind="orca cache manifest (the copy this run used: the shared one is rewritten when the cache grows)")
     orca_trees = {n: tree_sha256(man.parent / n) for n in ORCA_STORES if (man.parent / n).is_dir()}  # the manifest lists the parts, not these
     for n, h in orca_trees.items():
         L.input(man.parent / n, sha=h, tree=h, kind="orca assembled store (tree_sha256 over every file of the store)")
@@ -483,7 +484,7 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     oc = ocean(ctx)
     if not _ingest_checks(ctx, L, oc, sbox):
         return
-    L.output(man)
+    L.output(orca_snap)
     _tao(ctx, L, t0.timestamp(), t1.timestamp())
     ctx.replan()
 
@@ -819,7 +820,8 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     if not (tdir / "manifest.json").is_file():
         L.note(f"no TAO/TRITON download at {tdir}: wind priors stay the perturbations.yaml defaults (run `make fetch`)")
         return
-    L.input(tdir / "manifest.json")
+    L.snapshot(tdir / "manifest.json", ctx.path("ingest", "tao_manifest.json"),
+               kind="TAO cache manifest (the copy this run used: the shared one is rewritten when the cache grows)")
     moor = tao.load_tao(tdir, t0, t1)
     hours = np.arange(t0, t1 + 1, 3600.0)
     wrf = {}

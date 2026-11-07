@@ -105,6 +105,31 @@ def _orca_problems(run: str, st: str, man: pathlib.Path) -> list[str]:
     return out
 
 
+def _shared_problems(run: str, st: str, snap: pathlib.Path, shared: pathlib.Path) -> list[str]:
+    """`snap` is the copy of a shared cache manifest the stage used (`Ledger.snapshot`; `shared` is where it came from). The shared manifest is no part
+    of the check: it is rewritten when a later run grows the cache (a wider box or window, another 3-D hour) and a window outside the cached one replaces
+    it, which changes nothing the run read. What the run read is the files the copy names, so each of them still has to lie in the cache directory with the
+    hash the copy has: an orca per-hour part (`parts`, `hours/<name>`; an absent one is not a problem, as in `_orca_problems`: the assembled stores that
+    were read are inputs of their own) and a TAO file (`files`, `<mooring>/<name>`; an absent one is). Where the cache directory is not there (a run
+    copied to another machine) there is nothing to compare with."""
+    root = shared.parent
+    if not root.is_dir():
+        return []
+    man = _read_json(snap)
+    parts = {f"hours/{n}": h for n, h in man.get("parts", {}).items()}
+    files = {k: r["sha256"] for k, r in man.get("files", {}).items()}
+    out: list[str] = []
+    for key, sha in {**parts, **files}.items():
+        f = root / key
+        if not f.is_file():
+            if key in files:
+                out.append(f"{run}: stage {st}: input {f} is missing (the stage read it, {snap.name} lists it); run `fetch` again")
+        elif (now := sha256(f)) != sha:
+            out.append(f"{run}: stage {st}: input {f} changed since the stage ran (sha256 {now[:12]} against {sha[:12]} in {snap.name}): "
+                       "the cache file was edited, or rebuilt by a later run")
+    return out
+
+
 def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
     run_dir = pathlib.Path(run_dir)
     out: list[str] = []
@@ -136,7 +161,9 @@ def ledger_problems(run_dir: str | pathlib.Path) -> list[str]:
                     out += _dir_problems(run_dir.name, st, f, i.get("sha256"), i.get("tree_sha256"))
                 elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
                     out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
-                if f.name == "manifest.json" and f.is_file() and "parts" in _read_json(f):
+                if i.get("shared") and f.is_file():                      # a copy of a shared cache manifest: the files it names, not the shared one
+                    out += _shared_problems(run_dir.name, st, f, pathlib.Path(i["shared"]))
+                elif f.name == "manifest.json" and f.is_file() and "parts" in _read_json(f):
                     out += _orca_problems(run_dir.name, st, f)
             except _Unreadable as e:                                    # the sha256 line above already said a damaged file changed
                 out.append(f"{run_dir.name}: stage {st}: input {e}; delete it and run `fetch` again")

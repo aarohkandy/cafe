@@ -250,7 +250,7 @@ def _hangar(name: str) -> int:
         print(f"{name} ({cls}): provenance FAILED: {e}")
         return 1
     items = pipeline.provenance(raw, name)                                       # the items credibility.json counts (round 10, M-32)
-    print(f"{name} ({cls}): provenance OK, {sum(i['assumed'] for i in items)} of {len(items)} values assumed")
+    print(f"{name} ({cls}): provenance OK, {sum(i['assumed'] for i in items)} of {len(items)} items assumed")
     for i in items:
         why = "ASSUMED: " + i["why"] if i["assumed"] else "source: " + i["source"]
         print(f"  {i['path']} = {i['value']} {i['unit']}  [{why[:110]}]")

@@ -491,8 +491,8 @@ def test_ingest_uses_a_cache_that_covers_the_window_then_validates_against_the_m
     first = d["inputs"][0]
     assert first["ref"].startswith("https://orca.") and first["sha256"] is None and first["kind"] == "remote"
     outs = {pathlib.Path(o["path"]).name: o["sha256"] for o in d["outputs"]}
-    assert set(outs) == {"manifest.json", "tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json", "derived.digest.json"}
-    assert outs["manifest.json"] == ledger.sha256(man)
+    assert set(outs) == {"orca_manifest.json", "tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json", "derived.digest.json"}
+    assert outs["orca_manifest.json"] == ledger.sha256(man)                                                 # the copy is the manifest
     store = next(i for i in d["inputs"] if i["ref"].endswith("derived.zarr"))
     recorded = json.loads((tmp_path / "r" / "ingest" / surface.DIGEST).read_text())["store_sha256"]
     assert store["sha256"] == surface.store_sha256(data.cache / "derived.zarr") == recorded
@@ -760,7 +760,7 @@ def test_tao_writes_the_comparison_and_the_fitted_wind_priors(tmp_path, data):
     c = check_of(d, "tao_moorings_compared")
     assert c["ok"] and c["value"] == 2 and c["limit"] == 1 and len(d["notes"]) == 2 and d["notes"][0].startswith("env sigmas fitted")
     assert d["notes"][1].startswith("wind error split: speed persistent ") and "short-lived" in d["notes"][1] and "direction persistent " in d["notes"][1]
-    assert any(i["ref"].endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"])
+    assert any(i.get("shared", "").endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"])
     assert {pathlib.Path(o["path"]).name for o in d["outputs"]} == {"tao_compare.json", "priors_fitted.json", "env_sigmas_fitted.json"}
 
 

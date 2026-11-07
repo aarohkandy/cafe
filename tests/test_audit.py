@@ -767,3 +767,88 @@ def test_r8_l0_an_input_that_was_hashed_and_is_gone_is_a_problem_but_a_url_or_an
     probs = audit.ledger_problems(run)
     assert sorted(probs) == sorted([f"run: stage report: input {src} is missing (the stage read it); restore it, or run `fetch` / the stage again",
                                     f"run: stage report: input {store} is missing (the stage read it); restore it, or run `fetch` / the stage again"])
+
+
+# ---- review round 10, P-32: a ledger that hashed a shared cache manifest failed every earlier run's audit once the cache grew
+
+def _run_with_manifest_copy(tmp_path, man, copy_to="report/manifest_copy.json"):
+    """A run whose report stage recorded `man` the way ingest does: a copy in the run, with where it came from."""
+    run = make_run(tmp_path)
+    with Ledger(run, "report", "cfg") as L:
+        L.input(ledger_path(run, "emulator"))
+        L.snapshot(man, run / copy_to, kind="cache manifest")
+        L.output(run / "report.out")
+    return run
+
+
+def _orca_cache(tmp_path):
+    cache = tmp_path / "cache" / "orca"
+    (cache / "hours").mkdir(parents=True)
+    parts = {}
+    for n in ("wrf_a.npz", "wrf_b.npz"):
+        (cache / "hours" / n).write_bytes(n.encode())
+        parts[n] = sha256(cache / "hours" / n)
+    (cache / "manifest.json").write_text(json.dumps({"hours": 2, "parts": parts}))
+    return cache, parts
+
+
+def test_p32_a_cache_that_only_grew_passes_and_a_changed_part_fails_naming_it(tmp_path):
+    cache, parts = _orca_cache(tmp_path)
+    run = _run_with_manifest_copy(tmp_path, cache / "manifest.json")
+    assert audit.ledger_problems(run) == []
+    (cache / "hours" / "wrf_c.npz").write_bytes(b"c")                                 # a later run: one more hour, a rewritten manifest
+    (cache / "manifest.json").write_text(json.dumps({"hours": 3, "parts": {**parts, "wrf_c.npz": sha256(cache / "hours" / "wrf_c.npz")}}))
+    assert audit.ledger_problems(run) == []                                           # was: input .../manifest.json changed since the stage ran
+    (cache / "manifest.json").write_text("[1,2")                                      # the shared manifest is no part of the check, damaged or not
+    assert audit.ledger_problems(run) == []
+    (cache / "hours" / "wrf_b.npz").write_bytes(b"edited")
+    probs = audit.ledger_problems(run)
+    assert len(probs) == 1 and f"run: stage report: input {cache / 'hours' / 'wrf_b.npz'} changed since the stage ran" in probs[0]
+    assert parts["wrf_b.npz"][:12] in probs[0] and sha256(cache / "hours" / "wrf_b.npz")[:12] in probs[0] and "manifest_copy.json" in probs[0]
+    (cache / "hours" / "wrf_b.npz").unlink()
+    assert audit.ledger_problems(run) == []                                           # a part that is gone: the stores that were read are inputs of their own
+
+
+def test_p32_a_tao_file_that_is_gone_or_changed_fails_naming_it_and_a_new_manifest_does_not(tmp_path):
+    tdir = tmp_path / "tao" / "s2"
+    (tdir / "T0N165W").mkdir(parents=True)
+    f = tdir / "T0N165W" / "OS_wind.nc"
+    f.write_bytes(b"wind")
+    man = tdir / "manifest.json"
+    man.write_text(json.dumps({"t0": 0, "t1": 1, "files": {"T0N165W/OS_wind.nc": {"sha256": sha256(f)}}, "selected": {}}))
+    run = _run_with_manifest_copy(tmp_path, man)
+    assert audit.ledger_problems(run) == []
+    man.write_text(json.dumps({"t0": -9, "t1": 9, "files": {}, "selected": {}}))      # another window replaced the list: the file is still there
+    assert audit.ledger_problems(run) == []
+    f.write_bytes(b"edited")
+    assert [x.split(" changed")[0] for x in audit.ledger_problems(run)] == [f"run: stage report: input {f}"]
+    f.unlink()
+    assert audit.ledger_problems(run) == [f"run: stage report: input {f} is missing (the stage read it, manifest_copy.json lists it); run `fetch` again"]
+
+
+def test_p32_without_the_cache_directory_the_copy_in_the_run_is_all_there_is_to_check(tmp_path):
+    cache, _ = _orca_cache(tmp_path)
+    run = _run_with_manifest_copy(tmp_path, cache / "manifest.json")
+    shutil.rmtree(cache)
+    assert audit.ledger_problems(run) == []                                           # a run copied to a machine with no cache
+    (run / "report" / "manifest_copy.json").write_text('{"parts": {')
+    probs = audit.ledger_problems(run)
+    assert any("manifest_copy.json changed since the stage ran" in x for x in probs) and not any("Traceback" in x for x in probs)
+
+
+def test_p32_a_damaged_copy_beside_a_cache_is_a_problem_naming_the_copy_not_a_traceback(tmp_path):
+    cache, _ = _orca_cache(tmp_path)
+    run = _run_with_manifest_copy(tmp_path, cache / "manifest.json")
+    (run / "report" / "manifest_copy.json").write_text('{"parts": {')
+    probs = audit.ledger_problems(run)
+    assert any("manifest_copy.json changed since the stage ran" in x for x in probs)
+    assert any(f"input {run / 'report' / 'manifest_copy.json'} is not valid JSON (" in x for x in probs)
+
+
+def test_p32_a_ledger_without_a_copy_keeps_the_old_check_on_the_shared_manifest(tmp_path):
+    cache, parts = _orca_cache(tmp_path)
+    run = make_run(tmp_path)
+    _report_with_inputs(run, cache / "manifest.json")                                 # a run made before the copy existed
+    assert audit.ledger_problems(run) == []
+    (cache / "manifest.json").write_text(json.dumps({"hours": 3, "parts": parts}))
+    assert audit.ledger_problems(run) == [f"run: stage report: input {cache / 'manifest.json'} changed since the stage ran"]

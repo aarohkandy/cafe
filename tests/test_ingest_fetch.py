@@ -14,7 +14,7 @@ import urllib.parse
 import numpy as np
 import pytest
 
-from cafe.pm import ledger, pipeline
+from cafe.pm import audit, ledger, pipeline
 from cafe.pm.env import bathy, hycom, ocean as ocean_mod, orca, remote, tao
 from tests.conftest import Server
 from tests import test_pipeline as tp
@@ -55,8 +55,8 @@ def test_everything_cached_means_nothing_is_fetched_and_every_input_is_recorded_
     assert by[store.name]["sha256"] == hycom.open_store(store).attrs["manifest_sha256"] and by[store.name]["kind"].startswith("ocean store")
     gebco = bathy.cache_path(BOX, data.data / "bathy")
     assert by[gebco.name]["sha256"] == remote.sha256(gebco)
-    assert by["manifest.json"]["sha256"]                                               # the orca cache manifest, then TAO's below
-    assert any(i["ref"].endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"])
+    assert by["orca_manifest.json"]["sha256"] and by["orca_manifest.json"]["shared"] == str(data.data / "cache" / "ci_fixture" / "orca" / "manifest.json")
+    assert any(i["shared"].endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"] if i.get("shared"))      # TAO's copy
     assert all(i["sha256"] or i["ref"].startswith("https://") for i in d["inputs"])    # only the remote orca base has no hash
 
 
@@ -309,7 +309,86 @@ def test_l0_fetching_under_a_new_tao_selection_rule_leaves_the_manifest_an_earli
     assert check_of(d, "tao_present")["ok"] and legacy.read_bytes() == was
     new = tao.cache_dir(root) / "manifest.json"
     assert json.loads(new.read_text())["selection"] == tao.SELECTION and new.parent == root / "tao" / f"s{tao.SELECTION}"
-    assert any(i["ref"] == str(new) for i in d["inputs"]) and not any(i["ref"] == str(legacy) for i in d["inputs"])
+    assert any(i.get("shared") == str(new) for i in d["inputs"]) and not any(str(legacy) in (i["ref"], i.get("shared")) for i in d["inputs"])
+
+
+def ingest_problems(run):
+    """What the audit says about the ingest stage of a run directory that holds only that stage (the others have no ledger)."""
+    return [x for x in audit.ledger_problems(run) if "stage ingest:" in x]
+
+
+def test_p32_a_grown_orca_cache_leaves_the_audit_of_an_earlier_run_clean_and_a_changed_part_does_not(tmp_path, data_copy, monkeypatch):
+    """P-32: the ledger hashed the one shared `orca/manifest.json`, which `orca.assemble` rewrites whenever a later run needs more hours; the audit of every
+    earlier run then said 'input ... changed'. The run keeps the copy it used (ingest/orca_manifest.json); the audit asks the cache for the parts it names."""
+    forbid_downloads(monkeypatch)
+    cache = data_copy / "cache" / "ci_fixture" / "orca"
+    man = cache / "manifest.json"
+    run = tmp_path / "r"
+    d = run_stage(pipeline.s_ingest, ctx_for(run), "ingest")
+    snap = run / "ingest" / "orca_manifest.json"
+    assert snap.read_bytes() == man.read_bytes() and not list((run / "ingest").glob("*.part"))
+    ins = [i for i in d["inputs"] if i.get("shared") == str(man)]
+    assert [i["ref"] for i in ins] == [str(snap)] and ins[0]["sha256"] == remote.sha256(snap) and str(man) not in [i["ref"] for i in d["inputs"]]
+    outs = [o["path"] for o in d["outputs"]]
+    assert str(snap) in outs and str(man) not in outs
+    assert ingest_problems(run) == []
+    used = json.loads(snap.read_text())
+    name = min(used["parts"])
+    # a later run needs one hour more: the shared manifest names another window and one more part
+    grown = dict(used, t1="2023-03-04 00:00:00", hours=used["hours"] + 18, parts={**used["parts"], "wrf_2023030400.npz": "0" * 64})
+    man.write_text(json.dumps(grown))
+    assert ingest_problems(run) == []                                                        # was: input .../orca/manifest.json changed since the stage ran
+    man.write_text(json.dumps(dict(grown, parts={})))                                        # a window elsewhere replaced the list
+    assert ingest_problems(run) == []
+    part = cache / "hours" / name                                                            # the fixture's parts are gone (the stores were assembled)
+    part.parent.mkdir()
+    part.write_bytes(b"not the part this run read")
+    probs = ingest_problems(run)
+    assert len(probs) == 1 and f"input {part} changed since the stage ran" in probs[0] and used["parts"][name][:12] in probs[0]
+    part.unlink()
+    assert ingest_problems(run) == []                                                        # an absent part is no problem, as before
+    snap.write_text(snap.read_text() + " ")                                                 # the copy itself is hashed
+    assert any(f"input {snap} changed since the stage ran" in x for x in ingest_problems(run))
+
+
+def test_p32_a_grown_tao_cache_leaves_the_audit_of_an_earlier_run_clean_and_a_changed_or_lost_file_does_not(tmp_path, network):
+    """P-32, TAO: a wider box or window rewrites `tao/s2/manifest.json` (`fetch_tao` is called when `_tao_cached` says the cache does not cover it)."""
+    root = network["root"]
+    run = tmp_path / "r"
+    d = run_stage(pipeline.s_ingest, ctx_for(run), "ingest")
+    tdir = tao.cache_dir(root)
+    snap = run / "ingest" / "tao_manifest.json"
+    assert snap.read_bytes() == (tdir / "manifest.json").read_bytes()
+    assert [i["ref"] for i in d["inputs"] if i.get("shared") == str(tdir / "manifest.json")] == [str(snap)]
+    assert ingest_problems(run) == []
+    before = json.loads(snap.read_text())
+    tao.fetch_tao(BOX, T0 - 86400.0, T1 + 86400.0, tdir, base=tao.BASE)                      # what `_need` runs for a wider window
+    after = json.loads((tdir / "manifest.json").read_text())
+    assert after["t0"] < before["t0"] and after["t1"] > before["t1"]
+    assert ingest_problems(run) == []                                                        # was: input .../tao/s2/manifest.json changed since the stage ran
+    victim = min(tdir.glob("T0N165W/*.nc"))
+    was = victim.read_bytes()
+    victim.write_bytes(was[:-1] + bytes([was[-1] ^ 0xFF]))
+    probs = ingest_problems(run)
+    assert len(probs) == 1 and f"input {victim} changed since the stage ran" in probs[0]
+    victim.unlink()
+    probs = ingest_problems(run)
+    assert len(probs) == 1 and f"input {victim} is missing (the stage read it, tao_manifest.json lists it)" in probs[0]
+    victim.write_bytes(was)
+    assert ingest_problems(run) == []
+
+
+def test_p32_a_run_copied_to_a_machine_without_the_cache_is_audited_by_its_own_copy_of_the_manifests(tmp_path, network):
+    root = network["root"]
+    made = tmp_path / "r"
+    run_stage(pipeline.s_ingest, ctx_for(made), "ingest")
+    copy = tmp_path / "elsewhere" / "r"
+    shutil.copytree(made, copy)
+    shutil.rmtree(root / "tao")                                                             # no cache on the other machine
+    here = [x for x in ingest_problems(copy) if "tao" in x]
+    assert here == []                                                                       # the manifest copy is in the run; nothing to compare with
+    (copy / "ingest" / "tao_manifest.json").write_text("{}")
+    assert any("tao_manifest.json changed since the stage ran" in x for x in ingest_problems(copy))
 
 
 def test_a_fresh_ingest_downloads_gofs_tao_and_gebco_then_a_second_one_downloads_nothing(tmp_path, network, data):
@@ -338,7 +417,7 @@ def test_a_fresh_ingest_downloads_gofs_tao_and_gebco_then_a_second_one_downloads
     # TAO: the files of the two moorings, hashed in the manifest
     man = json.loads((tao.cache_dir(root) / "manifest.json").read_text())
     assert set(man["selected"]) == {"T0N165W", "T2S165W"} and tao.verify(tao.cache_dir(root)) == len(man["files"]) == 6
-    assert any(i["ref"].endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"])
+    assert any(i.get("shared", "").endswith(f"tao/s{tao.SELECTION}/manifest.json") and i["sha256"] for i in d["inputs"])
     assert check_of(d, "tao_moorings_compared")["ok"]
     # the second ingest finds everything cached and good: not one more request
     n_ncss, n_srv = len(ncss.log), len(srv.log)

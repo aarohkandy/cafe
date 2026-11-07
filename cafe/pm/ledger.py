@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-import datetime as dt, importlib.metadata, json, math, os, pathlib, platform, subprocess, sys, time
+import datetime as dt, importlib.metadata, json, math, os, pathlib, platform, shutil, subprocess, sys, time
 from types import TracebackType
 from typing import Any, Literal
 
@@ -115,6 +115,18 @@ class Ledger:
         p = pathlib.Path(str(ref))
         extra = {} if tree is None else dict(tree_sha256=tree)
         self.d["inputs"].append(dict(ref=str(ref), sha256=sha or (sha256(p) if p.is_file() else None), **extra, **meta))
+
+    def snapshot(self, src: str | pathlib.Path, dest: str | pathlib.Path, **meta: Any) -> None:
+        """A shared cache manifest (TAO, orca) is rewritten in place whenever a later run grows or replaces the cache, so a ledger that hashed it made every
+        earlier run's audit say "input changed" (review round 10, P-32). The stage copies the bytes it read into the run (`dest`, atomically) and records
+        the copy as the input, with `shared` = where it came from; the audit checks the copy by hash and the files it names against the shared cache
+        (`audit._shared_problems`), not the shared manifest. A run directory then carries the manifest the run used."""
+        dest = pathlib.Path(dest)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".part")
+        shutil.copyfile(src, tmp)
+        os.replace(tmp, dest)
+        self.input(dest, shared=str(src), **meta)
 
     def seed(self, name: str, value: Any) -> None:
         self.d["seeds"][name] = int(value)

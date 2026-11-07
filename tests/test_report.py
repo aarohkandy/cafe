@@ -906,6 +906,15 @@ def test_check_rendered_matches_whole_numeric_tokens():
     assert report.check_rendered(rep, "0 members, 0.25 .") == []
 
 
+def test_check_rendered_looks_at_number_nodes_only_a_bare_number_is_the_traceability_checks():
+    """A number outside a node ("bare") is `check_traceability`'s to refuse; the rendered-page check does not ask for it in the HTML."""
+    rep = dict(a=dict(value=0, unit="members"), loose=7, rows=[3, dict(value=0.25, unit="fraction")])
+    page = "<span class=n>0 members</span><span class=n>0.25</span>"
+    assert report.check_rendered(rep, page) == []                      # 7 and 3 are not in the page
+    assert "loose: the number 7 is outside a traced value node" in report.check_traceability(rep)
+    assert [k for k, _, _ in report._walk(rep)] == ["node", "bare", "bare", "node"]
+
+
 def stage3_with_a_window_not_run(run, msg):
     p = run / "stage3" / "windows.json"
     d = json.loads(p.read_text())

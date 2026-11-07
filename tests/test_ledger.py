@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from cafe.pm import audit, ledger
+from cafe.pm.env.remote import sha256
 from cafe.pm.ledger import Ledger, StageFailed, done
 
 
@@ -490,3 +491,26 @@ def test_l1_resolve_reports_a_lost_output_of_a_copy_in_the_copy_not_at_the_origi
     assert any("stage stage3: output" in p and str(lost) in p and "is missing" in p for p in probs)
     ext = pathlib.Path("/data/cache/stage3/x")
     assert ledger.resolve(ext, copy, roots) == ext                                                   # outside the run's places: as recorded
+
+
+def test_p32_a_snapshot_is_the_input_the_stage_read_and_a_resume_ignores_what_a_later_run_did_to_the_shared_file(tmp_path):
+    """A shared manifest rewritten by a later run made `done` rerun every earlier stage that had hashed it; the copy in the run is what is hashed."""
+    shared = tmp_path / "cache" / "manifest.json"
+    shared.parent.mkdir()
+    shared.write_text('{"parts": {"a": "1"}}')
+    run = tmp_path / "run"
+    dest = run / "ingest" / "m.json"
+    dest.parent.mkdir(parents=True)
+    out = run / "ingest" / "o.json"
+    out.write_text("o")
+    with Ledger(run, "ingest", "h") as L:
+        L.snapshot(shared, dest, kind="cache manifest")
+        L.output(out)
+    d = json.loads((run / "checkpoints" / "ingest" / "ledger.json").read_text())
+    assert d["inputs"] == [dict(ref=str(dest), sha256=sha256(shared), shared=str(shared), kind="cache manifest")]
+    assert dest.read_bytes() == shared.read_bytes() and not list(dest.parent.glob("*.part"))
+    shared.write_text('{"parts": {"a": "1", "b": "2"}}')                                     # a later run grew the cache
+    assert dest.read_text() == '{"parts": {"a": "1"}}'
+    assert done(run, "ingest", "h") is not None                                              # was None with the shared file as the input
+    dest.write_text("edited")
+    assert done(run, "ingest", "h") is None

@@ -397,7 +397,7 @@ def test_hangar_checks_provenance_and_lists_what_stage_1_takes_from_the_platform
     assert cli.main(["hangar", "--platform", name]) == 0
     out = capsys.readouterr().out.splitlines()
     n_assumed = pipeline._assumed(config.load_platform(name))
-    assert out[0].startswith(f"{name} ({cls}): provenance OK, {n_assumed} of ") and out[0].endswith("values assumed") and n_assumed > 0
+    assert out[0].startswith(f"{name} ({cls}): provenance OK, {n_assumed} of ") and out[0].endswith("items assumed") and n_assumed > 0
     assert len(out) == 1 + int(out[0].split(" of ")[1].split()[0]) and all(line.startswith("  ") and " = " in line for line in out[1:])
     assert any("[source: " in line for line in out) and any("[ASSUMED: " in line for line in out)
 
@@ -817,7 +817,7 @@ def test_r8_m7_validate_prints_no_note_when_go_is_not_above_the_interval_term(tm
 def test_r8_m16_hangar_modems_counts_the_two_assumed_defaults(capsys):
     assert cli.main(["hangar", "--platform", "modems"]) == 0
     out = capsys.readouterr().out
-    assert out.splitlines()[0] == "modems (modem table): provenance OK, 4 of 4 values assumed"  # M-32: with the 2 entries marked assumed (was 2 of 2)
+    assert out.splitlines()[0] == "modems (modem table): provenance OK, 4 of 4 items assumed"  # M-32: with the 2 entries marked assumed (was 2 of 2)
     assert "defaults.anchor_margin_db = 3.0 dB  [ASSUMED: " in out and "defaults.valid_range_factor = 10.0 -  [ASSUMED: " in out
 
 
@@ -1015,7 +1015,7 @@ def test_r10_m32_hangar_counts_the_assumed_inputs_the_way_the_credibility_report
         want = [i for i in credibility.platform_items() if i["file"] == f"platforms/{name}.yaml"]
         assert cli.main(["hangar", "--platform", name]) == 0
         out = capsys.readouterr().out.splitlines()
-        assert out[0].startswith(f"{name} ") and f"provenance OK, {sum(i['assumed'] for i in want)} of {len(want)} values assumed" in out[0], name
+        assert out[0].startswith(f"{name} ") and f"provenance OK, {sum(i['assumed'] for i in want)} of {len(want)} items assumed" in out[0], name
         assert len(out) == 1 + len(want)
     assert cli.main(["hangar", "--platform", "modems"]) == 0
     out = capsys.readouterr().out
@@ -1031,7 +1031,7 @@ def test_r10_m32_a_platform_file_with_an_entry_level_assumed_sentence_counts_it(
     first = capsys.readouterr().out.splitlines()[0]
     items = credibility.platform_items(elsewhere=[str(p)])
     mine = [i for i in items if i["file"] == str(p)]
-    assert f"provenance OK, {sum(i['assumed'] for i in mine)} of {len(mine)} values assumed" in first and sum(i["assumed"] for i in mine) == 1
+    assert f"provenance OK, {sum(i['assumed'] for i in mine)} of {len(mine)} items assumed" in first and sum(i["assumed"] for i in mine) == 1
 
 
 def test_r10_f_the_acceptance_out_help_says_a_directory_of_foreign_runs_is_refused(capsys):
