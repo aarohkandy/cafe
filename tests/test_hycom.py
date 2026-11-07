@@ -1199,6 +1199,79 @@ def test_lb0_a_directory_of_other_stores_is_not_a_store_to_replace_and_every_sto
     assert sorted(str(p.relative_to(parent)) for p in parent.rglob("*")) == before and (parent / "NOTES.txt").read_text() == "keep me"
 
 
+def _v2_store(fx, tmp_path, out):
+    """The ocean store the code writes (variables water_temp .. rho and c), written again in Zarr format 2 by zarr itself: the layout of a foreign store
+    (`.zgroup`, `<var>/.zarray`, chunk files `<var>/0.0.0`). `write_store` writes format 3 only."""
+    import xarray as xr
+    src = tmp_path / "v3.zarr"
+    h.ingest_lab_hycom(_lab_dir(fx, tmp_path)[0], fx["box"], src, "in_situ")
+    ds = xr.open_zarr(src, decode_times=False, consolidated=False).load()
+    for v in ds.variables.values():
+        v.encoding = {}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    ds.to_zarr(out, mode="w", zarr_format=2, consolidated=False)
+    return out
+
+
+def test_m22_a_zarr_2_ocean_store_with_a_variable_c_is_a_store_and_a_folder_of_them_is_not(fx, tmp_path):
+    """The variable `c` of a Zarr 2 store holds `.zarray` beside its chunk files `0.0.0.0`: not chunk keys only, so `c` of the store's own directory is
+    not the chunk directory of a Zarr 3 array (`all` of `_chunks_dir`). Before this test the mutant `any` passed and a folder of foreign stores was
+    deleted by `write_store`."""
+    from cafe.pm.config import ConfigError
+    parent = tmp_path / "ocean"
+    store = _v2_store(fx, tmp_path, parent / "ocean.zarr")
+    assert {p.name for p in store.iterdir()} >= {".zgroup", "c"} and (store / "c" / ".zarray").is_file() and not (store / "zarr.json").exists()
+    assert h.looks_like_zarr(store)                                                  # the store itself
+    (parent / "NOTES.txt").write_text("keep me")
+    before = sorted(str(p.relative_to(parent)) for p in parent.rglob("*"))
+    assert not h.looks_like_zarr(parent)                                             # the folder that holds it
+    with pytest.raises(ConfigError, match="no Zarr metadata or chunks"):
+        h.write_store(iter(()), parent, "in_situ", {})
+    assert sorted(str(p.relative_to(parent)) for p in parent.rglob("*")) == before
+
+
+@pytest.mark.parametrize("chunk", ["0.0.0.0", "0/0/0/0"])
+def test_m22_a_hand_built_folder_of_a_zarr_2_store_with_c_is_not_a_store(tmp_path, chunk):
+    """The shape in the review (`ocean.zarr/{.zgroup, c/.zarray, c/0.0.0.0}`), without the arrays' other metadata, and the same with Zarr 2's `/`
+    separator (`c/0/0/0/0`), whose directory `0` is a number: `.zarray` beside it still says `c` is a variable, not a chunk directory."""
+    parent = tmp_path / "ocean"
+    f = parent / "ocean.zarr" / "c" / chunk
+    f.parent.mkdir(parents=True)
+    (parent / "ocean.zarr" / ".zgroup").write_text("{}")
+    (parent / "ocean.zarr" / "c" / ".zarray").write_text("{}")
+    f.write_bytes(b"x")
+    assert not h.looks_like_zarr(parent) and h.looks_like_zarr(parent / "ocean.zarr")
+
+
+def test_m22_a_folder_of_a_zarr_2_store_that_lost_all_its_metadata_is_still_not_a_store(fx, tmp_path):
+    """Found while writing the test above: with every `.z*` file gone, the variable `c` of the Zarr 2 store holds only `0.0.0.0`, which `_chunks_dir`
+    took for the chunk keys of a Zarr 3 array (`[0-9.]+`), so the folder counted as a damaged store and `write_store` deleted it."""
+    parent = tmp_path / "ocean"
+    store = _v2_store(fx, tmp_path, parent / "ocean.zarr")
+    for f in list(store.rglob(".z*")):
+        f.unlink()
+    assert [p.name for p in (store / "c").iterdir()] == ["0.0.0.0"]
+    assert not h.looks_like_zarr(parent)
+
+
+@pytest.mark.parametrize("mark", ["zarr.json", ".zgroup", ".zarray", ".zattrs"])         # written out: ZARR_MARKS itself is what a mutant changes
+def test_m22_each_zarr_mark_alone_makes_the_directory_a_store(tmp_path, mark):
+    assert set(h.ZARR_MARKS) == {"zarr.json", ".zgroup", ".zarray", ".zattrs"}
+    d = tmp_path / "alone"
+    d.mkdir()
+    (d / mark).write_text("{}")
+    assert h.looks_like_zarr(d)
+
+
+def test_m22_a_zarray_in_a_variable_directory_makes_the_folder_a_store(tmp_path):
+    """Zarr 2 with the group's metadata lost: the variable's `.zarray` is what is left."""
+    e = tmp_path / "var"
+    (e / "water_temp").mkdir(parents=True)
+    assert not h.looks_like_zarr(e)
+    (e / "water_temp" / ".zarray").write_text("{}")
+    assert h.looks_like_zarr(e)
+
+
 @pytest.mark.parametrize("damage", ["none", "top_zarr_json", "all_metadata", "top_gone_arrays_cut"])
 def test_lb0_a_store_and_its_damaged_forms_are_still_recognised(fx, tmp_path, damage):
     d, _ = _lab_dir(fx, tmp_path)
