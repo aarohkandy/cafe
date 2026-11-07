@@ -158,3 +158,54 @@ Siblings not searched (as the finding says): other `np.where(cond, x + inc, 0.0)
 - killed: M-28 stuck reset keeps the old value
 - killed: M-28 surfacing pump work dropped
 - killed: M-26 lever arm without /sqrt(2) (uas.py:144, the refuted item): by `tests/test_uas_exact.py::test_rate_gains_follow_the_mixer_authority_of_each_axis`, a test that already existed
+
+---
+
+# Second pass on batch B (what the first pass listed as not done, and what the adversary left)
+
+Everything ran on orca (proot, 2 CPUs, `pm_r11b*`), tests only through `bin/pmx.sh` with `PM_HOST=cafe-orca PM_RUNTIME=proot`. Items that are decisions of the lead or documents for batch E (the receipts row for the curved-wall uniform flow; DECISIONS, CHANGELOG, PHYSICS 14.1, RUNBOOK text above) are not problems and were left as they are.
+
+## Production change: `lbm.bounce_back` chose the wall by the Python type of `qdist` (the "int scalar" neighbour of M-11)
+
+Root cause, not the symptom the first pass named: `isinstance(qdist, float)` picked the halfway wall for a float of ANY value (a float 0.3 silently became 0.5) and the curved wall for an int (an int 1 was a correct q = 1). Now the halfway path is taken by value (`isinstance(qdist, (int, float)) and qdist == 0.5`), any other scalar is that wall distance on every link (what the docstring now says), and an array is as before (`jnp.asarray(qdist, jnp.float32)` is a no-op on the float32 `geom.qd`).
+- Callers: `nest.step` (one call, passes the literal 0.5 or `geom.qd`, a float32 array) and tests. The 0.5 path is the same branch with the same operations (bit-identical), the array path the same operations: no printed number moves. Nothing passes another scalar.
+- Test: `tests/test_lbm.py::test_a_scalar_wall_distance_other_than_one_half_is_that_distance_on_every_link` (q 0.2, 0.3, 0.7, 1.0, as a float and an `np.float64`, against an array filled with q on random populations, with u_wall nonzero; a scalar and an array fold differently, hence atol 2e-6; also 0.5 equals the default). Fails on the old dispatch (all four q).
+- DECISIONS text for batch E, to add to the M-11 row: "`qdist` is the halfway wall only when it is the number 0.5; another scalar is that distance on every link (it used to be chosen by the Python type)."
+
+## M-13 through `fly_sitl` itself (the first pass tested two extracted helpers only)
+
+`tests/test_uas.py::test_r11_batch_b_fly_sitl_flies_a_formation_on_a_ship_that_is_not_at_the_origin_at_the_launch`: a stand-in autopilot (a script run as `arducopter`, speaking the real MAVLink over TCP with pymavlink: heartbeat armed in GUIDED, reading the real `SET_POSITION_TARGET_GLOBAL_INT` and take-off command the bridge sends) and a `_Sim1` subclass whose vehicle is where the servo channels (which carry the autopilot's last target in 0.1 m counts) say. The ship is `steaming(pos0=(1000, 500), speed=1, to_deg=90)` and the launch at 100 s (ship at (1100, 500)). The goto target, the arrival test and the recorded track all go through the real `fly_sitl` code. It asserts the run ends before the cap (all waypoints, a 10 s hold and the landing reached), the first target sent is the first waypoint plus the ship's few metres, no target is farther than 200 m from the home, and every recorded track point is one of the five formation points within 3 m. Fails on the old absolute-frame `_ship_rel` (the run reaches the 60 s cap). The physics of the vehicle is not exercised (the real firmware is still not on orca): the slow SITL receipts remain to be run once where the binary is.
+
+## M-26 neighbours pinned (`tests/test_uas.py`)
+
+- `test_r11_batch_b_the_no_headway_closing_speed_limit_is_read_as_it_is_not_doubled_or_halved` (`stuck_closing_ms`) and `test_r11_batch_b_the_no_headway_speed_asked_limit_is_read_as_it_is_not_doubled_or_halved` (`stuck_min_cmd_ms`): a calm 300 s sortie, whose steady closing speed on the long leg and the speed asked are both the leg speed v (probed on orca in headwinds 0 to 7.5 m/s: 8.0, 7.62, 6.12, 5.12 for a leg speed of 8), with the limit set to 1.25 v and 0.6 v read from the platform. Four mutants (limit doubled and halved, each) killed.
+- stage1.py:398, the battery margin: already pinned. The mutant `soc - 0.5 * reserve_frac` is killed by the existing `tests/test_stage1.py::test_the_sorties_are_also_kept_on_a_30_s_grid_over_each_launch_window_and_the_margin_is_the_lowest_charge_over_the_reserve`; no test added.
+
+## M-27 neighbours
+
+- `uas_case`'s weak final assertion `(R @ (v - u_env))[0] != 0` is now `rel == |v_rel| * [cos(tilt), 0, sin(tilt)]` (nose down into the flow); the mutant `rotation(heading, +tilt)` is killed (it was not).
+- `Y_MATCH`: the plate test allowed 0.51 cell. New `tests/test_stage3.py::test_r11_batch_b_the_matching_point_is_two_and_a_half_cells_from_the_wall_surface_and_the_log_law_is_read_there` (matching point at 6.0 for a wall cell 4, and `wall_state` evaluates the log law at 2.5, y+ = 2.5 u_tau/nu); the mutant `Y_MATCH = 2.0` is killed. `KAPPA`, `B_LOG` and `YPLUS_LAM` were pinned by the first pass's literal-valued test.
+- `NU_MAX` is read by nothing (grep of the repo) and its value contradicts its comment (nu 0.5 is tau 2.0, not 1.5): a row P-R11B1 in `review/orca/PROBLEMS.md`, open. Not changed: enforcing it or deleting it is a physics decision (it would move windows whose lattice viscosity is above the limit).
+
+## M-28 siblings (the `np.where` resets and energy increments of glider.py)
+
+Swept by mutation, each against the whole `tests/test_glider.py`: hotel energy halved, bottom pump work dropped, the depth-averaged current without the `- dr`, `stuck_s` increment halved, `d_prev` update dropped, `t_prev_dive` update dropped, `pump_time_s` halved at the bottom, the depth set to `dive_depth` at the bottom dropped, the surfacing time halved, `out_s` increment doubled: all killed by the first pass's tests or older ones. Two survived and now have a test each (`tests/test_glider.py`):
+- `d_prev[adv] = nan` (after a waypoint is reached the next distance was compared with the distance to the one just reached, so the dive counted as lost ground): `test_r11_batch_b_advancing_to_the_next_waypoint_forgets_the_distance_to_the_last_one`;
+- the `out_s` reset to 0 in station mode (two short excursions counted as one long one, flagging `station_lost`): `test_r11_batch_b_the_station_clock_runs_outside_the_tolerance_and_a_return_resets_it`.
+Each is shown failing on its mutant and passing on the code. Not swept: other `P[...]` values validated only by bound tests (a list too long for this pass).
+
+## What was run
+
+- Fail-first mutants of this pass (each alone, in throwaway detached worktrees `cafe-r11b-mut{A,B,C}`, removed afterwards; the test run of each is only the new test or, for the glider sweep, the whole glider file): 23 in all: 18 killed by the new tests or older ones at once (8 fail-first mutants of this pass's tests, 10 of the glider sweep), 2 of the sweep survived and were killed after their tests were added (H1, H2 below), and the stage1 margin one was killed by an existing test.
+- Whole files, `--cov=cafe/pm`, one job per file group on orca: see "Test runs, second pass" below.
+- `ruff check cafe/pm tests`: clean. `mypy cafe/pm`: no issues in 55 files. `python -m cafe.pm audit --code-only`: one problem, "mutation: no stored result at docs/mutation.json" (the record needs `make mutation`, hours: not run), so the banned scan has 0 hits.
+
+## Still not done
+
+- The full suite, `make mutation`, the slow receipts (stage-3 Cd grids, UAS SITL with the binary), the full `python -m cafe.pm audit`: not run, as in the first pass.
+- The fast receipts were not rerun after the `lbm.py` change (the path for 0.5 and for arrays is the same code; the fast receipts moved nothing after the first pass's change and `nest.receipts()` calls `bounce_back` with the literal 0.5 or an array).
+- Siblings listed above under M-28 (other `P[...]` bound-only values) and the `NU_MAX` decision.
+
+## Test runs, second pass (orca, proot, 2 CPUs a job, `--cov=cafe/pm`, four jobs at once)
+
+The whole files `tests/test_lbm.py tests/test_nest.py` (87), `tests/test_glider.py` (124), `tests/test_uas.py tests/test_uas_exact.py` (105) and `tests/test_stage3.py` (188): exit code 0 in each, 504 passed on the progress lines, no F, E, s or x (counted as CLAUDE.md says; the first pass had 494, and this pass added 10: 4 + 3 + 2 + 1). Coverage of the modules this batch touched, from those files alone: `stage3/windows.py`, `stage3/wallmodel.py` and `stage3/pipeline_windows.py` 100 percent; `stage3/lbm.py` misses lines 656 and 671-672 (the stored-receipt printing), `physics/glider.py` line 111 and `physics/uas.py` lines 109, 114, 117 (platform-file `ValueError`s), `stage3/nest.py` lines 83, 273-277, 512, 529-543, 558 (tests of other files cover them): none is a line of this batch, and every changed line (`bounce_back`'s dispatch and `wall` factor, `_ship_rel`, `_reached`, the three `fly_sitl` call sites, `left` in `glider.step`, `wall_pressure_pa`) is executed. The 100 percent gate on physics, stats and env needs the full suite and is not measured. The ruff and mypy runs were made before the last wording-only edits of two docstring lines and comments (line lengths); ruff was rerun after them (clean).

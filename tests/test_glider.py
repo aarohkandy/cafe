@@ -881,6 +881,32 @@ def test_r11_m28_a_good_dive_resets_the_stuck_clock_so_alternating_dives_never_f
     assert s.stuck_s[0] == pytest.approx(1.1 * limit) and s.fail["waypoint_unreachable"][0]       # consecutive losses still add up to it
 
 
+def test_r11_batch_b_advancing_to_the_next_waypoint_forgets_the_distance_to_the_last_one():
+    """`d_prev[adv] = nan` removed passed every test: after the glider reaches a waypoint, the distance left to the NEXT one was compared with the
+    distance it had to the one it just reached (small), so that dive counted as lost ground and the stuck clock ran."""
+    s = sim(mission=dict(mode="section", waypoints=[(180.0, 0.0), (181.0, 0.0)]))
+    s.step(60.0)
+    one = np.array([True])
+    s.wp_idx[:] = 0                                                   # on the first waypoint, which is where the glider is
+    s.d_prev[:] = 0.0
+    s.t_prev_dive[:] = s.t - 3600.0
+    s._begin_dive(one)
+    assert s.wp_idx[0] == 1
+    assert s.stuck_s[0] == 0.0                                        # the new leg is not "lost ground" against the old one
+
+
+def test_r11_batch_b_the_station_clock_runs_outside_the_tolerance_and_a_return_resets_it():
+    """`out_s` reset to its old value passed every test: two short excursions counted as one long one and flagged `station_lost`."""
+    s = sim(mission=dict(mode="station", station=(180.0, 0.0)))
+    s.step(60.0)
+    s.out_s[:] = 0.9 * s.md["lost_hours"] * 3600.0                    # an excursion that has ended: the glider is back on the station
+    s.step(60.0)
+    assert s.out_s[0] == 0.0 and not s.fail["station_lost"][0]
+    s.lon[:] = -179.0                                                 # a degree east of the station, far beyond the tolerance
+    s.step(60.0)
+    assert s.out_s[0] == pytest.approx(60.0)
+
+
 def test_r11_m28_the_surfacing_charges_the_comms_and_the_pump_that_empties_the_bladder_at_the_surface():
     s = sim(mission=dict(mode="drift", heading_to=90.0, dive_depth_m=200.0))
     e_prev, ph_prev = 0.0, s.phase[0]

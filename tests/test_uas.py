@@ -512,6 +512,71 @@ for fc in range(2, 400):
     assert not res["landed"][0] and res["track"]["t"].size >= 1
 
 
+AUTOPILOT_THAT_GOES_WHERE_TOLD = FAKE_HEAD + """
+import math
+from pymavlink.dialects.v20 import common as mavlink2
+mav = mavlink2.MAVLink(None, srcSystem=1, srcComponent=1)
+beat = mav.heartbeat_encode(2, 3, 129, 4, 4, 3).pack(mav)       # a copter that is armed and in GUIDED
+LAT0, LON0, MPD = %r, %r, %r
+target = [0.0, 0.0, 0.0]                                         # east, north, up of the last position target, metres from the firmware's home
+aimed = open(sys.argv[sys.argv.index("--defaults") + 1].split(",")[-1] + ".aimed", "w")
+srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 5760 + 10 * I)); srv.listen(1)
+def serve():
+    conn, _ = srv.accept()
+    conn.settimeout(0.05)
+    rx = mavlink2.MAVLink(None)
+    rx.robust_parsing = True
+    while True:
+        conn.sendall(beat)
+        try:
+            data = conn.recv(4096)
+        except socket.timeout:
+            data = b""
+        for msg in (rx.parse_buffer(data) or []):
+            if msg.get_type() == "SET_POSITION_TARGET_GLOBAL_INT":
+                target[:] = [(msg.lon_int / 1e7 - LON0) * MPD * math.cos(math.radians(LAT0)), (msg.lat_int / 1e7 - LAT0) * MPD, msg.alt]
+                aimed.write(json.dumps(target) + "\\n"); aimed.flush()
+            elif msg.get_type() == "COMMAND_LONG" and msg.command == 22:             # take off to param7
+                target[2] = msg.param7
+threading.Thread(target=serve, daemon=True).start()
+fc = 0
+while True:                                                      # the target goes back to the bridge in the servo channels, 0.1 m a count
+    ask(struct.pack("<HHI16H", 18458, 400, fc, *([int(round(x * 10)) + 20000 for x in target] + [1500] * 13)))
+    fc += 1
+""" % (uas.SITL_HOME[1], uas.SITL_HOME[0], uas.M_PER_DEG)
+
+
+class WhereTheServosSay(uas._Sim1):
+    """The physics of a vehicle that is exactly where the stand-in autopilot last told it to be: only the frames are tested."""
+
+    def step(self, pwm):
+        self.t += uas.DT_PHYS
+        self.p = jnp.asarray([[(pwm[i] - 20000) / 10.0] for i in range(3)])
+
+
+def test_r11_batch_b_fly_sitl_flies_a_formation_on_a_ship_that_is_not_at_the_origin_at_the_launch(tmp_path, monkeypatch):
+    """M-13 through `fly_sitl` itself, with a stand-in autopilot (the binary is not on every host): the position target it receives, the
+    arrival test and the recorded track must all be in the launch-relative frame. Before, the arrival test aimed at the ship's absolute
+    position, was never true, and the run ran to its cap with the track shifted by the ship's position at the launch."""
+    from cafe import emulator
+    monkeypatch.setattr(emulator, "SITL_DIR", fake_sitl(tmp_path, AUTOPILOT_THAT_GOES_WHERE_TOLD))
+    monkeypatch.setattr(uas, "_Sim1", WhereTheServosSay)
+    ship = uas.steaming(pos0=(1000.0, 500.0), speed=1.0, to_deg=90.0)                 # 1 m/s east: at (1100, 500) when the sortie starts at 100 s
+    wp = np.array([[30.0, -20.0, 25.0], [60.0, 10.0, 30.0]])
+    res = uas.fly_sitl(AnalyticEnv(wind=(0.0, 0.0)), ship, 100.0, origin=ORIGIN, plat=P, wp=wp, max_s=60.0, boot_s=0.5, patience_s=5.0, hold_s=10.0,
+                       workdir=str(tmp_path / "wd"))
+    assert res["t_end"][0] < 40.0                                                   # the waypoints, the hold and the landing were done, not the cap
+    aimed = np.array([json.loads(ln) for ln in (tmp_path / "wd" / "uas.parm.aimed").read_text().splitlines()])
+    assert np.allclose(aimed[0, :2], [30.0, -20.0], atol=5.0) and aimed[0, 2] == 25.0     # the first waypoint plus the ship's few metres since the launch
+    assert np.abs(aimed[:, :2]).max() < 200.0                                       # never the ship's position of 1100 m
+    pos = res["track"]["pos_rel"][0][res["track"]["t"] > 3.5]                      # from the take-off on (before it the stand-in stays put)
+    formation = np.array([[0.0, 0.0, 25.0], [30.0, -20.0, 25.0], [60.0, 10.0, 30.0], [0.0, 0.0, 15.0], [0.0, 0.0, 0.0]])
+    nearest = np.linalg.norm(pos[:, None, :] - formation[None], axis=2).min(1)
+    assert len(pos) >= 10 and nearest.max() < 3.0                                   # every point is a formation point, none shifted by the ship's offset
+    assert np.linalg.norm(pos - formation[2], axis=1).min() < 3.0                   # and the hold at the last waypoint is among them
+
+
 def test_an_autopilot_that_never_arms_is_reported_and_fails_the_sitl_receipts(tmp_path, monkeypatch):
     from cafe import emulator
     from cafe import receipts as R
@@ -959,6 +1024,32 @@ def test_r11_m26_the_no_headway_flag_waits_one_stuck_window_not_two_and_not_half
         return bool(uas.fly_sortie(HeadwindPulse(60.0, length, 14.0), uas.steaming(), 0.0, M=1, origin=ORIGIN, plat=plat, heading_deg=90.0)
                     ["flags"]["wind_exceeds_airspeed"][0])
     assert flag(1.8 * w) and not flag(0.9 * w)
+
+
+def calm_leg_flag(**failure):
+    """`wind_exceeds_airspeed` of a calm 300 s sortie flown with the given `failure` values: the steady closing speed on the long outbound leg is the
+    leg speed and the speed asked is the same (probed on orca: 8.0 and 8.0; the climb at the ship and the first seconds of the leg are below both)."""
+    plat = fast_plat()
+    plat["failure"].update(failure)
+    r = uas.fly_sortie(AnalyticEnv(wind=(0.0, 0.0)), uas.steaming(), 0.0, M=1, origin=ORIGIN, plat=plat, heading_deg=90.0)
+    return bool(r["flags"]["wind_exceeds_airspeed"][0])
+
+
+def test_r11_batch_b_the_no_headway_closing_speed_limit_is_read_as_it_is_not_doubled_or_halved():
+    """Review round 11, M-26 neighbour (`closing < stuck_v`). The steady closing speed of a calm leg is the leg speed v. A limit of 1.25 v is
+    never reached, so the flag fires; one of 0.6 v is passed in the first seconds of the leg, so it does not. Doubling the limit (1.2 v) turns the
+    second case into a flag, halving it (0.625 v) the first into none."""
+    v = fast_plat()["sortie"]["leg_speed_ms"]
+    assert not calm_leg_flag()                                                        # the shipped limit: a calm sortie has headway
+    assert calm_leg_flag(stuck_closing_ms=1.25 * v) and not calm_leg_flag(stuck_closing_ms=0.6 * v)
+
+
+def test_r11_batch_b_the_no_headway_speed_asked_limit_is_read_as_it_is_not_doubled_or_halved():
+    """Review round 11, M-26 neighbour (`ask > stuck_cmd`). With the closing limit out of reach (every closing speed is below 100 v) the flag is
+    set by the speed the controller asks for alone, which on the long leg is the leg speed v: a limit of 0.6 v is exceeded, so it fires; 1.25 v
+    never is. Doubling the limit (1.2 v) takes the first away, halving it (0.625 v) gives the second a flag."""
+    v = fast_plat()["sortie"]["leg_speed_ms"]
+    assert calm_leg_flag(stuck_closing_ms=100.0 * v, stuck_min_cmd_ms=0.6 * v) and not calm_leg_flag(stuck_closing_ms=100.0 * v, stuck_min_cmd_ms=1.25 * v)
 
 
 class WindAt(AnalyticEnv):

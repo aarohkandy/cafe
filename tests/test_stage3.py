@@ -87,6 +87,21 @@ def test_wall_set_plate_has_normals_distance_and_matching_points_on_the_right_si
     assert np.allclose(ws.wgt.sum(0), 1) and ws.valid.all()
 
 
+def test_r11_batch_b_the_matching_point_is_two_and_a_half_cells_from_the_wall_surface_and_the_log_law_is_read_there():
+    """The plate test above allows 0.51 cell. Wall cell 4 of a slab (surface at 3.5): matching point y = 3.5 + Y_MATCH = 6.0 and the log law
+    is evaluated at the same 2.5 (a changed Y_MATCH moves both)."""
+    solid = np.zeros((16, 20, 4), bool)
+    solid[:, :4, :] = True
+    ws = wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))
+    mid = (ws.cell[1] == 4) & (ws.cell[0] > 3) & (ws.cell[0] < 12)
+    assert mid.sum() > 20
+    assert np.allclose((ws.sten[1][:, mid] * ws.wgt[:, mid]).sum(0), 6.0, atol=1e-5)
+    nu = 3e-5
+    st_ = wm.wall_state(jnp.zeros((3,) + solid.shape).at[0].set(0.04), wm.WallSet(*(jnp.asarray(a) for a in ws)), nu)
+    ut = float(wm.utau_loglaw(jnp.float32(0.04), 2.5, nu))
+    assert np.allclose(np.asarray(st_["utau"])[mid], ut, rtol=1e-5) and np.allclose(np.asarray(st_["yplus"])[mid], 2.5 * ut / nu, rtol=1e-5)
+
+
 def test_wall_set_padding_and_errors():
     solid = _plate()
     ws = wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))
@@ -945,7 +960,9 @@ def test_hangar_numbers_are_the_vehicles_own_models(no_wall_receipt, monkeypatch
     vr = np.linalg.norm(cq["v"] - cq["u_env"])
     assert cq["cd_h"] == pytest.approx(Pq["airframe"]["mass_kg"] * Pq["aero"]["d_x"] * vr / (0.5 * 1.2 * vr ** 2 * q.ref_area), rel=0.1)
     assert cq["cl_h"] is None and cq["info"]["tilt_deg"] == pytest.approx(np.degrees(np.arctan(Pq["aero"]["d_x"] * vr / 9.81)))
-    assert (cq["R"] @ (cq["v"] - cq["u_env"]))[0] != 0
+    rq = cq["R"] @ (cq["v"] - cq["u_env"])                                                        # heading into the wind, leaning into it, nose down
+    tq = np.radians(cq["info"]["tilt_deg"])
+    assert np.allclose(rq, vr * np.array([np.cos(tq), 0.0, np.sin(tq)]), atol=1e-9)             # body x gets cos(tilt), body z (up) sin(tilt), sideways none
 
 
 
