@@ -67,6 +67,18 @@ def check_params(table: dict[str, str], vals: dict[str, Any], where: str, ref: s
             raise ValueError(f"{where}.{k}: {v!r} must be a number, got a list; give one value")
 
 
+def check_shape(raw: dict[str, Any], name: str) -> None:
+    """Raise ValueError when a glider or USV platform file's `params` or `mission_defaults` is not a mapping, or its `kind` is not a name. Both loaders
+    read them as mappings (`.items()`, `in REQUIRED`), and the raw AttributeError or TypeError ended `validate`, stage 1 and `hangar` in a traceback
+    (round 11, M-25); `uas.load_platform` has always answered with a ValueError."""
+    for k in ("params", "mission_defaults"):
+        if not isinstance(raw[k], dict):
+            raise ValueError(f"{name}:{k}: expected a mapping of parameters, got {type(raw[k]).__name__}; each parameter has a `value`, a `unit` and a "
+                             f"`source` (or `assumed: true` with a `why`)")
+    if not isinstance(raw["kind"], str):
+        raise ValueError(f"{name}:kind: {raw['kind']!r} must be a name (a string)")
+
+
 def drop_repeats(wps: Any, cyclic: bool = False) -> Any:
     """The waypoints (n, 2) with every point that equals the one before it removed (round 9, M-13). A leg of length zero has no direction: the USV's
     cross-track error of it is 0 whatever the boat does, so a section of `[A, A]` ran with its track test off. `cyclic`: the list is flown round and

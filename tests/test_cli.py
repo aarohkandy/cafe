@@ -419,16 +419,26 @@ def test_hangar_reports_a_platform_without_provenance_and_an_unknown_platform(ca
     assert "platform 'no_such_boat': no file" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("change, said", [(lambda d: d.update(params=5), "AttributeError: 'int' object has no attribute 'items'"),
-                                          (lambda d: d.update(kind=["seaglider"]), "TypeError: unhashable type: 'list'")])
+@pytest.mark.parametrize("change, said", [(lambda d: d.update(params=5), "odd.yaml:params: expected a mapping of parameters, got int; "),
+                                          (lambda d: d.update(kind=["seaglider"]), "odd.yaml:kind: ['seaglider'] must be a name (a string)")])
 def test_r11_m25_hangar_says_a_platform_file_of_the_wrong_shape_failed_the_check_and_does_not_traceback(tmp_path, capsys, change, said):
-    """`_hangar` caught only ValueError; the glider loader raises AttributeError and TypeError for these files (round 11, M-25)."""
+    """The glider loader raised AttributeError and TypeError for these files and `_hangar` caught only ValueError (round 11, M-25); the loader says
+    ValueError now."""
     d = yaml.safe_load((config.PLATFORMS / "seaglider.yaml").read_text())
     change(d)
     p = tmp_path / "odd.yaml"
     p.write_text(yaml.safe_dump(d))
     assert cli.main(["hangar", "--platform", str(p)]) == 1
-    assert capsys.readouterr().out == f"{p} (glider): provenance FAILED: {said}\n"
+    assert capsys.readouterr().out.startswith(f"{p} (glider): provenance FAILED: {said}")
+
+
+@pytest.mark.parametrize("error", [TypeError("unhashable type: 'list'"), AttributeError("'int' object has no attribute 'items'")])
+def test_r11_m25_hangar_says_a_type_or_attribute_error_of_a_class_loader_failed_the_check_too(capsys, monkeypatch, error):
+    def odd(name):
+        raise error
+    monkeypatch.setattr(glider, "load_platform", odd)
+    assert cli.main(["hangar", "--platform", "seaglider"]) == 1
+    assert capsys.readouterr().out == f"seaglider (glider): provenance FAILED: {type(error).__name__}: {error}\n"
 
 
 def test_r11_m25_hangar_says_a_key_error_of_a_class_loader_failed_the_check_too(capsys, monkeypatch):

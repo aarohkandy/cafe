@@ -1026,16 +1026,30 @@ def a_platform_file(tmp_path, name, fn):
     return p
 
 
-@pytest.mark.parametrize("vid, name, change, kind", [("glider_eq", "seaglider", lambda d: d.update(params=5), "AttributeError"),
-                                                     ("glider_eq", "seaglider", lambda d: d.update(mission_defaults=[1]), "AttributeError"),
-                                                     ("glider_eq", "seaglider", lambda d: d.update(kind=["seaglider"]), "TypeError"),
-                                                     ("usv", "saildrone_explorer", lambda d: d.update(params=[1]), "AttributeError")])
-def test_r11_m25_a_platform_file_of_the_wrong_shape_is_a_config_error_not_a_traceback(tmp_path, vid, name, change, kind):
-    """`_check_platform` caught only ValueError and KeyError, and the glider and USV loaders raise AttributeError (`.items()` of a section that is not a
-    mapping) and TypeError (an unhashable `kind`): `validate` ended in a traceback for a platform file named by its path."""
+@pytest.mark.parametrize("vid, name, change", [("glider_eq", "seaglider", lambda d: d.update(params=5)),
+                                               ("glider_eq", "seaglider", lambda d: d.update(mission_defaults=[1])),
+                                               ("glider_eq", "seaglider", lambda d: d.update(kind=["seaglider"])),
+                                               ("usv", "saildrone_explorer", lambda d: d.update(params=[1]))])
+def test_r11_m25_a_platform_file_of_the_wrong_shape_is_a_config_error_not_a_traceback(tmp_path, vid, name, change):
+    """The glider and USV loaders met a section that is not a mapping with an AttributeError (`.items()`) and an unhashable `kind` with a TypeError, and
+    `validate` ended in a traceback for a platform file named by its path. They answer with a ValueError now (`physics.check_shape`), which
+    `_check_platform` turns into the ConfigError."""
     p = a_platform_file(tmp_path, name, change)
-    with pytest.raises(ConfigError, match=rf"vehicles/{vid}/platform: .* does not load as a (glider|usv) platform \({kind}: "):
+    with pytest.raises(ConfigError, match=rf"vehicles/{vid}/platform: .* does not load as a (glider|usv) platform \(ValueError: "):
         load_mission(edit(tmp_path, lambda d: vehicle(d, vid).update(platform=str(p))))
+
+
+@pytest.mark.parametrize("error", [TypeError("unhashable type: 'list'"), AttributeError("'int' object has no attribute 'items'")])
+def test_r11_m25_a_class_loader_that_raises_a_type_or_attribute_error_is_a_config_error_too(monkeypatch, error):
+    """Defence for a loader that does not check its shape: the tuple of `_check_platform` still holds both (no shipped loader raises them now)."""
+    from cafe.pm.physics import glider
+
+    def odd(name):
+        raise error
+
+    monkeypatch.setattr(glider, "load_platform", odd)
+    with pytest.raises(ConfigError, match=rf"vehicles/glider_\w+/platform: 'seaglider' does not load as a glider platform \({type(error).__name__}: "):
+        load_mission(DEMO)
 
 
 def test_r11_m25_a_class_loader_that_raises_a_key_error_is_a_config_error_too(tmp_path, monkeypatch):

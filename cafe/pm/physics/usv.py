@@ -87,7 +87,7 @@ import numpy as np
 
 from ..env import conventions as cv
 from ..config import platform_doc as read_yaml, platform_path
-from . import check_params, drop_repeats
+from . import check_params, check_shape, drop_repeats
 
 Arr = Any
 G = 9.80665
@@ -138,6 +138,7 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
 
     if missing := [k for k in ("kind", "params", "mission_defaults") if k not in raw]:                          # round 7, M-35
         raise ValueError(f"{path.name}: missing {missing}; add them (see platforms/saildrone_explorer.yaml for the layout)")
+    check_shape(raw, path.name)
 
     def flat(block: dict[str, Any], where: str) -> dict[str, Any]:
         out = {}

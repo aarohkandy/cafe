@@ -14,6 +14,7 @@ from cafe.pm.env import perturb, subgrid
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.stats.sampling import load_perturbations
 from cafe.pm.physics import glider as g
+from cafe.pm.physics import usv
 
 SG, SL = g.load_platform("seaglider"), g.load_platform("slocum")
 DAY = 86400.0
@@ -921,3 +922,22 @@ def test_r11_m28_the_surfacing_charges_the_comms_and_the_pump_that_empties_the_b
     assert pump > 10.0                                                # a term of tens of joules: the mutant that drops it moves E by that
     assert s.E[0] - e_prev == pytest.approx(SG["hotel_W"] * 60.0 + s.comm_J + pump, rel=1e-9)
 
+
+
+# ---- review round 11, M-25 (needed by batch A): a section that is not a mapping, a `kind` that is not a name -----------------------------------------------
+@pytest.mark.parametrize("name, mod, change, said", [
+    ("seaglider", g, lambda d: d.update(params=5), r"glider\.yaml:params: expected a mapping .*got int"),
+    ("seaglider", g, lambda d: d.update(mission_defaults=[1]), r"glider\.yaml:mission_defaults: expected a mapping .*got list"),
+    ("seaglider", g, lambda d: d.update(kind=["seaglider"]), r"glider\.yaml:kind: \['seaglider'\] must be a name"),
+    ("saildrone_explorer", usv, lambda d: d.update(params=[1]), r"usv\.yaml:params: expected a mapping .*got list"),
+    ("saildrone_explorer", usv, lambda d: d.update(mission_defaults="x"), r"usv\.yaml:mission_defaults: expected a mapping .*got str"),
+    ("saildrone_explorer", usv, lambda d: d.update(kind=3), r"usv\.yaml:kind: 3 must be a name")])
+def test_r11_m25_a_platform_file_of_the_wrong_shape_is_a_value_error_from_the_class_loader(tmp_path, name, mod, change, said):
+    """Both loaders met `params: 5` with an AttributeError (`.items()`) and an unhashable `kind` with a TypeError; the callers caught them (round 11,
+    M-25), but a direct caller (stage 1, report) met the raw error. `uas.load_platform` has always answered with ValueError."""
+    raw = yaml.safe_load((g.PLATFORMS / f"{name}.yaml").read_text())
+    change(raw)
+    f = tmp_path / ("glider.yaml" if mod is g else "usv.yaml")
+    f.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=said):
+        mod.load_platform(str(f))
