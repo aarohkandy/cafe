@@ -189,9 +189,10 @@ ZARR_MARKS = ("zarr.json", ".zgroup", ".zarray", ".zattrs")
 
 
 def _chunks_dir(c: pathlib.Path) -> bool:
-    """`c` is the chunk directory of a Zarr 3 array: it holds chunk keys (numbers) and nothing else. A variable named `c` in a group (the sound speed of
-    the ocean store) is a directory too, but it holds a `zarr.json` or its own chunk directory `c`."""
-    return c.is_dir() and any(c.iterdir()) and all(re.fullmatch(r"[0-9.]+", q.name) for q in c.iterdir())
+    """`c` is the chunk directory of a Zarr 3 array: it holds chunk keys (whole numbers, one per grid axis) and nothing else. A variable named `c` in a
+    group (the sound speed of the ocean store) is a directory too, but it holds a `zarr.json` (v3) or a `.zarray` (v2) or its own chunk directory `c`.
+    A Zarr 2 variable `c` whose metadata is lost holds chunk files named `0.0.0.0`: those have dots, so they are not chunk keys of a Zarr 3 array."""
+    return c.is_dir() and any(c.iterdir()) and all(re.fullmatch(r"[0-9]+", q.name) for q in c.iterdir())
 
 
 def _is_array(q: pathlib.Path) -> bool:
