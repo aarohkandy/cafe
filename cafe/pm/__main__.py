@@ -262,8 +262,8 @@ def _hangar(name: str) -> int:
             loader.load_platform(name)
         elif bad := table_provenance(raw):
             raise ValueError(f"table numbers without a source or an assumed+why: {bad}")
-    except ValueError as e:
-        print(f"{name} ({cls}): provenance FAILED: {e}")
+    except (ValueError, KeyError, TypeError, AttributeError) as e:  # as config._check_platform: a file of the wrong shape fails the check
+        print(f"{name} ({cls}): provenance FAILED: {e if isinstance(e, ValueError) else f'{type(e).__name__}: {e}'}")
         return 1
     items = pipeline.provenance(raw, name)                                       # the items credibility.json counts (round 10, M-32)
     print(f"{name} ({cls}): provenance OK, {sum(i['assumed'] for i in items)} of {len(items)} items assumed")

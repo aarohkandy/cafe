@@ -492,3 +492,19 @@ def test_a_fresh_ingest_downloads_gofs_tao_and_gebco_then_a_second_one_downloads
     n_ncss, n_srv = len(ncss.log), len(srv.log)
     run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r2"), "ingest")
     assert len(ncss.log) == n_ncss and len(srv.log) == n_srv
+
+
+def test_r11_m25_a_gebco_cut_without_its_attrs_or_with_its_zip_cut_short_is_not_cached(data_copy):
+    """`_gebco_cached` names four errors: a missing file (OSError) and a changed raster (ValueError) are tested above; a cut that lacks a member is a
+    KeyError, and one cut short is a BadZipFile, which is not an OSError or a ValueError."""
+    p = bathy.cache_path(BOX, data_copy / "bathy")
+    was = p.read_bytes()
+    assert pipeline._gebco_cached(p)
+    z = dict(np.load(p))
+    del z["attrs"]
+    np.savez_compressed(p, **z)
+    assert not pipeline._gebco_cached(p)
+    p.write_bytes(was[: len(was) // 2])
+    assert not pipeline._gebco_cached(p)
+    p.write_bytes(was)
+    assert pipeline._gebco_cached(p)

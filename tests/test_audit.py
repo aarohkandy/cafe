@@ -1202,3 +1202,24 @@ def test_r11_m25_a_ledger_whose_machine_block_is_not_a_mapping_is_a_damaged_line
     edit(run, "report", lambda d: d.update(machine="x"))
     probs = audit.ledger_problems(run)
     assert len(probs) == 1 and "stage report: ledger" in probs[0] and "is damaged or incomplete (AttributeError" in probs[0]
+
+
+def test_r11_m25_a_coverage_file_with_a_summary_that_is_not_a_mapping_is_a_damaged_line_too(tmp_path):
+    """The other three types of `coverage_problems`' tuple are cases of test_lb0_...; a `summary` of 5 is the TypeError one."""
+    cov = tmp_path / "coverage.json"
+    cov.write_text('{"files": {"cafe/pm/a.py": {"summary": 5}}}')
+    probs = audit.coverage_problems(cov)
+    assert len(probs) == 1 and probs[0].startswith(f"coverage: {cov} is damaged or incomplete (TypeError")
+
+
+@pytest.mark.parametrize("ledger_text", ['{"inputs": 5}', '{"inputs": null}', "{cut", "[1]", None])
+def test_r11_m25_a_report_ledger_that_cannot_be_read_is_not_a_run_from_before_the_record(tmp_path, ledger_text):
+    """`root_files_unrecorded` is a note about a readable ledger; an unreadable one (`ledger_problems` names it), a missing one and one whose `inputs` is no
+    list say nothing."""
+    run = make_run(tmp_path)
+    p = ledger_path(run, "report")
+    if ledger_text is None:
+        p.unlink()
+    else:
+        p.write_text(ledger_text)
+    assert audit.root_files_unrecorded(run) is False

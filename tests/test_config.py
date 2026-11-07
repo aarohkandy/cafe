@@ -1013,3 +1013,39 @@ def test_r11_m14_a_bare_key_means_its_default_band_and_a_modem_with_none_says_wh
     assert comms.resolve_modem("benthos_atm960") == ("benthos_atm960", "MF") == comms.resolve_modem("Benthos_ATM960_mf")
     with pytest.raises(ConfigError, match=r"the modem has the bands \['long_10k', 'short_25k'\] and none is its default"):
         load_mission(edit(tmp_path, lambda d: d["links"][1].update(modem="whoi_micromodem")))
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 11, M-25 (siblings)
+
+def a_platform_file(tmp_path, name, fn):
+    """platforms/<name>.yaml copied to tmp_path and changed by `fn`; its path is what a mission's `platform:` may name."""
+    d = yaml.safe_load((config.PLATFORMS / f"{name}.yaml").read_text())
+    fn(d)
+    p = tmp_path / f"{name}_odd.yaml"
+    p.write_text(yaml.safe_dump(d))
+    return p
+
+
+@pytest.mark.parametrize("vid, name, change, kind", [("glider_eq", "seaglider", lambda d: d.update(params=5), "AttributeError"),
+                                                     ("glider_eq", "seaglider", lambda d: d.update(mission_defaults=[1]), "AttributeError"),
+                                                     ("glider_eq", "seaglider", lambda d: d.update(kind=["seaglider"]), "TypeError"),
+                                                     ("usv", "saildrone_explorer", lambda d: d.update(params=[1]), "AttributeError")])
+def test_r11_m25_a_platform_file_of_the_wrong_shape_is_a_config_error_not_a_traceback(tmp_path, vid, name, change, kind):
+    """`_check_platform` caught only ValueError and KeyError, and the glider and USV loaders raise AttributeError (`.items()` of a section that is not a
+    mapping) and TypeError (an unhashable `kind`): `validate` ended in a traceback for a platform file named by its path."""
+    p = a_platform_file(tmp_path, name, change)
+    with pytest.raises(ConfigError, match=rf"vehicles/{vid}/platform: .* does not load as a (glider|usv) platform \({kind}: "):
+        load_mission(edit(tmp_path, lambda d: vehicle(d, vid).update(platform=str(p))))
+
+
+def test_r11_m25_a_class_loader_that_raises_a_key_error_is_a_config_error_too(tmp_path, monkeypatch):
+    """No file of the shipped layout is known to make the class loaders raise KeyError (each key is checked before it is read), so the member of the tuple
+    is held by a loader that does."""
+    from cafe.pm.physics import glider
+
+    def lacking(name):
+        raise KeyError("rating_m")
+
+    monkeypatch.setattr(glider, "load_platform", lacking)
+    with pytest.raises(ConfigError, match=r"vehicles/glider_\w+/platform: 'seaglider' does not load as a glider platform \(KeyError: 'rating_m'\)"):
+        load_mission(DEMO)

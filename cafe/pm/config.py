@@ -332,7 +332,7 @@ def _check_platform(v: dict[str, Any], where: str) -> str:
     from .physics import glider, uas, usv
     try:
         {"uas": uas, "usv": usv, "glider": glider}[cls].load_platform(v["platform"])
-    except (ValueError, KeyError) as e:
+    except (ValueError, KeyError, TypeError, AttributeError) as e:  # a section that is not a mapping, a `kind` that is no name (M-25)
         raise ConfigError(f"{where}/platform: '{v['platform']}' does not load as a {cls} platform ({type(e).__name__}: {e})") from e
     return cls
 

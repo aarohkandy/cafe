@@ -383,7 +383,7 @@ def root_files_unrecorded(run_dir: str | pathlib.Path) -> bool:
     try:
         d = _read_json(pathlib.Path(run_dir) / "checkpoints" / "report" / "ledger.json")
         return not any(isinstance(i, dict) and i.get("ref") in RUN_ROOT_FILES for i in d.get("inputs", []))
-    except (_Unreadable, AttributeError, TypeError):
+    except (_Unreadable, TypeError):  # no or damaged ledger, or `inputs` not a list: `ledger_problems` says so
         return False
 
 
