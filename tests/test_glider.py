@@ -831,3 +831,67 @@ def test_r9_a_mission_default_out_of_its_range_is_refused_at_load_naming_it(tmp_
     f.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError, match=rf"glider\.yaml:mission_defaults\.{key}: "):
         g.load_platform(str(f))
+
+
+# ---- review round 11, M-12: the apogee overshoot is apogee_overshoot x w x pump_time, whatever dt --------------------------------------------
+def apogee_overshoot_m(pump_s, dt, overshoot=0.5, kind=SG):
+    """Depth gained between reaching the dive depth and the end of the apogee pump, and the last descent speed."""
+    s = sim(P=dict(kind, pump_time_s=pump_s, apogee_overshoot=overshoot), mission=dict(mode="drift", heading_to=90.0, dive_depth_m=300.0))
+    while s.phase[0] != g.APO:
+        s.step(dt)
+    d0 = s.depth[0]
+    assert d0 == pytest.approx(300.0)
+    while s.phase[0] == g.APO:
+        s.step(dt)
+    return s.depth[0] - d0, s.w_last[0]
+
+
+@pytest.mark.parametrize("pump_s,dt", [(120.0, 60.0), (100.0, 60.0), (150.0, 60.0), (120.0, 300.0), (120.0, 120.0), (90.0, 45.0)])
+def test_r11_m12_the_apogee_overshoot_is_half_the_descent_speed_times_the_pump_time_for_any_step(pump_s, dt):
+    over, w = apogee_overshoot_m(pump_s, dt)
+    assert w > 0.01 and over == pytest.approx(0.5 * w * pump_s, rel=1e-9)
+
+
+def test_r11_m12_a_zero_overshoot_leaves_the_depth_and_a_slocum_follows_the_same_rule():
+    assert apogee_overshoot_m(120.0, 60.0, overshoot=0.0)[0] == 0.0
+    over, w = apogee_overshoot_m(150.0, 300.0, kind=SL)
+    assert over == pytest.approx(0.5 * w * 150.0, rel=1e-9)
+
+
+# ---- review round 11, M-28: details the module's tests passed without ----------------------------------------------------------------------
+def test_r11_m28_a_good_dive_resets_the_stuck_clock_so_alternating_dives_never_flag_an_unreachable_waypoint():
+    """The reset to 0.0 replaced by the old value passed every test: a section glider that loses ground only every other dive then flagged
+    `waypoint_unreachable` for a total, not a run, of lost time."""
+    s = sim(mission=dict(mode="section", waypoints=[(181.0, 0.0)]))
+    s.step(60.0)                                                      # the first dive: nothing to compare with
+    assert s.stuck_s[0] == 0.0
+    limit = s.md["unreach_hours"] * 3600.0
+    one = np.array([True])
+    s.stuck_s[:] = 0.9 * limit
+    s.d_prev[:] = 1e12                                                # the last dive started far away: this one gained ground
+    s._begin_dive(one)
+    assert s.stuck_s[0] == 0.0
+    s.d_prev[:] = 0.0                                                 # the next one lost ground over a cycle of 0.2 limit
+    s.t_prev_dive[:] = s.t - 0.2 * limit
+    s._begin_dive(one)
+    assert s.stuck_s[0] == pytest.approx(0.2 * limit) and not s.fail["waypoint_unreachable"][0]
+    s.d_prev[:] = 0.0
+    s.t_prev_dive[:] = s.t - 0.9 * limit
+    s._begin_dive(one)
+    assert s.stuck_s[0] == pytest.approx(1.1 * limit) and s.fail["waypoint_unreachable"][0]       # consecutive losses still add up to it
+
+
+def test_r11_m28_the_surfacing_charges_the_comms_and_the_pump_that_empties_the_bladder_at_the_surface():
+    s = sim(mission=dict(mode="drift", heading_to=90.0, dive_depth_m=200.0))
+    e_prev, ph_prev = 0.0, s.phase[0]
+    for _ in range(3000):
+        s.step(60.0)
+        if ph_prev == g.ASC and s.phase[0] == g.SURF:
+            break
+        e_prev, ph_prev = s.E[0], s.phase[0]
+    assert s.phase[0] == g.SURF
+    dV = s.vbd_climb[0] - s.vbd_dive[0]
+    pump = float(g.pump_energy_J(dV, 0.0, SG["pump_eta"]))
+    assert pump > 10.0                                                # a term of tens of joules: the mutant that drops it moves E by that
+    assert s.E[0] - e_prev == pytest.approx(SG["hotel_W"] * 60.0 + s.comm_J + pump, rel=1e-9)
+

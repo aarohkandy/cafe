@@ -83,6 +83,11 @@ def nu_of(vehicle: Vehicle) -> float:
     return NU[vehicle.fluid] if vehicle.nu is None else vehicle.nu
 
 
+def wall_pressure_pa(rho_lat: Any, rho_f: float, dx: float, dt: float) -> Any:
+    """Gauge pressure [Pa] from the lattice density at the wall cells: p = cs^2 (rho - 1) rho_f (dx/dt)^2 with cs^2 = 1/3."""
+    return (rho_lat - 1.0) / 3.0 * rho_f * (dx / dt) ** 2
+
+
 def rho_of(vehicle: Vehicle) -> float:
     return RHO[vehicle.fluid] if vehicle.rho is None else vehicle.rho
 
@@ -315,7 +320,7 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
     cut = int(n * spec.spinup)
     # wall pressure (gauge, Pa) at the wall cells, mean over the last chunks: p = cs^2 (rho - 1) rho_f (dx/dt)^2
     if acc:
-        pwall = (np.mean(acc, 0) - 1.0) / 3.0 * rho_f * (dx / ns.dt) ** 2
+        pwall = wall_pressure_pa(np.mean(acc, 0), rho_f, dx, ns.dt)
     cell = np.asarray(geom.ws.cell)
     pts = (cell.T - anchor) * dx
     checks = stage3_checks(ser, ns, co["drag"][cut:], clearance, wm.stored_wall_error() if ns.wall_model else 0.0,

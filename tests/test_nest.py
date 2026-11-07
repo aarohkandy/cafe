@@ -28,6 +28,11 @@ def test_uniform_flow_gives_zero_force_and_the_nest_really_shifts():
     assert r["f_rel"] < 1e-4 and r["shifts"] >= 10
 
 
+def test_uniform_flow_gives_zero_force_on_a_curved_bouzidi_sphere_too():
+    r = nest.uniform_flow_force(bouzidi=True)
+    assert r["f_rel"] < 1e-3 and r["shifts"] >= 10                         # 0.39 mean and 7.8 max before the wall term took the 1/(2q)
+
+
 def test_zero_force_receipt_fails_without_the_moving_wall_term():
     r = nest.uniform_flow_force(wall_vel=False)
     assert r["f_rel"] > 1e-2                                              # the carried body now sees a phantom wind
@@ -189,6 +194,16 @@ def test_shell_weights_and_periodic_axes():
     assert (idx[2][k == 0].reshape(-1) >= 0).all()
     # a periodic axis contributes no shell cells of its own: cells with only z on the face are not in the shell
     assert not ((idx[0] == 6) & (idx[1] == 6)).any()
+
+
+def test_r11_m28_the_sponge_ramp_is_quadratic_in_the_layer_index():
+    """PHYSICS 14.1: weight 1 on the refill layer, (1 - k/(sponge + 1))^2 on layer k > 0; a linear ramp passed the monotone test above."""
+    spec = nest.NestSpec((14, 14, 14), 1.0, 1.0, 1e-3, sponge=4)
+    _, _, w, k = nest._shell(spec)
+    assert set(np.unique(k)) == {0, 1, 2, 3, 4}
+    for layer in range(1, 5):
+        assert np.allclose(w[k == layer], (1 - layer / 5.0) ** 2) and not np.allclose(w[k == layer], 1 - layer / 5.0)
+    assert (w[k == 0] == 1).all()
 
 
 def test_geometry_must_not_touch_open_faces():

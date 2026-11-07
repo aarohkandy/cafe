@@ -432,6 +432,24 @@ def fake_sitl(tmp_path, body):
     return d
 
 
+def test_r11_m13_sitl_targets_and_the_track_are_in_the_launch_relative_frame_whatever_the_ship_and_the_launch_time():
+    """`_Sim1.p` starts at zero at the launch: the waypoints ride on the ship's displacement since the launch, not on its position
+    (a ship not at the origin, or a launch after t = 0, left the arrival test never true and the track shifted by the ship's position)."""
+    t_launch, rel = 100.0, np.array([30.0, -20.0, 25.0])
+    ship = uas.steaming(pos0=(1000.0, 500.0), speed=5.0, to_deg=90.0)                # 5 m/s east from (1000, 500)
+    ship0 = np.asarray(ship(t_launch), float)
+    assert np.allclose(ship0, [1500.0, 500.0])
+    assert np.allclose(uas._ship_rel(ship, t_launch, ship0, 0.0), 0.0)
+    r = uas._ship_rel(ship, t_launch, ship0, 12.0)
+    assert r.shape == (3,) and np.allclose(r, [60.0, 0.0, 0.0], atol=1e-9)
+    tgt = r + rel                                                                      # what `goto` aims at, and tells the firmware
+    p = np.array([90.0, -20.0, 25.0])                                                  # a vehicle holding station on that point of the formation
+    assert uas._reached(p, tgt, 2.0, 2.0)
+    assert not uas._reached(p + [0.0, 0.0, 3.0], tgt, 2.0, 2.0) and not uas._reached(p + [2.5, 0.0, 0.0], tgt, 2.0, 2.0)
+    assert not uas._reached(p, tgt + np.append(ship0, 0.0), 2.0, 2.0)          # the old target (the ship's absolute position added) is far away
+    assert np.allclose(p - uas._ship_rel(ship, t_launch, ship0, 12.0), rel)   # the track's formula: p less the ship's displacement
+
+
 def test_missing_binary_is_a_clear_error_naming_the_path(tmp_path, monkeypatch):
     from cafe import emulator
     monkeypatch.setattr(emulator, "SITL_DIR", tmp_path / "nowhere")
@@ -903,3 +921,77 @@ for fc in range(0, 400):
     assert res["hole"]["flags"]["no_current_data"].tolist() == [True] and res["clean"]["flags"]["no_current_data"].tolist() == [False]
     assert np.isfinite([res["hole"]["soc_end"], res["hole"]["max_tilt_deg"], res["hole"]["energy_wh"]]).all()
     assert np.array_equal(res["hole"]["soc_end"], res["clean"]["soc_end"])                       # the env's wind is 0, so the zero wind is the clean flight
+
+
+# ---- review round 11, M-26: near-threshold tests of the thresholds the closed-loop tests passed by a wide margin ----------------------------------
+def test_r11_m26_the_battery_flag_fires_when_the_charge_crosses_the_reserve_not_half_of_it_and_the_return_starts_then_too():
+    """`soc < 0.5 * reserve` passed: the only battery tests used a pack so small that the charge fell far below either. The flag's first time is the
+    block in which the charge crossed `reserve_frac`: the 1 s record before it is at or above it, the one after below, and the vehicle turns for home."""
+    res = P["battery"]["reserve_frac"]
+    r = fly(scale=dict(battery=[0.2]), M=1)
+    t1 = float(r["t_first"]["battery_reserve"][0])
+    t, soc, ph = r["track"]["t"], r["track"]["soc"][0], r["track"]["phase"][0]
+    before, after = int(np.searchsorted(t, t1, side="right")) - 1, int(np.searchsorted(t, t1, side="left"))
+    assert t[before] <= t1 <= t[after] and soc[before] >= res > soc[after]
+    assert ph[before] == uas.FLY and ph[after + 1] == uas.RTL                       # the failsafe return starts with the flag, not at half the reserve
+
+
+class HeadwindPulse(AnalyticEnv):
+    """No wind except a `speed` m/s headwind (from the east, for legs flown east) from t = `ta` for `length` seconds."""
+
+    def __init__(self, ta, length, speed, **kw):
+        super().__init__(**kw)
+        self.ta, self.length, self.speed = ta, length, speed
+
+    def wind(self, lon, lat, z, t):
+        on = self.ta <= float(t) < self.ta + self.length
+        return Tagged(np.broadcast_to(np.array([-self.speed if on else 0.0, 0.0]), np.broadcast(lon, lat).shape + (2,)).copy(), "analytic", 0.0, "assumed")
+
+
+def test_r11_m26_the_no_headway_flag_waits_one_stuck_window_not_two_and_not_half_of_one():
+    """`stuck >= 2 * stuck_w` passed (the wind test only needed it to fire before 200 s). A 14 m/s headwind (above g tan(max tilt)/d_x) that lasts
+    1.8 windows sets the flag (the run of no headway starts about 3 s after the onset, so it has lasted 1.5 windows by the end); one of 0.9 does not."""
+    plat = fast_plat()
+    plat["launch_rule"]["max_mean_wind_ms"] = 99.0
+    w = plat["failure"]["stuck_window_s"]
+
+    def flag(length):
+        return bool(uas.fly_sortie(HeadwindPulse(60.0, length, 14.0), uas.steaming(), 0.0, M=1, origin=ORIGIN, plat=plat, heading_deg=90.0)
+                    ["flags"]["wind_exceeds_airspeed"][0])
+    assert flag(1.8 * w) and not flag(0.9 * w)
+
+
+class WindAt(AnalyticEnv):
+    """A wind that blows at `speed` m/s only within 2 % of the sortie length of the times in `at`, and none otherwise."""
+
+    def __init__(self, at, speed, span, **kw):
+        super().__init__(**kw)
+        self.at, self.speed, self.span = at, speed, span
+
+    def wind(self, lon, lat, z, t):
+        on = any(abs(float(t) - a) < 0.02 * self.span for a in self.at)
+        return Tagged(np.broadcast_to(np.array([self.speed if on else 0.0, 0.0]), np.broadcast(lon, lat).shape + (2,)).copy(), "analytic", 0.0, "assumed")
+
+
+@pytest.mark.parametrize("frac", [0.0, 0.5, 1.0])
+def test_r11_m26_the_launch_gate_averages_the_wind_at_the_start_the_middle_and_the_end_of_the_sortie(frac):
+    """`[0, 0.5, 0.5]` for the three sample times passed: a gale only at the end of the sortie was never read. A gale at any one of the three scrubs; a
+    gale between them (at a quarter) does not."""
+    t0, dur, lim = 5000.0, P["sortie"]["duration_s"], P["launch_rule"]["max_mean_wind_ms"]
+    gale = 10.0 * lim                                                                 # a third of it is still over the limit at any height of the check
+    env = WindAt([t0 + frac * dur], gale, dur)
+    assert not uas.launch_check(env, uas.steaming(), t0, P, 1, ORIGIN)["ok"][0]
+    assert uas.launch_check(WindAt([t0 + 0.25 * dur], gale, dur), uas.steaming(), t0, P, 1, ORIGIN)["ok"][0]
+
+
+def test_r11_m26_a_link_lost_for_exactly_the_hold_latches_and_one_sample_less_does_not():
+    """`run_s > link_hold_s` passed: the hold tests used 4 s and 6 s against a 5 s hold, never the 5 s itself."""
+    plat = fast_plat()
+    hold = int(plat["radio"]["link_loss_hold_s"])
+
+    def lost_for(n):
+        return lambda t, pos: np.full(len(pos), 19.5 < t < 19.5 + n)                    # n samples from t = 20 s
+    on = fly(link=lost_for(hold), plat=plat, M=1)
+    assert on["flags"]["lost_link"].all() and np.allclose(on["t_first"]["lost_link"], 20.0)
+    assert not fly(link=lost_for(hold - 1), plat=plat, M=1)["flags"]["lost_link"].any()
+

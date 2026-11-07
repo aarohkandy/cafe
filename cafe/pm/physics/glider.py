@@ -445,7 +445,8 @@ class GliderSim:
             move = move + dr_nom * self.scale[:, None]
             self.depth = np.where(fly, self.depth - sw * dt, self.depth)
             self.w_last = np.where(d0, np.abs(sw), self.w_last)
-        self.depth = np.where(apo0, self.depth + P["apogee_overshoot"] * self.w_last * dt, self.depth)
+        left = np.minimum(dt, np.maximum(self.timer, 0.0))                                    # pump time left in this step: sums to pump_time_s (M-12)
+        self.depth = np.where(apo0, self.depth + P["apogee_overshoot"] * self.w_last * left, self.depth)
         diving = ~s0
         self.gd += np.where(diving[:, None], move, 0.0)
         self.dr += dr_nom

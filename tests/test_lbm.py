@@ -221,6 +221,22 @@ def test_bounce_back_tangential_force_is_cs2_times_the_velocity_difference(u1, u
     assert np.allclose(np.asarray(F), np.asarray(F2), atol=1e-5)          # a per-cell field gives the same as a vector
 
 
+@pytest.mark.parametrize("u", [(0.04, 0.0, 0.0), (0.03, -0.02, 0.01)])
+def test_a_curved_wall_carried_by_the_fluid_leaves_a_uniform_equilibrium_unchanged_at_every_wall_distance(u):
+    """Bouzidi with a moving wall: the whole q >= 1/2 expression is divided by 2q, the wall term too. On a uniform equilibrium whose
+    velocity is the wall velocity every link must send back feq(-c) exactly, whatever q (review round 11, M-11)."""
+    shape = (10, 10, 10)
+    solid = np.zeros(shape, bool)
+    solid[4:7, 4:7, 4:7] = True
+    link = lbm.links(jnp.asarray(solid))
+    uu = jnp.asarray(u, jnp.float32)
+    f = lbm.feq(jnp.ones(shape), jnp.broadcast_to(uu.reshape(3, 1, 1, 1), (3,) + shape))
+    q = jnp.asarray(np.random.default_rng(1).uniform(0.05, 1.0, link.shape), jnp.float32)
+    assert float((q >= 0.5).mean()) > 0.3 and float((q < 0.5).mean()) > 0.3
+    fn, _ = lbm.bounce_back(f, lbm.stream(f), link, jnp.ones(shape), uu, qdist=q)
+    assert np.allclose(np.asarray(fn), np.asarray(f), atol=2e-6)
+
+
 def test_mirror_table_is_an_involution_that_flips_one_component():
     for a in range(3):
         assert (lbm.MIR[a][lbm.MIR[a]] == np.arange(19)).all()

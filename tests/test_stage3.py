@@ -17,7 +17,7 @@ from hypothesis import given, settings, strategies as st
 import jax.numpy as jnp
 
 import cafe.receipts as cr
-from cafe.pm import budget
+from cafe.pm import Tagged, budget
 from cafe.pm.config import ConfigError
 from cafe.pm.env import subgrid as sg_mod
 from cafe.pm.env.protocol import AnalyticEnv
@@ -436,6 +436,36 @@ def test_the_yplus_row_is_not_a_wall_model_pass_when_it_was_evaluated_at_the_rai
     res = dict(delta_te=0.1, dx=0.01, y_plus_estimate=1370.0)
     why = pw.why_failed([r], res, {})
     assert len(why) == 1 and "raised lattice viscosity" in why[0] and "1370" in why[0] and "not a wall-model pass" in why[0]
+
+
+def test_r11_m27_fit_window_coarsens_by_the_fourth_root_of_cells_times_the_shortest_run_over_the_budget():
+    """DECISIONS 81: cells ~ dx^-3 and transit steps ~ dx^-1, so dx grows as (cells x transits / budget)^(1/4); the `** 0.5` mutant passed."""
+    a = pw.assumptions()
+    veh = pw.glider_vehicle(pg.load_platform("seaglider"), a, "seaglider", 500.0)
+    n = a["cells_per_delta"]
+    fine = lbm.les_resolution(veh.length, 0.25, W.nu_of(veh), (n,), tuple(a["box_bodies"]), a["window_s"], bl_length=W.bl_length(veh))["rows"][n]
+    transits = a["min_flow_throughs"] * fine["shape"][0] / lbm.U_LAT
+    for cell_steps in (5e12, 2e12):
+        short = fine["cells"] * transits / cell_steps
+        want = fine["dx"] * short ** 0.25
+        assert short > 1.0 and want < veh.extra["resolve_dim"] / a["min_cells_across"]                  # coarsened, and the body's cells do not cap it
+        assert pw.fit_window(veh, 0.25, cell_steps, a)["dx"] == pytest.approx(want, rel=1e-6)
+
+
+def test_r11_m27_the_wall_pressure_is_cs2_times_the_density_excess_in_physical_units():
+    p = W.wall_pressure_pa(np.array([1.0, 1.003, 0.997]), 1000.0, 0.01, 1e-3)
+    assert np.allclose(p, [0.0, 100.0, -100.0])                                  # (rho - 1) / 3 x 1000 x (0.01 / 0.001)^2
+
+
+@pytest.mark.parametrize("yplus,viscous", [(9.5, True), (12.5, False), (40.0, False)])
+def test_r11_m27_the_wall_function_switches_to_the_viscous_law_below_y_plus_11_06(yplus, viscous):
+    """u = u_tau (ln(y u_tau / nu) / 0.41 + 5.2) with u_tau = 1, y = 1 and nu = 1 / y+; below y+ = 11.06 the viscous u_tau = sqrt(nu u / y) is given.
+    YPLUS_LAM = 14 gave the viscous value for 12.5 and passed every test; the constants are written out here so a changed kappa or B shows too."""
+    nu = 1.0 / yplus
+    u = math.log(yplus) / 0.41 + 5.2
+    got = float(wm.utau_loglaw(jnp.float32(u), 1.0, nu))
+    want = math.sqrt(nu * u) if viscous else 1.0
+    assert got == pytest.approx(want, rel=2e-3)
 
 
 # ------------------------------------------------------------------ one real LES window
@@ -885,6 +915,8 @@ def test_hangar_numbers_are_the_vehicles_own_models(no_wall_receipt, monkeypatch
     assert 0.0 < U < 0.6 and c["info"]["glide_deg"] < 0 and c["info"]["alpha_deg"] > 0           # descending, positive attack angle (BS3)
     rel = c["R"] @ (c["v"] - c["u_env"])                                                          # flow relative to the body, body axes
     assert rel[0] > 0 and abs(rel[1]) < 1e-9 and "seaglider_force_balance" in c["src"]
+    al = np.radians(c["info"]["alpha_deg"])                                                       # the angle of attack, in the x-z plane
+    assert np.arctan2(-rel[2], rel[0]) == pytest.approx(al, abs=1e-9) and rel[0] == pytest.approx(U * np.cos(al))
     # heading is respected: the horizontal through-water velocity points where the glider points
     assert np.allclose((c["v"] - c["u_env"])[:2] / np.linalg.norm((c["v"] - c["u_env"])[:2]), [1.0, 0.0], atol=1e-9)
     Ps = pg.load_platform("slocum")
@@ -892,6 +924,8 @@ def test_hangar_numbers_are_the_vehicles_own_models(no_wall_receipt, monkeypatch
     cs = pw.glider_case(ctx, WIN, Ps, vs, a, None)                                                # no track: head with the current (0.3 E, 0.1 N)
     assert cs["heading"] == pytest.approx(pw.compass(0.3, 0.1)) and cs["cd_h"] > 0 and cs["cl_h"] > 0 and "slocum" in cs["src"]
     assert vs.length == a["slocum.length_m"]
+    rs = cs["R"] @ (cs["v"] - cs["u_env"])
+    assert np.arctan2(-rs[2], rs[0]) == pytest.approx(np.radians(cs["info"]["alpha_deg"]), abs=1e-9) and abs(rs[1]) < 1e-9
     Pu = pu.load_platform("saildrone_explorer")
     hull = pw.usv_vehicle(Pu, a, "saildrone_explorer", "hull")
     ch = pw.usv_case(ctx, WIN, Pu, hull, a, 0.0, "hull")
@@ -935,6 +969,44 @@ def test_r10_m15_a_hole_in_the_weather_is_a_no_data_reason_in_every_class_and_a_
     assert all(r["error"].startswith("no_current_data: the environment gave no finite wind") and not r["ok"] for r in out["u"] + out["q"])
     # a read value that is a number stays accepted, and a calm (zeros) is a calm, not a hole
     assert "becalmed" in pw.run(fake_ctx(no_wall_receipt, env=AnalyticEnv(wind=(0.0, 0.0), current=(0.0, 0.0))), {"u": [WIN]}, FakeL())["u"][0]["error"]
+
+
+def test_r11_m23_val_checks_the_first_n_components_only_and_the_whole_array_without_n():
+    """A NaN in a component a path never reads (a vertical wind) must not refuse a window (DECISIONS 549); one in a component it reads must;
+    without n every component counts, a scalar included (`a[:None]` of a 0-d array is an IndexError, so the branch stays)."""
+    v = np.array([1.0, 2.0, math.nan])
+    assert pw._val(v, "wind", 2) is not None and np.array_equal(pw._val(v, "wind", 2)[:2], [1.0, 2.0])
+    with pytest.raises(ValueError, match="^no_current_data: the environment gave no finite wind"):
+        pw._val(v, "wind")
+    with pytest.raises(ValueError, match="^no_current_data: the environment gave no finite wind"):
+        pw._val(np.array([1.0, math.nan, 3.0]), "wind", 2)
+    with pytest.raises(ValueError, match="^no_current_data"):
+        pw._val(np.array([math.nan, 1.0, 3.0]), "wind", 2)
+    assert float(pw._val(3.5, "density")) == 3.5
+    with pytest.raises(ValueError, match="^no_current_data"):
+        pw._val(math.nan, "density")
+
+
+class NanUp(AnalyticEnv):
+    """wind and current as (east, north, up) with a NaN up: the third component is one no window reads."""
+
+    def wind(self, *a):
+        v = super().wind(*a).value
+        return Tagged(np.concatenate([v, np.full(v.shape[:-1] + (1,), math.nan)], -1), "analytic", 0.0, "assumed")
+
+    def current(self, *a):
+        v = super().current(*a).value
+        return Tagged(np.concatenate([v, np.full(v.shape[:-1] + (1,), math.nan)], -1), "analytic", 0.0, "assumed")
+
+
+def test_r11_m23_a_nan_in_a_vertical_component_does_not_refuse_a_uas_or_a_usv_case(tmp_path):
+    P, a = uas.load_platform(), pw.assumptions()
+    ctx = fake_ctx(tmp_path, env=NanUp(wind=(5.0, 1.0), current=(0.3, 0.1)))
+    c = pw.uas_case(ctx, WIN, P, pw.uas_vehicle(P, a, "quad_uas"), a, None)
+    assert np.isfinite(np.asarray(c["u_env"], float)).all()
+    Pu = pu.load_platform("saildrone_explorer")
+    cu = pw.usv_case(ctx, WIN, Pu, pw.usv_vehicle(Pu, a, "saildrone_explorer", "hull"), a, 0.0, "hull")
+    assert np.isfinite(np.asarray(cu["u_env"], float)).all()
 
 
 def uas_case_at(tmp_path, wind, heading=None):

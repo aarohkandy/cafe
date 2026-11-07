@@ -407,15 +407,17 @@ def sphere_drag(re: float, d: int = 8, domain: tuple[float, ...] = (12, 6, 6), s
                 cd_voxel_area=float(tail.mean() * (math.pi * d * d / 4) / area_vox), d_volume=float(d_vol), u_lat=u_lat)
 
 
-def uniform_flow_force(wall_vel: bool = True, steps: int = 400, shape: tuple[int, ...] = (40, 28, 28), r: float = 5.0) -> dict[str, Any]:
+def uniform_flow_force(wall_vel: bool = True, steps: int = 400, shape: tuple[int, ...] = (40, 28, 28), r: float = 5.0,
+                       bouzidi: bool = False) -> dict[str, Any]:
     """A sphere carried by a uniform stream (flow velocity = vehicle velocity): no relative motion, so the force must be
-    zero; the nest shifts every ~1/u_lat steps. Returns |F| relative to the force scale rho U^2 d^2 and the shift count."""
+    zero; the nest shifts every ~1/u_lat steps. Returns |F| relative to the force scale rho U^2 d^2 and the shift count.
+    bouzidi: the sphere's wall at its exact distance along each link (curved wall) instead of the staircase halfway wall."""
     ul = 0.04
     spec = NestSpec(shape, 0.01, 1.0, 1e-4, u_lat=ul, wall_model=False)
     u = np.array([1.0, 0.3, 0.0])                                            # m/s, oblique: shifts in two axes
     env = lambda x, y, z, t: jnp.stack([jnp.full_like(x, u[0]), jnp.full_like(x, u[1]), jnp.zeros_like(x)])    # noqa: E731
     c = np.array(shape) / 2
-    geom = make_geom(_sphere(shape, c, r), np.round(c))
+    geom = make_geom(_sphere(shape, c, r), np.round(c), qdist=lbm.ellipsoid_q(shape, c, (r,) * 3) if bouzidi else None)
     p0 = (np.round(c) + 0.5) * spec.dx
     params = (jnp.asarray(p0, jnp.float32), jnp.asarray(u, jnp.float32))
     _, ser = simulate(spec, env, geom, p0, params, steps, v0=u, wall_vel=wall_vel)
