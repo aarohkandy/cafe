@@ -434,6 +434,7 @@ class Facts:
         self.have = {st: d for st, d in self.ledgers.items() if d}
         self.mission = config.read_yaml(run / "mission.yaml") if (run / "mission.yaml").is_file() else None
         self.s1b = _json(run / "stage1b" / "summary.json")
+        check_summary(self.s1b)
         self.s1 = _json(run / "stage1" / "summary.json")
         self.refit = _json(run / "refit" / "refit.json") or {}
         self.problems = [p for p in ledger_problems(run) if "stage report" not in p and ": no ledger" not in p]
@@ -463,6 +464,32 @@ class Facts:
         return [k for k, e in self.perts.items() if e.get("kind") == "assumed" or "ASSUMED" in str(e.get("citation", ""))]
 
 
+def check_counts(k: Any, n: Any, src: str) -> None:
+    """A stored ensemble count is an integer `n` >= 1 and an integer 0 <= `k` <= `n`, else a ConfigError (`error:`, exit 2), not the ZeroDivisionError or
+    ValueError that `intervals.wilson` and `interval` raise on a count that is not one. The one rule of the credibility page and the report, for the stage-1b
+    summary's ensembles and the sensitivity cases (round 11, M-5)."""
+    if not all(isinstance(x, int) and not isinstance(x, bool) for x in (k, n)) or not 0 <= k <= n or n < 1:
+        raise config.ConfigError(f"{src}: k_fail {k!r} of n {n!r} members is not a count (integers, n >= 1, 0 <= k_fail <= n): "
+                                 "the summary was edited or is damaged; run it again (--fresh)")
+
+
+def check_summary(s1b: dict[str, Any] | None, where: str = "stage1b/summary.json") -> None:
+    """`check_counts` for every vehicle and link of a stage-1b summary (an absent or empty one has none)."""
+    s = (s1b or {}).get("summary", {})
+    for kind in ("vehicles", "links"):
+        for k, e in s.get(kind, {}).items():
+            check_counts(e["k_fail"], e["n"], f"{where} summary.{kind}.{k}")
+
+
+def _num(x: Any) -> float:
+    """A stored number read back: the pipeline writes every non-finite float as null (`ledger.clean`), and null is no number (round 11, M-1)."""
+    return math.nan if x is None else float(x)
+
+
+def _fmt(x: float, spec: str) -> str:
+    return "none" if math.isnan(x) else format(x, spec)
+
+
 def _data_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     L = f.have.get("ingest")
     if not L or not L["inputs"]:
@@ -473,9 +500,13 @@ def _data_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     ust = next((c for c in L["checks"] if c["name"] == "coare_ustar_vs_umwm_ust"), None)             # absent in ledgers from before round 8's reading of it
     agree = None if ust is None else ust.get("value")
     if not bad and ust is not None and not (isinstance(agree, (int, float)) and agree >= pipeline.USTAR_AGREE_FRACTION):
-        got = f"only {pipeline.ustar_percent(agree)} %" if isinstance(agree, (int, float)) else "no fraction recorded for"
-        miss.append(f"BRIEF 2.1 finding: {got} of the sea points have COARE u* within {100 * pipeline.USTAR_AGREE_BAND:.0f} % of UMWM ust; "
-                    f"the brief asks {pipeline.USTAR_AGREE_FRACTION:.0%}, so the forcing is not shown to be consistent and the level stays at 1")
+        if agree is None and ust["ok"]:                      # round 11, M-6: a calm sea passes the check with no fraction; it does not lift the level
+            miss.append(f"BRIEF 2.1 finding: the COARE u* agreement with UMWM ust was not assessable ({ust.get('note') or 'no fraction recorded'}); "
+                        "the forcing is not shown to be consistent, so the level stays at 1")
+        else:
+            got = f"only {pipeline.ustar_percent(agree)} %" if isinstance(agree, (int, float)) else "no fraction recorded for"
+            miss.append(f"BRIEF 2.1 finding: {got} of the sea points have COARE u* within {100 * pipeline.USTAR_AGREE_BAND:.0f} % of UMWM ust; "
+                        f"the brief asks {pipeline.USTAR_AGREE_FRACTION:.0%}, so the forcing is not shown to be consistent and the level stays at 1")
     elif not bad and L["checks"] and all(s.is_file() for s in schemas):
         lvl = 2
         ev.append(f.ev(f"{len(L['checks'])} ingest self-checks passed; schemas present", "cafe/schemas/wrfout.json, cafe/schemas/umwmout.json"))
@@ -488,13 +519,17 @@ def _data_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
         miss.append(f"no TAO/TRITON wind and SST comparison with pooled numbers stored (looked for {tao}); the WRF winds and frozen SST are not checked "
                     "against buoys")
         return lvl, ev, miss
-    sp, dr = float(pooled["speed_rmse"]), float(pooled["dir_rmse_deg"])
+    sp, dr, sb, db, sst = (_num(pooled.get(k, math.nan) if k == "sst_bias" else pooled[k])
+                                  for k in ("speed_rmse", "dir_rmse_deg", "speed_bias", "dir_bias_deg", "sst_bias"))     # null = no pairs (M-1)
     n = len([k for k in _json(tao) if k != "ALL"])
-    ev.append(f.ev(f"WRF compared with {n} TAO/TRITON moorings: wind speed RMSE {sp:.2f} m/s (bias {float(pooled['speed_bias']):+.2f}), direction RMSE "
-                   f"{dr:.1f} deg (bias {float(pooled['dir_bias_deg']):+.1f}), SST bias {float(pooled.get('sst_bias', math.nan)):+.2f} K; the same comparison "
+    ev.append(f.ev(f"WRF compared with {n} TAO/TRITON moorings: wind speed RMSE {_fmt(sp, '.2f')} m/s (bias {_fmt(sb, '+.2f')}), direction RMSE "
+                   f"{_fmt(dr, '.1f')} deg (bias {_fmt(db, '+.1f')}), SST bias {_fmt(sst, '+.2f')} K; the same comparison "
                    "fits the Stage-1 wind priors", str(tao)))
     if sp <= WIND_RMSE_LIMIT[0] and dr <= WIND_RMSE_LIMIT[1]:                       # (a NaN fails both)
         lvl = 3
+    elif math.isnan(sp) or math.isnan(dr):
+        miss.append("no usable wind " + " or ".join(w for w, v in (("speed", sp), ("direction", dr)) if math.isnan(v)) +
+                    " at the moorings (a calm, or no such channel): agreement with them is not shown, so the level stays at 2")
     else:
         miss.append(f"the pooled wind error ({sp:.2f} m/s, {dr:.1f} deg) is above {WIND_RMSE_LIMIT[0]:g} m/s or {WIND_RMSE_LIMIT[1]:g} deg, the brief's "
                     "prior sd: agreement with the moorings is not shown, so the level stays at 2")

@@ -123,14 +123,18 @@ def test_with_cov_each_job_has_its_own_coverage_file_and_the_combined_json_and_t
     home, env, log = world(tmp_path)
     stale = home / "cafe-worker/cafe/pm_t/coverage.json"
     stale.write_text("{}")
+    old_receipt = home / "cafe-worker/cafe/pm_t/coverage.receipt.json"
+    old_receipt.write_text("{}")
     r = suite(env, "pm_t", "2", "t1", "--cov")
     assert r.returncode == 0 and "coverage and audit" in r.stdout and not stale.exists()                          # an old coverage.json is not this run's
+    assert not old_receipt.exists()                                                                               # nor an old receipt (round 11, M-10)
     lines = calls(log)
     s1 = [l for l in lines if "@/data/shards/t1/s1.args" in l][0]
     assert s1.startswith("env COVERAGE_FILE=/data/shards/t1/.coverage.s1 python -m pytest") and "--cov=cafe/pm --cov-report=" in s1
     assert "COVERAGE_FILE=/data/shards/t1/.coverage.serial" in [l for l in lines if "serial.args" in l][0]
     last = log.read_text().split("sh -c ")[-1]                                                                   # the script has two lines
     assert "coverage combine --keep" in last and "coverage json" in last and "python -m cafe.pm.audit --pytest-done" in last
+    assert last.index("audit --pytest-receipt") < last.index("audit --pytest-done")        # the receipt first
     assert last.rstrip().endswith("x /data/shards/t1")
     assert (home / "cafe-worker/logs/t1_audit.log").read_text().endswith("rc=0\n")
     r = suite({**env, "FAKE_FAIL": "s1.args"}, "pm_t", "2", "t2", "--cov")

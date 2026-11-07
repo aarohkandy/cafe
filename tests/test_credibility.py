@@ -1222,3 +1222,40 @@ def test_p27_the_page_reads_a_sphere_receipt_through_the_gates_readers_so_it_sho
         if counted:
             assert row["S"] == counted[-1]["cd"] and row["D"] == pytest.approx(lbm.morrison(100.0))              # the finest counted grid, against Morrison
     assert row["status"] == status and want in row["note"]
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 11, M-1, M-5
+
+@pytest.mark.parametrize("key", ["speed_rmse", "dir_rmse_deg", "speed_bias", "dir_bias_deg", "sst_bias"])
+def test_r11_m1_a_pooled_mooring_comparison_with_a_null_number_keeps_level_two_and_says_what_is_missing(run, key):
+    """The pipeline writes a non-finite float as null (no direction pair at 1 m/s or more, no SST pair); `float(None)` ended a finished run in a traceback."""
+    write_tao(run)
+    p = run / "ingest" / "tao_compare.json"
+    d = json.loads(p.read_text())
+    d["ALL"][key] = None
+    p.write_text(json.dumps(d))
+    f = factors(run)["data_pedigree"]
+    ev = " ".join(x["what"] for x in f["evidence"])
+    if key in ("speed_rmse", "dir_rmse_deg"):
+        assert f["level"] == 2 and "no usable wind" in " ".join(f["missing"]) and "stays at 2" in " ".join(f["missing"])
+    else:
+        assert f["level"] == 3                                                  # a bias that is not there does not hold the error comparison down
+    assert "none" in ev and "nan" not in ev
+
+
+@pytest.mark.parametrize("k, n", [(3, 0), (65, 64), (-1, 64), (1.5, 64), (True, 64), (None, 64), (3, None)])
+def test_r11_m5_a_stored_ensemble_whose_counts_are_not_counts_is_a_config_error(run, k, n):
+    p = run / "stage1b" / "summary.json"
+    d = json.loads(p.read_text())
+    d["summary"]["vehicles"]["usv"].update(k_fail=k, n=n)
+    p.write_text(json.dumps(d))
+    with pytest.raises(cr.config.ConfigError, match="not a count.*run it again"):
+        cr.build(run, REAL)
+
+
+def test_r11_m6_a_calm_sea_holds_data_pedigree_at_one_by_an_explicit_rule_and_a_mooring_comparison_cannot_lift_it(run):
+    """The ingest passes a zero-wind window with no u* fraction (value None); row 393 said a ledger without the check is not held down, which is not this."""
+    ingest_check(run, value=None, note="all 40 sampled sea points have UMWM ust at or below 0.001 m/s (a calm): the u* agreement is not assessable")
+    write_tao(run)
+    f = factors(run)["data_pedigree"]
+    assert f["level"] == 1 and any("was not assessable (all 40 sampled sea points have UMWM ust at or below 0.001 m/s (a calm)" in m for m in f["missing"])

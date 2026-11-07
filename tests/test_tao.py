@@ -545,3 +545,18 @@ def test_main_runs_the_receipts(monkeypatch, capsys):
     R.OUT.clear()
     runpy.run_module("cafe.pm.env.tao", run_name="__main__")
     assert capsys.readouterr().out.count("PASS") == 6
+
+
+def test_r11_m9_a_run_loads_verifies_and_explains_from_the_manifest_copy_it_recorded_not_from_the_shared_file(tree, tmp_path):
+    """A fetch of another run rewrites the shared manifest; the stage that copied it must use the copy for everything it reads of the manifest."""
+    base = tree.publish()
+    out = tmp_path / "tao"
+    tao.fetch_tao(BOX, T0, T1, out, base)
+    copy = json.loads((out / "manifest.json").read_text())
+    want = tao.load_tao(out, T0, T1)
+    (out / "manifest.json").write_text(json.dumps(dict(copy, selected={}, files={})))        # the shared one, rewritten
+    assert tao.load_tao(out, T0, T1) == {} and tao.verify(out) == 0
+    got = tao.load_tao(out, T0, T1, man=copy)
+    assert got.keys() == want.keys() and tao.verify(out, man=copy) == len(copy["files"])
+    assert tao.wind_gap(out, "T0N165E", T0, T1) == "no WIND file overlaps the window"                  # the rewritten file lists none
+    assert tao.wind_gap(out, "T0N165E", T0, T1, man=copy) != "no WIND file overlaps the window"       # the copy lists them

@@ -6,6 +6,7 @@ __pycache__/
 .hypothesis/
 .pytest_cache/
 coverage.json
+coverage.receipt.json
 .coverage
 runs/
 checkpoints/

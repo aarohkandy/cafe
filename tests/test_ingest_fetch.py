@@ -7,6 +7,7 @@ bathymetry, the stand-in THREDDS tree of tests/test_tao.py, and an NCSS stand-in
 import http.server
 import io
 import json
+import pathlib
 import shutil
 import threading
 import urllib.parse
@@ -349,6 +350,31 @@ def test_p32_a_grown_orca_cache_leaves_the_audit_of_an_earlier_run_clean_and_a_c
     assert ingest_problems(run) == []                                                        # an absent part is no problem, as before
     snap.write_text(snap.read_text() + " ")                                                 # the copy itself is hashed
     assert any(f"input {snap} changed since the stage ran" in x for x in ingest_problems(run))
+
+
+def test_r11_m9_the_ingest_takes_what_it_reads_of_the_orca_and_tao_manifests_from_the_copy_it_recorded(tmp_path, data_copy, monkeypatch):
+    """The stage read the shared orca manifest, then copied it, then read it again for the key of the derived layer; the TAO stage copied it and then
+    loaded from the shared file. A fetch of another run between the reads makes the recorded copy differ from what the stage used."""
+    forbid_downloads(monkeypatch)
+    man_o = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
+    man_t = tao.cache_dir(data_copy) / "manifest.json"
+    hours = json.loads(man_o.read_text())["hours"]
+    real = ledger.copy_manifest
+
+    def swapped(src, dest):
+        if pathlib.Path(src) == man_o:                                                  # another run grows the cache just before the copy ...
+            man_o.write_text(json.dumps(dict(json.loads(man_o.read_text()), hours=hours + 7)))
+        got = real(src, dest)
+        if pathlib.Path(src) == man_t:                                                  # ... and rewrites the TAO manifest just after it
+            man_t.write_text(json.dumps(dict(json.loads(man_t.read_text()), selected={})))
+        return got
+    monkeypatch.setattr(ledger, "copy_manifest", swapped)
+    run = tmp_path / "r"
+    d = run_stage(pipeline.s_ingest, ctx_for(run), "ingest")
+    copy = json.loads((run / "ingest" / "orca_manifest.json").read_text())
+    assert copy["hours"] == hours + 7 and check_of(d, "orca_hours_cover_window")["value"] == copy["hours"]
+    kept = json.loads((run / "ingest" / "tao_manifest.json").read_text())
+    assert kept["selected"] and check_of(d, "tao_moorings_compared")["ok"]
 
 
 def test_lb0_a_derived_layer_rebuilt_on_other_code_leaves_the_audit_of_an_earlier_run_clean_and_a_damaged_one_does_not(tmp_path, data_copy, monkeypatch):

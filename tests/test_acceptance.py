@@ -169,12 +169,12 @@ def test_the_summary_keeps_verdicts_counts_and_what_the_interval_needs():
     assert "machine" not in s and "wall_s" not in json.dumps(s)
 
 
-def test_the_same_summary_has_no_differences_and_a_p_fail_inside_the_golden_interval_passes():
+def test_the_same_summary_has_no_differences_and_a_p_fail_inside_the_difference_interval_passes_for_independent_runs():
     g = acc.summary(report())
     assert acc.diff(g, copy.deepcopy(g)) == []
     new = copy.deepcopy(g)
     new["links"]["rf"].update(k_fail=14, p_fail=0.35)                                # 14 of 40 against 10 of 40: Newcombe's interval holds 0
-    assert acc.diff(g, new) == []
+    assert acc.diff(g, new, seed=False) == []                                         # (the same seed is judged member for member: round 11, M-4)
 
 
 def test_a_changed_verdict_string_is_a_difference():
@@ -194,10 +194,10 @@ def moved(g, kind, k, k_fail):
 
 def test_a_p_fail_whose_difference_interval_excludes_0_is_a_difference():
     g = acc.summary(report())
-    (msg,) = acc.diff(g, moved(g, "links", "rf", 30))
+    (msg,) = acc.diff(g, moved(g, "links", "rf", 30), seed=False)
     assert msg.startswith("links rf: P(fail) 0.7500 now against 0.2500 in the reference (30 of 40 and 10 of 40)") and "98.33% Newcombe interval" in msg
     assert msg.endswith("excludes 0")
-    assert len(acc.diff(g, moved(g, "links", "rf", 0))) == 1
+    assert len(acc.diff(g, moved(g, "links", "rf", 0), seed=False)) == 1
 
 
 def test_equal_counts_pass_and_the_extremes_all_pass_against_all_fail_do_not():
@@ -219,8 +219,8 @@ def summ(entries, n=32):
 
 
 def test_4_of_32_against_1_of_32_is_consistent_and_0_of_32_against_16_of_32_is_not():
-    assert acc.diff(summ({"uas": ("MARGINAL", 4)}), summ({"uas": ("MARGINAL", 1)})) == []
-    verdict, msg = acc.diff(summ({"uas": ("GO", 0)}), summ({"uas": ("MARGINAL", 16)}))
+    assert acc.diff(summ({"uas": ("MARGINAL", 4)}), summ({"uas": ("MARGINAL", 1)}), seed=False) == []
+    verdict, msg = acc.diff(summ({"uas": ("GO", 0)}), summ({"uas": ("MARGINAL", 16)}), seed=False)
     assert "links uas: P(fail) 0.5000 now against 0.0000 in the reference (16 of 32 and 0 of 32)" in msg and "95.00% Newcombe interval" in msg
     assert "undecided in both, but the 95% intervals on P(fail)" in verdict and "do not overlap" in verdict
 
@@ -241,10 +241,10 @@ def test_a_verdict_change_that_is_undecided_in_both_runs_passes_and_is_named(tmp
 def test_the_golden_diff_allows_and_names_the_same_change_and_still_checks_the_rest(tmp_path):
     g = tmp_path / "g.json"
     acc.check_golden(run_dict(tmp_path, uas_report("MARGINAL", 4)), g, MISSION, True)
-    ok = acc.check_golden(run_dict(tmp_path, uas_report("GO", 1)), g, MISSION, False)
+    ok = acc.check_golden(run_dict(tmp_path, uas_report("GO", 3)), g, MISSION, False)         # 3 of 32 against 4 of 32: one member, the same seed's allowance
     assert ok["ok"] and NAMED in ok["detail"] and ok["values"]["notes"] == [NAMED] and ok["values"]["problems"] == []
     bad = acc.check_golden(run_dict(tmp_path, uas_report("NO-GO", 30)), g, MISSION, False)
-    assert not bad["ok"] and "P(fail) 0.9375 now against 0.1250" in bad["detail"]
+    assert not bad["ok"] and "k_fail 30 of 32 now against 4 in the reference" in bad["detail"]
 
 
 def test_a_verdict_change_fails_when_either_run_has_it_decided():
@@ -254,9 +254,9 @@ def test_a_verdict_change_fails_when_either_run_has_it_decided():
         assert bad == [f"links x: verdict {a[0]!r} in the reference, {b[0]!r} now"], (a, b)
     assert acc.diff(summ({"x": undecided}, n=40), summ({"x": ("GO", 1)}, n=40)) == []
     # a MARGINAL whose whole interval is between 0.10 and 0.40 (40 of 200) is decided too: it may not turn GO at 30 of 200 (a P(fail) Newcombe accepts)
-    (msg,) = acc.diff(summ({"x": ("MARGINAL", 40)}, n=200), summ({"x": ("GO", 30)}, n=200))
+    (msg,) = acc.diff(summ({"x": ("MARGINAL", 40)}, n=200), summ({"x": ("GO", 30)}, n=200), seed=False)
     assert msg == "links x: verdict 'MARGINAL' in the reference, 'GO' now"
-    assert acc.compare(summ({"x": undecided}, n=40), summ({"x": ("GO", 1)}, n=40)) == ([], ["links x: MARGINAL -> GO, undecided in both at n = 40"])
+    assert acc.compare(summ({"x": undecided}, n=40), summ({"x": ("GO", 1)}, n=40), seed=False) == ([], ["links x: MARGINAL -> GO, undecided in both at n = 40"])
 
 
 def test_the_help_text_states_the_comparison_rule(capsys):
@@ -270,10 +270,10 @@ def test_the_family_wise_level_is_split_over_the_entries_compared():
     one, four = {"a": ("MARGINAL", 1)}, {k: ("MARGINAL", 1) for k in "abcd"}
     # 8 of 32 against 1 of 32: the lower end of the difference is +0.046 at 95 %, -0.009 at 98.75 %
     new_one, new_four = {"a": ("MARGINAL", 8)}, {k: ("MARGINAL", 8) for k in "abcd"}
-    (msg,) = acc.diff(summ(one), summ(new_one))
+    (msg,) = acc.diff(summ(one), summ(new_one), seed=False)
     assert "95.00% Newcombe interval" in msg
-    assert acc.diff(summ(four), summ(new_four)) == []
-    assert acc.diff(summ(four), summ({**new_four, "a": ("MARGINAL", 16)})) != []                                   # a bigger move still fails among four
+    assert acc.diff(summ(four), summ(new_four), seed=False) == []
+    assert acc.diff(summ(four), summ({**new_four, "a": ("MARGINAL", 16)}), seed=False) != []             # a bigger move still fails among four
     only_vehicles = acc.summary(report(links={}))
     assert acc._entries(only_vehicles, only_vehicles) == 2 and acc._entries(summ(four), summ(one)) == 1
 
@@ -281,7 +281,7 @@ def test_the_family_wise_level_is_split_over_the_entries_compared():
 def test_counts_of_members_vehicles_and_links_class_platform_and_mission_must_match_exactly():
     g = acc.summary(report())
     new = copy.deepcopy(g)
-    new["vehicles"]["gl"]["n"] = 41
+    new["vehicles"]["gl"].update(n=41, p_fail=1 / 41)                                   # (consistent with its own counts: that is checked on its own)
     new["vehicles"]["gl"]["cls"] = "usv"
     new["vehicles"]["gl"]["platform"] = "other"
     msgs = acc.diff(g, new)
@@ -324,7 +324,7 @@ def test_the_golden_it_wrote_passes_and_a_changed_verdict_or_p_fail_then_fails(t
     assert not bad["ok"] and "verdict 'NO-GO' in the reference, 'MARGINAL' now" in bad["detail"]
     shifted = report(links={"rf": stat("MARGINAL", 30, 40)})
     bad = acc.check_golden(run_dict(tmp_path, shifted), g, MISSION, False)
-    assert not bad["ok"] and "links rf: P(fail) 0.7500 now against 0.2500" in bad["detail"]
+    assert not bad["ok"] and "links rf: k_fail 30 of 40 now against 10 in the reference" in bad["detail"]
 
 
 def test_many_golden_problems_are_listed_with_a_count_and_a_run_without_a_report_fails(tmp_path):
@@ -864,19 +864,19 @@ def test_the_golden_written_from_a_real_report_passes_and_a_changed_verdict_or_p
     far["report"]["vehicles"][vid]["p_fail"]["value"] = 1.0
     far["report"]["vehicles"][vid]["k_fail"]["value"] = 1000
     bad = acc.check_golden(far, g, MISSION, False)
-    assert not bad["ok"] and f"vehicles {vid}: P(fail) 1.0000 now against 0.0000" in bad["detail"]
+    assert not bad["ok"] and f"vehicles {vid}: k_fail 1000 of 1000 now against 0 in the reference" in bad["detail"]
 
 
 # ---------------------------------------------------------------------------------------------------------------- review round 1 (M-33)
 
 def test_undecided_verdicts_may_move_only_while_their_intervals_overlap():
     """M-33: a verdict undecided in both runs could change however far apart the two P(fail) were; now their stopper-level intervals must overlap."""
-    near = acc.compare(summ({"x": ("MARGINAL", 4)}), summ({"x": ("GO", 1)}))                  # 0.125 and 0.031 at n = 32
+    near = acc.compare(summ({"x": ("MARGINAL", 4)}), summ({"x": ("GO", 1)}), seed=False)    # 0.125 and 0.031 at n = 32
     assert near == ([], ["links x: MARGINAL -> GO, undecided in both at n = 32"])
     lo, hi, _ = acc.intervals.interval(3, 32, acc.sequential.STOP_CONF)
     lo2, hi2, _ = acc.intervals.interval(15, 32, acc.sequential.STOP_CONF)
     assert hi < lo2 and acc._decided(dict(k_fail=3, n=32)) is False and acc._decided(dict(k_fail=15, n=32)) is False       # undecided both, and apart
-    bad, notes = acc.compare(summ({"x": ("GO", 3)}), summ({"x": ("MARGINAL", 15)}))
+    bad, notes = acc.compare(summ({"x": ("GO", 3)}), summ({"x": ("MARGINAL", 15)}), seed=False)
     assert notes == [] and any("verdict 'GO' in the reference, 'MARGINAL' now; undecided in both, but the 95% intervals on P(fail), "
                                f"{lo:.3f} to {hi:.3f} and {lo2:.3f} to {hi2:.3f}, do not overlap" in b for b in bad)
 
@@ -888,12 +888,12 @@ def test_r9_m17_a_link_that_turns_not_exercised_or_back_is_a_problem_even_when_b
     assert acc.compare(go, nx) == (["links x: verdict 'GO' in the reference, 'NOT EXERCISED' now"], [])
     assert acc.compare(nx, go) == (["links x: verdict 'NOT EXERCISED' in the reference, 'GO' now"], [])
     assert acc.compare(nx, nx) == ([], [])                                                       # the same verdict twice is no change
-    assert acc.compare(summ({"x": ("MARGINAL", 4)}), summ({"x": ("GO", 1)}))[0] == []         # the undecided rule for the other verdicts is as before
+    assert acc.compare(summ({"x": ("MARGINAL", 4)}), summ({"x": ("GO", 1)}), seed=False)[0] == []      # the undecided rule for the other verdicts is as before
 
 
 def test_the_overlap_rule_is_symmetric():
     a, b = summ({"x": ("GO", 3)}), summ({"x": ("MARGINAL", 15)})
-    assert len(acc.diff(a, b)) == len(acc.diff(b, a)) == 2                                    # the verdict and the P(fail) difference
+    assert len(acc.diff(a, b, seed=False)) == len(acc.diff(b, a, seed=False)) == 2                                    # the verdict and the P(fail) difference
     assert acc.compare(a, a) == ([], [])
 
 
@@ -1034,3 +1034,40 @@ def test_a_failed_fetch_fails_the_run_row_naming_the_fetch_command_and_starts_no
             and f"python -m cafe.pm fetch --mission {MISSION}" in row["detail"]
             and "CAFE_OFFLINE=1" in row["detail"])
     assert "no report" not in row["detail"]
+
+
+# ---------------------------------------------------------------------------------------------------- review round 11, M-4
+
+def test_r11_m4_the_golden_check_is_member_for_member_not_a_sampling_interval():
+    """glider_eq 18 of 64 against 33 of 64 passed the golden check (Newcombe holds 0 for two independent draws); one seed and one code give one set of
+    members."""
+    g = acc.summary(report())
+    ok = moved(g, "links", "rf", 11)                                                  # one member either way: another machine's rounding
+    assert acc.diff(g, ok) == [] and acc.diff(g, moved(g, "links", "rf", 9)) == []
+    (msg,) = acc.diff(g, moved(g, "links", "rf", 14))
+    assert msg == "links rf: k_fail 14 of 40 now against 10 in the reference: the same seed gives the same members (at most 1 may differ across machines)"
+    assert acc.diff(g, moved(g, "links", "rf", 14), seed=False) == []                 # two independent runs keep the interval rule
+
+
+def test_r11_m4_an_edited_golden_p_fail_or_conf_is_seen_with_the_counts_unchanged():
+    g = acc.summary(report())
+    new = copy.deepcopy(g)
+    new["links"]["rf"]["p_fail"] = 0.1
+    (msg,) = acc.diff(g, new)
+    assert msg == "links rf: p_fail 0.1 now is not k_fail / n = 10 / 40"
+    (msg,) = acc.diff(new, g)
+    assert msg == "links rf: p_fail 0.1 the reference is not k_fail / n = 10 / 40"
+    new = copy.deepcopy(g)
+    new["vehicles"]["usv"]["conf"] = 0.5
+    (msg,) = acc.diff(g, new)
+    assert msg == "vehicles usv: conf 0.9 in the reference, 0.5 now"
+
+
+def test_r11_m4_a_golden_of_the_wrong_counts_fails_the_check(tmp_path):
+    g = tmp_path / "g.json"
+    acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
+    rec = json.loads(g.read_text())
+    rec["summary"]["links"]["rf"]["k_fail"] = 25                                      # the golden was edited to a count that a doubling-tolerant check passes
+    g.write_text(json.dumps(rec))
+    bad = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
+    assert not bad["ok"] and "links rf: k_fail 10 of 40 now against 25 in the reference" in bad["detail"]

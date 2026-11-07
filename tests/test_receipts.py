@@ -219,8 +219,9 @@ def test_broken_run_restores_a_previous_overlay_and_a_missing_file_is_an_error(t
     monkeypatch.setattr(pr, "jobs", jobs_of(("a", failing)))
     pr.run(broken=BROKEN, out=tmp_path / "b.json", log=lambda s: None)
     assert __import__("os").environ[cv.OVERLAY_ENV] == str(other)
-    with pytest.raises(FileNotFoundError, match="no/such.yaml: no such file"):
+    with pytest.raises(FileNotFoundError, match="broken configuration: no such file") as e:
         pr.run(broken="no/such.yaml", log=lambda s: None)
+    assert e.value.filename == "no/such.yaml"                                           # the path is the exception's own, told once by config.os_error_text
 
 
 # ------------------------------------------------------------------ the convention setting and the wave-direction receipts
@@ -660,8 +661,10 @@ STORED = {"code_digest": f"{CURRENT}-pm", "date": "d", "host": "h", "git_sha": "
     dict(STORED, rows=[{"id": "x"}]),
     dict(STORED, rows=[{"group": "g", "claim": "c", "kind": "bracket", "value": 1.0}]),
     dict(STORED, rows=[[], None]),
+    # round 11, M-25: the one wrong shape that is a ValueError, not a KeyError or a TypeError (a number format applied to text)
+    dict(STORED, rows=[{"group": "g", "claim": "c", "reference": 1.0, "tol": 0.1, "rel": True, "error": "x", "value": 1.0, "ok": True}]),
 ], ids=["empty", "digest_only", "git_sha_not_text", "rows_not_rows", "other_code_and_no_git_sha",
-        "row_empty_dict", "row_without_keys", "bracket_without_bounds", "row_not_a_dict"])
+        "row_empty_dict", "row_without_keys", "bracket_without_bounds", "row_not_a_dict", "error_is_text"])
 def test_r10_m24_a_stored_record_that_is_valid_json_of_the_wrong_shape_is_a_not_run_row_with_the_command(slowenv, monkeypatch, record):
     (slowenv / "receipts").mkdir()
     (slowenv / "receipts" / "pm.emulator.json").write_text(json.dumps(record))

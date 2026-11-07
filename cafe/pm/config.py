@@ -222,7 +222,16 @@ def damaged_run_files(run: pathlib.Path) -> Iterator[None]:
     try:
         yield
     except (KeyError, TypeError) as e:
-        raise ConfigError(f"{run}: damaged or incomplete ({type(e).__name__}: {e}); run it again (--fresh)") from e
+        raise ConfigError(f"{run}: damaged or incomplete ({type(e).__name__}: {e}); run it again (--fresh); "
+                          "if that gives the same error, it is a bug: report it") from e
+
+
+def os_error_text(e: OSError) -> str:
+    """An OSError for a named path as one line with the reason and the path once: "Permission denied: runs/x", not str(e)'s "[Errno 13] Permission denied:
+    'runs/x'", and not a message that carries the path itself followed by the filename (round 11, M-20). Without a filename or a reason it is str(e)."""
+    if e.strerror and e.filename is not None:
+        return f"{e.strerror}: {e.filename}" + (f" -> {e.filename2}" if e.filename2 is not None else "")
+    return str(e)
 
 
 def write_json(p: pathlib.Path, obj: Any, **kw: Any) -> None:
@@ -285,11 +294,6 @@ def _registry(name: str, key: str) -> dict[str, Any]:
     return dict(_yaml(PLATFORMS / name)[key])
 
 
-def _modem_names() -> set[str]:
-    """The names a link's `modem` may take: a modems.yaml key, or "<key>_<band>" as stage 1 resolves it (case-insensitive)."""
-    return {n.lower() for k, v in _registry("modems.yaml", "modems").items() for n in (k, *(f"{k}_{b}" for b in v["bands"]))}
-
-
 MODES = {"glider": ("station", "section", "drift"), "usv": ("station", "section"), "uas": ()}      # task.mode each vehicle class can fly
 MIN_DEPLOY_BEFORE_END_S = 600.0       # stage 1's record interval (stage1.REC_S): a vehicle deployed later than this before window.end gets no record
 
@@ -339,7 +343,8 @@ def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None
     if dupl := sorted({i for i in lids if lids.count(i) > 1}):
         raise ConfigError(f"{path}: link ids {dupl} appear more than once; give each link its own id (results are keyed by link id)")
     shore = m.get("shore", {}).get("id")
-    radios, modems = set(_registry("radios.yaml", "radios")), _modem_names()
+    from .physics import comms
+    radios = set(_registry("radios.yaml", "radios"))
     for lk in m["links"]:
         where = f"{path}: links/{lk['id']}"
         if lk["a"] == lk["b"]:
@@ -352,10 +357,15 @@ def _check_links(m: dict[str, Any], path: pathlib.Path, nodes: set[str]) -> None
         need = {"rf": "radio", "acoustic": "modem"}.get(lk["kind"])
         if need and need not in lk:
             raise ConfigError(f"{where}: a {lk['kind']} link needs '{need}' (a key in platforms/{need}s.yaml)")
+        for field, kind in (("radio", "rf"), ("modem", "acoustic")):             # a field its kind never reads is refused, not ignored (M-15; row 154)
+            if field in lk and lk["kind"] != kind:
+                raise ConfigError(f"{where}/{field}: a {lk['kind']} link does not read '{field}' (only a {kind} link does); remove it")
         if "radio" in lk and lk["radio"] not in radios:
             raise ConfigError(f"{where}/radio: '{lk['radio']}' is not in platforms/radios.yaml; use one of {sorted(radios)}")
-        if "modem" in lk and lk["modem"].lower() not in modems:
-            raise ConfigError(f"{where}/modem: '{lk['modem']}' is not in platforms/modems.yaml; use a key or <key>_<band>, e.g. {sorted(modems)[:3]}")
+        if "modem" in lk and comms.resolve_modem(lk["modem"]) is None:
+            bare = _registry("modems.yaml", "modems").get(str(lk["modem"]).lower())
+            raise ConfigError(f"{where}/modem: '{lk['modem']}' is not in platforms/modems.yaml; use <key>_<band>, e.g. {sorted(comms.modem_names())[:3]}"
+                              + (f" (the modem has the bands {sorted(bare['bands'])} and none is its default)" if bare else ""))
         ends = {cls.get(lk["a"]), cls.get(lk["b"])}
         if lk["kind"] == "acoustic" and "uas" in ends:
             raise ConfigError(f"{where}: an acoustic link cannot end at a UAS (it flies, depth 0); use an rf link, or move that end")

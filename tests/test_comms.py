@@ -597,3 +597,14 @@ def test_r9_m25_a_scalar_range_with_an_ambiguous_link_is_refined_like_an_array(m
     assert float(s["margin"].value) == pytest.approx(a["margin"].value[0]) and float(s["margin"].value) == pytest.approx(float(s["thorp_margin"]) - 7.0)
     assert s["label"] == a["label"] == "Bellhop refined the ambiguous links" and s["margin"].source.endswith("+ Bellhop")
     assert float(s["tl_bellhop_db"] - s["tl_bellhop_iso_db"]) == pytest.approx(7.0)
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 11, M-16
+
+def test_r11_m16_the_spreading_exponent_is_one_constant_of_the_code_and_no_table_entry_says_otherwise():
+    """platforms/modems.yaml had `defaults.spreading_k`, which nothing read: the lab editing it changed no margin."""
+    import inspect
+    assert "spreading_k" not in c._yaml("modems.yaml")["defaults"] and c.SPREADING_K == 1.5
+    for f in (c.acoustic_tl_db, c.implementation_loss_db, c.acoustic_margin, c.acoustic_link):
+        assert inspect.signature(getattr(f, "__wrapped__", f)).parameters["k"].default == c.SPREADING_K
+    assert c.acoustic_margin(3000.0) == c.acoustic_margin(3000.0, k=1.5) != c.acoustic_margin(3000.0, k=2.0)

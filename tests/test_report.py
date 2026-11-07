@@ -1393,10 +1393,19 @@ def test_the_uas_block_says_attitude_exceedance_cannot_fire_and_prints_the_autho
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
 
 
+def set_link_counts(run, link, k_fail):
+    """A link's stored verdict as stage 1 writes it for `k_fail` failures: the report refuses a verdict that its counts do not give (round 11, M-2)."""
+    def fn(d):
+        e = d["summary"]["links"][link]
+        e["k_fail"] = k_fail
+        e["verdict"] = intervals.verdict(k_fail, e["n"], e["verdict"]["conf"])
+    edit_json(run / "stage1b" / "summary.json", fn)
+
+
 def test_the_acoustic_sanity_row_carries_the_ships_distance_to_the_page(run):
     m, plan = pm_run.make_run(run)
     set_link_fields(run, **{"glider_eq-ship-acoustic": dict(distance_km_median=555.0)})
-    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["glider_eq-ship-acoustic"]["verdict"].update(verdict="NO-GO"))
+    set_link_counts(run, "glider_eq-ship-acoustic", 40)                                       # NO-GO
     report.write(run, m, plan)
     rep, t = load(run), plain((run / "report" / "index.html").read_text())
     row = next(r for r in rep["sanity"]["rows"] if r["id"] == "glider_eq-ship-acoustic")
@@ -2327,8 +2336,7 @@ def test_r9_m17_a_link_with_a_median_need_of_zero_but_failures_keeps_its_graded_
     """Adversary: 10 of 24 members need the link and fail, 14 never do (median need 0). The card must not say NOT EXERCISED for it."""
     m, plan = pm_run.make_run(run)
     set_link_fields(run, **{"usv-uas-rf": dict(need_count_median=0, granularity_ok=False)})
-    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["usv-uas-rf"].update(verdict=dict(
-        d["summary"]["links"]["usv-uas-rf"]["verdict"], verdict="NO-GO")))
+    set_link_counts(run, "usv-uas-rf", 40)                                                    # NO-GO
     report.write(run, m, plan)
     card = plain((run / "report" / "index.html").read_text().split("<div id='v-usv-uas-rf'>")[1].split("<div id='v-")[0])
     assert "Required at no moment in the median member (0 samples): the link was not exercised in it" in card

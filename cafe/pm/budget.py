@@ -347,7 +347,9 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     batch costs its longest task or its tasks spread over the workers, whichever is longer, and several batches run at once when one does not fill.
     `mem_gb`: the memory the run may use (`par.memory_gb()`; None: unknown, no memory term). Each worker needs `WORKER_GB` on top of the
     environment (`env_gb`, default `env_model_gb`: per deg^2 day of the padded box): the workers are the CPUs or what memory holds, the smaller, and a plan for
-    which not even one worker fits is refused. A `workers` argument or CAFE_WORKERS is honoured as given, with a note when memory is short for it."""
+    which not even one worker fits is refused. A `workers` argument or CAFE_WORKERS is honoured as given, with a note when memory is short for it.
+    The memory term is the environment's (the padded box's area times the window's days) and a worker's (`WORKER_GB`): the number of vehicles is in
+    neither, so a 20-vehicle mission plans wherever a 4-vehicle one does and needs a larger time budget, not more memory (round 11, M-35)."""
     if budget not in BUDGET_S:
         raise PlanError(f"--budget {budget!r}: choose one of {list(BUDGET_S)}")
     if gpus < 0:

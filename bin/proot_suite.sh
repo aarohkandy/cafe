@@ -7,7 +7,8 @@
 #   tag   names the logs ~/cafe-worker/logs/<tag>_s<i>.log (-vv, so a failure has its name while it runs; each ends rc=N), <tag>_serial.log and <tag>_audit.log, and the
 #         folder pmdata/shards/<tag>/ (junit s<i>.xml, serial.xml, coverage). A run with the same tag takes its balance from that folder's junit files.
 #   --cov coverage per job, then `coverage combine`, `coverage json` to /app/coverage.json, and `python -m cafe.pm.audit --pytest-done` (ruff, mypy, the scans and the
-#         coverage gates; it fails on a coverage.json older than the code). Exit 0 only if every job and the audit passed; what failed is named.
+#         coverage gates; the receipt, coverage.receipt.json, is written first, only here, when every job passed, and holds the digest of the code that ran: --pytest-done
+#         fails without it or when the code has changed since). Exit 0 only if every job and the audit passed; what failed is named.
 # TERM, INT or HUP stops every job (proot_run.sh's own handler: TERM to the job's group, KILL after PM_STOP_GRACE s). Nothing is written outside ~/cafe-worker.
 set -u
 [ $# -eq 3 ] || { [ $# -eq 4 ] && [ "$4" = --cov ]; } || { echo "usage: sh proot_suite.sh <dir> <K> <tag> [--cov]" >&2; exit 2; }
@@ -54,7 +55,7 @@ verdict() {
     e=$(grep -o ' errors="[0-9]*"' "$3" | head -1 | tr -dc 0-9); f=$(grep -o ' failures="[0-9]*"' "$3" | head -1 | tr -dc 0-9)
     [ "$e$f" = 00 ] || BAD="$BAD $1(rc=0, but its junit file says ${f:-?} failed, ${e:-?} errors)"
 }
-[ -z "$COV" ] || rm -f "$R/coverage.json"                                       # an old one must not be read as this run's
+[ -z "$COV" ] || rm -f "$R/coverage.json" "$R/coverage.receipt.json"           # an old one must not be read as this run's
 touch "$SH/.start"
 # 1. the shares: a small python step under proot, once. Junit to balance by: the first suite's (if kept here), then this tag's last run, oldest first.
 J=; [ -f "$C/pmdata/junit_91c9777.xml" ] && J="/data/junit_91c9777.xml"
@@ -94,7 +95,7 @@ PIDS=
 # 4. coverage and the rest of the audit
 if [ -n "$COV" ] && [ -z "$BAD" ]; then
     sh "$R/bin/proot_run.sh" "$D" sh -c 'coverage combine --keep --data-file="$1/.coverage" "$1" && coverage json --data-file="$1/.coverage" -o /app/coverage.json \
-        && python -m cafe.pm.audit --pytest-done' x "$DS" > "$LOGS/${TAG}_audit.log" 2>&1; r=$?
+        && python -m cafe.pm.audit --pytest-receipt && python -m cafe.pm.audit --pytest-done' x "$DS" > "$LOGS/${TAG}_audit.log" 2>&1; r=$?
     echo "rc=$r" >> "$LOGS/${TAG}_audit.log"
     [ $r -eq 0 ] || BAD="$BAD audit(rc=$r)"
 elif [ -n "$COV" ]; then

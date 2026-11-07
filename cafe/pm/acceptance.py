@@ -30,7 +30,9 @@ disagree about P(fail) itself and it is a problem, decided or not. A verdict dec
 by Newcombe's (1998, Stat. Med. 17:873, method 10) hybrid
 Wilson-score interval for the difference of the two proportions, `intervals.newcombe_diff`, which must contain 0 at a family-wise 95 %: Bonferroni over the
 vehicles and links compared, so each entry is judged at 1 - 0.05 / entries. (A new estimate inside the 90 % interval of an independent one fails about a
-quarter of the time even when nothing is wrong.) The same-seed check is exact equality and is unchanged. Timings, the
+quarter of the time even when nothing is wrong.) The golden is a same-seed comparison, not an independent one: there the counts are the run's own, so each
+k_fail may differ by at most `SAME_SEED_K_TOL` (1) member, and each entry's `p_fail` must be its own k_fail / n and its `conf` the same in both (round 11,
+M-4); Newcombe is for `other_seed`. The `same_seed` check is exact equality and is unchanged. Timings, the
 dates, the host and paths are not in the golden. The golden is a regression snapshot of this tool's own output from a quick run someone reviewed, not
 an independent expectation: it can say the tool still does what it did, never that what it did is right (docs/BRIEF.md section 6 holds the independent
 expectation, and the credibility report compares the run with it). Its `source` is its provenance: the git sha it was made from (a commit, from a
@@ -219,6 +221,23 @@ def _interval(e: dict[str, Any]) -> tuple[float, float]:
     return lo, hi
 
 
+SAME_SEED_K_TOL = 1             # members: one seed on one code is one set of members, but another machine's rounding may move one that sits on a limit
+
+
+def _same_seed_problems(kind: str, name: str, g: dict[str, Any], r: dict[str, Any]) -> list[str]:
+    """Two summaries from the same seed (the golden against a new run) must agree member for member, not within a sampling interval: k_fail within
+    SAME_SEED_K_TOL, and each summary's `p_fail` the ratio of its own counts and the same `conf`, so an edited golden cannot be passed by a run that
+    reproduces the old counts (round 11, M-4)."""
+    bad = [f"{kind} {name}: k_fail {r['k_fail']} of {r['n']} now against {g['k_fail']} in the reference: the same seed gives the same members "
+           f"(at most {SAME_SEED_K_TOL} may differ across machines)"] if abs(r["k_fail"] - g["k_fail"]) > SAME_SEED_K_TOL else []
+    for who, e in (("the reference", g), ("now", r)):
+        if abs(e["p_fail"] - e["k_fail"] / e["n"]) > EPS:
+            bad.append(f"{kind} {name}: p_fail {e['p_fail']!r} {who} is not k_fail / n = {e['k_fail']} / {e['n']}")
+    if g["conf"] != r["conf"]:
+        bad.append(f"{kind} {name}: conf {g['conf']!r} in the reference, {r['conf']!r} now")
+    return bad
+
+
 def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tuple[list[str], list[str]]:
     """(problems, notes) of `new` against `ref` (both from `summary`): the exact fields must match; a verdict must match wherever either run has it
     decided; a change undecided in both is a note when the two runs' STOP_CONF intervals on P(fail) overlap and a problem when they do not; and
@@ -244,6 +263,9 @@ def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tupl
                                f"intervals on P(fail), {glo:.3f} to {ghi:.3f} and {rlo:.3f} to {rhi:.3f}, do not overlap")
                 else:
                     notes.append(f"{kind} {k}: {g['verdict']} -> {r['verdict']}, undecided in both at n = {g['n']}")
+            if seed:                                                    # round 11, M-4: one seed, one code: the counts are the run's own, not a draw
+                bad += _same_seed_problems(kind, k, g, r)
+                continue
             lo, hi = intervals.newcombe_diff(r["k_fail"], r["n"], g["k_fail"], g["n"], conf)
             if not lo - EPS <= 0 <= hi + EPS:
                 bad.append(f"{kind} {k}: P(fail) {r['p_fail']:.4f} now against {g['p_fail']:.4f} in the reference ({r['k_fail']} of {r['n']} and "
@@ -378,7 +400,7 @@ def check_broken(out: pathlib.Path) -> dict[str, Any]:
         rows, rc = receipts.run(broken=BROKEN, out=out / "receipts_broken.json", log=lines.append)
         _, base_rc = receipts.run(only=[WAVE_MODULE], out=out / "receipts_wave_direction.json", log=lines.append)
     except FileNotFoundError as e:
-        return _row("broken_config", False, str(e))
+        return _row("broken_config", False, config.os_error_text(e))
     (out / "receipts_broken.log").write_text("\n".join(lines) + "\n")
     caught = [r["id"] for r in rows if r["kind"] == "fail" and r["module"] == WAVE_MODULE]
     ok = rc == 0 and bool(caught) and base_rc == 0

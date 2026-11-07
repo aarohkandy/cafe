@@ -14,6 +14,7 @@
 - /.mutmut-cache
 - /audit.log
 - /coverage.json
+- /coverage.receipt.json
 - /.coverage*
 - /.hypothesis/
 - /.pytest_cache/

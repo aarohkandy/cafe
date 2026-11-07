@@ -20,6 +20,7 @@ from .env.remote import sha256, tree_sha256
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 STAGES = ["ingest", "hangar", "stage1", "windows", "stage3", "refit", "stage1b", "emulator", "report"]       # also the names of a run's output directories
 RUN_DIRS = {"checkpoints", *STAGES}
+RUN_ROOT_FILES = ("mission.yaml", "plan.json")        # the run's own files at its root; the report stage records them by these bare names (M-2)
 DIST = {"sklearn": "scikit-learn", "yaml": "PyYAML"}  # import name -> distribution name, where they differ (for libraries with no __version__)
 LIBS = ["numpy", "scipy", "xarray", "zarr", "h5py", "jax", "xlb", "gsw", "pycoare", "mannrs", "sklearn", "smt", "statsmodels",
         "pandas", "pyarrow", "arlpy", "yaml", "jsonschema", "netCDF4"]
@@ -97,6 +98,18 @@ def machine() -> dict[str, Any]:
                 warning=machine_warning(thr))
 
 
+def copy_manifest(src: str | pathlib.Path, dest: str | pathlib.Path) -> dict[str, Any]:
+    """Copy the shared manifest `src` to `dest` through a sibling temporary and os.replace, and return what the copy holds: the one read of the shared file
+    a stage makes (`Ledger.snapshot`)."""
+    dest = pathlib.Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dest)
+    man: dict[str, Any] = json.loads(dest.read_text())
+    return man
+
+
 class Ledger:
     def __init__(self, run_dir: str | pathlib.Path, stage: str, config_hash: str, code_digest: str | None = None) -> None:
         self.dir = pathlib.Path(run_dir) / "checkpoints" / stage
@@ -116,17 +129,21 @@ class Ledger:
         extra = {} if tree is None else dict(tree_sha256=tree)
         self.d["inputs"].append(dict(ref=str(ref), sha256=sha or (sha256(p) if p.is_file() else None), **extra, **meta))
 
-    def snapshot(self, src: str | pathlib.Path, dest: str | pathlib.Path, **meta: Any) -> None:
+    def snapshot(self, src: str | pathlib.Path, dest: str | pathlib.Path, **meta: Any) -> dict[str, Any]:
         """A shared cache manifest (TAO, orca) is rewritten in place whenever a later run grows or replaces the cache, so a ledger that hashed it made every
         earlier run's audit say "input changed" (review round 10, P-32). The stage copies the bytes it read into the run (`dest`, atomically) and records
         the copy as the input, with `shared` = where it came from (absolute); the audit checks the copy by hash and the files it names against the shared cache
-        (`audit._shared_problems`), not the shared manifest. A run directory then carries the manifest the run used."""
-        dest = pathlib.Path(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        tmp = dest.with_name(dest.name + ".part")
-        shutil.copyfile(src, tmp)
-        os.replace(tmp, dest)
-        self.input(dest, shared=os.path.abspath(src), **meta)       # absolute: a relative one is read against the cwd of whoever audits or resumes later
+        (`audit._shared_problems`), not the shared manifest. A run directory then carries the manifest the run used. Returns the parsed copy: the stage takes
+        what it reads of the manifest from it and not from a second read of the shared file, which a fetch of another run may have rewritten between the
+        two (round 11, M-9). `copy_manifest` and `record_copy` are its two halves, for a stage that needs the manifest before it records the input."""
+        man = copy_manifest(src, dest)
+        self.record_copy(src, dest, **meta)
+        return man
+
+    def record_copy(self, src: str | pathlib.Path, dest: str | pathlib.Path, **meta: Any) -> None:
+        """The input a `copy_manifest` made: the copy, with `shared` = where it came from (absolute: a relative one is read against the cwd of whoever
+        audits or resumes later)."""
+        self.input(pathlib.Path(dest), shared=os.path.abspath(src), **meta)
 
     def seed(self, name: str, value: Any) -> None:
         self.d["seeds"][name] = int(value)
@@ -213,6 +230,8 @@ def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path, roots: set[tup
     not as recorded, because the recorded one is the original run's file, which a copy must not borrow (round 9, L1). A path with a `..` in it is never
     rebased."""
     run_dir, p = pathlib.Path(run_dir), pathlib.Path(ref)
+    if str(ref) in RUN_ROOT_FILES:                                  # recorded by its bare name: the run's own, wherever the run lies now (round 11, M-2)
+        return run_dir / p
     if ".." in p.parts:
         return p
     for i in range(len(p.parts) - 1, -1, -1):
@@ -231,21 +250,41 @@ def resolve(ref: str | pathlib.Path, run_dir: str | pathlib.Path, roots: set[tup
     return lost or p
 
 
-def shared_changes(man: dict[str, Any], root: pathlib.Path) -> list[tuple[pathlib.Path, str, str | None]]:
-    """What a cache manifest copy `man` (`Ledger.snapshot`) names that is no longer in the cache directory `root` as the run read it, as (file, recorded
-    sha256, sha256 now, None for a file that is gone). An orca per-hour part (`parts`, `hours/<name>`) counts only when it is there and different: the
-    assembled stores that were read are inputs of their own. A TAO file (`files`, `<mooring>/<name>`) counts when it is gone too. The shared manifest is not
-    read: a later run rewrites it (a wider box, another window) without touching these files. The one comparison `done` and `audit` both make."""
+def shared_diff(man: dict[str, Any], root: pathlib.Path) -> tuple[list[tuple[pathlib.Path, str, str | None]], list[tuple[pathlib.Path, str, str]]]:
+    """What a cache manifest copy `man` (`Ledger.snapshot`) names that is no longer in the cache directory `root` as the run read it: (changes, rewrites),
+    each entry (file, recorded sha256, sha256 now), now None for a file that is gone. An orca per-hour part (`parts`, `hours/<name>`) counts only when it is
+    there and different: the assembled stores that were read are inputs of their own. A TAO file (`files`, `<mooring>/<name>`) counts when it is gone too.
+    The shared manifest is not read for that: a later run rewrites it (a wider box, another window) without touching these files.
+    A part that differs is a *rewrite*, not a change, when the live `root/manifest.json` now lists it with another sha than the run's copy and with the sha
+    the file has: a later ingest refetched it under the same name (a new 3-D hour or another box drops the parts cut for the old one,
+    `orca._drop_stale_parts`), which is what the cache does and not damage. A part the live manifest does not vouch for is a change, whatever else it
+    says. Option kept out: keeping the old parts costs disk (P-34 (c))."""
     want = {**{f"hours/{n}": h for n, h in man.get("parts", {}).items()}, **{k: r["sha256"] for k, r in man.get("files", {}).items()}}
-    out: list[tuple[pathlib.Path, str, str | None]] = []
+    try:
+        live = json.loads((root / "manifest.json").read_text()).get("parts", {})
+    except (ValueError, OSError, AttributeError):
+        live = {}
+    changes: list[tuple[pathlib.Path, str, str | None]] = []
+    rewrites: list[tuple[pathlib.Path, str, str]] = []
     for key, sha in want.items():
         f = root / key
         if f.is_file():
             if (now := sha256(f)) != sha:
-                out.append((f, sha, now))
+                name = key.removeprefix("hours/")
+                if key.startswith("hours/") and isinstance(live, dict) and live.get(name) == now:
+                    rewrites.append((f, sha, now))
+                else:
+                    changes.append((f, sha, now))
         elif key in man.get("files", {}):
-            out.append((f, sha, None))
-    return out
+            changes.append((f, sha, None))
+    return changes, rewrites
+
+
+def shared_changes(man: dict[str, Any], root: pathlib.Path) -> list[tuple[pathlib.Path, str, str | None]]:
+    """Every difference `shared_diff` finds, rewrites included: what `done` asks, since a stage that read a part that is no longer there as it was reads
+    again. The audit asks `shared_diff` and tells the two apart."""
+    changes, rewrites = shared_diff(man, root)
+    return [*changes, *rewrites]
 
 
 def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str, Any] | None:

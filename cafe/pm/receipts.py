@@ -453,7 +453,7 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
     base: dict[str, str] = {}
     if broken:
         if not pathlib.Path(broken).is_file():
-            raise FileNotFoundError(errno.ENOENT, f"broken configuration {broken}: no such file", str(broken))
+            raise FileNotFoundError(errno.ENOENT, "broken configuration: no such file", str(broken))      # `filename` has the path: told once
     try:
         if broken:
             os.environ.pop(cv.OVERLAY_ENV, None)
