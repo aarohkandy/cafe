@@ -437,7 +437,11 @@ class Facts:
         check_summary(self.s1b)
         self.s1 = _json(run / "stage1" / "summary.json")
         self.refit = _json(run / "refit" / "refit.json") or {}
-        self.problems = [p for p in ledger_problems(run) if "stage report" not in p and ": no ledger" not in p]
+        # The report stage's outputs are what a re-render rewrites, so those lines are not the run's damage. Its inputs are: mission.yaml and plan.json are
+        # recorded there and nowhere else (round 11, M-2), and an edit of either after the stage ran is the run's (look-ahead L0). `pipeline.s_report` voids
+        # the ledger of an earlier run of the stage while it runs, so a report built inside the stage has no such line.
+        mine = f"{run.name}: stage report: "
+        self.problems = [p for p in ledger_problems(run) if ": no ledger" not in p and (not p.startswith(mine) or p.startswith(mine + "input "))]
         self.refs = refs = {v["platform"] for v in (self.mission or {}).get("vehicles", [])}
         links = {lk["kind"] for lk in (self.mission or {}).get("links", [])}
         tables = ({"radios"} if "rf" in links else set()) | ({"modems"} if "acoustic" in links else set())
@@ -464,11 +468,16 @@ class Facts:
         return [k for k, e in self.perts.items() if e.get("kind") == "assumed" or "ASSUMED" in str(e.get("citation", ""))]
 
 
+def counts_ok(k: Any, n: Any) -> bool:
+    """The one rule for a stored ensemble count: an integer `n` >= 1 and an integer 0 <= `k` <= `n`."""
+    return all(isinstance(x, int) and not isinstance(x, bool) for x in (k, n)) and 0 <= k <= n and n >= 1
+
+
 def check_counts(k: Any, n: Any, src: str) -> None:
-    """A stored ensemble count is an integer `n` >= 1 and an integer 0 <= `k` <= `n`, else a ConfigError (`error:`, exit 2), not the ZeroDivisionError or
-    ValueError that `intervals.wilson` and `interval` raise on a count that is not one. The one rule of the credibility page and the report, for the stage-1b
-    summary's ensembles and the sensitivity cases (round 11, M-5)."""
-    if not all(isinstance(x, int) and not isinstance(x, bool) for x in (k, n)) or not 0 <= k <= n or n < 1:
+    """A stored ensemble count is an integer `n` >= 1 and an integer 0 <= `k` <= `n` (`counts_ok`), else a ConfigError (`error:`, exit 2), not the
+    ZeroDivisionError or ValueError that `intervals.wilson` and `interval` raise on a count that is not one. The one rule of the credibility page and the
+    report, for the stage-1b summary's ensembles and the sensitivity cases (round 11, M-5), and of `acceptance.compare` for the golden's (look-ahead L0)."""
+    if not counts_ok(k, n):
         raise config.ConfigError(f"{src}: k_fail {k!r} of n {n!r} members is not a count (integers, n >= 1, 0 <= k_fail <= n): "
                                  "the summary was edited or is damaged; run it again (--fresh)")
 

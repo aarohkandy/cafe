@@ -24,7 +24,7 @@ outputs are unchanged. Stage products live next to the ledgers:
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, io, json, os, pathlib, pickle, re, shutil, time, warnings, zipfile
+import contextlib, datetime as dt, io, json, math, os, pathlib, pickle, re, shutil, time, warnings, zipfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -349,6 +349,16 @@ def _ocean_cached(path: pathlib.Path, box: tuple[float, float, float, float], st
     return ok and (not man.is_file() or ds.attrs.get("manifest_sha256") == sha256(man))
 
 
+def _tao_covers(m: dict[str, Any], box: tuple[float, float, float, float], t0: float, t1: float) -> bool:
+    """A TAO manifest `m` (parsed) was made under the current selection rule (a copy of an older cache put in the directory by hand is refused) and covers
+    the box and the window. The part of `_tao_cached` that reads nothing but the manifest, so that it can be asked of the copy a run recorded."""
+    from .env import tao
+    if m.get("selection") != tao.SELECTION:
+        return False
+    s, n, w, e = hycom.box360(box)
+    return bool(m["t0"] <= t0 and m["t1"] >= t1 and m["box"][0] <= s and m["box"][1] >= n and m["box"][2] <= w and m["box"][3] >= e)
+
+
 def _tao_cached(tdir: pathlib.Path, box: tuple[float, float, float, float], t0: float, t1: float) -> bool:
     """TAO manifest was made under the current selection rule (tao.SELECTION), covers the box and window, every file still hashes to it
     (tao.verify) and `load_tao` can read each selected one."""
@@ -359,10 +369,7 @@ def _tao_cached(tdir: pathlib.Path, box: tuple[float, float, float, float], t0: 
     m = orca.read_json(mp)
     if m is None:                                                         # empty or truncated: the files are fetched again and the manifest rewritten
         return False
-    if m.get("selection") != tao.SELECTION:                               # another rule (a copy of an older cache put here by hand): select again
-        return False
-    s, n, w, e = hycom.box360(box)
-    if not (m["t0"] <= t0 and m["t1"] >= t1 and m["box"][0] <= s and m["box"][1] >= n and m["box"][2] <= w and m["box"][3] >= e):
+    if not _tao_covers(m, box, t0, t1):
         return False
     try:
         tao.verify(tdir)
@@ -378,6 +385,32 @@ def _gebco_cached(path: pathlib.Path) -> bool:
     except (OSError, ValueError, KeyError, zipfile.BadZipFile):
         return False
     return True
+
+
+def _copy_covering(ctx: Context, L: Ledger, name: str, src: pathlib.Path, dest: pathlib.Path, covers: Callable[[dict[str, Any]], bool],
+                   fetch: Callable[[], Any]) -> dict[str, Any] | None:
+    """`ledger.copy_manifest(src, dest)`, and the decision that the cache covers what the run wants asked of the copy. `_need` decides on a read of the shared
+    manifest and the stage then copies it again; a fetch of another run that rewrote it in between (a narrower window or box, no 3-D hour: the case of round 11
+    M-8) would leave a run that recorded, and read, a manifest that fails the very test it passed. Such a copy is fetched for again, once (not under
+    CAFE_OFFLINE), and the check `<name>_manifest_copy_covers` says how it ended. -> the parsed copy, None when it does not cover (the stage stops)."""
+    d = ledger.copy_manifest(src, dest)
+    note = f"the copy of the {name} manifest this run recorded covers the window, the box and what it reads"
+    if not covers(d):
+        if _offline():
+            note = (f"the copy of the {name} manifest this run recorded does not cover what it needs (another run's fetch replaced the cache) "
+                    "and CAFE_OFFLINE is set")
+        else:
+            ctx.log(f"ingest: the {name} manifest was replaced between the check and the copy by a manifest that does not cover this run: fetching again")
+            try:
+                fetch()
+                d = ledger.copy_manifest(src, dest)
+            except (OSError, ValueError, LookupError, FetchError) as e:
+                note = f"the {name} manifest was replaced by another run's and fetching again failed ({type(e).__name__}: {e})"
+            else:
+                note = "the copy covers it after fetching again (the shared manifest was replaced between the check and the copy)"
+    ok = covers(d)
+    L.check(f"{name}_manifest_copy_covers", ok, note=note if ok else note + "; rerun")
+    return d if ok else None
 
 
 def s_ingest(ctx: Context, L: Ledger) -> None:
@@ -454,7 +487,9 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
         return                                                           # the failed checks above stop the stage
     want = int((t1 - t0).total_seconds() // 3600) + 1
     orca_snap = ctx.path("ingest", "orca_manifest.json")
-    d = ledger.copy_manifest(man, orca_snap)                            # the one read of the shared manifest; all that follows reads this copy (round 11, M-9)
+    d = _copy_covering(ctx, L, "orca", man, orca_snap, lambda c: _orca_covers(c, t0, t1, box, h3), fetch_orca)     # the one read of the shared manifest (M-9),
+    if d is None:                                                        # and the decision that it covers is made on that copy, not on a read before it
+        return
     L.input(d["base"], sha=None, kind="remote", note="orca UWIN-CM run (byte-range reads; per-hour npz cache)")
     L.record_copy(man, orca_snap, kind="orca cache manifest (the copy this run used: the shared one is rewritten when the cache grows)")
     orca_trees = {n: tree_sha256(man.parent / n) for n in ORCA_STORES if (man.parent / n).is_dir()}  # the manifest lists the parts, not these
@@ -569,9 +604,24 @@ def _sea_sample(env: GriddedEnv, n: int = 300) -> tuple[NDArray[np.intp], NDArra
 
 
 CALM_SWH_M = 1e-3                # a significant wave height at or below this is a calm sea: there is no swell to synthesise a spectrum for
+CALM_WIND_MS = 0.2               # ... when the wind there is calm, too: a fully developed sea (0.21 U^2 / g) is CALM_SWH_M high at U = 0.22 m/s. Zero waves
+# under a wind above this are a wave file that is zero or was never written, not a calm, and the checks that compare it with the wind keep failing (L0)
 TP_LIMIT = 0.125                 # peak period: one frequency bin (the 37 UMWM bins are spaced 1.1225)
 DIR_LIMIT_DEG = 11.25            # mean direction: one direction bin of the 32 UMWM bins
 MSS_LIMIT = 0.5                  # 90th percentile of the slope variance's relative error: exact where the short-sea share is not clipped, 0.35 on the q2 data
+
+
+def _sample_wind(env: GriddedEnv, jj: NDArray[np.intp], ii: NDArray[np.intp], ti: int) -> NDArray[np.float64]:
+    """The 10 m wind speed [m/s] at the sampled UMWM sea nodes (`_sea_sample`) at UMWM hour index `ti`: the larger of WRF's and the wave file's own `wspd`, so
+    that a wave file with zeros in it cannot make its own wind calm. NaN where neither is known (a node outside the WRF grid and no `wspd`)."""
+    lon, lat = env.lou.x[ii], env.lau.x[jj]
+    t = np.full(lon.shape, env.tu.x[ti])
+    ins = np.asarray(env.inside(lon, lat, t), bool)
+    wrf = np.full(lon.shape, np.nan)
+    if ins.any():
+        wrf[ins] = cv.speed(env.u10(lon[ins], lat[ins], t[ins]))
+    out: NDArray[np.float64] = np.fmax(wrf, np.asarray(env.U["wspd"][ti][jj, ii], np.float64))
+    return out
 
 
 def _spectrum_errors(env: GriddedEnv) -> dict[str, float]:
@@ -580,7 +630,8 @@ def _spectrum_errors(env: GriddedEnv) -> dict[str, float]:
     against `dwp`, the largest error [deg] of its energy-weighted mean direction against `dwd`, the 90th percentile of the relative error of its slope variance
     against `mss`, and the fraction of points where that error exceeds 1 % (the clip on the short-sea share bit). NaN where no point had a swell;
     `seen` is the number of sampled sea points with a wave height and `calm` how many of them are at or below CALM_SWH_M, so that a sea with no swell at
-    all (every point calm) can be told from one whose parameters are missing (round 11, M-6)."""
+    all (every point calm) can be told from one whose parameters are missing (round 11, M-6). A point is calm only when the wind there is calm, too
+    (`CALM_WIND_MS`, `_sample_wind`); `flat` counts the points whose swh is at or below CALM_SWH_M under a wind that is not (look-ahead L0)."""
     from .env import waves
     jj, ii, tis = _sea_sample(env)
     th = waves.theta_compass(env.spec["th"]) if env.spec is not None else np.arange(5.625, 360, 11.25)
@@ -589,12 +640,15 @@ def _spectrum_errors(env: GriddedEnv) -> dict[str, float]:
     tp_err: list[float] = []
     dir_err: list[float] = []
     mss_err: list[float] = []
-    seen = calm = 0
+    seen = calm = flat = 0
     for ti in tis:
         g = {key: env.U[key][ti][jj, ii] for key in ("swh", "dwp", "dwd_e", "dwd_n", "mss", "wspd")}
         have = np.isfinite(g["swh"])
         seen += int(have.sum())
-        calm += int((have & (g["swh"] <= CALM_SWH_M)).sum())
+        low = have & (g["swh"] <= CALM_SWH_M)
+        still = low & (_sample_wind(env, jj, ii, ti) <= CALM_WIND_MS)
+        calm += int(still.sum())
+        flat += int((low & ~still).sum())
         ok = np.isfinite(g["swh"]) & (g["swh"] > CALM_SWH_M) & np.isfinite(g["dwp"]) & (g["dwp"] > 0) & np.isfinite(g["mss"]) & (g["mss"] > 0)
         if not ok.any():
             continue
@@ -607,9 +661,9 @@ def _spectrum_errors(env: GriddedEnv) -> dict[str, float]:
         dir_err += list(np.abs((mean_dir - dto + 180.0) % 360.0 - 180.0))
         mss_err += list(np.abs(waves.mean_square_slope(E, f, th) - g["mss"][ok]) / g["mss"][ok])
     if not tp_err:
-        return dict(tp=np.nan, dir_deg=np.nan, mss_p90=np.nan, mss_clipped=np.nan, n=0, seen=seen, calm=calm)
+        return dict(tp=np.nan, dir_deg=np.nan, mss_p90=np.nan, mss_clipped=np.nan, n=0, seen=seen, calm=calm, flat=flat)
     return dict(tp=float(np.max(tp_err)), dir_deg=float(np.max(dir_err)), mss_p90=float(np.percentile(mss_err, 90)),
-                mss_clipped=float(np.mean(np.asarray(mss_err) > 0.01)), n=len(tp_err), seen=seen, calm=calm)
+                mss_clipped=float(np.mean(np.asarray(mss_err) > 0.01)), n=len(tp_err), seen=seen, calm=calm, flat=flat)
 
 
 # (label, key of config/assumptions.yaml `ingest.<key>`, where the values are read): a scalar bound is a maximum with 0 below it, a pair is [lo, hi]
@@ -675,8 +729,10 @@ def ustar_percent(frac: float) -> str:
 
 
 def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float, int]:
-    """COARE u* (the surface layer built at ingest) against UMWM's `ust` at the sample: (points above USTAR_FLOOR_MS, median |dif|/ust, fraction within
-    USTAR_AGREE_BAND, sea points seen). A calm sea has sea points seen and none above the floor, which is no "sea nodes": the caller tells the two apart."""
+    """COARE u* (the surface layer built at ingest) against UMWM's `ust` at the sample: (points compared, median |dif|/ust, fraction within
+    USTAR_AGREE_BAND, sea points seen). A point is compared when its ust is above USTAR_FLOOR_MS, and also, as an infinite relative difference, when it is
+    at or below it under a wind that is not calm (`CALM_WIND_MS`): a ust of zero under 5 m/s is a file that is zero, not a calm (look-ahead L0). A calm sea
+    has sea points seen and none compared, which is no "sea nodes": the caller tells the two apart."""
     sl = env.subgrid
     assert sl is not None, "ingest builds the surface layer before this check"
     jj, ii, tis = _sea_sample(env)
@@ -692,6 +748,8 @@ def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float, int]:
         seen += int(have.sum())
         good = have & (b > USTAR_FLOOR_MS)
         rel += list(np.abs(a[good] - b[good]) / b[good])
+        windy = have & (b <= USTAR_FLOOR_MS) & ~(_sample_wind(env, jj, ii, ti)[ins] <= CALM_WIND_MS)        # zero ust under a wind: a disagreement, no calm
+        rel += [math.inf] * int(windy.sum())
     r = np.asarray(rel)
     return (int(r.size), float(np.median(r)) if r.size else float("nan"), float(np.mean(r <= USTAR_AGREE_BAND)) if r.size else float("nan"), seen)
 
@@ -747,15 +805,18 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
     L.check("forcing_in_physical_range", bad == 0, value=bad, limit=0, note=what)
     sp = _spectrum_errors(env)
     flat = sp["n"] == 0 and sp["seen"] > 0 and sp["calm"] == sp["seen"]          # every sampled sea point is a calm: nothing to compare, which is no failure
-    still = f"all {sp['seen']} sampled sea points have swh at or below {CALM_SWH_M:g} m (a calm sea): there is no swell to synthesise; not assessable"
+    still = (f"all {sp['seen']} sampled sea points have swh at or below {CALM_SWH_M:g} m in a wind at or below {CALM_WIND_MS:g} m/s (a calm sea): "
+             "there is no swell to synthesise; not assessable")
+    zero = (f"{int(sp['flat'])} of {sp['seen']} sampled sea points have swh at or below {CALM_SWH_M:g} m under a wind above {CALM_WIND_MS:g} m/s (WRF, or the "
+            "wave file's wspd): the wave file is zero or was never written, which is no calm; nothing to compare") if sp["n"] == 0 and sp["flat"] else ""
     where = f"spectrum_from_params at {sp['n']} sampled sea points against the file's dwp / dwd / mss (Hs is forced to the file's swh, so it is not a test)"
     L.check("spectrum_peak_period_vs_file", flat or bool(sp["tp"] <= TP_LIMIT), value=None if np.isnan(sp["tp"]) else sp["tp"], limit=TP_LIMIT,
-            note=still if flat else f"largest relative error of the synthesised peak period; {where}")
+            note=still if flat else zero or f"largest relative error of the synthesised peak period; {where}")
     L.check("spectrum_direction_vs_file", flat or bool(sp["dir_deg"] <= DIR_LIMIT_DEG), value=None if np.isnan(sp["dir_deg"]) else sp["dir_deg"],
-            limit=DIR_LIMIT_DEG, note=still if flat else f"largest error of the synthesised mean direction [deg]; {where}")
+            limit=DIR_LIMIT_DEG, note=still if flat else zero or f"largest error of the synthesised mean direction [deg]; {where}")
     L.check("spectrum_mss_vs_file", flat or bool(sp["mss_p90"] <= MSS_LIMIT), value=None if np.isnan(sp["mss_p90"]) else sp["mss_p90"], limit=MSS_LIMIT,
-            note=still if flat else "90th percentile of the relative error of the synthesised slope variance; the short-wave share is clipped (slope variance "
-                 f"then off by more than 1 %) at {sp['mss_clipped']:.1%} of the points; {where}")
+            note=still if flat else zero or "90th percentile of the relative error of the synthesised slope variance; the short-wave share is clipped (slope "
+                 f"variance then off by more than 1 %) at {sp['mss_clipped']:.1%} of the points; {where}")
     n, med, frac, seen = _ustar_agreement(env)
     L.check("coare_ustar_vs_umwm_ust", seen > 0 if not n else bool(np.isfinite(med)), value=None if not n else frac,
             note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within {100 * USTAR_AGREE_BAND:.0f} %; "
@@ -836,8 +897,13 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     if not (tdir / "manifest.json").is_file():
         L.note(f"no TAO/TRITON download at {tdir}: wind priors stay the perturbations.yaml defaults (run `make fetch`)")
         return
-    tman = L.snapshot(tdir / "manifest.json", ctx.path("ingest", "tao_manifest.json"),
-                      kind="TAO cache manifest (the copy this run used: the shared one is rewritten when the cache grows)")
+    sbox = ocean_box(ctx.mission)
+    tsnap = ctx.path("ingest", "tao_manifest.json")
+    tman = _copy_covering(ctx, L, "tao", tdir / "manifest.json", tsnap, lambda c: _tao_covers(c, sbox, t0, t1),
+                          lambda: tao.fetch_tao(sbox, t0, t1, tdir, base=tao.BASE))
+    if tman is None:
+        return                                                           # the failed check above stops the stage
+    L.record_copy(tdir / "manifest.json", tsnap, kind="TAO cache manifest (the copy this run used: the shared one is rewritten when the cache grows)")
     moor = tao.load_tao(tdir, t0, t1, man=tman)                            # the copy this run recorded, not a second read of the shared file (round 11, M-9)
     hours = np.arange(t0, t1 + 1, 3600.0)
     wrf = {}
@@ -1494,6 +1560,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
 
 def s_report(ctx: Context, L: Ledger) -> None:
     from . import report
+    L.path.unlink(missing_ok=True)       # an earlier run of this stage is void while it runs (its inputs are the old ones), and the report reads the ledgers
     for st in ("stage1b", "refit", "stage3", "windows", "emulator"):
         for p in sorted(ctx.run_dir.joinpath(st).glob("*.json")):
             L.input(p)

@@ -1071,3 +1071,21 @@ def test_r11_m4_a_golden_of_the_wrong_counts_fails_the_check(tmp_path):
     g.write_text(json.dumps(rec))
     bad = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
     assert not bad["ok"] and "links rf: k_fail 10 of 40 now against 25 in the reference" in bad["detail"]
+
+
+@pytest.mark.parametrize("seed", [True, False])
+@pytest.mark.parametrize("which", ["reference", "new"])
+def test_l0_r11_a_summary_with_n_zero_or_k_beyond_n_is_a_problem_line_not_a_zero_division(which, seed):
+    """`_same_seed_problems` divided by the stored n and the edited golden it exists to catch is where n = 0 comes from; the n field was already queued
+    ('n 0 in the reference') and was lost to the traceback. The other seed's Newcombe interval and `_decided` read the same counts."""
+    g = acc.summary(report())
+    bad = copy.deepcopy(g)
+    bad["links"]["rf"].update(n=0, k_fail=0, p_fail=0.0)
+    ref, new = (bad, g) if which == "reference" else (g, bad)
+    problems = acc.diff(ref, new, seed=seed)
+    where = "in the reference" if which == "reference" else "now"
+    assert f"links rf: k_fail 0 of n 0 {where} is not a count (integers, n >= 1, 0 <= k_fail <= n)" in problems
+    assert any(p.startswith("links rf: n ") for p in problems)                          # the n mismatch is reported, too
+    over = copy.deepcopy(g)
+    over["vehicles"]["usv"]["k_fail"] = over["vehicles"]["usv"]["n"] + 1
+    assert any("is not a count" in p for p in acc.diff(g, over, seed=seed))

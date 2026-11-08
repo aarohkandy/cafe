@@ -265,6 +265,9 @@ def _undecided(lo: float, hi: float) -> str:
     return head + f"spans the {' and the '.join(span)}, so more members (a larger --budget) would decide it."
 
 
+STORED_TOL = 1e-9               # a stored P(fail) or interval bound against the one its counts give: the same function on the same numbers, to rounding
+
+
 def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     """The verdict block shared by a vehicle and a link. `region` is "GO", "MARGINAL" or "NO-GO" when the whole P(fail) interval of the stopper's confidence
     (`sequential.STOP_CONF`) lies inside that verdict's range, else None and the verdict is not `decided`; a link with the verdict NOT EXERCISED has region
@@ -279,11 +282,16 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
         raise ConfigError(f"{src}: verdict.{', verdict.'.join(nonfinite)} is not a finite number: the summary was edited or is damaged; run it again (--fresh)")
     exercised = v["verdict"] != NOT_EXERCISED                       # a link never required: no member count decides it (region None, nothing more to say)
     if exercised:                                                   # round 11, M-2: the stored verdict is what these counts give under the cut-offs now loaded
-        again = intervals.verdict(e["k_fail"], e["n"], v["conf"])["verdict"]
+        given = intervals.verdict(e["k_fail"], e["n"], v["conf"])
+        again = given["verdict"]
         if again != v["verdict"]:
             raise ConfigError(f"{src}: the verdict is {v['verdict']} but {e['k_fail']} failures of {e['n']} members give {again} under the mission's cut-offs "
                               f"(GO from success {1 - intervals.P_FAIL_GO:.3g}, NO-GO below {1 - intervals.P_FAIL_NOGO:.3g}): mission.yaml or the summary was "
                               "edited or is damaged; run it again (--fresh)")
+        for key in ("p_fail", "fail_lo", "fail_hi"):                # printed as stored: a label that agrees with the counts does not vouch for them
+            if abs(v[key] - given[key]) > STORED_TOL:
+                raise ConfigError(f"{src}: verdict.{key} is {v[key]!r} but {e['k_fail']} failures of {e['n']} members give {given[key]!r} at conf {v['conf']}: "
+                                  "the summary was edited or is damaged; run it again (--fresh)")
     fail_lo = intervals.interval(e["k_fail"], e["n"], 0.95)[0]
     open_ = exercised and fail_lo < 0.05                            # round 10, M-4: only an ensemble that leaves P(fail) < 5 % open has a count to ask for
     unc = dict(kind=f"{v['method']} interval", conf=v["conf"], lo=v["fail_lo"], hi=v["fail_hi"])

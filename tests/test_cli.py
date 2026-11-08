@@ -15,6 +15,7 @@ import yaml
 from cafe.pm import __main__ as cli, audit, budget, config, ledger, par, pipeline, whatif
 from cafe.pm.config import ConfigError, damaged_run_files
 from cafe.pm.env import ocean as ocean_mod
+from cafe.pm.env.remote import sha256
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import glider
 from cafe.pm.stats import intervals
@@ -1253,3 +1254,26 @@ def test_r11_m25_an_os_error_that_names_a_path_given_only_as_its_second_file_is_
     assert cli._names_a_path_given(inside, given)
     elsewhere = OSError(18, "Invalid cross-device link", str(tmp_path / "elsewhere" / "a"), None, str(tmp_path / "elsewhere" / "b"))
     assert not cli._names_a_path_given(elsewhere, given)
+
+
+@pytest.mark.parametrize("name", ["mission.yaml", "plan.json"])
+def test_l0_r11_an_edit_of_the_runs_mission_or_plan_after_the_report_stage_is_in_the_reports_own_ledger_problems(tmp_path, capsys, monkeypatch, name):
+    """M-2 put mission.yaml and plan.json in the report stage's ledger, and `credibility.Facts.problems` dropped every line of that stage, so the audit saw the
+    edit and `report --run` printed it without a word (an edit that leaves the verdicts alone is not caught by the cut-off re-check)."""
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "nodata")
+    run = tmp_path / "run"
+    pm_run.make_run(run)
+    led = report_ledger_over_other_bytes(run)
+    d = json.loads(led.read_text())
+    d["inputs"] += [dict(ref=n, sha256=sha256(run / n)) for n in ledger.RUN_ROOT_FILES]               # what the report stage records since round 11
+    led.write_text(json.dumps(d))
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 0
+    assert json.loads((run / "report" / "report.json").read_text())["ledger_problems"] == []          # the re-render's own outputs are no damage
+    with (run / name).open("a") as f:
+        f.write("\n" if name == "mission.yaml" else " ")                                                  # a change that no verdict shows
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 0
+    probs = json.loads((run / "report" / "report.json").read_text())["ledger_problems"]
+    assert probs == [f"run: stage report: input {run / name} changed since the stage ran"]
+    assert f"warning: run: stage report: input {run / name} changed since the stage ran" in capsys.readouterr().err

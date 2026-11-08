@@ -508,3 +508,61 @@ def test_r11_m25_a_gebco_cut_without_its_attrs_or_with_its_zip_cut_short_is_not_
     assert not pipeline._gebco_cached(p)
     p.write_bytes(was)
     assert pipeline._gebco_cached(p)
+
+
+# ------------------------------------------------------------------------------------------------------ look-ahead L0: the decision is made on the copy
+
+@pytest.mark.parametrize("what", ["orca", "tao"])
+def test_l0_r11_a_cache_manifest_replaced_by_a_narrower_one_just_before_the_copy_is_fetched_for_again(tmp_path, data_copy, monkeypatch, what):
+    """`_need` judged the shared manifest, another run's ingest then replaced it (a narrower box, a shorter window, no 3-D hour: M-8) and the stage copied
+    and recorded the narrow one as covering. The test of coverage is now asked of the copy: it fetches again, once, and the check says so."""
+    forbid_downloads(monkeypatch)
+    monkeypatch.delenv("CAFE_OFFLINE")                                                  # online: a refetch is allowed
+    man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json" if what == "orca" else tao.cache_dir(data_copy) / "manifest.json"
+    good = man.read_text()
+    narrow = json.dumps(
+        dict(json.loads(good), box=[-166.0, -164.0, -2.0, 2.0], hours3d=[]) if what == "orca"
+        else dict(json.loads(good), t1=json.loads(good)["t0"]))
+    real, state = ledger.copy_manifest, dict(swapped=False, fetched=0)
+
+    def swapped(src, dest):
+        if pathlib.Path(src) == man and not state["swapped"]:
+            state["swapped"] = True
+            man.write_text(narrow)
+        return real(src, dest)
+
+    def again(*a, **k):
+        state["fetched"] += 1
+        man.write_text(good)                                                            # the fetch that makes the cache cover the run
+    monkeypatch.setattr(ledger, "copy_manifest", swapped)
+    monkeypatch.setattr(orca if what == "orca" else tao, "ingest" if what == "orca" else "fetch_tao", again)
+    run = tmp_path / "r"
+    d = run_stage(pipeline.s_ingest, ctx_for(run), "ingest")
+    c = check_of(d, f"{what}_manifest_copy_covers")
+    assert state == dict(swapped=True, fetched=1) and c["ok"] and "after fetching again" in c["note"]
+    assert json.loads((run / "ingest" / f"{what}_manifest.json").read_text()) == json.loads(good)
+
+
+@pytest.mark.parametrize("what", ["orca", "tao"])
+def test_l0_r11_a_replaced_manifest_that_cannot_be_fetched_for_stops_the_stage_by_name(tmp_path, data_copy, monkeypatch, what):
+    forbid_downloads(monkeypatch)
+    monkeypatch.delenv("CAFE_OFFLINE")                                                  # online: a refetch is allowed
+    man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json" if what == "orca" else tao.cache_dir(data_copy) / "manifest.json"
+    good = man.read_text()
+    narrow = json.dumps(
+        dict(json.loads(good), box=[-166.0, -164.0, -2.0, 2.0], hours3d=[]) if what == "orca"
+        else dict(json.loads(good), t1=json.loads(good)["t0"]))
+    real, state = ledger.copy_manifest, dict(swapped=False)
+
+    def swapped(src, dest):
+        if pathlib.Path(src) == man and not state["swapped"]:
+            state["swapped"] = True
+            man.write_text(narrow)
+        return real(src, dest)
+
+    def broken(*a, **k):
+        raise OSError("network down")
+    monkeypatch.setattr(ledger, "copy_manifest", swapped)
+    monkeypatch.setattr(orca if what == "orca" else tao, "ingest" if what == "orca" else "fetch_tao", broken)
+    with pytest.raises(ledger.StageFailed, match=f"{what}_manifest_copy_covers"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")

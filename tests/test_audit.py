@@ -390,9 +390,9 @@ def edit_keeping_mtime(path, text):
 @pytest.mark.parametrize("how, said", [
     ("no coverage", "no coverage.json"),
     ("no receipt", "no coverage.receipt.json: nothing says the suite passed"),
-    ("code edited", "cafe/pm or tests differ from the code the suite ran on"),
-    ("test edited", "cafe/pm or tests differ from the code the suite ran on"),
-    ("code edited, older mtime", "cafe/pm or tests differ from the code the suite ran on"),
+    ("code edited", "differs from what the suite ran on"),
+    ("test edited", "differs from what the suite ran on"),
+    ("code edited, older mtime", "differs from what the suite ran on"),
     ("other coverage", "coverage.json is not the one the suite's receipt was written for"),
     ("receipt says failed", "does not say the suite passed"),
     ("receipt damaged", "is not valid JSON"),
@@ -1223,3 +1223,26 @@ def test_r11_m25_a_report_ledger_that_cannot_be_read_is_not_a_run_from_before_th
     else:
         p.write_text(ledger_text)
     assert audit.root_files_unrecorded(run) is False
+
+
+@pytest.mark.parametrize("where", ["platforms/p.yaml", "config/c.yaml", "missions/m.yaml", "cafe/schemas/s.json", "tests/golden/g.json", "tests/fixtures/f.nc"])
+def test_l0_r11_a_data_file_the_suite_reads_edited_after_the_receipt_makes_it_stale(tmp_path, monkeypatch, capsys, where):
+    """The digest hashed only the .py files, so a platform, config or mission file (or a golden or fixture) changed after a green suite passed --pytest-done."""
+    monkeypatch.setattr(audit, "_run", lambda cmd: (0, ""))
+    pytest_done_root(tmp_path, monkeypatch)
+    f = tmp_path / where
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("a: 1\n")
+    audit.write_pytest_receipt(tmp_path)
+    (tmp_path / "platforms").mkdir(exist_ok=True)
+    (tmp_path / "platforms" / ".DS_Store").write_bytes(b"finder")                       # not a file of the suite
+    assert audit.coverage_stale(tmp_path) == []
+    edit_keeping_mtime(f, "a: 2\n")                                                      # rsync -a puts the time back
+    (said,) = audit.coverage_stale(tmp_path)
+    assert "differs from what the suite ran on" in said and "platforms" in said
+    assert audit.main(["--pytest-done"]) == 1
+    assert "differs from what the suite ran on" in capsys.readouterr().out
+    f.write_text("a: 1\n")
+    assert audit.coverage_stale(tmp_path) == []
+    f.with_name("new.yaml").write_text("b: 1\n")                                         # a file added after the run is a change, too
+    assert audit.coverage_stale(tmp_path) != []

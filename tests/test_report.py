@@ -2801,3 +2801,15 @@ def test_r11_m25_the_uas_limits_are_none_when_the_platform_will_not_read(monkeyp
 def test_r11_m25_a_glider_dive_depth_is_500_m_when_the_platform_will_not_read(monkeypatch, loader):
     monkeypatch.setattr(config, "load_platform", loader)
     assert report._dive_depth({"platform": "seaglider"}) == 500.0
+
+
+@pytest.mark.parametrize("field, value", [("p_fail", 0.0), ("fail_lo", 0.0), ("fail_hi", 0.001)])
+def test_l0_r11_a_verdict_whose_label_matches_its_counts_but_whose_p_fail_or_interval_does_not_is_refused(field, value):
+    """14 failures of 48 with `p_fail` 0.0 and the interval 0 to 0.001, MARGINAL as before: the label re-check passed and the stored numbers were printed."""
+    ref = dict(stage="stage1b", receipt="r", ledger="l")
+    given = intervals.verdict(14, 48)
+    assert given["verdict"] == "MARGINAL"
+    e = dict(n=48, k_fail=14, verdict=dict(given, **{field: value}))
+    with pytest.raises(config.ConfigError, match=rf"verdict\.{field} is {value!r} but 14 failures of 48 members give {given[field]!r}"):
+        report._stat(e, ref, "stage1b/summary.json vehicles.usv")
+    report._stat(dict(n=48, k_fail=14, verdict=dict(given, **{field: given[field] + 1e-12})), ref, "src")        # rounding is not an edit

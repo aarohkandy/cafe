@@ -2369,9 +2369,17 @@ def test_a_file_with_no_swh_in_any_sea_cell_fails_the_spectrum_checks_instead_of
     assert not check_of(ingest_checks(ctx), "spectrum_peak_period_vs_file")["ok"]
 
 
+def still_air(env):
+    """No wind anywhere: WRF's 10 m wind and the wave file's own `wspd` at zero."""
+    env.W["U10"][:] = 0.0
+    env.W["V10"][:] = 0.0
+    env.U["wspd"][:] = 0.0
+
+
 def test_r11_m6_a_calm_sea_passes_the_spectrum_checks_with_no_value_and_says_why(tmp_path):
     """Zero swh at every sea node is a calm, not a missing file: the checks had no point to compare and failed all three."""
     ctx = ctx_for(tmp_path / "r")
+    still_air(ctx.env)                                              # a calm is a still sea under no wind (look-ahead L0)
     ctx.env.U["swh"][:] = 0.0
     checks = ingest_checks(ctx)
     for name in ("spectrum_peak_period_vs_file", "spectrum_direction_vs_file", "spectrum_mss_vs_file"):
@@ -2382,12 +2390,31 @@ def test_r11_m6_a_calm_sea_passes_the_spectrum_checks_with_no_value_and_says_why
     assert "calm" not in check_of(ingest_checks(ctx), "spectrum_peak_period_vs_file")["note"]
 
 
+def test_l0_r11_zero_waves_under_a_wind_are_a_broken_file_not_a_calm(tmp_path):
+    """A zero-filled swh, ust, dwp and mss under the fixture's 5 m/s wind passed every wave check as 'a calm sea' (the calm was decided from the wave file's
+    own swh and ust). The wind there is asked, too: the spectrum checks and the u* check keep failing, by name, and say what the file looks like."""
+    ctx = ctx_for(tmp_path / "r")
+    for k in ("swh", "ust", "dwp", "mss"):
+        ctx.env.U[k][:] = 0.0
+    checks = ingest_checks(ctx)
+    for name in ("spectrum_peak_period_vs_file", "spectrum_direction_vs_file", "spectrum_mss_vs_file"):
+        c = check_of(checks, name)
+        assert not c["ok"] and c["value"] is None and "above 0.2 m/s" in c["note"] and "zero or was never written" in c["note"] and "calm sea" not in c["note"]
+    c = check_of(checks, "coare_ustar_vs_umwm_ust")
+    assert not c["ok"] and "0.0% within 20 %" in c["note"]
+    n, med, frac, seen = pipeline._ustar_agreement(ctx.env)
+    assert n == seen > 100 and med == float("inf") and frac == 0.0                             # every sampled point disagrees, none is skipped as a calm
+    ctx.env.U["wspd"][:] = 0.0                                                                  # the file's own wind at zero: WRF's is still 5 m/s
+    assert not check_of(ingest_checks(ctx), "spectrum_mss_vs_file")["ok"]
+
+
 def test_coare_ustar_is_compared_with_umwm_ust_and_the_agreement_is_logged(tmp_path):
     ctx = ctx_for(tmp_path / "r")
     n, med, frac, _ = pipeline._ustar_agreement(ctx.env)
     assert n > 100 and 0 <= frac <= 1 and med >= 0
     c = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")
     assert c["ok"] and c["value"] == pytest.approx(frac, abs=1e-4) and f"{n} sampled sea points" in c["note"]
+    still_air(ctx.env)
     ctx.env.U["ust"][:] = 0.0                                                                   # a calm: there is nothing to compare, which is no failure (M-6)
     c = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")
     assert c["ok"] and c["value"] is None and "have UMWM ust at or below 0.001 m/s (a calm)" in c["note"] and "no sea nodes" not in c["note"]

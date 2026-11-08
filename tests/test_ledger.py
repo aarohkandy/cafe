@@ -675,3 +675,22 @@ def test_r11_m2_a_report_stage_that_recorded_the_runs_mission_and_plan_is_not_do
     (run / "mission.yaml").write_text("seed: 1\n")
     assert done(run, "report", "h") is not None
     assert ledger.resolve("plan.json", tmp_path / "copy", set()) == tmp_path / "copy" / "plan.json"
+
+
+# A platform file is a hashed input of the hangar stage (DECISIONS 461): a byte changed in it, a comment or a `why` too, makes `audit` say "input ... changed
+# since the stage ran" for every run made before and lowers Verification and M&S management when `report --run` renders that run again. The reference runs
+# of round 11 (q10lb, q11, the demo mission, base commit 3ce8e09) hashed these four. Look-ahead L0, after M-12 edited a `why` text and broke both.
+REFERENCE_RUN_PLATFORMS = {"seaglider": "56504a67a56e97a7", "slocum": "63fa63b48d992ea3", "saildrone_explorer": "7d7f9ed5cdbc4fb9",
+                           "quad_uas": "aa55a771899344b1"}
+
+
+def test_l0_r11_the_platform_files_the_reference_runs_hashed_are_the_bytes_they_hashed():
+    from cafe.pm import config
+    root = pathlib.Path(__file__).resolve().parents[1]
+    demo = config.read_yaml(root / "missions" / "tepex_c_demo.yaml")
+    assert {v["platform"] for v in demo["vehicles"]} == set(REFERENCE_RUN_PLATFORMS)            # the pins cover every platform the demo's hangar stage hashes
+    changed = {n: sha256(config.platform_path(n))[:16] for n, want in REFERENCE_RUN_PLATFORMS.items() if sha256(config.platform_path(n))[:16] != want}
+    assert not changed, (f"platforms/{'.yaml, platforms/'.join(changed)}.yaml differs from the file the reference runs q10lb and q11 hashed at their hangar "
+                         "stage: every `audit` of those runs now fails with 'input ... changed' and a re-render lowers two credibility levels, whatever the "
+                         "edit was. Move a wording change to DECISIONS or the code; if a number must change, say in DECISIONS that those runs are re-run, "
+                         "then update the pin")
