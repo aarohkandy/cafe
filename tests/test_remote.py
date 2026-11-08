@@ -1,4 +1,5 @@
 """cafe.pm.env.remote against a local Range-capable server and against netCDF4's reading of the same files."""
+import email.utils
 import hashlib
 import ssl
 import urllib.parse
@@ -278,29 +279,52 @@ def test_download_pinned_sha_mismatch_removes_the_part_and_the_target(server, tm
     assert not (tmp_path / "a").exists() and not (tmp_path / "a.part").exists() and not (tmp_path / "a.part.id").exists()
 
 
-@pytest.fixture
-def versioned(monkeypatch):
-    """A server like the real ones: an ETag of the file's bytes on every reply, and a whole 200 for a ranged request whose If-Range names another version
-    (tests/conftest.py's Server sends no validator and ignores If-Range)."""
+def _validators(monkeypatch, honour=True, weak=False, last_modified=False):
+    """Make tests/conftest.py's Server (no validator, ignores If-Range) behave like a real one: an ETag of the file's bytes on every reply (weak with
+    `weak`), a Last-Modified that changes with them (`last_modified`), and (`honour`) a whole 200 for a ranged request whose If-Range names another
+    version. `honour=False` is a server that ignores If-Range, as THREDDS does. Returns the If-Range values the server was sent."""
     real_reply, real_serve = _Handler._reply, _Handler._serve
+    seen = []
 
-    def etag(h, name):
+    def digest(h, name):
         f = h.server.srv.root / name
-        return f'"{hashlib.md5(f.read_bytes()).hexdigest()}"' if f.is_file() else None
+        return hashlib.md5(f.read_bytes()).hexdigest() if f.is_file() else None
+
+    def validators(h, name):
+        d = digest(h, name)
+        if d is None:
+            return {}
+        out = {"ETag": f'W/"{d}"' if weak else f'"{d}"'}
+        if last_modified:
+            out["Last-Modified"] = email.utils.formatdate(int(d[:6], 16) + 1_700_000_000, usegmt=True)
+        return out
 
     def reply(self, code, body=b"", **hdr):
-        tag = etag(self, urllib.parse.unquote(self.path.lstrip("/")))
-        real_reply(self, code, body, **({"ETag": tag, **hdr} if tag else hdr))
+        real_reply(self, code, body, **{**validators(self, urllib.parse.unquote(self.path.lstrip("/"))), **hdr})
 
     def serve(self, s, name, rng, act):
         if act and act[0] == "call":                                   # run before the If-Range test, as a file replaced just before the request
             act[1](s)
             act = None
         ifr = self.headers.get("If-Range")
-        real_serve(self, s, name, None if ifr and ifr != etag(self, name) else rng, act)
+        if ifr:
+            seen.append(ifr)
+        stale = honour and ifr and ifr not in validators(self, name).values()
+        real_serve(self, s, name, None if stale else rng, act)
 
     monkeypatch.setattr(_Handler, "_reply", reply)
     monkeypatch.setattr(_Handler, "_serve", serve)
+    return seen
+
+
+@pytest.fixture
+def versioned(monkeypatch):
+    return _validators(monkeypatch)
+
+
+@pytest.fixture
+def deaf(monkeypatch):
+    return _validators(monkeypatch, honour=False)
 
 
 V1 = bytes(range(256)) * 12
@@ -319,6 +343,45 @@ def test_r12_m25_a_file_replaced_between_the_probe_and_the_resume_comes_back_who
     u = interrupted(server, tmp_path, "a", V1)
     server.plan["a"] = [("call", lambda s: None), ("call", lambda s: s.put("a", V2))]
     assert remote.download(u, tmp_path / "a").read_bytes() == V2
+
+
+def test_r12_m25_a_server_that_ignores_if_range_cannot_splice_a_file_replaced_after_the_probe(server, tmp_path, deaf):
+    """THREDDS (the TAO server) answers a stale If-Range with the tail of the new file; the tail's own ETag says it is not the part's file."""
+    u = interrupted(server, tmp_path, "a", V1)
+    server.plan["a"] = [("call", lambda s: None), ("call", lambda s: s.put("a", V2))]
+    assert remote.download(u, tmp_path / "a").read_bytes() == V2          # was V1[:1000] + V2[1000:]
+    assert not (tmp_path / "a.part").exists() and not (tmp_path / "a.part.id").exists()
+
+
+def test_r12_m25_a_weak_etag_is_not_an_if_range_validator_but_last_modified_is(server, tmp_path, monkeypatch):
+    seen = _validators(monkeypatch, weak=True, last_modified=True)
+    u = interrupted(server, tmp_path, "a", V1)
+    seen.clear()                                                          # the interrupted attempt's own resumes
+    lm = remote._probe(u)[1]["Last-Modified"]
+    assert remote.download(u, tmp_path / "a").read_bytes() == V1
+    assert seen == [lm]
+    assert remote._if_range({}) is None and remote._if_range({"ETag": '"x"'}) == '"x"'
+
+
+def test_r12_m25_remotefile_refuses_a_block_of_another_version(server, versioned):
+    u = server.put("a", V1)
+    f = remote.RemoteFile(u, block=64)
+    assert f.read(64) == V1[:64]
+    server.put("a", V2)
+    f.seek(64)
+    with pytest.raises(ConnectionError, match="changed on the server"):
+        f.read(64)                                                        # was V2[64:128] joined to V1[:64]
+
+
+def test_r12_m25_remotefile_with_no_validator_refuses_a_block_of_another_size(server):
+    u = server.put("a", V1)
+    f = remote.RemoteFile(u, block=64)
+    f.read(64)
+    server.put("a", V1 + b"more")
+    f.seek(64)
+    with pytest.raises(ConnectionError, match="changed on the server"):
+        f.read(64)
+    assert remote.RemoteFile(u, block=64).read(64) == V1[:64]              # a new session reads the new file
 
 
 def test_r12_m25_with_no_validator_a_changed_size_restarts(server, tmp_path):

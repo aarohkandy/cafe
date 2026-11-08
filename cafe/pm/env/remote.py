@@ -5,7 +5,8 @@ verification fails on Linux unless the right intermediate is trusted too. `confi
 is that certificate (fetched from its AIA URL http://crt.sectigo.com/InCommonRSAServerCA2.crt, chains to the
 USERTrust root in the system store). Verification is never turned off.
 
-    RemoteFile(url)            seekable read-only file: h5py.File(RemoteFile(url)) reads HDF5 hyperslabs by range
+    RemoteFile(url)            seekable read-only file: h5py.File(RemoteFile(url)) reads HDF5 hyperslabs by range; a block from another
+                               version of the file than the first probe saw (size, ETag, Last-Modified) is a ConnectionError
     cdf1_header(url)           (dims, nrec, {var: dict(dims, dtype, shape, offset, record, attrs)}) of a NetCDF classic file
     cdf1_read(url, var, hdr)   one variable of a CDF-1 file, by range
     download(url, path, sha, pin)  resumable (HTTP Range) only while the server file is the one the .part came from; size-checked,
@@ -60,14 +61,28 @@ def _open(url: str, start: int | None = None, end: int | None = None, timeout: f
     raise ConnectionError(f"{url}: {err}")
 
 
-def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tries: int = 3) -> bytes:
-    """Body of a ranged GET. A connection cut mid-body (IncompleteRead, reset, timeout) is retried like a failed connect."""
+Ident = tuple[int, dict[str, str]]
+
+
+def _ident(r: http.client.HTTPResponse, url: str) -> Ident:
+    """(total bytes, the validators the server sends: ETag, Last-Modified) of a ranged reply: which version of the file this reply is a piece of."""
+    cr = r.headers.get("Content-Range", "")
+    if not cr.startswith("bytes"):
+        raise ConnectionError(f"{url}: server ignored the Range header; byte-range reads need it")
+    return int(cr.rsplit("/", 1)[1]), {k: r.headers[k] for k in ("ETag", "Last-Modified") if r.headers.get(k)}
+
+
+def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tries: int = 3, ident: Ident | None = None) -> bytes:
+    """Body of a ranged GET. A connection cut mid-body (IncompleteRead, reset, timeout) is retried like a failed connect.
+    With `ident` (what the first probe saw) a reply from another version of the file is a ConnectionError, not bytes to splice in (round 12)."""
     err: Exception = ConnectionError("no attempt made")
     for k in range(tries):
         try:
             with _open(url, start, end, timeout) as r:
                 if start is not None and r.status != 206:
                     raise ConnectionError(f"{url}: server ignored the Range header (HTTP {r.status}); byte-range reads need it")
+                if ident is not None and _ident(r, url) != ident:
+                    raise ConnectionError(f"{url}: the file changed on the server during this session (first seen {ident}, now {_ident(r, url)}); start again")
                 return r.read()
         except (http.client.IncompleteRead, ConnectionResetError, TimeoutError) as e:
             err = e
@@ -75,13 +90,16 @@ def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tri
     raise ConnectionError(f"{url}: {err!r}")
 
 
-def _probe(url: str) -> tuple[int, dict[str, str]]:
-    """(total bytes, the validators the server sends: ETag, Last-Modified) of a one-byte ranged GET."""
+def _probe(url: str) -> Ident:
+    """The identity (see `_ident`) of the file, from a one-byte ranged GET."""
     with _open(url, 0, 0) as r:
-        cr = r.headers.get("Content-Range", "")
-        if not cr.startswith("bytes"):
-            raise ConnectionError(f"{url}: server ignored the Range header; byte-range reads need it")
-        return int(cr.rsplit("/", 1)[1]), {k: r.headers[k] for k in ("ETag", "Last-Modified") if r.headers.get(k)}
+        return _ident(r, url)
+
+
+def _if_range(valid: dict[str, str]) -> str | None:
+    """The If-Range value for a file with these validators: its strong ETag, else Last-Modified (a weak ETag cannot be an If-Range validator)."""
+    etag = valid.get("ETag", "")
+    return etag if etag and not etag.startswith("W/") else valid.get("Last-Modified")
 
 
 def size(url: str) -> int:
@@ -89,11 +107,13 @@ def size(url: str) -> int:
 
 
 class RemoteFile(io.RawIOBase):
-    """Read-only, seekable view of a URL; fetches aligned 4 MB blocks on demand and keeps them (LRU, 64 blocks)."""
+    """Read-only, seekable view of a URL; fetches aligned 4 MB blocks on demand and keeps them (LRU, 64 blocks). Every block's reply must come from the
+    version of the file the first probe saw (size, ETag, Last-Modified), else ConnectionError: blocks of two versions are never joined (round 12)."""
 
     def __init__(self, url: str, block: int = BLOCK, keep: int = 64) -> None:
         self.url, self.block, self.keep = url, block, keep
-        self.n = size(url)
+        self.ident = _probe(url)
+        self.n = self.ident[0]
         self.pos, self.cache, self.fetched = 0, dict[int, bytes](), 0
 
     def readable(self) -> bool:
@@ -115,7 +135,7 @@ class RemoteFile(io.RawIOBase):
             return self.cache[i]
         a = i * self.block
         b = min(a + self.block, self.n) - 1
-        data = _read(self.url, a, b)
+        data = _read(self.url, a, b, ident=self.ident)
         if len(data) != b - a + 1:
             raise ConnectionError(f"{self.url}: short read at {a} ({len(data)} of {b - a + 1} bytes)")
         self.fetched += len(data)
@@ -180,16 +200,20 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
     if seen != ident:
         part.unlink(missing_ok=True)
         mark.write_text(json.dumps(ident))
-    etag = valid.get("ETag", "")
-    ifr = etag if etag and not etag.startswith("W/") else valid.get("Last-Modified")          # a weak ETag cannot be an If-Range validator
+    ifr = _if_range(valid)
     have = part.stat().st_size if part.exists() else 0
     if have > total:
         part.unlink()
         have = 0
     while have < total:
         with _open(url, have, None, timeout=120, if_range=ifr if have else None) as r:
-            if have and r.status != 206:                  # the file changed since the probe, or the server ignores ranges: the whole body follows
+            if have and (r.status != 206 or _ident(r, url) != (total, valid)):      # replaced since the probe (a server that ignores If-Range still says so)
+                part.unlink()
                 have = 0
+                total, valid = _probe(url)
+                mark.write_text(json.dumps(dict(valid, total=total)))
+                ifr = _if_range(valid)
+                continue
             with open(part, "ab" if have else "wb") as f:
                 for b in iter(lambda: r.read(1 << 20), b""):
                     f.write(b)
