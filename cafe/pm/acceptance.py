@@ -37,7 +37,8 @@ dates, the host and paths are not in the golden. The golden is a regression snap
 an independent expectation: it can say the tool still does what it did, never that what it did is right (docs/BRIEF.md section 6 holds the independent
 expectation, and the credibility report compares the run with it). Its `source` is its provenance: the git sha it was made from (a commit, from a
 checkout that was clean), the code digest, and the reviewed run (the run's name and the sha-256 of its report.json); a golden without that is a FAIL
-that names the command writing a new one. A missing golden is a FAIL that names the command writing it. `--update-golden` rewrites it
+that names the command writing a new one. A missing golden is a FAIL that names the command writing it, and so is one that is not JSON, not an object, or whose
+`summary` is missing or of the wrong structure (`shape_problems`: a problem line that names the key, never a traceback). `--update-golden` rewrites it
 from the quick run and that check then FAILs ("updated, not compared"), so a gate cannot be passed by overwriting its reference.
 `--skip-overnight` is for rehearsals: the overnight check FAILs with "overnight not run". Exit 0 only if every check passes.
 DIR/acceptance.json and DIR/acceptance.txt hold the result.
@@ -250,11 +251,31 @@ def _damage(e: dict[str, Any], who: str) -> list[str]:
     return bad
 
 
-def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tuple[list[str], list[str]]:
+def shape_problems(s: Any, who: str) -> list[str]:
+    """What a summary lacks of the structure `compare` walks (`summary` makes it; a golden is read from a file that anyone can edit): an object with the
+    mission and the seed, and `vehicles` and `links` that are objects of objects. One line per damaged key, naming it. This is the one test of the shape
+    for every reader of a golden (round 12, P-R11L0-4): `compare` calls it on both sides before it reads a key, `check_golden` through `compare`."""
+    if s is None:
+        return [f"summary {who} is missing"]
+    if not isinstance(s, dict):
+        return [f"summary {who} is {type(s).__name__}, not an object"]
+    bad = [f"summary {who} has no {f!r}" for f in ("mission", "seed") if f not in s]
+    for kind in ("vehicles", "links"):
+        if not isinstance(s.get(kind), dict):
+            bad.append(f"summary {who}: {kind!r} is {'missing' if kind not in s else type(s[kind]).__name__ + ', not an object'}")
+        else:
+            bad += [f"summary {who}: {kind} {k!r} is {type(e).__name__}, not an object" for k, e in s[kind].items() if not isinstance(e, dict)]
+    return bad
+
+
+def compare(ref: Any, new: Any, seed: bool = True) -> tuple[list[str], list[str]]:
     """(problems, notes) of `new` against `ref` (both from `summary`): the exact fields must match; a verdict must match wherever either run has it
     decided; a change undecided in both is a note when the two runs' STOP_CONF intervals on P(fail) overlap and a problem when they do not; and
     Newcombe's interval for the difference of the two P(fail), at 1 - FAMILY_ALPHA / m
-    for the m entries compared (Bonferroni), must contain 0. seed=False leaves the mission seed out (the other_seed check)."""
+    for the m entries compared (Bonferroni), must contain 0. seed=False leaves the mission seed out (the other_seed check). A summary whose structure is
+    damaged (`shape_problems`) is a list of those problems and nothing else."""
+    if shaped := shape_problems(ref, "in the reference") + shape_problems(new, "now"):
+        return shaped, []
     bad = [f"{f}: {ref[f]!r} in the reference, {new[f]!r} now" for f in ("mission", "seed") if ref[f] != new[f] and (seed or f != "seed")]
     notes: list[str] = []
     conf = 1 - FAMILY_ALPHA / max(_entries(ref, new), 1)
@@ -301,9 +322,11 @@ def _allowed(notes: list[str]) -> str:
 _dirty = git_dirty                                      # the checkout's `git status`, else $CAFE_GIT_DIRTY (pm.sh sets it for a copy without .git), else None
 
 
-def provenance_problems(source: dict[str, Any]) -> list[str]:
+def provenance_problems(source: Any) -> list[str]:
     """What a golden's `source` lacks to say where it came from: a commit, the code digest, a checkout known to be clean (unknown is a problem too),
-    the reviewed run."""
+    the reviewed run. A `source` that is not an object lacks all of it."""
+    if not isinstance(source, dict):
+        return [f"source is {type(source).__name__}, not an object"]
     bad = []
     if not re.fullmatch(r"[0-9a-f]{40}", str(source.get("git_sha", ""))):
         bad.append(f"git_sha {source.get('git_sha')!r} is not a commit")
@@ -314,7 +337,7 @@ def provenance_problems(source: dict[str, Any]) -> list[str]:
     elif source.get("dirty") is None:
         bad.append("cannot tell whether the checkout was clean (no .git and no $CAFE_GIT_DIRTY): run it from a git checkout or through ./pm.sh")
     run = source.get("reviewed_run") or {}
-    if not (run.get("name") and run.get("report_sha256")):
+    if not isinstance(run, dict) or not (run.get("name") and run.get("report_sha256")):
         bad.append("no reviewed_run (the name of the run it was made from and the sha-256 of its report.json)")
     return bad
 
@@ -338,13 +361,20 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
                     updated=True)
     if not golden.is_file():
         return _row("golden_diff", False, f"no golden file at {golden}: write it from a quick run you have reviewed with `{cmd}`", missing=True)
-    g = json.loads(golden.read_text())
+    try:
+        g = json.loads(golden.read_text())
+    except (OSError, ValueError) as e:                                 # not JSON, not UTF-8, unreadable: a problem line naming the file, not a traceback
+        return _row("golden_diff", False, f"golden {golden.name} cannot be read as JSON ({type(e).__name__}: {str(e)[:100]}): write a new one from a quick "
+                                          f"run you have reviewed with `{cmd}`", problems=[str(e)[:100]], golden=str(golden))
+    if not isinstance(g, dict):
+        return _row("golden_diff", False, f"golden {golden.name} is {type(g).__name__}, not an object: write a new one from a quick run you have "
+                                          f"reviewed with `{cmd}`", problems=["not an object"], golden=str(golden))
     prov = provenance_problems(g.get("source", {}))
     if prov:
         return _row("golden_diff", False, f"golden {golden.name} has no provenance ({'; '.join(prov)}): write a new one from a quick run you have reviewed, "
                                           f"on a clean checkout, with `{cmd}`", provenance=prov, golden=str(golden))
-    bad, notes = compare(g["summary"], summary(r["report"]))
-    n = len(g["summary"]["vehicles"]) + len(g["summary"]["links"])
+    bad, notes = compare(g.get("summary"), summary(r["report"]))
+    n = 0 if bad else len(g["summary"]["vehicles"]) + len(g["summary"]["links"])
     return _row("golden_diff", not bad, ("; ".join(bad[:6]) + (f" (+{len(bad) - 6} more)" if len(bad) > 6 else "") if bad else
                 f"{n} verdicts and P(fail) agree with {golden.name} (git {g['source']['git_sha'][:10]})") + _allowed(notes),
                 problems=bad, notes=notes, golden=str(golden))

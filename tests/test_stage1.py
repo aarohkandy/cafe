@@ -642,6 +642,18 @@ def test_a_modem_band_named_in_modems_yaml_can_be_chosen_by_a_link():
     assert np.isfinite(r["margin_db"][0, 0])
 
 
+def test_r12_an_acoustic_link_built_by_hand_with_a_modem_comms_refuses_is_a_config_error_that_names_the_link_and_the_modems():
+    """P-R11G2 (`stage1.py` 636): the mission loader refuses a modem that is no modems.yaml key; a link made by hand gets the same words, not a KeyError
+    or a TypeError from the unpacking of None."""
+    out, _ = acoustic_scene(M=1, far=(0,))
+    with pytest.raises(config.ConfigError) as e:
+        stage1.evaluate_link(link("glider_eq-ship-acoustic", modem="no_such_modem"), out, MISSION, flat_env(1), 1, 3, [0])
+    msg = str(e.value)
+    assert msg.startswith("link glider_eq-ship-acoustic: modem 'no_such_modem' is not a modems.yaml key with a default band or <key>_<band> ")
+    assert "benthos_atm960_mf" in msg and "whoi_micromodem_long_10k" in msg                                     # the names it would take
+    assert comms.resolve_modem("no_such_modem") is None and comms.resolve_modem("BENTHOS_ATM960_MF") is not None     # resolve_modem's answer, any case
+
+
 def test_the_method_of_an_acoustic_link_is_a_string_even_when_comms_returns_one_per_element(monkeypatch):
     out, _ = acoustic_scene(M=1, far=(0,))
     per_element = np.array(["bellhop", "bellhop"], dtype=object)

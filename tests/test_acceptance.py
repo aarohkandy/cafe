@@ -1109,3 +1109,101 @@ def test_l0_r11_a_summary_with_n_zero_or_k_beyond_n_is_a_problem_line_not_a_zero
     over = copy.deepcopy(g)
     over["vehicles"]["usv"]["k_fail"] = over["vehicles"]["usv"]["n"] + 1
     assert any("is not a count" in p for p in acc.diff(g, over, seed=seed))
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 12: the golden's structure
+
+def golden_file(tmp_path):
+    g = tmp_path / "g.json"
+    acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
+    return g, json.loads(g.read_text())
+
+
+SHAPES = [
+    ("no summary", lambda r: r.pop("summary"), "summary in the reference is missing"),
+    ("summary null", lambda r: r.update(summary=None), "summary in the reference is missing"),
+    ("summary a list", lambda r: r.update(summary=[]), "summary in the reference is list, not an object"),
+    ("summary a string", lambda r: r.update(summary="x"), "summary in the reference is str, not an object"),
+    ("no mission", lambda r: r["summary"].pop("mission"), "summary in the reference has no 'mission'"),
+    ("no seed", lambda r: r["summary"].pop("seed"), "summary in the reference has no 'seed'"),
+    ("no vehicles", lambda r: r["summary"].pop("vehicles"), "summary in the reference: 'vehicles' is missing"),
+    ("no links", lambda r: r["summary"].pop("links"), "summary in the reference: 'links' is missing"),
+    ("vehicles a number", lambda r: r["summary"].update(vehicles=3), "summary in the reference: 'vehicles' is int, not an object"),
+    ("vehicles a list", lambda r: r["summary"].update(vehicles=[]), "summary in the reference: 'vehicles' is list, not an object"),
+    ("vehicles null", lambda r: r["summary"].update(vehicles=None), "summary in the reference: 'vehicles' is NoneType, not an object"),
+    ("links a string", lambda r: r["summary"].update(links="rf"), "summary in the reference: 'links' is str, not an object"),
+    ("a vehicle a number", lambda r: r["summary"]["vehicles"].update(gl=5), "summary in the reference: vehicles 'gl' is int, not an object"),
+    ("a vehicle null", lambda r: r["summary"]["vehicles"].update(usv=None), "summary in the reference: vehicles 'usv' is NoneType, not an object"),
+    ("a link a list", lambda r: r["summary"]["links"].update(rf=[1]), "summary in the reference: links 'rf' is list, not an object"),
+]
+
+
+@pytest.mark.parametrize("name, damage, line", SHAPES, ids=[x[0] for x in SHAPES])
+def test_r12_a_golden_of_the_wrong_structure_is_a_problem_line_naming_the_key_not_a_traceback(tmp_path, name, damage, line):
+    """P-R11L0-4: `g["summary"]` raised KeyError, `.keys()` on a list or a number AttributeError, an entry that was no object `.get` AttributeError: each
+    ended acceptance in a traceback."""
+    g, rec = golden_file(tmp_path)
+    damage(rec)
+    g.write_text(json.dumps(rec))
+    row = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
+    assert not row["ok"] and line in row["values"]["problems"] and line in row["detail"] and row["values"]["notes"] == []
+
+
+@pytest.mark.parametrize("name, damage, line", SHAPES[2:], ids=[x[0] for x in SHAPES[2:]])
+@pytest.mark.parametrize("seed", [True, False])
+def test_r12_compare_names_the_damaged_key_of_either_summary_and_reads_nothing_else(name, damage, line, seed):
+    """`compare` is where every reader of a golden goes through (check_golden, and check_other_seed with a summary of its own): the shape is tested there,
+    for the reference and for the new summary alike, and the result is the shape's problems only."""
+    good = acc.summary(report())
+    rec = dict(summary=copy.deepcopy(good))
+    damage(rec)
+    assert acc.compare(rec["summary"], good, seed) == ([line], [])
+    assert acc.compare(good, rec["summary"], seed) == ([line.replace("in the reference", "now")], [])
+    assert acc.compare(good, good, seed) == ([], [])
+
+
+def test_r12_damage_in_both_summaries_lists_both_and_a_missing_summary_is_missing(tmp_path):
+    good = acc.summary(report())
+    assert acc.compare(None, None) == (["summary in the reference is missing", "summary now is missing"], [])
+    both = copy.deepcopy(good)
+    both["links"] = []
+    assert acc.compare(both, both)[0] == ["summary in the reference: 'links' is list, not an object", "summary now: 'links' is list, not an object"]
+
+
+@pytest.mark.parametrize("content, words", [(b"[]", "is list, not an object"), (b"3", "is int, not an object"), (b"null", "is NoneType, not an object"),
+                                            (b"{not json", "cannot be read as JSON (JSONDecodeError"), (b"", "cannot be read as JSON (JSONDecodeError"),
+                                            (b"\xff\xfe\x00", "cannot be read as JSON (UnicodeDecodeError")])
+def test_r12_a_golden_that_is_not_a_json_object_fails_the_check_and_names_the_command(tmp_path, content, words):
+    g = tmp_path / "g.json"
+    g.write_bytes(content)
+    row = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
+    assert not row["ok"] and words in row["detail"] and "--update-golden" in row["detail"] and row["values"]["golden"] == str(g)
+
+
+@pytest.mark.parametrize("source, line", [("x", "source is str, not an object"), (None, "source is NoneType, not an object"),
+                                          ([1], "source is list, not an object")])
+def test_r12_a_golden_whose_source_is_not_an_object_has_no_provenance(tmp_path, source, line):
+    g, rec = golden_file(tmp_path)
+    rec["source"] = source
+    g.write_text(json.dumps(rec))
+    row = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
+    assert not row["ok"] and row["values"]["provenance"] == [line]
+    assert acc.provenance_problems(source) == [line]
+
+
+def test_r12_a_reviewed_run_that_is_not_an_object_is_missing_not_a_traceback(tmp_path):
+    g, rec = golden_file(tmp_path)
+    for run in ([1], "run", 5):
+        rec["source"]["reviewed_run"] = run
+        g.write_text(json.dumps(rec))
+        row = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
+        assert not row["ok"] and len(row["values"]["provenance"]) == 1 and row["values"]["provenance"][0].startswith("no reviewed_run")
+
+
+def test_r12_a_golden_with_no_source_key_is_listed_whole_and_a_good_one_still_passes(tmp_path):
+    g, rec = golden_file(tmp_path)
+    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["ok"]
+    del rec["source"]
+    g.write_text(json.dumps(rec))
+    row = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
+    assert not row["ok"] and len(row["values"]["provenance"]) == 4

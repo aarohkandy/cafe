@@ -568,6 +568,18 @@ def test_r11_m3_whatif_says_which_priors_a_finished_run_without_the_fit_files_is
     assert "(the run has no refit.json)" in capsys.readouterr().err
 
 
+def test_r12_whatif_with_both_fit_files_says_nothing_of_the_model(wi, capsys):
+    """P-R11G2 (`__main__.py` 282): a finished run that has priors_fitted.json and refit.json is answered with the report's own model, so there is no note
+    (the stderr line is only for a baseline that can differ from the report's P(fail)); the note function says so by returning None, not an empty line."""
+    (wi.run / "ingest").mkdir(exist_ok=True)
+    (wi.run / "ingest" / "priors_fitted.json").write_text(json.dumps({"wind_speed_bias": {"dist": "normal", "mean": 0.1, "value": 1.0}}))
+    assert (wi.run / "refit" / "refit.json").is_file()
+    cli.main(whatif_args(wi, "--shift", "6h"))
+    assert capsys.readouterr().err == "" and wi.seen["fitted"] is not None and wi.seen["scales"] is not None
+    assert cli._model_note(True, True, True) is None
+    assert cli._model_note(True, False, True) and cli._model_note(True, True, False) and cli._model_note(False, False, False)         # any file lacking: a note
+
+
 def test_whatif_does_not_trust_a_res_pkl_that_changed(wi, capsys):
     with open(wi.run / "stage1b" / "res.pkl", "ab") as f:
         f.write(b"x")

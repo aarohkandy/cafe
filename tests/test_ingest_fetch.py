@@ -10,6 +10,7 @@ import json
 import pathlib
 import shutil
 import threading
+import types
 import urllib.parse
 
 import numpy as np
@@ -566,3 +567,18 @@ def test_l0_r11_a_replaced_manifest_that_cannot_be_fetched_for_stops_the_stage_b
     monkeypatch.setattr(orca if what == "orca" else tao, "ingest" if what == "orca" else "fetch_tao", broken)
     with pytest.raises(ledger.StageFailed, match=f"{what}_manifest_copy_covers"):
         run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+
+
+def test_r12_offline_a_copy_that_does_not_cover_is_not_fetched_for_and_the_check_says_it_is_offline(tmp_path):
+    """P-R11G2 (`pipeline.py` 400): `_copy_covering` under CAFE_OFFLINE (the suite sets it) never calls the fetch, logs no refetch, ends with None and a
+    failed `<name>_manifest_copy_covers` check whose note names CAFE_OFFLINE, so the user knows to go online rather than to look for a network fault."""
+    src = tmp_path / "shared" / "manifest.json"
+    src.parent.mkdir()
+    src.write_text(json.dumps(dict(box=[-2.0, 2.0, -167.0, -163.0])))
+    L, calls, logs = ledger.Ledger(tmp_path / "run", "ingest", "h"), [], []
+    ctx = types.SimpleNamespace(log=logs.append)
+    got = pipeline._copy_covering(ctx, L, "orca", src, tmp_path / "run" / "orca_manifest.json", lambda d: False, lambda: calls.append("fetch"))
+    assert got is None and calls == [] and logs == [] and (tmp_path / "run" / "orca_manifest.json").is_file()
+    assert [(c["name"], c["ok"]) for c in L.d["checks"]] == [("orca_manifest_copy_covers", False)]
+    assert L.d["checks"][0]["note"] == ("the copy of the orca manifest this run recorded does not cover what it needs (another run's fetch replaced the "
+                                        "cache) and CAFE_OFFLINE is set; rerun")
