@@ -16,6 +16,7 @@ listed as "not run" with the file that would hold it.
 """
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import math
@@ -26,6 +27,7 @@ from typing import Any, Iterable
 from . import config, pipeline
 from .audit import ledger_problems
 from .ledger import STAGES
+from .physics import comms
 from .stage1 import NOT_EXERCISED
 from .stats import intervals, sampling
 
@@ -131,10 +133,13 @@ EXPECTED: dict[str, dict[str, dict[str, Any]]] = {"tepex_c_demo": {
     "glider_eq-ship-acoustic": dict(allowed=None, distance=True, text="glider acoustic link GO within 3 km of the ship, NO-GO beyond it"),
     "glider_2n-ship-acoustic": dict(allowed=None, distance=True, text="glider acoustic link GO within 3 km of the ship, NO-GO beyond it"),
 }}
-# What makes a mission the demo BRIEF section 6 describes, beside its name (round 12, M-5): window, box (lon_min, lon_max, lat_min, lat_max) and vehicle ids.
-# A copy with the name and another window or fleet is another mission; the cache is keyed by name, so a name alone proves nothing.
-DEMO_IDENTITY: dict[str, dict[str, Any]] = {"tepex_c_demo": dict(window=("2023-03-01T12:00:00Z", "2023-03-07T12:00:00Z"), box=(165.0, -165.0, -5.0, 5.0),
-                                                                 vehicles=("glider_eq", "glider_2n", "usv", "uas"))}
+# What makes a mission the demo BRIEF section 6 describes: its name AND the whole mission as shipped, apart from the seed (acceptance runs the demo under
+# others) and the description (prose). The expected outcomes depend on the window, the box, the ship, every vehicle's platform and task, the links and the
+# verdict cut-offs, and a list of the fields that matter would be one more thing to keep complete: a copy with the name, window, box and vehicle ids and a
+# ship moved to another ocean got the demo's expectations (look-ahead L0 after round 12, M-5). `tests/test_credibility.py` ties the digest to
+# missions/tepex_c_demo.yaml: edit that file and the test says to look at EXPECTED before changing the digest.
+DEMO_DIGEST: dict[str, str] = {"tepex_c_demo": "9e2c8cdf677206f31f78208e1ed1bea7e7a904a7d8272b56dd277c7458d41bf0"}
+NOT_IN_IDENTITY = ("seed", "description")
 DRIFT_DETAIL = "a drift glider has no mission criterion; GO means the battery and depth limits held on its fixed heading"
 SANITY_NOTE = ("BRIEF section 6, 'Expected outcome': what a correct tool should say about the demo mission, used as a sanity check and not as a "
                "target. It applies to that mission only, so no other mission has a sanity block. A disagreement is not a verdict on the model: it "
@@ -291,8 +296,8 @@ def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None, e
                           value=txt, unit=str(e.get("unit", "")), why=str(e.get("citation", "")), replace_with=""))
     for it in platform_items(root, elsewhere):
         if it["assumed"]:
-            items.append(dict(id=f"{it['file'].split('/')[-1]}:{it['path']}", file=it["file"], key=it["key"], kind="assumed", value=it["value"],
-                              unit=it["unit"], why=it["why"], replace_with=""))
+            items.append(dict(id=f"{it['file'].split('/')[-1]}:{it['path']}", file=it["file"], key=it["key"], path=it["path"], kind="assumed",
+                              value=it["value"], unit=it["unit"], why=it["why"], replace_with=""))
     for i, it in enumerate(items):
         it["anchor"] = f"A{i}"
     return items
@@ -434,6 +439,31 @@ def vv20_rows(data: pathlib.Path | None = None) -> list[dict[str, Any]]:
 
 # ------------------------------------------------------------------------------------------------------ the factor table
 
+def entries_read(links: Iterable[dict[str, Any]], root: pathlib.Path = ROOT) -> set[tuple[str, str]]:
+    """(section, entry) of platforms/radios.yaml and platforms/modems.yaml that the links of a mission read, as the code reads them: an rf link its `radio`
+    (`comms.rf_margin`), an iridium link the SBD service (`comms.iridium_session`'s default, which stage 1 calls), an acoustic link the modem its `modem` names
+    (`comms.resolve_modem`) and the modem band an `implementation_loss_like` sends its anchor to, and the `defaults` of modems.yaml (every acoustic link).
+    A file holds many radios and modems and a mission uses a few: the file is not the unit (look-ahead L0 after round 12, M-6)."""
+    out: set[tuple[str, str]] = set()
+    mf = root / "platforms" / "modems.yaml"
+    modems = ((config.read_yaml(mf) or {}).get("modems") or {}) if mf.is_file() else {}          # a root without the file (a test's) has no anchors to follow
+    for lk in links:
+        kind = lk.get("kind")
+        if kind == "rf":
+            out.add(("radios", str(lk.get("radio"))))
+        elif kind == "iridium":
+            out.add(("iridium", "sbd"))
+        elif kind == "acoustic":
+            out.add(("defaults", ""))
+            named, seen = comms.resolve_modem(str(lk.get("modem"))), set[tuple[str, str]]()
+            while named is not None and named not in seen:                     # a band can send its anchor to another band, in the same modem or not
+                seen.add(named)
+                out.add(("modems", named[0]))
+                like = (((modems.get(named[0]) or {}).get("bands") or {}).get(named[1]) or {}).get("implementation_loss_like")
+                named = (str(like[0]), str(like[1])) if isinstance(like, list) and len(like) == 2 else None
+    return out
+
+
 class Facts:
     """What the factor rules read, loaded once."""
 
@@ -452,8 +482,10 @@ class Facts:
         mine = f"{run.name}: stage report: "
         self.problems = [p for p in ledger_problems(run) if ": no ledger" not in p and (not p.startswith(mine) or p.startswith(mine + "input "))]
         self.refs = refs = {v["platform"] for v in (self.mission or {}).get("vehicles", [])}
-        links = {lk["kind"] for lk in (self.mission or {}).get("links", [])}
-        tables = ({"radios"} if "rf" in links else set()) | ({"modems"} if "acoustic" in links else set())
+        links = (self.mission or {}).get("links") or []
+        kinds = {lk.get("kind") for lk in links}
+        tables = ({"radios"} if kinds & {"rf", "iridium"} else set()) | ({"modems"} if "acoustic" in kinds else set())       # iridium reads radios.yaml too
+        self.read = entries_read(links, root)
         self.used = {platform_key(r, root): platform_label(platform_key(r, root), platform_shipped(r, root)) for r in refs} | \
                     {t: platform_label(t, True) for t in tables}                                    # key -> the `file` of its items
         self.items = platform_items(root, [r for r in refs if not platform_shipped(r, root)])
@@ -462,6 +494,17 @@ class Facts:
         why = subgrid_uncalibrated(run, root)
         sub = [] if why is None else [dict(SUBGRID_LIMITATION, text=why)]
         self.limitations = LIMITATIONS[:12] + sub + LIMITATIONS[12:]                       # L13 sits between L12 and L14
+
+    def item_used(self, key: str, path: str) -> bool:
+        """Whether this mission reads the platform input `path` of the platform `key` (the stem of its file; `item["key"]`). A vehicle's platform file is read
+        whole. radios.yaml and modems.yaml are catalogues of which a mission reads the entries its links name (`entries_read`), so the unit is the entry
+        (M-6, and again after round 12)."""
+        if key not in self.used:
+            return False
+        if key not in ("radios", "modems"):
+            return True
+        section, _, rest = path.partition(".")
+        return (section, "" if section == "defaults" else rest.split(".")[0]) in self.read
 
     def ev(self, what: str, f: str) -> dict[str, Any]:
         return dict(file=f, what=what)
@@ -611,7 +654,7 @@ def _validation(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
 
 
 def _input_pedigree(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
-    its = [i for i in f.items if i["key"] in f.used and (i["assumed"] or i["sourced"])]
+    its = [i for i in f.items if f.item_used(i["key"], i["path"]) and (i["assumed"] or i["sourced"])]
     if not its:
         return 0, [], ["no platform file with provenance fields is used by this mission (or mission.yaml is missing)"]
     good = sum(1 for i in its if i["sourced"] and not i["assumed"] and not i["recalled"])
@@ -752,14 +795,20 @@ def _far(e: dict[str, Any]) -> bool | None:
     return True if out is not None and out > 0.5 else None
 
 
+def mission_digest(mission: dict[str, Any]) -> str:
+    """sha-256 of the mission as canonical JSON, without the keys in NOT_IN_IDENTITY (keys sorted, so the order in the file does not matter)."""
+    core = {k: v for k, v in mission.items() if k not in NOT_IN_IDENTITY}
+    return hashlib.sha256(json.dumps(core, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def is_the_demo(mission: dict[str, Any]) -> bool:
-    """Whether `mission` has the name AND the window, box and vehicle ids of the mission BRIEF section 6 states an expected outcome for (DEMO_IDENTITY)."""
-    want = DEMO_IDENTITY.get(mission.get("name", ""))
-    if want is None:
+    """Whether `mission` is the mission BRIEF section 6 states an expected outcome for: its name, and everything else in it but the seed and the description
+    (DEMO_DIGEST). A mission whose keys cannot be sorted (a mapping with a number and a string for keys) is not it."""
+    try:
+        want = DEMO_DIGEST.get(mission.get("name", ""))
+        return want is not None and mission_digest(mission) == want
+    except (TypeError, ValueError):
         return False
-    w, b = mission.get("window") or {}, mission.get("box") or {}
-    return bool((w.get("start"), w.get("end")) == want["window"] and tuple(b.get(k) for k in ("lon_min", "lon_max", "lat_min", "lat_max")) == want["box"]
-                and tuple(sorted(v.get("id") for v in mission.get("vehicles") or [])) == tuple(sorted(want["vehicles"])))
 
 
 def sanity(f: Facts) -> dict[str, Any] | None:
@@ -894,8 +943,8 @@ def _render(c: dict[str, Any]) -> str:
 def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.Path | None = None) -> dict[str, Any]:
     f = Facts(pathlib.Path(run_dir), root, data or data_root())
     items = assumed_inputs(root, f.run, [r for r in f.refs if not platform_shipped(r, root)])
-    for it in items:                    # the catalogue lists every platform; `used` says whether this mission flies or links through it (M-6)
-        it["used"] = "key" not in it or it["file"] in f.used.values()     # config/ items apply to every mission: which keys a run read is not recorded
+    for it in items:                    # the catalogue lists every platform input; `used` says whether this mission flies or links through it (M-6)
+        it["used"] = "key" not in it or f.item_used(it["key"], it["path"])      # config/ items apply to every mission: which keys a run read is not recorded
     labels = {p.stem: platform_label(p.stem, True) for p in (root / "platforms").glob("*.yaml")} | f.used          # key -> the `file` of its items
     return dict(schema="cafe.pm.credibility/1", run=f.run.name,
                 note="Levels run 0-4 (BRIEF 5.4). The rule behind each level is this tool's reading of the factor, not the text of NASA-STD-7009B, "

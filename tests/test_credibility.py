@@ -678,12 +678,14 @@ def test_the_acoustic_sanity_row_reads_the_runs_ship_distance(run, data, verdict
     assert row["agrees"] is agrees and words in row["detail"] and "NO-GO beyond it" in row["expected"]
 
 
-def test_a_station_glider_still_has_a_checked_sanity_row_and_only_a_drift_one_is_exempt(run, data):
-    """Round 3 M-1: the exemption follows task.mode in the run's mission, not the vehicle id."""
+def test_a_station_glider_still_has_a_checked_sanity_row_and_only_a_drift_one_is_exempt(run, data, monkeypatch):
+    """Round 3 M-1: the exemption follows task.mode in the run's mission, not the vehicle id. (A mission with a changed task is no longer the demo, look-ahead
+    L0 after round 12, M-5, so the edited mission below is taken for it by hand: the subject here is the exemption, not the identity.)"""
     assert next(r for r in cr.build(run, REAL, data)["sanity"]["rows"] if r["id"] == "glider_eq")["agrees"] is False
     m = (run / "mission.yaml").read_text()
     assert m.count("mode: drift") == 1
     (run / "mission.yaml").write_text(m.replace("mode: drift", "mode: station"))                         # no longer a drift glider: back to being compared
+    monkeypatch.setattr(cr, "is_the_demo", lambda mission: True)
     assert next(r for r in cr.build(run, REAL, data)["sanity"]["rows"] if r["id"] == "glider_2n")["agrees"] is True
 
 
@@ -726,9 +728,124 @@ def test_r12_m5_a_copy_of_the_demo_with_its_name_but_another_window_or_fleet_get
 
 def test_r12_m5_the_usv_sentence_names_the_window_end_the_identity_forces():
     """Round 12, M-5: the USV expectation text says "the demo window ends 7 March 12Z" as a literal; it is true wherever it is shown only because
-    DEMO_IDENTITY holds that end. If one changes, so must the other."""
-    end = cr.DEMO_IDENTITY["tepex_c_demo"]["window"][1]
+    DEMO_DIGEST holds that end (it covers the whole mission, the window with it). If one changes, so must the other."""
+    end = yaml.safe_load((REAL / "missions" / "tepex_c_demo.yaml").read_text())["window"]["end"]
     assert end == "2023-03-07T12:00:00Z" and "ends 7 March 12Z" in cr.EXPECTED["tepex_c_demo"]["usv"]["text"]
+
+
+def demo_mission():
+    return yaml.safe_load((REAL / "missions" / "tepex_c_demo.yaml").read_text())
+
+
+def test_r12_l0_m5_the_digest_is_the_shipped_demos_and_ignores_only_the_seed_the_description_and_the_order_of_keys(run, data):
+    """Look-ahead L0 after round 12, M-5: the identity was the name, window, box and vehicle ids, the fields a variant is least likely to change."""
+    m = demo_mission()
+    assert cr.mission_digest(m) == cr.DEMO_DIGEST["tepex_c_demo"], (
+        f"missions/tepex_c_demo.yaml changed: check cr.EXPECTED (BRIEF section 6) still describes it, then set DEMO_DIGEST to {cr.mission_digest(m)}")
+    assert cr.is_the_demo(m) and cr.is_the_demo(dict(m, seed=5, description="another")) and cr.is_the_demo(dict(reversed(list(m.items()))))
+    assert not cr.is_the_demo(dict(m, name="other")) and not cr.is_the_demo({}) and not cr.is_the_demo(dict(name=["tepex_c_demo"]))
+    assert not cr.is_the_demo({"name": "tepex_c_demo", 1: "a", "b": 2})                       # keys that cannot be sorted: not the demo, and no TypeError
+    (run / "mission.yaml").write_text(yaml.safe_dump(dict(m, seed=5), sort_keys=False))         # what `run --seed 5` leaves in the run directory
+    assert cr.build(run, REAL, data)["sanity"]["mission"] == "tepex_c_demo"
+
+
+def test_r12_l0_m5_a_copy_with_the_demos_name_window_box_and_vehicle_ids_but_anything_else_changed_gets_no_sanity_block(run, data):
+    """Look-ahead L0 after round 12, M-5: the demo with the ship moved to 150 W, the USV on another platform and only the Iridium link kept had the demo's
+    window, box and ids, so it was told what BRIEF section 6 expects of the demo and shown "disagrees" wherever its verdicts differed."""
+    def edit_ship(m):
+        m["ship"]["lon"] = -150.0
+
+    def edit_platform(m):
+        next(v for v in m["vehicles"] if v["id"] == "usv")["platform"] = "slocum"
+
+    def edit_links(m):
+        m["links"] = [lk for lk in m["links"] if lk["kind"] == "iridium"]
+
+    def edit_task(m):
+        next(v for v in m["vehicles"] if v["id"] == "glider_eq")["task"]["mode"] = "drift"
+
+    def edit_link_field(m):
+        next(lk for lk in m["links"] if lk["kind"] == "rf")["radio"] = "xbee_pro_24"
+
+    def edit_cutoff(m):
+        m["verdict"]["go"] = 0.8
+
+    def edit_environment(m):
+        m["environment"]["subgrid"]["rain_lens"] = False
+
+    def edit_deploy(m):
+        next(v for v in m["vehicles"] if v["id"] == "glider_2n")["deploy"]["lat"] = 1.0
+    base = demo_mission()
+    assert cr.build(run, REAL, data)["sanity"] is not None
+    for edit in (edit_ship, edit_platform, edit_links, edit_task, edit_link_field, edit_cutoff, edit_environment, edit_deploy):
+        m = demo_mission()
+        edit(m)
+        assert m != base, edit.__name__
+        (run / "mission.yaml").write_text(yaml.safe_dump(m, sort_keys=False))
+        assert not cr.is_the_demo(m) and cr.build(run, REAL, data)["sanity"] is None, edit.__name__
+
+
+def link_used(run, data, links):
+    """{item id: used} for the radios.yaml and modems.yaml inputs of the demo with only `links` kept (each a link of the demo, or a changed copy of one)."""
+    m = demo_mission()
+    m["links"] = links
+    (run / "mission.yaml").write_text(yaml.safe_dump(m, sort_keys=False))
+    c = cr.build(run, REAL, data)
+    return {i["id"]: i["used"] for i in c["assumed_inputs"] if i["file"] in ("platforms/radios.yaml", "platforms/modems.yaml")}, c
+
+
+def demo_link(kind, **over):
+    return dict(next(lk for lk in demo_mission()["links"] if lk["kind"] == kind), **over)
+
+
+def used_ids(used, prefix):
+    return {k.split(":", 1)[1] for k, u in used.items() if u and k.startswith(prefix)}
+
+
+def test_r12_l0_m6_an_iridium_only_mission_uses_the_sbd_inputs_and_nothing_else_of_radios_and_modems(run, data):
+    """Look-ahead L0 after round 12, M-6: `tables` knew only rf and acoustic, so the Iridium link's own assumptions (iridium.sbd.p_success decides its verdict)
+    were "platform not used by this mission" and left out of "verdicts depend on them"; and every other radio and modem sat in the count beside them."""
+    from cafe.pm import report
+    used, c = link_used(run, data, [demo_link("iridium")])
+    sbd = {f"iridium.sbd.{k}" for k in ("p_success", "max_attempts", "fail_cost_s", "session_setup_median_s", "session_setup_sigma")}
+    assert used_ids(used, "radios.yaml") == sbd and used_ids(used, "modems.yaml") == set()
+    assert {k for k, u in used.items() if not u} >= {"radios.yaml:iridium.rudics.p_success", "radios.yaml:radios.rfd900x.gt_dbi",
+                                                     "modems.yaml:modems.benthos_atm960"}
+    a = report._assumed(c, dict(stage="credibility", ledger="l", receipt="r"))
+    n_used = sum(1 for i in c["assumed_inputs"] if i["used"] and i["kind"] != "fitted")
+    assert a["total"]["value"] == n_used and a["catalogue"]["value"] > n_used
+    assert a["by_file"]["platforms/radios.yaml"]["value"] == len(sbd) and a["not_used_by_file"]["platforms/radios.yaml"]["value"] > 0
+    assert "platforms/modems.yaml" in a["not_used_by_file"] and "platforms/modems.yaml" not in a["by_file"]
+
+
+def test_r12_l0_m6_the_demo_counts_the_radio_and_modem_it_flies_not_every_one_in_the_files(run, data):
+    used, c = link_used(run, data, demo_mission()["links"])
+    assert used_ids(used, "radios.yaml") == {f"radios.rfd900x.{k}" for k in ("gt_dbi", "gr_dbi", "misc_loss_db")} | \
+        {f"iridium.sbd.{k}" for k in ("p_success", "max_attempts", "fail_cost_s", "session_setup_median_s", "session_setup_sigma")}
+    assert used_ids(used, "modems.yaml") == {"defaults.anchor_margin_db", "defaults.valid_range_factor", "modems.benthos_atm960"}
+    assert used["modems.yaml:modems.whoi_micromodem"] is False and used["radios.yaml:radios.xbee_pro_24.gt_dbi"] is False
+
+
+def test_r12_l0_m6_a_modem_that_takes_its_anchor_from_another_counts_that_one_too_and_an_acoustic_link_reads_the_defaults(run, data):
+    used, _ = link_used(run, data, [demo_link("acoustic", modem="whoi_micromodem_long_10k")])
+    assert used_ids(used, "modems.yaml") == {"defaults.anchor_margin_db", "defaults.valid_range_factor", "modems.whoi_micromodem", "modems.benthos_atm960"}
+    assert used_ids(used, "radios.yaml") == set()
+    used, _ = link_used(run, data, [demo_link("acoustic", modem="Benthos_ATM960_HF")])             # any case, as the loader reads it
+    assert "modems.benthos_atm960" in used_ids(used, "modems.yaml") and "modems.whoi_micromodem" not in used_ids(used, "modems.yaml")
+    bad = [demo_link("acoustic", modem="no_such_modem"), demo_link("rf", radio="no_such_radio")]                     # a mission that cannot run: no crash
+    used, _ = link_used(run, data, bad)
+    assert used_ids(used, "radios.yaml") == set() and used_ids(used, "modems.yaml") == {"defaults.anchor_margin_db", "defaults.valid_range_factor"}
+
+
+def test_r12_l0_m6_the_input_pedigree_counts_the_same_inputs_as_the_assumed_count(run, data):
+    """The pedigree rule read `Facts.used` too, by file: with an rf link it counted all 19 radios.yaml inputs. One predicate (`Facts.item_used`) now."""
+    link_used(run, data, [demo_link("iridium")])
+    f = cr.Facts(run, REAL, data)
+    by_file = [i for i in f.items if i["key"] in f.used and (i["assumed"] or i["sourced"])]
+    by_entry = [i for i in f.items if f.item_used(i["key"], i["path"]) and (i["assumed"] or i["sourced"])]
+    assert len(by_entry) < len(by_file)
+    ev = next(x for x in cr.build(run, REAL, data)["factors"] if x["factor"] == "input_pedigree")["evidence"][0]["what"]
+    assert ev.startswith(f"{sum(1 for i in by_entry if i['sourced'] and not i['assumed'] and not i['recalled'])} of {len(by_entry)} platform inputs sourced")
 
 
 def test_without_a_stage_1b_summary_there_is_nothing_to_compare(tmp_path, data):

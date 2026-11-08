@@ -79,14 +79,15 @@ class Bathymetry:
 # ------------------------------------------------------------------ 1. GEBCO by byte range
 
 
-def _rows(url: str, base: int, ncols: int, j: Any, i0: int, i1: int, dtype: Any, workers: int) -> np.ndarray:
-    """Rows j, columns i0..i1 (exclusive) of a contiguous raster of `dtype` at byte `base` of the file, one range request per row."""
+def _rows(url: str, base: int, ncols: int, j: Any, i0: int, i1: int, dtype: Any, workers: int, ident: remote.Ident | None = None) -> np.ndarray:
+    """Rows j, columns i0..i1 (exclusive) of a contiguous raster of `dtype` at byte `base` of the file, one range request per row. `ident`: the version of
+    the file `base` was read from (`RemoteFile.ident`); a row from another one is a ConnectionError, not bytes to join to the rest (look-ahead L0 after
+    round 12, M-25)."""
     size = np.dtype(dtype).itemsize
 
     def one(r: Any) -> np.ndarray:
         a = base + (int(r) * ncols + i0) * size
-        with remote._open(url, a, a + (i1 - i0) * size - 1, timeout=120) as resp:
-            raw = resp.read()
+        raw = remote._read(url, a, a + (i1 - i0) * size - 1, timeout=120, ident=ident)
         if len(raw) != (i1 - i0) * size:
             raise ConnectionError(f"{url}: short read on row {r} ({len(raw)} of {(i1 - i0) * size} bytes)")
         return np.frombuffer(raw, dtype)
@@ -117,7 +118,7 @@ def fetch_gebco(box: Any, out_path: Any, url: str = GEBCO_URL, workers: int = 16
             continue
         i0, i1 = int(run.min()), int(run.max()) + 1
         if dset.chunks is None and dset.compression is None:
-            a = _rows(url, dset.id.get_offset(), dset.shape[1], j, i0, i1, dset.dtype, workers)
+            a = _rows(url, dset.id.get_offset(), dset.shape[1], j, i0, i1, dset.dtype, workers, f.ident)
         else:
             a = dset[j[0]:j[-1] + 1, i0:i1]
         pieces.append(a.astype("<i2"))

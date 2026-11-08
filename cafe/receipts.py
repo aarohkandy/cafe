@@ -43,7 +43,11 @@ def receipt(group: str, claim: str, value: float, reference: float, tol: float, 
 
 # Stored results (the hangar CFD runs, the SITL cross-check) are read back as receipts, so they carry what the table can check: when, where, which commit and
 # which code made them. An unstamped one, or one made by other code, is a context row, never a pass (round 12, M-35). The digest is the one
-# cafe.pm.receipts.code_digest("app") gives (the hash of cafe/*.py); a test holds the two together.
+# cafe.pm.receipts.code_digest("app") gives (the hash of cafe/*.py); a test holds the two together. It covers every cafe/*.py on purpose: a narrower
+# list would have to be right about what a result depends on, and a list that is too short counts a stale result. The price is that an edit to any of them
+# makes a stored result stale; `python -m cafe.receipts stamp FILE` re-stamps one you have checked, and says so in its row (`stamped_later`).
+# The writers: `python -m cafe.cfd` stamps what it writes (torpedo.external.json, wigley.surface.json, suboff.incidence.json). No program in this repo
+# writes crosscheck.json (the SITL pair came from a one-off run), so for that file `stamp` is the only way.
 STAMP = ("date", "host", "git_sha", "code_digest")
 
 
@@ -54,10 +58,21 @@ def app_digest() -> str:
     return h.hexdigest()
 
 
-def stamp(rec: dict[str, Any]) -> dict[str, Any]:
-    """`rec` with the stamp a stored result must carry: what a program that writes one of these files adds before it writes it."""
+def stamp(rec: dict[str, Any], later: bool = False) -> dict[str, Any]:
+    """`rec` with the stamp a stored result must carry: what a program that writes one of these files adds before it writes it. `later`: the stamp is put
+    on a result that was made before, after somebody checked it (`stamp_file`), and the record says so."""
     from cafe.pm.ledger import git_sha
-    return dict(rec, date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), host=platform.node(), git_sha=git_sha(), code_digest=app_digest())
+    out = dict(rec, date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), host=platform.node(), git_sha=git_sha(), code_digest=app_digest())
+    return dict(out, stamped_later=True) if later else out
+
+
+def stamp_file(path: str | pathlib.Path) -> pathlib.Path:
+    """Stamp the JSON object in `path` as a result that somebody has checked (`stamp(..., later=True)`), through a temporary and os.replace. This says the
+    code that is here stands behind the numbers, not that it made them: use it on a result you have looked at, never to make a stale one pass."""
+    from cafe.pm.config import json_object, write_json
+    p = pathlib.Path(path)
+    write_json(p, stamp(json_object(p, "nothing was stamped"), later=True), indent=1)
+    return p
 
 
 def stored(path: pathlib.Path, group: str) -> tuple[dict[str, Any], str] | None:
@@ -78,8 +93,10 @@ def stored(path: pathlib.Path, group: str) -> tuple[dict[str, Any], str] | None:
         elif rec["code_digest"] != app_digest():
             why = f"(stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}) was made by different code (stale)"
         else:
-            return rec, f" [stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}]"
-    context(group, f"stored result {path.name} {why}: not counted", 0.0, 0.0, "", "rerun the run that writes it; cafe.receipts.stamp() adds the stamp")
+            later = ", stamped afterwards, not by the run" if rec.get("stamped_later") is True else ""
+            return rec, f" [stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}{later}]"
+    context(group, f"stored result {path.name} {why}: not counted", 0.0, 0.0, "",
+            f"rerun the run that writes it (python -m cafe.cfd stamps its file), or if you have checked this one, `python -m cafe.receipts stamp {path}`")
     return None
 
 
@@ -620,6 +637,15 @@ def crosscheck_receipts(results: Any) -> None:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["stamp"]:                                 # python -m cafe.receipts stamp FILE...: see `stamp_file`
+        if len(sys.argv) < 3:
+            sys.exit("usage: python -m cafe.receipts stamp FILE [FILE...]")
+        try:
+            for f in sys.argv[2:]:
+                print(f"stamped {stamp_file(f)}")
+        except ValueError as e:                                     # a ConfigError: the file is missing, not JSON, or not an object
+            sys.exit(f"error: {e}")
+        sys.exit(0)
     results = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path("/work/runs")
     t0 = time.time()
     geometry_receipts()

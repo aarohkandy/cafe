@@ -906,7 +906,7 @@ def main(argv: list[str] | None = None) -> int:
             scales = {k: v for k, v in json_object(rp).items() if v["used"]} if rp.is_file() else None
             old = json_object(out, "delete it; this command writes it again") if out.is_file() else {}          # before the long part
             new = sensitivity_case(ctx.mission, ctx.env, a.prior, a.members, json_object(fp) if fp.is_file() else None, scales or None)
-    except (ConfigError, ResourceError) as e:
+    except (ConfigError, ResourceError, OutsideData, budget.PlanError) as e:      # damaged_run_files lets these through (look-ahead L0, M-7)
         print(f"error: {e}", file=sys.stderr)
         return 2
     for vid, cases in new.items():

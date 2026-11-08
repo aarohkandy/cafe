@@ -238,7 +238,8 @@ def test_an_off_by_one_column_in_the_byte_offset_fails_the_remote_cross_check(se
     from cafe import receipts as R
     cache_path = b.fetch_gebco(BOX, tmp_path / "g.npz", gebco["flat"])
     real = b._rows
-    monkeypatch.setattr(b, "_rows", lambda url, base, ncols, j, i0, i1, dtype, workers: real(url, base, ncols, j, i0 + 1, i1 + 1, dtype, workers))
+    monkeypatch.setattr(b, "_rows", lambda url, base, ncols, j, i0, i1, dtype, workers, ident=None:
+                        real(url, base, ncols, j, i0 + 1, i1 + 1, dtype, workers, ident))
     R.OUT.clear()
     b.receipts(cache_path, gebco["flat"])
     assert [r["claim"][:20] for r in R.OUT if r["ok"] is False] == ["GEBCO per-row byte-r"]
@@ -252,3 +253,19 @@ def test_a_sign_flip_in_depth_fails_the_node_receipt(server, gebco, tmp_path, mo
     R.OUT.clear()
     b.receipts(cache_path)
     assert [r["claim"][:12] for r in R.OUT if r["ok"] is False] == ["bilinear dep", "GEBCO cache:"]
+
+
+def test_r12_l0_m25_the_row_reads_of_gebco_refuse_a_file_replaced_after_its_metadata(server, gebco, tmp_path, monkeypatch):
+    """`fetch_gebco` read the HDF5 metadata through RemoteFile (which checks the version of every block) and the raster rows through plain ranged GETs, so a
+    file replaced in between gave offsets of one version and rows of the other without a word."""
+    real = b._rows
+
+    def replaced_then_read(*a, **k):
+        server.put("g.nc", (tmp_path / "g.nc").read_bytes() + bytes(8))
+        return real(*a, **k)
+    monkeypatch.setattr(b, "_rows", replaced_then_read)
+    with pytest.raises(ConnectionError, match="changed on the server"):
+        b.fetch_gebco(BOX, tmp_path / "x.npz", gebco["flat"], workers=2)
+    assert not (tmp_path / "x.npz").exists()
+    monkeypatch.setattr(b, "_rows", real)
+    assert b.fetch_gebco(BOX, tmp_path / "y.npz", gebco["flat"], workers=2).is_file()                # a file that stays the same version is read as before

@@ -628,3 +628,52 @@ def test_r9_m30_the_tree_hash_covers_the_names_of_the_files_and_the_empty_ones(t
     assert store("swapped", {"c/0": b"yy", "c/1": b"xx"}) != base
     assert store("joined", {"c/0": b"xxyy"}) != base                                   # file boundaries are part of the hash
     assert store("edge1", {"a": b"bX"}) != store("edge2", {"ab": b"X"})                # where the name ends and the bytes begin
+
+
+# ---- look-ahead L0 after round 12, M-25: the header and variable reads of a CDF file are pieces of one version of it, as RemoteFile's blocks are
+
+def test_r12_l0_m25_a_header_read_from_a_url_knows_its_version_and_a_local_one_has_none(cdf_file, server):
+    u = server.put("t.nc", cdf_file.read_bytes())
+    hdr = remote.cdf1_header(u)
+    assert hdr.ident == remote._probe(u) and hdr.ident[0] == len(cdf_file.read_bytes())
+    dims, nrec, variables = hdr                                           # still the plain three-tuple of before
+    assert hdr[0] is dims and hdr[1] == nrec and hdr[2] is variables and remote.cdf1_header(cdf_file).ident is None
+    assert remote.cdf1_read(u, "f", hdr).shape == (3, 5)
+    assert remote.cdf1_read(u, "f", tuple(hdr)).shape == (3, 5)                                      # a header made by hand has no version to check
+
+
+def test_r12_l0_m25_a_variable_read_refuses_a_file_replaced_after_the_header_of_another_size(cdf_file, server):
+    """`cdf1_read` took its offsets from version 1 of the file and joined whatever the server then sent: `orca.umwm_hour` reads a header and then many
+    variables, minutes apart. RemoteFile raised for the same change; this did not."""
+    data = cdf_file.read_bytes()
+    u = server.put("t.nc", data)
+    hdr = remote.cdf1_header(u)
+    server.put("t.nc", data + bytes(8))
+    with pytest.raises(ConnectionError, match="changed on the server"):
+        remote.cdf1_read(u, "f", hdr)
+
+
+def test_r12_l0_m25_a_variable_read_refuses_a_file_replaced_after_the_header_by_one_of_the_same_size(cdf_file, server, versioned):
+    data = cdf_file.read_bytes()
+    u = server.put("t.nc", data)
+    hdr = remote.cdf1_header(u)
+    np.testing.assert_array_equal(remote.cdf1_read(u, "f", hdr), remote.cdf1_read(cdf_file, "f", hdr))
+    server.put("t.nc", bytes(reversed(data)))
+    with pytest.raises(ConnectionError, match="changed on the server"):
+        remote.cdf1_read(u, "f", hdr)
+    server.put("t.nc", data)                                              # put back: the same version again is read
+    np.testing.assert_array_equal(remote.cdf1_read(u, "f", hdr), remote.cdf1_read(cdf_file, "f", hdr))
+
+
+def test_r12_l0_m25_the_pieces_of_one_header_are_of_one_version_too(tmp_path, server):
+    p = tmp_path / "big.nc"
+    with netCDF4.Dataset(p, "w", format="NETCDF3_CLASSIC") as nc:
+        nc.createDimension("x", 2)
+        v = nc.createVariable("v", "f4", ("x",))
+        v.long = "z" * 150_000                                             # a header of several 64 kB pieces
+        v[:] = [1.5, 2.5]
+    data = p.read_bytes()
+    u = server.put("big.nc", data)
+    server.plan["big.nc"] = [("sleep", 0), ("call", lambda s: s.put("big.nc", data + bytes(4)))]          # replaced between the first piece and the second
+    with pytest.raises(ConnectionError, match="changed on the server"):
+        remote.cdf1_header(u)

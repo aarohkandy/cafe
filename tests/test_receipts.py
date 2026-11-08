@@ -829,3 +829,60 @@ def test_r12_m35_a_receipt_that_raises_leaves_the_environment_as_it_was(monkeypa
     with pytest.raises(RuntimeError, match="no weather"):
         R.weather_receipts()
     assert os.environ["CAFE_OCEAN"] == "0"
+
+
+# ---- look-ahead L0 after round 12, M-35: the writers stamp, and a result that has no writer here can be stamped after it was checked
+
+CFD_FILES = (("external", "torpedo", "t1"), ("surface", "wigley", "w1"), ("incidence", "suboff", "s1"))
+
+
+@pytest.mark.parametrize("what,sample,sub", CFD_FILES)
+def test_r12_l0_m35_cafe_cfd_writes_the_stamped_file_that_cfd_receipts_reads(what, sample, sub, tmp_path, monkeypatch):
+    """Round 12, M-35 made `stored` require a stamp but no writer added one: `python -m cafe.cfd` wrote the bare result, so each of the three files was a
+    context row ("unstamped: not counted") whatever was run. The three go through `cfd.main`, to the path `cfd_receipts` reads (README: WORKDIR = runs/t1)."""
+    from cafe import cfd
+    for fn in ("characterize_external", "characterize_incidence", "characterize_free_surface"):
+        monkeypatch.setattr(cfd, fn, lambda *a, **k: dict(rho=1.0, speeds={}, dirs={}))
+    out = cfd.main([what, sample, str(tmp_path / sub)])
+    assert out == tmp_path / sub / f"{sample}.{what}.json"
+    assert out.relative_to(tmp_path).as_posix() in {"t1/torpedo.external.json", "w1/wigley.surface.json", "s1/suboff.incidence.json"}
+    got = R.stored(out, "CFD")
+    assert got is not None and got[0]["rho"] == 1.0 and R.OUT == []                                  # counted: no context row said otherwise
+    assert all(isinstance(got[0][k], str) and got[0][k] for k in R.STAMP) and "stamped_later" not in got[0]
+
+
+def test_r12_l0_m35_a_result_checked_by_hand_can_be_stamped_and_says_so(tmp_path, monkeypatch):
+    """Round 12, M-35: crosscheck.json has no writer in the repo, and the files the hangar runs left before the stamp existed are unstamped; the row's
+    advice named `stamp()`, which nothing called. `stamp_file` is the way, and the stamp says it was put on afterwards."""
+    f = tmp_path / "crosscheck.json"
+    f.write_text(json.dumps(crosscheck()))
+    assert R.stored(f, "Emulator") is None and "python -m cafe.receipts stamp " + str(f) in R.OUT[-1]["source"]
+    assert R.stamp_file(f) == f
+    rec, tag = R.stored(f, "Emulator")
+    assert rec["drones"] == crosscheck()["drones"] and rec["stamped_later"] is True and ", stamped afterwards, not by the run]" in tag
+    assert not list(tmp_path.glob("*.tmp"))                                                          # written through a temporary
+    assert "stamped_later" not in R.stamp(crosscheck()) and R.stamp(crosscheck(), later=True)["stamped_later"] is True
+    rows = run_crosscheck(tmp_path, json.loads(f.read_text()))
+    assert [r.get("kind") for r in rows] == [None, None] and all("stamped afterwards" in r["source"] for r in rows)
+    monkeypatch.setattr(R, "app_digest", lambda: "0" * 64)                                           # any later edit to cafe/*.py: stale again
+    assert R.stored(f, "Emulator") is None and "was made by different code (stale)" in R.OUT[-1]["claim"]
+
+
+def test_r12_l0_m35_the_stamp_command_stamps_each_file_and_refuses_a_file_that_is_no_result(tmp_path):
+    import subprocess, sys
+    a, b = tmp_path / "a.json", tmp_path / "b.json"
+    a.write_text(json.dumps(dict(x=1)))
+    b.write_text(json.dumps(dict(y=2)))
+
+    def run(*args):
+        return subprocess.run([sys.executable, "-m", "cafe.receipts", "stamp", *args], cwd=pr.ROOT, capture_output=True, text=True)
+    r = run(str(a), str(b))
+    assert r.returncode == 0 and r.stdout.count("stamped ") == 2, r.stderr
+    assert all(R.stored(f, "G") for f in (a, b)) and json.loads(a.read_text())["x"] == 1
+    bad = tmp_path / "bad.json"
+    bad.write_text("[1]")
+    r = run(str(bad))
+    assert r.returncode != 0 and "not a JSON object" in r.stderr and bad.read_text() == "[1]"
+    r = run(str(tmp_path / "missing.json"))
+    assert r.returncode != 0 and "error:" in r.stderr and not (tmp_path / "missing.json").exists()
+    assert run().returncode != 0

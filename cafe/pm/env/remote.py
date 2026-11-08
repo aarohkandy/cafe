@@ -7,8 +7,9 @@ USERTrust root in the system store). Verification is never turned off.
 
     RemoteFile(url)            seekable read-only file: h5py.File(RemoteFile(url)) reads HDF5 hyperslabs by range; a block from another
                                version of the file than the first probe saw (size, ETag, Last-Modified) is a ConnectionError
-    cdf1_header(url)           (dims, nrec, {var: dict(dims, dtype, shape, offset, record, attrs)}) of a NetCDF classic file
-    cdf1_read(url, var, hdr)   one variable of a CDF-1 file, by range
+    cdf1_header(url)           (dims, nrec, {var: dict(dims, dtype, shape, offset, record, attrs)}) of a NetCDF classic file; for a URL it also holds
+                               the identity of the version it was read from (`.ident`), and every read of that file through it is checked against it
+    cdf1_read(url, var, hdr)   one variable of a CDF-1 file, by range; a reply from another version than the header's is a ConnectionError
     download(url, path, sha, pin)  resumable (HTTP Range) only while the server file is the one the .part came from; size-checked,
                                `sha` decides whether an existing file is kept, and is checked on a fresh download only with `pin`
 """
@@ -24,7 +25,6 @@ from numpy.typing import NDArray
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 EXTRA_CA = ROOT / "config" / "certs" / "incommon_rsa_server_ca2.pem"
 BLOCK = 4 << 20
-Header = tuple[dict[str, int], int, dict[str, dict[str, Any]]]
 
 
 def context() -> ssl.SSLContext:
@@ -64,6 +64,13 @@ def _open(url: str, start: int | None = None, end: int | None = None, timeout: f
 Ident = tuple[int, dict[str, str]]
 
 
+class Header(tuple[dict[str, int], int, dict[str, dict[str, Any]]]):
+    """(dims, nrec, vars) of a NetCDF classic file. Read from a URL, `ident` is the identity (`_ident`) of the version the header came from: the offsets in
+    it are that version's, so `cdf1_read` asks every reply to be a piece of the same one, not a byte range of a file replaced in between (look-ahead L0
+    after round 12, M-25). None for a local file."""
+    ident: Ident | None = None
+
+
 def _ident(r: http.client.HTTPResponse, url: str) -> Ident:
     """(total bytes, the validators the server sends: ETag, Last-Modified) of a ranged reply: which version of the file this reply is a piece of."""
     cr = r.headers.get("Content-Range", "")
@@ -72,22 +79,29 @@ def _ident(r: http.client.HTTPResponse, url: str) -> Ident:
     return int(cr.rsplit("/", 1)[1]), {k: r.headers[k] for k in ("ETag", "Last-Modified") if r.headers.get(k)}
 
 
-def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tries: int = 3, ident: Ident | None = None) -> bytes:
-    """Body of a ranged GET. A connection cut mid-body (IncompleteRead, reset, timeout) is retried like a failed connect.
-    With `ident` (what the first probe saw) a reply from another version of the file is a ConnectionError, not bytes to splice in (round 12)."""
+def _read_ident(url: str, start: int | None, end: int | None, timeout: float = 60, tries: int = 3, ident: Ident | None = None) -> tuple[bytes, Ident | None]:
+    """(body, identity of the version it came from) of a ranged GET. A connection cut mid-body (IncompleteRead, reset, timeout) is retried like a failed
+    connect. With `ident` (what the first probe saw) a reply from another version of the file is a ConnectionError, not bytes to splice in (round 12);
+    without it the identity is None for a read with no range (no Content-Range to take it from)."""
     err: Exception = ConnectionError("no attempt made")
     for k in range(tries):
         try:
             with _open(url, start, end, timeout) as r:
                 if start is not None and r.status != 206:
                     raise ConnectionError(f"{url}: server ignored the Range header (HTTP {r.status}); byte-range reads need it")
-                if ident is not None and _ident(r, url) != ident:
-                    raise ConnectionError(f"{url}: the file changed on the server during this session (first seen {ident}, now {_ident(r, url)}); start again")
-                return r.read()
+                got = _ident(r, url) if start is not None else None
+                if ident is not None and got != ident:
+                    raise ConnectionError(f"{url}: the file changed on the server during this session (first seen {ident}, now {got}); start again")
+                return r.read(), got
         except (http.client.IncompleteRead, ConnectionResetError, TimeoutError) as e:
             err = e
         time.sleep(2 ** k)
     raise ConnectionError(f"{url}: {err!r}")
+
+
+def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tries: int = 3, ident: Ident | None = None) -> bytes:
+    """Body of a ranged GET (see `_read_ident`)."""
+    return _read_ident(url, start, end, timeout, tries, ident)[0]
 
 
 def _probe(url: str) -> Ident:
@@ -302,13 +316,22 @@ def parse_cdf1(fetch: Callable[[int, int], bytes]) -> Header:
         recsize = int(np.prod(rv[0]["shape"][1:])) * np.dtype(rv[0]["dtype"]).itemsize
     for v in out.values():
         v["recsize"] = recsize
-    return dict(dims), nrec, out
+    return Header((dict(dims), nrec, out))
 
 
 def cdf1_header(url_or_path: str | pathlib.Path) -> Header:
     p = str(url_or_path)
     if p.startswith("http"):
-        return parse_cdf1(lambda o, n: _read(p, o, o + n - 1))
+        seen: list[Ident] = []                                  # the first piece says which version this is; every later piece must be of it
+
+        def piece(o: int, n: int) -> bytes:
+            body, got = _read_ident(p, o, o + n - 1, ident=seen[0] if seen else None)
+            if got is not None and not seen:
+                seen.append(got)
+            return body
+        hdr = parse_cdf1(piece)
+        hdr.ident = seen[0] if seen else None
+        return hdr
     with open(p, "rb") as f:
         return parse_cdf1(lambda o, n: (f.seek(o), f.read(n))[1])
 
@@ -331,7 +354,7 @@ def cdf1_read(url_or_path: str | pathlib.Path, var: str, header: Header, rec: in
     nbytes = int(np.prod(shape)) * item
     p = str(url_or_path)
     if p.startswith("http"):
-        raw = _read(p, off, off + nbytes - 1, timeout=300)
+        raw = _read(p, off, off + nbytes - 1, timeout=300, ident=getattr(header, "ident", None))      # a header built by hand has none
     else:
         with open(p, "rb") as f:
             f.seek(off)

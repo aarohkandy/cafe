@@ -634,10 +634,11 @@ def characterize_free_surface(stl, draft, workdir, speeds, log=print):
     return fine
 
 
-if __name__ == "__main__":
-    # python -m cafe.cfd external|surface SAMPLE WORKDIR  (smoke runs on the built-in samples)
-    from cafe import geom
-    what, sample, work = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+def main(argv: list[str]) -> pathlib.Path:
+    """python -m cafe.cfd external|incidence|surface SAMPLE WORKDIR [...]: smoke runs on the built-in samples. Writes WORKDIR/SAMPLE.WHAT.json, stamped
+    (`cafe.receipts.stamp`): the file `cafe.receipts.cfd_receipts` reads counts only with a stamp from the code that is here (round 12, M-35)."""
+    from cafe import geom, receipts
+    what, sample, work = argv[0], argv[1], pathlib.Path(argv[2])
     work.mkdir(parents=True, exist_ok=True)
     s = geom.SAMPLES[sample]
     m = s["make"]()
@@ -645,16 +646,22 @@ if __name__ == "__main__":
     m.export(stl)
     if what == "incidence":
         # model-scale tow speed (Roddy 1990 drift tests at 6.5 kn), fresh-water viscosity of the tank
-        speed = float(sys.argv[4]) if len(sys.argv) > 4 else 1.5
+        speed = float(argv[3]) if len(argv) > 3 else 1.5
         r = characterize_incidence(stl, work / sample, "water", speed, planes=("+y",))
     elif what == "external":
         fluid, speed = ("air", 10.0) if s["kind"] == "uav" else ("water", 1.5)
-        dirs = sys.argv[4].split(",") if len(sys.argv) > 4 else tuple(DIRS)
+        dirs = argv[3].split(",") if len(argv) > 3 else tuple(DIRS)
         r = characterize_external(stl, work / sample, fluid, speed, dirs=dirs)
     else:
         hs = geom.hydrostatics(m, s["spec"]["mass"])
         L = hs["lwl"]
         speeds = [float(fn * np.sqrt(9.81 * L)) for fn in (0.2, 0.3, 0.4)]
         r = characterize_free_surface(stl, hs["draft"], work / sample, speeds)
-    (work / f"{sample}.{what}.json").write_text(json.dumps(r, indent=1, default=float))
+    out = work / f"{sample}.{what}.json"
+    out.write_text(json.dumps(receipts.stamp(r), indent=1, default=float))
     print(json.dumps(r, indent=1, default=float)[:3000])
+    return out
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

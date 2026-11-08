@@ -48,7 +48,7 @@ DIR/acceptance.json and DIR/acceptance.txt hold the result.
 """
 from __future__ import annotations
 
-import argparse, datetime as dt, hashlib, html, json, os, pathlib, re, shutil, subprocess, sys, time
+import argparse, datetime as dt, hashlib, html, json, os, pathlib, re, shlex, shutil, subprocess, sys, time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -375,10 +375,20 @@ def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) 
             "or name another file with `--golden`")
 
 
+def update_command(golden: pathlib.Path, mission: str, gpus: int, name: str) -> str:
+    """The command that writes `golden` from a quick run of `mission` (whose report names itself `name`), as the messages that ask for a new golden print it. It
+    carries what `--update-golden` needs to be accepted: `--golden` when the file is not the default one, `--golden-mission` when `golden_refusal` would
+    refuse the write (the file is damaged, or the golden of another mission). The same test as the refusal's, so the advice cannot be refused (look-ahead L0
+    after round 12, M-33)."""
+    cmd = f"python -m cafe.pm acceptance --mission {mission} --gpus {gpus} --update-golden"
+    return (cmd + (f" --golden {shlex.quote(str(golden))}" if golden != GOLDEN else "")
+            + (f" --golden-mission {name}" if golden_refusal(golden, name) else ""))
+
+
 def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: bool, golden_mission: str | None = None) -> dict[str, Any]:
-    cmd = f"python -m cafe.pm acceptance --mission {mission} --gpus {r['gpus']} --update-golden"
     if r["report"] is None:
         return _row("golden_diff", False, "the quick run wrote no report to compare")
+    cmd = update_command(golden, mission, r["gpus"], r["report"]["mission"]["name"])
     if update:
         if why := golden_refusal(golden, r["report"]["mission"]["name"], golden_mission):
             return _row("golden_diff", False, f"golden NOT updated: {why}", updated=False, refused=True, golden=str(golden))

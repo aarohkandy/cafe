@@ -1377,3 +1377,79 @@ def test_r12_m22_a_cafe_offline_that_is_no_value_is_exit_2_at_once_for_every_com
     assert calls == []
     monkeypatch.setenv("CAFE_OFFLINE", "0")
     assert cli.main(argv) == 0 and "CAFE_OFFLINE" not in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------------------------------------------- look-ahead L0 after round 12, M-7
+
+def _own_errors():
+    """One instance of each ValueError this package raises on purpose with a message for the user, apart from ConfigError (which has its own tests)."""
+    from cafe.pm.env.environment import OutsideData
+    from cafe.pm.stage3.lbm import MemoryGuardError
+    return [budget.PlanError("plan does not fit"), OutsideData("wind: outside the cached data"), MemoryGuardError("the grid does not fit the card"),
+            audit._Unreadable("x.json is not valid JSON"), whatif.Invalid("no such vehicle")]
+
+
+@pytest.mark.parametrize("i", range(5))
+def test_r12_l0_m7_damaged_run_files_lets_the_errors_this_program_raises_on_purpose_through_unwrapped(tmp_path, i):
+    """Round 12, M-7 widened the wrapped types to ValueError; PlanError, OutsideData and MemoryGuardError are ValueErrors with their own text, and a run
+    that does not fit the data does not get better with `--fresh`: they printed "damaged or incomplete (OutsideData: ...); run it again (--fresh)"."""
+    e = _own_errors()[i]
+    with pytest.raises(type(e)) as got:
+        with damaged_run_files(tmp_path):
+            raise e
+    assert got.value is e
+
+
+def test_r12_l0_m7_damaged_run_files_still_wraps_the_errors_that_damage_looks_like(tmp_path):
+    import numpy as np
+    for e in (ValueError("could not convert string to float: 'x'"), json.JSONDecodeError("Expecting value", "{", 0), np.linalg.LinAlgError("Singular matrix"),
+              UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")):
+        with pytest.raises(ConfigError, match=rf"^{tmp_path}: damaged or incomplete \({type(e).__name__}: .*\); run it again \(--fresh\)") as got:
+            with damaged_run_files(tmp_path):
+                raise e
+        assert got.value.__cause__ is e
+
+
+def test_r12_l0_m7_every_error_class_of_this_package_that_is_a_value_or_lookup_error_is_let_through(tmp_path):
+    """The rule is where the class is defined, so a class added later is covered: sweep the source for every one that exists now and check each is
+    known to `_own_errors` (or ConfigError's subclasses), so a new one is looked at here when it is added."""
+    import ast
+    known = {type(e).__name__ for e in _own_errors()} | {"ConfigError", "ResourceError"}
+    found = set()
+    for f in sorted((config.ROOT / "cafe").rglob("*.py")):
+        for n in ast.walk(ast.parse(f.read_text())):
+            if isinstance(n, ast.ClassDef) and any(isinstance(b, ast.Name) and b.id in {"ValueError", "LookupError", "KeyError", "IndexError", "TypeError",
+                                                                                         "AttributeError", "ConfigError"} for b in n.bases):
+                found.add(n.name)
+    assert found <= known, f"a new error class of this package that damaged_run_files lets through: {sorted(found - known)}; add it to _own_errors"
+
+
+def _plan_error():
+    return budget.PlanError("mission does not fit the plan")
+
+
+def _outside_data():
+    from cafe.pm.env.environment import OutsideData
+    return OutsideData("the data ends")
+
+
+@pytest.mark.parametrize("make", [_plan_error, _outside_data])
+def test_r12_l0_m7_report_prints_such_an_error_as_it_is_not_as_a_damaged_run(tmp_path, capsys, monkeypatch, make):
+    run = _damaged_run(tmp_path, monkeypatch, lambda run: None)
+    msg = str(make())
+    monkeypatch.setattr(cli.report, "write", lambda *a, **k: (_ for _ in ()).throw(make()))
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err == f"error: {msg}\n"
+
+
+@pytest.mark.parametrize("make", [_plan_error, _outside_data])
+def test_r12_l0_m7_the_stage1_command_prints_such_an_error_as_it_is_not_as_a_damaged_run(tmp_path, capsys, monkeypatch, make):
+    """`stage1 --mission M --run DIR` on a run whose environment lacks a position: the sensitivity case raises OutsideData inside `damaged_run_files`."""
+    import types
+    from cafe.pm import stage1
+    monkeypatch.setattr(pipeline, "Context", lambda *a, **k: types.SimpleNamespace(mission={}, env=None))
+    monkeypatch.setattr(stage1, "sensitivity_case", lambda *a, **k: (_ for _ in ()).throw(make()))
+    assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path)]) == 2
+    assert capsys.readouterr().err == f"error: {make()}\n"

@@ -25,6 +25,7 @@ from typing import Any
 
 from . import acceptance, audit, budget, ledger, par, pipeline, report, stage1, whatif
 from .config import ConfigError, ResourceError, damaged_run_files as _run_files, json_object as _json_object, load_mission, os_error_text
+from .env.environment import OutsideData
 from .stats import intervals
 
 
@@ -169,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"report: {ctx.run_dir / 'report' / 'index.html'}")
         else:
             return _report(pathlib.Path(a.run), a.open)
-    except (ConfigError, budget.PlanError, ResourceError) as e:
+    except (ConfigError, budget.PlanError, ResourceError, OutsideData) as e:       # the last: the data does not cover the mission
         print(f"error: {e}", file=sys.stderr)
         return 2
     except ledger.StageFailed as e:                                      # a stage's self-check failed: the message names it and the ledger has the detail

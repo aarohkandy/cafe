@@ -10,6 +10,7 @@ import copy
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -1287,3 +1288,42 @@ def test_r12_a_golden_with_no_source_key_is_listed_whole_and_a_good_one_still_pa
     g.write_text(json.dumps(rec))
     row = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
     assert not row["ok"] and len(row["values"]["provenance"]) == 4
+
+
+# ---------------------------------------------------------------------------------------------------------------- look-ahead L0 after round 12, M-33
+
+def advice_of(detail):
+    """The command a golden_diff message asks to run, as (flags by name, tokens)."""
+    import shlex
+    cmd = re.search(r"with `([^`]+)`", detail).group(1)
+    toks = shlex.split(cmd)
+    return {t: toks[i + 1] for i, t in enumerate(toks[:-1]) if t.startswith("--")}, toks
+
+
+@pytest.mark.parametrize("body, needs_mission", [("not json", True), ("[1]", True), ('{"summary": {"mission": 5}}', True), ('{"summary": 3}', True),
+                                                 ('{"summary": {"mission": "other"}}', True), ('{"summary": {"mission": "m"}}', False)])
+def test_r12_l0_m33_the_command_a_damaged_golden_asks_for_is_one_that_update_golden_accepts(tmp_path, body, needs_mission):
+    """Round 12, M-33 made `--update-golden` refuse a golden that is damaged or another mission's unless `--golden-mission NAME` is given, and left the four
+    messages that print the command to write a new golden as they were: the printed command was refused, and the first message never named the flag. It is
+    built in one place (`update_command`) with the refusal's own test, and the file given by `--golden` is in it too, or the command would write the default."""
+    f = tmp_path / "my golden.json"
+    f.write_text(body)
+    r = run_dict(tmp_path, report())
+    row = acc.check_golden(r, f, MISSION, False)
+    assert not row["ok"] and not row["values"].get("updated"), row["detail"]
+    flags, toks = advice_of(row["detail"])
+    assert flags["--golden"] == str(f) and ("--golden-mission" in flags) is needs_mission and "--update-golden" in toks
+    assert flags.get("--golden-mission") in (None, "m") and flags["--mission"] == MISSION and flags["--gpus"] == "0"
+    done = acc.check_golden(r, pathlib.Path(flags["--golden"]), flags["--mission"], True, golden_mission=flags.get("--golden-mission"))
+    assert done["values"]["updated"] is True and json.loads(f.read_text())["summary"]["mission"] == "m"           # the advice, followed, writes it
+
+
+def test_r12_l0_m33_the_command_names_golden_only_for_a_file_that_is_not_the_default_and_golden_mission_only_when_it_is_refused(tmp_path):
+    cmd = lambda g, name="m": acc.update_command(g, "mm.yaml", 2, name)                                 # noqa: E731
+    assert cmd(tmp_path / "none.json") == f"python -m cafe.pm acceptance --mission mm.yaml --gpus 2 --update-golden --golden {tmp_path / 'none.json'}"
+    other = tmp_path / "other.json"
+    other.write_text('{"summary": {"mission": "x"}}')
+    assert cmd(other).endswith(f"--golden {other} --golden-mission m") and cmd(other, "x").endswith(f"--golden {other}")
+    assert "--golden " not in cmd(acc.GOLDEN, "tepex_c_demo") and cmd(acc.GOLDEN, "tepex_c_demo").endswith("--gpus 2 --update-golden")
+    spaced = tmp_path / "a b.json"
+    assert cmd(spaced).endswith(f"--golden '{spaced}'")
