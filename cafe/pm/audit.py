@@ -25,10 +25,12 @@ older than the newest file under cafe/pm, so it cannot pass without tests having
 from __future__ import annotations
 
 import ast, datetime as dt, hashlib, importlib.metadata, json, pathlib, platform, re, subprocess, sys, tomllib
+from collections.abc import Callable
 from typing import Any
 
 from .env.remote import sha256, tree_sha256
 from .ledger import RUN_ROOT_FILES, STAGES, hashed, resolve, run_roots, shared_diff
+from .physics.comms import PARAMETER_FILES
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 BANNED = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError)\b|\bplaceholder\b|pytest\.skip|mark\.skip|skipif|xfail|\bskip\("
@@ -377,14 +379,27 @@ def pytest_passes(workers: int) -> list[list[str]]:
             base + ["--cov-append", "--cov-report=json:coverage.json", *SERIAL_TESTS]]
 
 
+def _records_none(run_dir: str | pathlib.Path, stage: str, wanted: Callable[[str], bool]) -> bool:
+    """True for a run whose `stage` ledger exists, is readable and lists no input `wanted` accepts (by its recorded `ref`): a run from before the stage
+    recorded them, so an edit of those files is not seen by `ledger_problems`."""
+    try:
+        d = _read_json(pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json")
+        return not any(isinstance(i, dict) and wanted(str(i.get("ref"))) for i in d.get("inputs", []))
+    except (_Unreadable, TypeError):  # no or damaged ledger, or `inputs` not a list: `ledger_problems` says so
+        return False
+
+
 def root_files_unrecorded(run_dir: str | pathlib.Path) -> bool:
     """True for a run whose report ledger exists and names neither `mission.yaml` nor `plan.json` as an input: made before round 11, so an edit of either is
     not seen by `ledger_problems` (the report refuses a verdict that its cut-offs do not give, which covers the mission file)."""
-    try:
-        d = _read_json(pathlib.Path(run_dir) / "checkpoints" / "report" / "ledger.json")
-        return not any(isinstance(i, dict) and i.get("ref") in RUN_ROOT_FILES for i in d.get("inputs", []))
-    except (_Unreadable, TypeError):  # no or damaged ledger, or `inputs` not a list: `ledger_problems` says so
-        return False
+    return _records_none(run_dir, "report", RUN_ROOT_FILES.__contains__)
+
+
+def link_tables_unrecorded(run_dir: str | pathlib.Path) -> bool:
+    """True for a run whose hangar ledger exists and names neither of the link tables `comms.PARAMETER_FILES` (`platforms/radios.yaml`, `modems.yaml`) as an
+    input: made before DECISIONS 635, so an edit of either is not seen by `ledger_problems` (round 12, P-R12Q3). The ref is the path the table was read
+    from, so a run is matched by the file's name."""
+    return _records_none(run_dir, "hangar", lambda ref: pathlib.PurePath(ref).name in PARAMETER_FILES)
 
 
 PYTEST_RECEIPT = "coverage.receipt.json"        # beside coverage.json: {code_digest, coverage_sha256, suite_ok, date}, written only for a suite that passed
@@ -484,6 +499,9 @@ def main(argv: list[str]) -> int:
         problems += ledger_problems(r)
         if root_files_unrecorded(r):
             print(f"note: {r}: the report ledger records neither mission.yaml nor plan.json (a run from before round 11): an edit of either is not seen here")
+        if link_tables_unrecorded(r):
+            print(f"note: {r}: the hangar ledger records neither platforms/modems.yaml nor platforms/radios.yaml (a run from before round 11's look-ahead, "
+                  "DECISIONS 635): an edit of either is not seen here")
     if not ledgers_only:
         problems += banned()
         problems += mutation_problems(ROOT)

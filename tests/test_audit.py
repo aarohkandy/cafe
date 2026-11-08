@@ -12,11 +12,13 @@ import pytest
 from cafe.pm import audit, ledger
 from cafe.pm.env.remote import sha256
 from cafe.pm.env import surface
+from cafe.pm.physics import comms
 from cafe.pm.ledger import Ledger
 
 
-def make_run(tmp_path, stages=audit.STAGES):
-    """A run dir whose ledgers chain the way pipeline.py writes them: each stage lists the previous stage's ledger as an input."""
+def make_run(tmp_path, stages=audit.STAGES, extra_inputs=None):
+    """A run dir whose ledgers chain the way pipeline.py writes them: each stage lists the previous stage's ledger as an input, and any file of
+    `extra_inputs` ({stage: [path]}) as well."""
     run = tmp_path / "run"
     prev = None
     for st in stages:
@@ -26,6 +28,8 @@ def make_run(tmp_path, stages=audit.STAGES):
         with Ledger(run, st, "cfg") as L:
             if prev is not None:
                 L.input(prev)
+            for f in (extra_inputs or {}).get(st, []):
+                L.input(f)
             L.check("c", True)
             L.output(out)
         prev = run / "checkpoints" / st / "ledger.json"
@@ -1210,6 +1214,62 @@ def test_r11_m25_a_coverage_file_with_a_summary_that_is_not_a_mapping_is_a_damag
     cov.write_text('{"files": {"cafe/pm/a.py": {"summary": 5}}}')
     probs = audit.coverage_problems(cov)
     assert len(probs) == 1 and probs[0].startswith(f"coverage: {cov} is damaged or incomplete (TypeError")
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 13 pre-pass, P-R12Q3
+
+def run_with_hangar_inputs(tmp_path, names):
+    """A run whose hangar ledger lists the files `names` under platforms/, as `pipeline.s_hangar` lists the vehicle platforms and (635) the link tables."""
+    files = []
+    for n in names:
+        f = tmp_path / "platforms" / n
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(n)
+        files.append(f)
+    return make_run(tmp_path, extra_inputs={"hangar": files})
+
+
+def test_r13_q3_a_run_whose_hangar_ledger_has_no_link_table_gets_a_note_and_stays_clean(tmp_path, capsys):
+    """DECISIONS 635: an edit of platforms/radios.yaml or modems.yaml after a run from before it is invisible to the audit; 594's note for mission.yaml and
+    plan.json is the form, so the blind spot is said, not silent (P-R12Q3). A note, not a problem: exit 0."""
+    run = make_recorded_run(tmp_path)
+    assert audit.ledger_problems(run) == [] and audit.link_tables_unrecorded(run)
+    capsys.readouterr()
+    assert audit.main(["--ledgers-only", str(run)]) == 0
+    out = capsys.readouterr().out
+    assert f"note: {run}: the hangar ledger records neither platforms/modems.yaml nor platforms/radios.yaml" in out
+    assert "records neither mission.yaml nor plan.json" not in out and "problem" not in out.replace("0 problem(s)", "")
+
+
+def test_r13_q3_a_run_that_records_the_link_tables_gets_no_note_and_each_note_stands_alone(tmp_path, capsys):
+    run = run_with_hangar_inputs(tmp_path, ("seaglider.yaml", *comms.PARAMETER_FILES))
+    assert audit.ledger_problems(run) == [] and not audit.link_tables_unrecorded(run)
+    capsys.readouterr()
+    assert audit.main(["--ledgers-only", str(run)]) == 0
+    out = capsys.readouterr().out
+    assert "hangar ledger records" not in out and "report ledger records neither" in out                  # each note is decided by its own ledger
+    old = make_run(tmp_path / "old")                                                  # neither kind recorded: both notes, in this order
+    assert audit.main(["--ledgers-only", str(old)]) == 0
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("note:")]
+    assert ["mission.yaml nor plan.json" in lines[0], "platforms/modems.yaml" in lines[1]] == [True, True] and len(lines) == 2
+
+
+def test_r13_q3_the_note_names_the_tables_the_hangar_stage_records(tmp_path):
+    """The names the note looks for are `comms.PARAMETER_FILES`, the ones `s_hangar` records, so a third table added there is looked for here too."""
+    for n in comms.PARAMETER_FILES:
+        assert not audit.link_tables_unrecorded(run_with_hangar_inputs(tmp_path / n, (n,)))
+    assert audit.link_tables_unrecorded(run_with_hangar_inputs(tmp_path / "v", ("seaglider.yaml",)))     # a vehicle platform is not a link table
+
+
+@pytest.mark.parametrize("ledger_text", ['{"inputs": 5}', '{"inputs": null}', "{cut", "[1]", None])
+def test_r13_q3_a_hangar_ledger_that_cannot_be_read_is_no_old_run_either(tmp_path, ledger_text):
+    run = make_run(tmp_path)
+    p = ledger_path(run, "hangar")
+    if ledger_text is None:
+        p.unlink()
+    else:
+        p.write_text(ledger_text)
+    assert audit.link_tables_unrecorded(run) is False
 
 
 @pytest.mark.parametrize("ledger_text", ['{"inputs": 5}', '{"inputs": null}', "{cut", "[1]", None])
