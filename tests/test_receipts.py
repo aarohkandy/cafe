@@ -1,6 +1,7 @@
 """cafe.pm.receipts: the table, the exit codes, the broken wave-direction configuration, and the direction convention setting."""
 import json
 import math
+import os
 import pathlib
 import re
 
@@ -588,6 +589,20 @@ def test_only_that_matches_no_group_exits_2_and_writes_nothing_and_a_part_goes_t
     assert (tmp_path / "x.json").exists()
 
 
+def test_r12_m31_every_part_of_only_must_select_a_group_and_an_empty_part_selects_none(tmp_path, monkeypatch):
+    """Round 12, M-31: `--only a,typo` ran `a` and said nothing of `typo`; a stray comma (`a,`) made the empty part select every group."""
+    monkeypatch.setattr(pr, "ROOT", tmp_path)
+    monkeypatch.setattr(pr, "jobs", jobs_of(("pm.env.waves", passing), ("pm.emulator", failing)))
+    logs = []
+    assert pr.run(only=["waves", "zzz"], log=logs.append) == ([], 2)
+    assert logs[-1].startswith("no receipt group matches 'zzz'; the groups are: pm.env.waves, pm.emulator") and "'waves'" not in logs[-1]
+    assert pr.run(only=["waves", ""], log=logs.append) == ([], 2) and logs[-1].startswith("no receipt group matches ''; ")
+    assert pr.run(only=["zzz", "yyy"], log=logs.append) == ([], 2) and logs[-1].startswith("no receipt group matches 'zzz', 'yyy'; ")
+    assert not (tmp_path / "runs").exists()                                                          # nothing written by any of them
+    rows, rc = pr.run(only=["waves", "emulator"], log=lambda s: None)
+    assert {r["module"] for r in rows} == {"pm.env.waves", "pm.emulator"}
+
+
 def test_the_gebco_cache_is_found_under_the_name_bathy_writes_and_its_absence_is_a_context_row(tmp_path, monkeypatch):      # round 7, M-39
     from cafe import receipts as R
     monkeypatch.setenv("CAFE_DATA", str(tmp_path))
@@ -691,3 +706,126 @@ def test_lb0_the_tao_receipt_checks_every_cache_with_a_manifest_the_older_rule_i
     assert dict(pr.jobs())["pm.env.tao"] == {"out_dir": [older, current]}
     older.joinpath("manifest.json").unlink()
     assert dict(pr.jobs())["pm.env.tao"] == {"out_dir": [current]}
+
+
+def test_r12_m8_the_table_is_written_through_a_temporary_so_a_killed_run_keeps_the_old_one(tmp_path, monkeypatch):
+    """Round 12, M-8: `out.write_text` truncated the table first; a kill mid-write left a half file that the report then read."""
+    monkeypatch.setattr(pr, "jobs", jobs_of(("pm.fake", passing)))
+    out = tmp_path / "receipts.json"
+    pr.run(out=out, log=lambda _: None)
+    old = out.read_bytes()
+    assert not list(tmp_path.glob("*.tmp"))
+    monkeypatch.setattr(pr, "jobs", jobs_of(("pm.fake", failing)))
+
+    def killed(src, dst):
+        raise OSError("killed between the write and the rename")
+    monkeypatch.setattr("os.replace", killed)
+    with pytest.raises(OSError, match="killed"):
+        pr.run(out=out, log=lambda _: None)
+    assert out.read_bytes() == old
+
+
+def test_r12_m8_the_meta_record_is_written_through_a_temporary_too(tmp_path, monkeypatch):
+    """Round 12, M-8 (sibling): `write_meta` used `write_text`, so a kill mid-write left a half receipts.meta.json beside a whole table, and the report said
+    "no readable receipts.meta.json" for a table that was fine."""
+    table = tmp_path / "receipts.json"
+    meta = pr.write_meta(table)
+    old = meta.read_bytes()
+    assert json.loads(old)["code_digest"] and not list(tmp_path.glob("*.tmp"))
+
+    def killed(src, dst):
+        raise OSError("killed between the write and the rename")
+    monkeypatch.setattr("os.replace", killed)
+    with pytest.raises(OSError, match="killed"):
+        pr.write_meta(table, slow=True)
+    assert meta.read_bytes() == old
+
+
+# ---- review round 12, M-35: stored app results are stamped or they are not receipts; the receipts put the environment back
+
+def crosscheck(**extra):
+    return dict(drones=dict(q=dict(firmware="ArduCopter", fast=dict(battery_left=0.5, hold_p95=1.0), sitl=dict(battery_left=0.5, hold_p95=1.0))), **extra)
+
+
+def run_crosscheck(tmp_path, rec):
+    R.OUT.clear()
+    (tmp_path / "crosscheck.json").write_text(json.dumps(rec))
+    R.crosscheck_receipts(tmp_path)
+    return list(R.OUT)
+
+
+def test_r12_m35_a_hand_written_crosscheck_is_not_a_pass_but_a_stamped_one_from_this_code_is(tmp_path):
+    """Round 12, M-35: a crosscheck.json with equal fast and SITL numbers became two PASS rows ("ArduPilot SITL flying the same physics") with nothing in
+    it to say which code made it, when, or that SITL ran at all."""
+    rows = run_crosscheck(tmp_path, crosscheck())
+    assert [r["kind"] for r in rows] == ["context"] and "unstamped" in rows[0]["claim"] and "date, host, git_sha, code_digest" in rows[0]["claim"]
+    assert not [r for r in rows if r.get("kind") != "context"]
+    part = crosscheck(date="2026-11-08T00:00:00+00:00", host="h", git_sha="abc" * 14)                                    # a stamp with a field missing
+    assert "carries no code_digest" in run_crosscheck(tmp_path, part)[0]["claim"]
+    old = dict(part, code_digest="0" * 64)
+    rows = run_crosscheck(tmp_path, old)
+    assert [r["kind"] for r in rows] == ["context"] and "was made by different code (stale)" in rows[0]["claim"] and "2026-11-08" in rows[0]["claim"]
+    rows = run_crosscheck(tmp_path, R.stamp(crosscheck()))
+    assert [r.get("kind") for r in rows] == [None, None] and all(r["ok"] for r in rows)
+    assert all(r["source"].startswith("ArduPilot SITL") or "absolute difference" in r["source"] for r in rows)
+    assert all(" [stored 20" in r["source"] and ", git " in r["source"] for r in rows)
+    (tmp_path / "crosscheck.json").write_text("[1]")
+    R.OUT.clear()
+    R.crosscheck_receipts(tmp_path)
+    assert "cannot be read as a JSON object (it holds list, not an object)" in R.OUT[0]["claim"]
+    (tmp_path / "crosscheck.json").write_text("{cut")
+    R.OUT.clear()
+    R.crosscheck_receipts(tmp_path)
+    assert R.OUT[0]["kind"] == "context" and "cannot be read" in R.OUT[0]["claim"]
+    (tmp_path / "crosscheck.json").unlink()
+    R.OUT.clear()
+    R.crosscheck_receipts(tmp_path)
+    assert R.OUT == []                                                                              # no file: no row here; `_app` says so once
+
+
+def test_r12_m35_the_stamp_is_the_one_pm_receipts_checks_and_the_cfd_results_go_through_it(tmp_path, monkeypatch):
+    assert R.app_digest() == pr.code_digest("app")                                                   # the two recipes cannot drift apart
+    for sub, name in (("t1", "torpedo.external.json"), ("w1", "wigley.surface.json"), ("s1", "suboff.incidence.json")):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / name).write_text(json.dumps(dict(dirs={}, speeds={})))                       # unstamped, and not even a result
+    R.cfd_receipts(tmp_path)
+    assert [(d["group"], d["kind"]) for d in R.OUT] == [("CFD", "context")] * 3 and all("unstamped" in d["claim"] for d in R.OUT)
+    seen = []
+    monkeypatch.setattr(R, "suboff_receipts", lambda c: (seen.append(c), R.receipt("Hull lift", "x", 1.0, 1.0, 0.1, "", "Roddy"))[1])
+    R.OUT.clear()
+    (tmp_path / "s1" / "suboff.incidence.json").write_text(json.dumps(R.stamp(dict(rho=1.0))))
+    R.cfd_receipts(tmp_path)
+    suboff = [d for d in R.OUT if d["group"] == "Hull lift"]
+    assert seen[0]["rho"] == 1.0 and len(suboff) == 1 and suboff[0]["source"].startswith("Roddy [stored 20")
+
+
+def test_r12_m35_a_receipt_that_raises_leaves_the_environment_as_it_was(monkeypatch):
+    """Round 12, M-35: `fleet_receipts` set CAFE_OCEAN=0 and halved the quad step, and put them back on the last line only; and it wrote CAFE_OCEAN=1 over
+    whatever the caller had."""
+    import datetime as dt
+    from cafe import env as envm, mission
+    calls = []
+
+    def run(world):
+        calls.append(mission.PHYS_DT["uav"])
+        if len(calls) == 2:
+            raise RuntimeError("the second run (half the step) died")
+        return dict(drones=dict(q=dict(energy_wh_p50=1.0, legs=[0, dict(err95_m_p50=1.0)])))
+    monkeypatch.setattr(mission, "run", run)
+    dt0 = mission.PHYS_DT["uav"]
+    monkeypatch.setenv("CAFE_OCEAN", "0")
+    with pytest.raises(RuntimeError, match="half the step"):
+        R.fleet_receipts()
+    assert calls == [dt0, dt0 / 2] and mission.PHYS_DT["uav"] == dt0 and os.environ["CAFE_OCEAN"] == "0"          # not "1", and not left halved
+    monkeypatch.delenv("CAFE_OCEAN")
+    calls.clear()
+    with pytest.raises(RuntimeError):
+        R.fleet_receipts()
+    assert "CAFE_OCEAN" not in os.environ and mission.PHYS_DT["uav"] == dt0
+    t0 = dt.datetime(2018, 2, 3, 14)                                                                     # weather_receipts: the same
+    monkeypatch.setattr(envm, "catalog", lambda: {t0: ("p", 0), t0 + dt.timedelta(hours=3): ("p", 0)})
+    monkeypatch.setattr(envm, "Env", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no weather")))
+    monkeypatch.setenv("CAFE_OCEAN", "0")
+    with pytest.raises(RuntimeError, match="no weather"):
+        R.weather_receipts()
+    assert os.environ["CAFE_OCEAN"] == "0"

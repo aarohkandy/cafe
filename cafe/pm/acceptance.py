@@ -20,7 +20,8 @@ separate step of RUNBOOK 4, whose duration depends on the lab's link, not on `--
 
 The golden keeps, per vehicle and link: verdict, k_fail, n, P(fail) and the interval's confidence, plus class and platform; and the mission name and
 seed. Two estimates from independent runs (the golden's, or the first run's, against the new one) are compared like this: the mission name, the seed
-(not for other_seed), class, platform, n and the set of vehicles and links must match exactly. A verdict must be identical wherever either run has it
+(not for other_seed), class, platform, the set of vehicles and links, and n (not for other_seed: the stopping rule ends a vehicle at 32 members under one seed
+and at 64 under another, and Newcombe's interval takes the two n) must match exactly. A verdict must be identical wherever either run has it
 decided, that is wherever `stats.intervals.decided_region` at the stopper's confidence (`stats.sequential.STOP_CONF`) puts the whole P(fail) interval
 inside GO, MARGINAL (0.10 to 0.40) or NO-GO. The rule for the verdicts that are undecided in both runs (a vehicle near a threshold at a quick budget
 cannot be decided): such a verdict may differ, but only within the interval logic. It is allowed when the two runs' P(fail) intervals at the stopper's
@@ -40,6 +41,8 @@ checkout that was clean), the code digest, and the reviewed run (the run's name 
 that names the command writing a new one. A missing golden is a FAIL that names the command writing it, and so is one that is not JSON, not an object, or whose
 `summary` is missing or of the wrong structure (`shape_problems`: a problem line that names the key, never a traceback). `--update-golden` rewrites it
 from the quick run and that check then FAILs ("updated, not compared"), so a gate cannot be passed by overwriting its reference.
+`--update-golden` refuses to overwrite a golden of another mission, or a file that is not a golden, unless `--golden-mission NAME` names this run's
+mission (round 12, M-33); the first write, with no file, needs nothing.
 `--skip-overnight` is for rehearsals: the overnight check FAILs with "overnight not run". Exit 0 only if every check passes.
 DIR/acceptance.json and DIR/acceptance.txt hold the result.
 """
@@ -61,7 +64,8 @@ WAVE_MODULE = "pm.env.wave_direction"
 RUNS: dict[str, tuple[str, int]] = dict(quick=("quick", 0), overnight=("overnight", 0), gpu=("4h", 1))      # role -> (budget, gpus)
 VOLATILE = ("run", "machine.wall_s", "machine.git_sha", "machine.versions", "machine.machine",   # report.json paths that differ between identical runs
             # the measured side of planned/measured (round 5, M-13; round 6, M-17)
-            "machine.timing.stage1.measured", "machine.timing.variants.measured", "machine.timing.stage1b_sensitivity.measured")
+            "machine.timing.stage1.measured", "machine.timing.variants.measured", "machine.timing.stage1b_sensitivity.measured",
+            "machine.timing.total")                                              # (round 12, M-9: the sum of the walls, and its ratio to the budget)
 HOLDOUT, CREDIBILITY = "emulator:output:holdout.json", "report:output:credibility.json"            # receipts whose files hold a timing / the run's name
 KILL_AT = 2.0                                                                                          # a run is killed at this multiple of its limit
 EPS = 1e-9
@@ -285,7 +289,8 @@ def compare(ref: Any, new: Any, seed: bool = True) -> tuple[list[str], list[str]
             bad.append(f"{kind}: {sorted(a)} in the reference, {sorted(b)} now")
         for k in sorted(a.keys() & b.keys()):
             g, r = a[k], b[k]
-            bad += [f"{kind} {k}: {f} {g.get(f)!r} in the reference, {r.get(f)!r} now" for f in ("cls", "platform", "n") if g.get(f) != r.get(f)]
+            exact = ("cls", "platform", "n") if seed else ("cls", "platform")       # round 12, M-32: n depends on the data (the stopping rule)
+            bad += [f"{kind} {k}: {f} {g.get(f)!r} in the reference, {r.get(f)!r} now" for f in exact if g.get(f) != r.get(f)]
             notcount = [f"{kind} {k}: {what}" for who, e in (("in the reference", g), ("now", r)) for what in _damage(e, who)]
             if notcount:                                  # an edited golden (n = 0, a p_fail of None, no conf): a problem line, not a traceback (look-ahead L0)
                 bad += notcount
@@ -299,7 +304,8 @@ def compare(ref: Any, new: Any, seed: bool = True) -> tuple[list[str], list[str]
                                f"undecided in both, but the {sequential.STOP_CONF:.0%} "
                                f"intervals on P(fail), {glo:.3f} to {ghi:.3f} and {rlo:.3f} to {rhi:.3f}, do not overlap")
                 else:
-                    notes.append(f"{kind} {k}: {g['verdict']} -> {r['verdict']}, undecided in both at n = {g['n']}")
+                    at = f"n = {g['n']}" if g["n"] == r["n"] else f"n = {g['n']} and {r['n']}"
+                    notes.append(f"{kind} {k}: {g['verdict']} -> {r['verdict']}, undecided in both at {at}")
             if seed:                                                    # round 11, M-4: one seed, one code: the counts are the run's own, not a draw
                 bad += _same_seed_problems(kind, k, g, r)
                 continue
@@ -350,11 +356,32 @@ def _golden_record(r: dict[str, Any], mission: str) -> dict[str, Any]:
                 summary=summary(r["report"]))
 
 
-def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: bool) -> dict[str, Any]:
+def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) -> str | None:
+    """Why `--update-golden` may not write `golden` for the mission `name`, or None. A golden that is there must be one for the same mission: a file that
+    is not a golden (unreadable, not an object, no summary.mission) or one for another mission is somebody's reference, and one `--update-golden` from
+    the CI fixture would replace the demo's. `allowed` is the mission named by `--golden-mission`: it lets that mission replace the file. The first
+    write, with no file, is always allowed (round 12, M-33)."""
+    if not golden.exists():
+        return None
+    try:
+        had = json.loads(golden.read_text())["summary"]["mission"]
+    except (OSError, ValueError, KeyError, TypeError):
+        had = None
+    had = had if isinstance(had, str) else None                                                  # {"summary": {"mission": 5}} is no golden either
+    if had == name or allowed == name:
+        return None
+    what = "is not a golden file (no summary.mission)" if had is None else f"is the golden of mission {had!r}"
+    return (f"{golden} {what} and this run is mission {name!r}: not overwritten. To replace it with this mission's golden add `--golden-mission {name}`, "
+            "or name another file with `--golden`")
+
+
+def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: bool, golden_mission: str | None = None) -> dict[str, Any]:
     cmd = f"python -m cafe.pm acceptance --mission {mission} --gpus {r['gpus']} --update-golden"
     if r["report"] is None:
         return _row("golden_diff", False, "the quick run wrote no report to compare")
     if update:
+        if why := golden_refusal(golden, r["report"]["mission"]["name"], golden_mission):
+            return _row("golden_diff", False, f"golden NOT updated: {why}", updated=False, refused=True, golden=str(golden))
         golden.parent.mkdir(parents=True, exist_ok=True)
         golden.write_text(json.dumps(_golden_record(r, mission), indent=1, allow_nan=False) + "\n")
         return _row("golden_diff", False, f"golden {golden} UPDATED from this run, not compared: rerun without --update-golden to check against it",
@@ -388,13 +415,22 @@ def _drop(rep: dict[str, Any], path: str) -> None:
     node.pop(last, None)
 
 
+def _each_str(o: Any, f: Callable[[str], str]) -> Any:
+    """`o` (parsed JSON) with `f` applied to every string, dict keys included."""
+    if isinstance(o, dict):
+        return {(f(k) if isinstance(k, str) else k): _each_str(v, f) for k, v in o.items()}
+    if isinstance(o, list):
+        return [_each_str(v, f) for v in o]
+    return f(o) if isinstance(o, str) else o
+
+
 def normalize(rep: dict[str, Any], run_dir: pathlib.Path) -> dict[str, Any]:
     """report.json without the fields that legitimately differ between two identical runs: VOLATILE, each trained emulator's query time, the
     sha-256 of holdout.json (it holds that time), and the run directory's path; credibility.json's sha-256 is replaced by that of the file without
     the run directory (its path and its own "run" field), or dropped when the file is not there."""
-    def unrun(text: str) -> str:
+    def unrun(text: str) -> str:               # on parsed strings, not on JSON text, which escapes a non-ASCII letter, a quote and a backslash in the path
         return text.replace(str(run_dir.resolve()), "<run>").replace(str(run_dir), "<run>")
-    out: dict[str, Any] = json.loads(unrun(json.dumps(rep)))
+    out: dict[str, Any] = _each_str(rep, unrun)
     for p in VOLATILE:
         _drop(out, p)
     for e in out.get("emulator", {}).get("vehicles", {}).values():
@@ -404,7 +440,7 @@ def normalize(rep: dict[str, Any], run_dir: pathlib.Path) -> dict[str, Any]:
         if r.get("id") == HOLDOUT or (r.get("id") == CREDIBILITY and not cred.is_file()):
             r.pop("sha256", None)
         elif r.get("id") == CREDIBILITY:
-            c = json.loads(unrun(cred.read_text()))
+            c = _each_str(json.loads(cred.read_text()), unrun)
             c.pop("run", None)
             r["sha256"] = hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
     return out
@@ -458,9 +494,14 @@ def check_broken(out: pathlib.Path) -> dict[str, Any]:
 
 
 def run(mission: str, gpus: int, out: pathlib.Path, golden: pathlib.Path = GOLDEN, update_golden: bool = False, skip_overnight: bool = False,
-        log: Callable[[str], None] = print) -> tuple[list[dict[str, Any]], int]:
-    """-> (check rows, exit code)."""
-    seed = int(config.load_mission(mission)["seed"])
+        log: Callable[[str], None] = print, golden_mission: str | None = None) -> tuple[list[dict[str, Any]], int]:
+    """-> (check rows, exit code). `golden_mission`: the mission `--golden-mission` lets replace a golden of another mission."""
+    spec = config.load_mission(mission)
+    seed = int(spec["seed"])
+    if update_golden and (why := golden_refusal(golden, spec["name"], golden_mission)):          # before hours of runs, not after (check_golden holds it too)
+        row = _row("golden_diff", False, f"golden NOT updated, and no run started: {why}", updated=False, refused=True, golden=str(golden))
+        log(f"FAIL  {row['name']}: {row['detail']}")
+        return [row], 1
     refuse_wiped_mission(mission, out, RUN_NAMES)
     claim_out(out, RUN_NAMES)
     rows: list[dict[str, Any]] = []
@@ -480,7 +521,7 @@ def run(mission: str, gpus: int, out: pathlib.Path, golden: pathlib.Path = GOLDE
         shutil.copyfile(shared, pristine)
     q = fresh("quick", "quick")
     step(check_run(q))
-    step(check_golden(q, golden, mission, update_golden))
+    step(check_golden(q, golden, mission, update_golden, golden_mission))
     same, other = fresh("quick_same", "quick"), fresh("quick_seed", "quick", seed + 1)
     step(check_run(same))
     step(check_same_seed(q, same))
@@ -508,7 +549,7 @@ def table(rows: list[dict[str, Any]]) -> str:
 def main(a: argparse.Namespace) -> int:
     out = pathlib.Path(a.out)
     started = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
-    rows, rc = run(a.mission, a.gpus, out, pathlib.Path(a.golden), a.update_golden, a.skip_overnight)
+    rows, rc = run(a.mission, a.gpus, out, pathlib.Path(a.golden), a.update_golden, a.skip_overnight, golden_mission=getattr(a, "golden_mission", None))
     text = table(rows)
     out.mkdir(parents=True, exist_ok=True)
     (out / "acceptance.txt").write_text(text + "\n")

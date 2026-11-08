@@ -314,6 +314,50 @@ def test_update_golden_records_the_run_and_the_code_it_came_from_but_never_passe
     assert rec["command"].endswith("--update-golden") and "wall_s" not in g.read_text()
 
 
+def test_r12_m33_update_golden_will_not_overwrite_the_golden_of_another_mission_or_a_file_that_is_not_a_golden(tmp_path):
+    """Round 12, M-33: `--update-golden` from the CI fixture overwrote tests/golden/tepex_c_demo_quick.json and the next demo acceptance failed with
+    "mission: ci_fixture in the reference". `--golden` pointed at any file overwrote it, too."""
+    g = tmp_path / "g.json"
+    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)["values"]["updated"]                      # the first write: no file, no refusal
+    before = g.read_bytes()
+    other = report(mission=dict(name="other", seed=dict(value=7)))
+    r = acc.check_golden(run_dict(tmp_path, other), g, MISSION, True)
+    assert not r["ok"] and r["values"]["updated"] is False and g.read_bytes() == before
+    assert "is the golden of mission 'm'" in r["detail"] and "this run is mission 'other'" in r["detail"] and "--golden-mission other" in r["detail"]
+    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)["values"]["updated"] is True              # the same mission is rebased as before
+    wrong = acc.check_golden(run_dict(tmp_path, other), g, MISSION, True, golden_mission="m")                  # a flag naming another mission does not
+    assert wrong["values"]["updated"] is False
+    named = acc.check_golden(run_dict(tmp_path, other), g, MISSION, True, golden_mission="other")
+    assert named["values"]["updated"] is True and json.loads(g.read_text())["summary"]["mission"] == "other"
+    for body in ("not json", "[1]", "{}", '{"summary": {"mission": 5}}', '{"summary": 3}'):
+        f = tmp_path / "x.json"
+        f.write_text(body)
+        r = acc.check_golden(run_dict(tmp_path, other), f, MISSION, True)
+        assert r["values"]["updated"] is False and f.read_text() == body and "is not a golden file" in r["detail"], body
+    assert acc.check_golden(run_dict(tmp_path, other), f, MISSION, True, golden_mission="other")["values"]["updated"] is True
+    assert acc.golden_refusal(tmp_path / "nothing.json", "any") is None
+
+
+def test_r12_m33_the_refusal_comes_before_any_run_starts(tmp_path, monkeypatch):
+    g = tmp_path / "g.json"
+    g.write_text(json.dumps(dict(summary=dict(mission="tepex_c_demo"))))
+    monkeypatch.setattr(acc, "run_one", lambda *a, **k: pytest.fail("a run started"))
+    log = []
+    rows, rc = acc.run(MISSION, 0, tmp_path / "o", g, update_golden=True, log=log.append)
+    assert rc == 1 and [r["name"] for r in rows] == ["golden_diff"] and "no run started" in rows[0]["detail"] and "'ci_fixture'" in rows[0]["detail"]
+    assert log and log[0].startswith("FAIL  golden_diff") and not (tmp_path / "o").exists()
+
+
+def test_r12_m33_the_flag_reaches_the_check_through_main(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(acc, "run", lambda *a, **k: (seen.append(k), ([], 0))[1])
+    ns = type("A", (), dict(out=str(tmp_path), mission=MISSION, gpus=0, golden="g", update_golden=True, skip_overnight=False))
+    acc.main(ns)
+    assert seen[-1] == dict(golden_mission=None)
+    acc.main(type("B", (ns,), dict(golden_mission="ci_fixture")))
+    assert seen[-1] == dict(golden_mission="ci_fixture")
+
+
 def test_the_golden_it_wrote_passes_and_a_changed_verdict_or_p_fail_then_fails(tmp_path):
     g = tmp_path / "g.json"
     acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
@@ -372,6 +416,22 @@ def test_normalize_hashes_credibility_json_without_its_run_directory(tmp_path):
         (d / "report" / "credibility.json").write_text(json.dumps(dict(run=name, evidence=f"{d}/ledger.json", text=body)))
         shas.append(acc.normalize(report(receipts=rec), d)["receipts"][0]["sha256"])
     assert shas[0] == shas[1] != shas[2] and len(shas[0]) == 64
+
+
+@pytest.mark.parametrize("name", ["café", 'q"x', "a\\b", "a b", "quick"])
+def test_r12_m30_a_run_directory_with_a_non_ascii_letter_a_quote_or_a_backslash_is_still_normalised(tmp_path, name):
+    """Round 12, M-30: the path was replaced in the JSON text of the report, where `é`, `"` and `\\` are escaped, so same_seed failed for a checkout
+    under such a path although both runs were identical."""
+    d, e = tmp_path / name, tmp_path / (name + "_same")
+    n = []
+    for run in (d, e):
+        (run / "report").mkdir(parents=True)
+        (run / "report" / "credibility.json").write_text(json.dumps(dict(run=run.name, evidence=f"{run}/ledger.json", at={f"{run}/k": [f"{run}/l"]})))
+        rep = report(run=run.name, note=f"see {run}/ledger.json", where={f"{run}/key": f"{run}/ingest/a.json"})
+        rep["receipts"] = [dict(id=acc.CREDIBILITY, stage="report", sha256="dd")]
+        n.append(acc.normalize(rep, run))
+    assert n[0] == n[1] and n[0]["note"] == "see <run>/ledger.json" and n[0]["where"] == {"<run>/key": "<run>/ingest/a.json"}
+    assert name not in json.dumps(n[0], ensure_ascii=False)
 
 
 def test_every_run_gets_its_own_copy_of_the_pristine_emulator_table(tmp_path, monkeypatch):
@@ -1105,10 +1165,30 @@ def test_l0_r11_a_summary_with_n_zero_or_k_beyond_n_is_a_problem_line_not_a_zero
     problems = acc.diff(ref, new, seed=seed)
     where = "in the reference" if which == "reference" else "now"
     assert f"links rf: k_fail 0 of n 0 {where} is not a count (integers, n >= 1, 0 <= k_fail <= n)" in problems
-    assert any(p.startswith("links rf: n ") for p in problems)                          # the n mismatch is reported, too
+    assert any(p.startswith("links rf: n ") for p in problems) == seed                  # the n mismatch is reported, too, where n must be the same (M-32)
     over = copy.deepcopy(g)
     over["vehicles"]["usv"]["k_fail"] = over["vehicles"]["usv"]["n"] + 1
     assert any("is not a count" in p for p in acc.diff(g, over, seed=seed))
+
+
+def test_r12_m32_another_seed_may_stop_at_another_n_and_the_same_seed_may_not():
+    """Round 12, M-32: `other_seed` demanded the same n, which the stopping rule makes data-dependent (32 members under one seed, 64 under another)."""
+    g = acc.summary(report())
+    new = copy.deepcopy(g)
+    new["vehicles"]["usv"].update(k_fail=60, n=80, p_fail=60 / 80)                      # usv was 30 of 40: the same P(fail) at twice the members
+    assert acc.diff(g, new, seed=False) == []
+    assert any(p.startswith("vehicles usv: n 40 in the reference, 80 now") for p in acc.diff(g, new, seed=True))
+    new["vehicles"]["usv"].update(k_fail=8, n=80, p_fail=0.1)                           # a different P(fail) is still found, at the other n
+    assert any("Newcombe" in p and p.startswith("vehicles usv: P(fail)") for p in acc.diff(g, new, seed=False))
+    und, other = copy.deepcopy(g), copy.deepcopy(g)
+    und["vehicles"]["gl"].update(verdict="MARGINAL", k_fail=5, n=40, p_fail=5 / 40)             # both undecided at their n (the intervals cross 0.10)
+    other["vehicles"]["gl"].update(verdict="GO", k_fail=4, n=64, p_fail=4 / 64)
+    notes = acc.compare(und, other, seed=False)[1]
+    assert notes == ["vehicles gl: MARGINAL -> GO, undecided in both at n = 40 and 64"]
+    for who in ("cls", "platform"):
+        bad = copy.deepcopy(other)
+        bad["vehicles"]["gl"][who] = "other"
+        assert any(p.startswith(f"vehicles gl: {who} ") for p in acc.diff(und, bad, seed=False))
 
 
 # ---------------------------------------------------------------------------------------------------------------- round 12: the golden's structure

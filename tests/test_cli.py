@@ -1146,7 +1146,7 @@ def test_r10_m32_hangar_counts_the_assumed_inputs_the_way_the_credibility_report
         assert len(out) == 1 + len(want)
     assert cli.main(["hangar", "--platform", "modems"]) == 0
     out = capsys.readouterr().out
-    assert "modems.benthos_atm960 = None" in out and "modems.whoi_micromodem = None" in out and "ASSUMED: sl_db 190" in out
+    assert "modems.benthos_atm960 = n/a (see why)" in out and "modems.whoi_micromodem = n/a (see why)" in out and "ASSUMED: sl_db 190" in out  # M-34
 
 
 def test_r10_m32_a_platform_file_with_an_entry_level_assumed_sentence_counts_it(capsys, tmp_path):

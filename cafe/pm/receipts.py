@@ -228,7 +228,8 @@ def wave_direction_receipts() -> None:
 
 def _app(results: pathlib.Path) -> None:
     """The existing app's quick receipts, in the order `python -m cafe.receipts` runs them (its FEA ones are the slow group `app.fea`).
-    The CFD and SITL cross-check results it reads are optional inputs from earlier hangar runs: absent means a context row."""
+    The CFD and SITL cross-check results it reads are optional inputs from earlier hangar runs: absent means a context row, and so does one that carries no
+    stamp or was made by other code (`cafe.receipts.stored`, round 12, M-35)."""
     from cafe import receipts as R
     for f in (R.geometry_receipts, R.env_receipts, R.weather_receipts, R.dynamics_receipts, R.hull_lift_algebra_receipts, R.ocean_receipts,
               R.bem_receipts, R.fleet_receipts):
@@ -433,10 +434,11 @@ def meta_path(table: pathlib.Path) -> pathlib.Path:
 def write_meta(table: pathlib.Path, slow: bool = False, only: list[str] | None = None) -> pathlib.Path:
     """Record next to the table which code made it (`code_digest` of the pipeline's resume hash, git sha, time, whether slow receipts were run and
     which were selected), so a verdict that cites the table can tell that the table is from other code (M-4 of review round 2)."""
+    from . import config
     from .ledger import git_sha
     p = meta_path(table)
-    p.write_text(json.dumps(dict(code_digest=code_digest("pm"), git_sha=git_sha(), made_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                                 slow=slow, only=only), indent=1))
+    config.write_json(p, dict(code_digest=code_digest("pm"), git_sha=git_sha(), made_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                              slow=slow, only=only), indent=1)                   # through a temporary like the table (M-8): a kill keeps the old record
     return p
 
 
@@ -444,10 +446,11 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
         log: Callable[[str], None] = _say) -> tuple[list[dict[str, Any]], int]:
     """-> (rows, exit code). `broken`: the overlay yaml to apply for this run (exit code inverted, see the module docstring). The same receipts are
     first run without the overlay: the broken run counts only receipts that pass in that baseline and fail with the overlay."""
+    from . import config
     from .env import conventions as cv
     names = [n for n, _ in jobs(slow)]
-    if only and not any(o in n for o in only for n in names):                   # round 6 M-12: nothing selected is not an empty table
-        log(f"no receipt group matches {', '.join(repr(o) for o in only)}; the groups are: {', '.join(names)}")
+    if only and (bad := [o for o in only if not o or not any(o in n for n in names)]):     # round 6 M-12, round 12 M-31: every part must select a group
+        log(f"no receipt group matches {', '.join(repr(o) for o in bad)}; the groups are: {', '.join(names)}")        # ('' is in every name: it is no part)
         return [], 2
     old = os.environ.get(cv.OVERLAY_ENV)
     base: dict[str, str] = {}
@@ -469,7 +472,7 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
             os.environ[cv.OVERLAY_ENV] = old
     out = pathlib.Path(out or ROOT / "runs" / ("receipts_broken.json" if broken else "receipts_partial.json" if only else "receipts.json"))
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(rows, indent=1, allow_nan=False))
+    config.write_json(out, rows, indent=1, allow_nan=False)                      # through a temporary: a kill mid-write keeps the old table (M-8)
     write_meta(out, slow, only)
     counts, text = summary(rows)
     log(text)
