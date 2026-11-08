@@ -606,6 +606,9 @@ def _sea_sample(env: GriddedEnv, n: int = 300) -> tuple[NDArray[np.intp], NDArra
 CALM_SWH_M = 1e-3                # a significant wave height at or below this is a calm sea: there is no swell to synthesise a spectrum for
 CALM_WIND_MS = 0.2               # ... when the wind there is calm, too: a fully developed sea (0.21 U^2 / g) is CALM_SWH_M high at U = 0.22 m/s. Zero waves
 # under a wind above this are a wave file that is zero or was never written, not a calm, and the checks that compare it with the wind keep failing (L0)
+FLAT_SHARE_MAX = 0.01            # the share of the sampled sea points that may have swh at or below CALM_SWH_M under a wind above CALM_WIND_MS before the
+# wave file is called broken (ASSUMED: a sheltered node or a cold-started point is no broken file; measured on the q11 cache: none of its 906 points).
+# A third of the points (a zeroed hour of the three sampled) is far above it
 TP_LIMIT = 0.125                 # peak period: one frequency bin (the 37 UMWM bins are spaced 1.1225)
 DIR_LIMIT_DEG = 11.25            # mean direction: one direction bin of the 32 UMWM bins
 MSS_LIMIT = 0.5                  # 90th percentile of the slope variance's relative error: exact where the short-sea share is not clipped, 0.35 on the q2 data
@@ -728,17 +731,18 @@ def ustar_percent(frac: float) -> str:
     return f"{min(100 * frac, 100 * USTAR_AGREE_FRACTION - 0.1):.1f}"
 
 
-def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float, int]:
+def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float, int, int]:
     """COARE u* (the surface layer built at ingest) against UMWM's `ust` at the sample: (points compared, median |dif|/ust, fraction within
-    USTAR_AGREE_BAND, sea points seen). A point is compared when its ust is above USTAR_FLOOR_MS, and also, as an infinite relative difference, when it is
-    at or below it under a wind that is not calm (`CALM_WIND_MS`): a ust of zero under 5 m/s is a file that is zero, not a calm (look-ahead L0). A calm sea
+    USTAR_AGREE_BAND, sea points seen, and how many of the compared are the points below). A point is compared when its ust is above USTAR_FLOOR_MS, and
+    also, as an infinite relative difference, when it is at or below it under a wind that is not calm (`CALM_WIND_MS`): a ust of zero under 5 m/s is a
+    file that is zero, not a calm (look-ahead L0). A calm sea
     has sea points seen and none compared, which is no "sea nodes": the caller tells the two apart."""
     sl = env.subgrid
     assert sl is not None, "ingest builds the surface layer before this check"
     jj, ii, tis = _sea_sample(env)
     lon, lat = env.lou.x[ii], env.lau.x[jj]
     rel: list[float] = []
-    seen = 0
+    seen = zero = 0
     for ti in tis:
         t = np.full(lon.shape, env.tu.x[ti])
         ins = env.inside(lon, lat, t)
@@ -750,8 +754,9 @@ def _ustar_agreement(env: GriddedEnv) -> tuple[int, float, float, int]:
         rel += list(np.abs(a[good] - b[good]) / b[good])
         windy = have & (b <= USTAR_FLOOR_MS) & ~(_sample_wind(env, jj, ii, ti)[ins] <= CALM_WIND_MS)        # zero ust under a wind: a disagreement, no calm
         rel += [math.inf] * int(windy.sum())
+        zero += int(windy.sum())
     r = np.asarray(rel)
-    return (int(r.size), float(np.median(r)) if r.size else float("nan"), float(np.mean(r <= USTAR_AGREE_BAND)) if r.size else float("nan"), seen)
+    return (int(r.size), float(np.median(r)) if r.size else float("nan"), float(np.mean(r <= USTAR_AGREE_BAND)) if r.size else float("nan"), seen, zero)
 
 
 def _round_trip_errors(env: GriddedEnv, oc: Any) -> dict[str, float]:
@@ -805,24 +810,30 @@ def _ingest_checks(ctx: Context, L: Ledger, oc: Any, sbox: tuple[float, float, f
     L.check("forcing_in_physical_range", bad == 0, value=bad, limit=0, note=what)
     sp = _spectrum_errors(env)
     flat = sp["n"] == 0 and sp["seen"] > 0 and sp["calm"] == sp["seen"]          # every sampled sea point is a calm: nothing to compare, which is no failure
+    broken = sp["flat"] > FLAT_SHARE_MAX * sp["seen"]                  # waves of zero under a wind at more than FLAT_SHARE_MAX of the points (L0)
     still = (f"all {sp['seen']} sampled sea points have swh at or below {CALM_SWH_M:g} m in a wind at or below {CALM_WIND_MS:g} m/s (a calm sea): "
              "there is no swell to synthesise; not assessable")
+    nothing = "; nothing to compare" if sp["n"] == 0 else ""
     zero = (f"{int(sp['flat'])} of {sp['seen']} sampled sea points have swh at or below {CALM_SWH_M:g} m under a wind above {CALM_WIND_MS:g} m/s (WRF, or the "
-            "wave file's wspd): the wave file is zero or was never written, which is no calm; nothing to compare") if sp["n"] == 0 and sp["flat"] else ""
+            f"wave file's wspd): the wave file is zero or was never written, which is no calm{nothing}") if broken else ""
     where = f"spectrum_from_params at {sp['n']} sampled sea points against the file's dwp / dwd / mss (Hs is forced to the file's swh, so it is not a test)"
-    L.check("spectrum_peak_period_vs_file", flat or bool(sp["tp"] <= TP_LIMIT), value=None if np.isnan(sp["tp"]) else sp["tp"], limit=TP_LIMIT,
+    L.check("spectrum_peak_period_vs_file", not broken and (flat or bool(sp["tp"] <= TP_LIMIT)), value=None if np.isnan(sp["tp"]) else sp["tp"], limit=TP_LIMIT,
             note=still if flat else zero or f"largest relative error of the synthesised peak period; {where}")
-    L.check("spectrum_direction_vs_file", flat or bool(sp["dir_deg"] <= DIR_LIMIT_DEG), value=None if np.isnan(sp["dir_deg"]) else sp["dir_deg"],
-            limit=DIR_LIMIT_DEG, note=still if flat else zero or f"largest error of the synthesised mean direction [deg]; {where}")
-    L.check("spectrum_mss_vs_file", flat or bool(sp["mss_p90"] <= MSS_LIMIT), value=None if np.isnan(sp["mss_p90"]) else sp["mss_p90"], limit=MSS_LIMIT,
-            note=still if flat else zero or "90th percentile of the relative error of the synthesised slope variance; the short-wave share is clipped (slope "
-                 f"variance then off by more than 1 %) at {sp['mss_clipped']:.1%} of the points; {where}")
-    n, med, frac, seen = _ustar_agreement(env)
-    L.check("coare_ustar_vs_umwm_ust", seen > 0 if not n else bool(np.isfinite(med)), value=None if not n else frac,
-            note=f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within {100 * USTAR_AGREE_BAND:.0f} %; "
-                 "BRIEF 5.5 asks that the agreement is logged"
-            if n else f"all {seen} sampled sea points have UMWM ust at or below {USTAR_FLOOR_MS:g} m/s (a calm): the u* agreement is not assessable"
-            if seen else "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask")
+    L.check("spectrum_direction_vs_file", not broken and (flat or bool(sp["dir_deg"] <= DIR_LIMIT_DEG)),
+            value=None if np.isnan(sp["dir_deg"]) else sp["dir_deg"], limit=DIR_LIMIT_DEG,
+            note=still if flat else zero or f"largest error of the synthesised mean direction [deg]; {where}")
+    L.check("spectrum_mss_vs_file", not broken and (flat or bool(sp["mss_p90"] <= MSS_LIMIT)), value=None if np.isnan(sp["mss_p90"]) else sp["mss_p90"],
+            limit=MSS_LIMIT, note=still if flat else zero or "90th percentile of the relative error of the synthesised slope variance; the short-wave share is "
+                 f"clipped (slope variance then off by more than 1 %) at {sp['mss_clipped']:.1%} of the points; {where}")
+    n, med, frac, seen, windy = _ustar_agreement(env)
+    dead = windy > FLAT_SHARE_MAX * seen                                         # UMWM ust of zero under a wind at more than FLAT_SHARE_MAX of the points
+    L.check("coare_ustar_vs_umwm_ust", not dead and (seen > 0 if not n else bool(np.isfinite(med))), value=None if not n else frac,
+            note=(f"{n} sampled sea points: median |COARE u* - UMWM ust| / ust = {med:.3f}, {frac:.1%} within {100 * USTAR_AGREE_BAND:.0f} %; "
+                  "BRIEF 5.5 asks that the agreement is logged"
+                  if n else f"all {seen} sampled sea points have UMWM ust at or below {USTAR_FLOOR_MS:g} m/s (a calm): the u* agreement is not assessable"
+                  if seen else "no sea nodes of the UMWM grid inside the box: widen the box or check the ocean mask")
+            + (f"; {windy} of {seen} sampled sea points have UMWM ust at or below {USTAR_FLOOR_MS:g} m/s under a wind above {CALM_WIND_MS:g} m/s: "
+               "the wave file is zero or was never written, which is no calm" if dead else ""))
     if n and frac < USTAR_AGREE_FRACTION:                                 # row 168: not a gate, but the finding BRIEF 2.1 asks for is made
         L.note(f"BRIEF 2.1 finding: only {ustar_percent(frac)} % of the {n} sea points have COARE u* within {100 * USTAR_AGREE_BAND:.0f} % of UMWM ust; "
                f"the brief asks {100 * USTAR_AGREE_FRACTION:.0f} %")

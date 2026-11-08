@@ -473,6 +473,16 @@ def counts_ok(k: Any, n: Any) -> bool:
     return all(isinstance(x, int) and not isinstance(x, bool) for x in (k, n)) and 0 <= k <= n and n >= 1
 
 
+def real_ok(x: Any) -> bool:
+    """A stored number that is a number: an int or float (not a bool) that is finite. `None`, a string and NaN are not."""
+    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+
+
+def conf_ok(c: Any) -> bool:
+    """A stored confidence level: a real number with 0 < conf < 1 (`intervals._kappa` takes a normal quantile of it)."""
+    return real_ok(c) and 0 < c < 1
+
+
 def check_counts(k: Any, n: Any, src: str) -> None:
     """A stored ensemble count is an integer `n` >= 1 and an integer 0 <= `k` <= `n` (`counts_ok`), else a ConfigError (`error:`, exit 2), not the
     ZeroDivisionError or ValueError that `intervals.wilson` and `interval` raise on a count that is not one. The one rule of the credibility page and the

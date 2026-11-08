@@ -277,10 +277,16 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     for key in ("n", "k_fail"):                                     # round 10, M-7: a verdict that disagrees with its own counts was edited or is damaged
         if key in v and v[key] != e[key]:
             raise ConfigError(f"{src}: verdict.{key} is {v[key]} but {key} is {e[key]}: the summary was edited or is damaged; run it again (--fresh)")
-    nonfinite = [k for k in ("p_fail", "fail_lo", "fail_hi") if not isinstance(v[k], (int, float)) or not math.isfinite(v[k])]
+    nonfinite = [k for k in ("p_fail", "fail_lo", "fail_hi") if not credibility.real_ok(v[k])]
     if nonfinite:
         raise ConfigError(f"{src}: verdict.{', verdict.'.join(nonfinite)} is not a finite number: the summary was edited or is damaged; run it again (--fresh)")
+    if not credibility.conf_ok(v.get("conf")):                      # look-ahead L0: a conf of '0.9' was a TypeError in intervals._kappa, not a refusal
+        raise ConfigError(f"{src}: verdict.conf is {v.get('conf')!r}, not a number with 0 < conf < 1: "
+                          "the summary was edited or is damaged; run it again (--fresh)")
     exercised = v["verdict"] != NOT_EXERCISED                       # a link never required: no member count decides it (region None, nothing more to say)
+    if not exercised and (e["k_fail"] != 0 or abs(v["p_fail"]) > STORED_TOL):          # written only when no moment required the link: nothing could fail
+        raise ConfigError(f"{src}: the verdict is {NOT_EXERCISED} (no moment required the link, so no member could fail it) but k_fail is {e['k_fail']} and "
+                          f"verdict.p_fail is {v['p_fail']!r}: the summary was edited or is damaged; run it again (--fresh)")
     if exercised:                                                   # round 11, M-2: the stored verdict is what these counts give under the cut-offs now loaded
         given = intervals.verdict(e["k_fail"], e["n"], v["conf"])
         again = given["verdict"]

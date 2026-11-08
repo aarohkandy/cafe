@@ -238,6 +238,18 @@ def _same_seed_problems(kind: str, name: str, g: dict[str, Any], r: dict[str, An
     return bad
 
 
+def _damage(e: dict[str, Any], who: str) -> list[str]:
+    """What an entry of a summary lacks of the numbers `compare` reads (the count, `p_fail`, `conf`): the one list of the reference's and the new entry's
+    problems, so that an edited golden is a problem line whatever field was damaged (look-ahead L0, twice)."""
+    bad = [] if credibility.counts_ok(e.get("k_fail"), e.get("n")) else [
+        f"k_fail {e.get('k_fail')!r} of n {e.get('n')!r} {who} is not a count (integers, n >= 1, 0 <= k_fail <= n)"]
+    if not credibility.real_ok(e.get("p_fail")):
+        bad.append(f"p_fail {e.get('p_fail')!r} {who} is not a finite number")
+    if not credibility.conf_ok(e.get("conf")):
+        bad.append(f"conf {e.get('conf')!r} {who} is not a number with 0 < conf < 1")
+    return bad
+
+
 def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tuple[list[str], list[str]]:
     """(problems, notes) of `new` against `ref` (both from `summary`): the exact fields must match; a verdict must match wherever either run has it
     decided; a change undecided in both is a note when the two runs' STOP_CONF intervals on P(fail) overlap and a problem when they do not; and
@@ -253,9 +265,8 @@ def compare(ref: dict[str, Any], new: dict[str, Any], seed: bool = True) -> tupl
         for k in sorted(a.keys() & b.keys()):
             g, r = a[k], b[k]
             bad += [f"{kind} {k}: {f} {g.get(f)!r} in the reference, {r.get(f)!r} now" for f in ("cls", "platform", "n") if g.get(f) != r.get(f)]
-            notcount = [f"{kind} {k}: k_fail {e.get('k_fail')!r} of n {e.get('n')!r} {who} is not a count (integers, n >= 1, 0 <= k_fail <= n)"
-                        for who, e in (("in the reference", g), ("now", r)) if not credibility.counts_ok(e.get("k_fail"), e.get("n"))]
-            if notcount:                                  # an edited golden (n = 0, k_fail beyond n): a problem line, not a ZeroDivisionError (look-ahead L0)
+            notcount = [f"{kind} {k}: {what}" for who, e in (("in the reference", g), ("now", r)) for what in _damage(e, who)]
+            if notcount:                                  # an edited golden (n = 0, a p_fail of None, no conf): a problem line, not a traceback (look-ahead L0)
                 bad += notcount
                 continue
             if g.get("verdict") != r.get("verdict"):

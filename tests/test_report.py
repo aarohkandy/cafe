@@ -2803,6 +2803,32 @@ def test_r11_m25_a_glider_dive_depth_is_500_m_when_the_platform_will_not_read(mo
     assert report._dive_depth({"platform": "seaglider"}) == 500.0
 
 
+def test_l0_r11_a_stored_verdict_relabelled_not_exercised_is_refused_unless_the_link_could_not_fail():
+    """The recounts sat in `if exercised:`, so 14 failures of 48 with only the label changed to NOT EXERCISED printed as decided with P(fail) 0.2917. The stage
+    writes that verdict only when no moment required the link, so k_fail and p_fail are 0."""
+    ref = dict(stage="stage1b", receipt="r", ledger="l")
+    given = intervals.verdict(14, 48)
+    e = dict(n=48, k_fail=14, verdict=dict(given, verdict=stage1.NOT_EXERCISED))
+    with pytest.raises(config.ConfigError, match=r"the verdict is NOT EXERCISED .* but k_fail is 14 and verdict\.p_fail is 0\.2916"):
+        report._stat(e, ref, "src")
+    zero = intervals.verdict(0, 48)
+    with pytest.raises(config.ConfigError, match=r"k_fail is 0 and verdict\.p_fail is 0\.29"):
+        report._stat(dict(n=48, k_fail=0, verdict=dict(zero, verdict=stage1.NOT_EXERCISED, p_fail=0.2917)), ref, "src")
+    out = report._stat(dict(n=48, k_fail=0, verdict=dict(zero, verdict=stage1.NOT_EXERCISED, note=stage1.NOT_EXERCISED_NOTE)), ref, "src")
+    assert out["verdict"] == "NOT EXERCISED" and out["decided"] is True
+
+
+@pytest.mark.parametrize("not_exercised", [False, True])
+@pytest.mark.parametrize("conf", ["0.9", None, 0, 1.0, 1.5, float("nan"), True])
+def test_l0_r11_a_stored_conf_that_is_not_a_number_between_0_and_1_is_a_config_error_not_a_type_error(conf, not_exercised):
+    ref = dict(stage="stage1b", receipt="r", ledger="l")
+    v = dict(intervals.verdict(0 if not_exercised else 14, 48), conf=conf)
+    if not_exercised:
+        v["verdict"] = stage1.NOT_EXERCISED
+    with pytest.raises(config.ConfigError, match=r"verdict\.conf is .*not a number with 0 < conf < 1"):
+        report._stat(dict(n=48, k_fail=0 if not_exercised else 14, verdict=v), ref, "src")
+
+
 @pytest.mark.parametrize("field, value", [("p_fail", 0.0), ("fail_lo", 0.0), ("fail_hi", 0.001)])
 def test_l0_r11_a_verdict_whose_label_matches_its_counts_but_whose_p_fail_or_interval_does_not_is_refused(field, value):
     """14 failures of 48 with `p_fail` 0.0 and the interval 0 to 0.001, MARGINAL as before: the label re-check passed and the stored numbers were printed."""

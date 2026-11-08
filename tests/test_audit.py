@@ -1225,7 +1225,8 @@ def test_r11_m25_a_report_ledger_that_cannot_be_read_is_not_a_run_from_before_th
     assert audit.root_files_unrecorded(run) is False
 
 
-@pytest.mark.parametrize("where", ["platforms/p.yaml", "config/c.yaml", "missions/m.yaml", "cafe/schemas/s.json", "tests/golden/g.json", "tests/fixtures/f.nc"])
+@pytest.mark.parametrize("where", ["platforms/p.yaml", "config/c.yaml", "missions/m.yaml", "cafe/schemas/s.json", "tests/golden/g.json", "tests/fixtures/f.nc",
+                                   "cafe/receipts.py", "cafe/mission.py", "bench/throughput.py", "pyproject.toml"])      # L0, second pass
 def test_l0_r11_a_data_file_the_suite_reads_edited_after_the_receipt_makes_it_stale(tmp_path, monkeypatch, capsys, where):
     """The digest hashed only the .py files, so a platform, config or mission file (or a golden or fixture) changed after a green suite passed --pytest-done."""
     monkeypatch.setattr(audit, "_run", lambda cmd: (0, ""))
@@ -1244,5 +1245,6 @@ def test_l0_r11_a_data_file_the_suite_reads_edited_after_the_receipt_makes_it_st
     assert "differs from what the suite ran on" in capsys.readouterr().out
     f.write_text("a: 1\n")
     assert audit.coverage_stale(tmp_path) == []
-    f.with_name("new.yaml").write_text("b: 1\n")                                         # a file added after the run is a change, too
+    (tmp_path / "config").mkdir(exist_ok=True)
+    (tmp_path / "config" / "new.yaml").write_text("b: 1\n")                              # a file added after the run is a change, too
     assert audit.coverage_stale(tmp_path) != []

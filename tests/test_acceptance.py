@@ -1075,6 +1075,26 @@ def test_r11_m4_a_golden_of_the_wrong_counts_fails_the_check(tmp_path):
 
 @pytest.mark.parametrize("seed", [True, False])
 @pytest.mark.parametrize("which", ["reference", "new"])
+@pytest.mark.parametrize("field, value", [("p_fail", None), ("p_fail", "0.0"), ("p_fail", float("nan")), ("p_fail", True),
+                                          ("conf", None), ("conf", "0.9"), ("conf", 1.0), ("conf", 0), ("conf", "missing")])
+def test_l0_r11_a_summary_whose_p_fail_or_conf_is_not_a_number_is_a_problem_line_not_a_traceback(which, seed, field, value):
+    """The entry guard covered k_fail and n only: p_fail None was a TypeError, a missing conf a KeyError (same-seed rule), an edited golden a traceback."""
+    g = acc.summary(report())
+    bad = copy.deepcopy(g)
+    if value == "missing":
+        del bad["links"]["rf"][field]
+        value = None
+    else:
+        bad["links"]["rf"][field] = value
+    ref, new = (bad, g) if which == "reference" else (g, bad)
+    problems = acc.diff(ref, new, seed=seed)
+    w = "in the reference" if which == "reference" else "now"
+    what = "a finite number" if field == "p_fail" else "a number with 0 < conf < 1"
+    assert f"links rf: {field} {value!r} {w} is not {what}" in problems
+
+
+@pytest.mark.parametrize("seed", [True, False])
+@pytest.mark.parametrize("which", ["reference", "new"])
 def test_l0_r11_a_summary_with_n_zero_or_k_beyond_n_is_a_problem_line_not_a_zero_division(which, seed):
     """`_same_seed_problems` divided by the stored n and the edited golden it exists to catch is where n = 0 comes from; the n field was already queued
     ('n 0 in the reference') and was lost to the traceback. The other seed's Newcombe interval and `_decided` read the same counts."""

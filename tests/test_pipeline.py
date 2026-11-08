@@ -2433,15 +2433,43 @@ def test_l0_r11_zero_waves_under_a_wind_are_a_broken_file_not_a_calm(tmp_path):
         assert not c["ok"] and c["value"] is None and "above 0.2 m/s" in c["note"] and "zero or was never written" in c["note"] and "calm sea" not in c["note"]
     c = check_of(checks, "coare_ustar_vs_umwm_ust")
     assert not c["ok"] and "0.0% within 20 %" in c["note"]
-    n, med, frac, seen = pipeline._ustar_agreement(ctx.env)
+    n, med, frac, seen, _ = pipeline._ustar_agreement(ctx.env)
     assert n == seen > 100 and med == float("inf") and frac == 0.0                             # every sampled point disagrees, none is skipped as a calm
     ctx.env.U["wspd"][:] = 0.0                                                                  # the file's own wind at zero: WRF's is still 5 m/s
     assert not check_of(ingest_checks(ctx), "spectrum_mss_vs_file")["ok"]
 
 
+def test_l0_r11_a_wave_file_zero_at_a_third_of_the_sampled_points_under_a_wind_fails_the_wave_checks(tmp_path):
+    """Look-ahead L0, second pass: the zero-file rule fired only when every sampled point was flat (n == 0) or more than half were infinite in the u* check, so
+    one of the three sampled hours zeroed (about a third of the points, the WRF wind at 5 m/s) passed all four checks. Any share above FLAT_SHARE_MAX fails."""
+    ctx = ctx_for(tmp_path / "r")
+    jj, ii, tis = pipeline._sea_sample(ctx.env)
+    for k in ("swh", "ust", "dwp", "mss"):
+        ctx.env.U[k][tis[0]][:] = 0.0                                                           # one of the three sampled hours
+    n, _, frac, seen, windy = pipeline._ustar_agreement(ctx.env)
+    assert windy > pipeline.FLAT_SHARE_MAX * seen and windy < seen / 2                          # the case the median and the half-rule let through
+    checks = ingest_checks(ctx)
+    for name in ("spectrum_peak_period_vs_file", "spectrum_direction_vs_file", "spectrum_mss_vs_file"):
+        c = check_of(checks, name)
+        assert not c["ok"] and "zero or was never written" in c["note"] and "above 0.2 m/s" in c["note"] and "nothing to compare" not in c["note"], name
+    c = check_of(checks, "coare_ustar_vs_umwm_ust")
+    assert not c["ok"] and f"{windy} of {seen} sampled sea points have UMWM ust at or below" in c["note"] and "zero or was never written" in c["note"]
+
+
+def test_l0_r11_a_single_flat_point_under_a_wind_is_not_a_broken_wave_file(tmp_path):
+    """The limit is a share, not 'any point': one sheltered node of the sample with no waves does not stop the stage (FLAT_SHARE_MAX is a stated assumption)."""
+    ctx = ctx_for(tmp_path / "r")
+    jj, ii, tis = pipeline._sea_sample(ctx.env)
+    for k in ("swh", "ust"):
+        ctx.env.U[k][tis[0]][jj[0], ii[0]] = 0.0
+    checks = ingest_checks(ctx)
+    assert all(check_of(checks, n)["ok"] for n in ("spectrum_peak_period_vs_file", "spectrum_direction_vs_file", "spectrum_mss_vs_file",
+                                                    "coare_ustar_vs_umwm_ust"))
+
+
 def test_coare_ustar_is_compared_with_umwm_ust_and_the_agreement_is_logged(tmp_path):
     ctx = ctx_for(tmp_path / "r")
-    n, med, frac, _ = pipeline._ustar_agreement(ctx.env)
+    n, med, frac, _, _ = pipeline._ustar_agreement(ctx.env)
     assert n > 100 and 0 <= frac <= 1 and med >= 0
     c = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")
     assert c["ok"] and c["value"] == pytest.approx(frac, abs=1e-4) and f"{n} sampled sea points" in c["note"]
@@ -3424,7 +3452,7 @@ def test_r9_m15_the_ustar_band_is_20_percent_of_umwm_ust_on_both_sides(tmp_path,
         w["ustar_umwm"] = u._replace(value=scale * np.asarray(u.value, float))
         return w
     monkeypatch.setattr(env, "waves", waves)
-    n, _, frac, _ = pipeline._ustar_agreement(env)
+    n, _, frac, _, _ = pipeline._ustar_agreement(env)
     assert n > 100 and frac == share
     note = check_of(ingest_checks(ctx), "coare_ustar_vs_umwm_ust")["note"]
     assert f"{100 * share:.1f}% within 20 %" in note
@@ -3434,11 +3462,11 @@ def test_r8_m1_a_ustar_agreement_below_the_briefs_90_percent_is_a_finding_in_the
     ctx = ctx_for(tmp_path / "r")
     ctx.env.U["ust"] *= 0.1                                                                                       # UMWM friction velocity a tenth of COARE's
     d = ingest_checks(ctx)
-    n, _, frac, _ = pipeline._ustar_agreement(ctx.env)
+    n, _, frac, _, _ = pipeline._ustar_agreement(ctx.env)
     assert frac < 0.1 and check_of(d, "coare_ustar_vs_umwm_ust")["ok"] and failing(d) == []                       # row 168: still not a gate
     assert [x for x in d["notes"] if x.startswith("BRIEF 2.1 finding")] == [
         f"BRIEF 2.1 finding: only {100 * frac:.1f} % of the {n} sea points have COARE u* within 20 % of UMWM ust; the brief asks 90 %"]
-    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, 0.95, 100))
+    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, 0.95, 100, 0))
     assert not [x for x in ingest_checks(ctx_for(tmp_path / "r2"))["notes"] if "BRIEF 2.1 finding" in x]
 
 
@@ -3645,7 +3673,7 @@ def test_r8_m35_installing_bellhop_changes_the_code_digest_and_nothing_else_does
 def test_r8_merge_the_stored_ustar_fraction_is_not_rounded_across_the_briefs_floor(tmp_path, monkeypatch, frac):
     """E stored round(frac, 4), so 0.89996 was written as 0.9: credibility.py (value >= 0.90) passed it while the finding note (on the unrounded
     fraction) fired. The value the ledger keeps and the note must be on the same side of the floor."""
-    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, frac, 100))
+    monkeypatch.setattr(pipeline, "_ustar_agreement", lambda env: (100, 0.05, frac, 100, 0))
     d = ingest_checks(ctx_for(tmp_path / "r"))
     value = check_of(d, "coare_ustar_vs_umwm_ust")["value"]
     finding = [x for x in d["notes"] if x.startswith("BRIEF 2.1 finding")]

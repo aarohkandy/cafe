@@ -390,18 +390,22 @@ def root_files_unrecorded(run_dir: str | pathlib.Path) -> bool:
 PYTEST_RECEIPT = "coverage.receipt.json"        # beside coverage.json: {code_digest, coverage_sha256, suite_ok, date}, written only for a suite that passed
 
 
-SUITE_DIRS = ("cafe/pm", "cafe/schemas", "tests", "platforms", "config", "missions")      # code, tests, and the parameter and data files the suite reads
+# all the code the suite imports (cafe/receipts.py, cafe/mission.py, bench/throughput.py ...), the tests, and the data files it reads
+SUITE_DIRS = ("cafe", "bench", "tests", "platforms", "config", "missions")
+SUITE_FILES = ("pyproject.toml",)                                                  # addopts, markers, the coverage and mutmut configuration
 
 
 def suite_digest(root: pathlib.Path = ROOT) -> str:
-    """sha256 over everything the suite measures or reads that is not a document: every file under `SUITE_DIRS` (the code and the tests, the platform,
-    config and mission yaml, the schemas, the golden and the fixtures), by path and content, so that a file edited after the run is seen whatever its
+    """sha256 over everything the suite measures or reads that is not a document: every file under `SUITE_DIRS` (all of cafe/ and bench/, not only
+    cafe/pm: the suite imports cafe.receipts, cafe.mission and bench.throughput; the tests; the platform, config and mission yaml; the schemas, the
+    golden and the fixtures) and `SUITE_FILES` (pyproject.toml), by path and content, so that a file edited after the run is seen whatever its
     modification time says (rsync -a sets it back; round 11, M-10). Bytecode and `.DS_Store` do not count. The documents, `bin/` and the Makefile are not
-    in it (look-ahead L0: the first version hashed the `.py` files only, and a platform or mission file edited after a green suite passed `--pytest-done`)."""
+    in it (look-ahead L0: the first version hashed the `.py` files only, and a platform or mission file edited after a green suite passed `--pytest-done`;
+    its second version named only five directories, and an edit of cafe/receipts.py, cafe/mission.py, bench/throughput.py or pyproject.toml still did)."""
     h = hashlib.sha256()
-    for d in (d for d in SUITE_DIRS if (root / d).is_dir()):
-        for f in sorted(f for f in (root / d).rglob("*") if f.is_file() and "__pycache__" not in f.parts and f.name != ".DS_Store" and f.suffix != ".pyc"):
-            h.update(str(f.relative_to(root)).encode() + b"\0" + f.read_bytes())
+    files = [f for d in SUITE_DIRS if (root / d).is_dir() for f in (root / d).rglob("*")] + [root / n for n in SUITE_FILES]
+    for f in sorted(f for f in files if f.is_file() and "__pycache__" not in f.parts and f.name != ".DS_Store" and f.suffix != ".pyc"):
+        h.update(str(f.relative_to(root)).encode() + b"\0" + f.read_bytes())
     return h.hexdigest()
 
 
@@ -432,7 +436,8 @@ def coverage_stale(root: pathlib.Path = ROOT) -> list[str]:
     if rec.get("suite_ok") is not True:
         return [f"pytest-done: {PYTEST_RECEIPT} does not say the suite passed"]
     if rec.get("code_digest") != suite_digest(root):
-        return ["pytest-done: a file under cafe/pm, tests, platforms, config or missions differs from what the suite ran on (the receipt's digest): "
+        return ["pytest-done: a file under cafe, bench, tests, platforms, config or missions, or pyproject.toml, differs from what the suite ran on "
+                "(the receipt's digest): "
                 "the tests did not run on this code"]
     if rec.get("coverage_sha256") != sha256(cov):
         return ["pytest-done: coverage.json is not the one the suite's receipt was written for"]
