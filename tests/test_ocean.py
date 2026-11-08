@@ -80,9 +80,10 @@ def test_ocean_remembers_where_it_came_from(oc, ci_env):
     assert np.array_equal(oc.axes[1].x, fx.ODEPTH) and oc.axes[3].x.min() >= 0.0 and oc.axes[3].x.max() < 360.0   # depth positive down, lon 0..360
 
 
-def test_fields_load_once_as_float32(oc):
+def test_fields_load_once_as_float32(oc, ci_env):
     a = oc._field("water_u")
-    assert a is oc._field("water_u") and a.dtype == np.float32 and a.shape == (13, len(fx.ODEPTH), len(fx.OLAT), len(fx.OLON))
+    lat, lon = fx._ocean_axes(ci_env.mission)                                                         # the axes the generator wrote the store with
+    assert a is oc._field("water_u") and a.dtype == np.float32 and a.shape == (13, len(fx.ODEPTH), len(lat), len(lon))
 
 
 # ------------------------------------------------------------------------------------------------------------ currents

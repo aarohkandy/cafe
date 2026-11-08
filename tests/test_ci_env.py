@@ -120,3 +120,18 @@ def test_r11_m17_a_mission_across_the_dateline_gets_its_own_3d_hours_moorings_an
     for name in ("orca_present", "tao_present", "gebco_present", "ocean_store_present", "mission_points_inside_cached_grids"):
         assert checks[name]["ok"], (name, checks[name]["note"])
     assert led["ok"] and not [c["name"] for c in led["checks"] if not c["ok"]]
+
+
+def test_r11_gate_every_name_a_test_reads_from_the_generator_exists_in_it():
+    """Round 11 batch A turned the generator's module constants OLAT and OLON into the result of `_ocean_axes`, and tests/test_ocean.py went on reading
+    `fx.OLAT`: it failed in the full gate only, because no run of batch A held that file. Every `fx.<name>` in the tests is a name the generator has."""
+    import ast
+    import pathlib
+    missing = []
+    for f in sorted(pathlib.Path(__file__).parent.rglob("*.py")):
+        tree = ast.parse(f.read_text())
+        aliases = {a.asname or a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module == "tests.fixtures.ci_env"
+                   for a in n.names if a.name == "make"}
+        missing += [f"{f.name}:{n.lineno}: {n.value.id}.{n.attr}" for n in ast.walk(tree)
+                    if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name) and n.value.id in aliases and not hasattr(fx, n.attr)]
+    assert not missing
