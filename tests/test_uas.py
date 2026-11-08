@@ -536,7 +536,7 @@ def serve():
         for msg in (rx.parse_buffer(data) or []):
             if msg.get_type() == "SET_POSITION_TARGET_GLOBAL_INT":
                 target[:] = [(msg.lon_int / 1e7 - LON0) * MPD * math.cos(math.radians(LAT0)), (msg.lat_int / 1e7 - LAT0) * MPD, msg.alt]
-                aimed.write(json.dumps(target) + "\\n"); aimed.flush()
+                aimed.write(json.dumps(target + [fc]) + "\\n"); aimed.flush()                 # and the frame it came in on: 2.5 ms of sim time each
             elif msg.get_type() == "COMMAND_LONG" and msg.command == 22:             # take off to param7
                 target[2] = msg.param7
 threading.Thread(target=serve, daemon=True).start()
@@ -570,8 +570,9 @@ def test_r11_batch_b_fly_sitl_flies_a_formation_on_a_ship_that_is_not_at_the_ori
     aimed = np.array([json.loads(ln) for ln in (tmp_path / "wd" / "uas.parm.aimed").read_text().splitlines()])
     assert np.allclose(aimed[0, :2], [30.0, -20.0], atol=5.0) and aimed[0, 2] == 25.0     # the first waypoint plus the ship's few metres since the launch
     assert np.abs(aimed[:, :2]).max() < 200.0                                       # never the ship's position of 1100 m
-    pos = res["track"]["pos_rel"][0][res["track"]["t"] > 3.5]                      # from the take-off on (before it the stand-in stays put)
     formation = np.array([[0.0, 0.0, 25.0], [30.0, -20.0, 25.0], [60.0, 10.0, 30.0], [0.0, 0.0, 15.0], [0.0, 0.0, 0.0]])
+    t_told = aimed[0, 3] * uas.DT_PHYS + 0.5                                        # before the stand-in is first told where to go it stays at the launch point
+    pos = res["track"]["pos_rel"][0][res["track"]["t"] > t_told]                    # (the commander thread lags the lockstep by wall time: P-R11M1)
     nearest = np.linalg.norm(pos[:, None, :] - formation[None], axis=2).min(1)
     assert len(pos) >= 10 and nearest.max() < 3.0                                   # every point is a formation point, none shifted by the ship's offset
     assert np.linalg.norm(pos - formation[2], axis=1).min() < 3.0                   # and the hold at the last waypoint is among them
