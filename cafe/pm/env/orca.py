@@ -365,7 +365,8 @@ def assemble(out: str | pathlib.Path, ts: list[dt.datetime], wg: dict[str, Any],
                         coords=dict(time=np.array([np.datetime64(t.replace(tzinfo=None), "s") for t in ST]),
                                     f=pts["f"].astype("f8"), th=pts["th"].astype("f8")))
         sp.attrs.update(source=BASE, units_F="m^4 rad^-1 (wavenumber spectrum)", stride=SPEC_STRIDE)
-        sp.to_zarr(out / "umwmspec.zarr", mode="w")
+        # F and f differ only in case: zarr orders such names in its consolidated metadata by directory listing, so the store hash would vary
+        sp.to_zarr(out / "umwmspec.zarr", mode="w", consolidated=False)
     names = [f"{k}_{stamp(t)}.npz" for t in ts for k in ("wrf", "umwm")]                     # this window's parts, not the directory's (round 12, M-29)
     names += [f"spec_{stamp(t)}.npz" for t in ts if t.hour % 6 == 0] if pts is not None else []
     man = dict(base=BASE, layout_version=LAYOUT_VERSION, t0=str(ts[0]), t1=str(ts[-1]), box=list(box) if box else None, hours=len(ts), hours3d=h3,

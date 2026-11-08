@@ -14,7 +14,7 @@
     promote-calibration --run DIR            copy that run's stage3/subgrid_calibration.json into the tracked config/subgrid.json (a deliberate, committed act)
     report    --run DIR [--open]             re-render the report from a finished run; --open shows it in a browser when there is a display
     receipts  [--broken YAML] [--slow] [--only NAME,..] [--json OUT]   every receipt (app + pre-mission) as one table; see cafe/pm/receipts.py
-    acceptance --mission M --gpus N --out DIR [--golden FILE] [--update-golden] [--skip-overnight]
+    acceptance --mission M --gpus N --out DIR [--golden FILE] [--update-golden [--golden-mission NAME]] [--skip-overnight]
                                              BRIEF 5.3: quick + overnight (+ 4h), golden diff, reproducibility, broken config; see cafe/pm/acceptance.py
                                              (verdicts identical where decided; P(fail) by Newcombe's difference interval, Bonferroni 95 %)
 """
@@ -108,7 +108,10 @@ def main(argv: list[str] | None = None) -> int:
                                                  "a directory that holds runs acceptance did not make is refused)")
     p.add_argument("--golden", default=str(acceptance.GOLDEN))
     p.add_argument("--update-golden", action="store_true", help="write the golden from the quick run; that check then fails until it is rerun without this. "
-                   "A golden file of another mission (or a file that is no golden) is not overwritten (round 12, M-33)")
+                   "A golden file of another mission (or a file that is no golden) is not overwritten unless --golden-mission NAME names this run's mission "
+                   "(round 12, M-33)")
+    p.add_argument("--golden-mission", default=None, metavar="NAME", help="with --update-golden: let this run's mission NAME replace a golden of another "
+                   "mission, or a file that is not a golden (round 12, M-33)")
     p.add_argument("--skip-overnight", action="store_true", help="rehearsal only: the overnight check fails ('not run')")
     a = ap.parse_args(argv)
     try:

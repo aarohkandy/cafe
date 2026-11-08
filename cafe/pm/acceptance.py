@@ -1,4 +1,4 @@
-"""`python -m cafe.pm acceptance --mission M --gpus N --out DIR [--golden FILE] [--update-golden] [--skip-overnight]`: BRIEF 5.3 and 0.1.
+"""`python -m cafe.pm acceptance --mission M --gpus N --out DIR [--golden FILE] [--update-golden [--golden-mission NAME]] [--skip-overnight]`: BRIEF 5.3, 0.1.
 
 Every run is a fresh `python -m cafe.pm run` in its own process and its own run directory under DIR (`quick`, `quick_same`, `quick_seed`,
 `overnight`, and `4h` when N >= 1), timed by the wall clock against `budget.BUDGET_S`: quick 20 min, overnight 10 h, 4h 4 h. The limit counts the compute

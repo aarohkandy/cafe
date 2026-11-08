@@ -591,7 +591,7 @@ def test_r8_m24_a_repeated_or_reversed_axis_value_is_a_config_error_naming_the_s
     import xarray as xr
     from cafe.pm.config import ConfigError
     d = _copy_cache(ci_env, tmp_path)
-    ds = xr.open_zarr(d / "orca" / store).load()
+    ds = xr.open_zarr(d / "orca" / store, consolidated=False).load()
     x = ds[dim].values.copy()
     x[10] = x[9]                                                                                       # the 11th stamp equals the 10th
     ds = ds.assign_coords({dim: x})

@@ -137,7 +137,7 @@ def synthetic_cache(root: str | pathlib.Path) -> pathlib.Path:
     xr.Dataset(dict(F=(("time", "point", "th", "f"), np.broadcast_to(F, (len(t), n) + F.shape).copy()),
                     k=(("time", "point", "f"), np.broadcast_to(k, (len(t), n, len(f))).copy()),
                     plon=(("point",), np.array([p[0] for p in pts])), plat=(("point",), np.array([p[1] for p in pts]))),
-               coords=dict(time=t, f=f, th=th)).to_zarr(root / "umwmspec.zarr", mode="w")
+               coords=dict(time=t, f=f, th=th)).to_zarr(root / "umwmspec.zarr", mode="w", consolidated=False)    # as orca.assemble
     return pathlib.Path(root).parent
 
 

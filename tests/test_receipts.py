@@ -264,7 +264,7 @@ def test_synthetic_cache_follows_the_stated_trade_wind(tmp_path):
     wdir = float(u.wdir[0, 0, 0])
     assert (math.cos(wdir), math.sin(wdir)) == pytest.approx((east / pr.SYNTH_MS, north / pr.SYNTH_MS))
     assert float(u.mwd[0, 0, 0]) - wdir == pytest.approx(math.radians(10)) and float(u.dwd[0, 0, 0]) - wdir == pytest.approx(math.radians(20))
-    s = xr.open_zarr(root / "orca" / "umwmspec.zarr")
+    s = xr.open_zarr(root / "orca" / "umwmspec.zarr", consolidated=False)
     assert s.F.dims == ("time", "point", "th", "f") and int((s.F[0, 0] > 0).any("f").sum()) == 1
 
 

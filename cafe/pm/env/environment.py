@@ -65,7 +65,7 @@ class GriddedEnv:
         self.wind_points = self.wind3d_points = 0                         # wind() points asked for / answered from the 3-D fields (stage 1 reads the deltas)
         def load(store: pathlib.Path) -> Any:
             try:
-                return xr.open_zarr(store).load()
+                return xr.open_zarr(store, consolidated=False).load()          # the spectrum store has no consolidated metadata (orca.assemble)
             except Exception as e:                                        # noqa: BLE001  any unreadable chunk or metadata file is the same advice
                 from ..config import ConfigError
                 raise ConfigError(f"environment cache file {store} cannot be read ({type(e).__name__}: {e}); delete {cache / 'orca'} and run "

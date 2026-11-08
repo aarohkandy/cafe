@@ -1167,6 +1167,16 @@ def test_r10_f_the_acceptance_out_help_says_a_directory_of_foreign_runs_is_refus
     assert "a directory that holds runs acceptance did not make is refused" in " ".join(capsys.readouterr().out.split())
 
 
+def test_r12_m33_the_acceptance_command_line_has_the_golden_mission_override(monkeypatch):
+    """Batch A's `--update-golden` refuses another mission's golden unless `--golden-mission NAME` names this run's mission; the flag had no parser entry,
+    so the override was reachable only from code and the refusal text told the user to type a flag argparse rejected."""
+    seen = []
+    monkeypatch.setattr(cli.acceptance, "main", lambda a: seen.append(a) or 0)
+    base = ["acceptance", "--mission", MISSION, "--out", "o", "--update-golden"]
+    assert cli.main(base) == 0 and seen[-1].golden_mission is None
+    assert cli.main([*base, "--golden-mission", "ci_fixture"]) == 0 and seen[-1].golden_mission == "ci_fixture"
+    assert "--golden-mission" in (cli.__doc__ or "")
+
 # ---------------------------------------------------------------------------------------------------------------- look-ahead batch LB0
 
 def test_lb0_an_oserror_about_a_file_the_user_did_not_name_keeps_its_traceback(monkeypatch, tmp_path, capsys):
