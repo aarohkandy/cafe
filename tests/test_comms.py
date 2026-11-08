@@ -608,3 +608,31 @@ def test_r11_m16_the_spreading_exponent_is_one_constant_of_the_code_and_no_table
     for f in (c.acoustic_tl_db, c.implementation_loss_db, c.acoustic_margin, c.acoustic_link):
         assert inspect.signature(getattr(f, "__wrapped__", f)).parameters["k"].default == c.SPREADING_K
     assert c.acoustic_margin(3000.0) == c.acoustic_margin(3000.0, k=1.5) != c.acoustic_margin(3000.0, k=2.0)
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 12, M-12
+
+def test_r12_m12_the_fresnel_figures_in_the_two_ray_docstring_are_what_the_formula_gives():
+    """The docstring said -1 holds below 1-2 deg; the vertical-polarised Fresnel coefficient of sea water is 0.70 at 1 deg and within 10 % of 1 below 0.3 deg.
+    The model keeps -1 (documents only); this pins the figures it quotes, so they cannot drift from the formula: eps_c 72.8 - j118.9 at 915 MHz (assumed)."""
+    eps = 72.8 - 118.9j
+
+    def G(deg):
+        psi = np.radians(deg)
+        r = np.sqrt(eps - np.cos(psi) ** 2)
+        return (eps * np.sin(psi) - r) / (eps * np.sin(psi) + r)
+    for deg, mag in ((0.05, 0.98), (0.25, 0.91), (0.5, 0.84), (1, 0.70), (2, 0.49), (3, 0.35), (5, 0.26), (12, 0.49), (20, 0.65)):
+        assert abs(G(deg)) == pytest.approx(mag, abs=0.006), deg
+    for deg, phase in ((0.05, -179), (1, -168), (2, -154), (5, -86)):
+        assert np.degrees(np.angle(G(deg))) == pytest.approx(phase, abs=1.0), deg
+    psi = np.linspace(0.01, 30.0, 30000)
+    g = np.array([abs(G(x)) for x in psi])
+    assert psi[g.argmin()] == pytest.approx(4.85, abs=0.05) and g.min() == pytest.approx(0.26, abs=0.005)                      # the pseudo-Brewster angle
+    assert psi[(g >= 0.9) & (psi < 3.0)].max() == pytest.approx(0.29, abs=0.02)                          # "within 10 % below about 0.3 deg"
+    doc = c.two_ray_curved_db.__doc__
+    assert "within 10 % of the magnitude only below about 0.3 deg" in doc and "pseudo-Brewster" in doc and "7.6 dB" in doc
+    assert "valid for grazing angles below ~1-2 deg" not in doc
+    # the model itself is unchanged, G = -1:
+    assert c.two_ray_curved_db(2e3, 2.2, 40.0, 0.0, F915, divergence=False, a_eff=c.FLAT_A) == pytest.approx(
+        20 * np.log10(4 * np.pi * np.hypot(2e3, 37.8) / LAM) - 20 * np.log10(abs(1 - (np.hypot(2e3, 37.8) / np.hypot(2e3, 42.2)) * np.exp(
+            -2j * np.pi * (np.hypot(2e3, 42.2) - np.hypot(2e3, 37.8)) / LAM))), abs=0.05)

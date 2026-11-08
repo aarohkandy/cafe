@@ -259,6 +259,22 @@ def fill_hs(hs: NDArray[Any], lon: NDArray[Any], lat: NDArray[Any], what: str) -
     return np.take_along_axis(hs, np.where(fw >= 0, fw, bw), 1), int((~ok).sum())
 
 
+def _link_hs(env: Any, A: tuple[NDArray[Any], ...], B: tuple[NDArray[Any], ...], tt: NDArray[Any], what: str) -> tuple[NDArray[Any], int]:
+    """Round 12, M-11. The wave height an RF link is evaluated in: `env.waves` (the member's own perturbation, members first) at both ends of the link
+    (`A`, `B`: the (n, M) arrays `_pos` returns), the larger of the two at each moment, so that the margin does not depend on which end the mission
+    names first (Hs 0.2 m at the ship and 3 m at the USV differed by 0.3 dB between the two namings). The larger is the conservative one. Each end is
+    filled on its own (`fill_hs`: a masked cell is that member's nearest finite value there, not 0; a member with no finite value at an end is OutsideData
+    naming its position), and an unknown position reads 0, no moment the link was required, which never raises the other end's value.
+    -> ((n, M) heights, the number of samples `fill_hs` replaced at the two ends together)."""
+    both, n_fill = [], 0
+    for P in (A, B):
+        h = np.asarray(env.waves(P[0].T, P[1].T, tt.T)["Hs"].value, float)
+        h, k = fill_hs(np.where(np.isfinite(P[0].T) & np.isfinite(P[1].T), h, 0.0), P[0][0], P[1][0], what)
+        both.append(h)
+        n_fill += k
+    return np.maximum(*both).T, n_fill
+
+
 def _uas_radio(P: dict[str, Any]) -> dict[str, Any]:
     """The platform's RF radio as a comms.rf_margin radio dict: the first block of quad_uas.yaml `radio` with a transmit power
     (rfd900x), its band centre, power and sensitivity, and antenna gains and losses from platforms/radios.yaml's entry of the same
@@ -621,13 +637,10 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         else:
             need = np.ones((len(t), M), bool)
         need &= live & np.isfinite(d)                                           # an unknown position is not a moment the link was required
-        lonA, latA = A[0], A[1]
-        tt = np.broadcast_to(t[:, None], lonA.shape)                         # each member at its own position
+        tt = np.broadcast_to(t[:, None], A[0].shape)                         # each member at its own position
         if lk["kind"] == "rf":
-            hs = np.asarray(env.waves(lonA.T, latA.T, tt.T)["Hs"].value, float)         # the member's own Hs perturbation (members first)
-            hs = np.where(np.isfinite(lonA.T) & np.isfinite(latA.T), hs, 0.0)           # an unknown position is no moment the link was required
-            hs, hs_filled = fill_hs(hs, lonA[0], latA[0], f"link {lk['id']}")
-            margin = comms.rf_margin(d, A[2], B[2], hs.T, lk["radio"])
+            hs, hs_filled = _link_hs(env, A, B, tt, f"link {lk['id']}")        # the larger of the two ends: the margin is the same whichever end is named first
+            margin = comms.rf_margin(d, A[2], B[2], hs, lk["radio"])
             valid = margin != comms.NO_LINK_DB
             method = f"two-ray over a 4/3-radius earth with divergence (Kerr), {lk['radio']} (Ament sea roughness, modelled)"
             margin_kind, invalid_kind = "RF link margin, dB", "beyond_horizon"
@@ -637,7 +650,8 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
                                   f"({sorted(comms.modem_names())})")
             modem, band = named
             dz = np.abs(A[3] - B[3])
-            wind = np.hypot(*np.moveaxis(np.asarray(env.wind(lonA.T, latA.T, 10.0, tt.T).value, float), -1, 0)).T          # the member's own wind, as for Hs
+            winds = [np.hypot(*np.moveaxis(np.asarray(env.wind(P[0].T, P[1].T, 10.0, tt.T).value, float), -1, 0)).T for P in (A, B)]       # each end's own wind
+            wind = np.fmax(*winds)                                           # the larger (noisier) of the two ends, as for Hs; a non-finite one is the other's
             margin, method = _acoustic(modem, band, d, dz, wind, need, A, B, t, env)
             valid = np.hypot(d, dz) <= comms.valid_range_m(modem, band)
             margin_kind, invalid_kind = "acoustic link margin, dB", "out_of_range"
@@ -832,6 +846,20 @@ def _speed(r: dict[str, Any], platform: str) -> dict[str, Any]:
 BRIEF_PRIOR = "usv_vpp_bias_brief"
 
 
+def check_case(prior: str, n: int, pri: dict[str, dict[str, Any]], paired: bool = False) -> None:
+    """Round 12, M-27: what `sensitivity_case` needs of its arguments, as a ConfigError (`error:` and exit 2 from the command), not a KeyError, an IndexError
+    or the sampler's ValueError after the environment is loaded. `prior` is a uniform entry of perturbations.yaml (it replaces
+    `usv_vpp_bias`, a uniform draw, and the case label reads its lo and hi; a normal or lognormal entry has neither). `n` is a number of members: an even one,
+    2 or more, when the case draws its own hypercube (the wind and current columns are antithetic pairs); any one or more when it is paired with the run's
+    (`paired`: the run's own n, which its stopping rule leaves odd as often as even)."""
+    if prior not in pri or pri[prior]["dist"] != "uniform":
+        uniform = ", ".join(k for k, e in pri.items() if e["dist"] == "uniform")
+        raise ConfigError(f"prior {prior!r} is not a uniform entry of config/perturbations.yaml (one of: {uniform})")
+    if n < (1 if paired else 2) or (n % 2 and not paired):
+        need = "at least one" if paired else "an even number, 2 or more (its wind and current draws are antithetic pairs)"
+        raise ConfigError(f"{n} members: the sensitivity case needs {need}")
+
+
 def sensitivity_case(mission: dict[str, Any], env: Any, prior: str = BRIEF_PRIOR, n: int = 32, fitted: dict[str, Any] | None = None,
                      scales: dict[str, Any] | None = None, X: dict[str, NDArray[Any]] | None = None) -> dict[str, list[dict[str, Any]]]:
     """The USV ensemble again with `usv_vpp_bias` drawn from perturbations.yaml's `prior` instead (default: the brief's literal -30 to -35 %,
@@ -840,6 +868,7 @@ def sensitivity_case(mission: dict[str, Any], env: Any, prior: str = BRIEF_PRIOR
     every column stays as the run drew it, and only `usv_vpp_bias` is replaced, by the new prior's value at the same quantile, so the members
     that flip are the effect of the prior alone. Without it the case draws its own n-point hypercube (a different sample from the run's)."""
     pri, marg = priors_for(mission, fitted)
+    check_case(prior, n if X is None else len(X["usv_vpp_bias"]), pri, paired=X is not None)         # the paired path takes its n from X
     new = sampling.to_marginals(pri, [prior])[prior]
     usvs = [v for v in mission["vehicles"] if _classes(mission)[v["id"]] == "usv"]
     if X is not None:
@@ -870,6 +899,7 @@ def main(argv: list[str] | None = None) -> int:
     rd = pathlib.Path(a.run)
     out = rd / "stage1b" / "sensitivity_cases.json"
     try:                                                                  # a damaged file of the run is an `error:` line and exit 2, as in `python -m cafe.pm`
+        check_case(a.prior, a.members, sampling.load_perturbations())     # round 12, M-27: before the environment loads (a fitted prior only replaces a key)
         with damaged_run_files(rd):                                       # round 10, M-5: valid JSON without a key it reads is the same damage
             ctx = pipeline.Context(a.mission, "quick", 0, rd)
             fp, rp = rd / "ingest" / "priors_fitted.json", rd / "refit" / "refit.json"

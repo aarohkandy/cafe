@@ -65,6 +65,15 @@ class NestSpec:
     rans_layer: float | None = None          # cells: near-wall mixing-length layer; None = the matching height
     nu_floor: float = 0.0                    # lattice viscosity floor: BGK at tau - 1/2 < ~1e-4 is NaN in float32 on coarse grids (Re distorted)
 
+    def __post_init__(self) -> None:
+        """Refuse a lattice viscosity above `wallmodel.NU_MAX`: `nu_lat` is where every nest (window, receipt, test) gets the viscosity its relaxation time
+        and its wall model are made from, so a window that would run BGK beyond what is trusted stops here, at the construction, before any kernel is built
+        (round 12, P-R11B1; measured: no window of the plan, receipt or test reaches a tenth of the limit)."""
+        if not self.nu_lat <= wm.NU_MAX:                    # written as "not <=" so that a NaN is refused too
+            raise ValueError(f"nest of {self.shape} cells: lattice viscosity {self.nu_lat:.3g} (tau {self.tau0:.3g}) is above wallmodel.NU_MAX {wm.NU_MAX:g}, "
+                             f"where BGK is not trusted (nu {self.nu:g} m2/s, U {self.U_ref:g} m/s, dx {self.dx:g} m, u_lat {self.u_lat:g}): "
+                             "use a smaller u_lat (a finer dt) or a larger dx (a coarser cell)")
+
     @property
     def dt(self) -> float:
         return self.u_lat * self.dx / self.U_ref

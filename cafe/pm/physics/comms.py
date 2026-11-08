@@ -6,8 +6,9 @@ Parameters live in platforms/radios.yaml and platforms/modems.yaml (each with it
 
 References
 - Two-ray: L = -20 log10[(lam/4 pi d) 2 sin(2 pi ht hr / lam d)] (BRIEF 2.8), here over a 4/3-radius earth: the reflection point from
-  Kerr's cubic, the antenna heights above the tangent plane there, exact path lengths, reflection coefficient -1 (grazing, smooth sea),
-  the divergence factor of the curved surface and the Ament roughness factor on the reflected ray.
+  Kerr's cubic, the antenna heights above the tangent plane there, exact path lengths, reflection coefficient -1 (grazing, smooth sea; the error
+  against the Fresnel coefficient is stated in `two_ray_curved_db`), the divergence factor of the curved surface and the Ament roughness factor on
+  the reflected ray.
 - Kerr, D.E. (ed.) (1951), Propagation of Short Radio Waves, MIT Rad. Lab. Series 13, ch. 2 (reflection point on a spherical earth,
   divergence factor); Blake, L.V. (1980), Radar Range-Performance Analysis, ch. 5.
 - Ament, W.S. (1953), "Toward a theory of reflection by a rough surface", Proc. IRE 41(1), 142-146; Beckmann & Spizzichino
@@ -107,9 +108,22 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     wave height hs [m], frequency f_hz, over a sphere of radius a_eff (default the 4/3 earth; FLAT_A is the plane earth). Field = |1 - rho_s D (r1/r2)
     exp(-j 2 pi (r2-r1)/lam)| x free space at the direct distance r1: r1, r2 are the direct and reflected path lengths between the antenna heights
     above the tangent plane at the specular point (kerr_reflection), D the divergence factor (divergence_factor; `divergence=False` leaves it out),
-    reflection coefficient -1 (valid for grazing angles below ~1-2 deg, i.e. d >> 100 (ht+hr)/ lam-scale geometry; closer in it is a smooth-sea
-    idealisation). Specular only: diffuse scatter is neglected, so null filling is underestimated. Antenna height changing with wave elevation on
-    small craft is NOT modelled (the roughness term stands in for it statistically). Fades out toward the horizon (D -> 0): use two_ray_loss_db."""
+    reflection coefficient -1: the limit of the Fresnel coefficient G of a vertical-polarised wave on sea water as the grazing angle goes to 0, and a
+    smooth-sea idealisation everywhere else. Round 12 (review C-6), for sea water at 915 MHz with eps_c = 72.8 - j118.9 (T 29 C, S 35, sigma 5.9 S/m:
+    ASSUMED, the lab has not given the sea temperature or the antenna polarisation, QUESTIONS_FOR_LAB), |G| is 0.98 at 0.05 deg, 0.91 at 0.25, 0.84
+    at 0.5, 0.70 at 1, 0.49 at 2, 0.35 at 3, 0.26 at 5 (the pseudo-Brewster angle, phase -86 deg), 0.49 at 12 and 0.65 at 20 deg, and its phase is
+    -179 deg at 0.05, -168 at 1 and -154 at 2 deg: -1 is within 10 % of the magnitude only below about 0.3 deg, not below "1-2 deg" as this docstring
+    said until then. The demo's grazing angles (UAS 18 to 108 m, USV whip 2.2 m) are 1.2 deg at 1 km and 0.2 deg at 5 km for the 18 m UAS and 6.3 and
+    1.3 deg for the 108 m UAS, so -1 is a good model from about 5 to 10 km out and not inside 3 km; the UAS-ship hook inside a sortie (a 15 m mast,
+    a few hundred metres to a few km) is at 2 to 30 deg, where |G| is 0.26 to 0.5. The error band of the margin against the Fresnel coefficient, as the
+    reviewer measured it (a script run outside this module, with this module's geometry and G(psi) in place of -1; with -1 it reproduces this
+    function to 0.0 dB; the margin sweeps were not re-run): this model is optimistic at interference peaks, by up to 7.6 dB, and conservative at nulls;
+    on the UAS-USV mission link from 0.2 km to the horizon the Fresnel margin is 7.4 dB lower to 23.6 dB higher at Hs 0.5 m and 2.8 dB lower to 6.9 dB
+    higher at Hs 1.5 m; on the sortie hook (0.05 to 6 km, Hs 0.5 m) 7.5 dB lower to 34.7 dB higher; no sample changed its sign. No verdict of the demo
+    rests on it (usv-uas-rf is NO-GO because 89 % of its needed moments are beyond the radio horizon, and the UAS lost-link mode is 0 of 64), but a link
+    whose budget is within about 8 dB at a peak is not decided by this function. Specular only: diffuse scatter is neglected, so null filling is
+    underestimated. Antenna height changing with wave elevation on small craft is NOT modelled (the roughness term stands in for it statistically).
+    Fades out toward the horizon (D -> 0): use two_ray_loss_db."""
     lam = C0 / f_hz
     d = np.maximum(d, 1.0)
     q1, q2, h1, h2 = kerr_reflection(d, ht, hr, a_eff)

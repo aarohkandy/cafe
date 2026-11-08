@@ -273,7 +273,10 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
     res = window_resolution(vehicle, spec)
     dx, shape, steps = res["dx"], res["shape"], res["steps"]
     nu = nu_of(vehicle)
-    ns = nest.NestSpec(shape, dx, res["u_rel"], nu, u_lat=spec.u_lat, storage=spec.storage, nu_floor=spec.nu_floor)
+    try:
+        ns = nest.NestSpec(shape, dx, res["u_rel"], nu, u_lat=spec.u_lat, storage=spec.storage, nu_floor=spec.nu_floor)
+    except ValueError as e:                                  # the viscosity limit: say which window (the stage keeps the first 300 characters)
+        raise ValueError(f"window of {vehicle.name}: {e}") from e
     res.update(nu_lat=ns.nu_lat, nu_lat_physical=nu * res["dt"] / dx ** 2, nu_floored=ns.nu_lat > nu * res["dt"] / dx ** 2)
     nest.check_memory(res["cells"])
     anchor = np.array(shape) // 2
