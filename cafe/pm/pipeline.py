@@ -1058,7 +1058,7 @@ def s_hangar(ctx: Context, L: Ledger) -> None:
     (QUESTIONS_FOR_LAB), so the "baseline model coefficients" Stage 1 and the refit start from are the analytic ones of the platform models
     (Seaglider force balance, `usv.hull_resistance`, the UAS drag area), not a RANS-with-GCI Hangar result."""
     from .config import platform_path
-    from .physics import glider, uas, usv
+    from .physics import comms, glider, uas, usv
     loaders: dict[str, Callable[[str], Any]] = dict(glider=glider.load_platform, usv=usv.load_platform, uas=uas.load_platform)
     rows = {}
     for v in ctx.mission["vehicles"]:
@@ -1072,8 +1072,10 @@ def s_hangar(ctx: Context, L: Ledger) -> None:
             err = str(e)
         L.check(f"provenance_{v['platform']}", not err, note=err)
         rows[v["id"]] = dict(platform=v["platform"], cls=cls, file=str(p), assumed=_assumed(_yaml(p)))
+    for name in comms.PARAMETER_FILES:                                    # the tables the link verdicts read: inputs too (L1)
+        L.input(comms.PLATFORMS / name)
     L.note("no Hangar CFD run: the baseline model coefficients are analytic (no vehicle CAD, QUESTIONS_FOR_LAB); no GCI, observed order or mesh quality exists "
-           "to check; the cache key is each platform file's sha-256 (a ledger input)")
+           "to check; the cache key is each platform file's sha-256 and that of radios.yaml and modems.yaml (ledger inputs)")
     L.output(_dump(rows, ctx.path("hangar", "hangar.json")))
 
 

@@ -34,6 +34,7 @@ from numpy.typing import ArrayLike, NDArray
 from .. import Tagged, config
 
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
+PARAMETER_FILES = ("radios.yaml", "modems.yaml")                     # every file `_yaml` reads: the hangar stage hashes each (a ledger input, round 11 L1)
 C0 = 299792458.0
 NO_LINK_DB = -200.0                  # margin returned when a link is physically impossible (beyond the radio horizon)
 THORP_ONLY_LABEL = "Thorp only, Bellhop unavailable"

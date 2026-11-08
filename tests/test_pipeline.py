@@ -23,7 +23,7 @@ from cafe.pm.audit import STAGES
 from cafe.pm.env import ocean as ocean_mod, orca, surface, tao
 from cafe.pm.env.environment import GriddedEnv
 from cafe.pm.env.protocol import AnalyticEnv
-from cafe.pm.physics import glider, uas, usv
+from cafe.pm.physics import comms, glider, uas, usv
 from cafe.pm.stats import sampling
 from tests.fixtures import pm_run
 from tests.fixtures.ci_env import make as fx
@@ -430,6 +430,37 @@ def test_hangar_lists_every_platform_file_with_its_number_of_assumed_values(tmp_
         assert rows[vid] == dict(platform=platform, cls=CLASSES[vid], file=str(f), assumed=assumed_leaves(yaml.safe_load(f.read_text())))
         assert check_of(d, f"provenance_{platform}")["ok"] and any(i["ref"] == str(f) and len(i["sha256"]) == 64 for i in d["inputs"])
     assert rows["uas"]["assumed"] > 10 and [pathlib.Path(o["path"]).name for o in d["outputs"]] == ["hangar.json"]
+
+
+def test_l1_r11_the_hangar_stage_hashes_the_two_link_tables_every_link_verdict_reads(tmp_path):
+    """Round 11 look-ahead L1: radios.yaml and modems.yaml were in no stage ledger, so an edit of an anchor or the ambiguity band was invisible to audit."""
+    d = run_stage(pipeline.s_hangar, ctx_for(tmp_path / "r"), "hangar")
+    by = {pathlib.Path(i["ref"]).name: i["sha256"] for i in d["inputs"]}
+    for name in ("radios.yaml", "modems.yaml"):
+        assert by[name] == hashlib.sha256((ROOT / "platforms" / name).read_bytes()).hexdigest()
+
+
+def test_l1_r11_an_edit_of_modems_or_radios_after_the_hangar_stage_is_a_problem_of_the_audit(tmp_path, monkeypatch):
+    plat = tmp_path / "platforms"
+    shutil.copytree(ROOT / "platforms", plat)
+    monkeypatch.setattr(comms, "PLATFORMS", plat)
+    run_stage(pipeline.s_hangar, ctx_for(tmp_path / "r"), "hangar")
+
+    def seen():
+        return [p for p in audit.ledger_problems(tmp_path / "r") if "stage hangar" in p and "changed since the stage ran" in p]
+    assert seen() == []
+    for name in ("modems.yaml", "radios.yaml"):
+        f = plat / name
+        f.write_text(f.read_text() + "\n# edited after the run\n")
+        assert any(name in p for p in seen()), name
+
+
+def test_l1_r11_every_yaml_the_link_models_read_is_one_the_hangar_stage_records():
+    """The sibling guard: a third table read through `comms._yaml` that `PARAMETER_FILES` does not name would be invisible to audit the same way."""
+    read = set()
+    for f in ("physics/comms.py", "stage1.py"):
+        read |= set(re.findall(r'_yaml\("([a-z_]+\.yaml)"\)', (ROOT / "cafe" / "pm" / f).read_text()))
+    assert read == set(comms.PARAMETER_FILES)
 
 
 def test_hangar_fails_on_a_platform_number_without_provenance(tmp_path, monkeypatch):

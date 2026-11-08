@@ -941,6 +941,33 @@ def test_r11_m19_worker_setup_checks_the_25_gb_it_says_it_needs_before_installin
     assert "rsync" in log.read_text()
 
 
+WORKER_DIRS = ["pmdata/bin", "pmdata/dtmb5415", "pmdata/bathy", "pmdata/tao", "pmdata/cache", "pmdata/ocean", "data"]
+
+
+def fill_worker(home, leave_out=None):
+    for d in WORKER_DIRS:
+        if d != leave_out:
+            (home / "work" / "cafe" / d).mkdir(parents=True)
+
+
+def test_l1_r11_worker_setup_run_again_on_a_finished_worker_with_less_than_25_gb_free_goes_on_to_top_it_up(tmp_path):
+    """Round 11 look-ahead L1: the 25 GB check ran before the idempotent steps, so the install's own use of the disk stopped the re-run that is called safe."""
+    home, env, log = setup_machine(tmp_path, 24 * 1048576)
+    fill_worker(home)                                                   # the docker stand-in answers `image inspect` as an image that is there
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host"], env)
+    assert r.returncode == 0 and "25 GB needed" not in r.stderr and "rsync" in log.read_text(), r.stderr
+
+
+@pytest.mark.parametrize("what", [*WORKER_DIRS, "image"])
+def test_l1_r11_worker_setup_still_checks_the_25_gb_when_the_image_or_a_data_directory_is_missing(tmp_path, what):
+    home, env, log = setup_machine(tmp_path, 24 * 1048576)
+    fill_worker(home, leave_out=what)
+    if what == "image":
+        (tmp_path / "tools" / "docker").write_text('#!/bin/sh\ncase "$1" in ps) exit 0 ;; image) exit 1 ;; esac\n')
+    r = run(["sh", str(ROOT / "bin/worker_setup.sh"), "u@host"], env)
+    assert r.returncode == 1 and "only 24 GB free" in r.stderr and not log.exists()
+
+
 def test_r11_m19_worker_setup_stops_after_adding_the_login_to_the_docker_group(tmp_path):
     """Round 11 M-19: it went on to `docker load` in the session that does not have the group yet, and failed there."""
     home, env, log = setup_machine(tmp_path, 100 * 1048576, ps_rc=1)
