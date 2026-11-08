@@ -36,6 +36,7 @@ RGAS, CPA = 287.1, 1004.67
 BE, CPW, RHOW, VISW, TCW = 0.026, 4000.0, 1022.0, 1.0e-6, 0.6
 A_WAVE, B_WAVE, A_SS, B_SS = 0.114, 0.622, 0.091, 2.0
 UMAX, CH1, CH2 = 19.0, 0.0017, -0.0050  # Charnock alpha = CH1*U10n + CH2, capped at U10n = UMAX
+CP_MIN = 2.0  # [m/s] a dominant phase speed below this is no developed sea (calm, ice, fill value): Charnock; the demo's UMWM dcp is never under 3.93
 
 
 def grav(lat: ArrayLike) -> Arr:
@@ -119,13 +120,15 @@ def coare35(
     """COARE 3.5 fluxes. `u` is the wind speed at zu RELATIVE to the surface current [m/s]; `t` air temperature [K] at zt;
     `q` air specific humidity [kg/kg] at zq; `P` surface pressure [Pa]; `ts` sea temperature [K] (bulk if jcool=1, skin if 0);
     `Rs`, `Rl` downward shortwave and longwave [W/m2]; `zi` boundary-layer height [m]; `cp` dominant phase speed [m/s] and
-    `sigH` significant wave height [m] switch the roughness to wave-age (cp only) or sea-state (cp and sigH) form where finite;
+    `sigH` significant wave height [m] switch the roughness to wave-age (cp only) or sea-state (cp and sigH) form where finite and, for cp,
+    at least CP_MIN (calm, ice or a fill value of 0 would give NaN or an absurd drag; those points use the Charnock form);
     `rain` rain rate [mm/h] (only adds the rain heat flux `rf`).
 
     Returns a dict of arrays shaped like the broadcast inputs: ustar, tau [N/m2, stress on the sea], z0, z0t, z0q, L (Obukhov,
     negative = unstable), zeta (zu/L), Cd, Ch, Ce (at the measurement heights, relative to gust-inclusive speed), Cdn10,
     u10n, hsb, hlb (W/m2, positive = sea loses heat), rf (W/m2, rain heat flux), tsr, qsr, dter (cool-skin dT, K, skin = ts -
-    dter), tkt, gf (gustiness factor, ut/du), ut, rhoa, lhvap and `zu` (needed by `profile`).
+    dter), tkt (cool-skin layer thickness, m), gf (gustiness factor, ut/du), ut, rhoa, lhvap and `zu` (needed by `profile`).
+    With jcool=0 there is no cool skin (`ts` is already the skin): dter and tkt are 0, not the loop's unused estimate.
     """
     a = np.broadcast_arrays(*[np.asarray(v, float) for v in (u, zu, t, zt, q, zq, P, ts, Rs, Rl, lat, zi)])
     u, zu, t, zt, q, zq, P, ts, Rs, Rl, lat, zi = a
@@ -135,7 +138,7 @@ def coare35(
     if sigH is None:
         sigH = np.full(shape, np.nan)
     cp, sigH = np.broadcast_to(np.asarray(cp, float), shape), np.broadcast_to(np.asarray(sigH, float), shape)
-    wave = np.isfinite(cp)
+    wave = np.isfinite(cp) & (cp >= CP_MIN)
     sea = wave & np.isfinite(sigH)
     tc, tsc, pmb = t - 273.15, ts - 273.15, P / 100.0
     g = grav(lat)
@@ -219,6 +222,8 @@ def coare35(
     usr, tsr, qsr, L, zet, dter, tkt = (
         np.where(k50, f, c) for f, c in zip(first, (usr, tsr, qsr, L, zet, dter, tkt), strict=True)
     )
+    if not jcool:  # the loop multiplies dter by jcool everywhere, so nothing above used these
+        dter, tkt = np.zeros(shape), np.zeros(shape)
     hsb, hlb = -rhoa * CPA * usr * tsr, -rhoa * lhvap * usr * qsr
     tau = rhoa * usr**2 / gf
     dqer = wetc * dter

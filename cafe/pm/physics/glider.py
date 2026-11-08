@@ -32,7 +32,8 @@ Lon/lat: local metres per degree, WGS84 series of the NGA "length of a degree" t
 - 0.0023 cos 6phi; 111412.84 cos phi - 93.5 cos 3phi + 0.118 cos 5phi), tested against the ellipsoid.
 Timing: phase changes are evaluated at step ends, so each of the 4 transitions per cycle is late by <= dt (about 1 % of a
 3 h cycle at 60 s).
-The Environment has no T(z): T = t_deep + (SST - t_deep) exp(-z/h) (assumed, platforms/*.yaml).
+The Environment API does not expose the ocean store's temperature (`Ocean.temperature` exists but is not wired to the protocol,
+`Environment` or the perturbed wrapper): T = t_deep + (SST - t_deep) exp(-z/h) (assumed, platforms/*.yaml).
 """
 
 from __future__ import annotations

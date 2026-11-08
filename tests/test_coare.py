@@ -251,3 +251,28 @@ def test_warm_layer_requires_time_last():
             sst=np.full(5, 302.0),
             glw=np.full(5, 420.0),
         )
+
+
+# ------------------------------------------------------------------------------------------------------------ round 12 M-13, M-14
+
+@pytest.mark.parametrize("cp", [0.0, -1.0, 1e-3, 0.3, 1.9])
+@pytest.mark.parametrize("sigH", [None, 0.0, 2.0])
+def test_a_phase_speed_below_the_floor_gives_the_charnock_result_not_nan(cp, sigH):
+    """Round 12 M-13: a UMWM dcp of 0 (calm, ice, fill) or any value under CP_MIN made the wave-age/sea-state form NaN or absurd (Cd 0.3);
+    those points now take the Charnock form, as a NaN cp does."""
+    r, ref = run(u=8.0, cp=cp, sigH=sigH), run(u=8.0)
+    assert all(np.all(np.isfinite(r[k])) for k in ("ustar", "z0", "L", "Cd"))
+    assert all(np.array_equal(r[k], ref[k]) for k in ("ustar", "z0", "L", "Cd"))
+
+
+def test_a_phase_speed_at_the_floor_still_uses_the_wave_age_form():
+    r, ref = run(u=8.0, cp=coare.CP_MIN), run(u=8.0)
+    assert coare.CP_MIN < 3.0 and r["z0"] != ref["z0"] and np.isfinite(r["ustar"])        # the demo's dcp is never under 3.93: it takes this branch unchanged
+
+
+def test_without_the_cool_skin_dter_and_tkt_are_zero():
+    """Round 12 M-14: with jcool=0 `ts` is the skin and the loop applies no cool skin, so the returned dter and tkt are those of none
+    (they were the unused estimate, 0.24 K and 6e-4 m); with jcool=1 they are the computed ones, and the fluxes do not depend on this."""
+    on, off = run(u=6.0, jcool=1), run(u=6.0, jcool=0)
+    assert np.all(off["dter"] == 0.0) and np.all(off["tkt"] == 0.0)
+    assert on["dter"] > 0.05 and on["tkt"] > 0.0

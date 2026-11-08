@@ -296,3 +296,32 @@ def test_r8_l0_the_digest_record_is_written_whole_or_not_at_all(ci_env, tmp_path
         S.build(GriddedEnv(d, env_sigmas()), d, "key-2", log=lambda m: None)
     monkeypatch.undo()
     assert (d / S.DIGEST).read_text() == before and json.loads(before)["built_from"] == "key-1"          # the old record, whole; the new store is not current
+
+
+# ------------------------------------------------------------------------------------------------------------ round 12 M-1
+
+def _few_restarts(ci_env, tmp_path, keep, nan=False):
+    """An env over the ci_env cache whose real spectra count only `keep` restart times inside the window (the others moved a year away)."""
+    d = tmp_path / "cache"
+    for s in ("wrf.zarr", "umwm.zarr", "umwmspec.zarr"):
+        shutil.copytree(ci_env.cache / "orca" / s, d / "orca" / s)
+    env = GriddedEnv(d, env_sigmas())
+    t = np.array(env.spec["t"], float)
+    env.spec = {**env.spec, "t": np.where(np.arange(len(t)) < keep, t, t + 3.0e7)}
+    if nan:
+        env.spec["F"] = np.full_like(env.spec["F"], np.nan)
+    messages = []
+    return env, S.build(env, d, log=messages.append), messages, d
+
+
+@pytest.mark.parametrize("keep,nan", [(0, False), (1, False), (2, False), (7, True)])
+def test_build_with_fewer_than_three_restart_spectra_or_no_finite_error_keeps_the_fit_alone(ci_env, tmp_path, keep, nan):
+    """Round 12 M-1: the leave-one-out error needs an interior restart time (three); with fewer, or with an error that is not finite, the
+    stored fit is null and `stokes_surface` tags the fit alone with 0.4|u_s| (it was a NaN uncertainty labelled "nan %", or an IndexError)."""
+    env, fit, messages, d = _few_restarts(ci_env, tmp_path, keep, nan)
+    assert fit is None and any("fewer than three restart spectra" in m for m in messages)
+    sl = S.SurfaceLayer(d)
+    assert sl.fit is None
+    lon, lat, t = np.array([194.4, 196.0]), np.array([-0.7, 0.9]), np.array([fx.T_REF + 9 * 3600.0, fx.T_REF + 20 * 3600.0])
+    s = GriddedEnv(d, env_sigmas(), subgrid=sl).waves(lon, lat, t)["stokes0"]
+    assert np.all(np.isfinite(s.uncertainty)) and np.allclose(s.uncertainty, 0.4 * np.abs(s.value)) and "nan" not in s.source

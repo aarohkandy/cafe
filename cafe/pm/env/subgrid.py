@@ -368,7 +368,9 @@ def windage_fraction(base_seed: int, members: Iterable[Any], cfg: dict[str, Any]
 
 def diurnal_jet(seed: int, dT_warm: ArrayLike, wind10: ArrayLike, cfg: dict[str, Any] | None = None) -> Tagged:
     """Surface-trapped diurnal jet proxy [m/s, (east, north)]: u_amp * min(dT_warm / dT_ref, 1) along the wind, u_amp uniform
-    in [0.1, 0.3] per member (axis 0). TEPEX-C's own hypothesis (BRIEF 2.2), labelled modelled; dT_ref in assumptions.yaml."""
+    in [0.1, 0.3] per member (axis 0). TEPEX-C's own hypothesis (BRIEF 2.2), labelled modelled; dT_ref in assumptions.yaml.
+    Only the receipts call this. A run's current is `SurfaceLayer.current_extra`, which gives every member the midpoint of the range:
+    the 0.1-0.3 spread is not sampled per member there, and the run's current carries no jet uncertainty."""
     cfg = cfg or load_config()
     w = np.asarray(wind10, float)
     j = cfg["ocean"]["diurnal_jet"]
