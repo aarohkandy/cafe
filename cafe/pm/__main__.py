@@ -121,7 +121,7 @@ def main(argv: list[str] | None = None) -> int:
             return acceptance.main(a)
         if a.cmd == "receipts":
             from . import receipts
-            return receipts.run(a.slow, a.only.split(",") if a.only else None, a.broken, a.json)[1]
+            return receipts.run(a.slow, a.only.split(",") if a.only is not None else None, a.broken, a.json)[1]
         if a.cmd == "audit":
             return audit.main(a.runs + (["--code-only"] if a.code_only else []) + (["--ledgers-only"] if a.ledgers_only else []))
         if a.cmd == "hangar":

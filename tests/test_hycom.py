@@ -1310,3 +1310,15 @@ def test_lb0_a_store_and_its_damaged_forms_are_still_recognised(fx, tmp_path, da
         for f in list(store.rglob("zarr.json")):
             f.write_text("{cut")
     assert h.looks_like_zarr(store)
+
+
+def test_r12_l1_m24_the_box_refusals_of_hycom_label_the_edges(tmp_path):
+    """box360, _sub and ingest_lab_hycom printed the (south, north, west, east) tuple bare, where OutsideData and the ocean_box refusals used words."""
+    import xarray as xr
+    with pytest.raises(ValueError, match=r"box lat -1 to 1, lon 350 to 10 crosses 0/360"):
+        h.box360((-1, 1, 350, 10))
+    with pytest.raises(ValueError, match=r"box lat -1 to 1, lon -180 to 181 is 361 degrees wide"):
+        h.box360((-1, 1, -180, 181))
+    ds = xr.Dataset({"x": (("lat", "lon"), np.zeros((3, 3)))}, coords=dict(lat=[-1.0, 0.0, 1.0], lon=[179.0, 180.0, 181.0]))
+    with pytest.raises(ValueError, match=r"no lab-HYCOM points inside the box \(lat 40 to 41, lon 10 to 11\)"):
+        h._sub(ds, (40.0, 41.0, 10.0, 11.0))

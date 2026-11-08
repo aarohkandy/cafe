@@ -136,7 +136,7 @@ class GriddedEnv:
             i = np.flatnonzero(bad)[0]
             L, A, T = (np.broadcast_to(np.asarray(x, float), bad.shape).ravel()[i] for x in (lon, lat, t))
             raise OutsideData(f"{what}: ({L:.3f}, {A:.3f}) at {dt.datetime.fromtimestamp(T, dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z "
-                              f"is outside the ingested data (box {bounds[:4]}, "
+                              f"is outside the ingested data (box {cv.box_words(bounds[2:4] + bounds[:2])}, "
                               f"{dt.datetime.fromtimestamp(bounds[4], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z.."
                               f"{dt.datetime.fromtimestamp(bounds[5], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z); "
                               "re-run `cafe fetch` with a larger box or window")

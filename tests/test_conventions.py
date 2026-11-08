@@ -48,3 +48,8 @@ def test_from_is_opposite_of_to(s, d):
 def test_math_compass_roundtrip(d):
     back = cv.math_rad_to_compass_to(cv.compass_to_to_math_rad(d))
     assert np.isclose((back - d + 180) % 360 - 180, 0, atol=1e-6)
+
+
+def test_r12_l1_m24_box_words_names_south_north_west_east_and_takes_any_four_numbers():
+    assert cv.box_words((-7.0, 7.0, 165.0, 195.0)) == "lat -7 to 7, lon 165 to 195"
+    assert cv.box_words([-1, 1, 350, 10]) == "lat -1 to 1, lon 350 to 10"

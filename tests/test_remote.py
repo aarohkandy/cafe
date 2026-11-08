@@ -247,7 +247,7 @@ def interrupted(server, tmp_path, name, data, cut=1000):
     return u
 
 
-def test_download_resumes_a_partial_file(server, tmp_path):
+def test_download_resumes_a_partial_file(server, tmp_path, versioned):
     data = bytes(range(256)) * 40
     u = interrupted(server, tmp_path, "a", data, 3000)
     p = remote.download(u, tmp_path / "a", hashlib.sha256(data).hexdigest())
@@ -677,3 +677,22 @@ def test_r12_l0_m25_the_pieces_of_one_header_are_of_one_version_too(tmp_path, se
     server.plan["big.nc"] = [("sleep", 0), ("call", lambda s: s.put("big.nc", data + bytes(4)))]          # replaced between the first piece and the second
     with pytest.raises(ConnectionError, match="changed on the server"):
         remote.cdf1_header(u)
+
+
+def test_r12_l1_m25_a_server_with_no_validator_never_has_a_part_resumed_across_calls(server, tmp_path):
+    """No ETag, no Last-Modified: a part of v1 and a v2 of the same size are indistinguishable, and `pin=False` (TAO) checks no hash, so v1[:1000] + v2[1000:]
+    came out with no error."""
+    u = interrupted(server, tmp_path, "a", V1)
+    assert not remote._if_range(remote._probe(u)[1])
+    server.put("a", V2)
+    server.log.clear()
+    assert remote.download(u, tmp_path / "a").read_bytes() == V2                  # was V1[:1000] + V2[1000:]
+    assert server.requests("a") == ["bytes=0-0", "bytes=0-"]                       # from byte 0, not from 1000
+    assert not (tmp_path / "a.part").exists() and not (tmp_path / "a.part.id").exists()
+
+
+def test_r12_l1_m25_a_weak_etag_alone_is_no_validator_for_resuming_either(server, tmp_path, monkeypatch):
+    _validators(monkeypatch, weak=True)
+    u = interrupted(server, tmp_path, "a", V1)
+    assert remote.download(u, tmp_path / "a").read_bytes() == V1
+    assert server.requests("a") == ["bytes=0-0", "bytes=0-"]

@@ -111,7 +111,7 @@ def test_inside_is_the_data_box(grid):
 def test_outside_data_names_the_point_and_the_box(grid):
     t = grid.tw.x[5]
     for lon, lat, tt in ((190.0, 0.0, t), (195.0, 5.0, t), (195.0, 0.0, grid.tw.x[0] - 7200.0)):
-        with pytest.raises(OutsideData, match=r"outside the ingested data \(box \(-167\.125, -162\.875, -2\.125, 2\.125\), "
+        with pytest.raises(OutsideData, match=r"outside the ingested data \(box lat -2\.125 to 2\.125, lon -167\.125 to -162\.875, "
                                               r"2023-03-01 18:00:00Z\.\.2023-03-03 06:00:00Z\)"):
             grid.u10(lon, lat, tt)
     with pytest.raises(OutsideData, match=r"\(190\.000, 0\.000\) at 2023-03-01 23:00:00Z"):
@@ -601,3 +601,11 @@ def test_r8_m24_a_repeated_or_reversed_axis_value_is_a_config_error_naming_the_s
     ds.to_zarr(d / "orca" / store, mode="w")
     with pytest.raises(ConfigError, match=rf"cache file .*{store}: axis {dim}: must be strictly increasing .*delete .*orca and run `python -m cafe.pm fetch"):
         GriddedEnv(d, env_sigmas())                                                                    # a bare ValueError before
+
+
+def test_r12_l1_m24_outside_data_labels_the_box_with_the_same_words_as_the_other_box_refusals(grid):
+    """GriddedEnv.bounds is (west, east, south, north, t0, t1); the message printed its first four unlabelled, (west, east, south, north), while the
+    ocean_box refusals say "lat S to N, lon W to E": one word "box", two tuple orders."""
+    with pytest.raises(OutsideData) as e:
+        grid.u10(190.0, 0.0, grid.tw.x[5])
+    assert "(box lat -2.125 to 2.125, lon -167.125 to -162.875, " in str(e.value) and "box (" not in str(e.value)

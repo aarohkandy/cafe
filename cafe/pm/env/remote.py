@@ -198,8 +198,11 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
     only when `pin` is set, and then a mismatch is a ValueError. A caller that holds the hash of an *earlier* copy (the TAO manifest) must not pin it:
     when upstream replaced the file, the old hash would refuse the new one on every try (round 12, M-26).
 
-    A `.part` is resumed only when `<name>.part.id` records the same total size, ETag and Last-Modified the server sends now; with no record, or another
-    version, it starts again from byte 0, and the resume request carries If-Range so that a file replaced in between comes back whole (round 12, M-25)."""
+    A `.part` left by an earlier call is resumed only when `<name>.part.id` records the same total size, ETag and Last-Modified the server sends now and
+    the server sends a validator that can go in If-Range (a strong ETag or Last-Modified); with no record, another version, or no such validator it starts
+    again from byte 0, and the resume request carries If-Range so that a file replaced in between comes back whole (round 12, M-25; look-ahead L1: a
+    server with no validator cannot tell a v1 part from v2 whatever the size, and no hash is checked here to catch the splice). A transfer cut inside
+    one call is still continued from where it stopped: that is seconds, not a restart of the process, and the size and 206 are checked."""
     path = pathlib.Path(path)
     if path.exists() and (sha is None or sha256(path) == sha):
         return path
@@ -211,10 +214,10 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
         seen = json.loads(mark.read_text())
     except (OSError, ValueError):
         seen = None
-    if seen != ident:
+    ifr = _if_range(valid)
+    if seen != ident or ifr is None:                                   # no validator the server honours: nothing tells a part of v1 from the rest of v2
         part.unlink(missing_ok=True)
         mark.write_text(json.dumps(ident))
-    ifr = _if_range(valid)
     have = part.stat().st_size if part.exists() else 0
     if have > total:
         part.unlink()

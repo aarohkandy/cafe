@@ -94,3 +94,9 @@ def compass_to_to_math_rad(deg: ArrayLike) -> F:
 def rotate_grid_to_earth(u: Any, v: Any, cosalpha: Any, sinalpha: Any) -> tuple[Any, Any]:
     """WRF grid-relative (u, v) -> earth (east, north), as wrf-python uvmet does: ue = u cos a - v sin a, ve = v cos a + u sin a."""
     return u * cosalpha - v * sinalpha, v * cosalpha + u * sinalpha
+
+
+def box_words(box: Any) -> str:
+    """A (south, north, west, east) box as "lat -7 to 7, lon -12 to 12" for a message: the bare tuple read as lon first, and two orders were printed."""
+    s, n, w, e = (float(x) for x in box)
+    return f"lat {s:g} to {n:g}, lon {w:g} to {e:g}"

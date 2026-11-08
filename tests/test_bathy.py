@@ -269,3 +269,8 @@ def test_r12_l0_m25_the_row_reads_of_gebco_refuse_a_file_replaced_after_its_meta
     assert not (tmp_path / "x.npz").exists()
     monkeypatch.setattr(b, "_rows", real)
     assert b.fetch_gebco(BOX, tmp_path / "y.npz", gebco["flat"], workers=2).is_file()                # a file that stays the same version is read as before
+
+
+def test_r12_l1_m24_gebco_empty_box_names_its_edges(server, gebco, tmp_path):
+    with pytest.raises(ValueError, match=r"has no grid points inside the box \(lat -2 to 2, lon 10.6 to 10.9\)"):
+        b.fetch_gebco((-2, 2, 10.6, 10.9), tmp_path / "x.npz", gebco["flat"])

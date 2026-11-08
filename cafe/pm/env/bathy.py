@@ -111,7 +111,7 @@ def fetch_gebco(box: Any, out_path: Any, url: str = GEBCO_URL, workers: int = 16
     lon0 = np.mod(lon180, 360.0)
     want = np.where((lon0 >= w - GEBCO_RES_DEG) & (lon0 <= e + GEBCO_RES_DEG))[0]
     if len(j) == 0 or len(want) == 0:
-        raise ValueError(f"{url} has no grid points inside the box {box}")
+        raise ValueError(f"{url} has no grid points inside the box ({cv.box_words(box)})")
     pieces, cols = [], []
     for run in (want[lon180[want] >= 0], want[lon180[want] < 0]):
         if len(run) == 0:

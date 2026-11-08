@@ -603,6 +603,18 @@ def test_r12_m31_every_part_of_only_must_select_a_group_and_an_empty_part_select
     assert {r["module"] for r in rows} == {"pm.env.waves", "pm.emulator"}
 
 
+def test_r12_l1_m31_an_empty_only_is_refused_in_run_and_reaches_it_from_the_command_line(tmp_path, monkeypatch):
+    """`--only ""` (an unset $GROUP) was falsy in the command line and ran every group, writing runs/receipts.json; `only=[]` did the same in run()."""
+    monkeypatch.setattr(pr, "ROOT", tmp_path)
+    monkeypatch.setattr(pr, "jobs", jobs_of(("pm.env.waves", passing)))
+    logs = []
+    assert pr.run(only=[], log=logs.append) == ([], 2) and logs[-1].startswith("no receipt group matches ''; ")
+    assert not (tmp_path / "runs").exists()
+    got = []
+    monkeypatch.setattr(pr, "run", lambda *a: got.append(a) or ([], 2))
+    assert cli.main(["receipts", "--only", ""]) == 2 and got[0][1] == [""]
+
+
 def test_the_gebco_cache_is_found_under_the_name_bathy_writes_and_its_absence_is_a_context_row(tmp_path, monkeypatch):      # round 7, M-39
     from cafe import receipts as R
     monkeypatch.setenv("CAFE_DATA", str(tmp_path))

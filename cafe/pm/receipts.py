@@ -449,8 +449,8 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
     from . import config
     from .env import conventions as cv
     names = [n for n, _ in jobs(slow)]
-    if only and (bad := [o for o in only if not o or not any(o in n for n in names)]):     # round 6 M-12, round 12 M-31: every part must select a group
-        log(f"no receipt group matches {', '.join(repr(o) for o in bad)}; the groups are: {', '.join(names)}")        # ('' is in every name: it is no part)
+    if only is not None and (bad := [o for o in only or [""] if not o or not any(o in n for n in names)]):   # M-12, M-31: each part, and an empty list
+        log(f"no receipt group matches {', '.join(repr(o) for o in bad)}; the groups are: {', '.join(names)}")   # (an empty part is in every name: no part)
         return [], 2
     old = os.environ.get(cv.OVERLAY_ENV)
     base: dict[str, str] = {}

@@ -74,11 +74,11 @@ def box360(box: Any) -> Box:
     if s >= n:
         raise ValueError(f"box south {s} must be below north {n}")
     if e - w > 360.0 + 1e-9:                                             # round 10, M-3 sibling: modulo 360 it would become a thin strip, fetched silently
-        raise ValueError(f"box {box} is {e - w:g} degrees wide, more than the whole circle")
+        raise ValueError(f"box {cv.box_words(box)} is {e - w:g} degrees wide, more than the whole circle")
     span = (e - w) % 360.0 or 360.0
     w = w % 360.0
     if w + span > 360.0 + 1e-9:
-        raise ValueError(f"box {box} crosses 0/360 E; GLBy longitudes start at 0, so fetch it as two boxes")
+        raise ValueError(f"box {cv.box_words(box)} crosses 0/360 E; GLBy longitudes start at 0, so fetch it as two boxes")
     return s, n, w, w + span
 
 
@@ -692,7 +692,7 @@ def read_archv(path: Any, grid: Any, temperature_kind: Any = None, depth: Any = 
         jj = np.flatnonzero(((lat >= s - 0.5) & (lat <= n + 0.5)) | _cut(lat, s, n))          # 0.5 deg around the box, and the bracket `_sub` will ask for
         ii = np.flatnonzero(((ll >= w - 0.5) & (ll <= e + 0.5)) | _cut(ll, w, e))             # of a grid coarser than that
         if len(ii) == 0 or len(jj) == 0:
-            raise ValueError(f"{path}: the grid has no points inside the box {box}")
+            raise ValueError(f"{path}: the grid has no points inside the box ({cv.box_words(box)})")
     sel, ang = np.ix_(jj, ii), np.radians(g["pang"])
     has_bt = ("u_btrop", 0) in index
     kdm = max(f["k"] for f in doc["fields"] if f["name"] == "thknss")
@@ -748,7 +748,7 @@ def _sub(ds: Any, box: Any) -> Any:
     ds = ds.assign_coords(lon=lon).isel(lon=np.flatnonzero(_cut(lon, w, e))).sortby("lat")
     ds = ds.isel(lat=np.flatnonzero(_cut(ds.lat.values, s, n)))
     if ds.sizes["lon"] == 0 or ds.sizes["lat"] == 0:
-        raise ValueError(f"no lab-HYCOM points inside the box {box}")
+        raise ValueError(f"no lab-HYCOM points inside the box ({cv.box_words(box)})")
     return ds
 
 
