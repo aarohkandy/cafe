@@ -9,7 +9,7 @@ import jax
 import jax.numpy as jnp
 
 import cafe.receipts as cr
-from cafe.pm.stage3 import lbm, nest
+from cafe.pm.stage3 import lbm, nest, wallmodel as wm
 
 settings.register_profile("jax", deadline=None)               # first call of a jitted function compiles
 settings.load_profile("jax")
@@ -461,8 +461,42 @@ def test_viscosity_floor_only_raises_the_lattice_viscosity():
     base = dict(shape=(8, 8, 8), dx=0.01, U_ref=1.0, nu=1e-9)
     assert nest.NestSpec(**base).nu_lat == pytest.approx(1e-9 * 0.04 * 0.01 / 1e-4)
     assert nest.NestSpec(**base, nu_floor=1e-4).nu_lat == 1e-4 and nest.NestSpec(**base, nu_floor=1e-4).tau0 == pytest.approx(0.5003)
-    big = dict(base, nu=1.0)
+    big = dict(base, nu=0.05)                                          # nu_lat 0.2 (tau 1.1): the fluid's own, above the floor and below wallmodel.NU_MAX
+    assert nest.NestSpec(**big).nu_lat == pytest.approx(0.2)
     assert nest.NestSpec(**big, nu_floor=1e-4).nu_lat == nest.NestSpec(**big).nu_lat
+
+
+def test_r12_a_nest_whose_lattice_viscosity_is_above_nu_max_is_refused_with_the_two_remedies():
+    """P-R11B1: `wallmodel.NU_MAX` was read by nothing, so a nest with tau 2.4 ran. nu_lat = nu u_lat / (U dx): 0.15 m2/s at u_lat 0.04, U 1 m/s and dx 1 cm."""
+    base = dict(shape=(8, 8, 8), dx=0.01, U_ref=1.0, nu=0.15)
+    with pytest.raises(ValueError) as e:
+        nest.NestSpec(**base)
+    msg = str(e.value)
+    assert msg.startswith("nest of (8, 8, 8) cells: lattice viscosity 0.6 (tau 2.3) is above wallmodel.NU_MAX 0.333333, where BGK is not trusted")
+    assert "(nu 0.15 m2/s, U 1 m/s" in msg
+    assert msg.endswith("dx 0.01 m, u_lat 0.04): use a smaller u_lat (a finer dt) or a larger dx (a coarser cell)")
+    assert len(msg) < 260                                                                                  # the stage keeps 300
+    assert nest.NestSpec(**base, u_lat=0.02).nu_lat == pytest.approx(0.3)                                  # the remedies the message names work
+    assert nest.NestSpec(**dict(base, dx=0.02)).nu_lat == pytest.approx(0.3)
+
+
+def test_r12_nu_max_is_the_tau_of_one_and_a_half_and_is_allowed_but_not_a_hair_over():
+    """The limit's comment says tau <= 1.5, which is nu 1/3 (the constant read 0.5, tau 2.0, until round 12). Exact here: dx 1, U 1, u_lat 0.5."""
+    assert wm.NU_MAX == 1 / 3 and lbm.tau_from_nu(wm.NU_MAX) == 1.5
+    at = dict(shape=(8, 8, 8), dx=1.0, U_ref=1.0, u_lat=0.5)
+    assert nest.NestSpec(**at, nu=2 / 3).nu_lat == wm.NU_MAX and nest.NestSpec(**at, nu=2 / 3).tau0 == 1.5          # the limit is inclusive
+    with pytest.raises(ValueError, match=r"lattice viscosity 0\.4 \(tau 1\.7\) is above wallmodel.NU_MAX 0\.333333"):
+        nest.NestSpec(**at, nu=0.8)
+    with pytest.raises(ValueError, match="lattice viscosity 0.5 "):
+        nest.NestSpec(**at, nu=1.0)                                                                                # the old limit's tau 2.0 is refused now
+    with pytest.raises(ValueError, match="lattice viscosity 0.6 "):
+        nest.NestSpec(shape=(8, 8, 8), dx=0.01, U_ref=1.0, nu=1e-9, nu_floor=0.6)                       # nu_lat is the floor's here: still the limit's
+    assert nest.NestSpec(shape=(8, 8, 8), dx=0.01, U_ref=1.0, nu=1e-9, nu_floor=0.3).nu_lat == 0.3
+
+
+def test_r12_a_nan_viscosity_is_refused_not_run():
+    with pytest.raises(ValueError, match="lattice viscosity nan "):
+        nest.NestSpec(shape=(8, 8, 8), dx=0.01, U_ref=1.0, nu=float("nan"))
 
 
 def test_a_sphere_grid_stored_without_a_code_sha_never_passes(monkeypatch, tmp_path):

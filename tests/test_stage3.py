@@ -2640,3 +2640,34 @@ def test_l1_a_rerun_kept_beside_a_grid_is_no_grid_of_the_study_as_the_credibilit
     assert [r["d"] for r in runs] == [8, 12, 16] and bad == [] and runs[0]["cd"] == 1.3053
     e, _ = nest.sphere_discretisation()
     assert e == pytest.approx(0.0153, abs=2e-4)
+
+
+# ------------------------------------------------------------------------------------------------------ round 12: wallmodel.NU_MAX
+
+def test_r12_a_window_over_nu_max_is_refused_by_name_before_anything_is_built():
+    """P-R11B1: run_window builds its NestSpec first, so the refusal comes before the voxelisation and the memory guard, names the vehicle, and still holds
+    its remedy inside the 300 characters the stage keeps (`_row`: `str(e)[:300]`)."""
+    import dataclasses
+    thick = dataclasses.replace(HULL, nu=0.2)                                          # nu_lat = nu u_lat / (U dx) = 0.2 * 0.04 / (1 * 0.01) = 0.8
+    with pytest.raises(ValueError) as e:
+        W.run_window(thick, W.WindowSpec(velocity=(1.0, 0.0, 0.0), dx=0.01, steps=10, box=(2.0, 0.8, 0.8)), _uniform([0, 0, 0]))
+    kept = str(e.value)[:300]
+    assert kept.startswith("window of auv: nest of (") and "lattice viscosity 0.8 (tau 2.9) is above wallmodel.NU_MAX 0.333333" in kept
+    assert "use a smaller u_lat (a finer dt) or a larger dx (a coarser cell)" in kept
+
+
+def test_r12_every_window_the_code_builds_today_is_far_below_nu_max():
+    """P-R11B1, measured on orca on the code of ee5e90b (numbers in review/orca/PROBLEMS.md): the demo's plan has lattice viscosity 1e-4 (the floor) in
+    all 40 windows of the four budgets with and without a GPU; a window cannot be finer than the 10-cells-per-delta dx (nu_lat = 0.108 n Re^-0.8 for n
+    cells), so the nominal windows bound every plan; the fixed receipts are 3e-5 to 8e-3. Re would have to fall to about 4 to reach
+    NU_MAX (1/3; the limit read 0.5, Re about 2.6, until it was set to the tau 1.5 its comment states)."""
+    a = budget.stage3_assumptions()
+    for key, fluid in (("nominal.glider", "water"), ("nominal.usv_hull", "water"), ("nominal.usv_wing", "air"), ("nominal.uas", "air")):
+        speed, length = a[key]
+        fine = lbm.les_resolution(length, speed, W.NU[fluid], (a["cells_per_delta"],))["rows"][a["cells_per_delta"]]
+        assert max(fine["nu_lat"], a["nu_lat_floor"]) < wm.NU_MAX / 1000, key                 # (3,300-fold at the floor)
+    c = wm.CHANNEL_CI
+    fixed = [wm.PLATE_CI["nu_lat"], wm.PLATE_SLOW["nu_lat"], c["h"] * c["u_tau"] / c["re_tau"]]
+    fixed += [lbm.U_LAT_SPHERE * nest.PLAN[tag][0] / re for tag, re in nest.SPHERE_RUNS]
+    assert max(fixed) < wm.NU_MAX / 20
+

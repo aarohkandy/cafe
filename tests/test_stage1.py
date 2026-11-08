@@ -615,11 +615,12 @@ def test_acoustic_noise_follows_the_wind():
 
 
 def test_acoustic_noise_is_read_at_each_members_own_position():
-    """Two members 4 km from the ship, one east of it in a 2 m/s wind and one west of it in a 20 m/s wind: their margins must differ."""
+    """Two members 4 km from the ship, one east of it in a 2 m/s wind and one west of it in a 20 m/s wind: their margins must differ. The ship's own end is
+    in the 2 m/s wind (round 12, M-11: the link reads the larger of its two ends' winds, so a ship in the gale would have made the two members alike)."""
     out, _ = acoustic_scene(M=2, far=(0, 0))
     out["glider_eq"]["lat"][:] = 0.0
     out["glider_eq"]["lon"] = np.stack([np.full(TGRID.size, -165.0 + km_north(4.0)), np.full(TGRID.size, -165.0 - km_north(4.0))], 1)
-    env = flat_env(2, u10=lambda lon, lat, t: np.stack([np.where(np.asarray(lon) > -165.0, 2.0, 20.0), np.zeros(np.shape(t))], -1))
+    env = flat_env(2, u10=lambda lon, lat, t: np.stack([np.where(np.asarray(lon) >= -165.0, 2.0, 20.0), np.zeros(np.shape(t))], -1))   # the ship is calm too
     r =stage1.evaluate_link(LK["glider_eq-ship-acoustic"], out, MISSION, env, 2, 3, [0, 1])
     s = out["glider_eq"]["surfaced"][:, 0]
     assert np.nanmin(r["margin_db"][s, 0]) > np.nanmax(r["margin_db"][s, 1])
@@ -1777,7 +1778,7 @@ def test_the_rf_link_fills_a_masked_hs_from_the_members_neighbouring_record_and_
         return stage1.evaluate_link(LK["usv-uas-rf"], out, MISSION, PerturbedEnv(base, {}, [0, 1], 3, pri), 2, 3, [0, 1])
     masked = run(NanHsEnv(lambda t: (t >= TGRID[10]) & (t <= TGRID[14]), hs=2.0))
     clear, glass = run(AnalyticEnv(hs=2.0)), run(AnalyticEnv(hs=0.0))
-    assert masked["hs_filled"] == 10 and clear["hs_filled"] == 0
+    assert masked["hs_filled"] == 20 and clear["hs_filled"] == 0                       # 10 samples at each of the two ends (round 12, M-11: both are read)
     assert np.allclose(masked["margin_db"], clear["margin_db"], equal_nan=True)               # the 2 m sea of the neighbouring record, not a calm one
     assert np.abs(glass["margin_db"][10:15] - clear["margin_db"][10:15]).max() > 0.1          # the test can tell the two apart
     assert "Kerr" in masked["method"] and "divergence" in masked["method"] and "4/3-radius" in masked["method"]
@@ -2240,3 +2241,129 @@ def test_p37_the_stage1_command_reports_a_full_shared_memory_as_an_error_line_an
     monkeypatch.setattr(stage1, "sensitivity_case", lambda *a: (_ for _ in ()).throw(OSError("killed")))
     with pytest.raises(OSError, match="killed"):
         stage1.main(["--mission", "m.yaml", "--run", str(tmp_path)])
+
+
+# ------------------------------------------------------------------------------------------------------------ round 12 (batch D)
+
+@pytest.mark.parametrize("flag, value, said", [("--members", "7", "7 members: the sensitivity case needs an even number, 2 or more"),
+                                              ("--members", "0", "0 members: "), ("--members", "-2", "-2 members: "),
+                                              ("--prior", "nope", "prior 'nope' is not a sampled entry of config/perturbations.yaml (one of: wind")])
+def test_r12_m27_the_stage1_command_refuses_a_bad_members_or_prior_before_the_environment_loads(tmp_path, monkeypatch, capsys, flag, value, said):
+    """`--members 7` was the sampler's ValueError, `0` an IndexError (rc 1, traceback, after the environment was loaded), and `--prior nope` the KeyError that
+    `damaged_run_files` blamed on the run ("damaged or incomplete; run it again (--fresh)"). Each is an `error:` line and exit 2 now, with nothing built."""
+    from cafe.pm import pipeline
+
+    def never(*a, **k):
+        raise AssertionError("the environment was loaded")
+    monkeypatch.setattr(pipeline, "Context", never)
+    monkeypatch.setattr(stage1, "sensitivity_case", never)
+    assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path), flag, value]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: " + said) and err.count("\n") == 1 and "damaged" not in err and "--fresh" not in err, err
+    assert not (tmp_path / "stage1b").exists()
+
+
+def test_r12_m27_sensitivity_case_itself_refuses_the_same_arguments_and_keeps_the_runs_own_odd_n():
+    """The check sits in `sensitivity_case`, so a direct caller gets a ConfigError too; the paired path (n from the run's X) takes any n of one or more:
+    the stopping rule leaves the run's n odd as often as even, and that case never draws antithetic pairs."""
+    def never(*a, **k):
+        raise AssertionError("run_batch was reached")
+    pri, marg = stage1.priors_for(MISSION)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(stage1, "run_batch", never)
+        for n in (7, 1, 0, -2):
+            with pytest.raises(config.ConfigError, match=f"^{n} members: the sensitivity case needs an even number, 2 or more"):
+                stage1.sensitivity_case(MISSION, "ENV", n=n)
+        for prior in ("nope", "current_correlation_length"):                              # the second is a setting (dist fixed), not a draw
+            with pytest.raises(config.ConfigError, match=f"prior '{prior}' is not a sampled entry of config/perturbations.yaml"):
+                stage1.sensitivity_case(MISSION, "ENV", prior=prior)
+        with pytest.raises(config.ConfigError, match="^0 members: the sensitivity case needs at least one"):
+            stage1.sensitivity_case(MISSION, "ENV", X={k: np.zeros(0) for k in marg})
+        _, X = sampling.lhs(15, marg, np.random.SeedSequence([MISSION["seed"], 0]))
+        with pytest.raises(AssertionError, match="run_batch was reached"):                 # 15 members, paired: accepted, runs on to the batch
+            stage1.sensitivity_case(MISSION, "ENV", X=X)
+    stage1.check_case(stage1.BRIEF_PRIOR, 32, pri)                                         # the default stays valid
+    stage1.check_case(stage1.BRIEF_PRIOR, 2, pri)
+    stage1.check_case(stage1.BRIEF_PRIOR, 1, pri, paired=True)                             # a run that stopped at one member, paired
+    with pytest.raises(config.ConfigError, match="^1 members: the sensitivity case needs an even number"):
+        stage1.check_case(stage1.BRIEF_PRIOR, 1, pri)
+
+
+class SplitSeaEnv(AnalyticEnv):
+    """Hs and 10 m wind that differ with latitude: the `rough` pair (Hs, wind) north of 0.005 deg (the USV, 1 km north of the ship in rf_scene),
+    the `calm` pair elsewhere."""
+    def __init__(self, calm, rough, lat_split=0.005, **kw):
+        super().__init__(**kw)
+        self.calm, self.rough, self.split = calm, rough, lat_split
+
+    def _north(self, lat, shape):
+        return np.broadcast_to(np.asarray(lat, float), shape) > self.split
+
+    def waves(self, lon, lat, t):
+        w = super().waves(lon, lat, t)
+        h = w["Hs"].value
+        return dict(w, Hs=Tagged(np.where(self._north(lat, h.shape), self.rough[0], self.calm[0]), "test", 0.0, "assumed"))
+
+    def wind(self, lon, lat, z, t):
+        s = np.broadcast_arrays(np.asarray(lon, float), np.asarray(lat, float), np.asarray(t, float))[0].shape
+        u = np.where(self._north(lat, s), self.rough[1], self.calm[1])
+        return Tagged(np.stack([u, np.zeros(s)], -1), "test", 0.0, "assumed")
+
+
+def _split_sea(calm, rough, M):
+    pri, _ = stage1.priors_for(MISSION)
+    return PerturbedEnv(SplitSeaEnv(calm, rough, hs=1.0), {}, list(range(M)), 3, pri)
+
+
+def test_r12_m11_an_rf_links_margin_reads_the_larger_hs_of_its_two_ends_whichever_is_named_first():
+    """C-5: Hs was read at end a only, so the same link differed by 0.3 dB (USV 3 km out) between a=usv,b=uas and a=uas,b=usv when the sea differs between
+    the ends. Here the USV (1 km north) has Hs 3 m and the ship, under the UAS, 0.2 m."""
+    out, _ = rf_scene(M=2, bad_samples=(0, 0))
+    lk = LK["usv-uas-rf"]
+    both = lambda env, a="usv", b="uas": stage1.evaluate_link(dict(lk, a=a, b=b), out, MISSION, env, 2, 3, [0, 1])
+    split = _split_sea((0.2, 6.0), (3.0, 6.0), 2)
+    fwd, rev = both(split), both(split, "uas", "usv")
+    rough, calm = both(_split_sea((3.0, 6.0), (3.0, 6.0), 2)), both(_split_sea((0.2, 6.0), (0.2, 6.0), 2))
+    assert np.abs(rough["margin_db"] - calm["margin_db"])[10:110].max() > 0.5                   # the test can tell the two seas apart (the two-ray nulls move)
+    assert np.array_equal(fwd["margin_db"], rev["margin_db"], equal_nan=True)                    # before: the two namings differ
+    assert np.array_equal(fwd["margin_db"], rough["margin_db"], equal_nan=True)                  # the larger Hs (the USV's) is the one used, in both namings
+    assert fwd["hs_filled"] == rev["hs_filled"] == 0
+
+
+def test_r12_m11_each_end_of_an_rf_link_fills_its_own_masked_hs_and_a_member_with_none_at_an_end_is_refused_by_position():
+    """The ship's end (south, Hs 0.2 m) has the sea mask on samples 10 to 14; the USV's (north, 3 m) has none. Before, only end a was read: nothing to fill."""
+    out, _ = rf_scene(M=2, bad_samples=(0, 0))
+    pri, _ = stage1.priors_for(MISSION)
+
+    class SouthMasked(SplitSeaEnv):
+        def __init__(self, nan_when, *a, **kw):
+            super().__init__(*a, **kw)
+            self.nan_when = nan_when
+
+        def waves(self, lon, lat, t):
+            w = super().waves(lon, lat, t)
+            h = np.where(~self._north(lat, w["Hs"].value.shape) & self.nan_when(np.asarray(t, float)), np.nan, w["Hs"].value)
+            return dict(w, Hs=Tagged(h, "test", 0.0, "assumed"))
+    def ev(env):
+        return stage1.evaluate_link(LK["usv-uas-rf"], out, MISSION, PerturbedEnv(env, {}, [0, 1], 3, pri), 2, 3, [0, 1])
+    r = ev(SouthMasked(lambda t: (t >= TGRID[10]) & (t <= TGRID[14]), (0.2, 6.0), (3.0, 6.0), hs=1.0))
+    assert r["hs_filled"] == 10                                                                   # 5 samples for each of the 2 members, at the ship's end only
+    same = stage1.evaluate_link(LK["usv-uas-rf"], out, MISSION, _split_sea((0.2, 6.0), (3.0, 6.0), 2), 2, 3, [0, 1])
+    assert np.array_equal(r["margin_db"], same["margin_db"], equal_nan=True)                      # filled from the member's neighbouring record, as at end a
+    with pytest.raises(OutsideData, match=r"link usv-uas-rf: member 0 has no wave height .* at \(-165\.000, 0\.000\)"):   # end b, the ship's
+        ev(SouthMasked(lambda t: np.ones(np.shape(t), bool), (0.2, 6.0), (3.0, 6.0), hs=1.0))
+
+
+def test_r12_m11_an_acoustic_links_noise_reads_the_larger_wind_of_its_two_ends_whichever_is_named_first():
+    """The same defect in the acoustic branch (wind read at end a): the glider 4 km north of the ship in a 20 m/s wind, the ship in 2 m/s."""
+    out, _ = acoustic_scene(M=1, far=(0,))
+    out["glider_eq"]["lat"][:] = km_north(4.0)
+    lk = LK["glider_eq-ship-acoustic"]
+    ev = lambda env, a="glider_eq", b="ship": stage1.evaluate_link(dict(lk, a=a, b=b), out, MISSION, env, 1, 3, [0])["margin_db"]
+    split = _split_sea((1.0, 2.0), (1.0, 20.0), 1)
+    fwd, rev = ev(split), ev(split, "ship", "glider_eq")
+    gale, calm = ev(_split_sea((1.0, 20.0), (1.0, 20.0), 1)), ev(_split_sea((1.0, 2.0), (1.0, 2.0), 1))
+    assert np.nanmax(gale) < np.nanmin(calm)                                                      # the test can tell the two winds apart
+    assert np.array_equal(fwd, rev, equal_nan=True) and np.array_equal(fwd, gale, equal_nan=True)     # before: ship first read 2 m/s
+    blind = ev(_split_sea((1.0, np.nan), (1.0, 20.0), 1))                                          # no wind at the ship's end: the glider's, not a NaN margin
+    assert np.array_equal(blind, gale, equal_nan=True) and np.isfinite(blind).any()

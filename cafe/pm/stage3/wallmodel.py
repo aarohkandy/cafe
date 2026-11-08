@@ -47,7 +47,7 @@ from cafe.pm.stage3 import lbm
 KAPPA, B_LOG = 0.41, 5.2
 Y_MATCH = 2.5                 # cells: centre of the third cell from the wall surface
 YPLUS_LAM = 11.06             # y+ where ln(y+)/kappa + B = y+
-NU_MAX = 0.5                  # tau <= 1.5: beyond that BGK is not trusted
+NU_MAX = 1 / 3               # lattice viscosity, tau = 1/2 + 3 nu <= 1.5: beyond that BGK is not trusted; nest.NestSpec refuses a window above it
 PLATE_CI: dict[str, Any] = dict(length=96, nu_lat=4e-5, half=36, span=4, nose=10, thick=1, steps=12000)      # ~1 min on 4 CPUs
 YPLUS_OK = (30.0, 300.0)      # window in which the log law holds at the matching point (BRIEF 5.5)
 
