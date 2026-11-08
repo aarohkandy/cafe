@@ -255,7 +255,7 @@ def test_warm_layer_requires_time_last():
 
 # ------------------------------------------------------------------------------------------------------------ round 12 M-13, M-14
 
-@pytest.mark.parametrize("cp", [0.0, -1.0, 1e-3, 0.3, 1.9])
+@pytest.mark.parametrize("cp", [0.0, -1.0, 1e-3, 0.3, 1.9, 2.0])
 @pytest.mark.parametrize("sigH", [None, 0.0, 2.0])
 def test_a_phase_speed_below_the_floor_gives_the_charnock_result_not_nan(cp, sigH):
     """Round 12 M-13: a UMWM dcp of 0 (calm, ice, fill) or any value under CP_MIN made the wave-age/sea-state form NaN or absurd (Cd 0.3);
@@ -265,9 +265,24 @@ def test_a_phase_speed_below_the_floor_gives_the_charnock_result_not_nan(cp, sig
     assert all(np.array_equal(r[k], ref[k]) for k in ("ustar", "z0", "L", "Cd"))
 
 
-def test_a_phase_speed_at_the_floor_still_uses_the_wave_age_form():
-    r, ref = run(u=8.0, cp=coare.CP_MIN), run(u=8.0)
-    assert coare.CP_MIN < 3.0 and r["z0"] != ref["z0"] and np.isfinite(r["ustar"])        # the demo's dcp is never under 3.93: it takes this branch unchanged
+@pytest.mark.parametrize("sigH", [None, 1.5])
+@pytest.mark.parametrize("u", [3.0, 8.0, 20.0])
+def test_the_drag_has_no_step_in_the_phase_speed(u, sigH):
+    """Round 12 M-13, adversary: a hard switch at the floor stepped Cd by up to 2.6 times (U 8 m/s: 1.19e-3 at cp 1.99, 3.07e-3 at 2.0). The wave form now
+    fades in between CP_MIN and CP_FULL, so Cd moves by at most 5 percent per 0.01 m/s of cp
+    over the whole range (the step was 12 to 230 percent in these six cases)."""
+    cp = np.arange(0.5, 6.0, 0.01)
+    cd = run(u=np.full(cp.size, u), cp=cp, sigH=sigH)["Cd"]
+    assert np.all(np.isfinite(cd)) and np.max(np.abs(np.diff(cd) / cd[:-1])) < 0.06
+
+
+def test_the_wave_form_is_pure_from_cp_full_and_charnock_up_to_cp_min(monkeypatch):
+    """The demo's dcp (at least 3.93 m/s) is over CP_FULL, so its drag does not depend on where the fade starts; cp at CP_MIN is the Charnock result."""
+    assert coare.CP_MIN < coare.CP_FULL <= 3.93
+    r = run(u=8.0, cp=coare.CP_FULL, sigH=1.5)
+    monkeypatch.setattr(coare, "CP_MIN", 0.5)
+    r2 = run(u=8.0, cp=coare.CP_FULL, sigH=1.5)
+    assert np.array_equal(r["Cd"], r2["Cd"]) and np.array_equal(r["z0"], r2["z0"]) and not np.array_equal(r["Cd"], run(u=8.0)["Cd"])
 
 
 def test_without_the_cool_skin_dter_and_tkt_are_zero():
