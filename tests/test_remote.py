@@ -265,11 +265,13 @@ def test_download_resumes_after_a_connection_cut_mid_body(server, tmp_path):
     assert server.requests("a") == ["bytes=0-0", "bytes=0-", "bytes=1000-"]
 
 
-def test_download_discards_an_oversized_part(server, tmp_path):
+def test_download_discards_an_oversized_part(server, tmp_path, versioned):
+    """With validators the record matches and the part reaches the size check (a server with none restarts at byte 0 first, so the branch is not reached)."""
     u = interrupted(server, tmp_path, "a", b"short" * 400, 1000)
     with open(tmp_path / "a.part", "ab") as f:                          # a part that matches the record but is longer than the file
         f.write(b"x" * 2000)
     assert remote.download(u, tmp_path / "a").read_bytes() == b"short" * 400
+    assert server.requests("a") == ["bytes=0-0", "bytes=0-"]            # from byte 0, not a resume at 3000
 
 
 def test_download_pinned_sha_mismatch_removes_the_part_and_the_target(server, tmp_path):
