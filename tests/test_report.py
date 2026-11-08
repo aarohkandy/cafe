@@ -2880,6 +2880,20 @@ def test_r12_m3_a_vehicle_named_values_is_not_a_number_node(full):
     assert [k for k, _, _ in report._walk(sections)] == ["bare"] * 3 and len(report.check_traceability(sections)) == 3   # lists of records: containers
 
 
+@pytest.mark.parametrize("names", [("value", "unit"), ("values", "unit"), ("unit", "values"), ("unit", "value")])
+def test_r12_m3_ids_that_are_node_keys_are_containers_even_together(full, names):
+    """Round 12, M-3 (the corner batch A left): a vehicle `values` with no windows (an empty list) beside a vehicle `unit` was read as an empty node,
+    so its neighbours went untraced. A node's `unit` is text; an id `unit` holds a card or a list. Two vehicles renamed to node keys, every section."""
+    rep = _rename_key(_rename_key(full[4], "glider_2n", names[0]), "usv", names[1])
+    assert {names[0], names[1]} <= set(rep["vehicles"])
+    assert not [p for k, p, _ in report._walk(rep) if k == "node" and p in ("vehicles", "map.windows", "map")]
+    assert report.check_traceability(rep) == []
+    assert report.check_rendered(rep, report.render(rep)) == []
+    sections = dict(windows={"values": [], "unit": [dict(t=1)], "usv": []}, rch={"unit": {}, "values": []})
+    assert [(k, p) for k, p, _ in report._walk(sections)] == [("bare", "windows.unit[0].t")] and len(report.check_traceability(sections)) == 1
+    assert [k for k, _, _ in report._walk(dict(a=dict(values=[], unit="m")))] == ["node"]               # the real empty node stays one
+
+
 def test_r12_m4_a_mode_that_did_not_fire_has_no_note(run):
     """Round 12, M-4: the summary lists every mode with its count, zeros included, and the card explained all of them ("no member failed" under an
     overdepth note). A note is for a mode with members."""

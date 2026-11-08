@@ -434,10 +434,11 @@ def meta_path(table: pathlib.Path) -> pathlib.Path:
 def write_meta(table: pathlib.Path, slow: bool = False, only: list[str] | None = None) -> pathlib.Path:
     """Record next to the table which code made it (`code_digest` of the pipeline's resume hash, git sha, time, whether slow receipts were run and
     which were selected), so a verdict that cites the table can tell that the table is from other code (M-4 of review round 2)."""
+    from . import config
     from .ledger import git_sha
     p = meta_path(table)
-    p.write_text(json.dumps(dict(code_digest=code_digest("pm"), git_sha=git_sha(), made_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-                                 slow=slow, only=only), indent=1))
+    config.write_json(p, dict(code_digest=code_digest("pm"), git_sha=git_sha(), made_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+                              slow=slow, only=only), indent=1)                   # through a temporary like the table (M-8): a kill keeps the old record
     return p
 
 

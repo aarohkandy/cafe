@@ -725,6 +725,22 @@ def test_r12_m8_the_table_is_written_through_a_temporary_so_a_killed_run_keeps_t
     assert out.read_bytes() == old
 
 
+def test_r12_m8_the_meta_record_is_written_through_a_temporary_too(tmp_path, monkeypatch):
+    """Round 12, M-8 (sibling): `write_meta` used `write_text`, so a kill mid-write left a half receipts.meta.json beside a whole table, and the report said
+    "no readable receipts.meta.json" for a table that was fine."""
+    table = tmp_path / "receipts.json"
+    meta = pr.write_meta(table)
+    old = meta.read_bytes()
+    assert json.loads(old)["code_digest"] and not list(tmp_path.glob("*.tmp"))
+
+    def killed(src, dst):
+        raise OSError("killed between the write and the rename")
+    monkeypatch.setattr("os.replace", killed)
+    with pytest.raises(OSError, match="killed"):
+        pr.write_meta(table, slow=True)
+    assert meta.read_bytes() == old
+
+
 # ---- review round 12, M-35: stored app results are stamped or they are not receipts; the receipts put the environment back
 
 def crosscheck(**extra):

@@ -724,6 +724,13 @@ def test_r12_m5_a_copy_of_the_demo_with_its_name_but_another_window_or_fleet_get
     assert cr.build(run, REAL, data)["sanity"] is not None and not cr.is_the_demo({}) and not cr.is_the_demo(dict(name="other"))
 
 
+def test_r12_m5_the_usv_sentence_names_the_window_end_the_identity_forces():
+    """Round 12, M-5: the USV expectation text says "the demo window ends 7 March 12Z" as a literal; it is true wherever it is shown only because
+    DEMO_IDENTITY holds that end. If one changes, so must the other."""
+    end = cr.DEMO_IDENTITY["tepex_c_demo"]["window"][1]
+    assert end == "2023-03-07T12:00:00Z" and "ends 7 March 12Z" in cr.EXPECTED["tepex_c_demo"]["usv"]["text"]
+
+
 def test_without_a_stage_1b_summary_there_is_nothing_to_compare(tmp_path, data):
     run = tmp_path / "bare"
     run.mkdir()

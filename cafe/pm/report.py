@@ -227,8 +227,8 @@ def tnum(t: float | None, ref: dict[str, Any], source: str) -> dict[str, Any] | 
 
 
 def _is_number_list(x: Any, has_unit: bool) -> bool:
-    """x is what `vals` stores: a list of numbers or None (a non-finite one), or of lists of them. An empty list counts only with `has_unit`: a vehicle
-    with no windows is an empty list too."""
+    """x is what `vals` stores: a list of numbers or None (a non-finite one), or of lists of them. An empty list counts only with `has_unit` (a text
+    `unit`, as `vals` makes; a vehicle with no windows is an empty list too, and a vehicle id `unit` holds a card or a list, never text)."""
     return isinstance(x, list) and (bool(x) or has_unit) and all(
         _is_number_list(v, True) if isinstance(v, list) else v is None or (isinstance(v, (int, float)) and not isinstance(v, bool)) for v in x)
 
@@ -238,7 +238,7 @@ def _walk(o: Any, path: str = "") -> Iterator[tuple[str, str, Any]]:
     if isinstance(o, dict):
         # a node is told by its payload, not by a key name (round 12, M-3): `vals` makes a list of numbers (or of lists of them), so a vehicle or link id
         # `values` (a card, which is a dict; a list of window records; an empty list, a node only with its unit) is a container, whose parts are walked
-        if _is_number_list(o.get("values"), "unit" in o) or ("value" in o and (o["value"] is None or isinstance(o["value"], (int, float)))):
+        if _is_number_list(o.get("values"), isinstance(o.get("unit"), str)) or ("value" in o and (o["value"] is None or isinstance(o["value"], (int, float)))):
             yield "node", path, o
             return
         for k, v in o.items():
