@@ -494,6 +494,41 @@ def test_platform_items_count_recalled_citations():
     assert all(i["assumed"] or i["sourced"] or i["path"] for i in its)
 
 
+def test_r12_m34_an_input_with_no_value_key_does_not_print_the_value_none(run, data):
+    """Round 12, M-34: the two modem entries carry their figures in the `assumed` text and have no `value`; the page printed "(assumed) None"."""
+    out = []
+    cr._prov(dict(modems=dict(m=dict(assumed="source level 190 dB re 1 uPa at 1 m", unit="dB"), k=dict(value=None, assumed="x"),
+                              n=dict(value=3.5, unit="m", source="a paper"))), "", "platforms/modems.yaml", out)
+    got = {i["path"]: i["value"] for i in out}
+    assert got == {"modems.m": "n/a (see why)", "modems.k": "None", "modems.n": "3.5"}          # an explicit null stays what it is
+    items = cr.build(run, REAL, data)["assumed_inputs"]
+    ids = {i["id"]: i for i in items}
+    assert ids["modems.yaml:modems.benthos_atm960"]["value"] == "n/a (see why)" and not [i["id"] for i in items if i["value"] == "None"]
+    assert "(assumed) None" not in html.unescape(cr.write(run)[0].read_text())
+
+
+def test_r12_m6_the_assumed_count_is_of_the_platforms_the_mission_uses_not_of_the_catalogue(run, data):
+    """Round 12, M-6: a one-UAS mission counted the sea-vehicle platforms, radios and modems it does not use, and said "verdicts depend on them"."""
+    from cafe.pm import report
+    mission = yaml.safe_load((run / "mission.yaml").read_text())
+    mission["vehicles"] = [v for v in mission["vehicles"] if v["id"] == "uas"]
+    mission["links"] = []
+    (run / "mission.yaml").write_text(yaml.safe_dump(mission))
+    c = cr.build(run, REAL, data)
+    by_file = lambda used: {f: sum(1 for i in c["assumed_inputs"] if i["file"] == f and i["used"] is used and i["kind"] != "fitted")
+                            for f in sorted({i["file"] for i in c["assumed_inputs"]})}
+    used, unused = {f: n for f, n in by_file(True).items() if n}, {f: n for f, n in by_file(False).items() if n}
+    assert "platforms/quad_uas.yaml" in used and "config/assumptions.yaml" in used
+    assert set(unused) == {f"platforms/{s}.yaml" for s in ("saildrone_explorer", "seaglider", "slocum", "modems", "radios")}
+    assert len(c["assumed_inputs"]) > sum(used.values())                                   # the page still lists the whole catalogue
+    a = report._assumed(c, dict(stage="credibility", ledger="l", receipt="r"))
+    assert a["total"]["value"] == sum(used.values()) and a["catalogue"]["value"] == sum(used.values()) + sum(unused.values())
+    assert {f: n["value"] for f, n in a["by_file"].items()} == used and {f: n["value"] for f, n in a["not_used_by_file"].items()} == unused
+    page = report._assumed_html(a)
+    assert "of the" in page and "in the catalogue are used by this mission" in page and "platform not used by this mission" in page
+    assert "(platform not used by this mission)" in html.unescape(cr._render(c))
+
+
 # ---------------------------------------------------------------------------------------------------------- the files
 
 def test_write_produces_valid_json_and_a_static_html_page(run, data):
@@ -673,6 +708,20 @@ def test_another_mission_gets_no_sanity_block_and_the_page_shows_it_only_for_the
     assert "Sanity check" not in (run / "report" / "credibility.html").read_text()
     (run / "mission.yaml").unlink()
     assert cr.build(run, REAL, data)["sanity"] is None
+
+
+def test_r12_m5_a_copy_of_the_demo_with_its_name_but_another_window_or_fleet_gets_no_sanity_block(run, data):
+    """Round 12, M-5: the expected outcome was keyed on the mission name, so a 24 h copy of the demo was told "glider_eq expected MARGINAL or NO-GO" and
+    was shown the demo's window end. The window, box and vehicle ids must be the demo's too."""
+    text = (run / "mission.yaml").read_text()
+    assert cr.build(run, REAL, data)["sanity"]["mission"] == "tepex_c_demo" and cr.is_the_demo(yaml.safe_load(text))
+    for old, new in (('end: "2023-03-07T12:00:00Z"', 'end: "2023-03-02T12:00:00Z"'), ("lat_max: 5.0", "lat_max: 4.0"), ("id: uas", "id: uas2")):
+        assert old in text, old
+        (run / "mission.yaml").write_text(text.replace(old, new, 1))
+        assert not cr.is_the_demo(yaml.safe_load(text.replace(old, new, 1))), old
+        assert cr.build(run, REAL, data)["sanity"] is None, old
+    (run / "mission.yaml").write_text(text)
+    assert cr.build(run, REAL, data)["sanity"] is not None and not cr.is_the_demo({}) and not cr.is_the_demo(dict(name="other"))
 
 
 def test_without_a_stage_1b_summary_there_is_nothing_to_compare(tmp_path, data):

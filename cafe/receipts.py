@@ -5,7 +5,8 @@ the same list, so what the user sees is exactly what was tested.
 """
 from __future__ import annotations
 
-import json, os, pathlib, sys, time
+import contextlib, datetime as dt, hashlib, json, os, pathlib, platform, sys, time
+from collections.abc import Iterator
 from typing import Any
 
 import numpy as np
@@ -38,6 +39,75 @@ def receipt(group: str, claim: str, value: float, reference: float, tol: float, 
     print(f"[{'PASS' if r['ok'] else 'FAIL'}] {group}: {claim}: {value:.4g} vs {reference:.4g} {unit} "
           f"({'%.1f%%' % (100 * err) if rel else '%.3g' % err}, tol {tol})")
     return r
+
+
+# Stored results (the hangar CFD runs, the SITL cross-check) are read back as receipts, so they carry what the table can check: when, where, which commit and
+# which code made them. An unstamped one, or one made by other code, is a context row, never a pass (round 12, M-35). The digest is the one
+# cafe.pm.receipts.code_digest("app") gives (the hash of cafe/*.py); a test holds the two together.
+STAMP = ("date", "host", "git_sha", "code_digest")
+
+
+def app_digest() -> str:
+    h = hashlib.sha256()
+    for p in sorted(pathlib.Path(__file__).parent.glob("*.py")):
+        h.update(p.name.encode() + b"\0" + p.read_bytes())
+    return h.hexdigest()
+
+
+def stamp(rec: dict[str, Any]) -> dict[str, Any]:
+    """`rec` with the stamp a stored result must carry: what a program that writes one of these files adds before it writes it."""
+    from cafe.pm.ledger import git_sha
+    return dict(rec, date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), host=platform.node(), git_sha=git_sha(), code_digest=app_digest())
+
+
+def stored(path: pathlib.Path, group: str) -> tuple[dict[str, Any], str] | None:
+    """(the stored result, ' [stored <date>, <host>, git <sha>]') or None. None also when there is no file (the caller says so once for all of them) and
+    after a context row has said why the file is not used: unreadable, not an object, unstamped, or made by other code."""
+    if not path.is_file():
+        return None
+    try:
+        rec = json.loads(path.read_text())
+        if not isinstance(rec, dict):
+            raise ValueError(f"it holds {type(rec).__name__}, not an object")
+    except (OSError, ValueError) as e:
+        why = f"cannot be read as a JSON object ({str(e)[:80]})"
+    else:
+        missing = [k for k in STAMP if not isinstance(rec.get(k), str) or not rec[k]]
+        if missing:
+            why = f"carries no {', '.join(missing)}, so nothing says which code made it or when (unstamped)"
+        elif rec["code_digest"] != app_digest():
+            why = f"(stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}) was made by different code (stale)"
+        else:
+            return rec, f" [stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}]"
+    context(group, f"stored result {path.name} {why}: not counted", 0.0, 0.0, "", "rerun the run that writes it; cafe.receipts.stamp() adds the stamp")
+    return None
+
+
+def _tag(n0: int, tag: str) -> None:
+    """Name the stored result in the source of every row recorded since OUT[n0]."""
+    for d in OUT[n0:]:
+        d["source"] = d["source"] + tag
+
+
+@contextlib.contextmanager
+def _env_kept(*keys: str, phys_dt: bool = False) -> Iterator[None]:
+    """The environment variables `keys` (and `mission.PHYS_DT` if asked) as they were, whatever happens inside: a receipt that sets CAFE_OCEAN=0 must not
+    leave it so after an error, nor switch on what the caller had off."""
+    old = {k: os.environ.get(k) for k in keys}
+    if phys_dt:
+        from cafe import mission
+        steps = dict(mission.PHYS_DT)
+    try:
+        yield
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        if phys_dt:
+            mission.PHYS_DT.clear()
+            mission.PHYS_DT.update(steps)
 
 
 CALM = envm.Waves(0.0, 1.0, 0.0)
@@ -185,26 +255,26 @@ def weather_receipts() -> None:
     t0 = dt.datetime(2018, 2, 3, 14)
     if t0 not in cat or t0 + dt.timedelta(hours=3) not in cat:
         return
-    os.environ["CAFE_OCEAN"] = "0"
-    E = envm.Env(t0, 2.0, (21.1, 21.3), (-158.5, -158.3))
-    raw = []
-    for h in (0, 1):
-        path, k = cat[t0 + dt.timedelta(hours=h)]
-        with netCDF4.Dataset(path) as ds:
-            lat, lon = ds["XLAT"][0][:, 0], envm.lon360(ds["XLONG"][0][0, :])
-            j, i = np.argmin(abs(lat - E.lat[3])), np.argmin(abs(lon - E.lon[3]))
-            raw.append(float(ds["U10"][k][j, i]))
-    got = float(E.surface(E.lat[3], E.lon[3], 1800.0)["U10"][0])
-    bracket("Weather", "Hourly WRF wind is time-varying (not a frozen snapshot)", float(not E.frozen), 1, 1, "",
-            "UWIN-CM run_nosal_2018020300b, hourly wrfsfc")
-    receipt("Weather", "U10 half way between two hours = mean of the two raw hours", got, np.mean(raw), 1e-4, "m/s",
-            "linear interpolation in time, raw netCDF values", rel=False)
-    lone = dt.datetime(2023, 3, 7, 17)
-    if lone in cat:
-        E2 = envm.Env(lone, 1.0, (9.9, 10.1), (-95.1, -94.9))
-        bracket("Weather", "A lone snapshot is held constant and labelled as such", float(E2.frozen and "held constant" in E2.sources["wind"]),
-                1, 1, "", "wrfout 2023-03-07 17 UTC (no neighbouring hours on disk)")
-    os.environ["CAFE_OCEAN"] = "1"
+    with _env_kept("CAFE_OCEAN"):
+        os.environ["CAFE_OCEAN"] = "0"
+        E = envm.Env(t0, 2.0, (21.1, 21.3), (-158.5, -158.3))
+        raw = []
+        for h in (0, 1):
+            path, k = cat[t0 + dt.timedelta(hours=h)]
+            with netCDF4.Dataset(path) as ds:
+                lat, lon = ds["XLAT"][0][:, 0], envm.lon360(ds["XLONG"][0][0, :])
+                j, i = np.argmin(abs(lat - E.lat[3])), np.argmin(abs(lon - E.lon[3]))
+                raw.append(float(ds["U10"][k][j, i]))
+        got = float(E.surface(E.lat[3], E.lon[3], 1800.0)["U10"][0])
+        bracket("Weather", "Hourly WRF wind is time-varying (not a frozen snapshot)", float(not E.frozen), 1, 1, "",
+                "UWIN-CM run_nosal_2018020300b, hourly wrfsfc")
+        receipt("Weather", "U10 half way between two hours = mean of the two raw hours", got, np.mean(raw), 1e-4, "m/s",
+                "linear interpolation in time, raw netCDF values", rel=False)
+        lone = dt.datetime(2023, 3, 7, 17)
+        if lone in cat:
+            E2 = envm.Env(lone, 1.0, (9.9, 10.1), (-95.1, -94.9))
+            bracket("Weather", "A lone snapshot is held constant and labelled as such", float(E2.frozen and "held constant" in E2.sources["wind"]),
+                    1, 1, "", "wrfout 2023-03-07 17 UTC (no neighbouring hours on disk)")
 
 
 def geometry_receipts() -> None:
@@ -251,10 +321,11 @@ def bem_receipts() -> None:
 
 
 def cfd_receipts(results: Any) -> None:
-    """Reads hangar CFD outputs if they exist (they take minutes-hours to produce)."""
-    t = results / "t1" / "torpedo.external.json"
-    if t.exists():
-        r = json.loads(t.read_text())
+    """Reads hangar CFD outputs if they exist (they take minutes-hours to produce). A result counts only with its stamp, from the code that is here
+    (`stored`); otherwise it is a context row saying why."""
+    if t := stored(results / "t1" / "torpedo.external.json", "CFD"):
+        r, tag = t
+        n0 = len(OUT)
         d = r["dirs"]["+x"]
         cd = -d["force"][0] / (0.5 * r["rho"] * r["speed"] ** 2 * 0.0285)
         receipt("CFD", "REMUS bare hull Cd (frontal)", cd, 0.12, 0.25, "", "Prestero 2001: Hoerner estimate 0.11-0.13")
@@ -262,9 +333,10 @@ def cfd_receipts(results: Any) -> None:
         wet = 0.709
         receipt("CFD", "REMUS friction drag vs ITTC-57 flat plate", -d["viscous"][0],
                 0.5 * r["rho"] * r["speed"] ** 2 * wet * 0.075 / (np.log10(re_) - 2) ** 2, 0.15, "N", "ITTC-57 line")
-    w = results / "w1" / "wigley.surface.json"
-    if w.exists():
-        r = json.loads(w.read_text())
+        _tag(n0, tag)
+    if w := stored(results / "w1" / "wigley.surface.json", "CFD"):
+        r, tag = w
+        n0 = len(OUT)
         ref = {0.2: 4.21, 0.3: 4.96, 0.4: 5.49}   # UT 2.5 m fixed model, Kajitani 1983 Fig 1 (digitized)
         S = 0.661 * 2.5 * (2 * 0.156 + 0.25)
         for U, res in r["speeds"].items():
@@ -272,9 +344,11 @@ def cfd_receipts(results: Any) -> None:
             k = min(ref, key=lambda f: abs(f - fn))
             ct = res["resistance"] / (0.5 * 1025 * float(U) ** 2 * S) * 1e3
             receipt("CFD", f"Wigley Ct x1e3 at Fn {fn:.2f}", ct, ref[k], 0.15, "", "Kajitani et al. 1983, UT 2.5 m fixed")
-    s = results / "s1" / "suboff.incidence.json"
-    if s.exists():
-        suboff_receipts(json.loads(s.read_text()))
+        _tag(n0, tag)
+    if sb := stored(results / "s1" / "suboff.incidence.json", "CFD"):
+        n0 = len(OUT)
+        suboff_receipts(sb[0])
+        _tag(n0, sb[1])
 
 
 # Roddy 1990 (DTRC/SHD-1298-08) captive-model drift tests, DARPA SUBOFF bare hull, 6.5 kn, fresh water;
@@ -432,7 +506,12 @@ def fea_receipts() -> None:
 
 def fleet_receipts() -> None:
     """Reachability (grid Zermelo) vs exact uniform-current times; link statistics vs exact geometry;
-    glider speed and pump energy."""
+    glider speed and pump energy. CAFE_OCEAN and the quad time step are put back as they were, also when a receipt raises (round 12, M-35)."""
+    with _env_kept("CAFE_OCEAN", phys_dt=True):
+        _fleet_receipts()
+
+
+def _fleet_receipts() -> None:
     from types import SimpleNamespace as NS
     from cafe import reach, mission, shapes, ctrl
     V, c, D = 1.0, 0.4, 20000.0
@@ -515,7 +594,6 @@ def fleet_receipts() -> None:
     vs, t_yo = ctrl.glide_sim(vg, 5, 100)
     receipt("Glider", "Steady-glide formula vs 6-DOF yo (speed made good, 5-100 m)", ctrl.glide_speed(vg) * np.cos(np.radians(26)), vs,
             0.25, "m/s", "our 6-DOF sim incl. top/bottom turns (consistency of two models, not a measurement)")
-    os.environ["CAFE_OCEAN"] = "1"
 
 
 def _t0():
@@ -527,16 +605,18 @@ def _t0():
 
 def crosscheck_receipts(results: Any) -> None:
     """Same mission, two independent autopilots on the same physics: ours (fast mode) and ArduPilot SITL.
-    Reads the pair recorded in runs/crosscheck.json (SITL runs take minutes, so they aren't rerun here)."""
-    f = results / "crosscheck.json"
-    if not f.exists():
+    Reads the pair recorded in runs/crosscheck.json (SITL runs take minutes, so they aren't rerun here). Like the CFD results, it counts only when it
+    carries its stamp and the code that made it is the code that is here."""
+    if not (c := stored(results / "crosscheck.json", "Emulator")):
         return
-    c = json.loads(f.read_text())
-    for drone, x in c["drones"].items():
+    rec, tag = c
+    n0 = len(OUT)
+    for drone, x in rec["drones"].items():
         receipt("Emulator", f"{drone}: battery left, fast mode vs {x['firmware']}", x["fast"]["battery_left"],
                 x["sitl"]["battery_left"], 0.03, "", "ArduPilot SITL flying the same physics")
         receipt("Emulator", f"{drone}: hold error p95, fast mode vs {x['firmware']}", x["fast"]["hold_p95"],
                 x["sitl"]["hold_p95"], 0.5, "m", "absolute difference; both well inside the 3 m tolerance", rel=False)
+    _tag(n0, tag)
 
 
 if __name__ == "__main__":

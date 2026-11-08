@@ -273,7 +273,9 @@ def test_assumed_inputs_are_all_listed_and_linked(full):
     for k in yaml.safe_load((config.CONFIG / "assumptions.yaml").read_text()):
         assert f"assumptions.yaml:{k}" in ids
     a = rep["assumed_inputs"]
-    assert {i["id"] for i in a["items"]} == ids and a["total"]["value"] == len(ids) and sum(n["value"] for n in a["by_file"].values()) == len(ids)
+    used = sum(n["value"] for n in a["by_file"].values())
+    assert {i["id"] for i in a["items"]} == ids and a["catalogue"]["value"] == len(ids) and a["total"]["value"] == used
+    assert used + sum(n["value"] for n in a["not_used_by_file"].values()) == len(ids) and sum(i["used"] for i in a["items"]) == used
     ch = (run / "report" / "credibility.html").read_text()
     for i in a["items"]:
         assert f"id='{i['href'].split('#')[1]}'" in ch
@@ -1040,6 +1042,17 @@ def test_the_sanity_block_compares_the_demo_missions_verdicts_with_the_brief(ful
     assert report.check_rendered(rep, h) == []
 
 
+def test_r12_m5_a_mission_with_the_demos_name_and_another_window_says_so_in_the_report(run):
+    m, plan = pm_run.make_run(run)
+    text = (run / "mission.yaml").read_text().replace('end: "2023-03-07T12:00:00Z"', 'end: "2023-03-02T12:00:00Z"')
+    assert text != (run / "mission.yaml").read_text()
+    (run / "mission.yaml").write_text(text)
+    report.write(run, m, plan)
+    assert load(run)["sanity"] == dict(applies=False, reason="This mission has the demo's name but not its window, box and vehicles, so BRIEF section 6's "
+                                                           "expected outcome for the demo mission does not apply to it.")
+    assert "has the demo's name but not its window" in plain((run / "report" / "index.html").read_text())
+
+
 def test_another_mission_has_no_sanity_block(run):
     m, plan = pm_run.make_run(run)
     text = (run / "mission.yaml").read_text().replace("name: tepex_c_demo", "name: other")
@@ -1703,7 +1716,7 @@ def test_a_fitted_sigma_is_not_counted_as_an_assumed_input_in_the_report(run):
     (run / "ingest" / "env_sigmas_fitted.json").write_text(json.dumps(dict(sst_k=0.2592, t2_k=1.1908)))
     report.write(run, m, plan)
     a = load(run)["assumed_inputs"]
-    assert a["total"]["value"] == base["total"]["value"] - 2
+    assert a["total"]["value"] == base["total"]["value"] - 2 and a["catalogue"]["value"] == base["catalogue"]["value"] - 2
     assert a["by_file"]["config/assumptions.yaml"]["value"] == base["by_file"]["config/assumptions.yaml"]["value"] - 2
     assert sum(i["kind"] == "fitted" for i in a["items"]) == 2 and len(a["items"]) == len(base["items"])
     t = plain((run / "report" / "index.html").read_text())
@@ -1967,7 +1980,7 @@ def test_the_machine_block_prints_what_the_planner_charged_next_to_what_the_stag
     del plan["stage1_s_basis"]                                               # an older plan without the basis, an older design without the keys
     edit_json(run / "checkpoints" / "emulator" / "ledger.json", lambda d: (d.pop("variant_planned_s"), d.pop("variant_wall_s")))
     report.write(run, m, plan)
-    assert set(load(run)["machine"]["timing"]) == {"stage1"} and "the plan is a lower bound" not in (run / "report" / "index.html").read_text()
+    assert set(load(run)["machine"]["timing"]) == {"stage1", "total"} and "the plan is a lower bound" not in (run / "report" / "index.html").read_text()
 
 
 def test_the_plan_block_says_sitl_is_not_in_the_pipeline_instead_of_a_member_count(run):
@@ -2757,6 +2770,7 @@ def test_r10_m16_a_glider_that_failed_overdepth_carries_the_explanation_in_its_c
     p = run / "stage1b" / "summary.json"
     d = json.loads(p.read_text())
     e = d["summary"]["vehicles"]["glider_eq"]
+    e["k_fail"], e["verdict"] = 3, intervals.verdict(3, e["n"])       # (the fixture's stage 1b glider has no failure; a note explains a mode that fired, M-4)
     e["modes"], e["dominant"] = {"overdepth": e["k_fail"]}, "overdepth"
     p.write_text(json.dumps(d))
     report.write(run, m, plan)
@@ -2839,3 +2853,85 @@ def test_l0_r11_a_verdict_whose_label_matches_its_counts_but_whose_p_fail_or_int
     with pytest.raises(config.ConfigError, match=rf"verdict\.{field} is {value!r} but 14 failures of 48 members give {given[field]!r}"):
         report._stat(e, ref, "stage1b/summary.json vehicles.usv")
     report._stat(dict(n=48, k_fail=14, verdict=dict(given, **{field: given[field] + 1e-12})), ref, "src")        # rounding is not an edit
+
+
+def _rename_key(o, old, new):
+    """`o` with every dict key `old` renamed `new` (a vehicle id in every section of the report)."""
+    if isinstance(o, dict):
+        return {(new if k == old else k): _rename_key(v, old, new) for k, v in o.items()}
+    return [_rename_key(v, old, new) for v in o] if isinstance(o, list) else o
+
+
+def test_r12_m3_a_vehicle_named_values_is_not_a_number_node(full):
+    """Round 12, M-3: `_walk` took any dict with a `values` key for a number node, so the vehicles dict of a mission with a vehicle `values` was one
+    "node", nothing under it was traced and `check_rendered` died with KeyError 'unit'. A node is told by its payload (a list under `values`)."""
+    rep = _rename_key(full[4], "glider_2n", "values")
+    assert "values" in rep["vehicles"]
+    paths = [p for k, p, _ in report._walk(rep) if k == "node"]
+    assert "vehicles" not in paths and any(p.startswith("vehicles.values.") for p in paths)
+    assert report.check_traceability(rep) == []
+    assert report.check_rendered(rep, report.render(rep)) == []
+    broken = copy.deepcopy(rep)
+    del broken["vehicles"]["values"]["p_fail"]["receipt"]                    # a number under the id is now looked at: this one is caught
+    assert any(p.startswith("vehicles.values.p_fail: missing") for p in report.check_traceability(broken))
+    assert report.check_traceability(dict(a=dict(values=[1, 2], unit="m"))) == ["a: missing ['stage', 'source', 'uncertainty', 'receipt', 'ledger']"]
+    assert report.check_traceability(dict(a=dict(values=[1, 2]))) != []                                   # a broken node (no unit) is still one, and flagged
+    sections = dict(windows={"values": [dict(t=1, lon=2.0)], "glider_eq": [], "usv": [dict(t=1)]}, none={"values": [], "usv": []})
+    assert [k for k, _, _ in report._walk(sections)] == ["bare"] * 3 and len(report.check_traceability(sections)) == 3   # lists of records: containers
+
+
+def test_r12_m4_a_mode_that_did_not_fire_has_no_note(run):
+    """Round 12, M-4: the summary lists every mode with its count, zeros included, and the card explained all of them ("no member failed" under an
+    overdepth note). A note is for a mode with members."""
+    ref = dict(stage="stage1b", ledger="l", receipt="r")
+    zero = dict(k_fail=0, cls="glider", modes=dict(overdepth=0, no_current_data=0, profile_incomplete=0, station_lost=0))
+    d = report._drivers(zero, None, "g", ref, "s", overdepth="a long text about the depth")
+    assert d["mode_notes"] == {}
+    fired = dict(zero, k_fail=3, modes=dict(zero["modes"], overdepth=3, no_current_data=0))
+    d = report._drivers(fired, None, "g", ref, "s", overdepth="a long text about the depth")
+    assert d["mode_notes"] == dict(overdepth="a long text about the depth")
+    uas = report._drivers(dict(fired, cls="uas", modes=dict(zero["modes"], no_current_data=2)), None, "u", ref, "s")
+    assert uas["mode_notes"] == dict(no_current_data=report.UAS_MODE_TEXT["no_current_data"])
+    html_ = report._drivers_html(report._drivers(zero, None, "g", ref, "s", overdepth="a long text about the depth"))
+    assert "<code>" not in html_ and "overdepth" not in html_ and "a long text" not in html_
+    assert "<code>overdepth</code>" in report._drivers_html(d)
+
+
+@pytest.mark.parametrize("body, why", [
+    ('[{"x": 1}]', "row 0 is not an object with a text `module`"), ("[1, 2]", "row 0"), ('{"a": 1}', "it holds dict"), ('"x"', "it holds str"),
+    ("null", "it holds NoneType"), ('[{"module": "pm.physics.usv", "kind": "fail", "ok": false}]', "row 0 (fail) has no text `name`"),
+    ('[{"module": "pm.physics.usv", "kind": "pass", "name": "n", "ok": null}]', "row 0 (pass)")])
+def test_r12_m8_a_receipts_table_of_the_wrong_shape_says_not_run_and_never_raises(run, body, why):
+    """Round 12, M-8: only the JSON syntax of runs/receipts.json was checked, so a table of the wrong shape ended the report in a KeyError or TypeError."""
+    report.RECEIPTS.write_text(body)
+    for key in report.PHYSICS:
+        p = report.Trace(run).physics(key)
+        assert p["status"] == "not run" and "is not a receipts table" in p["reason"] and why in p["reason"] and p["failures"] == []
+    ok = [dict(module="pm.physics.usv", name="n", ok=True, kind="pass"), dict(module="pm.env.waves", kind="context", ok=None)]
+    assert report._rows_problem(ok) is None and report._rows_problem([]) is None
+
+
+def test_r12_m9_the_machine_block_sums_the_walls_against_the_budget_and_names_the_causes_when_over(run):
+    """Round 12, M-9: a 20-vehicle run took 1,585 s against a budget of 1,200 and the page printed the budget and each stage's wall but never said so."""
+    m, plan = pm_run.make_run(run)
+    edit_json(run / "checkpoints" / "stage1b" / "ledger.json", lambda d: d.update(sensitivity_wall_s=30.014))
+    counted = {}
+    for i, st in enumerate(s for s in report.STAGES if s not in ("ingest", "report") and (run / "checkpoints" / s / "ledger.json").is_file()):
+        edit_json(run / "checkpoints" / st / "ledger.json", lambda d, w=100.0 * (i + 1): d.update(wall_s=w))
+        counted[st] = 100.0 * (i + 1)
+    edit_json(run / "checkpoints" / "ingest" / "ledger.json", lambda d: d.update(wall_s=5000.0))        # the ingest is not in the sum
+    plan["budget_s"] = sum(counted.values()) / 2                               # over by a factor 2
+    plan["stage1_s"] = counted["stage1"] / 2                                   # and stage 1 above its plan
+    report.write(run, m, plan)
+    rep, h = load(run), plain((run / "report" / "index.html").read_text())
+    tot = rep["machine"]["timing"]["total"]
+    assert tot["took"]["value"] == pytest.approx(sum(counted.values())) and tot["budget"]["value"] == plan["budget_s"]
+    assert tot["times"]["value"] == pytest.approx(2.0) and "ingest" not in tot["took"]["source"].split("over ")[1]
+    assert "Over the budget. The stages took" in h and "(the ingest and the report stage are not counted)" in h
+    assert "Known causes in this run: stage 1 took" in h and "planned; the stage 1b sensitivity case took 30.01 s, which no share of the plan pays for." in h
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
+    plan["budget_s"] = sum(counted.values()) * 2                               # inside it: the same sum, no "over", no causes
+    report.write(run, m, plan)
+    rep, h = load(run), plain((run / "report" / "index.html").read_text())
+    assert rep["machine"]["timing"]["total"]["times"]["value"] == pytest.approx(0.5) and "Over the budget" not in h and "Known causes" not in h
+    assert "The stages took" in h and "machine.timing.total" in acceptance.VOLATILE

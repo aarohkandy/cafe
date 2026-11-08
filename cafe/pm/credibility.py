@@ -131,6 +131,10 @@ EXPECTED: dict[str, dict[str, dict[str, Any]]] = {"tepex_c_demo": {
     "glider_eq-ship-acoustic": dict(allowed=None, distance=True, text="glider acoustic link GO within 3 km of the ship, NO-GO beyond it"),
     "glider_2n-ship-acoustic": dict(allowed=None, distance=True, text="glider acoustic link GO within 3 km of the ship, NO-GO beyond it"),
 }}
+# What makes a mission the demo BRIEF section 6 describes, beside its name (round 12, M-5): window, box (lon_min, lon_max, lat_min, lat_max) and vehicle ids.
+# A copy with the name and another window or fleet is another mission; the cache is keyed by name, so a name alone proves nothing.
+DEMO_IDENTITY: dict[str, dict[str, Any]] = {"tepex_c_demo": dict(window=("2023-03-01T12:00:00Z", "2023-03-07T12:00:00Z"), box=(165.0, -165.0, -5.0, 5.0),
+                                                                 vehicles=("glider_eq", "glider_2n", "usv", "uas"))}
 DRIFT_DETAIL = "a drift glider has no mission criterion; GO means the battery and depth limits held on its fixed heading"
 SANITY_NOTE = ("BRIEF section 6, 'Expected outcome': what a correct tool should say about the demo mission, used as a sanity check and not as a "
                "target. It applies to that mission only, so no other mission has a sanity block. A disagreement is not a verdict on the model: it "
@@ -175,6 +179,11 @@ def _json(p: pathlib.Path) -> Any:
 
 # ------------------------------------------------------------------------------------------------------ assumed inputs
 
+def _val(node: dict[str, Any]) -> str:
+    """The value of a provenance item as text. An item with no `value` key (a modem whose figures are in its `assumed` text) says so, not 'None' (M-34)."""
+    return repr(node["value"]) if "value" in node else "n/a (see why)"
+
+
 def _prov(node: Any, path: str, file: str, out: list[dict[str, Any]]) -> None:
     """Every mapping with a `value`, `source` or `assumed` key is one provenance item; recurse into the rest."""
     if not isinstance(node, dict):
@@ -184,7 +193,7 @@ def _prov(node: Any, path: str, file: str, out: list[dict[str, Any]]) -> None:
         why = str(node.get("why") or (a if isinstance(a, str) else ""))
         text = f"{why} {s or ''}"
         out.append(dict(file=file, path=path, assumed=bool(a), sourced=bool(s), recalled="recalled" in text, why=why,
-                        unit=str(node.get("unit", "")), value=repr(node.get("value")), source=str(s or "")))
+                        unit=str(node.get("unit", "")), value=_val(node), source=str(s or "")))
     for k, v in node.items():
         _prov(v, f"{path}.{k}" if path else str(k), file, out)
 
@@ -269,7 +278,7 @@ def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None, e
     for k, e in (config.read_yaml(root / "config" / "assumptions.yaml") or {}).items():
         got = fit.get(k.removeprefix("env.sigma.")) if k.startswith("env.sigma.") else None
         items.append(dict(id=f"assumptions.yaml:{k}", file="config/assumptions.yaml", kind="assumed" if got is None else "fitted",
-                          value=repr(e.get("value")) if got is None else f"this run used {got:.3g} (fitted from the TAO comparison); "
+                          value=_val(e) if got is None else f"this run used {got:.3g} (fitted from the TAO comparison); "
                                                                          f"assumed {e.get('value')!r}",
                           unit=str(e.get("unit", "")), why=str(e.get("why", "")), replace_with=str(e.get("replace_with", ""))))
     for k, e in (config.read_yaml(root / "config" / "perturbations.yaml") or {}).items():
@@ -743,12 +752,22 @@ def _far(e: dict[str, Any]) -> bool | None:
     return True if out is not None and out > 0.5 else None
 
 
+def is_the_demo(mission: dict[str, Any]) -> bool:
+    """Whether `mission` has the name AND the window, box and vehicle ids of the mission BRIEF section 6 states an expected outcome for (DEMO_IDENTITY)."""
+    want = DEMO_IDENTITY.get(mission.get("name", ""))
+    if want is None:
+        return False
+    w, b = mission.get("window") or {}, mission.get("box") or {}
+    return bool((w.get("start"), w.get("end")) == want["window"] and tuple(b.get(k) for k in ("lon_min", "lon_max", "lat_min", "lat_max")) == want["box"]
+                and tuple(sorted(v.get("id") for v in mission.get("vehicles") or [])) == tuple(sorted(want["vehicles"])))
+
+
 def sanity(f: Facts) -> dict[str, Any] | None:
     """The verdicts of the run against what BRIEF section 6 expects of the demo mission, or None for any other mission. A row with `distance` set
     (an acoustic link) agrees when the link is NO-GO beyond ACOUSTIC_NEAR_KM of the ship and GO within it; None only when the run holds no distance."""
     name = (f.mission or {}).get("name", "")
     exp = EXPECTED.get(name)
-    if exp is None or not f.s1b:
+    if exp is None or not f.s1b or not is_the_demo(f.mission or {}):
         return None
     ens = {**f.s1b["summary"]["vehicles"], **f.s1b["summary"]["links"]}
     rows = []
@@ -863,7 +882,8 @@ def _render(c: dict[str, Any]) -> str:
         key = next((x["key"] for x in c["assumed_inputs"] if x["file"] == file and "key" in x), pathlib.Path(file).stem)
         h.append(f"<h3 id='{e(plat_anchor(key))}'>{e(file)}</h3><div class=scroll><table><tr><th>Input<th>Kind<th>Value<th>Why<th>Replace with</tr>")
         for i in (x for x in c["assumed_inputs"] if x["file"] == file):
-            h.append(f"<tr id='{i['anchor']}'><td><code>{e(i['id'])}</code><td>{e(i['kind'])}<td>{e(i['value'])} {e(i['unit'])}"
+            off = "" if i["used"] else " (platform not used by this mission)"
+            h.append(f"<tr id='{i['anchor']}'><td><code>{e(i['id'])}</code><td>{e(i['kind'])}{off}<td>{e(i['value'])} {e(i['unit'])}"
                      f"<td>{e(i['why'])}<td>{e(i['replace_with'])}</tr>")
         h.append("</table></div>")
     return "".join(h)
@@ -874,6 +894,8 @@ def _render(c: dict[str, Any]) -> str:
 def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.Path | None = None) -> dict[str, Any]:
     f = Facts(pathlib.Path(run_dir), root, data or data_root())
     items = assumed_inputs(root, f.run, [r for r in f.refs if not platform_shipped(r, root)])
+    for it in items:                    # the catalogue lists every platform; `used` says whether this mission flies or links through it (M-6)
+        it["used"] = "key" not in it or it["file"] in f.used.values()     # config/ items apply to every mission: which keys a run read is not recorded
     labels = {p.stem: platform_label(p.stem, True) for p in (root / "platforms").glob("*.yaml")} | f.used          # key -> the `file` of its items
     return dict(schema="cafe.pm.credibility/1", run=f.run.name,
                 note="Levels run 0-4 (BRIEF 5.4). The rule behind each level is this tool's reading of the factor, not the text of NASA-STD-7009B, "

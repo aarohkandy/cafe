@@ -91,6 +91,19 @@ def _utc(t: float) -> str:
 
 # ------------------------------------------------------------------------------------------------------ the receipts table
 
+def _rows_problem(rows: Any) -> str | None:
+    """Why `rows` (the parsed runs/receipts.json) is not a receipts table, or None: a list of objects, each with a string `module`; a pass or fail row
+    also a string `name` and a boolean `ok`. These are the keys `Trace.physics` reads; other rows (context) are not read beyond their module. Round 12, M-8."""
+    if not isinstance(rows, list):
+        return f"it holds {type(rows).__name__}, not a list of rows"
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict) or not isinstance(r.get("module"), str):
+            return f"row {i} is not an object with a text `module`"
+        if r.get("kind") in ("pass", "fail") and not (isinstance(r.get("name"), str) and isinstance(r.get("ok"), bool)):
+            return f"row {i} ({r.get('kind')}) has no text `name` or no true/false `ok`"
+    return None
+
+
 class Trace:
     """Ledgers by stage, and the receipts table the numbers point into."""
 
@@ -106,9 +119,11 @@ class Trace:
         if not RECEIPTS.is_file():
             return f"{RECEIPTS_NAME} is not there: run `python -m cafe.pm receipts` and rerun the report"
         try:
-            return json.loads(RECEIPTS.read_text()), sha256(RECEIPTS)
+            rows = json.loads(RECEIPTS.read_text())
         except ValueError as e:
             return f"{RECEIPTS_NAME} is not valid JSON ({e})"
+        bad = _rows_problem(rows)
+        return f"{RECEIPTS_NAME} is not a receipts table ({bad}): rerun `python -m cafe.pm receipts`" if bad else (rows, sha256(RECEIPTS))
 
     def _stale(self) -> str | None:
         """Why the receipts table is not for this run's code, or None: the table's meta file (receipts.run writes it) must hold the code digest the run's
@@ -211,10 +226,19 @@ def tnum(t: float | None, ref: dict[str, Any], source: str) -> dict[str, Any] | 
     return None if t is None else num(t, "s since 1970-01-01T00:00:00Z", ref, source, utc=_utc(t))
 
 
+def _is_number_list(x: Any, has_unit: bool) -> bool:
+    """x is what `vals` stores: a list of numbers or None (a non-finite one), or of lists of them. An empty list counts only with `has_unit`: a vehicle
+    with no windows is an empty list too."""
+    return isinstance(x, list) and (bool(x) or has_unit) and all(
+        _is_number_list(v, True) if isinstance(v, list) else v is None or (isinstance(v, (int, float)) and not isinstance(v, bool)) for v in x)
+
+
 def _walk(o: Any, path: str = "") -> Iterator[tuple[str, str, Any]]:
     """Yield ("node", path, d) for every number node and ("bare", path, x) for a number outside one."""
     if isinstance(o, dict):
-        if "values" in o or ("value" in o and (o["value"] is None or isinstance(o["value"], (int, float)))):
+        # a node is told by its payload, not by a key name (round 12, M-3): `vals` makes a list of numbers (or of lists of them), so a vehicle or link id
+        # `values` (a card, which is a dict; a list of window records; an empty list, a node only with its unit) is a container, whose parts are walked
+        if _is_number_list(o.get("values"), "unit" in o) or ("value" in o and (o["value"] is None or isinstance(o["value"], (int, float)))):
             yield "node", path, o
             return
         for k, v in o.items():
@@ -434,8 +458,8 @@ def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[
         first=None if t_left is None or not np.isfinite(t_left).any()
         else tnum(float(np.nanmin(t_left)), ref, f"stage1b/res.pkl vehicles.{vid}.first.left_data"))
     return dict(first_fail_mode=None if r is None else _first_mode(r), res_available=r is not None, mode_shares=shares, left_data=left,
-                mode_notes={m: (UAS_MODE_TEXT if e.get("cls") == "uas" else {}).get(m) or MODE_TEXT[m] for m in e["modes"] if m in MODE_TEXT}
-                | ({"overdepth": overdepth} if overdepth and "overdepth" in e["modes"] else {}))
+                mode_notes={m: (UAS_MODE_TEXT if e.get("cls") == "uas" else {}).get(m) or MODE_TEXT[m] for m, n in e["modes"].items() if n and m in MODE_TEXT}
+                | ({"overdepth": overdepth} if overdepth and e["modes"].get("overdepth") else {}))          # only a mode that fired is explained (M-4)
 
 
 def _cases(tr: Trace, vid: str, n: int) -> list[dict[str, Any]]:
@@ -1000,6 +1024,12 @@ def _timing(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, 
     sw = (tr.led.get("stage1b") or {}).get("sensitivity_wall_s")               # the USV rerun under the brief's VPP bias: in no share of the plan (M-17)
     if sw is not None:
         out["stage1b_sensitivity"] = dict(measured=num(sw, "s", tr.ref("stage1b"), "checkpoints/stage1b/ledger.json sensitivity_wall_s"))
+    counted = [st for st, L in tr.led.items() if L and st not in ("ingest", "report")]     # the ingest is not counted (DECISIONS 196); no report ledger yet
+    if counted and plan["budget_s"] > 0:
+        took = sum(tr.led[st]["wall_s"] for st in counted)
+        out["total"] = dict(took=num(took, "s", tr.ref(counted[0]), "sum of checkpoints/<stage>/ledger.json wall_s over " + ", ".join(counted)),
+                            budget=num(plan["budget_s"], "s", pref, "plan.json budget_s"),
+                            times=num(took / plan["budget_s"], "times the budget", pref, "sum of the stage wall_s / plan.json budget_s"))
     d = tr.led.get("emulator") or {}
     w = d.get("variant_wall_s")
     if w and d.get("variant_planned_s") is not None:
@@ -1032,20 +1062,30 @@ def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str,
 
 
 def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
-    by: dict[str, int] = {}
+    """The assumed inputs and priors this mission's verdicts depend on (a platform it does not use does not count), and the catalogue they are part of."""
+    used: dict[str, int] = {}
+    rest: dict[str, int] = {}
     for i in cred["assumed_inputs"]:
         if i["kind"] != "fitted":                                          # a value this run fitted from data is listed, but not counted as assumed
-            by[i["file"]] = by.get(i["file"], 0) + 1
-    return dict(page="credibility.html", total=num(sum(by.values()), "inputs", cred_ref, "credibility.json assumed_inputs (kind other than fitted)"),
-                by_file={f: num(n, "inputs", cred_ref, "credibility.json assumed_inputs") for f, n in sorted(by.items())},
-                items=[dict(id=i["id"], kind=i["kind"], value=i["value"], unit=i["unit"], why=i["why"], href=f"credibility.html#{i['anchor']}")
+            d = used if i["used"] else rest
+            d[i["file"]] = d.get(i["file"], 0) + 1
+    src = "credibility.json assumed_inputs"
+    return dict(page="credibility.html",
+                total=num(sum(used.values()), "inputs", cred_ref, f"{src} (kind other than fitted, of a platform this mission uses)"),
+                catalogue=num(sum(used.values()) + sum(rest.values()), "catalogued inputs", cred_ref, f"{src} (kind other than fitted)"),
+                by_file={f: num(n, "inputs", cred_ref, src) for f, n in sorted(used.items())},
+                not_used_by_file={f: num(n, "inputs", cred_ref, f"{src} (platform not used by this mission)") for f, n in sorted(rest.items())},
+                items=[dict(id=i["id"], kind=i["kind"], used=i["used"], value=i["value"], unit=i["unit"], why=i["why"], href=f"credibility.html#{i['anchor']}")
                        for i in cred["assumed_inputs"]],
                 factors=[dict(name=f["name"], level=f"{f['level']} of 4") for f in cred["factors"]])
 
 
-def _sanity(cred: dict[str, Any], vehicles: dict[str, Any], links: dict[str, Any]) -> dict[str, Any]:
+def _sanity(cred: dict[str, Any], vehicles: dict[str, Any], links: dict[str, Any], name: str = "") -> dict[str, Any]:
     """BRIEF section 6's expected outcome for the demo mission against this run's verdicts (the table is credibility.EXPECTED)."""
     sn = cred.get("sanity")
+    if sn is None and name in credibility.EXPECTED:
+        return dict(applies=False, reason="This mission has the demo's name but not its window, box and vehicles, so BRIEF section 6's expected outcome "
+                                          "for the demo mission does not apply to it.")
     if sn is None:
         return dict(applies=False, reason="BRIEF section 6 states an expected outcome for the demo mission only; this mission has none.")
     both = {**vehicles, **links}
@@ -1081,7 +1121,7 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
         map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res, s1b), environment=_env(mission, env, res, wins, s1b, tr),
         stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref),
         assumed_inputs=_assumed(cred, cred_ref), sensitivity_scope=_sens_scope(tr))
-    rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"])
+    rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"], mission["name"])
     own = _jl(run / "stage3" / "subgrid_calibration.json")
     rep["subgrid"] = dict(source=("this run's stage3/subgrid_calibration.json" if own
                                   else "the shipped config/subgrid.json (no passed LES window in this run)"),
@@ -1617,6 +1657,16 @@ def _machine_html(m: dict[str, Any]) -> str:
                  f"measured {_n(sv['measured'])}.</p>")
     if vr:
         took += f"<p>Emulator variant runs: {_n(vr['runs'])}, planned {_n(vr['planned'])}, measured {_n(vr['measured'])}.</p>"
+    if tot := tm.get("total"):
+        over = tot["times"]["value"] > 1
+        causes: list[str] = []
+        if s1 and s1["measured"]["value"] > s1["planned"]["value"]:
+            causes.append(f"stage 1 took {_n(s1['measured'])} against {_n(s1['planned'])} planned")
+        if sv:
+            causes.append(f"the stage 1b sensitivity case took {_n(sv['measured'])}, which no share of the plan pays for")
+        took += (f"<p>{'<b>Over the budget.</b> ' if over else ''}The stages took {_n(tot['took'])} in all (the ingest and the report stage are not counted) "
+                 f"against the budget of {_n(tot['budget'])}: {_n(tot['times'])}."
+                 + (f" Known causes in this run: {'; '.join(causes)}." if over and causes else "") + "</p>")
     ing = (f"<p class=muted>Ingest took {_n(m['wall_s']['ingest'])}: it is not counted against --budget (a download over the network is a separate step, "
            "RUNBOOK 4, whose duration depends on the link).</p>") if "ingest" in m["wall_s"] else ""
     return (f"<pre>{e(m['describe'])}</pre><div class=scroll><table><tr><th>Vehicle<th>Cost per mission day (s per batch + s per member)"
@@ -1630,11 +1680,14 @@ def _machine_html(m: dict[str, Any]) -> str:
 def _assumed_html(a: dict[str, Any]) -> str:
     e = html.escape
     rows = "".join(f"<tr><td>{e(f)}<td>{_n(n)}</tr>" for f, n in a["by_file"].items())
+    off = ", ".join(f"{e(f)} {_n(n)}" for f, n in a["not_used_by_file"].items())
+    off = f"<p class=muted>Listed in the credibility report, but of platforms this mission does not use, and not counted above: {off}.</p>" if off else ""
     fac = "".join(f"<tr><td>{e(f['name'])}<td>{e(f['level'])}</tr>" for f in a["factors"])
-    lst = "".join(f"<li><a href='{e(i['href'])}'><code>{e(i['id'])}</code></a> ({e(i['kind'])}) {e(i['value'])} {e(i['unit'])}" for i in a["items"])
-    return (f"<p>{_n(a['total'])} are assumed or are priors, not measurements, and verdicts depend on them. Full detail: "
-            f"<a href='credibility.html'>credibility report</a> (levels, V&amp;V 20 table, limitations).</p>"
-            f"<div class=scroll><table><tr><th>File<th>Inputs</tr>{rows}</table></div>"
+    lst = "".join(f"<li><a href='{e(i['href'])}'><code>{e(i['id'])}</code></a> ({e(i['kind'])}{'' if i['used'] else ', platform not used by this mission'}) "
+                  f"{e(i['value'])} {e(i['unit'])}" for i in a["items"])
+    return (f"<p>{_n(a['total'])} of the {_n(a['catalogue'])} in the catalogue are used by this mission, are assumed or are priors, not measurements, "
+            f"and verdicts depend on them. Full detail: <a href='credibility.html'>credibility report</a> (levels, V&amp;V 20 table, limitations).</p>"
+            f"<div class=scroll><table><tr><th>File<th>Inputs</tr>{rows}</table></div>{off}"
             f"<div class=scroll><table><tr><th>NASA-STD-7009B factor<th>Level</tr>{fac}</table></div>"
             f"<details><summary>All assumed inputs</summary><ul>{lst}</ul></details>")
 
