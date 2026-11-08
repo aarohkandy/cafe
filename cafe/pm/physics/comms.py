@@ -114,8 +114,9 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     at 0.5, 0.70 at 1, 0.49 at 2, 0.35 at 3, 0.26 at 5 (the pseudo-Brewster angle, phase -86 deg), 0.49 at 12 and 0.65 at 20 deg, and its phase is
     -179 deg at 0.05, -168 at 1 and -154 at 2 deg: -1 is within 10 % of the magnitude only below about 0.3 deg, not below "1-2 deg" as this docstring
     said until then. The demo's grazing angles (UAS 18 to 108 m, USV whip 2.2 m) are 1.2 deg at 1 km and 0.2 deg at 5 km for the 18 m UAS and 6.3 and
-    1.3 deg for the 108 m UAS, so -1 is a good model from about 5 to 10 km out and not inside 3 km; the UAS-ship hook inside a sortie (a 15 m mast,
-    a few hundred metres to a few km) is at 2 to 30 deg, where |G| is 0.26 to 0.5. The error band of the margin against the Fresnel coefficient, as the
+    1.3 deg for the 108 m UAS, so -1 is within 10 % of the magnitude from about 4 km out for the 18 m UAS (0.3 deg at 3.9 km, flat earth) and from
+    about 21 km for the 108 m UAS, not inside those distances; the UAS-ship hook inside a sortie (a 15 m mast, a few hundred metres to a few km)
+    is at 2 to 30 deg, where |G| is 0.26 at 5 deg and 0.65 at 20 deg. The error band of the margin against the Fresnel coefficient, as the
     reviewer measured it (a script run outside this module, with this module's geometry and G(psi) in place of -1; with -1 it reproduces this
     function to 0.0 dB; the margin sweeps were not re-run): this model is optimistic at interference peaks, by up to 7.6 dB, and conservative at nulls;
     on the UAS-USV mission link from 0.2 km to the horizon the Fresnel margin is 7.4 dB lower to 23.6 dB higher at Hs 0.5 m and 2.8 dB lower to 6.9 dB

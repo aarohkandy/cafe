@@ -1,11 +1,13 @@
 """The documents say what the code does where a reader would act on them (review round 1: M-17, M-31, M-32)."""
+import json
 import os
 import re
 import stat
 import subprocess
 import sys
 
-from cafe.pm import config, credibility
+from cafe.pm import config, credibility, pipeline
+from cafe.pm.physics import comms
 
 ROOT = config.ROOT
 
@@ -374,3 +376,66 @@ def test_r11_m29_the_env_form_the_runbook_documents_reaches_the_job_and_a_variab
     assert run_in_the_proot_runner(tmp_path / "c", ["printenv", "CAFE_WORKERS"]) == (0, "3\n")                              # the runner's own: PM_CPUS
     for var in ("CAFE_OFFLINE", "CAFE_NPROC", "CAFE_EMULATOR_TABLE"):
         assert run_in_the_proot_runner(tmp_path / var, ["printenv", var], **{var: "1"}) == (1, "")
+
+
+# ---- review round 12: documents that quote the code or a measured record (M-12, M-17, M-18, M-20)
+
+def flat(doc):
+    return " ".join(doc.split())
+
+
+def test_r12_m17_the_wave_ages_are_assumptions_yaml_keys_and_no_document_says_they_are_not():
+    """Round 12 M-17: PHYSICS 4.1 and CREDIBILITY said `swell_age` and `wind_sea_age` are code defaults that are not keys of config/assumptions.yaml, so the
+    credibility report does not list them. waves.py reads them from it, and the report lists both."""
+    keys = config.read_yaml(ROOT / "config" / "assumptions.yaml")
+    assert keys["waves.swell_age"]["value"] == 1.2 and keys["waves.wind_sea_age"]["value"] == 2.0
+    assert {"assumptions.yaml:waves.swell_age", "assumptions.yaml:waves.wind_sea_age"} <= {i["id"] for i in credibility.assumed_inputs()}
+    src = text("cafe", "pm", "env", "waves.py")
+    assert 'assumption("waves.swell_age")' in src and 'assumption("waves.wind_sea_age")' in src
+    phys, cred = flat(text("docs", "PHYSICS.md")), flat(text("docs", "CREDIBILITY.md"))
+    for doc in (phys, cred):
+        assert "they are not keys in `config/assumptions.yaml`" not in doc and "assumed and are not in `assumptions.yaml`" not in doc
+    assert "the keys `waves.swell_age` and `waves.wind_sea_age` of `config/assumptions.yaml`" in phys
+    assert "`waves.swell_age` (1.2) and `waves.wind_sea_age` (2.0) are keys of `config/assumptions.yaml`" in cred
+
+
+def test_r12_m18_the_stokes_figures_in_physics_are_the_recorded_receipt_and_stored_attribute_not_a_lead_s_log():
+    """Round 12 M-18: PHYSICS 4.4 gave 38 % and 'under-predicts by about x2.7' as one finding from a log. 38 % is the all-node median of |fit/real - 1|; the
+    receipt's median fit/real ratio on the real cache was re-read (review/round_12/m18/, orca, 2026-11-08) and is 0.657. The documents quote those records."""
+    rec = ROOT / "review" / "round_12" / "m18"
+    rows = json.loads((rec / "wave_direction.json").read_text())
+    ctx = [r for r in rows if r["kind"] == "context" and r["name"].startswith("Wave direction (cache tepex_c_demo)")
+           and "parametric spectrum / from the real" in r["name"]]
+    assert len(ctx) == 1 and f"{ctx[0]['value']:.3f}" == "0.657"
+    probe = (rec / "probe2.txt").read_text()
+    assert '"fit_only_median_speed_err": 0.3842877802874689' in probe and '"corrected_loo_median_speed_err": 0.05130921006182648' in probe
+    phys = flat(text("docs", "PHYSICS.md"))
+    assert "the fit under-predicts by about x2.7 at the sample points" not in phys
+    assert "**0.657** at 211 points" in phys and "0.3843" in phys and "(0.0513)" in phys and "(3.74)" in phys and "points 211" in probe
+    assert "withdrawn" in row(34) and "0.657" in row(34) and "0.657" in row(658)
+
+
+def test_r12_m20_the_pad_cap_is_said_to_be_reached_at_24_5_days_in_the_runbook_and_the_rows():
+    """Round 12 M-20: 'at most 10, reached at about 26 days' in RUNBOOK 3 and rows 190 and 229; pipeline.padding gives 9.5 at 24.4 days and 10 from 24.5."""
+    rb = flat(text("docs", "RUNBOOK.md"))
+    assert "(at most 10, reached at 24.5 days: 24.4 days gives 9.5)" in rb and "reached at about 26 days" not in rb
+    for n in (190, 229):
+        assert "24.5 days" in row(n) and "about 26 days" not in row(n)
+    assert pipeline.MAX_PAD_DEG == 10.0 and "24.4 days" in str(pipeline.padding.__doc__)
+
+
+def test_r12_m12_physics_and_the_questions_state_the_fresnel_error_band_the_docstring_states():
+    """Round 12 M-12: -1 was said to hold below 1 to 2 deg. PHYSICS 12.1 and QUESTIONS_FOR_LAB 12a carry what the docstring of two_ray_curved_db carries (the
+    table itself is recomputed in tests/test_comms.py): within 10 % only below about 0.3 deg, up to 7.6 dB optimistic at a peak, the polarisation question."""
+    sec = flat(text("docs", "PHYSICS.md"))
+    sec = sec[sec.index("### 12.1 RF: two-ray over the sea"):]
+    sec = sec[:sec.index("### 12.2")]
+    doc = flat(str(comms.two_ray_curved_db.__doc__))
+    for part in ("within 10 % of the magnitude only below about 0.3 deg", "up to 7.6 dB", "7.4 dB lower to 23.6 dB higher", "7.5 dB lower to 34.7 dB higher",
+                 "no sample changed"):
+        assert part in doc and part in sec, part
+    assert "pseudo-Brewster angle 4.85 deg" in sec and "valid for grazing angles below ~1-2 deg" not in doc
+    q = flat(text("QUESTIONS_FOR_LAB.md"))
+    assert "12a. **Antenna polarisation, and the sea temperature and salinity at the RF link**" in q and "*Default:* vertical polarisation" in q
+    assert "Fresnel" in row(652) and "withdrawn" in row(652)
+

@@ -171,7 +171,7 @@ Context rows are shown for orientation and never count as a pass.
 
 Run them: `./run.sh python -m cafe.receipts /work/runs`. The slow CFD cases are produced once with
 `python -m cafe.cfd external torpedo /work/runs/t1`, `... surface wigley /work/runs/w1` and
-`... incidence suboff /work/runs/s1 3.344` (three grids, about 1 h on 6 cores). Adversarial review notes: `REVIEW.md`.
+`... incidence suboff /work/runs/s1 3.344` (three grids, about 1 h on 6 cores). The files carry a stamp (date, host, git sha, digest of `cafe/*.py`); one made before the stamp existed, or `runs/crosscheck.json`, is stamped with `python -m cafe.receipts stamp FILE` after you have looked at it, and a result without a stamp of the current code is a context row, not a pass. Adversarial review notes: `REVIEW.md`.
 
 ## Files
 

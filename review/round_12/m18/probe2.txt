@@ -1,0 +1,4 @@
+cache tepex_c_demo restart times in the sample 4 points 211
+fit/real: median 0.6574  p10 0.5099  p90 0.8474  min 0.4642  max 0.9950
+1/median 1.521 ; median |fit/real - 1| over these points 0.3426
+derived stokes_fit_check: {"n_restart_times": 25, "fit_only_median_speed_err": 0.3842877802874689, "corrected_loo_median_speed_err": 0.05130921006182648, "corrected_loo_median_dir_err_deg": 3.741982782195086}

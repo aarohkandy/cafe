@@ -113,6 +113,15 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
     horizon with the UAS is 24 to 49 km, so the RF NO-GO follows from the ship geometry, not the environment. Please give the intended positions.
     *Default:* the demo's positions as given.
 
+    12a. **Antenna polarisation, and the sea temperature and salinity at the RF link** (review round 12, M-12). The RF model reflects the sea with a coefficient of -1. The Fresnel
+    coefficient of a vertical-polarised wave on sea water at 915 MHz has magnitude 0.70 at a grazing angle of 1 deg and 0.26 at 5 deg, so -1 is within 10 % of the magnitude only
+    below about 0.3 deg (`docs/PHYSICS.md` 12.1). Which polarisation do the antennas on the ship, the USV and the UAS have, and what are the sea temperature and salinity along the link?
+    *Default:* vertical polarisation (assumed; the antennas are taken as 2 dBi in `platforms/radios.yaml`, with no polarisation stated) and sea water at 29 C and 35 (eps_c 72.8 - j118.9 at 915 MHz, sigma 5.9 S/m, both
+    assumed): the model keeps -1 and states the error band, up to 7.6 dB optimistic at interference peaks and conservative at nulls; no demo verdict rests on it (usv-uas-rf is NO-GO
+    because 89 % of its needed moments are beyond the radio horizon, and the UAS lost-link mode is 0 of 64). *If you answer:* a horizontal-polarised wave reflects closer to -1 at
+    these angles (not computed here), another temperature or salinity changes eps_c; either way the full Fresnel option is a code change in `two_ray_curved_db` (a function of the
+    grazing angle in place of -1), which moves every printed RF margin, the goldens and the parameter-file hashes (DECISIONS 652).
+
 13. **The UAS frame-only drag.** The Hangar `d_x` for the quadrotor includes the rotor momentum drag, so a stage-3 LES of the frame alone cannot be
     compared with it like for like. Can you split `d_x` into its frame and rotor parts, or give the frame's Cd*A?
     *Default:* UAS stage-3 windows are never used in the refit (on a CPU machine they are not run at all, see `STATUS.md`). *If supplied:* no code reads such

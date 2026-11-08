@@ -2,7 +2,7 @@
 
 Orca is the lab's Jupyter-style container, first reached through the VS Code tunnel `orca-guest-aaroh` and now over Tailscale and SSH as `cafe-orca`. It is the worker for cafe jobs; it replaced the Azure burst VM (`cafetest`, about $1.40/h), whose resource group was deleted on the owner's yes on 2026-11-06.
 
-**Status (updated in review round 11): connected, and cafe jobs run there.** The go check (`bin/orca_ready.sh`) passed on the real machine, and the demo's quick runs (`q10`, `q10lb`, `q11`, `q11la`) and the whole-suite gates ran there. Where things stand is in [`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md) (how to run, what is not the same as docker, the gate) and `STATUS.md`; this page keeps what was measured about the machine and how to connect.
+**Status (updated in review round 12): connected, and cafe jobs run there.** The go check (`bin/orca_ready.sh`) passed on the real machine, and the demo's quick runs (`q10`, `q10lb`, `q11`, `q11la`, `q12`, `q12la`) and the whole-suite gates ran there (`q11la` no longer audits clean: DECISIONS 690). Where things stand is in [`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md) (how to run, what is not the same as docker, the gate) and `STATUS.md`; this page keeps what was measured about the machine and how to connect.
 
 | Step | State |
 |---|---|

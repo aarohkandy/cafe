@@ -68,7 +68,7 @@ principles with plain `cos`/`sin`, no call into `conventions`, so the expected d
 | median direction error of the Stokes drift from the restart spectrum (pipeline) vs summing cos/sin of UMWM's own angles | 0 to 1 deg | |
 | median speed of the Stokes drift from the restart spectrum (pipeline) / summed from UMWM's own k and dk | 1 +- 2 % | |
 | median direction error of the Stokes drift from the parametric spectrum ... vs from the real restart spectrum | 0 to 30 deg (bound is ours, twice the 15 deg the cache gives; a wrong convention gives more than 100) | |
-| context: median speed of the Stokes drift from the parametric spectrum / from the real restart spectrum | none | shows the size of the correction that `surface.build` applies |
+| context: median speed of the Stokes drift from the parametric spectrum / from the real restart spectrum | none | shows the size of the correction that `surface.build` applies (0.657 on the real cache, 2026-11-08: `review/round_12/m18/`) |
 
 ---
 
@@ -154,13 +154,13 @@ z0  =  alpha u*^2 / g + 0.11 nu / u*       alpha:  Charnock  0.0017 U10n - 0.005
                                                    wave age  0.114 (u*/c_p)^0.622                                 (c_p finite)
                                                    sea state z0 = 0.091 Hs (u*/c_p)^2, floored at 0.11 nu/u*      (c_p and Hs finite)
 gustiness  u_t = sqrt(u^2 + u_g^2),  u_g = 1.2 (B_f z_i)^(1/3)  (B_f > 0),  else 0.2 m/s;      gf = u_t / u
-cool skin: Fairall et al. 1996 eqs 12-17;  thermal roughness z0q = min(1.6e-4, 5.8e-5 / R_r^0.72)        rain heat flux: Gosnell et al. 1995
+cool skin: Fairall et al. 1996 eqs 12-17 (with `jcool=0` the skin temperature is given, there is no cool skin and `dter` and `tkt` are returned as 0: review round 12, M-14);  thermal roughness z0q = min(1.6e-4, 5.8e-5 / R_r^0.72)        rain heat flux: Gosnell et al. 1995
 psi:  Beljaars & Holtslag 1991 (stable),  Grachev et al. 2000 (convective) blended with Businger et al. 1971 (Kansas) in the unstable branch
 profile:   U(z) = u* / (kappa gf) [ ln(z/z0) - psi_u(z/L) + psi_u(z0/L) ]       (mean, not gust-inclusive, wind relative to the current)
 ```
 
 In the pipeline `surface.build` runs COARE once per WRF hour on the whole grid with `cp = dcp` and `sigH = swh` from UMWM, so the roughness
-is the **sea-state** form wherever UMWM has a value. Inputs: `U10, T2, Q2, PSFC, SST, SWDOWN, GLW, PBLH` (z_i = max(PBLH, 100 m)), `RAINNC+RAINC`.
+is the **sea-state** form wherever UMWM's dominant phase speed `dcp` is at least 3.5 m/s (`coare.CP_FULL`); from 2 m/s (`CP_MIN`) to 3.5 m/s the Charnock parameter fades linearly into it, and at 2 m/s or under, negative or missing it is the Charnock form (review round 12, M-13, DECISIONS 653: a `dcp` of 0, in a calm or over ice, gave NaN u*, z0, L and Cd, and a hard switch at one speed gave a step of up to 2.6 times in Cd; the demo's smallest `dcp` is 3.93 m/s over 5.9 million sea values, so it takes the pure sea-state form there, bit for bit; the two speeds are ours and the fade is a guard against the step, not a calibration of young-sea drag). Inputs: `U10, T2, Q2, PSFC, SST, SWDOWN, GLW, PBLH` (z_i = max(PBLH, 100 m)), `RAINNC+RAINC`.
 WRF SST is read as the foundation temperature.
 
 Deliberate difference from `pycoare` 0.4.3: in sea-state mode pycoare never subtracts `0.11 nu/u*` inside its loop; the code follows the
@@ -226,8 +226,9 @@ w   = clip( (mss - a_A hs^2) / (a_B - a_A), 0, hs^2/2 )     a = int k^2 E df dth
   synthesised mss equals the file's to 0.0 % when w is not clipped.
 - s follows Mitsuyasu et al. 1975 and Hasselmann et al. 1980 (both marked `*` in the docstring: **not re-read**); the cap 60 is the narrowest the
   11.25 degree bins can resolve.
-- The swell threshold `swell_age = 1.2` and the short-sea age `wind_sea_age = 2.0` are **assumed**, and are **code defaults** of
-  `spectrum_from_params`; they are not keys in `config/assumptions.yaml`, so the credibility report does not list them.
+- The swell threshold `swell_age = 1.2` and the short-sea age `wind_sea_age = 2.0` are **assumed**. They are the keys `waves.swell_age` and
+  `waves.wind_sea_age` of `config/assumptions.yaml`, which `waves.py` reads, and the credibility report lists both as assumed inputs (they moved into the yaml
+  in an earlier round; this text said otherwise until review round 12, M-17, DECISIONS 657).
 - The discrete shapes lose about 0.5 % of Hs on 37 bins; the renormalisation removes it.
 
 ### 4.2 Real restart spectra
@@ -249,8 +250,12 @@ u_s(z) = u0 [ e^(2kz) - beta sqrt(-2 pi k z) erfc(sqrt(-2kz)) ],   V = u0 (1 - 2
 ### 4.4 The real-spectrum correction and its measured error
 
 The hourly Stokes field is integrated from the parametric spectrum (4.1) on every 3rd UMWM node. Against the real spectra at the 6-hourly
-restart times it was wrong: **median speed error 38 %**, the fit under-predicts by about x2.7 at the sample points (lead's log, real data). The
-fix (`surface._correct_with_real`):
+restart times it was wrong: **median speed error 38 %**, the median over all nodes of |fit/real - 1| (the attribute `fit_only_median_speed_err`, 0.3843 on the
+real cache, 25 restart times); that measure is symmetric and does not say which way the fit is wrong. The receipt `Wave direction (cache tepex_c_demo)`, context row
+"median speed of the Stokes drift from the parametric spectrum / from the real restart spectrum", re-read on the real cache (2026-11-08, code `2d5e6ad`, orca; the
+record is `review/round_12/m18/`) gives a median ratio of **0.657** at 211 points (10th to 90th percentile 0.51 to 0.85, largest 0.995): the fit is below the real
+speed at every point, by a factor of about 1.5 at the median and at most 2.2. (This section used to say "under-predicts by about x2.7", from the lead's log;
+no ledger holds that figure and it is withdrawn, review round 12, M-18, DECISIONS 658.) The fix (`surface._correct_with_real`):
 
 ```
 c(node, t_r) = ( real_e + i real_n ) / ( fit_e + i fit_n )      at each restart time t_r (complex ratio: speed error and rotation)
@@ -260,9 +265,11 @@ leave-one-out: predict each interior restart b from the corrections at its neigh
     speed error = median | |pred|/|real| - 1 |,   direction error = median | arg(pred/real) |
 ```
 
-Measured on the real cache (lead's log): **leave-one-out median speed error 5.1 %, direction 3.7 deg** (fit alone 38 %). `stokes_surface` tags
-the field with `uncertainty = (LOO median speed error) x |u_s|`: a median is used as a 1-sigma, which is an **assumption**. Without restart spectra the tag
-is `0.4 |u_s|` (assumed).
+Measured on the real cache (the stored attribute `stokes_fit_check` of the demo's `derived.zarr`): **leave-one-out median speed error 5.1 % (0.0513), direction 3.7 deg
+(3.74)** (fit alone 38 %). `stokes_surface` tags the field with `uncertainty = (LOO median speed error) x |u_s|`: a median is used as a 1-sigma, which is an
+**assumption**. The correction needs at least three restart times in the window (an interior one is predicted from its two neighbours): with fewer, or with a
+leave-one-out error that is not finite, there is no correction (`stokes_fit_check` is null) and the field is the fit alone (review round 12, M-1, DECISIONS 641); a window
+that short has one or two restart hours, for example 5:00 to 7:00. Without restart spectra, or without that correction, the tag is `0.4 |u_s|` (assumed).
 
 ### 4.5 Sea-surface realisation, second order (library only)
 
@@ -356,6 +363,8 @@ density: d rho = rho [ -alpha (dT_warm(z) + dT_lens) - beta dS ],  alpha, beta =
 
 Iyer & Drushka 2021 is cited "as summarised in BRIEF 2.2; the paper itself was not re-read". The lens size (7 km) is carried but not used.
 
+alpha and beta are evaluated once at the fixed tropical constants SA 35, CT 28, p 0 (`gsw.alpha(35.0, 28.0, 0.0)`), not at the box's mean surface state, which `surface.py` and DECISIONS 40 used to say: alpha is 3.19e-4 at CT 28, 2.14e-4 at 15 and 1.13e-4 at 5, so in a box of 5 degC the warm-layer and rain-lens density change is 2.8 times too large. The demo (SST 299 to 303 K) is unaffected; the box-mean option is not built (review round 12, M-16, DECISIONS 656).
+
 **Persistence.** `surface.build` stores `since_rain_s` (time since the last hour with rain above the trigger) and `last_rain_mm_h` (that hour's rate), and
 `SurfaceLayer._lens` feeds `last_rain_mm_h` as the rate, so a lens formed by an hour of rain decays with `exp(-t_since/tau)` after the rain stops. This was
 **added in commit bb68642 (2026-10-29)**; before it the lens followed the instantaneous rain rate and vanished with it, so `since_rain_s` had no effect.
@@ -366,12 +375,12 @@ U10, not the wind history.
 ### 5.4 Diurnal jet and ocean SDE
 
 ```
-jet [m/s] = 0.2 (midpoint of config/subgrid.json [0.1, 0.3]) x min(dT_warm / 3 K, 1) x ( 1 + z/d_warm )_+ , along the 10 m wind, added to the HYCOM current; +-0.1 as the sigma
+jet [m/s] = 0.2 (midpoint of config/subgrid.json [0.1, 0.3]) x min(dT_warm / 3 K, 1) x ( 1 + z/d_warm )_+ , along the 10 m wind, added to the HYCOM current; no uncertainty is carried: every member uses the 0.2 midpoint and the 0.1 to 0.3 range is drawn only by the receipt (`subgrid.diurnal_jet`)
 ```
 
 TEPEX-C's own hypothesis (BRIEF 2.2), **modelled, not observed**; `dT_ref = 3 K` is assumed. It enters through `SurfaceLayer` (mission switch
 `warm_layer`: no warm layer, no jet). Windage is **not** added to the current, because the HYCOM top layer holds the Ekman drift and the USV VPP has its
-own windage. At the surface the glider drifts with a per-member leeway of 1.8-2.3 % of U10 (`subgrid.windage_fraction`).
+own windage. At the surface the glider drifts with a per-member leeway of 1.8-2.3 % of U10 (`subgrid.windage_fraction`). The jet is not drawn per member: the run uses the midpoint 0.2 m/s times the warm-layer factor for every member, `current_extra` returns the base uncertainty, and `subgrid.diurnal_jet`, which draws the 0.1 to 0.3 range per member, is called by the receipts only (review round 12, M-10, DECISIONS 650); drawing it in stage 1 would shift the USV and glider P(fail) and is the owner's call.
 
 Ocean SDE (mission switch `ocean_sde`): the Okubo (1971) diffusivity `K = 0.0103 l^1.15` cm^2/s at the 0.08 deg HYCOM cell (**typed from memory**), and
 the Ito/Euler-Maruyama step `dx = (u + dK/dx) dt + sqrt(2K) dW` (OceanParcels tutorial; well-mixed condition of Thomson 1987). The vehicles take
@@ -547,6 +556,8 @@ x      = ( wrap180(lon - lon0) in radians x R cos(lat),  lat in radians x R ),  
 F(x)   = sqrt(2/32) sum_{i=1..32} cos( k_i . x + phi_i ),   k_i ~ N(0, 1/ell^2) per axis, phi_i ~ U(0, 2 pi)        random Fourier features, Gaussian covariance (Rahimi & Recht 2007)
 waves:   Hs' = Hs hs_scale[m];  Tm' likewise;  Tp' = max(Tp + tp_bias[m], 1 s);  Stokes drift x hs_scale^2 x (Tp / Tp')^3 (surface Stokes drift of a fixed spectrum shape goes as Hs^2 / Tp^3; review round 2, M-21)
 wind:    plus, when the fitted priors hold wind_speed_noise / wind_direction_noise (section 7): an AR(1) series per member, sd and e-folding time tau_h from the fit
+         (the bias and the noise are factors on the base wind vector, so they are not applied where the base speed is 1e-9 m/s or less: a window of exactly zero wind has no
+         wind spread, and at 1.1e-9 m/s the full bias applies along the base direction; review round 12, M-15, DECISIONS 655)
 density, sound speed, depth, SST, air: unchanged
 ```
 
@@ -608,7 +619,7 @@ buoyancy  B = g ( rho V - M ),   V = ( V_hull + dV_vbd ) exp( -gamma p + alpha_T
 - Ground velocity while flying = `U cos(theta)` along the heading + `env.current(z)` (which includes the surface jet inside the warm layer); surfaced: current + windage x 10 m wind; windage is 0.01 (**assumed**) for a bare `GliderSim`, and 1.8 to 2.3 % per member in Stage 1 (`subgrid.windage_fraction`, section 5.4; review round 4, M-21).
 - Pilot ballasting (`_trim`): at the start position, 11 depths. Dive VBD = `delta` below the lightest ballast point, climb VBD = `delta` above the heaviest (`vbd_delta_cc` = 60 cc, **assumed**);
   if the span does not fit the 850 cc pump range the vehicle mass is shifted to centre it.
-- Temperature: the environment holds no T(z), so `T = t_deep + (SST - t_deep) exp(-z/h)` with t_deep 4 degC and h = 150 m (**assumed**); it enters only through `alpha_T`. Credibility limitation L06.
+- Temperature: the Environment API does not expose the ocean store's temperature (`Ocean.temperature` exists but is not wired to the protocol, `Environment` or the perturbed wrapper), so `T = t_deep + (SST - t_deep) exp(-z/h)` with t_deep 4 degC and h = 150 m (**assumed**); it enters only through `alpha_T`. Credibility limitation L06 (review round 12, M-19, DECISIONS 659).
 - Energy: hotel 0.5 W (**assumed**) + pump work `p dV/eta` with eta 0.40 (**assumed**; bracketed by NOC 65 W for 2 min and Copernicus os-2019-36) + surface comms + attitude motors (414 J per dive, sourced).
 - Apogee overshoot: while the pump runs at the top of a dive (`pump_time_s`) the glider keeps sinking: the depth added is `apogee_overshoot` (0.5 in both platform files) times the last descent speed `w` for each second of the pump time, so it sums to `apogee_overshoot x w x pump_time_s` for any time step and any pump time (per step before review round 11, M-12: too deep by `ceil(pump/dt) dt / pump` when `pump_time_s` was not a multiple of `dt`; DECISIONS 604). Ordering the rating's depth trips `overdepth` by this overshoot (DECISIONS 550).
 - Failure flags: `station_lost` (outside the tolerance for `lost_hours`), `battery`, `seafloor`, `overdepth`, `no_flight`, `waypoint_unreachable`, `no_current_data` (a non-finite current at any member or wind at a surfaced one, review round 8, M-14; since review round 9, batch C, also a flight model that failed while the density or the temperature it was given is not finite, a floor that is not finite at the start of a dive, and a member under water over a floor that is not finite: a hole in the input, not a failure of the flight model, which `no_flight` and `seafloor` now mean only on finite inputs; DECISIONS 501). Phase changes are evaluated at step ends, late by at most one step.
@@ -743,7 +754,7 @@ multirate: rigid body and rate loop at 2.5 ms; wind lookup, guidance and velocit
   The sortie ends its pattern early when the airborne time exceeds `duration_s x time_limit_factor` (the return-to-ship failsafe, 1200 s) or the state of charge falls below the reserve. Every flown sortie reports the waypoints it reached (`wp_done`) of the pattern (`n_wp` = 2 x levels, 8 in the demo); below `sortie.min_profile_fraction` (1.0, assumed) the member records `profile_incomplete` at the end of the sortie (review round 4, M-1). The nominal pattern takes 1127 s of flight, so a 1200 s timer leaves 6 % slack: in a uniform wind the pattern is complete up to about 5.2 m/s (10 m value, log profile) and ends at 7 of 8 waypoints from 5.5 to 6.5 m/s, 6 at 7 and 5 from 7.5 to 9 m/s (probe, one member per wind, no turbulence). The UAS verdict therefore rests on the battery and on finishing the profile inside the time limit. A non-finite wave height on the link track is the same member's last finite Hs, then the next (counted in the ledger; a member with none stops the run): Hs 0 would be a glass-calm sea, the deepest two-ray null.
 - Wind: the mean wind from `env.wind` is looked up every 1 s (20 blocks) and held; turbulence (section 5.1) and gust fronts (5.2) are added at 50 ms. The Mann series are built from the fewest boxes that fit.
 - ArduCopter SITL (JSON backend, ArduPilot 4.7.x) flies the same physics in lockstep for a few members (`fly_sitl`; no pipeline stage calls it, it runs only as the slow receipts, so `plan.json` says `sitl_members` 0 for every budget, review round 6, M-3); the firmware is told it is at Canberra (`SITL_HOME`) because its compass and EKF
-  misbehave at the equator; only metres from home are used.
+  misbehave at the equator; only metres from home are used. The app's stored SITL cross-check (`runs/crosscheck.json`) and its stored CFD results are optional inputs that count as receipts only when they carry a stamp of the current code (`cafe.receipts.stamp`: date, host, git sha and the digest of `cafe/*.py`); `python -m cafe.receipts stamp FILE` stamps one somebody has checked, and any other is a context row (review round 12, M-35, DECISIONS 675, 678).
 
 Control authority (review round 2, M-28): per sortie Stage 1 records the seconds the horizontal-force demand was beyond the lean-angle clamp (`sat_s`) and the largest demand / clamp ratio (`demand_ratio_max`); the stage-1b summary carries their median and maximum over the unscrubbed sorties under `vehicles[uas].authority` (`clamp_s_median`, `clamp_s_max`, `demand_ratio_median`, `demand_ratio_max`). A probe in a uniform wind found the demand beyond the clamp in every sortie from about 6 m/s of wind, so a threshold on it would flag them all and separate nothing: no failure mode `authority_saturated` was added; the diagnostic is printed and does not fail a member. The UAS verdict therefore rests on the battery and on finishing the profile inside the time limit (q6: 55 of 64 members `profile_incomplete`, 6 `battery_reserve`); above about 12 m/s of wind the launch gate scrubs the sortie (review round 6, M-25).
 
@@ -781,7 +792,7 @@ Code: `cafe/pm/physics/comms.py`; `platforms/radios.yaml`, `modems.yaml`; use in
 ### 12.1 RF: two-ray over the sea
 
 ```
-E / E_free = | 1 - rho_s D (r1/r2) exp( -j 2 pi (r2 - r1)/lambda ) |,   r1 = sqrt(d^2 + (ht - hr)^2),  r2 = sqrt(d^2 + (ht + hr)^2)        reflection coefficient -1 (grazing, smooth); plane earth: D = 1
+E / E_free = | 1 - rho_s D (r1/r2) exp( -j 2 pi (r2 - r1)/lambda ) |,   r1 = sqrt(d^2 + (ht - hr)^2),  r2 = sqrt(d^2 + (ht + hr)^2)        reflection coefficient -1 (grazing, smooth; the error against the Fresnel coefficient is stated below); plane earth: D = 1
 L = 20 log10( 4 pi r1 / lambda ) - 20 log10( |E/E_free| )                                                        path loss
 rho_s = exp[ -2 (2 pi sigma_h sin(psi)/lambda)^2 ],   sigma_h = Hs/4,   sin(psi) = (ht + hr)/r2                      Ament 1953; Beckmann & Spizzichino 1963
 margin = P_t + G_t + G_r - cable - misc - L - sensitivity;     -200 dB beyond the 4/3-earth horizon  d_max = 4.12 (sqrt(ht) + sqrt(hr)) km          ITU-R P.834
@@ -790,7 +801,9 @@ margin = P_t + G_t + G_r - cable - misc - L - sensitivity;     -200 dB beyond th
 Curved earth (review round 4, M-8, DECISIONS 244). Two-ray over a 4/3-radius earth (a = 8 495 km): the specular point is the root of the cubic 2x^3 - 3dx^2 + (d^2 - 2a(ht + hr))x + 2a ht d = 0 (Kerr 1951, trigonometric form), R1 = x from the ht antenna; the antennas' heights above the tangent plane there are h1 = ht - R1^2/2a and h2 = hr - R2^2/2a; the direct and reflected path lengths are hypot(d, h1 - h2) and hypot(d, h1 + h2); the reflected field carries the reflection coefficient -1, the Ament roughness factor and the divergence factor of the spherical surface D = [1 + 2 R1 R2/(a d sin psi)]^-1/2 [1 + 2 R1 R2 sin psi/(a d)]^-1/2 (Kerr 1951; Blake 1980 ch. 5). Within 2 km the curved and the plane-earth loss agree between interference nulls and differ at them (review round 8, M-49; the 0.15 dB this sentence gave held for single distances and the ship-to-USV geometry only): the largest difference for d = 100 to 2000 m at 915 MHz, Hs 0, sampled every metre, is 0.8 dB for a surface pair (ht 2.2 m, hr 10 m), 26 dB for the UAS at the top of its profile (ht 2.2 m, hr 108.1 m) and 20 dB for ht 10 m, hr 18.1 m (29 and 34 dB sampled every 5 cm); with Hs 1 m it is 2.4 dB and with Hs 3 m 0.3 dB for that last pair. The nulls move by a fraction of a wavelength between the two geometries; the lost-link time of a UAS sortie is the statistic that depends on it. D falls to 0 with the grazing angle psi, so toward the horizon the reflected ray fades out and the curved loss tends to free space; with D the plane-earth model is pessimistic beyond about 10 km, not optimistic (the review's curved table without D, 9 to 40 dB more loss than flat, has the opposite sign). Geometric optics is not trusted below psi_c = (lambda / pi a)^(1/3) (2.3 mrad at 915 MHz; **ASSUMED**, recalled from Kerr / Blake, not re-read): from there to the radio horizon the loss is the larger of the curved loss and the plane-earth loss, which is conservative; beyond the horizon `rf_margin` reports no link. No smooth-earth diffraction (ITU-R P.526, the upgrade path) is modelled in that zone. For 15 m / 3 m masts at 915 MHz, Hs 0, the limit is at 6.9 km of a 23.1 km horizon, and the loss at 5 / 10 / 15 / 20 / 22 km is 115.7 / 127.7 / 134.0 / 139.0 / 140.6 dB (plane earth 114.9 / 126.9 / 134.0 / 139.0 / 140.6; curved with D 115.7 / 127.7 / 125.8 / 122.4 / 120.9). `rf_margin(20 km, 15 m, 3 m, Hs 0)` is +13.0 dB. The d^-4 receipt is the plane-earth law (`a_eff` = 1e12 m). References: Kerr, D.E. (ed.), Propagation of Short Radio Waves, MIT Rad. Lab. Series 13, 1951, ch. 2; Blake, L.V., Radar Range-Performance Analysis, 1980, ch. 5.
 
 Specular only (the rest of this subsection is the plane-earth form, which the curved model reduces to within 2 km): diffuse scatter is neglected, so null filling is underestimated; antenna motion with the waves is not modelled (the roughness term stands in). Antenna gain 2 dBi and 3 dB misc loss
-are **assumed**; the 900 MHz sensitivity is the datasheet's lowest-rate value. `two_ray_loss_db` gives the roughness factor the grazing angle `arctan2(ht + hr, d)`, whose sine is the `sin(psi)` above (review round 3, M-14: it used to pass `sin(psi)` to a function that sines its argument). The member's own Hs (perturbed) feeds the roughness. The antenna height of an aircraft is deck + flight altitude + 0.1 m.
+are **assumed**; the 900 MHz sensitivity is the datasheet's lowest-rate value. `two_ray_loss_db` gives the roughness factor the grazing angle `arctan2(ht + hr, d)`, whose sine is the `sin(psi)` above (review round 3, M-14: it used to pass `sin(psi)` to a function that sines its argument). The member's own Hs (perturbed) feeds the roughness; for an RF link between two nodes it is, at each moment, the larger of the Hs at the link's two ends (`stage1._link_hs`; review round 12, M-11, DECISIONS 651), the conservative one, so the margin does not depend on which end the mission names first (with Hs 0.2 m at the ship and 3 m at the USV the two namings differed by 0.3 dB at 3 km), and the ledger's `hs_filled` counts the filled samples of both ends. On the demo the change is at most 5.3e-4 dB in any sample of the usv-uas-rf margin. The antenna height of an aircraft is deck + flight altitude + 0.1 m.
+
+**The reflection coefficient -1 and the Fresnel coefficient** (review round 12, M-12, DECISIONS 652; documents only, the model is unchanged). -1 is the limit of the Fresnel coefficient G of a vertical-polarised wave on sea water as the grazing angle goes to 0 and a smooth-sea idealisation everywhere else; the earlier text, "valid below 1 to 2 deg", was wrong. For sea water at 915 MHz with eps_c = 72.8 - j118.9 (T 29 C, S 35, sigma 5.9 S/m: **assumed**, the lab has given neither the sea temperature nor the antenna polarisation, QUESTIONS_FOR_LAB 12a) the magnitude of G is 0.98, 0.91, 0.84, 0.70, 0.49, 0.35, 0.26, 0.49 and 0.65 at 0.05, 0.25, 0.5, 1, 2, 3, 5, 12 and 20 deg, and its phase is -179, -168, -154 and -86 deg at 0.05, 1, 2 and 5 deg (pseudo-Brewster angle 4.85 deg, magnitude 0.26): -1 is within 10 % of the magnitude only below about 0.3 deg (`tests/test_comms.py::test_r12_m12_*` recomputes the table). The demo's grazing angles (UAS 18 to 108 m, whip 2.2 m) are 1.2 deg at 1 km and 0.2 deg at 5 km for the 18 m UAS and 6.3 and 1.3 deg for the 108 m UAS, and 2 to 30 deg for the UAS-ship hook inside a sortie (|G| is 0.26 at 5 deg and 0.65 at 20 deg), so -1 is within 10 % of the magnitude from about 4 km out for the 18 m UAS (0.3 deg at 3.9 km, flat earth) and from about 21 km for the 108 m UAS, and not inside those distances. Error band of the margin against Fresnel, as the reviewer measured it (a script run outside the repository with this module's geometry and G(psi) in place of -1, which with -1 reproduces the function to 0.0 dB; the margin sweeps were not re-run when this was written): the -1 model is optimistic at interference peaks by up to 7.6 dB and conservative at nulls; on the mission link (UAS to USV, 0.2 km to the horizon) the Fresnel margin is 7.4 dB lower to 23.6 dB higher at Hs 0.5 m and 2.8 dB lower to 6.9 dB higher at Hs 1.5 m, on the hook (0.05 to 6 km, Hs 0.5 m) 7.5 dB lower to 34.7 dB higher, and no sample changed its sign. No verdict of the demo rests on it (usv-uas-rf is NO-GO because 88.85 % of its needed moments are beyond the radio horizon, `frac_beyond_horizon` 0.88848 in q12, and the UAS lost-link mode is 0 of 64), but a link whose budget is within about 8 dB at a peak is not decided by this function. A Fresnel function in place of -1 inside `two_ray_curved_db` would move every printed RF margin, the goldens and the parameter-file hashes, and needs a sea temperature and salinity from the lab.
 
 ### 12.2 Acoustic: Thorp and Stojanovic, Bellhop for the ambiguous links
 
@@ -808,6 +821,7 @@ L_impl = SL - TL(r_vendor) - NL(ref wind 5 m/s) - SNR_req - 3 dB       derived s
   **excess**: TL on the sound-speed profile minus TL on an isovelocity column, added to the Thorp TL. An absolute Bellhop TL would double-count the spreading, because `L_impl` is anchored under k = 1.5 and deep isovelocity
   water is k = 2. Consequence: k = 1.5 is optimistic against Bellhop's deep isovelocity answer. When Bellhop is absent the link is labelled "Thorp only, Bellhop unavailable".
 - Sound speed from TEOS-10 via the ocean store.
+- The wind of the noise term is, at each moment, the larger of the 10 m wind at the link's two ends (`np.fmax`: a non-finite wind at one end is the other end's), so the margin does not depend on the order of the ends (review round 12, M-11, DECISIONS 651); the demo's acoustic links have no finite margin, so no demo number moves.
 - **Slant range, valid range, Bellhop per member.** The Thorp budget uses the slant range hypot(r, dz), not the horizontal distance. `margin_db` is NaN wherever it is not a budget: beyond the radio horizon, beyond
   `valid_range_m = valid_range_factor x` the vendor range (`valid_range_factor` is **assumed**, 10, in `modems.yaml`), at samples the link does not need, and for Iridium. Summaries report `margin_db_median` over the valid
   samples, with `frac_beyond_horizon` and `frac_out_of_range`. Bellhop refines the needed acoustic samples inside the `ambiguous_db` band one member at a time, on the `env.sound_speed` profile (GOFS T/S, TEOS-10) at the
