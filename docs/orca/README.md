@@ -1,18 +1,19 @@
 # Running cafe on Orca
 
-Orca is the lab's Jupyter-style container, reached today only through the VS Code tunnel `orca-guest-aaroh`. It could replace the Azure burst VM (`cafetest`, about $1.40/h) as the worker for cafe jobs.
+Orca is the lab's Jupyter-style container, first reached through the VS Code tunnel `orca-guest-aaroh` and now over Tailscale and SSH as `cafe-orca`. It is the worker for cafe jobs; it replaced the Azure burst VM (`cafetest`, about $1.40/h), whose resource group was deleted on the owner's yes on 2026-11-06.
 
-**Status, 2026-11-04: not connected, and cafe jobs do not run there yet.** The lab has agreed. Keep using the burst VM until the steps below pass.
+**Status (updated in review round 11): connected, and cafe jobs run there.** The go check (`bin/orca_ready.sh`) passed on the real machine, and the demo's quick runs (`q10`, `q10lb`, `q11`, `q11la`) and the whole-suite gates ran there. Where things stand is in [`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md) (how to run, what is not the same as docker, the gate) and `STATUS.md`; this page keeps what was measured about the machine and how to connect.
 
 | Step | State |
 |---|---|
-| Orca's size, network and tools | Measured with `probe.sh` |
+| Orca's size, network and tools | Measured with `probe.sh` on 2026-11-04 (table below) |
 | `proot` runs a Ubuntu 24.04 system without root | Passed on Orca with `proot_test.sh` |
-| `bin/orca_setup.sh` | Fixed and rehearsed in a non-root container; never run on Orca |
-| Tailscale login and SSH in from outside | Not tested |
-| The real `cafe-pm` image under proot | Not tested |
-| OpenFOAM `interFoam` in parallel under proot | Not tested; the biggest risk |
-| A runner that works without docker | `PM_RUNTIME=proot` in `bin/pmx.sh` and `pm.sh`, rehearsed off orca; see [`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md) |
+| `bin/orca_setup.sh` | Run on Orca by the owner, who runs it again when the container restarts |
+| Tailscale login and SSH in from outside | Works: the laptop reaches it as `cafe-orca` |
+| The real `cafe-pm` image under proot | Runs the demo and the suite (`bin/pmx.sh` with `PM_RUNTIME=proot`) |
+| OpenFOAM `interFoam` in parallel under proot | Part of the go check, which passed |
+| A runner that works without docker | `PM_RUNTIME=proot` in `bin/pmx.sh` and `pm.sh`; see [`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md) |
+| The whole suite on Orca | `bin/orca_gate.sh`: 3,352 tests at `e06879c`, 3,649 at `4c95c40`, 3,705 at `cacc0c2` (54.6 min with coverage at K=8); the numbers and the timings are in ORCA_RUNNER.md |
 
 ## What Orca is
 
@@ -73,17 +74,14 @@ bash /tmp/cafe_orca_setup.sh
 
 Run it again after the container restarts; it restarts only our own `sshd` and `tailscaled`.
 
-## What is left before jobs can run
+## How it was brought up (history; every step passed)
 
-1. Copy the image and the data onto Orca, streamed from homebase, whose disk has too little room for a temporary copy. About 18 GB in all: the image is 5 GB, `pmdata` 7.7 GB, `data` 5.4 GB.
-2. Copy the image and data with `bin/orca_sync.sh`, then run the go check `PMX=pm_<you> PM_HOST=cafe-orca sh bin/orca_ready.sh` (default `pm_ready`; use your own `PMX` when another agent may run the check; the last step lists, as a warning, anything else that changed under `~` while it ran, because the account is shared) ([`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md)).
-3. Run `interFoam` in parallel under proot. If MPI's fast shared-memory transport fails there, this is where it shows.
-4. Run the full suite and compare it with the burst VM.
-5. Only after that, ask the owner about deleting `burst-cafetest-rg`. Read `~/az_serv/docs/MONEY.md` first.
+1. The image and the data were copied onto Orca, streamed from homebase, whose disk has too little room for a temporary copy (about 18 GB in all: the image is 5 GB, `pmdata` 7.7 GB, `data` 5.4 GB), with `bin/orca_sync.sh`; then the go check `PMX=pm_<you> PM_HOST=cafe-orca sh bin/orca_ready.sh` (default `pm_ready`; use your own `PMX` when another agent may run the check; the last step lists, as a warning, anything else that changed under `~` while it ran, because the account is shared) ([`docs/ORCA_RUNNER.md`](../ORCA_RUNNER.md)).
+2. `interFoam` in parallel under proot (the go check runs it). If MPI's fast shared-memory transport fails there, this is where it shows; Open MPI runs with `PMIX_MCA_gds=hash` (ORCA_RUNNER.md).
+3. The full suite on Orca: the first run (12 workers under one proot, `bin/orca_suite.sh`) took 77.6 min for 2,918 tests; the one-proot-per-job gate that followed is in ORCA_RUNNER.md.
+4. The owner was then asked about deleting `burst-cafetest-rg`, and said yes on 2026-11-06 (`~/az_serv/docs/MONEY.md`).
 
-If step 3 cannot be made to work, Orca can still run work that needs no OpenFOAM, but not the whole pipeline.
-
-### Estimated time
+### Estimated time (made before the setup; for history)
 
 Estimates, not measurements.
 

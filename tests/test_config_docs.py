@@ -1,5 +1,9 @@
 """The documents say what the code does where a reader would act on them (review round 1: M-17, M-31, M-32)."""
+import os
 import re
+import stat
+import subprocess
+import sys
 
 from cafe.pm import config, credibility
 
@@ -330,3 +334,43 @@ def test_r11_m32_every_phony_make_target_has_a_rule():
     mk = text("Makefile")
     names = re.search(r"^\.PHONY:(.*)$", mk, re.M).group(1).split()
     assert names and [n for n in names if not re.search(rf"^{re.escape(n)}:", mk, re.M)] == []
+
+
+PROOT_STAND_IN = """import os, sys
+a = sys.argv[1:]
+tmp = next(x.rsplit(":", 1)[0] for i, x in enumerate(a) if a[i - 1] == "-b" and x.endswith(":/tmp"))
+job = [x.replace("/tmp/.rc", tmp + "/.rc") for x in a[a.index("/usr/bin/env") + 1:]]
+os.execv("/usr/bin/env", ["env", *job])
+"""
+
+
+def run_in_the_proot_runner(tmp_path, command, **host):
+    """(exit code, stdout) of `bin/proot_run.sh app <command>` on a worker whose proot is a stand-in that runs the job's own command line (the `env -i ...` that
+    bin/proot_run.sh builds) on this host, with the job's /tmp put where the runner expects it. `host` is the environment of the caller."""
+    w = tmp_path / "home" / "cafe-worker"
+    (w / "bin").mkdir(parents=True)
+    (w / "bin" / "proot.py").write_text(PROOT_STAND_IN)
+    (w / "bin" / "proot").write_text(f'#!/bin/sh\nexec "{sys.executable}" "{w}/bin/proot.py" "$@"\n')
+    (w / "bin" / "proot").chmod(stat.S_IRWXU)
+    (w / "root" / "usr" / "bin").mkdir(parents=True)
+    (w / "root" / "usr" / "bin" / "env").write_text("")
+    (w / "root" / "usr" / "bin" / "env").chmod(stat.S_IRWXU)
+    (w / "root.done").write_text("x")
+    for d in ("app", "pmdata", "data"):
+        (w / "cafe" / d).mkdir(parents=True)
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "home"), "CAFE_MIN_FREE_GB": "0", "PM_CPUS": "3", **host}
+    r = subprocess.run(["sh", str(ROOT / "bin" / "proot_run.sh"), "app", *command], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+    return r.returncode, r.stdout
+
+
+def test_r11_m29_the_env_form_the_runbook_documents_reaches_the_job_and_a_variable_of_the_host_shell_does_not(tmp_path):
+    """Round 11 M-29: the runners start the job with a fixed environment, so `CAFE_OFFLINE=1 pm python ...` never set it; the RUNBOOK says to put
+    `env VAR=value` in front of the command. The real runner, with a stand-in proot: the documented form sets the variable (and overrides the CAFE_WORKERS
+    the runner derives from PM_CPUS); the same variable in the caller's environment is not there."""
+    rb = text("docs", "RUNBOOK.md")
+    assert "pm env CAFE_OFFLINE=1 python -m cafe.pm" in rb and "does not pass your shell's environment on" in rb
+    assert run_in_the_proot_runner(tmp_path / "a", ["env", "CAFE_OFFLINE=1", "printenv", "CAFE_OFFLINE"]) == (0, "1\n")
+    assert run_in_the_proot_runner(tmp_path / "b", ["env", "CAFE_WORKERS=5", "printenv", "CAFE_WORKERS"]) == (0, "5\n")
+    assert run_in_the_proot_runner(tmp_path / "c", ["printenv", "CAFE_WORKERS"]) == (0, "3\n")                              # the runner's own: PM_CPUS
+    for var in ("CAFE_OFFLINE", "CAFE_NPROC", "CAFE_EMULATOR_TABLE"):
+        assert run_in_the_proot_runner(tmp_path / var, ["printenv", var], **{var: "1"}) == (1, "")
