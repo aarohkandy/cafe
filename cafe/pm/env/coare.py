@@ -36,6 +36,10 @@ RGAS, CPA = 287.1, 1004.67
 BE, CPW, RHOW, VISW, TCW = 0.026, 4000.0, 1022.0, 1.0e-6, 0.6
 A_WAVE, B_WAVE, A_SS, B_SS = 0.114, 0.622, 0.091, 2.0
 UMAX, CH1, CH2 = 19.0, 0.0017, -0.0050  # Charnock alpha = CH1*U10n + CH2, capped at U10n = UMAX
+# [m/s] The wave-age and sea-state forms fade in linearly with the dominant phase speed: pure Charnock at CP_MIN and under (no developed sea: calm, ice,
+# fill value, tiny or negative), pure wave form at CP_FULL and over. A hard switch at one speed was a drag cliff of up to 2.6 times (Cd 1.2e-3 to 3.1e-3
+# at U = 8 m/s between cp 1.99 and 2.0). The demo's UMWM dcp is never under 3.93, so it is all above CP_FULL and unchanged; the receipts' cp is 6 to 14.
+CP_MIN, CP_FULL = 2.0, 3.5
 
 
 def grav(lat: ArrayLike) -> Arr:
@@ -119,13 +123,16 @@ def coare35(
     """COARE 3.5 fluxes. `u` is the wind speed at zu RELATIVE to the surface current [m/s]; `t` air temperature [K] at zt;
     `q` air specific humidity [kg/kg] at zq; `P` surface pressure [Pa]; `ts` sea temperature [K] (bulk if jcool=1, skin if 0);
     `Rs`, `Rl` downward shortwave and longwave [W/m2]; `zi` boundary-layer height [m]; `cp` dominant phase speed [m/s] and
-    `sigH` significant wave height [m] switch the roughness to wave-age (cp only) or sea-state (cp and sigH) form where finite;
+    `sigH` significant wave height [m] switch the roughness to wave-age (cp only) or sea-state (cp and sigH) form where finite; for cp
+    between CP_MIN and CP_FULL the Charnock parameter is blended linearly from the Charnock one to that form, and at CP_MIN or under (calm, ice or a
+    fill value of 0 would give NaN or an absurd drag) it is the Charnock form, so the drag has no step;
     `rain` rain rate [mm/h] (only adds the rain heat flux `rf`).
 
     Returns a dict of arrays shaped like the broadcast inputs: ustar, tau [N/m2, stress on the sea], z0, z0t, z0q, L (Obukhov,
     negative = unstable), zeta (zu/L), Cd, Ch, Ce (at the measurement heights, relative to gust-inclusive speed), Cdn10,
     u10n, hsb, hlb (W/m2, positive = sea loses heat), rf (W/m2, rain heat flux), tsr, qsr, dter (cool-skin dT, K, skin = ts -
-    dter), tkt, gf (gustiness factor, ut/du), ut, rhoa, lhvap and `zu` (needed by `profile`).
+    dter), tkt (cool-skin layer thickness, m), gf (gustiness factor, ut/du), ut, rhoa, lhvap and `zu` (needed by `profile`).
+    With jcool=0 there is no cool skin (`ts` is already the skin): dter and tkt are 0, not the loop's unused estimate.
     """
     a = np.broadcast_arrays(*[np.asarray(v, float) for v in (u, zu, t, zt, q, zq, P, ts, Rs, Rl, lat, zi)])
     u, zu, t, zt, q, zq, P, ts, Rs, Rl, lat, zi = a
@@ -135,7 +142,8 @@ def coare35(
     if sigH is None:
         sigH = np.full(shape, np.nan)
     cp, sigH = np.broadcast_to(np.asarray(cp, float), shape), np.broadcast_to(np.asarray(sigH, float), shape)
-    wave = np.isfinite(cp)
+    wmix = np.where(np.isfinite(cp), np.clip((cp - CP_MIN) / (CP_FULL - CP_MIN), 0.0, 1.0), 0.0)  # 0 = Charnock, 1 = wave form
+    wave = wmix > 0
     sea = wave & np.isfinite(sigH)
     tc, tsc, pmb = t - 273.15, ts - 273.15, P / 100.0
     g = grav(lat)
@@ -184,7 +192,7 @@ def coare35(
             cW = A_WAVE * (ustar / cp) ** B_WAVE
             zoS = sigH * A_SS * (ustar / cp) ** B_SS - (0.0 if first else 0.11 * visa / ustar)
             cS = np.maximum(zoS, 0.0) * g / ustar**2  # sea-state z0 below the smooth-flow value: keep the smooth value
-        return np.where(sea, cS, np.where(wave, cW, cC))
+            return np.where(wave, (1.0 - wmix) * cC + wmix * np.where(sea, cS, cW), cC)  # wmix is exactly 1 from CP_FULL up: the pure form
 
     charn = charnock(u10, usr, True)
     gf = ut / du
@@ -219,6 +227,8 @@ def coare35(
     usr, tsr, qsr, L, zet, dter, tkt = (
         np.where(k50, f, c) for f, c in zip(first, (usr, tsr, qsr, L, zet, dter, tkt), strict=True)
     )
+    if not jcool:  # the loop multiplies dter by jcool everywhere, so nothing above used these
+        dter, tkt = np.zeros(shape), np.zeros(shape)
     hsb, hlb = -rhoa * CPA * usr * tsr, -rhoa * lhvap * usr * qsr
     tau = rhoa * usr**2 / gf
     dqer = wetc * dter

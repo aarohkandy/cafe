@@ -9,6 +9,8 @@ so inter-vehicle range checks are consistent.
   member adds a short-lived error on top: a stationary AR(1) series per member on an hourly grid over the window (the grid the misfit was
   measured on; the value of the nearest hour is held, so the variance is the fitted sd at every time), the same at every place and height,
   drawn from `member_rng(seed, m, "wind_speed_noise" | "wind_direction_noise")`. Without those keys nothing changes.
+  The error is a factor on the base wind vector, so it is not applied where the base speed is 1e-9 m/s or less (its direction is
+  undefined): a window of exactly zero wind has no wind spread, and at 1.1e-9 m/s the full bias already applies along the base's direction.
 - Current: speed x scale, rotated by a direction bias. Half of each prior's variance is member-wide (the LHS draw,
   so Sobol indices see it); half is a smooth random field with the configured correlation length (100 km), built
   from random Fourier features (Rahimi & Recht 2007) with a Gaussian covariance, seeded per member, with longitudes measured from the
@@ -165,7 +167,7 @@ class PerturbedEnv:
         if "wind_direction_noise" in self.wn:
             d = self.wn["wind_direction_noise"](t, sp.shape) + (0.0 if d is None else d)
         new = np.maximum(sp + (0.0 if b is None else b), 0.0)
-        v = v * np.where(sp > 1e-9, new / np.where(sp > 1e-9, sp, 1.0), 0.0)[..., None]
+        v = v * np.where(sp > 1e-9, new / np.where(sp > 1e-9, sp, 1.0), 0.0)[..., None]    # zero wind stays zero: no direction to scale along (see the header)
         if d is not None:
             v = _rot(v, np.broadcast_to(d, sp.shape))
         return Tagged(v, w.source + "; member wind error applied", w.uncertainty, w.kind)

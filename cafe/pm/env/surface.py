@@ -11,11 +11,13 @@ What is modelled here (every value is Tagged kind="modelled"; none of it is in t
 - Diurnal warm layer (Fairall et al. 1996, NOAA COARE reference code): WRF's SST is frozen at 1 March, so the
   near-surface water is SST + dT_warm. It changes near-surface density and the surface-trapped jet proxy.
 - Surface-trapped diurnal jet (TEPEX-C's own hypothesis, BRIEF 2.2): amplitude midpoint of config/subgrid.json's
-  [u_min, u_max] x min(dT_warm / dT_ref, 1) along the wind, inside the warm layer; its half-range is the uncertainty.
+  [u_min, u_max] x min(dT_warm / dT_ref, 1) along the wind, inside the warm layer. Every member gets this midpoint: the range is
+  neither sampled per member nor carried as an uncertainty (`current_extra` returns the base current's); only the receipts draw from it.
 - Rain fresh lens (Iyer & Drushka 2021): top 0.5 m, from rain rate, wind and time since the rain.
 - Stokes surface drift: integrated from the DHH/JONSWAP spectrum fitted to UMWM's integrated parameters; at the
   6-hourly restart times the same integral over the REAL spectrum is the check on that fit (recorded by `build`).
-Seawater expansion/contraction coefficients are TEOS-10 (gsw.alpha, gsw.beta) at the box's mean surface state.
+Seawater expansion/contraction coefficients are TEOS-10 (gsw.alpha, gsw.beta) at the fixed tropical state SA 35 g/kg, CT 28 degC, p 0:
+they are not adapted to the box, so `density_extra` is too large by alpha(CT 28)/alpha(CT) outside the tropics (2.8 times at 5 degC).
 """
 from __future__ import annotations
 
@@ -131,6 +133,9 @@ def build(env: GriddedEnv, cache: Any, built_from: str | None = None, log: Calla
     tmp = (cache / DIGEST).with_suffix(".tmp")                               # written whole or not at all, as the Ledger is: a kill cannot leave half a record
     tmp.write_text(json.dumps(dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1))
     os.replace(tmp, cache / DIGEST)
+    if env.spec is not None and fit is None:
+        log("surface layer: fewer than three restart spectra in the window, or a non-finite leave-one-out error: "
+            "Stokes drift is the fit alone, tagged 0.4|u_s|")
     log(f"surface layer: COARE on {nt} hours, warm layer max dT {np.nanmax(dT):.2f} K, Stokes fit check {fit}")
     return fit
 
@@ -151,16 +156,28 @@ def _real_stokes(env: GriddedEnv, it: int, js: Any, is_: Any) -> Any:
     return R
 
 
-def _correct_with_real(env: GriddedEnv, St: Any, js: Any, is_: Any) -> tuple[Any, dict[str, Any]]:
+def _med(a: Any) -> float:
+    """Median ignoring NaN; NaN (no warning) when nothing is left."""
+    a = np.asarray(a, float)
+    a = a[~np.isnan(a)]
+    return float(np.median(a)) if a.size else float("nan")
+
+
+def _correct_with_real(env: GriddedEnv, St: Any, js: Any, is_: Any) -> tuple[Any, dict[str, Any] | None]:
     """Bias-correct the hourly parametric Stokes field with the real 6-hourly spectra.
 
     At each restart time the complex ratio c = (real_e + i real_n) / (fit_e + i fit_n) per node carries the speed error
     and the rotation; c is interpolated linearly in time (held beyond the first/last restart) and applied to every hour.
     The honest error estimate is leave-one-out: each interior restart is predicted from the corrections at its
-    neighbours (12 h apart, twice the interpolation span actually used) and compared with its real spectrum."""
+    neighbours (12 h apart, twice the interpolation span actually used) and compared with its real spectrum.
+
+    Fewer than three restart times in the window (no interior one to predict), or an error estimate that is not finite, gives
+    (St, None): the field is left as the fit alone and `stokes_surface` tags it with the fit-only 0.4|u_s|, not a NaN."""
     S = env.spec
     assert S is not None
     T = [it for it, t in enumerate(S["t"]) if env.tu.x[0] <= t <= env.tu.x[-1]]
+    if len(T) < 3:
+        return St, None
     hour = {it: int(np.argmin(np.abs(env.tu.x - S["t"][it]))) for it in T}
 
     def z(a: Any) -> Any:
@@ -173,14 +190,14 @@ def _correct_with_real(env: GriddedEnv, St: Any, js: Any, is_: Any) -> tuple[Any
         return np.isfinite(a) & np.isfinite(b) & (np.abs(b) > 1e-4)
 
     C = {it: np.where(good(real[it], fitz[it]), real[it] / np.where(good(real[it], fitz[it]), fitz[it], 1.0), np.nan) for it in T}
-    raw = [np.nanmedian(np.abs(np.abs(fitz[it]) / np.abs(real[it]) - 1)) for it in T]
+    raw = [_med(np.abs(np.abs(fitz[it]) / np.abs(real[it]) - 1)) for it in T]
     loo, ang = [], []
     for a, b, c in zip(T[:-2], T[1:-1], T[2:], strict=True):
         w = (S["t"][b] - S["t"][a]) / (S["t"][c] - S["t"][a])
         pred = ((1 - w) * C[a] + w * C[c]) * fitz[b]
         ok = good(real[b], pred)
-        loo.append(np.median(np.abs(np.abs(pred[ok]) / np.abs(real[b][ok]) - 1)))
-        ang.append(np.median(np.abs(np.degrees(np.angle(pred[ok] / real[b][ok])))))
+        loo.append(_med(np.abs(np.abs(pred[ok]) / np.abs(real[b][ok]) - 1)))
+        ang.append(_med(np.abs(np.degrees(np.angle(pred[ok] / real[b][ok])))))
     Ct = np.array([C[it] for it in T])
     tt = np.array([S["t"][it] for it in T])
     out = np.empty_like(St)
@@ -191,8 +208,9 @@ def _correct_with_real(env: GriddedEnv, St: Any, js: Any, is_: Any) -> tuple[Any
         cw = np.where(np.isfinite(cw), cw, 1.0)                     # no real spectrum at this node: keep the fit
         v = cw * z(St[h])
         out[h] = np.stack([v.real, v.imag], -1)
-    return out, dict(n_restart_times=len(T), fit_only_median_speed_err=float(np.median(raw)),
-                     corrected_loo_median_speed_err=float(np.median(loo)), corrected_loo_median_dir_err_deg=float(np.median(ang)))
+    fit = dict(n_restart_times=len(T), fit_only_median_speed_err=float(np.median(raw)),
+               corrected_loo_median_speed_err=float(np.median(loo)), corrected_loo_median_dir_err_deg=float(np.median(ang)))
+    return (out, fit) if all(np.isfinite(v) for v in fit.values()) else (St, None)
 
 
 class SurfaceLayer:
@@ -223,7 +241,7 @@ class SurfaceLayer:
         if not rain_lens:
             self.cfg = {**self.cfg, "rain_lens": {**self.cfg["rain_lens"], "enabled": False}}
         j = self.cfg["ocean"]["diurnal_jet"]
-        self.jet_mid, self.jet_half = 0.5 * (j["u_min"] + j["u_max"]), 0.5 * (j["u_max"] - j["u_min"])
+        self.jet_mid = 0.5 * (j["u_min"] + j["u_max"])
         self.jet_ref = subgrid.assumption("subgrid.diurnal_jet.dT_ref_K")
         self.alpha, self.beta = float(gsw.alpha(35.0, 28.0, 0.0)), float(gsw.beta(35.0, 28.0, 0.0))
 
