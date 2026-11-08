@@ -424,7 +424,8 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
                      "to stage 1; "
                      "the sub-grid layer and the refit stay uncalibrated")
     les = dict(backend=backend, rate=rate, rate_source=rate_src, windows_per_vehicle=K,
-               cell_steps_per_window=SHARE["stage3"] * B * rate / max(K * len(classes), 1),
+               # the share kept, not SHARE: the skipped windows gave theirs to stage 1 (round 12, M-28)
+               cell_steps_per_window=shares["stage3"] * B * rate / max(K * len(classes), 1),
                cpu_fallback=gpus == 0, windows=wins,
                label=("GPU LES windows" if gpus > 0 else
                       "CPU fallback: no LES coefficients exist on this machine (no window reaches the physical lattice viscosity with this "
@@ -602,8 +603,11 @@ def describe(p: dict[str, Any]) -> str:
     for k, v in p["member_cost"].items():
         lines.append(f"  {k}: {v['s_per_batch_day']:.3g} s/batch/day + {v['s_per_member_day']:.3g} s/member/day, {v['source']}")
     L = p["les"]
+    wins = L.get("windows") or {}
+    what = (f"no LES window runs on this machine ({len(wins)} part(s) not run)" if wins and not any(w["runs"] for w in wins.values())
+            else f"{L['cell_steps_per_window']:.3g} cell-updates per window")             # round 12, M-28: not the figure of a share that went to stage 1
     lines.append(f"stage 3: {L['windows_per_vehicle']} window(s)/vehicle on {L['backend']} at {L['rate']:.3g} cell-updates/s "
-                 f"({L['rate_source']}); {L['cell_steps_per_window']:.3g} cell-updates per window")
+                 f"({L['rate_source']}); {what}")
     lines += p["notes"]
     return "\n".join(lines)
 

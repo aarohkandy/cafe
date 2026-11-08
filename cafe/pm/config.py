@@ -218,10 +218,16 @@ def json_object(p: pathlib.Path, fix: str = "`run` writes it, so run it again (-
 @contextlib.contextmanager
 def damaged_run_files(run: pathlib.Path) -> Iterator[None]:
     """Round 10, M-5. A file of a finished run that is valid JSON but lacks a key, or holds another type where one is read, is the same damage as one that is
-    not JSON: a ConfigError (`error:`, exit 2), not a traceback. The original text stays in the message, so a bug in the code is not hidden by it."""
+    not JSON: a ConfigError (`error:`, exit 2), not a traceback. The original text stays in the message, so a bug in the code is not hidden by it. A
+    key missing or an index out of range (LookupError: KeyError, IndexError), a value of another type (TypeError, ValueError: a string where a number is
+    formatted or a mapping is built) and an entry that is no mapping (AttributeError) are the same damage. A ConfigError is a ValueError too, and passes
+    through unchanged: it is already the message for the user."""
     try:
         yield
-    except (KeyError, TypeError) as e:
+    except ConfigError:
+        raise
+    # AttributeError: `.get` on a number or a list (round 12, M-7); IndexError: `mc[v]` on a list; ValueError: found by mutating every entry of the run's JSON
+    except (LookupError, ValueError, TypeError, AttributeError) as e:
         raise ConfigError(f"{run}: damaged or incomplete ({type(e).__name__}: {e}); run it again (--fresh); "
                           "if that gives the same error, it is a bug: report it") from e
 
@@ -417,9 +423,11 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
     if dup:
         raise ConfigError(f"{path}: vehicle ids {sorted(dup)} appear more than once; give each vehicle its own id")
     owners = [(v["id"], f"vehicles/{v['id']}") for v in m["vehicles"]] + [(m[k]["id"], k) for k in ("ship", "shore") if k in m]
+    owners += dict.fromkeys((lk["id"], f"links/{lk['id']}") for lk in m["links"])         # round 12, M-2; two links of one id are `_check_links`'s message
     for i in dict.fromkeys(i for i, _ in owners):
         if len(who := [w for j, w in owners if j == i]) > 1:
-            raise ConfigError(f"{path}: ids must be unique across vehicles, ship and shore; '{i}' is used by {' and '.join(who)}; rename one")
+            raise ConfigError(f"{path}: ids must be unique across vehicles, links, ship and shore; '{i}' is used by {' and '.join(who)}; rename one "
+                              "(results, tables and the report's anchors are keyed by id)")
     if not m["box"]["lat_min"] < m["box"]["lat_max"]:
         raise ConfigError(f"{path}: box.lat_min ({m['box']['lat_min']}) must be below box.lat_max ({m['box']['lat_max']}); swap them")
     if (m["box"]["lon_max"] - m["box"]["lon_min"]) % 360.0 == 0:             # `_in_box`'s modulo: the same longitude twice is a strip with no width

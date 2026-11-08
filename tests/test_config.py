@@ -472,7 +472,7 @@ ROUND4 = [
     ("M-13 no launch fits", lambda d: d["window"].update(end="2023-03-01T13:00:00Z"),
      r"vehicles/uas/sorties: no launch fits in the window \(local_solar_time 14:00 at lon -165 is 01:00Z, a launch needs 32 min before window.end\)"),
     ("M-14 ship = vehicle", lambda d: d["ship"].update(id="usv"),
-     r"ids must be unique across vehicles, ship and shore; 'usv' is used by vehicles/usv and ship"),
+     r"ids must be unique across vehicles, links, ship and shore; 'usv' is used by vehicles/usv and ship"),
     ("M-14 shore = vehicle", lambda d: d["shore"].update(id="glider_eq"), r"'glider_eq' is used by vehicles/glider_eq and shore"),
     ("M-14 shore = ship", lambda d: d["shore"].update(id="ship"), r"'ship' is used by ship and shore"),
     ("M-15 1000 m", lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[10, 1000]),
@@ -633,7 +633,7 @@ def prime(d, lo=-15.0, hi=15.0, at=-5.0):
 
 
 def test_r7_m32_a_box_across_0_deg_e_is_refused_at_validation_naming_the_box(tmp_path):
-    with pytest.raises(ConfigError, match=r"m.yaml: box \(.*\): the box \(with its pad of 2 deg\) crosses 0 deg E; the GLBy ocean fetch cannot cross it"):
+    with pytest.raises(ConfigError, match=r"m.yaml: box lat .*, lon .*: the box \(with its pad of 2 deg\) crosses 0 deg E; the GLBy ocean fetch cannot"):
         load_mission(edit(tmp_path, prime))
     load_mission(edit(tmp_path, lambda d: prime(d, 2.0, 10.0, 5.0)))          # pad 2: the west edge is 0
     load_mission(DEMO)                                                                  # the dateline box is one request
@@ -963,13 +963,13 @@ def test_stored_receipt_problem_is_one_rule_for_the_sha_and_the_plate_re_and_ask
                                                    (80.0, 88.5, r"reaches 90.5 deg latitude, beyond \+-90"),             # round 11, M-24: just past the limit,
                                                    (-88.5, -80.0, r"reaches -90.5 deg latitude, beyond \+-90")])
 def test_r10_m8_a_padded_box_beyond_90_degrees_latitude_is_refused_at_validation(tmp_path, lat_min, lat_max, words):
-    with pytest.raises(ConfigError, match=rf"m.yaml: box \(.*\): the box with its pad of 2 deg {words}.*box.pad_deg"):
+    with pytest.raises(ConfigError, match=rf"m.yaml: box lat .*, lon .*: the box with its pad of 2 deg {words}.*box.pad_deg"):
         load_mission(edit(tmp_path, lambda d: d["box"].update(lat_min=lat_min, lat_max=lat_max)))
 
 
 def test_r10_m8_a_box_that_the_pad_makes_a_full_circle_is_refused_where_it_used_to_become_a_thin_strip(tmp_path):
     """lon -179.9 .. 179.9 with a pad of 2 is 363.8 deg wide; box360 took that modulo 360 and fetched 3.8 deg."""
-    with pytest.raises(ConfigError, match=r"m.yaml: box \(.*\): the box is 363.8 deg wide with its pad of 2 deg, a full circle or more"):
+    with pytest.raises(ConfigError, match=r"m.yaml: box lat .*, lon -181.9 to 181.9: the box is 363.8 deg wide with its pad of 2 deg, a full circle or more"):
         load_mission(edit(tmp_path, lambda d: d["box"].update(lon_min=-179.9, lon_max=179.9)))
     with pytest.raises(ConfigError, match=r"is 360 deg wide with its pad of 10 deg"):
         load_mission(edit(tmp_path, lambda d: d["box"].update(lon_min=-170.0, lon_max=170.0, pad_deg=10.0)))
@@ -1063,3 +1063,61 @@ def test_r11_m25_a_class_loader_that_raises_a_key_error_is_a_config_error_too(tm
     monkeypatch.setattr(glider, "load_platform", lacking)
     with pytest.raises(ConfigError, match=r"vehicles/glider_\w+/platform: 'seaglider' does not load as a glider platform \(KeyError: 'rating_m'\)"):
         load_mission(DEMO)
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 12, M-2
+
+@pytest.mark.parametrize("bad,msg", [
+    ("usv", r"ids must be unique across vehicles, links, ship and shore; 'usv' is used by vehicles/usv and links/usv"),
+    ("ship", r"'ship' is used by ship and links/ship"),
+    ("shore", r"'shore' is used by shore and links/shore"),
+    ("", r"links/0/id: .*does not match"),
+    ('a"b', r"links/0/id: .*does not match"),
+    ("<b>", r"links/0/id: .*does not match"),
+], ids=["vehicle", "ship", "shore", "empty", "quote", "markup"])
+def test_r12_m2_a_link_id_that_is_a_vehicle_the_ship_or_the_shore_or_is_no_name_is_refused(tmp_path, bad, msg):
+    """A link called `usv` took the vehicle's row in the Verdicts table (the report merged the two dicts) and every check still passed."""
+    with pytest.raises(ConfigError, match=msg):
+        load_mission(edit(tmp_path, lambda d: d["links"][0].update(id=bad)))
+
+
+@pytest.mark.parametrize("which", ["ship", "shore"])
+@pytest.mark.parametrize("bad", ["", 'a"b', "<i>", "a b"])
+def test_r12_m2_the_ship_and_shore_ids_have_the_vehicle_id_pattern(tmp_path, which, bad):
+    with pytest.raises(ConfigError, match=rf"{which}/id: .*does not match"):
+        load_mission(edit(tmp_path, lambda d: d[which].update(id=bad)))
+
+
+@pytest.mark.parametrize("field,put", [
+    ("vehicle id", lambda d: d["vehicles"][0].update(id="usv2\n")),
+    ("name", lambda d: d.update(name="demo\n")),
+    ("window start", lambda d: d["window"].update(start="2023-03-01T12:00:00Z\n")),
+    ("local_solar_time", lambda d: next(v for v in d["vehicles"] if v["id"] == "uas")["sorties"].update(local_solar_time="14:00\n")),
+])
+def test_r12_m2_a_pattern_of_the_mission_schema_does_not_let_a_final_newline_through(tmp_path, field, put):
+    """`$` matches before a final newline in Python's re (which jsonschema uses), and a YAML block scalar ends in one: `usv\\n` passed as an id,
+    `demo\\n` as the mission name (a directory name), and a time or an HH:MM with one passed the schema. The schema writes the end as `(?![\\s\\S])`,
+    which ECMA-262 has too."""
+    with pytest.raises(ConfigError, match="does not match"):
+        load_mission(edit(tmp_path, put))
+
+
+def test_r12_m2_the_shipped_missions_use_no_id_twice(tmp_path):
+    for f in sorted((config.ROOT / "missions").glob("*.yaml")):
+        m = load_mission(f)
+        ids = [v["id"] for v in m["vehicles"]] + [m[k]["id"] for k in ("ship", "shore")] + [lk["id"] for lk in m["links"]]
+        assert len(ids) == len(set(ids)), f
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 12, M-24
+
+def test_r12_m24_the_refusals_of_the_padded_box_label_the_edges_south_north_west_east_not_print_a_bare_tuple(tmp_path):
+    """The tuple (south, north, west, east) read as lon first: lon -10..10, lat -5..5 and a pad of 2 printed "box (-7.0, 7.0, -12.0, 12.0)"."""
+    def box(**kw):
+        return lambda d: d["box"].update(dict(lon_min=-10.0, lon_max=10.0, lat_min=-5.0, lat_max=5.0, pad_deg=2.0) | kw)
+    with pytest.raises(ConfigError, match=r"m.yaml: box lat -7 to 7, lon -12 to 12: the box \(with its pad of 2 deg\) crosses 0 deg E"):
+        load_mission(edit(tmp_path, box()))
+    with pytest.raises(ConfigError, match=r"m.yaml: box lat 83 to 91, lon -12 to 12: the box with its pad of 2 deg reaches 91 deg latitude"):
+        load_mission(edit(tmp_path, box(lat_min=85.0, lat_max=89.0)))
+    with pytest.raises(ConfigError, match=r"m.yaml: box lat -7 to 7, lon -181 to 181: the box is 362 deg wide"):
+        load_mission(edit(tmp_path, box(lon_min=-179.0, lon_max=179.0)))

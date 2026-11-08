@@ -189,17 +189,23 @@ class Context:
 
 
 DRIFT_MS = 0.5                   # the drift speed `padding` sizes a pad from: about the fastest sustained surface current (6 d: 2.3, padded 2.5 deg)
-MAX_PAD_DEG = 10.0               # config/schemas mission.json: box.pad_deg <= 10
+MAX_PAD_DEG = 10.0               # cafe/schemas/mission.json: box.pad_deg <= 10
 
 
 def padding(m: dict[str, Any]) -> float:
     """The box pad [deg]: the mission's `pad_deg`, else the window length x DRIFT_MS rounded up to 0.5 deg (at most MAX_PAD_DEG), so that a drifting
-    vehicle stays inside the downloaded data unless the window is longer than MAX_PAD_DEG / DRIFT_MS days. s_ingest says which one it used."""
+    vehicle stays inside the downloaded data unless the window is longer than about 24.4 days (the pad is MAX_PAD_DEG from 24.41 days: 10 deg
+    is 25.7 days of drift, less the rounding up to half a degree). s_ingest says which one it used."""
     b = m["box"]
     if "pad_deg" in b:
         return float(b["pad_deg"])
     days = (utc(m["window"]["end"]) - utc(m["window"]["start"])).total_seconds() / 86400.0
     return float(min(MAX_PAD_DEG, np.ceil(days * 86400.0 * DRIFT_MS / 111e3 * 2.0) / 2.0))
+
+
+def _box_words(box: tuple[float, float, float, float]) -> str:
+    """The padded box `ocean_box` returns, (south, north, west, east), as "lat -7 to 7, lon -12 to 12" for a message: the bare tuple read as lon first."""
+    return f"lat {box[0]:g} to {box[1]:g}, lon {box[2]:g} to {box[3]:g}"
 
 
 def ocean_box(m: dict[str, Any]) -> tuple[float, float, float, float]:
@@ -208,15 +214,16 @@ def ocean_box(m: dict[str, Any]) -> tuple[float, float, float, float]:
     pad = padding(m)
     box = (b["lat_min"] - pad, b["lat_max"] + pad, b["lon_min"] - pad, b["lon_max"] + pad)
     if box[0] < -90.0 or box[1] > 90.0:                                  # round 10, M-8: the one function load_mission and the ingest both call
-        raise ConfigError(f"box {box}: the box with its pad of {pad:g} deg reaches {box[0] if box[0] < -90.0 else box[1]:g} deg latitude, beyond +-90: "
+        edge = box[0] if box[0] < -90.0 else box[1]
+        raise ConfigError(f"box {_box_words(box)}: the box with its pad of {pad:g} deg reaches {edge:g} deg latitude, beyond +-90: "
                           "move the box edge away from the pole or lower box.pad_deg")
     if (width := ((b["lon_max"] - b["lon_min"]) % 360.0 or 360.0) + 2 * pad) >= 360.0:        # box360 would take it modulo 360 and fetch a thin strip
-        raise ConfigError(f"box {box}: the box is {width:g} deg wide with its pad of {pad:g} deg, a full circle or more; the ocean fetch cannot cut "
-                          "that: narrow the box or lower box.pad_deg")
+        raise ConfigError(f"box {_box_words(box)}: the box is {width:g} deg wide with its pad of {pad:g} deg, a full circle or more; "
+                          "the ocean fetch cannot cut that: narrow the box or lower box.pad_deg")
     try:
         hycom.box360(box)
     except ValueError as e:                                              # the only refusal left: load_mission checked south < north
-        raise ConfigError(f"box {box}: the box (with its pad of {pad:g} deg) crosses 0 deg E; the GLBy ocean fetch cannot cross it: "
+        raise ConfigError(f"box {_box_words(box)}: the box (with its pad of {pad:g} deg) crosses 0 deg E; the GLBy ocean fetch cannot cross it: "
                           "move the box east or west of 0 deg, or split the mission") from e
     return box
 

@@ -813,3 +813,23 @@ def test_lb0_the_emulator_scope_names_a_platform_by_its_file_and_its_content(tmp
     next(v for v in mine["vehicles"] if v["id"] == "glider_eq")["platform"] = str(tmp_path / "gone.yaml")
     assert budget.emulator_scope(mine, "glider_eq", "glider") == f"glider/{tmp_path / 'gone.yaml'}/144h"      # no file: the text as given
     assert budget.emulator_scope(demo, "nobody", "glider") == "glider/?/144h"
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 12, M-28
+
+def test_r12_m28_a_plan_with_no_running_window_does_not_print_the_cell_updates_of_a_share_that_went_to_stage_1(monkeypatch):
+    """quick on a CPU: every LES window is skipped and `shares.stage3` is 0, yet the plan printed "6.78e+08 cell-updates per window" from the constant 0.30."""
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    p = budget.plan("quick", 0, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)
+    assert p["shares"]["stage3"] == 0.0 and not any(w["runs"] for w in p["les"]["windows"].values())
+    assert p["les"]["cell_steps_per_window"] == 0.0
+    text = budget.describe(p)
+    assert "cell-updates per window" not in text and "no LES window runs on this machine (4 part(s) not run)" in text
+
+    def per_window(plan, share):
+        return share * plan["budget_s"] * plan["les"]["rate"] / (plan["les"]["windows_per_vehicle"] * len(CLASSES))
+    q = budget.plan("ci", 0, MISSION, thr={}, vehicle_classes=CLASSES)                          # the smoke window keeps its slice: a figure
+    assert q["les"]["cell_steps_per_window"] == pytest.approx(per_window(q, q["shares"]["stage3"]))
+    assert "cell-updates per window" in budget.describe(q) and "no LES window runs" not in budget.describe(q)
+    gpu = budget.plan("quick", 1, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)       # a GPU plan keeps the whole share
+    assert gpu["les"]["cell_steps_per_window"] == pytest.approx(per_window(gpu, budget.SHARE["stage3"]))
