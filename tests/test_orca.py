@@ -359,7 +359,7 @@ def ingest(env, out, t0=0, t1=2, **kw):
 
 
 def zarr(out, name):
-    return xr.open_zarr(out / name, chunks=None)
+    return xr.open_zarr(out / name, chunks=None, consolidated=False)
 
 
 def test_ingest_end_to_end(orca_env, tmp_path):
@@ -439,6 +439,21 @@ def test_r12_m29_the_manifest_lists_the_windows_parts_not_the_directorys(orca_en
     for store in ("wrf.zarr", "umwm.zarr", "umwmspec.zarr"):
         assert orca.remote.tree_sha256(out / store) == orca.remote.tree_sha256(clean / store)
     assert len(list((out / "hours").glob("*.npz"))) == 14               # the other window's parts are still cached, just not this window's
+
+
+def test_r12_m29_a_store_with_names_that_differ_only_in_case_has_no_consolidated_metadata(orca_env, tmp_path):
+    """The spectrum store holds `F` and `f`; zarr sorts its consolidated metadata by case-folded name, so the two tie and come out in directory-listing
+    order: two ingests of one window gave stores that differed in zarr.json alone (4 of 12 runs), and `tree_sha256` is a ledger input. Written without it
+    the bytes do not depend on the listing. No store may be consolidated while two of its names fold together."""
+    out = tmp_path / "out"
+    ingest(orca_env, out, 0, 2)
+    folded = 0
+    for name in ("wrf.zarr", "umwm.zarr", "umwmspec.zarr"):
+        names = [str(n) for n in zarr(out, name).variables]
+        if len({n.casefold() for n in names}) < len(names):
+            folded += 1
+            assert json.loads((out / name / "zarr.json").read_text()).get("consolidated_metadata") is None, name
+    assert folded == 1                                                  # umwmspec.zarr: the test would pass vacuously if the names stopped colliding
 
 
 def parts_of(out):
