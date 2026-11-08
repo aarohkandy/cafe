@@ -1088,6 +1088,20 @@ def test_r12_m2_the_ship_and_shore_ids_have_the_vehicle_id_pattern(tmp_path, whi
         load_mission(edit(tmp_path, lambda d: d[which].update(id=bad)))
 
 
+@pytest.mark.parametrize("field,put", [
+    ("vehicle id", lambda d: d["vehicles"][0].update(id="usv2\n")),
+    ("name", lambda d: d.update(name="demo\n")),
+    ("window start", lambda d: d["window"].update(start="2023-03-01T12:00:00Z\n")),
+    ("local_solar_time", lambda d: next(v for v in d["vehicles"] if v["id"] == "uas")["sorties"].update(local_solar_time="14:00\n")),
+])
+def test_r12_m2_a_pattern_of_the_mission_schema_does_not_let_a_final_newline_through(tmp_path, field, put):
+    """`$` matches before a final newline in Python's re (which jsonschema uses), and a YAML block scalar ends in one: `usv\\n` passed as an id,
+    `demo\\n` as the mission name (a directory name), and a time or an HH:MM with one passed the schema. The schema writes the end as `(?![\\s\\S])`,
+    which ECMA-262 has too."""
+    with pytest.raises(ConfigError, match="does not match"):
+        load_mission(edit(tmp_path, put))
+
+
 def test_r12_m2_the_shipped_missions_use_no_id_twice(tmp_path):
     for f in sorted((config.ROOT / "missions").glob("*.yaml")):
         m = load_mission(f)

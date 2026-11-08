@@ -219,10 +219,15 @@ def json_object(p: pathlib.Path, fix: str = "`run` writes it, so run it again (-
 def damaged_run_files(run: pathlib.Path) -> Iterator[None]:
     """Round 10, M-5. A file of a finished run that is valid JSON but lacks a key, or holds another type where one is read, is the same damage as one that is
     not JSON: a ConfigError (`error:`, exit 2), not a traceback. The original text stays in the message, so a bug in the code is not hidden by it. A
-    key missing, a value of another type and an entry that is no mapping (KeyError, TypeError, AttributeError) are the same damage."""
+    key missing or an index out of range (LookupError: KeyError, IndexError), a value of another type (TypeError, ValueError: a string where a number is
+    formatted or a mapping is built) and an entry that is no mapping (AttributeError) are the same damage. A ConfigError is a ValueError too, and passes
+    through unchanged: it is already the message for the user."""
     try:
         yield
-    except (KeyError, TypeError, AttributeError) as e:                   # AttributeError: `.get` on an entry that is a number or a list (round 12, M-7)
+    except ConfigError:
+        raise
+    # AttributeError: `.get` on a number or a list (round 12, M-7); IndexError: `mc[v]` on a list; ValueError: found by mutating every entry of the run's JSON
+    except (LookupError, ValueError, TypeError, AttributeError) as e:
         raise ConfigError(f"{run}: damaged or incomplete ({type(e).__name__}: {e}); run it again (--fresh); "
                           "if that gives the same error, it is a bug: report it") from e
 

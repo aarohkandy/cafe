@@ -1303,6 +1303,53 @@ def test_r12_m7_a_holdout_entry_that_is_no_object_is_damage_with_exit_2_not_an_a
     assert err.startswith("error: ") and "damaged or incomplete (AttributeError: " in err and "Traceback" not in err and str(run) in err
 
 
+@pytest.mark.parametrize("bad", [[1], [], 5], ids=["list", "empty_list", "int"])
+def test_r12_m7_a_plan_member_cost_that_is_no_mapping_is_damage_with_exit_2_not_an_index_error_traceback(tmp_path, capsys, monkeypatch, bad):
+    """`mc[v]` (budget.py, the per-vehicle cost sum) on a list is an IndexError, a LookupError like KeyError; 272 mutations of the run's JSON left this one."""
+    def damage(run):
+        p = run / "plan.json"
+        d = json.loads(p.read_text())
+        d["member_cost"] = bad
+        p.write_text(json.dumps(d))
+    run = _damaged_run(tmp_path, monkeypatch, damage)
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "damaged or incomplete (" in err and "Traceback" not in err and str(run) in err
+
+
+@pytest.mark.parametrize("name,key,bad", [("plan.json", ("stage1_s",), "x"), ("plan.json", ("les", "rate"), "x"), ("stage1b/summary.json", ("priors",), "x")],
+                         ids=["stage1_s", "les_rate", "priors"])
+def test_r12_m7_a_string_where_a_number_or_a_mapping_is_read_is_damage_with_exit_2_not_a_value_error_traceback(tmp_path, capsys, monkeypatch, name, key, bad):
+    """The wide probe (3055 mutations of the run's JSON) found these three: `format(\"x\", \".1f\")` and `dict(\"x\")` raise ValueError."""
+    def damage(run):
+        p = run / name
+        d = json.loads(p.read_text())
+        o = d
+        for k in key[:-1]:
+            o = o[k]
+        o[key[-1]] = bad
+        p.write_text(json.dumps(d))
+    run = _damaged_run(tmp_path, monkeypatch, damage)
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "damaged or incomplete (ValueError: " in err and "Traceback" not in err and str(run) in err
+
+
+def test_r12_m7_damaged_run_files_lets_a_config_error_through_unwrapped(tmp_path):
+    """ConfigError is a ValueError: wrapping it would print `damaged or incomplete (ConfigError: ...)` over a message that is already the user's."""
+    with pytest.raises(ConfigError, match=r"^only this$"):
+        with damaged_run_files(tmp_path):
+            raise ConfigError("only this")
+
+
+def test_r12_m7_damaged_run_files_names_an_index_error_and_keeps_its_text(tmp_path):
+    with pytest.raises(ConfigError, match=r"damaged or incomplete \(IndexError: list index out of range\); run it again"):
+        with damaged_run_files(tmp_path):
+            [1][3]
+
+
 def test_r12_m7_damaged_run_files_names_an_attribute_error_and_keeps_its_text(tmp_path):
     with pytest.raises(ConfigError, match=r"damaged or incomplete \(AttributeError: 'int' object has no attribute 'get'\); run it again"):
         with damaged_run_files(tmp_path):
