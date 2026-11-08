@@ -425,6 +425,22 @@ def test_ingest_resumes_from_cached_parts(orca_env, tmp_path):
     assert third["parts"] == first["parts"]
 
 
+def test_r12_m29_the_manifest_lists_the_windows_parts_not_the_directorys(orca_env, tmp_path):
+    """Window A, then a disjoint window B into the same cache, then A again: the stores are A's, so the manifest (whose hash keys the derived layer and is a
+    ledger input) must be A's, the same bytes as a cold cache of A. It listed A's and B's parts."""
+    out, clean = tmp_path / "out", tmp_path / "clean"
+    cold, _ = ingest(orca_env, clean, 0, 2)
+    ingest(orca_env, out, 0, 2)
+    other, _ = ingest(orca_env, out, 4, 6)
+    assert sorted(other["parts"]) == sorted([f"{k}_{mk.stamp(h)}.npz" for h in (4, 5, 6) for k in ("wrf", "umwm")] + [f"spec_{mk.stamp(6)}.npz"])
+    again, _ = ingest(orca_env, out, 0, 2)
+    assert again["parts"] == cold["parts"] and len(again["parts"]) == 7
+    assert again == cold and (out / "manifest.json").read_bytes() == (clean / "manifest.json").read_bytes()
+    for store in ("wrf.zarr", "umwm.zarr", "umwmspec.zarr"):
+        assert orca.remote.tree_sha256(out / store) == orca.remote.tree_sha256(clean / store)
+    assert len(list((out / "hours").glob("*.npz"))) == 14               # the other window's parts are still cached, just not this window's
+
+
 def parts_of(out):
     return {p.name: p.stat().st_mtime_ns for p in (out / "hours").glob("*.npz")}
 

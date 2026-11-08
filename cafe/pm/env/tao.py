@@ -142,7 +142,8 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
     """Download the `variables` files (resolution `res`) of every TAO/TRITON mooring in `box` whose deployment can overlap
     t0..t1 (epoch seconds, ISO strings or datetimes) into out_dir/<mooring>/, resumable (remote.download), hash every file,
     pick per mooring and variable the file with the most QC-good samples in the window (delayed-mode before real-time on a
-    tie), look for wave variables, and write out_dir/manifest.json. Returns its path."""
+    tie), look for wave variables, and write out_dir/manifest.json (`replaced`: the files whose upstream copy changed since the previous manifest, old and
+    new SHA-256). Returns its path."""
     from .hycom import epoch
     t0, t1 = epoch(t0), epoch(t1)
     out = pathlib.Path(out_dir)
@@ -161,10 +162,16 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
                 key = f"{name}/{f['file']}"
                 p = out / key
                 p.parent.mkdir(exist_ok=True)
-                remote.download(f["url"], p, old.get(key, {}).get("sha256"))
+                was = old.get(key, {}).get("sha256")
+                remote.download(f["url"], p, was)                        # `was` keeps a file that still has it; a new upstream copy is taken, not refused
                 a, b = _coverage(p)
+                now = remote.sha256(p)
+                if was and now != was:                                   # missing or damaged here, and upstream replaced it: say so (the wind prior can change)
+                    man.setdefault("replaced", {})[key] = dict(old=was, new=now)
+                    warnings.warn(f"TAO file {key} was fetched again and is not the file the manifest recorded (sha256 {was[:12]} -> {now[:12]}): "
+                                  "upstream replaced it; the wind prior fitted from it can change", stacklevel=2)
                 man["files"][key] = dict(mooring=name, var=var, mode=f["mode"], deployment=f["dep"], url=f["url"], bytes=p.stat().st_size,
-                                         sha256=remote.sha256(p), time_start=a, time_end=b)
+                                         sha256=now, time_start=a, time_end=b)
                 try:
                     score = (len(_series(p, var, f["mode"], t0, t1)["t"]), f["mode"] == "D")
                 except ValueError as e:                                  # a file without its QC flags is no candidate; another deployment is picked

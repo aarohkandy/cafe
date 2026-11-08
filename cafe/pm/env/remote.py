@@ -8,11 +8,12 @@ USERTrust root in the system store). Verification is never turned off.
     RemoteFile(url)            seekable read-only file: h5py.File(RemoteFile(url)) reads HDF5 hyperslabs by range
     cdf1_header(url)           (dims, nrec, {var: dict(dims, dtype, shape, offset, record, attrs)}) of a NetCDF classic file
     cdf1_read(url, var, hdr)   one variable of a CDF-1 file, by range
-    download(url, path, sha)   resumable (HTTP Range), verified against size and optional SHA-256
+    download(url, path, sha, pin)  resumable (HTTP Range) only while the server file is the one the .part came from; size-checked,
+                               `sha` decides whether an existing file is kept, and is checked on a fresh download only with `pin`
 """
 from __future__ import annotations
 
-import hashlib, http.client, io, os, pathlib, ssl, struct, time, urllib.error, urllib.request
+import hashlib, http.client, io, json, os, pathlib, ssl, struct, time, urllib.error, urllib.request
 from collections.abc import Callable
 from typing import Any
 
@@ -35,13 +36,16 @@ def context() -> ssl.SSLContext:
 _CTX: ssl.SSLContext | None = None
 
 
-def _open(url: str, start: int | None = None, end: int | None = None, timeout: float = 60, tries: int = 4) -> http.client.HTTPResponse:
+def _open(url: str, start: int | None = None, end: int | None = None, timeout: float = 60, tries: int = 4,
+          if_range: str | None = None) -> http.client.HTTPResponse:
     global _CTX
     _CTX = _CTX or context()
     hdr = {"User-Agent": "cafe-premission"}
     err: Exception = ConnectionError("no attempt made")
     if start is not None:
         hdr["Range"] = f"bytes={start}-{'' if end is None else end}"
+        if if_range:
+            hdr["If-Range"] = if_range                     # a server whose file changed answers 200 with the whole new body, not the tail of the old
     for k in range(tries):
         try:
             r: http.client.HTTPResponse = urllib.request.urlopen(urllib.request.Request(url, headers=hdr), context=_CTX, timeout=timeout)
@@ -71,12 +75,17 @@ def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tri
     raise ConnectionError(f"{url}: {err!r}")
 
 
-def size(url: str) -> int:
+def _probe(url: str) -> tuple[int, dict[str, str]]:
+    """(total bytes, the validators the server sends: ETag, Last-Modified) of a one-byte ranged GET."""
     with _open(url, 0, 0) as r:
         cr = r.headers.get("Content-Range", "")
         if not cr.startswith("bytes"):
             raise ConnectionError(f"{url}: server ignored the Range header; byte-range reads need it")
-        return int(cr.rsplit("/", 1)[1])
+        return int(cr.rsplit("/", 1)[1]), {k: r.headers[k] for k in ("ETag", "Last-Modified") if r.headers.get(k)}
+
+
+def size(url: str) -> int:
+    return _probe(url)[0]
 
 
 class RemoteFile(io.RawIOBase):
@@ -148,30 +157,53 @@ def tree_sha256(path: str | pathlib.Path) -> str:
     return h.hexdigest()
 
 
-def download(url: str, path: str | pathlib.Path, sha: str | None = None) -> pathlib.Path:
-    """Resumable download to `path` (a `.part` file grows until complete), verified by size and optional SHA-256."""
+def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bool = False) -> pathlib.Path:
+    """Resumable download to `path` (a `.part` file grows until complete), checked against the size the server states.
+
+    `sha` only decides whether an existing `path` is good enough to keep (its hash equals `sha`); the file a fresh download brings is compared with it
+    only when `pin` is set, and then a mismatch is a ValueError. A caller that holds the hash of an *earlier* copy (the TAO manifest) must not pin it:
+    when upstream replaced the file, the old hash would refuse the new one on every try (round 12, M-26).
+
+    A `.part` is resumed only when `<name>.part.id` records the same total size, ETag and Last-Modified the server sends now; with no record, or another
+    version, it starts again from byte 0, and the resume request carries If-Range so that a file replaced in between comes back whole (round 12, M-25)."""
     path = pathlib.Path(path)
     if path.exists() and (sha is None or sha256(path) == sha):
         return path
     part = path.with_name(path.name + ".part")
-    total = size(url)
+    mark = part.with_name(part.name + ".id")
+    total, valid = _probe(url)
+    ident = dict(valid, total=total)
+    try:
+        seen = json.loads(mark.read_text())
+    except (OSError, ValueError):
+        seen = None
+    if seen != ident:
+        part.unlink(missing_ok=True)
+        mark.write_text(json.dumps(ident))
+    etag = valid.get("ETag", "")
+    ifr = etag if etag and not etag.startswith("W/") else valid.get("Last-Modified")          # a weak ETag cannot be an If-Range validator
     have = part.stat().st_size if part.exists() else 0
     if have > total:
         part.unlink()
         have = 0
     while have < total:
-        with _open(url, have, None, timeout=120) as r, open(part, "ab") as f:
-            for b in iter(lambda: r.read(1 << 20), b""):
-                f.write(b)
+        with _open(url, have, None, timeout=120, if_range=ifr if have else None) as r:
+            if have and r.status != 206:                  # the file changed since the probe, or the server ignores ranges: the whole body follows
+                have = 0
+            with open(part, "ab" if have else "wb") as f:
+                for b in iter(lambda: r.read(1 << 20), b""):
+                    f.write(b)
         if part.stat().st_size == have:
             raise ConnectionError(f"{url}: stalled at {have} of {total} bytes; rerun to resume")
         have = part.stat().st_size
     if have != total:
         raise ConnectionError(f"{url}: {have} bytes on disk, server says {total}")
-    if sha and sha256(part) != sha:
+    if pin and sha and sha256(part) != sha:
         part.unlink()
-        raise ValueError(f"{url}: SHA-256 mismatch, partial file removed; rerun to fetch it again")
+        mark.unlink(missing_ok=True)
+        raise ValueError(f"{url}: SHA-256 mismatch against the pinned hash, download removed")
     os.replace(part, path)
+    mark.unlink(missing_ok=True)
     return path
 
 

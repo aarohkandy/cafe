@@ -1,6 +1,7 @@
 """cafe.pm.env.remote against a local Range-capable server and against netCDF4's reading of the same files."""
 import hashlib
 import ssl
+import urllib.parse
 
 import netCDF4
 import numpy as np
@@ -8,6 +9,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
 from cafe.pm.env import remote
+from tests.conftest import _Handler
 
 RNG = np.random.default_rng(7)
 FIXTURE = settings(deadline=None, max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
@@ -232,13 +234,25 @@ def test_download_replaces_a_file_that_fails_its_sha(server, tmp_path):
     assert p.read_bytes() == b"fresh bytes"
 
 
+def interrupted(server, tmp_path, name, data, cut=1000):
+    """A download of `data` that dies after `cut` bytes and leaves its .part (and the record of which file it came from) behind."""
+    u = server.put(name, data)
+    server.plan[name] = [("call", lambda s: None), ("truncate", cut)] + [("short", 0)] * 40
+    with pytest.raises(ConnectionError, match="stalled"):
+        remote.download(u, tmp_path / name)
+    assert (tmp_path / f"{name}.part").stat().st_size == cut
+    server.plan.clear()
+    server.log.clear()
+    return u
+
+
 def test_download_resumes_a_partial_file(server, tmp_path):
     data = bytes(range(256)) * 40
-    u = server.put("a", data)
-    (tmp_path / "a.part").write_bytes(data[:3000])
+    u = interrupted(server, tmp_path, "a", data, 3000)
     p = remote.download(u, tmp_path / "a", hashlib.sha256(data).hexdigest())
     assert p.read_bytes() == data
     assert server.requests("a") == ["bytes=0-0", "bytes=3000-"]
+    assert not (tmp_path / "a.part").exists() and not (tmp_path / "a.part.id").exists()
 
 
 def test_download_resumes_after_a_connection_cut_mid_body(server, tmp_path):
@@ -251,16 +265,91 @@ def test_download_resumes_after_a_connection_cut_mid_body(server, tmp_path):
 
 
 def test_download_discards_an_oversized_part(server, tmp_path):
-    u = server.put("a", b"short")
-    (tmp_path / "a.part").write_bytes(b"x" * 100)
-    assert remote.download(u, tmp_path / "a").read_bytes() == b"short"
+    u = interrupted(server, tmp_path, "a", b"short" * 400, 1000)
+    with open(tmp_path / "a.part", "ab") as f:                          # a part that matches the record but is longer than the file
+        f.write(b"x" * 2000)
+    assert remote.download(u, tmp_path / "a").read_bytes() == b"short" * 400
 
 
-def test_download_sha_mismatch_removes_the_part_and_the_target(server, tmp_path):
+def test_download_pinned_sha_mismatch_removes_the_part_and_the_target(server, tmp_path):
     u = server.put("a", b"payload")
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
-        remote.download(u, tmp_path / "a", "0" * 64)
-    assert not (tmp_path / "a").exists() and not (tmp_path / "a.part").exists()
+        remote.download(u, tmp_path / "a", "0" * 64, pin=True)
+    assert not (tmp_path / "a").exists() and not (tmp_path / "a.part").exists() and not (tmp_path / "a.part.id").exists()
+
+
+@pytest.fixture
+def versioned(monkeypatch):
+    """A server like the real ones: an ETag of the file's bytes on every reply, and a whole 200 for a ranged request whose If-Range names another version
+    (tests/conftest.py's Server sends no validator and ignores If-Range)."""
+    real_reply, real_serve = _Handler._reply, _Handler._serve
+
+    def etag(h, name):
+        f = h.server.srv.root / name
+        return f'"{hashlib.md5(f.read_bytes()).hexdigest()}"' if f.is_file() else None
+
+    def reply(self, code, body=b"", **hdr):
+        tag = etag(self, urllib.parse.unquote(self.path.lstrip("/")))
+        real_reply(self, code, body, **({"ETag": tag, **hdr} if tag else hdr))
+
+    def serve(self, s, name, rng, act):
+        if act and act[0] == "call":                                   # run before the If-Range test, as a file replaced just before the request
+            act[1](s)
+            act = None
+        ifr = self.headers.get("If-Range")
+        real_serve(self, s, name, None if ifr and ifr != etag(self, name) else rng, act)
+
+    monkeypatch.setattr(_Handler, "_reply", reply)
+    monkeypatch.setattr(_Handler, "_serve", serve)
+
+
+V1 = bytes(range(256)) * 12
+V2 = bytes(reversed(V1))                                               # the same size, other bytes
+
+
+def test_r12_m25_a_part_of_another_version_is_restarted_not_spliced(server, tmp_path, versioned):
+    u = interrupted(server, tmp_path, "a", V1)
+    server.put("a", V2)
+    assert remote.download(u, tmp_path / "a").read_bytes() == V2          # was v1[:1000] + v2[1000:]
+    assert server.requests("a") == ["bytes=0-0", "bytes=0-"]               # from byte 0, not from 1000
+
+
+def test_r12_m25_a_file_replaced_between_the_probe_and_the_resume_comes_back_whole(server, tmp_path, versioned):
+    """The If-Range test: the probe saw v1, the file is v2 when the tail is asked for; the server then sends all of v2, which replaces the part."""
+    u = interrupted(server, tmp_path, "a", V1)
+    server.plan["a"] = [("call", lambda s: None), ("call", lambda s: s.put("a", V2))]
+    assert remote.download(u, tmp_path / "a").read_bytes() == V2
+
+
+def test_r12_m25_with_no_validator_a_changed_size_restarts(server, tmp_path):
+    u = interrupted(server, tmp_path, "a", V1)
+    server.put("a", V2 + b"more")
+    assert remote.download(u, tmp_path / "a").read_bytes() == V2 + b"more"
+
+
+def test_r12_m25_a_damaged_record_is_no_record(server, tmp_path):
+    u = interrupted(server, tmp_path, "a", V1)
+    (tmp_path / "a.part.id").write_text('{"total": 30')
+    assert remote.download(u, tmp_path / "a").read_bytes() == V1
+    assert server.requests("a") == ["bytes=0-0", "bytes=0-"]
+
+
+def test_r12_m25_a_part_with_no_record_is_not_resumed(server, tmp_path):
+    u = server.put("a", V1)
+    (tmp_path / "a.part").write_bytes(b"x" * 1000)                     # a part an earlier version of the code left, or one made by hand
+    assert remote.download(u, tmp_path / "a").read_bytes() == V1
+    assert server.requests("a") == ["bytes=0-0", "bytes=0-"]
+
+
+def test_r12_m26_a_hash_of_an_earlier_copy_does_not_refuse_the_new_one(server, tmp_path):
+    """The TAO manifest holds the hash of the copy it fetched; upstream has replaced the file, which is missing here: it must be taken, not refused."""
+    u = server.put("a", V2)
+    p = remote.download(u, tmp_path / "a", hashlib.sha256(V1).hexdigest())
+    assert p.read_bytes() == V2 and not (tmp_path / "a.part").exists()
+    assert remote.download(u, p, hashlib.sha256(V2).hexdigest()) == p        # the hash still says when an existing file is kept
+    n = len(server.log)
+    remote.download(u, p, hashlib.sha256(V2).hexdigest())
+    assert len(server.log) == n
 
 
 def test_download_size_mismatch_when_the_file_grew(server, tmp_path):

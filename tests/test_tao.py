@@ -132,6 +132,28 @@ def test_fetch_is_resumable_without_refetching(tree, server, tmp_path):
     assert len([1 for name, _ in server.log if "fileServer" in name]) == n
 
 
+def test_r12_m26_a_file_missing_here_whose_upstream_copy_changed_is_fetched_and_recorded(tree, server, tmp_path):
+    """The manifest holds the hash of the copy it fetched. Upstream replaced that file (NOAA adds delayed-mode data after the fact) and the local one is gone:
+    the fetch used to refuse the new copy with 'SHA-256 mismatch' on every try, and nothing said that deleting manifest.json breaks the loop."""
+    base = tree.publish()
+    out = tmp_path / "tao"
+    first = json.loads(tao.fetch_tao(BOX, T0, T1, out, base).read_text())
+    assert "replaced" not in first
+    key = "T0N165E/OS_T0N165E_DM200A-20230201_D_WIND_10min.nc"
+    (out / key).unlink()
+    new = tmp_path / "new.nc"
+    write_nc(new, "WIND", _t(T0 - 3 * 86400, T1 + 86400), series, 5, "D", scale=1.1)
+    server.put(f"thredds/fileServer/oceansites/DATA/T0N165E/{key.split('/')[1]}", new.read_bytes())
+    with pytest.warns(UserWarning, match="upstream replaced it"):
+        man = json.loads(tao.fetch_tao(BOX, T0, T1, out, base).read_text())
+    now = tao.remote.sha256(out / key)
+    assert now != first["files"][key]["sha256"] and man["files"][key]["sha256"] == now
+    assert man["replaced"] == {key: dict(old=first["files"][key]["sha256"], new=now)}
+    assert tao.verify(out) == len(man["files"])
+    again = json.loads(tao.fetch_tao(BOX, T0, T1, out, base).read_text())          # nothing is replaced the second time
+    assert "replaced" not in again and again["files"] == man["files"]
+
+
 @pytest.mark.parametrize("damage", [b"", b'{"files": {"T0N165E/OS_T0'])
 def test_an_empty_or_truncated_manifest_is_fetched_again_not_a_traceback(tree, tmp_path, damage):
     """Round 6 integration of M-8: `_tao_cached` sends a damaged TAO manifest back to `fetch_tao`, which then read it with json.loads and raised
