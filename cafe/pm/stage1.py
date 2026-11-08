@@ -848,12 +848,13 @@ BRIEF_PRIOR = "usv_vpp_bias_brief"
 
 def check_case(prior: str, n: int, pri: dict[str, dict[str, Any]], paired: bool = False) -> None:
     """Round 12, M-27: what `sensitivity_case` needs of its arguments, as a ConfigError (`error:` and exit 2 from the command), not a KeyError, an IndexError
-    or the sampler's ValueError after the environment is loaded. `prior` is a sampled entry of perturbations.yaml. `n` is a number of members: an even one,
+    or the sampler's ValueError after the environment is loaded. `prior` is a uniform entry of perturbations.yaml (it replaces
+    `usv_vpp_bias`, a uniform draw, and the case label reads its lo and hi; a normal or lognormal entry has neither). `n` is a number of members: an even one,
     2 or more, when the case draws its own hypercube (the wind and current columns are antithetic pairs); any one or more when it is paired with the run's
     (`paired`: the run's own n, which its stopping rule leaves odd as often as even)."""
-    if prior not in pri or pri[prior]["dist"] == "fixed":
-        sampled = ", ".join(k for k, e in pri.items() if e["dist"] != "fixed")
-        raise ConfigError(f"prior {prior!r} is not a sampled entry of config/perturbations.yaml (one of: {sampled})")
+    if prior not in pri or pri[prior]["dist"] != "uniform":
+        uniform = ", ".join(k for k, e in pri.items() if e["dist"] == "uniform")
+        raise ConfigError(f"prior {prior!r} is not a uniform entry of config/perturbations.yaml (one of: {uniform})")
     if n < (1 if paired else 2) or (n % 2 and not paired):
         need = "at least one" if paired else "an even number, 2 or more (its wind and current draws are antithetic pairs)"
         raise ConfigError(f"{n} members: the sensitivity case needs {need}")

@@ -2247,7 +2247,9 @@ def test_p37_the_stage1_command_reports_a_full_shared_memory_as_an_error_line_an
 
 @pytest.mark.parametrize("flag, value, said", [("--members", "7", "7 members: the sensitivity case needs an even number, 2 or more"),
                                               ("--members", "0", "0 members: "), ("--members", "-2", "-2 members: "),
-                                              ("--prior", "nope", "prior 'nope' is not a sampled entry of config/perturbations.yaml (one of: wind")])
+                                              ("--prior", "nope",
+                                               "prior 'nope' is not a uniform entry of config/perturbations.yaml (one of: usv_vpp_bias, usv_vpp_bias_brief)\n"),
+                                              ("--prior", "wind_speed_bias", "prior 'wind_speed_bias' is not a uniform entry of config/perturbations.yaml ")])
 def test_r12_m27_the_stage1_command_refuses_a_bad_members_or_prior_before_the_environment_loads(tmp_path, monkeypatch, capsys, flag, value, said):
     """`--members 7` was the sampler's ValueError, `0` an IndexError (rc 1, traceback, after the environment was loaded), and `--prior nope` the KeyError that
     `damaged_run_files` blamed on the run ("damaged or incomplete; run it again (--fresh)"). Each is an `error:` line and exit 2 now, with nothing built."""
@@ -2274,8 +2276,8 @@ def test_r12_m27_sensitivity_case_itself_refuses_the_same_arguments_and_keeps_th
         for n in (7, 1, 0, -2):
             with pytest.raises(config.ConfigError, match=f"^{n} members: the sensitivity case needs an even number, 2 or more"):
                 stage1.sensitivity_case(MISSION, "ENV", n=n)
-        for prior in ("nope", "current_correlation_length"):                              # the second is a setting (dist fixed), not a draw
-            with pytest.raises(config.ConfigError, match=f"prior '{prior}' is not a sampled entry of config/perturbations.yaml"):
+        for prior in ("nope", "current_correlation_length", "wind_speed_bias", "current_speed_scale"):    # a setting, a normal, a lognormal
+            with pytest.raises(config.ConfigError, match=f"prior '{prior}' is not a uniform entry of config/perturbations.yaml"):
                 stage1.sensitivity_case(MISSION, "ENV", prior=prior)
         with pytest.raises(config.ConfigError, match="^0 members: the sensitivity case needs at least one"):
             stage1.sensitivity_case(MISSION, "ENV", X={k: np.zeros(0) for k in marg})
