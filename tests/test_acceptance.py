@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1294,7 +1295,6 @@ def test_r12_a_golden_with_no_source_key_is_listed_whole_and_a_good_one_still_pa
 
 def advice_of(detail):
     """The command a golden_diff message asks to run, as (flags by name, tokens)."""
-    import shlex
     cmd = re.search(r"with `([^`]+)`", detail).group(1)
     toks = shlex.split(cmd)
     return {t: toks[i + 1] for i, t in enumerate(toks[:-1]) if t.startswith("--")}, toks
@@ -1327,3 +1327,21 @@ def test_r12_l0_m33_the_command_names_golden_only_for_a_file_that_is_not_the_def
     assert "--golden " not in cmd(acc.GOLDEN, "tepex_c_demo") and cmd(acc.GOLDEN, "tepex_c_demo").endswith("--gpus 2 --update-golden")
     spaced = tmp_path / "a b.json"
     assert cmd(spaced).endswith(f"--golden '{spaced}'")
+
+
+@pytest.mark.parametrize("mission, name", [("my dir/m x.yaml", "na me"), ("missions/a;b.yaml", "n;rm"), ("it's.yaml", "$(x)")])
+def test_r12_l0_m33_the_mission_and_the_name_in_the_printed_command_are_one_word_each_whatever_they_hold(tmp_path, mission, name):
+    """`update_command` quoted the golden path and pasted the mission and the golden-mission name raw: a path with a space split into three words and one
+    with `;` ran its tail as a second command. Every user-chosen word goes through shlex.quote, in the refusal's own advice too."""
+    f = tmp_path / "g.json"
+    f.write_text('{"summary": {"mission": "other"}}')
+    for text in (acc.update_command(f, mission, 0, name), re.search(r"`(--golden-mission [^`]+)`", acc.golden_refusal(f, name)).group(1)):
+        toks = shlex.split(text)
+        assert (toks[toks.index("--golden-mission") + 1] == name) and (("--mission" not in toks) or toks[toks.index("--mission") + 1] == mission)
+    assert f" --mission {shlex.quote(mission)} " in acc.update_command(f, mission, 0, name)              # a shell sees `;` and `$(` even where shlex does not
+    cmd = shlex.split(acc.update_command(f, mission, 0, name))
+    assert len(cmd) == 13 and cmd[:5] == ["python", "-m", "cafe.pm", "acceptance", "--mission"]            # no word split off, no second command
+    r = run_dict(tmp_path, report(mission=dict(name=name, seed=dict(value=7))))
+    flag = lambda k: cmd[cmd.index(k) + 1]                                                              # noqa: E731
+    done = acc.check_golden(r, pathlib.Path(flag("--golden")), flag("--mission"), True, golden_mission=flag("--golden-mission"))
+    assert done["values"]["updated"] is True and json.loads(f.read_text())["summary"]["mission"] == name

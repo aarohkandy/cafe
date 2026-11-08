@@ -72,11 +72,17 @@ class Header(tuple[dict[str, int], int, dict[str, dict[str, Any]]]):
 
 
 def _ident(r: http.client.HTTPResponse, url: str) -> Ident:
-    """(total bytes, the validators the server sends: ETag, Last-Modified) of a ranged reply: which version of the file this reply is a piece of."""
+    """(total bytes, the validators the server sends: ETag, Last-Modified) of a ranged reply: which version of the file this reply is a piece of. A total
+    the server does not state (`bytes a-b/*`, legal, or anything that is not a number) is -1: the reads that only need pieces compare identities as before,
+    `_probe` (which needs the size) refuses it (look-ahead L0 after round 12, M-25)."""
     cr = r.headers.get("Content-Range", "")
     if not cr.startswith("bytes"):
         raise ConnectionError(f"{url}: server ignored the Range header; byte-range reads need it")
-    return int(cr.rsplit("/", 1)[1]), {k: r.headers[k] for k in ("ETag", "Last-Modified") if r.headers.get(k)}
+    try:
+        total = int(cr.rpartition("/")[2])
+    except ValueError:
+        total = -1
+    return total, {k: r.headers[k] for k in ("ETag", "Last-Modified") if r.headers.get(k)}
 
 
 def _read_ident(url: str, start: int | None, end: int | None, timeout: float = 60, tries: int = 3, ident: Ident | None = None) -> tuple[bytes, Ident | None]:
@@ -105,9 +111,13 @@ def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tri
 
 
 def _probe(url: str) -> Ident:
-    """The identity (see `_ident`) of the file, from a one-byte ranged GET."""
+    """The identity (see `_ident`) of the file, from a one-byte ranged GET. The size is what `size`, `RemoteFile` and `download` are built on, so a server
+    that does not state it is a ConnectionError naming that, not a size of -1."""
     with _open(url, 0, 0) as r:
-        return _ident(r, url)
+        got = _ident(r, url)
+    if got[0] < 0:
+        raise ConnectionError(f"{url}: server does not state the file size (Content-Range total is not a number)")
+    return got
 
 
 def _if_range(valid: dict[str, str]) -> str | None:

@@ -350,7 +350,7 @@ def provenance_problems(source: Any) -> list[str]:
 
 def _golden_record(r: dict[str, Any], mission: str) -> dict[str, Any]:
     report = hashlib.sha256((r["dir"] / "report" / "report.json").read_bytes()).hexdigest()
-    return dict(schema=1, command=f"python -m cafe.pm acceptance --mission {mission} --gpus {r['gpus']} --update-golden",
+    return dict(schema=1, command=f"python -m cafe.pm acceptance --mission {shlex.quote(mission)} --gpus {r['gpus']} --update-golden",
                 source=dict(git_sha=git_sha(), dirty=_dirty(), code_digest=pipeline.code_digest(), reviewed_run=dict(name=r["dir"].name, report_sha256=report),
                             date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), budget=r["budget"], gpus=r["gpus"]),
                 summary=summary(r["report"]))
@@ -371,18 +371,18 @@ def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) 
     if had == name or allowed == name:
         return None
     what = "is not a golden file (no summary.mission)" if had is None else f"is the golden of mission {had!r}"
-    return (f"{golden} {what} and this run is mission {name!r}: not overwritten. To replace it with this mission's golden add `--golden-mission {name}`, "
-            "or name another file with `--golden`")
+    return (f"{golden} {what} and this run is mission {name!r}: not overwritten. To replace it with this mission's golden "
+            f"add `--golden-mission {shlex.quote(name)}`, or name another file with `--golden`")
 
 
 def update_command(golden: pathlib.Path, mission: str, gpus: int, name: str) -> str:
     """The command that writes `golden` from a quick run of `mission` (whose report names itself `name`), as the messages that ask for a new golden print it. It
     carries what `--update-golden` needs to be accepted: `--golden` when the file is not the default one, `--golden-mission` when `golden_refusal` would
-    refuse the write (the file is damaged, or the golden of another mission). The same test as the refusal's, so the advice cannot be refused (look-ahead L0
-    after round 12, M-33)."""
-    cmd = f"python -m cafe.pm acceptance --mission {mission} --gpus {gpus} --update-golden"
+    refuse the write (the file is damaged, or the golden of another mission). The same test as the refusal's, so the advice cannot be refused, and every
+    word that is ours to choose is shlex-quoted, so it pastes as one command whatever the paths and the name hold (look-ahead L0 after round 12, M-33)."""
+    cmd = f"python -m cafe.pm acceptance --mission {shlex.quote(mission)} --gpus {gpus} --update-golden"
     return (cmd + (f" --golden {shlex.quote(str(golden))}" if golden != GOLDEN else "")
-            + (f" --golden-mission {name}" if golden_refusal(golden, name) else ""))
+            + (f" --golden-mission {shlex.quote(name)}" if golden_refusal(golden, name) else ""))
 
 
 def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: bool, golden_mission: str | None = None) -> dict[str, Any]:

@@ -696,3 +696,30 @@ def test_r12_l1_m25_a_weak_etag_alone_is_no_validator_for_resuming_either(server
     u = interrupted(server, tmp_path, "a", V1)
     assert remote.download(u, tmp_path / "a").read_bytes() == V1
     assert server.requests("a") == ["bytes=0-0", "bytes=0-"]
+
+
+def unknown_total(monkeypatch):
+    """A server that answers every range with `Content-Range: bytes a-b/*` (a legal reply: the total is not known)."""
+    real = _Handler._reply
+
+    def reply(self, code, body=b"", **hdr):
+        real(self, code, body, **{k: (v.rpartition("/")[0] + "/*" if k == "Content-Range" and code == 206 else v) for k, v in hdr.items()})
+    monkeypatch.setattr(_Handler, "_reply", reply)
+
+
+def test_r12_l0_m25_a_server_that_states_no_total_still_serves_the_header_and_the_reads_that_need_no_size(cdf_file, server, monkeypatch):
+    """`_ident` took int() of the total, so `bytes 0-31/*` was a bare ValueError from cdf1_header; before round 12 no identity was asked for here."""
+    unknown_total(monkeypatch)
+    src = server.put("t.nc", cdf_file.read_bytes())
+    hdr, local = remote.cdf1_header(src), remote.cdf1_header(str(cdf_file))
+    assert hdr[:2] == local[:2] and set(hdr[2]) == set(local[2]) and hdr.ident == (-1, {})
+    name = next(n for n, v in hdr[2].items() if not v["record"])
+    np.testing.assert_array_equal(remote.cdf1_read(src, name, hdr), remote.cdf1_read(str(cdf_file), name, local))
+
+
+@pytest.mark.parametrize("call", [remote.size, remote.RemoteFile, lambda u: remote.download(u, u.rsplit("/", 1)[1] + ".out")])
+def test_r12_l0_m25_a_server_that_states_no_total_is_a_connection_error_where_the_size_is_needed(server, monkeypatch, tmp_path, call):
+    unknown_total(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ConnectionError, match="does not state the file size"):
+        call(server.put("a", b"x" * 50))
