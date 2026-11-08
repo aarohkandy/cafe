@@ -107,10 +107,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", required=True, help="where the runs, receipts and acceptance.json go (each run in its own subdirectory, removed first; "
                                                  "a directory that holds runs acceptance did not make is refused)")
     p.add_argument("--golden", default=str(acceptance.GOLDEN))
-    p.add_argument("--update-golden", action="store_true", help="write the golden from the quick run; that check then fails until it is rerun without this")
+    p.add_argument("--update-golden", action="store_true", help="write the golden from the quick run; that check then fails until it is rerun without this. "
+                   "A golden file of another mission (or a file that is no golden) is not overwritten (round 12, M-33)")
     p.add_argument("--skip-overnight", action="store_true", help="rehearsal only: the overnight check fails ('not run')")
     a = ap.parse_args(argv)
     try:
+        pipeline._offline()                                              # round 12, M-22: a bad CAFE_OFFLINE is exit 2 now, not only when a download is due
         if a.cmd == "acceptance":
             return acceptance.main(a)
         if a.cmd == "receipts":

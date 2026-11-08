@@ -483,6 +483,18 @@ def test_r11_m27_the_wall_function_switches_to_the_viscous_law_below_y_plus_11_0
     assert got == pytest.approx(want, rel=2e-3)
 
 
+@pytest.mark.parametrize("yplus,viscous", [(11.03, True), (11.1, False)])
+def test_r12_m21_the_wall_function_switches_within_a_few_hundredths_of_y_plus_11_06(yplus, viscous):
+    """The two laws meet at y+ = 11.06, so a point near it differs by 0.1 % between them: YPLUS_LAM = 11.0 passed the 2e-3 tolerance of the points at 9.5
+    and 12.5 above. The tolerance here is 2e-4, and the constant is derived from KAPPA and B_LOG, not copied."""
+    from scipy.optimize import brentq
+    assert wm.YPLUS_LAM == pytest.approx(brentq(lambda y: math.log(y) / wm.KAPPA + wm.B_LOG - y, 5.0, 30.0), abs=0.005)
+    nu = 1.0 / yplus
+    u = math.log(yplus) / wm.KAPPA + wm.B_LOG
+    got = float(wm.utau_loglaw(jnp.float32(u), 1.0, nu))
+    assert got == pytest.approx(math.sqrt(nu * u) if viscous else 1.0, rel=2e-4)
+
+
 # ------------------------------------------------------------------ one real LES window
 def _uniform(u):
     u = np.asarray(u, np.float32)

@@ -3830,3 +3830,44 @@ def test_r10_m25_the_fitted_bias_prior_says_that_its_mean_is_the_flipped_error(t
         c = fit[key]["citation"]
         assert "mean = minus the 2-mooring mean error, i.e. mooring minus WRF" in c and "adds to WRF" in c and f"WRF minus mooring, {err:+.3g}" in c
     assert "mooring minus WRF" not in fit["wind_speed_noise"]["citation"]                            # the noise entries have no signed mean
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 12, M-20 and M-21
+
+def test_r12_m20_the_default_pad_reaches_its_cap_at_24_4_days_not_26():
+    m = config.load_mission(MISSION_PATH)
+    m["box"] = {k: v for k, v in m["box"].items() if k != "pad_deg"}
+
+    def pad(days):
+        end = config.utc(m["window"]["start"]) + dt.timedelta(days=days)
+        return pipeline.padding(dict(m, window=dict(start=m["window"]["start"], end=end.strftime("%Y-%m-%dT%H:%M:%SZ"))))
+    assert pad(24.4) == 9.5 and pad(24.5) == pipeline.MAX_PAD_DEG and pad(26.0) == pipeline.MAX_PAD_DEG
+    assert "about 24.4 days" in str(pipeline.padding.__doc__)                                    # the docstring said "longer than MAX_PAD_DEG / DRIFT_MS days"
+
+
+def test_r12_m21_the_calm_wave_height_is_a_calm_at_0_0009_m_and_a_swell_at_0_0011_m_and_0_01_m(tmp_path):
+    """CALM_SWH_M 1e-3 -> 5e-2 passed every test: the calm test used swh 0 and 1 m, far from the bound. A sea of 1 cm is not calm."""
+    assert pipeline.CALM_SWH_M == 1e-3
+    ctx = ctx_for(tmp_path / "r")
+    still_air(ctx.env)
+    for swh, calm in ((0.0009, True), (0.0011, False), (0.01, False)):
+        ctx.env.U["swh"][:] = swh
+        c = check_of(ingest_checks(ctx), "spectrum_peak_period_vs_file")
+        assert ("a calm sea" in c["note"]) is calm and (c["value"] is None) is calm, swh
+
+
+def test_r12_m21_the_flat_share_limit_is_one_percent_of_the_sampled_points_and_a_share_between_one_and_three_percent_fails(tmp_path):
+    """FLAT_SHARE_MAX 0.01 -> 0.03 passed every test: the tests zeroed one point of a few hundred or a third of them."""
+    assert pipeline.FLAT_SHARE_MAX == 0.01
+    ctx = ctx_for(tmp_path / "r")
+    jj, ii, tis = pipeline._sea_sample(ctx.env)
+    seen = pipeline._ustar_agreement(ctx.env)[3]
+    at = int(0.01 * seen)                                                                       # at the limit or under it: the file is not broken
+    over = at + 1                                                                               # over it, and under 3 %
+    assert 0 < at <= 0.01 * seen < over < 0.03 * seen and over <= len(jj)
+    names = ("spectrum_peak_period_vs_file", "spectrum_direction_vs_file", "spectrum_mss_vs_file", "coare_ustar_vs_umwm_ust")
+    for flat, ok in ((at, True), (over, False)):
+        for k in ("swh", "ust"):
+            ctx.env.U[k][tis[0]][jj[:flat], ii[:flat]] = 0.0                                   # the same first points, one more each time
+        checks = ingest_checks(ctx)
+        assert all(check_of(checks, n)["ok"] is ok for n in names), flat

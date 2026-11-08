@@ -1289,3 +1289,34 @@ def test_l0_r11_an_edit_of_the_runs_mission_or_plan_after_the_report_stage_is_in
     probs = json.loads((run / "report" / "report.json").read_text())["ledger_problems"]
     assert probs == [f"run: stage report: input {run / name} changed since the stage ran"]
     assert f"warning: run: stage report: input {run / name} changed since the stage ran" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------------------------------------------- review round 12, M-7 and M-22
+
+@pytest.mark.parametrize("bad", [5, [1, 2]], ids=["int", "list"])
+def test_r12_m7_a_holdout_entry_that_is_no_object_is_damage_with_exit_2_not_an_attribute_error_traceback(tmp_path, capsys, monkeypatch, bad):
+    """`.get` on a number or a list raised AttributeError (report._emulator); the other readers fail with a TypeError, which was already damage."""
+    run = _damaged_run(tmp_path, monkeypatch, _write_json("emulator", "holdout.json", obj={"glider_eq": bad}))
+    capsys.readouterr()
+    assert cli.main(["report", "--run", str(run)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: ") and "damaged or incomplete (AttributeError: " in err and "Traceback" not in err and str(run) in err
+
+
+def test_r12_m7_damaged_run_files_names_an_attribute_error_and_keeps_its_text(tmp_path):
+    with pytest.raises(ConfigError, match=r"damaged or incomplete \(AttributeError: 'int' object has no attribute 'get'\); run it again"):
+        with damaged_run_files(tmp_path):
+            (5).get("x")
+
+
+@pytest.mark.parametrize("argv", [["validate", "--mission", MISSION], ["plan", "--mission", MISSION, "--budget", "ci"],
+                                  ["fetch", "--mission", MISSION], ["hangar", "--platform", "modems"]])
+def test_r12_m22_a_cafe_offline_that_is_no_value_is_exit_2_at_once_for_every_command_also_on_a_warm_cache(monkeypatch, capsys, calls, argv):
+    """`CAFE_OFFLINE=ture` was read only when a download was due, so a cache that was complete made it a silent online run."""
+    monkeypatch.setenv("CAFE_OFFLINE", "ture")
+    assert cli.main(argv) == 2
+    captured = capsys.readouterr()
+    assert captured.err == "error: CAFE_OFFLINE='ture' is not 0 or 1; set CAFE_OFFLINE=1 to download nothing, or 0 or unset it\n" and captured.out == ""
+    assert calls == []
+    monkeypatch.setenv("CAFE_OFFLINE", "0")
+    assert cli.main(argv) == 0 and "CAFE_OFFLINE" not in capsys.readouterr().err
