@@ -104,7 +104,8 @@ def test_observed_order_error_paths():
     with pytest.raises(ValueError, match="refinement ratios must be finite and > 1"):
         vv.observed_order(1.0, 2.0, 0.5, 2.0)             # ratios below 1: not a refinement (round 13, M-27: was a RuntimeError "did not converge")
     assert vv.observed_order(1.0, 2.5, 1.5, 1.2, max_iter=1) == pytest.approx(vv.observed_order(1.0, 2.5, 1.5, 1.2), abs=1e-9)   # bracketing fallback
-    assert vv.observed_order(1.0, 2.5, 1e4, 1.2e4, max_iter=1) == pytest.approx(vv.observed_order(1.0, 2.5, 1e4, 1.2e4), abs=1e-9)    # the scan's grid overflows r^p
+    # the scan's grid overflows r^p
+    assert vv.observed_order(1.0, 2.5, 1e4, 1.2e4, max_iter=1) == pytest.approx(vv.observed_order(1.0, 2.5, 1e4, 1.2e4), abs=1e-9)
     with pytest.raises(RuntimeError, match="converge"):
         vv.observed_order(1.0, 1e-300, 1.5, 1.2)                # the order would be ~1700: out of range for both solvers
     with pytest.raises(ValueError, match="zero solution"):
@@ -203,6 +204,22 @@ def test_tabulate_with_equal_cell_counts_on_two_grids_gives_a_finite_row(tmp_pat
     cells = dict(CELLS, medium=CELLS["fine"])
     rows = dt.tabulate(stored(tmp_path, {g: (lambda fr, h=SIZE[g]: dt.CT_REF[fr] * (1.01 + 0.004 * h ** 2)) for g in CELLS}, cells=cells))
     assert len(rows) == 4 and all(math.isfinite(r.u_val) and r.u_num > 0 and "spread only" in r.case for r in rows.values())
+
+
+@pytest.mark.parametrize("grid, field", [("coarse", "ct"), ("fine", "ct_std"), ("fine", "ct")])
+def test_tabulate_keeps_a_row_for_a_stored_infinity_and_never_validates_it(tmp_path, grid, field):
+    """json.dumps writes and json.loads reads back an Infinity: U_num (or U_input) was infinite and vv20_row's refusal was a bare ValueError out of tabulate
+    (on 810ecdb it was a "validated" row with ratio 0). Like a NaN from a diverged solver, the row stays, with a NaN U_val, and is not validated."""
+    ct = converging()
+    if field == "ct":
+        ct[grid] = lambda fr, f=ct[grid]: math.inf if fr == 0.28 else f(fr)
+    rows = dt.tabulate(stored(tmp_path, ct, **({"ct_std": math.inf} if field == "ct_std" else {})))
+    assert len(rows) == 4
+    for fr, row in rows.items():
+        if field == "ct_std" or fr == 0.28:
+            assert math.isnan(row.u_val) and math.isnan(row.ratio) and row.validated is False
+        else:
+            assert math.isfinite(row.u_val)                                                       # the other speeds are untouched
 
 
 # ------------------------------------------------------------------ what test_vv.py pinned only through the code's own output (round 13, M-36)

@@ -591,9 +591,11 @@ def tabulate(root: pathlib.Path) -> dict[float, vv.Vv20]:
             continue
         s = got[0]["ct"]
         u_rel, r, note = discretization([c["ct"] for c in got], [c["cells"] for c in got], [c.get("surf_level") for c in got])
-        u_num = math.hypot(u_rel * s, got[0].get("ct_std", 0.0))
-        rows[fr] = vv.vv20_row(f"C_T Fr {key} (r={r:.2f}, {note})", s, ref, u_num, s * math.hypot(assumed("u_S_rel"), assumed("u_nu_rel")),
-                               assumed("u_D_rel") * ref)
+        # An infinite C_T or ct_std in a stored file is a diverged solver like a NaN one: the row stays, with a NaN uncertainty, never validated
+        # (vv20_row refuses an infinite one; round 13 D, M-27 look-ahead).
+        u_num, u_input = (math.nan if math.isinf(u) else u for u in (math.hypot(u_rel * s, got[0].get("ct_std", 0.0)),
+                                                                    s * math.hypot(assumed("u_S_rel"), assumed("u_nu_rel"))))
+        rows[fr] = vv.vv20_row(f"C_T Fr {key} (r={r:.2f}, {note})", s, ref, u_num, u_input, assumed("u_D_rel") * ref)
     return rows
 
 
