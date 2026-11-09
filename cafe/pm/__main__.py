@@ -25,7 +25,7 @@ from typing import Any
 
 from . import acceptance, audit, budget, ledger, par, pipeline, report, stage1, whatif
 from .config import ConfigError, ResourceError, damaged_run_files as _run_files, json_object as _json_object, load_mission, os_error_text
-from .env.environment import OutsideData
+from .env.environment import FETCH_CMD, OutsideData
 from .stats import intervals
 
 
@@ -308,7 +308,7 @@ def _whatif(a: argparse.Namespace) -> int:
             print(f"note: the run used seed {old.get('seed')}, this file says {m.get('seed')}; the what-if draws use {m.get('seed')}")
     ctx = pipeline.Context(a.mission, a.budget, a.gpus, run)
     if not ctx.cache.is_dir():
-        raise ConfigError(f"no environment cache at {ctx.cache}: run `python -m cafe.pm fetch --mission {a.mission}` first")
+        raise ConfigError(f"no environment cache at {ctx.cache}: run `{FETCH_CMD} {a.mission}` first")
     base, tracks, scales, fitted = {}, {}, None, None
     with _run_files(run):
         if (run / "stage1b" / "summary.json").is_file():

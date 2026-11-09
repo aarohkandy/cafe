@@ -249,3 +249,22 @@ def test_r7_m24_ocean_inside_tests_the_stores_lat_lon_and_time_axes_and_bounds_n
     assert not oc.inside(195.0, 0.0, t[-1] + 1.0) and not oc.inside(195.0, 0.0, t[0] - 1.0)
     assert list(oc.inside(np.array([195.0, 190.0]), np.array([0.0, 0.0]), t[3])) == [True, False]
     assert oc.bounds() == (-167.5, -162.5, -2.5, 2.5, float(t[0]), float(t[-1]))
+
+
+# ------------------------------------------------------------------------------------------------------------ round 13 M-37: a store across 0 E
+
+@pytest.mark.parametrize("axis,queries", [([-1.0, 0.0, 1.0], [-0.5, 359.5, 0.5, 360.5]), ([359.0, 360.0, 361.0], [-0.5, 359.5, 0.5, 360.5])])
+def test_r13_m37_a_store_that_crosses_0_e_is_queried_in_its_own_frame(axis, queries):
+    """`Ocean._lon` put a query in 0..360, which cut a store across 0 E in two: -0.5 and 359.5 are one place, and a mutant that wrapped to 0..360 held
+    the edge value for it. u is the longitude of the store's own axis here, so the answer is the place."""
+    o = object.__new__(O.Ocean)
+    x = np.asarray(axis)
+    o.axes = [O.Axis([0.0, 3600.0], "time"), O.Axis([0.0, 10.0], "depth"), O.Axis([-1.0, 1.0], "lat"), O.Axis(x, "lon")]
+    u = np.broadcast_to(x - 360.0 * (x > 180.0), (2, 2, 2, 3)).copy()                  # the longitude in -180..180
+    o.f = {"water_u": u, "water_v": np.zeros_like(u)}
+    o.src = "test store"
+    lon = np.array(queries)
+    got = o.current(lon, np.zeros(4), np.full(4, -5.0), 0.0).value[:, 0]
+    want = np.array([-0.5, -0.5, 0.5, 0.5])
+    assert np.allclose(got, want) and o.inside(lon, 0.0, 0.0).all()
+    assert not o.inside(np.array([1.5, 358.5]), 0.0, 0.0).any()

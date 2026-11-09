@@ -2,6 +2,7 @@
 import email.utils
 import hashlib
 import ssl
+import struct
 import urllib.parse
 
 import netCDF4
@@ -542,8 +543,11 @@ def test_read_bad_rows(cdf, rows):
 def test_record_index_past_the_end(cdf):
     src, _ = cdf
     hdr = remote.cdf1_header(src)
-    with pytest.raises((ConnectionError, FileNotFoundError)):
+    with pytest.raises(IndexError, match=rf"r1: record {NREC + 5} outside 0..{NREC}"):
         remote.cdf1_read(src, "r1", hdr, rec=NREC + 5)
+    with pytest.raises(IndexError, match="r1: record -1 outside"):                       # was OSError Errno 22 from f.seek(-n) (round 13, M-15)
+        remote.cdf1_read(src, "r1", hdr, rec=-1)
+    assert remote.cdf1_read(src, "s", hdr, rec=-1).shape == (3, 5)                      # a non-record variable has no record to be outside of
 
 
 def test_a_single_narrow_record_variable_is_not_padded(tmp_path, server):
@@ -725,3 +729,124 @@ def test_r12_l0_m25_a_server_that_states_no_total_is_a_connection_error_where_th
     monkeypatch.chdir(tmp_path)
     with pytest.raises(ConnectionError, match="does not state the file size"):
         call(server.put("a", b"x" * 50))
+
+
+# ------------------------------------------------------------------ round 13, batch C: damaged headers, local names starting "http", empty files
+
+def i4(*v):
+    return b"".join(struct.pack(">i", x) for x in v)
+
+
+def nm(text):
+    raw = text.encode()
+    return i4(len(raw)) + raw + bytes(-len(raw) % 4)
+
+
+def classic(dims=(("x", 3),), variables=(("v", (0,), 5, 12, 100),), nrec=0, dim_tag=10, var_tag=11):
+    """A CDF-1 header by hand: dims [(name, size)], variables [(name, dim ids, type code, vsize, begin)], no global attributes."""
+    b = b"CDF\x01" + i4(nrec) + (i4(dim_tag, len(dims)) if dims else i4(0, 0)) + b"".join(nm(n) + i4(s) for n, s in dims) + i4(0, 0)
+    b += i4(var_tag, len(variables)) if variables else i4(0, 0)
+    for name, ids, t, vsize, begin in variables:
+        b += nm(name) + i4(len(ids), *ids) + i4(0, 0) + i4(t) + struct.pack(">I", vsize % (1 << 32)) + i4(begin)
+    return b
+
+
+def parse(data):
+    return remote.parse_cdf1(lambda o, n: data[o:o + n])
+
+
+def test_r13_m15_a_good_hand_built_header_parses_and_a_variable_size_over_2_gib_is_not_damage():
+    hdr = parse(classic(variables=(("v", (0,), 5, 12, 100), ("F", (0,), 5, 2_434_000_000, 200))))
+    assert hdr[0] == {"x": 3} and hdr[2]["v"]["shape"] == [3] and hdr[2]["v"]["offset"] == 100
+    assert hdr[2]["F"]["offset"] == 200                                       # the 2.4 GB restart variable's size is unsigned in the file: not damage
+
+
+DAMAGED = {
+    "negative name length": (b"CDF\x01" + i4(0) + i4(10, 1) + i4(-8) + bytes(16), "a count of -8"),
+    "name length of 1 GiB": (b"CDF\x01" + i4(0) + i4(10, 1) + i4(1 << 30) + bytes(16), f"a field of {1 << 30} bytes"),
+    "name that is not UTF-8": (b"CDF\x01" + i4(0) + i4(10, 1) + i4(4) + b"\xff\xfe\xfd\xfc" + i4(3) + i4(0, 0, 0, 0), "not UTF-8"),
+    "negative dimension size": (classic(dims=(("x", -3),)), "a count of -3"),
+    "negative count": (b"CDF\x01" + i4(0) + i4(10, -2), "a count of -2"),
+    "dimension id out of range": (classic(variables=(("v", (0, 4), 5, 12, 100),)), "v: dimension id 4 of 1 dimensions"),
+    "negative dimension id": (classic(variables=(("v", (-1,), 5, 12, 100),)), "a count of -1"),
+    "type code 99": (classic(variables=(("v", (0,), 99, 12, 100),)), "type code 99"),
+    "a record variable with a streaming record count": (classic(dims=(("t", 0),), variables=(("v", (0,), 5, 12, 100),), nrec=-1), "shape [-1]"),
+    "negative offset": (classic(variables=(("v", (0,), 5, 12, -4),)), "offset -4"),
+    "dimension list with another tag": (classic(dim_tag=11), "list tag 11 (expected 10)"),
+    "variable list with a count and no tag": (classic(var_tag=0), "list tag 0 (expected 11)"),
+}
+
+
+@pytest.mark.parametrize("case", list(DAMAGED))
+def test_r13_m15_a_damaged_header_is_a_value_error_that_says_what(case):
+    data, why = DAMAGED[case]
+    with pytest.raises(ValueError, match="damaged NetCDF header") as e:
+        parse(data)
+    assert why in str(e.value)
+
+
+def test_r13_m15_a_header_that_ends_early_is_still_an_eof_error():
+    with pytest.raises(EOFError, match="header ends"):
+        parse(classic()[:-6])
+
+
+@pytest.mark.parametrize("remote_file", [False, True])
+def test_r13_m15_cdf1_header_names_the_file_of_a_damaged_header(tmp_path, server, remote_file):
+    data = DAMAGED["type code 99"][0]
+    src = server.put("bad.nc", data) if remote_file else str(tmp_path / "bad.nc")
+    if not remote_file:
+        (tmp_path / "bad.nc").write_bytes(data)
+    with pytest.raises(ValueError, match=r"bad\.nc: damaged NetCDF header: type code 99"):
+        remote.cdf1_header(src)
+
+
+def test_r13_m15_a_header_item_cap_is_far_above_the_longest_real_attribute(tmp_path):
+    """A global text attribute of 1 MiB parses (the real files' longest is a few kB); the cap only refuses lengths no header has."""
+    p = tmp_path / "long.nc"
+    with netCDF4.Dataset(p, "w", format="NETCDF3_CLASSIC") as nc:
+        nc.createDimension("x", 2)
+        nc.createVariable("v", "f4", ("x",)).long = "z" * (1 << 20)
+    assert len(remote.cdf1_header(p)[2]["v"]["attrs"]["long"]) == 1 << 20
+
+
+@pytest.mark.parametrize("path", ["httpx.nc", "http_cache/t.nc", "https-data.nc", "HTTPS_t.nc"])
+def test_r13_m16_a_local_file_whose_name_starts_with_http_is_read_from_disk(cdf_file, tmp_path, monkeypatch, path):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / path).parent.mkdir(exist_ok=True)
+    (tmp_path / path).write_bytes(cdf_file.read_bytes())
+    hdr = remote.cdf1_header(path)
+    assert hdr.ident is None
+    np.testing.assert_array_equal(remote.cdf1_read(path, "i", hdr), [-1, 0, 1 << 30])
+
+
+@pytest.mark.parametrize("url", ["http://h/x.nc", "https://h/x.nc", "HTTPS://h/x.nc"])
+def test_r13_m16_is_url_takes_the_scheme_not_the_first_four_letters(url):
+    assert remote._is_url(url) and not remote._is_url(url.replace("://", "_"))
+
+
+def test_r13_m18_a_file_of_0_bytes_is_empty_not_missing(server, tmp_path):
+    u = server.put("e", b"")
+    assert remote.size(u) == 0
+    f = remote.RemoteFile(u)
+    assert f.read() == b"" and f.seek(0, 2) == 0
+    p = remote.download(u, tmp_path / "e")
+    assert p.read_bytes() == b"" and not (tmp_path / "e.part").exists() and not (tmp_path / "e.part.id").exists()
+
+
+def test_r13_m18_an_empty_file_with_a_pinned_hash_is_checked_like_any_other(server, tmp_path):
+    u = server.put("e", b"")
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        remote.download(u, tmp_path / "e", "0" * 64, pin=True)
+    assert not (tmp_path / "e").exists()
+    assert remote.download(u, tmp_path / "e", hashlib.sha256(b"").hexdigest(), pin=True).read_bytes() == b""
+
+
+def test_r13_m18_a_missing_file_is_still_missing(server):
+    with pytest.raises(FileNotFoundError, match="HTTP 404"):
+        remote.size(server.url("nope"))
+
+
+def test_r13_m18_download_makes_the_destination_directory(server, tmp_path):
+    u = server.put("a", b"abc" * 100)
+    p = remote.download(u, tmp_path / "no" / "such" / "dir" / "a")
+    assert p.read_bytes() == b"abc" * 100 and list(p.parent.iterdir()) == [p]

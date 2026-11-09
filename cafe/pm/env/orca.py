@@ -245,10 +245,11 @@ def read_json(path: str | pathlib.Path) -> dict[str, Any] | None:
 
 
 def write_json(path: pathlib.Path, obj: Any, **kw: Any) -> None:
-    """`obj` as JSON in `path`, through a sibling temporary and os.replace: an ingest killed mid-write leaves the old file, never half of a new one."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(obj, **kw))
-    os.replace(tmp, path)
+    """`obj` as JSON in `path`, through a sibling temporary and os.replace: an ingest killed mid-write leaves the old file, never half of a new one.
+    The one writer is `config.write_json` (round 13, M-14: a copy here would keep any fix to it out of the ingest's manifests); imported here because
+    `config` pulls in scipy, which a plain ingest worker does not need until it writes."""
+    from ..config import write_json as shared
+    shared(path, obj, **kw)
 
 
 def ingest(t0: dt.datetime, t1: dt.datetime, box: Box, out: str | pathlib.Path, hours3d: Iterable[dt.datetime] = (), threads: int = 8,

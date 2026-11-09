@@ -206,7 +206,8 @@ def fake_files(monkeypatch, files):
 CPU_MAX = "/sys/fs/cgroup/cpu.max"
 
 
-@pytest.mark.parametrize("quota,want", [("200000 100000", 2), ("150000 100000", 1), ("max 100000", 8), ("800000 100000", 8), ("1600000 100000", 8)])
+@pytest.mark.parametrize("quota,want", [("200000 100000", 2), ("150000 100000", 1), ("50000 100000", 1), ("max 100000", 8), ("800000 100000", 8),
+                                        ("1600000 100000", 8)])
 def test_the_cgroup_quota_cuts_the_cpus_of_the_affinity_mask(monkeypatch, quota, want):
     """M-23: `docker --cpus 2` on an 8-CPU box is 2 workers; `quota // period` turned into `quota * period` gave 8 here and the old test still passed."""
     monkeypatch.delenv("CAFE_WORKERS")
@@ -327,6 +328,7 @@ def test_resize_lowers_the_limit_and_the_width_of_a_pool_that_has_not_started(mo
 
 @pytest.mark.parametrize("files,want", [({"cpu/cpu.cfs_quota_us": "800000", "cpu/cpu.cfs_period_us": "100000"}, 8),
                                        ({"cpu/cpu.cfs_quota_us": "150000", "cpu/cpu.cfs_period_us": "100000"}, 1),
+                                       ({"cpu/cpu.cfs_quota_us": "50000", "cpu/cpu.cfs_period_us": "100000"}, 1),     # --cpus 0.5: 1, not 0 (round 13, M-37)
                                        ({"cpu/cpu.cfs_quota_us": "-1", "cpu/cpu.cfs_period_us": "100000"}, 64),
                                        ({"cpu.max": "200000 100000", "cpu/cpu.cfs_quota_us": "800000", "cpu/cpu.cfs_period_us": "100000"}, 2),
                                        ({"cpu.max": "max 100000"}, 64), ({"cpu/cpu.cfs_quota_us": "x", "cpu/cpu.cfs_period_us": "100000"}, 64),
@@ -340,3 +342,24 @@ def test_the_cgroup_v1_cpu_quota_cuts_the_cpus_like_the_v2_one_does(monkeypatch,
     monkeypatch.setattr(par.os, "sched_getaffinity", lambda pid: set(range(64)))
     monkeypatch.setattr(par, "_cgroup_cpus", functools.partial(par._cgroup_cpus, str(tmp_path)))
     assert par.workers() == want
+
+
+def test_r13_m26_a_queued_tasks_adopted_files_live_until_its_result_is_back(monkeypatch):
+    """The docstring said a queued task's maps stay alive in the parent, but `Pool.submit` kept only the pickle, which names the files: `del a` and a
+    collection unlinked them before the worker (busy with two slow tasks) opened them, and `result()` raised FileNotFoundError."""
+    import time
+    monkeypatch.setenv("CAFE_WORKERS", "2")
+    a = par.adopt(np.ones(par.SHARE_MIN_BYTES // 8 + 1))
+    f = pathlib.Path(a.filename)
+    with par.Pool(2) as pool:
+        busy = [par.submit(time.sleep, 1.5), par.submit(time.sleep, 1.5)]
+        fut = par.submit(np.sum, a)                                  # queued behind the two sleeps
+        del a
+        gc.collect()
+        assert f.exists() and fut in pool.held                      # the task is queued or running: its arguments are held
+        assert fut.result() == par.SHARE_MIN_BYTES // 8 + 1
+        for b in busy:
+            b.result()
+    assert not pool.held                                             # released when the futures were done
+    gc.collect()
+    assert not f.exists()

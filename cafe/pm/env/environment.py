@@ -30,8 +30,41 @@ if TYPE_CHECKING:
 EPOCH = np.datetime64("1970-01-01T00:00:00", "s")
 
 
+FETCH_CMD = "python -m cafe.pm fetch --mission"           # the command that (re)builds a cache; `<mission file>` goes after it (there is no `cafe` script)
+
+
 def seconds(t64: ArrayLike) -> NDArray[np.float64]:
-    return (np.asarray(t64, "datetime64[s]") - EPOCH).astype("int64").astype(float)
+    """Datetime64 array -> float seconds since 1970. A NaT is a ValueError: it would be the int64 minimum, -9.2e18 s, a first time stamp that passes
+    for increasing (round 13, M-32)."""
+    t = np.asarray(t64, "datetime64[s]")
+    if np.isnat(t).any():
+        raise ValueError(f"{int(np.isnat(t).sum())} of {t.size} time stamps are NaT (not a time)")
+    return (t - EPOCH).astype("int64").astype(float)
+
+
+def _stamp(T: Any) -> str:
+    """A time for a message: 'YYYY-MM-DD HH:MM:SSZ', or the number when it is no time (NaN, infinity, 1e30), which `fromtimestamp` refuses (round 13, M-33)."""
+    try:
+        return f"{dt.datetime.fromtimestamp(T, dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z"
+    except (ValueError, OverflowError, OSError):
+        return f"{float(T):g} s"
+
+
+def _wrf_notes(a: Any) -> tuple[str, str]:
+    """(grid spacing in km as text, what the SST of this WRF file is) from the store's global attributes DX, SST_UPDATE and SIMULATION_START_DATE, which
+    `orca.wrf_grid` copies from the file: a coupled-SST file is not labelled frozen. An absent or unreadable attribute gives the text of the orca run
+    (12 km, frozen at 2023-03-01), the only data `orca.wrf_grid` accepts (round 13, M-30)."""
+    try:
+        km = f"{float(a['DX']) / 1000:g}"
+    except (KeyError, TypeError, ValueError):
+        km = "12"
+    try:
+        upd = int(a["SST_UPDATE"])
+    except (KeyError, TypeError, ValueError):
+        return km, "frozen at 2023-03-01: SST_UPDATE=0"
+    if upd:
+        return km, f"updated during the run: SST_UPDATE={upd}"
+    return km, f"frozen at {str(a.get('SIMULATION_START_DATE', '2023-03-01'))[:10]}: SST_UPDATE=0"
 
 
 def to_seconds(t: dt.datetime | str) -> float:
@@ -69,27 +102,37 @@ class GriddedEnv:
             except Exception as e:                                        # noqa: BLE001  any unreadable chunk or metadata file is the same advice
                 from ..config import ConfigError
                 raise ConfigError(f"environment cache file {store} cannot be read ({type(e).__name__}: {e}); delete {cache / 'orca'} and run "
-                                  f"`python -m cafe.pm fetch --mission ...` again: only that part is downloaded again") from e
+                                  f"`{FETCH_CMD} ...` again: only that part is downloaded again") from e
+
+        def damaged(store: str, e: ValueError) -> Exception:
+            from ..config import ConfigError
+            return ConfigError(f"environment cache file {cache / 'orca' / store}: {e} (a repeated, reversed or missing value); delete "
+                               f"{cache / 'orca'} and run `{FETCH_CMD} ...` again: only that part is downloaded again")
 
         def axis(x: Any, name: str, store: str) -> Axis:
             try:
                 return Axis(x, name)
-            except ValueError as e:                                       # a repeated, reversed or empty coordinate: the same advice as an unreadable file
-                from ..config import ConfigError
-                raise ConfigError(f"environment cache file {cache / 'orca' / store}: {e} (a repeated or reversed value); delete "
-                                  f"{cache / 'orca'} and run `python -m cafe.pm fetch --mission ...` again: only that part is downloaded again") from e
+            except ValueError as e:                                       # a repeated, reversed, empty or non-finite coordinate: as for an unreadable file
+                raise damaged(store, e) from e
+
+        def secs(x: Any, store: str) -> NDArray[np.float64]:
+            try:
+                return seconds(x)
+            except ValueError as e:                                       # a NaT stamp (round 13, M-32)
+                raise damaged(store, e) from e
 
         w = load(cache / "orca" / "wrf.zarr")
         u = load(cache / "orca" / "umwm.zarr")
-        self.wrf_src = f"WRF {w.attrs.get('TITLE', '').strip()} 12 km hourly ({w.attrs.get('source', '')})"
+        km, self.sst_note = _wrf_notes(w.attrs)
+        self.wrf_src = f"WRF {w.attrs.get('TITLE', '').strip()} {km} km hourly ({w.attrs.get('source', '')})"
         self.umwm_src = f"UMWM hourly ({u.attrs.get('source', '')})"
-        self.tw = axis(seconds(w.time.values), "time", "wrf.zarr")
+        self.tw = axis(secs(w.time.values, "wrf.zarr"), "time", "wrf.zarr")
         self.law, self.low = axis(w.lat.values, "lat", "wrf.zarr"), axis(w.lon.values, "lon", "wrf.zarr")
         self.W = {k: w[k].values.astype("f8") for k in w.data_vars if w[k].dims == ("time", "lat", "lon")}
         self.Wstatic = {k: w[k].values.astype("f8") for k in w.data_vars if w[k].dims == ("lat", "lon")}
         rain = self.W["RAINNC"] + self.W["RAINC"]
         self.W["rain_mm_h"] = rain_rate_nodes(rain, self.tw.x)
-        self.tu = axis(seconds(u.time.values), "time", "umwm.zarr")
+        self.tu = axis(secs(u.time.values, "umwm.zarr"), "time", "umwm.zarr")
         self.lau, self.lou = axis(u.lat.values, "lat", "umwm.zarr"), axis(u.lon.values, "lon", "umwm.zarr")
         sea = u["seamask"].values > 0
         self.sea = sea                                                    # UMWM sea nodes (lat, lon): ingest's NaN-in-sea-cells check reads it
@@ -103,13 +146,13 @@ class GriddedEnv:
         p3 = cache / "orca" / "wrf3d.zarr"
         if p3.exists():
             d3 = load(p3)
-            self.w3 = dict(t=seconds(d3.time.values), U=d3.U3.values.astype("f8"), V=d3.V3.values.astype("f8"),
+            self.w3 = dict(t=secs(d3.time.values, "wrf3d.zarr"), U=d3.U3.values.astype("f8"), V=d3.V3.values.astype("f8"),
                            Z=d3.Z3.values.astype("f8"))
         self.spec: dict[str, Any] | None = None
         ps = cache / "orca" / "umwmspec.zarr"
         if ps.exists():
             s = load(ps)
-            self.spec = dict(t=seconds(s.time.values), F=s.F.values, k=s.k.values, lon=s.plon.values, lat=s.plat.values,
+            self.spec = dict(t=secs(s.time.values, "umwmspec.zarr"), F=s.F.values, k=s.k.values, lon=s.plon.values, lat=s.plat.values,
                              f=s.f.values, th=s.th.values)
         self.ocean = ocean
         self.subgrid = subgrid
@@ -135,11 +178,9 @@ class GriddedEnv:
             bad = ~np.broadcast_to(inside, np.broadcast(lon, lat, t).shape)
             i = np.flatnonzero(bad)[0]
             L, A, T = (np.broadcast_to(np.asarray(x, float), bad.shape).ravel()[i] for x in (lon, lat, t))
-            raise OutsideData(f"{what}: ({L:.3f}, {A:.3f}) at {dt.datetime.fromtimestamp(T, dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z "
-                              f"is outside the ingested data (box {cv.box_words(bounds[2:4] + bounds[:2])}, "
-                              f"{dt.datetime.fromtimestamp(bounds[4], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z.."
-                              f"{dt.datetime.fromtimestamp(bounds[5], dt.timezone.utc):%Y-%m-%d %H:%M:%S}Z); "
-                              "re-run `cafe fetch` with a larger box or window")
+            raise OutsideData(f"{what}: ({L:.3f}, {A:.3f}) at {_stamp(T)} is outside the ingested data (box {cv.box_words(bounds[2:4] + bounds[:2])}, "
+                              f"{_stamp(bounds[4])}..{_stamp(bounds[5])}); "
+                              f"re-run `{FETCH_CMD} <mission file>` with a larger box or window")
 
     def _w(self, k: str, lon: Any, lat: Any, t: Any) -> Any:
         v, ins = interp(self.W[k], [self.tw, self.law, self.low], [t, lat, cv.wrap360(lon)])
@@ -200,10 +241,11 @@ class GriddedEnv:
     def air(self, lon: Any, lat: Any, t: Any) -> dict[str, Tagged]:
         s = self.sig
 
-        def tag(k: str, unit_sig: Any = None) -> Tagged:
-            return Tagged(self._w(k, lon, lat, t), f"{self.wrf_src} {k}", unit_sig)
+        def tag(k: str, unit_sig: Any = None, frac: bool = False) -> Tagged:
+            v = self._w(k, lon, lat, t)
+            return Tagged(v, f"{self.wrf_src} {k}", unit_sig * v if frac and unit_sig is not None else unit_sig)       # a fraction is of the value
 
-        a = dict(T2=tag("T2", s["t2_k"]), q2=tag("Q2", s["q2_frac"]), psfc=tag("PSFC", s["psfc_pa"]), swdown=tag("SWDOWN", s["swdown_frac"]),
+        a = dict(T2=tag("T2", s["t2_k"]), q2=tag("Q2", s["q2_frac"], True), psfc=tag("PSFC", s["psfc_pa"]), swdown=tag("SWDOWN", s["swdown_frac"], True),
                  glw=tag("GLW", s["glw_wm2"]), rain=Tagged(self._w("rain_mm_h", lon, lat, t), f"{self.wrf_src} d(RAINNC+RAINC)/dt", None),
                  ustar_wrf=tag("UST", None), pblh=tag("PBLH", None))
         if self.subgrid is not None:
@@ -313,7 +355,7 @@ class GriddedEnv:
 
     def current(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
         if self.ocean is None:
-            raise OutsideData("no ocean source loaded: run `cafe fetch` (GOFS 3.1 by default) or point ocean.source at the lab's HYCOM")
+            raise OutsideData(f"no ocean source loaded: run `{FETCH_CMD} <mission file>` (GOFS 3.1 by default) or point ocean.source at the lab's HYCOM")
         self._ocean_check("ocean current", lon, lat, t)
         v = self.ocean.current(lon, lat, z, t)
         if self.subgrid is not None:
@@ -341,5 +383,5 @@ class GriddedEnv:
         return Tagged(v, "UMWM depth (12 km)", None)
 
     def sst(self, lon: Any, lat: Any, t: Any) -> Tagged:
-        v = Tagged(self._w("SST", lon, lat, t), f"{self.wrf_src} SST (frozen at 2023-03-01: SST_UPDATE=0)", self.sig["sst_k"])
+        v = Tagged(self._w("SST", lon, lat, t), f"{self.wrf_src} SST ({self.sst_note})", self.sig["sst_k"])
         return self.subgrid.sst_extra(self, v, lon, lat, t) if self.subgrid is not None else v

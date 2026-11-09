@@ -8,7 +8,8 @@ parent has the jax CPU backend running, and a fork of a process with live XLA th
 directory otherwise, and returns the object with read-only memory maps of those files in their place: the demo's 9 GB environment is then in
 memory once, however many workers read it. A task's function and arguments travel as one pickle in which such a map is its file name and
 everything else is its value. A file's name is never reused, and the file goes when the last of the parent's maps of it does (an
-environment the pipeline rebuilds takes its files with it); a queued task's maps are alive in the parent until its result is back.
+environment the pipeline rebuilds takes its files with it); a queued task's maps are alive in the parent until its result is back (`Pool.submit` holds
+the task's arguments, not only their pickle, until its future is done).
 The pickles pass only between this process and the workers it spawned, never through a file another user can write."""
 from __future__ import annotations
 
@@ -214,6 +215,7 @@ class Pool:
     def __init__(self, n: int):
         self.n = max(1, int(n))
         self.ex: cf.ProcessPoolExecutor | None = None
+        self.held: dict[cf.Future[Any], tuple[Any, ...]] = {}              # a task's arguments until its future is done: only they keep the files
 
     def __enter__(self) -> Pool:
         global _active
@@ -233,7 +235,10 @@ class Pool:
         with _lock:
             if self.ex is None:
                 self.ex = cf.ProcessPoolExecutor(self.n, mp_context=mp.get_context("spawn"), initializer=_init)
-        return self.ex.submit(_run, blob)
+        fut = self.ex.submit(_run, blob)
+        self.held[fut] = args
+        fut.add_done_callback(lambda f: self.held.pop(f, None))
+        return fut
 
 
 def submit(fn: Callable[..., Any], *args: Any) -> cf.Future[Any]:

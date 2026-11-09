@@ -3,7 +3,7 @@
 Fallback order (first that works wins; what failed is kept in `Bathymetry.tried` and so reaches the report):
   1. GEBCO_2026 15 arc-second (BODC/GEBCO; 'elevation' [m, positive up], depth = -elevation, 0 on land), cut to the box without
      downloading the 7.5 GB global file: the file on CEDA is an uncompressed, contiguous int16 NetCDF-4, so one box row is one HTTP
-     byte range (about 8 kB for the 34 deg TEPEX-C box); `fetch_gebco` asks for the rows in parallel, hashes the result and caches
+     byte range (about 16 kB for the 34 deg TEPEX-C box: 8,160 int16 columns); `fetch_gebco` asks for the rows in parallel, hashes the result and caches
      it as a small .npz. GEBCO's own download app has no scriptable interface and its OPeNDAP link (data.ceda.ac.uk "extract subset")
      is a human page; NOAA's ERDDAP only hosts GEBCO_2020.
   2. HYCOM GOFS grid (the Zarr store of cafe.pm.env.hycom): the floor lies in [deepest valid level, next level), so the depth is the

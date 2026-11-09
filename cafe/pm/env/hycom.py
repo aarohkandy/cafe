@@ -328,9 +328,9 @@ def _sha(path: str | pathlib.Path) -> str:
 
 
 def _write_json(path: Any, obj: Any) -> None:
-    tmp = pathlib.Path(str(path) + ".tmp")
-    tmp.write_text(json.dumps(obj, indent=1, sort_keys=True))
-    os.replace(tmp, path)
+    """`obj` as JSON in `path` through `config.write_json`, the one writer (a temporary and os.replace; round 13, M-14)."""
+    from ..config import write_json
+    write_json(pathlib.Path(path), obj, indent=1, sort_keys=True)
 
 
 def _chunks(steps: Iterable[float], n: int) -> list[list[float]]:

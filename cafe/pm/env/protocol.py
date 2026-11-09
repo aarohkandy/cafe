@@ -10,7 +10,8 @@ Vectors come back with a trailing axis of 2 (east, north) or 3 (east, north, up)
     sound_speed(lon, lat, z, t) -> Tagged m/s
     depth(lon, lat)           -> Tagged m, positive, water depth at the point (0 on land)
     sst(lon, lat, t)          -> Tagged K
-    air(lon, lat, t)          -> dict of Tagged: T2 [K], q2 [kg/kg], psfc [Pa], swdown [W/m2], glw [W/m2], rain [mm/h], ustar [m/s], L [m]
+    air(lon, lat, t)          -> dict of Tagged: T2 [K], q2 [kg/kg], psfc [Pa], swdown [W/m2], glw [W/m2], rain [mm/h] always; ustar [m/s] and L [m] from
+                                 AnalyticEnv, and from GriddedEnv only with a SurfaceLayer sub-grid; GriddedEnv also always has ustar_wrf [m/s] and pblh [m]
     bounds                    -> (lon_min, lon_max, lat_min, lat_max, t_min, t_max); lon in [-180, 180)
 """
 from __future__ import annotations
@@ -46,7 +47,7 @@ def _profile(z: Any) -> Any:
 class AnalyticEnv:
     """Uniform (or simply varying) fields for unit tests: every value is a constructor argument.
 
-    current_profile(z) multiplies the surface current (default 1 above `ml_depth`, linear to 0 at 1000 m).
+    current_profile(z) multiplies the surface current (default: full strength at the surface, falling linearly to 0 at 1000 m depth).
     """
 
     def __init__(self, wind: ArrayLike = (5.0, 0.0), current: ArrayLike = (0.0, 0.0), hs: float = 1.0, tp: float = 8.0, wave_to: float = 90.0,
