@@ -34,6 +34,7 @@ from typing import Any
 
 from ..config import assumptions as _assumptions
 from . import conventions as cv, orca, remote
+from .environment import seconds
 from .hycom import box360
 
 BASE = "https://dods.ndbc.noaa.gov/thredds"
@@ -130,11 +131,20 @@ def _candidates(files: list[dict[str, Any]], t0: float, t1: float) -> list[dict[
     return out
 
 
+def _epoch(ds: Any, path: Any) -> Arr:
+    """The TIME of an open file as epoch seconds. A NaT is a ValueError naming the file, not the int64 minimum (-9.2e18 s) as a first time stamp (round 13,
+    M-32); `fetch_tao` then takes the file as unusable, as for a missing QC variable."""
+    try:
+        return seconds(ds.TIME.values)
+    except ValueError as e:
+        raise ValueError(f"{path}: TIME: {e}") from e
+
+
 def _coverage(path: Any) -> tuple[float, float]:
     """(first, last) TIME of a file as epoch seconds."""
     import xarray as xr
     with xr.open_dataset(path) as ds:
-        t = ds.TIME.values.astype("datetime64[s]").astype("int64").astype("float64")
+        t = _epoch(ds, path)
     return float(t[0]), float(t[-1])
 
 
@@ -164,7 +174,12 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
                 p.parent.mkdir(exist_ok=True)
                 was = old.get(key, {}).get("sha256")
                 remote.download(f["url"], p, was)                        # `was` keeps a file that still has it; a new upstream copy is taken, not refused
-                a, b = _coverage(p)
+                a: float | None
+                b: float | None
+                try:
+                    a, b = _coverage(p)
+                except ValueError:                                       # a damaged time axis: `_series` below says so, and the file is unusable
+                    a = b = None
                 now = remote.sha256(p)
                 if was and now != was:                                   # missing or damaged here, and upstream replaced it: say so (the wind prior can change)
                     man.setdefault("replaced", {})[key] = dict(old=was, new=now)
@@ -206,7 +221,7 @@ def _series(path: Any, var: str, mode: str, t0: float, t1: float) -> dict[str, A
     import xarray as xr
     names, qc_of = NC[var]
     with xr.open_dataset(path) as ds:
-        t = ds.TIME.values.astype("datetime64[s]").astype("int64").astype("float64")
+        t = _epoch(ds, path)
         vals = {n: ds[n].values.reshape(len(t), -1)[:, 0].astype(float) for n in names}
         if qc_of + "_QC" not in ds:      # no flags is no proof of good data: a dropped variable must not switch the filter off
             raise ValueError(f"{path}: variable {qc_of}_QC is missing, so no sample of {var} can be told good from bad; `fetch` skips such a file "
@@ -252,7 +267,7 @@ def wind_gap(out_dir: Any, name: str, t0: Any = None, t1: Any = None, man: dict[
             why.append(f"{label}: unusable, {man['unusable'][key]}")
             continue
         with xr.open_dataset(out / key) as ds:
-            t = ds.TIME.values.astype("datetime64[s]").astype("int64").astype("float64")
+            t = _epoch(ds, out / key)
             q = ds[NC["WIND"][1] + "_QC"].values.reshape(len(t), -1)[:, 0]
         flags = sorted({int(x) for x in q[(t >= a) & (t <= b)]})
         why.append(f"{label}: " + (f"QC flags {', '.join(map(str, flags))} in the window, none of the good ones {', '.join(map(str, GOOD[mode]))}"

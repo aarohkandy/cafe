@@ -1322,3 +1322,27 @@ def test_r12_l1_m24_the_box_refusals_of_hycom_label_the_edges(tmp_path):
     ds = xr.Dataset({"x": (("lat", "lon"), np.zeros((3, 3)))}, coords=dict(lat=[-1.0, 0.0, 1.0], lon=[179.0, 180.0, 181.0]))
     with pytest.raises(ValueError, match=r"no lab-HYCOM points inside the box \(lat 40 to 41, lon 10 to 11\)"):
         h._sub(ds, (40.0, 41.0, 10.0, 11.0))
+
+
+# ---- round 13 batch C, after the adversary: a NaT in a time coordinate was still written as -9.2e18 s, a finite "first time" the Axis check passes
+
+def _with_nat_first(src, dst):
+    import xarray as xr
+    with xr.open_dataset(src) as g:
+        f = g.load()
+    t = f.time.values.copy()
+    t[0] = np.datetime64("NaT")
+    f.assign_coords(time=t).to_netcdf(dst, encoding={"time": {"units": "seconds since 1970-01-01", "dtype": "float64", "_FillValue": -1.0}})
+    with xr.open_dataset(dst) as g:
+        assert np.isnat(g.time.values[0])                                       # the file the test is about: NaT first, as the reader sees it
+
+
+def test_r13_m32_a_lab_snapshot_with_a_nat_time_is_refused_not_stored_as_minus_9e18(fx, tmp_path):
+    d = _copies(fx, tmp_path / "lab", [(0, "snap_0.nc")])
+    _with_nat_first(d / "snap_0.nc", d / "snap_1.nc")
+    (d / "snap_0.nc").unlink()
+    assert h._snapshot_times(d / "snap_1.nc") == []                                            # the time pass leaves it to the reader to name
+    with pytest.raises(ValueError, match=r"1 of 1 time stamps are NaT"):
+        h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
+    assert not (tmp_path / "x.zarr").exists()
+

@@ -850,3 +850,70 @@ def test_r13_m18_download_makes_the_destination_directory(server, tmp_path):
     u = server.put("a", b"abc" * 100)
     p = remote.download(u, tmp_path / "no" / "such" / "dir" / "a")
     assert p.read_bytes() == b"abc" * 100 and list(p.parent.iterdir()) == [p]
+
+
+# ---- round 13 batch C, after the adversary's fuzz: a damaged size or count must be a ValueError at the header, not an OSError or an allocation at the read
+
+def two_records(vsize_b=20):
+    """A whole CDF-1 file by hand: two record variables of 5 floats a record, 3 records, and the vsize of the second as given."""
+    dims = (("t", 0), ("x", 5))
+    head = len(classic(dims=dims, variables=(("a", (0, 1), 5, 20, 0), ("b", (0, 1), 5, vsize_b, 0)), nrec=3))
+    begin = head
+    data = b"".join(struct.pack(">5f", *(np.arange(5) + 10 * r + 100 * k)) for r in range(3) for k in range(2))
+    return classic(dims=dims, variables=(("a", (0, 1), 5, 20, begin), ("b", (0, 1), 5, vsize_b, begin + 20)), nrec=3) + data
+
+
+def test_r13_m15_vsize_is_unsigned_so_a_record_size_cannot_go_negative(tmp_path):
+    good = tmp_path / "good.nc"
+    good.write_bytes(two_records())
+    hdr = remote.cdf1_header(good)
+    assert hdr[2]["b"]["recsize"] == 40
+    np.testing.assert_array_equal(remote.cdf1_read(good, "b", hdr, rec=2), np.arange(5) + 20 + 100)
+
+
+@pytest.mark.parametrize("remote_file", [False, True])
+def test_r13_m15_a_vsize_byte_damaged_to_0xff_is_a_value_error_at_the_header(tmp_path, server, remote_file):
+    """Fuzz at e557694: a vsize top byte set to 0xFF gave a negative record size, then `cdf1_read` raised OSError (Errno 22) on a negative seek."""
+    data = two_records(vsize_b=0xFF000000 | 20)
+    src = server.put("bad.nc", data) if remote_file else str(tmp_path / "bad.nc")
+    if not remote_file:
+        (tmp_path / "bad.nc").write_bytes(data)
+    why = r"bad\.nc: damaged NetCDF header: a.*its data would end at byte \d+, past the end of the file \(%d bytes\)" % len(data)
+    with pytest.raises(ValueError, match=why):
+        remote.cdf1_header(src)
+
+
+@pytest.mark.parametrize("remote_file", [False, True])
+def test_r13_m15_a_dimension_of_a_size_the_file_cannot_hold_is_a_value_error_at_the_header(tmp_path, server, remote_file):
+    """Fuzz at e557694: one dimension length byte damaged to 2,130,706,435; the header was accepted and `cdf1_read` tried to allocate the 21 GB."""
+    data = classic(dims=(("x", 50_000_000),), variables=(("v", (0,), 1, 50_000_000, 100),)) + bytes(60)
+    src = server.put("big.nc", data) if remote_file else str(tmp_path / "big.nc")
+    if not remote_file:
+        (tmp_path / "big.nc").write_bytes(data)
+    with pytest.raises(ValueError, match=r"big\.nc: damaged NetCDF header: v: its data would end at byte 50000100"):
+        remote.cdf1_header(src)
+
+
+def test_r13_m15_a_header_the_file_no_longer_fits_reads_what_is_there_and_no_more(tmp_path):
+    """The file shrank (or a header was built by hand) after the check: the read is a short read, and does not allocate what the header names."""
+    import tracemalloc
+    p = tmp_path / "t.nc"
+    p.write_bytes(two_records())
+    hdr = remote.cdf1_header(p)
+    hdr[2]["a"]["shape"] = [3, 100_000_000]                                   # 400 MB a record
+    tracemalloc.start()
+    try:
+        with pytest.raises(ConnectionError, match="short read"):
+            remote.cdf1_read(p, "a", hdr, rec=1)
+        assert tracemalloc.get_traced_memory()[1] < 50_000_000
+    finally:
+        tracemalloc.stop()
+
+
+def test_r13_m15_a_negative_offset_in_a_hand_built_header_is_a_value_error_not_an_os_error(tmp_path):
+    p = tmp_path / "t.nc"
+    p.write_bytes(two_records())
+    hdr = remote.cdf1_header(p)
+    hdr[2]["a"]["recsize"] = -16777168
+    with pytest.raises(ValueError, match=r"damaged NetCDF header: a: offset -\d+"):
+        remote.cdf1_read(p, "a", hdr, rec=2)

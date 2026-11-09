@@ -360,11 +360,12 @@ def parse_cdf1(fetch: Callable[[int, int], bytes]) -> Header:
         if any(i >= len(dims) for i in ids):
             raise _bad(f"{name}: dimension id {max(ids)} of {len(dims)} dimensions")
         atts = b.attrs()
-        t, vsize = b.type()[0], b.i4()
+        t = b.type()[0]
+        vsize = int(struct.unpack(">I", b.take(4))[0])                    # unsigned, as the format has it: the 2.4 GB restart F is -1860094976 signed
         begin = struct.unpack(">q" if off8 else ">i", b.take(8 if off8 else 4))[0]
         dn = [dims[i][0] for i in ids]
         shape = [nrec if dims[i][1] == 0 else dims[i][1] for i in ids]
-        if min(shape, default=0) < 0 or begin < 0:                       # not vsize: unsigned in the file (the 2.4 GB restart F is negative signed)
+        if min(shape, default=0) < 0 or begin < 0:
             raise _bad(f"{name}: shape {shape}, offset {begin}")
         out[name] = dict(dims=dn, dtype=_NC[t][0], shape=shape, offset=begin, vsize=vsize,
                          record=bool(ids) and dims[ids[0]][1] == 0, attrs=atts)
@@ -380,6 +381,16 @@ def parse_cdf1(fetch: Callable[[int, int], bytes]) -> Header:
 def _is_url(p: str) -> bool:
     """A remote file, as opposed to a local path that merely starts with "http" (httpx.nc, http_cache/...)."""
     return p.lower().startswith(("http://", "https://"))
+
+
+def _fits(hdr: Header, size: int) -> None:
+    """Every variable's data lies inside a file of `size` bytes, else the header is damaged: a length or a count with one byte changed names gigabytes that
+    `cdf1_read` would allocate or seek to (round 13, M-15 after the fuzz: MemoryError, OSError). The end of a record variable is its last record's."""
+    for name, v in hdr[2].items():
+        n = math.prod(v["shape"][1:] if v["record"] else v["shape"]) * np.dtype(v["dtype"]).itemsize
+        end = v["offset"] + n + (max(hdr[1] - 1, 0) * v["recsize"] if v["record"] else 0) if n else 0
+        if end > size:
+            raise _bad(f"{name}: its data would end at byte {end}, past the end of the file ({size} bytes)")
 
 
 def cdf1_header(url_or_path: str | pathlib.Path) -> Header:
@@ -401,9 +412,13 @@ def _header(p: str) -> Header:
             return body
         hdr = parse_cdf1(piece)
         hdr.ident = seen[0] if seen else None
+        if hdr.ident and hdr.ident[0] >= 0:                     # a total the server does not state is -1: nothing to compare with
+            _fits(hdr, hdr.ident[0])
         return hdr
     with open(p, "rb") as f:
-        return parse_cdf1(lambda o, n: (f.seek(o), f.read(n))[1])
+        hdr = parse_cdf1(lambda o, n: (f.seek(o), f.read(n))[1])
+        _fits(hdr, os.fstat(f.fileno()).st_size)
+        return hdr
 
 
 def cdf1_read(url_or_path: str | pathlib.Path, var: str, header: Header, rec: int = 0, rows: tuple[int, int] | None = None) -> NDArray[Any]:
@@ -424,13 +439,15 @@ def cdf1_read(url_or_path: str | pathlib.Path, var: str, header: Header, rec: in
         off += a * math.prod(shape[1:]) * item
         shape[0] = b - a
     nbytes = math.prod(shape) * item
+    if off < 0 or nbytes < 0:
+        raise _bad(f"{var}: offset {off}, {nbytes} bytes")
     p = str(url_or_path)
     if _is_url(p):
         raw = _read(p, off, off + nbytes - 1, timeout=300, ident=getattr(header, "ident", None))      # a header built by hand has none
     else:
         with open(p, "rb") as f:
             f.seek(off)
-            raw = f.read(nbytes)
+            raw = f.read(max(0, min(nbytes, os.fstat(f.fileno()).st_size - off)))  # never more than the file holds, whatever the header names
     if len(raw) != nbytes:
         raise ConnectionError(f"{p}:{var}: short read ({len(raw)} of {nbytes} bytes)")
     return np.frombuffer(raw, v["dtype"]).reshape(shape).astype(v["dtype"][1:] if v["dtype"][0] == ">" else v["dtype"])

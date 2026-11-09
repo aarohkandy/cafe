@@ -37,6 +37,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import conventions as cv, remote
+from .environment import seconds
 
 Box = tuple[float, float, float, float]
 NCSS = "https://ncss.hycom.org/thredds/ncss/grid/GLBy0.08/expt_93.0"
@@ -453,7 +454,7 @@ def assemble_gofs(pdir: Any, steps: Any, out_zarr: Any) -> pathlib.Path:
             raise ValueError(f"the {d} parts in {pdir} were cut to different boxes ({e}); delete {pdir} and run fetch again") from e
         per[d] = a.isel(time=~a.indexes["time"].duplicated())
     joined = xr.merge([per[d] for d in DATASETS], join="inner", compat="override")
-    t = joined.time.values.astype("datetime64[s]").astype("int64").astype("float64")
+    t = seconds(joined.time.values)
     missing = sorted(set(map(float, steps)) - set(map(float, t)))
     if missing:
         raise ValueError(f"{len(missing)} GOFS steps are missing from the parts (first {_iso(missing[0])}); rerun fetch_gofs")
@@ -567,7 +568,7 @@ def read_lab_netcdf(path: Any, temperature_kind: Any = None, depth: Any = None) 
             raise ValueError(f"{path}: depth must be positive down (found negative values); flip it before ingest")
         depth = zc if depth is None else depth
     depth = np.asarray(depth, float)
-    res = xr.Dataset(coords=dict(time=ds[dim["time"]].values.astype("datetime64[s]").astype("int64").astype("float64"),
+    res = xr.Dataset(coords=dict(time=seconds(ds[dim["time"]].values),
                                  depth=depth, lat=ds[dim["lat"]].values, lon=ds[dim["lon"]].values))
     for k, n in (("temp", "water_temp"), ("salt", "salinity"), ("u", "water_u"), ("v", "water_v")):
         a = ds[nm[k]].transpose(*order).values.astype(float)
@@ -760,7 +761,7 @@ def _snapshot_times(label: pathlib.Path) -> list[float]:
         if label.suffix == ".nc":
             with xr.open_dataset(label) as ds:
                 tc = _dim(ds[_pick(ds, "temp") or ""], "time") or ""
-                return [float(t) for t in ds[tc].values.astype("datetime64[s]").astype("int64")] if np.issubdtype(ds[tc].dtype, np.datetime64) else []
+                return [float(t) for t in seconds(ds[tc].values)] if np.issubdtype(ds[tc].dtype, np.datetime64) else []
         doc = read_b(str(label) + ".b")
         return [model_day_to_epoch(doc["fields"][0]["day"], doc["header"].get("yrflag", 3))]
     except (OSError, ValueError, KeyError, IndexError, TypeError):
