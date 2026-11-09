@@ -37,7 +37,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import conventions as cv, remote
-from .environment import seconds
+from .environment import FETCH_CMD, seconds
 
 Box = tuple[float, float, float, float]
 NCSS = "https://ncss.hycom.org/thredds/ncss/grid/GLBy0.08/expt_93.0"
@@ -245,7 +245,7 @@ def unreadable(path: Any, e: Exception, lab: bool | None = None) -> Exception:
         lab = not p.name.startswith("gofs")
     fix = (f"restore {p} from the lab's source (`python -m cafe.pm ingest-ocean --mission ... --path DIR --temperature-kind K` writes it); "
            "the pipeline cannot download it" if lab else
-           f"delete {p} and run `python -m cafe.pm fetch --mission ...` again: only that part is downloaded again")
+           f"delete {p} and run `{FETCH_CMD} ...` again: only that part is downloaded again")
     return ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); {fix}")
 
 

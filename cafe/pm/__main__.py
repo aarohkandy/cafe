@@ -20,7 +20,7 @@
 """
 from __future__ import annotations
 
-import argparse, os, pathlib, sys, webbrowser
+import argparse, os, pathlib, shlex, sys, webbrowser
 from typing import Any
 
 from . import acceptance, audit, budget, ledger, par, pipeline, report, stage1, whatif
@@ -40,7 +40,8 @@ def _seed(text: str) -> int:
     return n
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The command line's parser: `main` parses with it, and a test parses every `python -m cafe.pm <command>` the code prints as advice with it."""
     ap = argparse.ArgumentParser(prog="python -m cafe.pm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("run", "fetch", "validate", "plan"):
@@ -114,7 +115,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--golden-mission", default=None, metavar="NAME", help="with --update-golden: let this run's mission NAME replace a golden of another "
                    "mission, or a file that is not a golden (round 12, M-33)")
     p.add_argument("--skip-overnight", action="store_true", help="rehearsal only: the overnight check fails ('not run')")
-    a = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
     try:
         pipeline._offline()                                              # round 12, M-22: a bad CAFE_OFFLINE is exit 2 now, not only when a download is due
         if a.cmd == "acceptance":
@@ -207,7 +212,8 @@ def _report(run: pathlib.Path, open_it: bool) -> int:
     """Re-render a finished run's report; with the environment cache present the report also routes the reach map through its currents."""
     m = load_mission(run / "mission.yaml")
     if not (run / "plan.json").is_file():
-        raise ConfigError(f"{run}: no plan.json; this is not a finished run directory (run `python -m cafe.pm run` first)")
+        raise ConfigError(f"{run}: no plan.json; this is not a finished run directory "
+                          f"(run `python -m cafe.pm run --mission {shlex.quote(str(run / 'mission.yaml'))} --out {shlex.quote(str(run))}` first)")
     plan = _json_object(run / "plan.json")
     with _run_files(run):
         ctx = pipeline.Context(run / "mission.yaml", None, plan["gpus"], run, hash_budget=plan["budget"])         # no plan: no stage-1 memory model

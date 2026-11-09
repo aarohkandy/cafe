@@ -46,6 +46,17 @@ def has_commit(sha: Any) -> bool:
     return isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{7,}", sha) is not None
 
 
+def need_commit(doing: str) -> str:
+    """The commit a stored result is stamped with, or a ValueError that says `nothing was <doing>` when there is none (no git here and no $CAFE_GIT_SHA).
+    The one guard of every writer of a stamped result: `cafe.receipts.stamp` (so `python -m cafe.cfd` and the `stamp` command), `pm.receipts._save` (the slow
+    receipt groups), and the starts of the long runs that end in one, since a result that names no commit is refused by its readers (`has_commit`) and
+    the hours of work would be lost (look-ahead L0 after round 13, M-24)."""
+    sha = git_sha()
+    if not has_commit(sha):
+        raise ValueError(f"nothing was {doing}: no commit to name (no git here and $CAFE_GIT_SHA is not set); run it from the checkout, or through pm.sh")
+    return sha
+
+
 def git_dirty() -> bool | None:
     """Whether the checkout has uncommitted changes (`git status --porcelain` is not empty); for a copy synced without .git, $CAFE_GIT_DIRTY
     ("1" or "0", which pm.sh sets from the laptop's checkout); None when neither can say."""

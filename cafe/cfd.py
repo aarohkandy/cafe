@@ -641,9 +641,15 @@ def main(argv: list[str]) -> pathlib.Path:
     """python -m cafe.cfd external|incidence|surface SAMPLE WORKDIR [...]: smoke runs on the built-in samples. Writes WORKDIR/SAMPLE.WHAT.json, stamped
     (`cafe.receipts.stamp`): the file `cafe.receipts.cfd_receipts` reads counts only with a stamp from the code that is here (round 12, M-35)."""
     from cafe import geom, receipts
+    from cafe.pm.ledger import need_commit
     if len(argv) < 3 or argv[0] not in MAIN_WHATS or argv[1] not in geom.SAMPLES:       # any other WHAT used to run the free-surface study (round 13, M-9)
         print(f"usage: python -m cafe.cfd {'|'.join(MAIN_WHATS)} SAMPLE WORKDIR [...]; SAMPLE is one of {', '.join(geom.SAMPLES)}; got {argv}", file=sys.stderr)
         raise SystemExit(2)
+    try:
+        need_commit("run")                                                          # the stamp below needs a commit: say so before the hours of work, not after
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        raise SystemExit(2) from e
     what, sample, work = argv[0], argv[1], pathlib.Path(argv[2])
     work.mkdir(parents=True, exist_ok=True)
     s = geom.SAMPLES[sample]

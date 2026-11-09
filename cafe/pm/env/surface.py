@@ -225,12 +225,14 @@ class SurfaceLayer:
             d = xr.open_zarr(store).load()
         except Exception as e:                                         # noqa: BLE001  zarr/numcodecs raise RuntimeError, ValueError, OSError ...
             from ..config import ConfigError
+            from .environment import FETCH_CMD
             raise ConfigError(f"derived surface layer {store} cannot be read ({type(e).__name__}: {e}); delete {store} and run "
-                              "`python -m cafe.pm fetch --mission ...` again: only it is rebuilt") from e
+                              f"`{FETCH_CMD} ...` again: only it is rebuilt") from e
         self.t, self.la, self.lo = Axis(d.time.values, "time"), Axis(d.lat.values, "lat"), Axis(d.lon.values, "lon")
         if d.attrs.get("layout_version") != LAYOUT_VERSION:
+            from .environment import FETCH_CMD
             raise ValueError(f"{cache}/derived.zarr has layout {d.attrs.get('layout_version')}, this code needs {LAYOUT_VERSION}: "
-                             "delete it and run `python -m cafe.pm fetch` to rebuild it (about a minute)")
+                             f"delete it and run `{FETCH_CMD} <mission file>` to rebuild it (about a minute)")
         self.D = {k: d[k].values for k in ("ustar", "z0", "L", "gf", "dT_warm", "dz_warm", "since_rain_s", "last_rain_mm_h")}
         self.D["logz0"], self.D["invL"] = np.log(self.D.pop("z0")), 1.0 / self.D.pop("L")
         self.ts, self.las, self.los = Axis(d.time_u.values), Axis(d.lat_s.values), Axis(d.lon_s.values)

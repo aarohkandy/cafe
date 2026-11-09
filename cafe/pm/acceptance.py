@@ -2,8 +2,8 @@
 
 Every run is a fresh `python -m cafe.pm run` in its own process and its own run directory under DIR (`quick`, `quick_same`, `quick_seed`,
 `overnight`, and `4h` when N >= 1), timed by the wall clock against `budget.BUDGET_S`: quick 20 min, overnight 10 h, 4h 4 h. The limit counts the compute
-stages with a warm cache: a `python -m cafe.pm fetch` of the same mission runs first (a few seconds when the cache is warm; a cold network fetch is the
-separate step of RUNBOOK 4, whose duration depends on the lab's link, not on `--budget`) and only the `run` after it is timed. The checks:
+stages with a warm cache: a `python -m cafe.pm fetch --mission M` of the same mission runs first (a few seconds when the cache is warm; a cold network
+fetch is the separate step of RUNBOOK 4, whose duration depends on the lab's link, not on `--budget`) and only the `run` after it is timed. The checks:
 
     run_<name>        the fetch and the run exit 0, the run writes report/report.json and finishes within its budget (a run is killed at twice the
                       limit); the row shows the run's wall, the ingest wall and whether the fetch was cold
@@ -117,7 +117,7 @@ def claim_out(out: pathlib.Path, names: tuple[str, ...]) -> None:
         raise config.ConfigError(f"--out {out} holds {', '.join(held)}, and acceptance replaces those on every run; use an empty directory or a new one "
                                  f"(`make acceptance` uses runs/acceptance), or move them away and acceptance will mark {out} as its own")
     out.mkdir(parents=True, exist_ok=True)
-    (out / MARKER).write_text("made by `python -m cafe.pm acceptance`; the runs in this directory are replaced on every run\n")
+    (out / MARKER).write_text("made by `python -m cafe.pm acceptance --mission M --out DIR`; the runs in this directory are replaced on every run\n")
 
 
 def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.Path, seed: int | None = None,
@@ -328,20 +328,28 @@ def _allowed(notes: list[str]) -> str:
 _dirty = git_dirty                                      # the checkout's `git status`, else $CAFE_GIT_DIRTY (pm.sh sets it for a copy without .git), else None
 
 
+def checkout_problems(sha: Any, dirty: Any) -> list[str]:
+    """What the checkout a golden would be made from lacks to name its code: a commit (40 hex digits), and a tree known to be clean (dirty True, or unknown,
+    is a problem). `provenance_problems` reads a golden's `source` with it, and `--update-golden` asks it of this checkout before it runs and before it
+    writes, so the writer and the reader share one predicate (look-ahead L0 after round 13, M-7, M-24)."""
+    bad = []
+    if not re.fullmatch(r"[0-9a-f]{40}", str(sha if sha is not None else "")):
+        bad.append(f"git_sha {sha!r} is not a commit")
+    if dirty is True:
+        bad.append("made from a checkout with uncommitted changes, so its git sha does not describe the code")
+    elif dirty is None:
+        bad.append("cannot tell whether the checkout was clean (no .git and no $CAFE_GIT_DIRTY): run it from a git checkout or through ./pm.sh")
+    return bad
+
+
 def provenance_problems(source: Any) -> list[str]:
     """What a golden's `source` lacks to say where it came from: a commit, the code digest, a checkout known to be clean (unknown is a problem too),
     the reviewed run. A `source` that is not an object lacks all of it."""
     if not isinstance(source, dict):
         return [f"source is {type(source).__name__}, not an object"]
-    bad = []
-    if not re.fullmatch(r"[0-9a-f]{40}", str(source.get("git_sha", ""))):
-        bad.append(f"git_sha {source.get('git_sha')!r} is not a commit")
+    bad = checkout_problems(source.get("git_sha"), source.get("dirty"))
     if not source.get("code_digest"):
         bad.append("no code_digest")
-    if source.get("dirty") is True:
-        bad.append("made from a checkout with uncommitted changes, so its git sha does not describe the code")
-    elif source.get("dirty") is None:
-        bad.append("cannot tell whether the checkout was clean (no .git and no $CAFE_GIT_DIRTY): run it from a git checkout or through ./pm.sh")
     run = source.get("reviewed_run") or {}
     if not isinstance(run, dict) or not (run.get("name") and run.get("report_sha256")):
         bad.append("no reviewed_run (the name of the run it was made from and the sha-256 of its report.json)")
@@ -417,8 +425,12 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
     if update:
         if why := golden_refusal(golden, r["report"]["mission"]["name"], golden_mission):
             return _row("golden_diff", False, f"golden NOT updated: {why}", updated=False, refused=True, golden=str(golden))
+        rec = _golden_record(r, mission)
+        if prov := provenance_problems(rec["source"]):                  # the next check would refuse it, and this write would have replaced a working golden
+            return _row("golden_diff", False, f"golden NOT updated: it would have no provenance ({'; '.join(prov)}); {golden} is as it was",
+                        updated=False, refused=True, provenance=prov, golden=str(golden))
         golden.resolve().parent.mkdir(parents=True, exist_ok=True)
-        config.write_json(golden, _golden_record(r, mission), end="\n", indent=1, allow_nan=False)
+        config.write_json(golden, rec, end="\n", indent=1, allow_nan=False)
         return _row("golden_diff", False, f"golden {golden} UPDATED from this run, not compared: rerun without --update-golden to check against it",
                     updated=True)
     if golden.exists() and not golden.is_file():                       # a directory: no command can write it (`cmd` is None)
@@ -538,6 +550,11 @@ def run(mission: str, gpus: int, out: pathlib.Path, golden: pathlib.Path = GOLDE
     seed = int(spec["seed"])
     if update_golden and (why := golden_refusal(golden, spec["name"], golden_mission)):          # before hours of runs, not after (check_golden holds it too)
         row = _row("golden_diff", False, f"golden NOT updated, and no run started: {why}", updated=False, refused=True, golden=str(golden))
+        log(f"FAIL  {row['name']}: {row['detail']}")
+        return [row], 1
+    if update_golden and (prov := checkout_problems(git_sha(), _dirty())):                       # the same predicate as the write's, before the hours too
+        row = _row("golden_diff", False, f"golden NOT updated, and no run started: this checkout would give it no provenance ({'; '.join(prov)})",
+                   updated=False, refused=True, provenance=prov, golden=str(golden))
         log(f"FAIL  {row['name']}: {row['detail']}")
         return [row], 1
     refuse_wiped_mission(mission, out, RUN_NAMES)

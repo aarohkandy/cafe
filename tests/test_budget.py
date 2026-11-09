@@ -391,6 +391,26 @@ def test_stage3_plan_says_when_the_slice_is_too_small_to_run_and_when_the_fea_is
     assert set(tiny["cell_steps_per_part"].values()) == {0.0}
 
 
+def test_r13_l0_m38_the_planned_fea_floor_is_the_time_the_fea_child_takes_with_its_buckling_step():
+    """Batch E put the eigenvalue buckling step into the FEA child and a hard kill at its deadline, but `stage3.fea_min_s` (8 s) still priced a static solve on
+    a coarse mesh: a window with 8 s to 66 s of FEA reserve was planned as running and ended `killed`. Measured on the default Seaglider hull (h = L/20, 1408
+    elements; cafe-orca, proot, 2 CPUs; review/orca/PROBLEMS.md P-R13E1): 25 to 26 s static only, 65.7 to 67.3 s with the buckling step, 68.2 s for the
+    whole child."""
+    a = budget.stage3_assumptions()
+    p = budget.plan("ci", 0, MISSION, thr=thr(1.0, 0.01), vehicle_classes=CLASSES)
+    parts = budget.stage3_plan(p, CLASSES, a)["les_parts"]
+
+    def fea(reserve_s):                                                                          # the plan for a budget whose FEA reserve is reserve_s
+        slice_s = reserve_s / a["fea_reserve_frac"]
+        return budget.stage3_plan(dict(p, budget_s=slice_s * parts / p["shares"]["stage3"]), CLASSES, a)["fea"]
+    for reserve in (9.0, 26.0, 60.0, 65.7, 67.3):                                                # a reserve the child cannot finish in is planned out
+        assert fea(reserve)["reserve_s"] == pytest.approx(reserve) and not fea(reserve)["runs"], reserve
+    assert fea(68.2)["runs"] and fea(100.0)["runs"] and fea(68.2)["min_s"] == a["fea_min_s"] == 68.2
+    import yaml
+    raw = yaml.safe_load((pathlib.Path(budget.__file__).parents[2] / "config" / "assumptions.yaml").read_text())["stage3.fea_min_s"]
+    assert "buckling" in raw["why"] and "buckling" in raw["replace_with"]                      # it says which step it prices
+
+
 def test_stage3_plan_counts_free_surface_cases_that_fit_the_share_in_queue_order(monkeypatch):
     monkeypatch.setenv("CAFE_NPROC", "6")
     a = a3()

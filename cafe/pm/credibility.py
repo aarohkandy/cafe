@@ -28,8 +28,9 @@ from . import config, pipeline
 from .audit import ledger_problems
 from .ledger import STAGES, clean, has_commit
 from .physics import comms
-from .stage1 import NOT_EXERCISED
+from .stage1 import ACTS, NOT_EXERCISED, SUBGRID_SWITCHES, subgrid_switches
 from .stats import intervals, sampling
+from .vv import vv20_row
 
 ROOT = config.ROOT
 LEVELS = {0: "none: no evidence", 1: "weak: evidence exists, nothing checked it", 2: "moderate: checked by this tool's own self-checks",
@@ -306,16 +307,17 @@ def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None, e
 # ------------------------------------------------------------------------------------------------------ V&V 20 rows
 
 def _row(rid: str, case: str, source: str, S: float | None, D: float | None, u: tuple[float, float, float] | None, note: str) -> dict[str, Any]:
-    """One V&V 20 row. u = (u_num, u_input, u_D) or None when the run stored no uncertainty terms."""
+    """One V&V 20 row. u = (u_num, u_input, u_D) or None when the run stored no uncertainty terms. U_val, the ratio and `validated` are `vv.vv20_row`'s, not a
+    second copy of its arithmetic: a NaN term (a diverged grid's, from `dtmb5415.tabulate`) gives a NaN ratio and a row that is not validated, also when E is 0
+    (look-ahead L0 after round 13, M-27)."""
     r: dict[str, Any] = dict(id=rid, case=case, source=source, status="run" if S is not None else "not run", S=S, D=D, E=None, u_num=None, u_input=None,
                              u_D=None, u_val=None, ratio=None, validated=None, u_frac=None, informative=None, note=note)
     if S is not None and D is not None:
         r["E"] = S - D
-    if S is not None and u is not None:
+    if S is not None and D is not None and u is not None:
         r["u_num"], r["u_input"], r["u_D"] = u
-        r["u_val"] = math.sqrt(sum(x * x for x in u))
-        r["ratio"] = abs(r["E"]) / r["u_val"] if r["u_val"] > 0 else (0.0 if r["E"] == 0 else math.inf)
-        r["validated"] = r["ratio"] <= 1.0
+        v = vv20_row(case, S, D, *u)                                       # the one rule of U_val, the ratio and "validated" (a NaN is never validated)
+        r["u_val"], r["ratio"], r["validated"] = v.u_val, v.ratio, v.validated
         r["u_frac"] = r["u_val"] / abs(D) if D else math.inf                           # an uncertainty as large as the reference cannot validate it
         r["informative"] = r["u_frac"] < UVAL_MAX_FRAC
     return r
@@ -486,6 +488,15 @@ def flown_classes(mission: dict[str, Any] | None) -> set[str] | None:
     return out
 
 
+def _switches(mission: dict[str, Any] | None) -> dict[str, bool]:
+    """{switch: on} of the mission's `environment.subgrid` (`stage1.subgrid_switches`: on unless the mission says false); every switch on for a mission that
+    cannot be read, as `Facts.config_used` counts every item of one."""
+    try:
+        return {k: x["on"] for k, x in subgrid_switches(mission or {}).items()}
+    except (KeyError, TypeError, AttributeError):
+        return {k: True for k in SUBGRID_SWITCHES}
+
+
 def flown_radios(mission: dict[str, Any] | None) -> set[str]:
     """The entries of platforms/radios.yaml read by the UAS platforms of a mission (`comms.uas_radio_names`), whatever its links say."""
     out: set[str] = set()
@@ -502,7 +513,13 @@ def flown_radios(mission: dict[str, Any] | None) -> set[str]:
 # A class names the vehicles that read it, "a|b" either of two: stage-3 geometry and nominal windows (`pipeline_windows`, `budget.NOMINAL_WINDOW`), the
 # FEA (`budget.FEA_CLASSES`: the glider), the free-surface case (`budget.FS_PARTS`: the USV), the reach map (`report`: a glider or a USV, each at its
 # own speed) and the class priors (`stage1.priors_for`, the stage-1b sensitivity case). Only the Seaglider reads three of `stage3.glider.*` (round 13, M-3).
-CLASS_PRIORS = {"glider_speed_scale": "glider", "usv_vpp_bias": "usv", "usv_vpp_bias_brief": "usv", "bulk_stress_scale": "uas"}
+# The class priors are `stage1.ACTS` turned round (a prior is read by every class that lists it: battery_capacity_scale by the glider and the UAS, not the USV),
+# so a prior added there is counted here by the same rule (look-ahead L0 after round 13); usv_vpp_bias_brief is the stage-1b sensitivity case of usv_vpp_bias.
+CLASS_PRIORS = {k: "|".join(c for c, ks in ACTS.items() if k in ks) for ks in ACTS.values() for k in ks} | {"usv_vpp_bias_brief": "usv"}
+# The sub-grid parts a mission can switch off (`environment.subgrid.<name>: false`, `stage1.SUBGRID_SWITCHES`), by the word after `subgrid.`: the switch that
+# stops the code reading the keys of that part. The jet proxy is scaled by the warm layer's dT (zero with the layer off, `SurfaceLayer._dT_warm`). The gust
+# fronts are read by the UAS arm only (`stage1._uas_forcing`).
+SUBGRID_SWITCH = {"gust_front": "gust_fronts", "rain_lens": "rain_lens", "ocean_sde": "ocean_sde", "diurnal_jet": "warm_layer"}
 NOMINAL_CLASS = {"glider": "glider", "usv_hull": "usv", "usv_wing": "usv", "uas": "uas"}
 STAGE3_ONLY = {"fea_elements_along": "glider", "fea_reserve_frac": "glider", "fea_min_s": "glider", "fs": "usv"}      # by the word after `stage3.`
 SEAGLIDER_ONLY = {"glider.hull_diameter_m", "glider.wing_span_m", "glider.wing_chord_m"}                              # after `stage3.`
@@ -518,6 +535,8 @@ def config_scope(file: str, key: str) -> str:
         return "-"
     if parts[0] == "reach":
         return parts[2] if len(parts) > 2 else "glider|usv"                               # reach.speed_ms.<class>; the horizon and the allowance
+    if parts[:2] == ["subgrid", "gust_front"]:
+        return "uas"
     if parts[0] != "stage3":
         return ""
     if len(parts) > 2 and parts[1] == "nominal":
@@ -527,13 +546,24 @@ def config_scope(file: str, key: str) -> str:
     return parts[1] if len(parts) > 2 and parts[1] in VEHICLE_CLASSES else STAGE3_ONLY.get(parts[1], "")
 
 
+def config_switch(file: str, key: str) -> str:
+    """The `environment.subgrid` switch that must be on for a mission to read the item `key` of a config/ file ("" for an item no switch gates)."""
+    parts = key.split(".")
+    return SUBGRID_SWITCH.get(parts[1], "") if file.endswith("assumptions.yaml") and parts[0] == "subgrid" and len(parts) > 2 else ""
+
+
 def not_used_note(item: dict[str, Any]) -> str:
     """Why an item that is listed is not counted for this mission, for the pages (from its id: `assumptions.yaml:<key>`, `perturbations.yaml:<key>`, or
     `<platform file>:<path>`)."""
     file, _, key = item["id"].partition(":")
     if file not in ("assumptions.yaml", "perturbations.yaml"):
         return "platform not used by this mission"
-    return "read only by the DTMB validation study, not by a verdict" if config_scope(file, key) == "-" else "vehicle class not flown by this mission"
+    scope, sw = config_scope(file, key), config_switch(file, key)
+    if scope == "-":
+        return "read only by the DTMB validation study, not by a verdict"
+    if sw:                                                                     # a gust-front key is also a UAS one: either reason leaves it unread
+        return ("vehicle class not flown, or " if scope else "") + f"switched off by this mission (environment.subgrid.{sw}: false)"
+    return "vehicle class not flown by this mission"
 
 
 class Facts:
@@ -559,6 +589,7 @@ class Facts:
         uas_radios = flown_radios(self.mission)
         tables = ({"radios"} if kinds & {"rf", "iridium"} or uas_radios else set()) | ({"modems"} if "acoustic" in kinds else set())  # iridium: radios.yaml too
         self.flown = flown_classes(self.mission)
+        self.switches = _switches(self.mission)
         self.read = entries_read(links, root, uas_radios)
         self.used = {platform_key(r, root): platform_label(platform_key(r, root), platform_shipped(r, root)) for r in refs} | \
                     {t: platform_label(t, True) for t in tables}                                    # key -> the `file` of its items
@@ -572,7 +603,9 @@ class Facts:
     def config_used(self, file: str, key: str) -> bool:
         """Whether this mission reads the item `key` of the config/ file `file` (`config_scope`). Which keys a run read is not recorded, so this is the rule
         and not a trace; a mission whose vehicles cannot be read counts every item but the DTMB ones."""
-        scope = config_scope(file, key)
+        scope, sw = config_scope(file, key), config_switch(file, key)
+        if sw and not self.switches[sw]:
+            return False
         return scope == "" or (scope != "-" and (self.flown is None or not self.flown.isdisjoint(scope.split("|"))))
 
     def item_used(self, key: str, path: str) -> bool:

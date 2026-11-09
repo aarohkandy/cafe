@@ -60,22 +60,21 @@ def app_digest() -> str:
 
 def stamp(rec: dict[str, Any], later: bool = False) -> dict[str, Any]:
     """`rec` with the stamp a stored result must carry: what a program that writes one of these files adds before it writes it. `later`: the stamp is put
-    on a result that was made before, after somebody checked it (`stamp_file`), and the record says so."""
-    from cafe.pm.ledger import git_sha
-    out = dict(rec, date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), host=platform.node(), git_sha=git_sha(), code_digest=app_digest())
+    on a result that was made before, after somebody checked it (`stamp_file`), and the record says so. A stamp that names no commit is a ValueError
+    (`ledger.need_commit`): `stored` would not count it, so no writer may make one (`cfd.main` asks first, before its hours of work; round 13, M-24)."""
+    from cafe.pm.ledger import need_commit
+    out = dict(rec, date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), host=platform.node(), git_sha=need_commit("stamped"),
+               code_digest=app_digest())
     return dict(out, stamped_later=True) if later else out
 
 
 def stamp_file(path: str | pathlib.Path) -> pathlib.Path:
     """Stamp the JSON object in `path` as a result that somebody has checked (`stamp(..., later=True)`), through a temporary and os.replace. This says the
     code that is here stands behind the numbers, not that it made them: use it on a result you have looked at, never to make a stale one pass. A stamp
-    that names no commit is refused: `stored` would not count it (round 13, M-24)."""
+    that names no commit is refused by `stamp` (round 13, M-24)."""
     from cafe.pm.config import json_object, write_json
-    from cafe.pm.ledger import git_sha, has_commit
     p = pathlib.Path(path)
     rec = json_object(p, "nothing was stamped")
-    if not has_commit(git_sha()):
-        raise ValueError(f"{p}: nothing was stamped: no commit to name (no git here and $CAFE_GIT_SHA is not set); stamp it from the checkout, or through pm.sh")
     write_json(p, stamp(rec, later=True), indent=1)
     return p
 

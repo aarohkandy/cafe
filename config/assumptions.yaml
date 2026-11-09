@@ -306,10 +306,10 @@ stage3.fea_reserve_frac:
   why: "Share of a glider window's wall-clock slice held back for its FEA."
   replace_with: "Measured FEA time of the pressure hull at the mesh size used."
 stage3.fea_min_s:
-  value: 8.0
+  value: 68.2
   unit: "s"
-  why: "Least FEA reserve (stage3.fea_reserve_frac of a slice) at which the FEA of the pressure hull is planned to run at all (gmsh + ccx on a coarse shell mesh)."
-  replace_with: "Measured FEA time."
+  why: "Least FEA reserve (stage3.fea_reserve_frac of a slice) at which the FEA of the pressure hull is planned to run at all. It prices the whole FEA child (gmsh + ccx on a shell mesh, the static solve AND the eigenvalue buckling step that stage3/pipeline_windows.py _fea_child turns on, which is killed at its deadline): measured once on the default Seaglider hull (ellipsoid 1.8 m x 0.15 m, 7 mm Al, h = L/20, 1408 elements) at 68.2 s, of which the static solve alone is about 26 s (cafe-orca, proot, 2 CPUs, shared and loaded; review/orca/PROBLEMS.md P-R13E1). The earlier 8 s priced no run of either kind, so a window with 8 s to 66 s of reserve was planned as running and then reported killed."
+  replace_with: "Measured FEA time (static plus buckling) of the run's own hull, mesh size and machine; or a plan that prices the FEA in seconds as it prices the LES."
 stage3.chunk_steps:
   value: 100
   unit: "steps"

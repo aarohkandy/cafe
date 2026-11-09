@@ -428,6 +428,20 @@ def test_row_arithmetic_edge_cases():
     assert cr._clean({"x": [math.inf, math.nan, 1.0, "s", (2, 3.0)]}) == {"x": [None, None, 1.0, "s", [2, 3.0]]}
 
 
+def test_r13_l0_m27_a_nan_uncertainty_never_validates_a_row_in_the_credibility_table_either():
+    """Batch D made `vv20_row` give a NaN ratio and no validation for a NaN uncertainty (`dtmb5415.tabulate` emits one for a diverged grid); `_row` kept its own
+    copy of the arithmetic, which read `u_val > 0` as False and, with E exactly 0, gave ratio 0.0 and validated True."""
+    nan = math.nan
+    for S, D in ((4.02e-3, 4.02e-3), (4.1e-3, 4.02e-3)):                                            # E = 0, and E != 0 (ratio was inf, still not validated)
+        for u in ((nan, 1e-4, 1e-4), (1e-4, nan, 1e-4), (nan, nan, nan)):
+            r = cr._row("a", "c", "s", S, D, u, "")
+            assert math.isnan(r["ratio"]) and math.isnan(r["u_val"]) and r["validated"] is False and r["informative"] is False, (S, D, u)
+    from cafe.pm import vv                                                                          # and it is vv20_row's arithmetic on every ordinary row
+    for S, D, u in ((1.0, 1.0, (0.0, 0.0, 0.0)), (2.0, 1.0, (0.0, 0.0, 0.0)), (1.1, 1.0, (0.1, 0.0, 0.0)), (1.3, 1.0, (0.1, 0.1, 0.1))):
+        r, v = cr._row("a", "c", "s", S, D, u, ""), vv.vv20_row("c", S, D, *u)
+        assert (r["E"], r["u_val"], r["ratio"], r["validated"]) == (v.E, v.u_val, v.ratio, v.validated)
+
+
 def test_dtmb_not_importable_is_listed_as_not_run(data, monkeypatch):
     monkeypatch.setitem(sys.modules, "cafe.pm.dtmb5415", None)
     monkeypatch.delattr(cafe.pm, "dtmb5415", raising=False)
@@ -1498,6 +1512,49 @@ def test_r13_m3_a_one_uas_mission_counts_no_other_class_stage_3_key_and_no_dtmb_
     assert unused["assumptions.yaml:stage3.slocum.length_m"] == "vehicle class not flown by this mission"
     assert "(vehicle class not flown by this mission)" in html.unescape(cr._render(c))
     assert cr.not_used_note(dict(id="quad_uas.yaml:radio.x", file="platforms/quad_uas.yaml")) == "platform not used by this mission"
+
+
+def mission_with(run, keep, **subgrid):
+    """The demo's mission.yaml with only the vehicles `keep`, no links, and these `environment.subgrid` switches; -> the built report."""
+    m = demo_mission()
+    m["vehicles"] = [v for v in m["vehicles"] if v["id"] in keep]
+    m["links"] = []
+    m["environment"]["subgrid"].update(subgrid)
+    (run / "mission.yaml").write_text(yaml.safe_dump(m, sort_keys=False))
+    return cr.build(run, REAL, run.parent / "data")
+
+
+@pytest.mark.parametrize("vehicle, cls", [("glider_eq", "glider"), ("usv", "usv"), ("uas", "uas")])
+def test_r13_l0_the_priors_a_one_class_mission_counts_as_used_are_the_forcing_and_what_the_class_acts_on(run, data, vehicle, cls):
+    """`stage1.priors_for` always samples `battery_capacity_scale`, but only `_run_glider` and `_run_uas` read it (`stage1.ACTS`): a USV-only mission listed an
+    assumed +-5 % prior that none of its members read. The two other keys of perturbations.yaml are not in FORCING: the current's correlation length (read by
+    every perturbed environment) and the USV's brief prior (the stage-1b sensitivity case of `usv_vpp_bias`)."""
+    from cafe.pm import stage1
+    got = used_of(mission_with(run, {vehicle}), "config/perturbations.yaml")
+    assert got == set(stage1.FORCING) | set(stage1.ACTS[cls]) | {"current_correlation_length"} | ({"usv_vpp_bias_brief"} if cls == "usv" else set())
+    assert ("battery_capacity_scale" in got) is (cls != "usv")
+    assert cr.config_scope("config/perturbations.yaml", "battery_capacity_scale") == "glider|uas"
+
+
+def test_r13_l0_a_sub_grid_part_the_mission_switches_off_is_not_counted_as_used(run, data):
+    """`environment.subgrid.<name>: false` stops the code reading the keys of that part, but `config_used` counted every `subgrid.*` key as used by every
+    mission. The gust fronts are the UAS arm's alone; the jet proxy is scaled by the warm layer's dT (zero with the layer off)."""
+    parts = {"gust_front": "gust_fronts", "rain_lens": "rain_lens", "ocean_sde": "ocean_sde", "diurnal_jet": "warm_layer"}
+    file, flown = "config/assumptions.yaml", {"glider_eq", "usv", "uas"}
+    keys = {k for k in cr.config.assumptions() if k.startswith("subgrid.")}
+    assert {k.split(".")[1] for k in keys} == set(parts) | {"stability_ratio_clip"}
+    assert keys <= used_of(mission_with(run, flown), file)                                           # every switch on (the demo's): all used
+    for part, switch in parts.items():
+        c = mission_with(run, flown, **{switch: False})
+        mine = {k for k in keys if k.split(".")[1] == part}
+        assert mine and mine.isdisjoint(used_of(c, file)) and keys - mine <= used_of(c, file), part
+        notes = {cr.not_used_note(i) for i in c["assumed_inputs"] if i["id"].partition(":")[2] in mine}
+        assert len(notes) == 1 and f"switched off by this mission (environment.subgrid.{switch}: false)" in notes.pop(), part
+    usv = mission_with(run, {"usv"})                                                                 # all switches on, but no UAS: the gust fronts are not read
+    gust = {k for k in keys if k.startswith("subgrid.gust_front.")}
+    assert len(gust) == 8 and gust.isdisjoint(used_of(usv, file)) and {"subgrid.rain_lens.dT_K", "subgrid.ocean_sde.cell_deg"} <= used_of(usv, file)
+    assert gust <= used_of(mission_with(run, {"uas"}), file)
+    assert set(cr._switches(None).values()) == set(cr._switches(dict(environment=dict(subgrid=None))).values()) == {True}       # unreadable: every switch on
 
 
 def test_r13_m3_a_slocum_key_is_used_only_by_a_slocum_and_a_glider_key_by_any_glider(run, data):

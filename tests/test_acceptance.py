@@ -1002,10 +1002,14 @@ def test_without_a_git_checkout_the_golden_reads_pm_shs_dirty_flag(monkeypatch, 
     if flag is not None:
         monkeypatch.setenv("CAFE_GIT_DIRTY", flag)
     g = tmp_path / "g.json"
-    acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
+    done = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
+    assert acc._dirty() is dirty
+    if problems:                                                                       # a golden that the next check refuses is not written (look-ahead L0)
+        assert done["values"]["updated"] is False and done["values"]["refused"] is True and not g.exists()
+        return
     src = json.loads(g.read_text())["source"]
     assert src["dirty"] is dirty and len(acc.provenance_problems(src)) == problems
-    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["ok"] is (problems == 0)
+    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["ok"] is True
 
 
 def test_an_unprovenanced_golden_fails_and_names_the_command_that_writes_a_new_one(tmp_path, monkeypatch):
@@ -1395,6 +1399,30 @@ def test_r13_m7_the_command_stored_in_a_golden_is_the_printed_one_without_the_ma
     assert printed == shlex.split(stored) + ["--out", str(tmp_path / "acc_golden"), "--golden", str(g)]     # the same builder: the stored one is its prefix
     shipped = json.loads((ROOT / "tests" / "golden" / "tepex_c_demo_quick.json").read_text())["command"]
     assert shipped == acc._base_command("missions/tepex_c_demo.yaml", 0)                              # the text a re-mint writes is the text that is shipped
+
+
+@pytest.mark.parametrize("sha, dirty, words", [("none", False, "git_sha 'none' is not a commit"), (SHA, True, "uncommitted changes"),
+                                                (SHA, None, "cannot tell whether the checkout was clean"),
+                                                ("abc1234", False, "git_sha 'abc1234' is not a commit")])
+def test_r13_l0_update_golden_will_not_write_a_golden_the_next_check_refuses_over_a_working_one(tmp_path, monkeypatch, sha, dirty, words):
+    """Round 13, M-7 and M-24 made the reader (`provenance_problems`) refuse a golden that names no commit or a dirty or unknown tree, but the writer never
+    asked: a checkout with no .git and no $CAFE_GIT_SHA / $CAFE_GIT_DIRTY replaced the working golden with one that said 'UPDATED' and failed at the next check.
+    The writer and the run's start ask the same predicate (`checkout_problems`)."""
+    g = tmp_path / "g.json"
+    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)["values"]["updated"]        # a working golden, written from a clean commit
+    before = g.read_bytes()
+    monkeypatch.setattr(acc, "git_sha", lambda: sha)
+    monkeypatch.setattr(acc, "_dirty", lambda: dirty)
+    done = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
+    assert not done["ok"] and done["values"]["updated"] is False and done["values"]["refused"] is True and "golden NOT updated" in done["detail"]
+    assert words in done["detail"] and words in " ".join(done["values"]["provenance"]) and g.read_bytes() == before
+    assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["ok"]                      # the working golden still checks
+    monkeypatch.setattr(acc, "run_one", lambda *a, **k: pytest.fail("a run started"))                   # and the same refusal comes before the first long run
+    log = []
+    new = tmp_path / "new.json"                                                                           # (no golden there: only the provenance can refuse)
+    rows, rc = acc.run(MISSION, 0, tmp_path / "o", new, update_golden=True, log=log.append)
+    assert rc == 1 and [r["name"] for r in rows] == ["golden_diff"] and "no run started" in rows[0]["detail"] and words in rows[0]["detail"]
+    assert log[0].startswith("FAIL  golden_diff") and g.read_bytes() == before and not (tmp_path / "o").exists() and not new.exists()
 
 
 def test_r13_m17_a_golden_path_no_flag_can_make_writable_is_refused_before_any_run_and_advice_never_names_a_flag_that_cannot_help(tmp_path, monkeypatch):

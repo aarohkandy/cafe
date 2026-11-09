@@ -1453,3 +1453,68 @@ def test_r12_l0_m7_the_stage1_command_prints_such_an_error_as_it_is_not_as_a_dam
     monkeypatch.setattr(stage1, "sensitivity_case", lambda *a, **k: (_ for _ in ()).throw(make()))
     assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path)]) == 2
     assert capsys.readouterr().err == f"error: {make()}\n"
+
+
+def advised_commands():
+    """[(file:line, command text, argv)] for every `python -m cafe.pm <command> ...` in a string of cafe/ that a person is told to run: the strings of the code,
+    not its docstrings (prose about a command). An f-string's expressions, `...`, `<placeholder>` and a `[optional part]` stand for a value, as in a usage
+    line."""
+    import ast
+    import re
+    from cafe.pm.env.environment import FETCH_CMD
+    found = []
+    for f in sorted((config.ROOT / "cafe").rglob("*.py")):
+        tree = ast.parse(f.read_text())
+        skip = set()
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and n.body and isinstance(n.body[0], ast.Expr) \
+                    and isinstance(n.body[0].value, ast.Constant):
+                skip.add(id(n.body[0].value))                                         # a docstring
+            if isinstance(n, ast.JoinedStr):
+                skip.update(id(v) for v in n.values)                                  # the parts of an f-string are read as the one string below
+        for n in ast.walk(tree):
+            if id(n) in skip:
+                continue
+            if isinstance(n, ast.JoinedStr):
+                text = "".join(v.value if isinstance(v, ast.Constant) else "{}" for v in n.values)
+            elif isinstance(n, ast.Constant) and isinstance(n.value, str):
+                text = n.value
+            else:
+                continue
+            if text.strip() == FETCH_CMD:
+                continue                                                  # the prefix every fetch advice builds on: test_environment parses it with a mission
+            for m in re.finditer(r"python -m cafe\.pm ([a-z][a-z-]*)([^`\n]*)", text.replace("</code>", "`")):
+                rest = m.group(2)
+                while (cut := re.sub(r"\[[^\[\]]*\]", "", rest)) != rest:
+                    rest = cut
+                rest = re.sub(r"<[^>]*>|\{\}|\.\.\.", "X", rest)
+                found.append((f"{f.relative_to(config.ROOT)}:{n.lineno}", m.group(0), [m.group(1), *rest.split()]))
+    return found
+
+
+def test_r13_l0_every_command_the_code_tells_a_person_to_run_parses_with_the_real_parser():
+    """Round 13, M-23 fixed two messages that said `python -m cafe.pm fetch` (no `--mission`, which the parser requires, so the command exits 2) and left
+    three; the commands are hand-typed in several places. This parses every one the strings of cafe/ print, with `build_parser`."""
+    import contextlib
+    import io
+    import argparse
+    found = advised_commands()
+    ap = cli.build_parser()
+    for sub in (a for a in ap._actions if isinstance(a, argparse._SubParsersAction)):         # flags and what is required, not values: `K`, `{}` stand for one
+        for p in sub.choices.values():
+            for a in p._actions:
+                a.choices, a.type = None, None
+    assert {a[0] for _, _, a in found} >= {"fetch", "receipts", "ingest-ocean", "acceptance"} and len(found) >= 8      # it did scan
+    # `_base_command`: `update_command` adds --out to it, and the golden stores it as it is
+    bases = {("cafe/pm/acceptance.py", "python -m cafe.pm acceptance --mission {} --gpus {} --update-golden")}
+    bad = []
+    for where, text, argv in found:
+        if (where.split(":")[0], text.strip()) in bases:
+            continue
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                ap.parse_args(argv)
+        except SystemExit:
+            bad.append(f"{where}: `{text.strip()}`: {err.getvalue().strip().splitlines()[-1]}")
+    assert not bad, "\n".join(bad)

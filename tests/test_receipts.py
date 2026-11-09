@@ -940,13 +940,13 @@ def test_r13_m24_stamp_with_no_git_and_no_variable_is_none_and_stamp_file_refuse
         if value is not None:
             monkeypatch.setenv("CAFE_GIT_SHA", value)
         assert ledger.git_sha() == "none" and not ledger.has_commit(ledger.git_sha())
-    assert R.stamp(crosscheck())["git_sha"] == "none"
+    with pytest.raises(ValueError, match="nothing was stamped: no commit to name"):                 # the writer refuses too: it wrote git_sha "none"
+        R.stamp(crosscheck())
     f = tmp_path / "crosscheck.json"
     f.write_text(json.dumps(crosscheck()))
     with pytest.raises(ValueError, match="nothing was stamped: no commit to name"):
         R.stamp_file(f)
     assert json.loads(f.read_text()) == crosscheck()
-    assert run_crosscheck(tmp_path, R.stamp(crosscheck()))[0]["kind"] == "context"                  # and what it stamped before is no pass either
     monkeypatch.setenv("CAFE_GIT_SHA", "abcdef1")
     assert ledger.has_commit(ledger.git_sha()) and R.stored(f, "Emulator") is None and R.stamp_file(f) == f and R.stored(f, "Emulator")
 
@@ -958,6 +958,41 @@ def test_r13_m24_a_slow_group_stored_with_no_commit_is_not_counted(slowenv, monk
     R.OUT.clear()
     rows = run_group(monkeypatch, "pm.emulator", slow=False)
     assert [(r["id"], r["kind"]) for r in rows] == [("pm.emulator:not_run", "fail")] and "names no commit" in rows[0]["note"] and R.OUT == []
+
+
+def test_r13_l0_m24_every_writer_of_a_stamped_result_refuses_when_there_is_no_commit_and_the_long_ones_before_their_work(slowenv, monkeypatch, capsys):
+    """Round 13, M-24 made the readers (`stored`, `slow_group`) refuse a stamp that names no commit but the writers still wrote git_sha "none": a
+    `docker run ... python -m cafe.cfd surface wigley DIR` (about an hour) or `receipts --slow --only G` (up to 60 min) in a copy with no .git and no
+    $CAFE_GIT_SHA ended with a result that was not counted, and said nothing. They ask `ledger.need_commit` first; `stamp` and `_save` ask when they write."""
+    from cafe import cfd
+    from cafe.pm import ledger
+    monkeypatch.setattr(ledger, "ROOT", slowenv)                                                     # a copy with no .git
+    monkeypatch.delenv("CAFE_GIT_SHA", raising=False)
+    started = []
+
+    def study(*a, **k):
+        started.append(a)
+        return dict(rho=1.0, speeds={}, dirs={})
+    for fn in ("characterize_external", "characterize_incidence", "characterize_free_surface"):
+        monkeypatch.setattr(cfd, fn, study)
+    work = slowenv / "W"
+    with pytest.raises(SystemExit) as e:                                                             # cfd.main: before the study, the directory and the stl
+        cfd.main(["external", "torpedo", str(work)])
+    assert e.value.code == 2 and "nothing was run: no commit to name" in capsys.readouterr().err and started == [] and not work.exists()
+    with pytest.raises(SystemExit):
+        cfd.main(["external"])                                                                       # the usage line still comes first
+    assert "usage: python -m cafe.cfd" in capsys.readouterr().err
+    monkeypatch.setattr(pr, "jobs", lambda s=False: pytest.fail("a receipt group was started"))
+    lines = []
+    assert pr.run(slow=True, log=lines.append) == ([], 2) and "nothing was run: no commit to name" in lines[0]   # receipts --slow: before the first group
+    with pytest.raises(ValueError, match="nothing was stored: no commit to name"):                   # and the writer itself, for a caller that skips run()
+        pr._save("g", "pm", [], 1.0)
+    assert not (slowenv / "receipts").exists() and not list(slowenv.glob("**/*.json"))
+    monkeypatch.setenv("CAFE_GIT_SHA", "abcdef1")                                                    # with a commit all three write, and the readers count them
+    out = cfd.main(["external", "torpedo", str(work)])
+    assert started and R.stored(out, "CFD") is not None and json.loads(out.read_text())["git_sha"] == "abcdef1"
+    pr._save("g", "pm", [], 1.0)
+    assert json.loads(pr.store_path("g").read_text())["git_sha"] == "abcdef1"
 
 
 def test_r13_m14_the_stamp_command_reports_a_read_only_directory_and_keeps_a_symlink(tmp_path):

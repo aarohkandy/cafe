@@ -214,13 +214,14 @@ def _direction_receipts(label: str, cache: pathlib.Path, max_points: int = 800, 
 def wave_direction_receipts() -> None:
     """Direction receipts on the synthetic fixture always, and on the real mission cache when one is under $CAFE_DATA/cache."""
     from cafe import receipts as R
+    from .env.environment import FETCH_CMD
     with tempfile.TemporaryDirectory() as d:
         _direction_receipts("synthetic trade-wind fixture", synthetic_cache(d))
     real = sorted((data_root() / "cache").glob("*/orca/umwmspec.zarr"))
     if real:
         _direction_receipts(f"cache {real[0].parents[1].name}", real[0].parents[1])
     else:
-        R.context("Wave direction", f"no mission cache with restart spectra under {data_root() / 'cache'}", 0.0, 0.0, "", "python -m cafe.pm fetch --mission M")
+        R.context("Wave direction", f"no mission cache with restart spectra under {data_root() / 'cache'}", 0.0, 0.0, "", f"{FETCH_CMD} <mission file>")
 
 
 # ------------------------------------------------------------------ which receipts run
@@ -267,10 +268,13 @@ def code_digest(scope: str) -> str:
 
 
 def _save(group: str, scope: str, rows: list[dict[str, Any]], seconds: float) -> None:
-    from .ledger import git_sha
+    """Store a slow group's rows. A record that names no commit is refused here (`ledger.need_commit`): `slow_group` would not read it back (round 13, M-24);
+    `run` has already refused the whole slow run at its start, so this is the writer's own guard."""
+    from .ledger import need_commit
+    sha = need_commit("stored")
     p = store_path(group)
     p.parent.mkdir(parents=True, exist_ok=True)
-    rec = dict(group=group, scope=scope, code_digest=code_digest(scope), git_sha=git_sha(), date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    rec = dict(group=group, scope=scope, code_digest=code_digest(scope), git_sha=sha, date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                host=platform.node(), seconds=round(seconds), rows=rows)
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(rec, indent=1, default=str))
@@ -356,8 +360,9 @@ def _no_gebco(d: pathlib.Path) -> Callable[[], Any]:
     """The bathymetry receipts without a raster: the table says the raster checks were not run (round 7, M-39)."""
     def job() -> Any:
         from cafe import receipts as R
+        from .env.environment import FETCH_CMD
         R.context("Bathymetry", f"GEBCO cache not found under {d}/bathy: the bathymetry raster checks were not run", 0.0, 0.0, "",
-                  "python -m cafe.pm fetch")
+                  f"{FETCH_CMD} <mission file>")
         return importlib.import_module("cafe.pm.env.bathy").receipts(cache=None)
     return job
 
@@ -453,6 +458,13 @@ def run(slow: bool = False, only: list[str] | None = None, broken: str | pathlib
     first run without the overlay: the broken run counts only receipts that pass in that baseline and fail with the overlay."""
     from . import config
     from .env import conventions as cv
+    from .ledger import need_commit
+    if slow:                                                                    # the groups store their rows with the commit: say so now, not after 30 minutes
+        try:
+            need_commit("run")
+        except ValueError as e:
+            log(f"--slow: {e}")
+            return [], 2
     names = [n for n, _ in jobs(slow)]
     if only is not None and (bad := [o for o in only or [""] if not o or not any(o in n for n in names)]):   # M-12, M-31: each part, and an empty list
         log(f"no receipt group matches {', '.join(repr(o) for o in bad)}; the groups are: {', '.join(names)}")   # (an empty part is in every name: no part)

@@ -36,6 +36,7 @@ from scipy.stats import chi2
 from . import budget, ledger, par, stage1
 from .config import ConfigError, _yaml, assumptions, digest, env_sigmas, load_mission, utc, write_json
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
+from .env.environment import FETCH_CMD
 from .env.hycom import FetchError
 from .env.remote import sha256, tree_sha256
 from .ledger import STAGES, Ledger
@@ -164,7 +165,7 @@ class Context:
             if _derived_current(self.cache):
                 why = _derived_span_problem(self.cache, self.window_s())
                 if why:
-                    raise ConfigError(f"{self.cache}/derived.zarr: {why}; rerun `python -m cafe.pm fetch --mission {self.mission_path}` to rebuild it")
+                    raise ConfigError(f"{self.cache}/derived.zarr: {why}; rerun `{FETCH_CMD} {self.mission_path}` to rebuild it")
                 sub = surface.SurfaceLayer(self.cache, warm_layer=subgrid.switch(e, "warm_layer"), rain_lens=subgrid.switch(e, "rain_lens"))
             sig, fit = env_sigmas(), self.run_dir / "ingest" / "env_sigmas_fitted.json"
             if fit.is_file():
@@ -248,7 +249,7 @@ def _umwm_depth(cache: str | pathlib.Path) -> dict[str, NDArray[np.float64]] | N
         return dict(lon=u.lon.values, lat=u.lat.values, depth=np.where(u["seamask"].values > 0, u["depth"].values.astype("f8"), 0.0))
     except Exception as e:                                                # noqa: BLE001  any unreadable chunk or metadata file is the same advice
         raise ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); delete {pathlib.Path(cache) / 'orca'} and run "
-                          f"`python -m cafe.pm fetch --mission ...` again: only that part is downloaded again") from e
+                          f"`{FETCH_CMD} ...` again: only that part is downloaded again") from e
 
 
 def ocean(ctx: Context) -> Any:
@@ -280,7 +281,7 @@ def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], b
     the error. Returns whether the input is there."""
     note = what
     if not present():
-        cmd = hint or f"python -m cafe.pm fetch --mission {ctx.mission_path}"
+        cmd = hint or f"{FETCH_CMD} {ctx.mission_path}"
         if _offline():
             again = "run" if hint else "unset CAFE_OFFLINE and run"  # `fetch` is the command that was just run (or `run`, which fetches)
             note = f"{what} is not cached and CAFE_OFFLINE is set, so nothing is downloaded: {again} `{cmd}`"
@@ -1034,7 +1035,7 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
     if getattr(ctx.env, "subgrid", None) is None:
         if isinstance(ctx.env, GriddedEnv):                              # a gridded one has it unless missing or in another layout: other physics, not a pass
             L.check("derived_unchanged", False, note=f"{store} is missing or has another layout: ingest recorded it as an input of this run; "
-                                                     f"rerun `python -m cafe.pm fetch --mission {ctx.mission_path}` and the run")
+                                                     f"rerun `{FETCH_CMD} {ctx.mission_path}` and the run")
         return                                                           # an environment without the layer (the analytic ones) reads nothing derived
     if not rec.is_file():
         L.check("derived_unchanged", False, note=f"{rec} is missing: ingest did not record the surface layer this stage reads")
@@ -1043,7 +1044,7 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
     want = json.loads(rec.read_text())["store_sha256"]
     have = surface.store_sha256(store) if store.is_dir() else None
     L.check("derived_unchanged", have == want, value=have, limit=want, note=f"{store} hashes to what ingest recorded" if have == want
-            else f"{store} is not what ingest recorded (edited or rebuilt since): rerun `python -m cafe.pm fetch` and the run")
+            else f"{store} is not what ingest recorded (edited or rebuilt since): rerun `{FETCH_CMD} {ctx.mission_path}` and the run")
 
 
 def _covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime) -> bool:
