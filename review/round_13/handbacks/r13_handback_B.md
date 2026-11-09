@@ -58,3 +58,9 @@ Doc sentences: none.
 
 - Batch A (config.py): `config.write_json` takes no trailing-newline option, so I used a 10-line `_write_atomic` in acceptance.py. If A makes `write_json` accept a text/newline option (and resolves symlinks, M-14), acceptance can drop `_write_atomic` for it; not needed for correctness. The same bare `Path.write_text(json.dumps(...))` as M-17 remains at audit.py:433 and :490, credibility.py:973, report.py:1805 (A's files) and pipeline.py:266, :1402 and stage1.py:915 (outside the finding; E and A own them): root cause 4 of merged.md, listed here so F/lead can decide.
 - Batch F: the three DECISIONS rows above (numbers after the last), CHANGELOG lines, RUNBOOK.md:256 sentences, and DECISIONS 680's text ("the existing test that pins the prefix ... is unchanged" is no longer true of the test file, true of the prefix of the text).
+
+## Verified (orca, proot, 2 CPUs)
+
+- `tests/test_acceptance.py`, `tests/test_cli.py`, `tests/test_audit.py` whole: exit 0. `ruff check cafe/pm tests` and `mypy cafe/pm` (strict): clean. The 11 new test cases (`-k r13`) pass.
+- Each new test fails on a one-edit mutant of the final code (detached worktree, removed): no `--out` in the printed command (the m11 cases and the m7 test fail); `shlex.quote(mission)` dropped from `_base_command` (m11 mission-with-quote cases and m7); the is-a-file refusal removed (m17 refusal test); `_write_atomic` writing in place (m17 cut-write test); the directory/writable check removed (m17 refusal test); `--golden-mission` printed whenever the refusal is not None (m17 refusal test). On HEAD 810ecdb the tests cannot run as written (`update_command` has no `out` parameter), so the mutants are the failing-before evidence.
+- Orca cleanup: `pm_r13b`, `pm_r13b_mut` and the three `r13b_*` logs removed; nothing else touched there. The worktree `cafe-r13b-mut` is removed; `cafe-r13b` stays for the merge.
