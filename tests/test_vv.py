@@ -101,9 +101,10 @@ def test_observed_order_error_paths():
     for bad in [(0.0, 1.0), (1.0, 0.0), (math.nan, 1.0), (1.0, math.inf)]:
         with pytest.raises(ValueError):
             vv.observed_order(*bad, 2.0, 2.0)
-    with pytest.raises(RuntimeError, match="converge"):
-        vv.observed_order(1.0, 2.0, 0.5, 2.0)             # ratios below 1: not a refinement
+    with pytest.raises(ValueError, match="refinement ratios must be finite and > 1"):
+        vv.observed_order(1.0, 2.0, 0.5, 2.0)             # ratios below 1: not a refinement (round 13, M-27: was a RuntimeError "did not converge")
     assert vv.observed_order(1.0, 2.5, 1.5, 1.2, max_iter=1) == pytest.approx(vv.observed_order(1.0, 2.5, 1.5, 1.2), abs=1e-9)   # bracketing fallback
+    assert vv.observed_order(1.0, 2.5, 1e4, 1.2e4, max_iter=1) == pytest.approx(vv.observed_order(1.0, 2.5, 1e4, 1.2e4), abs=1e-9)    # the scan's grid overflows r^p
     with pytest.raises(RuntimeError, match="converge"):
         vv.observed_order(1.0, 1e-300, 1.5, 1.2)                # the order would be ~1700: out of range for both solvers
     with pytest.raises(ValueError, match="zero solution"):
@@ -140,6 +141,98 @@ def test_cfd_uses_the_cell_count_ratio():
     r = cfd.ratio_from_cells(330535, 150967)
     assert r == pytest.approx(vv.refinement_ratio(330535, 150967), rel=1e-12) and 1.2 < r < 1.4
     assert cfd.gci(100.0, 102.0, ratio=r) / cfd.gci(100.0, 102.0) > 1.8
+
+
+# ------------------------------------------------------------------ inputs the procedure cannot handle (round 13, M-27)
+
+@pytest.mark.parametrize("r21, r32", [(1.0, 2.0), (2.0, 1.0), (1.0, 1.0), (0.9, 2.0), (2.0, 0.5), (0.0, 2.0), (-2.0, 2.0), (math.nan, 2.0), (2.0, math.nan),
+                                      (math.inf, 2.0), (2.0, math.inf)])
+def test_celik_refuses_a_refinement_ratio_that_is_not_finite_and_above_1(r21, r32):
+    """r21 = 1 was a ZeroDivisionError (ln 1), 0.9 or 1.0 or NaN a misleading "did not converge" RuntimeError, 0 a math domain error."""
+    with pytest.raises(ValueError, match="refinement ratios must be finite and > 1"):
+        vv.celik_gci(1.0, 1.1, 1.15, r21, r32)
+    with pytest.raises(ValueError, match="refinement ratios must be finite and > 1"):
+        vv.observed_order(0.1, 0.05, r21, r32)
+
+
+def test_celik_still_accepts_a_ratio_below_1_3_and_flags_it():
+    g = vv.celik_gci(1.0, 1.01, 1.03, 1.05, 1.05)
+    assert g.r_ok is False and g.p > 0
+
+
+@pytest.mark.parametrize("kw", [dict(ratio=1.0), dict(ratio=0.5), dict(ratio=math.nan), dict(ratio=math.inf), dict(p=0.0), dict(p=-1.0), dict(p=math.nan),
+                                dict(p=math.inf)])
+def test_gci_two_grid_refuses_a_ratio_or_order_that_divides_by_zero_or_flips_the_sign(kw):
+    with pytest.raises(ValueError, match="two-grid GCI needs"):
+        vv.gci_two_grid(1.0, 1.1, **kw)
+
+
+def test_gci_two_grid_refuses_a_zero_fine_value_and_still_gives_roaches_number():
+    with pytest.raises(ValueError, match="non-zero fine value"):
+        vv.gci_two_grid(0.0, 1.1)
+    assert vv.gci_two_grid(2.0, 2.2, 2.0, 2.0, 3.0) == pytest.approx(3.0 * 0.1 / 3.0, rel=1e-12)          # Fs |e| / (r^p - 1) = 3 * 0.1 / 3
+
+
+@pytest.mark.parametrize("u", [(math.inf, 0.1, 0.1), (0.1, math.inf, 0.1), (0.1, 0.1, math.inf), (0.1, 0.1, -math.inf), (-0.1, 0.1, 0.1)])
+def test_vv20_row_refuses_an_infinite_or_negative_uncertainty(u):
+    """An infinite U_D gave u_val = inf, ratio 0 and "validated": any model agreed with an experiment known to nothing."""
+    with pytest.raises(ValueError, match="finite and not negative"):
+        vv.vv20_row("x", 1.0, 2.0, *u)
+
+
+def test_vv20_row_lets_nan_through_and_never_validates_it():
+    """A NaN uncertainty stays a row (a diverged solver's NaN in `dtmb5415.tabulate`) but is never "validated": with E = 0 its ratio was 0.0 and the row
+    passed; with E != 0 it was already not validated."""
+    for E in (0.0, 0.3):
+        row = vv.vv20_row("nan", 1.0, 1.0 - E, math.nan, 0.1, 0.1)
+        assert math.isnan(row.ratio) and row.validated is False
+
+
+def test_discretization_with_no_more_cells_on_the_finest_grid_is_the_spread_alone():
+    """Equal cell counts on the two finest grids: r21 = 1 was a ZeroDivisionError in `gci_two_grid`, in the fallback too."""
+    for values, cells in (([1.0, 1.02], [500.0, 500.0]), ([1.0, 1.02, 1.05], [500.0, 500.0, 100.0]), ([1.0, 1.02], [400.0, 500.0])):
+        u, r, note = dt.discretization(values, cells)
+        assert u == pytest.approx((max(values) - min(values)) / 2 / values[0], rel=1e-12) and r == pytest.approx((cells[0] / cells[1]) ** (1 / 3))
+        assert note.startswith("spread only") and "not more than" in note
+    u, _, note = dt.discretization([1.0, 1.02, 1.05], [800.0, 500.0, 500.0])                    # coarse pair equal: no observed order
+    assert note == "Fs = 3, p = 2 assumed: observed order undefined" and u == pytest.approx(
+        max(vv.gci_two_grid(1.0, 1.02, (800 / 500) ** (1 / 3)), 0.025))
+
+
+def test_tabulate_with_equal_cell_counts_on_two_grids_gives_a_finite_row(tmp_path):
+    cells = dict(CELLS, medium=CELLS["fine"])
+    rows = dt.tabulate(stored(tmp_path, {g: (lambda fr, h=SIZE[g]: dt.CT_REF[fr] * (1.01 + 0.004 * h ** 2)) for g in CELLS}, cells=cells))
+    assert len(rows) == 4 and all(math.isfinite(r.u_val) and r.u_num > 0 and "spread only" in r.case for r in rows.values())
+
+
+# ------------------------------------------------------------------ what test_vv.py pinned only through the code's own output (round 13, M-36)
+
+def test_celik_eq6_eq4_and_the_ext32_extrapolation_on_an_exact_power_law():
+    """phi = phi0 + c h^p: both Richardson values are phi0 exactly, so e_ext21 = c h1^p / phi0 (eq 6, denominator the extrapolated value, not phi1)."""
+    phi1, phi2, phi3, r21, r32 = power_law(2.0, 0.3, 1.7, [0.1, 0.15, 0.24])
+    g = vv.celik_gci(phi1, phi2, phi3, r21, r32)
+    assert g.p == pytest.approx(1.7, rel=1e-9)
+    assert g.phi_ext21 == pytest.approx(2.0, rel=1e-9) and g.phi_ext32 == pytest.approx(2.0, rel=1e-9)
+    assert g.eext21 == pytest.approx(0.3 * 0.1 ** 1.7 / 2.0, rel=1e-6)
+    assert g.eext21 != pytest.approx(0.3 * 0.1 ** 1.7 / phi1, rel=1e-3)                            # the phi1 denominator is the wrong one
+    assert g.phi_ext32 == pytest.approx((r32 ** g.p * phi2 - phi3) / (r32 ** g.p - 1), rel=1e-12)
+
+
+@pytest.mark.parametrize("r21, r32, ok", [(1.5, 1.2, False), (1.2, 1.5, False), (1.3, 1.3, True), (1.5, 1.5, True), (1.2, 1.2, False)])
+def test_r_ok_needs_both_ratios_at_1_3(r21, r32, ok):
+    phi1, phi2, phi3 = power_law(2.0, 0.3, 1.7, [0.1, 0.15, 0.24])[:3]
+    assert vv.celik_gci(phi1, phi2, phi3, r21, r32).r_ok is ok
+
+
+def test_vv20_row_is_validated_at_exactly_one():
+    row = vv.vv20_row("b", 5.0, 0.0, 3.0, 4.0, 0.0)                                                  # U_val = 5 = |E|
+    assert row.u_val == 5.0 and row.ratio == 1.0 and row.validated is True
+    assert vv.vv20_row("b", 5.0 + 1e-9, 0.0, 3.0, 4.0, 0.0).validated is False
+
+
+def test_grid_size_in_two_dimensions_is_the_square_root_of_the_mean_area():
+    assert vv.grid_size([4.0] * 3, dim=2) == 2.0
+    assert vv.grid_size([1.0, 9.0], dim=2) == pytest.approx(math.sqrt(5.0))
 
 
 # ------------------------------------------------------------------ V&V 20

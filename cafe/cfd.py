@@ -634,10 +634,16 @@ def characterize_free_surface(stl, draft, workdir, speeds, log=print):
     return fine
 
 
+MAIN_WHATS = ("external", "incidence", "surface")
+
+
 def main(argv: list[str]) -> pathlib.Path:
     """python -m cafe.cfd external|incidence|surface SAMPLE WORKDIR [...]: smoke runs on the built-in samples. Writes WORKDIR/SAMPLE.WHAT.json, stamped
     (`cafe.receipts.stamp`): the file `cafe.receipts.cfd_receipts` reads counts only with a stamp from the code that is here (round 12, M-35)."""
     from cafe import geom, receipts
+    if len(argv) < 3 or argv[0] not in MAIN_WHATS or argv[1] not in geom.SAMPLES:       # any other WHAT used to run the free-surface study (round 13, M-9)
+        print(f"usage: python -m cafe.cfd {'|'.join(MAIN_WHATS)} SAMPLE WORKDIR [...]; SAMPLE is one of {', '.join(geom.SAMPLES)}; got {argv}", file=sys.stderr)
+        raise SystemExit(2)
     what, sample, work = argv[0], argv[1], pathlib.Path(argv[2])
     work.mkdir(parents=True, exist_ok=True)
     s = geom.SAMPLES[sample]
@@ -652,7 +658,7 @@ def main(argv: list[str]) -> pathlib.Path:
         fluid, speed = ("air", 10.0) if s["kind"] == "uav" else ("water", 1.5)
         dirs = argv[3].split(",") if len(argv) > 3 else tuple(DIRS)
         r = characterize_external(stl, work / sample, fluid, speed, dirs=dirs)
-    else:
+    elif what == "surface":
         hs = geom.hydrostatics(m, s["spec"]["mass"])
         L = hs["lwl"]
         speeds = [float(fn * np.sqrt(9.81 * L)) for fn in (0.2, 0.3, 0.4)]

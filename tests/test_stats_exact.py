@@ -237,8 +237,82 @@ def test_load_perturbations_names_the_entry_and_the_missing_fields(tmp_path):
     p.write_text(yaml.safe_dump(dict(a=dict(value=1, unit="m", citation="x", kind="guess"))))
     with pytest.raises(ValueError, match=r"perturbation 'a': missing \[\] or kind not prior/assumed"):
         S.load_perturbations(p)
-    p.write_text(yaml.safe_dump(dict(a=dict(value=1, unit="m", citation="x", kind="assumed"), b=dict(value=2, unit="s", citation="y", kind="prior"))))
+    p.write_text(yaml.safe_dump(dict(a=dict(dist="normal", value=1, unit="m", citation="x", kind="assumed"),
+                                     b=dict(dist="normal", value=2, unit="s", citation="y", kind="prior"))))
     assert list(S.load_perturbations(p)) == ["a", "b"] and S.load_perturbations(str(p))["b"]["value"] == 2
+
+
+FIELDS = dict(unit="m", citation="c", kind="prior")
+
+
+@pytest.mark.parametrize("entry, words", [
+    (3, r"perturbation 'e': an entry is a mapping .*not 3"),
+    (dict(value=1.0), r"perturbation 'e': dist is None, not one of normal, lognormal, uniform, fixed"),
+    (dict(dist="weibull", value=1.0), r"perturbation 'e': dist is 'weibull'"),
+    (dict(dist="truncnorm", value=1.0, lo=-1, hi=1), r"perturbation 'e': dist is 'truncnorm'"),
+    (dict(dist="uniform", lo=2.0, hi=1.0, value=0.0), r"perturbation 'e': a uniform prior needs finite numbers lo < hi, got lo 2.0 and hi 1.0"),
+    (dict(dist="uniform", lo=1.0, hi=1.0, value=0.0), r"lo < hi, got lo 1.0 and hi 1.0"),
+    (dict(dist="uniform", hi=1.0, value=0.0), r"got lo None and hi 1.0"),
+    (dict(dist="uniform", lo=0.0, value=0.0), r"got lo 0.0 and hi None"),
+    (dict(dist="uniform", lo=float("nan"), hi=1.0, value=0.0), r"lo nan"),
+    (dict(dist="uniform", lo=0.0, hi=float("inf"), value=0.0), r"hi inf"),
+    (dict(dist="uniform", lo=True, hi=2.0, value=0.0), r"lo True"),
+    (dict(dist="uniform", lo="0", hi=2.0, value=0.0), r"lo '0'"),
+    (dict(dist="normal", value=True), r"perturbation 'e': the sd is True; a normal prior needs a finite sd > 0"),
+    (dict(dist="lognormal", value=True), r"the sd is True; a lognormal prior"),
+    (dict(dist="normal", value=10 ** 400), r"a normal prior needs a finite sd > 0"),
+    (dict(dist="normal", value=1.0, mean=float("nan")), r"perturbation 'e': the mean is nan; a normal prior needs a finite mean$"),
+    (dict(dist="normal", value=1.0, mean="0"), r"the mean is '0'"),
+    (dict(dist="lognormal", value=0.3, median=0.0), r"perturbation 'e': the median is 0.0; a lognormal prior needs a finite median > 0$"),
+    (dict(dist="lognormal", value=0.3, median=float("inf")), r"the median is inf"),
+])
+def test_one_check_refuses_every_entry_that_would_give_nan_members_or_a_traceback(tmp_path, entry, words):
+    """Round 13, M-28. These were an AttributeError, a KeyError, NaN members from `lhs` (a reversed uniform), a bool read as an sd of 1, or a
+    ZeroDivisionError; now a ValueError naming the entry, from `load_perturbations` and from `to_marginals` (a fitted prior bypasses the file)."""
+    with pytest.raises(ValueError, match=words):
+        S.check_entry("e", entry)
+    with pytest.raises(ValueError, match=words):
+        S.to_marginals({"e": entry}, ["e"])
+    if isinstance(entry, dict):
+        p = tmp_path / "p.yaml"
+        p.write_text(yaml.safe_dump(dict(good=dict(dist="fixed", value=0.0, **FIELDS), e=dict(entry, **FIELDS))))
+        with pytest.raises(ValueError, match=words):
+            S.load_perturbations(p)
+    else:
+        p = tmp_path / "p.yaml"
+        p.write_text(yaml.safe_dump(dict(e=entry)))
+        with pytest.raises(ValueError, match=words):
+            S.load_perturbations(p)
+
+
+def test_to_marginals_checks_every_entry_it_builds_by_default_and_only_the_named_ones_otherwise():
+    cfg = dict(ok=dict(dist="normal", value=1.0), bad=dict(dist="uniform", lo=2.0, hi=1.0))
+    with pytest.raises(ValueError, match="perturbation 'bad'"):
+        S.to_marginals(cfg)
+    assert list(S.to_marginals(cfg, ["ok"])) == ["ok"]
+    with pytest.raises(ValueError, match="perturbation 'nodist'"):
+        S.to_marginals(dict(nodist=dict(value=1.0)))
+
+
+@pytest.mark.parametrize("text, words", [("", r"p\.yaml: expected a mapping of perturbation entries, found nothing"),
+                                         ("{}", r"found nothing"),
+                                         ("- 1\n- 2\n", r"found list"),
+                                         ("foo: 3\n", r"perturbation 'foo': an entry is a mapping .*not 3")])
+def test_load_perturbations_refuses_an_empty_file_or_one_that_is_not_a_mapping_of_mappings(tmp_path, text, words):
+    p = tmp_path / "p.yaml"
+    p.write_text(text)
+    with pytest.raises(ValueError, match=words):
+        S.load_perturbations(p)
+
+
+def test_a_valid_uniform_with_a_nonzero_value_and_a_numpy_number_still_load_and_the_shipped_file_passes_unchanged():
+    S.check_entry("u", dict(dist="uniform", lo=np.float64(-1.0), hi=np.int64(2), value=5.0))                 # `value` is unused for a uniform: not checked
+    S.check_entry("n", dict(dist="normal", value=np.float64(2.0), mean=np.int64(-3)))
+    S.check_entry("f", dict(dist="fixed", value=0.0))
+    cfg = S.load_perturbations()
+    for k, e in cfg.items():
+        S.check_entry(k, e)
+    assert len(cfg) == 12 and sorted({e["dist"] for e in cfg.values()}) == ["fixed", "lognormal", "normal", "uniform"]
 
 
 def test_to_marginals_maps_value_to_sd_or_sigma_and_defaults_the_location():
@@ -489,6 +563,30 @@ def test_subset_simulation_with_an_event_that_is_not_rare_is_plain_monte_carlo()
 def test_subset_simulation_rounds_n_to_a_multiple_of_the_chain_count():
     r = rare.subset_simulation(lambda u: u[:, 0], 1, -50.0, n=107, p0=0.1, seed=2)      # round(10.7) = 11 chains of 107 // 11 = 9
     assert r["n_evals"] == 99
+
+
+def test_subset_simulation_uses_the_realised_level_probability_in_the_cov_and_the_product(monkeypatch):
+    """Round 13, M-34. n = 1000, p0 = 0.3 gives 300 chains of 3 = 900 samples, so the level probability is 300/900 = 1/3, not 0.3: the c.o.v. term
+    (1 - q)/(q n) used 0.3 (0.002593) while the probability used 1/3 (0.002222). Chains held constant and the chain correlation set to 0, so the
+    answer is a closed form: level 0 and the final level each add (2/3)/((1/3) 900)."""
+    x = np.sort(np.random.default_rng(5).standard_normal((900, 1))[:, 0])[::-1]                  # the first draw of subset_simulation(seed=5): 900 samples
+    target = 0.5 * (x[99] + x[100])                                                              # between the 100th and 101st of the 300 seeds
+    monkeypatch.setattr(rare, "_gamma", lambda ind: 0.0)
+    monkeypatch.setattr(rare, "_mma", lambda u, g, b, fn, rng, length, width: (np.repeat(u[None], length, 0), np.repeat(g[None], length, 0)))
+    r = rare.subset_simulation(lambda u: u[:, 0], 1, target, n=1000, p0=0.3, seed=5)
+    assert r["converged"] is True and len(r["levels"]) == 2
+    assert r["p"] == pytest.approx(1 / 9, rel=1e-12)                                              # (300/900) * (300 of 900 samples at or above the target)
+    assert r["cov"] == pytest.approx(math.sqrt(2 * (2 / 3) / ((1 / 3) * 900)), rel=1e-12)
+    assert r["cov"] != pytest.approx(math.sqrt((1 - 0.3) / (0.3 * 900) + (2 / 3) / ((1 / 3) * 900)), rel=1e-3)      # the nominal-p0 term it replaced
+
+
+@pytest.mark.parametrize("n, p0, words", [(4, 0.1, "0 seeds and chains of length 0"), (10, 0.04, "0 seeds"), (10, 0.6, "6 seeds and chains of length 1"),
+                                          (5, 0.9, "4 seeds and chains of length 1")])
+def test_subset_simulation_refuses_an_n_and_p0_that_leave_no_seed_or_a_chain_of_one(n, p0, words):
+    """n = 4 with p0 = 0.1 rounds to no seed (ZeroDivisionError); a chain of length 1 is an IndexError on `order[nc]`."""
+    with pytest.raises(ValueError, match=words):
+        rare.subset_simulation(lambda u: u[:, 0], 1, 1.0, n=n, p0=p0)
+    assert rare.subset_simulation(lambda u: u[:, 0], 1, -50.0, n=10, p0=0.5)["n_evals"] == 10        # 5 seeds of chains of 2: the smallest that runs
 
 
 def test_subset_simulation_pinned_two_level_run():
