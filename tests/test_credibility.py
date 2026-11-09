@@ -519,7 +519,9 @@ def test_r12_m6_the_assumed_count_is_of_the_platforms_the_mission_uses_not_of_th
                             for f in sorted({i["file"] for i in c["assumed_inputs"]})}
     used, unused = {f: n for f, n in by_file(True).items() if n}, {f: n for f, n in by_file(False).items() if n}
     assert "platforms/quad_uas.yaml" in used and "config/assumptions.yaml" in used
-    assert set(unused) == {f"platforms/{s}.yaml" for s in ("saildrone_explorer", "seaglider", "slocum", "modems", "radios")}
+    platforms = {f"platforms/{s}.yaml" for s in ("saildrone_explorer", "seaglider", "slocum", "modems", "radios")}      # radios: all but rfd900x
+    assert set(unused) == platforms | {"config/assumptions.yaml", "config/perturbations.yaml"}
+    assert used["platforms/radios.yaml"] == 3                                  # the UAS's own radio (rfd900x), whatever the links say (round 13, M-2)
     assert len(c["assumed_inputs"]) > sum(used.values())                                   # the page still lists the whole catalogue
     a = report._assumed(c, dict(stage="credibility", ledger="l", receipt="r"))
     assert a["total"]["value"] == sum(used.values()) and a["catalogue"]["value"] == sum(used.values()) + sum(unused.values())
@@ -802,19 +804,22 @@ def used_ids(used, prefix):
     return {k.split(":", 1)[1] for k, u in used.items() if u and k.startswith(prefix)}
 
 
-def test_r12_l0_m6_an_iridium_only_mission_uses_the_sbd_inputs_and_nothing_else_of_radios_and_modems(run, data):
+UAS_RADIO = {f"radios.rfd900x.{k}" for k in ("gt_dbi", "gr_dbi", "misc_loss_db")}
+
+
+def test_r12_l0_m6_an_iridium_only_mission_uses_the_sbd_inputs_and_nothing_else_of_radios_and_modems_but_its_uas_radio(run, data):
     """Look-ahead L0 after round 12, M-6: `tables` knew only rf and acoustic, so the Iridium link's own assumptions (iridium.sbd.p_success decides its verdict)
     were "platform not used by this mission" and left out of "verdicts depend on them"; and every other radio and modem sat in the count beside them."""
     from cafe.pm import report
     used, c = link_used(run, data, [demo_link("iridium")])
     sbd = {f"iridium.sbd.{k}" for k in ("p_success", "max_attempts", "fail_cost_s", "session_setup_median_s", "session_setup_sigma")}
-    assert used_ids(used, "radios.yaml") == sbd and used_ids(used, "modems.yaml") == set()
-    assert {k for k, u in used.items() if not u} >= {"radios.yaml:iridium.rudics.p_success", "radios.yaml:radios.rfd900x.gt_dbi",
+    assert used_ids(used, "radios.yaml") == sbd | UAS_RADIO and used_ids(used, "modems.yaml") == set()      # the demo's UAS reads rfd900x (M-2)
+    assert {k for k, u in used.items() if not u} >= {"radios.yaml:iridium.rudics.p_success", "radios.yaml:radios.xbee_pro_24.gt_dbi",
                                                      "modems.yaml:modems.benthos_atm960"}
     a = report._assumed(c, dict(stage="credibility", ledger="l", receipt="r"))
     n_used = sum(1 for i in c["assumed_inputs"] if i["used"] and i["kind"] != "fitted")
     assert a["total"]["value"] == n_used and a["catalogue"]["value"] > n_used
-    assert a["by_file"]["platforms/radios.yaml"]["value"] == len(sbd) and a["not_used_by_file"]["platforms/radios.yaml"]["value"] > 0
+    assert a["by_file"]["platforms/radios.yaml"]["value"] == len(sbd) + 3 and a["not_used_by_file"]["platforms/radios.yaml"]["value"] > 0
     assert "platforms/modems.yaml" in a["not_used_by_file"] and "platforms/modems.yaml" not in a["by_file"]
 
 
@@ -829,12 +834,12 @@ def test_r12_l0_m6_the_demo_counts_the_radio_and_modem_it_flies_not_every_one_in
 def test_r12_l0_m6_a_modem_that_takes_its_anchor_from_another_counts_that_one_too_and_an_acoustic_link_reads_the_defaults(run, data):
     used, _ = link_used(run, data, [demo_link("acoustic", modem="whoi_micromodem_long_10k")])
     assert used_ids(used, "modems.yaml") == {"defaults.anchor_margin_db", "defaults.valid_range_factor", "modems.whoi_micromodem", "modems.benthos_atm960"}
-    assert used_ids(used, "radios.yaml") == set()
+    assert used_ids(used, "radios.yaml") == UAS_RADIO                                                  # the demo's UAS, with no rf link
     used, _ = link_used(run, data, [demo_link("acoustic", modem="Benthos_ATM960_HF")])             # any case, as the loader reads it
     assert "modems.benthos_atm960" in used_ids(used, "modems.yaml") and "modems.whoi_micromodem" not in used_ids(used, "modems.yaml")
     bad = [demo_link("acoustic", modem="no_such_modem"), demo_link("rf", radio="no_such_radio")]                     # a mission that cannot run: no crash
     used, _ = link_used(run, data, bad)
-    assert used_ids(used, "radios.yaml") == set() and used_ids(used, "modems.yaml") == {"defaults.anchor_margin_db", "defaults.valid_range_factor"}
+    assert used_ids(used, "radios.yaml") == UAS_RADIO and used_ids(used, "modems.yaml") == {"defaults.anchor_margin_db", "defaults.valid_range_factor"}
 
 
 def test_r12_l0_m6_the_input_pedigree_counts_the_same_inputs_as_the_assumed_count(run, data):
@@ -1432,3 +1437,103 @@ def test_r11_m6_a_calm_sea_holds_data_pedigree_at_one_by_an_explicit_rule_and_a_
     write_tao(run)
     f = factors(run)["data_pedigree"]
     assert f["level"] == 1 and any("was not assessable (all 40 sampled sea points have UMWM ust at or below 0.001 m/s (a calm)" in m for m in f["missing"])
+
+
+# ---- review round 13: M-2 (the UAS lost-link radio), M-3 (config/ items are not all used by every mission)
+
+def only(run, keep, links=()):
+    """The demo's run with only the vehicles `keep` and the links `links` in its mission.yaml; -> the built report."""
+    m = demo_mission()
+    m["vehicles"] = [v for v in m["vehicles"] if v["id"] in keep]
+    m["links"] = list(links)
+    (run / "mission.yaml").write_text(yaml.safe_dump(m, sort_keys=False))
+    return cr.build(run, REAL, run.parent / "data")
+
+
+def used_of(c, file):
+    return {i["id"].split(":", 1)[1] for i in c["assumed_inputs"] if i["file"] == file and i["used"]}
+
+
+def test_r13_m2_a_uas_mission_with_no_rf_link_still_counts_the_radio_its_lost_link_hook_reads(run, data):
+    """`stage1._uas_radio` reads radios.yaml `rfd900x` (gt_dbi, gr_dbi, misc_loss_db, all assumed) for every UAS sortie; the rule looked only at the links."""
+    assert used_of(only(run, {"uas"}), "platforms/radios.yaml") == UAS_RADIO
+    assert used_of(only(run, {"glider_eq"}), "platforms/radios.yaml") == set()                       # no UAS, no link: no radio
+    xbee = {f"radios.xbee_pro_24.{k}" for k in ("gt_dbi", "gr_dbi", "misc_loss_db")}
+    got = used_of(only(run, {"uas"}, [demo_link("rf", radio="xbee_pro_24")]), "platforms/radios.yaml")
+    assert got == UAS_RADIO | xbee                                                                   # the link's radio and the hook's, both
+    f = cr.Facts(run, REAL, data)
+    assert ("radios", "rfd900x") in f.read and "radios" in f.used
+    ev = next(x for x in only(run, {"uas"})["factors"] if x["factor"] == "input_pedigree")["evidence"][0]["what"]
+    assert "platform inputs sourced" in ev
+
+
+def test_r13_m2_the_lost_link_hook_and_the_report_choose_the_radio_in_one_place():
+    from cafe.pm import stage1
+    from cafe.pm.physics import comms
+    from cafe.pm.physics import uas
+    P = uas.load_platform("quad_uas")
+    assert comms.uas_radio_names(P) == ("rfd900x", "rfd900x") and comms.uas_radio_names(cr.config.load_platform("quad_uas")) == ("rfd900x", "rfd900x")
+    r = stage1._uas_radio(P)
+    base = comms._yaml("radios.yaml")["radios"]["rfd900x"]
+    assert (r["gt_dbi"], r["gr_dbi"], r["misc_loss_db"], r["cable_loss_db"]) == (base["gt_dbi"], base["gr_dbi"], base["misc_loss_db"], base["cable_loss_db"])
+    xb = dict(radio=dict(P["radio"], mine=dict(tx_power_dbm=20.0)))
+    assert comms.uas_radio_names(xb) == ("rfd900x", "rfd900x")                                       # the first block with a transmit power wins
+    first = dict(radio=dict(xbee_pro_24=dict(tx_power_dbm=18.0), rfd900x=dict(tx_power_dbm=27.0)))
+    assert comms.uas_radio_names(first) == ("xbee_pro_24", "xbee_pro_24")
+    assert comms.uas_radio_names(dict(radio=dict(other=dict(tx_power_dbm=1.0)))) == ("other", "rfd900x")      # no entry of that name: radios.yaml's rfd900x
+    assert comms.uas_radio_names(dict(radio=dict(pa=dict(note="no power")))) == ("rfd900x", "rfd900x")
+    assert comms.uas_radio_names({}) == ("rfd900x", "rfd900x")                                       # no radio block: no StopIteration
+
+
+def test_r13_m3_a_one_uas_mission_counts_no_other_class_stage_3_key_and_no_dtmb_key_as_used(run, data):
+    c = only(run, {"uas"})
+    cfg = used_of(c, "config/assumptions.yaml")
+    assert "stage3.uas.arm_length_m" in cfg and "stage3.nominal.uas" in cfg and "stage3.window_s" in cfg and "subgrid.diurnal_jet.dT_ref_K" in cfg
+    assert cfg.isdisjoint({"stage3.slocum.length_m", "stage3.glider.hull_diameter_m", "stage3.usv.hull_draft_m", "stage3.nominal.glider",
+                           "stage3.nominal.usv_hull", "stage3.nominal.usv_wing", "dtmb5415.u_D_rel", "dtmb5415.u_S_rel", "dtmb5415.u_nu_rel"})
+    pert = used_of(c, "config/perturbations.yaml")
+    assert "bulk_stress_scale" in pert and "wind_speed_bias" in pert and pert.isdisjoint({"glider_speed_scale", "usv_vpp_bias", "usv_vpp_bias_brief"})
+    unused = {i["id"]: cr.not_used_note(i) for i in c["assumed_inputs"] if not i["used"] and i["file"].startswith("config/")}
+    assert unused["assumptions.yaml:dtmb5415.u_D_rel"] == "read only by the DTMB validation study, not by a verdict"
+    assert unused["assumptions.yaml:stage3.slocum.length_m"] == "vehicle class not flown by this mission"
+    assert "(vehicle class not flown by this mission)" in html.unescape(cr._render(c))
+    assert cr.not_used_note(dict(id="quad_uas.yaml:radio.x", file="platforms/quad_uas.yaml")) == "platform not used by this mission"
+
+
+def test_r13_m3_a_slocum_key_is_used_only_by_a_slocum_and_a_glider_key_by_any_glider(run, data):
+    slocum = next(v["id"] for v in demo_mission()["vehicles"] if v["platform"] == "slocum")
+    seaglider = next(v["id"] for v in demo_mission()["vehicles"] if v["platform"] == "seaglider")
+    with_slocum, with_sea = used_of(only(run, {slocum}), "config/assumptions.yaml"), used_of(only(run, {seaglider}), "config/assumptions.yaml")
+    assert "stage3.slocum.length_m" in with_slocum and "stage3.slocum.length_m" not in with_sea
+    assert {"stage3.glider.wing_x_frac", "stage3.nominal.glider"} <= with_slocum & with_sea              # both are gliders
+
+
+def test_r13_m3_the_demo_flies_every_class_so_only_the_three_dtmb_keys_are_not_used(run, data):
+    c = cr.build(run, REAL, data)
+    unused = {i["id"] for i in c["assumed_inputs"] if not i["used"] and i["file"].startswith("config/")}
+    assert unused == {"assumptions.yaml:dtmb5415.u_D_rel", "assumptions.yaml:dtmb5415.u_S_rel", "assumptions.yaml:dtmb5415.u_nu_rel"}
+
+
+def test_r13_m3_every_stage_3_key_of_assumptions_yaml_maps_to_a_class_or_to_every_mission():
+    """A key added for one class must be given its class here, or it counts as used by missions that never fly that class."""
+    keys = [k for k in cr.config.assumptions() if k.startswith("stage3.")]
+    every = {"window_s", "box_bodies", "cells_per_delta", "min_cells_across", "min_flow_throughs", "spinup", "fea_elements_along", "min_window_s",
+             "refit.between_window_frac", "refit.discretisation_frac", "fea_reserve_frac", "fea_min_s", "chunk_steps", "compile_s_guess", "les_margin",
+             "min_cells_thin_part", "nu_lat_floor", "skip_factor", "fs.margin", "fs.cost_factor", "fs.mesh_s_per_cell", "fs.snappy_cell_factor"}
+    per_class = {k for k in keys if cr.config_scope("config/assumptions.yaml", k)}
+    assert {k.removeprefix("stage3.") for k in keys if k not in per_class} == every
+    assert {cr.config_scope("config/assumptions.yaml", k) for k in per_class} == {"glider", "slocum", "usv", "uas"}
+    assert len(per_class) == 21 and cr.config_scope("config/assumptions.yaml", "stage3.nominal.usv_wing") == "usv"
+    assert cr.config_scope("config/assumptions.yaml", "dtmb5415.u_nu_rel") == "-" and cr.config_scope("config/assumptions.yaml", "waves.swell_age") == ""
+    assert cr.config_scope("config/perturbations.yaml", "bulk_stress_scale") == "uas" and cr.config_scope("config/perturbations.yaml", "tp_bias") == ""
+
+
+def test_r13_m3_a_mission_whose_vehicles_cannot_be_read_counts_every_class_but_never_the_dtmb_keys(run, data):
+    m = demo_mission()
+    m["vehicles"][0]["platform"] = "no_such_platform"
+    (run / "mission.yaml").write_text(yaml.safe_dump(m, sort_keys=False))
+    f = cr.Facts(run, REAL, data)
+    used = lambda key: f.config_used("config/assumptions.yaml", key)
+    assert f.flown is None and used("stage3.slocum.length_m") and not used("dtmb5415.u_D_rel")
+    (run / "mission.yaml").unlink()
+    assert cr.Facts(run, REAL, data).flown is None

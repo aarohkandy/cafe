@@ -1233,32 +1233,34 @@ def test_r13_q3_a_run_whose_hangar_ledger_has_no_link_table_gets_a_note_and_stay
     """DECISIONS 635: an edit of platforms/radios.yaml or modems.yaml after a run from before it is invisible to the audit; 594's note for mission.yaml and
     plan.json is the form, so the blind spot is said, not silent (P-R12Q3). A note, not a problem: exit 0."""
     run = make_recorded_run(tmp_path)
-    assert audit.ledger_problems(run) == [] and audit.link_tables_unrecorded(run)
+    assert audit.ledger_problems(run) == [] and audit.link_tables_unrecorded(run) == ["radios.yaml", "modems.yaml"]
     capsys.readouterr()
     assert audit.main(["--ledgers-only", str(run)]) == 0
     out = capsys.readouterr().out
-    assert f"note: {run}: the hangar ledger records neither platforms/modems.yaml nor platforms/radios.yaml" in out
+    for n in ("radios.yaml", "modems.yaml"):
+        assert f"note: {run}: the hangar ledger does not record platforms/{n}" in out
     assert "records neither mission.yaml nor plan.json" not in out and "problem" not in out.replace("0 problem(s)", "")
 
 
 def test_r13_q3_a_run_that_records_the_link_tables_gets_no_note_and_each_note_stands_alone(tmp_path, capsys):
     run = run_with_hangar_inputs(tmp_path, ("seaglider.yaml", *comms.PARAMETER_FILES))
-    assert audit.ledger_problems(run) == [] and not audit.link_tables_unrecorded(run)
+    assert audit.ledger_problems(run) == [] and audit.link_tables_unrecorded(run) == []
     capsys.readouterr()
     assert audit.main(["--ledgers-only", str(run)]) == 0
     out = capsys.readouterr().out
-    assert "hangar ledger records" not in out and "report ledger records neither" in out                  # each note is decided by its own ledger
+    assert "hangar ledger does not record" not in out and "report ledger records neither" in out                  # each note is decided by its own ledger
     old = make_run(tmp_path / "old")                                                  # neither kind recorded: both notes, in this order
     assert audit.main(["--ledgers-only", str(old)]) == 0
     lines = [ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("note:")]
-    assert ["mission.yaml nor plan.json" in lines[0], "platforms/modems.yaml" in lines[1]] == [True, True] and len(lines) == 2
+    assert len(lines) == 3 and "mission.yaml nor plan.json" in lines[0] and "platforms/radios.yaml" in lines[1] and "platforms/modems.yaml" in lines[2]
 
 
 def test_r13_q3_the_note_names_the_tables_the_hangar_stage_records(tmp_path):
     """The names the note looks for are `comms.PARAMETER_FILES`, the ones `s_hangar` records, so a third table added there is looked for here too."""
     for n in comms.PARAMETER_FILES:
-        assert not audit.link_tables_unrecorded(run_with_hangar_inputs(tmp_path / n, (n,)))
-    assert audit.link_tables_unrecorded(run_with_hangar_inputs(tmp_path / "v", ("seaglider.yaml",)))     # a vehicle platform is not a link table
+        assert n not in audit.link_tables_unrecorded(run_with_hangar_inputs(tmp_path / n, (n,)))
+    only_vehicle = run_with_hangar_inputs(tmp_path / "v", ("seaglider.yaml",))            # a vehicle platform is not a link table
+    assert audit.link_tables_unrecorded(only_vehicle) == list(comms.PARAMETER_FILES)
 
 
 @pytest.mark.parametrize("ledger_text", ['{"inputs": 5}', '{"inputs": null}', "{cut", "[1]", None])
@@ -1269,7 +1271,7 @@ def test_r13_q3_a_hangar_ledger_that_cannot_be_read_is_no_old_run_either(tmp_pat
         p.unlink()
     else:
         p.write_text(ledger_text)
-    assert audit.link_tables_unrecorded(run) is False
+    assert audit.link_tables_unrecorded(run) == []
 
 
 @pytest.mark.parametrize("ledger_text", ['{"inputs": 5}', '{"inputs": null}', "{cut", "[1]", None])
@@ -1308,3 +1310,49 @@ def test_l0_r11_a_data_file_the_suite_reads_edited_after_the_receipt_makes_it_st
     (tmp_path / "config").mkdir(exist_ok=True)
     (tmp_path / "config" / "new.yaml").write_text("b: 1\n")                              # a file added after the run is a change, too
     assert audit.coverage_stale(tmp_path) != []
+
+
+def test_r13_m21_a_symlink_loop_in_a_run_is_a_problem_line_not_a_runtime_error(tmp_path, capsys):
+    """`Path.resolve()` raises RuntimeError on a loop (Python 3.12): a stage that read a path through a self-loop link ended audit and report in a traceback."""
+    run = make_run(tmp_path)
+    (run / "loop").symlink_to(run / "loop")
+    edit(run, "report", lambda d: d["inputs"].append(dict(ref=str(run / "loop" / "x"))))              # the last stage: nothing chains to its ledger
+    assert audit.ledger_problems(run) == []                                         # the loop is read as an absent file, not a crash, and it was never hashed
+    edit(run, "report", lambda d: d["inputs"].append(dict(ref=str(run / "loop" / "y"), sha256="0" * 64)))
+    (said,) = audit.ledger_problems(run)
+    assert "stage report: input" in said and "is missing" in said
+    assert audit.main(["--ledgers-only", str(run)]) == 1
+    assert "is missing" in capsys.readouterr().out
+
+
+def test_r13_l1_a_file_named_like_a_link_table_but_not_in_platforms_is_not_the_table(tmp_path, capsys):
+    """P-R13L1 (a): the match was by file name only, so an input called radios.yaml from anywhere hid the note; the consumer reads `platforms/<name>`."""
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    for n in comms.PARAMETER_FILES:
+        (elsewhere / n).write_text(n)
+    run = make_run(tmp_path / "r", extra_inputs={"hangar": [elsewhere / n for n in comms.PARAMETER_FILES]})
+    assert audit.link_tables_unrecorded(run) == ["radios.yaml", "modems.yaml"]
+    capsys.readouterr()
+    assert audit.main(["--ledgers-only", str(run)]) == 0
+    assert capsys.readouterr().out.count("the hangar ledger does not record platforms/") == 2
+
+
+def test_r13_l1_a_run_that_records_one_table_and_not_the_other_gets_the_note_for_the_other(tmp_path, capsys):
+    """P-R13L1 (b): the note asked whether any table was recorded; a run with radios.yaml and without modems.yaml got none."""
+    run = run_with_hangar_inputs(tmp_path, ("radios.yaml",))
+    assert audit.link_tables_unrecorded(run) == ["modems.yaml"]
+    capsys.readouterr()
+    assert audit.main(["--ledgers-only", str(run)]) == 0
+    out = capsys.readouterr().out
+    assert "does not record platforms/modems.yaml" in out and "does not record platforms/radios.yaml" not in out
+    run = run_with_hangar_inputs(tmp_path / "other", ("modems.yaml",))
+    assert audit.link_tables_unrecorded(run) == ["radios.yaml"]
+
+
+def test_r13_l1_a_table_input_without_a_sha256_is_not_recorded(tmp_path):
+    """The hangar stage records `sha256 = None` for a file that was not there: nothing to compare an edit with."""
+    run = run_with_hangar_inputs(tmp_path, comms.PARAMETER_FILES)
+    assert audit.link_tables_unrecorded(run) == []
+    edit(run, "hangar", lambda d: [i.update(sha256=None) for i in d["inputs"] if i["ref"].endswith("modems.yaml")])
+    assert audit.link_tables_unrecorded(run) == ["modems.yaml"]

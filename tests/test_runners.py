@@ -1063,3 +1063,13 @@ def test_m28_a_job_name_that_is_a_log_of_the_suite_is_refused_under_proot_only(t
     assert rc == 2 and out == ""
     rc, out = sent(tmp_path, "bin/pmx.sh", "true", PM_RUNTIME="docker", PMX="pm_t", TM=tm)
     assert rc == 0 and "rsync" in out
+
+
+def test_r13_m24_run_sh_tells_the_container_the_commit_and_whether_the_tree_is_dirty(tmp_path):
+    """`./run.sh` passed neither: the synced cafe/ has no .git, so what it stamped (cafe.cfd) named git "none". A stand-in `git` answers for the checkout."""
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "git").write_text('#!/bin/sh\ncase "$1" in rev-parse) echo 0123456789abcdef0123456789abcdef01234567 ;; status) echo " M cafe/x.py" ;; esac\n')
+    (tools / "git").chmod(stat.S_IRWXU)
+    rc, out = sent(tmp_path, "run.sh", "python", "-m", "cafe.cfd", "external")
+    assert rc == 0 and "-e CAFE_GIT_SHA=0123456789abcdef0123456789abcdef01234567 -e CAFE_GIT_DIRTY=1 " in out and "cafe python -m cafe.cfd external" in out

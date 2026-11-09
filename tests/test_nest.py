@@ -494,6 +494,12 @@ def test_r12_nu_max_is_the_tau_of_one_and_a_half_and_is_allowed_but_not_a_hair_o
     assert nest.NestSpec(shape=(8, 8, 8), dx=0.01, U_ref=1.0, nu=1e-9, nu_floor=0.3).nu_lat == 0.3
 
 
+def test_r13_m8_a_lattice_viscosity_a_hair_over_nu_max_is_refused():
+    """The inclusive limit was tested at nu_lat == NU_MAX and at 0.4; a limit of NU_MAX * (1 + 1e-6) passed both."""
+    at = dict(shape=(8, 8, 8), dx=1.0, U_ref=1.0, u_lat=0.5)
+    with pytest.raises(ValueError, match="above wallmodel.NU_MAX"):
+        nest.NestSpec(**at, nu=2 * wm.NU_MAX * (1 + 1e-9))
+
 def test_r12_a_nan_viscosity_is_refused_not_run():
     with pytest.raises(ValueError, match="lattice viscosity nan "):
         nest.NestSpec(shape=(8, 8, 8), dx=0.01, U_ref=1.0, nu=float("nan"))

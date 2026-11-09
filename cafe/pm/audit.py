@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .env.remote import sha256, tree_sha256
-from .ledger import RUN_ROOT_FILES, STAGES, hashed, resolve, run_roots, shared_diff
+from .ledger import RUN_ROOT_FILES, STAGES, hashed, real, resolve, run_roots, shared_diff
 from .physics.comms import PARAMETER_FILES
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -112,7 +112,7 @@ def _same_place(run_dir: pathlib.Path, d: dict[str, Any]) -> bool:
     not copied, so what it recorded outside the run is still where it was."""
     if (d.get("machine") or {}).get("host") != platform.node():
         return False
-    return any(pathlib.Path(*r).resolve() == run_dir.resolve() for r in run_roots(d))
+    return any(real(pathlib.Path(*r)) == real(run_dir) for r in run_roots(d))
 
 
 def _shared_problems(run: str, st: str, snap: pathlib.Path, shared: pathlib.Path, here: bool) -> list[str]:
@@ -202,7 +202,7 @@ def _stage_problems(run_dir: pathlib.Path, st: str, d: dict[str, Any], prev: pat
             out.append(f"{run_dir.name}: stage {st}: output {f} is missing")
         elif sha256(f) != o["sha256"]:
             out.append(f"{run_dir.name}: stage {st}: output {f} changed since the stage ran")
-    if prev is not None and prev.resolve() not in {resolve(i["ref"], run_dir, roots).resolve() for i in d.get("inputs", [])}:
+    if prev is not None and real(prev) not in {real(resolve(i["ref"], run_dir, roots)) for i in d.get("inputs", [])}:
         out.append(f"{run_dir.name}: stage {st}: does not record the {STAGES[STAGES.index(st) - 1]} ledger as an input (chain broken)")
 
 
@@ -379,12 +379,12 @@ def pytest_passes(workers: int) -> list[list[str]]:
             base + ["--cov-append", "--cov-report=json:coverage.json", *SERIAL_TESTS]]
 
 
-def _records_none(run_dir: str | pathlib.Path, stage: str, wanted: Callable[[str], bool]) -> bool:
-    """True for a run whose `stage` ledger exists, is readable and lists no input `wanted` accepts (by its recorded `ref`): a run from before the stage
-    recorded them, so an edit of those files is not seen by `ledger_problems`."""
+def _records_none(run_dir: str | pathlib.Path, stage: str, wanted: Callable[[dict[str, Any]], bool]) -> bool:
+    """True for a run whose `stage` ledger exists, is readable and lists no input `wanted` accepts (the recorded input, a mapping with its `ref`): a run from
+    before the stage recorded them, so an edit of those files is not seen by `ledger_problems`."""
     try:
         d = _read_json(pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json")
-        return not any(isinstance(i, dict) and wanted(str(i.get("ref"))) for i in d.get("inputs", []))
+        return not any(isinstance(i, dict) and wanted(i) for i in d.get("inputs", []))
     except (_Unreadable, TypeError):  # no or damaged ledger, or `inputs` not a list: `ledger_problems` says so
         return False
 
@@ -392,14 +392,17 @@ def _records_none(run_dir: str | pathlib.Path, stage: str, wanted: Callable[[str
 def root_files_unrecorded(run_dir: str | pathlib.Path) -> bool:
     """True for a run whose report ledger exists and names neither `mission.yaml` nor `plan.json` as an input: made before round 11, so an edit of either is
     not seen by `ledger_problems` (the report refuses a verdict that its cut-offs do not give, which covers the mission file)."""
-    return _records_none(run_dir, "report", RUN_ROOT_FILES.__contains__)
+    return _records_none(run_dir, "report", lambda i: str(i.get("ref")) in RUN_ROOT_FILES)
 
 
-def link_tables_unrecorded(run_dir: str | pathlib.Path) -> bool:
-    """True for a run whose hangar ledger exists and names neither of the link tables `comms.PARAMETER_FILES` (`platforms/radios.yaml`, `modems.yaml`) as an
-    input: made before DECISIONS 635, so an edit of either is not seen by `ledger_problems` (round 12, P-R12Q3). The ref is the path the table was read
-    from, so a run is matched by the file's name."""
-    return _records_none(run_dir, "hangar", lambda ref: pathlib.PurePath(ref).name in PARAMETER_FILES)
+def link_tables_unrecorded(run_dir: str | pathlib.Path) -> list[str]:
+    """The link tables of `comms.PARAMETER_FILES` (`radios.yaml`, `modems.yaml`) that the hangar ledger of a run does not record, so an edit of one is not
+    seen by `ledger_problems` (round 12, P-R12Q3; DECISIONS 635 records them). Empty for a run that has none missing and for a ledger that is missing or
+    cannot be read. A table is recorded by an input that is that file of a `platforms` directory, as `pipeline.s_hangar` records it, and that carries a
+    sha256: a `radios.yaml` anywhere else, or a reference to a file that was not there, is not the table (P-R13L1). Each table is decided on its own."""
+    def is_table(n: str) -> Callable[[dict[str, Any]], bool]:
+        return lambda i: pathlib.PurePath(str(i.get("ref"))).parts[-2:] == ("platforms", n) and bool(i.get("sha256"))
+    return [n for n in PARAMETER_FILES if _records_none(run_dir, "hangar", is_table(n))]
 
 
 PYTEST_RECEIPT = "coverage.receipt.json"        # beside coverage.json: {code_digest, coverage_sha256, suite_ok, date}, written only for a suite that passed
@@ -499,9 +502,9 @@ def main(argv: list[str]) -> int:
         problems += ledger_problems(r)
         if root_files_unrecorded(r):
             print(f"note: {r}: the report ledger records neither mission.yaml nor plan.json (a run from before round 11): an edit of either is not seen here")
-        if link_tables_unrecorded(r):
-            print(f"note: {r}: the hangar ledger records neither platforms/modems.yaml nor platforms/radios.yaml (a run from before round 11's look-ahead, "
-                  "DECISIONS 635): an edit of either is not seen here")
+        for table in link_tables_unrecorded(r):
+            print(f"note: {r}: the hangar ledger does not record platforms/{table} (a run from before round 11's look-ahead, DECISIONS 635): "
+                  "an edit of it is not seen here")
     if not ledgers_only:
         problems += banned()
         problems += mutation_problems(ROOT)

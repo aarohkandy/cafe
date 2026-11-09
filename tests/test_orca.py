@@ -456,6 +456,16 @@ def test_r12_m29_a_store_with_names_that_differ_only_in_case_has_no_consolidated
     assert folded == 1                                                  # umwmspec.zarr: the test would pass vacuously if the names stopped colliding
 
 
+def test_r13_m8_only_hours_divisible_by_six_get_a_spectrum_part_and_no_spectra_means_none_in_the_manifest(orca_env, tmp_path):
+    """The two M-29 tests above pass when `hour % 6` is `hour % 3` or when the spec_ names are listed without the spectra (older tests killed those mutants,
+    not these): the window 0 to 3 holds hour 0 and hour 3, and a window with spectra=False holds hour 0 and no spec_ part."""
+    man, _ = ingest(orca_env, tmp_path / "a", 0, 3)
+    assert sorted(n for n in man["parts"] if n.startswith("spec_")) == [f"spec_{mk.stamp(0)}.npz"] and len(man["parts"]) == 9
+    off, _ = ingest(orca_env, tmp_path / "b", 0, 2, spectra=False)
+    assert not [n for n in off["parts"] if n.startswith("spec_")] and len(off["parts"]) == 6 and not (tmp_path / "b" / "umwmspec.zarr").exists()
+    assert not list((tmp_path / "b" / "hours").glob("spec_*"))
+
+
 def parts_of(out):
     return {p.name: p.stat().st_mtime_ns for p in (out / "hours").glob("*.npz")}
 

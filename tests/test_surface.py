@@ -126,14 +126,21 @@ def test_sst_is_the_frozen_wrf_sst_plus_the_warm_layer(ci_full):
     assert ci_full.sst(lon, lat, ci_full.tw.x[DAY]).value[2] - ci_full.sst(lon, lat, ci_full.tw.x[20]).value[2] > 0.1
 
 
+def test_r13_m8_med_ignores_nan_and_is_nan_when_nothing_is_left():
+    """NaN is live in production (`R` is `np.full(..., nan)` where no real spectrum lies); without the filter the median of any array holding one is NaN."""
+    assert S._med([1.0, np.nan, 3.0, np.nan, 5.0]) == 3.0 and S._med([np.nan, 2.0]) == 2.0 and S._med([4.0, 1.0]) == 2.5
+    assert np.isnan(S._med([np.nan, np.nan])) and np.isnan(S._med([]))
+
+
 # ------------------------------------------------------------------------------------------------------------ diurnal jet
 
 def test_diurnal_jet_points_downwind_and_vanishes_below_the_warm_layer_and_at_night(ci_full, sl):
+    assert sl.jet_mid == pytest.approx(0.2) and sl.jet_ref == 3.0                               # 0.1 to 0.3 m/s midpoint, 3 K (round 13, M-5)
     lon, lat = np.array([194.0, 196.0]), np.array([-1.0, 1.0])
     t = ci_full.tw.x[DAY]
     jet = ci_full.current(lon, lat, np.zeros(2), t).value - ci_full.ocean.current(lon, lat, np.zeros(2), t).value
     dT0 = ci_full.air(lon, lat, t)["dT_warm"].value
-    assert np.allclose(np.hypot(*jet.T), sl.jet_mid * dT0 / sl.jet_ref, rtol=1e-6) and dT0.min() > 0.1      # amplitude: midpoint x dT_warm / dT_ref
+    assert np.allclose(np.hypot(*jet.T), 0.2 * dT0 / 3.0, rtol=1e-6) and dT0.min() > 0.1    # amplitude: midpoint x dT_warm / dT_ref, literals (DECISIONS 650)
     w = ci_full.u10(lon, lat, t)
     cross = jet[:, 0] * w[:, 1] - jet[:, 1] * w[:, 0]
     assert np.allclose(cross / np.hypot(*jet.T) / np.hypot(*w.T), 0.0, atol=1e-9) and (np.sum(jet * w, -1) > 0).all()    # along the wind, not against it

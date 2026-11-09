@@ -26,7 +26,7 @@ from typing import Any, Iterable
 
 from . import config, pipeline
 from .audit import ledger_problems
-from .ledger import STAGES
+from .ledger import STAGES, clean, has_commit
 from .physics import comms
 from .stage1 import NOT_EXERCISED
 from .stats import intervals, sampling
@@ -439,12 +439,13 @@ def vv20_rows(data: pathlib.Path | None = None) -> list[dict[str, Any]]:
 
 # ------------------------------------------------------------------------------------------------------ the factor table
 
-def entries_read(links: Iterable[dict[str, Any]], root: pathlib.Path = ROOT) -> set[tuple[str, str]]:
+def entries_read(links: Iterable[dict[str, Any]], root: pathlib.Path = ROOT, uas_radios: Iterable[str] = ()) -> set[tuple[str, str]]:
     """(section, entry) of platforms/radios.yaml and platforms/modems.yaml that the links of a mission read, as the code reads them: an rf link its `radio`
     (`comms.rf_margin`), an iridium link the SBD service (`comms.iridium_session`'s default, which stage 1 calls), an acoustic link the modem its `modem` names
     (`comms.resolve_modem`) and the modem band an `implementation_loss_like` sends its anchor to, and the `defaults` of modems.yaml (every acoustic link).
-    A file holds many radios and modems and a mission uses a few: the file is not the unit (look-ahead L0 after round 12, M-6)."""
-    out: set[tuple[str, str]] = set()
+    `uas_radios` are the entries the mission's UAS platforms read whatever the links say (`flown_radios`; the sortie's lost-link hook reads one, round 13,
+    M-2). A file holds many radios and modems and a mission uses a few: the file is not the unit (look-ahead L0 after round 12, M-6)."""
+    out: set[tuple[str, str]] = {("radios", r) for r in uas_radios}
     mf = root / "platforms" / "modems.yaml"
     modems = ((config.read_yaml(mf) or {}).get("modems") or {}) if mf.is_file() else {}          # a root without the file (a test's) has no anchors to follow
     for lk in links:
@@ -462,6 +463,67 @@ def entries_read(links: Iterable[dict[str, Any]], root: pathlib.Path = ROOT) -> 
                 like = (((modems.get(named[0]) or {}).get("bands") or {}).get(named[1]) or {}).get("implementation_loss_like")
                 named = (str(like[0]), str(like[1])) if isinstance(like, list) and len(like) == 2 else None
     return out
+
+
+_clean = clean                                                                  # report.py takes it from here
+
+
+def flown_classes(mission: dict[str, Any] | None) -> set[str] | None:
+    """The kinds of vehicle a mission flies: "glider", "usv" and "uas" (`config.platform_class`), and "slocum" for a glider whose platform file is a Slocum
+    (the stage-3 geometry reads `stage3.slocum.*` for it only). None when the mission is not there or a platform cannot be read: what is flown is then not
+    known, and every item counts as used."""
+    if mission is None:
+        return None
+    out: set[str] = set()
+    try:
+        for v in mission["vehicles"]:
+            out.add(c := config.platform_class(v))
+            if c == "glider" and config.load_platform(v["platform"]).get("kind") == "slocum":
+                out.add("slocum")
+    except (config.ConfigError, KeyError, TypeError, AttributeError):
+        return None
+    return out
+
+
+def flown_radios(mission: dict[str, Any] | None) -> set[str]:
+    """The entries of platforms/radios.yaml read by the UAS platforms of a mission (`comms.uas_radio_names`), whatever its links say."""
+    out: set[str] = set()
+    for v in (mission or {}).get("vehicles") or []:
+        if isinstance(v, dict) and "base" in v:                                                   # the rule of `config.platform_class`
+            try:
+                out.add(comms.uas_radio_names(config.load_platform(v["platform"]))[1])
+            except (config.ConfigError, KeyError, TypeError, AttributeError):
+                out.add("rfd900x")                                                                  # the entry a platform with no radio block reads
+    return out
+
+
+# What a config/ item needs to be used by a mission. "" is every mission; "-" is none, the item is read by the DTMB validation study and no verdict.
+# A class names the vehicles that read it: stage-3 geometry and nominal windows (`pipeline_windows`, `budget.NOMINAL_WINDOW`) and the class priors
+# (`stage1.priors_for`, the stage-1b sensitivity case). `stage3.glider.*` is read for every glider, some of it for the Seaglider only (round 13, M-3).
+CLASS_PRIORS = {"glider_speed_scale": "glider", "usv_vpp_bias": "usv", "usv_vpp_bias_brief": "usv", "bulk_stress_scale": "uas"}
+NOMINAL_CLASS = {"glider": "glider", "usv_hull": "usv", "usv_wing": "usv", "uas": "uas"}
+VEHICLE_CLASSES = ("glider", "slocum", "usv", "uas")
+
+
+def config_scope(file: str, key: str) -> str:
+    """Which vehicles use the item `key` of a config/ file: "" every mission, "-" none (the DTMB study), else a class of `flown_classes`."""
+    if file.endswith("perturbations.yaml"):
+        return CLASS_PRIORS.get(key, "")
+    parts = key.split(".")
+    if parts[0] == "dtmb5415":
+        return "-"
+    if parts[0] == "stage3" and len(parts) > 2:
+        return parts[1] if parts[1] in VEHICLE_CLASSES else NOMINAL_CLASS.get(parts[2], "") if parts[1] == "nominal" else ""
+    return ""
+
+
+def not_used_note(item: dict[str, Any]) -> str:
+    """Why an item that is listed is not counted for this mission, for the pages (from its id: `assumptions.yaml:<key>`, `perturbations.yaml:<key>`, or
+    `<platform file>:<path>`)."""
+    file, _, key = item["id"].partition(":")
+    if file not in ("assumptions.yaml", "perturbations.yaml"):
+        return "platform not used by this mission"
+    return "read only by the DTMB validation study, not by a verdict" if config_scope(file, key) == "-" else "vehicle class not flown by this mission"
 
 
 class Facts:
@@ -484,8 +546,10 @@ class Facts:
         self.refs = refs = {v["platform"] for v in (self.mission or {}).get("vehicles", [])}
         links = (self.mission or {}).get("links") or []
         kinds = {lk.get("kind") for lk in links}
-        tables = ({"radios"} if kinds & {"rf", "iridium"} else set()) | ({"modems"} if "acoustic" in kinds else set())       # iridium reads radios.yaml too
-        self.read = entries_read(links, root)
+        uas_radios = flown_radios(self.mission)
+        tables = ({"radios"} if kinds & {"rf", "iridium"} or uas_radios else set()) | ({"modems"} if "acoustic" in kinds else set())  # iridium: radios.yaml too
+        self.flown = flown_classes(self.mission)
+        self.read = entries_read(links, root, uas_radios)
         self.used = {platform_key(r, root): platform_label(platform_key(r, root), platform_shipped(r, root)) for r in refs} | \
                     {t: platform_label(t, True) for t in tables}                                    # key -> the `file` of its items
         self.items = platform_items(root, [r for r in refs if not platform_shipped(r, root)])
@@ -494,6 +558,12 @@ class Facts:
         why = subgrid_uncalibrated(run, root)
         sub = [] if why is None else [dict(SUBGRID_LIMITATION, text=why)]
         self.limitations = LIMITATIONS[:12] + sub + LIMITATIONS[12:]                       # L13 sits between L12 and L14
+
+    def config_used(self, file: str, key: str) -> bool:
+        """Whether this mission reads the item `key` of the config/ file `file` (`config_scope`). Which keys a run read is not recorded, so this is the rule
+        and not a trace; a mission whose vehicles cannot be read counts every item but the DTMB ones."""
+        scope = config_scope(file, key)
+        return scope == "" or (scope != "-" and (self.flown is None or scope in self.flown))
 
     def item_used(self, key: str, path: str) -> bool:
         """Whether this mission reads the platform input `path` of the platform `key` (the stem of its file; `item["key"]`). A vehicle's platform file is read
@@ -745,7 +815,7 @@ def _ms_management(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     if not f.have:
         return 0, [], ["no stage ledger"]
     ev, miss, lvl = [f.ev(f"{len(f.have)} ledgers", "run:checkpoints/")], [], 1
-    keys = all(d.get("git_sha") not in (None, "none") and d.get("config_hash") and d.get("versions") for d in f.have.values())
+    keys = all(has_commit(d.get("git_sha")) and d.get("config_hash") and d.get("versions") for d in f.have.values())
     seeds = bool((f.have.get("stage1") or {}).get("seeds"))
     if keys and seeds:
         lvl = 2
@@ -931,7 +1001,7 @@ def _render(c: dict[str, Any]) -> str:
         key = next((x["key"] for x in c["assumed_inputs"] if x["file"] == file and "key" in x), pathlib.Path(file).stem)
         h.append(f"<h3 id='{e(plat_anchor(key))}'>{e(file)}</h3><div class=scroll><table><tr><th>Input<th>Kind<th>Value<th>Why<th>Replace with</tr>")
         for i in (x for x in c["assumed_inputs"] if x["file"] == file):
-            off = "" if i["used"] else " (platform not used by this mission)"
+            off = "" if i["used"] else f" ({not_used_note(i)})"
             h.append(f"<tr id='{i['anchor']}'><td><code>{e(i['id'])}</code><td>{e(i['kind'])}{off}<td>{e(i['value'])} {e(i['unit'])}"
                      f"<td>{e(i['why'])}<td>{e(i['replace_with'])}</tr>")
         h.append("</table></div>")
@@ -944,7 +1014,7 @@ def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.
     f = Facts(pathlib.Path(run_dir), root, data or data_root())
     items = assumed_inputs(root, f.run, [r for r in f.refs if not platform_shipped(r, root)])
     for it in items:                    # the catalogue lists every platform input; `used` says whether this mission flies or links through it (M-6)
-        it["used"] = "key" not in it or f.item_used(it["key"], it["path"])      # config/ items apply to every mission: which keys a run read is not recorded
+        it["used"] = f.item_used(it["key"], it["path"]) if "key" in it else f.config_used(it["file"], it["id"].partition(":")[2])
     labels = {p.stem: platform_label(p.stem, True) for p in (root / "platforms").glob("*.yaml")} | f.used          # key -> the `file` of its items
     return dict(schema="cafe.pm.credibility/1", run=f.run.name,
                 note="Levels run 0-4 (BRIEF 5.4). The rule behind each level is this tool's reading of the factor, not the text of NASA-STD-7009B, "
@@ -952,17 +1022,6 @@ def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.
                 levels=LEVELS, factors=factor_table(f), vv20=f.vv, limitations=f.limitations, sanity=sanity(f), assumed_inputs=items,
                 ledger_problems=f.problems,
                 platform_assumed_counts={s: sum(1 for i in items if i["file"] == lab and i["kind"] == "assumed") for s, lab in sorted(labels.items())})
-
-
-def _clean(x: Any) -> Any:
-    """JSON without NaN or Infinity: non-finite floats become null."""
-    if isinstance(x, float):
-        return x if math.isfinite(x) else None
-    if isinstance(x, dict):
-        return {k: _clean(v) for k, v in x.items()}
-    if isinstance(x, (list, tuple)):
-        return [_clean(v) for v in x]
-    return x
 
 
 def write(run_dir: str | pathlib.Path) -> list[pathlib.Path]:

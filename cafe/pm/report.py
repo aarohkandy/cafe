@@ -1062,7 +1062,8 @@ def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str,
 
 
 def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
-    """The assumed inputs and priors this mission's verdicts depend on (a platform it does not use does not count), and the catalogue they are part of."""
+    """The assumed inputs and priors this mission's verdicts depend on (a platform or vehicle class it does not use does not count),
+    and the catalogue they are part of."""
     used: dict[str, int] = {}
     rest: dict[str, int] = {}
     for i in cred["assumed_inputs"]:
@@ -1071,10 +1072,10 @@ def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
             d[i["file"]] = d.get(i["file"], 0) + 1
     src = "credibility.json assumed_inputs"
     return dict(page="credibility.html",
-                total=num(sum(used.values()), "inputs", cred_ref, f"{src} (kind other than fitted, of a platform this mission uses)"),
+                total=num(sum(used.values()), "inputs", cred_ref, f"{src} (kind other than fitted, of a platform or vehicle class this mission uses)"),
                 catalogue=num(sum(used.values()) + sum(rest.values()), "catalogued inputs", cred_ref, f"{src} (kind other than fitted)"),
                 by_file={f: num(n, "inputs", cred_ref, src) for f, n in sorted(used.items())},
-                not_used_by_file={f: num(n, "inputs", cred_ref, f"{src} (platform not used by this mission)") for f, n in sorted(rest.items())},
+                not_used_by_file={f: num(n, "inputs", cred_ref, f"{src} (not used by this mission)") for f, n in sorted(rest.items())},
                 items=[dict(id=i["id"], kind=i["kind"], used=i["used"], value=i["value"], unit=i["unit"], why=i["why"], href=f"credibility.html#{i['anchor']}")
                        for i in cred["assumed_inputs"]],
                 factors=[dict(name=f["name"], level=f"{f['level']} of 4") for f in cred["factors"]])
@@ -1084,8 +1085,8 @@ def _sanity(cred: dict[str, Any], vehicles: dict[str, Any], links: dict[str, Any
     """BRIEF section 6's expected outcome for the demo mission against this run's verdicts (the table is credibility.EXPECTED)."""
     sn = cred.get("sanity")
     if sn is None and name in credibility.EXPECTED:
-        return dict(applies=False, reason="This mission has the demo's name but not its window, box and vehicles, so BRIEF section 6's expected outcome "
-                                          "for the demo mission does not apply to it.")
+        return dict(applies=False, reason="This mission has the demo's name but is not the shipped demo mission (something in it other than the seed and "
+                                          "the description differs), so BRIEF section 6's expected outcome for the demo mission does not apply to it.")
     if sn is None:
         return dict(applies=False, reason="BRIEF section 6 states an expected outcome for the demo mission only; this mission has none.")
     both = {**vehicles, **links}
@@ -1681,9 +1682,10 @@ def _assumed_html(a: dict[str, Any]) -> str:
     e = html.escape
     rows = "".join(f"<tr><td>{e(f)}<td>{_n(n)}</tr>" for f, n in a["by_file"].items())
     off = ", ".join(f"{e(f)} {_n(n)}" for f, n in a["not_used_by_file"].items())
-    off = f"<p class=muted>Listed in the credibility report, but of platforms this mission does not use, and not counted above: {off}.</p>" if off else ""
+    off = (f"<p class=muted>Listed in the credibility report, but not used by this mission (a platform or vehicle class it does not fly), "
+           f"and not counted above: {off}.</p>") if off else ""
     fac = "".join(f"<tr><td>{e(f['name'])}<td>{e(f['level'])}</tr>" for f in a["factors"])
-    lst = "".join(f"<li><a href='{e(i['href'])}'><code>{e(i['id'])}</code></a> ({e(i['kind'])}{'' if i['used'] else ', platform not used by this mission'}) "
+    lst = "".join(f"<li><a href='{e(i['href'])}'><code>{e(i['id'])}</code></a> ({e(i['kind'])}{'' if i['used'] else ', ' + credibility.not_used_note(i)}) "
                   f"{e(i['value'])} {e(i['unit'])}" for i in a["items"])
     return (f"<p>{_n(a['total'])} of the {_n(a['catalogue'])} in the catalogue are used by this mission, are assumed or are priors, not measurements, "
             f"and verdicts depend on them. Full detail: <a href='credibility.html'>credibility report</a> (levels, V&amp;V 20 table, limitations).</p>"

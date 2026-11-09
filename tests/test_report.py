@@ -1048,9 +1048,24 @@ def test_r12_m5_a_mission_with_the_demos_name_and_another_window_says_so_in_the_
     assert text != (run / "mission.yaml").read_text()
     (run / "mission.yaml").write_text(text)
     report.write(run, m, plan)
-    assert load(run)["sanity"] == dict(applies=False, reason="This mission has the demo's name but not its window, box and vehicles, so BRIEF section 6's "
-                                                           "expected outcome for the demo mission does not apply to it.")
-    assert "has the demo's name but not its window" in plain((run / "report" / "index.html").read_text())
+    assert load(run)["sanity"] == dict(applies=False, reason=NOT_THE_DEMO)
+    assert "has the demo's name but is not the shipped demo mission" in plain((run / "report" / "index.html").read_text())
+
+
+NOT_THE_DEMO = ("This mission has the demo's name but is not the shipped demo mission (something in it other than the seed and the description differs), "
+                "so BRIEF section 6's expected outcome for the demo mission does not apply to it.")
+
+
+def test_r13_m12_a_copy_that_moves_only_the_ship_is_not_said_to_differ_in_window_box_and_vehicles(run):
+    """Since DECISIONS 683 the whole mission is compared, so a copy with only its ship (or a link, or a cut-off) moved got a sentence that was false of it."""
+    m, plan = pm_run.make_run(run)
+    text = (run / "mission.yaml").read_text()
+    moved = text.replace("antenna_height_m: 15.0", "antenna_height_m: 16.0")
+    assert moved != text and moved.count("antenna_height_m: 16.0") == 1
+    (run / "mission.yaml").write_text(moved)
+    report.write(run, m, plan)
+    got = load(run)["sanity"]
+    assert got == dict(applies=False, reason=NOT_THE_DEMO) and "window, box and vehicles" not in got["reason"]
 
 
 def test_another_mission_has_no_sanity_block(run):
@@ -2923,6 +2938,20 @@ def test_r12_m8_a_receipts_table_of_the_wrong_shape_says_not_run_and_never_raise
         assert p["status"] == "not run" and "is not a receipts table" in p["reason"] and why in p["reason"] and p["failures"] == []
     ok = [dict(module="pm.physics.usv", name="n", ok=True, kind="pass"), dict(module="pm.env.waves", kind="context", ok=None)]
     assert report._rows_problem(ok) is None and report._rows_problem([]) is None
+
+
+def test_r13_m8_a_run_over_budget_with_stage_1_inside_its_plan_names_no_stage_1_cause(run):
+    """`if s1 and measured > planned` was `if s1` in a mutant that passed every test: stage 1 within its plan must not be blamed for an overrun."""
+    m, plan = pm_run.make_run(run)
+    counted = {}
+    for i, st in enumerate(s for s in report.STAGES if s not in ("ingest", "report") and (run / "checkpoints" / s / "ledger.json").is_file()):
+        edit_json(run / "checkpoints" / st / "ledger.json", lambda d, w=100.0 * (i + 1): d.update(wall_s=w))
+        counted[st] = 100.0 * (i + 1)
+    plan["budget_s"] = sum(counted.values()) / 2                               # over by a factor 2
+    plan["stage1_s"] = counted["stage1"] * 2                                   # but stage 1 took half its plan
+    report.write(run, m, plan)
+    h = plain((run / "report" / "index.html").read_text())
+    assert "Over the budget. The stages took" in h and "Stage 1: planned" in h and "stage 1 took" not in h
 
 
 def test_r12_m9_the_machine_block_sums_the_walls_against_the_budget_and_names_the_causes_when_over(run):

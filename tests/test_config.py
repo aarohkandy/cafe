@@ -1121,3 +1121,44 @@ def test_r12_m24_the_refusals_of_the_padded_box_label_the_edges_south_north_west
         load_mission(edit(tmp_path, box(lat_min=85.0, lat_max=89.0)))
     with pytest.raises(ConfigError, match=r"m.yaml: box lat -7 to 7, lon -181 to 181: the box is 362 deg wide"):
         load_mission(edit(tmp_path, box(lon_min=-179.0, lon_max=179.0)))
+
+
+# ---- review round 13: M-22 (a long instance in a schema message, deep YAML) and M-14 (a symlink kept a symlink)
+
+def test_r13_m22_a_65_vehicle_list_is_one_short_line_that_names_the_limit(tmp_path):
+    """jsonschema's message repeats `repr(instance)`: 65 vehicles gave a ConfigError of 15,040 characters, 3,000 of 694,992."""
+    d = doc()
+    d["vehicles"] = [dict(id=f"v{i}", platform="slocum") for i in range(65)]
+    with pytest.raises(ConfigError) as e:
+        load_mission(write(tmp_path, d))
+    msg = str(e.value)
+    assert len(msg) < 1000 and "vehicles: has 65 items; at most 64 are allowed" in msg and "v64" not in msg
+
+
+def test_r13_m22_a_long_wrong_value_is_cut_but_keeps_the_field_and_the_reason(tmp_path):
+    d = doc()
+    d["name"] = "x" * 5000
+    with pytest.raises(ConfigError) as e:
+        load_mission(write(tmp_path, d))
+    msg = str(e.value)
+    assert len(msg) < 1000 and "name: " in msg and "..." in msg and "is too long" in msg
+    assert config._short("short", "x") == "short" and config._short("y" * 400, 1).endswith("...") and len(config._short("y" * 400, 1)) == 303
+
+
+def test_r13_m22_yaml_nested_hundreds_deep_is_a_config_error_not_a_recursion_error(tmp_path):
+    p = tmp_path / "deep.yaml"
+    p.write_text("a: " + "[" * 3000 + "]" * 3000 + "\n")
+    with pytest.raises(ConfigError, match=r"deep.yaml: nested too deeply to read"):
+        config.read_yaml(p)
+    j = tmp_path / "deep.json"
+    j.write_text("[" * 100000 + "]" * 100000)
+    with pytest.raises(ConfigError, match="not a JSON object"):
+        config.json_object(j)
+
+
+def test_r13_m14_write_json_replaces_the_file_a_symlink_points_to_and_leaves_the_link(tmp_path):
+    real, link = tmp_path / "real.json", tmp_path / "sl.json"
+    real.write_text("{}")
+    link.symlink_to(real)
+    config.write_json(link, {"a": 1})
+    assert link.is_symlink() and config.json_object(real) == {"a": 1} and config.json_object(link) == {"a": 1} and not list(tmp_path.glob("*.tmp"))
