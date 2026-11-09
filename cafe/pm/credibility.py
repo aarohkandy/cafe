@@ -469,17 +469,18 @@ _clean = clean                                                                  
 
 
 def flown_classes(mission: dict[str, Any] | None) -> set[str] | None:
-    """The kinds of vehicle a mission flies: "glider", "usv" and "uas" (`config.platform_class`), and "slocum" for a glider whose platform file is a Slocum
-    (the stage-3 geometry reads `stage3.slocum.*` for it only). None when the mission is not there or a platform cannot be read: what is flown is then not
-    known, and every item counts as used."""
+    """The kinds of vehicle a mission flies: "glider", "usv" and "uas" (`config.platform_class`), and for a glider "seaglider" if its platform's kind is
+    `seaglider` and "slocum" for any other kind (the test `pipeline_windows.glider_vehicle` makes: the Seaglider reads `stage3.glider.hull_diameter_m`,
+    `wing_span_m` and `wing_chord_m`, any other glider `stage3.slocum.*`). None when the mission is not there or a platform cannot be read: what is flown
+    is then not known, and every item counts as used."""
     if mission is None:
         return None
     out: set[str] = set()
     try:
         for v in mission["vehicles"]:
             out.add(c := config.platform_class(v))
-            if c == "glider" and config.load_platform(v["platform"]).get("kind") == "slocum":
-                out.add("slocum")
+            if c == "glider":
+                out.add("seaglider" if config.load_platform(v["platform"]).get("kind") == "seaglider" else "slocum")
     except (config.ConfigError, KeyError, TypeError, AttributeError):
         return None
     return out
@@ -498,23 +499,32 @@ def flown_radios(mission: dict[str, Any] | None) -> set[str]:
 
 
 # What a config/ item needs to be used by a mission. "" is every mission; "-" is none, the item is read by the DTMB validation study and no verdict.
-# A class names the vehicles that read it: stage-3 geometry and nominal windows (`pipeline_windows`, `budget.NOMINAL_WINDOW`) and the class priors
-# (`stage1.priors_for`, the stage-1b sensitivity case). `stage3.glider.*` is read for every glider, some of it for the Seaglider only (round 13, M-3).
+# A class names the vehicles that read it, "a|b" either of two: stage-3 geometry and nominal windows (`pipeline_windows`, `budget.NOMINAL_WINDOW`), the
+# FEA (`budget.FEA_CLASSES`: the glider), the free-surface case (`budget.FS_PARTS`: the USV), the reach map (`report`: a glider or a USV, each at its
+# own speed) and the class priors (`stage1.priors_for`, the stage-1b sensitivity case). Only the Seaglider reads three of `stage3.glider.*` (round 13, M-3).
 CLASS_PRIORS = {"glider_speed_scale": "glider", "usv_vpp_bias": "usv", "usv_vpp_bias_brief": "usv", "bulk_stress_scale": "uas"}
 NOMINAL_CLASS = {"glider": "glider", "usv_hull": "usv", "usv_wing": "usv", "uas": "uas"}
-VEHICLE_CLASSES = ("glider", "slocum", "usv", "uas")
+STAGE3_ONLY = {"fea_elements_along": "glider", "fea_reserve_frac": "glider", "fea_min_s": "glider", "fs": "usv"}      # by the word after `stage3.`
+SEAGLIDER_ONLY = {"glider.hull_diameter_m", "glider.wing_span_m", "glider.wing_chord_m"}                              # after `stage3.`
+VEHICLE_CLASSES = ("glider", "seaglider", "slocum", "usv", "uas")
 
 
 def config_scope(file: str, key: str) -> str:
-    """Which vehicles use the item `key` of a config/ file: "" every mission, "-" none (the DTMB study), else a class of `flown_classes`."""
+    """Which vehicles use the item `key` of a config/ file: "" every mission, "-" none (the DTMB study), else a class of `flown_classes` ("a|b": either)."""
     if file.endswith("perturbations.yaml"):
         return CLASS_PRIORS.get(key, "")
     parts = key.split(".")
     if parts[0] == "dtmb5415":
         return "-"
-    if parts[0] == "stage3" and len(parts) > 2:
-        return parts[1] if parts[1] in VEHICLE_CLASSES else NOMINAL_CLASS.get(parts[2], "") if parts[1] == "nominal" else ""
-    return ""
+    if parts[0] == "reach":
+        return parts[2] if len(parts) > 2 else "glider|usv"                               # reach.speed_ms.<class>; the horizon and the allowance
+    if parts[0] != "stage3":
+        return ""
+    if len(parts) > 2 and parts[1] == "nominal":
+        return NOMINAL_CLASS.get(parts[2], "")
+    if ".".join(parts[1:]) in SEAGLIDER_ONLY:
+        return "seaglider"
+    return parts[1] if len(parts) > 2 and parts[1] in VEHICLE_CLASSES else STAGE3_ONLY.get(parts[1], "")
 
 
 def not_used_note(item: dict[str, Any]) -> str:
@@ -563,7 +573,7 @@ class Facts:
         """Whether this mission reads the item `key` of the config/ file `file` (`config_scope`). Which keys a run read is not recorded, so this is the rule
         and not a trace; a mission whose vehicles cannot be read counts every item but the DTMB ones."""
         scope = config_scope(file, key)
-        return scope == "" or (scope != "-" and (self.flown is None or scope in self.flown))
+        return scope == "" or (scope != "-" and (self.flown is None or not self.flown.isdisjoint(scope.split("|"))))
 
     def item_used(self, key: str, path: str) -> bool:
         """Whether this mission reads the platform input `path` of the platform `key` (the stem of its file; `item["key"]`). A vehicle's platform file is read

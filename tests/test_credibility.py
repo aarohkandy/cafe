@@ -1517,15 +1517,48 @@ def test_r13_m3_the_demo_flies_every_class_so_only_the_three_dtmb_keys_are_not_u
 def test_r13_m3_every_stage_3_key_of_assumptions_yaml_maps_to_a_class_or_to_every_mission():
     """A key added for one class must be given its class here, or it counts as used by missions that never fly that class."""
     keys = [k for k in cr.config.assumptions() if k.startswith("stage3.")]
-    every = {"window_s", "box_bodies", "cells_per_delta", "min_cells_across", "min_flow_throughs", "spinup", "fea_elements_along", "min_window_s",
-             "refit.between_window_frac", "refit.discretisation_frac", "fea_reserve_frac", "fea_min_s", "chunk_steps", "compile_s_guess", "les_margin",
-             "min_cells_thin_part", "nu_lat_floor", "skip_factor", "fs.margin", "fs.cost_factor", "fs.mesh_s_per_cell", "fs.snappy_cell_factor"}
+    every = {"window_s", "box_bodies", "cells_per_delta", "min_cells_across", "min_flow_throughs", "spinup", "min_window_s",
+             "refit.between_window_frac", "refit.discretisation_frac", "chunk_steps", "compile_s_guess", "les_margin",
+             "min_cells_thin_part", "nu_lat_floor", "skip_factor"}
     per_class = {k for k in keys if cr.config_scope("config/assumptions.yaml", k)}
     assert {k.removeprefix("stage3.") for k in keys if k not in per_class} == every
-    assert {cr.config_scope("config/assumptions.yaml", k) for k in per_class} == {"glider", "slocum", "usv", "uas"}
-    assert len(per_class) == 21 and cr.config_scope("config/assumptions.yaml", "stage3.nominal.usv_wing") == "usv"
+    assert {cr.config_scope("config/assumptions.yaml", k) for k in per_class} == {"glider", "seaglider", "slocum", "usv", "uas"}
+    assert len(per_class) == 28 and cr.config_scope("config/assumptions.yaml", "stage3.nominal.usv_wing") == "usv"
     assert cr.config_scope("config/assumptions.yaml", "dtmb5415.u_nu_rel") == "-" and cr.config_scope("config/assumptions.yaml", "waves.swell_age") == ""
     assert cr.config_scope("config/perturbations.yaml", "bulk_stress_scale") == "uas" and cr.config_scope("config/perturbations.yaml", "tp_bias") == ""
+
+
+def test_r13_a_config_keys_of_one_class_outside_the_stage_3_class_prefix_are_scoped_to_it(run, data):
+    """The adversary of batch A: `reach.speed_ms.<class>`, the FEA keys (glider only: `budget.FEA_CLASSES`) and `stage3.fs.*` (the USV's free-surface
+    case) are read per class and counted as used by every mission; the reach map has no UAS, and the Seaglider alone reads three `stage3.glider.*`."""
+    scope = lambda k: cr.config_scope("assumptions.yaml", k)
+    assert (scope("reach.speed_ms.glider"), scope("reach.speed_ms.usv"), scope("reach.horizon_h"), scope("reach.fluid_allowance_ms")) == \
+        ("glider", "usv", "glider|usv", "glider|usv")
+    assert {scope(f"stage3.{k}") for k in ("fea_min_s", "fea_elements_along", "fea_reserve_frac")} == {"glider"}
+    assert {scope(f"stage3.fs.{k}") for k in ("margin", "cost_factor", "mesh_s_per_cell", "snappy_cell_factor")} == {"usv"}
+    assert {scope(f"stage3.glider.{k}") for k in ("hull_diameter_m", "wing_span_m", "wing_chord_m")} == {"seaglider"}
+    assert scope("stage3.glider.wing_x_frac") == "glider" and scope("stage3.slocum.length_m") == "slocum"
+    uas, sea, slo = (used_of(only(run, {v}), "config/assumptions.yaml") for v in ("uas", "glider_eq", "glider_2n"))
+    assert used_of(only(run, {"usv"}), "config/assumptions.yaml") >= {"reach.speed_ms.usv", "stage3.fs.margin", "reach.horizon_h"}
+    assert uas.isdisjoint({"reach.speed_ms.usv", "reach.speed_ms.glider", "reach.horizon_h", "reach.fluid_allowance_ms", "stage3.fea_min_s",
+                           "stage3.fea_elements_along", "stage3.fea_reserve_frac", "stage3.fs.margin", "stage3.fs.cost_factor"})
+    assert {"reach.speed_ms.glider", "stage3.fea_min_s", "stage3.glider.wing_span_m", "reach.horizon_h"} <= sea
+    assert sea.isdisjoint({"reach.speed_ms.usv", "stage3.fs.margin"}) and "stage3.glider.wing_span_m" not in slo and "stage3.slocum.length_m" in slo
+
+
+def test_r13_a_a_glider_of_another_kind_than_seaglider_reads_the_slocum_geometry_keys(run, data, tmp_path):
+    """`pipeline_windows.glider_vehicle` takes the Seaglider branch for `kind: seaglider` and the `stage3.slocum.*` branch for every other glider."""
+    other = tmp_path / "spray.yaml"
+    other.write_text((REAL / "platforms" / "slocum.yaml").read_text().replace("kind: slocum", "kind: spray_glider", 1))
+    assert "kind: spray_glider" in other.read_text()
+    m = demo_mission()
+    m["vehicles"] = [dict(next(v for v in m["vehicles"] if v["id"] == "glider_2n"), platform=str(other))]
+    assert cr.flown_classes(m) == {"glider", "slocum"}
+    assert cr.flown_classes(demo_mission()) == {"glider", "seaglider", "slocum", "usv", "uas"}
+    m["links"] = []
+    (run / "mission.yaml").write_text(yaml.safe_dump(m, sort_keys=False))
+    cfg = used_of(cr.build(run, REAL, data), "config/assumptions.yaml")
+    assert "stage3.slocum.length_m" in cfg and "stage3.glider.wing_span_m" not in cfg
 
 
 def test_r13_m3_a_mission_whose_vehicles_cannot_be_read_counts_every_class_but_never_the_dtmb_keys(run, data):

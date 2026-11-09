@@ -198,17 +198,33 @@ def _jsonable(x: Any) -> Any:
     return str(x)
 
 
+def _key(k: Any) -> str:
+    """The text `json.dumps` writes for the dict key `k` (a number, bool or None is text there), or, for a key it refuses (a numpy integer, a date, a
+    tuple, a non-finite float), the text `clean` makes of it."""
+    if isinstance(k, str):
+        return k
+    if k is None:
+        return "null"
+    if isinstance(k, bool):
+        return "true" if k else "false"
+    if isinstance(k, int):
+        return str(int(k))
+    if isinstance(k, float):
+        return repr(float(k))
+    c = clean(k)
+    return _key(c) if c is None or isinstance(c, (bool, int, float, str)) else str(c)
+
+
 def clean(x: Any) -> Any:
     """x as strict JSON data: numpy values and dates made plain (`_jsonable`), every non-finite float (NaN, an unbounded limit) replaced by None,
-    because JSON has no NaN or Infinity and `jq` / JSON.parse reject them. A dict key that is not a str, int, bool, None or finite float (a numpy integer,
-    a date, a tuple) is made text the same way (`json.dumps` refuses it, and in `Ledger.__exit__` that TypeError would replace the stage's own exception,
-    round 13 M-29); two keys that come out the same keep the first value."""
+    because JSON has no NaN or Infinity and `jq` / JSON.parse reject them. Every dict key is made the text JSON writes for it (`_key`: 1 is "1", True is
+    "true", None is "null"; a numpy integer, a date, a tuple, a non-finite float that `json.dumps` refuses are made text the same way, and in
+    `Ledger.__exit__` that TypeError would replace the stage's own exception, round 13 M-29), and two keys that come out the same keep the first value:
+    `{1: a, "1": b}` would otherwise be written with two "1" keys, and `sort_keys` fails on a dict of mixed key types."""
     if isinstance(x, dict):
-        out: dict[Any, Any] = {}
+        out: dict[str, Any] = {}
         for k, v in x.items():
-            if not (k is None or isinstance(k, (str, int, bool)) or isinstance(k, float) and math.isfinite(k)):
-                k = str(k) if isinstance(k, float) else str(clean(k))
-            out.setdefault(k, clean(v))
+            out.setdefault(_key(k), clean(v))
         return out
     if isinstance(x, (list, tuple)):
         return [clean(v) for v in x]
