@@ -1409,7 +1409,7 @@ def test_r13_m17_a_golden_path_no_flag_can_make_writable_is_refused_before_any_r
         why = acc.golden_refusal(bad, "m", "m")
         assert why and (str(bad) in why or str(afile) in why), bad
         assert acc.golden_refusal(bad, "m") == why
-        assert "--golden-mission" not in acc.update_command(bad, "mm.yaml", 0, "m", tmp_path / "o")
+        assert acc.update_command(bad, "mm.yaml", 0, "m", tmp_path / "o") is None
         monkeypatch.setattr(acc, "run_one", lambda *a, **k: pytest.fail("a run started"))
         rows, rc = acc.run(MISSION, 0, tmp_path / "o2", bad, update_golden=True, log=lambda s: None, golden_mission="ci_fixture")
         assert rc == 1 and [r["name"] for r in rows] == ["golden_diff"] and "no run started" in rows[0]["detail"] and not (tmp_path / "o2").exists()
@@ -1444,3 +1444,29 @@ def test_r13_m17_a_golden_write_cut_short_leaves_the_old_golden_and_no_temporary
     link.symlink_to(g)
     acc.check_golden(run_dict(tmp_path / "acc", report()), link, MISSION, True)
     assert link.is_symlink() and json.loads(g.read_text())["summary"]["mission"] == "m"
+
+
+@pytest.mark.parametrize("body", [None, "not json", "[1]", '{"summary": {"mission": "m"}}'])
+@pytest.mark.parametrize("where", ["below_a_file", "unwritable_dir", "writable"])
+def test_r13_b2_a_golden_message_prints_a_command_only_if_the_parser_accepts_it_and_run_would_not_refuse_it(tmp_path, monkeypatch, body, where):
+    """Round 13 batch B, a sibling of M-17: a missing (or damaged) golden below a file, or in a directory this user cannot write, still printed
+    `... --update-golden ... --golden X`, which `run()` refuses before it starts. Every command a message prints is fed to the real parser and then to the
+    refusal `run()` applies to the parsed `--golden` and `--golden-mission`; where no command can work, the message prints none and names `--golden`."""
+    plain = tmp_path / "plain"
+    plain.write_text("x")
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    f = {"below_a_file": plain / "sub" / "g.json", "unwritable_dir": ro / "g.json", "writable": tmp_path / "g.json"}[where]
+    if body is not None and where != "below_a_file":
+        f.write_text(body)
+    real = os.access
+    monkeypatch.setattr(acc.os, "access", lambda p, m, *a, **k: False if pathlib.Path(p) == ro else real(p, m, *a, **k))
+    row = acc.check_golden(run_dict(tmp_path / "acc", report(mission=dict(name="m", seed=dict(value=7)))), f, "m.yaml", False)
+    found = re.search(r"with `(python -m [^`]+)`", row["detail"])
+    if where == "writable":
+        a = parse_printed(found.group(1), monkeypatch)
+        assert a.golden == str(f) and acc.golden_refusal(pathlib.Path(a.golden), "m", a.golden_mission) is None
+    else:
+        assert found is None and "--update-golden" not in row["detail"], row["detail"]
+        assert "cannot be written there: name another file with `--golden`" in row["detail"]
+        assert acc.golden_refusal(f, "m", "m") and acc.update_command(f, "m.yaml", 0, "m", tmp_path / "acc") is None

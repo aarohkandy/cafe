@@ -403,14 +403,18 @@ def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) 
             f"add `--golden-mission {shlex.quote(name)}`, or name another file with `--golden`")
 
 
-def update_command(golden: pathlib.Path, mission: str, gpus: int, name: str, out: pathlib.Path) -> str:
-    """The command that writes `golden` from a quick run of `mission` (whose report names itself `name`), as the messages that ask for a new golden print it. It
+def update_command(golden: pathlib.Path, mission: str, gpus: int, name: str, out: pathlib.Path) -> str | None:
+    """The command that writes `golden` from a quick run of `mission` (whose report names itself `name`), as the messages that ask for a new golden print it,
+    or None when `golden_refusal` refuses the path even with `--golden-mission` (a directory, below a file, in a directory this user cannot write): then
+    no command is printed, since `run()` would refuse it before it started (round 13, a sibling of M-17). It
     carries what `acceptance` needs to be accepted at all, after the base command (the old prefix is unchanged): `--out`, required by the parser, a
     fresh sibling of `out` (the directory of the run being judged, which holds runs the new command would replace), then what
     `--update-golden` needs: `--golden` when the file is not the default one, `--golden-mission` when `golden_refusal` would refuse the write (the file is
     damaged, or the golden of another mission) and the flag mends it. The same test as the refusal's, so the advice cannot be refused, and every word
     that is ours to choose is shlex-quoted, so it pastes as one command whatever the paths and the name hold
     (look-ahead L0 after round 12, M-33; `--out`, round 13, M-11)."""
+    if golden_refusal(golden, name, name):
+        return None
     fresh = out.parent / ((out.name or "acceptance") + "_golden")
     return (_base_command(mission, gpus) + f" --out {shlex.quote(str(fresh))}" + (f" --golden {shlex.quote(str(golden))}" if golden != GOLDEN else "")
             + (f" --golden-mission {shlex.quote(name)}" if golden_refusal(golden, name) and not golden_refusal(golden, name, name) else ""))
@@ -420,6 +424,9 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
     if r["report"] is None:
         return _row("golden_diff", False, "the quick run wrote no report to compare")
     cmd = update_command(golden, mission, r["gpus"], r["report"]["mission"]["name"], r["dir"].parent)
+
+    def how(todo: str) -> str:                                          # the advice, or, when no command can write this path, that and the way out
+        return f": {todo} `{cmd}`" if cmd else " and it cannot be written there: name another file with `--golden`"
     if update:
         if why := golden_refusal(golden, r["report"]["mission"]["name"], golden_mission):
             return _row("golden_diff", False, f"golden NOT updated: {why}", updated=False, refused=True, golden=str(golden))
@@ -427,22 +434,23 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
         _write_atomic(golden, json.dumps(_golden_record(r, mission), indent=1, allow_nan=False) + "\n")
         return _row("golden_diff", False, f"golden {golden} UPDATED from this run, not compared: rerun without --update-golden to check against it",
                     updated=True)
-    if golden.exists() and not golden.is_file():                       # a directory: no command can write it, and `cmd` would be refused too
+    if golden.exists() and not golden.is_file():                       # a directory: no command can write it (`cmd` is None)
         return _row("golden_diff", False, f"golden {golden} is not a file: name a file with `--golden`", golden=str(golden))
     if not golden.is_file():
-        return _row("golden_diff", False, f"no golden file at {golden}: write it from a quick run you have reviewed with `{cmd}`", missing=True)
+        return _row("golden_diff", False, f"no golden file at {golden}" + how("write it from a quick run you have reviewed with"), missing=True)
     try:
         g = json.loads(golden.read_text())
     except (OSError, ValueError) as e:                                 # not JSON, not UTF-8, unreadable: a problem line naming the file, not a traceback
-        return _row("golden_diff", False, f"golden {golden.name} cannot be read as JSON ({type(e).__name__}: {str(e)[:100]}): write a new one from a quick "
-                                          f"run you have reviewed with `{cmd}`", problems=[str(e)[:100]], golden=str(golden))
+        return _row("golden_diff", False, f"golden {golden.name} cannot be read as JSON ({type(e).__name__}: {str(e)[:100]})"
+                                          + how("write a new one from a quick run you have reviewed with"), problems=[str(e)[:100]], golden=str(golden))
     if not isinstance(g, dict):
-        return _row("golden_diff", False, f"golden {golden.name} is {type(g).__name__}, not an object: write a new one from a quick run you have "
-                                          f"reviewed with `{cmd}`", problems=["not an object"], golden=str(golden))
+        return _row("golden_diff", False, f"golden {golden.name} is {type(g).__name__}, not an object"
+                                          + how("write a new one from a quick run you have reviewed with"), problems=["not an object"], golden=str(golden))
     prov = provenance_problems(g.get("source", {}))
     if prov:
-        return _row("golden_diff", False, f"golden {golden.name} has no provenance ({'; '.join(prov)}): write a new one from a quick run you have reviewed, "
-                                          f"on a clean checkout, with `{cmd}`", provenance=prov, golden=str(golden))
+        return _row("golden_diff", False, f"golden {golden.name} has no provenance ({'; '.join(prov)})"
+                                          + how("write a new one from a quick run you have reviewed, on a clean checkout, with"), provenance=prov,
+                    golden=str(golden))
     bad, notes = compare(g.get("summary"), summary(r["report"]))
     n = 0 if bad else len(g["summary"]["vehicles"]) + len(g["summary"]["links"])
     return _row("golden_diff", not bad, ("; ".join(bad[:6]) + (f" (+{len(bad) - 6} more)" if len(bad) > 6 else "") if bad else
