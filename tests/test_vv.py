@@ -1099,3 +1099,53 @@ def test_p37_too_little_disk_for_a_dtmb5415_run_is_one_error_line_and_exit_2_and
     monkeypatch.setattr(dt, "run_grid", lambda *a, **k: (_ for _ in ()).throw(OSError("killed")))
     with pytest.raises(OSError, match="killed"):
         dt.main(["run", "fine"])
+
+
+@pytest.mark.parametrize("words", [[], ["bogus"], ["fine", "abc"], ["fine", "0"], ["fine", "-3"], ["fine", "7", "0.28,x"], ["fine", "7", "0"],
+                                    ["fine", "7", "0.28", "extra"], ["fine", "7", "nan"]])
+def test_r13_l1_run_with_a_missing_or_malformed_argument_is_the_usage_and_exit_2_not_a_traceback(monkeypatch, capsys, words):
+    """`python -m cafe.pm.dtmb5415 run` was an IndexError, and a word that is no number a ValueError, where an unknown command already printed the usage."""
+    monkeypatch.setattr(dt, "run_grid", lambda *a, **k: pytest.fail("a grid started"))
+    assert dt.main(["run", *words]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: run") and "Usage" in err
+
+
+# ------------------------------------------------------------------ look-ahead L1: zero values and the two copies of the two-grid index
+
+@pytest.mark.parametrize("args", [(1.0, 1.2, 1.0), (0.0, 1.2, 2.0), (np.float64(0.0), 1.2, 2.0), (1.0, 1.2, 0.5), (1.0, 1.2, math.nan), (1.0, 1.2, 2.0, 0.0)])
+def test_r13_l1_cfd_gci_is_vvs_formula_and_has_no_index_where_vv_refuses(args):
+    """`cafe.cfd.gci` kept the unguarded formula: ratio 1 or a zero fine value was a ZeroDivisionError (with a numpy scalar a silent inf or nan) where
+    `vv.gci_two_grid` raises ValueError. It is now NaN, which the free-surface window's `fs_gci` check reads as "not informative"."""
+    with pytest.raises(ValueError):
+        vv.gci_two_grid(*args)
+    assert math.isnan(cfd.gci(*args))
+    assert cfd.gci(100.0, 102.0, ratio=1.4, p=2.0, fs=3.0) == vv.gci_two_grid(100.0, 102.0, 1.4, 2.0, 3.0)
+
+
+def test_r13_l1_a_direction_with_no_index_makes_the_study_add_the_finer_grid(tmp_path, monkeypatch):
+    """`study` took `max` of the per-direction indices: with NaN in a later direction the max kept the finite one, the grid was trusted and no finer
+    grid ran. A direction with no index now counts as unbounded."""
+    def fake(stl, wd, fluid, speed, dirs, off, cofr, log=print):
+        cells = {-1: 1000, 0: 2000, 1: 4000}[off]
+        drag = {-1: dict(x=1.01, y=0.0), 0: dict(x=1.0, y=0.0), 1: dict(x=1.0, y=0.0)}[off]
+        return dict(mesh=dict(cells=cells), dirs={d: dict(force=[-drag[d[1]] * v for v in cfd.dvec(d)], moment=[0.0, 0.0, 0.0]) for d in dirs})
+    monkeypatch.setattr(cfd, "external", fake)
+    monkeypatch.setattr(cfd, "_shrink", lambda p: None)
+    out = cfd.characterize_external("x.stl", tmp_path, "water", 1.5, dirs=("+x", "+y"), log=lambda *a: None)
+    assert out["grids"] == 3 and math.isinf(out["gci_two_grid"])
+
+
+def test_r13_l1_a_finest_ct_of_zero_is_a_nan_uncertainty_and_a_row_that_is_not_validated(tmp_path):
+    """`discretization` computed the spread (a division by the finest value) before its guards: a stored run whose finest C_T is exactly 0.0 (a solver
+    that never produced a force) was a ZeroDivisionError out of `tabulate`, and with it the report and the receipts."""
+    u, r, note = dt.discretization([0.0, 0.003, 0.004], [4e6, 2e6, 1e6], [1, 1, 1])
+    assert math.isnan(u) and r == pytest.approx(2 ** (1 / 3)) and note == "relative uncertainty undefined: the finest grid's value is 0"
+    with pytest.raises(ValueError):
+        vv.gci_two_grid(0.0, 0.003, 2.0)                                                         # the same input vv refuses
+    ct = converging()
+    ct["fine"] = lambda fr, f=ct["fine"]: 0.0 if fr == 0.28 else f(fr)
+    root = stored(tmp_path, ct)
+    rows = dt.tabulate(root)
+    assert len(rows) == 4 and math.isnan(rows[0.28].u_val) and rows[0.28].validated is False and all(math.isfinite(rows[f].u_val) for f in rows if f != 0.28)
+    assert "value is 0" in dt.row_notes(root)[0.28]["note"]

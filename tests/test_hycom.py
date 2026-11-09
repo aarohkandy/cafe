@@ -1356,3 +1356,9 @@ def test_r13_sweep_the_store_manifest_writer_follows_a_symlink_and_leaves_the_li
     h._write_json(link, {"v": 1})
     assert link.is_symlink() and json.loads(real.read_text()) == {"v": 1} and real.read_text() == json.dumps({"v": 1}, indent=1, sort_keys=True)
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_r13_l1_refuse_overlap_of_a_symlink_loop_store_is_not_a_runtimeerror(tmp_path):
+    loop = tmp_path / "store.zarr"
+    loop.symlink_to("store.zarr")
+    h.refuse_overlap(loop, tmp_path / "src")                    # a loop is no directory that holds the source: returns, was RuntimeError

@@ -660,3 +660,29 @@ def test_subset_simulation_cov_is_not_far_below_the_empirical_one():      # roun
     est = [rare.subset_simulation(lambda u: u[:, 0], 1, 3.5, n=500, seed=s) for s in range(40)]
     ps = np.array([e["p"] for e in est])
     assert np.mean([e["cov"] for e in est]) * 1.8 > ps.std() / ps.mean()
+
+
+# ---------------------------------------------------------------------------------------------------------- round 13, look-ahead L1
+@pytest.mark.parametrize("mean", [math.nan, math.inf, 0, 0.0, -5, True, "100", None])
+def test_r13_l1_a_fixed_correlation_length_that_is_nan_zero_or_negative_is_refused_where_every_reader_sees_it(tmp_path, mean):
+    """`check_entry` had no branch for dist 'fixed', so `current_correlation_length` with mean .nan (all-NaN current fields), 0 (ZeroDivisionError) or
+    -5 (numpy's 'scale < 0') loaded with no word. The setting is a length the random-field generator divides by."""
+    words = r"perturbation 'current_correlation_length': the fixed setting \(mean\) is .*finite and > 0"
+    e = dict(dist="fixed", mean=mean, value=0.0, **FIELDS)
+    with pytest.raises(ValueError, match=words):
+        S.check_entry("current_correlation_length", e)
+    cfg = yaml.safe_load(S.PERTURBATIONS.read_text())
+    cfg["current_correlation_length"] = e
+    p = tmp_path / "p.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match=words):
+        S.load_perturbations(p)
+
+
+def test_r13_l1_a_fixed_correlation_length_must_be_given_and_any_other_fixed_setting_is_checked_only_when_it_has_a_mean():
+    with pytest.raises(ValueError, match=r"the fixed setting \(mean\) is None"):
+        S.check_entry("current_correlation_length", dict(dist="fixed", value=0.0))
+    S.check_entry("other_setting", dict(dist="fixed", value=0.0))                       # a fixed entry with no mean that no code divides by stays valid
+    with pytest.raises(ValueError, match=r"perturbation 'other_setting': the fixed setting"):
+        S.check_entry("other_setting", dict(dist="fixed", mean=math.nan, value=0.0))
+    S.check_entry("current_correlation_length", dict(dist="fixed", mean=np.float64(5e4), value=0.0))

@@ -560,9 +560,10 @@ def platform_path(ref: str | pathlib.Path) -> pathlib.Path:
 def platform_display(ref: str | pathlib.Path) -> str:
     """`platform_path(ref)` as a label for a report: relative to the repo when the file is in it (a name and `platforms/<name>.yaml` give the same
     text), else the path as given."""
+    from .ledger import real                                         # a symlink loop in the path is a path that is not in the repo, never a RuntimeError
     p = platform_path(ref)
     try:
-        return p.resolve().relative_to(ROOT).as_posix()
+        return real(p).relative_to(ROOT).as_posix()
     except ValueError:
         return str(p)
 
@@ -583,8 +584,10 @@ def assumptions() -> dict[str, Any]:
 
 def env_sigmas() -> dict[str, Any]:
     """1-sigma uncertainties GriddedEnv tags its values with: wind, Hs and Tp from the Stage-1 priors (perturbations.yaml),
-    the rest from assumptions.yaml (env.sigma.*) until the TAO comparison replaces them."""
-    pri = _yaml(CONFIG / "perturbations.yaml")
+    the rest from assumptions.yaml (env.sigma.*) until the TAO comparison replaces them. The priors come through `sampling.load_perturbations`, the one
+    reader that checks an entry, so a NaN or zero sd is refused here as in stage 1 (round 13, look-ahead L1)."""
+    from .stats import sampling
+    pri = sampling.load_perturbations(CONFIG / "perturbations.yaml")
     a = assumptions()
     out = {k.split(".")[-1]: a[k]["value"] for k in a if k.startswith("env.sigma.")}
     out.update(wind_ms=pri["wind_speed_bias"]["value"], hs_frac=pri["hs_scale"]["value"], tp_s=pri["tp_bias"]["value"])

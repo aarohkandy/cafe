@@ -272,6 +272,8 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
 
 _NC = {1: ("i1", 1), 2: ("S1", 1), 3: (">i2", 2), 4: (">i4", 4), 5: (">f4", 4), 6: (">f8", 8)}
 MAX_ITEM = 64 << 20          # one name or one attribute value of a header; the real files' are a few kB, so a longer one is a damaged length (round 13, M-15)
+MAX_ENTRIES = 1 << 16        # entries of one header list (dimensions, attributes, variables, ids of a variable): NetCDF's own limits are 1024 to 8192,
+                             # so more is a damaged count, and a count of 2**31 - 1 would otherwise read the whole file into lists (round 13, look-ahead L1)
 
 
 def _bad(what: str) -> ValueError:
@@ -297,9 +299,10 @@ class _Buf:
     def i4(self) -> int:
         return int(struct.unpack(">i", self.take(4))[0])
 
-    def count(self) -> int:
+    def count(self, most: int | None = None) -> int:
+        """A non-negative count; with `most`, at most that (the number of entries of a list: each takes bytes, so a bigger one is a damaged header)."""
         n = self.i4()
-        if n < 0:
+        if n < 0 or (most is not None and n > most):
             raise _bad(f"a count of {n} at byte {self.p - 4}")
         return n
 
@@ -314,7 +317,7 @@ class _Buf:
 
     def kind(self, want: int) -> int:
         """The count of a (tag, count) list header: 0 for an absent list, else the number of entries (the tag must be `want`)."""
-        tag, n = self.i4(), self.count()
+        tag, n = self.i4(), self.count(MAX_ENTRIES)
         if tag not in (0, want) or (tag == 0 and n):
             raise _bad(f"list tag {tag} (expected {want}) at byte {self.p - 8}")
         return n
@@ -356,7 +359,7 @@ def parse_cdf1(fetch: Callable[[int, int], bytes]) -> Header:
     out: dict[str, dict[str, Any]] = {}
     for _ in range(b.kind(11)):
         name = b.name()
-        ids = [b.count() for _ in range(b.count())]
+        ids = [b.count() for _ in range(b.count(MAX_ENTRIES))]
         if any(i >= len(dims) for i in ids):
             raise _bad(f"{name}: dimension id {max(ids)} of {len(dims)} dimensions")
         atts = b.attrs()
@@ -386,9 +389,12 @@ def _is_url(p: str) -> bool:
 def _fits(hdr: Header, size: int) -> None:
     """Every variable's data lies inside a file of `size` bytes, else the header is damaged: a length or a count with one byte changed names gigabytes that
     `cdf1_read` would allocate or seek to (round 13, M-15 after the fuzz: MemoryError, OSError). The end of a record variable is its last record's."""
+    nrec = max(hdr[1], 0)
     for name, v in hdr[2].items():
+        if v["record"] and nrec == 0:                       # an unlimited dimension nothing was written to: a record variable has no data to lie past the end
+            continue
         n = math.prod(v["shape"][1:] if v["record"] else v["shape"]) * np.dtype(v["dtype"]).itemsize
-        end = v["offset"] + n + (max(hdr[1] - 1, 0) * v["recsize"] if v["record"] else 0) if n else 0
+        end = v["offset"] + n + ((nrec - 1) * v["recsize"] if v["record"] else 0) if n else 0
         if end > size:
             raise _bad(f"{name}: its data would end at byte {end}, past the end of the file ({size} bytes)")
 

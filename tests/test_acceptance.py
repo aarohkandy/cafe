@@ -1498,3 +1498,40 @@ def test_r13_b2_a_golden_message_prints_a_command_only_if_the_parser_accepts_it_
         assert found is None and "--update-golden" not in row["detail"], row["detail"]
         assert "cannot be written there: name another file with `--golden`" in row["detail"]
         assert acc.golden_refusal(f, "m", "m") and acc.update_command(f, "m.yaml", 0, "m", tmp_path / "acc") is None
+
+
+def self_link(p):
+    """A symlink that points at itself (`ln -s loop loop`): resolve() raises RuntimeError on it in Python 3.12, exists() and is_file() say it is not there."""
+    p.symlink_to(p.name)
+    return p
+
+
+def test_r13_l1_a_symlink_loop_in_a_path_the_user_typed_is_not_a_runtimeerror(tmp_path):
+    """Round 13 M-21 moved the run-directory sites to `ledger.real`; `refuse_wiped_mission` still called `.resolve()` on --mission and so did the commands
+    it builds for `--mission` and `--out`."""
+    loop = self_link(tmp_path / "loop")
+    acc.refuse_wiped_mission(str(loop), tmp_path / "out", acc.RUN_NAMES)                      # no overlap with out/<name>: returns, was RuntimeError
+    inside = tmp_path / "out" / "quick"
+    inside.mkdir(parents=True)
+    (inside / "mission.yaml").write_text("x")
+    with pytest.raises(config.ConfigError, match="is inside"):
+        acc.refuse_wiped_mission(str(inside / "mission.yaml"), tmp_path / "out", acc.RUN_NAMES)       # the real refusal is unchanged
+
+
+def test_r13_l1_a_golden_that_is_or_lies_below_a_symlink_loop_is_refused_before_any_run(tmp_path, monkeypatch):
+    """Round 13 M-17's early refusal read a loop as an absent file (exists() and is_file() swallow ELOOP), so the first long run executed and
+    `golden.resolve()` raised RuntimeError after it. Both shapes now come back from `golden_refusal`, `check_golden` and `run`, with no run and no write."""
+    loopfile = self_link(tmp_path / "loopfile.json")
+    loopdir = self_link(tmp_path / "loopdir")
+    for bad in (loopfile, loopdir / "g.json"):
+        why = acc.golden_refusal(bad, "m", "m")
+        assert why and "symbolic link that leads back to itself" in why and str(bad) in why
+        assert acc.golden_refusal(bad, "m") == why and acc.update_command(bad, "mm.yaml", 0, "m", tmp_path / "o") is None
+        monkeypatch.setattr(acc, "run_one", lambda *a, **k: pytest.fail("a run started"))
+        rows, rc = acc.run(MISSION, 0, tmp_path / "o2", bad, update_golden=True, log=lambda s: None, golden_mission="ci_fixture")
+        assert rc == 1 and [r["name"] for r in rows] == ["golden_diff"] and "no run started" in rows[0]["detail"] and not (tmp_path / "o2").exists()
+        done = acc.check_golden(run_dict(tmp_path / "acc", report()), bad, MISSION, True, "m")
+        assert done["values"]["refused"] is True and done["values"]["updated"] is False
+    assert loopfile.is_symlink() and not loopfile.exists()                                        # nothing replaced the link
+    acc.check_golden(run_dict(tmp_path / "acc", report()), tmp_path / "fine.json", MISSION, True)      # an ordinary new golden is still written
+    assert (tmp_path / "fine.json").is_file()

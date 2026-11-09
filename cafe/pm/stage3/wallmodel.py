@@ -426,7 +426,10 @@ def receipts(plate: dict[str, Any] | None = None, chan: dict[str, Any] | None = 
 
 def main(argv: list[str]) -> int:
     """python -m cafe.pm.stage3.wallmodel [slow|channel|receipts]"""
-    if argv[:1] == ["channel"]:
+    p = lbm.cli_parser("python -m cafe.pm.stage3.wallmodel", ("receipts", "slow", "channel"), main.__doc__)
+    a = p.parse_intermixed_args(argv)
+    lbm.cli_values(p, a, ())                                               # no words after the command
+    if a.cmd == "channel":
         sha0 = lbm.physics_sha()
         r = channel(**CHANNEL_CI)
         r.pop("profile")
@@ -434,7 +437,7 @@ def main(argv: list[str]) -> int:
         _write_receipt(channel_path(), dict(r, params=CHANNEL_CI, code_sha=sha0))
         print(json.dumps(r, default=float))
         return 0
-    if argv[:1] == ["slow"]:
+    if a.cmd == "slow":
         sha0 = lbm.physics_sha()
         r = flat_plate(**PLATE_SLOW)
         r.pop("force")

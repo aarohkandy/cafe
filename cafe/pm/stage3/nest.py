@@ -586,13 +586,18 @@ def sphere_receipts() -> list[dict[str, Any]]:
 
 
 def main(argv: list[str]) -> int:
-    """python -m cafe.pm.stage3.nest [receipts | slow RE D NX NY NZ [--lateral freeslip|dirichlet] [--needs-d N]]"""
-    if argv[:1] == ["slow"]:
+    """python -m cafe.pm.stage3.nest [receipts | slow RE D NX NY NZ [--lateral freeslip|dirichlet|periodic] [--needs-d N]]"""
+    p = lbm.cli_parser("python -m cafe.pm.stage3.nest", ("receipts", "slow"), main.__doc__)
+    p.add_argument("--lateral", choices=("dirichlet", "freeslip", "periodic"), default="dirichlet")
+    p.add_argument("--needs-d", type=lbm.positive_int, default=None)
+    a = p.parse_intermixed_args(argv)
+    kinds = (lbm.positive_text, lbm.positive_int, lbm.positive_float, lbm.positive_float, lbm.positive_float) if a.cmd == "slow" else ()
+    vals = lbm.cli_values(p, a, kinds)
+    if a.cmd == "slow":
         sha0 = lbm.physics_sha()
-        lat = argv[argv.index("--lateral") + 1] if "--lateral" in argv else "dirichlet"
-        need = int(argv[argv.index("--needs-d") + 1]) if "--needs-d" in argv else None
-        tag, d = argv[1], int(argv[2])
-        dom = tuple(float(a) for a in argv[3:6])
+        lat, need = a.lateral, a.needs_d
+        tag, d = vals[0], vals[1]
+        dom = tuple(vals[2:5])
         t0 = time.time()
         r = sphere_drag(float(tag), d, dom, lateral=lat)
         r.update(seconds=time.time() - t0, re=float(tag), ref=lbm.morrison(float(tag)), lateral=lat, history=[float(x) for x in r["history"]],

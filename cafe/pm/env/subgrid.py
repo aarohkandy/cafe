@@ -511,7 +511,8 @@ def promote_calibration(run: str | pathlib.Path, path: str | pathlib.Path | None
     act: nothing else ever changes the tracked file. Returns the block written."""
     import datetime as dt
     import hashlib
-    run = pathlib.Path(run).resolve()
+    from ..ledger import real                                      # `resolve()` raises RuntimeError on a symlink loop in a path the user typed
+    run = real(run)
     src, led = run / "stage3" / "subgrid_calibration.json", run / "checkpoints" / "stage3" / "ledger.json"
     if not src.is_file() or not led.is_file():
         raise ValueError(f"{run}: no stage3/subgrid_calibration.json (or no stage-3 ledger): that run did not calibrate the sub-grid layer")

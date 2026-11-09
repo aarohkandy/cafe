@@ -52,7 +52,9 @@ def check_entry(k: str, e: Any) -> None:
     """Refuse a perturbations.yaml entry (or a fitted prior that replaces one) that would give NaN members or a raw traceback, naming it.
 
     A mapping with `dist` one of DISTS; normal and lognormal: `value` a finite sd > 0, `mean` (normal) finite and `median` (lognormal) finite > 0
-    when given; uniform: finite `lo` < `hi`. The one check, called by `load_perturbations` for every entry and by `to_marginals` for the entries it builds.
+    when given; uniform: finite `lo` < `hi`; fixed: `mean`, the setting itself, finite and > 0 when given and always for `current_correlation_length`,
+    which the random-field generator divides by (NaN fields, a ZeroDivisionError or numpy's 'scale < 0' otherwise; round 13, look-ahead L1). The one
+    check, called by `load_perturbations` for every entry and by `to_marginals` for the entries it builds.
     """
     if not isinstance(e, dict):
         raise ValueError(f"perturbation {k!r}: an entry is a mapping (dist, value, unit, citation, kind), not {e!r}")
@@ -70,6 +72,9 @@ def check_entry(k: str, e: Any) -> None:
         hi: Any = e.get("hi")
         if not (_num(lo) and _num(hi) and lo < hi):
             raise ValueError(f"perturbation {k!r}: a uniform prior needs finite numbers lo < hi, got lo {lo!r} and hi {hi!r}")
+    elif "mean" in e or k == "current_correlation_length":                # a fixed setting: the one the code divides by is a length
+        if not (_num(e.get("mean")) and e["mean"] > 0):
+            raise ValueError(f"perturbation {k!r}: the fixed setting (mean) is {e.get('mean')!r}; it is a length the random field divides by: finite and > 0")
 
 
 def load_perturbations(path: str | pathlib.Path | None = None) -> dict[str, dict[str, Any]]:

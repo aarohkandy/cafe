@@ -1642,3 +1642,9 @@ def test_r13_sweep_a_cut_write_leaves_the_old_credibility_json(tmp_path, monkeyp
     with pytest.raises(OSError, match="killed"):
         cr.write(tmp_path)
     assert f.read_bytes() == before and not list(f.parent.glob("*.tmp"))
+
+
+def test_r13_l1_a_symlink_loop_platform_path_is_not_a_shipped_platform_and_not_a_runtimeerror(tmp_path):
+    loop = tmp_path / "loopdir"
+    loop.symlink_to("loopdir")
+    assert cr.platform_shipped(str(loop / "p.yaml")) is False                                    # `p.parent.resolve()` raised: the loop is the parent

@@ -645,8 +645,11 @@ def candidates(mission: dict[str, Any], vid: str) -> list[dict[str, Any]]:
         if m2 is None or m2 not in made:
             made += [m2] if m2 is not None else []
             kept.append(c)
+    mates = [o["id"] for o in mission["vehicles"] if "base" in o and o["id"] != vid]
     for c in kept:
         c["change"] = describe(c["mod"], v, _window(mission))
+        if mates and "base" in v and ("dlon" in c["mod"] or "dlat" in c["mod"]):          # the ship is one: the others fly from the new point too
+            c["change"] += f" (the ship moves, so {', '.join(mates)} launch{'es' if len(mates) == 1 else ''} from the new point too)"
     return kept
 
 
@@ -797,7 +800,8 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
     """The what-if: `ops` = dict(shift_h, dlon, dlat, drop=[ids]) applied to every vehicle (or to `only`). `base` = {vid: Stage-1 verdict dict}
     of the unchanged mission. Per changed vehicle: emulator-first, else Stage 1 at `plan`. Dropped vehicles need no run: Stage-1 vehicles do not
     interact, only the links through them go. -> dict(vehicles={vid: ...}, dropped, links_removed, unchanged={vid: why}): `unchanged` holds a UAS
-    whose launch shift is whole days (the same time of day), left out of `vehicles` unless a move applies to it."""
+    whose launch shift is whole days (the same time of day), left out of `vehicles` unless a move applies to it. A move of a UAS moves the ship, so every
+    other UAS launched from it is a changed vehicle too, also when `only` leaves it out: it is answered with the move alone and its `ship` says why."""
     pri, marg = stage1.priors_for(mission, fitted)
     seed = int(mission["seed"])
     drop = list(ops.get("drop", []))
@@ -817,6 +821,13 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
                 changed[vid] = dict(mod, shift_h=0.0)
             else:
                 del changed[vid]
+    with_ship: dict[str, str] = {}                                           # a UAS that only moves because the ship does (round 13, look-ahead L1)
+    mover = next((vid for vid in changed if "base" in vehicle(mission, vid) and (mod["dlon"] or mod["dlat"])), None)
+    if mover is not None:                                                    # the ship is one: every other UAS on it flies from the new point, `only` or not
+        for v in mission["vehicles"]:
+            if "base" in v and v["id"] not in changed and v["id"] not in drop:
+                changed[v["id"]] = dict(mod, shift_h=0.0)
+                with_ship[v["id"]] = f"the ship moved with {mover}: {mod['dlon']:+g} deg lon, {mod['dlat']:+g} deg lat"
     m2 = apply(mission, changed, drop)
     out: dict[str, Any] = {}
     for vid in changed:
@@ -829,10 +840,11 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
         a = predict(em, m2, vid, cls, tracks.get(vid), mod, env)
         flight = flight_note(vehicle(mission, vid), mod["shift_h"], _window(mission))
         if a["status"] == "ok":
-            out[vid] = dict(base=b, method="EMULATED", flight=flight, **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")})
+            out[vid] = dict(base=b, method="EMULATED", flight=flight, ship=with_ship.get(vid),
+                            **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")})
         else:
             why = no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " ")
-            out[vid] = dict(base=b, method="Stage 1", why=why, flight=flight, **_stage1(m2, vid, env, plan, fitted, scales))
+            out[vid] = dict(base=b, method="Stage 1", why=why, flight=flight, ship=with_ship.get(vid), **_stage1(m2, vid, env, plan, fitted, scales))
     gone = [k["id"] for k in mission["links"] if k["a"] in drop or k["b"] in drop]
     return dict(vehicles=out, dropped=drop, links_removed=gone, unchanged=unchanged)
 

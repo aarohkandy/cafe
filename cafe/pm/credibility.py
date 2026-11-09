@@ -26,7 +26,7 @@ from typing import Any, Iterable
 
 from . import config, pipeline
 from .audit import ledger_problems
-from .ledger import STAGES, clean, has_commit
+from .ledger import STAGES, clean, has_commit, real
 from .physics import comms
 from .stage1 import ACTS, NOT_EXERCISED, SUBGRID_SWITCHES, subgrid_switches
 from .stats import intervals, sampling
@@ -207,7 +207,7 @@ def _prov(node: Any, path: str, file: str, out: list[dict[str, Any]]) -> None:
 def platform_shipped(ref: str, root: pathlib.Path = ROOT) -> bool:
     """Whether a platform reference (a name or a path, config.platform_path) is one of root/platforms/*.yaml."""
     p = config.platform_path(ref)
-    return p.suffix == ".yaml" and p.parent.resolve() in {(root / "platforms").resolve(), config.PLATFORMS.resolve()}
+    return p.suffix == ".yaml" and real(p.parent) in {real(root / "platforms"), real(config.PLATFORMS)}
 
 
 def platform_key(ref: str, root: pathlib.Path = ROOT) -> str:

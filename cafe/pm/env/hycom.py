@@ -179,7 +179,8 @@ def refuse_overlap(out_zarr: Any, source: Any) -> None:
     (the lab's files are read from the directory itself, not recursively, and each one is checked on its own against the store), so it is accepted. The
     paths are resolved first (symlinks, `..`)."""
     from ..config import ConfigError
-    o, s = pathlib.Path(out_zarr).resolve(), pathlib.Path(source).resolve()
+    from ..ledger import real                                   # `resolve()` raises RuntimeError on a symlink loop in a path the user typed
+    o, s = real(out_zarr), real(source)
     for q in (o, o.with_name(o.name + ".tmp")):
         if q == s or q in s.parents:
             raise ConfigError(f"the store {out_zarr} and its source {source} are the same directory, or the store holds the source: "

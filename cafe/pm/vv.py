@@ -150,7 +150,7 @@ def celik_gci(phi1: float, phi2: float, phi3: float, r21: float, r32: float) -> 
 
 
 def gci_two_grid(fine: float, coarse: float, ratio: float = 2.0, p: float = 2.0, fs: float = FS_TWO_GRID) -> float:
-    """Relative uncertainty of the fine-grid value from two grids and an assumed order (Roache). Same as cafe.cfd.gci for the arguments it accepts:
+    """Relative uncertainty of the fine-grid value from two grids and an assumed order (Roache); `cafe.cfd.gci` calls this and gives NaN where this raises.
     ValueError for a zero fine value, a ratio that is not finite and > 1 (r = 1 divides by zero) or an order that is not finite and > 0."""
     if fine == 0 or not (math.isfinite(ratio) and ratio > 1 and math.isfinite(p) and p > 0):
         raise ValueError(f"two-grid GCI needs a non-zero fine value, a finite ratio > 1 and a finite order > 0 (fine {fine}, ratio {ratio}, p {p})")

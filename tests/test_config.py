@@ -1184,3 +1184,23 @@ def test_r13_sweep_write_text_is_the_one_atomic_writer_and_write_json_can_end_a_
         with pytest.raises(OSError, match="killed"):
             write()
         assert f.read_bytes() == before and not list(tmp_path.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("key, bad", [("wind_speed_bias", float("nan")), ("hs_scale", 0.0), ("tp_bias", -1.0), ("current_correlation_length", 0.0)])
+def test_r13_l1_env_sigmas_reads_the_priors_through_the_checked_loader(monkeypatch, tmp_path, key, bad):
+    """`env_sigmas` read perturbations.yaml raw: a NaN `wind_speed_bias` value reached the Tagged sigmas that the stage-1 loader would have refused."""
+    cfg = yaml.safe_load((config.CONFIG / "perturbations.yaml").read_text())
+    if key == "current_correlation_length":
+        cfg[key]["mean"] = bad
+    else:
+        cfg[key]["value"] = bad
+    (tmp_path / "perturbations.yaml").write_text(yaml.safe_dump(cfg))
+    monkeypatch.setattr(config, "CONFIG", tmp_path)
+    with pytest.raises(ValueError, match=f"perturbation '{key}'"):
+        config.env_sigmas()
+
+
+def test_r13_l1_platform_display_of_a_symlink_loop_is_the_path_as_given_not_a_runtimeerror(tmp_path):
+    loop = tmp_path / "loop.yaml"
+    loop.symlink_to("loop.yaml")
+    assert config.platform_display(str(loop)) == str(loop)

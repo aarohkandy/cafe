@@ -440,3 +440,11 @@ def test_promote_calibration_records_the_runs_full_path_the_date_and_its_ledger_
     assert sg.load_config(f)["calibration"]["sigma_u_over_ustar"] == r["calibration"]["sigma_u_over_ustar"]
     with pytest.raises(ValueError, match="did not calibrate"):
         sg.promote_calibration(tmp_path / "empty", f)
+
+
+def test_r13_l1_promote_calibration_names_a_symlink_loop_run_instead_of_a_runtimeerror(tmp_path):
+    """`--run loop` (`ln -s loop loop`) raised RuntimeError out of `Path.resolve()`, which `main` (it turns only ValueError into a line) did not catch."""
+    loop = tmp_path / "loop"
+    loop.symlink_to("loop")
+    with pytest.raises(ValueError, match="no stage3/subgrid_calibration.json"):
+        sg.promote_calibration(loop, tmp_path / "f.json")

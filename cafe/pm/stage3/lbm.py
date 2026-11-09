@@ -21,6 +21,7 @@ precision instead (FluidX3D's FP16S idea; Lehmann, Krauzig & Schmid, Phys. Rev. 
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import hashlib
 import json
@@ -711,26 +712,77 @@ def receipts(backend: str = "jax") -> list[dict[str, Any]]:
     return [r for r in cr.OUT if r["group"] == g]
 
 
+def positive_float(s: str) -> float:
+    """a finite number above 0"""
+    v = float(s)
+    if not (math.isfinite(v) and v > 0):
+        raise ValueError(s)
+    return v
+
+
+def positive_int(s: str) -> int:
+    """a whole number above 0"""
+    v = int(s)
+    if v <= 0:
+        raise ValueError(s)
+    return v
+
+
+def positive_text(s: str) -> str:
+    """a finite number above 0 (kept as typed: it names the stored file)"""
+    positive_float(s)
+    return s
+
+
+def cli_parser(prog: str, cmds: tuple[str, ...], doc: str | None) -> argparse.ArgumentParser:
+    """The parser of the stage-3 entry points (`lbm`, `nest`, `wallmodel`): one command word from `cmds` (none means receipts) and its positional words.
+    An unknown word is a usage error (exit 2), where these mains used to run the receipts for it (round 13, look-ahead L1; cfd.main's M-9 for the
+    siblings). Options may stand anywhere, so parse with `parse_intermixed_args`."""
+    p = argparse.ArgumentParser(prog=prog, description=doc)
+    p.add_argument("cmd", nargs="?", choices=cmds, default="receipts")
+    p.add_argument("args", nargs="*", metavar="ARG")
+    return p
+
+
+def cli_values(p: argparse.ArgumentParser, a: argparse.Namespace, kinds: tuple[Callable[[str], Any], ...], required: int | None = None) -> list[Any]:
+    """The positional words of the command `a.cmd` converted by `kinds` (at least `required`, default all): a missing, extra or malformed word is
+    `p.error` (usage and exit 2), never an IndexError or a ValueError traceback."""
+    n = len(kinds) if required is None else required
+    if not n <= len(a.args) <= len(kinds):
+        want = "no arguments" if not kinds else f"{n} arguments" if n == len(kinds) else f"{n} to {len(kinds)} arguments"
+        p.error(f"{a.cmd} takes {want}, got {len(a.args)}")
+    out: list[Any] = []
+    for w, k in zip(a.args, kinds, strict=False):                            # fewer words than `kinds` when the rest are optional
+        try:
+            out.append(k(w))
+        except ValueError:
+            p.error(f"{a.cmd}: {w!r} is not {k.__doc__}")
+    return out
+
+
 def main(argv: list[str]) -> int:
     """python -m cafe.pm.stage3.lbm [receipts|slow RE [D [NX NY NZ in diameters]]|memory] [--backend jax|warp] [--fp32-storage]"""
-    fp32 = "--fp32-storage" in argv
-    argv = [a for a in argv if a != "--fp32-storage"]
-    backend = argv[argv.index("--backend") + 1] if "--backend" in argv else pick_backend()
-    st = storage_for("auto", fp32)
-    cmd = argv[0] if argv else "receipts"
-    if cmd == "slow":
+    p = cli_parser("python -m cafe.pm.stage3.lbm", ("receipts", "slow", "memory"), main.__doc__)
+    p.add_argument("--backend", choices=("jax", "warp"), default=None)
+    p.add_argument("--fp32-storage", action="store_true")
+    a = p.parse_intermixed_args(argv)
+    slow = a.cmd == "slow"
+    vals = cli_values(p, a, (positive_text, positive_int, positive_float, positive_float, positive_float) if slow else (), 1 if slow else 0)
+    if len(vals) in (3, 4):
+        p.error("slow takes RE, RE D or RE D NX NY NZ")
+    backend = a.backend or pick_backend()
+    st = storage_for("auto", a.fp32_storage)
+    if a.cmd == "slow":
         sha0 = physics_sha()
-        re = float(argv[1])
-        d = int(argv[2]) if len(argv) > 2 else 16
-        dom = tuple(float(a) for a in argv[3:6]) if len(argv) >= 6 else (14, 12, 12)
-        r = sphere(backend, re, d=d, domain=dom, storage=st, progress=lambda t, c: print(f"t={t} cd={c:.4f}", flush=True))
+        tag, d, dom = vals[0], vals[1] if len(vals) > 1 else 16, tuple(vals[2:5]) if len(vals) == 5 else (14, 12, 12)
+        r = sphere(backend, float(tag), d=d, domain=dom, storage=st, progress=lambda t, c: print(f"t={t} cd={c:.4f}", flush=True))
         r.pop("history", None)
         r["code_sha"] = sha0
         SLOW_DIR.mkdir(parents=True, exist_ok=True)
-        write_json(slow_path(f"sphere_{argv[1]}"), r, default=float)
+        write_json(slow_path(f"sphere_{tag}"), r, default=float)
         print(json.dumps(r, default=float))
         return 0
-    if cmd == "memory":
+    if a.cmd == "memory":
         print(json.dumps(les_resolution(1.5, 1.5, 1.05e-6, storage=st), indent=1, default=float))
         print("jax bytes/cell:", measure_jax_bytes_per_cell(storage=st))
         return 0

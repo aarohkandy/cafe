@@ -520,6 +520,8 @@ def discretization(values: Sequence[float], cells: Sequence[float], levels: Sequ
     Roache's Fs = 3 with the order assumed to be 2 on the finest pair, and never less than half the spread of the values; the note says why.
     A finest grid with no more cells than the next (r <= 1) has no ratio to extrapolate over: half the spread alone."""
     r21 = vv.refinement_ratio(cells[0], cells[1])
+    if values[0] == 0:                       # a solver that never produced a force: no relative uncertainty (round 13, look-ahead L1; vv refuses it too)
+        return math.nan, r21, "relative uncertainty undefined: the finest grid's value is 0"
     spread = (max(values) - min(values)) / 2 / abs(values[0])
     if r21 <= 1:                                         # no refinement: Roache's formula divides by r^p - 1 = 0 (round 13, M-27); the spread is all there is
         return spread, r21, f"spread only, Fs and p unused: the finest grid has {cells[0]:g} cells, not more than the next grid's {cells[1]:g}"
@@ -657,15 +659,32 @@ def receipts(root: Optional[pathlib.Path] = None) -> str:
     return f"DTMB 5415: geometry receipts + {len(rows)} Froude rows + {n} cases checked for y+ and convergence{skipped}"
 
 
+def _run_args(words: list[str]) -> tuple[str, int, tuple[float, ...]]:
+    """`run GRID [MAX_ITERS [FR,FR,...]]` as (grid, iterations, Froude numbers); ValueError saying what is wrong with it."""
+    if not 1 <= len(words) <= 3:
+        raise ValueError(f"takes a grid and, optionally, max_iters and a Froude list, got {len(words)} words")
+    if words[0] not in GRIDS:
+        raise ValueError(f"{words[0]!r} is not a grid ({', '.join(GRIDS)})")
+    iters = int(words[1]) if len(words) > 1 else MAX_ITERS
+    frs = tuple(float(x) for x in words[2].split(",")) if len(words) > 2 else ORDER
+    if iters <= 0 or not all(math.isfinite(f) and f > 0 for f in frs):
+        raise ValueError("max_iters and every Froude number must be above 0")
+    return words[0], iters, frs
+
+
 def main(argv: list[str]) -> int:
     root = data_root()
     cmd = argv[0] if argv else "report"
     if cmd == "prepare":
         print(json.dumps(prepare(root), indent=1))
     elif cmd == "run":
-        frs = tuple(float(x) for x in argv[3].split(",")) if len(argv) > 3 else ORDER
         try:
-            print(json.dumps(run_grid(root, argv[1], int(argv[2]) if len(argv) > 2 else MAX_ITERS, frs=frs), indent=1))
+            grid, iters, frs = _run_args(argv[1:])
+        except ValueError as e:                  # a missing grid, a word that is no number: the usage, not an IndexError (round 13, look-ahead L1)
+            print(f"error: run {' '.join(argv[1:])}: {e}\n{__doc__}", file=sys.stderr)
+            return 2
+        try:
+            print(json.dumps(run_grid(root, grid, iters, frs=frs), indent=1))
         except config.ResourceError as e:                       # not enough disk: the message names the remedy, as in `python -m cafe.pm` (exit 2)
             print(f"error: {e}", file=sys.stderr)
             return 2

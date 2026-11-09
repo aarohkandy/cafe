@@ -239,8 +239,9 @@ def platform_label(ref: Any) -> str:
     the first 12 hex digits of the sha-256 of its content (a platform file of the lab's own is hashed by nothing else, so an edited one is another
     function). A reference that names no file keeps the text it was given; `load_platform` is the one that refuses it."""
     from .config import PLATFORMS, platform_path
-    f = platform_path(ref).resolve()
-    if f.parent == PLATFORMS.resolve():
+    from .ledger import real                                       # a symlink loop in a platform path the mission names is a file that cannot be read
+    f = real(platform_path(ref))
+    if f.parent == real(PLATFORMS):
         return f.stem
     try:
         return f"{f.stem}@{hashlib.sha256(f.read_bytes()).hexdigest()[:12]}"

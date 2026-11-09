@@ -238,7 +238,7 @@ def _report(run: pathlib.Path, open_it: bool) -> int:
     for p in paths:
         print(p)
     if open_it:
-        shown = _has_display() and webbrowser.open(paths[0].resolve().as_uri())
+        shown = _has_display() and webbrowser.open(ledger.real(paths[0]).as_uri())
         print(f"opened {paths[0]}" if shown else f"no display to open it on: {paths[0]}")
     return 0
 
@@ -348,6 +348,8 @@ def _whatif(a: argparse.Namespace) -> int:
         print(f"{vid}: {r['base']['verdict']} (P(fail) {r['base']['p_fail']:.3f}) -> {r['verdict']} (P(fail) {r['p_fail']:.3f}){iv}  [{how}]")
         if r.get("flight"):
             print(f"  note: {vid} {r['flight']}")
+        if r.get("ship"):
+            print(f"  note: {vid} {r['ship']}")
     for vid, why in ans.get("unchanged", {}).items():
         print(f"{vid}: unchanged ({why})")
     if ans["dropped"]:

@@ -853,3 +853,10 @@ def test_r12_m28_a_plan_with_no_running_window_does_not_print_the_cell_updates_o
     assert "cell-updates per window" in budget.describe(q) and "no LES window runs" not in budget.describe(q)
     gpu = budget.plan("quick", 1, MISSION, thr=thr(0.01, 0.001), vehicle_classes=CLASSES)       # a GPU plan keeps the whole share
     assert gpu["les"]["cell_steps_per_window"] == pytest.approx(per_window(gpu, budget.SHARE["stage3"]))
+
+
+def test_r13_l1_the_platform_label_of_a_symlink_loop_is_the_reference_as_given(tmp_path):
+    """`platform_label` ran `Path.resolve()` on a platform path the mission names: a loop was a RuntimeError, not the OSError it handles."""
+    loop = tmp_path / "loop.yaml"
+    loop.symlink_to("loop.yaml")
+    assert budget.platform_label(str(loop)) == str(loop)

@@ -917,3 +917,69 @@ def test_r13_m15_a_negative_offset_in_a_hand_built_header_is_a_value_error_not_a
     hdr[2]["a"]["recsize"] = -16777168
     with pytest.raises(ValueError, match=r"damaged NetCDF header: a: offset -\d+"):
         remote.cdf1_read(p, "a", hdr, rec=2)
+
+
+# ---------------------------------------------------------------------------------------------------------- round 13, look-ahead L1
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_r13_l1_a_valid_file_with_an_unlimited_dimension_nothing_was_written_to_still_opens(tmp_path, fmt):
+    """`_fits` added one full record to the end of a record variable even when `numrecs` was 0, so a 148-byte file with fixed variables and an empty
+    unlimited dimension (a model output still being written, an empty extraction) was refused as 'its data would end at byte 164'. Its fixed
+    variables could not be read at all."""
+    p = tmp_path / "empty_records.nc"
+    with netCDF4.Dataset(p, "w", format=fmt) as nc:
+        nc.createDimension("t", None)
+        nc.createDimension("y", 4)
+        nc.createVariable("fx", "f4", ("y",))[:] = np.arange(4, dtype="f4")
+        nc.createVariable("v", "f4", ("t", "y"))
+    hdr = remote.cdf1_header(p)
+    assert hdr[1] == 0 and hdr[0] == {"t": 0, "y": 4} and hdr[2]["v"]["record"]
+    assert list(remote.cdf1_read(p, "fx", hdr)) == [0.0, 1.0, 2.0, 3.0]
+    with pytest.raises(IndexError, match="record 0 outside 0..0"):
+        remote.cdf1_read(p, "v", hdr)
+    for n in (1, 2):                                                     # with records written the end is still the last record's
+        q = tmp_path / f"r{n}.nc"
+        with netCDF4.Dataset(q, "w", format=fmt) as nc:
+            nc.createDimension("t", None)
+            nc.createDimension("y", 4)
+            nc.createVariable("v", "f4", ("t", "y"))
+            for i in range(n):
+                nc["v"][i] = np.arange(4, dtype="f4") + i
+        assert remote.cdf1_header(q)[1] == n
+    short = tmp_path / "short.nc"                                       # a record variable cut off inside its last record is still damaged
+    short.write_bytes(q.read_bytes()[:-8])
+    with pytest.raises(ValueError, match="damaged NetCDF header: v: its data would end"):
+        remote.cdf1_header(short)
+
+
+HUGE = 2 ** 31 - 1
+
+
+def _be(*ints):
+    return struct.pack(">" + "i" * len(ints), *ints)
+
+
+def _nm(s):
+    b = s.encode()
+    return _be(len(b)) + b + b"\0" * (-len(b) % 4)
+
+
+@pytest.mark.parametrize("what, head", [
+    ("dimensions", _be(10, HUGE)),
+    ("attributes", _be(0, 0) + _be(12, HUGE)),
+    ("variables", _be(0, 0) + _be(0, 0) + _be(11, HUGE)),
+    ("dimension ids of a variable", _be(10, 1) + _nm("x") + _be(4) + _be(0, 0) + _be(11, 1) + _nm("v") + _be(HUGE))])
+def test_r13_l1_a_hostile_entry_count_is_refused_at_once_not_after_reading_the_file(what, head):
+    """M-15 bounded a field's size and a count's sign, but not how many entries a count promises: 2**31 - 1 dimensions on a file with real bytes behind
+    it were read to the end of the file into lists (4 MB: 1 s and 43 MB; the 2.4 GB restart would have needed about 25 GB), then an EOFError. A damaged
+    header is a ValueError, and the parser reads no more than the header's own bytes."""
+    blob = b"CDF\x01" + _be(0) + head + bytes(4 << 20)
+    fetched = []
+
+    def fetch(o, n):
+        fetched.append(n)
+        return blob[o:o + n]
+    with pytest.raises(ValueError, match=f"a count of {HUGE} at byte"):
+        remote.parse_cdf1(fetch)
+    assert sum(fetched) < 1 << 20, what
+    ok = b"CDF\x01" + _be(0) + _be(10, remote.MAX_ENTRIES) + b"".join(_nm("d") + _be(1) for _ in range(remote.MAX_ENTRIES)) + _be(0, 0) + _be(0, 0)
+    assert len(remote.parse_cdf1(lambda o, n: ok[o:o + n])[0]) == 1                  # the cap itself is accepted (the dict keeps one name)

@@ -48,12 +48,12 @@ DIR/acceptance.json and DIR/acceptance.txt hold the result.
 """
 from __future__ import annotations
 
-import argparse, datetime as dt, hashlib, html, json, os, pathlib, re, shlex, shutil, subprocess, sys, time
+import argparse, datetime as dt, errno, hashlib, html, json, os, pathlib, re, shlex, shutil, subprocess, sys, time
 from collections.abc import Callable, Iterator
 from typing import Any
 
 from . import budget, config, credibility, pipeline, receipts
-from .ledger import git_dirty, git_sha
+from .ledger import git_dirty, git_sha, real
 from .stage1 import NOT_EXERCISED
 from .stats import intervals, sequential
 
@@ -88,10 +88,10 @@ def refuse_wiped_mission(mission: str, out: pathlib.Path, names: tuple[str, ...]
     """ConfigError when `mission` lies inside out/<name> or out/<name>_fetch for a name in `names`: `run_one` removes both before its subprocesses read
     the mission, so a run's own mission.yaml would be gone (and fetch would say `file not found`). `run` asks for every run name at once, so a mission
     in the directory of the last run is refused before the first one starts, not after hours (round 9, M-12 sibling)."""
-    m = pathlib.Path(mission).resolve()
+    m = real(mission)
     for n in names:
         for d in (out / n, out / f"{n}_fetch"):
-            if m.is_relative_to(d.resolve()):
+            if m.is_relative_to(real(d)):
                 raise config.ConfigError(f"--mission {mission} is inside {d}, which acceptance removes before it runs; copy the mission out of {out} "
                                          "(a run's own copy is <run dir>/mission.yaml)")
 
@@ -131,18 +131,18 @@ def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.P
     d = out / name
     shutil.rmtree(d, ignore_errors=True)
     out.mkdir(parents=True, exist_ok=True)
-    argv = ["run", "--mission", str(pathlib.Path(mission).resolve()), "--budget", budget_name, "--gpus", str(gpus), "--out", str(d.resolve()), "--fresh"]
+    argv = ["run", "--mission", str(real(mission)), "--budget", budget_name, "--gpus", str(gpus), "--out", str(real(d)), "--fresh"]
     argv += [] if seed is None else ["--seed", str(seed)]
     own = d / "emulator_table" / "train.parquet"
     own.parent.mkdir(parents=True)
     if table is not None:
         shutil.copyfile(table, own)
-    argv += ["--emulator-table", str(own.resolve())]
+    argv += ["--emulator-table", str(real(own))]
     limit = budget.BUDGET_S[budget_name]
     fd = out / f"{name}_fetch"
     shutil.rmtree(fd, ignore_errors=True)
     t = time.monotonic()
-    frc = _execute(["fetch", "--mission", str(pathlib.Path(mission).resolve()), "--out", str(fd.resolve()), "--fresh"], dict(os.environ),
+    frc = _execute(["fetch", "--mission", str(real(mission)), "--out", str(real(fd)), "--fresh"], dict(os.environ),
                    out / f"{name}_fetch.log", None)
     fetch_wall = time.monotonic() - t
     base = dict(name=name, mission=mission, budget=budget_name, gpus=gpus, seed=seed, dir=d, limit_s=limit, fetch_rc=frc, fetch_wall_s=fetch_wall,
@@ -374,9 +374,14 @@ def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) 
     """Why `--update-golden` may not write `golden` for the mission `name`, or None. A golden that is there must be one for the same mission: a file that
     is not a golden (unreadable, not an object, no summary.mission) or one for another mission is somebody's reference, and one `--update-golden` from
     the CI fixture would replace the demo's. `allowed` is the mission named by `--golden-mission`: it lets that mission replace the file. What no flag
-    can mend comes first and is checked for `allowed` too: the path is not a file (a directory), it sits below something that is not a directory, or
+    can mend comes first and is checked for `allowed` too: the path is a symlink loop, is not a file (a directory), it sits below something that is not one, or
     the directory that receives it is not writable, so the write would fail after the first long run (round 13, M-17). The first write, with no file,
     is otherwise always allowed (round 12, M-33)."""
+    try:
+        os.stat(golden)
+    except OSError as e:                                            # exists() and is_file() read a loop as "absent": the write would then fail after the run
+        if e.errno == errno.ELOOP:
+            return f"{golden} is, or lies below, a symbolic link that leads back to itself: not written, name a file with `--golden`"
     where = golden.parent
     while not where.exists():                                       # the nearest directory that is there: the one mkdir and the write start from
         where = where.parent
@@ -429,7 +434,7 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
         if prov := provenance_problems(rec["source"]):                  # the next check would refuse it, and this write would have replaced a working golden
             return _row("golden_diff", False, f"golden NOT updated: it would have no provenance ({'; '.join(prov)}); {golden} is as it was",
                         updated=False, refused=True, provenance=prov, golden=str(golden))
-        golden.resolve().parent.mkdir(parents=True, exist_ok=True)
+        real(golden).parent.mkdir(parents=True, exist_ok=True)
         config.write_json(golden, rec, end="\n", indent=1, allow_nan=False)
         return _row("golden_diff", False, f"golden {golden} UPDATED from this run, not compared: rerun without --update-golden to check against it",
                     updated=True)
@@ -479,7 +484,7 @@ def normalize(rep: dict[str, Any], run_dir: pathlib.Path) -> dict[str, Any]:
     sha-256 of holdout.json (it holds that time), and the run directory's path; credibility.json's sha-256 is replaced by that of the file without
     the run directory (its path and its own "run" field), or dropped when the file is not there."""
     def unrun(text: str) -> str:               # on parsed strings, not on JSON text, which escapes a non-ASCII letter, a quote and a backslash in the path
-        return text.replace(str(run_dir.resolve()), "<run>").replace(str(run_dir), "<run>")
+        return text.replace(str(real(run_dir)), "<run>").replace(str(run_dir), "<run>")
     out: dict[str, Any] = _each_str(rep, unrun)
     for p in VOLATILE:
         _drop(out, p)

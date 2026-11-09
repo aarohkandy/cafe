@@ -325,9 +325,14 @@ def _keep_surface(case, fo, rho):
 
 
 def gci(fine, coarse, ratio=2.0, p=2.0, fs=3.0):
-    """Two-grid Grid Convergence Index (Roache): relative uncertainty of the fine-grid value."""
-    eps = (coarse - fine) / fine
-    return fs * abs(eps) / (ratio ** p - 1)
+    """Two-grid Grid Convergence Index (Roache): relative uncertainty of the fine-grid value. `cafe.pm.vv.gci_two_grid` is the one formula; where it refuses
+    (a zero fine value, a ratio that is not above 1, a bad order) there is no index, so this gives NaN, which the callers and the free-surface window's
+    `fs_gci` check already read as "not informative" (round 13, look-ahead L1): a long study does not end in a ZeroDivisionError after its solves."""
+    from cafe.pm import vv
+    try:
+        return vv.gci_two_grid(fine, coarse, ratio, p, fs)
+    except ValueError:
+        return float("nan")
 
 
 def ratio_from_cells(n_fine, n_coarse):
@@ -361,7 +366,7 @@ def characterize_external(stl, workdir, fluid, speed, cofr=(0, 0, 0), dirs=tuple
             r["force_coarse"] = ref["dirs"][d]["force"]
             r["moment_coarse"] = ref["dirs"][d]["moment"]
         res["coarse_cells"] = ref["mesh"]["cells"]
-        return max(r["gci"] for r in res["dirs"].values())
+        return max(g if np.isfinite(g) else np.inf for g in (r["gci"] for r in res["dirs"].values()))   # no index in a direction: the grid is not trusted
 
     run("coarse", -1)
     run("fine", 0)

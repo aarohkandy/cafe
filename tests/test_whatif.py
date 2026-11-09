@@ -1519,3 +1519,29 @@ def test_lb1_a_deploy_shift_that_apply_refuses_is_not_described_as_a_flight():
         assert ("flies" in c["change"]) == accepted[h], c["change"]
     assert accepted == {6.0: True, 12.0: True, 24.0: True, 48.0: False, -6.0: True, -12.0: False, -24.0: False, -48.0: False}      # window start 03-01 18Z
     assert whatif.flight_note(whatif.vehicle(m, GL), 48.0, window) is None and whatif.flight_note(whatif.vehicle(m, GL), 24.0, window) is not None
+
+
+def test_r13_l1_a_uas_move_also_answers_the_other_uas_on_the_same_ship_and_says_why():
+    """The ship is one, so `answer(..., dlon .5, only=['uas'])` moved `uas_b`'s launch point too (the apply-level change is M-40's), but `uas_b` was in
+    neither `vehicles` nor `unchanged`: its base verdict stayed in the answer as if nothing had changed."""
+    m = whatif.apply(two_uas(), drop=["usv", "glider_1n", GL])
+    base = {v: dict(verdict="GO", p_fail=0.0) for v in ("uas", "uas_b")}
+    r = whatif.answer(m, dict(dlon=0.1), base, {}, ENV, {}, plan_for(m), None, None, only=["uas"])
+    assert list(r["vehicles"]) == ["uas", "uas_b"] and r["unchanged"] == {}
+    assert r["vehicles"]["uas"]["ship"] is None
+    assert r["vehicles"]["uas_b"]["ship"] == "the ship moved with uas: +0.1 deg lon, +0 deg lat" and r["vehicles"]["uas_b"]["method"] == "Stage 1"
+    both = whatif.answer(m, dict(dlon=0.1), base, {}, ENV, {}, plan_for(m), None, None)                       # no `only`: the same two, each once
+    assert list(both["vehicles"]) == ["uas", "uas_b"] and both["vehicles"]["uas_b"]["ship"] is None
+    shift = whatif.answer(m, dict(shift_h=6.0), base, {}, ENV, {}, plan_for(m), None, None, only=["uas"])   # a shift moves nothing shared
+    assert list(shift["vehicles"]) == ["uas"]
+    gone = whatif.answer(m, dict(dlon=0.1, drop=["uas_b"]), base, {}, ENV, {}, plan_for(whatif.apply(m, drop=["uas_b"])), None, None, only=["uas"])
+    assert list(gone["vehicles"]) == ["uas"]                                                                  # a dropped UAS is not answered
+
+
+def test_r13_l1_the_flip_search_says_that_a_ship_move_takes_the_other_uas_along():
+    two = whatif.candidates(two_uas(), "uas")
+    moves = [c for c in two if "dlon" in c["mod"] or "dlat" in c["mod"]]
+    assert moves and all(c["change"].endswith("(the ship moves, so uas_b launches from the new point too)") for c in moves)
+    assert not any("ship moves" in c["change"] for c in two if c not in moves)
+    assert not any("ship moves" in c["change"] for c in whatif.candidates(CI, "uas"))                          # one UAS: nobody else moves with it
+    assert not any("ship moves" in c["change"] for c in whatif.candidates(two_uas(), GL))                      # a glider's move is its own

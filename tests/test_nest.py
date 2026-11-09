@@ -520,3 +520,51 @@ def test_a_sphere_grid_stored_without_a_code_sha_never_passes(monkeypatch, tmp_p
     cr.OUT.clear()
     nest.sphere_path("100", 12).write_text(_sphere_json(100.0, 1.0382, d=12))
     assert _rows(nest.sphere_receipts(), "100", "Richardson")[0]["ok"] is True                                       # both current: the same numbers pass
+
+
+def no_work(monkeypatch):
+    """Everything the stage-3 entry points can start, replaced by a failure: a bad command line must stop before any of it."""
+    for mod, names in ((nest, ("receipts", "sphere_drag")), (lbm, ("receipts", "sphere", "pick_backend", "les_resolution", "measure_jax_bytes_per_cell")),
+                       (wm, ("receipts", "flat_plate", "channel"))):
+        for n in names:
+            monkeypatch.setattr(mod, n, lambda *a, _n=n, **k: pytest.fail(f"{_n} ran"))
+
+
+@pytest.mark.parametrize("main, argv", [
+    (nest.main, ["solw"]), (nest.main, ["slow"]), (nest.main, ["slow", "abc", "8", "12", "6", "6"]), (nest.main, ["slow", "100", "8", "12", "6"]),
+    (nest.main, ["slow", "100", "0", "12", "6", "6"]), (nest.main, ["slow", "100", "8", "12", "6", "6", "--lateral", "bogus"]),
+    (nest.main, ["slow", "100", "8", "12", "6", "6", "--needs-d"]), (nest.main, ["receipts", "extra"]),
+    (lbm.main, ["solw"]), (lbm.main, ["slow"]), (lbm.main, ["slow", "--backend"]), (lbm.main, ["slow", "abc"]), (lbm.main, ["slow", "1e4", "8", "10"]),
+    (lbm.main, ["slow", "1e4", "8", "10", "6", "6", "--backend", "numpy"]), (lbm.main, ["memory", "1"]), (lbm.main, ["slow", "nan"]),
+    (wm.main, ["solw"]), (wm.main, ["slow", "x"]), (wm.main, ["--lateral"])])
+def test_r13_l1_a_mistyped_command_line_of_a_stage_3_entry_point_is_a_usage_error_not_the_wrong_job(monkeypatch, capsys, main, argv):
+    """Round 13 M-9 fixed `cafe.cfd`; its siblings kept the shape: any unknown word ran the full receipts (`solw`, `--help`), a missing value was an
+    IndexError and a word that is no number a ValueError, all after the backend was picked. Now exit 2 with the usage, and nothing started."""
+    no_work(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        main(argv)
+    assert e.value.code == 2 and "usage: python -m cafe.pm.stage3." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("main", [nest.main, lbm.main, wm.main])
+def test_r13_l1_help_prints_the_usage_and_runs_nothing(monkeypatch, capsys, main):
+    no_work(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        main(["--help"])
+    assert e.value.code == 0 and "usage: python -m cafe.pm.stage3." in capsys.readouterr().out
+
+
+def test_r13_l1_the_commands_that_were_valid_still_parse_the_same(monkeypatch, tmp_path):
+    """Options stand anywhere, the sphere tag is kept as typed (it names the stored file), the defaults of `lbm slow` are unchanged."""
+    seen = {}
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(nest, "sphere_drag", lambda re, d, dom, lateral: seen.update(nest=(re, d, dom, lateral)) or dict(history=[1.0], cd=1.0))
+    assert nest.main(["--needs-d", "24", "slow", "1e4", "16", "14", "8", "8", "--lateral", "freeslip"]) == 0
+    assert seen["nest"] == (1e4, 16, (14.0, 8.0, 8.0), "freeslip") and nest.sphere_path("1e4", 16).is_file()
+    assert json.loads(nest.sphere_path("1e4", 16).read_text())["needs_d"] == 24
+    monkeypatch.setattr(lbm, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(lbm, "pick_backend", lambda: "jax")
+    monkeypatch.setattr(lbm, "sphere",
+                        lambda backend, re, d, domain, storage, progress: seen.update(lbm=(backend, re, d, domain)) or dict(cd=1.0, history=[1.0]))
+    assert lbm.main(["slow", "1e4"]) == 0
+    assert seen["lbm"] == ("jax", 1e4, 16, (14, 12, 12)) and (tmp_path / "lbm_sphere_1e4.json").is_file()
