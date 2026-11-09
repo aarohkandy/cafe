@@ -348,9 +348,28 @@ def provenance_problems(source: Any) -> list[str]:
     return bad
 
 
+def _base_command(mission: str, gpus: int) -> str:
+    """The one copy of the command that writes a golden: `update_command` prints it and adds `--out` and the golden flags after it, `_golden_record`
+    stores it as it is, without the directory, which belongs to one machine (round 13, M-7, M-11)."""
+    return f"python -m cafe.pm acceptance --mission {shlex.quote(mission)} --gpus {gpus} --update-golden"
+
+
+def _write_atomic(p: pathlib.Path, text: str) -> None:
+    """`text` in `p` through a sibling temporary and os.replace, through a symlink to the file it names: a write cut short (disk full, killed) leaves the
+    old file, never half of a new one that reads as "not a golden file" (round 13, M-17)."""
+    p = p.resolve()
+    tmp = p.with_name(p.name + ".tmp")
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, p)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def _golden_record(r: dict[str, Any], mission: str) -> dict[str, Any]:
     report = hashlib.sha256((r["dir"] / "report" / "report.json").read_bytes()).hexdigest()
-    return dict(schema=1, command=f"python -m cafe.pm acceptance --mission {shlex.quote(mission)} --gpus {r['gpus']} --update-golden",
+    return dict(schema=1, command=_base_command(mission, r["gpus"]),
                 source=dict(git_sha=git_sha(), dirty=_dirty(), code_digest=pipeline.code_digest(), reviewed_run=dict(name=r["dir"].name, report_sha256=report),
                             date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), budget=r["budget"], gpus=r["gpus"]),
                 summary=summary(r["report"]))
@@ -359,8 +378,17 @@ def _golden_record(r: dict[str, Any], mission: str) -> dict[str, Any]:
 def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) -> str | None:
     """Why `--update-golden` may not write `golden` for the mission `name`, or None. A golden that is there must be one for the same mission: a file that
     is not a golden (unreadable, not an object, no summary.mission) or one for another mission is somebody's reference, and one `--update-golden` from
-    the CI fixture would replace the demo's. `allowed` is the mission named by `--golden-mission`: it lets that mission replace the file. The first
-    write, with no file, is always allowed (round 12, M-33)."""
+    the CI fixture would replace the demo's. `allowed` is the mission named by `--golden-mission`: it lets that mission replace the file. What no flag
+    can mend comes first and is checked for `allowed` too: the path is not a file (a directory), it sits below something that is not a directory, or
+    the directory that receives it is not writable, so the write would fail after the first long run (round 13, M-17). The first write, with no file,
+    is otherwise always allowed (round 12, M-33)."""
+    where = golden.parent
+    while not where.exists():                                       # the nearest directory that is there: the one mkdir and the write start from
+        where = where.parent
+    if golden.exists() and not golden.is_file():
+        return f"{golden} is not a file: not written, name a file with `--golden`"
+    if not where.is_dir() or not os.access(where, os.W_OK | os.X_OK):
+        return f"{where} is not a directory this user can write to, so {golden} cannot be written: not written, name a file with `--golden`"
     if not golden.exists():
         return None
     try:
@@ -375,27 +403,32 @@ def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) 
             f"add `--golden-mission {shlex.quote(name)}`, or name another file with `--golden`")
 
 
-def update_command(golden: pathlib.Path, mission: str, gpus: int, name: str) -> str:
+def update_command(golden: pathlib.Path, mission: str, gpus: int, name: str, out: pathlib.Path) -> str:
     """The command that writes `golden` from a quick run of `mission` (whose report names itself `name`), as the messages that ask for a new golden print it. It
-    carries what `--update-golden` needs to be accepted: `--golden` when the file is not the default one, `--golden-mission` when `golden_refusal` would
-    refuse the write (the file is damaged, or the golden of another mission). The same test as the refusal's, so the advice cannot be refused, and every
-    word that is ours to choose is shlex-quoted, so it pastes as one command whatever the paths and the name hold (look-ahead L0 after round 12, M-33)."""
-    cmd = f"python -m cafe.pm acceptance --mission {shlex.quote(mission)} --gpus {gpus} --update-golden"
-    return (cmd + (f" --golden {shlex.quote(str(golden))}" if golden != GOLDEN else "")
-            + (f" --golden-mission {shlex.quote(name)}" if golden_refusal(golden, name) else ""))
+    carries what `acceptance` needs to be accepted at all, after the base command (the old prefix is unchanged): `--out`, required by the parser, a
+    fresh sibling of `out` (the directory of the run being judged, which holds runs the new command would replace), then what
+    `--update-golden` needs: `--golden` when the file is not the default one, `--golden-mission` when `golden_refusal` would refuse the write (the file is
+    damaged, or the golden of another mission) and the flag mends it. The same test as the refusal's, so the advice cannot be refused, and every word
+    that is ours to choose is shlex-quoted, so it pastes as one command whatever the paths and the name hold
+    (look-ahead L0 after round 12, M-33; `--out`, round 13, M-11)."""
+    fresh = out.parent / ((out.name or "acceptance") + "_golden")
+    return (_base_command(mission, gpus) + f" --out {shlex.quote(str(fresh))}" + (f" --golden {shlex.quote(str(golden))}" if golden != GOLDEN else "")
+            + (f" --golden-mission {shlex.quote(name)}" if golden_refusal(golden, name) and not golden_refusal(golden, name, name) else ""))
 
 
 def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: bool, golden_mission: str | None = None) -> dict[str, Any]:
     if r["report"] is None:
         return _row("golden_diff", False, "the quick run wrote no report to compare")
-    cmd = update_command(golden, mission, r["gpus"], r["report"]["mission"]["name"])
+    cmd = update_command(golden, mission, r["gpus"], r["report"]["mission"]["name"], r["dir"].parent)
     if update:
         if why := golden_refusal(golden, r["report"]["mission"]["name"], golden_mission):
             return _row("golden_diff", False, f"golden NOT updated: {why}", updated=False, refused=True, golden=str(golden))
-        golden.parent.mkdir(parents=True, exist_ok=True)
-        golden.write_text(json.dumps(_golden_record(r, mission), indent=1, allow_nan=False) + "\n")
+        golden.resolve().parent.mkdir(parents=True, exist_ok=True)
+        _write_atomic(golden, json.dumps(_golden_record(r, mission), indent=1, allow_nan=False) + "\n")
         return _row("golden_diff", False, f"golden {golden} UPDATED from this run, not compared: rerun without --update-golden to check against it",
                     updated=True)
+    if golden.exists() and not golden.is_file():                       # a directory: no command can write it, and `cmd` would be refused too
+        return _row("golden_diff", False, f"golden {golden} is not a file: name a file with `--golden`", golden=str(golden))
     if not golden.is_file():
         return _row("golden_diff", False, f"no golden file at {golden}: write it from a quick run you have reviewed with `{cmd}`", missing=True)
     try:
@@ -562,10 +595,10 @@ def main(a: argparse.Namespace) -> int:
     rows, rc = run(a.mission, a.gpus, out, pathlib.Path(a.golden), a.update_golden, a.skip_overnight, golden_mission=getattr(a, "golden_mission", None))
     text = table(rows)
     out.mkdir(parents=True, exist_ok=True)
-    (out / "acceptance.txt").write_text(text + "\n")
+    _write_atomic(out / "acceptance.txt", text + "\n")
     done = dict(mission=a.mission, gpus=a.gpus, ok=rc == 0, started=started, finished=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                 git_sha=git_sha(), code_digest=pipeline.code_digest(), skip_overnight=a.skip_overnight, checks=rows)
-    (out / "acceptance.json").write_text(json.dumps(done, indent=1, default=str, allow_nan=False))
+    _write_atomic(out / "acceptance.json", json.dumps(done, indent=1, default=str, allow_nan=False))
     print(text)
     print(f"table: {out / 'acceptance.json'}")
     return rc
