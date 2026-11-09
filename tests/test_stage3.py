@@ -641,6 +641,14 @@ def test_fluidx3d_is_disabled_by_default_and_says_why(tmp_path):
     for b in (5, ["/bin/ls"]):
         ok, why = fluidx3d.available({"fluidx3d": {"enabled": True, "binary": b}})
         assert not ok and "must be a string path" in why, b                  # was a TypeError out of pathlib.Path
+    # the key itself in the wrong shape ("fluidx3d": true as shorthand) was a TypeError out of the dict merge; a falsy one is just disabled
+    for sec in (True, "yes", [1], 5):
+        ok, why = fluidx3d.available({"fluidx3d": sec})
+        assert not ok and "must be an object" in why and repr(sec) in why, sec
+    for config in ([1], "x", True):
+        ok, why = fluidx3d.available(config)
+        assert not ok and "must be a JSON object" in why, config
+    assert "disabled in config" in fluidx3d.available({"fluidx3d": False})[1] and "disabled in config" in fluidx3d.available({"fluidx3d": []})[1]
 
 
 def test_round_13_m43_a_quoted_false_does_not_make_the_plan_drop_the_free_surface_case(monkeypatch):

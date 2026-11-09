@@ -186,6 +186,16 @@ def test_round_13_m39_the_other_numbers_of_a_change_are_checked_in_the_same_plac
             whatif.apply(CI, {vid: mod})
 
 
+@pytest.mark.parametrize("duty", [1e-320, 5e-324])
+@pytest.mark.parametrize("mission", ["CI", "DEMO"])
+def test_round_13_m39_a_tiny_uas_duty_is_invalid_not_an_overflow_error(mission, duty):
+    """Sibling of M-39: `every_days / 1e-320` is inf and `math.ceil(inf)` an OverflowError out of `apply`; a glider's dive_depth_m * duty cannot overflow."""
+    m = {"CI": CI, "DEMO": DEMO}[mission]
+    with pytest.raises(whatif.Invalid, match="too long to be a number of days"):
+        whatif.apply(m, {"uas": dict(duty=duty)})
+    assert whatif.vehicle(whatif.apply(m, {"uas": dict(duty=1e-300)}), "uas")["sorties"]["every_days"] > 1e299      # finite: only the overflow is refused
+
+
 def test_round_13_m39_the_what_if_command_refuses_an_infinite_shift_before_it_asks_whether_it_is_whole_days():
     """`answer` asked `_whole_days(inf)` of a UAS first: an OverflowError."""
     with pytest.raises(whatif.Invalid, match="--shift/--move: the change shift_h inf"):

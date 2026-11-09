@@ -180,6 +180,8 @@ def _duty_days(every: float, duty: float) -> float:
     """The sortie period at a duty: every / duty, rounded up to whole days once it is a day or more (a fraction of a day moves the launch off the
     mission's time of day)."""
     x = every / duty
+    if not math.isfinite(x):                                                  # a duty of 1e-320 overflows the quotient; `ceil(inf)` is an OverflowError
+        raise Invalid(f"a duty of {duty:g} on sorties every {every:g} d gives a period too long to be a number of days")
     return float(math.ceil(x - 1e-9)) if x >= 1.0 else x
 
 

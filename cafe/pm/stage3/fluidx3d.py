@@ -39,7 +39,13 @@ def settings(config: dict[str, Any] | None) -> dict[str, Any]:
 
 def available(config: dict[str, Any] | None) -> tuple[bool, str]:
     """(ok, reason). ok only when `enabled` is the JSON boolean true (not "false", 1 or "true": the plugin is licence-restricted and wants one deliberate
-    line) and the binary is an executable file. Every caller (`budget.fs_plan`, `windows`, `pipeline_windows`) asks here."""
+    line) and the binary is an executable file. A config, or a `fluidx3d` key, that is not an object (`"fluidx3d": true` as shorthand) is refused with
+    its reason too. Every caller (`budget.fs_plan`, `windows`, `pipeline_windows`) asks here."""
+    if config and not isinstance(config, dict):
+        return False, f"the config is {config!r}, it must be a JSON object"
+    sec = (config or {}).get("fluidx3d")
+    if sec and not isinstance(sec, dict):
+        return False, f"config['fluidx3d'] is {sec!r}, it must be an object like {{\"enabled\": true, \"binary\": \"/path\"}}"
     s = settings(config)
     if s["enabled"] is not True:
         if s["enabled"] is False:
