@@ -38,13 +38,24 @@ def settings(config: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def available(config: dict[str, Any] | None) -> tuple[bool, str]:
-    """(ok, reason). ok only when enabled in the config and the binary is an executable file."""
+    """(ok, reason). ok only when `enabled` is the JSON boolean true (not "false", 1 or "true": the plugin is licence-restricted and wants one deliberate
+    line) and the binary is an executable file. A config, or a `fluidx3d` key, that is not an object (`"fluidx3d": true` as shorthand) is refused with
+    its reason too. Every caller (`budget.fs_plan`, `windows`, `pipeline_windows`) asks here."""
+    if config and not isinstance(config, dict):
+        return False, f"the config is {config!r}, it must be a JSON object"
+    sec = (config or {}).get("fluidx3d")
+    if sec and not isinstance(sec, dict):
+        return False, f"config['fluidx3d'] is {sec!r}, it must be an object like {{\"enabled\": true, \"binary\": \"/path\"}}"
     s = settings(config)
-    if not s["enabled"]:
-        return False, "disabled in config (default: licence forbids commercial/military use, see docs/LICENSES.md)"
+    if s["enabled"] is not True:
+        if s["enabled"] is False:
+            return False, "disabled in config (default: licence forbids commercial/military use, see docs/LICENSES.md)"
+        return False, f"disabled: config['fluidx3d']['enabled'] is {s['enabled']!r}, it must be the JSON boolean true to turn this licence-restricted plugin on"
     b = s["binary"]
     if not b:
         return False, "enabled but config['fluidx3d']['binary'] is not set"
+    if not isinstance(b, str):
+        return False, f"enabled but config['fluidx3d']['binary'] is {b!r}, it must be a string path"
     p = pathlib.Path(b)
     if not p.is_file():
         return False, f"binary {b} does not exist"

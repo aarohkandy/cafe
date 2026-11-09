@@ -395,31 +395,43 @@ def _load_res(ctx: Context) -> dict[str, Any] | None:
 _spawn = subprocess.run                                                     # a seam: tests replace it without touching subprocess.run for ccx
 
 
-def _fea_child(job: str, out: str) -> int:
-    """Child process of `_fea`: job = .npz with the vehicle (JSON), wall points, pressure and mesh size; writes the FEA summary as JSON."""
+def _fea_child(job: str, out: str, deadline: float | None = None) -> int:
+    """Child process of `_fea`: job = .npz with the vehicle (JSON), wall points, pressure and mesh size; writes the FEA summary as JSON.
+    The child leads its own process group (`_fea` starts it a session) and kills the group at `deadline` (epoch seconds, the parent's own kill time) with
+    `freesurface.arm_watchdog`: subprocess.run's timeout would kill only this python process and leave ccx running. A SIGKILL skips this process's own
+    cleanup, so its work lives in the parent's directory (the one `job` is in, and `_fea` points the child's TMPDIR there), which the parent removes.
+    The buckling step runs too (`windows.fea_window`): the utilization is the larger of the stress and the knocked-down buckling one (round 13 M-38)."""
+    base = pathlib.Path(job).parent
+    if deadline is not None:
+        freesurface.arm_watchdog(max(deadline - time.time(), 0.0))
     z = np.load(job, allow_pickle=False)
     veh = W.Vehicle(**json.loads(str(z["vehicle"])))
-    with tempfile.TemporaryDirectory() as wd:
-        r = W.fea_window(veh, z["points"], z["pressure"], workdir=wd, h=float(z["h"]))
+    r = W.fea_window(veh, z["points"], z["pressure"], workdir=base / "fea", h=float(z["h"]), buckle=True)
     pathlib.Path(out).write_text(json.dumps(r, default=float))
     return 0
 
 
 def _fea(veh: W.Vehicle, r: dict[str, Any], a: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
-    """The FEA of the pressure hull in a child process that is killed at `timeout_s` (a safety kill): gmsh and ccx cannot be interrupted
-    from inside, and the stage's wall-clock share is not negotiable. A killed FEA is `run` False with a reason that says so."""
+    """The FEA of the pressure hull in a child process that is killed, with the ccx and gmsh it started, at `timeout_s` (a safety kill): gmsh and ccx
+    cannot be interrupted from inside, and the stage's wall-clock share is not negotiable. A killed FEA is `run` False with a reason that says so."""
     if veh.extra.get("fea") is None:
         return dict(run=False, reason=veh.extra["fea_reason"])
+    killed = dict(run=False, reason="killed: the FEA did not finish inside the window's remaining wall-clock slice")
+    if timeout_s is not None and timeout_s <= 0.0:
+        return killed
     t0 = time.perf_counter()
     with tempfile.TemporaryDirectory() as wd:
         job, out = pathlib.Path(wd) / "job.npz", pathlib.Path(wd) / "out.json"
         np.savez(job, vehicle=json.dumps(dataclasses.asdict(veh), default=float), points=r["wall_points"], pressure=r["wall_pressure"],
                  h=veh.length / need(a, "fea_elements_along"))
         try:
-            p = _spawn([sys.executable, "-m", __name__, "--fea", str(job), str(out)], capture_output=True, text=True, timeout=timeout_s,
-                               cwd=str(pathlib.Path(__file__).resolve().parents[3]))
+            p = _spawn([sys.executable, "-m", __name__, "--fea", "-" if timeout_s is None else str(time.time() + timeout_s), str(job), str(out)],
+                       capture_output=True, text=True, timeout=None if timeout_s is None else timeout_s + FS_GRACE_S, start_new_session=True,
+                       env={**os.environ, "TMPDIR": wd}, cwd=str(pathlib.Path(__file__).resolve().parents[3]))
         except subprocess.TimeoutExpired:
-            return dict(run=False, reason="killed: the FEA did not finish inside the window's remaining wall-clock slice")
+            return killed
+        if p.returncode == -9:                                              # its watchdog at the deadline (the free-surface child reads -9 the same way)
+            return killed
         if p.returncode or not out.exists():
             return dict(run=False, reason=f"FEA failed: {(p.stderr.strip().splitlines() or ['no message'])[-1][:200]}")
         return dict(run=True, seconds=time.perf_counter() - t0, **json.loads(out.read_text()))
@@ -822,4 +834,4 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
 
 
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(_fea_child(sys.argv[2], sys.argv[3]) if sys.argv[1:2] == ["--fea"] else 2)
+    sys.exit(_fea_child(sys.argv[3], sys.argv[4], None if sys.argv[2] == "-" else float(sys.argv[2])) if sys.argv[1:2] == ["--fea"] else 2)

@@ -345,21 +345,25 @@ def tri_quality(nodes: NDArray[Any], faces: NDArray[Any]) -> float:
 def fea_window(vehicle: Vehicle, points: NDArray[Any], pressure: NDArray[Any], workdir: str | os.PathLike[str] | None = None, h: float | None = None,
                buckle: bool = False) -> dict[str, Any]:
     """Shell model of the vehicle's hull under the window's wall pressure plus hydrostatic pressure at `vehicle.depth`.
-    Pressure at a shell element = value at the nearest LBM wall cell. Utilization = von Mises (99th percentile, as
-    cafe.fea reports it) / yield, or the reciprocal of the buckling factor when `buckle`, whichever is larger."""
+    Pressure at a shell element = value at the nearest LBM wall cell. `stress_utilization` = von Mises (99th percentile, as cafe.fea reports it) / yield.
+    With `buckle`, `buckling_utilization` = 1 / (buckling factor x `hangar.KNOCKDOWN`): the same rule `hangar` rates a hull's collapse depth by, the
+    linear factor of an imperfect shell under external pressure being about twice the load it carries; None without `buckle`. `utilization` is the
+    larger of the two: above 1 the hull yields or buckles under this load."""
     from scipy.spatial import cKDTree
-    from cafe import fea
+    from cafe import fea, hangar
     m = vehicle_mesh(vehicle)
     tree = cKDTree(points)
     hydro = rho_of(vehicle) * 9.81 * vehicle.depth
     pr = lambda cen, nrm: pressure[tree.query(cen)[1]] + hydro            # noqa: E731  (positive pushes inward)
     steps = ("static", "buckle") if buckle else ("static",)
     r = fea.solve(m, "shell", vehicle.material, thickness=vehicle.thickness, pressure=pr, steps=steps, h=h, workdir=workdir)
-    util = r["vm_p99"] / fea.MATERIALS[vehicle.material]["yield_"]
-    if buckle and r.get("buckling_factor"):
-        util = max(util, 1.0 / r["buckling_factor"])
+    stress = r["vm_p99"] / fea.MATERIALS[vehicle.material]["yield_"]
+    lam = r.get("buckling_factor") if buckle else None
+    buckling = 1.0 / (lam * hangar.KNOCKDOWN) if lam else None
     f = r.pop("field")
-    return dict(utilization=float(util), vm_p99=r["vm_p99"], vm_max=r["vm_max"], safety_factor=r["safety_factor"],
+    return dict(utilization=float(max(stress, buckling or 0.0)), stress_utilization=float(stress),
+                buckling_utilization=None if buckling is None else float(buckling), knockdown=hangar.KNOCKDOWN if buckling is not None else None,
+                vm_p99=r["vm_p99"], vm_max=r["vm_max"], safety_factor=r["safety_factor"],
                 buckling_factor=r.get("buckling_factor"), elements=r["elements"], nodes=r["nodes"],
                 min_element_quality=tri_quality(f["nodes"], f["faces"]), hydrostatic_pa=hydro)
 

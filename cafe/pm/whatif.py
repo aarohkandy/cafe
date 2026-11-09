@@ -19,9 +19,11 @@ the `scope` column is of no scope and is left out (it is counted in `unscoped_ro
 below that `trained` is False and says why.
 
 A "mission change" is a dict per vehicle: shift_h (deploy later; a UAS: its daily sorties later in the day), dlon/dlat in degrees (a UAS
-moves with its ship) and duty (<= 1: glider dive depth x duty, UAS every_days / duty rounded up to whole days). `apply` makes the changed
-mission or raises Invalid; a UAS shift of a whole number of days is Invalid (the same launch time of day).
-Candidate changes for the flip search are single changes, ranked by `cost` in units of "one notch": 6 h, 0.5 degree, 25 % of duty.
+moves with its ship, and a ship moves once: two UAS on it that ask for different moves are Invalid) and duty (<= 1: glider dive depth x duty,
+UAS every_days / duty rounded up to whole days). `apply` makes the changed mission or raises Invalid; a UAS shift of a whole number of days is Invalid
+(the same launch time of day).
+Candidate changes for the flip search are single changes, ranked by `cost` in units of "one notch": 6 h, 0.5 degree, 25 % of duty; two that make
+the same mission are one.
 """
 from __future__ import annotations
 
@@ -42,12 +44,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from numpy.typing import NDArray
-from scipy.stats import binom, qmc
+from scipy.stats import betabinom, binom, qmc
 
 from . import budget, par, report, stage1
 from .config import ConfigError, _in_box, fmt_box, utc
 from .emulator import LIMITS as LIMITS                          # the BRIEF 2.7 limits live in emulator.py (receipts() reads them too); this is the same dict
-from .emulator import Emulator, FreshDraw, coverage_band, locked, read_table, store_path, write_table
+from .emulator import Emulator, FreshDraw, conformal_rank, coverage_band, locked, read_table, store_path, write_table
 from .env.environment import OutsideData
 from .stats import intervals
 
@@ -120,12 +122,12 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
         vehicle(m, vid)
     m["vehicles"] = [v for v in m["vehicles"] if v["id"] not in drop]
     m["links"] = [k for k in m["links"] if k["a"] not in drop and k["b"] not in drop]
-    ship_moved = False
+    ship_move: tuple[str, float, float] | None = None
     for vid, mod in (mods or {}).items():
         if vid in drop:
             continue
         v = vehicle(m, vid)
-        h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
+        h, dlon, dlat, duty = _numbers(vid, mod)
         if h and "base" in v:
             if _whole_days(h):
                 raise Invalid(f"{vid}: launching {h:+g} h later is a whole number of days, the same launch time of day: nothing changes")
@@ -135,13 +137,16 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
         elif h:
             t = utc(v["deploy"]["time"]).timestamp() + 3600.0 * h
             if not _deploy_in_window(t, (t0, t1)):
-                raise Invalid(f"{vid}: deploying {h:+g} h gives {_iso(t)}, outside the window {m['window']['start']} .. {m['window']['end']}")
+                raise Invalid(f"{vid}: deploying {h:+g} h gives {_when(t)}, outside the window {m['window']['start']} .. {m['window']['end']}")
             v["deploy"]["time"] = _iso(t)
         if dlon or dlat:
             if "base" in v:
-                if not ship_moved:
+                if ship_move is None:
                     m["ship"]["lon"], m["ship"]["lat"] = float(_wrap(m["ship"]["lon"] + dlon)), m["ship"]["lat"] + dlat
-                ship_moved = True
+                    ship_move = (vid, dlon, dlat)
+                elif (dlon, dlat) != ship_move[1:]:                 # the ship is one: the second UAS's own move would be dropped without a word
+                    raise Invalid(f"{ship_move[0]} and {vid} are both launched from the ship and ask for different moves of it, ({ship_move[1]:+g}, "
+                                  f"{ship_move[2]:+g}) deg and ({dlon:+g}, {dlat:+g}) deg: a ship moves once, so give them the same move")
             else:
                 v["deploy"]["lon"], v["deploy"]["lat"] = float(_wrap(v["deploy"]["lon"] + dlon)), v["deploy"]["lat"] + dlat
                 t = v["task"]
@@ -162,15 +167,34 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
     return m
 
 
+def _numbers(vid: str, mod: dict[str, Any]) -> tuple[float, float, float, float]:
+    """(shift_h, dlon, dlat, duty) of a change as floats; Invalid for a number that is not finite, or a duty that is not above 0 (the one place every
+    caller of `apply` and `answer` goes through: a shift of 1e999 h is a typo, not a ZeroDivisionError or an OverflowError)."""
+    h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
+    if not all(math.isfinite(x) for x in (3600.0 * h, dlon, dlat, duty)) or duty <= 0.0:       # 3600 * h: a shift in seconds must be a number too
+        raise Invalid(f"{vid}: the change shift_h {h:g}, dlon {dlon:g}, dlat {dlat:g}, duty {duty:g} needs finite numbers and a duty above 0")
+    return h, dlon, dlat, duty
+
+
 def _duty_days(every: float, duty: float) -> float:
     """The sortie period at a duty: every / duty, rounded up to whole days once it is a day or more (a fraction of a day moves the launch off the
     mission's time of day)."""
     x = every / duty
+    if not math.isfinite(x):                                                  # a duty of 1e-320 overflows the quotient; `ceil(inf)` is an OverflowError
+        raise Invalid(f"a duty of {duty:g} on sorties every {every:g} d gives a period too long to be a number of days")
     return float(math.ceil(x - 1e-9)) if x >= 1.0 else x
 
 
 def _iso(t: float) -> str:
     return dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _when(t: float) -> str:
+    """`_iso` for a message: a time the calendar cannot hold (a shift of 1e9 h) is said so, not a ValueError."""
+    try:
+        return _iso(t)
+    except (ValueError, OverflowError, OSError):
+        return "a date beyond the calendar"
 
 
 def solo(mission: dict[str, Any], vid: str) -> dict[str, Any]:
@@ -208,7 +232,7 @@ def describe(mod: dict[str, Any], v: dict[str, Any] | None = None, window: tuple
     if duty != 1.0:
         if v is not None and "base" in v:
             x = float(v["sorties"].get("every_days", 1))
-            up = " (rounded up to whole days)" if x / duty >= 1.0 and x / duty != _duty_days(x, duty) else ""
+            up = " (rounded up to whole days)" if x / duty >= 1.0 and abs(x / duty - _duty_days(x, duty)) > 1e-9 else ""
             out.append(f"fly sorties every {_duty_days(x, duty):g} d instead of {x:g}{up}")
         else:
             d0 = (v or {}).get("task", {}).get("dive_depth_m")
@@ -378,16 +402,22 @@ def add_rows(path: Any, rows: list[dict[str, Any]]) -> tuple[pd.DataFrame, str]:
 # ------------------------------------------------------------------------------------------------------ training design
 
 def _fits(mission: dict[str, Any], vid: str, mod: dict[str, Any]) -> dict[str, Any]:
-    """The change shrunk until it is valid: shift and move halved together, then (a move that cannot be made at any size: a vehicle at the box
-    edge) the move dropped and the shift halved with the duty kept. The all-zero change only when nothing valid is left."""
+    """The change of one vehicle shrunk until it is valid (`_fits_all` for one)."""
+    return _fits_all(mission, {vid: mod})[vid]
+
+
+def _fits_all(mission: dict[str, Any], mods: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The changes of vehicles that are applied together (the UAS on one ship) shrunk until they are valid: shift and move halved together, then (a move
+    that cannot be made at any size: a vehicle at the box edge) the move dropped and the shift halved with the duty kept. The same step for every
+    vehicle, so a move they share stays the same one. The all-zero change only when nothing valid is left."""
     for shift_s, move_s in [(0.5 ** k, 0.5 ** k) for k in range(5)] + [(0.5 ** k, 0.0) for k in range(5)]:
-        m = dict(mod, shift_h=mod["shift_h"] * shift_s, dlon=mod["dlon"] * move_s, dlat=mod["dlat"] * move_s)
+        ms = {vid: dict(m, shift_h=m["shift_h"] * shift_s, dlon=m["dlon"] * move_s, dlat=m["dlat"] * move_s) for vid, m in mods.items()}
         try:
-            apply(mission, {vid: m})
-            return m
+            apply(mission, ms)
+            return ms
         except Invalid:
             continue
-    return dict(shift_h=0.0, dlon=0.0, dlat=0.0, duty=1.0)
+    return {vid: dict(shift_h=0.0, dlon=0.0, dlat=0.0, duty=1.0) for vid in mods}
 
 
 def is_base(mod: dict[str, Any]) -> bool:
@@ -397,8 +427,10 @@ def is_base(mod: dict[str, Any]) -> bool:
 
 def design(mission: dict[str, Any], n: int, seed: int) -> list[dict[str, Any]]:
     """n mission variants for training: per vehicle a Latin-hypercube point over shift, move and duty (each vehicle its own), so one
-    Stage-1 run of the variant gives every vehicle a different row."""
-    out: list[dict[str, Any]] = [{} for _ in range(n)]
+    Stage-1 run of the variant gives every vehicle a different row. The ship is one: the UAS on it share the move the first of them draws (and are
+    fitted together), since `apply` moves the ship once."""
+    raw: list[dict[str, Any]] = [{} for _ in range(n)]
+    ship: list[str] = []                                                       # the vehicles launched from the ship
     t0, t1 = _window(mission)
     for i, v in enumerate(mission["vehicles"]):
         u = qmc.LatinHypercube(d=4, seed=seed + i).random(n)
@@ -412,7 +444,15 @@ def design(mission: dict[str, Any], n: int, seed: int) -> list[dict[str, Any]]:
             # would be out of the emulator's range
             d_k = (1.0 if u[k, 3] < 0.5 else 0.5) if "base" in v else 1.0 - 0.5 * u[k, 3] if duty else 1.0
             mod = dict(shift_h=lo + u[k, 0] * (hi - lo), dlon=-1.0 + 2.0 * u[k, 1], dlat=-1.0 + 2.0 * u[k, 2], duty=d_k)
-            out[k][v["id"]] = _fits(mission, v["id"], mod)
+            if "base" in v and ship:
+                mod.update(dlon=raw[k][ship[0]]["dlon"], dlat=raw[k][ship[0]]["dlat"])
+            raw[k][v["id"]] = mod
+        if "base" in v:
+            ship.append(v["id"])
+    out: list[dict[str, Any]] = []
+    for r in raw:
+        fit = _fits_all(mission, {vid: r[vid] for vid in ship})
+        out.append({vid: fit[vid] if vid in fit else _fits(mission, vid, m) for vid, m in r.items()})
     return out
 
 
@@ -447,11 +487,20 @@ def _coverage_in(cov: Any, nominal: float) -> Any:
     return (cov >= lo) & (cov <= hi)
 
 
-def _chance_miss(n_test: int, nominal: float) -> float:
-    """The probability that a calibrated emulator's hold-out hit count, Binomial(n_test, nominal), is outside the coverage gate. On 20 to 30 points that
-    alone misses the +-0.05 gate often."""
-    k = np.arange(n_test + 1)
-    return float(binom.pmf(k[~_coverage_in(k / max(n_test, 1), nominal)], n_test, nominal).sum())
+def _chance_miss(n_test: int, nominal: float, n_cal: int | None = None) -> float:
+    """The probability that a calibrated emulator's hold-out hit count is outside the coverage gate. Split-conformal coverage is itself random: with `n_cal`
+    calibration scores and k = `conformal_rank(n_cal, nominal)` it is Beta(k, n_cal + 1 - k), so the hits of `n_test` points are Beta-Binomial(n_test, k,
+    n_cal + 1 - k); with k above n_cal the interval is infinite and every point is a hit. Without `n_cal` (a hold-out recorded before it was) the coverage
+    is taken as exactly `nominal`, Binomial(n_test, nominal), which understates the chance (at 20 test points and 16 calibration scores 0.25 for 0.53);
+    `fit_class` says which was used."""
+    hits = np.arange(n_test + 1)
+    out = hits[~_coverage_in(hits / max(n_test, 1), nominal)]
+    if n_cal is None:
+        return float(binom.pmf(out, n_test, nominal).sum())
+    k = conformal_rank(n_cal, nominal)
+    if k > n_cal:
+        return float(n_test in out)
+    return float(betabinom.pmf(out, n_test, k, n_cal + 1 - k).sum())
 
 
 def fit_class(df: pd.DataFrame, cls: str, scope: str, path: Any, code_digest: str | None = None,
@@ -514,9 +563,12 @@ def fit_class(df: pd.DataFrame, cls: str, scope: str, path: Any, code_digest: st
     acc = dict(rmse_ok=bool(gate <= LIMITS["rmse"]), coverage_ok=bool(_coverage_in(h["coverage"]["p_fail"], h["nominal"])),
                query_ok=bool(q <= LIMITS["query_ms"]))
     missed = [n for n, ok in (("RMSE", acc["rmse_ok"]), ("coverage", acc["coverage_ok"]), ("query time", acc["query_ok"])) if not ok]
-    chance = _chance_miss(h["n_test"], h["nominal"])
+    n_cal = h.get("n_cal")
+    chance = _chance_miss(h["n_test"], h["nominal"], n_cal)
+    model = (f"Beta-Binomial over {n_cal} calibration scores: the conformal coverage varies with them" if n_cal is not None else
+             "Binomial: no n_cal recorded, so the coverage is taken as exactly nominal")
     return em, dict(info, trained=True, n_train=h["n_train"], n_test=h["n_test"], nominal=h["nominal"], rmse=h["rmse"], coverage=h["coverage"],
-                    coverage_raw_p=h["coverage_raw_p"], coverage_chance_fail=chance, used=not missed,
+                    coverage_raw_p=h["coverage_raw_p"], coverage_chance_fail=chance, coverage_chance_model=model, n_cal=n_cal, used=not missed,
                     unused_reason=f"the {scope} emulator missed BRIEF 2.7 acceptance ({', '.join(missed)}), so Stage 1 answers" if missed else None,
                     query_ms=q, noise_floor_rmse=floor, rmse_debiased=deb, rmse_gate=gate, **fresh_info,
                     draws=DRAWS, acceptance=acc, threshold=em.threshold, multi_fidelity=em.multi_fidelity)
@@ -567,16 +619,35 @@ def usable(ems: dict[str, tuple[Emulator | None, dict[str, Any]]], scope: str) -
 
 
 def candidates(mission: dict[str, Any], vid: str) -> list[dict[str, Any]]:
-    """Single changes in cost order: deploy +-6/12/24/48 h, +-0.5/1 degree in lon or lat, lower duty. Each: mod, cost (notches), change (words)."""
+    """Single changes in cost order: deploy +-6/12/24/48 h, +-0.5/1 degree in lon or lat, lower duty. Each: mod, cost (notches), change (words).
+    Two changes that make the same mission are one (the cheaper stays): a UAS launched 12 h later and 12 h earlier flies at the same time of day, and
+    a UAS duty is priced as the duty its whole-day period really is (every 1 d at 0.75 and at 0.5 are both 2 d, a duty of 0.5). A change `apply` refuses
+    stays, for the flip search to list as invalid."""
     v = vehicle(mission, vid)
     whole_days = "base" in v                                                  # a UAS shifted by whole days flies at the same time of day: not a change
     out: list[dict[str, Any]] = [dict(mod=dict(shift_h=s * h), cost=h / 6.0) for h in SHIFTS for s in (1, -1) if not (whole_days and h % 24 == 0)]
     out += [dict(mod={ax: s * d}, cost=d / 0.5) for d in MOVES for ax in ("dlon", "dlat") for s in (1, -1)]
-    if "base" in v or "dive_depth_m" in v["task"]:
+    if "base" in v:
+        every = float(v["sorties"].get("every_days", 1))
+        for f in DUTIES:
+            days = _duty_days(every, f)
+            eff = f if abs(every / f - days) < 1e-9 else every / days            # the duty the period really is
+            out.append(dict(mod=dict(duty=eff), cost=(1 - eff) / 0.25))
+    elif "dive_depth_m" in v["task"]:
         out += [dict(mod=dict(duty=f), cost=(1 - f) / 0.25) for f in DUTIES]
-    for c in out:
+    kept: list[dict[str, Any]] = []
+    made: list[dict[str, Any]] = []
+    for c in sorted(out, key=lambda c: c["cost"]):
+        try:
+            m2 = apply(mission, {vid: c["mod"]})
+        except Invalid:
+            m2 = None
+        if m2 is None or m2 not in made:
+            made += [m2] if m2 is not None else []
+            kept.append(c)
+    for c in kept:
         c["change"] = describe(c["mod"], v, _window(mission))
-    return sorted(out, key=lambda c: c["cost"])
+    return kept
 
 
 def predict(em: Emulator | None, mission: dict[str, Any], vid: str, cls: str, trk: Track | None, mod: dict[str, Any], env: Any) -> dict[str, Any]:
@@ -733,6 +804,7 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
     if drop and not [v for v in mission["vehicles"] if v["id"] not in drop]:        # (`apply` may return none: run_variant relies on it)
         raise Invalid(f"--drop {', '.join(drop)} would leave no vehicles; a mission needs at least one (it has {[v['id'] for v in mission['vehicles']]})")
     mod = dict(shift_h=ops.get("shift_h", 0.0), dlon=ops.get("dlon", 0.0), dlat=ops.get("dlat", 0.0))
+    _numbers("--shift/--move", mod)                                          # before `_whole_days`, which cannot take an infinity
     live = [v["id"] for v in mission["vehicles"] if v["id"] not in drop and (only is None or v["id"] in only)]
     for vid in only or []:
         vehicle(mission, vid)

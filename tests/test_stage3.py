@@ -1,4 +1,5 @@
 """Wall model, windows (LES + FEA), FluidX3D plugin, refit. Physics checks sit next to tests that break them."""
+import dataclasses
 import json
 import math
 import os
@@ -6,6 +7,7 @@ import pathlib
 import pickle
 import re
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -17,6 +19,7 @@ from hypothesis import given, settings, strategies as st
 import jax.numpy as jnp
 
 import cafe.receipts as cr
+from cafe import hangar
 from cafe.pm import Tagged, budget
 from cafe.pm.config import ConfigError
 from cafe.pm.env import subgrid as sg_mod
@@ -580,7 +583,14 @@ def test_fea_buckling_utilization_can_exceed_the_stress_utilization(tmp_path):
     th = np.linspace(0, 2 * math.pi, 40, endpoint=False)
     pts = np.array([[x, 0.05 * math.cos(a), 0.05 * math.sin(a)] for x in np.linspace(-0.2, 0.2, 20) for a in th])
     r = W.fea_window(thin, pts, np.full(len(pts), 3e5), workdir=tmp_path, h=0.02, buckle=True)
-    assert r["buckling_factor"] and r["utilization"] == pytest.approx(max(r["vm_p99"] / 276e6, 1 / r["buckling_factor"]))
+    # round 13 M-38: the buckling utilization is 1 / (factor x hangar.KNOCKDOWN), the rule `hangar` rates collapse depth by (0.5: a real shell collapses at
+    # about half the linear load); before, `1 / factor` alone read the hull twice too safe
+    assert r["buckling_factor"] and hangar.KNOCKDOWN == 0.5 and r["knockdown"] == 0.5
+    assert r["stress_utilization"] == pytest.approx(r["vm_p99"] / 276e6) and r["buckling_utilization"] == pytest.approx(2.0 / r["buckling_factor"])
+    assert r["utilization"] == pytest.approx(max(r["stress_utilization"], r["buckling_utilization"])) and r["buckling_utilization"] > r["stress_utilization"]
+    plain = W.fea_window(thin, pts, np.full(len(pts), 3e5), workdir=tmp_path / "plain", h=0.02)
+    assert plain["buckling_utilization"] is None and plain["knockdown"] is None and plain["buckling_factor"] is None
+    assert plain["utilization"] == plain["stress_utilization"] == pytest.approx(r["stress_utilization"])
 
 
 def test_tri_quality():
@@ -623,6 +633,31 @@ def test_fluidx3d_is_disabled_by_default_and_says_why(tmp_path):
     f.write_text("x")
     assert "not executable" in fluidx3d.available(cfg(f))[1]
     assert fluidx3d.available(cfg())[0]
+    # round 13 M-43: only the JSON boolean true turns it on; "false" was truthy and, with a real binary, switched on a licence-restricted plugin
+    for on in ("false", "true", 1, "yes", [True]):
+        ok, why = fluidx3d.available(cfg(enabled=on))
+        assert not ok and "must be the JSON boolean true" in why and repr(on) in why, on
+    assert not fluidx3d.available(cfg(enabled=0))[0] and "disabled in config" in fluidx3d.available(cfg(enabled=False))[1]
+    for b in (5, ["/bin/ls"]):
+        ok, why = fluidx3d.available({"fluidx3d": {"enabled": True, "binary": b}})
+        assert not ok and "must be a string path" in why, b                  # was a TypeError out of pathlib.Path
+    # the key itself in the wrong shape ("fluidx3d": true as shorthand) was a TypeError out of the dict merge; a falsy one is just disabled
+    for sec in (True, "yes", [1], 5):
+        ok, why = fluidx3d.available({"fluidx3d": sec})
+        assert not ok and "must be an object" in why and repr(sec) in why, sec
+    for config in ([1], "x", True):
+        ok, why = fluidx3d.available(config)
+        assert not ok and "must be a JSON object" in why, config
+    assert "disabled in config" in fluidx3d.available({"fluidx3d": False})[1] and "disabled in config" in fluidx3d.available({"fluidx3d": []})[1]
+
+
+def test_round_13_m43_a_quoted_false_does_not_make_the_plan_drop_the_free_surface_case(monkeypatch):
+    """Round 13 M-43: `budget.fs_plan` asks `available`; with "false" and a real binary it answered None (the plugin runs it), pricing no interFoam case."""
+    assets = budget.stage3_assumptions()
+    monkeypatch.setattr(fs, "fluidx3d_config", lambda: cfg(enabled="false"))
+    assert budget.fs_plan({"usv": "usv"}, 1, assets, None) is not None
+    monkeypatch.setattr(fs, "fluidx3d_config", lambda: cfg(enabled=True))
+    assert budget.fs_plan({"usv": "usv"}, 1, assets, None) is None
 
 
 def test_stub_binary_round_trip_gives_the_known_drag_coefficient(tmp_path):
@@ -1182,6 +1217,9 @@ def test_run_all_classes_rows_have_everything_and_nothing_unvalidated_is_ok(no_w
                 assert not wall["ok"] and not r["ok"]                          # no stored passing wall-model receipt: no row may be ok
             assert r["heading_source"].startswith("relative-flow") and r["added_resistance"] is not None
     assert out["g"][0]["fea"]["run"] and out["g"][0]["fea"]["utilization"] > 0                           # glider pressure hull
+    fea = out["g"][0]["fea"]                                                   # round 13 M-38: the child runs the buckling step, the row stores it
+    assert fea["buckling_factor"] is not None and fea["buckling_utilization"] == pytest.approx(2.0 / fea["buckling_factor"])
+    assert fea["utilization"] == pytest.approx(max(fea["stress_utilization"], fea["buckling_utilization"]))
     assert not out["u"][0]["fea"]["run"] and "no structural model" in out["u"][0]["fea"]["reason"] and not out["q"][0]["fea"]["run"]
     assert out["g"][0]["cl_hangar"] is not None and out["u"][0]["cl_hangar"] is None and out["u"][1]["cl_hangar"] is not None
     assert L.checks["every_window_attempted"][0] and L.checks["no_row_claims_ok_with_a_failing_check"][0] and L.checks["every_window_attempted"][1] == 6
@@ -1295,6 +1333,82 @@ def test_fea_failure_timeout_and_the_real_child_process(no_wall_receipt, monkeyp
     assert out["run"] and out["utilization"] > 0 and out["seconds"] > 0
     out2 = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=0.05)
     assert not out2["run"] and out2["reason"].startswith("killed: the FEA")                  # a hard stop at the slice, however far gmsh/ccx got
+
+
+HANG = """
+import os, pathlib, subprocess, sys, time
+from cafe import fea
+from cafe.pm.stage3 import pipeline_windows as pw
+def hang(*a, **k):                                   # CalculiX: a grandchild that outlives its parent unless the group is killed
+    p = subprocess.Popen(["sleep", "731.25"])
+    pathlib.Path(os.environ["PIDFILE"]).write_text(str(p.pid))
+    p.wait()
+fea.solve = hang
+# the real `_fea_child`; only the deadline is re-based on the clock after the (slow) imports, so the test does not wait for the parent's 60 s
+sys.exit(pw._fea_child(sys.argv[2], sys.argv[3], time.time() + 3.0))
+"""
+
+
+def _gone(pid, within=10.0):
+    """No such process, or only a zombie (a killed orphan waits for its reaper)."""
+    end = time.time() + within
+    while time.time() < end:
+        try:
+            if pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return True
+        except (FileNotFoundError, ProcessLookupError):
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def test_round_13_m42_a_killed_fea_window_takes_its_ccx_with_it(monkeypatch, tmp_path):
+    """Round 13 M-42: on the FEA deadline `subprocess.run`'s timeout killed the python child and left ccx running. The real `_fea`, a real child that starts
+    a grandchild `sleep` and hangs on it: the sleep must be gone, and the temporary directory with it."""
+    ball = W.Vehicle("ball", "water", 0.1, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.05, 0.05, 0.05))], material="al6061",
+                     thickness=0.002, depth=0.0, extra=dict(fea=True))
+    pts = _sphere_points(0.05, 50)
+    real, seen = pw._spawn, {}
+
+    def spawn(cmd, **kw):
+        seen.update(kw, cmd=cmd)
+        return real([sys.executable, "-c", HANG, *cmd[-3:]], **kw)
+    monkeypatch.setattr(pw, "_spawn", spawn)
+    pid_file = tmp_path / "ccx.pid"
+    monkeypatch.setenv("PIDFILE", str(pid_file))
+    out = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=60)
+    assert out == dict(run=False, reason="killed: the FEA did not finish inside the window's remaining wall-clock slice")
+    assert seen["start_new_session"] is True and seen["timeout"] == 60 + pw.FS_GRACE_S and "--fea" in seen["cmd"]
+    assert pid_file.exists(), "the stand-in never started its grandchild"
+    assert _gone(int(pid_file.read_text())), "the grandchild (ccx) is still running after the FEA was killed"
+    assert not pathlib.Path(seen["env"]["TMPDIR"]).exists()                                   # the parent's directory, which the child works in, is gone
+
+
+def test_round_13_m42_the_child_arms_the_group_watchdog_at_the_parents_deadline_and_runs_the_buckling_step(monkeypatch, tmp_path):
+    armed, solved = [], {}
+    monkeypatch.setattr(pw.freesurface, "arm_watchdog", lambda s: armed.append(s))
+    monkeypatch.setattr(W, "fea_window", lambda veh, pts, pr, **k: solved.update(k) or dict(utilization=0.5))
+    ball = W.Vehicle("ball", "water", 0.1, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.05, 0.05, 0.05))])
+    job, out = tmp_path / "job.npz", tmp_path / "out.json"
+    np.savez(job, vehicle=json.dumps(dataclasses.asdict(ball), default=float), points=np.zeros((1, 3)), pressure=np.zeros(1), h=0.1)
+    assert pw._fea_child(str(job), str(out)) == 0 and armed == [] and solved["buckle"] is True and solved["workdir"] == tmp_path / "fea"
+    assert pw._fea_child(str(job), str(out), time.time() + 100.0) == 0 and 90.0 < armed[0] <= 100.0
+    assert pw._fea_child(str(job), str(out), time.time() - 5.0) == 0 and armed[1] == 0.0                # the deadline passed during start-up: kill now
+    assert json.loads(out.read_text()) == dict(utilization=0.5)
+
+
+def test_round_13_m42_a_fea_with_no_time_left_is_killed_without_starting_and_a_watchdog_kill_reads_as_killed(monkeypatch):
+    import subprocess
+    ball = W.Vehicle("ball", "water", 0.1, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.05, 0.05, 0.05))], material="al6061",
+                     thickness=0.002, depth=0.0, extra=dict(fea=True))
+    r = dict(wall_points=_sphere_points(0.05, 20), wall_pressure=np.zeros(20))
+    calls = []
+    monkeypatch.setattr(pw, "_spawn", lambda cmd, **k: calls.append(cmd) or subprocess.CompletedProcess(cmd, -9, "", ""))
+    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=0.0)["reason"].startswith("killed: the FEA")
+    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=60.0)["reason"].startswith("killed: the FEA") and len(calls) == 1
+    assert calls[0][calls[0].index("--fea") + 1] != "-"
+    pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=None)
+    assert calls[1][calls[1].index("--fea") + 1] == "-"                                       # no deadline: no watchdog
 
 
 def test_run_flags_a_row_that_claims_ok_with_a_failing_check(no_wall_receipt, monkeypatch):
@@ -1869,7 +1983,19 @@ def test_nproc_follows_the_environment(monkeypatch):
     assert fs.nproc() == 3
     monkeypatch.delenv("CAFE_NPROC")
     monkeypatch.setenv("CAFE_WORKERS", "16")
-    assert fs.nproc() == 6                                                                  # the measured knee caps it
+    assert fs.nproc() == 6                                                                  # the cap: 6 is chosen between the measured 4- and 8-core points
+
+
+def test_round_13_m45_six_cores_is_a_chosen_cap_between_measured_points_and_is_priced_by_interpolation():
+    """Round 13 M-45: "6 is the measured scaling knee" was not a measured point: the benchmark has 1, 2, 4 and 8 cores. If a 6-core run is added, this fails and
+    the wording of `nproc` (and DECISIONS 297) has to become the measurement."""
+    from cafe import planner
+    measured = json.loads(planner.BENCH.read_text())[fs.SOLVER]["cell_updates_per_s"]
+    assert sorted(int(k) for k in measured) == [1, 2, 4, 8]
+    r6, src = fs.rate(6)
+    assert measured["4"] < r6 < measured["8"] and r6 == pytest.approx((measured["4"] + measured["8"]) / 2) and "interpolated to 6" in src
+    assert r6 / (6 * measured["1"]) == pytest.approx(0.55, abs=0.005) and measured["4"] / (4 * measured["1"]) == pytest.approx(0.76, abs=0.005)
+    assert "not a measured one" in fs.nproc.__doc__ and "scaling knee" not in fs.nproc.__doc__
 
 
 def test_two_grid_runs_the_coarse_and_fine_cases_and_puts_the_gci_at_the_measured_ratio(tmp_path, monkeypatch):
@@ -2337,6 +2463,22 @@ def test_the_hull_fs_row_states_the_displacement_next_to_the_platforms_mass(no_w
     import yaml
     why = yaml.safe_load((pathlib.Path(__file__).parents[1] / "config" / "assumptions.yaml").read_text())["stage3.usv.hull_draft_m"]["why"]
     assert "displaces about 2.0 t" in why and "0.75 t" in why and "2.7 times the displacement" in why and "1.29" in why
+
+
+def test_round_13_m44_the_draft_the_assumption_names_as_its_remedy_gives_the_mesh_the_platforms_displacement(no_wall_receipt):
+    """Round 13 M-44: the remedy draft c = 3 V / (2 pi a b) = 0.18 m counted the half ellipsoid alone, but the mesh also has the keel: it displaced 0.875 m3
+    (19 % over the platform's 0.733 m3). The draft stated in `replace_with` is read back from the text and put through the row note's volume arithmetic."""
+    import yaml
+    a, P, veh, c = _usv_case(no_wall_receipt, "hull_fs", 8.392)
+    text = yaml.safe_load((pathlib.Path(__file__).parents[1] / "config" / "assumptions.yaml").read_text())["stage3.usv.hull_draft_m"]["replace_with"]
+    stated = float(re.search(r"V_keel = 0\.14 m3, about (\d\.\d+) m", text)[1])
+    kc = P["keel_area_m2"] / P["keel_span_m"]
+    v_keel = kc * P["keel_t_c"] * kc * P["keel_span_m"]
+    mesh = lambda draft: 2 * math.pi / 3 * (P["lwl_m"] / 2) * (P["beam_wl_m"] / 2) * draft + v_keel               # half ellipsoid + keel box
+    want = P["mass_kg"] / P["rho_water"]
+    assert v_keel == pytest.approx(0.14, abs=1e-3) and mesh(stated) == pytest.approx(want, rel=0.01)
+    assert mesh(0.18) > 1.15 * want and mesh(a["usv.hull_draft_m"]) == pytest.approx(1.98, abs=0.01)         # the old figure and the shipped 0.45 m are not it
+    assert "0.875 m3" in text and "19 % over" in text and "0.733 m3" in text
 
 
 def test_a_truncated_wall_model_receipt_is_stale_not_a_crash(monkeypatch, tmp_path):
