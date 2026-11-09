@@ -1570,3 +1570,18 @@ def test_r13_m3_a_mission_whose_vehicles_cannot_be_read_counts_every_class_but_n
     assert f.flown is None and used("stage3.slocum.length_m") and not used("dtmb5415.u_D_rel")
     (run / "mission.yaml").unlink()
     assert cr.Facts(run, REAL, data).flown is None
+
+
+def test_r13_sweep_a_cut_write_leaves_the_old_credibility_json(tmp_path, monkeypatch, cut_writes):
+    """Round 13, M-17 sibling: report/credibility.json is read back by the report, `receipts` and the audit; written in place, a cut left three characters."""
+    monkeypatch.setattr(cr, "build", lambda run: {"a": 1})
+    monkeypatch.setattr(cr, "_render", lambda c: "<p>x</p>")
+    cr.write(tmp_path)
+    f = tmp_path / "report" / "credibility.json"
+    before = f.read_bytes()
+    assert json.loads(before) == {"a": 1}
+    monkeypatch.setattr(cr, "build", lambda run: {"a": 2})
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        cr.write(tmp_path)
+    assert f.read_bytes() == before and not list(f.parent.glob("*.tmp"))

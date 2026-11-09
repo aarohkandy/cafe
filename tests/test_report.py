@@ -2978,3 +2978,20 @@ def test_r12_m9_the_machine_block_sums_the_walls_against_the_budget_and_names_th
     rep, h = load(run), plain((run / "report" / "index.html").read_text())
     assert rep["machine"]["timing"]["total"]["times"]["value"] == pytest.approx(0.5) and "Over the budget" not in h and "Known causes" not in h
     assert "The stages took" in h and "machine.timing.total" in acceptance.VOLATILE
+
+
+def test_r13_sweep_a_cut_write_leaves_the_old_report_json(tmp_path, monkeypatch, cut_writes):
+    """Round 13, M-17 sibling: report.json is the file the acceptance run hashes into its golden; written in place, a cut left three characters."""
+    monkeypatch.setattr(report.credibility, "write", lambda run: [])
+    monkeypatch.setattr(report, "render", lambda rep: "<p>x</p>")
+    monkeypatch.setattr(report, "build", lambda *a, **k: {"a": 1})
+    (tmp_path / "report").mkdir()                                                 # `build` makes it
+    report.write(tmp_path, {}, {})
+    f = tmp_path / "report" / "report.json"
+    before = f.read_bytes()
+    assert json.loads(before) == {"a": 1}
+    monkeypatch.setattr(report, "build", lambda *a, **k: {"a": 2})
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        report.write(tmp_path, {}, {})
+    assert f.read_bytes() == before and not list(f.parent.glob("*.tmp"))

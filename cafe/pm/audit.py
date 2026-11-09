@@ -28,6 +28,7 @@ import ast, datetime as dt, hashlib, importlib.metadata, json, pathlib, platform
 from collections.abc import Callable
 from typing import Any
 
+from .config import write_json
 from .env.remote import sha256, tree_sha256
 from .ledger import RUN_ROOT_FILES, STAGES, hashed, real, resolve, run_roots, shared_diff
 from .physics.comms import PARAMETER_FILES
@@ -433,7 +434,7 @@ def write_pytest_receipt(root: pathlib.Path = ROOT) -> dict[str, Any]:
     (`python -m cafe.pm.audit --pytest-receipt`)."""
     rec: dict[str, Any] = dict(code_digest=suite_digest(root), coverage_sha256=sha256(root / "coverage.json"), suite_ok=True,
                                date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
-    (root / PYTEST_RECEIPT).write_text(json.dumps(rec, indent=1) + "\n")
+    write_json(root / PYTEST_RECEIPT, rec, end="\n", indent=1)
     return rec
 
 
@@ -490,7 +491,7 @@ def main(argv: list[str]) -> int:
         except (_Unreadable, KeyError, TypeError, OSError) as e:           # mutmut's counts are missing, truncated or not what it writes
             print(f"error: {MUTATION_STATS} cannot be used ({type(e).__name__}: {e}): run `make mutation`")
             return 2
-        (ROOT / MUTATION_FILE).write_text(json.dumps(rec, indent=1) + "\n")
+        write_json(ROOT / MUTATION_FILE, rec, end="\n", indent=1)
         print(f"wrote {MUTATION_FILE}")
         return 0
     ledgers_only = "--ledgers-only" in argv

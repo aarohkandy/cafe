@@ -1039,6 +1039,6 @@ def write(run_dir: str | pathlib.Path) -> list[pathlib.Path]:
     out.mkdir(parents=True, exist_ok=True)
     c = build(run_dir)
     j, h = out / "credibility.json", out / "credibility.html"
-    j.write_text(json.dumps(_clean(c), indent=1, allow_nan=False))
+    config.write_json(j, _clean(c), indent=1, allow_nan=False)
     h.write_text(page("Credibility report", _render(c)))
     return [h, j]

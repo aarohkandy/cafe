@@ -3871,3 +3871,16 @@ def test_r12_m21_the_flat_share_limit_is_one_percent_of_the_sampled_points_and_a
             ctx.env.U[k][tis[0]][jj[:flat], ii[:flat]] = 0.0                                   # the same first points, one more each time
         checks = ingest_checks(ctx)
         assert all(check_of(checks, n)["ok"] is ok for n in names), flat
+
+
+def test_r13_sweep_dump_is_whole_or_not_at_all_and_can_sort_keys(tmp_path, monkeypatch, cut_writes):
+    """Round 13, M-17 sibling: `_dump` writes every ledgered JSON of the run; a cut write left three characters in place of the old file. The
+    sensitivity-case file (stage 1b) goes through it with `sort_keys`, so its bytes are as `json.dumps(..., indent=1, sort_keys=True)` made them."""
+    f = tmp_path / "o.json"
+    pipeline._dump({"b": 1, "a": [2.0, float("nan")]}, f, sort_keys=True)
+    before = f.read_bytes()
+    assert before == json.dumps({"a": [2.0, None], "b": 1}, indent=1).encode()
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        pipeline._dump({"a": 2}, f)
+    assert f.read_bytes() == before and not list(tmp_path.glob("*.tmp"))

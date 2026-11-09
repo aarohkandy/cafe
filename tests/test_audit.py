@@ -1356,3 +1356,28 @@ def test_r13_l1_a_table_input_without_a_sha256_is_not_recorded(tmp_path):
     assert audit.link_tables_unrecorded(run) == []
     edit(run, "hangar", lambda d: [i.update(sha256=None) for i in d["inputs"] if i["ref"].endswith("modems.yaml")])
     assert audit.link_tables_unrecorded(run) == ["modems.yaml"]
+
+
+def test_r13_sweep_a_cut_write_leaves_the_old_pytest_receipt_and_mutation_record(tmp_path, monkeypatch, cut_writes):
+    """Round 13, M-17 sibling: both records were written in place, so a disk that filled mid-write left three characters that `mutation_problems` and
+    `--pytest-done` then read as a damaged record. Whole or not at all, newline kept."""
+    pytest_done_root(tmp_path, monkeypatch)
+    receipt = tmp_path / audit.PYTEST_RECEIPT
+    before = receipt.read_bytes()
+    assert before.endswith(b"}\n")
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        audit.write_pytest_receipt(tmp_path)
+    assert receipt.read_bytes() == before and not list(receipt.parent.glob("*.tmp"))
+    monkeypatch.undo()
+    root = mut_root(tmp_path / "m")
+    monkeypatch.setattr(audit, "ROOT", root)
+    (root / "docs").mkdir()
+    assert audit.main(["--mutation-record"]) == 0
+    record = root / audit.MUTATION_FILE
+    before = record.read_bytes()
+    assert before.endswith(b"}\n")
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        audit.main(["--mutation-record"])
+    assert record.read_bytes() == before and not list(record.parent.glob("*.tmp"))

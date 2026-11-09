@@ -354,19 +354,6 @@ def _base_command(mission: str, gpus: int) -> str:
     return f"python -m cafe.pm acceptance --mission {shlex.quote(mission)} --gpus {gpus} --update-golden"
 
 
-def _write_atomic(p: pathlib.Path, text: str) -> None:
-    """`text` in `p` through a sibling temporary and os.replace, through a symlink to the file it names: a write cut short (disk full, killed) leaves the
-    old file, never half of a new one that reads as "not a golden file" (round 13, M-17)."""
-    p = p.resolve()
-    tmp = p.with_name(p.name + ".tmp")
-    try:
-        tmp.write_text(text)
-        os.replace(tmp, p)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
 def _golden_record(r: dict[str, Any], mission: str) -> dict[str, Any]:
     report = hashlib.sha256((r["dir"] / "report" / "report.json").read_bytes()).hexdigest()
     return dict(schema=1, command=_base_command(mission, r["gpus"]),
@@ -431,7 +418,7 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
         if why := golden_refusal(golden, r["report"]["mission"]["name"], golden_mission):
             return _row("golden_diff", False, f"golden NOT updated: {why}", updated=False, refused=True, golden=str(golden))
         golden.resolve().parent.mkdir(parents=True, exist_ok=True)
-        _write_atomic(golden, json.dumps(_golden_record(r, mission), indent=1, allow_nan=False) + "\n")
+        config.write_json(golden, _golden_record(r, mission), end="\n", indent=1, allow_nan=False)
         return _row("golden_diff", False, f"golden {golden} UPDATED from this run, not compared: rerun without --update-golden to check against it",
                     updated=True)
     if golden.exists() and not golden.is_file():                       # a directory: no command can write it (`cmd` is None)
@@ -603,10 +590,10 @@ def main(a: argparse.Namespace) -> int:
     rows, rc = run(a.mission, a.gpus, out, pathlib.Path(a.golden), a.update_golden, a.skip_overnight, golden_mission=getattr(a, "golden_mission", None))
     text = table(rows)
     out.mkdir(parents=True, exist_ok=True)
-    _write_atomic(out / "acceptance.txt", text + "\n")
+    config.write_text(out / "acceptance.txt", text + "\n")
     done = dict(mission=a.mission, gpus=a.gpus, ok=rc == 0, started=started, finished=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                 git_sha=git_sha(), code_digest=pipeline.code_digest(), skip_overnight=a.skip_overnight, checks=rows)
-    _write_atomic(out / "acceptance.json", json.dumps(done, indent=1, default=str, allow_nan=False))
+    config.write_json(out / "acceptance.json", done, indent=1, default=str, allow_nan=False)
     print(text)
     print(f"table: {out / 'acceptance.json'}")
     return rc

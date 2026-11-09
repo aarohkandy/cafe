@@ -1162,3 +1162,25 @@ def test_r13_m14_write_json_replaces_the_file_a_symlink_points_to_and_leaves_the
     link.symlink_to(real)
     config.write_json(link, {"a": 1})
     assert link.is_symlink() and config.json_object(real) == {"a": 1} and config.json_object(link) == {"a": 1} and not list(tmp_path.glob("*.tmp"))
+
+
+def test_r13_sweep_write_text_is_the_one_atomic_writer_and_write_json_can_end_a_line(tmp_path, cut_writes):
+    """Round 13 (M-17 sibling sweep, batches A and B's need): the golden, the audit records and the run's reports need a trailing newline and a write
+    that leaves the old file when cut. `write_json`'s default bytes stay as they were (the ingest manifests are hashed); `end` adds the newline;
+    a cut leaves no temporary behind; a symlink is followed."""
+    f = tmp_path / "r.json"
+    config.write_json(f, {"a": 1}, indent=1)
+    assert f.read_bytes() == b'{\n "a": 1\n}'
+    config.write_json(f, {"a": 1}, indent=1, end="\n")
+    before = f.read_bytes()
+    assert before == b'{\n "a": 1\n}\n'
+    link = tmp_path / "sl.json"
+    link.symlink_to(f)
+    config.write_text(link, "x\n")
+    assert link.is_symlink() and f.read_text() == "x\n"
+    config.write_text(f, before.decode())
+    cut_writes()
+    for write in (lambda: config.write_text(f, "new"), lambda: config.write_json(f, {"a": 2}, end="\n")):
+        with pytest.raises(OSError, match="killed"):
+            write()
+        assert f.read_bytes() == before and not list(tmp_path.glob("*.tmp"))

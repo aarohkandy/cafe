@@ -257,14 +257,25 @@ def os_error_text(e: OSError) -> str:
     return str(e)
 
 
-def write_json(p: pathlib.Path, obj: Any, **kw: Any) -> None:
-    """`obj` as JSON in `p` through a sibling temporary and os.replace: a run killed mid-write leaves the old file, never half of a new one that
-    `json_object` and the other readers of a stored result would then have to refuse (round 9, L0; the writer of every slow-run receipt). A symlink is
-    followed, so the file it points to is the one replaced and the link stays a link (round 13, M-14)."""
+def write_text(p: pathlib.Path, text: str) -> None:
+    """`text` in `p` through a sibling temporary and os.replace: a run killed mid-write, or a disk that fills, leaves the old file, never half of a new one
+    that `json_object` and the other readers of a stored result would then have to refuse (round 9, L0; the writer of every slow-run receipt), and no
+    temporary behind. A symlink is followed, so the file it points to is the one replaced and the link stays a link (round 13, M-14). The one writer of
+    a file a person or a later stage reads back: the acceptance golden, the audit records, the run's reports and ledgered JSON (round 13, M-17 sweep)."""
     p = pathlib.Path(os.path.realpath(p))
     tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text(json.dumps(obj, **kw))
-    os.replace(tmp, p)
+    try:
+        tmp.write_text(text)
+        os.replace(tmp, p)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def write_json(p: pathlib.Path, obj: Any, end: str = "", **kw: Any) -> None:
+    """`obj` as JSON (`kw` go to json.dumps) followed by `end` in `p`, by `write_text`. The default writes no trailing newline: the ingest manifests are
+    hashed, so their bytes must stay as they are; the golden and the audit records pass a newline as `end`."""
+    write_text(p, json.dumps(obj, **kw) + end)
 
 
 def finite_real(v: Any) -> bool:

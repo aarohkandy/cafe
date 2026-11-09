@@ -675,3 +675,12 @@ def test_r9_m38_a_failed_assemble_leaves_no_manifest_so_the_half_rewritten_cache
     man, lines = ingest(orca_env, out)                                              # the parts were kept: re-assembly only, no fetch
     assert lines[0] == "ingest: 7 parts, 7 cached, fetching 0 with 4 threads" and man["hours"] == 3
     assert orca.read_json(out / "manifest.json")["parts"] == man["parts"]
+
+
+def test_r13_sweep_the_ingest_manifest_writer_follows_a_symlink_and_leaves_the_link(tmp_path):
+    """Round 13, M-14 sibling (batch A's need): `orca.write_json` was a copy of `config.write_json` that replaced a symlinked manifest by a regular file."""
+    real, link = tmp_path / "real.json", tmp_path / "manifest.json"
+    real.write_text("{}")
+    link.symlink_to(real)
+    orca.write_json(link, {"v": 1}, indent=1)
+    assert link.is_symlink() and json.loads(real.read_text()) == {"v": 1} and not list(tmp_path.glob("*.tmp"))

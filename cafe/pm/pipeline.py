@@ -34,7 +34,7 @@ from numpy.typing import NDArray
 from scipy.stats import chi2
 
 from . import budget, ledger, par, stage1
-from .config import ConfigError, _yaml, assumptions, digest, env_sigmas, load_mission, utc
+from .config import ConfigError, _yaml, assumptions, digest, env_sigmas, load_mission, utc, write_json
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.hycom import FetchError
 from .env.remote import sha256, tree_sha256
@@ -261,9 +261,10 @@ def ocean(ctx: Context) -> Any:
 
 # res.pkl is only ever read back by this pipeline from its own run directory, and every reader names it as a ledger input,
 # whose sha256 `make audit` re-checks: it is a private checkpoint format, never loaded from anywhere else.
-def _dump(obj: Any, path: pathlib.Path) -> pathlib.Path:
-    """`obj` as strict JSON: a NaN or an infinity (an unbounded check limit, a missing SST bias) is written as null, which `jq` and JSON.parse read."""
-    path.write_text(json.dumps(ledger.clean(obj), indent=1, allow_nan=False))
+def _dump(obj: Any, path: pathlib.Path, **kw: Any) -> pathlib.Path:
+    """`obj` as strict JSON: a NaN or an infinity (an unbounded check limit, a missing SST bias) is written as null, which `jq` and JSON.parse read.
+    Whole or not at all (`config.write_json`); `kw` (sort_keys) go to json.dumps."""
+    write_json(path, ledger.clean(obj), indent=1, allow_nan=False, **kw)
     return path
 
 
@@ -1399,8 +1400,7 @@ def _sensitivity_cases(ctx: Context, L: Ledger, scales: dict[str, Any]) -> None:
         cases = stage1.sensitivity_case(ctx.mission, ctx.env, stage1.BRIEF_PRIOR, len(next(iter(X.values()))), fitted, scales or None, X=X)
     L.d["sensitivity_wall_s"] = round(time.perf_counter() - t0, 3)             # in no share of the plan; shown in the machine block (M-17)
     out = ctx.path("stage1b", "sensitivity_cases.json")
-    out.write_text(json.dumps(ledger.clean(cases), indent=1, sort_keys=True, allow_nan=False))
-    L.output(out)
+    L.output(_dump(cases, out, sort_keys=True))
     L.note("sensitivity case (brief VPP bias, same members and inputs, only usv_vpp_bias replaced): "
            + "; ".join(f"{v} {c[0]['k_fail']} of {c[0]['n']} {c[0]['verdict']}" for v, c in cases.items()))
 

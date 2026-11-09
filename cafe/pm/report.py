@@ -1804,7 +1804,7 @@ def write(run_dir: str | pathlib.Path, mission: dict[str, Any], plan: dict[str, 
     cred = credibility.write(run)
     rep = build(run, mission, plan, env)
     j, h = run / "report" / "report.json", run / "report" / "index.html"
-    j.write_text(json.dumps(rep, indent=1, allow_nan=False))
+    config.write_json(j, rep, indent=1, allow_nan=False)
     h.write_text(render(rep))
     return [h, j, *cred]
 

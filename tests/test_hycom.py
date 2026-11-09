@@ -1346,3 +1346,13 @@ def test_r13_m32_a_lab_snapshot_with_a_nat_time_is_refused_not_stored_as_minus_9
         h.ingest_lab_hycom(d, fx["box"], tmp_path / "x.zarr", "in_situ")
     assert not (tmp_path / "x.zarr").exists()
 
+
+
+def test_r13_sweep_the_store_manifest_writer_follows_a_symlink_and_leaves_the_link(tmp_path):
+    """Round 13, M-14 sibling (batch A's need): `hycom._write_json` was a copy of `config.write_json` that replaced a symlinked manifest by a regular file."""
+    real, link = tmp_path / "real.json", tmp_path / "manifest.json"
+    real.write_text("{}")
+    link.symlink_to(real)
+    h._write_json(link, {"v": 1})
+    assert link.is_symlink() and json.loads(real.read_text()) == {"v": 1} and real.read_text() == json.dumps({"v": 1}, indent=1, sort_keys=True)
+    assert not list(tmp_path.glob("*.tmp"))

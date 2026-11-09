@@ -2369,3 +2369,19 @@ def test_r12_m11_an_acoustic_links_noise_reads_the_larger_wind_of_its_two_ends_w
     assert np.array_equal(fwd, rev, equal_nan=True) and np.array_equal(fwd, gale, equal_nan=True)     # before: ship first read 2 m/s
     blind = ev(_split_sea((1.0, np.nan), (1.0, 20.0), 1))                                          # no wind at the ship's end: the glider's, not a NaN margin
     assert np.array_equal(blind, gale, equal_nan=True) and np.isfinite(blind).any()
+
+
+def test_r13_sweep_a_cut_write_leaves_the_old_sensitivity_cases(tmp_path, monkeypatch, cut_writes):
+    """Round 13, M-17 sibling: the command adds its case to a file that accumulates the earlier ones, so a write cut short must not destroy them."""
+    import json
+    from cafe.pm import pipeline
+    monkeypatch.setattr(pipeline, "Context", lambda mission, budget, gpus, run: types.SimpleNamespace(mission=MISSION, env="ENV"))
+    monkeypatch.setattr(stage1, "sensitivity_case", lambda *a, **k: {"usv": [dict(case="c", k_fail=1, n=32, verdict="MARGINAL", note="")]})
+    assert stage1.main(["--mission", "m.yaml", "--run", str(tmp_path)]) == 0
+    f = tmp_path / "stage1b" / "sensitivity_cases.json"
+    before = f.read_bytes()
+    assert list(json.loads(before)) == ["usv"]
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        stage1.main(["--mission", "m.yaml", "--run", str(tmp_path), "--members", "8"])
+    assert f.read_bytes() == before and not list(f.parent.glob("*.tmp"))

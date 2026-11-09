@@ -202,3 +202,19 @@ def emulator_speed_not_tested(monkeypatch):
     of the speed is `test_query_under_10_ms_and_format` and the emulator receipt, which run alone (`audit.SERIAL_TESTS`)."""
     from cafe.pm import whatif
     monkeypatch.setitem(whatif.LIMITS, "query_ms", 1e9)
+
+
+@pytest.fixture
+def cut_writes(monkeypatch):
+    """Round 13 (the M-17 sibling sweep): call the returned function, and from then on any `Path.write_text` writes the first three characters and raises
+    OSError("killed"), as a disk that fills or a process that is killed mid-write does. A writer that goes through a temporary leaves its old target; one
+    that writes in place leaves three characters of it."""
+    orig = pathlib.Path.write_text
+
+    def cut(self, text, *a, **k):
+        orig(self, text[:3], *a, **k)
+        raise OSError("killed")
+
+    def start():
+        monkeypatch.setattr(pathlib.Path, "write_text", cut)
+    return start

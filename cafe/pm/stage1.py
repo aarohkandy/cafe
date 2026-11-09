@@ -887,9 +887,9 @@ def main(argv: list[str] | None = None) -> int:
     """python -m cafe.pm.stage1 --mission M --run DIR [--prior usv_vpp_bias_brief] [--members 32]: store sensitivity_case's result in
     DIR/stage1b/sensitivity_cases.json (replacing the entries of the same case), for the report to show next to the verdict. DIR is a finished
     run of M (its ingest cache, fitted priors and refit multipliers are used)."""
-    import argparse, json, pathlib, sys
+    import argparse, pathlib, sys
     from . import pipeline
-    from .config import ConfigError, ResourceError, damaged_run_files, json_object
+    from .config import ConfigError, ResourceError, damaged_run_files, json_object, write_json
     ap = argparse.ArgumentParser(prog="python -m cafe.pm.stage1", description=main.__doc__)
     ap.add_argument("--mission", required=True)
     ap.add_argument("--run", required=True)
@@ -912,7 +912,7 @@ def main(argv: list[str] | None = None) -> int:
     for vid, cases in new.items():
         old[vid] = [c for c in old.get(vid, []) if c["case"] != cases[0]["case"]] + cases
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(old, indent=1, sort_keys=True))
+    write_json(out, old, indent=1, sort_keys=True)
     print(f"{out}: " + ", ".join(f"{v} {c[0]['k_fail']} of {c[0]['n']} {c[0]['verdict']}" for v, c in new.items()))
     return 0
 
