@@ -63,10 +63,8 @@ def _fixed_point(base: float, s: float, r21: float, r32: float, tol: float, max_
     for _ in range(max_iter):
         try:
             a, b = r21 ** p - s, r32 ** p - s
-            if a / b <= 0:
-                raise RuntimeError("eq 3b has no real q(p) at this p (the order is not defined for these ratios)")
-            new = (base + math.log(a / b)) / math.log(r21)
-        except (OverflowError, ZeroDivisionError):
+            new = (base + math.log(a / b)) / math.log(r21)             # a / b <= 0 (log: ValueError) needed a ratio below 1: refused in observed_order
+        except (OverflowError, ZeroDivisionError, ValueError):
             raise RuntimeError("fixed-point iteration for the apparent order did not converge") from None
         if abs(new - p) < tol:
             return new
@@ -113,7 +111,11 @@ def observed_order(eps21: float, eps32: float, r21: float, r32: float, tol: floa
     positive root of eq 3 itself. The paper puts an absolute value around the logarithm so that p > 0 always; where eq 3
     has no positive root (|eps32| < |eps21| with r32 >= r21: diverging) that absolute-value p is returned and
     `celik_gci` sets converging = False. Raises ValueError when either difference is zero or non-finite (Celik: the
-    procedure does not work; run another grid) and RuntimeError when not even the absolute-value form has a root."""
+    procedure does not work; run another grid) or when a refinement ratio is not finite and > 1 (r = 1 divides by ln r, r < 1 is a
+    coarsening) and RuntimeError when not even the absolute-value form has a root."""
+    if not (math.isfinite(r21) and math.isfinite(r32) and r21 > 1 and r32 > 1):
+        raise ValueError(f"refinement ratios must be finite and > 1 (the fine pair r21 = {r21}, the coarse pair r32 = {r32}); "
+                         f"r < {R_MIN} is allowed and flagged by r_ok")
     if not (math.isfinite(eps21) and math.isfinite(eps32)) or eps21 == 0 or eps32 == 0:
         raise ValueError("eps21 and eps32 must be finite and non-zero")
     p = _signed_order(eps21, eps32, r21, r32, tol, max_iter)
@@ -148,7 +150,10 @@ def celik_gci(phi1: float, phi2: float, phi3: float, r21: float, r32: float) -> 
 
 
 def gci_two_grid(fine: float, coarse: float, ratio: float = 2.0, p: float = 2.0, fs: float = FS_TWO_GRID) -> float:
-    """Relative uncertainty of the fine-grid value from two grids and an assumed order (Roache). Same as cafe.cfd.gci."""
+    """Relative uncertainty of the fine-grid value from two grids and an assumed order (Roache). Same as cafe.cfd.gci for the arguments it accepts:
+    ValueError for a zero fine value, a ratio that is not finite and > 1 (r = 1 divides by zero) or an order that is not finite and > 0."""
+    if fine == 0 or not (math.isfinite(ratio) and ratio > 1 and math.isfinite(p) and p > 0):
+        raise ValueError(f"two-grid GCI needs a non-zero fine value, a finite ratio > 1 and a finite order > 0 (fine {fine}, ratio {ratio}, p {p})")
     return float(fs * abs((coarse - fine) / fine) / (ratio ** p - 1))
 
 
@@ -167,12 +172,14 @@ class Vv20(NamedTuple):
 
 
 def vv20_row(case: str, S: float, D: float, u_num: float, u_input: float, u_D: float) -> Vv20:
-    """E = S - D; U_val = sqrt(U_num^2 + U_input^2 + U_D^2) (ASME V&V 20-2009 sec 2, independent terms)."""
-    if min(u_num, u_input, u_D) < 0:
-        raise ValueError("uncertainties are magnitudes and cannot be negative")
+    """E = S - D; U_val = sqrt(U_num^2 + U_input^2 + U_D^2) (ASME V&V 20-2009 sec 2, independent terms). An uncertainty is a magnitude, so
+    negative or infinite is a ValueError (an infinite U_D gave ratio 0 and "validated"). A NaN one is let through, so that a diverged solver's NaN in
+    `dtmb5415.tabulate` stays a row, but is never validated: the ratio is NaN (with E = 0 it was 0, which "validated" the row)."""
+    if any(u < 0 or u == math.inf for u in (u_num, u_input, u_D)):
+        raise ValueError(f"uncertainties are magnitudes and must be finite and not negative (u_num {u_num}, u_input {u_input}, u_D {u_D})")
     E = S - D
     u_val = math.sqrt(u_num ** 2 + u_input ** 2 + u_D ** 2)
-    ratio = abs(E) / u_val if u_val > 0 else (0.0 if E == 0 else math.inf)
+    ratio = math.nan if math.isnan(u_val) else abs(E) / u_val if u_val > 0 else (0.0 if E == 0 else math.inf)
     return Vv20(case, S, D, E, u_num, u_input, u_D, u_val, ratio, ratio <= 1.0)
 
 

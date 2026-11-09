@@ -517,8 +517,12 @@ def discretization(values: Sequence[float], cells: Sequence[float], levels: Sequ
     """Relative U_num of values[0] from two or three grids, finest first, and how it was got. -> (u_rel, r fine/next, note).
     Three grids that converge monotonically at r >= 1.3 with an observed order inside P_SANE: Celik 2008 GCI_fine with Fs = 1.25.
     Anything else (two grids, divergence, oscillation, an unbelievable p, grids that differ in snappy surface level) falls back to
-    Roache's Fs = 3 with the order assumed to be 2 on the finest pair, and never less than half the spread of the values; the note says why."""
+    Roache's Fs = 3 with the order assumed to be 2 on the finest pair, and never less than half the spread of the values; the note says why.
+    A finest grid with no more cells than the next (r <= 1) has no ratio to extrapolate over: half the spread alone."""
     r21 = vv.refinement_ratio(cells[0], cells[1])
+    spread = (max(values) - min(values)) / 2 / abs(values[0])
+    if r21 <= 1:                                         # no refinement: Roache's formula divides by r^p - 1 = 0 (round 13, M-27); the spread is all there is
+        return spread, r21, f"spread only, Fs and p unused: the finest grid has {cells[0]:g} cells, not more than the next grid's {cells[1]:g}"
     why = "two grids" if len(values) == 2 else "grids differ in snappy surface level" if len(set(levels)) > 1 else ""
     if not why:
         try:
@@ -530,7 +534,7 @@ def discretization(values: Sequence[float], cells: Sequence[float], levels: Sequ
                    else f"p = {g.p:.2f} outside {P_SANE}" if not P_SANE[0] <= g.p <= P_SANE[1] else "")
             if not why:
                 return g.gci_fine21, r21, f"p = {g.p:.2f}, Fs = {vv.FS_THREE_GRID}"
-    return max(vv.gci_two_grid(values[0], values[1], r21), (max(values) - min(values)) / 2 / abs(values[0])), r21, f"Fs = 3, p = 2 assumed: {why}"
+    return max(vv.gci_two_grid(values[0], values[1], r21), spread), r21, f"Fs = 3, p = 2 assumed: {why}"
 
 
 def read_run(f: pathlib.Path) -> dict[str, Any] | None:
@@ -587,9 +591,11 @@ def tabulate(root: pathlib.Path) -> dict[float, vv.Vv20]:
             continue
         s = got[0]["ct"]
         u_rel, r, note = discretization([c["ct"] for c in got], [c["cells"] for c in got], [c.get("surf_level") for c in got])
-        u_num = math.hypot(u_rel * s, got[0].get("ct_std", 0.0))
-        rows[fr] = vv.vv20_row(f"C_T Fr {key} (r={r:.2f}, {note})", s, ref, u_num, s * math.hypot(assumed("u_S_rel"), assumed("u_nu_rel")),
-                               assumed("u_D_rel") * ref)
+        # An infinite C_T or ct_std in a stored file is a diverged solver like a NaN one: the row stays, with a NaN uncertainty, never validated
+        # (vv20_row refuses an infinite one; round 13 D, M-27 look-ahead).
+        u_num, u_input = (math.nan if math.isinf(u) else u for u in (math.hypot(u_rel * s, got[0].get("ct_std", 0.0)),
+                                                                    s * math.hypot(assumed("u_S_rel"), assumed("u_nu_rel"))))
+        rows[fr] = vv.vv20_row(f"C_T Fr {key} (r={r:.2f}, {note})", s, ref, u_num, u_input, assumed("u_D_rel") * ref)
     return rows
 
 

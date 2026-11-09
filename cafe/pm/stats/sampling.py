@@ -21,7 +21,8 @@ PERTURBATIONS = pathlib.Path(__file__).resolve().parents[3] / "config" / "pertur
 def marginal(spec: dict[str, Any]) -> Any:
     """Frozen scipy distribution from {"dist": normal|lognormal|uniform|truncnorm, ...}.
 
-    normal: mean, sd. lognormal: median, sigma (log-space sd). uniform: lo, hi. truncnorm: mean, sd, lo, hi.
+    normal: mean, sd. lognormal: median, sigma (log-space sd). uniform: lo, hi. truncnorm: mean, sd, lo, hi (a direct-call
+    distribution: `to_marginals` does not build it from perturbations.yaml, and `marginal` does not check the numbers; `check_entry` does).
     """
     d = spec["dist"]
     if d == "normal":
@@ -36,14 +37,55 @@ def marginal(spec: dict[str, Any]) -> Any:
     raise ValueError(f"unknown distribution {d!r}")
 
 
+DISTS = ("normal", "lognormal", "uniform", "fixed")             # what a perturbations.yaml entry may be (a "fixed" one is a setting, not sampled)
+
+
+def _num(x: Any) -> bool:
+    """A finite real number: not a bool (YAML `true` is an int to isinstance), a string, None, NaN or infinity."""
+    try:
+        return isinstance(x, (int, float, np.number)) and not isinstance(x, bool) and bool(np.isfinite(x))
+    except (OverflowError, TypeError):                              # an integer too large for a float
+        return False
+
+
+def check_entry(k: str, e: Any) -> None:
+    """Refuse a perturbations.yaml entry (or a fitted prior that replaces one) that would give NaN members or a raw traceback, naming it.
+
+    A mapping with `dist` one of DISTS; normal and lognormal: `value` a finite sd > 0, `mean` (normal) finite and `median` (lognormal) finite > 0
+    when given; uniform: finite `lo` < `hi`. The one check, called by `load_perturbations` for every entry and by `to_marginals` for the entries it builds.
+    """
+    if not isinstance(e, dict):
+        raise ValueError(f"perturbation {k!r}: an entry is a mapping (dist, value, unit, citation, kind), not {e!r}")
+    d = e.get("dist")
+    if d not in DISTS:
+        raise ValueError(f"perturbation {k!r}: dist is {d!r}, not one of {', '.join(DISTS)}")
+    if d in ("normal", "lognormal"):
+        if not (_num(e.get("value")) and e["value"] > 0):
+            raise ValueError(f"perturbation {k!r}: the sd is {e.get('value')!r}; a {d} prior needs a finite sd > 0 (scipy turns 0 into NaN members)")
+        loc = "mean" if d == "normal" else "median"
+        if loc in e and not (_num(e[loc]) and (d == "normal" or e[loc] > 0)):
+            raise ValueError(f"perturbation {k!r}: the {loc} is {e[loc]!r}; a {d} prior needs a finite {loc}{' > 0' if d == 'lognormal' else ''}")
+    elif d == "uniform":
+        lo: Any = e.get("lo")
+        hi: Any = e.get("hi")
+        if not (_num(lo) and _num(hi) and lo < hi):
+            raise ValueError(f"perturbation {k!r}: a uniform prior needs finite numbers lo < hi, got lo {lo!r} and hi {hi!r}")
+
+
 def load_perturbations(path: str | pathlib.Path | None = None) -> dict[str, dict[str, Any]]:
-    """Read config/perturbations.yaml; every entry must carry value, unit, citation and kind: prior (sourced) or assumed."""
-    from ..config import read_yaml                                  # the strict reader: a repeated key or a leading-zero number is refused, as in every stage
-    cfg: dict[str, dict[str, Any]] = read_yaml(path or PERTURBATIONS)
+    """Read config/perturbations.yaml; every entry must carry value, unit, citation and kind: prior (sourced) or assumed, and pass `check_entry`."""
+    from ..config import ConfigError, read_yaml                     # the strict reader: a repeated key or a leading-zero number is refused, as in every stage
+    p = path or PERTURBATIONS
+    cfg: dict[str, dict[str, Any]] = read_yaml(p)
+    if not isinstance(cfg, dict) or not cfg:
+        raise ConfigError(f"{p}: expected a mapping of perturbation entries, found {'nothing' if not cfg else type(cfg).__name__}")
     for k, e in cfg.items():
+        if not isinstance(e, dict):
+            check_entry(k, e)                                       # names the entry; the fields below need a mapping
         miss = {"value", "unit", "citation", "kind"} - e.keys()
         if miss or e["kind"] not in ("prior", "assumed"):              # assumed: no source, listed in the credibility report
             raise ValueError(f"perturbation {k!r}: missing {sorted(miss)} or kind not prior/assumed")
+        check_entry(k, e)
     return cfg
 
 
@@ -53,11 +95,12 @@ def to_marginals(cfg: dict[str, dict[str, Any]], names: list[str] | None = None)
     Entries with dist "fixed" are settings (e.g. a correlation length), not sampled, and are left out unless named.
     """
     out = {}
-    for k in names or [k for k in cfg if cfg[k]["dist"] != "fixed"]:
+    for k in names or list(cfg):
         e = cfg[k]
+        check_entry(k, e)
         d = e["dist"]
-        if d in ("normal", "lognormal") and not (isinstance(e["value"], (int, float, np.number)) and np.isfinite(e["value"]) and e["value"] > 0):
-            raise ValueError(f"{k!r}: the sd is {e['value']!r}; a {d} prior needs a finite sd > 0 (scipy turns 0 into NaN members)")
+        if d == "fixed" and not names:
+            continue
         if d == "normal":
             out[k] = dict(dist="normal", mean=e.get("mean", 0.0), sd=e["value"])
         elif d == "lognormal":

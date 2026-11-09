@@ -46,13 +46,18 @@ def subset_simulation(fn: Callable[[np.ndarray], np.ndarray], d: int, target: fl
                       seed: int = 0, max_levels: int = 20, width: float = 1.0) -> dict[str, Any]:
     """P(g(u) >= target) for u ~ N(0, I_d); `fn` maps (m, d) -> (m,).
 
-    n is rounded to a multiple of the chain count. Returns dict(p, cov, levels, n_evals, converged); converged is False
+    n is rounded to a multiple of the chain count; the level probability is then nc / n, not p0 (they differ unless n p0 is a whole number
+    that divides n), and that one figure is used in both the probability and the c.o.v. A ValueError if n p0 rounds to no seed or to a chain
+    shorter than 2. Returns dict(p, cov, levels, n_evals, converged); converged is False
     (p = 0, cov = inf) if the thresholds stop rising (ties) or max_levels is spent.
     """
     rng = np.random.default_rng(seed)
     nc = int(round(n * p0))
+    if nc < 1 or n // nc < 2:
+        raise ValueError(f"n = {n} and p0 = {p0} give {nc} seeds and chains of length {n // nc if nc else 0}: need a seed and chains of length 2 or more")
     length = n // nc
     n = nc * length
+    p_lvl = nc / n                                                  # the realised level probability: the c.o.v. term and the product below use this one
     u = rng.standard_normal((n, d))
     g = fn(u)
     n_evals, d2, p = n, 0.0, 1.0
@@ -69,8 +74,8 @@ def subset_simulation(fn: Callable[[np.ndarray], np.ndarray], d: int, target: fl
         if lvl and b <= levels[-1]:
             break
         gam = _gamma(g.reshape(length, nc) >= b) if lvl else 0.0      # the NEW threshold's indicator (Au & Beck eq. 29); round 7, M-26
-        d2 += (1 - p0) / (p0 * n) * (1 + gam)
-        p *= nc / n
+        d2 += (1 - p_lvl) / (p_lvl * n) * (1 + gam)
+        p *= p_lvl
         levels.append(float(b))
         us, gs = _mma(u[order[:nc]], g[order[:nc]], b, fn, rng, length, width)
         n_evals += (length - 1) * nc
