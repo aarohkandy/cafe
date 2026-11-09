@@ -1,6 +1,7 @@
 """cafe.pm.env.environment against the analytic fields of tests/fixtures/ci_env (every expected value is a closed-form function of
 lon, lat, t defined in make.py, not read back from the files), plus one deliberately broken variant per convention."""
 import datetime as dt
+import re
 import shutil
 
 import numpy as np
@@ -609,3 +610,156 @@ def test_r12_l1_m24_outside_data_labels_the_box_with_the_same_words_as_the_other
     with pytest.raises(OutsideData) as e:
         grid.u10(190.0, 0.0, grid.tw.x[5])
     assert "(box lat -2.125 to 2.125, lon -167.125 to -162.875, " in str(e.value) and "box (" not in str(e.value)
+
+
+# ---- review round 13, batch C: M-25, M-30, M-32, M-33, M-23, M-37 ---------------------------------------------------------------------------------
+
+def test_r13_m25_a_fractional_sigma_of_air_is_a_sigma_in_the_units_of_the_value(grid):
+    """q2_frac (0.1) and swdown_frac (0.2) were passed as the uncertainty itself: 0.1 kg/kg on a humidity of 0.017, 0.2 W/m2 on a flux of 900. Nothing
+    printed them (the report reads wind, Hs and current; the air() consumers read `.value`), but `Tagged.uncertainty` is 1-sigma in the value's units."""
+    lon, lat = nodes(grid)
+    t = grid.tw.x[[4, 14, 24]]
+    a, s = grid.air(lon, lat, t), env_sigmas()
+    assert np.allclose(a["q2"].uncertainty, s["q2_frac"] * a["q2"].value, rtol=1e-12, atol=0) and np.all(a["q2"].uncertainty < 0.01)
+    assert np.allclose(a["swdown"].uncertainty, s["swdown_frac"] * a["swdown"].value, rtol=1e-12, atol=0) and np.any(a["swdown"].uncertainty > 1.0)
+    assert a["T2"].uncertainty == s["t2_k"] and a["psfc"].uncertainty == s["psfc_pa"] and a["glw"].uncertainty == s["glw_wm2"]      # absolute ones stay scalars
+
+
+DEMO_WRF_ATTRS = {"DX": "12000.0", "SST_UPDATE": "0", "SIMULATION_START_DATE": "2023-03-01_00:00:00"}          # as in the demo's wrf.zarr
+
+
+def test_r13_m30_the_demos_sst_and_wrf_labels_are_the_words_they_always_were(grid):
+    assert E._wrf_notes(DEMO_WRF_ATTRS) == ("12", "frozen at 2023-03-01: SST_UPDATE=0")
+    lon, lat = nodes(grid)
+    assert grid.wrf_src.startswith("WRF OUTPUT FROM WRF V4.7.1 MODEL 12 km hourly (")
+    assert grid.sst(lon, lat, grid.tw.x[0]).source == f"{grid.wrf_src} SST (frozen at 2023-03-01: SST_UPDATE=0)"
+
+
+LEGACY = ("12", "frozen at 2023-03-01: SST_UPDATE=0")
+
+
+@pytest.mark.parametrize("attrs,want", [({"DX": "4000.0", "SST_UPDATE": "1", "SIMULATION_START_DATE": "2023-03-01_00:00:00"},
+                                         ("4", "updated during the run: SST_UPDATE=1")),
+                                        ({"DX": "12000.0", "SST_UPDATE": "0", "SIMULATION_START_DATE": "2024-07-15_06:00:00"},
+                                         ("12", "frozen at 2024-07-15: SST_UPDATE=0")),
+                                        ({"DX": 12000.0, "SST_UPDATE": 0}, LEGACY), ({"DX": "x", "SST_UPDATE": "?"}, LEGACY), ({}, LEGACY)])
+def test_r13_m30_the_sst_note_and_the_grid_spacing_are_read_from_the_wrf_attributes(attrs, want):
+    assert E._wrf_notes(attrs) == want
+
+
+def test_r13_m30_a_cache_of_coupled_wrf_is_not_labelled_frozen(ci_env, tmp_path):
+    import json
+    d = _copy_cache(ci_env, tmp_path)
+    meta = d / "orca" / "wrf.zarr" / "zarr.json"
+    doc = json.loads(meta.read_text())
+    doc["attributes"].update(SST_UPDATE="1", DX="4000.0")
+    meta.write_text(json.dumps(doc))
+    g = GriddedEnv(d, env_sigmas())
+    lon, lat = nodes(g)
+    src = g.sst(lon, lat, g.tw.x[0]).source
+    assert "frozen" not in src and "SST_UPDATE=1" in src and "4 km hourly" in g.wrf_src and "12 km" not in g.wrf_src
+
+
+def test_r13_m32_a_nat_time_stamp_is_refused_where_it_is_read():
+    t = np.array(["NaT", "2023-03-01T01:00:00", "2023-03-01T02:00:00"], "datetime64[ns]")
+    with pytest.raises(ValueError, match=r"1 of 3 time stamps are NaT"):
+        E.seconds(t)
+    with pytest.raises(ValueError, match="NaT"):
+        E.seconds(t[::-1])                                                                          # in the last slot too
+    assert E.seconds(t[1:]).tolist() == [E.to_seconds("2023-03-01T01:00:00Z"), E.to_seconds("2023-03-01T02:00:00Z")]
+
+
+@pytest.mark.parametrize("store", ["wrf.zarr", "umwm.zarr", "wrf3d.zarr", "umwmspec.zarr"])
+def test_r13_m32_a_nat_first_time_stamp_is_a_config_error_naming_the_store_and_the_fix(ci_env, tmp_path, store):
+    """The first stamp NaT became -9.2e18 s, which `np.diff(t) > 0` accepted as an increasing axis; the 3-D and spectrum times never met an Axis at all."""
+    import xarray as xr
+    from cafe.pm.config import ConfigError
+    d = _copy_cache(ci_env, tmp_path)
+    ds = xr.open_zarr(d / "orca" / store, consolidated=False).load()
+    x = ds["time"].values.copy()
+    x[0] = np.datetime64("NaT")
+    ds = ds.assign_coords(time=x)
+    for v in ds.variables.values():
+        v.encoding.clear()
+    shutil.rmtree(d / "orca" / store)
+    ds.to_zarr(d / "orca" / store, mode="w", consolidated=False)
+    with pytest.raises(ConfigError, match=rf"cache file .*{store}: 1 of \d+ time stamps are NaT .*delete .*orca and run `python -m cafe.pm fetch"):
+        GriddedEnv(d, env_sigmas())
+
+
+@pytest.mark.parametrize("x", [[np.nan], [0.0, np.nan], [np.inf], [0.0, np.inf], [-np.inf, 0.0], [0.0, 1.0, np.inf]])
+def test_r13_m32_an_axis_needs_finite_values_even_when_it_is_increasing(x):
+    """`[nan]` and `[0, inf]` passed the strictly-increasing test, which is all the old Axis asked."""
+    with pytest.raises(ValueError, match="axis t: must be finite"):
+        E.Axis(x, "t")
+
+
+@pytest.mark.parametrize("t,words", [(np.nan, "nan s"), (np.inf, "inf s"), (1e30, "1e+30 s")])
+def test_r13_m33_a_time_that_is_no_time_is_outside_data_not_a_bare_value_error(grid, t, words):
+    where = rf"WRF U10: \(195\.000, 0\.000\) at {re.escape(words)} is outside the ingested data"
+    with pytest.raises(OutsideData, match=where + r" \(box .*, 2023-03-01 18:00:00Z\.\.2023-03-03 06:00:00Z\)"):
+        grid.u10(195.0, 0.0, t)
+    with grid.lenient():
+        assert grid.u10(195.0, 0.0, t).shape == (2,)                                              # lenient mode never raised
+
+
+def test_r13_m33_the_text_of_a_finite_time_is_what_it_was():
+    assert E._stamp(E.to_seconds("2023-03-03T06:00:04Z")) == "2023-03-03 06:00:04Z"
+    assert E._stamp(np.float64(0.0)) == "1970-01-01 00:00:00Z"
+
+
+def test_r13_m23_the_fetch_command_the_data_errors_name_is_one_the_cli_parses(grid, tmp_path, capsys):
+    """Both OutsideData messages said `cafe fetch`; there is no `cafe` command. FETCH_CMD is also what `whatif` prints (`__main__`)."""
+    import shlex
+    from cafe.pm import __main__ as cli
+    with pytest.raises(OutsideData) as far:
+        grid.u10(190.0, 0.0, grid.tw.x[5])
+    with pytest.raises(OutsideData) as none:
+        grid.current(195.0, 0.0, -10.0, grid.tw.x[5])
+    for e in (far, none):
+        assert f"`{E.FETCH_CMD} <mission file>`" in str(e.value) and "cafe fetch" not in str(e.value)
+    argv = shlex.split(E.FETCH_CMD)
+    assert argv[:3] == ["python", "-m", "cafe.pm"]
+    assert cli.main(argv[3:] + [str(tmp_path / "nope.yaml")]) == 2          # parsed (an unknown command or flag is SystemExit), then refused for the file
+    assert "error:" in capsys.readouterr().err
+
+
+def test_r13_m37_an_hour_that_starts_before_the_data_end_is_the_mean_rate_of_the_part_that_exists():
+    """The last hour of rain (acc 0 -> 6 mm) read from its middle: the 30 minutes that exist have the rate 6 mm/h. Without the clamp to the data end the
+    hour's far end was read at the edge value and divided by the whole hour: 3 mm/h."""
+    e = hourly_stub([0, 0, 0, 6])
+    assert e.rain_hourly(0.5, 0.5, 2.5 * 3600.0) == pytest.approx(6.0)
+    assert e.rain_hourly(0.5, 0.5, 2.0 * 3600.0) == pytest.approx(6.0)                             # the whole hour, for comparison
+
+
+def test_r13_m37_the_restart_spectrum_distance_shrinks_with_the_cosine_of_the_latitude():
+    """At 60 N a degree of longitude is 55.6 km; 0.5 deg is 27.8 km, within 40 km. Without the cosine the same point was 55.6 km away, and none was found."""
+    e = object.__new__(GriddedEnv)
+    e.spec = dict(t=np.array([0.0]), F=np.zeros((1, 1, 2, 3)), k=np.zeros((1, 1, 3)), lon=np.array([10.5]), lat=np.array([60.0]),
+                  f=np.arange(3.0), th=np.arange(2.0))
+    e.umwm_src = "UMWM test"
+    assert e.restart_spectrum(10.0, 60.0, 0.0) is not None
+    assert e.restart_spectrum(9.0, 60.0, 0.0) is None                                              # 1.5 deg: 83 km at this latitude
+    assert e.restart_spectrum(10.0, 60.0, 4.0 * 3600.0) is None                                    # and the time limit, 3 h
+
+
+def test_r13_m37_lenient_gives_back_the_strictness_it_found(grid):
+    """`self.strict = was` became `= True` in a mutant: a non-strict environment turned strict after one `with lenient()`."""
+    e = object.__new__(GriddedEnv)
+    e.strict = False
+    with e.lenient():
+        assert not e.strict
+    assert e.strict is False
+
+
+def test_r13_m37_a_gap_of_two_hours_between_3d_hours_is_not_interpolated_across(grid):
+    """`<= 3600 + 1e-6` became 7200: two ingested 3-D hours 2 h apart were joined, with a wind linear in time over an hour that was never read."""
+    env = GriddedEnv.__new__(GriddedEnv)
+    env.__dict__.update(grid.__dict__)
+    t0 = float(grid.w3["t"][0])
+    pair = {k: grid.w3[k][:2] for k in ("U", "V", "Z")}
+    lon, lat, z = np.array([195.1]), np.array([0.3]), np.array([30.0])
+    env.w3 = dict(t=np.array([t0, t0 + 3600.0]), **pair)
+    assert env._wind3d(lon, lat, z, t0 + 1800.0) is not None
+    env.w3 = dict(t=np.array([t0, t0 + 7200.0]), **pair)
+    assert env._wind3d(lon, lat, z, t0 + 3600.0) is None

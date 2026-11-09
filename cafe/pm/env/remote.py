@@ -15,7 +15,7 @@ USERTrust root in the system store). Verification is never turned off.
 """
 from __future__ import annotations
 
-import hashlib, http.client, io, json, os, pathlib, ssl, struct, time, urllib.error, urllib.request
+import hashlib, http.client, io, json, math, os, pathlib, ssl, struct, time, urllib.error, urllib.request
 from collections.abc import Callable
 from typing import Any
 
@@ -112,9 +112,16 @@ def _read(url: str, start: int | None, end: int | None, timeout: float = 60, tri
 
 def _probe(url: str) -> Ident:
     """The identity (see `_ident`) of the file, from a one-byte ranged GET. The size is what `size`, `RemoteFile` and `download` are built on, so a server
-    that does not state it is a ConnectionError naming that, not a size of -1."""
-    with _open(url, 0, 0) as r:
-        got = _ident(r, url)
+    that does not state it is a ConnectionError naming that, not a size of -1. A file of 0 bytes answers 416 and is (0, {}), not a missing file
+    (round 13, M-18)."""
+    try:
+        with _open(url, 0, 0) as r:
+            got = _ident(r, url)
+    except FileNotFoundError as e:
+        c = e.__cause__
+        if isinstance(c, urllib.error.HTTPError) and c.code == 416:          # `bytes=0-0` of a file of 0 bytes is "not satisfiable": it is there, and empty
+            return 0, {}
+        raise
     if got[0] < 0:
         raise ConnectionError(f"{url}: server does not state the file size (Content-Range total is not a number)")
     return got
@@ -218,6 +225,7 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
         return path
     part = path.with_name(path.name + ".part")
     mark = part.with_name(part.name + ".id")
+    path.parent.mkdir(parents=True, exist_ok=True)
     total, valid = _probe(url)
     ident = dict(valid, total=total)
     try:
@@ -247,6 +255,8 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
         if part.stat().st_size == have:
             raise ConnectionError(f"{url}: stalled at {have} of {total} bytes; rerun to resume")
         have = part.stat().st_size
+    if not total:
+        part.touch()                                                   # a file of 0 bytes never opened the part in the loop
     if have != total:
         raise ConnectionError(f"{url}: {have} bytes on disk, server says {total}")
     if pin and sha and sha256(part) != sha:
@@ -261,6 +271,11 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
 # ------------------------------------------------------------------ NetCDF classic (CDF-1/CDF-2) headers
 
 _NC = {1: ("i1", 1), 2: ("S1", 1), 3: (">i2", 2), 4: (">i4", 4), 5: (">f4", 4), 6: (">f8", 8)}
+MAX_ITEM = 64 << 20          # one name or one attribute value of a header; the real files' are a few kB, so a longer one is a damaged length (round 13, M-15)
+
+
+def _bad(what: str) -> ValueError:
+    return ValueError(f"damaged NetCDF header: {what}")
 
 
 class _Buf:
@@ -268,6 +283,8 @@ class _Buf:
         self.fetch, self.data, self.p = fetch, b"", 0
 
     def take(self, n: int) -> bytes:
+        if not 0 <= n <= MAX_ITEM:
+            raise _bad(f"a field of {n} bytes at byte {self.p}")
         while self.p + n > len(self.data):
             more = self.fetch(len(self.data), max(65536, n))
             if not more:
@@ -280,18 +297,40 @@ class _Buf:
     def i4(self) -> int:
         return int(struct.unpack(">i", self.take(4))[0])
 
-    def name(self) -> str:
+    def count(self) -> int:
         n = self.i4()
-        s = self.take(n).decode()
+        if n < 0:
+            raise _bad(f"a count of {n} at byte {self.p - 4}")
+        return n
+
+    def name(self) -> str:
+        n = self.count()
+        try:
+            s = self.take(n).decode()
+        except UnicodeDecodeError as e:
+            raise _bad(f"a name that is not UTF-8 at byte {self.p - n}") from e
         self.take(-n % 4)
         return s
 
+    def kind(self, want: int) -> int:
+        """The count of a (tag, count) list header: 0 for an absent list, else the number of entries (the tag must be `want`)."""
+        tag, n = self.i4(), self.count()
+        if tag not in (0, want) or (tag == 0 and n):
+            raise _bad(f"list tag {tag} (expected {want}) at byte {self.p - 8}")
+        return n
+
+    def type(self) -> tuple[int, str, int]:
+        t = self.i4()
+        if t not in _NC:
+            raise _bad(f"type code {t} at byte {self.p - 4}")
+        return (t, *_NC[t])
+
     def attrs(self) -> dict[str, Any]:
-        tag, n = self.i4(), self.i4()
         out: dict[str, Any] = {}
-        for _ in range(n if tag == 12 else 0):
-            k, t, m = self.name(), self.i4(), self.i4()
-            dt, w = _NC[t]
+        for _ in range(self.kind(12)):
+            k = self.name()
+            t, dt, w = self.type()
+            m = self.count()
             raw = self.take(m * w)
             self.take(-(m * w) % 4)
             out[k] = raw.decode(errors="replace") if t == 2 else np.frombuffer(raw, dt)
@@ -299,42 +338,71 @@ class _Buf:
 
 
 def parse_cdf1(fetch: Callable[[int, int], bytes]) -> Header:
-    """Parse a classic NetCDF header. fetch(offset, nbytes) -> bytes. Returns (dims, nrec, vars)."""
+    """Parse a classic NetCDF header. fetch(offset, nbytes) -> bytes. Returns (dims, nrec, vars).
+
+    The file's lengths, counts, ids, type codes and sizes are the server's, so each is checked where it is read: a damaged header is a ValueError saying
+    what and where, never an IndexError or KeyError, a name read from a negative length, or a negative shape (round 13, M-15). A header that ends early
+    is still an EOFError (the caller may fetch more), and a fetch that fails is its own error."""
     b = _Buf(fetch)
     magic = b.take(4)
     if magic[:3] != b"CDF" or magic[3] not in (1, 2):
         raise ValueError(f"not a NetCDF classic file (magic {magic!r})")
     off8 = magic[3] == 2
     nrec = b.i4()
-    tag, n = b.i4(), b.i4()
     dims: list[tuple[str, int]] = []
-    for _ in range(n if tag == 10 else 0):
-        dims.append((b.name(), b.i4()))
+    for _ in range(b.kind(10)):
+        dims.append((b.name(), b.count()))
     b.attrs()
-    tag, n = b.i4(), b.i4()
     out: dict[str, dict[str, Any]] = {}
-    for _ in range(n if tag == 11 else 0):
+    for _ in range(b.kind(11)):
         name = b.name()
-        ids = [b.i4() for _ in range(b.i4())]
+        ids = [b.count() for _ in range(b.count())]
+        if any(i >= len(dims) for i in ids):
+            raise _bad(f"{name}: dimension id {max(ids)} of {len(dims)} dimensions")
         atts = b.attrs()
-        t, vsize = b.i4(), b.i4()
+        t = b.type()[0]
+        vsize = int(struct.unpack(">I", b.take(4))[0])                    # unsigned, as the format has it: the 2.4 GB restart F is -1860094976 signed
         begin = struct.unpack(">q" if off8 else ">i", b.take(8 if off8 else 4))[0]
         dn = [dims[i][0] for i in ids]
         shape = [nrec if dims[i][1] == 0 else dims[i][1] for i in ids]
+        if min(shape, default=0) < 0 or begin < 0:
+            raise _bad(f"{name}: shape {shape}, offset {begin}")
         out[name] = dict(dims=dn, dtype=_NC[t][0], shape=shape, offset=begin, vsize=vsize,
                          record=bool(ids) and dims[ids[0]][1] == 0, attrs=atts)
     rv = [v for v in out.values() if v["record"]]
     recsize = sum(v["vsize"] for v in rv)
     if len(rv) == 1:                         # a lone record variable is packed without padding (netCDF classic format spec)
-        recsize = int(np.prod(rv[0]["shape"][1:])) * np.dtype(rv[0]["dtype"]).itemsize
+        recsize = math.prod(rv[0]["shape"][1:]) * np.dtype(rv[0]["dtype"]).itemsize
     for v in out.values():
         v["recsize"] = recsize
     return Header((dict(dims), nrec, out))
 
 
+def _is_url(p: str) -> bool:
+    """A remote file, as opposed to a local path that merely starts with "http" (httpx.nc, http_cache/...)."""
+    return p.lower().startswith(("http://", "https://"))
+
+
+def _fits(hdr: Header, size: int) -> None:
+    """Every variable's data lies inside a file of `size` bytes, else the header is damaged: a length or a count with one byte changed names gigabytes that
+    `cdf1_read` would allocate or seek to (round 13, M-15 after the fuzz: MemoryError, OSError). The end of a record variable is its last record's."""
+    for name, v in hdr[2].items():
+        n = math.prod(v["shape"][1:] if v["record"] else v["shape"]) * np.dtype(v["dtype"]).itemsize
+        end = v["offset"] + n + (max(hdr[1] - 1, 0) * v["recsize"] if v["record"] else 0) if n else 0
+        if end > size:
+            raise _bad(f"{name}: its data would end at byte {end}, past the end of the file ({size} bytes)")
+
+
 def cdf1_header(url_or_path: str | pathlib.Path) -> Header:
     p = str(url_or_path)
-    if p.startswith("http"):
+    try:
+        return _header(p)
+    except ValueError as e:                                     # not a classic file, or a damaged header: say whose
+        raise ValueError(f"{p}: {e}") from e
+
+
+def _header(p: str) -> Header:
+    if _is_url(p):
         seen: list[Ident] = []                                  # the first piece says which version this is; every later piece must be of it
 
         def piece(o: int, n: int) -> bytes:
@@ -344,9 +412,13 @@ def cdf1_header(url_or_path: str | pathlib.Path) -> Header:
             return body
         hdr = parse_cdf1(piece)
         hdr.ident = seen[0] if seen else None
+        if hdr.ident and hdr.ident[0] >= 0:                     # a total the server does not state is -1: nothing to compare with
+            _fits(hdr, hdr.ident[0])
         return hdr
     with open(p, "rb") as f:
-        return parse_cdf1(lambda o, n: (f.seek(o), f.read(n))[1])
+        hdr = parse_cdf1(lambda o, n: (f.seek(o), f.read(n))[1])
+        _fits(hdr, os.fstat(f.fileno()).st_size)
+        return hdr
 
 
 def cdf1_read(url_or_path: str | pathlib.Path, var: str, header: Header, rec: int = 0, rows: tuple[int, int] | None = None) -> NDArray[Any]:
@@ -355,6 +427,8 @@ def cdf1_read(url_or_path: str | pathlib.Path, var: str, header: Header, rec: in
     rows=(a, b) reads only indices a..b-1 of the variable's first non-record axis (one contiguous range), e.g. the
     rows of a (y, x) field or a run of sea points of an (x, th, f) spectrum."""
     v = header[2][var]
+    if v["record"] and not 0 <= rec < header[1]:
+        raise IndexError(f"{var}: record {rec} outside 0..{header[1]}")
     shape = list(v["shape"][1:] if v["record"] else v["shape"])
     item = np.dtype(v["dtype"]).itemsize
     off = v["offset"] + (rec * v["recsize"] if v["record"] else 0)
@@ -362,16 +436,18 @@ def cdf1_read(url_or_path: str | pathlib.Path, var: str, header: Header, rec: in
         a, b = rows
         if not 0 <= a < b <= shape[0]:
             raise IndexError(f"{var}: rows {a}..{b} outside 0..{shape[0]}")
-        off += a * int(np.prod(shape[1:])) * item
+        off += a * math.prod(shape[1:]) * item
         shape[0] = b - a
-    nbytes = int(np.prod(shape)) * item
+    nbytes = math.prod(shape) * item
+    if off < 0 or nbytes < 0:
+        raise _bad(f"{var}: offset {off}, {nbytes} bytes")
     p = str(url_or_path)
-    if p.startswith("http"):
+    if _is_url(p):
         raw = _read(p, off, off + nbytes - 1, timeout=300, ident=getattr(header, "ident", None))      # a header built by hand has none
     else:
         with open(p, "rb") as f:
             f.seek(off)
-            raw = f.read(nbytes)
+            raw = f.read(max(0, min(nbytes, os.fstat(f.fileno()).st_size - off)))  # never more than the file holds, whatever the header names
     if len(raw) != nbytes:
         raise ConnectionError(f"{p}:{var}: short read ({len(raw)} of {nbytes} bytes)")
     return np.frombuffer(raw, v["dtype"]).reshape(shape).astype(v["dtype"][1:] if v["dtype"][0] == ">" else v["dtype"])

@@ -291,3 +291,16 @@ def test_without_the_cool_skin_dter_and_tkt_are_zero():
     on, off = run(u=6.0, jcool=1), run(u=6.0, jcool=0)
     assert np.all(off["dter"] == 0.0) and np.all(off["tkt"] == 0.0)
     assert on["dter"] > 0.05 and on["tkt"] > 0.0
+
+
+# ------------------------------------------------------------------------------------------------------------ round 13 M-4
+
+def test_r13_m4_the_fade_runs_from_cp_2_to_cp_3_5_and_is_linear_in_cp():
+    """DECISIONS 653 and PHYSICS 14: Charnock at 2.0 m/s and under, the wave form at 3.5 and over, a linear mix between. The tests above read the constants
+    back, so a changed constant (CP_FULL = 3.0, CP_MIN = 2.5) or a squared weight still passed them. The mid-fade drags are values of this code at the
+    stated constants, 8 m/s: a deliberate retune moves them and amends the row."""
+    assert (coare.CP_MIN, coare.CP_FULL) == (2.0, 3.5)
+    for sigH, cd_mid in ((None, 1.37997e-3), (1.5, 2.03156e-3)):
+        lo, mid, hi = (run(u=8.0, cp=cp, sigH=sigH)["Cd"] for cp in (2.0, 2.75, 3.5))
+        assert lo < mid < hi and mid == pytest.approx(cd_mid, rel=2e-5)
+    assert run(u=8.0, cp=2.0, sigH=1.5)["Cd"] == pytest.approx(run(u=8.0)["Cd"], rel=1e-12)             # Charnock at CP_MIN, with or without sigH

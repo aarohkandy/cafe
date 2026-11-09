@@ -16,6 +16,8 @@ class Axis:
         x = np.asarray(x, float)
         if x.ndim != 1 or len(x) < 1:
             raise ValueError(f"axis {name}: need a 1-D array, got shape {x.shape}")
+        if not np.all(np.isfinite(x)):                                  # NaN, or infinity (a NaT read as a number is neither: environment.seconds refuses it)
+            raise ValueError(f"axis {name}: must be finite")
         if len(x) > 1 and not np.all(np.diff(x) > 0):
             raise ValueError(f"axis {name}: must be strictly increasing")
         self.x, self.name = x, name

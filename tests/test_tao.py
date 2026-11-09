@@ -582,3 +582,51 @@ def test_r11_m9_a_run_loads_verifies_and_explains_from_the_manifest_copy_it_reco
     assert got.keys() == want.keys() and tao.verify(out, man=copy) == len(copy["files"])
     assert tao.wind_gap(out, "T0N165E", T0, T1) == "no WIND file overlaps the window"                  # the rewritten file lists none
     assert tao.wind_gap(out, "T0N165E", T0, T1, man=copy) != "no WIND file overlaps the window"       # the copy lists them
+
+
+# ---- round 13 batch C, after the adversary: a NaT in TIME was read as -9.2e18 s, a first time stamp (M-32)
+
+def _nat_first(path, var, qc):
+    import xarray as xr
+    t = _t(T0, T0 + 3600)
+    write_nc(path, var, t, series, qc, "D")
+    with xr.open_dataset(path) as f:
+        ds = f.load()
+    tt = ds.TIME.values.copy()
+    tt[0] = np.datetime64("NaT")
+    ds.assign_coords(TIME=tt).to_netcdf(path, encoding={"TIME": {"units": "seconds since 1970-01-01", "dtype": "float64", "_FillValue": -1.0}})
+    with xr.open_dataset(path) as g:
+        assert np.isnat(g.TIME.values[0])
+
+
+def test_r13_m32_a_file_with_a_nat_time_is_refused_naming_the_file(tmp_path):
+    _nat_first(tmp_path / "n.nc", "WIND", 1)
+    for call in (lambda: tao._coverage(tmp_path / "n.nc"), lambda: tao._series(tmp_path / "n.nc", "WIND", "D", T0, T0 + 3600)):
+        with pytest.raises(ValueError, match=r"n\.nc: TIME: 1 of 6 time stamps are NaT"):
+            call()
+
+
+def test_r13_m32_fetch_takes_a_file_with_a_nat_time_as_unusable_and_picks_another_deployment(server, tmp_path, monkeypatch):
+    t = Tree(server, tmp_path)
+    t.add("T2N165E", "DM100A-20230201", "D", "WIND", 1)
+    t.add("T2N165E", "DM100B-20230201", "R", "WIND", 1, a=T0, b=T0 + 3 * 86400)
+    base = t.publish()
+    real = tao.remote.download
+    bad = "OS_T2N165E_DM100A-20230201_D_WIND_10min.nc"
+
+    def download(url, p, was=None):
+        r = real(url, p, was)
+        if p.name == bad and not getattr(download, "done", False):
+            download.done = True
+            import xarray as xr
+            with xr.open_dataset(p) as f:
+                ds = f.load()
+            tt = ds.TIME.values.copy()
+            tt[0] = np.datetime64("NaT")
+            ds.assign_coords(TIME=tt).to_netcdf(p, encoding={"TIME": {"units": "seconds since 1970-01-01", "dtype": "float64", "_FillValue": -1.0}})
+        return r
+    monkeypatch.setattr(tao.remote, "download", download)
+    man = json.loads(tao.fetch_tao((1, 3, 163, 167), T0, T1, tmp_path / "tao", base).read_text())
+    key = "T2N165E/" + bad
+    assert "TIME: " in man["unusable"][key] and "NaT" in man["unusable"][key] and man["files"][key]["time_start"] is None
+    assert man["selected"]["T2N165E"]["WIND"].endswith("DM100B-20230201_R_WIND_10min.nc")
