@@ -10,7 +10,7 @@ outputs are unchanged. Stage products live next to the ledgers:
     run_dir/mission.yaml                  the mission as run
     run_dir/stage1/summary.json, res.pkl  verdicts per vehicle/link; members' tracks, flags and sampled parameters
     run_dir/windows/windows.json          the worst windows per vehicle that stage 3 resolves
-    run_dir/stage3/windows.json           window coefficients, checks, FEA utilization
+    run_dir/stage3/windows.json           window coefficients, checks, FEA utilization (the larger of the stress and the knocked-down buckling one)
     run_dir/refit/refit.json              Stage-1 multipliers from the windows (or why none were used)
     run_dir/stage1b/summary.json, res.pkl the rerun with the refit multipliers (a copy of stage 1 when nothing was refit)
     run_dir/emulator/holdout.json         per vehicle: its emulator scope's hold-out scores and acceptance, or why it is not trained

@@ -109,7 +109,8 @@ GRIDS = {"coarse": (-3, 0), "fine": (0, 0)}                                  # (
 
 def nproc() -> int:
     """MPI ranks the free-surface run uses: CAFE_NPROC when set (a whole number of at least 1, else ConfigError), else the machine's workers
-    (par.workers()) capped at 6, the measured scaling knee (8 cores reach efficiency 0.44).
+    (par.workers()) capped at 6: a chosen cap between the measured 4-core (efficiency 0.76) and 8-core (0.44) points, not a measured one. The throughput
+    was measured at 1, 2, 4 and 8 cores only; six is priced at the rate `rate` interpolates between them (153k cell-updates/s, efficiency 0.55).
     pipeline_windows.run exports it as CAFE_NPROC before anything imports cafe.cfd, so the run uses what was planned."""
     from .. import par
     return par.env_count("CAFE_NPROC") or max(1, min(6, par.workers()))

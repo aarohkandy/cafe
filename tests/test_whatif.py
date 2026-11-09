@@ -5,10 +5,12 @@ Stage 1 runs for real on a fake environment where the answer is known (a storm c
 """
 import contextlib
 import copy
+import json
 import math
 import re
 import threading
 import time
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -119,6 +121,76 @@ def test_a_move_carries_the_station_the_waypoints_and_a_uas_moves_its_ship():
     assert whatif.vehicle(m, "glider_1n")["deploy"]["lon"] == -165.0 and "waypoints" not in g["task"]
     two = whatif.apply(CI, {"uas": dict(dlat=-0.25), "glider_1n": dict()})
     assert two["ship"]["lat"] == -0.25
+
+
+def two_uas():
+    """CI with a second UAS launched from the same ship."""
+    m = copy.deepcopy(CI)
+    m["vehicles"].append(dict(copy.deepcopy(whatif.vehicle(CI, "uas")), id="uas_b"))
+    return m
+
+
+def test_round_13_m40_two_uas_on_one_ship_that_ask_for_different_moves_are_refused_naming_both():
+    """Round 13 M-40: `{uas: dlon -0.5, uas_b: dlon -0.2}` left the ship at -165.5 and dropped the second move without a word."""
+    m = two_uas()
+    with pytest.raises(whatif.Invalid, match=r"uas and uas_b .* different moves of it, \(-0\.5, \+0\) deg and \(-0\.2, \+0\) deg"):
+        whatif.apply(m, {"uas": dict(dlon=-0.5), "uas_b": dict(dlon=-0.2)})
+    assert whatif.apply(m, {"uas": dict(dlon=-0.5), "uas_b": dict(dlon=-0.5)})["ship"]["lon"] == -165.5        # the same move: the ship moves once
+    assert whatif.apply(m, {"uas": dict(dlon=-0.5), "uas_b": dict(shift_h=6.0)})["ship"]["lon"] == -165.5      # no move asked: nothing to clash with
+    assert whatif.apply(m, {"uas_b": dict(dlon=-0.2)})["ship"]["lon"] == -165.2
+
+
+def test_round_13_m40_the_design_gives_every_uas_of_a_ship_the_same_move_and_the_variant_runs_it():
+    """Round 13 M-40: `design(m, 4, 1)` drew uas_b's own dlon -0.904 but the ship ended at uas's -0.256; the drawn point of uas_b was never the one run."""
+    m = two_uas()
+    d = whatif.design(m, 6, 1)
+    assert len(d) == 6 and any(r["uas"]["dlon"] or r["uas"]["dlat"] for r in d)
+    for r in d:
+        assert (r["uas"]["dlon"], r["uas"]["dlat"]) == (r["uas_b"]["dlon"], r["uas_b"]["dlat"])
+        v = whatif.apply(m, r)                                                    # valid: no clash
+        assert v["ship"]["lon"] == pytest.approx(float(whatif._wrap(m["ship"]["lon"] + r["uas_b"]["dlon"])))
+    assert any(r["uas"]["shift_h"] != r["uas_b"]["shift_h"] for r in d) and any(r["uas"]["duty"] != r["uas_b"]["duty"] for r in d)    # these stay each its own
+    assert whatif.design(m, 6, 1) == d
+
+
+def test_round_13_m40_a_ship_move_that_does_not_fit_is_shrunk_for_both_uas_alike():
+    m = two_uas()
+    m["box"]["lat_max"] = 0.3                                                       # the ship at 0 N: a 1 deg north move does not fit, a 0.25 one does
+    got = whatif._fits_all(m, {"uas": dict(shift_h=4.0, dlon=0.0, dlat=1.0, duty=1.0), "uas_b": dict(shift_h=8.0, dlon=0.0, dlat=1.0, duty=0.5)})
+    assert got == {"uas": dict(shift_h=1.0, dlon=0.0, dlat=0.25, duty=1.0), "uas_b": dict(shift_h=2.0, dlon=0.0, dlat=0.25, duty=0.5)}
+    whatif.apply(m, got)
+
+
+@pytest.mark.parametrize("vid, h", [(v, h) for v in (GL, "glider_1n", "usv") for h in (1e9, -1e9, 1e300)]
+                         + [(v, h) for v in (GL, "glider_1n", "usv", "uas") for h in (math.inf, -math.inf, math.nan, 1e308)])
+def test_round_13_m39_a_huge_or_infinite_shift_is_invalid_not_a_year_out_of_range(vid, h):
+    """Round 13 M-39: `apply(demo, {'glider_eq': {'shift_h': 1e9}})` was `ValueError: year 116102 is out of range`; inf was an OverflowError."""
+    with pytest.raises(whatif.Invalid):
+        whatif.apply(CI, {vid: dict(shift_h=h)})
+
+
+def test_round_13_m39_a_shift_just_outside_the_window_keeps_its_wording_and_a_huge_one_names_the_vehicle():
+    with pytest.raises(whatif.Invalid, match=re.escape(f"{GL}: deploying +36 h gives") + ".* outside the window"):
+        whatif.apply(CI, {GL: dict(shift_h=36)})
+    with pytest.raises(whatif.Invalid, match=re.escape(f"{GL}: deploying +1e+09 h gives a date beyond the calendar, outside the window")):
+        whatif.apply(CI, {GL: dict(shift_h=1e9)})
+    with pytest.raises(whatif.Invalid, match=re.escape(f"{GL}: the change shift_h inf, dlon 0, dlat 0, duty 1 needs finite numbers and a duty above 0")):
+        whatif.apply(CI, {GL: dict(shift_h=math.inf)})
+
+
+@pytest.mark.parametrize("mod", [dict(dlon=math.inf), dict(dlat=math.nan), dict(duty=math.nan), dict(duty=0.0), dict(duty=-0.5)])
+def test_round_13_m39_the_other_numbers_of_a_change_are_checked_in_the_same_place(mod):
+    """Sibling of M-39: a duty of 0 was a ZeroDivisionError for a UAS; a non-finite move was a NaN position or a ValueError."""
+    for vid in (GL, "uas"):
+        with pytest.raises(whatif.Invalid, match="needs finite numbers and a duty above 0"):
+            whatif.apply(CI, {vid: mod})
+
+
+def test_round_13_m39_the_what_if_command_refuses_an_infinite_shift_before_it_asks_whether_it_is_whole_days():
+    """`answer` asked `_whole_days(inf)` of a UAS first: an OverflowError."""
+    with pytest.raises(whatif.Invalid, match="--shift/--move: the change shift_h inf"):
+        whatif.answer(CI, dict(shift_h=math.inf), {}, {}, None, {}, {}, None, None)
+    assert math.isinf(whatif.parse_shift("1" + "0" * 400 + "h"))                    # how the command line gets there: float() of 400 digits
 
 
 def test_a_move_out_of_the_box_is_refused():
@@ -364,9 +436,9 @@ def test_a_trained_emulator_reports_its_holdout_and_acceptance(storm_em):
     assert info["rmse_debiased"] == pytest.approx(np.sqrt(max(info["rmse"]["p_fail"] ** 2 - info["noise_floor_rmse"] ** 2, 0.0)))
     assert info["acceptance"]["query_ok"] and em.features == whatif.BASE + whatif.TASK["glider"] and em.targets[:2] == ["p_fail", "t_fail_h"]
     assert info["threshold"] == em.threshold and info["multi_fidelity"] is False
-    # on 28 held-out points the +-0.05 gate passes 24, 25 or 26 hits; a calibrated emulator (hits ~ Binomial(28, 0.9)) misses it the rest of the time
-    passes = sum(math.comb(28, k) * 0.9 ** k * 0.1 ** (28 - k) for k in (24, 25, 26))
-    assert info["coverage_chance_fail"] == pytest.approx(1 - passes, rel=1e-9) and 0.3 < info["coverage_chance_fail"] < 0.5
+    # on 28 held-out points the +-0.05 gate passes 24, 25 or 26 hits; the conformal coverage of the n_cal calibration scores is itself random (round 13 M-1)
+    assert info["n_cal"] == 22 and info["coverage_chance_model"].startswith("Beta-Binomial over 22 calibration scores")
+    assert info["coverage_chance_fail"] == pytest.approx(float(exact_chance_miss(28, 22)), abs=1e-9) and 0.5 < info["coverage_chance_fail"] < 0.65
 
 
 def test_acceptance_is_judged_against_the_briefs_limits(tmp_path, monkeypatch):
@@ -436,7 +508,8 @@ def test_candidates_are_single_changes_in_cost_order():
     assert {x["change"] for x in c} >= {shifted(6, 1.5), shifted(-48), "move 0.5 deg west", "move 1 deg north",
                                         "dive 25 % shallower (950 m to 712.5 m)"}
     assert next(x for x in c if x["change"] == shifted(24, 1.5))["cost"] == 4.0 and next(x for x in c if x["change"] == "move 1 deg east")["cost"] == 2.0
-    assert len(whatif.candidates(CI, "usv")) == 16 and len(whatif.candidates(CI, "uas")) == 14
+    assert len(whatif.candidates(CI, "usv")) == 16 and len(whatif.candidates(CI, "uas")) == 12
+    # (14 before round 13 M-41: duties 0.75 and 0.5 of a 1 d period are one, and so are +12 h and -12 h)
     assert all(len(x["mod"]) == 1 for x in c)
 
 
@@ -801,9 +874,38 @@ def test_a_lower_uas_duty_rounds_the_period_up_to_whole_days_and_says_so():
     v = whatif.vehicle(CI, "uas")
     assert whatif.describe(dict(duty=0.75), v) == "fly sorties every 2 d instead of 1 (rounded up to whole days)"
     assert whatif.describe(dict(duty=0.5), v) == "fly sorties every 2 d instead of 1"
-    assert [c["change"] for c in whatif.candidates(CI, "uas") if "sorties every" in c["change"]] == [
-        "fly sorties every 2 d instead of 1 (rounded up to whole days)", "fly sorties every 2 d instead of 1"]
+    assert [c["change"] for c in whatif.candidates(CI, "uas") if "sorties every" in c["change"]] == ["fly sorties every 2 d instead of 1"]   # M-41
     assert whatif._duty_days(0.5, 0.75) == pytest.approx(2 / 3) and whatif._duty_days(1.0, 1.0) == 1.0 and whatif._duty_days(3.0, 0.75) == 4.0
+
+
+def uas_periods(m):
+    return [c for c in whatif.candidates(m, "uas") if "sorties every" in c["change"]]
+
+
+def test_round_13_m41_two_duties_that_give_the_same_whole_day_period_are_one_candidate_priced_at_the_duty_it_is():
+    """Round 13 M-41: every 1 d at duty 0.75 and 0.5 are both 2 d (`apply` gives equal missions) yet were priced 1.0 and 2.0 notches."""
+    assert whatif.apply(CI, {"uas": dict(duty=0.75)}) == whatif.apply(CI, {"uas": dict(duty=0.5)})
+    got = uas_periods(CI)
+    assert [(c["change"], c["cost"], c["mod"]) for c in got] == [("fly sorties every 2 d instead of 1", 2.0, dict(duty=0.5))]
+    for e, days in ((3.0, (4.0, 6.0)), (2.0, (3.0, 4.0)), (0.5, (0.5 / 0.75, 1.0))):                                    # distinct periods stay distinct
+        m = copy.deepcopy(CI)
+        whatif.vehicle(m, "uas")["sorties"]["every_days"] = e
+        got = uas_periods(m)
+        assert [whatif.vehicle(whatif.apply(m, {"uas": c["mod"]}), "uas")["sorties"]["every_days"] for c in got] == pytest.approx(list(days))
+        assert [c["cost"] for c in got] == pytest.approx([(1 - e / d) / 0.25 for d in days]) and not [c for c in got if "rounded up" in c["change"]]
+    m = copy.deepcopy(CI)
+    whatif.vehicle(m, "uas")["sorties"]["every_days"] = 0.9                                                          # 1.2 d and 1.8 d both round up to 2 d
+    assert len(uas_periods(m)) == 1
+
+
+def test_round_13_m41_every_candidate_is_a_different_mission_and_a_launch_12_h_either_way_is_one():
+    """Sibling: +12 h and -12 h are the same time of day, the same mission at the same cost."""
+    assert [c["change"] for c in whatif.candidates(CI, "uas") if "12 h" in c["change"]] == ["launch the sorties 12 h later"]
+    for e in (0.5, 0.9, 1.0, 2.0, 3.0):
+        m = copy.deepcopy(CI)
+        whatif.vehicle(m, "uas")["sorties"]["every_days"] = e
+        made = [whatif.apply(m, {"uas": c["mod"]}) for c in whatif.candidates(m, "uas")]
+        assert len({json.dumps(x, sort_keys=True) for x in made}) == len(made) and all(x != m for x in made), e
 
 
 class Env3D(AnalyticEnv):
@@ -1299,6 +1401,56 @@ def binom_pmf_sum(n, ks, p=0.9):
     return sum(math.comb(n, k) * p ** k * (1 - p) ** (n - k) for k in ks)
 
 
+def exact_chance_miss(n_test, n_cal, level=Fraction(9, 10), tol=Fraction(5, 100)):
+    """An exact Fraction, independent of scipy and of `whatif`: with k = ceil((n_cal + 1) * level) the split-conformal coverage is Beta(k, n_cal + 1 - k), so
+    the hits of n_test points are Beta-Binomial(n_test, k, n_cal + 1 - k) with pmf C(n, j) B(j + k, n - j + b) / B(k, b) and B(x, y) = (x-1)! (y-1)! / (x+y-1)!;
+    the miss is the mass off the gate |j / n_test - level| <= tol. k above n_cal: no bound, the interval is infinite, every point is a hit."""
+    k = -(-(n_cal + 1) * level.numerator // level.denominator)
+    inside = lambda j: abs(Fraction(j, n_test) - level) <= tol
+    if k > n_cal:
+        return Fraction(int(not inside(n_test)))
+    b = n_cal + 1 - k
+    beta = lambda x, y: Fraction(math.factorial(x - 1) * math.factorial(y - 1), math.factorial(x + y - 1))
+    return sum(math.comb(n_test, j) * beta(j + k, n_test - j + b) / beta(k, b) for j in range(n_test + 1) if not inside(j))
+
+
+@pytest.mark.parametrize("n_test, n_cal, miss", [(20, 16, 0.527), (25, 20, 0.666), (28, 22, 0.568), (50, 40, 0.424), (100, 80, 0.206)])
+def test_round_13_m1_the_chance_a_calibrated_emulator_misses_the_gate_counts_the_randomness_of_the_conformal_coverage(n_test, n_cal, miss):
+    """Round 13 M-1: hits are Binomial(n_test, nominal) only if the coverage is exactly nominal; with n_cal scores it is Beta(k, n_cal + 1 - k), mean 16 / 17 =
+    0.941 at n_cal 16, and the 0.85 .. 0.95 gate on 20 points is missed with probability 0.53, not the 0.2545 that was printed."""
+    got = whatif._chance_miss(n_test, 0.9, n_cal)
+    assert got == pytest.approx(float(exact_chance_miss(n_test, n_cal)), abs=1e-9) and got == pytest.approx(miss, abs=5e-4)
+    assert got > whatif._chance_miss(n_test, 0.9) + 0.05                           # the Binomial, kept for a hold-out that recorded no n_cal, understates it
+
+
+def test_round_13_m1_the_exact_figure_is_what_split_conformal_does_when_simulated():
+    """The oracle itself against the procedure: n_cal exchangeable scores, the bound is the k-th smallest, a test point is covered with probability U_(k)."""
+    rng = np.random.default_rng(13)
+    for n_test, n_cal in ((20, 16), (28, 22)):
+        k = math.ceil((n_cal + 1) * 0.9)
+        cov = np.sort(rng.random((200_000, n_cal)), 1)[:, k - 1]
+        hits = rng.binomial(n_test, cov)
+        sim = float(np.mean(np.abs(hits / n_test - 0.9) > 0.05 + 1e-9))
+        assert sim == pytest.approx(float(exact_chance_miss(n_test, n_cal)), abs=0.006)
+
+
+def test_round_13_m1_too_few_calibration_scores_give_an_infinite_interval_that_covers_everything_and_so_always_misses():
+    """k = ceil((n_cal + 1) * 0.9) above n_cal (n_cal 0 .. 8): coverage 1 exactly, outside 0.85 .. 0.95 whatever the number of test points."""
+    for n_cal in range(9):
+        assert math.ceil((n_cal + 1) * 0.9) > n_cal and whatif._chance_miss(20, 0.9, n_cal) == 1.0 == exact_chance_miss(20, n_cal)
+    assert whatif._chance_miss(20, 0.9, 9) == pytest.approx(float(exact_chance_miss(20, 9)), abs=1e-9)
+    assert whatif._chance_miss(20, 0.9, 9) < 1.0
+
+
+def test_round_13_m1_a_holdout_without_n_cal_is_labelled_binomial(tmp_path, monkeypatch):
+    from cafe.pm.emulator import Emulator
+    real = Emulator.holdout_report
+    monkeypatch.setattr(Emulator, "holdout_report", lambda self, *a, **k: {x: y for x, y in real(self, *a, **k).items() if x != "n_cal"})
+    _, info = whatif.fit_class(storm_table(110, seed=3), "glider", GSC, tmp_path / "t.parquet")
+    assert info["n_cal"] is None and info["coverage_chance_model"].startswith("Binomial: no n_cal recorded")
+    assert info["coverage_chance_fail"] == whatif._chance_miss(info["n_test"], 0.9)
+
+
 def test_a_hold_out_coverage_of_17_of_20_passes_the_gate_and_the_receipt_bracket_agrees(tmp_path, monkeypatch):
     """Round 10 M-6: 17 of 20 failed `abs(cov - 0.9) <= 0.05` by 4e-17; the chance figure said it was inside. the emulator receipt brackets the same edge with
     the same `coverage_band` the gate uses."""
@@ -1309,7 +1461,7 @@ def test_a_hold_out_coverage_of_17_of_20_passes_the_gate_and_the_receipt_bracket
         monkeypatch.setattr(Emulator, "holdout_report", lambda self, *a, h=hits, **k: dict(real(self, *a, **k), n_test=20, coverage={"p_fail": h / 20}))
         _, info = whatif.fit_class(storm_table(110, seed=hits), "glider", GSC, tmp_path / "t.parquet")
         assert info["acceptance"]["coverage_ok"] is ok and info["n_test"] == 20, hits
-        assert info["coverage_chance_fail"] == pytest.approx(1 - binom_pmf_sum(20, (17, 18, 19)), abs=1e-12)
+        assert info["coverage_chance_fail"] == pytest.approx(float(exact_chance_miss(20, info["n_cal"])), abs=1e-9)
         n0 = len(R.OUT)
         R.bracket("t", "c", hits / 20, *coverage_band(0.9, whatif.LIMITS["coverage"]))
         assert R.OUT[n0]["ok"] is ok

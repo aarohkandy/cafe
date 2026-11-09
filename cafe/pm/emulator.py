@@ -47,10 +47,16 @@ def coverage_band(nominal: float, tol: float) -> tuple[float, float]:
     return nominal - tol - COVERAGE_DUST, nominal + tol + COVERAGE_DUST
 
 
+def conformal_rank(n: int, level: float) -> int:
+    """The rank ceil((n+1) * level) of the calibration score that bounds the interval of nominal coverage `level` (n scores); above n there is none and
+    the interval is infinite. The one rule of `_conformal_q` and of the chance figure (`whatif._chance_miss`), whose coverage is Beta(k, n + 1 - k)."""
+    return int(np.ceil((n + 1) * level))
+
+
 def _conformal_q(scores: np.ndarray, alpha: float) -> float:
     """ceil((n+1)(1-alpha))-th smallest calibration score; inf when the set is too small for that level."""
     n = len(scores)
-    k = int(np.ceil((n + 1) * (1 - alpha)))
+    k = conformal_rank(n, 1 - alpha)
     return float("inf") if k > n else float(np.partition(scores, k - 1)[k - 1])
 
 
@@ -271,7 +277,7 @@ class Emulator:
     def holdout_report(self, df: pd.DataFrame, frac: float = 0.2, alpha: float = 0.1, fresh: FreshDraw | None = None) -> dict[str, Any]:
         """Fit a fresh emulator on the other (1 - frac) of the feature points, score on the held-out frac. The split is by distinct feature
         point (`point_cols`): rows that share it (replicates of one mission) are all on one side, so a point the model trained on is never
-        scored. `n_train` and `n_test` count rows.
+        scored. `n_train`, `n_cal` (the calibration scores, which fix how the coverage itself varies: see `whatif._chance_miss`) and `n_test` count rows.
 
         The table's targets are estimates from member draws that the training rows may share with the held-out ones (the same hypercube and noise
         streams), so the in-sample score can under-read the error against the true P(fail). `fresh(row)` re-estimates P(fail) at one held-out row
@@ -285,7 +291,7 @@ class Emulator:
         test = np.isin(point, np.random.default_rng(self.seed + 1).permutation(pts)[:k])
         sub = Emulator(self.features, self.targets, self.path, self.prob, self.eps, self.noise, self.seed, self.point_cols)
         sub.fit(df[~test])
-        out = dict(sub.score(df[test], alpha), n_train=sub.n_train + sub.n_cal)
+        out = dict(sub.score(df[test], alpha), n_train=sub.n_train + sub.n_cal, n_cal=sub.n_cal)
         if fresh is not None:
             got: list[tuple[pd.Series, float, int]] = []
             for _, row in df[test].drop_duplicates(self.point_cols).iterrows():

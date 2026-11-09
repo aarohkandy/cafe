@@ -388,6 +388,17 @@ def test_the_holdout_splits_by_feature_point_so_replicates_never_straddle_it(tmp
     assert h["n_test"] == 24 and len(seen["train"]) == 96 and h["n_train"] == 96 and len(points(seen["train"])) == 32
 
 
+def test_round_13_m1_the_holdout_records_how_many_calibration_scores_set_its_conformal_coverage(tmp_path):
+    """Round 13 M-1: the chance a calibrated emulator misses the coverage gate depends on n_cal (coverage ~ Beta(k, n_cal + 1 - k)); the hold-out says it,
+    and the rank k that `_conformal_q` uses is the one function the chance figure uses too."""
+    df = E.synthetic_table(50, 1)
+    em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "t.parquet", seed=1)
+    h = em.holdout_report(df)
+    assert h["n_test"] == 10 and h["n_train"] == 40 and h["n_cal"] == 8                  # 50 points: 10 held out, 20 % of the other 40 calibrate
+    assert [E.conformal_rank(n, 0.9) for n in (8, 9, 16, 22, 40)] == [9, 9, 16, 21, 37]
+    assert E._conformal_q(np.arange(8.0), 0.1) == float("inf") and E._conformal_q(np.arange(9.0), 0.1) == 8.0     # rank 9 of 8 scores: none; of 9: the largest
+
+
 def test_a_holdout_of_one_feature_point_is_refused(tmp_path):
     em = E.Emulator(E.FEATURES, E.TARGETS, path=tmp_path / "t.parquet")
     with pytest.raises(ValueError, match="at least two distinct feature points, the table has 1"):

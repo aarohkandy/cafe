@@ -254,7 +254,7 @@ stage3.usv.hull_draft_m:
   value: 0.45
   unit: "m"
   why: "Vertical semi-axis of the submerged hull body in the water window; the yaml draft (2 m) is the keel, which is modelled separately. About 0.45 m for a 7 m slender hull. The `hull` window is a FULLY SUBMERGED ellipsoid of semi-axes (lwl/2, beam/2, this value), not the waterline hull: its surface (about 17 m2 for the explorer, 2.6 x the platform's assumed wetted area) is wetted all over, and the Hangar reference is evaluated on that surface (stage3/pipeline_windows.py usv_case), so the multiplier is per unit of the window's surface. The `hull_fs` window (the same ellipsoid cut at the waterline, plus the keel) displaces about 2.0 t (1.84 m3 submerged half-ellipsoid plus 0.14 m3 keel) against the platform's 0.75 t, so its wave-making resistance is for 2.7 times the displacement (its wetted-area ratio is 1.29); the `hull` window is fully submerged and displaces 3.75 t."
-  replace_with: "CAD (waterline sections); a draft that gives the half-ellipsoid the platform's own displacement (c = 3 V / (2 pi a b), about 0.18 m)."
+  replace_with: "CAD (waterline sections); a draft that gives the mesh (half ellipsoid plus keel) the platform's own displacement: c = (V_platform - V_keel) / (2 pi a b / 3) with V_platform = mass_kg / rho_water = 0.733 m3 and V_keel = 0.14 m3, about 0.145 m (0.18 m is the half ellipsoid alone and leaves the mesh at 0.875 m3, 895 kg, 19 % over)."
 stage3.usv.wing_t_c:
   value: 0.15
   unit: "-"
