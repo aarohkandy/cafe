@@ -299,10 +299,22 @@ def test_counts_of_members_vehicles_and_links_class_platform_and_mission_must_ma
     assert [m.split(":")[0] for m in acc.diff(g, other, seed=False)] == ["mission"]
 
 
-def test_a_missing_golden_fails_and_names_the_command_that_writes_it(tmp_path):
-    r = acc.check_golden(run_dict(tmp_path, report()), tmp_path / "golden" / "g.json", "missions/tepex_c_demo.yaml", False)
+def parse_printed(cmd, monkeypatch):
+    """The namespace the real command-line parser (`python -m cafe.pm`, `__main__.main`) makes of a printed command, or a SystemExit if it refuses it.
+    `acceptance.main` is replaced, so nothing runs (round 13, M-11: the printed command was only ever fed back to `check_golden`, never to the parser)."""
+    seen = []
+    monkeypatch.setattr(cli.acceptance, "main", lambda a: seen.append(a) or 0)
+    words = shlex.split(cmd)
+    assert words[:3] == ["python", "-m", "cafe.pm"], cmd
+    assert cli.main(words[3:]) == 0
+    return seen[0]
+
+
+def test_a_missing_golden_fails_and_names_the_command_that_writes_it(tmp_path, monkeypatch):
+    r = acc.check_golden(run_dict(tmp_path / "acc", report()), tmp_path / "golden" / "g.json", "missions/tepex_c_demo.yaml", False)
     assert not r["ok"] and r["values"]["missing"] and "no golden file at" in r["detail"]
-    assert "python -m cafe.pm acceptance --mission missions/tepex_c_demo.yaml --gpus 0 --update-golden" in r["detail"]
+    a = parse_printed(re.search(r"with `([^`]+)`", r["detail"]).group(1), monkeypatch)
+    assert (a.mission, a.gpus, a.update_golden, a.out) == ("missions/tepex_c_demo.yaml", 0, True, str(tmp_path / "acc_golden"))
     assert not (tmp_path / "golden").exists()
 
 
@@ -996,7 +1008,7 @@ def test_without_a_git_checkout_the_golden_reads_pm_shs_dirty_flag(monkeypatch, 
     assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["ok"] is (problems == 0)
 
 
-def test_an_unprovenanced_golden_fails_and_names_the_command_that_writes_a_new_one(tmp_path):
+def test_an_unprovenanced_golden_fails_and_names_the_command_that_writes_a_new_one(tmp_path, monkeypatch):
     g = tmp_path / "g.json"
     acc.check_golden(run_dict(tmp_path, report()), g, MISSION, True)
     assert acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["ok"]
@@ -1006,7 +1018,7 @@ def test_an_unprovenanced_golden_fails_and_names_the_command_that_writes_a_new_o
     g.write_text(json.dumps(rec))
     r = acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)
     assert not r["ok"] and "has no provenance (git_sha 'none' is not a commit; no reviewed_run" in r["detail"] and "on a clean checkout" in r["detail"]
-    assert f"python -m cafe.pm acceptance --mission {MISSION} --gpus 0 --update-golden" in r["detail"] and len(r["values"]["provenance"]) == 2
+    assert parse_printed(re.search(r"with `([^`]+)`", r["detail"]).group(1), monkeypatch).mission == MISSION and len(r["values"]["provenance"]) == 2
     del rec["source"]
     g.write_text(json.dumps(rec))
     assert "git_sha None is not a commit" in acc.check_golden(run_dict(tmp_path, report()), g, MISSION, False)["detail"]
@@ -1319,12 +1331,14 @@ def test_r12_l0_m33_the_command_a_damaged_golden_asks_for_is_one_that_update_gol
 
 
 def test_r12_l0_m33_the_command_names_golden_only_for_a_file_that_is_not_the_default_and_golden_mission_only_when_it_is_refused(tmp_path):
-    cmd = lambda g, name="m": acc.update_command(g, "mm.yaml", 2, name)                                 # noqa: E731
-    assert cmd(tmp_path / "none.json") == f"python -m cafe.pm acceptance --mission mm.yaml --gpus 2 --update-golden --golden {tmp_path / 'none.json'}"
+    cmd = lambda g, name="m": acc.update_command(g, "mm.yaml", 2, name, tmp_path / "runs" / "acc")        # noqa: E731
+    assert cmd(tmp_path / "none.json") == (f"python -m cafe.pm acceptance --mission mm.yaml --gpus 2 --update-golden "
+                                           f"--out {tmp_path / 'runs' / 'acc_golden'} --golden {tmp_path / 'none.json'}")
     other = tmp_path / "other.json"
     other.write_text('{"summary": {"mission": "x"}}')
     assert cmd(other).endswith(f"--golden {other} --golden-mission m") and cmd(other, "x").endswith(f"--golden {other}")
-    assert "--golden " not in cmd(acc.GOLDEN, "tepex_c_demo") and cmd(acc.GOLDEN, "tepex_c_demo").endswith("--gpus 2 --update-golden")
+    default = cmd(acc.GOLDEN, "tepex_c_demo")
+    assert "--golden " not in default and default.endswith("--gpus 2 --update-golden --out " + str(tmp_path / "runs" / "acc_golden"))
     spaced = tmp_path / "a b.json"
     assert cmd(spaced).endswith(f"--golden '{spaced}'")
 
@@ -1335,13 +1349,124 @@ def test_r12_l0_m33_the_mission_and_the_name_in_the_printed_command_are_one_word
     with `;` ran its tail as a second command. Every user-chosen word goes through shlex.quote, in the refusal's own advice too."""
     f = tmp_path / "g.json"
     f.write_text('{"summary": {"mission": "other"}}')
-    for text in (acc.update_command(f, mission, 0, name), re.search(r"`(--golden-mission [^`]+)`", acc.golden_refusal(f, name)).group(1)):
+    out = tmp_path / "runs"
+    for text in (acc.update_command(f, mission, 0, name, out), re.search(r"`(--golden-mission [^`]+)`", acc.golden_refusal(f, name)).group(1)):
         toks = shlex.split(text)
         assert (toks[toks.index("--golden-mission") + 1] == name) and (("--mission" not in toks) or toks[toks.index("--mission") + 1] == mission)
-    assert f" --mission {shlex.quote(mission)} " in acc.update_command(f, mission, 0, name)              # a shell sees `;` and `$(` even where shlex does not
-    cmd = shlex.split(acc.update_command(f, mission, 0, name))
-    assert len(cmd) == 13 and cmd[:5] == ["python", "-m", "cafe.pm", "acceptance", "--mission"]            # no word split off, no second command
+    assert f" --mission {shlex.quote(mission)} " in acc.update_command(f, mission, 0, name, out)         # a shell sees `;` and `$(` even where shlex does not
+    cmd = shlex.split(acc.update_command(f, mission, 0, name, out))
+    assert len(cmd) == 15 and cmd[:5] == ["python", "-m", "cafe.pm", "acceptance", "--mission"]            # no word split off, no second command
     r = run_dict(tmp_path, report(mission=dict(name=name, seed=dict(value=7))))
     flag = lambda k: cmd[cmd.index(k) + 1]                                                              # noqa: E731
     done = acc.check_golden(r, pathlib.Path(flag("--golden")), flag("--mission"), True, golden_mission=flag("--golden-mission"))
     assert done["values"]["updated"] is True and json.loads(f.read_text())["summary"]["mission"] == name
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 13, batch B: M-11, M-7, M-17
+
+@pytest.mark.parametrize("body", [None, "not json", '{"summary": {"mission": "other"}}', '{"summary": {"mission": "m"}}'])
+@pytest.mark.parametrize("mission, name", [("missions/a.yaml", "m"), ("my dir/it's;x.yaml", "n;$(x)")])
+def test_r13_m11_every_command_a_golden_message_prints_is_accepted_by_the_real_parser_and_asks_for_a_fresh_out(tmp_path, monkeypatch, body, mission, name):
+    """Round 13, M-11: the printed `python -m cafe.pm acceptance --mission M --gpus N --update-golden` lacked `--out`, which the parser requires, and the
+    tests fed it back to `check_golden` only. Here it goes through `__main__.main`; `--out` is a new sibling of the judged run's directory, since the
+    run's own holds runs the command would replace."""
+    f = tmp_path / "my golden.json"
+    if body is not None:
+        f.write_text(body)
+    rep = report(mission=dict(name=name, seed=dict(value=7)))
+    row = acc.check_golden(run_dict(tmp_path / "acc", rep), f, mission, False)
+    a = parse_printed(re.search(r"with `([^`]+)`", row["detail"]).group(1), monkeypatch)
+    assert a.mission == mission and a.update_golden and a.golden == str(f) and a.gpus == 0
+    needs_flag = body is not None and not (body == '{"summary": {"mission": "m"}}' and name == "m")
+    assert a.out == str(tmp_path / "acc_golden") and not pathlib.Path(a.out).exists() and a.golden_mission == (name if needs_flag else None)
+    assert shlex.split(acc.update_command(f, mission, 3, name, tmp_path / "x" / "acc"))[3:10] == ["acceptance", "--mission", mission, "--gpus", "3",
+                                                                                                  "--update-golden", "--out"]
+
+
+def test_r13_m7_the_command_stored_in_a_golden_is_the_printed_one_without_the_machines_directory_and_one_word_per_argument(tmp_path):
+    """Round 13, M-7: dropping `shlex.quote(mission)` from the stored command survived every test (the 685 test read only `summary.mission`). Both now come
+    from `_base_command`, the printed one adding `--out` after it; the stored form has no `--out`, so the shipped golden is the same text as before."""
+    mission = "my dir/it's;x.yaml"
+    g = tmp_path / "g.json"
+    acc.check_golden(run_dict(tmp_path / "acc", report()), g, mission, True)
+    stored = json.loads(g.read_text())["command"]
+    assert shlex.split(stored) == ["python", "-m", "cafe.pm", "acceptance", "--mission", mission, "--gpus", "0", "--update-golden"]
+    printed = shlex.split(acc.update_command(g, mission, 0, "m", tmp_path / "acc"))
+    assert printed == shlex.split(stored) + ["--out", str(tmp_path / "acc_golden"), "--golden", str(g)]     # the same builder: the stored one is its prefix
+    shipped = json.loads((ROOT / "tests" / "golden" / "tepex_c_demo_quick.json").read_text())["command"]
+    assert shipped == acc._base_command("missions/tepex_c_demo.yaml", 0)                              # the text a re-mint writes is the text that is shipped
+
+
+def test_r13_m17_a_golden_path_no_flag_can_make_writable_is_refused_before_any_run_and_advice_never_names_a_flag_that_cannot_help(tmp_path, monkeypatch):
+    """Round 13, M-17: `--golden DIR --golden-mission NAME` passed the early refusal, the first quick run (about 20 min) executed, then `write_text` raised
+    IsADirectoryError and the remaining checks never ran. A directory, a parent that is a file and a directory that cannot be written are refused for
+    `allowed` too, at the same place, and `update_command` does not offer `--golden-mission` for them."""
+    d = tmp_path / "gd"
+    d.mkdir()
+    afile = tmp_path / "plain"
+    afile.write_text("x")
+    for bad in (d, afile / "g.json", afile / "deeper" / "g.json"):
+        why = acc.golden_refusal(bad, "m", "m")
+        assert why and (str(bad) in why or str(afile) in why), bad
+        assert acc.golden_refusal(bad, "m") == why
+        assert acc.update_command(bad, "mm.yaml", 0, "m", tmp_path / "o") is None
+        monkeypatch.setattr(acc, "run_one", lambda *a, **k: pytest.fail("a run started"))
+        rows, rc = acc.run(MISSION, 0, tmp_path / "o2", bad, update_golden=True, log=lambda s: None, golden_mission="ci_fixture")
+        assert rc == 1 and [r["name"] for r in rows] == ["golden_diff"] and "no run started" in rows[0]["detail"] and not (tmp_path / "o2").exists()
+        done = acc.check_golden(run_dict(tmp_path / "acc", report()), bad, MISSION, True, "m")
+        assert done["values"]["refused"] is True and done["values"]["updated"] is False
+    row = acc.check_golden(run_dict(tmp_path / "acc", report()), d, MISSION, False)
+    assert "is not a file" in row["detail"] and "`python -m" not in row["detail"] and not row["values"].get("missing")
+    monkeypatch.setattr(acc.os, "access", lambda *a: False)                                          # a directory this user cannot write to
+    assert "cannot be written" in acc.golden_refusal(tmp_path / "new.json", "m")
+    assert acc.golden_refusal(tmp_path / "gone" / "deep" / "new.json", "m")
+
+
+def test_r13_m17_a_golden_write_cut_short_leaves_the_old_golden_and_no_temporary(tmp_path, monkeypatch):
+    """Round 13, M-17: `golden.write_text` was in place, so a full disk left a truncated golden that reads as "not a golden file" and cannot be replaced
+    without `--golden-mission`. A write now goes to a sibling temporary and os.replace; through a symlink it replaces the file the link names."""
+    g = tmp_path / "g.json"
+    r = run_dict(tmp_path / "acc", report())
+    acc.check_golden(r, g, MISSION, True)
+    before = g.read_bytes()
+    real = pathlib.Path.write_text
+
+    def cut(self, text, *a, **k):
+        real(self, text[:20], *a, **k)
+        raise OSError(28, "No space left on device")
+    monkeypatch.setattr(pathlib.Path, "write_text", cut)
+    with pytest.raises(OSError):
+        acc.check_golden(r, g, MISSION, True)
+    monkeypatch.undo()
+    assert g.read_bytes() == before and sorted(p.name for p in tmp_path.iterdir() if p.name.startswith("g.")) == ["g.json"]
+    assert acc.golden_refusal(g, "m") is None                                                         # still a golden
+    link = tmp_path / "link.json"
+    link.symlink_to(g)
+    acc.check_golden(run_dict(tmp_path / "acc", report()), link, MISSION, True)
+    assert link.is_symlink() and json.loads(g.read_text())["summary"]["mission"] == "m"
+
+
+@pytest.mark.parametrize("body", [None, "not json", "[1]", '{"summary": {"mission": "m"}}'])
+@pytest.mark.parametrize("where", ["below_a_file", "unwritable_dir", "writable"])
+def test_r13_b2_a_golden_message_prints_a_command_only_if_the_parser_accepts_it_and_run_would_not_refuse_it(tmp_path, monkeypatch, body, where):
+    """Round 13 batch B, a sibling of M-17: a missing (or damaged) golden below a file, or in a directory this user cannot write, still printed
+    `... --update-golden ... --golden X`, which `run()` refuses before it starts. Every command a message prints is fed to the real parser and then to the
+    refusal `run()` applies to the parsed `--golden` and `--golden-mission`; where no command can work, the message prints none and names `--golden`."""
+    plain = tmp_path / "plain"
+    plain.write_text("x")
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    f = {"below_a_file": plain / "sub" / "g.json", "unwritable_dir": ro / "g.json", "writable": tmp_path / "g.json"}[where]
+    if body is not None and where != "below_a_file":
+        f.write_text(body)
+    real = os.access
+    monkeypatch.setattr(acc.os, "access", lambda p, m, *a, **k: False if pathlib.Path(p) == ro else real(p, m, *a, **k))
+    row = acc.check_golden(run_dict(tmp_path / "acc", report(mission=dict(name="m", seed=dict(value=7)))), f, "m.yaml", False)
+    found = re.search(r"with `(python -m [^`]+)`", row["detail"])
+    if where == "writable":
+        a = parse_printed(found.group(1), monkeypatch)
+        assert a.golden == str(f) and acc.golden_refusal(pathlib.Path(a.golden), "m", a.golden_mission) is None
+    else:
+        assert found is None and "--update-golden" not in row["detail"], row["detail"]
+        assert "cannot be written there: name another file with `--golden`" in row["detail"]
+        assert acc.golden_refusal(f, "m", "m") and acc.update_command(f, "m.yaml", 0, "m", tmp_path / "acc") is None
