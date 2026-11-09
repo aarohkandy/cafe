@@ -109,9 +109,10 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     exp(-j 2 pi (r2-r1)/lam)| x free space at the direct distance r1: r1, r2 are the direct and reflected path lengths between the antenna heights
     above the tangent plane at the specular point (kerr_reflection), D the divergence factor (divergence_factor; `divergence=False` leaves it out),
     reflection coefficient -1: the limit of the Fresnel coefficient G of a vertical-polarised wave on sea water as the grazing angle goes to 0, and a
-    smooth-sea idealisation everywhere else. Round 12 (review C-6), for sea water at 915 MHz with eps_c = 72.8 - j118.9 (T 29 C, S 35, sigma 5.9 S/m:
-    ASSUMED, the lab has not given the sea temperature or the antenna polarisation, QUESTIONS_FOR_LAB), |G| is 0.98 at 0.05 deg, 0.91 at 0.25, 0.84
-    at 0.5, 0.70 at 1, 0.49 at 2, 0.35 at 3, 0.26 at 5 (the pseudo-Brewster angle, phase -86 deg), 0.49 at 12 and 0.65 at 20 deg, and its phase is
+    smooth-sea idealisation everywhere else. Round 12 (review C-6), for sea water at 915 MHz with eps_c = 72.8 - j118.9 (T 29 C, S 35, sigma 6.05 S/m, for
+    eps'' = 60 lambda sigma is 118.9 at 915 MHz: ASSUMED, the lab has not given the sea temperature or the antenna polarisation, QUESTIONS_FOR_LAB),
+    |G| is 0.98 at 0.05 deg, 0.91 at 0.25, 0.84 at 0.5, 0.70 at 1, 0.49 at 2, 0.35 at 3, 0.26 at 5 (the pseudo-Brewster angle, phase -86 deg), 0.49 at 12
+    and 0.65 at 20 deg, and its phase is
     -179 deg at 0.05, -168 at 1 and -154 at 2 deg: -1 is within 10 % of the magnitude only below about 0.3 deg, not below "1-2 deg" as this docstring
     said until then. The demo's grazing angles (UAS 18 to 108 m, USV whip 2.2 m) are 1.2 deg at 1 km and 0.2 deg at 5 km for the 18 m UAS and 6.3 and
     1.3 deg for the 108 m UAS, so -1 is within 10 % of the magnitude from about 4 km out for the 18 m UAS (0.3 deg at 3.9 km, flat earth) and from
@@ -156,6 +157,14 @@ def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, a_eff: float = A_EF
 
 def _radio(radio: str | dict[str, Any]) -> dict[str, Any]:
     return radio if isinstance(radio, dict) else _yaml("radios.yaml")["radios"][radio]
+
+
+def uas_radio_names(P: dict[str, Any]) -> tuple[str, str]:
+    """(the `radio` block of a UAS platform, the entry of platforms/radios.yaml) the lost-link hook reads (`stage1._uas_radio`): the platform's first `radio`
+    block with a `tx_power_dbm`, and the entry of that name, else rfd900x. A platform with no such block is (rfd900x, rfd900x). The one choice, shared by the
+    hook and by the credibility report's "used by this mission" rule (round 13, M-2: the report listed the entry as unused)."""
+    block = next((k for k, v in (P.get("radio") or {}).items() if isinstance(v, dict) and "tx_power_dbm" in v), "rfd900x")
+    return block, block if block in _yaml("radios.yaml")["radios"] else "rfd900x"
 
 
 def rf_margin(d: FA, ht: FA, hr: FA, hs: FA, radio: str | dict[str, Any] = "rfd900x") -> F:

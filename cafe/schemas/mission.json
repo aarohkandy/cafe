@@ -37,7 +37,7 @@
                             "antenna_height_m": {"type": "number", "minimum": 0.5, "maximum": 100, "description": "metres above the sea, 0.5 (a deck rail) to 100"},
                             "transducer_depth_m": {"type": "number", "minimum": 0, "maximum": 100, "description": "metres below the sea, 0 to 100 (an over-the-side transducer on a cable)"}}},
     "shore": {"type": "object", "required": ["id"], "additionalProperties": false, "properties": {"id": {"$ref": "#/$defs/id"}}},
-    "vehicles": {"type": "array", "minItems": 1, "maxItems": 64, "items": {
+    "vehicles": {"type": "array", "minItems": 1, "maxItems": 64, "description": "1 to 64 vehicles; more are refused", "items": {
       "type": "object", "required": ["id", "platform"], "additionalProperties": false,
       "properties": {
         "id": {"$ref": "#/$defs/id"},

@@ -279,10 +279,10 @@ def _uas_radio(P: dict[str, Any]) -> dict[str, Any]:
     """The platform's RF radio as a comms.rf_margin radio dict: the first block of quad_uas.yaml `radio` with a transmit power
     (rfd900x), its band centre, power and sensitivity, and antenna gains and losses from platforms/radios.yaml's entry of the same
     name (rfd900x if there is none)."""
-    name = next(k for k, v in P["radio"].items() if isinstance(v, dict) and "tx_power_dbm" in v)
-    r = P["radio"][name]
-    base = comms._yaml("radios.yaml")["radios"]
-    return dict(base.get(name, base["rfd900x"]), center_mhz=float(np.mean(r["freq_mhz"])), tx_dbm=r["tx_power_dbm"], rx_sens_dbm=r["rx_sensitivity_dbm"])
+    block, entry = comms.uas_radio_names(P)
+    r = P["radio"][block]
+    base = comms._yaml("radios.yaml")["radios"][entry]
+    return dict(base, center_mhz=float(np.mean(r["freq_mhz"])), tx_dbm=r["tx_power_dbm"], rx_sens_dbm=r["rx_sensitivity_dbm"])
 
 
 def ship_antenna_m(mission: dict[str, Any], radio: dict[str, Any] | None = None) -> float:

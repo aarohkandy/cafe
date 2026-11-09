@@ -309,10 +309,15 @@ def slow_group(group: str, minutes: int, scope: str, runner: Callable[[], Any], 
                 except (KeyError, TypeError, AttributeError, ValueError):
                     why = f"the stored result at {p} is not a receipt record (missing or wrong-typed fields); the command above writes it again"
                 else:
-                    if current:
+                    from .ledger import has_commit
+                    if not has_commit(rec["git_sha"]):
+                        why = (f"the stored result ({stamp}) names no commit, so nothing says which code made it; run through pm.sh or the README's pm() "
+                               "(they pass CAFE_GIT_SHA) or set CAFE_GIT_SHA=<commit>, and rerun it")
+                    elif current:
                         R.OUT.extend(stored)
                         return None
-                    why = f"the stored result ({stamp}) was made by different code"
+                    else:
+                        why = f"the stored result ({stamp}) was made by different code"
         raise NotRun(f"not run on this code: `python -m cafe.pm receipts --slow --only {group}` (≈{minutes} min); {why}; digest = {SCOPES[scope]}")
     return job
 

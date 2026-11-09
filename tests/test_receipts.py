@@ -21,6 +21,7 @@ def clean(monkeypatch):
     """Each test sees an empty cafe.receipts.OUT and no overlay, whatever ran before."""
     monkeypatch.setattr(R, "OUT", [])
     monkeypatch.delenv(cv.OVERLAY_ENV, raising=False)
+    monkeypatch.setenv("CAFE_GIT_SHA", "a" * 40)                    # a copy with no .git is told its commit; a stamp that names none is not a stamp (M-24)
 
 
 def passing():
@@ -898,3 +899,86 @@ def test_r12_l0_m35_the_stamp_command_stamps_each_file_and_refuses_a_file_that_i
     r = run(str(tmp_path / "missing.json"))
     assert r.returncode != 0 and "error:" in r.stderr and not (tmp_path / "missing.json").exists()
     assert run().returncode != 0
+
+
+# ---- review round 13: M-6 (an empty or wrong-typed stamp field), M-19 (the advice names the writer), M-24 (a stamp naming no commit), M-14 (stamp CLI)
+
+@pytest.mark.parametrize("field", ["date", "host", "git_sha", "code_digest"])
+@pytest.mark.parametrize("bad", ["", None, 5])
+def test_r13_m6_a_stamp_field_that_is_empty_or_not_text_is_unstamped_not_a_traceback(tmp_path, field, bad):
+    """The test for the missing field only dropped keys, so `if k not in rec` passed: "" printed ' [stored , , git ]', 5 raised TypeError at `[:10]`."""
+    rows = run_crosscheck(tmp_path, dict(R.stamp(crosscheck()), **{field: bad}))
+    assert [r["kind"] for r in rows] == ["context"] and f"carries no {field}" in rows[0]["claim"] and "unstamped" in rows[0]["claim"]
+
+
+def test_r13_m19_the_advice_names_the_program_that_writes_the_file_or_says_none_does(tmp_path):
+    rows = run_crosscheck(tmp_path, crosscheck())
+    assert "cafe.cfd" not in rows[0]["source"] and "no program in this repo writes this file" in rows[0]["source"]
+    assert "python -m cafe.receipts stamp " + str(tmp_path / "crosscheck.json") in rows[0]["source"]
+    stale = dict(R.stamp(crosscheck()), code_digest="0" * 64)
+    assert "cafe.cfd" not in run_crosscheck(tmp_path, stale)[0]["source"]                           # the stale case had the same wrong advice
+    for sub, name in (("t1", "torpedo.external.json"), ("w1", "wigley.surface.json"), ("s1", "suboff.incidence.json")):
+        R.OUT.clear()
+        (tmp_path / sub).mkdir(exist_ok=True)
+        (tmp_path / sub / name).write_text("{}")
+        assert R.stored(tmp_path / sub / name, "CFD") is None
+        assert "python -m cafe.cfd stamps its file" in R.OUT[-1]["source"] and "SITL" not in R.OUT[-1]["source"]
+
+
+@pytest.mark.parametrize("sha", ["none", "abc", "g" * 40, "ABCDEF1234"])
+def test_r13_m24_a_stamp_that_names_no_commit_is_a_context_row_that_says_how_to_get_one(tmp_path, sha):
+    """`./run.sh` passed no CAFE_GIT_SHA and the synced copy has no .git: `stamp()` wrote git_sha "none" and `stored` counted it ("git none")."""
+    rows = run_crosscheck(tmp_path, dict(R.stamp(crosscheck()), git_sha=sha))
+    assert [r["kind"] for r in rows] == ["context"] and "names no commit" in rows[0]["claim"] and "CAFE_GIT_SHA" in rows[0]["claim"]
+
+
+def test_r13_m24_stamp_with_no_git_and_no_variable_is_none_and_stamp_file_refuses_it(tmp_path, monkeypatch):
+    from cafe.pm import ledger
+    monkeypatch.setattr(ledger, "ROOT", tmp_path)                                                    # a copy with no .git
+    for value in (None, ""):                                                                         # unset, and a wrapper whose `git rev-parse` failed
+        monkeypatch.delenv("CAFE_GIT_SHA", raising=False)
+        if value is not None:
+            monkeypatch.setenv("CAFE_GIT_SHA", value)
+        assert ledger.git_sha() == "none" and not ledger.has_commit(ledger.git_sha())
+    assert R.stamp(crosscheck())["git_sha"] == "none"
+    f = tmp_path / "crosscheck.json"
+    f.write_text(json.dumps(crosscheck()))
+    with pytest.raises(ValueError, match="nothing was stamped: no commit to name"):
+        R.stamp_file(f)
+    assert json.loads(f.read_text()) == crosscheck()
+    assert run_crosscheck(tmp_path, R.stamp(crosscheck()))[0]["kind"] == "context"                  # and what it stamped before is no pass either
+    monkeypatch.setenv("CAFE_GIT_SHA", "abcdef1")
+    assert ledger.has_commit(ledger.git_sha()) and R.stored(f, "Emulator") is None and R.stamp_file(f) == f and R.stored(f, "Emulator")
+
+
+def test_r13_m24_a_slow_group_stored_with_no_commit_is_not_counted(slowenv, monkeypatch):
+    run_group(monkeypatch, "pm.emulator", slow=True)
+    f = slowenv / "receipts" / "pm.emulator.json"
+    f.write_text(json.dumps(dict(json.loads(f.read_text()), git_sha="none")))
+    R.OUT.clear()
+    rows = run_group(monkeypatch, "pm.emulator", slow=False)
+    assert [(r["id"], r["kind"]) for r in rows] == [("pm.emulator:not_run", "fail")] and "names no commit" in rows[0]["note"] and R.OUT == []
+
+
+def test_r13_m14_the_stamp_command_reports_a_read_only_directory_and_keeps_a_symlink(tmp_path):
+    import subprocess, sys
+
+    def run(*args):
+        return subprocess.run([sys.executable, "-m", "cafe.receipts", "stamp", *args], cwd=pr.ROOT, capture_output=True, text=True)
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    (ro / "r.json").write_text(json.dumps(dict(x=1)))
+    ro.chmod(0o500)
+    try:
+        if os.access(ro, os.W_OK):
+            pytest.fail("the directory is still writable (running as root?): this test cannot tell")
+        r = run(str(ro / "r.json"))
+    finally:
+        ro.chmod(0o700)
+    assert r.returncode != 0 and "Traceback" not in r.stderr and "nothing was stamped" in r.stderr and json.loads((ro / "r.json").read_text()) == dict(x=1)
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps(dict(x=1)))
+    (tmp_path / "sl.json").symlink_to(real)
+    r = run(str(tmp_path / "sl.json"))
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "sl.json").is_symlink() and R.stored(real, "G") is not None                  # the target was stamped; the link is still a link

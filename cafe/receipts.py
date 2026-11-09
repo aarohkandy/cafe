@@ -68,16 +68,27 @@ def stamp(rec: dict[str, Any], later: bool = False) -> dict[str, Any]:
 
 def stamp_file(path: str | pathlib.Path) -> pathlib.Path:
     """Stamp the JSON object in `path` as a result that somebody has checked (`stamp(..., later=True)`), through a temporary and os.replace. This says the
-    code that is here stands behind the numbers, not that it made them: use it on a result you have looked at, never to make a stale one pass."""
+    code that is here stands behind the numbers, not that it made them: use it on a result you have looked at, never to make a stale one pass. A stamp
+    that names no commit is refused: `stored` would not count it (round 13, M-24)."""
     from cafe.pm.config import json_object, write_json
+    from cafe.pm.ledger import git_sha, has_commit
     p = pathlib.Path(path)
-    write_json(p, stamp(json_object(p, "nothing was stamped"), later=True), indent=1)
+    rec = json_object(p, "nothing was stamped")
+    if not has_commit(git_sha()):
+        raise ValueError(f"{p}: nothing was stamped: no commit to name (no git here and $CAFE_GIT_SHA is not set); stamp it from the checkout, or through pm.sh")
+    write_json(p, stamp(rec, later=True), indent=1)
     return p
+
+
+# The files `python -m cafe.cfd` writes, stamped; no other stored result has a writer here.
+CFD_FILES = ("torpedo.external.json", "wigley.surface.json", "suboff.incidence.json")
 
 
 def stored(path: pathlib.Path, group: str) -> tuple[dict[str, Any], str] | None:
     """(the stored result, ' [stored <date>, <host>, git <sha>]') or None. None also when there is no file (the caller says so once for all of them) and
-    after a context row has said why the file is not used: unreadable, not an object, unstamped, or made by other code."""
+    after a context row has said why the file is not used: unreadable, not an object, unstamped (a field missing or empty, or no commit named), or made by
+    other code. The advice names the program that writes this file, or says that none does."""
+    from cafe.pm.ledger import has_commit
     if not path.is_file():
         return None
     try:
@@ -90,13 +101,18 @@ def stored(path: pathlib.Path, group: str) -> tuple[dict[str, Any], str] | None:
         missing = [k for k in STAMP if not isinstance(rec.get(k), str) or not rec[k]]
         if missing:
             why = f"carries no {', '.join(missing)}, so nothing says which code made it or when (unstamped)"
+        elif not has_commit(rec["git_sha"]):
+            why = (f"names no commit (git_sha {rec['git_sha']!r}), so nothing says which code made it (unstamped); run through pm.sh or the README's pm(), "
+                   "which pass CAFE_GIT_SHA, or set CAFE_GIT_SHA=<commit>")
         elif rec["code_digest"] != app_digest():
             why = f"(stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}) was made by different code (stale)"
         else:
             later = ", stamped afterwards, not by the run" if rec.get("stamped_later") is True else ""
             return rec, f" [stored {rec['date']}, {rec['host']}, git {rec['git_sha'][:10]}{later}]"
+    redo = ("rerun the run that writes it (python -m cafe.cfd stamps its file)" if path.name in CFD_FILES
+            else "redo the SITL cross-check by hand (no program in this repo writes this file)")
     context(group, f"stored result {path.name} {why}: not counted", 0.0, 0.0, "",
-            f"rerun the run that writes it (python -m cafe.cfd stamps its file), or if you have checked this one, `python -m cafe.receipts stamp {path}`")
+            f"{redo}, or if you have checked this one, `python -m cafe.receipts stamp {path}`")
     return None
 
 
@@ -643,8 +659,11 @@ if __name__ == "__main__":
         try:
             for f in sys.argv[2:]:
                 print(f"stamped {stamp_file(f)}")
-        except ValueError as e:                                     # a ConfigError: the file is missing, not JSON, or not an object
+        except ValueError as e:                                     # a ConfigError: the file is missing, not JSON, or not an object; or no commit to name
             sys.exit(f"error: {e}")
+        except OSError as e:                                        # a read-only directory (/work is mounted read-only under pm.sh), a full disk
+            from cafe.pm.config import os_error_text
+            sys.exit(f"error: nothing was stamped: {os_error_text(e)}")
         sys.exit(0)
     results = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path("/work/runs")
     t0 = time.time()

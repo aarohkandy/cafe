@@ -616,6 +616,8 @@ def test_r12_m12_the_fresnel_figures_in_the_two_ray_docstring_are_what_the_formu
     """The docstring said -1 holds below 1-2 deg; the vertical-polarised Fresnel coefficient of sea water is 0.70 at 1 deg and within 10 % of 1 below 0.3 deg.
     The model keeps -1 (documents only); this pins the figures it quotes, so they cannot drift from the formula: eps_c 72.8 - j118.9 at 915 MHz (assumed)."""
     eps = 72.8 - 118.9j
+    assert -eps.imag == pytest.approx(60 * LAM * 6.05, abs=0.05)                                  # sigma 6.05 S/m gives the eps'' quoted (M-10)
+    assert "sigma 6.05 S/m" in c.two_ray_curved_db.__doc__ and "5.9 S/m" not in c.two_ray_curved_db.__doc__
 
     def G(deg):
         psi = np.radians(deg)

@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-import datetime as dt, importlib.metadata, json, math, os, pathlib, platform, shutil, subprocess, sys, time
+import datetime as dt, importlib.metadata, json, math, os, pathlib, platform, re, shutil, subprocess, sys, time
 from types import TracebackType
 from typing import Any, Literal
 
@@ -31,12 +31,19 @@ class StageFailed(RuntimeError):
 
 
 def git_sha() -> str:
-    """HEAD of the checkout, else $CAFE_GIT_SHA (a copy synced without .git, e.g. into the container), else "none"."""
+    """HEAD of the checkout, else $CAFE_GIT_SHA (a copy synced without .git, e.g. into the container), else "none". An empty $CAFE_GIT_SHA (a wrapper whose
+    `git rev-parse` failed) is "none" too, so the two ways of not knowing are one answer (round 13, M-24)."""
     try:
         sha = subprocess.run(["git", "-C", str(ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         sha = ""
-    return sha or os.environ.get("CAFE_GIT_SHA", "none")
+    return sha or os.environ.get("CAFE_GIT_SHA") or "none"
+
+
+def has_commit(sha: Any) -> bool:
+    """Whether a recorded `git_sha` names a commit (7 or more hex digits). "none", "" and anything that is not text do not: a stamp that carries one says
+    nothing about which code made the result (round 13, M-24)."""
+    return isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{7,}", sha) is not None
 
 
 def git_dirty() -> bool | None:
@@ -191,16 +198,45 @@ def _jsonable(x: Any) -> Any:
     return str(x)
 
 
+def _key(k: Any) -> str:
+    """The text `json.dumps` writes for the dict key `k` (a number, bool or None is text there), or, for a key it refuses (a numpy integer, a date, a
+    tuple, a non-finite float), the text `clean` makes of it."""
+    if isinstance(k, str):
+        return k
+    if k is None:
+        return "null"
+    if isinstance(k, bool):
+        return "true" if k else "false"
+    if isinstance(k, int):
+        return str(int(k))
+    if isinstance(k, float):
+        return repr(float(k))
+    c = clean(k)
+    return _key(c) if c is None or isinstance(c, (bool, int, float, str)) else str(c)
+
+
 def clean(x: Any) -> Any:
     """x as strict JSON data: numpy values and dates made plain (`_jsonable`), every non-finite float (NaN, an unbounded limit) replaced by None,
-    because JSON has no NaN or Infinity and `jq` / JSON.parse reject them."""
+    because JSON has no NaN or Infinity and `jq` / JSON.parse reject them. Every dict key is made the text JSON writes for it (`_key`: 1 is "1", True is
+    "true", None is "null"; a numpy integer, a date, a tuple, a non-finite float that `json.dumps` refuses are made text the same way, and in
+    `Ledger.__exit__` that TypeError would replace the stage's own exception, round 13 M-29), and two keys that come out the same keep the first value:
+    `{1: a, "1": b}` would otherwise be written with two "1" keys, and `sort_keys` fails on a dict of mixed key types."""
     if isinstance(x, dict):
-        return {k: clean(v) for k, v in x.items()}
+        out: dict[str, Any] = {}
+        for k, v in x.items():
+            out.setdefault(_key(k), clean(v))
+        return out
     if isinstance(x, (list, tuple)):
         return [clean(v) for v in x]
     if isinstance(x, float):
         return x if math.isfinite(x) else None
     return x if x is None or isinstance(x, (bool, int, str)) else clean(_jsonable(x))
+
+
+def real(p: str | pathlib.Path) -> pathlib.Path:
+    """`p` with symlinks followed, for a path inside a run directory. `Path.resolve()` raises RuntimeError on a symlink loop (Python 3.12), where
+    `os.path.realpath` does not: the loop then shows as the path being missing, which the audit already reports (round 13, M-21)."""
+    return pathlib.Path(os.path.realpath(p))
 
 
 def hashed(i: dict[str, Any]) -> bool:
@@ -335,9 +371,9 @@ def rerecord(run_dir: str | pathlib.Path, stage: str, written: list[pathlib.Path
         return False
     d = json.loads(p.read_text())
     roots = run_roots(d)
-    outs = {resolve(o["path"], run_dir, roots).resolve(): o for o in d["outputs"]}
+    outs = {real(resolve(o["path"], run_dir, roots)): o for o in d["outputs"]}
     for w in written:
-        outs.setdefault(w.resolve(), dict(path=str(w)))["sha256"] = sha256(w)
+        outs.setdefault(real(w), dict(path=str(w)))["sha256"] = sha256(w)
     d["outputs"] = list(outs.values())
     d["notes"].append(f"re-rendered by report --run (git_sha {git_sha()}, code_digest {code_digest})")
     tmp = p.with_suffix(".tmp")

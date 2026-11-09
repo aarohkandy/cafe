@@ -75,6 +75,8 @@ def _yaml(path: str | pathlib.Path) -> Any:
         raise ConfigError(f"{path}: {e}") from e
     except yaml.YAMLError as e:
         raise ConfigError(f"{path}: not valid YAML ({e})") from e
+    except RecursionError as e:                                             # a few hundred nested brackets: PyYAML recurses per level (round 13, M-22)
+        raise ConfigError(f"{path}: nested too deeply to read; a mission or platform file has a few levels, not hundreds") from e
 
 
 read_yaml = _yaml                                                       # the one YAML reader: every config, platform and mission file goes through it
@@ -123,7 +125,18 @@ def _say(e: Any) -> str:
         return f"YAML reads an unquoted no/yes/on/off as {str(e.instance).lower()}; put it in quotes"
     if e.validator == "type" and e.validator_value == "number" and isinstance(e.instance, str) and _is_float(e.instance):
         return f"the number is written in a form YAML reads as text ({e.instance!r}); write {float(e.instance):g}"
-    return str(e.message)
+    if e.validator == "maxItems":                                           # jsonschema's message repeats the whole list (15 kB for 65 vehicles)
+        return f"has {len(e.instance)} items; at most {e.validator_value} are allowed"
+    return _short(str(e.message), e.instance)
+
+
+def _short(msg: str, instance: Any) -> str:
+    """A schema message without the instance it quotes whole: jsonschema starts most of them with `repr(instance)` (a long string, a long list), which
+    would make one wrong entry a message of any length. The instance is cut to 80 characters, the reason after it stays; any other message is cut at 300."""
+    r = repr(instance)
+    if len(r) > 80 and msg.startswith(r):
+        msg = r[:80] + "..." + msg[len(r):]
+    return msg if len(msg) <= 300 else msg[:300] + "..."
 
 
 def validate(doc: Any, schema_name: str, where: str) -> Any:
@@ -208,7 +221,7 @@ def json_object(p: pathlib.Path, fix: str = "`run` writes it, so run it again (-
     what makes the file again."""
     try:
         d = json.loads(p.read_text())
-    except (ValueError, OSError) as e:                                   # JSONDecodeError and UnicodeDecodeError are ValueErrors
+    except (ValueError, OSError, RecursionError) as e:                   # JSONDecodeError, UnicodeDecodeError: ValueErrors; RecursionError: nesting
         raise ConfigError(f"{p}: not a JSON object ({e}); {fix}") from e
     if not isinstance(d, dict):
         raise ConfigError(f"{p}: not a JSON object (it holds {type(d).__name__}); {fix}")
@@ -246,7 +259,9 @@ def os_error_text(e: OSError) -> str:
 
 def write_json(p: pathlib.Path, obj: Any, **kw: Any) -> None:
     """`obj` as JSON in `p` through a sibling temporary and os.replace: a run killed mid-write leaves the old file, never half of a new one that
-    `json_object` and the other readers of a stored result would then have to refuse (round 9, L0; the writer of every slow-run receipt)."""
+    `json_object` and the other readers of a stored result would then have to refuse (round 9, L0; the writer of every slow-run receipt). A symlink is
+    followed, so the file it points to is the one replaced and the link stays a link (round 13, M-14)."""
+    p = pathlib.Path(os.path.realpath(p))
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_text(json.dumps(obj, **kw))
     os.replace(tmp, p)

@@ -694,3 +694,37 @@ def test_l0_r11_the_platform_files_the_reference_runs_hashed_are_the_bytes_they_
                          "stage: every `audit` of those runs now fails with 'input ... changed' and a re-render lowers two credibility levels, whatever the "
                          "edit was. Move a wording change to DECISIONS or the code; if a number must change, say in DECISIONS that those runs are re-run, "
                          "then update the pin")
+
+
+def test_r13_a_clean_gives_every_dict_key_the_text_json_writes_so_a_native_int_and_the_same_number_as_text_cannot_collide():
+    """The adversary of batch A: `clean({1: a, "1": b})` kept both keys (only converted keys were merged), `json.dumps` wrote two "1" keys, and
+    `sort_keys=True` raised TypeError on the mixed key types."""
+    got = ledger.clean({1: "a", "1": "b", 2.5: "c", "2.5": "d", np.int64(3): "e", "3": "f", False: "g", "false": "h", None: "i", "null": "j", "x": "k"})
+    assert got == {"1": "a", "2.5": "c", "3": "e", "false": "g", "null": "i", "x": "k"}              # the first of each text wins; the others are gone
+    out = json.dumps(got, sort_keys=True, allow_nan=False)
+    assert out.count('"1":') == 1 and json.loads(out) == got
+    assert list(ledger.clean({2: 0, "a": 1, None: 2})) == ["2", "a", "null"]
+    assert ledger.clean({"k": {3: [{4: 5}]}}) == {"k": {"3": [{"4": 5}]}}                            # nested, inside lists too
+
+
+def test_r13_m29_clean_makes_a_non_json_dict_key_text_and_the_ledger_keeps_the_stage_error(tmp_path):
+    """`json.dumps` refuses a numpy-integer, date or tuple key; in `Ledger.__exit__` that TypeError replaced the exception the stage was leaving."""
+    assert ledger.clean({np.int64(3): np.float64(1.0), dt.date(2023, 3, 1): 2, (1, 2): 3, 4: 5, "s": 6, None: 7, float("nan"): 8}) == \
+        {"3": 1.0, "2023-03-01": 2, "[1, 2]": 3, "4": 5, "s": 6, "null": 7, "nan": 8}
+    assert ledger.clean({np.int64(3): "first", "3": "second"}) == {"3": "first"}                    # two keys that come out the same keep the first
+    assert json.loads(json.dumps(ledger.clean({np.int64(3): 1.0}), allow_nan=False)) == {"3": 1.0}
+    with pytest.raises(ValueError, match="the stage's own error"):
+        with Ledger(tmp_path, "stage1", "h1") as L:
+            L.d["extra"] = {np.int64(3): 1.0}
+            raise ValueError("the stage's own error")
+    d = json.loads((tmp_path / "checkpoints" / "stage1" / "ledger.json").read_text())
+    assert d["extra"] == {"3": 1.0} and d["error"] == "ValueError: the stage's own error" and d["ok"] is False
+
+
+def test_r13_m21_real_follows_symlinks_and_survives_a_loop(tmp_path):
+    (tmp_path / "a").mkdir()
+    (tmp_path / "ln").symlink_to(tmp_path / "a")
+    (tmp_path / "loop").symlink_to(tmp_path / "loop")
+    assert ledger.real(tmp_path / "ln" / "x") == (tmp_path / "a" / "x").resolve()
+    assert ledger.real(tmp_path / "loop" / "x").name == "x"                                          # no RuntimeError
+
