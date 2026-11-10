@@ -833,9 +833,10 @@ def test_lb1_a_mooring_left_out_of_the_comparison_is_named_with_its_reason(tmp_p
 def test_the_fitted_wind_prior_removes_the_model_bias_and_stage1_accepts_it(tmp_path, data):
     ctx, t0, t1 = tao_ctx(tmp_path)
     tao_stage(ctx, t0, t1)
-    a = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())["ALL"]
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
-    assert a["speed_bias"] + fit["wind_speed_bias"]["mean"] == pytest.approx(0.0)                                      # model + prior mean = mooring
+    per = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())
+    each = [v["speed_bias"] for k, v in per.items() if k != "ALL"]
+    assert np.mean(each) + fit["wind_speed_bias"]["mean"] == pytest.approx(0.0)   # model + prior mean = mooring (M-44: the mean of the moorings' means)
     pri, marg = stage1.priors_for(ctx.mission, fit)
     assert marg["wind_speed_bias"] == dict(dist="normal", mean=fit["wind_speed_bias"]["mean"], sd=fit["wind_speed_bias"]["value"])
     # the data are tighter than the 2 m/s prior
@@ -944,6 +945,37 @@ def test_the_wind_error_fit_recovers_a_known_persistent_and_short_lived_split_wi
     total = np.sqrt(0.9 ** 2 + 1.4 ** 2)                                                           # the old fit held this whole hourly sd fixed per member
     assert got["persistent"] < 0.7 * total
 
+
+def test_r14_m28_the_noise_is_the_pooled_sd_about_each_moorings_own_mean_weighted_by_degrees_of_freedom():
+    """Round 14, M-28: replacing `np.average(s2, weights=n - 1)` by `np.mean(s2)` passed every test of `fit_wind_error`, because their moorings had records of
+    about one length. Two of very unequal length and sd: the answer is the pooled within-mooring variance, sum of squares over sum of degrees of freedom."""
+    rng = np.random.default_rng(3)
+    a, b = rng.normal(0.4, 0.5, 50), rng.normal(-0.2, 3.0, 500)
+    got = pipeline.fit_wind_error({"short": a, "long": b})
+    pooled = (((a - a.mean()) ** 2).sum() + ((b - b.mean()) ** 2).sum()) / ((a.size - 1) + (b.size - 1))
+    assert got["noise"] == pytest.approx(np.sqrt(pooled), rel=1e-12)
+    assert abs(got["noise"] - np.sqrt((a.var(ddof=1) + b.var(ddof=1)) / 2)) > 0.5   # the unweighted mean of the variances is far off
+
+
+def test_r14_m44_the_fit_returns_the_unweighted_mean_of_the_moorings_means_and_not_the_pooled_samples_mean():
+    """Constant series, so the means are exact: 1 (100 samples), 2 (10) and 4 (20). Unweighted 7/3; pooled over the samples 200/130."""
+    got = pipeline.fit_wind_error({"a": np.full(100, 1.0), "b": np.full(10, 2.0), "c": np.full(20, 4.0)})
+    assert got["mean"] == pytest.approx(7.0 / 3.0, rel=1e-12) and abs(got["mean"] - 200.0 / 130.0) > 0.5
+
+
+def test_r14_m44_the_fitted_prior_means_follow_the_estimator_the_citation_and_the_uncertainty_term_name(tmp_path, data, monkeypatch):
+    """Speed and direction both: minus the unweighted mean of the moorings' time-mean errors (the demo's 14 moorings moved 0.009 m/s and 0.14 deg)."""
+    ctx, t0, t1 = tao_ctx(tmp_path)
+
+    def col(n, speed, direction):
+        return np.column_stack([np.full(n, speed), np.full(n, direction)])
+    monkeypatch.setattr(pipeline, "_wind_residuals", lambda wrf, moor: {"A": col(100, 1.0, 10.0), "B": col(10, 2.0, 20.0), "C": col(20, 4.0, 40.0)})
+    tao_stage(ctx, t0, t1)
+    fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
+    assert fit["wind_speed_bias"]["mean"] == pytest.approx(-7.0 / 3.0) and fit["wind_direction_bias"]["mean"] == pytest.approx(-70.0 / 3.0)
+    for key in ("wind_speed_bias", "wind_direction_bias"):
+        assert "mean = minus the unweighted mean of the 3 moorings' time-mean errors, i.e. mooring minus WRF" in fit[key]["citation"]
+        assert "uncertainty of the mean of 3 moorings" in fit[key]["citation"]
 
 def test_a_different_split_is_recovered_too_and_white_noise_has_no_memory():
     a = pipeline.fit_wind_error(ar1_moorings(np.random.default_rng(11), persistent=0.3, noise=2.0, tau=12.0))
@@ -4018,12 +4050,14 @@ def test_r10_m25_the_fitted_bias_prior_says_that_its_mean_is_the_flipped_error(t
     """Round 10, M-25: the citation 'WRF minus 11 moorings' sat over a mean of the opposite sign, so a reader of priors_fitted.json alone got it backwards."""
     ctx, t0, t1 = tao_ctx(tmp_path)
     tao_stage(ctx, t0, t1)
-    a = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())["ALL"]
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
-    for key, err in (("wind_speed_bias", a["speed_bias"]), ("wind_direction_bias", a["dir_bias_deg"])):
+    per = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())
+    for key, field in (("wind_speed_bias", "speed_bias"), ("wind_direction_bias", "dir_bias_deg")):
+        err = float(np.mean([v[field] for k, v in per.items() if k != "ALL"]))                                   # round 14, M-44: not a["..."], the pooled samples
         assert fit[key]["mean"] == pytest.approx(-err)
         c = fit[key]["citation"]
-        assert "mean = minus the 2-mooring mean error, i.e. mooring minus WRF" in c and "adds to WRF" in c and f"WRF minus mooring, {err:+.3g}" in c
+        assert "mean = minus the unweighted mean of the 2 moorings' time-mean errors, i.e. mooring minus WRF" in c and "adds to WRF" in c
+        assert f"WRF minus mooring, {err:+.3g}" in c
     assert "mooring minus WRF" not in fit["wind_speed_noise"]["citation"]                            # the noise entries have no signed mean
 
 
