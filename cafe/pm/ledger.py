@@ -48,12 +48,16 @@ def has_commit(sha: Any) -> bool:
 
 def need_commit(doing: str) -> str:
     """The commit a stored result is stamped with, or a ValueError that says `nothing was <doing>` when there is none (no git here and no $CAFE_GIT_SHA).
-    The one guard of every writer of a stamped result: `cafe.receipts.stamp` (so `python -m cafe.cfd` and the `stamp` command), `pm.receipts._save` (the slow
+    A `CAFE_GIT_SHA` that is set to something that is no commit (`HEAD`, upper case, `abc`) is named as such, not called unset (round 14, M-6). The one
+    guard of every writer of a stamped result: `cafe.receipts.stamp` (so `python -m cafe.cfd` and the `stamp` command), `pm.receipts._save` (the slow
     receipt groups), and the starts of the long runs that end in one, since a result that names no commit is refused by its readers (`has_commit`) and
     the hours of work would be lost (look-ahead L0 after round 13, M-24)."""
     sha = git_sha()
     if not has_commit(sha):
-        raise ValueError(f"nothing was {doing}: no commit to name (no git here and $CAFE_GIT_SHA is not set); run it from the checkout, or through pm.sh")
+        env = os.environ.get("CAFE_GIT_SHA", "")
+        why = (f"$CAFE_GIT_SHA is set to {env!r}, which is not a commit (7 or more lower-case hex digits)" if env and env != "none" else
+               "no git here and $CAFE_GIT_SHA is not set")                                    # round 14, M-6: a value that is set is not "not set"
+        raise ValueError(f"nothing was {doing}: no commit to name ({why}); run it from the checkout, or through pm.sh")
     return sha
 
 
@@ -117,15 +121,19 @@ def machine() -> dict[str, Any]:
 
 
 def copy_manifest(src: str | pathlib.Path, dest: str | pathlib.Path) -> dict[str, Any]:
-    """Copy the shared manifest `src` to `dest` through a sibling temporary and os.replace, and return what the copy holds: the one read of the shared file
-    a stage makes (`Ledger.snapshot`)."""
+    """Copy the shared manifest `src` to `dest` through a sibling temporary and os.replace, and return what the copy holds: the one read of the shared
+    file a stage makes (`Ledger.snapshot`). {} when the copy is not a JSON object: the callers' shape checks (`_orca_covers`, `_tao_covers`) then say it
+    covers nothing and the cache is fetched again, as for a manifest of the wrong shape (round 14, M-22 sibling)."""
     dest = pathlib.Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     shutil.copyfile(src, tmp)
     os.replace(tmp, dest)
-    man: dict[str, Any] = json.loads(dest.read_text())
-    return man
+    try:
+        man = json.loads(dest.read_text())
+    except ValueError:                                                    # not JSON (a damaged disk): no record; it covers nothing, so it is fetched again
+        return {}
+    return man if isinstance(man, dict) else {}
 
 
 class Ledger:
@@ -197,9 +205,8 @@ class Ledger:
         if missing and et is None:
             self.d["error"] = f"outputs never written: {missing}"
         self.d["ok"] = et is None and not missing and self.ok
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(clean(self.d), indent=1, allow_nan=False))
-        os.replace(tmp, self.path)
+        from .config import write_text
+        write_text(self.path, json.dumps(clean(self.d), indent=1, allow_nan=False))
         if missing and et is None:
             raise StageFailed(f"stage {self.d['stage']}: registered outputs were never written: {missing} (ledger: {self.path})")
         if et is None and not self.ok:
@@ -417,7 +424,6 @@ def rerecord(run_dir: str | pathlib.Path, stage: str, written: list[pathlib.Path
         outs.setdefault(real(w), dict(path=str(w)))["sha256"] = sha256(w)
     d["outputs"] = list(outs.values())
     d["notes"].append(f"re-rendered by report --run (git_sha {git_sha()}, code_digest {code_digest})")
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(clean(d), indent=1, allow_nan=False))
-    os.replace(tmp, p)
+    from .config import write_text
+    write_text(p, json.dumps(clean(d), indent=1, allow_nan=False))
     return True

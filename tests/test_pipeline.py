@@ -357,7 +357,8 @@ def test_stages_after_a_rerun_stage_run_again_so_the_chain_stays_valid(tmp_path,
 
 
 @pytest.mark.parametrize("what", ["code", "budget", "gpus", "mission"])
-def test_a_change_of_code_budget_gpus_or_mission_reruns_every_stage(tmp_path, monkeypatch, what):
+def test_a_change_of_code_or_mission_reruns_every_stage_and_of_budget_or_gpus_every_stage_but_the_ingest(tmp_path, monkeypatch, what):
+    """The ingest reads neither the budget nor the GPU count (round 14, M-30), so a `fetch` leaves it current for a run of any budget."""
     calls = []
     stub_stages(monkeypatch, calls)
     m = tmp_path / "m.yaml"
@@ -374,7 +375,7 @@ def test_a_change_of_code_budget_gpus_or_mission_reruns_every_stage(tmp_path, mo
     elif what == "mission":
         m.write_text(m.read_text().replace("go: 0.9", "go: 0.95"))
     again(**({"budget_name": "quick"} if what == "budget" else {"gpus": 1} if what == "gpus" else {}))
-    assert calls == STAGES
+    assert calls == (STAGES[1:] if what in ("budget", "gpus") else STAGES)
 
 
 def test_a_failed_self_check_stops_the_run_and_the_stage_is_redone_on_resume(tmp_path, monkeypatch):
@@ -833,21 +834,26 @@ def test_lb1_a_mooring_left_out_of_the_comparison_is_named_with_its_reason(tmp_p
 def test_the_fitted_wind_prior_removes_the_model_bias_and_stage1_accepts_it(tmp_path, data):
     ctx, t0, t1 = tao_ctx(tmp_path)
     tao_stage(ctx, t0, t1)
-    a = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())["ALL"]
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
-    assert a["speed_bias"] + fit["wind_speed_bias"]["mean"] == pytest.approx(0.0)                                      # model + prior mean = mooring
+    per = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())
+    each = [v["speed_bias"] for k, v in per.items() if k != "ALL"]
+    assert np.mean(each) + fit["wind_speed_bias"]["mean"] == pytest.approx(0.0)   # model + prior mean = mooring (M-44: the mean of the moorings' means)
     pri, marg = stage1.priors_for(ctx.mission, fit)
     assert marg["wind_speed_bias"] == dict(dist="normal", mean=fit["wind_speed_bias"]["mean"], sd=fit["wind_speed_bias"]["value"])
     # the data are tighter than the 2 m/s prior
     assert marg["wind_direction_bias"]["mean"] == fit["wind_direction_bias"]["mean"] and marg["wind_speed_bias"]["sd"] < 2.0
 
 
-def test_without_a_tao_download_the_default_priors_stand_and_the_ledger_says_so(tmp_path, data_copy):
+def test_r14_m24_a_run_without_a_tao_download_stops_at_the_tao_present_check_and_does_not_go_on_with_default_priors(tmp_path, data_copy):
+    """The `_tao` docstring and PHYSICS said a mission with no TAO download keeps the perturbations.yaml priors; `s_ingest` asks `_need("tao")` first, so the
+    stage fails there (BRIEF 5.4 makes the comparison mandatory) and `_tao`'s branch for a missing manifest could not be reached. It is gone; this is the
+    behaviour that was real."""
     shutil.rmtree(data_copy / "tao")
-    ctx = ctx_for(tmp_path / "r", record=False)
-    d = tao_stage(ctx, ctx.env.tw.x[0], ctx.env.tw.x[-1])
-    assert d["notes"] == [f"no TAO/TRITON download at {tao.cache_dir(data_copy)}: wind priors stay the perturbations.yaml defaults (run `make fetch`)"]
-    assert d["checks"] == [] and d["outputs"] == [] and d["inputs"] == [] and not (ctx.run_dir / "ingest").exists()
+    with pytest.raises(ledger.StageFailed, match="tao_present"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    d = read_ledger(tmp_path / "r", "ingest")
+    note = next(c["note"] for c in d["checks"] if c["name"] == "tao_present")
+    assert "python -m cafe.pm fetch --mission" in note and not (tmp_path / "r" / "ingest" / "priors_fitted.json").exists()
 
 
 def test_a_negative_variance_from_rounding_gives_a_zero_spread(tmp_path, data, monkeypatch):
@@ -941,6 +947,37 @@ def test_the_wind_error_fit_recovers_a_known_persistent_and_short_lived_split_wi
     assert got["persistent"] < 0.7 * total
 
 
+def test_r14_m28_the_noise_is_the_pooled_sd_about_each_moorings_own_mean_weighted_by_degrees_of_freedom():
+    """Round 14, M-28: replacing `np.average(s2, weights=n - 1)` by `np.mean(s2)` passed every test of `fit_wind_error`, because their moorings had records of
+    about one length. Two of very unequal length and sd: the answer is the pooled within-mooring variance, sum of squares over sum of degrees of freedom."""
+    rng = np.random.default_rng(3)
+    a, b = rng.normal(0.4, 0.5, 50), rng.normal(-0.2, 3.0, 500)
+    got = pipeline.fit_wind_error({"short": a, "long": b})
+    pooled = (((a - a.mean()) ** 2).sum() + ((b - b.mean()) ** 2).sum()) / ((a.size - 1) + (b.size - 1))
+    assert got["noise"] == pytest.approx(np.sqrt(pooled), rel=1e-12)
+    assert abs(got["noise"] - np.sqrt((a.var(ddof=1) + b.var(ddof=1)) / 2)) > 0.5   # the unweighted mean of the variances is far off
+
+
+def test_r14_m44_the_fit_returns_the_unweighted_mean_of_the_moorings_means_and_not_the_pooled_samples_mean():
+    """Constant series, so the means are exact: 1 (100 samples), 2 (10) and 4 (20). Unweighted 7/3; pooled over the samples 200/130."""
+    got = pipeline.fit_wind_error({"a": np.full(100, 1.0), "b": np.full(10, 2.0), "c": np.full(20, 4.0)})
+    assert got["mean"] == pytest.approx(7.0 / 3.0, rel=1e-12) and abs(got["mean"] - 200.0 / 130.0) > 0.5
+
+
+def test_r14_m44_the_fitted_prior_means_follow_the_estimator_the_citation_and_the_uncertainty_term_name(tmp_path, data, monkeypatch):
+    """Speed and direction both: minus the unweighted mean of the moorings' time-mean errors (the demo's 14 moorings moved 0.009 m/s and 0.14 deg)."""
+    ctx, t0, t1 = tao_ctx(tmp_path)
+
+    def col(n, speed, direction):
+        return np.column_stack([np.full(n, speed), np.full(n, direction)])
+    monkeypatch.setattr(pipeline, "_wind_residuals", lambda wrf, moor: {"A": col(100, 1.0, 10.0), "B": col(10, 2.0, 20.0), "C": col(20, 4.0, 40.0)})
+    tao_stage(ctx, t0, t1)
+    fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
+    assert fit["wind_speed_bias"]["mean"] == pytest.approx(-7.0 / 3.0) and fit["wind_direction_bias"]["mean"] == pytest.approx(-70.0 / 3.0)
+    for key in ("wind_speed_bias", "wind_direction_bias"):
+        assert "mean = minus the unweighted mean of the 3 moorings' time-mean errors, i.e. mooring minus WRF" in fit[key]["citation"]
+        assert "uncertainty of the mean of 3 moorings" in fit[key]["citation"]
+
 def test_a_different_split_is_recovered_too_and_white_noise_has_no_memory():
     a = pipeline.fit_wind_error(ar1_moorings(np.random.default_rng(11), persistent=0.3, noise=2.0, tau=12.0))
     assert a["persistent"] == pytest.approx(0.3, rel=0.2) and a["noise"] == pytest.approx(2.0, rel=0.2) and a["tau_h"] == pytest.approx(12.0, rel=0.2)
@@ -985,6 +1022,28 @@ def test_moorings_outside_the_grid_fail_the_stage_through_its_self_check(tmp_pat
         tao_stage(ctx, t0, t1)
     c = check_of(read_ledger(ctx.run_dir, "ingest"), "tao_moorings_compared")
     assert (c["ok"], c["value"]) == (False, 0)
+
+
+def test_r14_m24_a_box_with_no_usable_mooring_fails_the_ingest_and_the_check_says_the_box_must_contain_moorings(tmp_path, data):
+    """Kept refusal (BRIEF 5.4): the note used to name only "moorings with usable wind in the window", which reads as a window problem."""
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    ctx._env = types.SimpleNamespace(inside=lambda lon, lat: False)
+    with pytest.raises(ledger.StageFailed, match="tao_moorings_compared"):
+        tao_stage(ctx, t0, t1)
+    note = check_of(read_ledger(ctx.run_dir, "ingest"), "tao_moorings_compared")["note"]
+    assert "the mission box must contain TAO/TRITON moorings" in note
+
+def test_r14_p_r14b2_a_stale_fit_does_not_survive_an_ingest_that_stops_at_the_moorings_check(tmp_path, data):
+    """`priors_fitted.json` and `env_sigmas_fitted.json` of an earlier attempt stayed when a later one failed at `tao_moorings_compared` before writing
+    either, and `whatif --run`, `Context.env` and the credibility page read whatever is there."""
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    ctx._env = types.SimpleNamespace(inside=lambda lon, lat: False)
+    stale = [ctx.path("ingest", f) for f in ("priors_fitted.json", "env_sigmas_fitted.json")]
+    for f in stale:
+        f.write_text(json.dumps(dict(sst_k=9.9)))
+    with pytest.raises(ledger.StageFailed, match="tao_moorings_compared"):
+        tao_stage(ctx, t0, t1)
+    assert not any(f.exists() for f in stale)
 
 
 def test_the_tao_fit_also_sets_the_sst_and_t2_sigmas_that_the_environment_is_tagged_with(tmp_path, data):
@@ -1384,6 +1443,32 @@ def test_a_mission_without_a_usv_runs_no_sensitivity_case(tmp_path, monkeypatch,
     assert sens == [] and not (ctx.run_dir / "stage1b" / report.SENSITIVITY).exists() and SENS_NOTE not in d["notes"]
 
 
+def test_r14_m29_a_stale_sensitivity_file_does_not_survive_a_mission_with_no_usv(tmp_path, monkeypatch, sens):
+    """`_sensitivity_cases` returned at once for a mission with no USV and removed nothing: the file of the earlier mission stayed in the stage directory,
+    where `s_report` takes every json as an input and the report's `_cases` shows its entry under whatever vehicle has that id."""
+    ctx = ctx_for(tmp_path / "r")
+    ctx.mission = dict(ctx.mission, vehicles=[v for v in ctx.mission["vehicles"] if pipeline.stage1._classes(ctx.mission)[v["id"]] != "usv"])
+    stage1_files(ctx)
+    ctx.path("refit", "refit.json").write_text(json.dumps({}))
+    stale = ctx.path("stage1b", report.SENSITIVITY)
+    stale.write_text(json.dumps({"usv": [dict(n=8, k_fail=1, verdict="NO-GO")]}))
+    monkeypatch.setattr(pipeline, "_stage1", boom)
+    d = run_stage(pipeline.s_stage1b, ctx, "stage1b")
+    assert not stale.exists() and report.SENSITIVITY not in [pathlib.Path(o["path"]).name for o in d["outputs"]]
+
+
+def test_r14_m29_a_stale_fitted_sigma_file_does_not_survive_an_ingest_that_fits_none(tmp_path, data, monkeypatch):
+    """The same defect one stage earlier: `ingest/env_sigmas_fitted.json` is written only when a sigma was fitted, and `Context.env` and the credibility page
+    read it whenever it is there, so a second attempt that fitted nothing still ran on the first one's sigmas."""
+    real_cmp, real_load = tao.compare, tao.load_tao
+    monkeypatch.setattr(tao, "compare", lambda w, m: (lambda r: {**r, "ALL": {**r["ALL"], "sst_rmse": float("nan")}})(real_cmp(w, m)))
+    monkeypatch.setattr(tao, "load_tao", lambda *a, **k: {n: {x: y for x, y in v.items() if x != "airt"} for n, v in real_load(*a, **k).items()})
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    stale = ctx.path("ingest", "env_sigmas_fitted.json")
+    stale.write_text(json.dumps(dict(sst_k=9.9)))
+    tao_stage(ctx, t0, t1)
+    assert not stale.exists() and ctx.env.sig["sst_k"] == config.env_sigmas()["sst_k"]
+
 def summaries(ctx, was, now=None):
     """stage 1's summary.json with the verdicts `was`; the stand-in for _stage1 writes stage 1b's with `now`."""
     def doc(v):
@@ -1771,13 +1856,61 @@ def test_the_emulator_table_is_the_option_then_the_environment_then_the_shared_d
     assert ctx.table == tmp_path / "opt.parquet" and pipeline.emulator_table("x.parquet") == pathlib.Path("x.parquet")
 
 
-def test_a_fetch_leaves_the_ingest_ledger_current_for_the_run_of_the_same_budget(tmp_path):
-    """The resume hash names the budget; fetch hashes with the one it was given, so `run` after `fetch` (and `fetch` after `run`) keeps ingest up to date."""
+def test_a_fetch_leaves_the_ingest_ledger_current_for_a_run_of_any_budget_gpu_count_and_seed(tmp_path):
+    """Round 14, M-30: the ingest hash named the budget and the GPU count, and `fetch` has neither (it hashed with "quick" and 0), so `fetch` then
+    `run --budget 4h` (or `--gpus 1`, or `--seed`) rebuilt the ingest, about 9 GB of tree hashes for the demo, and `fetch --out` into a finished 4 h run
+    made the next `run` redo every stage."""
     pipeline.run(MISSION_PATH, "ci", 0, tmp_path / "r", stop_after="ingest", log=quiet)
-    again = ctx_for(tmp_path / "r")
-    assert ledger.done(again.run_dir, "ingest", again.hash) is not None
-    assert ctx_for(tmp_path / "r2", budget_name=None).hash != again.hash                                         # but no budget at all is its own hash
+    held = read_ledger(tmp_path / "r", "ingest")["config_hash"]
+    for name, gpus, seed in (("ci", 0, None), ("quick", 0, None), ("4h", 0, None), ("quick", 1, None), ("ci", 0, 77)):
+        again = pipeline.Context(MISSION_PATH, name, gpus, tmp_path / "r", quiet, seed=seed, gpu_mem_gb=16.0 if gpus else None)
+        assert again.stage_hash("ingest") == held and ledger.done(again.run_dir, "ingest", again.stage_hash("ingest")) is not None, (name, gpus, seed)
+    assert ctx_for(tmp_path / "r2", budget_name=None).stage_hash("ingest") == held                                 # and a fetch has none of them
+    assert ctx_for(tmp_path / "r2", budget_name="ci").hash != ctx_for(tmp_path / "r2", budget_name="quick").hash                  # the other stages' do
+    other = tmp_path / "other.yaml"
+    other.write_text(MISSION_PATH.read_text().replace("pad_deg: 0.5", "pad_deg: 0.6"))
+    assert pipeline.Context(other, "ci", 0, tmp_path / "r", quiet).stage_hash("ingest") != held                    # a changed mission still reruns it
 
+
+def test_r14_m30_the_ingest_writes_the_same_thing_under_any_budget_gpu_count_and_seed(tmp_path, data_copy):
+    """The condition for the ingest's hash to leave the budget out: nothing it writes depends on it. Its outputs, inputs and self-checks, byte for byte."""
+    def summary(d, run):
+        return ([(pathlib.Path(o["path"]).name, o["sha256"]) for o in d["outputs"]], [(i["ref"].replace(str(run), "RUN"), i["sha256"]) for i in d["inputs"]],
+                [(c["name"], c["ok"], c["value"], c["limit"]) for c in d["checks"]])
+    seen = {}
+    for k, (name, gpus, seed) in enumerate((("ci", 0, None), ("quick", 0, None), ("ci", 1, None), ("quick", 1, None), ("ci", 0, 77))):
+        ctx = pipeline.Context(MISSION_PATH, name, gpus, tmp_path / f"r{k}", quiet, seed=seed, gpu_mem_gb=16.0 if gpus else None)
+        seen[(name, gpus, seed)] = summary(run_stage(pipeline.s_ingest, ctx, "ingest"), tmp_path / f"r{k}")
+    first = next(iter(seen.values()))
+    assert first[0] and first[2]
+    diff = {k: [(a, b) for part in range(3) for a, b in zip(first[part], v[part], strict=True) if a != b] for k, v in seen.items() if v != first}
+    assert not diff, diff
+
+
+def test_r14_m27_what_a_file_manager_or_an_editor_leaves_beside_the_code_does_not_change_the_digest(tmp_path, monkeypatch):
+    """`config` was hashed by `rglob("*.*")`: a Finder-made `.DS_Store`, an editor's `x.json~` or `.a.swp` sent by pm.sh changed the server's digest, and
+    with it every ledger hash, stored result and receipt. A real file there still does."""
+    import fnmatch
+    root = tmp_path / "tree"
+    for rel, text in (("cafe/a.py", "x = 1\n"), ("cafe/schemas/s.json", "{}"), ("config/a.json", "{}"), ("config/certs/c.pem", "pem"),
+                      ("platforms/p.yaml", "p: 1\n")):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    monkeypatch.setattr(pipeline, "__file__", str(root / "cafe" / "pm" / "pipeline.py"))
+    clean = pipeline.code_digest()
+    junk = ["config/.DS_Store", "config/x.json~", "config/.a.swp", "config/certs/._c.pem", "config/b.tmp", "platforms/.DS_Store", "cafe/.#a.py",
+            "cafe/schemas/s.json~"]
+    for rel in junk:
+        (root / rel).write_text("junk")
+        assert pipeline.code_digest() == clean, rel
+    (root / "config" / "b.yaml").write_text("b: 1\n")
+    assert pipeline.code_digest() != clean
+    (root / "config" / "b.yaml").unlink()
+    (root / "config" / "certs" / "c.pem").write_text("another certificate")
+    assert pipeline.code_digest() != clean
+    rules = [ln[2:].strip() for ln in (ROOT / "bin" / "sync_filters").read_text().splitlines() if ln.startswith("- ")]   # and bin/sync_filters keeps them off
+    for rel in junk[:5]:
+        assert any(fnmatch.fnmatch(pathlib.PurePosixPath(rel).name, r) for r in rules if "/" not in r), rel
 
 def test_a_context_without_a_budget_plans_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(budget, "plan", lambda *a, **k: pytest.fail("no budget, no plan"))
@@ -1794,7 +1927,7 @@ def test_run_to_ingest_plans_nothing_and_writes_no_plan_file(tmp_path, monkeypat
         return real(mission, budget_name, *a, **k)
     monkeypatch.setattr(pipeline, "Context", spy)
     pipeline.run(MISSION_PATH, "quick", 0, tmp_path / "r", stop_after="ingest", log=quiet)
-    assert seen == [(None, "quick")] and not (tmp_path / "r" / "plan.json").exists() and (tmp_path / "r" / "checkpoints" / "ingest" / "ledger.json").is_file()
+    assert seen == [(None, None)] and not (tmp_path / "r" / "plan.json").exists() and (tmp_path / "r" / "checkpoints" / "ingest" / "ledger.json").is_file()
 
 
 def test_the_planner_is_given_the_gpu_memory_it_must_guard(tmp_path):
@@ -2237,7 +2370,7 @@ def test_the_hangar_ledger_says_that_no_cfd_ran_and_what_the_baseline_coefficien
 # ---- M-14: the orca cache is only reused for the box and 3-D hours it was cut for
 
 def manifest(**over):
-    return dict(dict(t0="2023-03-01 18:00:00", t1="2023-03-03 06:00:00", box=[-167.0, -163.0, -2.0, 2.0],
+    return dict(dict(base="https://example.org/orca", t0="2023-03-01 18:00:00", t1="2023-03-03 06:00:00", box=[-167.0, -163.0, -2.0, 2.0], hours=37,
                      hours3d=["2023-03-02_01:00:00", "2023-03-02_02:00:00", "2023-03-03_01:00:00", "2023-03-03_02:00:00"]), **over)
 
 
@@ -3014,7 +3147,7 @@ def test_the_workers_of_a_run_are_the_cpus_cut_to_what_the_memory_holds_and_ever
 
 
 # ---- review round 6, M-5: no usable wind direction at the moorings leaves the configured priors alone ----------------------------------------------
-@pytest.mark.parametrize("calm", [True, False], ids=["no-direction-at-all", "only-the-mean-is-nan"])
+@pytest.mark.parametrize("calm", [True, False], ids=["no-direction-at-all", "one-mooring-with-direction-and-its-mean-is-nan"])
 def test_a_comparison_without_a_usable_wind_direction_writes_no_direction_prior_and_stage1_accepts_the_fit(tmp_path, data, monkeypatch, calm):
     """M-5: a calm WRF (or moorings without a direction channel) wrote `wind_direction_bias: {mean: null, value: null}` and stage 1 died with a TypeError."""
     ctx, t0, t1 = tao_ctx(tmp_path)
@@ -3029,6 +3162,10 @@ def test_a_comparison_without_a_usable_wind_direction_writes_no_direction_prior_
     if calm:
         monkeypatch.setattr(pipeline, "_wind_residuals",
                             lambda wrf, moor: {k: np.column_stack([v[:, 0], np.full(len(v), nan)]) for k, v in real_res(wrf, moor).items()})
+    else:                                       # round 14, M-44: two moorings with a direction give their own mean, one gives the pooled one
+        monkeypatch.setattr(pipeline, "_wind_residuals",
+                            lambda wrf, moor: {k: v if i == 0 else np.column_stack([v[:, 0], np.full(len(v), nan)])
+                                               for i, (k, v) in enumerate(real_res(wrf, moor).items())})
     d = tao_stage(ctx, t0, t1)
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
     assert set(fit) >= {"wind_speed_bias", "wind_speed_noise"} and not [k for k in fit if k.startswith("wind_direction")]
@@ -3079,6 +3216,78 @@ def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
         mp.write_text(damage)
         assert pipeline._tao_cached(tdir, box, t0, t1) is False
 
+
+def test_r14_m22_an_orca_manifest_that_is_an_object_without_its_times_is_fetched_again_and_says_so(tmp_path, data_copy, monkeypatch):
+    """`{}` is valid JSON and an object, so `read_json` returned it and `_covers` raised KeyError 't0' (a traceback; fetch is documented as healing a cache).
+    Round 14 sibling: `hours` is read after the cover test has passed (the ledger check `orca_hours_cover_window`), and `hours3d` is turned into a
+    set: a missing `hours` was a KeyError, `"x"` a TypeError, `[[1]]` an unhashable list."""
+    monkeypatch.delenv("CAFE_OFFLINE")
+    man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
+    saved = man.read_text()
+    calls, logged = [], []
+
+    def fake_ingest(t0, t1, box, out, hours3d=(), threads=8, spectra=True, log=print):
+        calls.append(box)
+        man.write_text(saved)
+    monkeypatch.setattr(orca, "ingest", fake_ingest)
+    good = json.loads(saved)
+    for k, damage in enumerate(("{}", json.dumps({k: v for k, v in good.items() if k != "t1"}), json.dumps(dict(good, t0=5)), json.dumps(dict(good, box="x")),
+                                   json.dumps({k: v for k, v in good.items() if k != "hours"}), json.dumps(dict(good, hours="x")),
+                                   json.dumps(dict(good, hours3d=[[1]])), json.dumps(dict(good, hours3d="x")))):
+        calls.clear()
+        man.write_text(damage)
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / f"r{k}", log=logged.append), "ingest")
+        assert len(calls) == 1
+    assert any("orca manifest" in x and "lacks what the ingest reads" in x and "fetching again" in x for x in logged)
+
+
+def test_r14_m22_a_tao_manifest_that_is_an_object_of_the_wrong_shape_is_not_cached_and_not_a_traceback(data_copy):
+    tdir = tao.cache_dir(data_copy)
+    mp = tdir / "manifest.json"
+    m = config.load_mission(MISSION_PATH)
+    box, t0, t1 = pipeline.ocean_box(m), config.utc(m["window"]["start"]).timestamp(), config.utc(m["window"]["end"]).timestamp()
+    good = json.loads(mp.read_text())
+    assert pipeline._tao_cached(tdir, box, t0, t1) is True
+    first = next(iter(good["files"]))
+    damages = [{}, {k: v for k, v in good.items() if k != "t0"}, dict(good, t0="garbage"), dict(good, box=[1, 2, 3]), dict(good, files=[]),
+               dict(good, selected=5),
+               dict(good, files=dict(good["files"], **{first: dict(good["files"][first], mode="Z")})),         # `_series` indexes GOOD[mode]
+               dict(good, selected={m0: dict(good["selected"][m0], FOO=first) for m0 in good["selected"]}),                       # and NC[var]
+               dict(good, files={first: {}}), dict(good, positions={}), dict(good, selected={"T0N170W": {"WIND": "no/such/file"}})]
+    for damage in damages:
+        mp.write_text(json.dumps(damage))
+        assert pipeline._tao_cached(tdir, box, t0, t1) is False, damage
+    mp.write_text(json.dumps(dict(good, extra_key=[1])))                               # a key nobody reads is no damage
+    assert pipeline._tao_cached(tdir, box, t0, t1) is True
+
+
+def test_r14_m22_fetching_over_a_misshapen_tao_manifest_checks_every_file_again(tmp_path, monkeypatch):
+    """`fetch_tao` read the old manifest's `files` with `.get`: a list there was an AttributeError, not the fresh start an unreadable file gets."""
+    from cafe.pm.env import tao as tao_mod
+    monkeypatch.setattr(tao_mod, "moorings", lambda box, base: [])
+    out = tmp_path / "tao"
+    out.mkdir()
+    (out / "manifest.json").write_text(json.dumps(dict(files=[1], t0=0)))
+    man = json.loads(tao_mod.fetch_tao((-1.0, 1.0, 160.0, 170.0), 0.0, 3600.0, out).read_text())
+    assert man["files"] == {} and tao_mod.manifest_shape(man)
+
+def test_r14_m14_the_fetch_command_the_ingest_advises_is_shell_quoted(tmp_path, data_copy):
+    """`f"{FETCH_CMD} {mission_path}"` split a mission at `my missions/m 1.yaml` into three words; round 13's test used paths without spaces."""
+    import shlex
+    from cafe.pm import __main__ as cli
+    m = tmp_path / "my missions" / "it's m 1.yaml"
+    m.parent.mkdir()
+    m.write_text(MISSION_PATH.read_text())
+    (data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json").write_text("")
+    with pytest.raises(ledger.StageFailed, match="orca_present"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r", mission=m), "ingest")
+    note = next(c["note"] for c in read_ledger(tmp_path / "r", "ingest")["checks"] if c["name"] == "orca_present")
+    advised = re.search(r"`(python -m cafe\.pm fetch[^`]*)`", note)[1]
+    argv = shlex.split(advised)
+    assert argv[:4] == ["python", "-m", "cafe.pm", "fetch"] and len(argv) == 6 and argv[-1] == str(m)
+    assert cli.build_parser().parse_args(argv[3:]).mission == str(m)
+    assert pipeline.fetch_cmd(MISSION_PATH) == f"python -m cafe.pm fetch --mission {MISSION_PATH}"                    # nothing to quote: unchanged
+    assert shlex.split(pipeline.fetch_cmd("a b/c.yaml"))[-1] == "a b/c.yaml"
 
 def test_r10_a_tao_cache_made_under_another_selection_rule_is_not_cached(data_copy):
     """Round 10, M-19 follow-up: the per-variable selection changes which files a cache holds, but `_tao_cached` accepted a manifest of the old rule (files
@@ -3582,6 +3791,31 @@ def test_r8_m34_run_seed_rewrites_the_saved_mission_whatever_the_spelling_of_see
     assert (tmp_path / "run2" / "mission.yaml").read_bytes() == m.read_bytes()                                    # no override: the file itself
 
 
+def test_r14_m21_run_seed_writes_a_copy_that_loads_when_a_vehicle_id_reads_as_a_float(tmp_path, monkeypatch):
+    """`yaml.safe_dump` wrote the quoted id "1e5" bare; `load_mission` on the copy (what report and whatif read) then refused it as a number."""
+    stub_stages(monkeypatch, [])
+    m = tmp_path / "m.yaml"
+    m.write_text(MISSION_PATH.read_text().replace("id: glider_1n", 'id: "1e5"'))
+    assert config.load_mission(m)["vehicles"][1]["id"] == "1e5"
+    pipeline.run(m, "ci", 0, tmp_path / "run", log=[].append, seed=9)
+    copy = config.load_mission(tmp_path / "run" / "mission.yaml")
+    assert copy["vehicles"][1]["id"] == "1e5" and copy["seed"] == 9
+
+def test_r14_m20_a_cut_write_of_the_stage_3_calibration_leaves_no_half_file(tmp_path, monkeypatch, cut_writes):
+    """`recalibrate_subgrid` wrote subgrid_calibration.json in place: a kill left three characters that report, credibility and the next stage read as the
+    run's calibration."""
+    import types
+    from cafe.pm.env import subgrid
+    from cafe.pm.stage3 import pipeline_windows as pw
+    cal = dict(subgrid.load_config()["calibration"], sigma_u_over_ustar=2.9)
+    monkeypatch.setattr(subgrid, "recalibrate", lambda series: dict(calibration=cal, uncertainty=dict(sigma_u_over_ustar=0.2, length_scale_factor=0.1),
+                                                                    windows=[dict(label="w")], skipped=[]))
+    row = dict(ok=True, part="hull", t=1.0, inflow_series=dict(u=[1.0], dt=1.0, U=6.0, ustar=0.3, z=10.0))
+    cut_writes()
+    with pytest.raises(OSError, match="killed"), ledger.Ledger(tmp_path / "r", "stage3", "h") as L:
+        pw.recalibrate_subgrid(types.SimpleNamespace(run_dir=tmp_path / "r"), {"usv": [row]}, L)
+    assert not (tmp_path / "r" / "stage3" / "subgrid_calibration.json").exists() and not list((tmp_path / "r").rglob("*.tmp"))
+
 # ---- review round 8: M-4 (the contents of the ocean store), M-23 (a cut checkpoint ledger), M-35 (Bellhop in the code digest)
 
 def _ocean_store_of(data_copy):
@@ -3840,12 +4074,14 @@ def test_r10_m25_the_fitted_bias_prior_says_that_its_mean_is_the_flipped_error(t
     """Round 10, M-25: the citation 'WRF minus 11 moorings' sat over a mean of the opposite sign, so a reader of priors_fitted.json alone got it backwards."""
     ctx, t0, t1 = tao_ctx(tmp_path)
     tao_stage(ctx, t0, t1)
-    a = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())["ALL"]
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
-    for key, err in (("wind_speed_bias", a["speed_bias"]), ("wind_direction_bias", a["dir_bias_deg"])):
+    per = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())
+    for key, field in (("wind_speed_bias", "speed_bias"), ("wind_direction_bias", "dir_bias_deg")):
+        err = float(np.mean([v[field] for k, v in per.items() if k != "ALL"]))          # round 14, M-44: not the "ALL" entry, which pools the samples
         assert fit[key]["mean"] == pytest.approx(-err)
         c = fit[key]["citation"]
-        assert "mean = minus the 2-mooring mean error, i.e. mooring minus WRF" in c and "adds to WRF" in c and f"WRF minus mooring, {err:+.3g}" in c
+        assert "mean = minus the unweighted mean of the 2 moorings' time-mean errors, i.e. mooring minus WRF" in c and "adds to WRF" in c
+        assert f"WRF minus mooring, {err:+.3g}" in c
     assert "mooring minus WRF" not in fit["wind_speed_noise"]["citation"]                            # the noise entries have no signed mean
 
 

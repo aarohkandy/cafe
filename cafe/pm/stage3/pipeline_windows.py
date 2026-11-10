@@ -766,7 +766,7 @@ def recalibrate_subgrid(ctx: Context, rows: dict[str, list[dict[str, Any]]], L: 
         L.note(f"sub-grid layer uncalibrated: {why}; stage3/subgrid_calibration.json was not written")
     else:
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps(subgrid.calibration_block(cal, "stage 3 of this run (stage3/subgrid_calibration.json)"), indent=1))
+        config.write_json(out, subgrid.calibration_block(cal, "stage 3 of this run (stage3/subgrid_calibration.json)"), indent=1)
         c, u = cal["calibration"], cal["uncertainty"]
         L.note(f"sub-grid layer recalibrated from {n_used} passed window(s): sigma_u/u* = {c['sigma_u_over_ustar']:.3g} +- "
                f"{u['sigma_u_over_ustar']:.2g}, length_scale_factor = {c['length_scale_factor']:.3g} +- {u['length_scale_factor']:.2g}; "

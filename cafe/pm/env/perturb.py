@@ -127,6 +127,12 @@ class WindNoise:
         return out
 
 
+def ell_text(ell_m: float) -> str:
+    """The correlation length of the current error's random field as a label: "100 km" at the shipped 100000.0 m, "20 km", "1.5 km", "250 m". Every sentence
+    that names the setting formats it here, so a label cannot keep saying 100 km after `current_correlation_length` has changed (round 14, M-17)."""
+    return f"{ell_m / 1000.0:g} km" if ell_m >= 1000.0 else f"{ell_m:g} m"
+
+
 class PerturbedEnv:
     def __init__(self, env: Environment, X: dict[str, ArrayLike], members: Any, base_seed: Any, priors: dict[str, Any],
                  sde: dict[str, float] | None = None, window: tuple[float, float] | None = None):
@@ -136,6 +142,7 @@ class PerturbedEnv:
         self.env, self.X, self.bounds = env, {k: np.asarray(v, float) for k, v in X.items()}, env.bounds
         self.M = len(members)
         ell = float(priors["current_correlation_length"]["mean"])
+        self.ell_text = ell_text(ell)
         self.cs = float(priors["current_speed_scale"]["value"])
         self.cd = float(priors["current_direction_bias"]["value"])
         lon_min, lon_max = env.bounds[0], env.bounds[1]
@@ -182,7 +189,7 @@ class PerturbedEnv:
         db = self._m("current_direction_bias", sh)
         rot = (db / np.sqrt(2.0) if db is not None else 0.0) + self.cd / np.sqrt(2.0) * self.fd(lonb, latb)
         v = _rot(v * np.exp(logs)[..., None], np.broadcast_to(rot, sh))
-        src = c.source + "; member current error applied (member-wide + 100 km random field)"
+        src = c.source + f"; member current error applied (member-wide + {self.ell_text} random field)"
         return Tagged(v, src, c.uncertainty, c.kind)
 
     def sde_displacement(self, lon: Any, lat: Any, t: Any) -> Any:

@@ -21,7 +21,7 @@ they are not adapted to the box, so `density_extra` is too large by alpha(CT 28)
 """
 from __future__ import annotations
 
-import json, os, pathlib
+import json, pathlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -130,9 +130,8 @@ def build(env: GriddedEnv, cache: Any, built_from: str | None = None, log: Calla
     ds.attrs["layout_version"] = LAYOUT_VERSION
     ds.attrs["built_from"] = built_from
     ds.to_zarr(cache / "derived.zarr", mode="w")
-    tmp = (cache / DIGEST).with_suffix(".tmp")                               # written whole or not at all, as the Ledger is: a kill cannot leave half a record
-    tmp.write_text(json.dumps(dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1))
-    os.replace(tmp, cache / DIGEST)
+    from ..config import write_json                                          # written whole or not at all, as the Ledger is: a kill cannot leave half a record
+    write_json(cache / DIGEST, dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1)
     if env.spec is not None and fit is None:
         log("surface layer: fewer than three restart spectra in the window, or a non-finite leave-one-out error: "
             "Stokes drift is the fit alone, tagged 0.4|u_s|")

@@ -1204,3 +1204,271 @@ def test_r13_l1_platform_display_of_a_symlink_loop_is_the_path_as_given_not_a_ru
     loop = tmp_path / "loop.yaml"
     loop.symlink_to("loop.yaml")
     assert config.platform_display(str(loop)) == str(loop)
+
+
+# ---- review round 14, batch B: M-18 (the mode of a rewritten file), M-21 (a string that reads as a float), M-26 (aliases of aliases)
+
+def test_r14_m18_write_text_keeps_the_mode_of_the_file_it_replaces_and_a_new_file_gets_the_default(tmp_path):
+    """The replace gave the name a new inode with the temporary's default mode: a 0600 file became 0644 on its first rewrite (the shared golden)."""
+    f = tmp_path / "secret.json"
+    f.write_text("{}")
+    f.chmod(0o600)
+    config.write_text(f, "{}\n")
+    assert f.stat().st_mode & 0o777 == 0o600 and f.read_text() == "{}\n"
+    link = tmp_path / "sl.json"
+    link.symlink_to(f)
+    config.write_text(link, "x")
+    assert link.is_symlink() and f.stat().st_mode & 0o777 == 0o600
+    ro = tmp_path / "ro.json"
+    ro.write_text("a")
+    ro.chmod(0o400)
+    config.write_text(ro, "b")
+    assert ro.read_text() == "b" and ro.stat().st_mode & 0o777 == 0o400 and not list(tmp_path.glob("*.tmp"))
+    new = tmp_path / "new.json"
+    config.write_text(new, "n")
+    default = tmp_path / "plain"
+    default.write_text("")
+    assert new.stat().st_mode & 0o777 == default.stat().st_mode & 0o777
+
+
+def test_r14_m18_a_hard_link_does_not_survive_a_rewrite_and_the_docstring_says_so(tmp_path):
+    """A replace cannot keep a second name for the same inode: the link keeps the old content. Pinned so the limit stays stated."""
+    f, other = tmp_path / "a.json", tmp_path / "b.json"
+    f.write_text("old")
+    other.hardlink_to(f)
+    config.write_text(f, "new")
+    assert f.read_text() == "new" and other.read_text() == "old" and "hard link" in (config.write_text.__doc__ or "")
+
+
+def test_r14_m21_a_string_that_reads_as_a_float_is_written_quoted_so_the_copy_loads_back(tmp_path):
+    """`yaml.safe_dump` wrote the string "1e5" bare; the loader's extra float rule (1e5 is a number) then read it back as 100000.0."""
+    d = {"id": "1e5", "n": 1e5, "k": {"2E-3": "-4e+2", "plain": "text"}, "list": ["7e1", 7e1]}
+    text = yaml.dump(d, Dumper=config._Dumper, sort_keys=False)
+    p = tmp_path / "x.yaml"
+    p.write_text(text)
+    assert config.read_yaml(p) == d and isinstance(config.read_yaml(p)["id"], str)
+    assert yaml.safe_dump(d) != text                                    # the stock dumper is what fails: it leaves "1e5" bare
+
+
+def alias_tower(levels, width=10):
+    """A file in which each level is a list of `width` aliases of the level below: width ** levels values once written out, a few lines on disk."""
+    lines = ["a0: &a0 [" + ", ".join(["0"] * width) + "]"]
+    lines += [f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * width) + "]" for i in range(1, levels)]
+    return "\n".join(lines) + "\n"
+
+
+def test_r14_m26_nested_aliases_are_refused_at_once_and_a_modest_use_still_loads(tmp_path):
+    """Each level multiplied the work of `_finite`, `_unshare` and the digest by ten: 6 levels took 0.6 s, 9 levels about 100 minutes."""
+    import time
+    p = tmp_path / "tower.yaml"
+    p.write_text(alias_tower(8))
+    t = time.perf_counter()
+    with pytest.raises(ConfigError, match="tower.yaml: aliases nested too deeply"):
+        config.read_yaml(p)
+    assert time.perf_counter() - t < 1.0
+    p.write_text(alias_tower(4))                                        # 10 ** 4 values: legal, and fast
+    assert len(config.read_yaml(p)["a3"]) == 10
+    p.write_text("shared: &s {a: 1, b: [1, 2]}\nx: *s\ny: *s\n")        # row 462: aliases stay legal
+    assert config.read_yaml(p)["y"] == {"a": 1, "b": [1, 2]}
+
+
+def merge_tower(levels, width=10):
+    lines = ["m0: &m0 {a: 1}"]
+    lines += [f"m{i}: &m{i} {{<<: [" + ", ".join([f"*m{i - 1}"] * width) + "]}" for i in range(1, levels)]
+    return "\n".join(lines) + "\n"
+
+
+def test_r14_m26_a_tower_of_merge_keys_is_refused_before_it_is_built_and_a_modest_merge_still_loads(tmp_path):
+    """PyYAML copies the pairs of every merged mapping while it builds the node (`flatten_mapping`), so the alias count after the load came too late:
+    `<<: [*m x10]` per level took 0.7 s at 6 levels and 6.8 s at 7, about ten times more each."""
+    import time
+    p = tmp_path / "merges.yaml"
+    p.write_text(merge_tower(8))
+    t = time.perf_counter()
+    with pytest.raises(ConfigError, match="merges.yaml: aliases nested too deeply: a mapping merges more than"):
+        config.read_yaml(p)
+    assert time.perf_counter() - t < 1.0
+    p.write_text(merge_tower(4))                                        # 10 ** 3 pairs: legal, and the merged key is there
+    assert config.read_yaml(p)["m3"] == {"a": 1}
+    p.write_text("base: &b {a: 1, b: 2}\nx: {<<: *b, b: 3, c: 4}\ny: {<<: [*b, {a: 9}]}\n")        # row 462: merges stay legal, and mean what YAML says
+    assert config.read_yaml(p)["x"] == {"a": 1, "b": 3, "c": 4} and config.read_yaml(p)["y"] == {"a": 1, "b": 2}
+
+
+def test_r14_m26_a_list_that_contains_itself_is_a_config_error_not_a_recursion_error(tmp_path):
+    p = tmp_path / "loop.yaml"
+    p.write_text("a: &a [1, *a]\n")
+    with pytest.raises(ConfigError, match="loop.yaml: an alias refers to the list or mapping it is inside"):
+        config.read_yaml(p)
+
+
+# ---- review round 14, batch B: M-20, M-37 and P-R13M1 (the writers of a file that is read back)
+
+# The `.write_text(` / `.write_bytes(` calls of cafe/pm that are not `config.write_text`, and the `os.replace` calls that are not the one in it, each with why
+# it is not the shared writer. A new one fails this test: use `config.write_text` / `write_json`, or add the file here with its reason (DECISIONS 739).
+BARE_WRITES = {
+    "acceptance.py": (2, "a marker line and a log of the broken-fixture run in --out; nothing reads either back"),
+    "audit.py": (1, "empties the log file"),
+    "dtmb5415.py": (3, "the OpenFOAM case files and the downloaded hull, in a work directory of the run, rewritten whole on each call"),
+    "env/remote.py": (2, "the marker beside a partial download; a damaged marker restarts the download"),
+    "physics/uas.py": (1, "the SITL parameter file in the scratch directory of one flight"),
+    "pipeline.py": (1, "res.pkl: bytes, and the stage ledger holds its sha-256, so a cut file is a stage that is not done"),
+    "shares.py": (2, "pytest argument files, written again at the start of every suite run"),
+    "stage3/fluidx3d.py": (2, "the case file and log in a scratch directory of one window"),
+    "stage3/freesurface.py": (1, "the result of a child process, in its scratch directory, read by the parent that started it"),
+    "stage3/pipeline_windows.py": (2, "the same child result and the job file, both in a scratch directory"),
+}
+# The other ways a file is written in place that the scan below counts: `shutil.copy`, `copyfile` and `copy2`, and `np.save`, `savez` and `savez_compressed`
+# (a copy cut half way left a mission.yaml of three bytes that `report` and `whatif` reload: M-20 sibling). File name -> (calls, why it is not a risk).
+BARE_COPIES = {
+    "acceptance.py": (2, "the training table copied into a fresh --out of the acceptance run, before any run reads it; a cut copy is a failed acceptance"),
+    "env/bathy.py": (1, "written to a `.part.npz` and then `os.replace`d"),
+    "env/orca.py": (1, "written to a `.tmp.npz` and then `os.replace`d"),
+    "ledger.py": (1, "copied to a `.part` and then `os.replace`d"),
+    "par.py": (1, "a new numbered array in a directory this process made and removes at exit; the reader gets the path after the save returns"),
+    "physics/usv.py": (1, "the optional table cache of `tables(P, cache_dir)`; no code of cafe/pm passes a directory (the tests do)"),
+    "pipeline.py": (1, "stage 1b's copy of res.pkl: the stage ledger holds its sha-256, so a cut file is a stage that is not done"),
+    "stage3/pipeline_windows.py": (1, "the job file of one child process, in a scratch directory the parent removes"),
+}
+BARE_REPLACES = {
+    "config.py": 1,
+    "emulator.py": 1,                  # a unique temporary name per writer (a parquet table)
+    "env/bathy.py": 1, "env/hycom.py": 3, "env/orca.py": 1, "env/remote.py": 1,         # npz and zarr stores and downloads, written as `.part` then renamed
+    "ledger.py": 1,                    # copy_manifest: a byte copy of a shared file
+}
+
+
+COPY_CALLS = {("shutil", f) for f in ("copy", "copyfile", "copy2")} | {(m, f) for m in ("np", "numpy") for f in ("save", "savez", "savez_compressed")}
+
+
+def _scan_writes():
+    import ast
+    root = config.ROOT / "cafe" / "pm"
+    writes, replaces, copies = {}, {}, {}
+    for p in sorted(root.rglob("*.py")):
+        rel = p.relative_to(root).as_posix()
+        for n in ast.walk(ast.parse(p.read_text())):
+            if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
+                continue
+            recv = n.func.value
+            if n.func.attr in ("write_text", "write_bytes") and not (isinstance(recv, ast.Name) and recv.id == "config") and rel != "config.py":
+                writes[rel] = writes.get(rel, 0) + 1
+            if n.func.attr == "replace" and isinstance(recv, ast.Name) and recv.id == "os":
+                replaces[rel] = replaces.get(rel, 0) + 1
+            if isinstance(recv, ast.Name) and (recv.id, n.func.attr) in COPY_CALLS:
+                copies[rel] = copies.get(rel, 0) + 1
+    return writes, replaces, copies
+
+
+def test_r14_p_r13m1_every_writer_of_a_read_back_file_is_config_write_text_or_named_here():
+    """Round 13 swept seven bare `write_text` sites and left five hand-written temporary-and-replace writers; round 14 found five more bare sites (M-20, M-37).
+    The scan keeps the next one out: an unlisted call, or a listed file with a different number of calls, fails."""
+    writes, replaces, copies = _scan_writes()
+    assert writes == {k: v[0] for k, v in BARE_WRITES.items()}
+    assert replaces == BARE_REPLACES
+    assert copies == {k: v[0] for k, v in BARE_COPIES.items()}
+
+
+def test_r14_m20_a_cut_write_of_the_seeded_mission_copy_leaves_the_mission(tmp_path, monkeypatch, cut_writes):
+    """`run --mission <run>/mission.yaml --out <run> --seed S` reads and writes the same file: the in-place write left three characters and no original."""
+    from cafe.pm import pipeline
+    run = tmp_path / "run"
+    run.mkdir()
+    m = run / "mission.yaml"
+    m.write_text((config.ROOT / "missions" / "ci_fixture.yaml").read_text())
+    before = m.read_bytes()
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "data")
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        pipeline.run(m, "ci", 0, run, log=[].append, seed=9)
+    assert m.read_bytes() == before and not list(run.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("which", ["credibility", "report"])
+def test_r14_m20_a_cut_write_of_an_html_page_leaves_the_old_page(tmp_path, monkeypatch, cut_writes, which):
+    from cafe.pm import credibility, report
+    run = tmp_path / "run"
+    (run / "report").mkdir(parents=True)
+    f = run / "report" / ("credibility.html" if which == "credibility" else "index.html")
+    f.write_text("<p>old</p>")
+    monkeypatch.setattr(config, "write_json", lambda *a, **k: None)                     # the json beside it is not under test
+    monkeypatch.setattr(credibility, "build", lambda r: {})
+    monkeypatch.setattr(credibility, "_render", lambda c: "<p>new</p>")
+    monkeypatch.setattr(report, "build", lambda *a, **k: {})
+    monkeypatch.setattr(report, "render", lambda rep: "<p>new</p>")
+    if which == "report":
+        monkeypatch.setattr(credibility, "write", lambda r: [])                         # report.write calls it first
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        credibility.write(run) if which == "credibility" else report.write(run, {}, {})
+    assert f.read_text() == "<p>old</p>" and not list(f.parent.glob("*.tmp"))
+
+
+def test_r14_m20_a_cut_copy_of_the_unseeded_mission_leaves_the_mission_of_the_run(tmp_path, monkeypatch, cut_writes):
+    """The `seed is None` branch beside the seeded one was `shutil.copy` in place: a rerun of an edited mission into the same --out, cut by a full disk,
+    left a mission.yaml of three bytes that `report --run` and `whatif --run` reload."""
+    from cafe.pm import pipeline
+    run = tmp_path / "run"
+    run.mkdir()
+    other = tmp_path / "other.yaml"
+    other.write_text((config.ROOT / "missions" / "ci_fixture.yaml").read_text() + "# an edit\n")
+    m = run / "mission.yaml"
+    m.write_text((config.ROOT / "missions" / "ci_fixture.yaml").read_text())
+    before = m.read_bytes()
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "data")
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        pipeline.run(other, "ci", 0, run, log=[].append)
+    assert m.read_bytes() == before and not list(run.glob("*.tmp"))
+
+
+def test_r14_m37_a_cut_write_of_the_tracked_subgrid_config_leaves_the_old_file(tmp_path, cut_writes):
+    from cafe.pm.env import subgrid
+    f = tmp_path / "subgrid.json"
+    f.write_text((subgrid._CFG_DIR / "subgrid.json").read_text())
+    before = f.read_bytes()
+    cal = dict(subgrid.load_config()["calibration"], sigma_u_over_ustar=2.9)
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        subgrid.write_calibration(cal, f)
+    assert f.read_bytes() == before and not list(tmp_path.glob("*.tmp"))
+
+
+def test_r14_p_r13m1_a_cut_write_of_a_ledger_a_rerecord_a_receipt_and_a_tao_manifest_leaves_the_old_file_and_no_temporary(tmp_path, monkeypatch, cut_writes):
+    """The hand-written temporary-and-replace writers left their `.tmp` behind when the write failed, and replaced a symlink instead of the file it names."""
+    from cafe.pm import ledger, receipts
+    from cafe.pm.env import tao
+    run = tmp_path / "run"
+    with ledger.Ledger(run, "s1", "h1") as L:
+        L.note("first")
+    f = run / "checkpoints" / "s1" / "ledger.json"
+    before = f.read_bytes()
+    link = tmp_path / "linked"
+    link.mkdir()
+    target = link / "target.json"
+    target.write_text("{}")
+    (run / "checkpoints" / "s2").mkdir()
+    (run / "checkpoints" / "s2" / "ledger.json").symlink_to(target)
+    with ledger.Ledger(run, "s2", "h2") as L:                                    # a ledger behind a link is written to the file it names, the link stays
+        L.note("via link")
+    assert (run / "checkpoints" / "s2" / "ledger.json").is_symlink() and "via link" in target.read_text()
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path / "data"))
+    monkeypatch.setattr(receipts, "code_digest", lambda scope: "d")
+    monkeypatch.setenv("CAFE_GIT_SHA", "a" * 40)
+    receipts._save("pm.g", "pm", [], 1.0)
+    rf = receipts.store_path("pm.g")
+    rbefore = rf.read_bytes()
+    monkeypatch.setattr(tao, "moorings", lambda box, base: [])
+    mf = tao.fetch_tao((-1.0, 1.0, 160.0, 170.0), 0.0, 3600.0, tmp_path / "tao")
+    mbefore = mf.read_bytes()
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        with ledger.Ledger(run, "s1", "h1") as L:
+            L.note("second")
+    with pytest.raises(OSError, match="killed"):
+        ledger.rerecord(run, "s1", [], "digest")
+    with pytest.raises(OSError, match="killed"):
+        receipts._save("pm.g", "pm", [dict(id="x")], 2.0)
+    with pytest.raises(OSError, match="killed"):
+        tao.fetch_tao((-1.0, 1.0, 160.0, 170.0), 0.0, 7200.0, tmp_path / "tao")
+    assert (f.read_bytes(), rf.read_bytes(), mf.read_bytes()) == (before, rbefore, mbefore)
+    assert not list(tmp_path.rglob("*.tmp"))

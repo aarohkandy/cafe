@@ -244,6 +244,21 @@ def read_json(path: str | pathlib.Path) -> dict[str, Any] | None:
     return d if isinstance(d, dict) else None
 
 
+def real_numbers(v: Any, n: int | None = None) -> bool:
+    """`v` is a list (of `n` items when given) of numbers that are not bool: the shape check of a manifest's box and times."""
+    return isinstance(v, list) and (n is None or len(v) == n) and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
+
+
+def manifest_shape(d: dict[str, Any]) -> bool:
+    """Whether the parsed orca manifest `d` holds what the ingest reads of it: `base`, `t0` and `t1` as strings, `hours` a number (the ledger check
+    `orca_hours_cover_window` compares it), `box` a list of four numbers or absent (None: a manifest written before the box was recorded; the cache
+    then cannot say it covers a box) and `hours3d` a list of strings when present. A readable
+    object of another shape (`{}`, a `t0` deleted by hand) is no more a record than an empty file is, so the cache is fetched again (round 14, M-22)."""
+    h3 = d.get("hours3d", [])
+    return (all(isinstance(d.get(k), str) for k in ("base", "t0", "t1")) and real_numbers([d.get("hours")], 1)
+            and (d.get("box") is None or real_numbers(d["box"], 4)) and isinstance(h3, list) and all(isinstance(h, str) for h in h3))
+
+
 def write_json(path: pathlib.Path, obj: Any, **kw: Any) -> None:
     """`obj` as JSON in `path`, through a sibling temporary and os.replace: an ingest killed mid-write leaves the old file, never half of a new one.
     The one writer is `config.write_json` (round 13, M-14: a copy here would keep any fix to it out of the ingest's manifests); imported here because

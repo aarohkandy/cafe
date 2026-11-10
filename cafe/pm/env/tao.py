@@ -32,7 +32,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from typing import Any
 
-from ..config import assumptions as _assumptions
+from ..config import assumptions as _assumptions, write_json
 from . import conventions as cv, orca, remote
 from .environment import seconds
 from .hycom import box360
@@ -159,7 +159,8 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     mpath = out / "manifest.json"
-    old = (orca.read_json(mpath) or {}).get("files", {})                 # an empty or truncated manifest is no record: every file is checked again
+    prev = orca.read_json(mpath)                                         # an empty, truncated or misshapen manifest is no record: every file is checked again
+    old = prev["files"] if prev is not None and manifest_shape(prev) else {}
     man: dict[str, Any] = dict(source=base + CATALOG, selection=SELECTION, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={},
                                waves=dict(checked=0, matches=[]))
     for name, lat, lon in moorings(box, base):
@@ -198,10 +199,22 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
                 man["selected"].setdefault(name, {})[var] = best[1]
         man["selected"].setdefault(name, {})
         man.setdefault("positions", {})[name] = [lat, lon]
-    tmp = pathlib.Path(str(mpath) + ".tmp")
-    tmp.write_text(json.dumps(man, indent=1, sort_keys=True))
-    os.replace(tmp, mpath)
+    write_json(mpath, man, indent=1, sort_keys=True)
     return mpath
+
+
+def manifest_shape(m: dict[str, Any]) -> bool:
+    """Whether the parsed manifest `m` holds what `verify`, `unusable_selected`, `wind_gap` and `load_tao` index: `t0` and `t1` numbers, `box` four
+    numbers, `files` a mapping of records with strings `sha256`, `mooring`, `var` and a `mode` that is a key of GOOD, `selected` a mapping of mooring to
+    {variable (a key of NC): file key in `files`}, and a `positions` pair of numbers for each selected mooring (`_series` indexes GOOD and NC with them).
+    A readable object of another shape is no record: the cache is fetched again, as it is for an empty file (round 14, M-22)."""
+    files, sel, pos = m.get("files"), m.get("selected"), m.get("positions", {})
+    return (orca.real_numbers([m.get("t0"), m.get("t1")]) and orca.real_numbers(m.get("box"), 4)
+            and isinstance(files, dict) and all(isinstance(r, dict) and all(isinstance(r.get(k), str) for k in ("sha256", "mooring", "var", "mode"))
+                                                and r["mode"] in GOOD for r in files.values())
+            and isinstance(sel, dict) and isinstance(pos, dict)
+            and all(isinstance(v, dict) and all(k in files and var in NC for var, k in v.items()) and orca.real_numbers(pos.get(n), 2)
+                    for n, v in sel.items()))
 
 
 def verify(out_dir: Any, man: dict[str, Any] | None = None) -> int:

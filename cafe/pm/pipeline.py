@@ -24,7 +24,7 @@ outputs are unchanged. Stage products live next to the ledgers:
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, io, json, math, os, pathlib, pickle, re, shutil, time, warnings, zipfile
+import contextlib, datetime as dt, io, json, math, os, pathlib, pickle, re, shlex, shutil, time, warnings, zipfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -34,7 +34,7 @@ from numpy.typing import NDArray
 from scipy.stats import chi2
 
 from . import budget, ledger, par, stage1
-from .config import ConfigError, _yaml, assumptions, digest, env_sigmas, load_mission, utc, write_json
+from .config import ConfigError, _Dumper, _yaml, assumptions, digest, env_sigmas, load_mission, utc, write_json, write_text
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.environment import FETCH_CMD
 from .env.hycom import FetchError
@@ -47,17 +47,30 @@ if TYPE_CHECKING:
 DATA = pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
 
 
+def fetch_cmd(mission: str | pathlib.Path) -> str:
+    """The command that rebuilds the cache of `mission`, as a person pastes it: the mission path is shell-quoted, so a path with a space or a quote is one
+    argument (round 14, M-14). Every advice that names the mission file builds it here."""
+    return f"{FETCH_CMD} {shlex.quote(str(mission))}"
+
+
+def is_junk(p: pathlib.Path) -> bool:
+    """A file a file manager or an editor leaves in a folder (`.DS_Store`, `._x`, `x.json~`, `.a.swp`, `x.tmp`), which is no part of the code or the data
+    (round 14, M-27). `bin/sync_filters` keeps the same names off the server; none is tracked."""
+    return p.name.startswith(".") or p.name.endswith(("~", ".swp", ".swo", ".tmp"))
+
+
 def code_digest() -> str:
     """sha256 over every `cafe/**/*.py` (the pipeline imports cafe.cfd, cafe.fea, cafe.emulator, cafe.reach, cafe.receipts from outside cafe/pm),
-    the schemas (`cafe/schemas/*.json`, the contract ingest and `load_mission` read), the config and platform files, and the installed version of every
-    library `ledger.versions()` lists that is installed (Python as major.minor): a resumed stage is reused only if none changed."""
+    the schemas (`cafe/schemas/*.json`, the contract ingest and `load_mission` read), the config and platform files (not what a file manager or an editor
+    leaves beside them: `is_junk`), and the installed version of every library `ledger.versions()` lists that is installed (Python as major.minor): a
+    resumed stage is reused only if none changed."""
     import hashlib
     root = pathlib.Path(__file__).resolve().parents[2]
     h = hashlib.sha256()
     for p in sorted([*root.joinpath("cafe").rglob("*.py"), *root.joinpath("cafe", "schemas").glob("*.json"), *root.joinpath("config").rglob("*.*"),
                      *root.joinpath("platforms").glob("*.yaml")]):
         rel = p.relative_to(root)
-        if "__pycache__" not in rel.parts and "site" not in rel.parts:
+        if "__pycache__" not in rel.parts and "site" not in rel.parts and not is_junk(p):
             h.update(str(rel).encode() + b"\0" + p.read_bytes())
     v = {k: x for k, x in ledger.versions().items() if x is not None}
     v["python"] = ".".join(v["python"].split(".")[:2])
@@ -93,7 +106,7 @@ class Context:
                  log: Callable[[str], None] = print, seed: int | None = None, emulator_table: str | pathlib.Path | None = None,
                  gpu_mem_gb: float | None = None, hash_budget: str | None = None) -> None:
         """`budget_name` None: no plan (`fetch`: ingest needs the mission and its window, never a budget, so a mission no budget can run still downloads).
-        `hash_budget`: the budget the resume hash names when there is no plan, so that a fetch into a run directory leaves its ledgers current for `run`.
+        `hash_budget`: the budget the resume hash names when there is no plan (`report --run`, which renders a finished run and keeps its ledgers current).
         `gpu_mem_gb`: the device memory the planner sizes the nests against (budget.plan refuses a nest over 85 % of it)."""
         self.mission_path = pathlib.Path(mission_path)
         self.mission = load_mission(mission_path)
@@ -148,7 +161,13 @@ class Context:
 
     def stage_hash(self, name: str) -> str:
         """The config hash a stage's ledger carries: `hash`, and for the emulator and the stages after it also the emulator plan and the workers it
-        was sized on (the variants depend on them), so a resume under another CPU count reruns those and reuses stage 1 and 1b."""
+        was sized on (the variants depend on them), so a resume under another CPU count reruns those and reuses stage 1 and 1b.
+
+        The ingest's hash is the mission (without its seed, which ingest never reads) and the code, nothing else: it reads no budget, no GPU count and no
+        plan (`ctx.replan()` at its end changes the plan and the workers of the stages after it, not what it writes), so a `fetch` (which has none of those)
+        leaves it current for a `run` of any budget, GPU count and seed, and a `run` leaves it current for a `fetch` (round 14, M-30)."""
+        if name == "ingest":
+            return digest(dict(mission={k: v for k, v in self.mission.items() if k not in ("_path", "seed")}, code=self.code_digest))
         if not self.plan or STAGES.index(name) < STAGES.index("emulator"):
             return self.hash
         return digest(dict(config=self.hash, emulator=self.plan["emulator"], workers=self.plan["workers"]))
@@ -165,7 +184,7 @@ class Context:
             if _derived_current(self.cache):
                 why = _derived_span_problem(self.cache, self.window_s())
                 if why:
-                    raise ConfigError(f"{self.cache}/derived.zarr: {why}; rerun `{FETCH_CMD} {self.mission_path}` to rebuild it")
+                    raise ConfigError(f"{self.cache}/derived.zarr: {why}; rerun `{fetch_cmd(self.mission_path)}` to rebuild it")
                 sub = surface.SurfaceLayer(self.cache, warm_layer=subgrid.switch(e, "warm_layer"), rain_lens=subgrid.switch(e, "rain_lens"))
             sig, fit = env_sigmas(), self.run_dir / "ingest" / "env_sigmas_fitted.json"
             if fit.is_file():
@@ -281,7 +300,7 @@ def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], b
     the error. Returns whether the input is there."""
     note = what
     if not present():
-        cmd = hint or f"{FETCH_CMD} {ctx.mission_path}"
+        cmd = hint or fetch_cmd(ctx.mission_path)
         if _offline():
             again = "run" if hint else "unset CAFE_OFFLINE and run"  # `fetch` is the command that was just run (or `run`, which fetches)
             note = f"{what} is not cached and CAFE_OFFLINE is set, so nothing is downloaded: {again} `{cmd}`"
@@ -357,7 +376,7 @@ def _tao_covers(m: dict[str, Any], box: tuple[float, float, float, float], t0: f
     """A TAO manifest `m` (parsed) was made under the current selection rule (a copy of an older cache put in the directory by hand is refused) and covers
     the box and the window. The part of `_tao_cached` that reads nothing but the manifest, so that it can be asked of the copy a run recorded."""
     from .env import tao
-    if m.get("selection") != tao.SELECTION:
+    if m.get("selection") != tao.SELECTION or not tao.manifest_shape(m):
         return False
     s, n, w, e = hycom.box360(box)
     return bool(m["t0"] <= t0 and m["t1"] >= t1 and m["box"][0] <= s and m["box"][1] >= n and m["box"][2] <= w and m["box"][3] >= e)
@@ -450,7 +469,9 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
         d = orca.read_json(man)
         if d is None and man.exists():
             ctx.log(f"ingest: orca manifest {man} is unreadable (empty or truncated): fetching again")
-        if d is not None and _old_orca_layout(d, t0):
+        if d is not None and not orca.manifest_shape(d):
+            ctx.log(f"ingest: orca manifest {man} lacks what the ingest reads of it (base, t0, t1, hours, box, hours3d): fetching again")
+        elif d is not None and _old_orca_layout(d, t0):
             ctx.log(f"ingest: orca manifest {man} was made by older code (its hour labels are shifted for a window that starts at "
                     f":{t0.minute:02d}): fetching again")
         return d is not None and _orca_covers(d, t0, t1, box, h3)
@@ -485,7 +506,8 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
                  lambda: bathy.fetch_gebco(sbox, gebco, bathy.GEBCO_URL)),
            _need(ctx, L, "ocean_store", f"the ocean store {store.name} for the box and window" + (f" ({short})" if short else ""),
                  lambda: _ocean_cached(store, sbox, steps, window), fetch_ocean,
-                 hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {ctx.mission_path} --path <lab HYCOM dir> "
+                 hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {shlex.quote(str(ctx.mission_path))} "
+                                                                  "--path <lab HYCOM dir> "
                                                                   "--temperature-kind <in_situ|potential>")]
     if not all(got):
         return                                                           # the failed checks above stop the stage
@@ -580,8 +602,8 @@ def _orca_covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime, box: tuple
     """The orca manifest covers the window, its recorded box contains `box` (lon_min, lon_max, lat_min, lat_max; a manifest with no box was
     written before the box was recorded and cannot say) and it has every 3-D hour wanted, and it is not of the old layout (`_old_orca_layout`)."""
     b = d.get("box")
-    return bool(_covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and _lon_arc_covers(b[:2], box[:2]) and b[2] <= box[2] and b[3] >= box[3]
-                and {orca.stamp(h) for h in hours3d} <= set(d.get("hours3d", [])))
+    return bool(orca.manifest_shape(d) and _covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and _lon_arc_covers(b[:2], box[:2])
+                and b[2] <= box[2] and b[3] >= box[3] and {orca.stamp(h) for h in hours3d} <= set(d.get("hours3d", [])))
 
 
 def _lon_arc_covers(have: tuple[float, float] | list[float], want: tuple[float, float] | list[float]) -> bool:
@@ -876,6 +898,8 @@ def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] |
     `series`: mooring -> hourly residuals (NaN gaps). persistent: the predictive sd of the error at a new site (random effects): the variance of
     the moorings' time-mean errors across moorings, less the mean sampling variance of those means (s^2 / n x (1 + rho) / (1 - rho) for an AR(1)
     series) and floored at 0, plus the variance of the fitted mean (var(means) / k for k moorings), so it is 0 only when every mean is equal.
+    mean: that fitted mean, the unweighted mean of the k moorings' time-mean errors (model minus mooring): the estimator whose variance the term above
+    is, not the mean of all the samples pooled, which weights a mooring by its record length (round 14, M-44).
     noise: the pooled sd of the residuals about each mooring's own mean; tau_h: its e-folding time from the lag-1 autocorrelation rho of those
     residuals (0 when rho <= 0, rho capped at 0.999).
     persistent_hi95: the same with the between-mooring variance at its 95 % one-sided upper bound ((k - 1) var / chi2_0.05(k - 1)): the data cannot
@@ -897,7 +921,7 @@ def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] |
     sampling = float(np.mean(s2 / n * (1 + rho) / (1 - rho)))
     between = float(np.var(means, ddof=1))
     hi = between * (len(kept) - 1) / float(chi2.ppf(0.05, len(kept) - 1))                       # 95 % one-sided upper bound of the between-mooring variance
-    return dict(persistent=float(np.sqrt(max(between - sampling, 0.0) + between / len(kept))),
+    return dict(mean=float(np.mean(means)), persistent=float(np.sqrt(max(between - sampling, 0.0) + between / len(kept))),
                 persistent_hi95=float(np.sqrt(max(hi - sampling, 0.0) + hi / len(kept))), noise=float(np.sqrt(np.average(s2, weights=n - 1))),
                 tau_h=0.0 if rho <= 0 else float(-1.0 / np.log(rho)), rho=rho, moorings=float(len(kept)))
 
@@ -905,13 +929,16 @@ def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] |
 def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     """Data validation (BRIEF 5.4): WRF 10 m wind and SST against the TAO/TRITON moorings in the box, hourly, model minus
     mooring. The wind error is split (`fit_wind_error`) into a persistent part per member (the wind bias priors) and a short-lived AR(1) part
-    (`wind_speed_noise`, `wind_direction_noise`), written to ingest/priors_fitted.json; without moorings the perturbations.yaml priors stand
-    and the ledger says so. With fewer than two moorings the split is not defined: the whole hourly misfit is then the persistent sd."""
+    (`wind_speed_noise`, `wind_direction_noise`), written to ingest/priors_fitted.json. The comparison is mandatory (BRIEF 5.4): the cache must exist
+    (`s_ingest` has made the `tao_present` check before this runs, so there is a manifest) and a mission box with no TAO/TRITON mooring that has usable
+    wind in the window fails the stage at `tao_moorings_compared`. The perturbations.yaml priors stand only for a quantity the moorings do not measure
+    (a calm WRF, no direction channel: DECISIONS 312). With fewer than two moorings the split is not defined: the whole hourly misfit is then the
+    persistent sd. Round 14, M-24: this said the priors stand without moorings, and a branch for "no download" could not be reached."""
     from .env import tao
+    for f in ("priors_fitted.json", "env_sigmas_fitted.json"):
+        ctx.path("ingest", f).unlink(missing_ok=True)       # an earlier attempt's fit is no fit of this one, and this attempt can stop before it writes
+        # either (`whatif --run`, `Context.env` and the credibility page read whatever is there)
     tdir = tao.cache_dir(DATA)
-    if not (tdir / "manifest.json").is_file():
-        L.note(f"no TAO/TRITON download at {tdir}: wind priors stay the perturbations.yaml defaults (run `make fetch`)")
-        return
     sbox = ocean_box(ctx.mission)
     tsnap = ctx.path("ingest", "tao_manifest.json")
     tman = _copy_covering(ctx, L, "tao", tdir / "manifest.json", tsnap, lambda c: _tao_covers(c, sbox, t0, t1),
@@ -928,7 +955,8 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
             wrf[name] = dict(t=hours, wind10=ctx.env.u10(lo, la, hours), sst=ctx.env.sst(lo, la, hours).value)
     cmp = tao.compare(wrf, moor)
     n = len([k for k in cmp if k != "ALL"])
-    L.check("tao_moorings_compared", n > 0, value=n, limit=1, note="moorings with usable wind in the window")
+    L.check("tao_moorings_compared", n > 0, value=n, limit=1,
+            note="moorings with usable wind in the window (the mission box must contain TAO/TRITON moorings: BRIEF 5.4 makes the comparison mandatory)")
     left = {k: "outside the environment's grid" if k not in wrf else tao.wind_gap(tdir, k, t0, t1, man=tman) for k in moor if k not in cmp}      # round 10, LB1
     if left:
         L.note(f"{len(moor)} moorings in the TAO manifest, {n} compared; left out: " + "; ".join(f"{k} ({why})" for k, why in sorted(left.items())))
@@ -942,19 +970,22 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     pooled = (float(np.sqrt(max(a["speed_rmse"] ** 2 - a["speed_bias"] ** 2, 0.0))), float(np.sqrt(max(a["dir_rmse_deg"] ** 2 - a["dir_bias_deg"] ** 2, 0.0))))
     fit: dict[str, Any] = {}
     said: list[str] = []
-    for key, unit, mean, split, hourly in (("speed", "m/s", -a["speed_bias"], sp, pooled[0]), ("direction", "deg", -a["dir_bias_deg"], dr, pooled[1])):
+    for key, unit, pooled_bias, split, hourly in (("speed", "m/s", a["speed_bias"], sp, pooled[0]), ("direction", "deg", a["dir_bias_deg"], dr, pooled[1])):
+        mean = -pooled_bias if split is None else -split["mean"]            # with a split: the unweighted mean of the moorings' means (M-44)
         if split is None:
             how = f"fewer than 2 moorings, so the whole hourly misfit ({hourly:.3g} {unit}) is held as one persistent error"
         else:
             how = (f"persistent part only: the between-mooring spread of the time-mean error less its sampling variance, plus the uncertainty "
-                   f"of the mean of {n} moorings; the hourly rest is wind_{key}_noise")
+                   f"of the mean of {int(split['moorings'])} moorings; the hourly rest is wind_{key}_noise")
         value = hourly if split is None else split["persistent"]
         if not (np.isfinite(mean) and np.isfinite(value)):                 # calm wind or no such channel: the configured priors stand (round 6, M-5)
             n_ok = int(sum(np.isfinite(v[:, 0 if key == "speed" else 1]).sum() for v in res.values()))
             L.note(f"no usable wind {key} at the moorings ({'dir' if key == 'direction' else 'speed'}_n {n_ok}): "
                    f"wind_{key}_bias/noise stay the perturbations.yaml priors")
             continue
-        flip = (f"mean = minus the {n}-mooring mean error, i.e. mooring minus WRF: the correction perturb.py adds to WRF (the error itself is WRF minus "
+        what = ("the mean error over the moorings' pooled samples" if split is None else
+                f"the unweighted mean of the {int(split['moorings'])} moorings' time-mean errors")
+        flip = (f"mean = minus {what}, i.e. mooring minus WRF: the correction perturb.py adds to WRF (the error itself is WRF minus "
                 f"mooring, {-mean:+.3g} {unit})")                      # round 10, M-25: the sign of `mean` is the opposite of the data the citation names
         fit[f"wind_{key}_bias"] = dict(dist="normal", mean=mean, value=value, unit=unit, citation=f"{cite}; {flip}; {how}", kind="data")
         if split is not None:
@@ -1035,7 +1066,7 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
     if getattr(ctx.env, "subgrid", None) is None:
         if isinstance(ctx.env, GriddedEnv):                              # a gridded one has it unless missing or in another layout: other physics, not a pass
             L.check("derived_unchanged", False, note=f"{store} is missing or has another layout: ingest recorded it as an input of this run; "
-                                                     f"rerun `{FETCH_CMD} {ctx.mission_path}` and the run")
+                                                     f"rerun `{fetch_cmd(ctx.mission_path)}` and the run")
         return                                                           # an environment without the layer (the analytic ones) reads nothing derived
     if not rec.is_file():
         L.check("derived_unchanged", False, note=f"{rec} is missing: ingest did not record the surface layer this stage reads")
@@ -1044,7 +1075,7 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
     want = json.loads(rec.read_text())["store_sha256"]
     have = surface.store_sha256(store) if store.is_dir() else None
     L.check("derived_unchanged", have == want, value=have, limit=want, note=f"{store} hashes to what ingest recorded" if have == want
-            else f"{store} is not what ingest recorded (edited or rebuilt since): rerun `{FETCH_CMD} {ctx.mission_path}` and the run")
+            else f"{store} is not what ingest recorded (edited or rebuilt since): rerun `{fetch_cmd(ctx.mission_path)}` and the run")
 
 
 def _covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime) -> bool:
@@ -1390,7 +1421,9 @@ def _sensitivity_cases(ctx: Context, L: Ledger, scales: dict[str, Any]) -> None:
     """The USV verdict again under the brief's literal VPP bias (stage1.BRIEF_PRIOR, DECISIONS 163), paired with the main one: the run's own
     hypercube (`res["X"]`, so the same members, the same n and the same other inputs) with only the `usv_vpp_bias` column replaced, same seed and
     refit multipliers, written to stage1b/sensitivity_cases.json for the report to show next to the calibrated verdict. Nothing is written for a
-    mission without a USV."""
+    mission without a USV, and the file an earlier attempt of this stage left is removed first: the report takes every json of the stage directory as an
+    input, so a file of a mission that had a USV would be shown under a vehicle that is none (round 14, M-29)."""
+    ctx.path("stage1b", "sensitivity_cases.json").unlink(missing_ok=True)
     if not any(stage1._classes(ctx.mission)[v["id"]] == "usv" for v in ctx.mission["vehicles"]):
         return
     fp = ctx.run_dir / "ingest" / "priors_fitted.json"
@@ -1601,8 +1634,7 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
     """`stop_after="ingest"` is `fetch`: it plans nothing, so a mission no budget can run on this machine (a 30-day window at 28 GB; a 20-vehicle
     fleet plans, and only needs a larger time budget) still downloads."""
     fetch = stop_after == "ingest"
-    ctx = Context(mission_path, None if fetch else budget_name, gpus, run_dir, log, seed, emulator_table, gpu_mem_gb,
-                  hash_budget=budget_name if fetch else None)
+    ctx = Context(mission_path, None if fetch else budget_name, gpus, run_dir, log, seed, emulator_table, gpu_mem_gb)
     if not fetch:
         from .emulator import read_table, store_path
         table = store_path(ctx.table)[0]
@@ -1611,11 +1643,12 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
     dest = ctx.path("mission.yaml")
     if seed is None:
         if not (dest.exists() and os.path.samefile(ctx.mission_path, dest)):      # `--mission <run dir>/mission.yaml --out <run dir>` (RUNBOOK): it is the copy
-            shutil.copy(ctx.mission_path, dest)
+            with open(ctx.mission_path, newline="") as f:                 # the bytes as they are (no newline translation), through the one atomic writer (M-20)
+                write_text(dest, f.read())
     else:                                                                 # the copy is what `report` and `whatif` reload: it must carry the seed that was run,
         # whatever the spelling of `seed` in the file (`seed : 5`, "seed": 5, a flow mapping); its comments are lost, the original is `plan.json`'s
         # mission_path. The same file is rewritten with the new seed (the text is read before the file is opened for writing)
-        dest.write_text(yaml.safe_dump(dict(_yaml(ctx.mission_path), seed=seed), sort_keys=False))
+        write_text(dest, yaml.dump(dict(_yaml(ctx.mission_path), seed=seed), Dumper=_Dumper, sort_keys=False))
     if ctx.plan:
         _dump(ctx.plan, ctx.path("plan.json"))
         log(budget.describe(ctx.plan))
