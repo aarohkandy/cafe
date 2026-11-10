@@ -1204,3 +1204,76 @@ def test_r13_l1_platform_display_of_a_symlink_loop_is_the_path_as_given_not_a_ru
     loop = tmp_path / "loop.yaml"
     loop.symlink_to("loop.yaml")
     assert config.platform_display(str(loop)) == str(loop)
+
+
+# ---- review round 14, batch B: M-18 (the mode of a rewritten file), M-21 (a string that reads as a float), M-26 (aliases of aliases)
+
+def test_r14_m18_write_text_keeps_the_mode_of_the_file_it_replaces_and_a_new_file_gets_the_default(tmp_path):
+    """The replace gave the name a new inode with the temporary's default mode: a 0600 file became 0644 on its first rewrite (the shared golden)."""
+    f = tmp_path / "secret.json"
+    f.write_text("{}")
+    f.chmod(0o600)
+    config.write_text(f, "{}\n")
+    assert f.stat().st_mode & 0o777 == 0o600 and f.read_text() == "{}\n"
+    link = tmp_path / "sl.json"
+    link.symlink_to(f)
+    config.write_text(link, "x")
+    assert link.is_symlink() and f.stat().st_mode & 0o777 == 0o600
+    ro = tmp_path / "ro.json"
+    ro.write_text("a")
+    ro.chmod(0o400)
+    config.write_text(ro, "b")
+    assert ro.read_text() == "b" and ro.stat().st_mode & 0o777 == 0o400 and not list(tmp_path.glob("*.tmp"))
+    new = tmp_path / "new.json"
+    config.write_text(new, "n")
+    default = tmp_path / "plain"
+    default.write_text("")
+    assert new.stat().st_mode & 0o777 == default.stat().st_mode & 0o777
+
+
+def test_r14_m18_a_hard_link_does_not_survive_a_rewrite_and_the_docstring_says_so(tmp_path):
+    """A replace cannot keep a second name for the same inode: the link keeps the old content. Pinned so the limit stays stated."""
+    f, other = tmp_path / "a.json", tmp_path / "b.json"
+    f.write_text("old")
+    other.hardlink_to(f)
+    config.write_text(f, "new")
+    assert f.read_text() == "new" and other.read_text() == "old" and "hard link" in (config.write_text.__doc__ or "")
+
+
+def test_r14_m21_a_string_that_reads_as_a_float_is_written_quoted_so_the_copy_loads_back(tmp_path):
+    """`yaml.safe_dump` wrote the string "1e5" bare; the loader's extra float rule (1e5 is a number) then read it back as 100000.0."""
+    d = {"id": "1e5", "n": 1e5, "k": {"2E-3": "-4e+2", "plain": "text"}, "list": ["7e1", 7e1]}
+    text = yaml.dump(d, Dumper=config._Dumper, sort_keys=False)
+    p = tmp_path / "x.yaml"
+    p.write_text(text)
+    assert config.read_yaml(p) == d and isinstance(config.read_yaml(p)["id"], str)
+    assert yaml.safe_dump(d) != text                                    # the stock dumper is what fails: it leaves "1e5" bare
+
+
+def alias_tower(levels, width=10):
+    """A file in which each level is a list of `width` aliases of the level below: width ** levels values once written out, a few lines on disk."""
+    lines = ["a0: &a0 [" + ", ".join(["0"] * width) + "]"]
+    lines += [f"a{i}: &a{i} [" + ", ".join([f"*a{i - 1}"] * width) + "]" for i in range(1, levels)]
+    return "\n".join(lines) + "\n"
+
+
+def test_r14_m26_nested_aliases_are_refused_at_once_and_a_modest_use_still_loads(tmp_path):
+    """Each level multiplied the work of `_finite`, `_unshare` and the digest by ten: 6 levels took 0.6 s, 9 levels about 100 minutes."""
+    import time
+    p = tmp_path / "tower.yaml"
+    p.write_text(alias_tower(8))
+    t = time.perf_counter()
+    with pytest.raises(ConfigError, match="tower.yaml: aliases nested too deeply"):
+        config.read_yaml(p)
+    assert time.perf_counter() - t < 1.0
+    p.write_text(alias_tower(4))                                        # 10 ** 4 values: legal, and fast
+    assert len(config.read_yaml(p)["a3"]) == 10
+    p.write_text("shared: &s {a: 1, b: [1, 2]}\nx: *s\ny: *s\n")        # row 462: aliases stay legal
+    assert config.read_yaml(p)["y"] == {"a": 1, "b": [1, 2]}
+
+
+def test_r14_m26_a_list_that_contains_itself_is_a_config_error_not_a_recursion_error(tmp_path):
+    p = tmp_path / "loop.yaml"
+    p.write_text("a: &a [1, *a]\n")
+    with pytest.raises(ConfigError, match="loop.yaml: an alias refers to the list or mapping it is inside"):
+        config.read_yaml(p)

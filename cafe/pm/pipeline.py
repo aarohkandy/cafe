@@ -34,7 +34,7 @@ from numpy.typing import NDArray
 from scipy.stats import chi2
 
 from . import budget, ledger, par, stage1
-from .config import ConfigError, _yaml, assumptions, digest, env_sigmas, load_mission, utc, write_json
+from .config import ConfigError, _Dumper, _yaml, assumptions, digest, env_sigmas, load_mission, utc, write_json
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.environment import FETCH_CMD
 from .env.hycom import FetchError
@@ -1615,7 +1615,7 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
     else:                                                                 # the copy is what `report` and `whatif` reload: it must carry the seed that was run,
         # whatever the spelling of `seed` in the file (`seed : 5`, "seed": 5, a flow mapping); its comments are lost, the original is `plan.json`'s
         # mission_path. The same file is rewritten with the new seed (the text is read before the file is opened for writing)
-        dest.write_text(yaml.safe_dump(dict(_yaml(ctx.mission_path), seed=seed), sort_keys=False))
+        dest.write_text(yaml.dump(dict(_yaml(ctx.mission_path), seed=seed), Dumper=_Dumper, sort_keys=False))
     if ctx.plan:
         _dump(ctx.plan, ctx.path("plan.json"))
         log(budget.describe(ctx.plan))

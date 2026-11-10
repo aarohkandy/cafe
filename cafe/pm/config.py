@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, hashlib, json, math, os, pathlib, re
+import contextlib, datetime as dt, hashlib, json, math, os, pathlib, re, shutil
 from collections.abc import Hashable, Iterator
 from typing import Any
 
@@ -58,7 +58,39 @@ def _int(self: _Loader, node: Any) -> Any:
 
 _Loader.add_constructor("tag:yaml.org,2002:int", _int)
 # YAML 1.1 wants a dot in a float, so PyYAML reads 1e-6, 5e0 and 1e+7 as text; every file read through `read_yaml` takes them as numbers (round 8, L0)
-_Loader.add_implicit_resolver("tag:yaml.org,2002:float", re.compile(r"^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$"), list("-+0123456789"))
+_EXP_FLOAT = re.compile(r"^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$")
+_Loader.add_implicit_resolver("tag:yaml.org,2002:float", _EXP_FLOAT, list("-+0123456789"))
+
+
+class _Dumper(yaml.SafeDumper):
+    """The writer that matches `_Loader` (round 14, M-21): the string "1e5" has to be written quoted, or the loader reads it back as the float 100000.0.
+    PyYAML's own dumper quotes a string only when its resolver would read it as another type, and it does not know the loader's extra float rule."""
+
+
+_Dumper.add_implicit_resolver("tag:yaml.org,2002:float", _EXP_FLOAT, list("-+0123456789"))
+
+
+ALIAS_NODES_MAX = 1_000_000                                                 # expanded nodes of one file; a real mission is a few thousand (round 14, M-26)
+
+
+def _expanded_size(node: Any, memo: dict[int, int], active: set[int]) -> int:
+    """The number of nodes `node` has when every alias is written out, counted once per shared node (`memo` by id), so a tree that doubles ten times is
+    measured at once and refused, not walked. Refuses past ALIAS_NODES_MAX, and a list or mapping that is its own descendant (`&a [*a]`)."""
+    if not isinstance(node, (dict, list)):
+        return 1
+    k = id(node)
+    if k in memo:
+        return memo[k]
+    if k in active:
+        raise ConfigError("an alias refers to the list or mapping it is inside; an alias stands for a copy of a mapping or list that is already complete")
+    active.add(k)
+    n = 1 + sum(_expanded_size(v, memo, active) for v in (node.values() if isinstance(node, dict) else node))
+    if n > ALIAS_NODES_MAX:
+        raise ConfigError(f"aliases nested too deeply: the file expands to more than {ALIAS_NODES_MAX:,} values once every alias is written out "
+                          f"(a mission has a few thousand); an alias of an alias of an alias multiplies")
+    active.discard(k)
+    memo[k] = n
+    return n
 
 
 def _yaml(path: str | pathlib.Path) -> Any:
@@ -66,7 +98,9 @@ def _yaml(path: str | pathlib.Path) -> Any:
     if not path.exists():
         raise ConfigError(f"{path}: file not found")
     try:
-        return yaml.load(path.read_text(), Loader=_Loader)                  # noqa: S506  _Loader is a SafeLoader
+        doc = yaml.load(path.read_text(), Loader=_Loader)                   # noqa: S506  _Loader is a SafeLoader
+        _expanded_size(doc, {}, set())                                       # before _finite, _unshare, credibility._prov and json.dumps walk it as a tree (round 14, M-26)
+        return doc
     except UnicodeDecodeError as e:
         raise ConfigError(f"{path}: not a UTF-8 text file ({e.reason} at byte {e.start}); the mission and platform files are UTF-8 YAML") from e
     except OSError as e:
@@ -261,11 +295,15 @@ def write_text(p: pathlib.Path, text: str) -> None:
     """`text` in `p` through a sibling temporary and os.replace: a run killed mid-write, or a disk that fills, leaves the old file, never half of a new one
     that `json_object` and the other readers of a stored result would then have to refuse (round 9, L0; the writer of every slow-run receipt), and no
     temporary behind. A symlink is followed, so the file it points to is the one replaced and the link stays a link (round 13, M-14). The one writer of
-    a file a person or a later stage reads back: the acceptance golden, the audit records, the run's reports and ledgered JSON (round 13, M-17 sweep)."""
+    a file a person or a later stage reads back: the acceptance golden, the audit records, the run's reports and ledgered JSON (round 13, M-17 sweep), the
+    ledgers, the receipt store and the ingest manifests (round 14, P-R13M1). An existing file keeps its permission bits (a new file gets the default
+    ones); a hard link to it does not survive, because a replace gives the name a new inode and the other name keeps the old content (round 14, M-18)."""
     p = pathlib.Path(os.path.realpath(p))
     tmp = p.with_name(p.name + ".tmp")
     try:
         tmp.write_text(text)
+        with contextlib.suppress(OSError):                                  # the mode of the file being replaced; a target that is new or unreadable has none to keep
+            shutil.copymode(p, tmp)
         os.replace(tmp, p)
     except BaseException:
         tmp.unlink(missing_ok=True)

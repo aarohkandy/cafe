@@ -3582,6 +3582,16 @@ def test_r8_m34_run_seed_rewrites_the_saved_mission_whatever_the_spelling_of_see
     assert (tmp_path / "run2" / "mission.yaml").read_bytes() == m.read_bytes()                                    # no override: the file itself
 
 
+def test_r14_m21_run_seed_writes_a_copy_that_loads_when_a_vehicle_id_reads_as_a_float(tmp_path, monkeypatch):
+    """`yaml.safe_dump` wrote the quoted id "1e5" bare; `load_mission` on the copy (what report, whatif and a rerun with --seed read) then refused it as a number."""
+    stub_stages(monkeypatch, [])
+    m = tmp_path / "m.yaml"
+    m.write_text(MISSION_PATH.read_text().replace("id: glider_1n", 'id: "1e5"'))
+    assert config.load_mission(m)["vehicles"][1]["id"] == "1e5"
+    pipeline.run(m, "ci", 0, tmp_path / "run", log=[].append, seed=9)
+    copy = config.load_mission(tmp_path / "run" / "mission.yaml")
+    assert copy["vehicles"][1]["id"] == "1e5" and copy["seed"] == 9
+
 # ---- review round 8: M-4 (the contents of the ocean store), M-23 (a cut checkpoint ledger), M-35 (Bellhop in the code digest)
 
 def _ocean_store_of(data_copy):
