@@ -451,7 +451,7 @@ def shear_layer_mass(refill: bool = True, rho_override: float | None = None, ste
 
 
 SLOW_DIR = pathlib.Path(os.environ.get("CAFE_DATA", "/data")) / "receipts"
-SPHERE_RUNS = (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4))
+SPHERE_RUNS = lbm.SPHERE_RUNS                    # one list of the stored runs: `lbm.sphere_tag` accepts exactly these
 
 
 def sphere_path(tag: str, d: int) -> pathlib.Path:
@@ -591,7 +591,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--lateral", choices=("dirichlet", "freeslip", "periodic"), default="dirichlet")
     p.add_argument("--needs-d", type=lbm.positive_int, default=None)
     a = p.parse_intermixed_args(argv)
-    kinds = (lbm.positive_text, lbm.positive_int, lbm.positive_float, lbm.positive_float, lbm.positive_float) if a.cmd == "slow" else ()
+    kinds = (lbm.sphere_tag, lbm.positive_int, lbm.positive_float, lbm.positive_float, lbm.positive_float) if a.cmd == "slow" else ()
     vals = lbm.cli_values(p, a, kinds)
     if a.cmd == "slow":
         sha0 = lbm.physics_sha()

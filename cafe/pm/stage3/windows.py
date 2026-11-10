@@ -302,7 +302,8 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
         acc.append(rho[c[0], c[1], c[2]])
         del acc[:-3]
 
-    wlog: dict[str, Any] = {}
+    nns = wm.no_shear_cells(geom.ws)                                           # wall cells without a normal: bounce-back at the body velocity, no log-law shear
+    wlog: dict[str, Any] = dict(no_shear_cells=nns)
     pre = time.perf_counter() - t_enter                                        # voxelising, wall set, memory guard: part of the budget
     wall = None if spec.wall_s is None else max(spec.wall_s - pre, 0.0)
     state, ser = nest.simulate(ns, env, geom, p0, params, steps, chunk=spec.chunk, v0=tuple(vn), on_chunk=on_chunk,
@@ -330,6 +331,8 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
                            "; ".join(wm.stale_wall_receipts()) if ns.wall_model else "")
     return dict(vehicle=vehicle.name, resolution=res, t=t, force=fsi, ref_area=area, **co, checks=checks,
                 ok=all(c["ok"] for c in checks), wall_points=pts, wall_pressure=pwall, source="native-nest",
+                note=(f"{nns} of {len(cell[0])} wall cells have no surface normal (a slot one cell wide between walls) and get no wall shear: "
+                      "the drag there is under-counted and they are left out of the y+ share") if nns else "",
                 shifts=int(np.abs(ser["shift"]).sum()), series={k: ser[k] for k in ("umax", "res", "yfrac")}, wall=wlog, steps_run=n)
 
 
@@ -359,6 +362,8 @@ def fea_window(vehicle: Vehicle, points: NDArray[Any], pressure: NDArray[Any], w
     r = fea.solve(m, "shell", vehicle.material, thickness=vehicle.thickness, pressure=pr, steps=steps, h=h, workdir=workdir)
     stress = r["vm_p99"] / fea.MATERIALS[vehicle.material]["yield_"]
     lam = r.get("buckling_factor") if buckle else None
+    if buckle and not lam:                                                  # fea.solve raises first; never fall back to the stress alone (round 14 M-31)
+        raise RuntimeError("the FEA returned no buckling factor: the hull's collapse is not known")
     buckling = 1.0 / (lam * hangar.KNOCKDOWN) if lam else None
     f = r.pop("field")
     return dict(utilization=float(max(stress, buckling or 0.0)), stress_utilization=float(stress),

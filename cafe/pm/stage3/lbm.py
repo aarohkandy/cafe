@@ -728,10 +728,13 @@ def positive_int(s: str) -> int:
     return v
 
 
-def positive_text(s: str) -> str:
-    """a finite number above 0 (kept as typed: it names the stored file)"""
-    positive_float(s)
-    return s
+def sphere_tag(s: str) -> str:
+    """one of the sphere Reynolds numbers 100, 1000, 1e4 (any spelling of the number)"""
+    v = positive_float(s)
+    for tag, re in SPHERE_RUNS:
+        if v == re:
+            return tag                                                       # the canonical tag names the stored file and is the one the receipts read
+    raise ValueError(s)
 
 
 def cli_parser(prog: str, cmds: tuple[str, ...], doc: str | None) -> argparse.ArgumentParser:
@@ -767,7 +770,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--fp32-storage", action="store_true")
     a = p.parse_intermixed_args(argv)
     slow = a.cmd == "slow"
-    vals = cli_values(p, a, (positive_text, positive_int, positive_float, positive_float, positive_float) if slow else (), 1 if slow else 0)
+    vals = cli_values(p, a, (sphere_tag, positive_int, positive_float, positive_float, positive_float) if slow else (), 1 if slow else 0)
     if len(vals) in (3, 4):
         p.error("slow takes RE, RE D or RE D NX NY NZ")
     backend = a.backend or pick_backend()

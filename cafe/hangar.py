@@ -162,10 +162,10 @@ def fea_cases(kind, m_flu, spec, veh, parts, work):
         r = run("depth", hull, "shell" if structure == "shell" else "solid", pressure=lambda c, n: np.full(len(c), p_ref),
                 steps=("static", "buckle"), h=hull.extents.max() / 70)     # L/45 read collapse ~9 % high; L/70 is converged
         yield_depth = REF_DEPTH * fea.MATERIALS[mat]["yield_"] / r["vm_p99"]
-        buckle_depth = REF_DEPTH * r["buckling_factor"] * KNOCKDOWN if r.get("buckling_factor") else np.inf
+        buckle_depth = REF_DEPTH * r["buckling_factor"] * KNOCKDOWN   # fea.solve raises when the step finds none (round 14 M-31)
         crush = min(yield_depth, buckle_depth)
         out.update(vm_p99_at_ref=r["vm_p99"], ref_depth=REF_DEPTH, yield_depth=yield_depth,
-                   buckling_factor=r.get("buckling_factor"), buckle_depth=buckle_depth, knockdown=KNOCKDOWN,
+                   buckling_factor=r["buckling_factor"], buckle_depth=buckle_depth, knockdown=KNOCKDOWN,
                    crush_depth=crush, rated_depth=crush / DEPTH_SF,
                    mode="buckling" if buckle_depth < yield_depth else "yield")
         out["cases"].append(_case("Hull at depth", f"{REF_DEPTH:.0f} m of sea water on the hull; scales linearly with depth",

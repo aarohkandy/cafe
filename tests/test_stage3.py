@@ -168,6 +168,81 @@ def test_wall_state_imposes_the_log_law_stress_on_a_free_slip_wall():
     assert np.abs(np.asarray(wm.wall_state(v, ws, nu)["fw"])[:, mid]).max() < 1e-8
 
 
+def _utau_oracle(u, y, nu):
+    """The friction velocity for a speed u at distance y from the law of the wall written out with its constants (kappa 0.41, B 5.2, the log law
+    meets u+ = y+ at y+ = 11.06), by a root find: no code of wallmodel.py. u below 11.06^2 nu / y is in the viscous layer, u_tau = sqrt(nu u / y)."""
+    from scipy.optimize import brentq
+    if u <= 11.06 ** 2 * nu / y:
+        return math.sqrt(nu * u / y)
+    return brentq(lambda ut: ut * (math.log(y * ut / nu) / 0.41 + 5.2) - u, 11.06 * nu / y, u, xtol=1e-12)
+
+
+@pytest.mark.parametrize("nu", [4e-5, 3e-3])             # the log-law branch and the viscous one
+def test_r14_m32_the_wall_stress_on_a_diagonal_wall_has_the_face_area_the_tangent_and_the_post_kick_slip(nu):
+    """Round 14 M-32: every direct `wall_state` test had an axis-aligned wall (face area 1) and a post-kick slip too small for its tolerance, so dropping
+    the area factor or the `- fw` of the wall velocity left every wall-model test green. Here a sphere (face areas 1/sum|n| from 1 down to 0.58) in a uniform
+    stream against a moving wall: |fw| = u_tau^2 / sum|n| per cell along the relative tangential flow, perpendicular to the normal, and
+    u_slip = u_w + u_1t - fw to float32. The oracle is numpy and the law of the wall written out (`_utau_oracle`), not the module's own functions."""
+    shape = (24, 24, 24)
+    solid = nest._sphere(shape, (12, 12, 12), 5.0)
+    ws = wm.WallSet(*(jnp.asarray(a) for a in wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))))
+    n = np.asarray(ws.nrm, np.float64)
+    area = 1.0 / np.abs(n).sum(0)
+    assert area.mean() < 0.85 and area.min() < 0.65 and np.asarray(ws.valid).all()       # a wall clearly off the axes
+    u, uw = np.array([0.08, 0.03, -0.04]), np.array([0.01, 0.0, 0.005])
+    st_ = wm.wall_state(jnp.broadcast_to(jnp.asarray(u, jnp.float32).reshape(3, 1, 1, 1), (3,) + shape), ws, nu, u_wall=tuple(uw))
+    rel = u - uw
+    tang = rel[:, None] - (rel @ n) * n                                                  # (3, N) relative velocity tangent to each wall cell
+    s = np.linalg.norm(tang, axis=0)
+    ok = s > 0.01                                                                        # the flow is not along the normal
+    assert ok.sum() > 0.9 * len(s)
+    ut = np.array([_utau_oracle(v, 2.5, nu) for v in s[ok]])
+    fw_ref = ut ** 2 * area[ok] * tang[:, ok] / s[ok]
+    fw = np.asarray(st_["fw"], np.float64)
+    np.testing.assert_allclose(fw[:, ok], fw_ref, rtol=5e-3, atol=1e-3 * np.abs(fw_ref).max())
+    assert np.abs((fw * n).sum(0)).max() < 1e-3 * np.abs(fw).max()                      # the stress is tangent to the wall
+    slip = np.asarray(st_["u_slip"], np.float64)
+    np.testing.assert_allclose(slip[:, ok], uw[:, None] + tang[:, ok] - fw_ref, rtol=0, atol=5e-8)      # the kick is >= 1e-5: 200 times this
+    assert np.abs(fw_ref).max() > 1e-5
+
+
+def test_r14_m34_a_wall_cell_with_no_surface_normal_gets_no_shear_and_is_counted():
+    """Round 14 M-34: in a one-cell slot between two walls the smoothed solid has gradient exactly 0, n stayed 0, the face area read 1/1e-6 and the
+    stress was 1e6 times the log law (fw 80 against u_tau^2 8e-5). Such a cell is not `valid`: no shear, the body velocity for the bounce-back, out of the
+    y+ share, and `no_shear_cells` counts it (padding not)."""
+    solid = np.zeros((8, 11, 8), bool)
+    solid[:, :5], solid[:, 6:] = True, True                                           # the fluid is the layer y = 5
+    ws0 = wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))
+    assert ws0.cell.shape[1] == 64 and np.abs(ws0.nrm).max() == 0.0                    # the premise: 64 wall cells, none with a normal
+    assert not ws0.valid.any() and wm.no_shear_cells(ws0) == 64 and wm.no_shear_cells(wm.pad_wall_set(ws0, 70)) == 64
+    ws = wm.WallSet(*(jnp.asarray(a) for a in ws0))
+    nu = 0.01
+    u = jnp.zeros((3,) + solid.shape).at[0].set(0.02)
+    st_ = wm.wall_state(u, ws, nu)
+    ut = float(wm.utau_loglaw(jnp.float32(0.02), 2.5, nu))
+    assert float(jnp.abs(st_["fw"]).max()) <= 1e-3 * ut ** 2                          # was 1e6 times it
+    fld = np.asarray(wm.wall_field((0.0, 0.01, 0.0), ws, st_, solid.shape))
+    assert (fld[0] == 0).all() and np.allclose(fld[1], 0.01)                           # the body's velocity at every cell, as for a padded entry
+    assert wm.yplus_fraction(st_["yplus"], ws.valid) == 0.0
+    _, plate = _plate_ws()
+    assert wm.no_shear_cells(plate) == 0 and np.asarray(plate.valid).all()
+
+
+def test_r14_m34_the_eddy_viscosity_next_to_a_cell_without_a_normal_is_finite_and_the_shear_stays_zero():
+    """The stated choice of M-34: `near_wall_tau` is not changed, so the fluid next to a no-normal wall cell still gets the mixing-length eddy
+    viscosity from that cell's u_tau (finite, only ever raising tau) while the cell itself gets no shear: a thin slot under-counts its drag, it does
+    not blow up. Pins the choice; it passed before the M-34 change too (this is not a fix)."""
+    solid = np.zeros((8, 11, 8), bool)
+    solid[:, :5], solid[:, 6:] = True, True
+    ws = wm.WallSet(*(jnp.asarray(a) for a in wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))))
+    nu = 0.01
+    st_ = wm.wall_state(jnp.zeros((3,) + solid.shape).at[0].set(0.02), ws, nu)
+    new = np.asarray(wm.near_wall_tau(jnp.full(solid.shape, 0.5001), ws, st_, nu))
+    assert ws.near.shape[1] > 0 and not np.asarray(ws.valid).any()                    # the premise: fluid cells in the layer, every wall cell without a normal
+    assert np.isfinite(new).all() and (new >= 0.5001 - 1e-7).all() and (new > 0.5001).any()
+    assert float(jnp.abs(st_["fw"]).max()) == 0.0
+
+
 def test_wall_force_adds_exactly_the_stress_momentum_to_the_fluid_and_reports_the_body_force():
     solid, ws = _plate_ws()
     shape = solid.shape
@@ -525,9 +600,16 @@ def test_run_window_small_ellipsoid_in_a_current():
     names = {c["name"] for c in r["checks"]}
     assert {"mach_max", "yplus_in_30_300_fraction", "mass_drift_per_step"} <= names
     assert r["shifts"] == 0                                                  # vehicle frame: the grid sits on the vehicle
+    assert r["wall"]["no_shear_cells"] == 0 and r["note"] == ""              # an ellipsoid has a normal at every wall cell (round 14 M-34)
     # the same hull towed the other way: force flips sign, drag coefficient does not
     r2 = W.run_window(HULL, W.WindowSpec(velocity=(-0.5, 0, 0), dx=0.01, steps=1600, box=(2.0, 0.8, 0.8)), _uniform([0, 0, 0]))
     assert r2["force"][-200:, 0].mean() > 0 and r2["cd"] == pytest.approx(r["cd"], rel=0.15)
+
+
+def test_r14_m34_the_window_result_counts_the_wall_cells_that_get_no_shear(monkeypatch):
+    monkeypatch.setattr(wm, "no_shear_cells", lambda ws: 7)
+    r = W.run_window(HULL, W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=200, box=(2.0, 0.8, 0.8), chunk=200), _uniform([0, 0, 0]))
+    assert r["wall"]["no_shear_cells"] == 7 and r["note"].startswith(f"7 of {len(r['wall_points'])} wall cells have no surface normal")
 
 
 def test_run_window_ground_frame_shifts_the_nest_with_the_vehicle():
@@ -591,6 +673,103 @@ def test_fea_buckling_utilization_can_exceed_the_stress_utilization(tmp_path):
     plain = W.fea_window(thin, pts, np.full(len(pts), 3e5), workdir=tmp_path / "plain", h=0.02)
     assert plain["buckling_utilization"] is None and plain["knockdown"] is None and plain["buckling_factor"] is None
     assert plain["utilization"] == plain["stress_utilization"] == pytest.approx(r["stress_utilization"])
+
+
+def _ccx_dat(factors):
+    """job.dat text of a buckling step in CalculiX's layout; `factors` None is a dat with no buckling block at all."""
+    if factors is None:
+        return " displacements (vx,vy,vz) for set NALL and time  0.1000000E+01\n"
+    rows = "".join(f"{i + 1:7d}   {v:.7E}\n" for i, v in enumerate(factors))
+    head = "\n B U C K L I N G   F A C T O R   O U T P U T\n\n     MODE NO       BUCKLING\n                   FACTOR\n\n"
+    return head + rows + "\n E I G E N V A L U E   O U T P U T\n"
+
+
+def _fake_ccx(monkeypatch, factors):
+    """The real mesher and the real `fea.solve`, with only CalculiX replaced by a job.dat holding `factors` and the static step's two readers
+    by fixed stresses (von Mises 1 MPa) and zero displacements."""
+    import subprocess
+    from cafe import fea
+
+    def run(cmd, cwd=None, **k):
+        pathlib.Path(cwd, "job.dat").write_text(_ccx_dat(factors))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+    monkeypatch.setattr(fea.subprocess, "run", run)
+    monkeypatch.setattr(fea, "_el_stress", lambda dat: np.tile([1e6, 0, 0, 0, 0, 0], (4, 1)))
+    monkeypatch.setattr(fea, "_frd", lambda path, nodes: (np.zeros((len(nodes), 3)), np.ones(len(nodes)), np.zeros((len(nodes), 3))))
+    return fea
+
+
+def test_r14_m31_a_buckling_step_with_no_positive_eigenvalue_is_an_error_not_a_none(monkeypatch, tmp_path):
+    """Round 14 M-31: `fea.solve` returned `buckling_factor` None when the dat held no positive eigenvalue, `fea_window` stored the stress-only
+    utilization (0.367 for the default glider hull where the buckling one is 1.374) with no flag, and `hangar` rated the hull as never buckling (inf)."""
+    import trimesh
+    ball = trimesh.creation.icosphere(subdivisions=1, radius=0.1)
+    kw = dict(thickness=0.002, pressure=lambda c, n: np.full(len(c), 1e5), steps=("buckle",), h=0.08)
+    fea = _fake_ccx(monkeypatch, [-0.5, 1.6, 2.0])
+    r = fea.solve(ball, "shell", "al6061", workdir=tmp_path / "ok", **kw)
+    assert r["buckling_factor_dead_load"] == 1.6 and r["buckling_factor"] == pytest.approx(0.75 * 1.6) and r["buckling_factors_dead_load"] == [1.6, 2.0]
+    for factors in (None, [], [-0.5, -2.0], [0.0]):                         # no block, an empty one, negative eigenvalues only, a zero one
+        _fake_ccx(monkeypatch, factors)
+        with pytest.raises(RuntimeError, match="no positive eigenvalue"):
+            fea.solve(ball, "shell", "al6061", workdir=tmp_path / "bad", **kw)
+    r = fea.solve(ball, "shell", "al6061", thickness=0.002, pressure=lambda c, n: np.full(len(c), 1e5), steps=("static",), h=0.08, workdir=tmp_path / "st")
+    assert "buckling_factor" not in r                                       # a static-only call has no buckling to miss
+
+
+def test_r14_m31_the_stage_3_fea_row_is_not_run_when_the_buckling_factor_is_missing(monkeypatch):
+    """The chain a window takes: `pipeline_windows._fea` -> child `_fea_child` -> `windows.fea_window` -> `fea.solve`. Without a factor the row is
+    `run` False with the reason and carries no utilization; with one it carries the knocked-down buckling utilization as before."""
+    import subprocess
+    ball = W.Vehicle("ball", "water", 0.1, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.05, 0.05, 0.05))], material="al6061",
+                     thickness=0.002, depth=0.0, extra=dict(fea=True))
+    pts = _sphere_points(0.05, 200)
+    r, a = dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4)
+
+    def child(cmd, **kw):                                                   # `_fea_child` in this process; a raise is the child's traceback on stderr
+        try:
+            return subprocess.CompletedProcess(cmd, pw._fea_child(cmd[-2], cmd[-1]), "", "")
+        except Exception as e:
+            return subprocess.CompletedProcess(cmd, 1, "", f"Traceback (most recent call last):\n  File x\n{type(e).__name__}: {e}\n")
+    monkeypatch.setattr(pw, "_spawn", child)
+    _fake_ccx(monkeypatch, None)
+    out = pw._fea(ball, r, a)
+    assert out["run"] is False and out["reason"].startswith("FEA failed: RuntimeError: CalculiX buckling step returned no positive eigenvalue")
+    assert "utilization" not in out and "stress_utilization" not in out
+    _fake_ccx(monkeypatch, [1.6])
+    out = pw._fea(ball, r, a)
+    assert out["run"] and out["buckling_factor"] == pytest.approx(0.75 * 1.6) and out["buckling_utilization"] == pytest.approx(1 / (0.75 * 1.6 * 0.5))
+    assert out["utilization"] == pytest.approx(max(out["stress_utilization"], out["buckling_utilization"]))
+
+
+def test_r14_m31_fea_window_itself_refuses_a_solve_without_a_buckling_factor(monkeypatch, tmp_path):
+    """A second guard that does not rest on fea.py: whatever `fea.solve` returns, a buckle=True window without a factor is no result."""
+    from cafe import fea
+    ball = W.Vehicle("ball", "water", 0.1, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.05, 0.05, 0.05))], material="al6061",
+                     thickness=0.002, depth=0.0)
+    pts = _sphere_points(0.05, 50)
+    ok = dict(vm_p99=1e8, vm_max=2e8, safety_factor=2.7, elements=3, nodes=3, field=dict(nodes=np.eye(3), faces=np.array([[0, 1, 2]])))
+    monkeypatch.setattr(fea, "solve", lambda *a, **k: dict(ok, buckling_factor=None))
+    with pytest.raises(RuntimeError, match="no buckling factor"):
+        W.fea_window(ball, pts, np.full(len(pts), 1e5), workdir=tmp_path, buckle=True)
+    w = W.fea_window(ball, pts, np.full(len(pts), 1e5), workdir=tmp_path)          # no buckle asked: the stress alone is the answer, as before
+    assert w["buckling_utilization"] is None and w["utilization"] == w["stress_utilization"]
+
+
+def test_r14_m31_hangar_depth_case_is_not_rated_without_a_buckling_factor(monkeypatch, tmp_path):
+    """`hangar.fea_cases` read a missing factor as `buckle_depth = inf` and rated the hull by its yield alone; now the case raises (the job's own handler
+    records 'structure NOT checked: FEA failed ... no depth limit applied') and with a factor the buckling depth is REF_DEPTH x 0.75 x factor x KNOCKDOWN."""
+    import trimesh
+    ball = trimesh.creation.icosphere(subdivisions=1, radius=0.1)
+    spec = dict(material="al6061", structure="shell", wall_mm=2.0, mass=5.0)
+    fea = _fake_ccx(monkeypatch, None)
+    real_mesh = fea.mesh_body
+    monkeypatch.setattr(fea, "mesh_body", lambda m, structure, h, **k: real_mesh(m, structure, 0.08, **k))          # L/70 of this ball is 1000s of elements
+    with pytest.raises(RuntimeError, match="no positive eigenvalue"):
+        hangar.fea_cases("uuv", ball, spec, None, {}, tmp_path / "none")
+    _fake_ccx(monkeypatch, [1.6])
+    out, _ = hangar.fea_cases("uuv", ball, spec, None, {}, tmp_path / "some")
+    assert out["buckle_depth"] == pytest.approx(hangar.REF_DEPTH * 0.75 * 1.6 * hangar.KNOCKDOWN) and out["mode"] == "buckling"
+    assert out["buckling_factor"] == pytest.approx(0.75 * 1.6) and out["crush_depth"] == out["buckle_depth"]
 
 
 def test_tri_quality():
