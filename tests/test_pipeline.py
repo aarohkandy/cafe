@@ -357,7 +357,8 @@ def test_stages_after_a_rerun_stage_run_again_so_the_chain_stays_valid(tmp_path,
 
 
 @pytest.mark.parametrize("what", ["code", "budget", "gpus", "mission"])
-def test_a_change_of_code_budget_gpus_or_mission_reruns_every_stage(tmp_path, monkeypatch, what):
+def test_a_change_of_code_or_mission_reruns_every_stage_and_of_budget_or_gpus_every_stage_but_the_ingest(tmp_path, monkeypatch, what):
+    """The ingest reads neither the budget nor the GPU count (round 14, M-30), so a `fetch` leaves it current for a run of any budget."""
     calls = []
     stub_stages(monkeypatch, calls)
     m = tmp_path / "m.yaml"
@@ -374,7 +375,7 @@ def test_a_change_of_code_budget_gpus_or_mission_reruns_every_stage(tmp_path, mo
     elif what == "mission":
         m.write_text(m.read_text().replace("go: 0.9", "go: 0.95"))
     again(**({"budget_name": "quick"} if what == "budget" else {"gpus": 1} if what == "gpus" else {}))
-    assert calls == STAGES
+    assert calls == (STAGES[1:] if what in ("budget", "gpus") else STAGES)
 
 
 def test_a_failed_self_check_stops_the_run_and_the_stage_is_redone_on_resume(tmp_path, monkeypatch):
@@ -2356,7 +2357,7 @@ def test_the_hangar_ledger_says_that_no_cfd_ran_and_what_the_baseline_coefficien
 # ---- M-14: the orca cache is only reused for the box and 3-D hours it was cut for
 
 def manifest(**over):
-    return dict(dict(t0="2023-03-01 18:00:00", t1="2023-03-03 06:00:00", box=[-167.0, -163.0, -2.0, 2.0],
+    return dict(dict(base="https://example.org/orca", t0="2023-03-01 18:00:00", t1="2023-03-03 06:00:00", box=[-167.0, -163.0, -2.0, 2.0],
                      hours3d=["2023-03-02_01:00:00", "2023-03-02_02:00:00", "2023-03-03_01:00:00", "2023-03-03_02:00:00"]), **over)
 
 
@@ -3133,7 +3134,7 @@ def test_the_workers_of_a_run_are_the_cpus_cut_to_what_the_memory_holds_and_ever
 
 
 # ---- review round 6, M-5: no usable wind direction at the moorings leaves the configured priors alone ----------------------------------------------
-@pytest.mark.parametrize("calm", [True, False], ids=["no-direction-at-all", "only-the-mean-is-nan"])
+@pytest.mark.parametrize("calm", [True, False], ids=["no-direction-at-all", "one-mooring-with-direction-and-its-mean-is-nan"])
 def test_a_comparison_without_a_usable_wind_direction_writes_no_direction_prior_and_stage1_accepts_the_fit(tmp_path, data, monkeypatch, calm):
     """M-5: a calm WRF (or moorings without a direction channel) wrote `wind_direction_bias: {mean: null, value: null}` and stage 1 died with a TypeError."""
     ctx, t0, t1 = tao_ctx(tmp_path)
@@ -3148,6 +3149,10 @@ def test_a_comparison_without_a_usable_wind_direction_writes_no_direction_prior_
     if calm:
         monkeypatch.setattr(pipeline, "_wind_residuals",
                             lambda wrf, moor: {k: np.column_stack([v[:, 0], np.full(len(v), nan)]) for k, v in real_res(wrf, moor).items()})
+    else:                                       # round 14, M-44: two moorings with a direction give their own mean, one gives the pooled one
+        monkeypatch.setattr(pipeline, "_wind_residuals",
+                            lambda wrf, moor: {k: v if i == 0 else np.column_stack([v[:, 0], np.full(len(v), nan)])
+                                               for i, (k, v) in enumerate(real_res(wrf, moor).items())})
     d = tao_stage(ctx, t0, t1)
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
     assert set(fit) >= {"wind_speed_bias", "wind_speed_noise"} and not [k for k in fit if k.startswith("wind_direction")]
