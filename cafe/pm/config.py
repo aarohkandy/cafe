@@ -378,7 +378,7 @@ def missing_numbers(d: dict[str, Any], numeric: tuple[str, ...], optional: tuple
     return [k for k in numeric if not finite_real(d.get(k))] + [k for k in optional if k in d and not finite_real(d[k])]
 
 
-SPHERE_RUNS = (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4))     # the stored sphere runs (tag, Re): `lbm.SPHERE_RUNS` and `nest.SPHERE_RUNS` are this, and so is the credibility page's list (round 14, P-R14E2)
+SPHERE_RUNS = (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4))     # the stored sphere runs (tag, Re): read by lbm, nest and the credibility page (P-R14E2)
 PLATE_FIELDS = ("err", "cf", "re", "ittc", "yfrac")         # what the wall-model plate receipt's readers index; each must be a finite number (missing_numbers)
 CHANNEL_FIELDS = ("err", "cf", "cf_dean")                   # the channel's: stage 3's gate reads `err`, the credibility report `cf` and `cf_dean`
 PLATE_RE_MIN = 1e6                                          # ITTC-57 is a turbulent correlation: a plate run below this Re_L is not compared with it

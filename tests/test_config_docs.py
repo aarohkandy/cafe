@@ -513,9 +513,9 @@ def test_r13_m38_the_questions_and_the_status_say_what_the_stored_fea_utilizatio
 
 
 def test_r14_m8_every_document_that_counts_the_real_time_tests_counts_audit_serial_tests():
-    """Round 14, M-8: DECISIONS 334 and STATUS 59 and 103 said five where `audit.SERIAL_TESTS` has seven. The number a document gives for them is that list's length."""
+    """Round 14, M-8: DECISIONS 334 and STATUS 59 and 103 said five where `audit.SERIAL_TESTS` has seven: the number a document gives is that list's length."""
     from cafe.pm import audit
-    words = dict(zip("one two three four five six seven eight nine ten".split(), range(1, 11)))
+    words = dict(zip("one two three four five six seven eight nine ten".split(), range(1, 11), strict=True))
     seen = []
     for name in ("STATUS.md", "DECISIONS.md", "README.md", "docs/RUNBOOK.md", "docs/ORCA_RUNNER.md"):
         for m in re.finditer(r"\b(one|two|three|four|five|six|seven|eight|nine|ten) real-time tests\b", text(*name.split("/"))):

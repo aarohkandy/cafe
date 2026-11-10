@@ -42,7 +42,7 @@ import jax.numpy as jnp
 from cafe.planner import boundary_layer
 import cafe.receipts as cr
 from cafe.receipts import receipt, bracket
-from ..config import SPHERE_RUNS, finite_real, missing_numbers, write_json
+from ..config import SPHERE_RUNS as SPHERE_RUNS, finite_real, missing_numbers, write_json
 
 # ---------------------------------------------------------------------------------------------------- D3Q19 (native)
 _AX = [(0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)]
@@ -684,7 +684,7 @@ def result_row(group: str, claim: str, rec: dict[str, Any] | None, value_key: st
     receipt(group, claim, rec[value_key], ref, tol, "", source)
 
 
-# SPHERE_RUNS (imported above) is the one list of the stored runs; it lives in config so the credibility page reads it without importing jax (P-R14E2)
+# SPHERE_RUNS (imported above, re-exported) is the one list of the stored runs; it lives in config so the credibility page needn't import jax (P-R14E2)
 
 
 def receipts(backend: str = "jax") -> list[dict[str, Any]]:
