@@ -16,7 +16,7 @@ from hypothesis import given, settings, strategies as st
 
 from cafe.pm import Tagged
 from cafe.pm.env.protocol import AnalyticEnv
-from cafe.pm.physics import uas
+from cafe.pm.physics import comms, uas
 
 P = uas.load_platform()
 G = uas.G0
@@ -72,9 +72,9 @@ def test_platform_holds_what_the_brief_asks_for():
     assert P["airframe"]["mass_kg"] == 0.772 and P["airframe"]["inertia_kgm2"] == [0.0025, 0.0021, 0.0043]
     assert (P["aero"]["d_x"], P["aero"]["d_y"], P["aero"]["d_z"]) == (0.544, 0.386, 0.0)
     assert P["battery"]["peukert_exponent"] == 1.05
-    rf, g24 = P["radio"]["rfd900x"], P["radio"]["link_2g4"]
-    assert rf["freq_mhz"] == [902.0, 928.0] and rf["tx_power_dbm"] == 30.0 and rf["rx_sensitivity_dbm"] == -121.0
-    assert g24["freq_mhz"][0] > 2000.0 and P["radio"]["ship_antenna_height_m"] > 0
+    rf = comms._yaml("radios.yaml")["radios"][P["radio"]["link"]]                       # the radio's numbers are radios.yaml's alone (round 14, M-39)
+    assert P["radio"]["link"] == "rfd900x" and rf["center_mhz"] == 915.0 and rf["tx_dbm"] == 30.0 and rf["rx_sens_dbm"] == -121.0   # BRIEF 2.8: 902-928 MHz
+    assert P["radio"]["ship_antenna_height_m"] > 0
     assert P["sortie"]["duration_s"] == 1200.0
 
 

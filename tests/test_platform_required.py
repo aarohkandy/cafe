@@ -104,6 +104,9 @@ def test_every_parameter_the_models_read_is_in_a_table():
     quad = yaml.safe_load((ROOT / "platforms" / "quad_uas.yaml").read_text())
     for g, table in uas.REQUIRED.items():
         assert set(table) <= set(quad[g]), (g, set(table) - set(quad[g]))
+    stage1_radio = re.findall(r'\bP\["radio"\]\["(\w+)"\]', src("stage1.py")) + re.findall(r'\bra\["(\w+)"\]', src("stage1.py"))
+    for key in stage1_radio:                                                                            # round 14, M-4: a key stage 1 indexes
+        assert key in uas.REQUIRED["radio"], key
     # the UAS groups: every `X["key"]` of derive() and launch_check() with X one of the unpacked group names
     import inspect
     names = dict(af="airframe", ro="rotor", ae="aero", ba="battery", li="limits", co="controller", fa="failure")
@@ -293,3 +296,61 @@ def test_r9_m1_every_class_loader_resolves_a_platform_reference_by_config_platfo
     yml = tmp_path / "mine.yml"
     yml.write_text((plat / f"{name}.v2.yaml").read_text())
     assert LOADERS[name].load_platform(str(yml)) == want
+
+
+# ---- review round 14: M-4 (the radio a UAS platform names), M-35 (an integer too large for a float), M-36 (strings and flags inside a list),
+# M-39 (one copy of a radio)
+CASES_R14 = [
+    ("quad_uas", lambda r: r["radio"].pop("link"), r"quad_uas\.yaml:radio: missing \['link'\]; add them"),
+    ("quad_uas", lambda r: r.pop("radio"), r"quad_uas\.yaml: missing \['radio'\]"),
+    ("quad_uas", lambda r: r["radio"]["link"].update(value="no_such_radio"),
+     r"quad_uas\.yaml:radio\.link: 'no_such_radio' is not an entry of platforms/radios\.yaml; use one of \['rfd900x'"),
+    ("quad_uas", lambda r: r["radio"]["link"].update(value=["rfd900x"]), r"radio\.link: \['rfd900x'\] is not an entry of platforms/radios\.yaml"),
+    ("quad_uas", lambda r: r["radio"].update(rfd900x={"tx_power_dbm": {"value": 20.0, "unit": "dBm", "source": "s"}}),
+     r"quad_uas\.yaml:radio\.rfd900x: a radio's numbers are in platforms/radios\.yaml only"),
+    ("quad_uas", lambda r: r["radio"].update(link_2g4={"tx_power_dbm": {"value": 27.0, "unit": "dBm", "source": "s"}}), r"radio\.link_2g4: a radio's numbers"),
+    ("seaglider", lambda r: r["params"]["battery_J"].update(value=10 ** 400), r"seaglider\.yaml:params\.battery_J: 1\d+ must be a finite number above 0"),
+    ("seaglider", lambda r: r["params"]["battery_J"].update(value=-10 ** 400), r"params\.battery_J: -1\d+ must be a finite number above 0"),
+    ("seaglider", lambda r: r["params"].update(zzz={"value": 10 ** 400, "unit": "m", "assumed": True, "why": "w"}), r"params\.zzz: 1\d+ must be a finite"),
+    ("quad_uas", lambda r: r["battery"]["ocv_soc"].update(value=[0.0, 0.2, 10 ** 400, 0.6, 0.9, 1.0]),
+     r"quad_uas\.yaml:battery\.ocv_soc: .* must be a finite number"),
+    ("saildrone_explorer", lambda r: r["params"]["mass_kg"].update(value=10 ** 400),
+     r"saildrone_explorer\.yaml:params\.mass_kg: 1\d+ must be a finite"),
+    ("quad_uas", lambda r: r["airframe"]["inertia_kgm2"].update(value=["0.0025", "0.0021", "0.0043"]),
+     r"quad_uas\.yaml:airframe\.inertia_kgm2: \['0\.0025', .* must be a finite number above 0 in every place of a list of 3"),
+    ("quad_uas", lambda r: r["airframe"]["inertia_kgm2"].update(value=[0.0025, True, 0.0043]),
+     r"airframe\.inertia_kgm2: \[0\.0025, True, 0\.0043\] must be a finite"),
+    ("quad_uas", lambda r: r["battery"]["ocv_soc"].update(value=["0.0", "0.2", "0.4", "0.6", "0.9", "1.0"]),
+     r"battery\.ocv_soc: \['0\.0'.* must be a finite number"),
+    ("quad_uas", lambda r: r["battery"]["ocv_cell_v"].update(value=["3.0", "3.45", "3.6", "3.78", "4.02", "4.2"]),
+     r"battery\.ocv_cell_v: \['3\.0'.* must be a finite"),
+    ("quad_uas", lambda r: r["sortie"]["levels_m"].update(value=[True, 25.0, 50.0, 80.0]),
+     r"sortie\.levels_m: \[True, 25\.0, 50\.0, 80\.0\] must be a finite number above 0"),
+    ("quad_uas", lambda r: r["sortie"]["levels_m"].update(value=["25", "50"]), r"sortie\.levels_m: \['25', '50'\] must be a finite number above 0"),
+]
+
+
+@pytest.mark.parametrize("name,edit,msg", CASES_R14, ids=[f"{c[0]}-{i}" for i, c in enumerate(CASES_R14)])
+def test_r14_a_bad_radio_link_a_leftover_radio_block_a_huge_integer_and_text_in_a_list_are_refused_naming_file_and_field(tmp_path, name, edit, msg):
+    """M-4: a UAS file with no `radio.link` loaded and stage 1 died with KeyError 'rfd900x'. M-35: a 400-digit integer was an OverflowError out of every
+    loader. M-36: `["0.0025", ...]` and `[True, 25, ...]` were read as numbers by numpy while the scalar rule refuses both. M-39: a radio block repeats
+    radios.yaml's numbers."""
+    path = copy_of(tmp_path, name, edit)
+    with pytest.raises(ValueError, match=msg) as e:
+        LOADERS[name].load_platform(path)
+    assert type(e.value) is ValueError                                                                  # not an OverflowError, which is no ValueError
+
+
+def test_r14_m35_m36_the_one_check_refuses_a_huge_integer_and_text_or_a_flag_at_any_depth_and_keeps_numbers_and_unlisted_names():
+    for bad in (10 ** 400, -10 ** 400, [1.0, 10 ** 400], [["1", 2.0]], [[1.0, 2.0], [True, 3.0]], ("2", 3.0), "7", True):
+        with pytest.raises(ValueError, match=r"x: .* must be a finite number"):
+            check_params(dict(x="any"), dict(x=bad), "f", "seaglider")
+    check_params(dict(x="list:pos", y="pos", z="other"), dict(x=[1, 2.5, 3], y=4, z="a name", name=["a", "b"], flag=True), "f", "seaglider")
+    with pytest.raises(ValueError, match=r"f\.zzz: .* must be a finite number"):
+        check_params({}, dict(zzz=10 ** 400), "f", "seaglider")                                         # an unlisted key is refused, not skipped
+
+
+def test_r14_m39_a_uas_file_names_its_radio_and_holds_no_radio_numbers():
+    raw = yaml.safe_load((ROOT / "platforms" / "quad_uas.yaml").read_text())["radio"]
+    assert raw["link"]["value"] == "rfd900x" and not [k for k, v in raw.items() if "tx_power_dbm" in v or "freq_mhz" in v]
+    assert uas.load_platform("quad_uas")["radio"]["link"] == "rfd900x"

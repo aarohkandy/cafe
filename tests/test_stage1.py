@@ -1084,13 +1084,19 @@ def test_a_higher_theta_e_gives_more_gust_fronts(ci_full, monkeypatch):
     assert hi > lo                                                                                          # the rate factor itself
 
 
-def test_the_uas_radio_is_the_platforms_with_the_antenna_terms_of_radios_yaml():
+def test_the_uas_radio_is_the_radios_yaml_entry_the_platform_names_and_every_number_of_it():
+    """Round 14, M-39: the platform file held the band, power and sensitivity of the RFD900x a second time, overriding radios.yaml's. The hook's radio is
+    the entry `radio.link` names, whole, and equals what a mission rf link of that name reads (a lab edit of radios.yaml moves both)."""
+    radios = comms._yaml("radios.yaml")["radios"]
+    assert uas_plat()["radio"]["link"] == "rfd900x"
+    for name, entry in radios.items():
+        assert stage1._uas_radio(dict(radio=dict(link=name))) == entry == comms._radio(name), name
     r = stage1._uas_radio(uas_plat())
     assert r["center_mhz"] == 915.0 and r["tx_dbm"] == 30.0 and r["rx_sens_dbm"] == -121.0 and r["gt_dbi"] == 2.0 and r["misc_loss_db"] == 3.0
-    other = dict(uas_plat(), radio=dict(uas_plat()["radio"], link_2g4=dict(uas_plat()["radio"]["link_2g4"], tx_power_dbm=27.0)))
-    other["radio"] = {"link_2g4": other["radio"]["link_2g4"], **{k: v for k, v in other["radio"].items() if k != "rfd900x"}}
-    q = stage1._uas_radio(other)                                                                            # unknown to radios.yaml: rfd900x's antennas
-    assert q["center_mhz"] == pytest.approx(2441.75) and q["tx_dbm"] == 27.0 and q["gt_dbi"] == 2.0
+    demo_link = next(lk for lk in config.load_mission(config.ROOT / "missions" / "tepex_c_demo.yaml")["links"] if lk["kind"] == "rf")
+    assert r == comms._radio(demo_link["radio"])                                                           # the demo's USV-UAS link and the UAS hook: one radio
+    r["tx_dbm"] = 0.0
+    assert radios["rfd900x"]["tx_dbm"] == 30.0                                                             # a copy: the hook cannot edit the catalogue
 
 
 def link_hook(M=3, hs=1.0, ship_h=15.0):

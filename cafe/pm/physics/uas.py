@@ -35,7 +35,7 @@ from numpy.typing import NDArray
 
 from ..env import conventions as cv
 from ..config import platform_doc as read_yaml, platform_path
-from . import check_params
+from . import check_params, comms
 
 Arr = Any
 F = NDArray[np.float64]
@@ -73,8 +73,8 @@ def check_provenance(node: Any, path: str = "") -> list[str]:
     return [path]
 
 
-# What the model reads, per group, with the kind of value each must be (physics.check_params; see glider.REQUIRED). `radio.rfd900x` and `link_2g4` are
-# not read here (stage 1 takes radios from platforms/radios.yaml).
+# What the model reads, per group, with the kind of value each must be (physics.check_params; see glider.REQUIRED). `radio.link` names the entry of
+# platforms/radios.yaml that holds every number of the lost-link radio (`stage1._uas_radio`); the file has no radio block of its own.
 REQUIRED = {
     "airframe": dict(mass_kg="pos<=100", inertia_kgm2="list3:pos", motor_radius_m="pos", hotel_w="nonneg"),
     "rotor": dict(thrust_max_n_each="pos", omega_max_rpm="pos", prop_diameter_m="pos", figure_of_merit="pos", motor_time_const_s="pos", esc_motor_eff="pos",
@@ -90,7 +90,7 @@ REQUIRED = {
                    deck_height_m="nonneg", time_limit_factor="pos", min_profile_fraction="unit", hard_stop_factor="pos"),
     "launch_rule": dict(max_mean_wind_ms="pos", wind_check_height_m="pos", gust_lookahead_min="nonneg", gust_front_threshold_ms="pos"),
     "failure": dict(stuck_window_s="pos", stuck_closing_ms="nonneg", stuck_min_cmd_ms="nonneg"),
-    "radio": dict(link_loss_hold_s="pos", uas_antenna_height_above_body_m="nonneg", ship_antenna_height_m="nonneg"),
+    "radio": dict(link="other", link_loss_hold_s="pos", uas_antenna_height_above_body_m="nonneg", ship_antenna_height_m="nonneg"),
 }
 
 
@@ -109,6 +109,11 @@ def load_platform(path: Optional[str] = None) -> dict[str, Any]:
         raise ValueError(f"{p.name}: missing {missing}; add them (see platforms/quad_uas.yaml for the layout)")
     for g, table in REQUIRED.items():
         check_params(table, P[g], f"{p.name}:{g}", "quad_uas")
+    ra, radios = P["radio"], comms._yaml("radios.yaml")["radios"]
+    if blocks := [k for k, v in ra.items() if isinstance(v, dict)]:                                   # round 14, M-39: one copy of a radio's numbers
+        raise ValueError(f"{p.name}:radio.{blocks[0]}: a radio's numbers are in platforms/radios.yaml only; delete the block and name the entry in radio.link")
+    if not isinstance(ra["link"], str) or ra["link"] not in radios:                                  # round 14, M-4: stage 1 indexes it
+        raise ValueError(f"{p.name}:radio.link: {ra['link']!r} is not an entry of platforms/radios.yaml; use one of {sorted(radios)}")
     soc, cell = np.asarray(P["battery"]["ocv_soc"], float), np.asarray(P["battery"]["ocv_cell_v"], float)             # round 8, M-26: interpolated on soc
     if soc.size < 2 or np.any(np.diff(soc) <= 0):
         raise ValueError(f"{p.name}:battery.ocv_soc: {P['battery']['ocv_soc']!r} must be at least two states of charge in strictly increasing order; "

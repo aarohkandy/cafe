@@ -37,12 +37,20 @@ def _rule(kind: str) -> tuple[str, Callable[[Any], Any]]:
     return (f"{what} and at most {mx}", lambda a: ok(a) & (a <= float(mx))) if mx else (what, ok)
 
 
+def _text_or_flag(v: Any) -> bool:
+    """Whether `v` is a string or a flag, or a list holding one at any depth: numpy would read "25" and True as numbers."""
+    return isinstance(v, (str, bool)) or (isinstance(v, (list, tuple)) and any(_text_or_flag(x) for x in v))
+
+
 def _numeric(v: Any) -> Any:
-    """`v` as a float array (a scalar or a list of numbers), or None for a string, a flag or anything else."""
-    if isinstance(v, (str, bool)):
+    """`v` as a float array (a scalar or a list of numbers), or None for a string, a flag, a list holding either, or anything else. An integer too large
+    for a float is an infinite number (the caller refuses it as it refuses inf), not an OverflowError (round 14, M-35 and M-36)."""
+    if _text_or_flag(v):
         return None
     try:
         return np.asarray(v, float)
+    except OverflowError:
+        return np.asarray(np.inf)
     except (TypeError, ValueError):
         return None
 
@@ -52,8 +60,9 @@ def check_params(table: dict[str, str], vals: dict[str, Any], where: str, ref: s
     or outside its kind (`pos` > 0, `nonneg` >= 0, `frac` [0, 1), `unit` [0, 1], `any` signed, `nonzero`, `ge1`, `angle90` (0, 90);
     `<name><=max` adds a maximum, `range:lo:hi` is a closed interval, `int:lo:hi` the same for a whole number,
     `list[n]:<kind>` a list; `other` only has to exist). A listed value is a
-    single number unless its kind says `list`: a list for a number is refused (round 8, M-26). Numbers the table does not list must still be
-    finite. `ref` names the shipped platform file that shows the layout."""
+    single number unless its kind says `list`: a list for a number is refused (round 8, M-26), and a string or a flag, alone or inside a list, is not a
+    number (round 14, M-36). Numbers the table does not list must still be finite, an integer too large for a float included (M-35).
+    `ref` names the shipped platform file that shows the layout."""
     if missing := [k for k in table if k not in vals]:
         raise ValueError(f"{where}: missing {missing}; add them (see platforms/{ref}.yaml for the layout)")
     for k, v in vals.items():

@@ -411,6 +411,18 @@ def test_r13_l0_m38_the_planned_fea_floor_is_the_time_the_fea_child_takes_with_i
     assert "buckling" in raw["why"] and "buckling" in raw["replace_with"]                      # it says which step it prices
 
 
+def test_r14_m15_the_ci_budget_plans_the_glider_fea_out_because_its_reserve_is_under_the_floor():
+    """Round 14, M-15: at the floor of 8 s the ci reserve (9.0 s of the 36.0 s slice of the one smoke window) was above it and the FEA was started and
+    killed; at 68.2 s (the child with its buckling step) it is planned out, so `make ci` does not reach the FEA child. Raising ci's budget or lowering the
+    floor would reopen row 741."""
+    a = budget.stage3_assumptions()
+    m = config.load_mission(config.ROOT / "missions" / "ci_fixture.yaml")                         # what `make ci` flies
+    classes = stage1._classes(m)
+    s = budget.stage3_plan(budget.plan("ci", 0, m, thr={}, vehicle_classes=classes), classes, a)
+    assert s["slice_s"] == pytest.approx(36.0) and s["fea"]["reserve_s"] == pytest.approx(9.0) and s["fea"]["min_s"] == 68.2
+    assert s["fea"]["runs"] is False and s["runs"]                                               # the window runs, the FEA inside its slice does not
+
+
 def test_stage3_plan_counts_free_surface_cases_that_fit_the_share_in_queue_order(monkeypatch):
     monkeypatch.setenv("CAFE_NPROC", "6")
     a = a3()
