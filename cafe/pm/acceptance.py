@@ -48,7 +48,7 @@ DIR/acceptance.json and DIR/acceptance.txt hold the result.
 """
 from __future__ import annotations
 
-import argparse, datetime as dt, errno, hashlib, html, json, os, pathlib, re, shlex, shutil, subprocess, sys, time
+import argparse, datetime as dt, errno, hashlib, html, json, os, pathlib, re, shlex, shutil, stat, subprocess, sys, time
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -370,13 +370,29 @@ def _golden_record(r: dict[str, Any], mission: str) -> dict[str, Any]:
                 summary=summary(r["report"]))
 
 
+def _probe(p: pathlib.Path) -> str:
+    """What `p` is, without a raise: "absent", "file", "dir", "other", or "denied" when a directory on the way cannot be searched (EACCES, EPERM). The
+    errors `Path.exists` and `is_file` read as absent (ENOENT, ENOTDIR, ELOOP, EBADF) are absent here; anything else is a real fault and propagates. A
+    path below a directory with no search permission made them raise PermissionError out of the golden's messages (round 14, M-2)."""
+    try:
+        mode = os.stat(p).st_mode
+    except OSError as e:
+        if e.errno in (errno.EACCES, errno.EPERM):
+            return "denied"
+        if e.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP, errno.EBADF):
+            return "absent"
+        raise
+    return "dir" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "other"
+
+
 def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) -> str | None:
     """Why `--update-golden` may not write `golden` for the mission `name`, or None. A golden that is there must be one for the same mission: a file that
     is not a golden (unreadable, not an object, no summary.mission) or one for another mission is somebody's reference, and one `--update-golden` from
     the CI fixture would replace the demo's. `allowed` is the mission named by `--golden-mission`: it lets that mission replace the file. What no flag
     can mend comes first and is checked for `allowed` too: the path is a symlink loop, is not a file (a directory), it sits below something that is not one, or
-    the directory that receives it is not writable (judged where a link leads, even one to a missing file or directory: the merge look-ahead), so the
-    write would fail after the first long run (round 13, M-17). The first write, with no file, is otherwise always allowed (round 12, M-33)."""
+    the directory that receives it is not writable or a directory above it cannot be searched (judged where a link leads, even one to a missing file or
+    directory: the merge look-ahead; round 14, M-2), so the write would fail after the first long run (round 13, M-17). The first write, with no file, is
+    otherwise always allowed (round 12, M-33)."""
     try:
         os.stat(golden)
     except OSError as e:                                            # exists() and is_file() read a loop as "absent": the write would then fail after the run
@@ -385,13 +401,14 @@ def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) 
     # the write lands at real(golden) (`check_golden` makes its parent, `config.write_json` resolves the path); a link to a missing file or directory
     # reads as absent from `golden` itself, so the climb starts there
     where = real(golden).parent
-    while not where.exists():                                       # the nearest directory that is there: the one mkdir and the write start from
+    while (below := _probe(where)) == "absent":                     # the nearest directory that is there: the one mkdir and the write start from
         where = where.parent
-    if golden.exists() and not golden.is_file():
+    kind = _probe(golden)                                           # "denied": a directory above it cannot be searched: nothing there can be judged or written
+    if kind not in ("absent", "file", "denied"):
         return f"{golden} is not a file: not written, name a file with `--golden`"
-    if not where.is_dir() or not os.access(where, os.W_OK | os.X_OK):
+    if kind == "denied" or below != "dir" or not os.access(where, os.W_OK):               # (search permission on `where` is what `_probe(golden)` just tried)
         return f"{where} is not a directory this user can write to, so {golden} cannot be written: not written, name a file with `--golden`"
-    if not golden.exists():
+    if kind == "absent":
         return None
     try:
         had = json.loads(golden.read_text())["summary"]["mission"]
@@ -440,9 +457,13 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
         config.write_json(golden, rec, end="\n", indent=1, allow_nan=False)
         return _row("golden_diff", False, f"golden {golden} UPDATED from this run, not compared: rerun without --update-golden to check against it",
                     updated=True)
-    if golden.exists() and not golden.is_file():                       # a directory: no command can write it (`cmd` is None)
+    kind = _probe(golden)
+    if kind == "denied":                                               # a directory above it cannot be searched: neither read nor written (`cmd` is None)
+        return _row("golden_diff", False, f"golden {golden} cannot be read: a directory above it cannot be searched"
+                                          + how("write it from a quick run you have reviewed with"), golden=str(golden))
+    if kind not in ("absent", "file"):                                 # a directory: no command can write it (`cmd` is None)
         return _row("golden_diff", False, f"golden {golden} is not a file: name a file with `--golden`", golden=str(golden))
-    if not golden.is_file():
+    if kind == "absent":
         return _row("golden_diff", False, f"no golden file at {golden}" + how("write it from a quick run you have reviewed with"), missing=True)
     try:
         g = json.loads(golden.read_text())
@@ -484,9 +505,15 @@ def _each_str(o: Any, f: Callable[[str], str]) -> Any:
 def normalize(rep: dict[str, Any], run_dir: pathlib.Path) -> dict[str, Any]:
     """report.json without the fields that legitimately differ between two identical runs: VOLATILE, each trained emulator's query time, the
     sha-256 of holdout.json (it holds that time), and the run directory's path; credibility.json's sha-256 is replaced by that of the file without
-    the run directory (its path and its own "run" field), or dropped when the file is not there."""
+    the run directory (its path and its own "run" field), or dropped when the file is not there. Only the absolute forms of the directory are
+    replaced, never a relative string: a run directory `quick` would otherwise rewrite the word wherever it stands (`plan.budget` is "quick"), and the
+    run named `quick_same` would not, so two identical runs differed (round 14, M-1)."""
+    forms = {str(real(run_dir))} | ({str(run_dir)} if run_dir.is_absolute() else set())
+
     def unrun(text: str) -> str:               # on parsed strings, not on JSON text, which escapes a non-ASCII letter, a quote and a backslash in the path
-        return text.replace(str(real(run_dir)), "<run>").replace(str(run_dir), "<run>")
+        for f in sorted(forms, key=len, reverse=True):
+            text = text.replace(f, "<run>")
+        return text
     out: dict[str, Any] = _each_str(rep, unrun)
     for p in VOLATILE:
         _drop(out, p)
@@ -553,6 +580,7 @@ def check_broken(out: pathlib.Path) -> dict[str, Any]:
 def run(mission: str, gpus: int, out: pathlib.Path, golden: pathlib.Path = GOLDEN, update_golden: bool = False, skip_overnight: bool = False,
         log: Callable[[str], None] = print, golden_mission: str | None = None) -> tuple[list[dict[str, Any]], int]:
     """-> (check rows, exit code). `golden_mission`: the mission `--golden-mission` lets replace a golden of another mission."""
+    out = real(out)                                                                                  # once: every run directory below is absolute (M-1)
     spec = config.load_mission(mission)
     seed = int(spec["seed"])
     if update_golden and (why := golden_refusal(golden, spec["name"], golden_mission)):          # before hours of runs, not after (check_golden holds it too)

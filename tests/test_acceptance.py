@@ -448,6 +448,86 @@ def test_r12_m30_a_run_directory_with_a_non_ascii_letter_a_quote_or_a_backslash_
     assert name not in json.dumps(n[0], ensure_ascii=False)
 
 
+def test_r14_m1_a_relative_run_directory_never_rewrites_the_word_it_is_named_after(tmp_path, monkeypatch):
+    """Round 14, M-1: `--out .` makes the run directory `Path('quick')`; `str.replace('quick', '<run>')` then rewrote `plan.budget` in the report of the run
+    named `quick` and not in the one named `quick_same`, so two identical runs differed and same_seed failed. Only the absolute forms are replaced."""
+    monkeypatch.chdir(tmp_path)
+    assert acc.normalize(dict(plan=dict(budget="quick")), pathlib.Path("quick")) == dict(plan=dict(budget="quick"))
+    n = acc.normalize(dict(note=f"quick run of {tmp_path / 'quick'}/stage1", plan=dict(budget="quick")), pathlib.Path("quick"))
+    assert n == dict(note="quick run of <run>/stage1", plan=dict(budget="quick"))                  # the absolute path is still removed
+
+
+def test_r14_m1_two_identical_runs_in_relative_directories_pass_same_seed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    reps = []
+    for name in ("quick", "quick_same"):
+        rep = report(run=name, note=f"quick run of {tmp_path / name}/stage1", plan=dict(budget="quick"))
+        reps.append(dict(run_dict(tmp_path, rep, name=name), dir=pathlib.Path(name)))
+    assert acc.check_same_seed(*reps)["ok"]
+
+
+def test_r14_m1_the_credibility_hash_of_runs_in_relative_directories_leaves_out_the_directory_only(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    shas = []
+    for name, text in (("quick", "x"), ("quick_same", "x"), ("quick_other", "y")):
+        (tmp_path / name / "report").mkdir(parents=True)
+        cred = dict(run=name, budget="quick", text=text, evidence=f"{tmp_path / name}/ledger.json")
+        (tmp_path / name / "report" / "credibility.json").write_text(json.dumps(cred))
+        rep = report(receipts=[dict(id=acc.CREDIBILITY, stage="report", sha256="dd")])
+        shas.append(acc.normalize(rep, pathlib.Path(name))["receipts"][0]["sha256"])
+    assert shas[0] == shas[1] != shas[2]
+
+
+def test_r14_m1_run_resolves_its_out_once_so_every_run_directory_is_absolute(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    seen = []
+
+    def stop(mission, name, budget_name, gpus, out, seed=None, table=None):
+        seen.append(out)
+        raise RuntimeError("stop")
+    monkeypatch.setattr(acc, "run_one", stop)
+    with pytest.raises(RuntimeError, match="stop"):
+        acc.run(MISSION, 0, pathlib.Path("rel_out"), golden_for(tmp_path), log=lambda s: None)
+    assert seen == [tmp_path / "rel_out"] and seen[0].is_absolute()
+
+
+def test_r14_m2_a_golden_below_a_directory_that_cannot_be_searched_is_refused_not_a_traceback(tmp_path, monkeypatch):
+    """Round 14, M-2: `Path.exists` and `is_file` raise PermissionError (only ENOENT, ENOTDIR, ELOOP and EBADF read as absent), so `golden_refusal`,
+    `update_command` and `check_golden` ended in a traceback, and a plain run spent its first quick run first. Every path below is refused."""
+    sub = tmp_path / "d" / "sub"
+    sub.mkdir(parents=True)
+    (sub / "g.json").write_text("{}")
+    sub.chmod(0)
+    try:
+        if os.access(sub, os.X_OK):
+            pytest.fail("the directory can still be searched (running as root?): this test cannot tell")
+        monkeypatch.setattr(acc, "run_one", lambda *a, **k: pytest.fail("a run started"))
+        for g in (sub / "g.json", sub / "new.json", sub / "x" / "y" / "new.json"):
+            why = acc.golden_refusal(g, "m")
+            assert why and "cannot be written" in why and acc.golden_refusal(g, "m", "m") == why, g
+            assert acc.update_command(g, "mm.yaml", 0, "m", tmp_path / "o") is None
+            row = acc.check_golden(run_dict(tmp_path / "acc", report()), g, MISSION, False)
+            assert not row["ok"] and "cannot be read" in row["detail"] and "name another file with `--golden`" in row["detail"]
+            row = acc.check_golden(run_dict(tmp_path / "acc", report()), g, MISSION, True)
+            assert row["values"]["refused"] is True and row["values"]["updated"] is False
+            rows, rc = acc.run(MISSION, 0, tmp_path / "o2", g, update_golden=True, log=lambda s: None)
+            assert rc == 1 and [r["name"] for r in rows] == ["golden_diff"] and "no run started" in rows[0]["detail"] and not (tmp_path / "o2").exists()
+    finally:
+        sub.chmod(0o700)
+
+
+def test_r14_m2_a_directory_that_can_be_written_but_not_searched_refuses_a_golden_in_it(tmp_path):
+    w = tmp_path / "wonly"
+    w.mkdir()
+    w.chmod(0o200)
+    try:
+        if os.access(w, os.X_OK):
+            pytest.fail("the directory can still be searched (running as root?): this test cannot tell")
+        assert "cannot be written" in acc.golden_refusal(w / "g.json", "m")
+    finally:
+        w.chmod(0o700)
+
+
 def test_every_run_gets_its_own_copy_of_the_pristine_emulator_table(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: seen.append(argv) or (0 if argv[0] == "fetch" else 1))
