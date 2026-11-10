@@ -4053,7 +4053,7 @@ def test_r10_m25_the_fitted_bias_prior_says_that_its_mean_is_the_flipped_error(t
     fit = json.loads((ctx.run_dir / "ingest" / "priors_fitted.json").read_text())
     per = json.loads((ctx.run_dir / "ingest" / "tao_compare.json").read_text())
     for key, field in (("wind_speed_bias", "speed_bias"), ("wind_direction_bias", "dir_bias_deg")):
-        err = float(np.mean([v[field] for k, v in per.items() if k != "ALL"]))                                   # round 14, M-44: not a["..."], the pooled samples
+        err = float(np.mean([v[field] for k, v in per.items() if k != "ALL"]))          # round 14, M-44: not the "ALL" entry, which pools the samples
         assert fit[key]["mean"] == pytest.approx(-err)
         c = fit[key]["citation"]
         assert "mean = minus the unweighted mean of the 2 moorings' time-mean errors, i.e. mooring minus WRF" in c and "adds to WRF" in c

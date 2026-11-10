@@ -42,7 +42,7 @@ from .config import ConfigError, json_object
 from .stage1 import NOT_EXERCISED, _classes, path_speed as _member_speeds
 from .env.remote import sha256
 from .ledger import STAGES
-from .stats import intervals, sequential
+from .stats import intervals, sampling, sequential
 
 SCHEMA = "cafe.pm.report/1"
 RECEIPTS_NAME = "runs/receipts.json"                                          # the model receipts (python -m cafe.pm receipts), relative to the repo
@@ -65,7 +65,7 @@ UAS_MODE_TEXT = dict(no_current_data="the wind at the aircraft's position in fli
                                      "its flight or its battery could not be computed from there on and the member is counted as failed; this is a hole in "
                                      "the input, not a failure of the aircraft's flight model")
 SENS_SCOPE = ("These indices rank only the sampled columns (the member-wide biases and scales of the forcing and of the vehicle). The larger errors are "
-              "per-member random streams that are not columns and are not ranked: the hourly wind error{wind}, half of the current error (the 100 km random "
+              "per-member random streams that are not columns and are not ranked: the hourly wind error{wind}, half of the current error (the {ell} random "
               "field), the ocean SDE, the UAS turbulence and gusts, and the Iridium draws.")
 CHIODI_RATIO = 0.96 / 5.4                                                     # platforms/saildrone_explorer.yaml chiodi_mean_sog_ms / chiodi_mean_wind_ms
 PHYSICS = dict(glider="pm.physics.glider", usv="pm.physics.usv", uas="pm.physics.uas", link="pm.physics.comms")     # vehicle class or link -> group
@@ -366,13 +366,24 @@ def _top3(e: dict[str, Any], ref: dict[str, Any], src: str) -> list[Any]:
             for p, x in sorted(s1.items(), key=lambda kv: -kv[1])[:3] if x > f]
 
 
+def _ell_text() -> str:
+    """The current error's correlation length as the sentence names it: the setting in config/perturbations.yaml (a run's code digest holds that file, so a
+    run made under another value is out of date for the audit), 100 km when it cannot be read (round 14, M-17)."""
+    from .env.perturb import ell_text
+    try:
+        ell = float(sampling.load_perturbations()["current_correlation_length"]["mean"])
+    except (OSError, ValueError, KeyError, TypeError, ConfigError):
+        ell = 100000.0
+    return ell_text(ell)
+
+
 def _sens_scope(tr: Trace) -> dict[str, Any]:
     """What the sensitivity indices cannot see (M-17). With the fitted wind priors (ingest/priors_fitted.json) the sentence carries the hourly wind error's sd
     next to the sd of the wind-speed and direction columns; without them the sentence stands without the numbers."""
     f = _jl(tr.run / "ingest" / "priors_fitted.json") or {}
     keys = ("wind_speed_noise", "wind_direction_noise", "wind_speed_bias", "wind_direction_bias")
     if not all(isinstance(f.get(k), dict) and isinstance(f[k].get("value"), (int, float)) for k in keys):
-        return dict(text=SENS_SCOPE.format(wind=""), wind_sd=None, wind_hi95={})
+        return dict(text=SENS_SCOPE.format(wind="", ell=_ell_text()), wind_sd=None, wind_hi95={})
     ref, src = tr.ref("ingest", output="priors_fitted.json"), "ingest/priors_fitted.json"
     nodes = {k: num(f[k]["value"], f[k].get("unit", ""), ref, f"{src} {k}.value") for k in keys}
     hi = {k: num(f[k]["value_hi95"], f[k].get("unit", ""), ref, f"{src} {k}.value_hi95")          # round 5, M-10: the fit's 95 % upper bound, if it has one
@@ -380,7 +391,7 @@ def _sens_scope(tr: Trace) -> dict[str, Any]:
     g = {k: _txt(n) + (f" (95 % upper bound {_txt(hi[k])})" if k in hi else "") for k, n in nodes.items()}
     wind = (f" (sd {g['wind_speed_noise']} and {g['wind_direction_noise']}, against {g['wind_speed_bias']} and {g['wind_direction_bias']} for the "
             "wind-speed and direction columns)")
-    return dict(text=SENS_SCOPE.format(wind=wind), wind_sd=nodes, wind_hi95=hi)
+    return dict(text=SENS_SCOPE.format(wind=wind, ell=_ell_text()), wind_sd=nodes, wind_hi95=hi)
 
 
 def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:

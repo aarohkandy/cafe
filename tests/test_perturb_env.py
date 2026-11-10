@@ -211,3 +211,31 @@ def test_the_sde_reads_shapes_with_trailing_axes_and_refuses_times_outside_its_w
     for t in (-300.0, 10 * 60.0 + 3 * 60.0):
         with pytest.raises(ValueError, match="outside its window"):
             pe.sde_displacement(np.zeros(2), np.zeros(2), t)
+
+
+# ---- review round 14, M-17: the labels name the correlation length that is set
+
+@pytest.mark.parametrize("ell, text", [(100000.0, "100 km"), (20000.0, "20 km"), (1500.0, "1.5 km"), (250.0, "250 m"), (0.5, "0.5 m")])
+def test_r14_m17_the_current_label_and_the_sensitivity_scope_sentence_follow_current_correlation_length(ci_full, tmp_path, monkeypatch, ell, text):
+    """Both sentences said "100 km" whatever `current_correlation_length` was: with 20000.0 the Field used 20 km under a label that said 100 km."""
+    import types
+    from cafe.pm import report
+    from cafe.pm.stats import sampling
+    assert P.ell_text(ell) == text
+    pri = copy.deepcopy(QUIET)
+    pri["current_correlation_length"]["mean"] = ell
+    src = member_env(ci_full, dict(current_speed_scale=np.array([4.0, 1.0]), current_direction_bias=np.array([90.0, 0.0])), 2, pri).current(
+        np.full(2, 195.0), np.zeros(2), np.full(2, -100.0), T).source
+    assert f"member-wide + {text} random field" in src and ("100 km" not in src or text == "100 km")
+    cfg = tmp_path / "perturbations.yaml"
+    cfg.write_text(sampling.PERTURBATIONS.read_text().replace("mean: 100000.0", f"mean: {ell}"))
+    monkeypatch.setattr(sampling, "PERTURBATIONS", cfg)
+    scope = report._sens_scope(types.SimpleNamespace(run=tmp_path))["text"]
+    assert f"half of the current error (the {text} random field)" in scope and ("100 km" not in scope or text == "100 km")
+    cfg.write_text("not: [valid")                                          # unreadable: the shipped value, as before
+    assert "(the 100 km random field)" in report._sens_scope(types.SimpleNamespace(run=tmp_path))["text"]
+
+
+def test_r14_m17_the_shipped_setting_prints_as_it_always_did():
+    from cafe.pm import report
+    assert PRI["current_correlation_length"]["mean"] == 100000.0 and report._ell_text() == "100 km"
