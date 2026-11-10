@@ -127,6 +127,47 @@ def test_run_plan_and_gpu_command_and_memory_guard(monkeypatch):
         nest.sphere_drag(100.0, 8)
 
 
+SPELLINGS = [("100", "100"), ("1e2", "100"), ("100.0", "100"), ("1_00", "100"), ("+100", "100"), ("1E2", "100"), ("1000", "1000"), ("1e3", "1000"),
+             ("1000.0", "1000"), ("10000", "1e4"), ("1e4", "1e4"), ("1E4", "1e4"), ("1e+4", "1e4"), ("10_000", "1e4"), ("10000.0", "1e4")]
+
+
+@pytest.mark.parametrize("spelling, tag", SPELLINGS)
+def test_r14_m12_any_spelling_of_a_sphere_re_is_stored_under_the_tag_the_receipts_read(monkeypatch, tmp_path, spelling, tag):
+    """Round 14 M-12: the tag was kept as typed, so `lbm slow 1e2` stored `lbm_sphere_1e2.json` and `nest slow 100.0 ...` stored `nest_sphere_100.0_d8.json`,
+    after minutes to hours, and the receipts read `sphere_100`, `sphere_1000`, `sphere_1e4` and `nest_sphere_<tag>_d*` only: the run counted for nothing.
+    Any spelling of one of the three numbers now names the canonical file, and the reader finds it."""
+    monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
+    monkeypatch.setattr(nest, "sphere_drag", lambda re, d, dom, lateral: dict(cd=1.1, d=d, shape=(1, 2, 3), history=np.ones(3), steps=3))
+    assert nest.main(["slow", spelling, "8", "12", "6", "6"]) == 0
+    assert sorted(f.name for f in tmp_path.iterdir()) == [f"nest_sphere_{tag}_d8.json"]
+    assert [f.name for f, _ in nest.stored_study(tag, tmp_path)[0]] == [f"nest_sphere_{tag}_d8.json"]
+    assert json.loads(nest.sphere_path(tag, 8).read_text())["re"] == float(tag)
+    seen = {}
+    monkeypatch.setattr(lbm, "SLOW_DIR", tmp_path / "x")
+    monkeypatch.setattr(lbm, "pick_backend", lambda: "jax")
+    monkeypatch.setattr(lbm, "sphere", lambda backend, re, d, domain, storage, progress: seen.update(re=re) or dict(cd=1.0, history=[1.0]))
+    assert lbm.main(["slow", spelling]) == 0 and seen["re"] == float(tag)
+    assert sorted(f.name for f in (tmp_path / "x").iterdir()) == [f"lbm_sphere_{tag}.json"]
+    assert lbm.slow_path(f"sphere_{tag}") == tmp_path / "x" / f"lbm_sphere_{tag}.json"
+
+
+@pytest.mark.parametrize("main, argv", [
+    (nest.main, ["slow", "500", "8", "12", "6", "6"]), (nest.main, ["slow", "100.5", "8", "12", "6", "6"]), (nest.main, ["slow", "1e5", "8", "12", "6", "6"]),
+    (nest.main, ["slow", "0.1", "8", "12", "6", "6"]), (lbm.main, ["slow", "500"]), (lbm.main, ["slow", "99.999", "8"]), (lbm.main, ["slow", "1e5", "8"]),
+    (lbm.main, ["slow", "-100"])])
+def test_r14_m12_a_sphere_re_other_than_the_three_stored_runs_is_a_usage_error_naming_them(monkeypatch, capsys, main, argv):
+    no_work(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        main(argv)
+    err = capsys.readouterr().err
+    assert e.value.code == 2 and "100, 1000, 1e4" in err and argv[1] in err
+
+
+def test_r14_m12_the_nest_and_the_xlb_sphere_runs_are_one_list_that_the_plan_covers():
+    assert nest.SPHERE_RUNS is lbm.SPHERE_RUNS and [t for t, _ in lbm.SPHERE_RUNS] == list(nest.PLAN)
+    assert all(lbm.sphere_tag(t) == t and lbm.sphere_tag(repr(re)) == t for t, re in lbm.SPHERE_RUNS)
+
+
 def test_l0_a_nest_sphere_receipt_is_written_through_a_temporary_so_a_kill_keeps_the_old_one(monkeypatch, tmp_path):
     monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
     monkeypatch.setattr(lbm, "physics_sha", lambda: "sha-now")
@@ -555,7 +596,7 @@ def test_r13_l1_help_prints_the_usage_and_runs_nothing(monkeypatch, capsys, main
 
 
 def test_r13_l1_the_commands_that_were_valid_still_parse_the_same(monkeypatch, tmp_path):
-    """Options stand anywhere, the sphere tag is kept as typed (it names the stored file), the defaults of `lbm slow` are unchanged."""
+    """Options stand anywhere, the canonical sphere tags (100, 1000, 1e4) name the stored file as typed, the defaults of `lbm slow` are unchanged."""
     seen = {}
     monkeypatch.setattr(nest, "SLOW_DIR", tmp_path)
     monkeypatch.setattr(nest, "sphere_drag", lambda re, d, dom, lateral: seen.update(nest=(re, d, dom, lateral)) or dict(history=[1.0], cd=1.0))

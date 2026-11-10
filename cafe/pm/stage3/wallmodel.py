@@ -12,8 +12,9 @@ How the stress enters the LBM (a wall-stress boundary condition in the family of
   * the log-law stress rho u_tau^2 is removed from the wall cell's momentum along the relative tangential flow (and added to the
     body's force), times the face area 1/(|n_x|+|n_y|+|n_z|) of the voxel wall;
   * between the wall and the matching point (or `rans_layer` cells) the eddy viscosity is nu_t = kappa u_tau y, the mixing length for
-    which the log law is the equilibrium solution (near_wall_tau). Smagorinsky's C_s dx = 0.17 cells is 6x too short at y = 1 cell and
-    15x at 2.5, so without this the stress cannot be carried from the outer flow to the wall (the channel receipt fails by >50 %).
+    which the log law is the equilibrium solution (near_wall_tau). Smagorinsky's C_s dx = 0.17 cells is 2.4x too short at y = 1 cell and
+    6x at the 2.5-cell matching point (the log law needs l = kappa y), so without this the stress cannot be carried from the outer flow
+    to the wall (the channel receipt fails by >50 %).
     The usual WMLES limiter l = min(C_s dx, kappa y) never exceeds C_s dx for y >= 0.5 cells and would change nothing here.
 Rejected before this (measured, flat plate, lattice units): a no-slip wall with an effective viscosity chosen to match the stress
 delivered 1.3-2.6x the log-law stress (bounce-back transmits c_s^2 u_1 per face regardless of the viscosity, lbm.bounce_back); a slip
@@ -49,6 +50,7 @@ Y_MATCH = 2.5                 # cells: centre of the third cell from the wall su
 YPLUS_LAM = 11.06             # y+ where ln(y+)/kappa + B = y+
 NU_MAX = 1 / 3               # lattice viscosity, tau = 1/2 + 3 nu <= 1.5: beyond that BGK is not trusted; nest.NestSpec refuses a window above it
 PLATE_CI: dict[str, Any] = dict(length=96, nu_lat=4e-5, half=36, span=4, nose=10, thick=1, steps=12000)      # ~1 min on 4 CPUs
+NORMAL_MIN = 1e-6             # smallest |grad| of the smoothed solid indicator that gives a wall cell a normal (cells of a thin slot have exactly 0)
 YPLUS_OK = (30.0, 300.0)      # window in which the log law holds at the matching point (BRIEF 5.5)
 
 
@@ -59,7 +61,7 @@ class WallSet(NamedTuple):
     wgt: Any        # (8, N) float
     nrm: Any       # (3, N) float  unit normal pointing into the fluid
     phi: Any        # (N,) float  distance of the cell centre to the wall surface, cells
-    valid: Any      # (N,) bool
+    valid: Any      # (N,) bool  a wall-model cell: the smoothed solid has a gradient there (|grad| > NORMAL_MIN) and it is not padding
     near: Any       # (3, M) int  fluid cells within the near-wall (RANS) layer of the wall
     near_phi: Any   # (M,) float  their distance to the wall surface, cells
     near_src: Any   # (M,) int  index of the nearest wall cell (its u_tau is used)
@@ -86,7 +88,8 @@ def wall_set(solid: np.ndarray, link: np.ndarray, pad_to: int | None = None, y_m
     dist = ndimage.distance_transform_edt(~solid) - 0.5                      # cells to the halfway-bounce-back surface
     g = np.stack(np.gradient(ndimage.gaussian_filter(solid.astype(float), 1.5)))
     nrm = -g[:, wc[0], wc[1], wc[2]]
-    nrm /= np.maximum(np.linalg.norm(nrm, axis=0), 1e-12)
+    mag = np.linalg.norm(nrm, axis=0)
+    nrm /= np.maximum(mag, 1e-12)
     phi = np.maximum(dist[wc[0], wc[1], wc[2]], 0.5)
     pos = wc + (y_match - phi) * nrm                                         # matching points, cell-index coordinates
     lo = np.floor(pos).astype(int)
@@ -117,8 +120,16 @@ def wall_set(solid: np.ndarray, link: np.ndarray, pad_to: int | None = None, y_m
     else:
         src = np.zeros(nm.shape[1], int)
     damp = np.ones(nm.shape[1]) if rans_layer is None else np.clip(1 - nphi / rans_layer, 0.0, 1.0)
-    ws = WallSet(wc, sten, wgt, nrm, phi, np.ones(n, bool), nm, nphi, src, damp)
+    # a cell whose smoothed-solid gradient vanishes (a one-cell slot between two walls) has no normal: n stays 0, the face-area factor
+    # 1/max(sum|n|, 1e-6) would read 1e6 and the stress 1e6 times the log law (round 14 M-34), so it is not a wall-model cell
+    ws = WallSet(wc, sten, wgt, nrm, phi, mag > NORMAL_MIN, nm, nphi, src, damp)
     return pad_wall_set(ws, pad_to) if pad_to else ws
+
+
+def no_shear_cells(ws: WallSet) -> int:
+    """Number of wall cells that get no log-law shear because they have no normal (not `valid`), padding not counted (a padded entry has weight 0,
+    a real one weights summing to 1)."""
+    return int(((np.asarray(ws.wgt).sum(0) > 0) & ~np.asarray(ws.valid, bool)).sum())
 
 
 def pad_wall_set(ws: WallSet, n: int, m: int | None = None) -> WallSet:
@@ -166,8 +177,9 @@ def wall_state(u: jax.Array, ws: WallSet, nu_lat: float, u_wall: ArrayLike = (0.
 
 def near_wall_tau(tau: jax.Array, ws: WallSet, st: dict[str, jax.Array], nu_lat: float) -> jax.Array:
     """Mixing-length eddy viscosity nu_t = kappa u_tau y (times the damping of the near-wall layer) as a relaxation time, never
-    below what Smagorinsky gave. Smagorinsky's length C_s*dx = 0.17 cells is 6x too short at y = 1 cell and 6x at 2.5 (the log law
-    needs l = kappa y): the stress cannot be carried from the outer flow to the wall without it. NB the usual WMLES limiter
+    below what Smagorinsky gave. Smagorinsky's length C_s*dx = 0.17 cells is too short against the log law's l = kappa y (2.4x at y = 1
+    cell, 6x at the 2.5-cell matching point; the module docstring has the same two numbers): the stress cannot be carried from the outer
+    flow to the wall without it. NB the usual WMLES limiter
     l = min(C_s dx, kappa y) never exceeds C_s dx for y >= 0.5 cells, so it would change nothing; the log-consistent length is
     kappa y."""
     c = tuple(ws.near)

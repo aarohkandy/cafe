@@ -31,7 +31,8 @@ def _gmsh():
     import gmsh
     ignored = signal.getsignal(signal.SIGPIPE) == signal.SIG_IGN
     gmsh.initialize(interruptible=False)   # safe off the main thread
-    if ignored:                            # initialize() puts SIGPIPE back to its default, finalize() does not undo it, and Python ignores it: a later write to a
+    if ignored:
+        # initialize() puts SIGPIPE back to its default, finalize() does not undo it, and Python ignores it: a later write to a
         # closed socket or pipe in this process (a local HTTP server's client gone, an xdist worker's channel) then killed it with no traceback (P-R13A-2). libc
         # signal() rather than signal.signal(), which only the main thread may call; Python's own record of the handler already says SIG_IGN.
         ctypes.CDLL(None).signal(signal.SIGPIPE, ctypes.c_void_p(1))
@@ -306,21 +307,32 @@ def _solve(m, structure, material, thickness, pressure, point_loads, steps, h, w
         out["field"] = dict(nodes=nodes, faces=el[:, :3] if structure == "shell" else _tet_boundary(el),
                             vm=nodal_vm, u=U)
     if "buckle" in steps:
-        blk = dat.split("B U C K L I N G   F A C T O R   O U T P U T")[-1] if "B U C K L I N G" in dat else ""
-        fac = [float(x) for x in re.findall(r"^\s*\d+\s+([-\d.E+]+)\s*$", blk.split("E I G E N")[0], re.M)]
-        pos = [f for f in fac if f > 0]
+        pos = _buckling_factors(dat)
         # CalculiX's linear buckling treats pressure as a dead load; sea pressure follows the surface, which
         # lowers collapse by n^2/(n^2-1): 4/3 for the 2-lobe mode (verified: long tube 0.765 vs Bresse 0.546 MPa).
         # Apply the conservative 3/4 to every result.
-        out["buckling_factor_dead_load"] = min(pos) if pos else None
+        out["buckling_factor_dead_load"] = min(pos)
         out["buckling_factors_dead_load"] = sorted(pos)[:6]
-        out["buckling_factor"] = 0.75 * min(pos) if pos else None
+        out["buckling_factor"] = 0.75 * min(pos)
     if "modes" in steps:
         fr = re.findall(r"^\s*\d+\s+[-\d.E+]+\s+[-\d.E+]+\s+([-\d.E+]+)\s+[-\d.E+]+\s*$",
                         dat.split("E I G E N V A L U E   O U T P U T")[-1].split("P A R T I C I P")[0], re.M)
         f = np.array([float(x) for x in fr])
         out["frequencies_hz"] = f[f > 1.0][:n_modes].tolist()
     return out
+
+
+def _buckling_factors(dat: str) -> list[float]:
+    """The positive buckling factors of CalculiX's job.dat. The buckling step was asked for, so a block that is missing, unparsed or has no positive
+    eigenvalue is an error (RuntimeError, one line: pipeline_windows._fea reports the last line of the child's stderr), never a None that a consumer
+    reads as a stress-only or never-buckling result (round 14 M-31). The message holds no 'jacobian' (`solve` retries those with another mesh)."""
+    blk = dat.split("B U C K L I N G   F A C T O R   O U T P U T")[-1] if "B U C K L I N G" in dat else ""
+    fac = [float(x) for x in re.findall(r"^\s*\d+\s+([-\d.E+]+)\s*$", blk.split("E I G E N")[0], re.M)]
+    pos = [f for f in fac if f > 0]
+    if not pos:
+        raise RuntimeError("CalculiX buckling step returned no positive eigenvalue (no buckling factor block in job.dat, or none above 0): "
+                           "the hull's collapse is not known")
+    return pos
 
 
 def _tet_boundary(el):
