@@ -53,7 +53,7 @@ One assertion each, no production change. Each was applied to a throwaway worktr
 - m4 `_same_place` `real()` to `.resolve()`: `test_r14_m5_same_place_follows_a_symlink_loop_to_false_and_does_not_raise` (a recorded place that is a loop, and a run directory that is a loop: False, no RuntimeError).
 - m5 `describe` tolerance `> 1e-9` to `> 0`: `test_r14_m5_a_period_that_is_whole_to_float_rounding_is_not_said_to_be_rounded_up` (every 7 d at duty 0.07: `7 / 0.07` is 100.00000000000001 and the text is "fly sorties every 100 d instead of 7"). A tolerance of `1e-15` would also be killed.
 - m6 `_stamp` without OSError: `test_r14_m5_a_time_the_platform_refuses_with_an_oserror_is_printed_as_the_number` (replaces `environment.dt` by a stub whose `fromtimestamp` raises OSError; platform-bound by construction, said in the docstring, no skip).
-- m7 `_ms_management` `has_commit(sha)` to `sha not in (None, "none")`: `test_r14_m5_a_ledger_whose_git_sha_names_no_commit_is_management_level_one` for "abc" and "" (the run of the mutant stopped at the first failure, "abc"; the "" case was not run on its own against the mutant).
+- m7 `_ms_management` `has_commit(sha)` to `sha not in (None, "none")`: `test_r14_m5_a_ledger_whose_git_sha_names_no_commit_is_management_level_one` for "abc" and "" (the first run of the mutant stopped at the first failure, "abc"; in the second pass the "" case was run alone against the mutant, with the parametrization narrowed to `[""]` in a throwaway worktree: unmutated rc 0, mutant rc 1, `assert (3 == 1)`: KILLED).
 - m8 `_row` without `D is not None` (both places: the `E` line and the `u` line): `test_r14_m5_a_row_with_a_simulation_and_no_reference_has_no_error_and_no_verdict` with `u` None and with `u` given; the two edits are separate mutants (m5_8a, m5_8b), both killed.
 CHANGELOG: "Tests: eight surviving mutants of round 13's fixes (rows 713, 716, 746, 752 and the describe tolerance, `_stamp`, `_row`) now fail a test; the ninth, `W_OK|X_OK`, is gone with M-2 (round 14, M-5)."
 No new DECISIONS row (the tests pin 713, 716, 746, 752). Doc sentences: none.
@@ -66,7 +66,7 @@ Tests only; the optional shared constant for the 1 m/s floor is not made (it tou
 - `test_r14_m41_the_roughness_law_is_pinned_at_calm_moderate_strong_and_above_the_charnock_cap`: `cd10n` at 0.01, 5, 10, 15, 25 m/s and `wind_to_10m` at (6 m/s, 4 m), (22, 4), (0.01, 4), (3, 2) to rtol 1e-6. The numbers were measured from the code on orca and then reproduced by an independent fixed point in plain Python (law written out from Edson et al. 2013: kappa 0.4, alpha = 0.0017 min(U10n, 19) - 0.005, smooth term 0.11 nu/u*, nu 1.5e-5, run to convergence): they agree to all printed digits for `cd10n` (0.0024909, 0.00092266, 0.0013211, 0.0018266, 0.0027335) and `wind_to_10m` (6.4707214713970, 24.99302335593, 0.01127177487, 3.4133855999) (the 22 m/s value agrees to 1e-12 with the 20-iteration loop). 25 m/s is above the cap 19; 0.01 m/s has u* below the 1e-3 floor.
 Kills (seen): CH2 -0.0050 to -0.0040, UMAX 19 to 25, the u* floor 1e-4 to 1e-3, `range(20)` to 2 in `wind_to_10m`, `range(30)` to 2 in `cd10n`, and `&` to `|`: six of six KILLED. The pins fail if someone retunes the law on purpose: the docstring names Edson et al. 2013 and the row that changes the law must amend them.
 CHANGELOG: "Tests: the TAO roughness law (CH2, UMAX, the u* floor, both iteration counts) and the 1 m/s direction floor are pinned (round 14, M-41)." No new DECISIONS row. Doc sentences: none.
-Not done (finding's sibling list): the other tao constants (KAPPA, NU_AIR, HALF_BIN_S, MIN_IN_BIN) were not mutated: KAPPA and NU_AIR are inside the pinned values (a change moves them), HALF_BIN_S and MIN_IN_BIN have their own tests (`test_r9_m30_...`).
+Siblings (second pass): KAPPA 0.4 to 0.41, NU_AIR 1.5e-5 to 1.6e-5, HALF_BIN_S 1800 to 1700 and MIN_IN_BIN 3 to 2 were each applied to `cafe/pm/env/tao.py` in the throwaway worktree and `tests/test_tao.py` run on orca (unmutated rc 0): all four rc 1, KILLED. The optional shared constant for the 1 m/s floor stays unmade by the batch text (pipeline.py is batch B's).
 
 ### M-42 (tests/test_round14_survivors.py): P11, W31, W29
 
@@ -79,7 +79,7 @@ The wider run of the finding's "HOLD" mutants over test_uas/test_dyn/test_glider
 
 ## Tests run
 
-All on orca, `PM_HOST=cafe-orca PM_RUNTIME=proot PMX=pm_r14a PM_CPUS=2`: the whole files `tests/test_acceptance.py`, `tests/test_receipts.py`, `tests/test_tao.py` and `tests/test_round14_survivors.py` in one detached run (TM `r14a_files`; result below), `ruff check cafe/pm tests cafe/receipts.py` clean, `mypy cafe/pm` clean (55 files). `mypy cafe/receipts.py` is not part of the gate and has 123 errors at d5aea52 already (untyped file); `main` adds none that are new in kind.
+All on orca, `PM_HOST=cafe-orca PM_RUNTIME=proot PMX=pm_r14a PM_CPUS=2`: the whole files `tests/test_acceptance.py`, `tests/test_receipts.py`, `tests/test_tao.py` and `tests/test_round14_survivors.py` in one detached run (TM `r14a_files`; result below), `ruff check cafe/pm tests cafe/receipts.py` clean, `mypy cafe/pm` clean (55 files); both re-run in the second pass on the final tree (492b00c, after the usage-message and docstring edits): "All checks passed!" and "Success: no issues found in 55 source files". `mypy cafe/receipts.py` is not part of the gate and has 123 errors at d5aea52 already (untyped file); `main` adds none that are new in kind.
 
 Result of the detached whole-file run (log `r14a_files`): exit code 0, 419 passed characters on the progress lines, no `F`, `E`, `s` or `x` (counted with the grep of CLAUDE.md). The new tests were run alone before and after the last edits (the usage-message wording of `cafe.receipts` and the two lint-only edits came after the mutant runs; the whole-file run is on the final code). Against d5aea52 (sources unfixed, new tests present) the M-1, M-2 and M-3 tests fail and M-41's roughness and direction tests were killed by the six mutants, as listed above.
 
@@ -91,3 +91,14 @@ Result of the detached whole-file run (log `r14a_files`): exit code 0, 419 passe
 - Batch E (wallmodel.py): M-34, M-45 must leave `plate_mask` (nose profile) and the `receipts` y+ share gate 0.9 as they are; the tests pin both.
 - Batch F's code files (`physics/__init__.py` `_numeric`, M-35/M-36): the P11 test needs a nested list `[[a, b, c]]` for `list3:pos` to stay refused with "must be a finite number above 0".
 - Test helpers imported by `tests/test_round14_survivors.py`: `tests.test_whatif` (`ENV`, `plan_for`, `two_uas`), `tests.test_platform_required` (`LOADERS`, `copy_of`), `tests.test_credibility` (`factors`). A batch that renames or moves them breaks that file at import.
+
+## Second pass: the leftovers of the first, and how each was settled
+
+- mypy and ruff after the last edits: re-run on the committed tree, clean (above).
+- m7 `""` alone against the mutant: run, killed (above).
+- Sibling constants of M-41: mutated, all killed (above).
+- M-41's shared 1 m/s constant: not made, a stated decision of the batch text (it would touch pipeline.py, batch B's). Not a problem.
+- M-3 `if results.is_dir()`: kept for the default `/work/runs` only, which is absent on a bare machine. README:172 names `/work/runs` explicitly, and the finding's own fix makes a named directory that does not exist a usage error (exit 2, nothing started, the message says to make it or leave the argument out); the README sentence is in the M-3 section for batch F (documents are F's). A stated decision of the finding plus a document handed to F, not a problem here.
+- `lbm.cli_parser` not reused: the finding says "if importable without a cycle"; `cli_parser` takes `cmd` with `choices=cmds` (a fixed set, default "receipts"), and here the first word is `stamp` or any directory, so it does not fit. Checked in the second pass. Not a problem.
+- Docs not edited: instructed; the text is in this file for batch F.
+- Seen, not changed (outside M-3): a results directory that is read-only (the default `/work/runs` under `pm.sh` and `bin/pmx.sh`, mounted `:ro`) ends the run in an OSError traceback at the final `write_json`, after every receipt ran and before the tally line is printed; the old `write_text` did the same. Not run, so not confirmed; RUNBOOK 7 point 3 already tells a clean machine to give a writable directory.
