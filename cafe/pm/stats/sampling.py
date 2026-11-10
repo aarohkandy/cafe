@@ -9,6 +9,7 @@ here pair i and i + n/2 are mirrored (u -> 1 - u) on the named dominant paramete
 from __future__ import annotations
 
 import hashlib
+import math
 import pathlib
 from typing import Any
 
@@ -48,6 +49,7 @@ REQUIRED = ("wind_speed_bias", "wind_direction_bias", "current_speed_scale", "cu
 FRACTIONS = ("usv_vpp_bias", "usv_vpp_bias_brief")
 FACTORS = ("current_speed_scale", "hs_scale", "bulk_stress_scale", "glider_speed_scale", "battery_capacity_scale")
 SUPPORT_SD = 6.0
+BIG = 1e300                                                         # a sampled value stays inside +-BIG (a lognormal above 1/BIG); floats end at 1.8e308
 
 
 def _num(x: Any) -> bool:
@@ -58,11 +60,31 @@ def _num(x: Any) -> bool:
         return False
 
 
+def _check_range(k: str, e: dict[str, Any]) -> None:
+    """A sampled prior (normal, lognormal, uniform) stays finite over its whole support: a lognormal's `median * exp(+-SUPPORT_SD * sigma)` inside
+    (1/BIG, BIG), a normal's `mean +- SUPPORT_SD sd` and a uniform's `hi - lo` finite. Otherwise `marginal(...).ppf` gives inf or 0 for a member (a
+    sigma of 1000 gave Hs factors of inf: round 14, M-9, the unbounded priors). Only finiteness: how large a plausible sd is stays a lab number (row 456)."""
+    d = e["dist"]
+    if d == "lognormal":
+        mid, half = math.log(e.get("median", 1.0)), SUPPORT_SD * e["value"]
+        ok, what = abs(mid) + half < math.log(BIG), f"median * exp(+-{SUPPORT_SD:g} sigma) = exp({mid:g} +- {half:g})"
+    elif d == "normal":
+        mid, half = float(e.get("mean", 0.0)), SUPPORT_SD * float(e["value"])
+        ok, what = math.isfinite(mid + half) and math.isfinite(mid - half), f"mean +- {SUPPORT_SD:g} sd = {mid:g} +- {half:g}"
+    elif d == "uniform":
+        ok, what = math.isfinite(float(e["hi"]) - float(e["lo"])), f"hi - lo = {e['hi']!r} - {e['lo']!r}"
+    else:
+        return
+    if not ok:
+        raise ValueError(f"perturbation {k!r}: the {d} prior reaches {what}, which is not a finite float (a lognormal: inside "
+                         f"1/{BIG:g} to {BIG:g}); a member would be inf or 0. Check the units")
+
+
 def _check_factor(k: str, e: dict[str, Any]) -> None:
     """The limit physics gives a speed-like prior (`FRACTIONS`, `FACTORS`): the factor it makes is > 0 over the whole support, so the vehicle never flies
     backwards or with a negative Hs. A fraction is also a fraction and not a percent (-30 to -35 typed for -0.30 to -0.35: round 14, M-9), so no number of
-    it reaches 1 in size. Called by `check_entry` once the numbers are known finite. A lognormal is positive; the support of a uniform ends at lo, of a
-    normal SUPPORT_SD sd below the mean."""
+    it reaches 1 in size. Called by `check_entry` once the numbers are known finite. A lognormal is positive (and `_check_range` keeps it a finite, non-zero
+    float); the support of a uniform ends at lo, of a normal SUPPORT_SD sd below the mean."""
     one = 1.0 if k in FRACTIONS else 0.0
     if one:
         for f in ("lo", "hi", "mean", "median") + (("value",) if e["dist"] == "normal" else ()):
@@ -83,7 +105,8 @@ def check_entry(k: str, e: Any) -> None:
     when given; uniform: finite `lo` < `hi`; fixed: `mean`, the setting itself, finite and > 0 when given. `current_correlation_length` is always
     checked, whatever its dist: it must be fixed with a mean in (ELL_MIN, ELL_MAX), the length the random-field generator divides by (NaN fields,
     a ZeroDivisionError, numpy's 'scale < 0', a KeyError 'mean' for a normal or uniform one, NaN for a mean of 1e-310; round 13, look-ahead L1 and the
-    merge look-ahead). A prior of `FRACTIONS` or `FACTORS` is also checked by `_check_factor` (a speed factor > 0, a fraction not a percent; round 14, M-9).
+    merge look-ahead). A sampled prior is also checked by `_check_range` (finite over its support: no inf or 0 member) and one of `FRACTIONS` or
+    `FACTORS` by `_check_factor` (a speed factor > 0, a fraction not a percent; round 14, M-9).
     The one check, called by `load_perturbations` for every entry and by `to_marginals` for the entries it builds.
     """
     if not isinstance(e, dict):
@@ -112,6 +135,7 @@ def check_entry(k: str, e: Any) -> None:
     elif "mean" in e:                                               # any other fixed setting that gives a mean
         if not (_num(e["mean"]) and e["mean"] > 0):
             raise ValueError(f"perturbation {k!r}: the fixed setting (mean) is {e['mean']!r}; it must be finite and > 0")
+    _check_range(k, e)
     if k in FRACTIONS + FACTORS:
         _check_factor(k, e)
 

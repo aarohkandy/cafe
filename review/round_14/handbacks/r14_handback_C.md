@@ -129,6 +129,33 @@ DECISIONS and STATUS sentences for F (the code facts, checked in this batch's re
 
 ---
 
+## Adversary pass on cd5f2cb: two more problems fixed (M-9 siblings)
+
+### 1. A speed-factor prior with a huge sigma or tiny median was accepted (inf or 0 members)
+`sampling._check_range` (called by `check_entry` for every sampled prior, before `_check_factor`): the prior must be a finite float over its `SUPPORT_SD` support: a lognormal's `|log median| + 6 sigma < log(1e300)` (so `median * exp(+-6 sigma)` is inside 1e-300 to 1e300 and `ppf` is never inf or 0), a normal's `mean +- 6 sd` finite, a uniform's `hi - lo` finite. It is in the one shared place (`check_entry`), so `load_perturbations`, `to_marginals` and a fitted prior all get it, and it covers the lognormals `_check_factor` did not test and the additive priors (`tp_bias`, the wind biases) alike. Only finiteness is refused: `tp_bias` sd 1e9 s and `hs_scale` sigma 50 are finite (ppf 1e130 at 6 sd) and stay accepted, which is row 456 (a plausible magnitude is a lab number; NEW-C1 says so). Before: `hs_scale` value 1000, `battery_capacity_scale` median 1e-300, `glider_speed_scale` median 1e300 accepted, `ppf([.01,.5,.99])` of the first `[0, 1, inf]`; after: each ValueError naming the entry. The shipped file and the q14 fitted priors pass (re-checked by `test_r14_m9_the_shipped_priors_pass_every_check_unchanged`). One earlier test accepted `lognormal median=1e-300 sigma=50` as "positive of any shape": that is the case the finding proves wrong, so it now uses median 1e-3, sigma 5.
+- Callers checked: `check_entry` is called by `load_perturbations` and `to_marginals` only (grep); no other prior passes a larger support.
+- DECISIONS NEW-C1 for F: add "and every sampled prior is finite over its 6 sd support (`_check_range`): a sigma of 1000 gave Hs factors of inf; a large finite sd stays accepted (456)". RUNBOOK 314 row: add "or its support is not a finite float".
+
+### 2. `vpp_bias_mean` typed as a percent was clipped to a speed factor of 0.1 on the default path
+`usv.VPP_BIAS_CLIP = (-0.9, 0.5)` is now the one statement of the clip: `draw_vpp_bias` clips to it, and `REQUIRED["vpp_bias_mean"]` is `range:-0.9:0.5` (was `any`), so `load_platform` refuses a mean outside what the draw can keep, with the hint (physics `HINTS`) "a fraction of speed ... not a percent". `draw_vpp_bias` also runs `check_params` on that one key, so a P dict handed to `USVSim` without the loader (the adversary's probe) is refused too, with `usv params.vpp_bias_mean: -24.22 must be a finite number from -0.9 to 0.5; a fraction of speed ... not a percent`. The perturb path (`mean_sog`, stage 1's `vpp_bias`) keeps its `fac <= 0` check. The drawn spread is not refused: `vpp_bias_sd` stays `nonneg` and the draw still clips (tests with sd 5 pin it); a sd typed as a percent only widens a clipped draw, it does not fly a constant 0.1. The shipped mean (-0.2422) is inside; the printed demo numbers do not move. `tests/test_usv.py::test_every_leaf_of_the_usv_table_that_may_take_any_value...` lists the `any` kinds: `vpp_bias_mean` left the set (the test says a change there must be conscious; this is it).
+- Callers: `draw_vpp_bias` is called by `USVSim.__init__` only (and tests); `usv.REQUIRED` by `load_platform` only (grep). Whole test_usv, test_stats_exact, test_config, test_stage1, test_credibility, test_perturb_env files run.
+
+### Fail-first for the two fixes (throwaway detached worktree at cd5f2cb, orca `pm_r14c_mut`, removed with its directory afterwards)
+| code | tests that fail |
+|---|---|
+| unfixed cd5f2cb (new tests copied in) | `test_r14_m9_a_sampled_prior_whose_support_is_not_a_finite_float_is_refused` (48 cases: 8 shapes x 5 factor priors + `tp_bias`), `test_r14_m9_a_percent_typed_for_the_platforms_mean_bias_is_refused_not_clipped...` (5) |
+| fix applied, `draw_vpp_bias` check removed | the percent test, the `USVSim(P-dict)` half (5 cases); the loader half stays green |
+| fix applied, `_check_range` call removed | the 48 cases |
+The two "stays allowed" tests (a finite sigma 50 / sd 1e9, a mean inside the clip) pass on both: they pin that nothing legal moved.
+
+### Not problems / left, with the reason
+- Stray pids 2082561 and 2082562 on orca: not started by this agent (they are the previous run's), so by the orca rules I did not kill them. Still alive (parent pid 1, plus the proot_run.sh wrapper 2080555 / proot 2080582 waiting for them). Owner or the agent that started them: `kill 2082561 2082562`.
+- Full suite, `orca_gate.sh` and `make mutation`: the lead's gate, not run here.
+- `tests/test_pipeline.py -k gebco` matched nothing: `_gebco_cached` is covered through `tests/test_bathy.py`; no edit in `pipeline.py` this round.
+- SIGHUP in `par` beside the lead's TERM-only decision: left as the builder flagged it (one word to remove). Not mine to decide; the lead's call.
+- `par._sweep` pid-namespace residual and the "not newer than the pid start" test: a stated residual of unsupported setups (shared bind-mounted `/tmp`), unchanged.
+- Docs (DECISIONS, CHANGELOG, RUNBOOK, STATUS) and the `len(audit.SERIAL_TESTS)` guard: handed to F, not problems.
+
 ## Tests and what I verified
 
 Each fix has a regression test that fails on a mutant of the fix and passes on the fix (throwaway detached worktree `cafe-r14c-mut` at d5aea52 with the batch applied, one mutant at a time on orca, `pm_r14c_mut`; removed afterwards):

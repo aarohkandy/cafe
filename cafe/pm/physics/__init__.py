@@ -18,7 +18,8 @@ _RULES: dict[str, tuple[str, Callable[[Any], Any]]] = {
 }
 
 
-HINTS = {"r_int_ohm": "an ideal pack has no solution for the current at constant power; use 1e-6 for a near-ideal one"}          # round 8, M-11
+HINTS = {"r_int_ohm": "an ideal pack has no solution for the current at constant power; use 1e-6 for a near-ideal one",
+         "vpp_bias_mean": "a fraction of speed (the factor is 1 + x, so -0.2 is 20 % slower), not a percent: write -0.2 for -20 %"}          # round 8, M-11
 
 
 def _rule(kind: str) -> tuple[str, Callable[[Any], Any]]:

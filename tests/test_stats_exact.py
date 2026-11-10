@@ -776,8 +776,32 @@ def test_r14_m9_a_scale_prior_is_a_factor_that_stays_positive_over_its_support(n
 
 @pytest.mark.parametrize("name", S.FACTORS)
 def test_r14_m9_a_positive_scale_prior_of_any_shape_passes(name):
-    for e in (dict(dist="lognormal", median=1e-300, value=50.0), dict(dist="uniform", lo=0.5, hi=1.5, value=0.0), dict(dist="normal", mean=1.0, value=0.1)):
+    for e in (dict(dist="lognormal", median=1e-3, value=5.0), dict(dist="uniform", lo=0.5, hi=1.5, value=0.0), dict(dist="normal", mean=1.0, value=0.1)):
         S.check_entry(name, dict(e, unit="x", citation="c", kind="prior"))
+
+
+@pytest.mark.parametrize("name", S.FACTORS + ("tp_bias",))
+@pytest.mark.parametrize("entry", [
+    dict(dist="lognormal", value=1000.0), dict(dist="lognormal", median=1e-300, value=0.5), dict(dist="lognormal", median=1e300, value=0.5),
+    dict(dist="lognormal", median=1.0, value=116.0), dict(dist="lognormal", median=5e-324, value=0.1),
+    dict(dist="normal", mean=1e308, value=1e308), dict(dist="normal", mean=1.0, value=1e308), dict(dist="uniform", lo=-1e308, hi=1e308)])
+def test_r14_m9_a_sampled_prior_whose_support_is_not_a_finite_float_is_refused(name, entry):
+    """The adversary's repro: hs_scale value 1000 gave ppf [0, 1, inf], so a member's Hs factor was inf; median 1e-300 and 1e300 the same."""
+    e = dict(entry, unit="x", citation="c", kind="prior", **({} if "value" in entry else dict(value=0.0)))
+    with pytest.raises(ValueError, match=rf"perturbation '{name}': the {entry['dist']} prior reaches .* not a finite float"):
+        S.check_entry(name, e)
+    with pytest.raises(ValueError, match=rf"perturbation '{name}'"):
+        S.to_marginals({name: e}, [name])
+
+
+@pytest.mark.parametrize("name", S.FACTORS + ("tp_bias",))
+def test_r14_m9_a_prior_with_a_large_but_finite_support_stays_allowed_and_its_members_are_finite(name):
+    """Only finiteness is refused (row 456: how wide an sd may be is a lab number): sigma 50 and a 1e9 s sd give finite members."""
+    e = dict(dist="normal", value=1e9) if name == "tp_bias" else dict(dist="lognormal", median=1.0, value=50.0)         # a normal factor must stay > 0
+    e = dict(e, unit="x", citation="c", kind="prior")
+    S.check_entry(name, e)
+    x = S.marginal(S.to_marginals({name: e})[name]).ppf([1e-6, 0.5, 1 - 1e-6])
+    assert np.isfinite(x).all() and (name == "tp_bias" or (x > 0).all())
 
 
 def test_r14_m9_the_percent_check_does_not_read_a_number_the_other_checks_refuse_and_other_priors_are_not_percent_checked():

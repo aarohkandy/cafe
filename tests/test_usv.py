@@ -916,7 +916,7 @@ def test_the_usv_loader_still_takes_the_shipped_values_and_the_stated_edges(tmp_
 
 def test_every_leaf_of_the_usv_table_that_may_take_any_value_is_one_the_model_only_adds_or_multiplies():
     """M-10: a new `any` leaf must be a conscious choice (the others were `any` while the model divided by them)."""
-    assert {k for k, v in usv.REQUIRED.items() if v == "any"} == {"wing_ce_x_m", "keel_x_m", "vpp_bias_mean", "current_z_m"}
+    assert {k for k, v in usv.REQUIRED.items() if v == "any"} == {"wing_ce_x_m", "keel_x_m", "current_z_m"}  # vpp_bias_mean left it: round 14, M-9
     assert usv.MISSION_REQUIRED["cap_cycles"] != "any"
 
 
@@ -1280,6 +1280,21 @@ def test_r14_m9_a_speed_bias_that_makes_the_speed_factor_zero_or_negative_is_ref
         sim(AnalyticEnv(), bias=bias)
     with pytest.raises(ValueError, match="fraction"):                              # one bad member is enough
         usv.USVSim(P, 3, AnalyticEnv(), (-165.0, -1.0), 0.0, dict(mode="station", station=(-165.0, 0.5)), perturb=dict(vpp_bias=np.array([-0.3, -0.4, bias])))
+
+
+@pytest.mark.parametrize("mean", [-24.22, -1.0, -0.95, 0.51, 3.0])
+def test_r14_m9_a_percent_typed_for_the_platforms_mean_bias_is_refused_not_clipped_to_a_speed_factor_of_a_tenth(tmp_path, mean):
+    """The default path (no perturb) clipped vpp_bias_mean = -24.22 (the platform's -0.2422 as a percent) to -0.9 and flew every member at 10 %."""
+    with pytest.raises(ValueError, match=r"vpp_bias_mean: .* must be a finite number from -0.9 to 0.5; a fraction of speed .* not a percent"):
+        usv.load_platform(usv_file(tmp_path, "params", "vpp_bias_mean", mean))
+    with pytest.raises(ValueError, match=r"usv params\.vpp_bias_mean: .* not a percent"):                     # a dict handed over without the loader
+        usv.USVSim({**P, "vpp_bias_mean": mean}, 4, AnalyticEnv(), (0.0, 0.0), 0.0, dict(mode="station", station=(0.0, 1.0), seed=7))
+
+
+@pytest.mark.parametrize("mean", [-0.9, 0.5, -0.2422, 0.0])
+def test_r14_m9_a_mean_bias_inside_the_clip_is_taken_as_it_was(mean):
+    s = usv.USVSim({**P, "vpp_bias_mean": mean, "vpp_bias_sd": 0.0}, 4, AnalyticEnv(), (0.0, 0.0), 0.0, dict(mode="station", station=(0.0, 1.0), seed=7))
+    assert np.allclose(s.fac, 1.0 + mean)
 
 
 def test_r14_m9_a_speed_bias_above_minus_one_is_a_positive_factor_and_the_drawn_path_never_reaches_the_check():
