@@ -1190,3 +1190,39 @@ def test_r13_m24_run_sh_tells_the_container_the_commit_and_whether_the_tree_is_d
     (tools / "git").chmod(stat.S_IRWXU)
     rc, out = sent(tmp_path, "run.sh", "python", "-m", "cafe.cfd", "external")
     assert rc == 0 and "-e CAFE_GIT_SHA=0123456789abcdef0123456789abcdef01234567 -e CAFE_GIT_DIRTY=1 " in out and "cafe python -m cafe.cfd external" in out
+
+
+def test_r14_m33_a_second_sync_from_the_owning_checkout_is_refused_while_its_detached_job_runs_and_not_after(tmp_path, request):
+    """M-33, first sentence: the owner marker only compares checkouts, so `pmx.sh` from the same checkout replaced the files under a TM= job."""
+    home, env = live(tmp_path, "ssh", "rsync", "docker", "tmux", PMX="pm_t", TM="held")
+    real_rsync_without_modes(tmp_path)
+    dest = home / "work" / "cafe" / "pm_t"
+    dest.parent.mkdir(parents=True)
+    a = tmp_path / "lead"
+    a.mkdir()
+    (a / "README.md").write_text("r")
+    (a / "common.py").write_text("1")
+    release = tmp_path / "release"
+    request.addfinalizer(lambda: release.write_text(""))       # a failed assert must not leave the job looping
+    job = tmp_path / "job.sh"
+    job.write_text(f"while [ ! -e {release} ]; do sleep 0.2; done\n")
+    pmx = ["sh", str(ROOT / "bin/pmx.sh")]
+    assert run([*pmx, "sh", str(job)], env, cwd=a).returncode == 0
+    (a / "README.md").unlink()
+    (a / "common.py").write_text("22")
+    r = run([*pmx, "true"], {**env, "TM": "other"}, cwd=a)
+    assert r.returncode == 1 and "held" in r.stderr and "still running" in r.stderr and "PM_TAKE=1" in r.stderr
+    assert (dest / "README.md").exists() and (dest / "common.py").read_text() == "1"                                  # nothing was sent
+    assert run([*pmx, "true"], {k: v for k, v in env.items() if k != "TM"}, cwd=a).returncode == 1                  # a foreground sync is refused the same way
+    r = run([*pmx, "true"], {**{k: v for k, v in env.items() if k != "TM"}, "PM_TAKE": "1"}, cwd=a)
+    assert r.returncode == 0, r.stderr                                                                             # PM_TAKE=1 syncs anyway
+    assert not (dest / "README.md").exists()
+    release.write_text("")
+    for _ in range(100):                                                                                           # the job ends, its session is gone
+        if not (home / "tmuxstate" / "held").exists():
+            break
+        time.sleep(0.1)
+    (a / "common.py").write_text("three")
+    r = run([*pmx, "true"], {k: v for k, v in env.items() if k != "TM"}, cwd=a)
+    assert r.returncode == 0, r.stderr                                                                     # a finished job leaves a name only
+    assert (dest / "common.py").read_text() == "three"
