@@ -375,14 +375,16 @@ def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) 
     is not a golden (unreadable, not an object, no summary.mission) or one for another mission is somebody's reference, and one `--update-golden` from
     the CI fixture would replace the demo's. `allowed` is the mission named by `--golden-mission`: it lets that mission replace the file. What no flag
     can mend comes first and is checked for `allowed` too: the path is a symlink loop, is not a file (a directory), it sits below something that is not one, or
-    the directory that receives it is not writable, so the write would fail after the first long run (round 13, M-17). The first write, with no file,
-    is otherwise always allowed (round 12, M-33)."""
+    the directory that receives it is not writable (judged where a link leads, even one to a missing file or directory: the merge look-ahead), so the
+    write would fail after the first long run (round 13, M-17). The first write, with no file, is otherwise always allowed (round 12, M-33)."""
     try:
         os.stat(golden)
     except OSError as e:                                            # exists() and is_file() read a loop as "absent": the write would then fail after the run
         if e.errno == errno.ELOOP:
             return f"{golden} is, or lies below, a symbolic link that leads back to itself: not written, name a file with `--golden`"
-    where = golden.parent
+    # the write lands at real(golden) (`check_golden` makes its parent, `config.write_json` resolves the path); a link to a missing file or directory
+    # reads as absent from `golden` itself, so the climb starts there
+    where = real(golden).parent
     while not where.exists():                                       # the nearest directory that is there: the one mkdir and the write start from
         where = where.parent
     if golden.exists() and not golden.is_file():

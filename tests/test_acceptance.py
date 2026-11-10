@@ -1535,3 +1535,31 @@ def test_r13_l1_a_golden_that_is_or_lies_below_a_symlink_loop_is_refused_before_
     assert loopfile.is_symlink() and not loopfile.exists()                                        # nothing replaced the link
     acc.check_golden(run_dict(tmp_path / "acc", report()), tmp_path / "fine.json", MISSION, True)      # an ordinary new golden is still written
     assert (tmp_path / "fine.json").is_file()
+
+
+def test_r13_merge_a_golden_path_that_is_a_dangling_link_is_judged_where_the_write_lands(tmp_path, monkeypatch):
+    """`golden_refusal` climbed from `golden.parent`, and a link to a missing file or directory reads as absent, so a link into a directory this user cannot
+    write passed: the long runs executed and `real(golden).parent.mkdir` raised FileNotFoundError after them. The sibling of the symlink loop."""
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    real_access = os.access
+    monkeypatch.setattr(acc.os, "access", lambda p, m, **k: False if pathlib.Path(p) == ro else real_access(p, m, **k))   # ro: the unwritable one
+    (tmp_path / "w").mkdir()
+    dangdir = tmp_path / "w" / "dangdir"
+    dangdir.symlink_to(ro / "missing" / "sub")
+    dangfile = tmp_path / "w" / "dangfile"
+    dangfile.symlink_to(ro / "gone.json")
+    okfile = tmp_path / "w" / "okfile"
+    okfile.symlink_to(tmp_path / "w" / "newdir" / "g.json")                                     # a dangling link into a place that can be made: still allowed
+    monkeypatch.setattr(acc, "run_one", lambda *a, **k: pytest.fail("a run started"))
+    for bad in (dangdir / "g.json", dangfile):
+        why = acc.golden_refusal(bad, "m", "m")
+        assert why and "cannot be written" in why and str(ro) in why and str(bad) in why
+        assert acc.golden_refusal(bad, "m") == why and acc.update_command(bad, "mm.yaml", 0, "m", tmp_path / "o") is None
+        rows, rc = acc.run(MISSION, 0, tmp_path / "o2", bad, update_golden=True, log=lambda s: None, golden_mission="ci_fixture")
+        assert rc == 1 and [r["name"] for r in rows] == ["golden_diff"] and "no run started" in rows[0]["detail"] and not (tmp_path / "o2").exists()
+        done = acc.check_golden(run_dict(tmp_path / "acc", report()), bad, MISSION, True, "m")
+        assert done["values"]["refused"] is True and done["values"]["updated"] is False
+    assert acc.golden_refusal(okfile, "m", "m") is None
+    acc.check_golden(run_dict(tmp_path / "acc", report()), okfile, MISSION, True)
+    assert (tmp_path / "w" / "newdir" / "g.json").is_file()

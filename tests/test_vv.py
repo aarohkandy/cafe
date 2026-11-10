@@ -1111,6 +1111,21 @@ def test_r13_l1_run_with_a_missing_or_malformed_argument_is_the_usage_and_exit_2
     assert err.startswith("error: run") and "Usage" in err
 
 
+@pytest.mark.parametrize("fr", ["0.37", "0.2800001", "0.5", "1e-9", "0.28,0.37"])
+def test_r13_merge_a_froude_number_with_no_reference_is_refused_before_any_case_runs(tmp_path, monkeypatch, capsys, fr):
+    """`run coarse 100 0.37` passed the parser, ran a whole case, stored the speed in run_coarse.json and then died on CT_REF[0.37] in the log line."""
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
+    root = prepared(tmp_path)
+    calls: list[int] = []
+    with pytest.raises(ValueError, match="no reference C_T"):
+        dt._run_args(["coarse", "100", fr])
+    assert dt.main(["run", "coarse", "100", fr]) == 2 and "no reference C_T" in capsys.readouterr().err
+    with pytest.raises(ValueError, match="no reference C_T"):                                               # run_grid, for a caller that skips the parser
+        dt.run_grid(root, "coarse", 100, print, lambda *a, **k: calls.append(1), frs=tuple(float(x) for x in fr.split(",")))
+    assert calls == [] and not (root / "run_coarse.json").exists()
+    assert dt._run_args(["coarse", "100", "0.28,0.1"]) == ("coarse", 100, (0.28, 0.1))                    # the four numbers with a reference still pass
+
+
 # ------------------------------------------------------------------ look-ahead L1: zero values and the two copies of the two-grid index
 
 @pytest.mark.parametrize("args", [(1.0, 1.2, 1.0), (0.0, 1.2, 2.0), (np.float64(0.0), 1.2, 2.0), (1.0, 1.2, 0.5), (1.0, 1.2, math.nan), (1.0, 1.2, 2.0, 0.0)])

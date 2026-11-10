@@ -37,6 +37,7 @@ def marginal(spec: dict[str, Any]) -> Any:
     raise ValueError(f"unknown distribution {d!r}")
 
 
+ELL_MIN, ELL_MAX = 1e-200, 1e200                                    # m: inside these 1/ell and x*k of the random field stay finite (1e-310: NaN fields)
 DISTS = ("normal", "lognormal", "uniform", "fixed")             # what a perturbations.yaml entry may be (a "fixed" one is a setting, not sampled)
 
 
@@ -52,16 +53,24 @@ def check_entry(k: str, e: Any) -> None:
     """Refuse a perturbations.yaml entry (or a fitted prior that replaces one) that would give NaN members or a raw traceback, naming it.
 
     A mapping with `dist` one of DISTS; normal and lognormal: `value` a finite sd > 0, `mean` (normal) finite and `median` (lognormal) finite > 0
-    when given; uniform: finite `lo` < `hi`; fixed: `mean`, the setting itself, finite and > 0 when given and always for `current_correlation_length`,
-    which the random-field generator divides by (NaN fields, a ZeroDivisionError or numpy's 'scale < 0' otherwise; round 13, look-ahead L1). The one
-    check, called by `load_perturbations` for every entry and by `to_marginals` for the entries it builds.
+    when given; uniform: finite `lo` < `hi`; fixed: `mean`, the setting itself, finite and > 0 when given. `current_correlation_length` is always
+    checked, whatever its dist: it must be fixed with a mean in (ELL_MIN, ELL_MAX), the length the random-field generator divides by (NaN fields,
+    a ZeroDivisionError, numpy's 'scale < 0', a KeyError 'mean' for a normal or uniform one, NaN for a mean of 1e-310; round 13, look-ahead L1 and the
+    merge look-ahead). The one check, called by `load_perturbations` for every entry and by `to_marginals` for the entries it builds.
     """
     if not isinstance(e, dict):
         raise ValueError(f"perturbation {k!r}: an entry is a mapping (dist, value, unit, citation, kind), not {e!r}")
     d = e.get("dist")
     if d not in DISTS:
         raise ValueError(f"perturbation {k!r}: dist is {d!r}, not one of {', '.join(DISTS)}")
-    if d in ("normal", "lognormal"):
+    if k == "current_correlation_length":                           # a length in metres the random field divides by: PerturbedEnv reads priors[k]["mean"]
+        if d != "fixed":
+            raise ValueError(f"perturbation {k!r}: dist is {d!r}; it is a fixed setting (dist fixed, with mean), not sampled: the random field reads its mean")
+        m: Any = e.get("mean")
+        if not (_num(m) and ELL_MIN < m < ELL_MAX):
+            raise ValueError(f"perturbation {k!r}: the fixed setting (mean) is {m!r}; it is a length the random field divides by: finite and > 0, "
+                             f"between {ELL_MIN:g} and {ELL_MAX:g} m so that 1/length stays a finite float")
+    elif d in ("normal", "lognormal"):
         if not (_num(e.get("value")) and e["value"] > 0):
             raise ValueError(f"perturbation {k!r}: the sd is {e.get('value')!r}; a {d} prior needs a finite sd > 0 (scipy turns 0 into NaN members)")
         loc = "mean" if d == "normal" else "median"
@@ -72,9 +81,9 @@ def check_entry(k: str, e: Any) -> None:
         hi: Any = e.get("hi")
         if not (_num(lo) and _num(hi) and lo < hi):
             raise ValueError(f"perturbation {k!r}: a uniform prior needs finite numbers lo < hi, got lo {lo!r} and hi {hi!r}")
-    elif "mean" in e or k == "current_correlation_length":                # a fixed setting: the one the code divides by is a length
-        if not (_num(e.get("mean")) and e["mean"] > 0):
-            raise ValueError(f"perturbation {k!r}: the fixed setting (mean) is {e.get('mean')!r}; it is a length the random field divides by: finite and > 0")
+    elif "mean" in e:                                               # any other fixed setting that gives a mean
+        if not (_num(e["mean"]) and e["mean"] > 0):
+            raise ValueError(f"perturbation {k!r}: the fixed setting (mean) is {e['mean']!r}; it must be finite and > 0")
 
 
 def load_perturbations(path: str | pathlib.Path | None = None) -> dict[str, dict[str, Any]]:

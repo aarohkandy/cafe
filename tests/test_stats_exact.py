@@ -686,3 +686,29 @@ def test_r13_l1_a_fixed_correlation_length_must_be_given_and_any_other_fixed_set
     with pytest.raises(ValueError, match=r"perturbation 'other_setting': the fixed setting"):
         S.check_entry("other_setting", dict(dist="fixed", mean=math.nan, value=0.0))
     S.check_entry("current_correlation_length", dict(dist="fixed", mean=np.float64(5e4), value=0.0))
+
+
+# ---------------------------------------------------------------------------------------------------------- round 13, merge look-ahead
+@pytest.mark.parametrize("entry", [dict(dist="normal", value=1000.0), dict(dist="normal", mean=5e4, value=1000.0),
+                                   dict(dist="lognormal", value=0.5), dict(dist="uniform", lo=1.0, hi=2.0, value=0.0),
+                                   dict(dist="fixed", mean=1e-310, value=0.0), dict(dist="fixed", mean=1e-320, value=0.0),
+                                   dict(dist="fixed", mean=5e-324, value=0.0), dict(dist="fixed", mean=1e300, value=0.0),
+                                   dict(dist="fixed", mean=1e-200, value=0.0), dict(dist="fixed", mean=1e200, value=0.0)])
+def test_r13_merge_the_correlation_length_is_a_fixed_setting_whose_inverse_is_finite_whatever_the_entry_says(tmp_path, entry):
+    """`check_entry` tested the correlation length only inside its 'fixed' branch: a normal or uniform one loaded and `PerturbedEnv` raised KeyError 'mean',
+    and a fixed mean of 1e-310 (1/ell is inf) gave NaN current fields."""
+    from cafe.pm.env.perturb import Field
+    e = dict(entry, **FIELDS)
+    words = r"perturbation 'current_correlation_length': (dist is .* fixed setting|the fixed setting \(mean\) is .*finite and > 0)"
+    with pytest.raises(ValueError, match=words):
+        S.check_entry("current_correlation_length", e)
+    cfg = yaml.safe_load(S.PERTURBATIONS.read_text())
+    cfg["current_correlation_length"] = e
+    p = tmp_path / "p.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match=words):
+        S.load_perturbations(p)
+    for good in (1e-100, 1e100):                                    # the bound is not tighter than it needs to be: the field is finite inside it
+        S.check_entry("current_correlation_length", dict(dist="fixed", mean=good, value=0.0, **FIELDS))
+        assert np.isfinite(Field(1, [0, 1], "s", good)(np.zeros((2, 3)) + 1.0, np.zeros((2, 3)) + 2.0)).all()
+    S.check_entry("another_normal", dict(dist="normal", value=1000.0, **FIELDS))                        # other entries keep their dist

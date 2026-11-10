@@ -484,10 +484,19 @@ def _case(solver: Callable[..., dict[str, Any]], root: pathlib.Path, grid: str, 
                 converged=seen.get("converged"))
 
 
+def check_froude(frs: tuple[float, ...]) -> None:
+    """ValueError unless every Froude number is one of CT_REF's (the four with a reference C_T): `run_grid` logs C_T against CT_REF[fr] after the solve and
+    stores the speed first, so any other number (0.37, 0.2800001) was a full solve, a stored speed and then a KeyError (round 13, merge look-ahead)."""
+    bad = [f for f in frs if f not in CT_REF]
+    if bad:
+        raise ValueError(f"Froude number {', '.join(map(str, bad))} has no reference C_T; the ones that have are {', '.join(map(str, CT_REF))}")
+
+
 def run_grid(root: pathlib.Path, grid: str, max_iters: int = MAX_ITERS, log: Callable[[str], None] = print,
              solver: Callable[..., dict[str, Any]] = cfd.free_surface, frs: tuple[float, ...] = ORDER) -> dict[str, Any]:
     """interFoam LTS at the Froude numbers `frs` on one grid (GRIDS), one meshing + solve per speed so each finished speed is on disk
     (run_<grid>.json) and a restart does not repeat it. Disk is checked before every case. A file stamped with another RECIPE is refused."""
+    check_froude(frs)                                    # before any work or file: a speed with no reference stopped the run after its solve
     h = json.loads((root / "hydro.json").read_text())
     f = root / f"run_{grid}.json"
     out = dict(grid=grid, recipe=RECIPE, S=h["wetted_area"], surf_level=SURF_LEVEL, speeds={}) if not f.exists() else read_run(f)
@@ -667,8 +676,9 @@ def _run_args(words: list[str]) -> tuple[str, int, tuple[float, ...]]:
         raise ValueError(f"{words[0]!r} is not a grid ({', '.join(GRIDS)})")
     iters = int(words[1]) if len(words) > 1 else MAX_ITERS
     frs = tuple(float(x) for x in words[2].split(",")) if len(words) > 2 else ORDER
-    if iters <= 0 or not all(math.isfinite(f) and f > 0 for f in frs):
-        raise ValueError("max_iters and every Froude number must be above 0")
+    if iters <= 0:
+        raise ValueError("max_iters must be above 0")
+    check_froude(frs)
     return words[0], iters, frs
 
 

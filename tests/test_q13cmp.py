@@ -59,4 +59,22 @@ def test_r13_l2_a_run_with_no_design_file_is_named_and_not_a_traceback(tmp_path,
     if n:
         (tmp_path / "b" / "emulator").mkdir()
     assert q.variants_run(tmp_path / "b") is None
-    assert "b no emulator/design.json; same count" in q.variant_line("a", "b", q.variants_run(tmp_path / "a"), None)
+    line = q.variant_line("a", "b", q.variants_run(tmp_path / "a"), None)  # was "same count": its emulator figures are not comparable
+    assert "b no emulator/design.json; COUNT DIFFERS" in line and "one run has no emulator/design.json" in line
+
+
+def test_r13_merge_one_run_without_a_design_file_differs_and_two_without_one_do_not_and_a_killed_state_counts():
+    six, five_killed = (6, 6, None), (5, 6, "killed: the stage share")
+    assert q.counts_differ(None, six) and q.counts_differ(six, None) and not q.counts_differ(None, None)
+    assert q.counts_differ(six, five_killed) and not q.counts_differ(six, (6, 6, None))
+    assert q.counts_differ(six, (6, 6, "killed after the last variant"))                  # the same number, one of them killed
+    assert "same count" in q.variant_line("a", "b", None, None)
+
+
+def test_r13_merge_the_comparison_of_a_run_with_no_design_file_sets_the_emulator_leaves_apart_as_load_dependent(tmp_path, capsys):
+    make(tmp_path, "old", 6, 28)
+    (tmp_path / "old" / "emulator" / "design.json").unlink()
+    make(tmp_path, "new", 5, 30)
+    out = run_main(tmp_path, capsys, "old", "new")
+    assert "old no emulator/design.json; new 5 of 6 run; COUNT DIFFERS" in out.splitlines()[0]
+    assert "[load-dependent] /emulator/run_note" in out

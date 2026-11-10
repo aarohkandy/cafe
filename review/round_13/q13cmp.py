@@ -58,13 +58,18 @@ def variants_run(root):
 
 
 def counts_differ(va, vb):
-    return va is not None and vb is not None and va[0] != vb[0]
+    """True when the two runs did not run the same emulator variants: a different number, a different killed state, or one without a design.json
+    (an older run, or one where the emulator stage did not run: its emulator figures are not comparable to a run that has them)."""
+    if va is None or vb is None:
+        return (va is None) != (vb is None)
+    return va[0] != vb[0] or bool(va[2]) != bool(vb[2])
 
 
 def variant_line(a, b, va, vb):
     def show(v):
         return "no emulator/design.json" if v is None else f"{v[0]} of {v[1]} run" + (f" ({v[2]})" if v[2] else "")
-    verdict = ("COUNT DIFFERS: the emulator, flip and hold-out figures below are load-dependent (a kill at the stage share), not code"
+    why = "one run has no emulator/design.json" if (va is None) != (vb is None) else "a kill at the stage share"
+    verdict = (f"COUNT DIFFERS: the emulator, flip and hold-out figures below are load-dependent ({why}), not code"
                if counts_differ(va, vb) else "same count")
     return f"## variants run: {a} {show(va)}; {b} {show(vb)}; {verdict}"
 
