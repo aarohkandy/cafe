@@ -27,7 +27,7 @@ pm python -m cafe.pm fetch --mission missions/tepex_c_demo.yaml                 
 pm bin/run_premission --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out runs/quick   # then open runs/quick/report/index.html
 ```
 
-Run from the repository root, in a git checkout (the image has no `git`; the wrapper passes the commit and the clean-tree flag, which the ledgers and the acceptance golden need). On homebase use `./pm.sh <command>` instead of `pm <command>`. The numpy, jax, xlb and gsw the pipeline needs are in the image, not on the host. Add `--cpus N --memory M` to the wrapper's `docker run` so the plan sees the limits (it needs the environment, 0.0031 GB per square degree of the padded box per window day, so 9 GB for the demo, plus 0.9 GB per stage-1 worker, and refuses a mission that does not fit); RUNBOOK step 1 has the details and the optional Bellhop build for acoustic links.
+Run from the repository root, in a git checkout (the image has no `git`; the wrapper passes the commit and the clean-tree flag, which the ledgers and the acceptance golden need; outside a checkout the commit is empty and a stored CFD or SITL result stamped through the wrapper names no commit, which `make receipts` does not count). On homebase use `./pm.sh <command>` instead of `pm <command>`. The numpy, jax, xlb and gsw the pipeline needs are in the image, not on the host. Add `--cpus N --memory M` to the wrapper's `docker run` so the plan sees the limits (it needs the environment, 0.0031 GB per square degree of the padded box per window day, so 9 GB for the demo, plus 0.9 GB per stage-1 worker, and refuses a mission that does not fit); RUNBOOK step 1 has the details and the optional Bellhop build for acoustic links.
 
 [`docs/RUNBOOK.md`](docs/RUNBOOK.md) takes it from a clean machine to a report and says which verdicts to trust; [`STATUS.md`](STATUS.md) says what is missing and why (no GPU,
 the lab's HYCOM run, the lab server, platform datasheets); [`QUESTIONS_FOR_LAB.md`](QUESTIONS_FOR_LAB.md) lists what the lab can answer to close the gaps; `docs/CREDIBILITY.md`
@@ -171,7 +171,7 @@ Context rows are shown for orientation and never count as a pass.
 
 Run them: `./run.sh python -m cafe.receipts /work/runs`. The slow CFD cases are produced once with
 `python -m cafe.cfd external torpedo /work/runs/t1`, `... surface wigley /work/runs/w1` and
-`... incidence suboff /work/runs/s1 3.344` (three grids, about 1 h on 6 cores). The files carry a stamp (date, host, git sha, digest of `cafe/*.py`); one made before the stamp existed, or `runs/crosscheck.json`, is stamped with `python -m cafe.receipts stamp FILE` after you have looked at it, and a result without a stamp of the current code is a context row, not a pass. Adversarial review notes: `REVIEW.md`.
+`... incidence suboff /work/runs/s1 3.344` (three grids, about 1 h on 6 cores). The files carry a stamp (date, host, git sha, digest of `cafe/*.py`); the git sha must name a commit (`./run.sh` passes `CAFE_GIT_SHA` as `pm.sh` does, and `python -m cafe.cfd` and `python -m cafe.receipts stamp` refuse to write a stamp with none, review round 13, M-24); one made before the stamp existed, or `runs/crosscheck.json`, is stamped with `python -m cafe.receipts stamp FILE` after you have looked at it, and a result without a stamp of the current code is a context row, not a pass. Adversarial review notes: `REVIEW.md`.
 
 ## Files
 

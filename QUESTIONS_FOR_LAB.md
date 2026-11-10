@@ -32,7 +32,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    SST? *Default:* frozen WRF SST + the COARE warm-layer model, enabled and badged MODELLED; the TAO comparison
    quantifies the frozen-SST error. *If a coupled run exists:* lay its files out like orca's WRF files and re-point `CAFE_ORCA` at them (the mission file has no atmosphere
    path and no source other than `orca_uwincm`; `validate` refuses `local_wrf` and `path` and names this route); the warm layer stays on only
-   if its SST has no diurnal cycle.
+   if its SST has no diurnal cycle. A coupled run also needs the schema and the fetch check changed: `cafe/schemas/wrfout.json` pins `SST_UPDATE` 0, `SIMULATION_START_DATE` and `DX`, and `orca.wrf_grid` refuses a file that differs, so a coupled-SST file is refused at fetch today; once they are loosened the SST label and the grid spacing in the data-source text follow the file's attributes (review round 13, M-30; DECISIONS 722).
 
 4. **Which platforms TEPEX-C will fly** (Saildrone Explorer vs Voyager; Seaglider vs Slocum; which UAS), with mass,
    CG, geometry or CAD, propulsion and battery curves, speed polars or flight-model coefficients, comms hardware and
@@ -49,6 +49,9 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
    `min_dive_m` to `rating_m`), `radius_km` outside 0.01 to 1000 or `lost_after_h` above 720 is refused by `validate`, each message naming the field and the limit.
    Since review round 9 (M-22) a glider or USV file must also carry every `mission_defaults` key its model reads, each in a range we chose: USV `becalmed_after_h` and `corridor_km` above 0, `calm_sustain_s` and `stall_sustain_s` 0 or above, `track_tolerance_km` above 0 and at most 1000, `wp_radius_m` above 0, `roll_limit_deg` above 0 and at most 180; glider `dive_depth_m`, `station_tol_m` and `wp_radius_m` above 0, `lost_hours` and `unreach_hours` 0 or above.
    *Default:* those limits. *If a real vehicle or mission is outside one:* tell us the number, and the limit in `cafe/schemas/mission.json` or the platform's `REQUIRED` table is widened (a code change).
+
+   4a. **The default glider hull: wall thickness and the buckling knockdown** (review round 13, M-38). Stage 3 now runs the FEA's buckling step on the glider hull and stores the larger of the stress and the knocked-down buckling utilization. For the default hull (`platforms/seaglider.yaml`: Al 6061, 8 mm wall, rated 500 m) the stress utilization is 0.367 (von Mises p99 101.32 MPa against 276 MPa yield), the linear buckling utilization 0.687 (factor 1.455) and, with the 0.5 knockdown for imperfect shells (`hangar.KNOCKDOWN`), 1.374: the model hull collapses at about 364 m, not 500 m. Is the wall thickness (and the material) the real pressure hull's, and is the 0.5 knockdown too conservative for it?
+   *Default:* the platform file and the knockdown 0.5 stay; the stage-3 utilization reads above 1 for the default glider hull. *If you answer:* a thicker wall, another material or another knockdown is a platform-file or `hangar.KNOCKDOWN` change; no verdict reads the value today (no pm code consumes `fea['utilization']`).
 
 5. **Mission definition.** Deployment windows, waypoints, station-keeping tolerance, surfacing schedule, which
    link pairs must hold and what outage is acceptable, and the go/no-go thresholds the PIs actually use.
@@ -87,7 +90,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
 8. **FluidX3D licence.** Is FluidX3D's licence (no commercial or military use; modifications must be published)
    acceptable for NOAA use? *Default:* the FluidX3D backend exists but ships disabled; free-surface windows use
    interFoam on CPU. *If yes:* after reading `docs/LICENSES.md`, build FluidX3D and set
-   `"fluidx3d": {"enabled": true, "binary": "/path/to/FluidX3D"}` in `config/premission.json`.
+   `"fluidx3d": {"enabled": true, "binary": "/path/to/FluidX3D"}` in `config/premission.json` (only the JSON boolean `true` turns it on; a quoted "false" or a 1 is refused with a message, DECISIONS 735).
 
 9. **Campaign date, box and file layout.** Confirm spring 2028, 160°E–160°W, 5°S–5°N, and whether a 2028-season
    forecast run (not the 2023 hindcast) will be produced before deployment. *Default:* 2023 hindcast layout
@@ -116,7 +119,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
     12a. **Antenna polarisation, and the sea temperature and salinity at the RF link** (review round 12, M-12). The RF model reflects the sea with a coefficient of -1. The Fresnel
     coefficient of a vertical-polarised wave on sea water at 915 MHz has magnitude 0.70 at a grazing angle of 1 deg and 0.26 at 5 deg, so -1 is within 10 % of the magnitude only
     below about 0.3 deg (`docs/PHYSICS.md` 12.1). Which polarisation do the antennas on the ship, the USV and the UAS have, and what are the sea temperature and salinity along the link?
-    *Default:* vertical polarisation (assumed; the antennas are taken as 2 dBi in `platforms/radios.yaml`, with no polarisation stated) and sea water at 29 C and 35 (eps_c 72.8 - j118.9 at 915 MHz, sigma 5.9 S/m, both
+    *Default:* vertical polarisation (assumed; the antennas are taken as 2 dBi in `platforms/radios.yaml`, with no polarisation stated) and sea water at 29 C and 35 (eps_c 72.8 - j118.9 at 915 MHz, sigma 6.05 S/m, which gives that eps'', both
     assumed): the model keeps -1 and states the error band, up to 7.6 dB optimistic at interference peaks and conservative at nulls; no demo verdict rests on it (usv-uas-rf is NO-GO
     because 89 % of its needed moments are beyond the radio horizon, and the UAS lost-link mode is 0 of 64). *If you answer:* a horizontal-polarised wave reflects closer to -1 at
     these angles (not computed here), another temperature or salinity changes eps_c; either way the full Fresnel option is a code change in `two_ray_curved_db` (a function of the

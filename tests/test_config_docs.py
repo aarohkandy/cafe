@@ -439,3 +439,70 @@ def test_r12_m12_physics_and_the_questions_state_the_fresnel_error_band_the_docs
     assert "12a. **Antenna polarisation, and the sea temperature and salinity at the RF link**" in q and "*Default:* vertical polarisation" in q
     assert "Fresnel" in row(652) and "withdrawn" in row(652)
 
+
+
+# ---- review round 13 (the document sides of M-10, M-13, M-20, M-22, M-23, M-38, M-44, M-45)
+
+def test_r13_m10_the_sea_water_conductivity_is_the_one_that_gives_the_quoted_eps_c_in_every_place():
+    """Round 13 M-10: eps'' = 60 lambda sigma is 116.0 at 915 MHz for the 5.9 S/m the documents printed and 118.9 (the quoted eps_c) for 6.05 S/m."""
+    lam = 299792458.0 / 915e6
+    assert abs(60 * lam * 6.05 - 118.9) < 0.1 and abs(60 * lam * 5.9 - 118.9) > 2
+    places = {"PHYSICS": text("docs", "PHYSICS.md"), "QUESTIONS_FOR_LAB": text("QUESTIONS_FOR_LAB.md"), "row 652": row(652),
+              "the two_ray_curved_db docstring": str(comms.two_ray_curved_db.__doc__)}
+    for name, doc in places.items():
+        assert "sigma 5.9 S/m" not in flat(doc) and "sigma 6.05 S/m" in flat(doc), name
+
+
+def test_r13_m44_the_draft_that_gives_the_free_surface_hull_the_platforms_displacement_is_0_145_m_with_the_keel_counted():
+    """Round 13 M-44: 0.18 m is the half ellipsoid alone; with the 0.14 m3 keel the mesh needs c = (V_platform - V_keel) / (2 pi a b / 3), about 0.145 m."""
+    yaml_text = flat(text("config", "assumptions.yaml"))
+    assert "about 0.145 m" in yaml_text and "a draft of about 0.18 m" not in yaml_text
+    phys = flat(text("docs", "PHYSICS.md"))
+    assert "a draft of about 0.18 m would give" not in phys and "about 0.145 m" in phys
+    assert "names a draft of about 0.18 m" not in row(407) and "about 0.145 m" in row(407)
+
+
+def test_r13_m45_six_cores_is_called_a_chosen_cap_not_a_measured_knee():
+    """Round 13 M-45: the throughput is measured at 1, 2, 4 and 8 cores only; six is interpolated."""
+    assert "measured scaling knee" not in row(297) and "chosen cap" in row(297)
+    assert "measured scaling knee" not in text("cafe", "pm", "stage3", "freesurface.py")
+
+
+def test_r13_m22_the_runbook_states_the_vehicle_limit_the_schema_enforces():
+    """Round 13 M-22: 65 vehicles was refused by a limit no document stated."""
+    limit = json.loads(text("cafe", "schemas", "mission.json"))["properties"]["vehicles"]["maxItems"]
+    assert limit == 64 and f"1 to {limit} vehicles" in flat(text("docs", "RUNBOOK.md"))
+
+
+def test_r13_m13_the_runbook_names_the_directory_make_receipts_reads_the_stored_results_from():
+    """Round 13 M-13: `make receipts` reads the stored CFD and SITL files from $CAFE_APP_RUNS (default /work/runs, read-only under pm.sh and bin/pmx.sh)."""
+    assert 'os.environ.get("CAFE_APP_RUNS", "/work/runs")' in text("cafe", "pm", "receipts.py")
+    rb = flat(text("docs", "RUNBOOK.md"))
+    assert "`$CAFE_APP_RUNS` (default `/work/runs`" in rb and "read-only under `pm.sh` and `bin/pmx.sh`" in rb
+
+
+def test_r13_m20_the_runbook_and_status_give_the_receipt_counts_measured_in_round_13_not_round_11s():
+    """Round 13 M-20: `make receipts` on a clean orca at 939851e printed 273 pass, 30 fail, 32 context (335 rows) in about 12 min; the RUNBOOK said 350 rows,
+    287 passing, 33 context and about 17 min. The counts are re-measured at code freeze (the totals move with the stamped files of the app group)."""
+    for name, doc in (("RUNBOOK", flat(text("docs", "RUNBOOK.md"))), ("STATUS", flat(text("STATUS.md")))):
+        assert "273 pass" in doc and "32 context" in doc and "335 rows" in doc, name
+        # round 11's counts stay only as history
+        assert "ended with 350 rows" not in doc and "round 11: 350 rows" not in doc and "about 17 min at 2 CPUs" not in doc, name
+    assert "about 12 min at 2 CPUs on orca" in flat(text("docs", "RUNBOOK.md"))
+
+
+def test_r13_m23_the_brief_lists_the_command_that_fetches_data_the_way_the_cli_spells_it():
+    """Round 13 M-23: there is no `cafe` script; BRIEF 2.9 and 6 named `cafe fetch`. The brief's text stays as given; its Corrections table has the command."""
+    from cafe.pm.env import environment
+    table = text("docs", "BRIEF.md").split("## Corrections")[1].split("\n---\n")[0]
+    assert environment.FETCH_CMD in table and "cafe fetch" in table
+
+
+def test_r13_m38_the_questions_and_the_status_say_what_the_stored_fea_utilization_is():
+    """Round 13 M-38: the stage-3 FEA stores the larger of the von Mises and the knocked-down buckling utilization (hangar.KNOCKDOWN 0.5)."""
+    assert "KNOCKDOWN = 0.5" in text("cafe", "hangar.py")
+    q = flat(text("QUESTIONS_FOR_LAB.md"))
+    assert "4a. **The default glider hull" in q and "0.367" in q and "0.687" in q and "1.374" in q
+    assert "*Default:*" in q.split("4a. **The default glider hull")[1]
+    st = flat(text("STATUS.md"))
+    assert "knocked-down buckling" in st and "wing and arm root" in st

@@ -11,7 +11,7 @@ project's repository is what binds. "Linking" below means importing a library in
   allowed for private, educational and research purposes; **commercial use and military use are not allowed**; modified
   versions must be **published**; the author must be credited.
 * Consequence for us: `cafe/pm/stage3/fluidx3d.py` never builds, bundles or downloads FluidX3D. It runs a binary the lab
-  has built itself, and only when `config["fluidx3d"]["enabled"]` is true *and* the path exists. A lab that enables it takes
+  has built itself, and only when `config["fluidx3d"]["enabled"]` is the JSON boolean `true` (a quoted "false" or a 1 does not turn it on: review round 13, M-43) *and* the path exists. A lab that enables it takes
   on the licence; the report says "FluidX3D backend" whenever it was used.
 * The XLB backends below are the default and pass the same LBM receipts. FluidX3D adds speed and the free-surface (FSLBM) path.
 
