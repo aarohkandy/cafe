@@ -728,3 +728,43 @@ def test_r13_m21_real_follows_symlinks_and_survives_a_loop(tmp_path):
     assert ledger.real(tmp_path / "ln" / "x") == (tmp_path / "a" / "x").resolve()
     assert ledger.real(tmp_path / "loop" / "x").name == "x"                                          # no RuntimeError
 
+
+
+ASSUMED = ("a.b:\n  value: 2.0\n  unit: m\n  why: the first wording\n  replace_with: a measurement\n"
+           "c:\n  value: [1, 2]\n  unit: '-'\n  why: w\n  replace_with: r\n")
+
+
+def stage3_problems(run):
+    return [x for x in audit.ledger_problems(run) if "stage stage3" in x]
+
+
+def test_r13_l2_an_assumptions_input_is_hashed_by_its_values_so_a_reworded_why_is_no_change(tmp_path):
+    """Round 13 look-ahead L2: stage 3 hashed the whole of config/assumptions.yaml, so a wording edit of a `why` or `replace_with` (no stage reads
+    them) made every kept run's audit say 'changed since the stage ran'. A value, a unit or a key still does."""
+    src = tmp_path / "assumptions.yaml"
+    src.write_text(ASSUMED)
+    with Ledger(tmp_path, "stage3", "h1") as L:
+        L.input_values(src)
+    rec = json.loads((tmp_path / "checkpoints" / "stage3" / "ledger.json").read_text())["inputs"][0]
+    assert rec["values_only"] is True and rec["sha256"] == ledger.values_sha256(src) != sha256(src)
+    src.write_text(ASSUMED.replace("the first wording", "another wording, longer").replace("a measurement", "a better one"))
+    assert done(tmp_path, "stage3", "h1") is not None and stage3_problems(tmp_path) == []
+    for edit in ("value: 2.0", "value: 2.5"), ("unit: m", "unit: km"), ("a.b:", "a.c:"), ("value: [1, 2]", "value: [1, 3]"):
+        src.write_text(ASSUMED.replace(*edit))
+        assert done(tmp_path, "stage3", "h1") is None, edit
+        assert stage3_problems(tmp_path) == [f"{tmp_path.name}: stage stage3: input {src} changed since the stage ran"], edit
+
+
+def test_r13_l2_a_plain_input_and_a_file_that_is_not_a_mapping_still_change_the_hash(tmp_path):
+    src = tmp_path / "assumptions.yaml"
+    src.write_text(ASSUMED)
+    with Ledger(tmp_path, "stage3", "h1") as L:
+        L.input(src)                                                      # an older ledger, or any other file: its bytes
+        L.input_values(tmp_path / "absent.yaml")                          # nothing there: recorded as before, with no hash
+    src.write_text(ASSUMED.replace("first", "second"))
+    assert done(tmp_path, "stage3", "h1") is None
+    assert ledger.values_sha256(src) != "" and ledger.values_sha256(tmp_path / "absent.yaml") == ""
+    src.write_text("- a\n- b\n")
+    assert ledger.values_sha256(src) == ""
+    src.write_text("a: [unclosed\n")
+    assert ledger.values_sha256(src) == ""

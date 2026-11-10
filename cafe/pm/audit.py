@@ -30,7 +30,7 @@ from typing import Any
 
 from .config import write_json
 from .env.remote import sha256, tree_sha256
-from .ledger import RUN_ROOT_FILES, STAGES, hashed, real, resolve, run_roots, shared_diff
+from .ledger import RUN_ROOT_FILES, STAGES, hashed, input_sha, real, resolve, run_roots, shared_diff
 from .physics.comms import PARAMETER_FILES
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -189,7 +189,7 @@ def _stage_problems(run_dir: pathlib.Path, st: str, d: dict[str, Any], prev: pat
                           "re-checked against them (what the run made is checked by its own ledgers)", file=sys.stderr)
                 else:
                     out += changed
-            elif i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
+            elif i.get("sha256") and f.is_file() and input_sha(i, f) != i["sha256"]:
                 out.append(f"{run_dir.name}: stage {st}: input {f} changed since the stage ran")
             if i.get("shared") and f.is_file():                      # a copy of a shared cache manifest: the files it names, not the shared one
                 out += _shared_problems(run_dir.name, st, f, pathlib.Path(i["shared"]), _same_place(run_dir, d))

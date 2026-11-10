@@ -147,6 +147,14 @@ class Ledger:
         extra = {} if tree is None else dict(tree_sha256=tree)
         self.d["inputs"].append(dict(ref=str(ref), sha256=sha or (sha256(p) if p.is_file() else None), **extra, **meta))
 
+    def input_values(self, ref: Any) -> None:
+        """Record a `{key: {value, unit, why, replace_with}}` file (config/assumptions.yaml) by `values_sha256`: what a stage reads of it, not its prose. The
+        input carries `values_only`, which `done` and the audit read through `input_sha`: a reworded `why` is no changed input (R13 look-ahead L2)."""
+        if pathlib.Path(str(ref)).is_file():
+            self.input(ref, sha=values_sha256(str(ref)), values_only=True)
+        else:
+            self.input(ref)
+
     def snapshot(self, src: str | pathlib.Path, dest: str | pathlib.Path, **meta: Any) -> dict[str, Any]:
         """A shared cache manifest (TAO, orca) is rewritten in place whenever a later run grows or replaces the cache, so a ledger that hashed it made every
         earlier run's audit say "input changed" (review round 10, P-32). The stage copies the bytes it read into the run (`dest`, atomically) and records
@@ -248,6 +256,28 @@ def real(p: str | pathlib.Path) -> pathlib.Path:
     """`p` with symlinks followed, for a path inside a run directory. `Path.resolve()` raises RuntimeError on a symlink loop (Python 3.12), where
     `os.path.realpath` does not: the loop then shows as the path being missing, which the audit already reports (round 13, M-21)."""
     return pathlib.Path(os.path.realpath(p))
+
+
+PROSE_KEYS = ("why", "replace_with")                    # the fields of an assumptions entry that only explain it: no stage reads them
+
+
+def values_sha256(p: str | pathlib.Path) -> str:
+    """sha-256 of a `{key: {value, unit, why, replace_with}}` file with the prose fields (`PROSE_KEYS`) left out: a value, a unit, a key or an extra field
+    changes it, a reworded `why` or `replace_with` does not. A file that cannot be read as a mapping gives "", which no recorded hash equals."""
+    from .config import ConfigError, digest, read_yaml
+    try:
+        doc = read_yaml(p)
+        if not isinstance(doc, dict):
+            return ""
+        return str(digest({k: {f: x for f, x in v.items() if f not in PROSE_KEYS} if isinstance(v, dict) else v for k, v in doc.items()}))
+    except (ConfigError, TypeError):
+        return ""
+
+
+def input_sha(i: dict[str, Any], f: pathlib.Path) -> str:
+    """The hash of file `f` as the ledger input `i` was hashed: by its values for a `values_only` input, else its bytes. The one place `done` and the
+    audit compare a file input with what the stage recorded."""
+    return values_sha256(f) if i.get("values_only") else str(sha256(f))
 
 
 def hashed(i: dict[str, Any]) -> bool:
@@ -359,7 +389,7 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
             f = resolve(i["ref"], run_dir, roots)
             if hashed(i) and not f.exists():                                      # a deleted store or file: the stage ran on data that is gone
                 return None
-            if i.get("sha256") and f.is_file() and sha256(f) != i["sha256"]:
+            if i.get("sha256") and f.is_file() and input_sha(i, f) != i["sha256"]:
                 return None
             if i.get("tree_sha256") and f.is_dir() and tree_sha256(f) != i["tree_sha256"]:       # a store: every file of it, not the manifest it was made from
                 return None

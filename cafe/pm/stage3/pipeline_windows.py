@@ -790,9 +790,10 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     os.environ.setdefault("CAFE_NPROC", str(freesurface.nproc()))           # the ranks planned are the ranks run (cafe.cfd reads it at import)
     a = assumptions()
     res = _load_res(ctx)
-    for f in (pathlib.Path(ctx.run_dir) / "stage1" / "res.pkl", config.CONFIG / "assumptions.yaml"):      # what the rows depend on, for the ledger
-        if f.exists():
-            L.input(f)
+    if (f := pathlib.Path(ctx.run_dir) / "stage1" / "res.pkl").exists():          # what the rows depend on, for the ledger
+        L.input(f)
+    if (f := config.CONFIG / "assumptions.yaml").exists():                         # by its values: a reworded why or replace_with is no change (L2)
+        L.input_values(f)
     plat = {v["id"]: v["platform"] for v in ctx.mission["vehicles"]}
     sizes = budget.stage3_plan(ctx.plan, ctx.classes, a)
     share = stage_share_s(ctx)

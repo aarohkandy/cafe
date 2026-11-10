@@ -859,6 +859,7 @@ class FakeL:
     def __init__(self):
         self.checks = {}
         self.inputs = []
+        self.by_values = []
         self.notes = []
 
     def note(self, s):
@@ -866,6 +867,10 @@ class FakeL:
 
     def input(self, ref, sha=None, **meta):
         self.inputs.append(str(ref))
+
+    def input_values(self, ref):
+        self.inputs.append(str(ref))
+        self.by_values.append(str(ref))
 
     def check(self, name, ok, value=None, limit=None, note=""):
         self.checks[name] = (bool(ok), value, limit)
@@ -1225,6 +1230,7 @@ def test_run_all_classes_rows_have_everything_and_nothing_unvalidated_is_ok(no_w
     assert L.checks["every_window_attempted"][0] and L.checks["no_row_claims_ok_with_a_failing_check"][0] and L.checks["every_window_attempted"][1] == 6
     assert any("stage3 g/body" in s for s in ctx.logs)
     assert any(f.endswith("assumptions.yaml") for f in L.inputs)             # the ledger names the numbers the rows depend on
+    assert [pathlib.Path(f).name for f in L.by_values] == ["assumptions.yaml"]   # by its values: a reworded why is not a change (R13 look-ahead L2)
     # the refit reads exactly these fields
     assert all("cd_hangar" in r for rows in out.values() for r in rows)
 
