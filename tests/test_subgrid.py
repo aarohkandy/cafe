@@ -1,6 +1,7 @@
 import copy
 import functools
 import json
+import pathlib
 
 import numpy as np
 import pytest
@@ -448,3 +449,39 @@ def test_r13_l1_promote_calibration_names_a_symlink_loop_run_instead_of_a_runtim
     loop.symlink_to("loop")
     with pytest.raises(ValueError, match="no stage3/subgrid_calibration.json"):
         sg.promote_calibration(loop, tmp_path / "f.json")
+
+
+# ---- review round 14, M-40: a key of config/subgrid.json that reads like a switch is read by something
+
+PROSE_KEYS = {"note", "citation"}                                  # text for a person; no code reads them as a setting
+
+
+def _leaf_names(d):
+    for k, v in d.items():
+        if isinstance(v, dict):
+            yield from _leaf_names(v)
+        else:
+            yield k
+
+
+def _string_constants(*files):
+    import ast
+    out = set()
+    for f in files:
+        out |= {n.value for n in ast.walk(ast.parse(f.read_text())) if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+    return out
+
+
+def test_r14_m40_every_key_of_the_subgrid_config_is_read_by_code_or_is_prose():
+    """`version`, `turbulence.model`, `stability.scaling` and `gust_front.detection` (`dT_K`, `within_s`) were read by nothing: editing them changed no number
+    and told nobody, and `detection` repeated `calibration.gust_stats.dT`, so the two could drift. A key is read when its name is a string the readers of the
+    file (subgrid.py, surface.py, and the credibility page for `source_run`) hold; the rest are the prose keys named here. Run on the file as it was, the
+    scan names exactly those five."""
+    here = pathlib.Path(sg.__file__).parent
+    read = _string_constants(here / "subgrid.py", here / "surface.py", here.parent / "credibility.py") | PROSE_KEYS
+    names = set(_leaf_names(json.loads((sg._CFG_DIR / "subgrid.json").read_text())))
+    assert names - read == set(), f"read by nothing: {sorted(names - read)}"
+    assert {"gamma", "dT", "u_min", "size_km"} <= names                                  # it did scan the numbers
+    old = {"version": 1, "turbulence": {"model": "x", "gamma": 3.9}, "stability": {"scaling": "x"},
+           "gust_front": {"detection": {"dT_K": -1.5, "within_s": 600}}}
+    assert set(_leaf_names(old)) - read == {"version", "model", "scaling", "dT_K", "within_s"}      # and it names the five of the review

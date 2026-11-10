@@ -1,22 +1,18 @@
 {
-  "version": 1,
-  "note": "Sub-grid atmosphere/ocean layer (cafe/pm/env/subgrid.py). Numbers without a citation live in config/assumptions.yaml, not here. The calibration block is what Stage-3 LES overwrites; the code uses it, not the defaults below, and reports calibration.source_run.",
+  "note": "Sub-grid atmosphere/ocean layer (cafe/pm/env/subgrid.py). Numbers without a citation live in config/assumptions.yaml, not here. The calibration block is what Stage-3 LES overwrites; the code uses it, not the defaults below, and reports calibration.source_run. Every key of this file is read by code, except note and citation: a rule or a threshold that no code reads is said in the citation text, not kept as a key that looks like a switch (tests/test_subgrid.py checks it).",
   "turbulence": {
-    "model": "Mann (1994) uniform-shear spectral tensor box, mannrs 2.0.0",
     "gamma": 3.9,
     "lambda1_over_z": 0.7,
     "lambda1_max_m": 42.0,
     "L_over_lambda1": 0.8,
     "box": {"nx": 16384, "ny": 16, "nz": 16, "dx_over_L": 0.5, "ly_over_L": 8.0, "lz_over_L": 8.0},
-    "citation": "Gamma = 3.9, L = 0.8 Lambda1, Lambda1 = 0.7 z (z <= 60 m; capped at 42 m) from IEC 61400-1 ed.3 (2005) Annex C (Mann uniform-shear model), after Mann 1994 J. Fluid Mech. 273, 141 and Mann 1998 Probab. Eng. Mech. 13, 269. sigma_u = 2.5 u*: neutral surface-layer value, Panofsky & Dutton 1984; Kaimal & Finnigan 1994 (BRIEF 2.2). Box resolution: dx = L/2 and lateral spacing L/2 resolve the 1-D spectrum to k L ~ 3 (about 80 % of the Mann variance); the delivered series is rescaled to the target sigma_u (see subgrid.turbulence)."
+    "citation": "Model: the Mann (1994) uniform-shear spectral tensor box, mannrs 2.0.0 (the only model coded). Gamma = 3.9, L = 0.8 Lambda1, Lambda1 = 0.7 z (z <= 60 m; capped at 42 m) from IEC 61400-1 ed.3 (2005) Annex C (Mann uniform-shear model), after Mann 1994 J. Fluid Mech. 273, 141 and Mann 1998 Probab. Eng. Mech. 13, 269. sigma_u = 2.5 u*: neutral surface-layer value, Panofsky & Dutton 1984; Kaimal & Finnigan 1994 (BRIEF 2.2). Box resolution: dx = L/2 and lateral spacing L/2 resolve the 1-D spectrum to k L ~ 3 (about 80 % of the Mann variance); the delivered series is rescaled to the target sigma_u (see subgrid.turbulence)."
   },
   "stability": {
-    "scaling": "mixing_length",
-    "citation": "L_Mann(z/L_ob) = L_neutral / phi_m(z/L_ob), phi_m of Businger et al. 1971 / Dyer 1974 (unstable (1-16 zeta)^-1/4, stable 1+5 zeta), because Pena, Gryning & Mann 2010 QJRMS 136, 2119 tie the Mann length scale to the mixing length of the diabatic wind profile. The ratio clip is in assumptions.yaml. This rule is NOT validated against offshore data here; Stage-3 LES calibration (length_scale_factor) is the intended correction."
+    "citation": "Scaling: the Mann length scale follows the mixing length (the only rule coded; it is not a switch). L_Mann(z/L_ob) = L_neutral / phi_m(z/L_ob), phi_m of Businger et al. 1971 / Dyer 1974 (unstable (1-16 zeta)^-1/4, stable 1+5 zeta), because Pena, Gryning & Mann 2010 QJRMS 136, 2119 tie the Mann length scale to the mixing length of the diabatic wind profile. The ratio clip is in assumptions.yaml. This rule is NOT validated against offshore data here; Stage-3 LES calibration (length_scale_factor) is the intended correction."
   },
   "gust_front": {
-    "detection": {"dT_K": -1.5, "within_s": 600},
-    "citation": "Cold-pool front = air temperature drop of at least 1.5 K within 10 min, 382 events from Saildrone missions in the central/eastern tropical Pacific, mostly ITCZ: Wills, Cronin & Zhang 2021, Geophys. Res. Lett. 48, doi:10.1029/2021GL093373. Strongest gusts 5-10 min after the temperature front (Wills et al. 2023 JGR-A, as summarised in search; paper not re-read). dU 3-10 m/s, duration 10-30 min, dT -1.5 K are BRIEF 2.2 ranges; their distribution shape (uniform) and the event rate are assumptions."
+    "citation": "No code reads a detection threshold: the temperature drop of an event is calibration.gust_stats.dT, which Stage 3 can recalibrate. Cold-pool front = air temperature drop of at least 1.5 K within 10 min (dT -1.5 K, within 600 s), 382 events from Saildrone missions in the central/eastern tropical Pacific, mostly ITCZ: Wills, Cronin & Zhang 2021, Geophys. Res. Lett. 48, doi:10.1029/2021GL093373. Strongest gusts 5-10 min after the temperature front (Wills et al. 2023 JGR-A, as summarised in search; paper not re-read). dU 3-10 m/s, duration 10-30 min, dT -1.5 K are BRIEF 2.2 ranges; their distribution shape (uniform) and the event rate are assumptions."
   },
   "ocean": {
     "okubo": {"a_cm2_s": 0.0103, "p": 1.15},
