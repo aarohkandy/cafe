@@ -927,13 +927,13 @@ def fit_wind_error(series: dict[str, NDArray[np.float64]]) -> dict[str, float] |
 def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     """Data validation (BRIEF 5.4): WRF 10 m wind and SST against the TAO/TRITON moorings in the box, hourly, model minus
     mooring. The wind error is split (`fit_wind_error`) into a persistent part per member (the wind bias priors) and a short-lived AR(1) part
-    (`wind_speed_noise`, `wind_direction_noise`), written to ingest/priors_fitted.json; without moorings the perturbations.yaml priors stand
-    and the ledger says so. With fewer than two moorings the split is not defined: the whole hourly misfit is then the persistent sd."""
+    (`wind_speed_noise`, `wind_direction_noise`), written to ingest/priors_fitted.json. The comparison is mandatory (BRIEF 5.4): the cache must exist
+    (`s_ingest` has made the `tao_present` check before this runs, so there is a manifest) and a mission box with no TAO/TRITON mooring that has usable
+    wind in the window fails the stage at `tao_moorings_compared`. The perturbations.yaml priors stand only for a quantity the moorings do not measure
+    (a calm WRF, no direction channel: DECISIONS 312). With fewer than two moorings the split is not defined: the whole hourly misfit is then the
+    persistent sd. Round 14, M-24: this said the priors stand without moorings, and a branch for "no download" could not be reached."""
     from .env import tao
     tdir = tao.cache_dir(DATA)
-    if not (tdir / "manifest.json").is_file():
-        L.note(f"no TAO/TRITON download at {tdir}: wind priors stay the perturbations.yaml defaults (run `make fetch`)")
-        return
     sbox = ocean_box(ctx.mission)
     tsnap = ctx.path("ingest", "tao_manifest.json")
     tman = _copy_covering(ctx, L, "tao", tdir / "manifest.json", tsnap, lambda c: _tao_covers(c, sbox, t0, t1),
@@ -950,7 +950,7 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
             wrf[name] = dict(t=hours, wind10=ctx.env.u10(lo, la, hours), sst=ctx.env.sst(lo, la, hours).value)
     cmp = tao.compare(wrf, moor)
     n = len([k for k in cmp if k != "ALL"])
-    L.check("tao_moorings_compared", n > 0, value=n, limit=1, note="moorings with usable wind in the window")
+    L.check("tao_moorings_compared", n > 0, value=n, limit=1, note="moorings with usable wind in the window (the mission box must contain TAO/TRITON moorings: BRIEF 5.4 makes the comparison mandatory)")
     left = {k: "outside the environment's grid" if k not in wrf else tao.wind_gap(tdir, k, t0, t1, man=tman) for k in moor if k not in cmp}      # round 10, LB1
     if left:
         L.note(f"{len(moor)} moorings in the TAO manifest, {n} compared; left out: " + "; ".join(f"{k} ({why})" for k, why in sorted(left.items())))

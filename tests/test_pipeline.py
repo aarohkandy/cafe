@@ -842,12 +842,16 @@ def test_the_fitted_wind_prior_removes_the_model_bias_and_stage1_accepts_it(tmp_
     assert marg["wind_direction_bias"]["mean"] == fit["wind_direction_bias"]["mean"] and marg["wind_speed_bias"]["sd"] < 2.0
 
 
-def test_without_a_tao_download_the_default_priors_stand_and_the_ledger_says_so(tmp_path, data_copy):
+def test_r14_m24_a_run_without_a_tao_download_stops_at_the_tao_present_check_and_does_not_go_on_with_default_priors(tmp_path, data_copy):
+    """The `_tao` docstring and PHYSICS said a mission with no TAO download keeps the perturbations.yaml priors; `s_ingest` asks `_need("tao")` first, so the
+    stage fails there (BRIEF 5.4 makes the comparison mandatory) and `_tao`'s branch for a missing manifest could not be reached. It is gone; this is the
+    behaviour that was real."""
     shutil.rmtree(data_copy / "tao")
-    ctx = ctx_for(tmp_path / "r", record=False)
-    d = tao_stage(ctx, ctx.env.tw.x[0], ctx.env.tw.x[-1])
-    assert d["notes"] == [f"no TAO/TRITON download at {tao.cache_dir(data_copy)}: wind priors stay the perturbations.yaml defaults (run `make fetch`)"]
-    assert d["checks"] == [] and d["outputs"] == [] and d["inputs"] == [] and not (ctx.run_dir / "ingest").exists()
+    with pytest.raises(ledger.StageFailed, match="tao_present"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r"), "ingest")
+    d = read_ledger(tmp_path / "r", "ingest")
+    note = next(c["note"] for c in d["checks"] if c["name"] == "tao_present")
+    assert "python -m cafe.pm fetch --mission" in note and not (tmp_path / "r" / "ingest" / "priors_fitted.json").exists()
 
 
 def test_a_negative_variance_from_rounding_gives_a_zero_spread(tmp_path, data, monkeypatch):
@@ -986,6 +990,15 @@ def test_moorings_outside_the_grid_fail_the_stage_through_its_self_check(tmp_pat
     c = check_of(read_ledger(ctx.run_dir, "ingest"), "tao_moorings_compared")
     assert (c["ok"], c["value"]) == (False, 0)
 
+
+def test_r14_m24_a_box_with_no_usable_mooring_fails_the_ingest_and_the_check_says_the_box_must_contain_moorings(tmp_path, data):
+    """Kept refusal (BRIEF 5.4): the note used to name only "moorings with usable wind in the window", which reads as a window problem."""
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    ctx._env = types.SimpleNamespace(inside=lambda lon, lat: False)
+    with pytest.raises(ledger.StageFailed, match="tao_moorings_compared"):
+        tao_stage(ctx, t0, t1)
+    note = check_of(read_ledger(ctx.run_dir, "ingest"), "tao_moorings_compared")["note"]
+    assert "the mission box must contain TAO/TRITON moorings" in note
 
 def test_the_tao_fit_also_sets_the_sst_and_t2_sigmas_that_the_environment_is_tagged_with(tmp_path, data):
     ctx, t0, t1 = tao_ctx(tmp_path)
