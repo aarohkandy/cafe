@@ -205,15 +205,15 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
 
 def manifest_shape(m: dict[str, Any]) -> bool:
     """Whether the parsed manifest `m` holds what `verify`, `unusable_selected`, `wind_gap` and `load_tao` index: `t0` and `t1` numbers, `box` four
-    numbers, `files` a mapping of records with strings `sha256`, `mooring`, `var` and `mode`, `selected` a mapping of mooring to {variable: file key
-    in `files`}, and a `positions` pair of numbers for each selected mooring. A readable object of another shape is no record: the cache is fetched
-    again, as it is for an empty file (round 14, M-22)."""
+    numbers, `files` a mapping of records with strings `sha256`, `mooring`, `var` and a `mode` that is a key of GOOD, `selected` a mapping of mooring to
+    {variable (a key of NC): file key in `files`}, and a `positions` pair of numbers for each selected mooring (`_series` indexes GOOD and NC with them).
+    A readable object of another shape is no record: the cache is fetched again, as it is for an empty file (round 14, M-22)."""
     files, sel, pos = m.get("files"), m.get("selected"), m.get("positions", {})
     return (orca.real_numbers([m.get("t0"), m.get("t1")]) and orca.real_numbers(m.get("box"), 4)
             and isinstance(files, dict) and all(isinstance(r, dict) and all(isinstance(r.get(k), str) for k in ("sha256", "mooring", "var", "mode"))
-                                                for r in files.values())
+                                                and r["mode"] in GOOD for r in files.values())
             and isinstance(sel, dict) and isinstance(pos, dict)
-            and all(isinstance(v, dict) and all(k in files and isinstance(var, str) for var, k in v.items()) and orca.real_numbers(pos.get(n), 2)
+            and all(isinstance(v, dict) and all(k in files and var in NC for var, k in v.items()) and orca.real_numbers(pos.get(n), 2)
                     for n, v in sel.items()))
 
 

@@ -93,12 +93,58 @@ def _expanded_size(node: Any, memo: dict[int, int], active: set[int]) -> int:
     return n
 
 
+def _merged_pairs(node: Any, memo: dict[int, int], active: set[int]) -> int:
+    """The number of key/value pairs a mapping node has once every `<<` is written out, counted once per shared node (`memo` by id), walking every node
+    below it. PyYAML copies the pairs of each merged mapping into the node while it builds the document (`flatten_mapping`), so `<<: [*m, *m, ...]`
+    tenfolds the pair list per level before any check on the finished document can run: this measures the composed nodes instead, before they are built
+    (round 14, M-26 sibling). Refuses past ALIAS_NODES_MAX. 0 for anything that is not a mapping, and for a node met again inside itself."""
+    if not isinstance(node, (yaml.MappingNode, yaml.SequenceNode)):
+        return 0
+    k = id(node)
+    if k in memo:
+        return memo[k]
+    if k in active:
+        return 0                                                          # the construction says what a cycle is (_expanded_size, or RecursionError in `_yaml`)
+    active.add(k)
+    n = 0
+    if isinstance(node, yaml.SequenceNode):
+        for c in node.value:
+            _merged_pairs(c, memo, active)
+    else:
+        for key, val in node.value:
+            if key.tag == "tag:yaml.org,2002:merge":
+                n += sum(_merged_pairs(c, memo, active) for c in (val.value if isinstance(val, yaml.SequenceNode) else [val]))
+            else:
+                _merged_pairs(key, memo, active)
+                _merged_pairs(val, memo, active)
+                n += 1
+    if n > ALIAS_NODES_MAX:
+        raise ConfigError(f"aliases nested too deeply: a mapping merges more than {ALIAS_NODES_MAX:,} keys once every `<<` is written out "
+                          f"(a mission has a few thousand); a merge of a merge of a merge multiplies")
+    active.discard(k)
+    memo[k] = n
+    return n
+
+
+def _load(text: str) -> Any:
+    """`yaml.load(text, _Loader)` with the merged pairs measured between composing the nodes and building them."""
+    loader = _Loader(text)
+    try:
+        node = loader.get_single_node()
+        if node is None:
+            return None
+        _merged_pairs(node, {}, set())
+        return loader.construct_document(node)
+    finally:
+        loader.dispose()
+
+
 def _yaml(path: str | pathlib.Path) -> Any:
     path = pathlib.Path(path)
     if not path.exists():
         raise ConfigError(f"{path}: file not found")
     try:
-        doc = yaml.load(path.read_text(), Loader=_Loader)                   # noqa: S506  _Loader is a SafeLoader
+        doc = _load(path.read_text())
         _expanded_size(doc, {}, set())                                       # before _finite, _unshare and json.dumps walk it as a tree (M-26)
         return doc
     except UnicodeDecodeError as e:

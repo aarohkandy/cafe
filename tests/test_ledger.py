@@ -791,3 +791,15 @@ def test_r14_m6_a_commit_variable_that_is_set_but_is_no_commit_is_named_not_call
         ledger.need_commit("stamped")
     monkeypatch.setenv("CAFE_GIT_SHA", "abcdef1234567")
     assert ledger.need_commit("stamped") == "abcdef1234567"
+
+
+@pytest.mark.parametrize("text", ["", "{\"t0\": ", "[1, 2]", "null", "\xff\xfe"])
+def test_r14_m22_a_copy_of_a_manifest_that_is_not_a_json_object_is_an_empty_record_not_a_traceback(tmp_path, text):
+    """`copy_manifest` ended in a bare `json.loads` of the copy: a shared manifest that was not JSON (a damaged disk) raised JSONDecodeError out of the stage,
+    where `orca.read_json` makes the same file "no record" and the cache is fetched again."""
+    src = tmp_path / "manifest.json"
+    src.write_bytes(text.encode("latin-1"))
+    assert ledger.copy_manifest(src, tmp_path / "run" / "copy.json") == {}
+    assert (tmp_path / "run" / "copy.json").read_bytes() == src.read_bytes()
+    src.write_text('{"t0": 1}')
+    assert ledger.copy_manifest(src, tmp_path / "run" / "copy.json") == {"t0": 1}

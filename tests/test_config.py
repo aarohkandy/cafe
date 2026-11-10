@@ -1272,6 +1272,28 @@ def test_r14_m26_nested_aliases_are_refused_at_once_and_a_modest_use_still_loads
     assert config.read_yaml(p)["y"] == {"a": 1, "b": [1, 2]}
 
 
+def merge_tower(levels, width=10):
+    lines = ["m0: &m0 {a: 1}"]
+    lines += [f"m{i}: &m{i} {{<<: [" + ", ".join([f"*m{i - 1}"] * width) + "]}" for i in range(1, levels)]
+    return "\n".join(lines) + "\n"
+
+
+def test_r14_m26_a_tower_of_merge_keys_is_refused_before_it_is_built_and_a_modest_merge_still_loads(tmp_path):
+    """PyYAML copies the pairs of every merged mapping while it builds the node (`flatten_mapping`), so the alias count after the load came too late:
+    `<<: [*m x10]` per level took 0.7 s at 6 levels and 6.8 s at 7, about ten times more each."""
+    import time
+    p = tmp_path / "merges.yaml"
+    p.write_text(merge_tower(8))
+    t = time.perf_counter()
+    with pytest.raises(ConfigError, match="merges.yaml: aliases nested too deeply: a mapping merges more than"):
+        config.read_yaml(p)
+    assert time.perf_counter() - t < 1.0
+    p.write_text(merge_tower(4))                                        # 10 ** 3 pairs: legal, and the merged key is there
+    assert config.read_yaml(p)["m3"] == {"a": 1}
+    p.write_text("base: &b {a: 1, b: 2}\nx: {<<: *b, b: 3, c: 4}\ny: {<<: [*b, {a: 9}]}\n")        # row 462: merges stay legal, and mean what YAML says
+    assert config.read_yaml(p)["x"] == {"a": 1, "b": 3, "c": 4} and config.read_yaml(p)["y"] == {"a": 1, "b": 2}
+
+
 def test_r14_m26_a_list_that_contains_itself_is_a_config_error_not_a_recursion_error(tmp_path):
     p = tmp_path / "loop.yaml"
     p.write_text("a: &a [1, *a]\n")
@@ -1295,6 +1317,18 @@ BARE_WRITES = {
     "stage3/freesurface.py": (1, "the result of a child process, in its scratch directory, read by the parent that started it"),
     "stage3/pipeline_windows.py": (2, "the same child result and the job file, both in a scratch directory"),
 }
+# The other ways a file is written in place that the scan below counts: `shutil.copy`, `copyfile` and `copy2`, and `np.save`, `savez` and `savez_compressed`
+# (a copy cut half way left a mission.yaml of three bytes that `report` and `whatif` reload: M-20 sibling). File name -> (calls, why it is not a risk).
+BARE_COPIES = {
+    "acceptance.py": (2, "the training table copied into a fresh --out of the acceptance run, before any run reads it; a cut copy is a failed acceptance"),
+    "env/bathy.py": (1, "written to a `.part.npz` and then `os.replace`d"),
+    "env/orca.py": (1, "written to a `.tmp.npz` and then `os.replace`d"),
+    "ledger.py": (1, "copied to a `.part` and then `os.replace`d"),
+    "par.py": (1, "a new numbered array in a directory this process made and removes at exit; the reader gets the path after the save returns"),
+    "physics/usv.py": (1, "the optional table cache of `tables(P, cache_dir)`; no code of cafe/pm passes a directory (the tests do)"),
+    "pipeline.py": (1, "stage 1b's copy of res.pkl: the stage ledger holds its sha-256, so a cut file is a stage that is not done"),
+    "stage3/pipeline_windows.py": (1, "the job file of one child process, in a scratch directory the parent removes"),
+}
 BARE_REPLACES = {
     "config.py": 1,
     "emulator.py": 1,                  # a unique temporary name per writer (a parquet table)
@@ -1303,10 +1337,13 @@ BARE_REPLACES = {
 }
 
 
+COPY_CALLS = {("shutil", f) for f in ("copy", "copyfile", "copy2")} | {(m, f) for m in ("np", "numpy") for f in ("save", "savez", "savez_compressed")}
+
+
 def _scan_writes():
     import ast
     root = config.ROOT / "cafe" / "pm"
-    writes, replaces = {}, {}
+    writes, replaces, copies = {}, {}, {}
     for p in sorted(root.rglob("*.py")):
         rel = p.relative_to(root).as_posix()
         for n in ast.walk(ast.parse(p.read_text())):
@@ -1317,15 +1354,18 @@ def _scan_writes():
                 writes[rel] = writes.get(rel, 0) + 1
             if n.func.attr == "replace" and isinstance(recv, ast.Name) and recv.id == "os":
                 replaces[rel] = replaces.get(rel, 0) + 1
-    return writes, replaces
+            if isinstance(recv, ast.Name) and (recv.id, n.func.attr) in COPY_CALLS:
+                copies[rel] = copies.get(rel, 0) + 1
+    return writes, replaces, copies
 
 
 def test_r14_p_r13m1_every_writer_of_a_read_back_file_is_config_write_text_or_named_here():
     """Round 13 swept seven bare `write_text` sites and left five hand-written temporary-and-replace writers; round 14 found five more bare sites (M-20, M-37).
     The scan keeps the next one out: an unlisted call, or a listed file with a different number of calls, fails."""
-    writes, replaces = _scan_writes()
+    writes, replaces, copies = _scan_writes()
     assert writes == {k: v[0] for k, v in BARE_WRITES.items()}
     assert replaces == BARE_REPLACES
+    assert copies == {k: v[0] for k, v in BARE_COPIES.items()}
 
 
 def test_r14_m20_a_cut_write_of_the_seeded_mission_copy_leaves_the_mission(tmp_path, monkeypatch, cut_writes):
@@ -1361,6 +1401,24 @@ def test_r14_m20_a_cut_write_of_an_html_page_leaves_the_old_page(tmp_path, monke
     with pytest.raises(OSError, match="killed"):
         credibility.write(run) if which == "credibility" else report.write(run, {}, {})
     assert f.read_text() == "<p>old</p>" and not list(f.parent.glob("*.tmp"))
+
+
+def test_r14_m20_a_cut_copy_of_the_unseeded_mission_leaves_the_mission_of_the_run(tmp_path, monkeypatch, cut_writes):
+    """The `seed is None` branch beside the seeded one was `shutil.copy` in place: a rerun of an edited mission into the same --out, cut by a full disk,
+    left a mission.yaml of three bytes that `report --run` and `whatif --run` reload."""
+    from cafe.pm import pipeline
+    run = tmp_path / "run"
+    run.mkdir()
+    other = tmp_path / "other.yaml"
+    other.write_text((config.ROOT / "missions" / "ci_fixture.yaml").read_text() + "# an edit\n")
+    m = run / "mission.yaml"
+    m.write_text((config.ROOT / "missions" / "ci_fixture.yaml").read_text())
+    before = m.read_bytes()
+    monkeypatch.setattr(pipeline, "DATA", tmp_path / "data")
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        pipeline.run(other, "ci", 0, run, log=[].append)
+    assert m.read_bytes() == before and not list(run.glob("*.tmp"))
 
 
 def test_r14_m37_a_cut_write_of_the_tracked_subgrid_config_leaves_the_old_file(tmp_path, cut_writes):

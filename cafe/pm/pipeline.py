@@ -470,7 +470,7 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
         if d is None and man.exists():
             ctx.log(f"ingest: orca manifest {man} is unreadable (empty or truncated): fetching again")
         if d is not None and not orca.manifest_shape(d):
-            ctx.log(f"ingest: orca manifest {man} lacks what the ingest reads of it (base, t0, t1, box, hours3d): fetching again")
+            ctx.log(f"ingest: orca manifest {man} lacks what the ingest reads of it (base, t0, t1, hours, box, hours3d): fetching again")
         elif d is not None and _old_orca_layout(d, t0):
             ctx.log(f"ingest: orca manifest {man} was made by older code (its hour labels are shifted for a window that starts at "
                     f":{t0.minute:02d}): fetching again")
@@ -935,6 +935,9 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     (a calm WRF, no direction channel: DECISIONS 312). With fewer than two moorings the split is not defined: the whole hourly misfit is then the
     persistent sd. Round 14, M-24: this said the priors stand without moorings, and a branch for "no download" could not be reached."""
     from .env import tao
+    for f in ("priors_fitted.json", "env_sigmas_fitted.json"):
+        ctx.path("ingest", f).unlink(missing_ok=True)       # an earlier attempt's fit is no fit of this one, and this attempt can stop before it writes
+        # either (`whatif --run`, `Context.env` and the credibility page read whatever is there)
     tdir = tao.cache_dir(DATA)
     sbox = ocean_box(ctx.mission)
     tsnap = ctx.path("ingest", "tao_manifest.json")
@@ -1001,7 +1004,6 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     t2 = _t2_rmse(ctx, moor, hours)
     if t2 is not None:
         sig["t2_k"] = t2
-    ctx.path("ingest", "env_sigmas_fitted.json").unlink(missing_ok=True)     # an earlier attempt's fit is no fit of this one (Context.env reads it)
     if sig:
         L.output(_dump(sig, ctx.path("ingest", "env_sigmas_fitted.json")))
         ctx._env = None                                                  # rebuilt with these sigmas on next use (Context.env)
@@ -1641,7 +1643,8 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
     dest = ctx.path("mission.yaml")
     if seed is None:
         if not (dest.exists() and os.path.samefile(ctx.mission_path, dest)):      # `--mission <run dir>/mission.yaml --out <run dir>` (RUNBOOK): it is the copy
-            shutil.copy(ctx.mission_path, dest)
+            with open(ctx.mission_path, newline="") as f:                 # the bytes as they are (no newline translation), through the one atomic writer (M-20)
+                write_text(dest, f.read())
     else:                                                                 # the copy is what `report` and `whatif` reload: it must carry the seed that was run,
         # whatever the spelling of `seed` in the file (`seed : 5`, "seed": 5, a flow mapping); its comments are lost, the original is `plan.json`'s
         # mission_path. The same file is rewritten with the new seed (the text is read before the file is opened for writing)

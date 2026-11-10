@@ -1033,6 +1033,19 @@ def test_r14_m24_a_box_with_no_usable_mooring_fails_the_ingest_and_the_check_say
     note = check_of(read_ledger(ctx.run_dir, "ingest"), "tao_moorings_compared")["note"]
     assert "the mission box must contain TAO/TRITON moorings" in note
 
+def test_r14_p_r14b2_a_stale_fit_does_not_survive_an_ingest_that_stops_at_the_moorings_check(tmp_path, data):
+    """`priors_fitted.json` and `env_sigmas_fitted.json` of an earlier attempt stayed when a later one failed at `tao_moorings_compared` before writing
+    either, and `whatif --run`, `Context.env` and the credibility page read whatever is there."""
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    ctx._env = types.SimpleNamespace(inside=lambda lon, lat: False)
+    stale = [ctx.path("ingest", f) for f in ("priors_fitted.json", "env_sigmas_fitted.json")]
+    for f in stale:
+        f.write_text(json.dumps(dict(sst_k=9.9)))
+    with pytest.raises(ledger.StageFailed, match="tao_moorings_compared"):
+        tao_stage(ctx, t0, t1)
+    assert not any(f.exists() for f in stale)
+
+
 def test_the_tao_fit_also_sets_the_sst_and_t2_sigmas_that_the_environment_is_tagged_with(tmp_path, data):
     ctx, t0, t1 = tao_ctx(tmp_path)
     prior = (ctx.env.sig["sst_k"], ctx.env.sig["t2_k"])
@@ -2357,7 +2370,7 @@ def test_the_hangar_ledger_says_that_no_cfd_ran_and_what_the_baseline_coefficien
 # ---- M-14: the orca cache is only reused for the box and 3-D hours it was cut for
 
 def manifest(**over):
-    return dict(dict(base="https://example.org/orca", t0="2023-03-01 18:00:00", t1="2023-03-03 06:00:00", box=[-167.0, -163.0, -2.0, 2.0],
+    return dict(dict(base="https://example.org/orca", t0="2023-03-01 18:00:00", t1="2023-03-03 06:00:00", box=[-167.0, -163.0, -2.0, 2.0], hours=37,
                      hours3d=["2023-03-02_01:00:00", "2023-03-02_02:00:00", "2023-03-03_01:00:00", "2023-03-03_02:00:00"]), **over)
 
 
@@ -3205,7 +3218,9 @@ def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
 
 
 def test_r14_m22_an_orca_manifest_that_is_an_object_without_its_times_is_fetched_again_and_says_so(tmp_path, data_copy, monkeypatch):
-    """`{}` is valid JSON and an object, so `read_json` returned it and `_covers` raised KeyError 't0' (a traceback; fetch is documented as healing a cache)."""
+    """`{}` is valid JSON and an object, so `read_json` returned it and `_covers` raised KeyError 't0' (a traceback; fetch is documented as healing a cache).
+    Round 14 sibling: `hours` is read after the cover test has passed (the ledger check `orca_hours_cover_window`), and `hours3d` is turned into a
+    set: a missing `hours` was a KeyError, `"x"` a TypeError, `[[1]]` an unhashable list."""
     monkeypatch.delenv("CAFE_OFFLINE")
     man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
     saved = man.read_text()
@@ -3216,7 +3231,9 @@ def test_r14_m22_an_orca_manifest_that_is_an_object_without_its_times_is_fetched
         man.write_text(saved)
     monkeypatch.setattr(orca, "ingest", fake_ingest)
     good = json.loads(saved)
-    for k, damage in enumerate(("{}", json.dumps({k: v for k, v in good.items() if k != "t1"}), json.dumps(dict(good, t0=5)), json.dumps(dict(good, box="x")))):
+    for k, damage in enumerate(("{}", json.dumps({k: v for k, v in good.items() if k != "t1"}), json.dumps(dict(good, t0=5)), json.dumps(dict(good, box="x")),
+                                   json.dumps({k: v for k, v in good.items() if k != "hours"}), json.dumps(dict(good, hours="x")),
+                                   json.dumps(dict(good, hours3d=[[1]])), json.dumps(dict(good, hours3d="x")))):
         calls.clear()
         man.write_text(damage)
         run_stage(pipeline.s_ingest, ctx_for(tmp_path / f"r{k}", log=logged.append), "ingest")
@@ -3234,6 +3251,8 @@ def test_r14_m22_a_tao_manifest_that_is_an_object_of_the_wrong_shape_is_not_cach
     first = next(iter(good["files"]))
     damages = [{}, {k: v for k, v in good.items() if k != "t0"}, dict(good, t0="garbage"), dict(good, box=[1, 2, 3]), dict(good, files=[]),
                dict(good, selected=5),
+               dict(good, files=dict(good["files"], **{first: dict(good["files"][first], mode="Z")})),         # `_series` indexes GOOD[mode]
+               dict(good, selected={m0: dict(good["selected"][m0], FOO=first) for m0 in good["selected"]}),                       # and NC[var]
                dict(good, files={first: {}}), dict(good, positions={}), dict(good, selected={"T0N170W": {"WIND": "no/such/file"}})]
     for damage in damages:
         mp.write_text(json.dumps(damage))

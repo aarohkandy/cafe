@@ -250,11 +250,13 @@ def real_numbers(v: Any, n: int | None = None) -> bool:
 
 
 def manifest_shape(d: dict[str, Any]) -> bool:
-    """Whether the parsed orca manifest `d` holds what the ingest reads of it: `base`, `t0` and `t1` as strings, `box` a list of four numbers or absent
-    (None: a manifest written before the box was recorded; the cache then cannot say it covers a box) and `hours3d` a list when present. A readable
+    """Whether the parsed orca manifest `d` holds what the ingest reads of it: `base`, `t0` and `t1` as strings, `hours` a number (the ledger check
+    `orca_hours_cover_window` compares it), `box` a list of four numbers or absent (None: a manifest written before the box was recorded; the cache
+    then cannot say it covers a box) and `hours3d` a list of strings when present. A readable
     object of another shape (`{}`, a `t0` deleted by hand) is no more a record than an empty file is, so the cache is fetched again (round 14, M-22)."""
-    return (all(isinstance(d.get(k), str) for k in ("base", "t0", "t1")) and (d.get("box") is None or real_numbers(d["box"], 4))
-            and isinstance(d.get("hours3d", []), list))
+    h3 = d.get("hours3d", [])
+    return (all(isinstance(d.get(k), str) for k in ("base", "t0", "t1")) and real_numbers([d.get("hours")], 1)
+            and (d.get("box") is None or real_numbers(d["box"], 4)) and isinstance(h3, list) and all(isinstance(h, str) for h in h3))
 
 
 def write_json(path: pathlib.Path, obj: Any, **kw: Any) -> None:

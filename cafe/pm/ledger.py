@@ -121,15 +121,19 @@ def machine() -> dict[str, Any]:
 
 
 def copy_manifest(src: str | pathlib.Path, dest: str | pathlib.Path) -> dict[str, Any]:
-    """Copy the shared manifest `src` to `dest` through a sibling temporary and os.replace, and return what the copy holds: the one read of the shared file
-    a stage makes (`Ledger.snapshot`)."""
+    """Copy the shared manifest `src` to `dest` through a sibling temporary and os.replace, and return what the copy holds: the one read of the shared
+    file a stage makes (`Ledger.snapshot`). {} when the copy is not a JSON object: the callers' shape checks (`_orca_covers`, `_tao_covers`) then say it
+    covers nothing and the cache is fetched again, as for a manifest of the wrong shape (round 14, M-22 sibling)."""
     dest = pathlib.Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(dest.name + ".part")
     shutil.copyfile(src, tmp)
     os.replace(tmp, dest)
-    man: dict[str, Any] = json.loads(dest.read_text())
-    return man
+    try:
+        man = json.loads(dest.read_text())
+    except ValueError:                                                    # not JSON (a damaged disk): no record; it covers nothing, so it is fetched again
+        return {}
+    return man if isinstance(man, dict) else {}
 
 
 class Ledger:
