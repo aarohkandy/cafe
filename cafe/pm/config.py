@@ -62,7 +62,7 @@ _EXP_FLOAT = re.compile(r"^[-+]?[0-9][0-9_]*[eE][-+]?[0-9]+$")
 _Loader.add_implicit_resolver("tag:yaml.org,2002:float", _EXP_FLOAT, list("-+0123456789"))
 
 
-class _Dumper(yaml.SafeDumper):
+class _Dumper(yaml.SafeDumper):                                         # type: ignore[misc]
     """The writer that matches `_Loader` (round 14, M-21): the string "1e5" has to be written quoted, or the loader reads it back as the float 100000.0.
     PyYAML's own dumper quotes a string only when its resolver would read it as another type, and it does not know the loader's extra float rule."""
 
@@ -99,7 +99,7 @@ def _yaml(path: str | pathlib.Path) -> Any:
         raise ConfigError(f"{path}: file not found")
     try:
         doc = yaml.load(path.read_text(), Loader=_Loader)                   # noqa: S506  _Loader is a SafeLoader
-        _expanded_size(doc, {}, set())                                       # before _finite, _unshare, credibility._prov and json.dumps walk it as a tree (round 14, M-26)
+        _expanded_size(doc, {}, set())                                       # before _finite, _unshare and json.dumps walk it as a tree (M-26)
         return doc
     except UnicodeDecodeError as e:
         raise ConfigError(f"{path}: not a UTF-8 text file ({e.reason} at byte {e.start}); the mission and platform files are UTF-8 YAML") from e
@@ -302,7 +302,7 @@ def write_text(p: pathlib.Path, text: str) -> None:
     tmp = p.with_name(p.name + ".tmp")
     try:
         tmp.write_text(text)
-        with contextlib.suppress(OSError):                                  # the mode of the file being replaced; a target that is new or unreadable has none to keep
+        with contextlib.suppress(OSError):                                  # the mode of the file being replaced; a new file has none to keep
             shutil.copymode(p, tmp)
         os.replace(tmp, p)
     except BaseException:

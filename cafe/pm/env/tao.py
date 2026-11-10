@@ -32,7 +32,7 @@ from numpy.typing import ArrayLike, NDArray
 
 from typing import Any
 
-from ..config import assumptions as _assumptions
+from ..config import assumptions as _assumptions, write_json
 from . import conventions as cv, orca, remote
 from .environment import seconds
 from .hycom import box360
@@ -198,9 +198,7 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
                 man["selected"].setdefault(name, {})[var] = best[1]
         man["selected"].setdefault(name, {})
         man.setdefault("positions", {})[name] = [lat, lon]
-    tmp = pathlib.Path(str(mpath) + ".tmp")
-    tmp.write_text(json.dumps(man, indent=1, sort_keys=True))
-    os.replace(tmp, mpath)
+    write_json(mpath, man, indent=1, sort_keys=True)
     return mpath
 
 

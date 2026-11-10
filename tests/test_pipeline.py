@@ -3583,7 +3583,7 @@ def test_r8_m34_run_seed_rewrites_the_saved_mission_whatever_the_spelling_of_see
 
 
 def test_r14_m21_run_seed_writes_a_copy_that_loads_when_a_vehicle_id_reads_as_a_float(tmp_path, monkeypatch):
-    """`yaml.safe_dump` wrote the quoted id "1e5" bare; `load_mission` on the copy (what report, whatif and a rerun with --seed read) then refused it as a number."""
+    """`yaml.safe_dump` wrote the quoted id "1e5" bare; `load_mission` on the copy (what report and whatif read) then refused it as a number."""
     stub_stages(monkeypatch, [])
     m = tmp_path / "m.yaml"
     m.write_text(MISSION_PATH.read_text().replace("id: glider_1n", 'id: "1e5"'))
@@ -3591,6 +3591,21 @@ def test_r14_m21_run_seed_writes_a_copy_that_loads_when_a_vehicle_id_reads_as_a_
     pipeline.run(m, "ci", 0, tmp_path / "run", log=[].append, seed=9)
     copy = config.load_mission(tmp_path / "run" / "mission.yaml")
     assert copy["vehicles"][1]["id"] == "1e5" and copy["seed"] == 9
+
+def test_r14_m20_a_cut_write_of_the_stage_3_calibration_leaves_no_half_file(tmp_path, monkeypatch, cut_writes):
+    """`recalibrate_subgrid` wrote subgrid_calibration.json in place: a kill left three characters that report, credibility and the next stage read as the
+    run's calibration."""
+    import types
+    from cafe.pm.env import subgrid
+    from cafe.pm.stage3 import pipeline_windows as pw
+    cal = dict(subgrid.load_config()["calibration"], sigma_u_over_ustar=2.9)
+    monkeypatch.setattr(subgrid, "recalibrate", lambda series: dict(calibration=cal, uncertainty=dict(sigma_u_over_ustar=0.2, length_scale_factor=0.1),
+                                                                    windows=[dict(label="w")], skipped=[]))
+    row = dict(ok=True, part="hull", t=1.0, inflow_series=dict(u=[1.0], dt=1.0, U=6.0, ustar=0.3, z=10.0))
+    cut_writes()
+    with pytest.raises(OSError, match="killed"), ledger.Ledger(tmp_path / "r", "stage3", "h") as L:
+        pw.recalibrate_subgrid(types.SimpleNamespace(run_dir=tmp_path / "r"), {"usv": [row]}, L)
+    assert not (tmp_path / "r" / "stage3" / "subgrid_calibration.json").exists() and not list((tmp_path / "r").rglob("*.tmp"))
 
 # ---- review round 8: M-4 (the contents of the ocean store), M-23 (a cut checkpoint ledger), M-35 (Bellhop in the code digest)
 

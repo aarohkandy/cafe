@@ -197,9 +197,8 @@ class Ledger:
         if missing and et is None:
             self.d["error"] = f"outputs never written: {missing}"
         self.d["ok"] = et is None and not missing and self.ok
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(clean(self.d), indent=1, allow_nan=False))
-        os.replace(tmp, self.path)
+        from .config import write_text
+        write_text(self.path, json.dumps(clean(self.d), indent=1, allow_nan=False))
         if missing and et is None:
             raise StageFailed(f"stage {self.d['stage']}: registered outputs were never written: {missing} (ledger: {self.path})")
         if et is None and not self.ok:
@@ -417,7 +416,6 @@ def rerecord(run_dir: str | pathlib.Path, stage: str, written: list[pathlib.Path
         outs.setdefault(real(w), dict(path=str(w)))["sha256"] = sha256(w)
     d["outputs"] = list(outs.values())
     d["notes"].append(f"re-rendered by report --run (git_sha {git_sha()}, code_digest {code_digest})")
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(clean(d), indent=1, allow_nan=False))
-    os.replace(tmp, p)
+    from .config import write_text
+    write_text(p, json.dumps(clean(d), indent=1, allow_nan=False))
     return True

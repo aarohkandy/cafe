@@ -1805,7 +1805,7 @@ def write(run_dir: str | pathlib.Path, mission: dict[str, Any], plan: dict[str, 
     rep = build(run, mission, plan, env)
     j, h = run / "report" / "report.json", run / "report" / "index.html"
     config.write_json(j, rep, indent=1, allow_nan=False)
-    h.write_text(render(rep))
+    config.write_text(h, render(rep))
     return [h, j, *cred]
 
 

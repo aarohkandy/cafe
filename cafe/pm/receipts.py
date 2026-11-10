@@ -33,7 +33,7 @@ on this machine, proves nothing about the overlay; what `make broken` and the CI
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, errno, hashlib, importlib, io, json, math, os, pathlib, platform, re, tempfile, time
+import contextlib, datetime as dt, errno, hashlib, importlib, io, math, os, pathlib, platform, re, tempfile, time
 from collections.abc import Callable
 from typing import Any
 
@@ -276,9 +276,8 @@ def _save(group: str, scope: str, rows: list[dict[str, Any]], seconds: float) ->
     p.parent.mkdir(parents=True, exist_ok=True)
     rec = dict(group=group, scope=scope, code_digest=code_digest(scope), git_sha=sha, date=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
                host=platform.node(), seconds=round(seconds), rows=rows)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(rec, indent=1, default=str))
-    os.replace(tmp, p)
+    from .config import write_json
+    write_json(p, rec, indent=1, default=str)
 
 
 def slow_group(group: str, minutes: int, scope: str, runner: Callable[[], Any], slow: bool,

@@ -496,11 +496,12 @@ def calibration_block(result: dict[str, Any], source_run: str) -> dict[str, Any]
 def write_calibration(cal: dict[str, Any], path: str | pathlib.Path | None = None) -> pathlib.Path:
     """Write the calibration block `cal` into config/subgrid.json (or `path`), leaving every other line of the file as it is. Stage 3 does not call this
     (it writes its own stage3/subgrid_calibration.json); only `promote_calibration` does. Clears the config cache."""
+    from ..config import write_text
     f = pathlib.Path(path or _CFG_DIR / "subgrid.json")
     text = f.read_text()
     head = text[: text.index('  "calibration": {')]
     body = json.dumps(cal, indent=2).replace("\n", "\n  ")
-    f.write_text(head + '  "calibration": ' + body + "\n}\n")
+    write_text(f, head + '  "calibration": ' + body + "\n}\n")                 # a kill keeps the old file; every run reads it (M-37)
     _load.cache_clear()
     return f
 
