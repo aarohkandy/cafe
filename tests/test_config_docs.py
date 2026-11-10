@@ -522,3 +522,69 @@ def test_r14_m8_every_document_that_counts_the_real_time_tests_counts_audit_seri
             seen.append((name, m.group(1)))
             assert words[m.group(1)] == len(audit.SERIAL_TESTS), (name, m.group(0))
     assert {n for n, _ in seen} >= {"STATUS.md", "DECISIONS.md"}                       # it did find the places
+
+
+# ---- review round 14 (the document sides of M-3, M-15, M-16, M-33 and M-43)
+
+def test_r14_m15_the_makefile_and_the_runbook_say_that_make_ci_plans_the_glider_fea_out_under_the_floor_the_assumption_file_holds():
+    """Round 14, M-15: under `--budget ci` the glider FEA reserve is 9.0 s, under `stage3.fea_min_s`, so `make ci` does not reach the FEA child (the budget
+    test `test_r14_m15_*` pins the plan); the Makefile and RUNBOOK 2 said 'every stage' with no exception."""
+    floor = config.assumptions()["stage3.fea_min_s"]["value"]
+    assert floor == 68.2
+    ci_line = next(line for line in text("Makefile").splitlines() if line.startswith("ci:") and "##" in line)
+    assert "the glider FEA is planned out" in ci_line and "stage3.fea_min_s" in ci_line
+    rb = flat(text("docs", "RUNBOOK.md"))
+    assert "except that the glider FEA is planned out under `ci`" in rb and f"`stage3.fea_min_s`, {floor}" in rb
+    assert "9.0 s" in row(776) and f"{floor}" in row(776) and "(amends 741)" in row(776)
+
+
+def test_r14_m16_the_runbook_says_that_a_make_ci_run_audits_clean_only_inside_the_call_because_its_data_is_in_tmp():
+    """Round 14, M-16: `CI_DATA` defaults to /tmp/cafe_ci_data, which the container drops; a later audit or `report --run` of runs/ci reports its inputs
+    missing. The Makefile default and the sentence stay together (a persistent default would make the sentence false: change both)."""
+    assert "ci: CI_DATA ?= /tmp/cafe_ci_data" in text("Makefile")
+    rb = flat(text("docs", "RUNBOOK.md"))
+    assert "The run's data is in `/tmp/cafe_ci_data` (`CI_DATA`), which the container drops" in rb
+    assert "audit passes only inside the `make ci` call" in rb and "nine `AUDIT FAIL` lines" in rb
+    assert "_same_place` is not changed" in row(777)
+
+
+def test_r14_m3_the_readme_and_the_runbook_say_what_python_m_cafe_receipts_takes():
+    """Round 14, M-3: `python -m cafe.receipts` takes `stamp FILE...` or one existing results directory; anything else is a usage error before any receipt."""
+    assert "`python -m cafe.receipts` takes `stamp FILE...` or one existing results directory" in flat(text("docs", "RUNBOOK.md"))
+    assert "the directory must exist" in flat(text("README.md")) and "usage error" in flat(text("README.md"))
+    src = text("cafe", "receipts.py")
+    assert "RESULTS_DEFAULT" in src and "def main(" in src
+
+
+def test_r14_m33_every_documented_orca_gate_command_that_names_the_checkout_carries_pm_take():
+    """Round 14, M-33: a fresh worktree is another checkout than the one that owns `pm_<you>`, so the gate of a round needs `PM_TAKE=1` once (and `PMX` is
+    required). The commands CLAUDE.md and ORCA_RUNNER give, and the gate commands of the newest HANDOFF block, carry it."""
+    cmd = "PM_HOST=cafe-orca PMX=pm_<you> bin/orca_gate.sh"
+    for name, doc in (("CLAUDE.md", text("CLAUDE.md")), ("docs/ORCA_RUNNER.md", text("docs", "ORCA_RUNNER.md"))):
+        assert f"PM_TAKE=1 {cmd}" in doc, name
+        assert cmd not in doc.replace(f"PM_TAKE=1 {cmd}", ""), name
+    block = text("HANDOFF.md").split("### Round 14 is fixed and merged on `r14-merged`")[1].split("\n### ")[0]
+    gates = [m.start() for m in re.finditer(r"bin/orca_gate\.sh 8 proof1", block)]
+    assert gates and all("PM_TAKE=1" in block[max(0, g - 60):g] for g in gates)
+    assert "`PMX` is required" in text("docs", "ORCA_RUNNER.md")
+
+
+def test_r14_m43_the_leave_one_out_sd_of_the_wind_fit_is_the_one_measured_and_every_site_that_quotes_it_agrees():
+    """Round 14, M-43: PHYSICS 7, CREDIBILITY L19 and row 589 gave 0.155 (from a round 10 log no committed file reproduced) and PHYSICS gave the other
+    moorings' mean errors as +0.07 to +1.14. `review/round_14/m43/loo_q14la.txt` is `fit_wind_error` on q14la's hourly residuals without each mooring, run on
+    orca on the merged code; its all-14 fit equals the run's `priors_fitted.json`. The places that quote it say what it says."""
+    out = (ROOT / "review" / "round_14" / "m43" / "loo_q14la.txt").read_text()
+    speed = out.split("=== direction deg")[0]
+    sd13 = re.search(r"without T5S165E : persistent ([0-9.]+)", speed).group(1)
+    assert sd13 == "0.1545" and "all 14: persistent 0.5689" in speed and "stored wind_speed_bias: value 0.5689" in speed
+    means = {m.group(1): float(m.group(2)) for m in re.finditer(r"^  (T\w+)\s+mean\s+([+-][0-9.]+)", speed, re.M)}
+    others = [v for k, v in means.items() if k != "T5S165E"]
+    assert len(means) == 14 and len(others) == 13 and means["T5S165E"] == -1.4822
+    assert f"{min(others):.3f}" == "-0.032" and f"{max(others):.3f}" == "1.142"
+    loo = [float(m.group(1)) for m in re.finditer(r"without (?!T5S165E)\w+\s*: persistent ([0-9.]+)", speed.split("leave one out:")[1])]
+    assert len(loo) == 13 and f"{min(loo):.3f}" == "0.562" and f"{max(loo):.3f}" == "0.610"
+    phys, cred, qs = flat(text("docs", "PHYSICS.md")), flat(text("docs", "CREDIBILITY.md")), flat(text("QUESTIONS_FOR_LAB.md"))
+    for name, doc in (("PHYSICS", phys), ("CREDIBILITY L19", cred), ("QUESTIONS_FOR_LAB 7a", qs), ("row 589", row(589))):
+        assert sd13 in doc and "0.155 " not in doc.replace("0.1545", ""), name
+    assert "-0.03 (T2N170W) to +1.14 (T5N165E)" in phys and "+0.07 to +1.14" not in phys and "0.562 to 0.610" in phys
+    assert "-0.032 to +1.142" in cred and "-0.032 to +1.142" in row(589)

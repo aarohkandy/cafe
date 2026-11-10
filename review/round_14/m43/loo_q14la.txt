@@ -1,0 +1,69 @@
+moorings with a series: 14 stored priors: {'wind_speed_bias': (-0.45997156050501903, 0.5688639537425331), 'wind_speed_noise': (None, 1.4608541645955726), 'wind_direction_bias': (6.379703917597245, 5.245574667829986), 'wind_direction_noise': (None, 24.63167744863315)}
+
+=== speed m/s: per-mooring time-mean error (model minus mooring), n
+  T0N165E  mean  +0.6654  n 144
+  T0N170W  mean  +0.2832  n 43
+  T0N180W  mean  +0.8677  n 145
+  T2N165E  mean  +0.9545  n 145
+  T2N170W  mean  -0.0321  n 145
+  T2N180W  mean  +0.5010  n 145
+  T2S165E  mean  +0.0732  n 145
+  T2S170W  mean  +0.6272  n 145
+  T2S180W  mean  +0.8163  n 145
+  T5N165E  mean  +1.1419  n 145
+  T5N180W  mean  +0.8149  n 145
+  T5S165E  mean  -1.4822  n 145
+  T5S170W  mean  +0.0931  n 145
+  T5S180W  mean  +1.1156  n 145
+all 14: persistent 0.5689  hi95 0.9572  mean +0.45997  noise 1.4609  rho 0.834
+stored wind_speed_bias: value 0.5689  hi95 0.9572  mean -0.45997
+leave one out:
+  without T0N165E : persistent 0.6099  hi95 1.0296  mean +0.44417  noise 1.4517  moorings 13
+  without T0N170W : persistent 0.6051  hi95 1.0274  mean +0.47357  noise 1.4714  moorings 13
+  without T0N180W : persistent 0.5858  hi95 1.0078  mean +0.42861  noise 1.4940  moorings 13
+  without T2N165E : persistent 0.5922  hi95 1.0067  mean +0.42193  noise 1.4581  moorings 13
+  without T2N170W : persistent 0.5880  hi95 1.0044  mean +0.49782  noise 1.4705  moorings 13
+  without T2N180W : persistent 0.5977  hi95 1.0249  mean +0.45681  noise 1.4981  moorings 13
+  without T2S165E : persistent 0.5943  hi95 1.0138  mean +0.48973  noise 1.4619  moorings 13
+  without T2S170W : persistent 0.6068  hi95 1.0286  mean +0.44711  noise 1.4676  moorings 13
+  without T2S180W : persistent 0.5910  hi95 1.0133  mean +0.43256  noise 1.4855  moorings 13
+  without T5N165E : persistent 0.5621  hi95 0.9752  mean +0.40751  noise 1.4610  moorings 13
+  without T5N180W : persistent 0.5921  hi95 1.0139  mean +0.43267  noise 1.4617  moorings 13
+  without T5S165E : persistent 0.1545  hi95 0.4946  mean +0.60937  noise 1.2926  moorings 13
+  without T5S170W : persistent 0.5914  hi95 1.0130  mean +0.48819  noise 1.4790  moorings 13
+  without T5S180W : persistent 0.5637  hi95 0.9784  mean +0.40954  noise 1.4872  moorings 13
+without T5S165E: sd of the 13 time-mean errors 0.3977, range -0.0321 to +1.1419
+
+=== direction deg: per-mooring time-mean error (model minus mooring), n
+  T0N165E  mean -11.3494  n 137
+  T0N170W  mean  -9.1002  n 43
+  T0N180W  mean -11.6578  n 145
+  T2N165E  mean  -2.8206  n 141
+  T2N170W  mean -20.2188  n 145
+  T2N180W  mean -13.2535  n 145
+  T2S165E  mean  -2.3978  n 145
+  T2S170W  mean -12.3911  n 145
+  T2S180W  mean -11.6269  n 145
+  T5N165E  mean  +3.9997  n 144
+  T5N180W  mean -19.2197  n 145
+  T5S165E  mean  +5.0868  n 143
+  T5S170W  mean  +5.5181  n 145
+  T5S180W  mean +10.1154  n 145
+all 14: persistent 5.2456  hi95 12.1529  mean -6.37970  noise 24.6317  rho 0.891
+stored wind_direction_bias: value 5.2456  hi95 12.1529  mean +6.37970
+leave one out:
+  without T0N165E : persistent 6.3370  hi95 13.3289  mean -5.99742  noise 24.2319  moorings 13
+  without T0N170W : persistent 5.6965  hi95 13.1194  mean -6.17044  noise 24.8716  moorings 13
+  without T0N180W : persistent 5.3726  hi95 12.8830  mean -5.97370  noise 25.3556  moorings 13
+  without T2N165E : persistent 6.3844  hi95 13.4078  mean -6.65348  noise 24.1316  moorings 13
+  without T2N170W : persistent 3.7654  hi95 11.4360  mean -5.31516  noise 25.2913  moorings 13
+  without T2N180W : persistent 5.5939  hi95 12.8829  mean -5.85095  noise 25.0504  moorings 13
+  without T2S165E : persistent 5.9332  hi95 13.1838  mean -6.68600  noise 24.2625  moorings 13
+  without T2S170W : persistent 5.4699  hi95 12.8837  mean -5.91729  noise 25.2850  moorings 13
+  without T2S180W : persistent 5.2441  hi95 12.8315  mean -5.97607  noise 25.3936  moorings 13
+  without T5N165E : persistent 6.0724  hi95 12.8052  mean -7.17812  noise 23.7238  moorings 13
+  without T5N180W : persistent 4.7567  hi95 11.9402  mean -5.39201  noise 24.2672  moorings 13
+  without T5S165E : persistent 4.5305  hi95 12.0271  mean -7.26174  noise 22.5440  moorings 13
+  without T5S170W : persistent 4.5745  hi95 11.9912  mean -7.29492  noise 25.0526  moorings 13
+  without T5S180W : persistent 2.6989  hi95 10.6675  mean -7.64855  noise 25.2002  moorings 13
+without T5S165E: sd of the 13 time-mean errors 9.4298, range -20.2188 to +10.1154

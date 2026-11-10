@@ -12,14 +12,18 @@ q = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(q)
 
 
-def make(root, name, n_var, rows, killed=None, wall=1.0):
+def make(root, name, n_var, rows, killed=None, wall=1.0, cand=10):
+    """A run directory with the files the comparison reads. `cand`: the UAS flip search's candidate count, which follows the code (DECISIONS 733); the
+    `reason` text of a tried move quotes the rows of the training table, which follow the variants run (DECISIONS 754)."""
     run = root / name
     (run / "emulator").mkdir(parents=True)
     (run / "report").mkdir()
     (run / "emulator" / "design.json").write_text(json.dumps(dict(
         variants=[dict(variant=f"v{k}") for k in range(n_var)], planned_variants=6, killed=killed, rows_added=rows)))
+    tried = [dict(change="launch the sorties 6 h later", p_fail=0.875, reason=f"{n_var + 1} uas/quad_uas/144h rows in the training table, 100 are needed")]
+    (run / "emulator" / "flip.json").write_text(json.dumps(dict(vehicles=dict(uas=dict(candidates=cand, tried=tried)))))
     (run / "report" / "report.json").write_text(json.dumps(dict(
-        run=name, emulator=dict(run_note=f"{n_var} variant runs"), vehicles=dict(uas=dict(fix=dict(candidates=2 * n_var))), seed=7,
+        run=name, emulator=dict(run_note=f"{n_var} variant runs"), vehicles=dict(uas=dict(fix=dict(candidates=cand, tried=tried))), seed=7,
         machine=dict(timing=dict(variants=dict(runs=n_var), total=wall)))))
     return run
 
@@ -36,12 +40,12 @@ def test_r13_l2_the_comparison_names_the_variant_counts_and_lists_what_follows_t
     out = run_main(tmp_path, capsys, "slow", "fast")
     first = out.splitlines()[0]
     assert first.startswith("## variants run: slow 5 of 6 run (killed: the variant runs spent") and "fast 6 of 6 run; COUNT DIFFERS" in first
-    assert "[load-dependent] /rows_added" in out and "[load-dependent] /emulator/run_note" in out and "[load-dependent] /vehicles/uas/fix/candidates" in out
+    assert "[load-dependent] /rows_added" in out and "[load-dependent] /emulator/run_note" in out and "[load-dependent] /vehicles/uas/fix/tried/#/reason" in out
     assert "[load-dependent] /machine/timing/variants/runs" in out
     assert "/machine/timing/total   e.g." in out and "[load-dependent] /machine/timing/total" not in out        # a figure the count cannot move stays a mover
     assert "/run   e.g." in out and "[load-dependent] /run" not in out
-    # not load-dependent: run, total; load-dependent: killed (2), variant, rows_added, run_note, candidates, runs
-    assert "## total json leaves differing: 2 (and 7 load-dependent: the variant counts differ)" in out
+    # not load-dependent: run, total; load-dependent: killed (2), variant, rows_added, run_note, runs, and the `reason` of a tried move (flip.json, report.json)
+    assert "## total json leaves differing: 2 (and 8 load-dependent: the variant counts differ)" in out
 
 
 def test_r13_l2_runs_with_the_same_variant_count_list_every_leaf_as_before(tmp_path, capsys):
@@ -78,3 +82,28 @@ def test_r13_merge_the_comparison_of_a_run_with_no_design_file_sets_the_emulator
     out = run_main(tmp_path, capsys, "old", "new")
     assert "old no emulator/design.json; new 5 of 6 run; COUNT DIFFERS" in out.splitlines()[0]
     assert "[load-dependent] /emulator/run_note" in out
+
+
+def test_r14_q2_a_flip_candidate_count_that_differs_is_a_mover_and_only_reason_texts_follow_the_variants(tmp_path, capsys):
+    """Round 14, P-R14Q2: q14 and q13la have 10 UAS flip candidates and q13 has 12 (DECISIONS 733: the same mission is listed once), whatever the number of
+    variants run; the comparison tagged every `/fix/` node and every leaf of `emulator/flip.json` load-dependent when the counts differed, and hid it."""
+    make(tmp_path, "slow", 5, 24, killed=dict(reason="killed: the stage share"), wall=2.0, cand=10)
+    make(tmp_path, "fast", 6, 28, cand=12)
+    out = run_main(tmp_path, capsys, "slow", "fast")
+    assert "fast 6 of 6 run; COUNT DIFFERS" in out.splitlines()[0]
+    assert "/vehicles/uas/fix/candidates   e.g." in out and "[load-dependent] /vehicles/uas/fix/candidates" not in out
+    assert "/vehicles/uas/candidates   e.g." in out and "[load-dependent] /vehicles/uas/candidates" not in out                 # emulator/flip.json
+    assert "[load-dependent] /vehicles/uas/tried/#/reason" in out and "[load-dependent] /vehicles/uas/fix/tried/#/reason" in out
+    # movers: run, total, and the candidate count in flip.json and in report.json; load-dependent: killed (2), variant, rows_added, run_note, runs, 2 x reason
+    assert "## total json leaves differing: 4 (and 8 load-dependent: the variant counts differ)" in out
+
+
+@pytest.mark.parametrize("f, group, expect", [
+    ("emulator/flip.json", "/vehicles/uas/candidates", False), ("emulator/flip.json", "/vehicles/uas/tried/#/change", False),
+    ("emulator/flip.json", "/vehicles/uas/tried/#/p_fail", False), ("emulator/flip.json", "/vehicles/uas/tried/#/reason", True),
+    ("report/report.json", "/vehicles/uas/fix/candidates", False), ("report/report.json", "/vehicles/uas/fix/tried/#/reason", True),
+    ("report/report.json", "/vehicles/uas/fix/rows", True), ("report/report.json", "/vehicles/uas/fix/spent", True),
+    ("emulator/design.json", "/anything", True), ("emulator/holdout.json", "/stale_rows", True), ("report/report.json", "/emulator/run_note", True),
+    ("report/report.json", "/machine/timing/variants/runs", True), ("report/report.json", "/machine/timing/total", False)])
+def test_r14_q2_only_the_figures_that_follow_the_variants_are_load_dependent(f, group, expect):
+    assert q.load_dependent(f, group) is expect

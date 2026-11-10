@@ -169,7 +169,7 @@ beam theory, and quad hover RPM against bench data. Reach is checked against exa
 statistics against exact geometry, and fast mode against ArduCopter firmware on the same mission.
 Context rows are shown for orientation and never count as a pass.
 
-Run them: `./run.sh python -m cafe.receipts /work/runs`. The slow CFD cases are produced once with
+Run them: `./run.sh python -m cafe.receipts /work/runs` (the directory must exist, so on a new machine `mkdir -p` it or leave the argument out; any other first word is a usage error, exit 2, before anything runs). The slow CFD cases are produced once with
 `python -m cafe.cfd external torpedo /work/runs/t1`, `... surface wigley /work/runs/w1` and
 `... incidence suboff /work/runs/s1 3.344` (three grids, about 1 h on 6 cores). The files carry a stamp (date, host, git sha, digest of `cafe/*.py`); the git sha must name a commit (`./run.sh` passes `CAFE_GIT_SHA` as `pm.sh` does, and `python -m cafe.cfd` and `python -m cafe.receipts stamp` refuse to write a stamp with none, review round 13, M-24); one made before the stamp existed, or `runs/crosscheck.json`, is stamped with `python -m cafe.receipts stamp FILE` after you have looked at it, and a result without a stamp of the current code is a context row, not a pass. Adversarial review notes: `REVIEW.md`.
 

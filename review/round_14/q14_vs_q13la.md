@@ -65,3 +65,5 @@ These are the lines row 758 gave and row 753 explains (an old ledger holds the b
 ## Reading
 
 On a TAO cache that did not change, code `ae8f3d5` to `20537b1` moves no verdict, count, interval, prior, mooring count or array of the demo. What moved is `stage3.fea_min_s` (8.0 to 68.2 s, row 741) with its credibility text, the stage-3 ledger's `values_only` key (753), provenance, and wall times; the emulator figures follow the 6 of 6 variants as in q13. q14 prints what row 758 predicted. Open: P-R14Q1 (ingest and report time, cause shown only by inference), P-R14Q2 (rows 754 and 758 and `q13cmp.py` attribute row 733's change to load).
+
+Update (round 14 documents step): P-R14Q2 is fixed (DECISIONS 754 and 758 amended, `q13cmp.py` narrowed, DECISIONS 816) and P-R14Q1 is answered by the numbers lens (the round 14 code did not slow the ingest). The audits above were measured at `20537b1`; the changes of round 14 changed the platform files, so `q14` no longer audits clean (DECISIONS 816).

@@ -4,7 +4,11 @@ usage: python q13cmp.py A B   (run names under /data/runs)
 
 The first line it prints is how many emulator variants each run ran (`emulator/design.json`). The emulator stage kills before a variant once the variants
 have spent its wall-clock share (DECISIONS 288), so the count follows the machine's speed (round 13, look-ahead L2, P-R13L2-1). When the two counts differ, the
-leaves of the emulator, flip and hold-out figures that moved are listed apart, as "load-dependent", and are not in the count of leaves that differ.
+leaves that follow it are listed apart, as "load-dependent", and are not in the count of leaves that differ: every leaf of `emulator/design.json` and
+`emulator/holdout.json`, the `/emulator/` node and the variant timing of `report.json`, and in `emulator/flip.json` and the `/fix/` nodes of `report.json`
+only the leaves named in LOAD_KEY (the `reason` texts quote the rows of the training table). The flip search's candidates, moves and verdicts follow the code,
+not the count (DECISIONS 733, 754; round 14, P-R14Q2: the UAS lists 12 candidates in q13 and 10 in q13la and q14, whatever the variants run), so they stay
+in the list.
 """
 import hashlib
 import json
@@ -19,8 +23,11 @@ import numpy as np
 R = Path("/data/runs")
 
 PROV = re.compile(r"/(ref|path|sha256|tree_sha256|code_digest|config_hash|git_sha|started|wall_s)$")
-# what moves with the number of variants run, inside a file that is not itself the emulator's: report.json's emulator node, the flip fixes and the variant timing
-LOAD_LEAF = re.compile(r"^/emulator/|/fix/|^/machine/timing/variants/")
+# what moves with the number of variants run, inside a file that is not itself the emulator's: report.json's emulator node and the variant timing
+LOAD_LEAF = re.compile(r"^/emulator/|^/machine/timing/variants/")
+# and, in the flip search (`emulator/flip.json`, the `/fix/` nodes of report.json), only these leaves: the training table the variants grew is what a `reason`
+# quotes, the rest of a candidate (its change, move, cost, p_fail, verdict) and the candidate count are the code's
+LOAD_KEY = re.compile(r"/(reason|rows|points|stale_rows|other_scope_rows|spent|rows_added)$")
 
 
 def sha(p):
@@ -75,8 +82,11 @@ def variant_line(a, b, va, vb):
 
 
 def load_dependent(f, group):
-    """True for a leaf group that moves with the number of variants run: any leaf of a file under `emulator/`, or a leaf of another file that LOAD_LEAF names."""
-    return f.startswith("emulator/") or bool(LOAD_LEAF.search(group))
+    """True for a leaf group that moves with the number of variants run: any leaf of a file under `emulator/` but the flip search's, a leaf of another file that
+    LOAD_LEAF names, and a leaf of the flip search (`emulator/flip.json`, a `/fix/` node) that LOAD_KEY names."""
+    if LOAD_LEAF.search(group) or (f.startswith("emulator/") and f != "emulator/flip.json"):
+        return True
+    return (f == "emulator/flip.json" or "/fix/" in group) and bool(LOAD_KEY.search(group))
 
 
 def compare_json(ra, rb, fa, fb, load):
