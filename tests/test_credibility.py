@@ -1499,6 +1499,13 @@ def test_r13_m2_the_lost_link_hook_and_the_report_choose_the_radio_in_one_place(
     assert comms.uas_radio_names({}) == ("rfd900x", "rfd900x")                                       # no radio block: no StopIteration
 
 
+def test_flown_radios_names_the_radio_of_each_uas_platform_and_rfd900x_for_one_that_cannot_be_loaded():
+    assert cr.flown_radios(dict(vehicles=[dict(platform="quad_uas", base="ship")])) == {"rfd900x"}
+    assert cr.flown_radios(dict(vehicles=[dict(platform="no_such_platform", base="ship")])) == {"rfd900x"}   # a ConfigError: rfd900x
+    assert cr.flown_radios(dict(vehicles=[dict(platform=None, base="ship"), "usv", dict(platform="slocum")])) == {"rfd900x"}
+    assert cr.flown_radios(dict(vehicles=[dict(platform="slocum")])) == set() and cr.flown_radios({}) == set() and cr.flown_radios(None) == set()
+
+
 def test_r13_m3_a_one_uas_mission_counts_no_other_class_stage_3_key_and_no_dtmb_key_as_used(run, data):
     c = only(run, {"uas"})
     cfg = used_of(c, "config/assumptions.yaml")

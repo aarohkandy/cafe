@@ -524,6 +524,15 @@ def test_whatif_says_under_the_line_what_a_deploy_shift_did_to_the_flight(wi, ca
     assert out[2] == f"  note: glider_eq {note}" and len(out) == 4 and out[3].startswith("usv: ")
 
 
+def test_whatif_says_under_the_line_what_a_ship_move_did_to_the_vehicle(wi, capsys, monkeypatch):
+    note = "the ship moves with the deploy point: its links to the shore change length"
+    r = dict(base=dict(verdict="GO", p_fail=0.01), method="Stage 1", why="no emulator", p_fail=0.02, verdict="GO", n=32)
+    monkeypatch.setattr(whatif, "answer", lambda *a, **k: dict(vehicles={"usv": dict(r, flight=None, ship=note)}, dropped=[], links_removed=[]))
+    cli.main(whatif_args(wi, "--move", "1deg W"))
+    out = capsys.readouterr().out.splitlines()
+    assert out[2] == f"  note: usv {note}" and len(out) == 3
+
+
 def test_whatif_without_links_removed_says_none(wi, capsys, monkeypatch):
     monkeypatch.setattr(whatif, "answer", lambda *a, **k: dict(vehicles={}, dropped=["usv"], links_removed=[]))
     cli.main(whatif_args(wi, "--drop", "usv"))
@@ -1457,7 +1466,7 @@ def test_r12_l0_m7_the_stage1_command_prints_such_an_error_as_it_is_not_as_a_dam
 
 def advised_commands():
     """[(file:line, command text, argv)] for every `python -m cafe.pm <command> ...` in a string of cafe/ that a person is told to run: the strings of the code,
-    not its docstrings (prose about a command). An f-string's expressions, `...`, `<placeholder>` and a `[optional part]` stand for a value, as in a usage
+    not its docstrings (prose about a command). An f-string's expressions, `...`, `<name>` and a `[optional part]` stand for a value, as in a usage
     line."""
     import ast
     import re

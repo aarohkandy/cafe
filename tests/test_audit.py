@@ -616,6 +616,12 @@ def test_the_older_modules_the_scan_names_are_clean_today():
     assert len(older) == 15 and not [h for h in audit.banned() if h.startswith(older)]
 
 
+def test_the_whole_scanned_tree_has_no_banned_token_today():
+    """Round 13 gate: a test helper's docstring held a banned stand-in word for five commits; only the gate's audit step found it. The scan is the same
+    one, so a hit fails here, in the file's own run, with its file and line."""
+    assert audit.banned() == []
+
+
 # ---- review round 3, M-24 and M-27
 
 def test_ledgers_only_audits_the_run_dirs_given_and_nothing_else(tmp_path, monkeypatch, capsys):
