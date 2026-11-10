@@ -313,12 +313,16 @@ def test_physics_12_1_gives_the_curved_against_plane_earth_difference_at_nulls()
     assert "0.15 dB." not in doc and "26 dB" in doc
 
 
+OWNER_MARKER_RULE = " --exclude=/.pmx.owner"
+
+
 def test_pm_sh_and_pmx_sh_read_one_filter_list_and_never_delete_what_they_exclude():
     """M-39: pm.sh synced without --delete (a removed test still ran on the server) and each script would have had its own list of the outputs to keep."""
     rules = text("bin", "sync_filters")
     for script in (text("pm.sh"), text("bin", "pmx.sh")):
         assert "--delete" in script and "--filter" in script and "sync_filters" in script
-        assert "--delete-excluded" not in script and "--exclude" not in script
+        assert "--delete-excluded" not in script and "--exclude" not in script.replace(OWNER_MARKER_RULE, "")        # but pmx.sh's owner marker (M-33)
+    assert text("bin", "pmx.sh").count(OWNER_MARKER_RULE) == 1 and OWNER_MARKER_RULE not in text("pm.sh")
     for out in ("/runs/", "/config/throughput.json", "/config/subgrid.json", "/docs/mutation.json", "/mutants/", "/audit.log",
                 "/coverage.json", "/tests/golden/***", "/report/***"):
         assert re.search(rf"^[-P] {re.escape(out)}$", rules, re.M), out

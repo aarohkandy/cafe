@@ -1,7 +1,10 @@
 # Sourced (`. bin/pm_checks.sh`) by pm.sh, bin/pmx.sh, bin/orca_ready.sh, bin/orca_gate.sh, bin/proot_suite.sh, bin/orca_sync.sh and bin/worker_setup.sh: the one place that decides what a name or a number pasted into a command line may be.
 # They reach a shell on the worker (and docker's argument list), so a ';' or a space in one is a command there. Each function exits the calling script with status 2 before anything is sent.
 pm_bad() { echo "$1" >&2; exit 2; }
-pm_num() { case $2 in ''|0*|*[!0-9]*) pm_bad "$1: a whole number from 1, not '$2'" ;; esac; }                           # $1 name, $2 value
+# A count (PM_CPUS, PM_THREADS, CAFE_MIN_FREE_GB, K) reaches a `[ n -le 32 ]` or `[ free -ge n ]` on the worker: dash answers a number past its integer range with 'Illegal number' and the test then fails open, so a long one
+# is refused here by its digits alone (10 or more), never by its value: PM_CPUS=99 stays the documented warning. pm_num is 1 to 999999999, pm_count also takes 0 (CAFE_MIN_FREE_GB=0 switches the disk check off) (round 14 M-19).
+pm_num() { case $2 in ''|0*|*[!0-9]*|??????????*) pm_bad "$1: a whole number from 1 to 999999999, not '$2'" ;; esac; }              # $1 name, $2 value
+pm_count() { case $2 in ''|*[!0-9]*|??????????*) pm_bad "$1: a whole number from 0 to 999999999, not '$2'" ;; esac; }
 # A machine's address as a script argument (the orca IP of bin/orca_sync.sh, the host of bin/worker_setup.sh's user@host): an IPv4 or IPv6 address or a DNS name, so letters, digits, '.', '-' and ':' only, not
 # empty and not starting with '-' (ssh would read it as an option). It lands unquoted in a command line on homebase, where a ';' or a space is a command (round 11 M-18).
 pm_host() { case $2 in ''|-*|*[!A-Za-z0-9.:-]*) pm_bad "$1: an IP address or host name (letters, digits, '.', '-' and ':'), not '$2'" ;; esac; }       # $1 name, $2 value
