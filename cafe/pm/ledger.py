@@ -48,12 +48,16 @@ def has_commit(sha: Any) -> bool:
 
 def need_commit(doing: str) -> str:
     """The commit a stored result is stamped with, or a ValueError that says `nothing was <doing>` when there is none (no git here and no $CAFE_GIT_SHA).
-    The one guard of every writer of a stamped result: `cafe.receipts.stamp` (so `python -m cafe.cfd` and the `stamp` command), `pm.receipts._save` (the slow
+    A `CAFE_GIT_SHA` that is set to something that is no commit (`HEAD`, upper case, `abc`) is named as such, not called unset (round 14, M-6). The one
+    guard of every writer of a stamped result: `cafe.receipts.stamp` (so `python -m cafe.cfd` and the `stamp` command), `pm.receipts._save` (the slow
     receipt groups), and the starts of the long runs that end in one, since a result that names no commit is refused by its readers (`has_commit`) and
     the hours of work would be lost (look-ahead L0 after round 13, M-24)."""
     sha = git_sha()
     if not has_commit(sha):
-        raise ValueError(f"nothing was {doing}: no commit to name (no git here and $CAFE_GIT_SHA is not set); run it from the checkout, or through pm.sh")
+        env = os.environ.get("CAFE_GIT_SHA", "")
+        why = (f"$CAFE_GIT_SHA is set to {env!r}, which is not a commit (7 or more lower-case hex digits)" if env and env != "none" else
+               "no git here and $CAFE_GIT_SHA is not set")                                    # round 14, M-6: a value that is set is not "not set"
+        raise ValueError(f"nothing was {doing}: no commit to name ({why}); run it from the checkout, or through pm.sh")
     return sha
 
 

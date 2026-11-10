@@ -768,3 +768,26 @@ def test_r13_l2_a_plain_input_and_a_file_that_is_not_a_mapping_still_change_the_
     assert ledger.values_sha256(src) == ""
     src.write_text("a: [unclosed\n")
     assert ledger.values_sha256(src) == ""
+
+
+# ---- review round 14, batch B
+
+@pytest.mark.parametrize("value", ["HEAD", "ABCDEF1234567", "abc", "abcdef1234567 "])
+def test_r14_m6_a_commit_variable_that_is_set_but_is_no_commit_is_named_not_called_unset(monkeypatch, value):
+    """`need_commit` said "$CAFE_GIT_SHA is not set" for `HEAD`, an upper-case sha, `abc` and a padded sha; the run was rightly refused, the reason was wrong."""
+    def no_git(*a, **k):
+        raise FileNotFoundError("git")
+    monkeypatch.setattr(ledger.subprocess, "run", no_git)
+    monkeypatch.setenv("CAFE_GIT_SHA", value)
+    with pytest.raises(ValueError, match=r"nothing was stamped: no commit to name \(\$CAFE_GIT_SHA is set to .*not a commit \(7 or more lower-case hex digits\)\)") as e:
+        ledger.need_commit("stamped")
+    assert repr(value) in str(e.value) and "is not set" not in str(e.value)
+    for unset in ("", "none"):
+        monkeypatch.setenv("CAFE_GIT_SHA", unset)
+        with pytest.raises(ValueError, match="no git here and \\$CAFE_GIT_SHA is not set"):
+            ledger.need_commit("stamped")
+    monkeypatch.delenv("CAFE_GIT_SHA")
+    with pytest.raises(ValueError, match="no git here and \\$CAFE_GIT_SHA is not set"):
+        ledger.need_commit("stamped")
+    monkeypatch.setenv("CAFE_GIT_SHA", "abcdef1234567")
+    assert ledger.need_commit("stamped") == "abcdef1234567"
