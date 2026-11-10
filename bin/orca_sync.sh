@@ -9,6 +9,7 @@
 set -eu
 IP="${1:?usage: sh bin/orca_sync.sh <orca tailnet IP> [proot] [root] [pmdata] [data]}"; shift
 . "$(dirname "$0")/pm_checks.sh"; pm_host "the orca address" "$IP"          # IP is pasted unquoted into a command line on homebase: exit 2 before anything is sent
+pm_count CAFE_MIN_FREE_GB "${CAFE_MIN_FREE_GB:-60}"          # compared with `[ -ge ]` on homebase: a 20-digit one is refused here, not left to print 'integer expression expected' (round 14 M-19)
 set -f; for x in $*; do case $x in proot|root|pmdata|data) ;; *) echo "STOP: unknown part '$x' (proot root pmdata data)" >&2; exit 1 ;; esac; done; set +f
 VIA="${ORCA_VIA:-azureuser@100.108.213.121}"; K="${PM_KEY:-$HOME/.ssh/homebase_ed25519}"
 O="${ORCA_TOFU:+-o StrictHostKeyChecking=accept-new}"

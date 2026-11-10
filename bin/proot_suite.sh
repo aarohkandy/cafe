@@ -9,13 +9,13 @@
 #   --cov coverage per job, then `coverage combine`, `coverage json` to /app/coverage.json, and `python -m cafe.pm.audit --pytest-done` (ruff, mypy, the scans and the
 #         coverage gates; the receipt, coverage.receipt.json, is written first, only here, when every job passed, and holds the digest of the code that ran: --pytest-done
 #         fails without it or when the code has changed since). Exit 0 only if every job and the audit passed; what failed is named.
-# TERM, INT or HUP stops every job (proot_run.sh's own handler: TERM to the job's group, KILL after PM_STOP_GRACE s). Nothing is written outside ~/cafe-worker.
+# TERM, INT or HUP stops every job, in every step, the shares step and the audit included (proot_run.sh's own handler: TERM to the job's group, KILL after PM_STOP_GRACE s). Nothing is written outside ~/cafe-worker.
 set -u
 [ $# -eq 3 ] || { [ $# -eq 4 ] && [ "$4" = --cov ]; } || { echo "usage: sh proot_suite.sh <dir> <K> <tag> [--cov]" >&2; exit 2; }
 D=$1; K=$2; TAG=$3; COV=${4:-}
 case ${D#pm_} in "$D"|''|*[!A-Za-z0-9_-]*) echo "dir: pm_ and then letters, digits, _ or - only (not '$D')" >&2; exit 2 ;; esac
 . "$(dirname "$0")/pm_checks.sh"; pm_tag "$TAG"                                   # the same rule bin/orca_gate.sh applies before it sends anything
-case $K in ''|0*|*[!0-9]*) echo "K: a whole number from 1 to 16, not '$K'" >&2; exit 2 ;; esac
+pm_num K "$K"
 [ "$K" -le 16 ] || { echo "K=$K jobs of 2 CPUs is above orca's 32 CPUs (K at most 16)" >&2; exit 2; }
 W="$HOME/cafe-worker"; C="$W/cafe"; R="$C/$D"; LOGS="$W/logs"; SH="$C/pmdata/shards/$TAG"; DS="/data/shards/$TAG"      # DS: the same folder, as the job sees it
 [ -f "$W/.cafe-worker-owned" ] && [ -d "$R" ] && [ -d "$C/pmdata" ] || { echo "no cafe-worker of ours here, or no $R: sync first (bin/orca_gate.sh)" >&2; exit 1; }
@@ -29,7 +29,7 @@ stop() { trap '' INT TERM HUP; for p in $PIDS; do kill -TERM "$p" 2>/dev/null ||
 trap stop INT TERM HUP
 trap 'rm -f "$SH/.pid"' EXIT
 
-# One job: its log (ending rc=N), the wrapper's TERM passed on to proot_run.sh. $1 = log name, the rest = the command run in the cafe-pm root filesystem.
+# One job: its log (ending rc=N), the wrapper's TERM passed on to proot_run.sh. $1 = log name, the rest = the command run in the cafe-pm root filesystem. Every step, the shares and the audit too, goes through it (M-38).
 job() {
     n=$1; shift
     ( sh "$R/bin/proot_run.sh" "$D" "$@" > "$LOGS/$n.log" 2>&1 &
@@ -57,12 +57,13 @@ verdict() {
 }
 [ -z "$COV" ] || rm -f "$R/coverage.json" "$R/coverage.receipt.json"           # an old one must not be read as this run's
 touch "$SH/.start"
-# 1. the shares: a small python step under proot, once. Junit to balance by: the first suite's (if kept here), then this tag's last run, oldest first.
+# 1. the shares: a small python step under proot, once (as a job, so that a signal acts at once). Junit to balance by: the first suite's (if kept here), then this tag's last run, oldest first.
 J=; [ -f "$C/pmdata/junit_91c9777.xml" ] && J="/data/junit_91c9777.xml"
 for x in $(ls -tr "$SH"/s[0-9]*.xml 2>/dev/null); do J="$J $DS/$(basename "$x")"; done
+# A step is a job() like the others, waited for with `wait`, which a trapped signal ends at once: run in the foreground it would hold TERM, INT and HUP back until it returned (round 14 M-38).
 # shellcheck disable=SC2086
-sh "$R/bin/proot_run.sh" "$D" python -m cafe.pm.shares "$K" "$DS" $J > "$LOGS/${TAG}_shares.log" 2>&1; r=$?
-echo "rc=$r" >> "$LOGS/${TAG}_shares.log"
+job "${TAG}_shares" python -m cafe.pm.shares "$K" "$DS" $J
+wait $PIDS; r=$?; PIDS=
 [ $r -eq 0 ] || { echo "STOP: the shares step failed (rc=$r), see $LOGS/${TAG}_shares.log" >&2; exit 1; }
 for x in "$SH"/s[0-9]*.xml; do [ -f "$x" ] || continue; i=${x##*/s}; i=${i%.xml}; [ -f "$SH/s$i.args" ] || rm -f "$x"; done       # a smaller K than last time: its extra junit files go
 grep -v '^rc=' "$LOGS/${TAG}_shares.log"                                   # not its rc= line: the last line of this log is the job's own, for whoever polls it
@@ -94,9 +95,9 @@ PIDS=
 
 # 4. coverage and the rest of the audit
 if [ -n "$COV" ] && [ -z "$BAD" ]; then
-    sh "$R/bin/proot_run.sh" "$D" sh -c 'coverage combine --keep --data-file="$1/.coverage" "$1" && coverage json --data-file="$1/.coverage" -o /app/coverage.json \
-        && python -m cafe.pm.audit --pytest-receipt && python -m cafe.pm.audit --pytest-done' x "$DS" > "$LOGS/${TAG}_audit.log" 2>&1; r=$?
-    echo "rc=$r" >> "$LOGS/${TAG}_audit.log"
+    job "${TAG}_audit" sh -c 'coverage combine --keep --data-file="$1/.coverage" "$1" && coverage json --data-file="$1/.coverage" -o /app/coverage.json \
+        && python -m cafe.pm.audit --pytest-receipt && python -m cafe.pm.audit --pytest-done' x "$DS"
+    wait $PIDS; r=$?; PIDS=
     [ $r -eq 0 ] || BAD="$BAD audit(rc=$r)"
 elif [ -n "$COV" ]; then
     echo "coverage and audit not run: a job failed"

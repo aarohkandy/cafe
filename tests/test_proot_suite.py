@@ -22,6 +22,7 @@ echo "${PM_CPUS:-unset} ${PM_THREADS:-unset}" >> "$HOME/threads.log"
 [ -z "$n" ] || echo "start $n $(date +%s.%N)" >> "$HOME/calls.log"
 trap 'kill $(jobs -p) 2>/dev/null; echo "term $n" >> "$HOME/calls.log"; exit 143' TERM
 case "$*" in *"${FAKE_FAIL:-no match at all}"*) echo "boom"; exit 1 ;; esac
+case "$*" in *"${FAKE_HANG:-no match at all}"*) echo "hang $*" >> "$HOME/calls.log"; sleep 30 & wait $!; exit 0 ;; esac
 case "$*" in
   *cafe.pm.shares*)
     shift; for a in "$@"; do case "$a" in /data/*) a="$HOME/cafe-worker/cafe/pmdata/${a#/data/}" ;; esac; set -- "$@" "$a"; shift; done
@@ -250,13 +251,20 @@ def test_the_gate_syncs_like_pmx_and_starts_the_suite_detached_under_the_tag(tmp
     assert "proot_run.sh" not in out and "docker" not in out
 
 
-def test_the_gate_defaults_the_host_and_the_directory_and_refuses_what_proot_suite_would(tmp_path):
-    rc, out, _ = sent(tmp_path, "bin/orca_gate.sh", "2", "x1")
-    assert rc == 0 and " cafe-orca " in out and "cafe-worker/cafe/pm_x1/" in out
+def test_the_gate_defaults_the_host_and_refuses_what_proot_suite_would(tmp_path):
+    rc, out, _ = sent(tmp_path, "bin/orca_gate.sh", "2", "x1", PMX="pm_me")
+    assert rc == 0 and " cafe-orca " in out and "cafe-worker/cafe/pm_me/" in out
     for args in (("17", "t"), ("0", "t"), ("2",), ("x", "t"), ("2", "a/b"), ("2", ""), ("2", "t", "--cove"), ("2", "t", "--cov", "x"), ()):
         (tmp_path / "sent.log").unlink(missing_ok=True)
-        rc, out, _ = sent(tmp_path, "bin/orca_gate.sh", *args)
+        rc, out, _ = sent(tmp_path, "bin/orca_gate.sh", *args, PMX="pm_me")
         assert (rc, out) == (2, ""), args                                                                        # refused here, nothing sent
+
+
+@pytest.mark.parametrize("given", [{}, dict(PMX="")])
+def test_r14_m33_the_gate_needs_a_pmx_of_its_own_and_no_longer_makes_one_from_the_tag(tmp_path, given):
+    """M-33: `orca_gate.sh 8 q14` synced onto pm_q14, the code tree of the q14 run, with --delete: the tag names a log, not a directory."""
+    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "8", "q14", **given)
+    assert (rc, out) == (2, "") and "PMX=pm_<you> is required" in err
 
 
 def test_pm_entry_picks_the_worker_script_for_proot_only_and_the_docker_command_does_not_change(tmp_path):
@@ -302,13 +310,13 @@ def test_m28_a_tag_that_is_no_log_name_still_runs(tmp_path, tag):
 
 @pytest.mark.parametrize("tag", BAD_TAGS)
 def test_m28_the_gate_refuses_the_same_tags_before_anything_is_sent(tmp_path, tag):
-    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag)
+    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag, PMX="pm_me")
     assert (rc, out) == (2, "") and "tag" in err
 
 
 @pytest.mark.parametrize("tag", OK_TAGS)
 def test_m28_the_gate_still_sends_the_others(tmp_path, tag):
-    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag)
+    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag, PMX="pm_me")
     assert rc == 0 and f"tmux new-session -d -s {tag} " in out, err
 
 
@@ -321,7 +329,7 @@ SHORT_TAGS = ["a", "9", "-x", "_x", "-"]
 def test_lb0_the_gate_and_the_suite_refuse_the_tags_pmx_would_refuse_as_a_tm(tmp_path, tag):
     """`orca_gate.sh` exports the tag as TM and `pmx.sh` needs 2 or more characters, the first a letter or digit: `pm_tag` let `a`, `-x` and `_x` through
     and the gate stopped in `pmx.sh` with a message about TM. All three scripts now refuse it with one rule, before anything is sent."""
-    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag)
+    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "2", tag, PMX="pm_me")
     assert (rc, out) == (2, "") and err.startswith("tag: 2 or more of letters, digits, _ and -, the first a letter or digit")
     home, env, log = world(tmp_path)
     r = suite(env, "pm_t", "1", tag)
@@ -334,3 +342,57 @@ def test_lb0_a_tm_and_a_tag_go_through_one_rule(tmp_path):
         assert (rc, out) == (2, "") and err.startswith("TM: 2 or more of letters, digits, _ and -, the first a letter or digit"), tm
     rc, out, err = sent(tmp_path, "bin/pmx.sh", "true", PMX="pm_t", TM="ab")
     assert rc == 0, err
+
+
+# ---- round 14 M-19: a count of 20 digits is refused by its length, before a `[` can print "Illegal number" and let it through
+
+BIG = "9" * 20
+
+
+def test_r14_m19_a_k_of_twenty_digits_is_refused_with_exit_2_and_no_shell_error_by_the_gate_and_the_suite(tmp_path):
+    """M-19: K=99999999999999999999 reached `[ "$1" -le 16 ]`, whose own error line ("integer expression expected" or "Illegal number") came first."""
+    rc, out, err = sent(tmp_path, "bin/orca_gate.sh", BIG, "t1", PMX="pm_me")
+    assert (rc, out) == (2, "") and "K: a whole number from 1 to 999999999" in err and "xpression" not in err and "Illegal" not in err
+    home, env, log = world(tmp_path)
+    r = suite(env, "pm_t", BIG, "t1")
+    assert r.returncode == 2 and "K: a whole number from 1 to 999999999" in r.stderr and calls(log) == []
+    assert "xpression" not in r.stderr and "Illegal" not in r.stderr
+    r = suite(env, "pm_t", "17", "t1")
+    assert r.returncode == 2 and "above orca's 32 CPUs" in r.stderr                                      # a short number out of range keeps its own message
+
+
+# ---- round 14 M-38: TERM, INT and HUP act at once in the shares step and in the audit step too
+
+@pytest.mark.parametrize("step, extra", [("cafe.pm.shares", ()), ("cafe.pm.audit", ("--cov",))])
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+def test_r14_m38_a_signal_during_the_shares_step_or_the_audit_step_stops_the_suite_at_once(tmp_path, step, extra, sig):
+    """M-38: both steps ran in the foreground, so the trap waited for them to return: a signal left the audit (minutes of ruff, mypy and coverage) running.
+    The stand-in step sleeps 30 s; the suite must be gone in a few seconds, with the step stopped, its log ended and .pid removed."""
+    home, env, log = world(tmp_path)
+    p = subprocess.Popen(["sh", str(ROOT / "bin/proot_suite.sh"), "pm_t", "2", "t1", *extra], env={**env, "FAKE_HANG": step}, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, start_new_session=True, text=True)
+    try:
+        t = time.time() + 30
+        while time.time() < t and not [l for l in calls(log) if l.startswith("hang ")]:
+            time.sleep(0.1)
+        assert step in log.read_text().split("hang ", 1)[1]                                  # the audit's command has two lines
+        p.send_signal(sig)
+        assert p.wait(timeout=10) == 143
+    finally:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        p.wait()
+    assert [l for l in calls(log) if l.startswith("term")]
+    name = "shares" if step.endswith("shares") else "audit"
+    assert (home / f"cafe-worker/logs/t1_{name}.log").read_text().endswith("rc=143\n")
+    assert not (home / "cafe-worker/cafe/pmdata/shards/t1/.pid").exists()
+
+
+def test_r14_m38_the_shares_and_audit_steps_keep_their_logs_and_their_failure_messages(tmp_path):
+    home, env, log = world(tmp_path)
+    r = suite({**env, "FAKE_FAIL": "cafe.pm.audit"}, "pm_t", "1", "t1", "--cov")
+    assert r.returncode == 1 and "FAILED: audit(rc=1)" in r.stdout
+    assert (home / "cafe-worker/logs/t1_audit.log").read_text() == "boom\nrc=1\n"
+    assert (home / "cafe-worker/logs/t1_shares.log").read_text().endswith("rc=0\n") and "rc=0" not in r.stdout    # the plan, not the rc= line

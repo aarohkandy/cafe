@@ -187,7 +187,9 @@ def test_a_failed_copy_does_not_run_the_job_on_stale_code(tmp_path):
     (tmp_path / "sent.log").unlink()
     r = subprocess.run(["sh", str(ROOT / "bin/pmx.sh"), "true"], cwd=ROOT, capture_output=True, text=True, timeout=30,
                        env={"PATH": f"{tmp_path / 'tools'}:{os.environ['PATH']}", "HOME": str(tmp_path), "PM_HOST": "worker"})
-    assert r.returncode == 1 and not (tmp_path / "sent.log").exists()
+    log = tmp_path / "sent.log"
+    after = log.read_text() if log.exists() else ""                                  # the owner marker is read before the copy (M-33); nothing may follow it
+    assert r.returncode == 1 and "docker run" not in after and ".pmx.owner >" not in after and "rsync" not in after
 
 
 def test_the_worker_side_scripts_stay_inside_too():
@@ -818,6 +820,121 @@ def test_pm_threads_must_be_a_whole_number_from_one(tmp_path, bad):
     assert r.returncode == 2 and "PM_THREADS" in r.stderr and not (tmp_path / "home/argv").exists()
 
 
+# ---- round 14 M-19: a count of 20 digits is refused by its length, not left to a `[` that prints "Illegal number" and falls through
+
+@pytest.mark.parametrize("script, env", BOTH)
+@pytest.mark.parametrize("var, runtime", [("PM_CPUS", "docker"), ("PM_CPUS", "proot"), ("CAFE_MIN_FREE_GB", "proot"), ("PM_THREADS", "proot")])
+@pytest.mark.parametrize("value, ok", [("9" * 20, False), ("1000000000", False), ("999999999", True), ("99", True)])
+def test_r14_m19_a_count_of_ten_digits_or_more_is_refused_before_anything_is_sent(tmp_path, script, env, var, runtime, value, ok):
+    """M-19: the length alone decides (PM_CPUS=99 stays the documented warning on the worker, 999999999 is still a number)."""
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME=runtime, **env, **{var: value})
+    assert (rc == 0 and "rsync" in out) if ok else (rc == 2 and out == "")
+
+
+@pytest.mark.parametrize("var", ["PM_CPUS", "PM_THREADS", "CAFE_MIN_FREE_GB"])
+def test_r14_m19_proot_run_refuses_a_count_of_twenty_digits_started_by_hand_and_prints_no_shell_error(tmp_path, var):
+    """M-19: PM_CPUS=99999999999999999999 printed `[: Illegal number`, then the warning, and ran; CAFE_MIN_FREE_GB made `[` fail into a STOP about the disk."""
+    w, env = proot_world(tmp_path)
+    (w / "bin/proot").write_text(RECORD_ARGV)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], {**env, var: "9" * 20})
+    assert r.returncode == 2 and var in r.stderr and "Illegal" not in r.stderr and "xpression" not in r.stderr and "STOP" not in r.stderr
+    assert not (tmp_path / "home/argv").exists()
+
+
+def test_r14_m19_proot_run_still_runs_with_a_short_cpu_count_above_32_and_only_warns(tmp_path):
+    w, env = proot_world(tmp_path, PM_CPUS="99")
+    (w / "bin/proot").write_text(RECORD_ARGV)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    assert "above orca's 32 CPUs" in r.stderr and "Illegal" not in r.stderr and (tmp_path / "home/argv").exists()
+
+
+def test_r14_m19_orca_sync_refuses_a_free_space_figure_of_twenty_digits_before_anything_is_sent(tmp_path):
+    """M-19 sibling: the figure is compared with `[ -ge ]` on homebase, which printed 'integer expression expected' and stopped on the wrong ground."""
+    home, env = sync_world(tmp_path)
+    log = log_ssh(tmp_path)
+    r = run(["sh", str(ROOT / "bin/orca_sync.sh"), "orca", "root"], {**env, "CAFE_MIN_FREE_GB": "9" * 20})
+    assert r.returncode == 2 and "CAFE_MIN_FREE_GB" in r.stderr and not log.exists() and r.stdout == ""
+
+
+# ---- round 14 M-33: one checkout owns each pm_<you> directory on the worker; the gate has no directory made from its tag
+
+def swallow_the_marker_write(tmp_path):
+    """The stand-in ssh of `live`, except that the command which writes .pmx.owner does nothing."""
+    (tmp_path / "tools" / "ssh").write_text('#!/bin/sh\nshift 3\ncase "$*" in *"> "*.pmx.owner*) exit 0 ;; esac\ncd "$HOME" || exit 1\nexec sh -c "$*"\n')
+
+
+def test_r14_m33_pmx_sh_will_not_empty_a_directory_another_checkout_owns_and_pm_take_takes_it(tmp_path):
+    """M-33: a second `pmx.sh` onto a PMX in use (or `orca_gate.sh` with a tag that is also a directory) replaced the files of the first under its job."""
+    home, env = live(tmp_path, "ssh", "docker", PMX="pm_t")
+    real_rsync_without_modes(tmp_path)
+    dest = home / "work" / "cafe" / "pm_t"
+    dest.parent.mkdir(parents=True)
+    a, b = tmp_path / "lead", tmp_path / "other"
+    for src, files in ((a, ("common.py", "test_new.py")), (b, ("common.py",))):
+        src.mkdir()
+        for f in files:
+            (src / f).write_text(src.name)
+    assert run(["sh", str(ROOT / "bin/pmx.sh"), "true"], env, cwd=a).returncode == 0
+    assert str(a.resolve()) in (dest / ".pmx.owner").read_text()
+    r = run(["sh", str(ROOT / "bin/pmx.sh"), "true"], env, cwd=b)
+    assert r.returncode == 1 and "belongs to" in r.stderr and str(a.resolve()) in r.stderr and "PM_TAKE=1" in r.stderr
+    assert sorted(p.name for p in dest.iterdir() if p.name != ".pmx.owner") == ["common.py", "test_new.py"]
+    assert (dest / "common.py").read_text() == "lead"                                                                    # nothing was sent
+    (a / "common.py").write_text("lead2")
+    assert run(["sh", str(ROOT / "bin/pmx.sh"), "true"], env, cwd=a).returncode == 0 and (dest / "common.py").read_text() == "lead2"      # the owner again
+    r = run(["sh", str(ROOT / "bin/pmx.sh"), "true"], {**env, "PM_TAKE": "1"}, cwd=b)
+    assert r.returncode == 0, r.stderr
+    assert sorted(p.name for p in dest.iterdir() if p.name != ".pmx.owner") == ["common.py"] and str(b.resolve()) in (dest / ".pmx.owner").read_text()
+    assert run(["sh", str(ROOT / "bin/pmx.sh"), "true"], env, cwd=a).returncode == 1                                          # and now a is the other one
+
+
+def test_r14_m33_a_directory_with_no_marker_is_synced_and_other_pmx_directories_are_not_touched(tmp_path):
+    home, env = live(tmp_path, "ssh", "docker", PMX="pm_t")
+    real_rsync_without_modes(tmp_path)
+    other = home / "work" / "cafe" / "pm_other"
+    other.mkdir(parents=True)
+    (other / ".pmx.owner").write_text("elsewhere:/x\n")
+    (other / "f.py").write_text("theirs")
+    a = tmp_path / "lead"
+    a.mkdir()
+    (a / "f.py").write_text("mine")
+    assert run(["sh", str(ROOT / "bin/pmx.sh"), "true"], env, cwd=a).returncode == 0
+    assert (home / "work/cafe/pm_t/f.py").read_text() == "mine"
+    assert (other / "f.py").read_text() == "theirs" and (other / ".pmx.owner").read_text() == "elsewhere:/x\n"
+
+
+def test_r14_m33_the_marker_survives_the_delete_of_the_sync_so_that_no_other_checkout_sees_a_gap(tmp_path):
+    """The marker is written after the copy, so a copy that deleted it would leave a gap between the two in which a second checkout finds no owner."""
+    home, env = live(tmp_path, "ssh", "docker", PMX="pm_t")
+    real_rsync_without_modes(tmp_path)
+    a = tmp_path / "lead"
+    a.mkdir()
+    (a / "f.py").write_text("1")
+    dest = home / "work" / "cafe" / "pm_t"
+    dest.parent.mkdir(parents=True)
+    assert run(["sh", str(ROOT / "bin/pmx.sh"), "true"], env, cwd=a).returncode == 0
+    first = (dest / ".pmx.owner").read_text()
+    swallow_the_marker_write(tmp_path)
+    (a / "g.py").write_text("2")
+    assert run(["sh", str(ROOT / "bin/pmx.sh"), "true"], env, cwd=a).returncode == 0
+    assert (dest / "g.py").exists() and (dest / ".pmx.owner").read_text() == first
+
+
+def test_r14_m33_the_gate_from_a_new_worktree_runs_with_a_plain_pm_take_and_not_without(tmp_path):
+    """The documented gate command is run from a new merge worktree every round, which is another checkout: PM_TAKE=1 alone must be enough."""
+    home, env = live(tmp_path, "ssh", "rsync", "tmux", PMX="pm_g")
+    d = home / "cafe-worker" / "cafe" / "pm_g"
+    (d / "bin").mkdir(parents=True)
+    (d / "bin" / "proot_suite.sh").write_text("exit 0\n")
+    (d / ".pmx.owner").write_text("laptop:/elsewhere/cafe-r13m\n")
+    gate = ["sh", str(ROOT / "bin/orca_gate.sh"), "8", "gate1", "--cov"]
+    r = run(gate, env)
+    assert r.returncode == 1 and "belongs to laptop:/elsewhere/cafe-r13m" in r.stderr and not (home / "rsync.log").exists()
+    r = run(gate, {**env, "PM_TAKE": "1"})
+    assert r.returncode == 0, r.stderr
+    assert "--delete" in (home / "rsync.log").read_text() and (d / ".pmx.owner").read_text().strip() != "laptop:/elsewhere/cafe-r13m"
+
+
 # ---- round 10 M-30: bin/orca_ready.sh takes the caller's PMX and names its marker for it; only a name of ours fails the last check
 
 def ready_world(tmp_path):
@@ -1073,3 +1190,39 @@ def test_r13_m24_run_sh_tells_the_container_the_commit_and_whether_the_tree_is_d
     (tools / "git").chmod(stat.S_IRWXU)
     rc, out = sent(tmp_path, "run.sh", "python", "-m", "cafe.cfd", "external")
     assert rc == 0 and "-e CAFE_GIT_SHA=0123456789abcdef0123456789abcdef01234567 -e CAFE_GIT_DIRTY=1 " in out and "cafe python -m cafe.cfd external" in out
+
+
+def test_r14_m33_a_second_sync_from_the_owning_checkout_is_refused_while_its_detached_job_runs_and_not_after(tmp_path, request):
+    """M-33, first sentence: the owner marker only compares checkouts, so `pmx.sh` from the same checkout replaced the files under a TM= job."""
+    home, env = live(tmp_path, "ssh", "rsync", "docker", "tmux", PMX="pm_t", TM="held")
+    real_rsync_without_modes(tmp_path)
+    dest = home / "work" / "cafe" / "pm_t"
+    dest.parent.mkdir(parents=True)
+    a = tmp_path / "lead"
+    a.mkdir()
+    (a / "README.md").write_text("r")
+    (a / "common.py").write_text("1")
+    release = tmp_path / "release"
+    request.addfinalizer(lambda: release.write_text(""))       # a failed assert must not leave the job looping
+    job = tmp_path / "job.sh"
+    job.write_text(f"while [ ! -e {release} ]; do sleep 0.2; done\n")
+    pmx = ["sh", str(ROOT / "bin/pmx.sh")]
+    assert run([*pmx, "sh", str(job)], env, cwd=a).returncode == 0
+    (a / "README.md").unlink()
+    (a / "common.py").write_text("22")
+    r = run([*pmx, "true"], {**env, "TM": "other"}, cwd=a)
+    assert r.returncode == 1 and "held" in r.stderr and "still running" in r.stderr and "PM_TAKE=1" in r.stderr
+    assert (dest / "README.md").exists() and (dest / "common.py").read_text() == "1"                                  # nothing was sent
+    assert run([*pmx, "true"], {k: v for k, v in env.items() if k != "TM"}, cwd=a).returncode == 1                  # a foreground sync is refused the same way
+    r = run([*pmx, "true"], {**{k: v for k, v in env.items() if k != "TM"}, "PM_TAKE": "1"}, cwd=a)
+    assert r.returncode == 0, r.stderr                                                                             # PM_TAKE=1 syncs anyway
+    assert not (dest / "README.md").exists()
+    release.write_text("")
+    for _ in range(100):                                                                                           # the job ends, its session is gone
+        if not (home / "tmuxstate" / "held").exists():
+            break
+        time.sleep(0.1)
+    (a / "common.py").write_text("three")
+    r = run([*pmx, "true"], {k: v for k, v in env.items() if k != "TM"}, cwd=a)
+    assert r.returncode == 0, r.stderr                                                                     # a finished job leaves a name only
+    assert (dest / "common.py").read_text() == "three"
