@@ -1017,3 +1017,52 @@ def test_r13_m14_the_stamp_command_reports_a_read_only_directory_and_keeps_a_sym
     r = run(str(tmp_path / "sl.json"))
     assert r.returncode == 0, r.stderr
     assert (tmp_path / "sl.json").is_symlink() and R.stored(real, "G") is not None                  # the target was stamped; the link is still a link
+
+
+# ---- review round 14, M-3: the command line of `python -m cafe.receipts`
+
+GROUPS = ("geometry_receipts", "env_receipts", "weather_receipts", "dynamics_receipts", "hull_lift_algebra_receipts", "ocean_receipts", "bem_receipts",
+          "fea_receipts", "fleet_receipts")
+
+
+def no_receipts(monkeypatch):
+    """Every receipt group replaced by a recorder; -> the list of what ran."""
+    ran = []
+    for g in GROUPS:
+        monkeypatch.setattr(R, g, lambda g=g: ran.append(g))
+    monkeypatch.setattr(R, "cfd_receipts", lambda d: ran.append(("cfd", d)))
+    monkeypatch.setattr(R, "crosscheck_receipts", lambda d: ran.append(("crosscheck", d)))
+    return ran
+
+
+@pytest.mark.parametrize("argv", [["bogus"], ["stmap", "f.json"], ["--bogus"], ["a_dir_that_is_not_there"], ["stamp"], [".", "extra"]])
+def test_r14_m3_a_word_that_is_no_results_directory_is_a_usage_error_and_no_receipt_starts(argv, tmp_path, monkeypatch, capsys):
+    """Round 14, M-3: only `stamp` was special; any other first word was the results directory, unchecked, and the whole app suite ran for it (a typo of
+    `stamp` took minutes, and `stamp` with no file exited 1 where its siblings exit 2)."""
+    monkeypatch.chdir(tmp_path)
+    ran = no_receipts(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        R.main(argv)
+    assert e.value.code == 2 and ran == [] and "usage: python -m cafe.receipts" in capsys.readouterr().err
+    assert list(tmp_path.iterdir()) == []                                                   # nothing was written
+
+
+def test_r14_m3_the_command_word_of_a_real_run_exits_2_with_the_usage_and_starts_nothing(tmp_path):
+    import subprocess, sys
+    r = subprocess.run([sys.executable, "-m", "cafe.receipts", "bogus"], cwd=pr.ROOT, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 2 and "usage: python -m cafe.receipts" in r.stderr and "[PASS]" not in r.stdout and r.stdout == ""
+
+
+def test_r14_m3_a_results_directory_runs_everything_and_receipts_json_goes_through_the_atomic_writer(tmp_path, monkeypatch, capsys):
+    ran = no_receipts(monkeypatch)
+    real = tmp_path / "elsewhere.json"
+    real.write_text("[]")
+    (tmp_path / "receipts.json").symlink_to(real)
+    monkeypatch.setattr(R, "OUT", [dict(group="G", ok=True, claim="c")])
+    assert R.main([str(tmp_path)]) == 0
+    assert ran == [*GROUPS, ("cfd", tmp_path), ("crosscheck", tmp_path)]
+    assert (tmp_path / "receipts.json").is_symlink()                                                    # write_json follows the link
+    assert json.loads(real.read_text()) == [dict(group="G", ok=True, claim="c")]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere.json", "receipts.json"] and "1/1 receipts pass" in capsys.readouterr().out
+    monkeypatch.setattr(R, "OUT", [dict(group="G", ok=False, claim="c")])
+    assert R.main([str(tmp_path)]) == 1

@@ -5,7 +5,7 @@ the same list, so what the user sees is exactly what was tested.
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, hashlib, json, os, pathlib, platform, sys, time
+import argparse, contextlib, datetime as dt, hashlib, json, os, pathlib, platform, sys, time
 from collections.abc import Iterator
 from typing import Any
 
@@ -651,20 +651,32 @@ def crosscheck_receipts(results: Any) -> None:
     _tag(n0, tag)
 
 
-if __name__ == "__main__":
-    if sys.argv[1:2] == ["stamp"]:                                 # python -m cafe.receipts stamp FILE...: see `stamp_file`
-        if len(sys.argv) < 3:
-            sys.exit("usage: python -m cafe.receipts stamp FILE [FILE...]")
+RESULTS_DEFAULT = "/work/runs"
+
+
+def main(argv: list[str]) -> int:
+    """`python -m cafe.receipts [RESULTS_DIR]` runs every app receipt (RESULTS_DIR, default `RESULTS_DEFAULT`, holds the stored CFD and SITL results and gets
+    receipts.json); `python -m cafe.receipts stamp FILE...` stamps stored results (see `stamp_file`). A first word that is no existing directory, and `stamp`
+    with no file, is a usage error (exit 2) before any receipt runs: any word used to be taken for the results directory (round 14, M-3)."""
+    p = argparse.ArgumentParser(prog="python -m cafe.receipts", description=main.__doc__)
+    p.add_argument("words", nargs="*", metavar="RESULTS_DIR | stamp FILE...")
+    w = p.parse_args(argv).words
+    if w[:1] == ["stamp"]:                                         # see `stamp_file`
+        if len(w) < 2:
+            p.error("stamp needs at least one FILE")
         try:
-            for f in sys.argv[2:]:
+            for f in w[1:]:
                 print(f"stamped {stamp_file(f)}")
         except ValueError as e:                                     # a ConfigError: the file is missing, not JSON, or not an object; or no commit to name
             sys.exit(f"error: {e}")
         except OSError as e:                                        # a read-only directory (/work is mounted read-only under pm.sh), a full disk
             from cafe.pm.config import os_error_text
             sys.exit(f"error: nothing was stamped: {os_error_text(e)}")
-        sys.exit(0)
-    results = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path("/work/runs")
+        return 0
+    if len(w) > 1 or (w and not pathlib.Path(w[0]).is_dir()):
+        p.error(f"{' '.join(w)!r} is not one existing results directory (the only other command is `stamp FILE...`); make the directory first, "
+                f"or give no argument for {RESULTS_DEFAULT}")
+    results = pathlib.Path(w[0]) if w else pathlib.Path(RESULTS_DEFAULT)
     t0 = time.time()
     geometry_receipts()
     env_receipts()
@@ -677,8 +689,14 @@ if __name__ == "__main__":
     fleet_receipts()
     cfd_receipts(results)
     crosscheck_receipts(results)
-    (results / "receipts.json").write_text(json.dumps(OUT, indent=1)) if results.exists() else None
+    if results.is_dir():                                            # the default /work/runs is not there on a bare machine; a named one was checked above
+        from cafe.pm.config import write_json
+        write_json(results / "receipts.json", OUT, indent=1)
     scored = [r for r in OUT if r.get("kind") != "context"]
     bad = [r for r in scored if not r["ok"]]
     print(f"{len(scored) - len(bad)}/{len(scored)} receipts pass, {len(OUT) - len(scored)} context rows ({time.time() - t0:.0f}s)")
-    sys.exit(1 if bad else 0)
+    return 1 if bad else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

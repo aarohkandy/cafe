@@ -396,6 +396,31 @@ def test_compare_wraps_directions_through_north_and_ignores_calm():
     assert c["dir_n"] == 0 and np.isnan(c["dir_bias_deg"]) and np.isclose(c["speed_bias"], 0.0, atol=1e-9)
 
 
+@pytest.mark.parametrize("model_scale, truth_speed", [(7.5, 0.4), (0.4 / 3.0, 3.0)])
+def test_r14_m41_a_direction_needs_both_speeds_at_the_one_m_s_floor_not_either(model_scale, truth_speed):
+    """Round 14, M-41: `fast = ws >= 1 & ts >= 1` survived as `|`: the calm test set the model to the mooring's own 0.4 m/s, so both sides were below the
+    floor. One side at 3 m/s and the other at 0.4 m/s (either way round) has no direction."""
+    truth = moored(speed=truth_speed)
+    tt = np.arange(3600.0, 7 * 3600, 3600.0) + T0
+    c = tao.compare({"M": model_of(truth, tt, model_scale, 40.0)}, {"M": truth})["M"]
+    assert c["n"] == len(tt) and c["dir_n"] == 0 and np.isnan(c["dir_bias_deg"])
+    both = tao.compare({"M": model_of(moored(speed=3.0), tt, 1.0, 40.0)}, {"M": moored(speed=3.0)})["M"]       # at 3 m/s on both sides it has one
+    assert both["dir_n"] == len(tt) and np.isclose(both["dir_bias_deg"], 40.0, atol=1e-6)
+
+
+def test_r14_m41_the_roughness_law_is_pinned_at_calm_moderate_strong_and_above_the_charnock_cap():
+    """Round 14, M-41: CH2 -0.0050 to -0.0040, UMAX 19 to 25, the 1e-4 floor on u* and the fixed-point iteration counts (30 in `cd10n`, 20 in
+    `wind_to_10m`) survived every test: the tolerances were loose, or the constants were copied into the test. The values are those of Edson et al. (2013)
+    as coded (kappa 0.4, alpha = 0.0017 min(U10n, 19) - 0.005, smooth term 0.11 nu/u*, nu 1.5e-5), found independently by a fixed point run to
+    convergence in plain Python (round 14); they differ from COARE 3.5's own Cd by at most the receipt's 0.0062. 25 m/s is above the cap of 19; 0.01 m/s
+    has u* below the 1e-3 floor."""
+    u = np.array([0.01, 5.0, 10.0, 15.0, 25.0])
+    want = [0.002490902921634846, 0.0009226595924135322, 0.0013211386039536906, 0.0018266032505883819, 0.0027335169401432415]
+    assert np.allclose(tao.cd10n(u), want, rtol=1e-6, atol=0)
+    got = [float(tao.wind_to_10m(s, z)) for s, z in ((6.0, 4.0), (22.0, 4.0), (0.01, 4.0), (3.0, 2.0))]
+    assert np.allclose(got, [6.470721471397069, 24.99302335593346, 0.011271774871676484, 3.4133855999219445], rtol=1e-6, atol=0)
+
+
 def test_compare_pools_and_skips_what_does_not_match():
     a, b = moored(6.0, 100.0), moored(4.0, 80.0, 300.0)
     tt = np.arange(3600.0, 7 * 3600, 3600.0) + T0
