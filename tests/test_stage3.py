@@ -228,6 +228,21 @@ def test_r14_m34_a_wall_cell_with_no_surface_normal_gets_no_shear_and_is_counted
     assert wm.no_shear_cells(plate) == 0 and np.asarray(plate.valid).all()
 
 
+def test_r14_m34_the_eddy_viscosity_next_to_a_cell_without_a_normal_is_finite_and_the_shear_stays_zero():
+    """The stated choice of M-34: `near_wall_tau` is not changed, so the fluid next to a no-normal wall cell still gets the mixing-length eddy
+    viscosity from that cell's u_tau (finite, only ever raising tau) while the cell itself gets no shear: a thin slot under-counts its drag, it does
+    not blow up. Pins the choice; it passed before the M-34 change too (this is not a fix)."""
+    solid = np.zeros((8, 11, 8), bool)
+    solid[:, :5], solid[:, 6:] = True, True
+    ws = wm.WallSet(*(jnp.asarray(a) for a in wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))))
+    nu = 0.01
+    st_ = wm.wall_state(jnp.zeros((3,) + solid.shape).at[0].set(0.02), ws, nu)
+    new = np.asarray(wm.near_wall_tau(jnp.full(solid.shape, 0.5001), ws, st_, nu))
+    assert ws.near.shape[1] > 0 and not np.asarray(ws.valid).any()                    # the premise: fluid cells in the layer, every wall cell without a normal
+    assert np.isfinite(new).all() and (new >= 0.5001 - 1e-7).all() and (new > 0.5001).any()
+    assert float(jnp.abs(st_["fw"]).max()) == 0.0
+
+
 def test_wall_force_adds_exactly_the_stress_momentum_to_the_fluid_and_reports_the_body_force():
     solid, ws = _plate_ws()
     shape = solid.shape

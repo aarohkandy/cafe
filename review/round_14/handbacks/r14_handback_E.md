@@ -80,6 +80,13 @@ Verification: see the last section.
 
 ---
 
+## Follow-up pass (items the first pass left open)
+
+- **Not problems (said and moved on):** "not run" list (mutation, slow receipts, demo, coverage, LES windows with `--gpus 0`): scope, stated in the first pass. `lbm.physics_sha` and `app_digest` moves: documents, handed to F (CHANGELOG "Still pending" paragraph, above). `credibility._stored_rows` line 385 (P-R14E2): `credibility.py` is batch B's file (batch table), so it stays open for B or F; nothing in batch E's files is left with a second copy (`nest.SPHERE_RUNS` is `lbm.SPHERE_RUNS`; `lbm.receipts`' `{"100": 8, ...}` d table is indexed by those tags and raises `KeyError` for a fourth, so it cannot drift silently; `nest.PLAN` keys are tested against the list).
+- **`wall["no_shear_cells"]` and `note` not in the stage-3 row:** `pipeline_windows.py` is batch B's file and the stage-3 row is built from named keys at its `run_window` call (`r["wall"]` is read for `run_steps`, `planned_steps`, `diverged`, `setup_s` ...). Not edited here. Hand-off to B, if wanted: copy `r["note"]` (empty unless a wall cell has no normal) into the row's `reasons` or ledger note. Latent: no geometry the code builds has such a cell.
+- **`near_wall_tau` next to a cell without a normal:** kept (stated in the M-34 DECISIONS row: finite, only raises tau; the thin slot under-counts drag instead of over-counting it). It was untested; `tests/test_stage3.py::test_r14_m34_the_eddy_viscosity_next_to_a_cell_without_a_normal_is_finite_and_the_shear_stays_zero` now pins it (finite, never below the base tau, raised somewhere, `fw` exactly 0). It passes on d5aea52's `wall_set` too: a pin of a stated choice, not a fix, so no failing-first run.
+- **Sweep for siblings of M-34:** `WallSet.nrm` is read only in `wallmodel.py` (`wall_state`, `wall_set`, `pad_wall_set`); `windows.py:360` has a lambda argument named `nrm` it never uses; `nest.py` reads `ws.valid` only. Nothing else divides by the normal.
+
 ## What I checked could break, and how
 
 - `wall_set` has one production caller, `nest.make_geom` (and the tests). Readers of `WallSet.valid`: `wall_state`, `wall_field`, `yplus_fraction`, `nest.py` (`ok = geom.ws.valid` for the y+ share and the mean u_tau), `pad_wall_set` (pads with False, unchanged). Where nothing is invalid (every geometry above), all of them compute the same arrays as before; where something is, each of them excludes it in one place (`valid`). `near_wall_tau` is deliberately unchanged (stated in the row).
