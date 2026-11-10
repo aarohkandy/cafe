@@ -1,6 +1,7 @@
 """cafe.pm.env.bathy: GEBCO cut to a box by HTTP byte ranges (contiguous and chunked layouts, across the dateline), the GOFS and
 UMWM fallbacks, the fallback order, and the Tagged answers."""
 import json
+import types
 
 import numpy as np
 import pytest
@@ -141,6 +142,37 @@ def test_bilinear_depth_is_exact_for_a_linear_field_and_the_same_in_any_longitud
 def test_negative_depth_cannot_happen_and_nan_is_land():
     g = b.Bathymetry([0.0, 1.0], [0.0, 1.0], np.array([[np.nan, -5.0], [10.0, 20.0]]), "x", 1.0, 1.0)
     assert (g.depth >= 0).all() and g(0.0, 0.0).value == 0.0
+
+
+@pytest.mark.parametrize("make", ["empty", "garbage", "cut", "no_attrs", "no_elevation"])
+def test_r14_m23_a_gebco_cut_that_is_no_readable_cache_is_one_error_that_says_to_refetch(server, gebco, tmp_path, make, monkeypatch):
+    """`: > bathy/gebco2026_*.npz` made `np.load` raise EOFError, which no caller caught: the ingest's `_gebco_cached` raised instead of answering False,
+    so fetch could not replace the file. Now `from_gebco` says it once, for `_gebco_cached`, `choose` and `receipts` alike."""
+    from cafe.pm import pipeline
+    good = b.fetch_gebco(BOX, tmp_path / "good.npz", gebco["flat"])
+    p = tmp_path / "gebco2026_x.npz"
+    z = dict(np.load(good))
+    if make == "empty":
+        p.write_bytes(b"")
+    elif make == "garbage":
+        p.write_bytes(b"garbage")
+    elif make == "cut":
+        p.write_bytes(good.read_bytes()[:-2000])
+    else:
+        z.pop("attrs" if make == "no_attrs" else "elevation")
+        np.savez(p, **z)
+    with pytest.raises(ValueError, match=rf"{p}: not a readable GEBCO cache \(\w+.*\); delete it and refetch"):
+        b.from_gebco(p)
+    assert pipeline._gebco_cached(p) is False
+    assert pipeline._gebco_cached(good) is True
+    # the ingest's one place a download starts: offline, the check fails with the command that fetches, instead of an EOFError out of `present()`
+    checks, notes = [], []
+    L = types.SimpleNamespace(check=lambda name, ok, note=None: checks.append((name, ok, note)), note=notes.append)
+    ctx = types.SimpleNamespace(mission_path="m.yaml", log=lambda *_: None)
+    monkeypatch.setenv("CAFE_OFFLINE", "1")
+    assert pipeline._need(ctx, L, "gebco", "the GEBCO_2026 cut for the box", lambda: pipeline._gebco_cached(p), lambda: None) is False
+    assert checks == [("gebco_present", False, "the GEBCO_2026 cut for the box is not cached and CAFE_OFFLINE is set, so nothing is downloaded: "
+                                              "unset CAFE_OFFLINE and run `python -m cafe.pm fetch --mission m.yaml`")]
 
 
 def test_cache_with_altered_raster_is_refused(server, gebco, tmp_path):

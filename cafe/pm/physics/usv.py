@@ -105,6 +105,7 @@ STRINGS = ("radio_900mhz", "radio_2g4", "iridium_link")
 
 # ------------------------------------------------------------------ parameters
 
+VPP_BIAS_CLIP = (-0.9, 0.5)             # the fractional speed change a drawn member may have (factor = 1 + bias); the platform's mean must lie inside it
 # What the model reads from `params`, with the kind of value each must be (physics.check_params; see glider.REQUIRED). Includes the keys stage 1 and the
 # stage-3 windows read (antenna height, keel). Angles are bounded and the mass is 1 to 1e5 kg (round 8, M-28: the bounds are choices, each is in the
 # refusal); so are the size, area, metacentric height, battery, hotel load and heights (round 8, L1).
@@ -119,8 +120,9 @@ REQUIRED = dict(
     wind_area_front_m2="nonneg", wind_area_side_m2="nonneg", wind_cd_front="nonneg", wind_cd_side="nonneg", wind_height_m="pos<=50",
     rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms=f"pos<={WAVE_U_MAX}", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos",
     chiodi_max_sog_ms="pos", chiodi_max_wind_ms="pos", chiodi_band="nonneg", sun_overpredict_lo="nonneg", sun_overpredict_hi="nonneg", battery_wh="pos<=1e6",
-    solar_area_m2="nonneg", solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="nonneg<=50", vpp_bias_mean="any",
-    vpp_bias_sd="nonneg", current_z_m="any", tack_time_s="nonneg", tack_speed_frac="unit", tack_horizon_s="pos", replan_s="pos",
+    solar_area_m2="nonneg", solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="nonneg<=50",
+    vpp_bias_mean=f"range:{VPP_BIAS_CLIP[0]}:{VPP_BIAS_CLIP[1]}", vpp_bias_sd="nonneg", current_z_m="any", tack_time_s="nonneg", tack_speed_frac="unit",
+    tack_horizon_s="pos", replan_s="pos",
 )
 # Every mission default the model indexes (`md["..."]`; a test reads the literals). Present, finite and in range: a threshold or a width above 0, a sustain
 # time 0 or above (0: at once), track_tolerance_km up to the mission schema's 1000; cap_cycles also takes a log of (sqrt(2 ln N): N >= 1).
@@ -486,15 +488,17 @@ def roll_sigma_deg(P: dict[str, Any], hs: Arr, tp: Arr, chi_deg: Arr) -> Arr:
 # ------------------------------------------------------------------ Stage 1
 
 def draw_vpp_bias(P: dict[str, Any], members: int, seed: int = 0) -> Arr:
-    """Fractional VPP speed change per member ~ N(vpp_bias_mean, vpp_bias_sd), clipped to [-0.9, 0.5] (factor = 1 + bias)."""
-    return np.clip(np.random.default_rng(seed).normal(P["vpp_bias_mean"], P["vpp_bias_sd"], members), -0.9, 0.5)
+    """Fractional VPP speed change per member ~ N(vpp_bias_mean, vpp_bias_sd), clipped to `VPP_BIAS_CLIP` (factor = 1 + bias). The mean must lie inside the
+    clip (a percent typed for it was clipped to a speed factor of 0.1 without a word: round 14, M-9), as `load_platform` already checks for a file."""
+    check_params({"vpp_bias_mean": REQUIRED["vpp_bias_mean"]}, {"vpp_bias_mean": P["vpp_bias_mean"]}, "usv params", "saildrone_explorer")
+    return np.clip(np.random.default_rng(seed).normal(P["vpp_bias_mean"], P["vpp_bias_sd"], members), *VPP_BIAS_CLIP)
 
 
 class USVSim:
     """M-member wing-sail USV ensemble.  `env` is a cafe.pm.env Environment, `start` = (lon, lat) scalars or (M,) arrays,
     `t0` epoch seconds.  mission: dict(mode='section'|'station', waypoints=[(lon, lat), ...] or station=(lon, lat), repeat=False,
     seed=0, plus any mission_defaults key: becalmed_after_h, track_tolerance_km, corridor_km, wp_radius_m, roll_limit_deg,
-    calm_sustain_s, stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change} (default draws N(vpp_bias_mean, vpp_bias_sd)).
+    calm_sustain_s, stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change, > -1} (default draws N(vpp_bias_mean, vpp_bias_sd)).
     The wind is read at the anemometer height, the current at current_z_m; wind/current errors are the caller's environment's."""
 
     def __init__(self, params: dict[str, Any], members: int, env: Any, start: tuple[Arr, Arr], t0: float, mission: dict[str, Any],
@@ -518,6 +522,9 @@ class USVSim:
         pt = perturb or {}
         bias = pt["vpp_bias"] if "vpp_bias" in pt else draw_vpp_bias(P, M, int(md.get("seed", 0)))
         self.fac = 1.0 + np.broadcast_to(np.asarray(bias, float), (M,)).copy()
+        if (self.fac <= 0).any():                                                       # round 14, M-9: positive on every path (the drawn bias is clipped)
+            raise ValueError(f"vpp_bias {np.asarray(bias, float).min():g}: the speed factor 1 + bias is {self.fac.min():g}, not > 0; the bias is a fraction "
+                             f"(-0.3 for 30 % slower), not a percent")
         lon, lat = (np.broadcast_to(np.asarray(a, float), (M,)).copy() for a in start)
         nf = ~(np.isfinite(lon) & np.isfinite(lat))                                      # round 7, M-16: a non-finite start is a labelled failure from t = 0
         self.lon, self.lat = np.where(nf, 0.0, lon), np.where(nf, 0.0, lat)               # (finite, so the step stays finite)

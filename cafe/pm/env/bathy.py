@@ -18,7 +18,7 @@ unit, why, what replaces it): GEBCO deep-ocean depth from satellite-predicted ba
 the grid-level quantization (a uniform distribution over the level spacing, computed, not assumed) except the open last level (an assumed
 sigma, bathy.gofs_open_level_sigma_m), UMWM unknown.
 """
-import concurrent.futures as cf, functools, hashlib, json, os, pathlib
+import concurrent.futures as cf, functools, hashlib, json, os, pathlib, zipfile, zlib
 from typing import Any
 
 import numpy as np
@@ -141,12 +141,19 @@ def fetch_gebco(box: Any, out_path: Any, url: str = GEBCO_URL, workers: int = 16
 
 
 def from_gebco(path: Any) -> Bathymetry:
-    """Bathymetry from a fetch_gebco cache. Verifies the stored SHA-256 of the raster."""
-    z = np.load(path)
-    attrs = json.loads(str(z["attrs"]))
-    if hashlib.sha256(np.ascontiguousarray(z["elevation"]).tobytes()).hexdigest() != attrs["sha256"]:
+    """Bathymetry from a fetch_gebco cache. Verifies the stored SHA-256 of the raster. A file that is no readable cache (empty, cut short, not an archive,
+    an array or `attrs` missing) is a ValueError naming it and saying to delete and refetch, whichever caller reads it: `np.load` raises EOFError for an
+    empty one, which no caller's `except` listed (round 14, M-23)."""
+    try:
+        with np.load(path) as z:
+            attrs = json.loads(str(z["attrs"]))
+            lon, lat, elev = z["lon"], z["lat"], np.ascontiguousarray(z["elevation"])
+            want, doi = attrs["sha256"], attrs["doi"]
+    except (EOFError, zipfile.BadZipFile, zlib.error, KeyError, ValueError) as e:
+        raise ValueError(f"{path}: not a readable GEBCO cache ({type(e).__name__}: {e}); delete it and refetch") from e
+    if hashlib.sha256(elev.tobytes()).hexdigest() != want:
         raise ValueError(f"{path}: raster SHA-256 differs from the one recorded at download; delete it and refetch")
-    return Bathymetry(z["lon"], z["lat"], -z["elevation"].astype(float), f"GEBCO_2026 15 arc-second ({attrs['doi'] or 'doi n/a'})",
+    return Bathymetry(lon, lat, -elev.astype(float), f"GEBCO_2026 15 arc-second ({doi or 'doi n/a'})",
                       GEBCO_RES_DEG * M_PER_DEG, functools.partial(_relative, "gebco_rel_sigma"))
 
 

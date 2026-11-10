@@ -10,12 +10,19 @@ memory once, however many workers read it. A task's function and arguments trave
 everything else is its value. A file's name is never reused, and the file goes when the last of the parent's maps of it does (an
 environment the pipeline rebuilds takes its files with it); a queued task's maps are alive in the parent until its result is back (`Pool.submit` holds
 the task's arguments, not only their pickle, until its future is done).
-The pickles pass only between this process and the workers it spawned, never through a file another user can write."""
+The pickles pass only between this process and the workers it spawned, never through a file another user can write.
+
+A killed run leaves nothing for the next one (round 14, M-25). `atexit` removes the directory on a normal exit; SIGTERM and SIGHUP, which run no `atexit`, are
+caught once (only where nobody has installed a handler or an ignore: a signal handler another part of the program set stays theirs) to remove it and
+die of the signal as before; SIGKILL cannot be caught, so the next run's first `_share` removes the `cafe-share-<pid>-*` directories beside its own that a dead
+process of the same user left (not another user's, and not one whose pid is alive: a pid a live process has reused keeps its dead neighbour's directory).
+A worker exits when its parent does, whichever way that ended: it would otherwise run its task to the end, and a queued one is not read."""
 from __future__ import annotations
 
-import atexit, concurrent.futures as cf, contextlib, faulthandler, importlib, io, itertools, mmap, multiprocessing as mp, os, pathlib, pickle, shutil, tempfile
-import threading, weakref
+import atexit, concurrent.futures as cf, contextlib, faulthandler, importlib, io, itertools, mmap, multiprocessing as mp, os, pathlib, pickle, re, shutil
+import signal, stat, tempfile, threading, weakref
 from collections.abc import Callable, Iterator
+from types import FrameType
 from typing import Any
 
 import numpy as np
@@ -147,14 +154,63 @@ def _release(path: str) -> None:
     pathlib.Path(path).unlink(missing_ok=True)
 
 
+def _dead(pid: int) -> bool:
+    """No process has this pid. A pid of someone else's (PermissionError) is alive; so is anything we cannot tell."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (OSError, OverflowError):
+        return False
+    return False
+
+
+def _sweep(base: pathlib.Path) -> None:
+    """Remove the `cafe-share-<pid>-*` directories in `base` (if it is one) that belong to this user and to a pid that is gone (a SIGKILL ran no `atexit`)."""
+    if not base.is_dir():
+        return
+    me = os.getuid()
+    for d in base.glob("cafe-share-*-*"):
+        m = re.fullmatch(r"cafe-share-(\d+)-.*", d.name)
+        try:
+            st = d.lstat()                                                  # lstat: a link named like one is not followed
+            if m and stat.S_ISDIR(st.st_mode) and st.st_uid == me and _dead(int(m[1])):
+                shutil.rmtree(d, True)
+        except OSError:
+            continue
+
+
+def _on_signal(signum: int, frame: FrameType | None) -> None:
+    """SIGTERM or SIGHUP: remove the shared directory (no lock: this runs in the main thread, possibly inside `_share`), then die of the signal as the
+    default would."""
+    if _dir is not None:
+        shutil.rmtree(_dir, True)
+    signal.signal(signum, signal.SIG_DFL)
+    os.kill(os.getpid(), signum)
+
+
+def _clean_on_signals() -> None:
+    """Install `_on_signal` for SIGTERM and SIGHUP where the disposition is still the default (a handler or an ignore, as under nohup, is someone's choice);
+    only the main thread can, so a first `_share` from a batch thread tries again at the next."""
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            if signal.getsignal(sig) is signal.SIG_DFL:
+                signal.signal(sig, _on_signal)
+
+
 def _share(a: np.ndarray) -> str:
     """A new .npy file holding `a` (pickle's own memo writes an array met twice in one `adopt` once)."""
     global _dir
     with _lock:
         if _dir is None:
-            room = shutil.disk_usage(SHM).free if SHM.is_dir() else 0
-            _dir = pathlib.Path(tempfile.mkdtemp(prefix=f"cafe-share-{os.getpid()}-", dir=SHM if room >= SHM_MIN_FREE else None))
+            tmp = pathlib.Path(tempfile.gettempdir())
+            for where in (SHM, tmp):                                    # both: a dead run's 9 GB in /dev/shm is why this one may be choosing the disk
+                _sweep(where)
+            room = shutil.disk_usage(SHM).free if SHM.is_dir() else 0      # (after the sweep)
+            base = SHM if room >= SHM_MIN_FREE else tmp
+            _dir = pathlib.Path(tempfile.mkdtemp(prefix=f"cafe-share-{os.getpid()}-", dir=base))
             atexit.register(shutil.rmtree, _dir, True)
+        _clean_on_signals()
         i = next(_names)
         path = str(_dir / f"{i}.npy")
         if shutil.disk_usage(_dir).free < a.nbytes:                      # SHM_MIN_FREE is looked at once, for the directory; a long window outgrows it later
@@ -203,10 +259,19 @@ def _run(blob: bytes) -> Any:
     return fn(*args)
 
 
+def _exit_with(parent: Any) -> None:
+    """Block until the parent process is gone, then leave without cleanup (a worker holds nothing of its own)."""
+    parent.join()
+    os._exit(1)
+
+
 def _init() -> None:
     global _in_worker
     _in_worker = True
     faulthandler.enable()                                                 # a worker that dies in native code says where (the pool only says it broke)
+    parent = mp.parent_process()
+    if parent is not None:                                                # a worker reads its queue between tasks only: it would finish this one
+        threading.Thread(target=_exit_with, args=(parent,), daemon=True).start()
 
 
 class Pool:

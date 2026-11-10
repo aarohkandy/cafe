@@ -1,9 +1,17 @@
 """cafe.pm.par: stage 1 on several worker processes gives the same members and the same bits as on one."""
+import contextlib
 import functools
 import gc
 import itertools
+import os
 import pathlib
 import pickle
+import signal
+import subprocess
+import sys
+import textwrap
+import threading
+import time
 import types
 
 import numpy as np
@@ -363,3 +371,227 @@ def test_r13_m26_a_queued_tasks_adopted_files_live_until_its_result_is_back(monk
     assert not pool.held                                             # released when the futures were done
     gc.collect()
     assert not f.exists()
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 14, M-25
+@pytest.fixture
+def private_dirs(tmp_path, monkeypatch):
+    """`_share` makes its directory under tmp_path (never /dev/shm), forgets the one this process made, and the signal handlers it installs are put back."""
+    monkeypatch.setattr(par.tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(par, "SHM", tmp_path / "no_shm")
+    monkeypatch.setattr(par, "SHM_MIN_FREE", 1 << 62)                                               # so the temporary directory is the one chosen
+    monkeypatch.setattr(par, "_dir", None)
+    monkeypatch.setattr(par.atexit, "register", lambda *a, **k: None)
+    saved = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP)}
+    yield tmp_path
+    for s, h in saved.items():
+        signal.signal(s, h)
+
+
+def dead_pid():
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def leftover(base, pid, name="abc123", files=2):
+    d = base / f"cafe-share-{pid}-{name}"
+    d.mkdir()
+    for i in range(files):
+        (d / f"{i}.npy").write_bytes(b"x" * 10)
+    return d
+
+
+def test_r14_m25_the_next_run_removes_the_directories_a_dead_run_of_this_user_left(private_dirs):
+    """A SIGKILL runs no atexit: five killed runs left five `cafe-share-<pid>-*` directories, in /dev/shm each the size of the environment."""
+    dead1, dead2 = leftover(private_dirs, dead_pid()), leftover(private_dirs, dead_pid(), "zz_9")
+    mine, parent = leftover(private_dirs, os.getpid()), leftover(private_dirs, os.getppid())          # alive: stay
+    (private_dirs / "no_shm").mkdir()
+    in_shm = leftover(private_dirs / "no_shm", dead_pid())                                          # the other place a run may have chosen
+    file_named_so, no_pid = private_dirs / f"cafe-share-{dead_pid()}-f", leftover(private_dirs, "abc", "x")
+    file_named_so.write_text("a file")
+    link = private_dirs / f"cafe-share-{dead_pid()}-link"
+    link.symlink_to(mine)                                                                           # a link is not followed and not removed
+    path = par._share(np.arange(3.0))
+    assert [d.exists() for d in (dead1, dead2, in_shm)] == [False] * 3
+    assert [d.exists() for d in (mine, parent, no_pid)] == [True] * 3 and file_named_so.exists() and link.is_symlink() and (mine / "0.npy").exists()
+    assert pathlib.Path(path).parent.parent == private_dirs and pathlib.Path(path).parent.name.startswith(f"cafe-share-{os.getpid()}-")
+    assert np.array_equal(np.load(path), np.arange(3.0))
+    again = leftover(private_dirs, dead_pid(), "later")
+    par._share(np.arange(3.0))                                                                      # only the first `_share` of a process sweeps
+    assert again.exists()
+
+
+def test_r14_m25_a_directory_of_another_user_is_never_removed(private_dirs, monkeypatch):
+    d = leftover(private_dirs, dead_pid())
+    monkeypatch.setattr(par.os, "getuid", lambda: d.stat().st_uid + 1)
+    par._sweep(private_dirs)
+    assert d.exists()
+    monkeypatch.undo()
+    par._sweep(private_dirs)
+    assert not d.exists()
+
+
+def test_r14_m25_a_missing_directory_or_one_that_vanishes_during_the_sweep_is_not_an_error(tmp_path):
+    par._sweep(tmp_path / "nothing here")                                                          # no /dev/shm on this machine
+    def vanished():
+        raise FileNotFoundError(2, "gone")
+    gone = types.SimpleNamespace(name=f"cafe-share-{dead_pid()}-x", lstat=vanished)
+    par._sweep(types.SimpleNamespace(is_dir=lambda: True, glob=lambda pattern: [gone]))            # removed by its owner between the listing and the look
+
+
+def test_r14_m25_a_pid_that_is_alive_for_another_user_or_unreadable_is_alive(monkeypatch):
+    assert par._dead(dead_pid()) and not par._dead(os.getpid()) and not par._dead(1 << 70)
+
+    def refuse(pid, sig):
+        raise PermissionError(1, "Operation not permitted")
+    monkeypatch.setattr(par.os, "kill", refuse)
+    assert not par._dead(1)
+
+
+def test_r14_m25_the_handlers_are_installed_only_where_nobody_has_set_one_and_only_from_the_main_thread(private_dirs):
+    for s in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, signal.SIG_DFL)
+    t = threading.Thread(target=par._clean_on_signals)
+    t.start()
+    t.join()
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL                                     # signal.signal only works in the main thread: try again later
+    par._clean_on_signals()
+    assert signal.getsignal(signal.SIGTERM) is par._on_signal and signal.getsignal(signal.SIGHUP) is par._on_signal
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    mine = lambda *a: None                                                                         # noqa: E731
+    signal.signal(signal.SIGHUP, mine)
+    par._clean_on_signals()
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_IGN and signal.getsignal(signal.SIGHUP) is mine       # an ignore (nohup) or a handler stays theirs
+
+
+def test_r14_m25_the_handler_removes_the_directory_and_then_dies_of_the_signal_as_the_default_would(private_dirs, monkeypatch):
+    d = leftover(private_dirs, os.getpid())
+    sent = []
+    monkeypatch.setattr(par, "_dir", d)
+    monkeypatch.setattr(par.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    par._on_signal(signal.SIGTERM, None)
+    assert not d.exists() and sent == [(os.getpid(), signal.SIGTERM)] and signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+    monkeypatch.setattr(par, "_dir", None)
+    par._on_signal(signal.SIGHUP, None)                                                            # before any array was shared: nothing to remove
+    assert sent[-1] == (os.getpid(), signal.SIGHUP) and signal.getsignal(signal.SIGHUP) is signal.SIG_DFL
+
+
+ADOPT = textwrap.dedent("""
+    import os, pathlib, signal, sys, tempfile, time
+    import numpy as np
+    from cafe.pm import par
+    tempfile.tempdir, par.SHM = sys.argv[1], pathlib.Path(sys.argv[1]) / "no_shm"
+    os.environ["CAFE_WORKERS"] = "2"
+    if sys.argv[2] == "ignore":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if sys.argv[2] == "own":
+        signal.signal(signal.SIGTERM, lambda *a: os._exit(3))
+    m = par.adopt(np.zeros(par.SHARE_MIN_BYTES // 8 + 1))
+    print(m.filename, flush=True)
+    time.sleep(60)
+""")
+
+
+def run_adopter(tmp_path, how):
+    p = subprocess.Popen([sys.executable, "-c", ADOPT, str(tmp_path), how], stdout=subprocess.PIPE, text=True, cwd=config.ROOT,
+                         env=dict(os.environ, PYTHONPATH=str(config.ROOT)))
+    try:
+        return p, pathlib.Path(p.stdout.readline().strip()).parent
+    except BaseException:
+        p.kill()
+        raise
+
+
+@pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGHUP])
+def test_r14_m25_a_terminated_run_leaves_no_shared_directory_and_dies_of_the_signal(tmp_path, sig):
+    """SIGTERM ran no atexit either: the directory stayed."""
+    p, d = run_adopter(tmp_path, "default")
+    try:
+        assert d.is_dir() and d.parent == tmp_path and any(d.iterdir())
+        p.send_signal(sig)
+        assert p.wait(timeout=60) == -sig                                                           # killed by the signal, not an exit code
+        assert not d.exists()
+    finally:
+        p.kill()
+        p.wait()
+
+
+@pytest.mark.parametrize("how, code", [("ignore", None), ("own", 3)])
+def test_r14_m25_a_signal_disposition_the_program_set_is_left_alone(tmp_path, how, code):
+    """The SITL and watchdog handling of TERM is not ours to take over: with an ignore or a handler set before the first share, nothing is installed."""
+    p, d = run_adopter(tmp_path, how)
+    try:
+        p.send_signal(signal.SIGTERM)
+        if code is None:
+            time.sleep(2)
+            assert p.poll() is None                                                                 # ignored, as it asked
+        else:
+            assert p.wait(timeout=60) == code                                                       # its handler ran, not ours
+        assert d.is_dir()
+    finally:
+        p.kill()
+        p.wait()
+
+
+BEAT = textwrap.dedent("""
+    import os, pathlib, sys, time
+    from cafe.pm import par
+
+    def beat(path):
+        pathlib.Path(path + ".pid").write_text(str(os.getpid()))
+        for _ in range(300):                      # at most a minute of task
+            pathlib.Path(path).write_text(str(time.time()))
+            time.sleep(0.2)
+
+    if __name__ == "__main__":
+        with par.Pool(2):
+            par.submit(beat, sys.argv[1])
+            time.sleep(120)
+""")
+
+
+def test_r14_m25_a_worker_leaves_when_its_parent_is_killed(tmp_path):
+    """A worker reads its queue only between tasks, so a task runs to its end after `kill -9` of the parent (the three children of q-run stayed alive)."""
+    script, heart = tmp_path / "beat.py", tmp_path / "heart"
+    script.write_text(BEAT)
+    p = subprocess.Popen([sys.executable, str(script), str(heart)], cwd=config.ROOT, env=dict(os.environ, PYTHONPATH=str(config.ROOT)))
+    try:
+        for _ in range(600):
+            if heart.exists():
+                break
+            time.sleep(0.1)
+        assert heart.exists()                                                                       # the worker is in its task
+        p.kill()
+        p.wait()
+        last, still = heart.stat().st_mtime_ns, 0
+        for _ in range(300):                                                                        # the beat stops within seconds, not after the minute
+            time.sleep(0.1)
+            now = heart.stat().st_mtime_ns
+            still = still + 1 if now == last else 0
+            last = now
+            if still >= 20:
+                break
+        assert still >= 20, "the worker kept running after its parent was killed"
+    finally:
+        p.kill()
+        pid = pathlib.Path(f"{heart}.pid")
+        if pid.exists():                                                                            # a worker not told to leave would outlive the test
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(pid.read_text()), signal.SIGKILL)
+
+
+def test_r14_m25_the_watch_on_the_parent_ends_the_worker_when_the_parent_is_gone_and_a_main_process_has_none(monkeypatch):
+    calls = []
+    monkeypatch.setattr(par.os, "_exit", calls.append)
+    par._exit_with(types.SimpleNamespace(join=lambda: calls.append("parent gone")))
+    assert calls == ["parent gone", 1]
+    seen = threading.Event()
+    monkeypatch.setattr(par, "_exit_with", lambda parent: seen.set() if parent == "the parent" else None)
+    monkeypatch.setattr(par, "_in_worker", False)
+    monkeypatch.setattr(par.mp, "parent_process", lambda: None)
+    par._init()
+    assert not seen.wait(0.3)                                                                       # pytest's own process: no parent, no watch
+    monkeypatch.setattr(par.mp, "parent_process", lambda: "the parent")
+    par._init()
+    assert seen.wait(10)
