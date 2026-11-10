@@ -309,6 +309,9 @@ CASES_R14 = [
     ("quad_uas", lambda r: r["radio"].update(rfd900x={"tx_power_dbm": {"value": 20.0, "unit": "dBm", "source": "s"}}),
      r"quad_uas\.yaml:radio\.rfd900x: a radio's numbers are in platforms/radios\.yaml only"),
     ("quad_uas", lambda r: r["radio"].update(link_2g4={"tx_power_dbm": {"value": 27.0, "unit": "dBm", "source": "s"}}), r"radio\.link_2g4: a radio's numbers"),
+    ("quad_uas", lambda r: r["radio"].update(tx_power_dbm={"value": 5.0, "unit": "dBm", "source": "s"}),
+     r"quad_uas\.yaml:radio\.tx_power_dbm: a radio's numbers are in platforms/radios\.yaml only"),          # a flat leaf is as unread as a block
+    ("quad_uas", lambda r: r["radio"].update(freq_mhz={"value": 868.0, "unit": "MHz", "source": "s"}), r"radio\.freq_mhz: a radio's numbers"),
     ("seaglider", lambda r: r["params"]["battery_J"].update(value=10 ** 400), r"seaglider\.yaml:params\.battery_J: 1\d+ must be a finite number above 0"),
     ("seaglider", lambda r: r["params"]["battery_J"].update(value=-10 ** 400), r"params\.battery_J: -1\d+ must be a finite number above 0"),
     ("seaglider", lambda r: r["params"].update(zzz={"value": 10 ** 400, "unit": "m", "assumed": True, "why": "w"}), r"params\.zzz: 1\d+ must be a finite"),

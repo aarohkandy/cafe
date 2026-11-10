@@ -110,8 +110,8 @@ def load_platform(path: Optional[str] = None) -> dict[str, Any]:
     for g, table in REQUIRED.items():
         check_params(table, P[g], f"{p.name}:{g}", "quad_uas")
     ra, radios = P["radio"], comms._yaml("radios.yaml")["radios"]
-    if blocks := [k for k, v in ra.items() if isinstance(v, dict)]:                                   # round 14, M-39: one copy of a radio's numbers
-        raise ValueError(f"{p.name}:radio.{blocks[0]}: a radio's numbers are in platforms/radios.yaml only; delete the block and name the entry in radio.link")
+    if stray := [k for k in ra if k not in REQUIRED["radio"]]:                                       # round 14, M-39: any key, flat or a block
+        raise ValueError(f"{p.name}:radio.{stray[0]}: a radio's numbers are in platforms/radios.yaml only; delete it and name the entry in radio.link")
     if not isinstance(ra["link"], str) or ra["link"] not in radios:                                  # round 14, M-4: stage 1 indexes it
         raise ValueError(f"{p.name}:radio.link: {ra['link']!r} is not an entry of platforms/radios.yaml; use one of {sorted(radios)}")
     soc, cell = np.asarray(P["battery"]["ocv_soc"], float), np.asarray(P["battery"]["ocv_cell_v"], float)             # round 8, M-26: interpolated on soc
