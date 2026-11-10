@@ -357,7 +357,7 @@ def _tao_covers(m: dict[str, Any], box: tuple[float, float, float, float], t0: f
     """A TAO manifest `m` (parsed) was made under the current selection rule (a copy of an older cache put in the directory by hand is refused) and covers
     the box and the window. The part of `_tao_cached` that reads nothing but the manifest, so that it can be asked of the copy a run recorded."""
     from .env import tao
-    if m.get("selection") != tao.SELECTION:
+    if m.get("selection") != tao.SELECTION or not tao.manifest_shape(m):
         return False
     s, n, w, e = hycom.box360(box)
     return bool(m["t0"] <= t0 and m["t1"] >= t1 and m["box"][0] <= s and m["box"][1] >= n and m["box"][2] <= w and m["box"][3] >= e)
@@ -450,7 +450,9 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
         d = orca.read_json(man)
         if d is None and man.exists():
             ctx.log(f"ingest: orca manifest {man} is unreadable (empty or truncated): fetching again")
-        if d is not None and _old_orca_layout(d, t0):
+        if d is not None and not orca.manifest_shape(d):
+            ctx.log(f"ingest: orca manifest {man} lacks what the ingest reads of it (base, t0, t1, box, hours3d): fetching again")
+        elif d is not None and _old_orca_layout(d, t0):
             ctx.log(f"ingest: orca manifest {man} was made by older code (its hour labels are shifted for a window that starts at "
                     f":{t0.minute:02d}): fetching again")
         return d is not None and _orca_covers(d, t0, t1, box, h3)
@@ -580,7 +582,7 @@ def _orca_covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime, box: tuple
     """The orca manifest covers the window, its recorded box contains `box` (lon_min, lon_max, lat_min, lat_max; a manifest with no box was
     written before the box was recorded and cannot say) and it has every 3-D hour wanted, and it is not of the old layout (`_old_orca_layout`)."""
     b = d.get("box")
-    return bool(_covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and _lon_arc_covers(b[:2], box[:2]) and b[2] <= box[2] and b[3] >= box[3]
+    return bool(orca.manifest_shape(d) and _covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and _lon_arc_covers(b[:2], box[:2]) and b[2] <= box[2] and b[3] >= box[3]
                 and {orca.stamp(h) for h in hours3d} <= set(d.get("hours3d", [])))
 
 

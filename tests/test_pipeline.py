@@ -3080,6 +3080,53 @@ def test_r6_m8_an_empty_or_truncated_tao_manifest_is_not_cached(data_copy):
         assert pipeline._tao_cached(tdir, box, t0, t1) is False
 
 
+def test_r14_m22_an_orca_manifest_that_is_an_object_without_its_times_is_fetched_again_and_says_so(tmp_path, data_copy, monkeypatch):
+    """`{}` is valid JSON and an object, so `read_json` returned it and `_covers` raised KeyError 't0' (a traceback; fetch is documented as healing a cache)."""
+    monkeypatch.delenv("CAFE_OFFLINE")
+    man = data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json"
+    saved = man.read_text()
+    calls, logged = [], []
+
+    def fake_ingest(t0, t1, box, out, hours3d=(), threads=8, spectra=True, log=print):
+        calls.append(box)
+        man.write_text(saved)
+    monkeypatch.setattr(orca, "ingest", fake_ingest)
+    good = json.loads(saved)
+    for k, damage in enumerate(("{}", json.dumps({k: v for k, v in good.items() if k != "t1"}), json.dumps(dict(good, t0=5)), json.dumps(dict(good, box="x")))):
+        calls.clear()
+        man.write_text(damage)
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / f"r{k}", log=logged.append), "ingest")
+        assert len(calls) == 1
+    assert any("orca manifest" in x and "lacks what the ingest reads" in x and "fetching again" in x for x in logged)
+
+
+def test_r14_m22_a_tao_manifest_that_is_an_object_of_the_wrong_shape_is_not_cached_and_not_a_traceback(data_copy):
+    tdir = tao.cache_dir(data_copy)
+    mp = tdir / "manifest.json"
+    m = config.load_mission(MISSION_PATH)
+    box, t0, t1 = pipeline.ocean_box(m), config.utc(m["window"]["start"]).timestamp(), config.utc(m["window"]["end"]).timestamp()
+    good = json.loads(mp.read_text())
+    assert pipeline._tao_cached(tdir, box, t0, t1) is True
+    first = next(iter(good["files"]))
+    damages = [{}, {k: v for k, v in good.items() if k != "t0"}, dict(good, t0="garbage"), dict(good, box=[1, 2, 3]), dict(good, files=[]), dict(good, selected=5),
+               dict(good, files={first: {}}), dict(good, positions={}), dict(good, selected={"T0N170W": {"WIND": "no/such/file"}})]
+    for damage in damages:
+        mp.write_text(json.dumps(damage))
+        assert pipeline._tao_cached(tdir, box, t0, t1) is False, damage
+    mp.write_text(json.dumps(dict(good, extra_key=[1])))                               # a key nobody reads is no damage
+    assert pipeline._tao_cached(tdir, box, t0, t1) is True
+
+
+def test_r14_m22_fetching_over_a_misshapen_tao_manifest_checks_every_file_again(tmp_path, monkeypatch):
+    """`fetch_tao` read the old manifest's `files` with `.get`: a list there was an AttributeError, not the fresh start an unreadable file gets."""
+    from cafe.pm.env import tao as tao_mod
+    monkeypatch.setattr(tao_mod, "moorings", lambda box, base: [])
+    out = tmp_path / "tao"
+    out.mkdir()
+    (out / "manifest.json").write_text(json.dumps(dict(files=[1], t0=0)))
+    man = json.loads(tao_mod.fetch_tao((-1.0, 1.0, 160.0, 170.0), 0.0, 3600.0, out).read_text())
+    assert man["files"] == {} and tao_mod.manifest_shape(man)
+
 def test_r10_a_tao_cache_made_under_another_selection_rule_is_not_cached(data_copy):
     """Round 10, M-19 follow-up: the per-variable selection changes which files a cache holds, but `_tao_cached` accepted a manifest of the old rule (files
     hash, window and box cover), so an old cache kept its old selection for ever. The manifest names its rule; any other (or none) is fetched again."""

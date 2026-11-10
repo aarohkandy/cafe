@@ -159,7 +159,8 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
     out = pathlib.Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     mpath = out / "manifest.json"
-    old = (orca.read_json(mpath) or {}).get("files", {})                 # an empty or truncated manifest is no record: every file is checked again
+    prev = orca.read_json(mpath)                                         # an empty, truncated or misshapen manifest is no record: every file is checked again
+    old = prev["files"] if prev is not None and manifest_shape(prev) else {}
     man: dict[str, Any] = dict(source=base + CATALOG, selection=SELECTION, box=list(box360(box)), t0=t0, t1=t1, files={}, selected={},
                                waves=dict(checked=0, matches=[]))
     for name, lat, lon in moorings(box, base):
@@ -200,6 +201,20 @@ def fetch_tao(box: Any, t0: Any, t1: Any, out_dir: Any, base: str = BASE, variab
         man.setdefault("positions", {})[name] = [lat, lon]
     write_json(mpath, man, indent=1, sort_keys=True)
     return mpath
+
+
+def manifest_shape(m: dict[str, Any]) -> bool:
+    """Whether the parsed manifest `m` holds what `verify`, `unusable_selected`, `wind_gap` and `load_tao` index: `t0` and `t1` numbers, `box` four
+    numbers, `files` a mapping of records with strings `sha256`, `mooring`, `var` and `mode`, `selected` a mapping of mooring to {variable: file key
+    in `files`}, and a `positions` pair of numbers for each selected mooring. A readable object of another shape is no record: the cache is fetched
+    again, as it is for an empty file (round 14, M-22)."""
+    files, sel, pos = m.get("files"), m.get("selected"), m.get("positions", {})
+    return (orca.real_numbers([m.get("t0"), m.get("t1")]) and orca.real_numbers(m.get("box"), 4)
+            and isinstance(files, dict) and all(isinstance(r, dict) and all(isinstance(r.get(k), str) for k in ("sha256", "mooring", "var", "mode"))
+                                                for r in files.values())
+            and isinstance(sel, dict) and isinstance(pos, dict)
+            and all(isinstance(v, dict) and all(k in files and isinstance(var, str) for var, k in v.items()) and orca.real_numbers(pos.get(n), 2)
+                    for n, v in sel.items()))
 
 
 def verify(out_dir: Any, man: dict[str, Any] | None = None) -> int:
