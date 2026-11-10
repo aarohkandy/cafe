@@ -24,7 +24,7 @@ outputs are unchanged. Stage products live next to the ledgers:
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, io, json, math, os, pathlib, pickle, re, shutil, time, warnings, zipfile
+import contextlib, datetime as dt, io, json, math, os, pathlib, pickle, re, shlex, shutil, time, warnings, zipfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -47,17 +47,30 @@ if TYPE_CHECKING:
 DATA = pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
 
 
+def fetch_cmd(mission: str | pathlib.Path) -> str:
+    """The command that rebuilds the cache of `mission`, as a person pastes it: the mission path is shell-quoted, so a path with a space or a quote is one
+    argument (round 14, M-14). Every advice that names the mission file builds it here."""
+    return f"{FETCH_CMD} {shlex.quote(str(mission))}"
+
+
+def is_junk(p: pathlib.Path) -> bool:
+    """A file a file manager or an editor leaves in a folder (`.DS_Store`, `._x`, `x.json~`, `.a.swp`, `x.tmp`), which is no part of the code or the data
+    (round 14, M-27). `bin/sync_filters` keeps the same names off the server; none is tracked."""
+    return p.name.startswith(".") or p.name.endswith(("~", ".swp", ".swo", ".tmp"))
+
+
 def code_digest() -> str:
     """sha256 over every `cafe/**/*.py` (the pipeline imports cafe.cfd, cafe.fea, cafe.emulator, cafe.reach, cafe.receipts from outside cafe/pm),
-    the schemas (`cafe/schemas/*.json`, the contract ingest and `load_mission` read), the config and platform files, and the installed version of every
-    library `ledger.versions()` lists that is installed (Python as major.minor): a resumed stage is reused only if none changed."""
+    the schemas (`cafe/schemas/*.json`, the contract ingest and `load_mission` read), the config and platform files (not what a file manager or an editor
+    leaves beside them: `is_junk`), and the installed version of every library `ledger.versions()` lists that is installed (Python as major.minor): a
+    resumed stage is reused only if none changed."""
     import hashlib
     root = pathlib.Path(__file__).resolve().parents[2]
     h = hashlib.sha256()
     for p in sorted([*root.joinpath("cafe").rglob("*.py"), *root.joinpath("cafe", "schemas").glob("*.json"), *root.joinpath("config").rglob("*.*"),
                      *root.joinpath("platforms").glob("*.yaml")]):
         rel = p.relative_to(root)
-        if "__pycache__" not in rel.parts and "site" not in rel.parts:
+        if "__pycache__" not in rel.parts and "site" not in rel.parts and not is_junk(p):
             h.update(str(rel).encode() + b"\0" + p.read_bytes())
     v = {k: x for k, x in ledger.versions().items() if x is not None}
     v["python"] = ".".join(v["python"].split(".")[:2])
@@ -93,7 +106,7 @@ class Context:
                  log: Callable[[str], None] = print, seed: int | None = None, emulator_table: str | pathlib.Path | None = None,
                  gpu_mem_gb: float | None = None, hash_budget: str | None = None) -> None:
         """`budget_name` None: no plan (`fetch`: ingest needs the mission and its window, never a budget, so a mission no budget can run still downloads).
-        `hash_budget`: the budget the resume hash names when there is no plan, so that a fetch into a run directory leaves its ledgers current for `run`.
+        `hash_budget`: the budget the resume hash names when there is no plan (`report --run`, which renders a finished run and keeps its ledgers current).
         `gpu_mem_gb`: the device memory the planner sizes the nests against (budget.plan refuses a nest over 85 % of it)."""
         self.mission_path = pathlib.Path(mission_path)
         self.mission = load_mission(mission_path)
@@ -148,7 +161,13 @@ class Context:
 
     def stage_hash(self, name: str) -> str:
         """The config hash a stage's ledger carries: `hash`, and for the emulator and the stages after it also the emulator plan and the workers it
-        was sized on (the variants depend on them), so a resume under another CPU count reruns those and reuses stage 1 and 1b."""
+        was sized on (the variants depend on them), so a resume under another CPU count reruns those and reuses stage 1 and 1b.
+
+        The ingest's hash is the mission (without its seed, which ingest never reads) and the code, nothing else: it reads no budget, no GPU count and no
+        plan (`ctx.replan()` at its end changes the plan and the workers of the stages after it, not what it writes), so a `fetch` (which has none of those)
+        leaves it current for a `run` of any budget, GPU count and seed, and a `run` leaves it current for a `fetch` (round 14, M-30)."""
+        if name == "ingest":
+            return digest(dict(mission={k: v for k, v in self.mission.items() if k not in ("_path", "seed")}, code=self.code_digest))
         if not self.plan or STAGES.index(name) < STAGES.index("emulator"):
             return self.hash
         return digest(dict(config=self.hash, emulator=self.plan["emulator"], workers=self.plan["workers"]))
@@ -165,7 +184,7 @@ class Context:
             if _derived_current(self.cache):
                 why = _derived_span_problem(self.cache, self.window_s())
                 if why:
-                    raise ConfigError(f"{self.cache}/derived.zarr: {why}; rerun `{FETCH_CMD} {self.mission_path}` to rebuild it")
+                    raise ConfigError(f"{self.cache}/derived.zarr: {why}; rerun `{fetch_cmd(self.mission_path)}` to rebuild it")
                 sub = surface.SurfaceLayer(self.cache, warm_layer=subgrid.switch(e, "warm_layer"), rain_lens=subgrid.switch(e, "rain_lens"))
             sig, fit = env_sigmas(), self.run_dir / "ingest" / "env_sigmas_fitted.json"
             if fit.is_file():
@@ -281,7 +300,7 @@ def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], b
     the error. Returns whether the input is there."""
     note = what
     if not present():
-        cmd = hint or f"{FETCH_CMD} {ctx.mission_path}"
+        cmd = hint or fetch_cmd(ctx.mission_path)
         if _offline():
             again = "run" if hint else "unset CAFE_OFFLINE and run"  # `fetch` is the command that was just run (or `run`, which fetches)
             note = f"{what} is not cached and CAFE_OFFLINE is set, so nothing is downloaded: {again} `{cmd}`"
@@ -487,7 +506,8 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
                  lambda: bathy.fetch_gebco(sbox, gebco, bathy.GEBCO_URL)),
            _need(ctx, L, "ocean_store", f"the ocean store {store.name} for the box and window" + (f" ({short})" if short else ""),
                  lambda: _ocean_cached(store, sbox, steps, window), fetch_ocean,
-                 hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {ctx.mission_path} --path <lab HYCOM dir> "
+                 hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {shlex.quote(str(ctx.mission_path))} "
+                                                                  "--path <lab HYCOM dir> "
                                                                   "--temperature-kind <in_situ|potential>")]
     if not all(got):
         return                                                           # the failed checks above stop the stage
@@ -582,8 +602,8 @@ def _orca_covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime, box: tuple
     """The orca manifest covers the window, its recorded box contains `box` (lon_min, lon_max, lat_min, lat_max; a manifest with no box was
     written before the box was recorded and cannot say) and it has every 3-D hour wanted, and it is not of the old layout (`_old_orca_layout`)."""
     b = d.get("box")
-    return bool(orca.manifest_shape(d) and _covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and _lon_arc_covers(b[:2], box[:2]) and b[2] <= box[2] and b[3] >= box[3]
-                and {orca.stamp(h) for h in hours3d} <= set(d.get("hours3d", [])))
+    return bool(orca.manifest_shape(d) and _covers(d, t0, t1) and not _old_orca_layout(d, t0) and b is not None and _lon_arc_covers(b[:2], box[:2])
+                and b[2] <= box[2] and b[3] >= box[3] and {orca.stamp(h) for h in hours3d} <= set(d.get("hours3d", [])))
 
 
 def _lon_arc_covers(have: tuple[float, float] | list[float], want: tuple[float, float] | list[float]) -> bool:
@@ -975,6 +995,7 @@ def _tao(ctx: Context, L: Ledger, t0: float, t1: float) -> None:
     t2 = _t2_rmse(ctx, moor, hours)
     if t2 is not None:
         sig["t2_k"] = t2
+    ctx.path("ingest", "env_sigmas_fitted.json").unlink(missing_ok=True)     # an earlier attempt's fit is no fit of this one (Context.env reads it)
     if sig:
         L.output(_dump(sig, ctx.path("ingest", "env_sigmas_fitted.json")))
         ctx._env = None                                                  # rebuilt with these sigmas on next use (Context.env)
@@ -1037,7 +1058,7 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
     if getattr(ctx.env, "subgrid", None) is None:
         if isinstance(ctx.env, GriddedEnv):                              # a gridded one has it unless missing or in another layout: other physics, not a pass
             L.check("derived_unchanged", False, note=f"{store} is missing or has another layout: ingest recorded it as an input of this run; "
-                                                     f"rerun `{FETCH_CMD} {ctx.mission_path}` and the run")
+                                                     f"rerun `{fetch_cmd(ctx.mission_path)}` and the run")
         return                                                           # an environment without the layer (the analytic ones) reads nothing derived
     if not rec.is_file():
         L.check("derived_unchanged", False, note=f"{rec} is missing: ingest did not record the surface layer this stage reads")
@@ -1046,7 +1067,7 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
     want = json.loads(rec.read_text())["store_sha256"]
     have = surface.store_sha256(store) if store.is_dir() else None
     L.check("derived_unchanged", have == want, value=have, limit=want, note=f"{store} hashes to what ingest recorded" if have == want
-            else f"{store} is not what ingest recorded (edited or rebuilt since): rerun `{FETCH_CMD} {ctx.mission_path}` and the run")
+            else f"{store} is not what ingest recorded (edited or rebuilt since): rerun `{fetch_cmd(ctx.mission_path)}` and the run")
 
 
 def _covers(d: dict[str, Any], t0: dt.datetime, t1: dt.datetime) -> bool:
@@ -1392,7 +1413,9 @@ def _sensitivity_cases(ctx: Context, L: Ledger, scales: dict[str, Any]) -> None:
     """The USV verdict again under the brief's literal VPP bias (stage1.BRIEF_PRIOR, DECISIONS 163), paired with the main one: the run's own
     hypercube (`res["X"]`, so the same members, the same n and the same other inputs) with only the `usv_vpp_bias` column replaced, same seed and
     refit multipliers, written to stage1b/sensitivity_cases.json for the report to show next to the calibrated verdict. Nothing is written for a
-    mission without a USV."""
+    mission without a USV, and the file an earlier attempt of this stage left is removed first: the report takes every json of the stage directory as an
+    input, so a file of a mission that had a USV would be shown under a vehicle that is none (round 14, M-29)."""
+    ctx.path("stage1b", "sensitivity_cases.json").unlink(missing_ok=True)
     if not any(stage1._classes(ctx.mission)[v["id"]] == "usv" for v in ctx.mission["vehicles"]):
         return
     fp = ctx.run_dir / "ingest" / "priors_fitted.json"
@@ -1603,8 +1626,7 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
     """`stop_after="ingest"` is `fetch`: it plans nothing, so a mission no budget can run on this machine (a 30-day window at 28 GB; a 20-vehicle
     fleet plans, and only needs a larger time budget) still downloads."""
     fetch = stop_after == "ingest"
-    ctx = Context(mission_path, None if fetch else budget_name, gpus, run_dir, log, seed, emulator_table, gpu_mem_gb,
-                  hash_budget=budget_name if fetch else None)
+    ctx = Context(mission_path, None if fetch else budget_name, gpus, run_dir, log, seed, emulator_table, gpu_mem_gb)
     if not fetch:
         from .emulator import read_table, store_path
         table = store_path(ctx.table)[0]

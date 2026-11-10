@@ -25,7 +25,7 @@ from typing import Any
 
 from . import acceptance, audit, budget, ledger, par, pipeline, report, stage1, whatif
 from .config import ConfigError, ResourceError, damaged_run_files as _run_files, json_object as _json_object, load_mission, os_error_text
-from .env.environment import FETCH_CMD, OutsideData
+from .env.environment import OutsideData
 from .stats import intervals
 
 
@@ -309,12 +309,12 @@ def _whatif(a: argparse.Namespace) -> int:
         diff = sorted(k for k in m.keys() | old.keys() if k not in ("seed", "_path") and m.get(k) != old.get(k))
         if diff:
             raise ConfigError(f"--mission {a.mission} is not the mission run {run} was made from (differs in: {', '.join(diff)}); what-if compares a change "
-                              f"with that run's verdicts. Use `--mission {copy}`, or run the edited mission first")
+                              f"with that run's verdicts. Use `--mission {shlex.quote(str(copy))}`, or run the edited mission first")
         if m.get("seed") != old.get("seed"):
             print(f"note: the run used seed {old.get('seed')}, this file says {m.get('seed')}; the what-if draws use {m.get('seed')}")
     ctx = pipeline.Context(a.mission, a.budget, a.gpus, run)
     if not ctx.cache.is_dir():
-        raise ConfigError(f"no environment cache at {ctx.cache}: run `{FETCH_CMD} {a.mission}` first")
+        raise ConfigError(f"no environment cache at {ctx.cache}: run `{pipeline.fetch_cmd(a.mission)}` first")
     base, tracks, scales, fitted = {}, {}, None, None
     with _run_files(run):
         if (run / "stage1b" / "summary.json").is_file():

@@ -1,7 +1,14 @@
 # rsync filter rules shared by pm.sh and bin/pmx.sh (both sync with --delete, so a file removed from the tree is removed on the server too). First match wins.
 # Never used with --delete-excluded: a "-" rule keeps a path out of the transfer AND out of the deletion, a "P" rule only out of the deletion.
 
-# never sent, never deleted
+# never sent, never deleted. The first five are what `pipeline.is_junk` leaves out of code_digest: a file manager's or an editor's leavings must not change the
+# digest the server computes from what was sent (round 14, M-27)
+- .DS_Store
+- ._*
+- *~
+- *.swp
+- *.swo
+- *.tmp
 - .git
 - __pycache__
 - site

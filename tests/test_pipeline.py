@@ -1384,6 +1384,32 @@ def test_a_mission_without_a_usv_runs_no_sensitivity_case(tmp_path, monkeypatch,
     assert sens == [] and not (ctx.run_dir / "stage1b" / report.SENSITIVITY).exists() and SENS_NOTE not in d["notes"]
 
 
+def test_r14_m29_a_stale_sensitivity_file_does_not_survive_a_mission_with_no_usv(tmp_path, monkeypatch, sens):
+    """`_sensitivity_cases` returned at once for a mission with no USV and removed nothing: the file of the earlier mission stayed in the stage directory,
+    where `s_report` takes every json as an input and the report's `_cases` shows its entry under whatever vehicle has that id."""
+    ctx = ctx_for(tmp_path / "r")
+    ctx.mission = dict(ctx.mission, vehicles=[v for v in ctx.mission["vehicles"] if pipeline.stage1._classes(ctx.mission)[v["id"]] != "usv"])
+    stage1_files(ctx)
+    ctx.path("refit", "refit.json").write_text(json.dumps({}))
+    stale = ctx.path("stage1b", report.SENSITIVITY)
+    stale.write_text(json.dumps({"usv": [dict(n=8, k_fail=1, verdict="NO-GO")]}))
+    monkeypatch.setattr(pipeline, "_stage1", boom)
+    d = run_stage(pipeline.s_stage1b, ctx, "stage1b")
+    assert not stale.exists() and report.SENSITIVITY not in [pathlib.Path(o["path"]).name for o in d["outputs"]]
+
+
+def test_r14_m29_a_stale_fitted_sigma_file_does_not_survive_an_ingest_that_fits_none(tmp_path, data, monkeypatch):
+    """The same defect one stage earlier: `ingest/env_sigmas_fitted.json` is written only when a sigma was fitted, and `Context.env` and the credibility page
+    read it whenever it is there, so a second attempt that fitted nothing still ran on the first one's sigmas."""
+    real_cmp, real_load = tao.compare, tao.load_tao
+    monkeypatch.setattr(tao, "compare", lambda w, m: (lambda r: {**r, "ALL": {**r["ALL"], "sst_rmse": float("nan")}})(real_cmp(w, m)))
+    monkeypatch.setattr(tao, "load_tao", lambda *a, **k: {n: {x: y for x, y in v.items() if x != "airt"} for n, v in real_load(*a, **k).items()})
+    ctx, t0, t1 = tao_ctx(tmp_path)
+    stale = ctx.path("ingest", "env_sigmas_fitted.json")
+    stale.write_text(json.dumps(dict(sst_k=9.9)))
+    tao_stage(ctx, t0, t1)
+    assert not stale.exists() and ctx.env.sig["sst_k"] == config.env_sigmas()["sst_k"]
+
 def summaries(ctx, was, now=None):
     """stage 1's summary.json with the verdicts `was`; the stand-in for _stage1 writes stage 1b's with `now`."""
     def doc(v):
@@ -1771,13 +1797,61 @@ def test_the_emulator_table_is_the_option_then_the_environment_then_the_shared_d
     assert ctx.table == tmp_path / "opt.parquet" and pipeline.emulator_table("x.parquet") == pathlib.Path("x.parquet")
 
 
-def test_a_fetch_leaves_the_ingest_ledger_current_for_the_run_of_the_same_budget(tmp_path):
-    """The resume hash names the budget; fetch hashes with the one it was given, so `run` after `fetch` (and `fetch` after `run`) keeps ingest up to date."""
+def test_a_fetch_leaves_the_ingest_ledger_current_for_a_run_of_any_budget_gpu_count_and_seed(tmp_path):
+    """Round 14, M-30: the ingest hash named the budget and the GPU count, and `fetch` has neither (it hashed with "quick" and 0), so `fetch` then
+    `run --budget 4h` (or `--gpus 1`, or `--seed`) rebuilt the ingest, about 9 GB of tree hashes for the demo, and `fetch --out` into a finished 4 h run
+    made the next `run` redo every stage."""
     pipeline.run(MISSION_PATH, "ci", 0, tmp_path / "r", stop_after="ingest", log=quiet)
-    again = ctx_for(tmp_path / "r")
-    assert ledger.done(again.run_dir, "ingest", again.hash) is not None
-    assert ctx_for(tmp_path / "r2", budget_name=None).hash != again.hash                                         # but no budget at all is its own hash
+    held = read_ledger(tmp_path / "r", "ingest")["config_hash"]
+    for name, gpus, seed in (("ci", 0, None), ("quick", 0, None), ("4h", 0, None), ("quick", 1, None), ("ci", 0, 77)):
+        again = pipeline.Context(MISSION_PATH, name, gpus, tmp_path / "r", quiet, seed=seed, gpu_mem_gb=16.0 if gpus else None)
+        assert again.stage_hash("ingest") == held and ledger.done(again.run_dir, "ingest", again.stage_hash("ingest")) is not None, (name, gpus, seed)
+    assert ctx_for(tmp_path / "r2", budget_name=None).stage_hash("ingest") == held                                 # and a fetch has none of them
+    assert ctx_for(tmp_path / "r2", budget_name="ci").hash != ctx_for(tmp_path / "r2", budget_name="quick").hash                  # the other stages' do
+    other = tmp_path / "other.yaml"
+    other.write_text(MISSION_PATH.read_text().replace("pad_deg: 0.5", "pad_deg: 0.6"))
+    assert pipeline.Context(other, "ci", 0, tmp_path / "r", quiet).stage_hash("ingest") != held                    # a changed mission still reruns it
 
+
+def test_r14_m30_the_ingest_writes_the_same_thing_under_any_budget_gpu_count_and_seed(tmp_path, data_copy):
+    """The condition for the ingest's hash to leave the budget out: nothing it writes depends on it. Its outputs, inputs and self-checks, byte for byte."""
+    def summary(d, run):
+        return ([(pathlib.Path(o["path"]).name, o["sha256"]) for o in d["outputs"]], [(i["ref"].replace(str(run), "RUN"), i["sha256"]) for i in d["inputs"]],
+                [(c["name"], c["ok"], c["value"], c["limit"]) for c in d["checks"]])
+    seen = {}
+    for k, (name, gpus, seed) in enumerate((("ci", 0, None), ("quick", 0, None), ("ci", 1, None), ("quick", 1, None), ("ci", 0, 77))):
+        ctx = pipeline.Context(MISSION_PATH, name, gpus, tmp_path / f"r{k}", quiet, seed=seed, gpu_mem_gb=16.0 if gpus else None)
+        seen[(name, gpus, seed)] = summary(run_stage(pipeline.s_ingest, ctx, "ingest"), tmp_path / f"r{k}")
+    first = next(iter(seen.values()))
+    assert first[0] and first[2]
+    diff = {k: [(a, b) for part in range(3) for a, b in zip(first[part], v[part], strict=True) if a != b] for k, v in seen.items() if v != first}
+    assert not diff, diff
+
+
+def test_r14_m27_what_a_file_manager_or_an_editor_leaves_beside_the_code_does_not_change_the_digest(tmp_path, monkeypatch):
+    """`config` was hashed by `rglob("*.*")`: a Finder-made `.DS_Store`, an editor's `x.json~` or `.a.swp` sent by pm.sh changed the server's digest, and
+    with it every ledger hash, stored result and receipt. A real file there still does."""
+    import fnmatch
+    root = tmp_path / "tree"
+    for rel, text in (("cafe/a.py", "x = 1\n"), ("cafe/schemas/s.json", "{}"), ("config/a.json", "{}"), ("config/certs/c.pem", "pem"),
+                      ("platforms/p.yaml", "p: 1\n")):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(text)
+    monkeypatch.setattr(pipeline, "__file__", str(root / "cafe" / "pm" / "pipeline.py"))
+    clean = pipeline.code_digest()
+    junk = ["config/.DS_Store", "config/x.json~", "config/.a.swp", "config/certs/._c.pem", "config/b.tmp", "platforms/.DS_Store", "cafe/.#a.py",
+            "cafe/schemas/s.json~"]
+    for rel in junk:
+        (root / rel).write_text("junk")
+        assert pipeline.code_digest() == clean, rel
+    (root / "config" / "b.yaml").write_text("b: 1\n")
+    assert pipeline.code_digest() != clean
+    (root / "config" / "b.yaml").unlink()
+    (root / "config" / "certs" / "c.pem").write_text("another certificate")
+    assert pipeline.code_digest() != clean
+    rules = [ln[2:].strip() for ln in (ROOT / "bin" / "sync_filters").read_text().splitlines() if ln.startswith("- ")]   # and bin/sync_filters keeps them off
+    for rel in junk[:5]:
+        assert any(fnmatch.fnmatch(pathlib.PurePosixPath(rel).name, r) for r in rules if "/" not in r), rel
 
 def test_a_context_without_a_budget_plans_nothing(tmp_path, monkeypatch):
     monkeypatch.setattr(budget, "plan", lambda *a, **k: pytest.fail("no budget, no plan"))
@@ -1794,7 +1868,7 @@ def test_run_to_ingest_plans_nothing_and_writes_no_plan_file(tmp_path, monkeypat
         return real(mission, budget_name, *a, **k)
     monkeypatch.setattr(pipeline, "Context", spy)
     pipeline.run(MISSION_PATH, "quick", 0, tmp_path / "r", stop_after="ingest", log=quiet)
-    assert seen == [(None, "quick")] and not (tmp_path / "r" / "plan.json").exists() and (tmp_path / "r" / "checkpoints" / "ingest" / "ledger.json").is_file()
+    assert seen == [(None, None)] and not (tmp_path / "r" / "plan.json").exists() and (tmp_path / "r" / "checkpoints" / "ingest" / "ledger.json").is_file()
 
 
 def test_the_planner_is_given_the_gpu_memory_it_must_guard(tmp_path):
@@ -3108,7 +3182,8 @@ def test_r14_m22_a_tao_manifest_that_is_an_object_of_the_wrong_shape_is_not_cach
     good = json.loads(mp.read_text())
     assert pipeline._tao_cached(tdir, box, t0, t1) is True
     first = next(iter(good["files"]))
-    damages = [{}, {k: v for k, v in good.items() if k != "t0"}, dict(good, t0="garbage"), dict(good, box=[1, 2, 3]), dict(good, files=[]), dict(good, selected=5),
+    damages = [{}, {k: v for k, v in good.items() if k != "t0"}, dict(good, t0="garbage"), dict(good, box=[1, 2, 3]), dict(good, files=[]),
+               dict(good, selected=5),
                dict(good, files={first: {}}), dict(good, positions={}), dict(good, selected={"T0N170W": {"WIND": "no/such/file"}})]
     for damage in damages:
         mp.write_text(json.dumps(damage))
@@ -3126,6 +3201,24 @@ def test_r14_m22_fetching_over_a_misshapen_tao_manifest_checks_every_file_again(
     (out / "manifest.json").write_text(json.dumps(dict(files=[1], t0=0)))
     man = json.loads(tao_mod.fetch_tao((-1.0, 1.0, 160.0, 170.0), 0.0, 3600.0, out).read_text())
     assert man["files"] == {} and tao_mod.manifest_shape(man)
+
+def test_r14_m14_the_fetch_command_the_ingest_advises_is_shell_quoted(tmp_path, data_copy):
+    """`f"{FETCH_CMD} {mission_path}"` split a mission at `my missions/m 1.yaml` into three words; round 13's test used paths without spaces."""
+    import shlex
+    from cafe.pm import __main__ as cli
+    m = tmp_path / "my missions" / "it's m 1.yaml"
+    m.parent.mkdir()
+    m.write_text(MISSION_PATH.read_text())
+    (data_copy / "cache" / "ci_fixture" / "orca" / "manifest.json").write_text("")
+    with pytest.raises(ledger.StageFailed, match="orca_present"):
+        run_stage(pipeline.s_ingest, ctx_for(tmp_path / "r", mission=m), "ingest")
+    note = next(c["note"] for c in read_ledger(tmp_path / "r", "ingest")["checks"] if c["name"] == "orca_present")
+    advised = re.search(r"`(python -m cafe\.pm fetch[^`]*)`", note)[1]
+    argv = shlex.split(advised)
+    assert argv[:4] == ["python", "-m", "cafe.pm", "fetch"] and len(argv) == 6 and argv[-1] == str(m)
+    assert cli.build_parser().parse_args(argv[3:]).mission == str(m)
+    assert pipeline.fetch_cmd(MISSION_PATH) == f"python -m cafe.pm fetch --mission {MISSION_PATH}"                    # nothing to quote: unchanged
+    assert shlex.split(pipeline.fetch_cmd("a b/c.yaml"))[-1] == "a b/c.yaml"
 
 def test_r10_a_tao_cache_made_under_another_selection_rule_is_not_cached(data_copy):
     """Round 10, M-19 follow-up: the per-variable selection changes which files a cache holds, but `_tao_cached` accepted a manifest of the old rule (files
