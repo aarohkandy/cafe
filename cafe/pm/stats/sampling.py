@@ -39,6 +39,15 @@ def marginal(spec: dict[str, Any]) -> Any:
 
 ELL_MIN, ELL_MAX = 1e-200, 1e200                                    # m: inside these 1/ell and x*k of the random field stay finite (1e-310: NaN fields)
 DISTS = ("normal", "lognormal", "uniform", "fixed")             # what a perturbations.yaml entry may be (a "fixed" one is a setting, not sampled)
+# The entries every reader indexes by name (stage1.FORCING and ACTS, perturb.PerturbedEnv, config.env_sigmas); `usv_vpp_bias_brief` is the stage-1b case's, read
+# only when that case runs, where stage1.check_case names it if it is absent.
+REQUIRED = ("wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "hs_scale", "tp_bias", "current_correlation_length",
+            "bulk_stress_scale", "glider_speed_scale", "usv_vpp_bias", "battery_capacity_scale")
+# What the stage-1 code does with a sampled prior x as a speed factor: a FRACTION is read as 1 + x (stage1._run_usv: the USV flies at that factor of its
+# polar), a FACTOR as x itself. A speed factor is positive, whatever the prior says; `SUPPORT_SD` standard deviations is where a normal is taken to end.
+FRACTIONS = ("usv_vpp_bias", "usv_vpp_bias_brief")
+FACTORS = ("current_speed_scale", "hs_scale", "bulk_stress_scale", "glider_speed_scale", "battery_capacity_scale")
+SUPPORT_SD = 6.0
 
 
 def _num(x: Any) -> bool:
@@ -49,6 +58,24 @@ def _num(x: Any) -> bool:
         return False
 
 
+def _check_factor(k: str, e: dict[str, Any]) -> None:
+    """The limit physics gives a speed-like prior (`FRACTIONS`, `FACTORS`): the factor it makes is > 0 over the whole support, so the vehicle never flies
+    backwards or with a negative Hs. A fraction is also a fraction and not a percent (-30 to -35 typed for -0.30 to -0.35: round 14, M-9), so no number of
+    it reaches 1 in size. Called by `check_entry` once the numbers are known finite. A lognormal is positive; the support of a uniform ends at lo, of a
+    normal SUPPORT_SD sd below the mean."""
+    one = 1.0 if k in FRACTIONS else 0.0
+    if one:
+        for f in ("lo", "hi", "mean", "median") + (("value",) if e["dist"] == "normal" else ()):
+            if f in e and _num(e[f]) and abs(e[f]) >= 1:
+                raise ValueError(f"perturbation {k!r}: {f} is {e[f]!r}; this prior is a fraction of speed (the speed factor is 1 + x, so -0.3 is 30 % slower), "
+                                 f"not a percent: write -0.3 for -30 %")
+    low = {"uniform": lambda: e["lo"], "normal": lambda: e.get("mean", 0.0) - SUPPORT_SD * e["value"]}.get(e["dist"])
+    if low is not None and one + low() <= 0:
+        raise ValueError(f"perturbation {k!r}: the {'speed factor 1 + x' if one else 'factor x'} reaches {one + low():g} or less at the low end of the "
+                         f"{e['dist']} prior ({'lo' if e['dist'] == 'uniform' else f'mean - {SUPPORT_SD:g} sd'} = {low():g}); a speed factor must stay > 0"
+                         f"{', and a fraction is not a percent' if one else ''}")
+
+
 def check_entry(k: str, e: Any) -> None:
     """Refuse a perturbations.yaml entry (or a fitted prior that replaces one) that would give NaN members or a raw traceback, naming it.
 
@@ -56,7 +83,8 @@ def check_entry(k: str, e: Any) -> None:
     when given; uniform: finite `lo` < `hi`; fixed: `mean`, the setting itself, finite and > 0 when given. `current_correlation_length` is always
     checked, whatever its dist: it must be fixed with a mean in (ELL_MIN, ELL_MAX), the length the random-field generator divides by (NaN fields,
     a ZeroDivisionError, numpy's 'scale < 0', a KeyError 'mean' for a normal or uniform one, NaN for a mean of 1e-310; round 13, look-ahead L1 and the
-    merge look-ahead). The one check, called by `load_perturbations` for every entry and by `to_marginals` for the entries it builds.
+    merge look-ahead). A prior of `FRACTIONS` or `FACTORS` is also checked by `_check_factor` (a speed factor > 0, a fraction not a percent; round 14, M-9).
+    The one check, called by `load_perturbations` for every entry and by `to_marginals` for the entries it builds.
     """
     if not isinstance(e, dict):
         raise ValueError(f"perturbation {k!r}: an entry is a mapping (dist, value, unit, citation, kind), not {e!r}")
@@ -84,10 +112,13 @@ def check_entry(k: str, e: Any) -> None:
     elif "mean" in e:                                               # any other fixed setting that gives a mean
         if not (_num(e["mean"]) and e["mean"] > 0):
             raise ValueError(f"perturbation {k!r}: the fixed setting (mean) is {e['mean']!r}; it must be finite and > 0")
+    if k in FRACTIONS + FACTORS:
+        _check_factor(k, e)
 
 
 def load_perturbations(path: str | pathlib.Path | None = None) -> dict[str, dict[str, Any]]:
-    """Read config/perturbations.yaml; every entry must carry value, unit, citation and kind: prior (sourced) or assumed, and pass `check_entry`."""
+    """Read config/perturbations.yaml; every entry must carry value, unit, citation and kind: prior (sourced) or assumed, and pass `check_entry`, and every
+    entry of `REQUIRED` must be there (a deleted one was a KeyError at the first reader; round 14, M-13)."""
     from ..config import ConfigError, read_yaml                     # the strict reader: a repeated key or a leading-zero number is refused, as in every stage
     p = path or PERTURBATIONS
     cfg: dict[str, dict[str, Any]] = read_yaml(p)
@@ -100,13 +131,17 @@ def load_perturbations(path: str | pathlib.Path | None = None) -> dict[str, dict
         if miss or e["kind"] not in ("prior", "assumed"):              # assumed: no source, listed in the credibility report
             raise ValueError(f"perturbation {k!r}: missing {sorted(miss)} or kind not prior/assumed")
         check_entry(k, e)
+    gone = [k for k in REQUIRED if k not in cfg]
+    if gone:
+        raise ValueError(f"perturbation {gone[0]!r}: missing from {p}" + (f" (and {', '.join(map(repr, gone[1:]))})" if gone[1:] else ""))
     return cfg
 
 
 def to_marginals(cfg: dict[str, dict[str, Any]], names: list[str] | None = None) -> dict[str, dict[str, Any]]:
     """perturbations.yaml entries -> marginal specs for `lhs` (the `value` field is sd / sigma).
 
-    Entries with dist "fixed" are settings (e.g. a correlation length), not sampled, and are left out unless named.
+    Entries with dist "fixed" are settings (e.g. a correlation length), not sampled: they are skipped when `names` is empty or None, and a named one
+    raises ValueError ("not a sampled parameter").
     """
     out = {}
     for k in names or list(cfg):

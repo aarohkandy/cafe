@@ -3,6 +3,7 @@ lon, lat, t defined in make.py, not read back from the files), plus one delibera
 import datetime as dt
 import re
 import shutil
+import types
 
 import numpy as np
 import pytest
@@ -397,6 +398,22 @@ def test_ocean_calls_without_an_ocean_say_so(grid):
         grid.current(195.0, 0.0, -10.0, grid.tw.x[0])
 
 
+@pytest.mark.parametrize("call", [lambda g: g.current(195.0, 0.0, -10.0, g.tw.x[0]), lambda g: g.density(195.0, 0.0, -10.0, g.tw.x[0]),
+                                  lambda g: g.sound_speed(195.0, 0.0, -10.0, g.tw.x[0])])
+def test_r14_m10_density_and_sound_speed_without_an_ocean_say_so_as_current_does(grid, call):
+    """An interrupted fetch leaves a cache with no ocean store; `whatif` reached `density` through the glider's trim and ended in a bare AssertionError."""
+    assert grid.ocean is None
+    with pytest.raises(OutsideData, match=r"no ocean source loaded: run `.*fetch"):
+        call(grid)
+
+
+def test_r14_m10_with_an_ocean_the_same_calls_reach_it(grid, monkeypatch):
+    ocean = types.SimpleNamespace(density=lambda lon, lat, z, t: "rho", sound_speed=lambda lon, lat, z, t: "c", current=lambda lon, lat, z, t: "u")
+    monkeypatch.setattr(grid, "ocean", ocean)
+    t = grid.tw.x[0]
+    assert (grid.density(195.0, 0.0, -10.0, t), grid.sound_speed(195.0, 0.0, -10.0, t), grid.current(195.0, 0.0, -10.0, t)) == ("rho", "c", "u")
+
+
 def test_3d_winds_go_through_the_grid_to_earth_rotation_like_u10(grid, monkeypatch):
     """U3/V3 are grid-relative like U10. Store the analytic earth wind as the components of a grid rotated alpha CCW from east: the
     wind above the first mass level must come back earth-relative; without the rotation it would be turned by alpha."""
@@ -629,22 +646,41 @@ DEMO_WRF_ATTRS = {"DX": "12000.0", "SST_UPDATE": "0", "SIMULATION_START_DATE": "
 
 
 def test_r13_m30_the_demos_sst_and_wrf_labels_are_the_words_they_always_were(grid):
-    assert E._wrf_notes(DEMO_WRF_ATTRS) == ("12", "frozen at 2023-03-01: SST_UPDATE=0")
+    assert E._wrf_notes(DEMO_WRF_ATTRS) == ("12 km", "frozen at 2023-03-01: SST_UPDATE=0")
     lon, lat = nodes(grid)
     assert grid.wrf_src.startswith("WRF OUTPUT FROM WRF V4.7.1 MODEL 12 km hourly (")
     assert grid.sst(lon, lat, grid.tw.x[0]).source == f"{grid.wrf_src} SST (frozen at 2023-03-01: SST_UPDATE=0)"
 
 
-LEGACY = ("12", "frozen at 2023-03-01: SST_UPDATE=0")
+NO_DX, NO_SST = "grid spacing (DX) not recorded", "SST_UPDATE not recorded"
+START = "2023-03-01_00:00:00"
 
 
-@pytest.mark.parametrize("attrs,want", [({"DX": "4000.0", "SST_UPDATE": "1", "SIMULATION_START_DATE": "2023-03-01_00:00:00"},
-                                         ("4", "updated during the run: SST_UPDATE=1")),
+@pytest.mark.parametrize("attrs,want", [({"DX": "4000.0", "SST_UPDATE": "1", "SIMULATION_START_DATE": START}, ("4 km", "updated during the run: SST_UPDATE=1")),
                                         ({"DX": "12000.0", "SST_UPDATE": "0", "SIMULATION_START_DATE": "2024-07-15_06:00:00"},
-                                         ("12", "frozen at 2024-07-15: SST_UPDATE=0")),
-                                        ({"DX": 12000.0, "SST_UPDATE": 0}, LEGACY), ({"DX": "x", "SST_UPDATE": "?"}, LEGACY), ({}, LEGACY)])
+                                         ("12 km", "frozen at 2024-07-15: SST_UPDATE=0")),
+                                        # round 14, M-7: an attribute that is absent or no number is not recorded, never the orca run's words
+                                        ({"DX": 12000.0, "SST_UPDATE": 0}, ("12 km", "frozen: SST_UPDATE=0 (start date not recorded)")),
+                                        ({"DX": "x", "SST_UPDATE": "?"}, (NO_DX, NO_SST)), ({}, (NO_DX, NO_SST))])
 def test_r13_m30_the_sst_note_and_the_grid_spacing_are_read_from_the_wrf_attributes(attrs, want):
     assert E._wrf_notes(attrs) == want
+
+
+@pytest.mark.parametrize("dx", ["nan", float("nan"), "inf", float("-inf"), 0, "0", -12000, "-12000.0", None, "1e400"])
+def test_r14_m7_a_grid_spacing_that_is_no_positive_finite_number_is_not_printed_as_one(dx):
+    """`{'DX': nan}` gave km 'nan', 0 gave '0', -12000 gave '-12', inf gave 'inf'; each is now the words that say the file did not record it."""
+    assert E._wrf_notes({"DX": dx, "SST_UPDATE": "0", "SIMULATION_START_DATE": START}) == (NO_DX, "frozen at 2023-03-01: SST_UPDATE=0")
+
+
+UPDATED, FROZEN = "updated during the run: SST_UPDATE=", "frozen at 2023-03-01: SST_UPDATE=0"
+
+
+@pytest.mark.parametrize("upd,want", [("1.0", UPDATED + "1"), (2, UPDATED + "2"), (1.0, UPDATED + "1"), ("0.0", FROZEN), (0.0, FROZEN),
+                                      ("1.5", NO_SST), (1.5, NO_SST), ("nan", NO_SST), (float("nan"), NO_SST), ("inf", NO_SST), (float("-inf"), NO_SST),
+                                      ("1e400", NO_SST), ("", NO_SST), (None, NO_SST), ("yes", NO_SST)])
+def test_r14_m7_an_sst_update_that_is_no_whole_number_is_not_labelled_frozen(upd, want):
+    """'1.0' was a ValueError of `int`, so a coupled file was labelled frozen; 1.5 was truncated to 1; nan gave 'frozen' as well."""
+    assert E._wrf_notes({"DX": "12000.0", "SST_UPDATE": upd, "SIMULATION_START_DATE": START}) == ("12 km", want)
 
 
 def test_r13_m30_a_cache_of_coupled_wrf_is_not_labelled_frozen(ci_env, tmp_path):

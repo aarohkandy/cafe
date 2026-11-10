@@ -494,7 +494,7 @@ class USVSim:
     """M-member wing-sail USV ensemble.  `env` is a cafe.pm.env Environment, `start` = (lon, lat) scalars or (M,) arrays,
     `t0` epoch seconds.  mission: dict(mode='section'|'station', waypoints=[(lon, lat), ...] or station=(lon, lat), repeat=False,
     seed=0, plus any mission_defaults key: becalmed_after_h, track_tolerance_km, corridor_km, wp_radius_m, roll_limit_deg,
-    calm_sustain_s, stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change} (default draws N(vpp_bias_mean, vpp_bias_sd)).
+    calm_sustain_s, stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change, > -1} (default draws N(vpp_bias_mean, vpp_bias_sd)).
     The wind is read at the anemometer height, the current at current_z_m; wind/current errors are the caller's environment's."""
 
     def __init__(self, params: dict[str, Any], members: int, env: Any, start: tuple[Arr, Arr], t0: float, mission: dict[str, Any],
@@ -518,6 +518,9 @@ class USVSim:
         pt = perturb or {}
         bias = pt["vpp_bias"] if "vpp_bias" in pt else draw_vpp_bias(P, M, int(md.get("seed", 0)))
         self.fac = 1.0 + np.broadcast_to(np.asarray(bias, float), (M,)).copy()
+        if (self.fac <= 0).any():                                                       # round 14, M-9: positive on every path (the drawn bias is clipped)
+            raise ValueError(f"vpp_bias {np.asarray(bias, float).min():g}: the speed factor 1 + bias is {self.fac.min():g}, not > 0; the bias is a fraction "
+                             f"(-0.3 for 30 % slower), not a percent")
         lon, lat = (np.broadcast_to(np.asarray(a, float), (M,)).copy() for a in start)
         nf = ~(np.isfinite(lon) & np.isfinite(lat))                                      # round 7, M-16: a non-finite start is a labelled failure from t = 0
         self.lon, self.lat = np.where(nf, 0.0, lon), np.where(nf, 0.0, lat)               # (finite, so the step stays finite)

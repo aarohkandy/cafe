@@ -12,7 +12,7 @@ the TAO comparison overwrites the wind and SST ones, see cafe.pm.env.tao).
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, functools, pathlib
+import contextlib, datetime as dt, functools, math, pathlib
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -51,20 +51,25 @@ def _stamp(T: Any) -> str:
 
 
 def _wrf_notes(a: Any) -> tuple[str, str]:
-    """(grid spacing in km as text, what the SST of this WRF file is) from the store's global attributes DX, SST_UPDATE and SIMULATION_START_DATE, which
-    `orca.wrf_grid` copies from the file: a coupled-SST file is not labelled frozen. An absent or unreadable attribute gives the text of the orca run
-    (12 km, frozen at 2023-03-01), the only data `orca.wrf_grid` accepts (round 13, M-30)."""
+    """(grid spacing as text, what the SST of this WRF file is) from the store's global attributes DX, SST_UPDATE and SIMULATION_START_DATE, which
+    `orca.wrf_grid` copies from the file: a coupled-SST file is not labelled frozen. An attribute that is absent or that is no number the words can
+    state (a DX that is not finite and > 0, an SST_UPDATE that is not a whole number) is said to be not recorded, never given the orca run's value
+    (12 km, frozen at 2023-03-01), which `orca.wrf_grid` guarantees only for a cache it wrote (round 14, M-7; round 13, M-30 had the old words)."""
     try:
-        km = f"{float(a['DX']) / 1000:g}"
+        dx = float(a["DX"]) / 1000
     except (KeyError, TypeError, ValueError):
-        km = "12"
+        dx = math.nan
+    grid = f"{dx:g} km" if math.isfinite(dx) and dx > 0 else "grid spacing (DX) not recorded"
     try:
-        upd = int(a["SST_UPDATE"])
+        upd = float(a["SST_UPDATE"])
     except (KeyError, TypeError, ValueError):
-        return km, "frozen at 2023-03-01: SST_UPDATE=0"
-    if upd:
-        return km, f"updated during the run: SST_UPDATE={upd}"
-    return km, f"frozen at {str(a.get('SIMULATION_START_DATE', '2023-03-01'))[:10]}: SST_UPDATE=0"
+        upd = math.nan
+    if not (math.isfinite(upd) and upd == int(upd)):
+        return grid, "SST_UPDATE not recorded"
+    if int(upd):
+        return grid, f"updated during the run: SST_UPDATE={int(upd)}"
+    start = str(a.get("SIMULATION_START_DATE", ""))[:10]
+    return grid, f"frozen at {start}: SST_UPDATE=0" if start else "frozen: SST_UPDATE=0 (start date not recorded)"
 
 
 def to_seconds(t: dt.datetime | str) -> float:
@@ -123,8 +128,8 @@ class GriddedEnv:
 
         w = load(cache / "orca" / "wrf.zarr")
         u = load(cache / "orca" / "umwm.zarr")
-        km, self.sst_note = _wrf_notes(w.attrs)
-        self.wrf_src = f"WRF {w.attrs.get('TITLE', '').strip()} {km} km hourly ({w.attrs.get('source', '')})"
+        grid, self.sst_note = _wrf_notes(w.attrs)
+        self.wrf_src = f"WRF {w.attrs.get('TITLE', '').strip()} {grid} hourly ({w.attrs.get('source', '')})"
         self.umwm_src = f"UMWM hourly ({u.attrs.get('source', '')})"
         self.tw = axis(secs(w.time.values, "wrf.zarr"), "time", "wrf.zarr")
         self.law, self.low = axis(w.lat.values, "lat", "wrf.zarr"), axis(w.lon.values, "lon", "wrf.zarr")
@@ -354,24 +359,30 @@ class GriddedEnv:
     # ------------------------------------------------------------ ocean
 
     def current(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
-        if self.ocean is None:
-            raise OutsideData(f"no ocean source loaded: run `{FETCH_CMD} <mission file>` (GOFS 3.1 by default) or point ocean.source at the lab's HYCOM")
+        ocean = self._need_ocean()
         self._ocean_check("ocean current", lon, lat, t)
-        v = self.ocean.current(lon, lat, z, t)
+        v = ocean.current(lon, lat, z, t)
         if self.subgrid is not None:
             v = self.subgrid.current_extra(self, v, lon, lat, z, t)
         return v
 
+    def _need_ocean(self) -> Ocean:
+        """The ocean store, or the OutsideData of `current` when there is none (a fetch that was interrupted leaves such a cache): `whatif` and a glider's
+        trim reach `density` and `sound_speed` first, and an `assert` there was a bare AssertionError traceback (round 14, M-10)."""
+        if self.ocean is None:
+            raise OutsideData(f"no ocean source loaded: run `{FETCH_CMD} <mission file>` (GOFS 3.1 by default) or point ocean.source at the lab's HYCOM")
+        return self.ocean
+
     def density(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
-        assert self.ocean is not None
+        ocean = self._need_ocean()
         self._ocean_check("ocean density", lon, lat, t)
-        v = self.ocean.density(lon, lat, z, t)
+        v = ocean.density(lon, lat, z, t)
         return self.subgrid.density_extra(self, v, lon, lat, z, t) if self.subgrid is not None else v
 
     def sound_speed(self, lon: Any, lat: Any, z: Any, t: Any) -> Tagged:
-        assert self.ocean is not None
+        ocean = self._need_ocean()
         self._ocean_check("ocean sound speed", lon, lat, t)
-        return self.ocean.sound_speed(lon, lat, z, t)
+        return ocean.sound_speed(lon, lat, z, t)
 
     def depth(self, lon: Any, lat: Any) -> Tagged:
         if self.ocean is not None and hasattr(self.ocean, "bathymetry"):

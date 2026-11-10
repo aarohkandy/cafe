@@ -237,9 +237,10 @@ def test_load_perturbations_names_the_entry_and_the_missing_fields(tmp_path):
     p.write_text(yaml.safe_dump(dict(a=dict(value=1, unit="m", citation="x", kind="guess"))))
     with pytest.raises(ValueError, match=r"perturbation 'a': missing \[\] or kind not prior/assumed"):
         S.load_perturbations(p)
-    p.write_text(yaml.safe_dump(dict(a=dict(dist="normal", value=1, unit="m", citation="x", kind="assumed"),
-                                     b=dict(dist="normal", value=2, unit="s", citation="y", kind="prior"))))
-    assert list(S.load_perturbations(p)) == ["a", "b"] and S.load_perturbations(str(p))["b"]["value"] == 2
+    p.write_text(yaml.safe_dump(dict(yaml.safe_load(S.PERTURBATIONS.read_text()),                       # the required entries are there (round 14, M-13)
+                                     a=dict(dist="normal", value=1, unit="m", citation="x", kind="assumed"),
+                                     b=dict(dist="normal", value=2, unit="s", citation="y", kind="prior")), sort_keys=False))
+    assert list(S.load_perturbations(p))[-2:] == ["a", "b"] and S.load_perturbations(str(p))["b"]["value"] == 2
 
 
 FIELDS = dict(unit="m", citation="c", kind="prior")
@@ -712,3 +713,129 @@ def test_r13_merge_the_correlation_length_is_a_fixed_setting_whose_inverse_is_fi
         S.check_entry("current_correlation_length", dict(dist="fixed", mean=good, value=0.0, **FIELDS))
         assert np.isfinite(Field(1, [0, 1], "s", good)(np.zeros((2, 3)) + 1.0, np.zeros((2, 3)) + 2.0)).all()
     S.check_entry("another_normal", dict(dist="normal", value=1000.0, **FIELDS))                        # other entries keep their dist
+
+
+# ---------------------------------------------------------------------------------------------------------- round 14, M-8, M-9, M-13
+def shipped():
+    return yaml.safe_load(S.PERTURBATIONS.read_text())
+
+
+def test_r14_m8_a_named_fixed_entry_is_refused_and_an_unnamed_one_is_left_out():
+    """The docstring said fixed entries are left out unless named; a named one reaches the else branch and raises."""
+    cfg = S.load_perturbations()
+    assert "current_correlation_length" not in S.to_marginals(cfg) and "current_correlation_length" not in S.to_marginals(cfg, [])
+    with pytest.raises(ValueError, match="'current_correlation_length' has dist 'fixed': not a sampled parameter"):
+        S.to_marginals(cfg, ["current_correlation_length"])
+    assert "left out" not in S.to_marginals.__doc__ and "raises ValueError" in S.to_marginals.__doc__
+
+
+PERCENT = r"perturbation 'usv_vpp_bias': (lo|hi|mean|value) is .*a fraction of speed .* not a percent"
+FACTOR1 = r"perturbation 'usv_vpp_bias': the speed factor 1 \+ x reaches .* must stay > 0"
+
+
+@pytest.mark.parametrize("name", ["usv_vpp_bias", "usv_vpp_bias_brief"])
+@pytest.mark.parametrize("entry, words", [
+    (dict(dist="uniform", lo=-35.0, hi=-30.0), r"lo is -35.0; this prior is a fraction of speed .* not a percent"),     # the brief's -30 to -35 % as typed
+    (dict(dist="uniform", lo=-0.35, hi=30.0), r"hi is 30.0; .* not a percent"),
+    (dict(dist="uniform", lo=-1.0, hi=-0.3), r"lo is -1.0; .* not a percent"),                                  # exactly -100 %: the factor 0
+    (dict(dist="uniform", lo=0.2, hi=1.0), r"hi is 1.0; .* not a percent"),
+    (dict(dist="normal", mean=-30.0, value=2.0), r"mean is -30.0; .* not a percent"),
+    (dict(dist="normal", mean=-0.3, value=50.0), r"value is 50.0; .* not a percent"),
+    (dict(dist="normal", mean=-0.25, value=0.2), r"the speed factor 1 \+ x reaches -0.45 or less .*mean - 6 sd = -1.45"),      # 6 sd: past -100 %
+    (dict(dist="normal", value=0.17), r"mean - 6 sd = -1.02"),                                                  # a normal with the default mean 0
+])
+def test_r14_m9_a_speed_fraction_must_be_a_fraction_and_keep_its_speed_factor_positive(name, entry, words):
+    """`usv_vpp_bias` is read as the factor 1 + x (stage1._run_usv); -35..-30 typed for -0.35..-0.30 made the USV fly at a speed factor of about -30."""
+    e = dict(entry, unit="x", citation="c", kind="prior", **({} if "value" in entry else dict(value=0.0)))
+    with pytest.raises(ValueError, match=rf"perturbation '{name}': .*{words}"):
+        S.check_entry(name, e)
+    with pytest.raises(ValueError, match=rf"perturbation '{name}'"):
+        S.to_marginals({name: e}, [name])
+
+
+@pytest.mark.parametrize("entry", [dict(dist="uniform", lo=-0.2565, hi=-0.2280, value=0.0), dict(dist="uniform", lo=-0.35, hi=-0.30, value=0.0),
+                                   dict(dist="uniform", lo=-0.99, hi=0.99, value=0.0), dict(dist="normal", mean=-0.25, value=0.1),
+                                   dict(dist="normal", mean=-0.25, value=0.12), dict(dist="lognormal", median=0.2, value=0.5)])
+def test_r14_m9_what_physics_allows_of_a_speed_fraction_is_allowed(entry):
+    """The limits are the factor's, not chosen ranges: 1 + lo > 0 and 1 + mean - 6 sd > 0 (here 1 - 0.25 - 0.72 = 0.03)."""
+    S.check_entry("usv_vpp_bias", dict(entry, unit="x", citation="c", kind="prior"))
+
+
+@pytest.mark.parametrize("name", S.FACTORS)
+@pytest.mark.parametrize("entry, words", [
+    (dict(dist="uniform", lo=0.0, hi=2.0), r"the factor x reaches 0 or less at the low end of the uniform prior \(lo = 0\)"),
+    (dict(dist="uniform", lo=-1.0, hi=2.0), r"factor x reaches -1 or less"),
+    (dict(dist="normal", mean=1.0, value=0.2), r"normal prior \(mean - 6 sd = -0.2\)"),
+    (dict(dist="normal", value=0.1), r"mean - 6 sd = -0.6"),
+])
+def test_r14_m9_a_scale_prior_is_a_factor_that_stays_positive_over_its_support(name, entry, words):
+    """Sibling of the fraction: `glider_speed_scale`, `hs_scale`, ... multiply a speed or a height as x itself, and `current_speed_scale` takes its log."""
+    with pytest.raises(ValueError, match=rf"perturbation '{name}': .*{words}"):
+        S.check_entry(name, dict(entry, unit="x", citation="c", kind="prior", **({} if "value" in entry else dict(value=0.0))))
+
+
+@pytest.mark.parametrize("name", S.FACTORS)
+def test_r14_m9_a_positive_scale_prior_of_any_shape_passes(name):
+    for e in (dict(dist="lognormal", median=1e-300, value=50.0), dict(dist="uniform", lo=0.5, hi=1.5, value=0.0), dict(dist="normal", mean=1.0, value=0.1)):
+        S.check_entry(name, dict(e, unit="x", citation="c", kind="prior"))
+
+
+def test_r14_m9_the_percent_check_does_not_read_a_number_the_other_checks_refuse_and_other_priors_are_not_percent_checked():
+    with pytest.raises(ValueError, match="needs finite numbers lo < hi"):
+        S.check_entry("usv_vpp_bias", dict(dist="uniform", lo="-35", hi=-30.0))                 # not a TypeError out of abs()
+    S.check_entry("usv_vpp_bias", dict(dist="fixed", lo="x", mean=0.3, value=0.0))             # a fixed entry's other fields are nobody's
+    S.check_entry("wind_speed_bias", dict(dist="normal", mean=-40.0, value=50.0))              # m/s: a magnitude of 50 is a number, not a percent
+    S.check_entry("tp_bias", dict(dist="normal", value=1e9))
+
+
+def test_r14_m9_the_shipped_priors_pass_every_check_unchanged():
+    cfg = S.load_perturbations()
+    for k, e in cfg.items():
+        S.check_entry(k, e)
+    assert (cfg["usv_vpp_bias"]["lo"], cfg["usv_vpp_bias"]["hi"]) == (-0.2565, -0.2280)
+    assert (cfg["usv_vpp_bias_brief"]["lo"], cfg["usv_vpp_bias_brief"]["hi"]) == (-0.35, -0.30)
+    assert set(S.REQUIRED) | {"usv_vpp_bias_brief"} == set(cfg)
+
+
+def test_r14_m9_a_percent_in_the_file_is_refused_where_every_reader_sees_it(tmp_path):
+    cfg = shipped()
+    cfg["usv_vpp_bias"].update(lo=-35, hi=-30)
+    p = tmp_path / "p.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match=PERCENT):
+        S.load_perturbations(p)
+
+
+@pytest.mark.parametrize("gone", S.REQUIRED)
+def test_r14_m13_a_deleted_required_prior_is_named_where_the_file_is_read(tmp_path, gone):
+    """tp_bias gone was a KeyError in config.env_sigmas; current_correlation_length gone loaded and failed at the first environment."""
+    cfg = shipped()
+    del cfg[gone]
+    p = tmp_path / "p.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    with pytest.raises(ValueError, match=rf"perturbation '{gone}': missing from {p}$"):
+        S.load_perturbations(p)
+    other = "wind_speed_bias" if gone != "wind_speed_bias" else "tp_bias"                  # two gone: the first in REQUIRED's order is named, the rest listed
+    del cfg[other]
+    p.write_text(yaml.safe_dump(cfg))
+    first, second = sorted((gone, other), key=S.REQUIRED.index)
+    with pytest.raises(ValueError, match=rf"perturbation '{first}': missing from {p} \(and '{second}'\)$"):
+        S.load_perturbations(p)
+
+
+def test_r14_m13_the_deleted_prior_reaches_env_sigmas_as_that_error_and_the_brief_case_stays_optional(tmp_path, monkeypatch):
+    from cafe.pm import config, stage1
+    cfg = shipped()
+    del cfg["tp_bias"]
+    (tmp_path / "perturbations.yaml").write_text(yaml.safe_dump(cfg))
+    monkeypatch.setattr(config, "CONFIG", tmp_path)
+    with pytest.raises(ValueError, match=r"perturbation 'tp_bias': missing from .*perturbations.yaml"):
+        config.env_sigmas()
+    cfg = shipped()
+    del cfg["usv_vpp_bias_brief"]                                                       # legitimately optional until the sensitivity case runs
+    p = tmp_path / "nobrief.yaml"
+    p.write_text(yaml.safe_dump(cfg))
+    pri = S.load_perturbations(p)
+    assert "usv_vpp_bias_brief" not in pri
+    with pytest.raises(config.ConfigError, match="prior 'usv_vpp_bias_brief' is not a uniform entry of config/perturbations.yaml"):
+        stage1.check_case("usv_vpp_bias_brief", 4, pri)

@@ -1271,3 +1271,19 @@ def test_r10_m17_the_speed_cap_cannot_pass_the_top_of_the_added_resistance_table
     assert usv.load_platform(usv_file(tmp_path, "params", "stw_cap_ms", usv.WAVE_U_MAX))["stw_cap_ms"] == usv.WAVE_U_MAX
     with pytest.raises(ValueError, match=r"stw_cap_ms: 4.0 must be a finite number .*at most 3.5"):
         usv.load_platform(usv_file(tmp_path, "params", "stw_cap_ms", 4.0))
+
+
+@pytest.mark.parametrize("bias", [-30.0, -35.0, -1.0, -1.5, -100.0])
+def test_r14_m9_a_speed_bias_that_makes_the_speed_factor_zero_or_negative_is_refused_on_the_perturb_path(bias):
+    """stage1 passes `(1 + X) * drag ** -0.5 - 1` and `fac = 1 + bias` had no clip there: -30 (a percent typed for a fraction) gave a factor of -29."""
+    with pytest.raises(ValueError, match=r"the speed factor 1 \+ bias is -?[0-9.e+-]+, not > 0; the bias is a fraction .* not a percent"):
+        sim(AnalyticEnv(), bias=bias)
+    with pytest.raises(ValueError, match="fraction"):                              # one bad member is enough
+        usv.USVSim(P, 3, AnalyticEnv(), (-165.0, -1.0), 0.0, dict(mode="station", station=(-165.0, 0.5)), perturb=dict(vpp_bias=np.array([-0.3, -0.4, bias])))
+
+
+def test_r14_m9_a_speed_bias_above_minus_one_is_a_positive_factor_and_the_drawn_path_never_reaches_the_check():
+    s = sim(AnalyticEnv(), bias=-0.99)
+    assert np.allclose(s.fac, 0.01) and (s.fac > 0).all()
+    wide = usv.USVSim({**P, "vpp_bias_sd": 5.0}, 50, AnalyticEnv(), (0.0, 0.0), 0.0, dict(mode="station", station=(0.0, 1.0), seed=2))
+    assert wide.fac.min() == pytest.approx(0.1)                                    # the drawn bias is clipped to >= -0.9
