@@ -1341,6 +1341,32 @@ def test_fea_failure_timeout_and_the_real_child_process(no_wall_receipt, monkeyp
     assert not out2["run"] and out2["reason"].startswith("killed: the FEA")                  # a hard stop at the slice, however far gmsh/ccx got
 
 
+def _sigpipe_ignored():
+    """Whether this process ignores SIGPIPE as the kernel has it: `signal.getsignal` is Python's own record, which a C library's change does not touch."""
+    line = next(ln for ln in pathlib.Path("/proc/self/status").read_text().splitlines() if ln.startswith("SigIgn"))
+    return bool(int(line.split()[1], 16) & (1 << 12))
+
+
+def test_r14_meshing_with_gmsh_leaves_sigpipe_ignored_so_a_closed_socket_is_an_error_and_not_a_dead_process():
+    """P-R13A-2 and the rows like it: `gmsh.initialize()` puts SIGPIPE back to its default and `finalize()` does not undo it, so after the first in-process
+    FEA (`in_process_fea` of this file) the pytest process died, with no traceback and rc -13 (141 from a shell), at the next write to a closed socket: the
+    local HTTP servers of test_remote and test_ingest_fetch, an xdist worker's channel (measured on orca, r14). `cafe.fea._gmsh` sets it back."""
+    import signal
+    import socket
+    import trimesh
+    from cafe import fea
+    assert _sigpipe_ignored()
+    try:
+        fea.mesh_body(trimesh.creation.icosphere(subdivisions=1, radius=0.1), "shell", 0.05)
+        assert _sigpipe_ignored()
+        a, b = socket.socketpair()
+        b.close()
+        with a, pytest.raises(BrokenPipeError):
+            a.send(b"x")
+    finally:
+        signal.signal(signal.SIGPIPE, signal.SIG_IGN)                       # whatever the mesher did, the next test keeps its process
+
+
 HANG = """
 import os, pathlib, subprocess, sys, time
 from cafe import fea

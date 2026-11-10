@@ -5,7 +5,7 @@ A flying/swimming body has no supports, so the net applied load is balanced by a
 opposite body acceleration (inertia relief by hand) and held by a statically determinate 3-2-1
 constraint whose reactions should come out ~0 (checked and reported).
 """
-import pathlib, re, shutil, subprocess, tempfile
+import ctypes, pathlib, re, shutil, signal, subprocess, tempfile
 from typing import Any
 import numpy as np
 import trimesh
@@ -29,7 +29,12 @@ MATERIALS = {
 
 def _gmsh():
     import gmsh
+    ignored = signal.getsignal(signal.SIGPIPE) == signal.SIG_IGN
     gmsh.initialize(interruptible=False)   # safe off the main thread
+    if ignored:                            # initialize() puts SIGPIPE back to its default, finalize() does not undo it, and Python ignores it: a later write to a
+        # closed socket or pipe in this process (a local HTTP server's client gone, an xdist worker's channel) then killed it with no traceback (P-R13A-2). libc
+        # signal() rather than signal.signal(), which only the main thread may call; Python's own record of the handler already says SIG_IGN.
+        ctypes.CDLL(None).signal(signal.SIGPIPE, ctypes.c_void_p(1))
     gmsh.option.setNumber("General.Terminal", 0)
     return gmsh
 

@@ -6,6 +6,7 @@ for the whole module (pipeline.DATA and env.ocean.DATA are patched), never the r
 """
 import datetime as dt
 import hashlib
+import itertools
 import json
 import pathlib
 import pickle                      # res.pkl is the pipeline's own checkpoint, written into this test's temporary run directory and read back from there
@@ -1517,6 +1518,10 @@ def fake_stage1(monkeypatch):
                     f[:] = False
         return b
     monkeypatch.setattr(stage1, "run_batch", run_batch)
+    # The stage's own clock is the real kill at the share, and with stage 1 faked it would only measure how loaded the machine is (P-R13M2): this module's clock
+    # ticks 1 ms a call, far below any share. A test of the kill sets its own clock after this one.
+    ticks = itertools.count(0.0, 0.001)
+    monkeypatch.setattr(pipeline, "time", types.SimpleNamespace(time=time.time, perf_counter=lambda: next(ticks)))
     return calls
 
 
@@ -1906,6 +1911,18 @@ def test_the_hold_out_is_rechecked_on_members_no_training_row_used(tmp_path, tab
     assert ("point(s) re-run on fresh members:" in note) == bool(h["fresh_points"])
     assert ("only the in-sample score is judged" in note) == (not h["fresh_points"])
     assert h["fresh_points"] >= 1, "no variant row landed in the hold-out: the fresh-draw wiring is not exercised"
+
+
+def test_r14_a_slow_machine_does_not_cut_the_variants_of_a_test_that_fakes_stage_1(tmp_path, table, fake_stage1, monkeypatch):
+    """P-R13M2: the hold-out test failed under load on orca (`fresh_points` 0: no variant row in the hold-out) because the variant loop's real kill at the
+    share (20 s here) fired before the third variant; the loop takes about 6 s alone, and a clock 4 times slower than that cut it (measured, r14). `fake_stage1`
+    owns the stage's clock now, so a test that fakes stage 1 never reads the machine's speed; the kill itself is tested with its own clock above."""
+    real = time.perf_counter
+    monkeypatch.setattr(time, "perf_counter", lambda: real() * 1000)                  # a machine 1000 times slower than this one
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48, unused_refit=True), 100.0)           # share 20 s: three variants
+    run_stage(pipeline.s_emulator, ctx, "emulator")
+    design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
+    assert len(design["variants"]) == 3 and design["killed"] is None
 
 
 def test_a_held_out_point_whose_fresh_rerun_leaves_the_environment_data_is_left_out_of_the_fresh_check_not_a_crash(tmp_path, table, fake_stage1, monkeypatch):
