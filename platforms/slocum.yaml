@@ -35,7 +35,6 @@ params:
   gps_s:         {value: 120.0,       unit: s,        assumed: true, why: "see seaglider.yaml"}
   windage:       {value: 0.01,        unit: "-",      assumed: true, why: "see seaglider.yaml"}
   antenna_height_m: {value: 0.3,      unit: m,        assumed: true, why: "Slocum tail antenna tip above the water when surfaced; the lab's CAD replaces it"}
-  acoustic_modem: {value: benthos_atm960, unit: "-",  source: "platforms/modems.yaml (Teledyne Benthos ATM-960 series)"}
   seafloor_margin_m: {value: 50.0,    unit: m,        assumed: true, why: "see seaglider.yaml"}
   min_dive_m:    {value: 30.0,        unit: m,        assumed: true, why: "see seaglider.yaml"}
 mission_defaults:

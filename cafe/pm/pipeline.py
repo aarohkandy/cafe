@@ -267,8 +267,8 @@ def _umwm_depth(cache: str | pathlib.Path) -> dict[str, NDArray[np.float64]] | N
         u = xr.open_zarr(p)
         return dict(lon=u.lon.values, lat=u.lat.values, depth=np.where(u["seamask"].values > 0, u["depth"].values.astype("f8"), 0.0))
     except Exception as e:                                                # noqa: BLE001  any unreadable chunk or metadata file is the same advice
-        raise ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); delete {pathlib.Path(cache) / 'orca'} and run "
-                          f"`{FETCH_CMD} ...` again: only that part is downloaded again") from e
+        raise ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); delete "
+                          f"{shlex.quote(str(pathlib.Path(cache) / 'orca'))} and run `{FETCH_CMD} ...` again: only that part is downloaded again") from e
 
 
 def ocean(ctx: Context) -> Any:

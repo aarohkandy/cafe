@@ -28,7 +28,7 @@ thknss [Pa] / 9806 = m, srfhgt [m2/s2] / 9.806 = m; NERSC abfile.py (github.com/
 records; .a records padded to ((idm*jdm+4095)//4096)*4096 big-endian float32 words, values above 2**99 are land / no data;
 regional.grid.b lists `plon:  min,max = a b` lines in record order.
 """
-import concurrent.futures as cf, datetime as dt, functools, itertools, json, os, pathlib, re, shutil, subprocess, sys, threading, time
+import concurrent.futures as cf, datetime as dt, functools, itertools, json, os, pathlib, re, shlex, shutil, subprocess, sys, threading, time
 import urllib.parse, urllib.request
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
@@ -36,7 +36,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from . import conventions as cv, remote
+from . import conventions as cv, orca, remote
 from .environment import FETCH_CMD, seconds
 
 Box = tuple[float, float, float, float]
@@ -244,9 +244,10 @@ def unreadable(path: Any, e: Exception, lab: bool | None = None) -> Exception:
     p = pathlib.Path(path)
     if lab is None:
         lab = not p.name.startswith("gofs")
-    fix = (f"restore {p} from the lab's source (`python -m cafe.pm ingest-ocean --mission ... --path DIR --temperature-kind K` writes it); "
+    q = shlex.quote(str(p))                                                  # pasted into a shell: a path with a space is one word (round 14 L0)
+    fix = (f"restore {q} from the lab's source (`python -m cafe.pm ingest-ocean --mission ... --path DIR --temperature-kind K` writes it); "
            "the pipeline cannot download it" if lab else
-           f"delete {p} and run `{FETCH_CMD} ...` again: only that part is downloaded again")
+           f"delete {q} and run `{FETCH_CMD} ...` again: only that part is downloaded again")
     return ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); {fix}")
 
 
@@ -370,7 +371,11 @@ def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1
     pdir = out_dir / f"{name}.parts"
     pdir.mkdir(parents=True, exist_ok=True)
     mpath = pdir / "manifest.json"
-    man = json.loads(mpath.read_text()) if mpath.exists() else {}
+    man = orca.read_json(mpath)
+    if man is None or not manifest_shape(man):                       # absent, empty, truncated, another shape: no record, all parts again (round 14 L0)
+        if mpath.exists():
+            log(f"{mpath} is not a parts manifest (empty, truncated or of another shape): all parts are fetched again")
+        man = {}
     lock = threading.Lock()
     jobs = [(d, c) for d in DATASETS for c in _chunks(steps, chunk_steps)]
     if man.get("parts") and man.get("box") != list(box):             # parts cut to another box are not this box's: a part is reused by name and hash only
@@ -417,12 +422,26 @@ def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1
     return out
 
 
+def manifest_shape(d: dict[str, Any], whole: bool = False) -> bool:
+    """Whether the parsed parts manifest `d` holds what the fetch reads of it: `parts` (absent is a fresh manifest) a dict of records with a string `sha256`.
+    `whole`: what assemble_gofs reads on top: `dataset` and `box` of the manifest, `dataset` and `server` of every part (round 14 L0, the M-22 sibling:
+    the orca and TAO manifests had this check, the ocean one was read with a bare json.loads)."""
+    parts = d.get("parts", {})
+    if not isinstance(parts, dict) or not all(isinstance(r, dict) and isinstance(r.get("sha256"), str) for r in parts.values()):
+        return False
+    return not whole or ("parts" in d and isinstance(d.get("dataset"), str) and orca.real_numbers(d.get("box"), 4)
+                         and all(isinstance(r.get(k), str) for r in parts.values() for k in ("dataset", "server")))
+
+
 def assemble_gofs(pdir: Any, steps: Any, out_zarr: Any) -> pathlib.Path:
     """The parts in `pdir` (checked against manifest.json hashes) -> Zarr with rho and c. One time step in memory at a time."""
     import xarray as xr
     pdir = pathlib.Path(pdir)
     refuse_overlap(out_zarr, pdir)                                           # the parts are hours of download; the store replaces its predecessor with rmtree
-    man = json.loads((pdir / "manifest.json").read_text())
+    man = orca.read_json(pdir / "manifest.json")
+    if man is None or not manifest_shape(man, whole=True):
+        raise ValueError(f"{pdir / 'manifest.json'} is missing or is not a parts manifest (empty, truncated or of another shape); "
+                         f"delete it and rerun fetch_gofs to fetch the parts again")
     for fn, rec in man["parts"].items():
         if _sha(pdir / fn) != rec["sha256"]:
             raise ValueError(f"{pdir / fn}: SHA-256 differs from the manifest; delete it and rerun fetch_gofs to fetch that part again")
@@ -452,7 +471,7 @@ def assemble_gofs(pdir: Any, steps: Any, out_zarr: Any) -> pathlib.Path:
         try:                                                          # join="exact": parts of different boxes never become NaN holes (the outer default did)
             a = xr.concat([opened[fn] for fn in names], dim="time", join="exact").sortby("time")
         except ValueError as e:
-            raise ValueError(f"the {d} parts in {pdir} were cut to different boxes ({e}); delete {pdir} and run fetch again") from e
+            raise ValueError(f"the {d} parts in {pdir} were cut to different boxes ({e}); delete {shlex.quote(str(pdir))} and run fetch again") from e
         per[d] = a.isel(time=~a.indexes["time"].duplicated())
     joined = xr.merge([per[d] for d in DATASETS], join="inner", compat="override")
     t = seconds(joined.time.values)

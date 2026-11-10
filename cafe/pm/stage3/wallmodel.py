@@ -157,7 +157,8 @@ def wall_state(u: jax.Array, ws: WallSet, nu_lat: float, u_wall: ArrayLike = (0.
     (A no-slip bounce-back wall delivers c_s^2 u_1 per face, ~10^3 times u_tau^2 at these speeds; a slip velocity chosen to
     leave exactly u_tau^2 is a cancellation of two large numbers and measured as noise, so the stress is imposed directly:
     the wall-stress boundary condition of the wall-modelled LES literature, here on a voxel wall with the lattice-link
-    face area 1/(|n_x|+|n_y|+|n_z|) per wall cell.) Returns lattice units."""
+    face area 1/(|n_x|+|n_y|+|n_z|) per wall cell.) A wall cell with no normal (not `valid`) has u_tau 0: no shear, and
+    `near_wall_tau` raises no eddy viscosity from it. Returns lattice units."""
     uw = jnp.asarray(u_wall, jnp.float32).reshape(3, 1)
     cell = tuple(ws.cell)
     um = (u[:, ws.sten[0], ws.sten[1], ws.sten[2]] * ws.wgt[None]).sum(1) - uw        # relative velocity at the matching point
@@ -166,10 +167,10 @@ def wall_state(u: jax.Array, ws: WallSet, nu_lat: float, u_wall: ArrayLike = (0.
     u1 = u[(slice(None),) + cell] - uw
     u1_t = u1 - (u1 * n).sum(0) * n
     sp = jnp.sqrt((um_t ** 2).sum(0))
-    ut = utau_loglaw(sp, y_match, nu_lat)
+    ut = utau_loglaw(sp, y_match, nu_lat) * jnp.asarray(ws.valid)                          # no normal, no wall model: u_tau 0, so no shear, no eddy viscosity
     s1 = jnp.sqrt((u1_t ** 2).sum(0))
     area = 1.0 / jnp.maximum(jnp.abs(n).sum(0), 1e-6)                                      # padded entries have n = 0
-    fw = ut ** 2 * area * u1_t / jnp.maximum(s1, 1e-9) * jnp.asarray(ws.valid)          # force on the body, along the relative flow
+    fw = ut ** 2 * area * u1_t / jnp.maximum(s1, 1e-9)                                      # force on the body, along the relative flow
     # the wall velocity is the cell's tangential velocity AFTER the stress kick (-fw per unit volume): with the pre-kick velocity
     # the bounce-back would hand back ~60 % of the stress (measured on the flat plate: F_BB = -0.6 F_shear)
     return dict(utau=ut, yplus=y_match * ut / nu_lat, u_slip=uw + u1_t - fw, u1=u1_t, um=um_t, fw=fw)

@@ -21,7 +21,7 @@ they are not adapted to the box, so `density_extra` is too large by alpha(CT 28)
 """
 from __future__ import annotations
 
-import json, pathlib
+import json, pathlib, shlex
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -225,7 +225,7 @@ class SurfaceLayer:
         except Exception as e:                                         # noqa: BLE001  zarr/numcodecs raise RuntimeError, ValueError, OSError ...
             from ..config import ConfigError
             from .environment import FETCH_CMD
-            raise ConfigError(f"derived surface layer {store} cannot be read ({type(e).__name__}: {e}); delete {store} and run "
+            raise ConfigError(f"derived surface layer {store} cannot be read ({type(e).__name__}: {e}); delete {shlex.quote(str(store))} and run "
                               f"`{FETCH_CMD} ...` again: only it is rebuilt") from e
         self.t, self.la, self.lo = Axis(d.time.values, "time"), Axis(d.lat.values, "lat"), Axis(d.lon.values, "lon")
         if d.attrs.get("layout_version") != LAYOUT_VERSION:

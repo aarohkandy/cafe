@@ -81,6 +81,20 @@ def test_loader_refuses_bad_leaves(tmp_path, leaf, msg):
         g.load_platform(str(f))
 
 
+@pytest.mark.parametrize("name", ["seaglider", "slocum"])
+@pytest.mark.parametrize("value", ["no_such_modem", "benthos_atm960"])
+def test_r14_l0_a_glider_file_with_a_modem_name_that_no_code_reads_is_refused_whatever_the_name(tmp_path, name, value):
+    """`acoustic_modem: no_such_modem` loaded, and so did a real name: both changed no result (a link's modem is named in the mission). It is refused at load
+    with the fix, and the shipped files no longer carry it."""
+    raw = yaml.safe_load((g.PLATFORMS / f"{name}.yaml").read_text())
+    assert "acoustic_modem" not in raw["params"] and "acoustic_modem" not in g.load_platform(name)
+    raw["params"]["acoustic_modem"] = {"value": value, "unit": "-", "source": "a test"}
+    f = tmp_path / "old.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=r"old\.yaml:params\.acoustic_modem: no code reads it .*modems\.yaml.*delete it"):
+        g.load_platform(str(f))
+
+
 def test_loader_accepts_a_good_file(tmp_path):
     """Review round 5, M-4: the old version loaded a stub with one invented parameter; a file now has to hold everything the model reads, so the
     good file is the shipped slocum.yaml with a parameter and a mission default added."""

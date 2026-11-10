@@ -83,7 +83,7 @@ BOTH = [("bin/pmx.sh", dict(PMX="pm_t")), ("pm.sh", {})]
 @pytest.mark.parametrize("script, env", BOTH)
 @pytest.mark.parametrize("var, value, runtime", [
     *[("PM_CPUS", v, r) for v in ("2,", "2;x", "0", "1.5", "-1", "$(id)", "2 3", "02") for r in ("docker", "proot")],
-    *[("CAFE_MIN_FREE_GB", v, "proot") for v in ("1;echo INJ", "0", "6 0", "x")],
+    *[("CAFE_MIN_FREE_GB", v, "proot") for v in ("1;echo INJ", "6 0", "x", "-1")],
     *[("PM_THREADS", v, "proot") for v in ("2;x", "0", "2 2")],
     *[(n, v, "docker") for n in ("PM_MEM", "PM_SHM") for v in ("8g;x", "g", "0g", "8 g", "8gb;x", "$(id)")]])
 def test_m23_a_number_pasted_into_the_remote_command_line_is_refused_before_anything_is_sent(tmp_path, script, env, var, value, runtime):
@@ -854,6 +854,21 @@ def test_r14_m19_orca_sync_refuses_a_free_space_figure_of_twenty_digits_before_a
     log = log_ssh(tmp_path)
     r = run(["sh", str(ROOT / "bin/orca_sync.sh"), "orca", "root"], {**env, "CAFE_MIN_FREE_GB": "9" * 20})
     assert r.returncode == 2 and "CAFE_MIN_FREE_GB" in r.stderr and not log.exists() and r.stdout == ""
+
+
+@pytest.mark.parametrize("script, env", BOTH)
+def test_r14_l0_a_free_space_floor_of_zero_switches_the_disk_check_off_through_every_runner(tmp_path, script, env):
+    """Round 14 L0: pm_job took CAFE_MIN_FREE_GB through pm_num (1 and up), so the 0 that proot_run.sh, orca_sync.sh and their comments document as "no disk
+    check" was refused (exit 2, nothing sent) by the laptop-side first gate of pmx.sh, pm.sh, orca_gate.sh and orca_ready.sh."""
+    rc, out = sent(tmp_path, script, "true", PM_RUNTIME="proot", CAFE_MIN_FREE_GB="0", **env)
+    assert rc == 0 and "CAFE_MIN_FREE_GB=0 " in out
+
+
+def test_r14_l0_the_one_check_of_the_job_accepts_zero_for_the_free_space_floor_and_nothing_else_it_refused(tmp_path):
+    check = lambda v: subprocess.run(["sh", "-c", ". bin/pm_checks.sh; PM_RUNTIME=proot pm_job"], cwd=ROOT, env={**os.environ, "CAFE_MIN_FREE_GB": v},  # noqa: E731
+                                     capture_output=True, text=True).returncode
+    assert [check(v) for v in ("0", "1", "999999999")] == [0, 0, 0]
+    assert [check(v) for v in ("00x", "1.5", "1000000000", "1 2")] == [2, 2, 2, 2]
 
 
 # ---- round 14 M-33: one checkout owns each pm_<you> directory on the worker; the gate has no directory made from its tag

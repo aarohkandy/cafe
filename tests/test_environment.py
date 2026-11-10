@@ -799,3 +799,15 @@ def test_r13_m37_a_gap_of_two_hours_between_3d_hours_is_not_interpolated_across(
     assert env._wind3d(lon, lat, z, t0 + 1800.0) is not None
     env.w3 = dict(t=np.array([t0, t0 + 7200.0]), **pair)
     assert env._wind3d(lon, lat, z, t0 + 3600.0) is None
+
+
+def test_r14_l0_the_delete_advice_for_an_orca_store_is_one_shell_word_when_the_cache_path_has_a_space(ci_env, tmp_path):
+    """The M-14 sibling: `delete {cache}/orca and run ...` was pasted as two words for a cache in `my runs`."""
+    import shlex
+    from cafe.pm.config import ConfigError
+    d = _copy_cache(ci_env, tmp_path / "my runs")
+    chunk = next(p for p in sorted((d / "orca" / "wrf.zarr" / "U10").rglob("*")) if p.is_file() and p.name != "zarr.json")
+    chunk.write_bytes(b"")
+    with pytest.raises(ConfigError, match="cannot be read") as e:
+        GriddedEnv(d, env_sigmas())
+    assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(d / "orca")]

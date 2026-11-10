@@ -5,7 +5,7 @@ the same list, so what the user sees is exactly what was tested.
 """
 from __future__ import annotations
 
-import argparse, contextlib, datetime as dt, hashlib, json, os, pathlib, platform, sys, time
+import argparse, contextlib, datetime as dt, hashlib, json, os, pathlib, platform, shlex, sys, time
 from collections.abc import Iterator
 from typing import Any
 
@@ -111,7 +111,7 @@ def stored(path: pathlib.Path, group: str) -> tuple[dict[str, Any], str] | None:
     redo = ("rerun the run that writes it (python -m cafe.cfd stamps its file)" if path.name in CFD_FILES
             else "redo the SITL cross-check by hand (no program in this repo writes this file)")
     context(group, f"stored result {path.name} {why}: not counted", 0.0, 0.0, "",
-            f"{redo}, or if you have checked this one, `python -m cafe.receipts stamp {path}`")
+            f"{redo}, or if you have checked this one, `python -m cafe.receipts stamp {shlex.quote(str(path))}`")
     return None
 
 

@@ -1066,3 +1066,38 @@ def test_r14_m3_a_results_directory_runs_everything_and_receipts_json_goes_throu
     assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere.json", "receipts.json"] and "1/1 receipts pass" in capsys.readouterr().out
     monkeypatch.setattr(R, "OUT", [dict(group="G", ok=False, claim="c")])
     assert R.main([str(tmp_path)]) == 1
+
+
+def test_r14_l0_the_stamp_advice_is_one_shell_word_per_path_so_pasting_it_stamps_the_file(tmp_path):
+    """`python -m cafe.receipts stamp <tmp>/my runs/sitl.json` was two arguments: `my` and `runs/sitl.json`."""
+    import shlex
+    f = tmp_path / "my runs" / "sitl.json"
+    f.parent.mkdir()
+    f.write_text("[]")
+    R.OUT.clear()
+    assert R.stored(f, "g") is None
+    cmd = R.OUT[0]["source"].split("`python -m cafe.receipts stamp ")[1].split("`")[0]
+    assert shlex.split(cmd) == [str(f)]
+    plain = tmp_path / "sitl.json"
+    plain.write_text("[]")
+    R.OUT.clear()
+    R.stored(plain, "g")
+    assert f"stamp {plain}`" in R.OUT[0]["source"]                                                  # a plain path is not changed
+    R.OUT.clear()
+
+
+@pytest.mark.parametrize("what, sample", [("external", "torpedo"), ("surface", "wigley"), ("incidence", "suboff")])
+def test_r14_l0_a_cut_write_of_the_stamped_cfd_result_leaves_the_stamped_file_it_replaces(what, sample, tmp_path, monkeypatch, cut_writes):
+    """`python -m cafe.cfd` can run for hours and wrote its stamped result in place: a kill or a full disk between truncate and write left a file that
+    `stored` reports as 'cannot be read as a JSON object' and counts nothing. It goes through config.write_text, a temporary and os.replace (RC-4)."""
+    from cafe import cfd
+    for fn in ("characterize_external", "characterize_incidence", "characterize_free_surface"):
+        monkeypatch.setattr(cfd, fn, lambda *a, **k: dict(rho=1.0, speeds={}, dirs={}))
+    out = cfd.main([what, sample, str(tmp_path / "W")])
+    before = out.read_bytes()
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        cfd.main([what, sample, str(tmp_path / "W")])
+    assert out.read_bytes() == before and not list(out.parent.glob("*.tmp"))
+    R.OUT.clear()
+    assert R.stored(out, "CFD") is not None and R.OUT == []

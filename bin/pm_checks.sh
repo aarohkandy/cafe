@@ -37,7 +37,7 @@ pm_job() {
   [ -z "${PM_CPUS-}" ] || pm_num PM_CPUS "$PM_CPUS"
   if [ "${PM_RUNTIME:-docker}" = proot ]; then
     case ${PM_STOP_GRACE:-10} in *[!0-9]*) pm_bad "PM_STOP_GRACE: whole seconds (default 10), not '$PM_STOP_GRACE'" ;; esac
-    [ -z "${CAFE_MIN_FREE_GB-}" ] || pm_num CAFE_MIN_FREE_GB "$CAFE_MIN_FREE_GB"
+    [ -z "${CAFE_MIN_FREE_GB-}" ] || pm_count CAFE_MIN_FREE_GB "$CAFE_MIN_FREE_GB"      # 0 switches the disk check off (round 14 L0: pm_num refused it)
     [ -z "${PM_THREADS-}" ] || pm_num PM_THREADS "$PM_THREADS"
   else
     [ -z "${PM_MEM-}" ] || pm_size PM_MEM "$PM_MEM"

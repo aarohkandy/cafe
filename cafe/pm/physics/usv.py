@@ -100,7 +100,7 @@ NH = 72                   # candidate headings
 FAILS = ("becalmed", "swept_off_track", "capsize_proxy", "wing_stall_calm", "wing_stall_angle", "battery", "no_current_data")
 MODES = ("section", "station")
 PLATFORMS = pathlib.Path(__file__).resolve().parents[3] / "platforms"
-STRINGS = ("radio_900mhz", "radio_2g4", "iridium_link")
+REMOVED = ("radio_900mhz", "radio_2g4", "iridium_link")      # keys of older platform files that no code read (round 14 L0, M-39 sibling)
 
 
 # ------------------------------------------------------------------ parameters
@@ -129,7 +129,7 @@ REQUIRED = dict(
 # A mission may override any of them, but the report and stage 3 read the platform's own, so a file without one is refused at load (round 9, M-22).
 MISSION_REQUIRED = dict(becalmed_after_h="pos", calm_sustain_s="nonneg", track_tolerance_km="pos<=1000", corridor_km="pos", wp_radius_m="pos",
                         roll_limit_deg="pos<=180", stall_sustain_s="nonneg", cap_cycles="ge1")
-OPTIONAL = ("draft_nominal_m", "keel_depth_m", "iridium_antenna_height_m") + STRINGS      # read by no code
+OPTIONAL = ("draft_nominal_m", "keel_depth_m", "iridium_antenna_height_m")      # read by no code
 
 
 def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
@@ -149,7 +149,10 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
                 raise ValueError(f"{path.name}:{where}.{k}: need value and unit")
             if not (leaf.get("source") or (leaf.get("assumed") is True and leaf.get("why"))):
                 raise ValueError(f"{path.name}:{where}.{k}: need a source, or assumed: true with a why")
-            if isinstance(leaf["value"], str) and k not in STRINGS:
+            if k in REMOVED:
+                raise ValueError(f"{path.name}:{where}.{k}: no code reads it (the radio of a link is named in the mission's links, or by `radio.link` of a UAS "
+                                 "platform, from platforms/radios.yaml); delete it")
+            if isinstance(leaf["value"], str):
                 raise ValueError(f"{path.name}:{where}.{k}: {leaf['value']!r} is a string (floats need a dot and a signed exp.)")
             out[k] = leaf["value"]
         return out

@@ -1362,3 +1362,45 @@ def test_r13_l1_refuse_overlap_of_a_symlink_loop_store_is_not_a_runtimeerror(tmp
     loop = tmp_path / "store.zarr"
     loop.symlink_to("store.zarr")
     h.refuse_overlap(loop, tmp_path / "src")                    # a loop is no directory that holds the source: returns, was RuntimeError
+
+
+# ---- round 14 look-ahead L0 (the M-22 and M-14 siblings): the ocean parts manifest is read like the orca and TAO ones, and its advice is pasteable
+
+DAMAGED_MANIFESTS = ["", "{cut", "[]", "null", '{"parts": []}', '{"parts": {"a.nc": 1}}', '{"parts": {"a.nc": {"sha256": 5}}}']
+
+
+@pytest.mark.parametrize("text", DAMAGED_MANIFESTS)
+def test_r14_l0_a_damaged_ocean_manifest_is_no_record_so_fetch_gofs_fetches_every_part_again(fx, truth, ncss, tmp_path, text):
+    """`fetch_gofs` read the manifest with a bare json.loads and used it as a dict: an empty file was a JSONDecodeError and `[]` an AttributeError, before any
+    request. The orca and TAO manifests of the same state are fetched again (round 14, M-22); so is this one."""
+    _fetch(tmp_path, ncss)
+    n = len(ncss.log)
+    (tmp_path / "gofs_tepex_c.parts" / "manifest.json").write_text(text)
+    logged: list[str] = []
+    z = _fetch(tmp_path, ncss, log=logged.append)
+    assert len(ncss.log) == n + 6 and any("is not a parts manifest" in x for x in logged)
+    _same(h.open_store(z), truth)
+
+
+@pytest.mark.parametrize("text", DAMAGED_MANIFESTS + ["{}", '{"parts": {}, "dataset": "x"}'])
+def test_r14_l0_assemble_gofs_names_a_manifest_that_is_not_a_parts_manifest_and_the_fix(fx, tmp_path, text):
+    pdir = tmp_path / "gofs_tepex_c.parts"
+    pdir.mkdir()
+    (pdir / "manifest.json").write_text(text)
+    with pytest.raises(ValueError, match=r"manifest\.json is missing or is not a parts manifest .*delete it and rerun fetch_gofs"):
+        h.assemble_gofs(pdir, mk.STEPS, tmp_path / "out.zarr")
+    (pdir / "manifest.json").unlink()
+    with pytest.raises(ValueError, match="is missing or is not a parts manifest"):
+        h.assemble_gofs(pdir, mk.STEPS, tmp_path / "out.zarr")
+
+
+def test_r14_l0_the_delete_and_restore_advice_is_one_shell_word_per_path(tmp_path):
+    """`delete {p}` and `restore {p}` are pasted: a path with a space was two words (`rm` of a missing `my`)."""
+    import shlex
+    p = tmp_path / "my runs" / "gofs_x.zarr"
+    msg = str(h.unreadable(p, OSError("x")))
+    assert shlex.split(msg.split("delete ")[1].split(" and run")[0]) == [str(p)]
+    msg = str(h.unreadable(tmp_path / "my runs" / "lab.zarr", OSError("x")))
+    assert shlex.split(msg.split("restore ")[1].split(" from the lab")[0]) == [str(tmp_path / "my runs" / "lab.zarr")]
+    plain = tmp_path / "gofs_x.zarr"
+    assert f"delete {plain} and run" in str(h.unreadable(plain, OSError("x")))                      # a plain path is not changed

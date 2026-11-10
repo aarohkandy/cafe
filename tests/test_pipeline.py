@@ -4137,3 +4137,13 @@ def test_r13_sweep_dump_is_whole_or_not_at_all_and_can_sort_keys(tmp_path, monke
     with pytest.raises(OSError, match="killed"):
         pipeline._dump({"a": 2}, f)
     assert f.read_bytes() == before and not list(tmp_path.glob("*.tmp"))
+
+
+def test_r14_l0_the_delete_advice_for_the_umwm_store_is_one_shell_word_when_the_cache_path_has_a_space(data_copy, tmp_path):
+    import shlex
+    cache = tmp_path / "my runs" / "ci_fixture"
+    shutil.copytree(data_copy / "cache" / "ci_fixture", cache)
+    (cache / "orca" / "umwm.zarr" / "zarr.json").write_text("{garbage")
+    with pytest.raises(config.ConfigError, match="cannot be read") as e:
+        pipeline._umwm_depth(cache)
+    assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(cache / "orca")]

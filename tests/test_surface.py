@@ -332,3 +332,12 @@ def test_build_with_fewer_than_three_restart_spectra_or_no_finite_error_keeps_th
     lon, lat, t = np.array([194.4, 196.0]), np.array([-0.7, 0.9]), np.array([fx.T_REF + 9 * 3600.0, fx.T_REF + 20 * 3600.0])
     s = GriddedEnv(d, env_sigmas(), subgrid=sl).waves(lon, lat, t)["stokes0"]
     assert np.all(np.isfinite(s.uncertainty)) and np.allclose(s.uncertainty, 0.4 * np.abs(s.value)) and "nan" not in s.source
+
+
+def test_r14_l0_the_delete_advice_for_the_derived_layer_is_one_shell_word_when_the_cache_path_has_a_space(tmp_path):
+    import shlex
+    from cafe.pm.config import ConfigError
+    (tmp_path / "my runs" / "derived.zarr").mkdir(parents=True)
+    with pytest.raises(ConfigError, match="derived surface layer .* cannot be read") as e:
+        S.SurfaceLayer(tmp_path / "my runs")
+    assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(tmp_path / "my runs" / "derived.zarr")]

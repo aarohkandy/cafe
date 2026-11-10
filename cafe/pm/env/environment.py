@@ -12,7 +12,7 @@ the TAO comparison overwrites the wind and SST ones, see cafe.pm.env.tao).
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, functools, math, pathlib
+import contextlib, datetime as dt, functools, math, pathlib, shlex
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
@@ -106,13 +106,13 @@ class GriddedEnv:
                 return xr.open_zarr(store, consolidated=False).load()          # the spectrum store has no consolidated metadata (orca.assemble)
             except Exception as e:                                        # noqa: BLE001  any unreadable chunk or metadata file is the same advice
                 from ..config import ConfigError
-                raise ConfigError(f"environment cache file {store} cannot be read ({type(e).__name__}: {e}); delete {cache / 'orca'} and run "
+                raise ConfigError(f"environment cache file {store} cannot be read ({type(e).__name__}: {e}); delete {shlex.quote(str(cache / 'orca'))} and run "
                                   f"`{FETCH_CMD} ...` again: only that part is downloaded again") from e
 
         def damaged(store: str, e: ValueError) -> Exception:
             from ..config import ConfigError
             return ConfigError(f"environment cache file {cache / 'orca' / store}: {e} (a repeated, reversed or missing value); delete "
-                               f"{cache / 'orca'} and run `{FETCH_CMD} ...` again: only that part is downloaded again")
+                               f"{shlex.quote(str(cache / 'orca'))} and run `{FETCH_CMD} ...` again: only that part is downloaded again")
 
         def axis(x: Any, name: str, store: str) -> Axis:
             try:

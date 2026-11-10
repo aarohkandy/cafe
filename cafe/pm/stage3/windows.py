@@ -329,10 +329,13 @@ def run_window(vehicle: Vehicle, spec: WindowSpec, inflow: nest.UEnv, backend: s
     pts = (cell.T - anchor) * dx
     checks = stage3_checks(ser, ns, co["drag"][cut:], clearance, wm.stored_wall_error() if ns.wall_model else 0.0,
                            "; ".join(wm.stale_wall_receipts()) if ns.wall_model else "")
+    note = (f"{nns} of {len(cell[0])} wall cells have no surface normal (a slot one cell wide between walls) and get no wall shear: "
+            "the drag there is under-counted and they are left out of the y+ share") if nns else ""
+    if nns:                                                                    # a failing row, so the window is not ok, not refitted and says why (round 14 L0)
+        checks.append(check_row("wall_cells_without_normal", nns, 0, False, note=note))
     return dict(vehicle=vehicle.name, resolution=res, t=t, force=fsi, ref_area=area, **co, checks=checks,
                 ok=all(c["ok"] for c in checks), wall_points=pts, wall_pressure=pwall, source="native-nest",
-                note=(f"{nns} of {len(cell[0])} wall cells have no surface normal (a slot one cell wide between walls) and get no wall shear: "
-                      "the drag there is under-counted and they are left out of the y+ share") if nns else "",
+                note=note,
                 shifts=int(np.abs(ser["shift"]).sum()), series={k: ser[k] for k in ("umax", "res", "yfrac")}, wall=wlog, steps_run=n)
 
 

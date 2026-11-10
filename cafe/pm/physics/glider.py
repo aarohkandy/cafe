@@ -82,7 +82,8 @@ REQUIRED: dict[str, dict[str, str]] = {
 # but the report and stage 3 read the platform's dive depth, and a platform file describes the vehicle, not one mission (round 9, M-22). A tolerance or a
 # radius is above 0; the hours are 0 or above (0: at once).
 MISSION_REQUIRED = dict(dive_depth_m="pos", station_tol_m="pos", lost_hours="nonneg", wp_radius_m="pos", unreach_hours="nonneg")
-OPTIONAL = ("rho_ref", "acoustic_modem")        # in the files, read by no model code
+OPTIONAL = ("rho_ref",)        # in the files, read by no model code
+REMOVED = ("acoustic_modem",)  # a key of older platform files that no code read: a link's modem is named in the mission (round 14 L0, M-39 sibling)
 
 
 def load_platform(name: str) -> dict[str, Any]:
@@ -103,7 +104,10 @@ def load_platform(name: str) -> dict[str, Any]:
             if not (leaf.get("source") or (leaf.get("assumed") is True and leaf.get("why"))):
                 raise ValueError(f"{path.name}:{where}.{k}: need a source, or assumed: true with a why")
             v = leaf["value"]
-            if isinstance(v, str) and k != "acoustic_modem":
+            if k in REMOVED:
+                raise ValueError(f"{path.name}:{where}.{k}: no code reads it (the modem of a link is named in the mission's links, from "
+                                 "platforms/modems.yaml); delete it")
+            if isinstance(v, str):
                 raise ValueError(f"{path.name}:{where}.{k}: {v!r} is a string (YAML floats need a dot and a signed exponent)")
             out[k] = v
         return out

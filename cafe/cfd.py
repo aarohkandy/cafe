@@ -675,7 +675,8 @@ def main(argv: list[str]) -> pathlib.Path:
         speeds = [float(fn * np.sqrt(9.81 * L)) for fn in (0.2, 0.3, 0.4)]
         r = characterize_free_surface(stl, hs["draft"], work / sample, speeds)
     out = work / f"{sample}.{what}.json"
-    out.write_text(json.dumps(receipts.stamp(r), indent=1, default=float))
+    from cafe.pm.config import write_json                  # the stamped result of hours of CFD: a kill or a full disk leaves the old file, not half of a new one
+    write_json(out, receipts.stamp(r), indent=1, default=float)
     print(json.dumps(r, indent=1, default=float)[:3000])
     return out
 

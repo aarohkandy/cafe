@@ -65,16 +65,29 @@ def fresh_tables(monkeypatch):
 
 # ------------------------------------------------------------------ platform file
 
+REMOVED_KEYS = ("radio_900mhz", "radio_2g4", "iridium_link")
+
 def test_every_number_has_a_source_or_an_assumption():
     raw = yaml.safe_load(pathlib.Path(usv.PLATFORMS / "saildrone_explorer.yaml").read_text())
     for block in ("params", "mission_defaults"):
         for k, leaf in raw[block].items():
             assert "unit" in leaf and (leaf.get("source") or (leaf.get("assumed") is True and leaf.get("why"))), k
-    for k in ("rf_antenna_height_m", "iridium_antenna_height_m", "radio_900mhz", "radio_2g4", "iridium_link"):
+    for k in ("rf_antenna_height_m", "iridium_antenna_height_m"):
         assert k in P
-    radios = yaml.safe_load((usv.PLATFORMS / "radios.yaml").read_text())
-    assert P["radio_900mhz"] in radios["radios"] and P["radio_2g4"] in radios["radios"] and "sbd" in radios["iridium"]
-    assert radios["radios"][P["radio_900mhz"]]["center_mhz"] == 915.0 and radios["radios"][P["radio_2g4"]]["center_mhz"] > 2400.0
+    assert not set(REMOVED_KEYS) & set(P)                                      # round 14 L0: the radio names no code read are gone from the file
+
+
+@pytest.mark.parametrize("key", REMOVED_KEYS)
+@pytest.mark.parametrize("value", ["no_such_radio", "rfd900x"])
+def test_r14_l0_a_usv_file_with_a_radio_name_that_no_code_reads_is_refused_whatever_the_name(tmp_path, key, value):
+    """`radio_900mhz: no_such_radio` loaded, and so did a real name: both changed no result. A key that reads as a switch and is read by nothing is
+    refused at load, with the fix (a link's radio is named in the mission), like the radio block of the UAS file (round 14, M-39)."""
+    raw = yaml.safe_load((usv.PLATFORMS / "saildrone_explorer.yaml").read_text())
+    raw["params"][key] = {"value": value, "unit": "-", "source": "a test"}
+    f = tmp_path / "old.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=rf"old\.yaml:params\.{key}: no code reads it .*radios\.yaml.*delete it"):
+        usv.load_platform(str(f))
 
 
 def test_brief_numbers():
@@ -88,6 +101,7 @@ def test_brief_numbers():
     (lambda p: p["params"]["loa_m"].pop("source"), "need a source"),
     (lambda p: p["params"]["lwl_m"].pop("why"), "need a source"),
     (lambda p: p["params"]["loa_m"].update(value="seven"), "is a string"),
+    (lambda p: p["params"].update(radio_2g4=dict(value="xbee_pro_24", unit="-", source="a test")), "radio_2g4: no code reads it"),
     (lambda p: p["mission_defaults"]["wp_radius_m"].pop("why"), "mission_defaults.wp_radius_m"),
 ])
 def test_loader_refuses_incomplete_leaves(tmp_path, edit, msg):

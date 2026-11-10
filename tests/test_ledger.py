@@ -681,8 +681,10 @@ def test_r11_m2_a_report_stage_that_recorded_the_runs_mission_and_plan_is_not_do
 # since the stage ran" for every run made before and lowers Verification and M&S management when `report --run` renders that run again. The reference runs
 # of round 11 (q10lb, q11, the demo mission, base commit 3ce8e09) hashed these four. Look-ahead L0, after M-12 edited a `why` text and broke both.
 # quad_uas is the file of round 14 (DECISIONS 761): the runs made before it read it as changed by design, and the pin follows the file.
-REFERENCE_RUN_PLATFORMS = {"seaglider": "56504a67a56e97a7", "slocum": "63fa63b48d992ea3", "saildrone_explorer": "7d7f9ed5cdbc4fb9",
+REFERENCE_RUN_PLATFORMS = {"seaglider": "911a7aa781406790", "slocum": "737d9fc4bc1fc381", "saildrone_explorer": "3a197c02b49a7d68",
                            "quad_uas": "a4771e81659ff27f"}      # round 14, M-39: aa55a771899344b1 before the radio block went (DECISIONS 761)
+# Round 14 look-ahead L0 (the M-39 sibling): the three platforms also lost the name keys no code read; before it seaglider was 56504a67a56e97a7,
+# slocum 63fa63b48d992ea3 and saildrone_explorer 7d7f9ed5cdbc4fb9 (the files the reference runs hashed).
 
 
 def test_l0_r11_the_platform_files_the_reference_runs_hashed_are_the_bytes_they_hashed():

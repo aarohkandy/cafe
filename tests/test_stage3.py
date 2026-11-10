@@ -228,19 +228,23 @@ def test_r14_m34_a_wall_cell_with_no_surface_normal_gets_no_shear_and_is_counted
     assert wm.no_shear_cells(plate) == 0 and np.asarray(plate.valid).all()
 
 
-def test_r14_m34_the_eddy_viscosity_next_to_a_cell_without_a_normal_is_finite_and_the_shear_stays_zero():
-    """The stated choice of M-34: `near_wall_tau` is not changed, so the fluid next to a no-normal wall cell still gets the mixing-length eddy
-    viscosity from that cell's u_tau (finite, only ever raising tau) while the cell itself gets no shear: a thin slot under-counts its drag, it does
-    not blow up. Pins the choice; it passed before the M-34 change too (this is not a fix)."""
-    solid = np.zeros((8, 11, 8), bool)
-    solid[:, :5], solid[:, 6:] = True, True
-    ws = wm.WallSet(*(jnp.asarray(a) for a in wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))))
-    nu = 0.01
-    st_ = wm.wall_state(jnp.zeros((3,) + solid.shape).at[0].set(0.02), ws, nu)
-    new = np.asarray(wm.near_wall_tau(jnp.full(solid.shape, 0.5001), ws, st_, nu))
-    assert ws.near.shape[1] > 0 and not np.asarray(ws.valid).any()                    # the premise: fluid cells in the layer, every wall cell without a normal
-    assert np.isfinite(new).all() and (new >= 0.5001 - 1e-7).all() and (new > 0.5001).any()
-    assert float(jnp.abs(st_["fw"]).max()) == 0.0
+def test_r14_l0_a_cell_without_a_normal_has_no_friction_velocity_so_it_raises_no_eddy_viscosity_either():
+    """Round 14 M-34 left `near_wall_tau` reading the u_tau of a wall cell that has no normal: the velocity there has no tangential meaning (n = 0, so the
+    whole velocity counts), the log law gave u_tau 0.003 at every one of the 400 cells of a one-cell slot (20 x 20 x 20, solid below z = 6 and from z = 7,
+    u = (0.05, 0, 0.02), nu 4e-5) and the mixing-length viscosity kappa u_tau y was about 12 times the molecular one around cells the model had just
+    declared to have no wall model. A cell without a normal has u_tau 0: no shear (M-34) and no eddy viscosity (this), so the fluid next to it keeps
+    Smagorinsky's. The row 79 / M-34 choice "near_wall_tau is not changed" is reversed here."""
+    solid = np.zeros((20, 20, 20), bool)
+    solid[:, :, :6], solid[:, :, 7:] = True, True
+    ws = wm.WallSet(*(jnp.asarray(a) for a in wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))), rans_layer=2.5)))
+    assert ws.cell.shape[1] == 400 and not np.asarray(ws.valid).any() and ws.near.shape[1] > 0                # the premise
+    nu = 4e-5
+    u = jnp.zeros((3,) + solid.shape).at[0].set(0.05).at[2].set(0.02)
+    st_ = wm.wall_state(u, ws, nu)
+    assert float(jnp.abs(st_["utau"]).max()) == 0.0 and float(jnp.abs(st_["fw"]).max()) == 0.0
+    tau0 = lbm.tau_from_nu(nu)
+    new = np.asarray(wm.near_wall_tau(jnp.full(solid.shape, tau0), ws, st_, nu))
+    assert np.isfinite(new).all() and (new == np.float32(tau0)).all()                                          # not one cell raised (was 400, by up to 1.5e-3)
 
 
 def test_wall_force_adds_exactly_the_stress_momentum_to_the_fluid_and_reports_the_body_force():
@@ -601,6 +605,7 @@ def test_run_window_small_ellipsoid_in_a_current():
     assert {"mach_max", "yplus_in_30_300_fraction", "mass_drift_per_step"} <= names
     assert r["shifts"] == 0                                                  # vehicle frame: the grid sits on the vehicle
     assert r["wall"]["no_shear_cells"] == 0 and r["note"] == ""              # an ellipsoid has a normal at every wall cell (round 14 M-34)
+    assert "wall_cells_without_normal" not in names
     # the same hull towed the other way: force flips sign, drag coefficient does not
     r2 = W.run_window(HULL, W.WindowSpec(velocity=(-0.5, 0, 0), dx=0.01, steps=1600, box=(2.0, 0.8, 0.8)), _uniform([0, 0, 0]))
     assert r2["force"][-200:, 0].mean() > 0 and r2["cd"] == pytest.approx(r["cd"], rel=0.15)
@@ -610,6 +615,8 @@ def test_r14_m34_the_window_result_counts_the_wall_cells_that_get_no_shear(monke
     monkeypatch.setattr(wm, "no_shear_cells", lambda ws: 7)
     r = W.run_window(HULL, W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=200, box=(2.0, 0.8, 0.8), chunk=200), _uniform([0, 0, 0]))
     assert r["wall"]["no_shear_cells"] == 7 and r["note"].startswith(f"7 of {len(r['wall_points'])} wall cells have no surface normal")
+    row = [c for c in r["checks"] if c["name"] == "wall_cells_without_normal"][0]                      # round 14 L0: a failing row, so the window is not ok
+    assert row["value"] == 7 and row["limit"] == 0 and not row["ok"] and row["note"] == r["note"]
 
 
 def test_run_window_ground_frame_shifts_the_nest_with_the_vehicle():
@@ -1429,6 +1436,28 @@ def test_both_stored_passing_receipts_clear_only_the_wall_model_row(no_wall_rece
     r = out["q"][0]
     assert [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]["ok"]
     assert r["ok"] == all(c["ok"] for c in r["checks"])                         # ok is exactly "every check passed": nothing else decides it
+
+
+def test_r14_l0_wall_cells_without_a_normal_fail_a_row_of_the_window_and_the_reason_names_them(no_wall_receipt, monkeypatch):
+    """Round 14 M-34 put the count of wall cells that get no shear in `run_window`'s `wall` and `note`, which `pipeline_windows` copies into no row: the
+    window showed a low drag, ok and no reason. The count is now a failing check of the window itself, so the row is not ok, not refitted, and says why."""
+    cheap(monkeypatch)
+    wm.channel_path().parent.mkdir(parents=True, exist_ok=True)
+    sha = lbm.physics_sha()
+    wm.channel_path().write_text(json.dumps(_stub_channel(err=0.03, code_sha=sha)))
+    wm.slow_path().write_text(json.dumps(dict(_without(_stub_plate(err=0.05), "force"), code_sha=sha)))
+    run = lambda: pw.run(fake_ctx(no_wall_receipt), {"q": [WIN]}, FakeL())["q"][0]                              # noqa: E731
+    r = run()
+    # the premise:
+    assert "wall_cells_without_normal" not in {c["name"] for c in r["checks"]} and not any("wall cells have no surface normal" in x for x in r["reasons"])
+    # (the toy window fails other checks: its ok is not the premise)
+    assert [c for c in r["checks"] if c["name"] == "wall_model_receipt_error"][0]["ok"]
+    monkeypatch.setattr(wm, "no_shear_cells", lambda ws: 7)
+    r = run()
+    row = [c for c in r["checks"] if c["name"] == "wall_cells_without_normal"][0]
+    assert row["value"] == 7 and not row["ok"] and "7 of " in row["note"] and "no surface normal" in row["note"]
+    assert not r["ok"] and not r["usable_for_refit"] and any("7 of " in x and "under-counted" in x for x in r["reasons"])
+    assert r["ok"] == all(c["ok"] for c in r["checks"])
 
 
 def r_ok(out):

@@ -475,7 +475,7 @@ def why_failed(checks: list[dict[str, Any]], res: dict[str, Any], wlog: dict[str
         elif n == "yplus_in_30_300_fraction" and c.get("note") == W.YPLUS_RAISED_NOTE:
             out.append(f"y+ fraction {v:.0%} was evaluated at the raised lattice viscosity, not the physical one (estimate at the physical "
                        f"viscosity {res['y_plus_estimate']:.0f}): not a wall-model pass")
-        elif n == "hangar_reference_comparable":
+        elif n in ("hangar_reference_comparable", "wall_cells_without_normal"):
             out.append(c["note"])
         elif n == "yplus_in_30_300_fraction":
             out.append(f"y+ at the matching point outside 30-300 at {1 - v:.0%} of the wall cells "
