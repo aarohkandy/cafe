@@ -152,7 +152,7 @@ def test_make_acceptance_writes_into_its_own_directory_and_make_audit_checks_its
 
 def test_the_audit_spreads_the_suite_over_the_cpus_and_runs_the_real_time_tests_alone_in_the_same_coverage_record():
     """L-W1: the serial audit was killed at the 180 min job timeout on the hosted runner. Pass 1 is xdist by file without the real-time tests, pass 2
-    those alone with --cov-append and the json report; the pins and the five tests are the ones mutmut deselects."""
+    those alone with --cov-append and the json report; the pins and the seven tests are the ones mutmut deselects."""
     import tomllib
     from cafe.pm import audit
     one, two = audit.pytest_passes(4)
@@ -510,3 +510,15 @@ def test_r13_m38_the_questions_and_the_status_say_what_the_stored_fea_utilizatio
     assert "*Default:*" in q.split("4a. **The default glider hull")[1]
     st = flat(text("STATUS.md"))
     assert "knocked-down buckling" in st and "wing and arm root" in st
+
+
+def test_r14_m8_every_document_that_counts_the_real_time_tests_counts_audit_serial_tests():
+    """Round 14, M-8: DECISIONS 334 and STATUS 59 and 103 said five where `audit.SERIAL_TESTS` has seven. The number a document gives for them is that list's length."""
+    from cafe.pm import audit
+    words = dict(zip("one two three four five six seven eight nine ten".split(), range(1, 11)))
+    seen = []
+    for name in ("STATUS.md", "DECISIONS.md", "README.md", "docs/RUNBOOK.md", "docs/ORCA_RUNNER.md"):
+        for m in re.finditer(r"\b(one|two|three|four|five|six|seven|eight|nine|ten) real-time tests\b", text(*name.split("/"))):
+            seen.append((name, m.group(1)))
+            assert words[m.group(1)] == len(audit.SERIAL_TESTS), (name, m.group(0))
+    assert {n for n, _ in seen} >= {"STATUS.md", "DECISIONS.md"}                       # it did find the places

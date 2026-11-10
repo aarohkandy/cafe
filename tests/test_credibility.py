@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 import cafe.pm
-from cafe.pm import credibility as cr
+from cafe.pm import config, credibility as cr
 from cafe.pm import dtmb5415
 from cafe.pm.stage1 import NOT_EXERCISED
 from tests.fixtures import pm_run
@@ -1658,3 +1658,16 @@ def test_r13_l1_a_symlink_loop_platform_path_is_not_a_shipped_platform_and_not_a
     loop = tmp_path / "loopdir"
     loop.symlink_to("loopdir")
     assert cr.platform_shipped(str(loop / "p.yaml")) is False                                    # `p.parent.resolve()` raised: the loop is the parent
+
+
+def test_r14_p_r14e2_the_stored_sphere_rows_are_the_one_list_of_runs_and_a_fourth_run_gets_its_rows(monkeypatch, tmp_path):
+    """The page typed the three runs (100, 1000, 1e4) by hand; `lbm.sphere_tag` accepted exactly `SPHERE_RUNS`. Now both read `config.SPHERE_RUNS`."""
+    from cafe.pm.stage3 import lbm, nest
+    assert lbm.SPHERE_RUNS is config.SPHERE_RUNS and nest.SPHERE_RUNS is config.SPHERE_RUNS
+
+    def ids():
+        return [r["id"] for r in cr._stored_rows(tmp_path) if r["id"].split(":")[0].endswith("_sphere")]
+
+    assert ids() == [f"{k}:Re{t}" for k in ("nest_sphere", "lbm_sphere") for t, _ in config.SPHERE_RUNS]
+    monkeypatch.setattr(config, "SPHERE_RUNS", (*config.SPHERE_RUNS, ("1e5", 1e5)))
+    assert "nest_sphere:Re1e5" in ids() and "lbm_sphere:Re1e5" in ids()

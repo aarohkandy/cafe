@@ -1643,3 +1643,9 @@ def test_r13_merge_a_golden_path_that_is_a_dangling_link_is_judged_where_the_wri
     assert acc.golden_refusal(okfile, "m", "m") is None
     acc.check_golden(run_dict(tmp_path / "acc", report()), okfile, MISSION, True)
     assert (tmp_path / "w" / "newdir" / "g.json").is_file()
+
+
+def test_r14_m14_acceptance_fetch_advice_of_a_failed_fetch_quotes_the_mission_path(tmp_path):
+    """The one fetch advice that did not go through `pipeline.fetch_cmd`: a mission path with a space or a quote must paste as one argument."""
+    r = acc.check_run(dict(run_dict(tmp_path, None, rc=1), fetch_rc=1, mission="my dir/it's.yaml"))
+    assert not r["ok"] and f"`{pipeline.fetch_cmd('my dir/it' + chr(39) + 's.yaml')}`" in r["detail"] and "'my dir/it'" in r["detail"]

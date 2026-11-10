@@ -171,7 +171,7 @@ def check_run(r: dict[str, Any]) -> dict[str, Any]:
     """Exit 0, a report, and the wall-clock limit."""
     why = []
     if r.get("fetch_rc"):
-        why.append(f"fetch exit code {r['fetch_rc']}: the run needs a warm cache, so run `python -m cafe.pm fetch --mission {r['mission']}` first "
+        why.append(f"fetch exit code {r['fetch_rc']}: the run needs a warm cache, so run `{pipeline.fetch_cmd(r['mission'])}` first "
                    f"(RUNBOOK 4; with CAFE_OFFLINE=1 a cold cache cannot be filled), see {r['log']}")
     elif r["rc"] != 0:
         why.append(f"exit code {r['rc']}" + (" (killed at the time limit)" if r["rc"] == 124 else "") + f", see {r['log']}")

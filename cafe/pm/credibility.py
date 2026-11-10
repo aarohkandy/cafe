@@ -382,7 +382,7 @@ def _stored_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     rec = data / "receipts"
     out = []
     for kind, label in (("nest_sphere", "native LBM sphere Cd"), ("lbm_sphere", "XLB sphere Cd")):
-        for tag, re_ in (("100", 100.0), ("1000", 1000.0), ("1e4", 1e4)):
+        for tag, re_ in config.SPHERE_RUNS:
             rid, case = f"{kind}:Re{tag}", f"{label} at Re = {re_:g} vs Morrison 2013"
             if kind == "nest_sphere":                         # one file per resolution, nest_sphere_<tag>_d<cells>.json: the finest the gate counts
                 pattern, missing = f"nest_sphere_{tag}_d*.json", f"not run: no nest_sphere_{tag}_d*.json under {rec}"

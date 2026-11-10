@@ -1527,3 +1527,21 @@ def test_r13_l0_every_command_the_code_tells_a_person_to_run_parses_with_the_rea
         except SystemExit:
             bad.append(f"{where}: `{text.strip()}`: {err.getvalue().strip().splitlines()[-1]}")
     assert not bad, "\n".join(bad)
+
+
+def test_r14_m14_no_string_of_cafe_pastes_a_mission_after_the_fetch_command_without_pipeline_fetch_cmd():
+    """Round 14, M-14 quoted the mission path of the fetch advice in `pipeline.fetch_cmd`; `acceptance` still built its own. An f-string that puts a value
+    right after `fetch --mission` (or after the name `FETCH_CMD`) is that defect again: only `fetch_cmd` itself may (it quotes)."""
+    import ast
+    import re
+    bad = []
+    for f in sorted((config.ROOT / "cafe").rglob("*.py")):
+        tree = ast.parse(f.read_text())
+        quoting = {id(m) for d in ast.walk(tree) if isinstance(d, ast.FunctionDef) and d.name == "fetch_cmd" for m in ast.walk(d)}
+        for n in ast.walk(tree):
+            if not isinstance(n, ast.JoinedStr) or id(n) in quoting:
+                continue
+            text = "".join(v.value if isinstance(v, ast.Constant) else "{" + (v.value.id if isinstance(v.value, ast.Name) else "") + "}" for v in n.values)
+            if re.search(r"fetch --mission\s+\{|\{FETCH_CMD\}\s+\{", text):
+                bad.append(f"{f.relative_to(config.ROOT)}:{n.lineno}: {text}")
+    assert not bad, bad
