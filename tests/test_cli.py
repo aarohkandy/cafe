@@ -1507,7 +1507,10 @@ def test_r13_l0_every_command_the_code_tells_a_person_to_run_parses_with_the_rea
     import contextlib
     import io
     import argparse
+    import shlex
     found = advised_commands()
+    fetch = pipeline.fetch_cmd("my dir/m.yaml")                       # the one fetch advice since round 14, M-14: no other string of cafe/ spells the command out
+    found.append(("cafe/pm/pipeline.py:fetch_cmd", fetch, shlex.split(fetch)[3:]))
     ap = cli.build_parser()
     for sub in (a for a in ap._actions if isinstance(a, argparse._SubParsersAction)):         # flags and what is required, not values: `K`, `{}` stand for one
         for p in sub.choices.values():

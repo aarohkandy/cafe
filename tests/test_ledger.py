@@ -680,8 +680,9 @@ def test_r11_m2_a_report_stage_that_recorded_the_runs_mission_and_plan_is_not_do
 # A platform file is a hashed input of the hangar stage (DECISIONS 461): a byte changed in it, a comment or a `why` too, makes `audit` say "input ... changed
 # since the stage ran" for every run made before and lowers Verification and M&S management when `report --run` renders that run again. The reference runs
 # of round 11 (q10lb, q11, the demo mission, base commit 3ce8e09) hashed these four. Look-ahead L0, after M-12 edited a `why` text and broke both.
+# quad_uas is the file of round 14 (DECISIONS 761): the runs made before it read it as changed by design, and the pin follows the file.
 REFERENCE_RUN_PLATFORMS = {"seaglider": "56504a67a56e97a7", "slocum": "63fa63b48d992ea3", "saildrone_explorer": "7d7f9ed5cdbc4fb9",
-                           "quad_uas": "aa55a771899344b1"}
+                           "quad_uas": "a4771e81659ff27f"}      # round 14, M-39: aa55a771899344b1 before the radio block went (DECISIONS 761)
 
 
 def test_l0_r11_the_platform_files_the_reference_runs_hashed_are_the_bytes_they_hashed():
