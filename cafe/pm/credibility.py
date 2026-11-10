@@ -27,7 +27,7 @@ from typing import Any, Iterable
 from . import config, pipeline
 from .audit import ledger_problems
 from .ledger import STAGES, clean, has_commit, real
-from .physics import comms
+from .physics import comms, uas
 from .stage1 import ACTS, NOT_EXERCISED, SUBGRID_SWITCHES, subgrid_switches
 from .stats import intervals, sampling
 from .vv import vv20_row
@@ -498,14 +498,14 @@ def _switches(mission: dict[str, Any] | None) -> dict[str, bool]:
 
 
 def flown_radios(mission: dict[str, Any] | None) -> set[str]:
-    """The entries of platforms/radios.yaml read by the UAS platforms of a mission (`comms.uas_radio_names`), whatever its links say."""
+    """The entries of platforms/radios.yaml read by the UAS platforms of a mission (the `radio.link` of each, `stage1._uas_radio`), whatever its links say."""
     out: set[str] = set()
     for v in (mission or {}).get("vehicles") or []:
         if isinstance(v, dict) and "base" in v:                                                   # the rule of `config.platform_class`
             try:
-                out.add(comms.uas_radio_names(config.load_platform(v["platform"]))[1])
-            except (config.ConfigError, KeyError, TypeError, AttributeError):
-                out.add("rfd900x")                                                                  # the entry a platform with no radio block reads
+                out.add(uas.load_platform(v["platform"])["radio"]["link"])
+            except (ValueError, OSError, KeyError, TypeError, AttributeError):
+                out.add("rfd900x")                                                                  # a platform that cannot be loaded: the default entry
     return out
 
 

@@ -128,13 +128,6 @@ failure:
 
 radio:
   link_loss_hold_s: {value: 5.0, unit: s, assumed: true, why: "a link counts as lost (lost_link) only after it has been below 0 dB margin for this long without a break; ArduCopter's GCS failsafe timeout default (FS_GCS_TIMEOUT 5 s), recalled not re-read; a shorter fade is ridden through", replace_with: "the lab's failsafe timeout"}
-  rfd900x:
-    freq_mhz: {value: [902.0, 928.0], unit: MHz, source: "RFDesign RFD900x datasheet (docs/BRIEF.md 2.8)"}
-    tx_power_dbm: {value: 30.0, unit: dBm, source: "RFDesign RFD900x datasheet: 1 W"}
-    rx_sensitivity_dbm: {value: -121.0, unit: dBm, source: "RFDesign RFD900x datasheet, lowest air data rate (docs/BRIEF.md 2.8)"}
-  link_2g4:
-    freq_mhz: {value: [2400.0, 2483.5], unit: MHz, source: "ISM band edges"}
-    tx_power_dbm: {value: 27.0, unit: dBm, assumed: true, why: "500 mW 2.4 GHz FHSS telemetry radio; replace with the lab's radio"}
-    rx_sensitivity_dbm: {value: -100.0, unit: dBm, assumed: true, why: "typical 2.4 GHz digital modem at low rate; replace with the datasheet value"}
+  link: {value: rfd900x, unit: "-", source: "platforms/radios.yaml `rfd900x` (RFDesign RFD900x, 902-928 MHz, 30 dBm, -121 dBm, docs/BRIEF.md 2.8): the BRIEF's default USV<->UAS radio; the entry holds every number of the radio and no block here repeats them"}
   uas_antenna_height_above_body_m: {value: 0.1, unit: m, assumed: true, why: "whip antenna on the top plate; the link height is deck + flight altitude + this"}
   ship_antenna_height_m: {value: 10.0, unit: m, assumed: true, why: "mast antenna height above the sea surface"}

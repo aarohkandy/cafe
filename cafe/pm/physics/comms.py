@@ -159,14 +159,6 @@ def _radio(radio: str | dict[str, Any]) -> dict[str, Any]:
     return radio if isinstance(radio, dict) else _yaml("radios.yaml")["radios"][radio]
 
 
-def uas_radio_names(P: dict[str, Any]) -> tuple[str, str]:
-    """(the `radio` block of a UAS platform, the entry of platforms/radios.yaml) the lost-link hook reads (`stage1._uas_radio`): the platform's first `radio`
-    block with a `tx_power_dbm`, and the entry of that name, else rfd900x. A platform with no such block is (rfd900x, rfd900x). The one choice, shared by the
-    hook and by the credibility report's "used by this mission" rule (round 13, M-2: the report listed the entry as unused)."""
-    block = next((k for k, v in (P.get("radio") or {}).items() if isinstance(v, dict) and "tx_power_dbm" in v), "rfd900x")
-    return block, block if block in _yaml("radios.yaml")["radios"] else "rfd900x"
-
-
 def rf_margin(d: FA, ht: FA, hr: FA, hs: FA, radio: str | dict[str, Any] = "rfd900x") -> F:
     """Link margin [dB] = Pt + Gt + Gr - cable - misc - L(two-ray) - sensitivity; NO_LINK_DB beyond the radio horizon.
     d [m] ground range; ht, hr [m] antenna heights above the surface; hs [m] significant wave height (local WRF/UMWM swh)."""

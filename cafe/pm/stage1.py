@@ -276,13 +276,9 @@ def _link_hs(env: Any, A: tuple[NDArray[Any], ...], B: tuple[NDArray[Any], ...],
 
 
 def _uas_radio(P: dict[str, Any]) -> dict[str, Any]:
-    """The platform's RF radio as a comms.rf_margin radio dict: the first block of quad_uas.yaml `radio` with a transmit power
-    (rfd900x), its band centre, power and sensitivity, and antenna gains and losses from platforms/radios.yaml's entry of the same
-    name (rfd900x if there is none)."""
-    block, entry = comms.uas_radio_names(P)
-    r = P["radio"][block]
-    base = comms._yaml("radios.yaml")["radios"][entry]
-    return dict(base, center_mhz=float(np.mean(r["freq_mhz"])), tx_dbm=r["tx_power_dbm"], rx_sens_dbm=r["rx_sensitivity_dbm"])
+    """The platform's RF radio as a comms.rf_margin radio dict: the entry of platforms/radios.yaml that `radio.link` names (`uas.load_platform` has checked
+    that it is one), every number of it, so the lost-link hook and a mission rf link naming the same entry fly the same radio (round 14, M-39)."""
+    return dict(comms._yaml("radios.yaml")["radios"][P["radio"]["link"]])
 
 
 def ship_antenna_m(mission: dict[str, Any], radio: dict[str, Any] | None = None) -> float:

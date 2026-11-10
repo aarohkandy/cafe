@@ -1482,26 +1482,29 @@ def test_r13_m2_a_uas_mission_with_no_rf_link_still_counts_the_radio_its_lost_li
 
 
 def test_r13_m2_the_lost_link_hook_and_the_report_choose_the_radio_in_one_place():
+    """Round 14, M-4 and M-39: both read `radio.link` of the loaded platform (the block-order rule and its fallbacks are gone)."""
     from cafe.pm import stage1
     from cafe.pm.physics import comms
     from cafe.pm.physics import uas
     P = uas.load_platform("quad_uas")
-    assert comms.uas_radio_names(P) == ("rfd900x", "rfd900x") and comms.uas_radio_names(cr.config.load_platform("quad_uas")) == ("rfd900x", "rfd900x")
+    assert P["radio"]["link"] == "rfd900x" and cr.flown_radios(dict(vehicles=[dict(platform="quad_uas", base="ship")])) == {P["radio"]["link"]}
     r = stage1._uas_radio(P)
     base = comms._yaml("radios.yaml")["radios"]["rfd900x"]
     assert (r["gt_dbi"], r["gr_dbi"], r["misc_loss_db"], r["cable_loss_db"]) == (base["gt_dbi"], base["gr_dbi"], base["misc_loss_db"], base["cable_loss_db"])
-    xb = dict(radio=dict(P["radio"], mine=dict(tx_power_dbm=20.0)))
-    assert comms.uas_radio_names(xb) == ("rfd900x", "rfd900x")                                       # the first block with a transmit power wins
-    first = dict(radio=dict(xbee_pro_24=dict(tx_power_dbm=18.0), rfd900x=dict(tx_power_dbm=27.0)))
-    assert comms.uas_radio_names(first) == ("xbee_pro_24", "xbee_pro_24")
-    assert comms.uas_radio_names(dict(radio=dict(other=dict(tx_power_dbm=1.0)))) == ("other", "rfd900x")      # no entry of that name: radios.yaml's rfd900x
-    assert comms.uas_radio_names(dict(radio=dict(pa=dict(note="no power")))) == ("rfd900x", "rfd900x")
-    assert comms.uas_radio_names({}) == ("rfd900x", "rfd900x")                                       # no radio block: no StopIteration
+    assert not hasattr(comms, "uas_radio_names")
 
 
-def test_flown_radios_names_the_radio_of_each_uas_platform_and_rfd900x_for_one_that_cannot_be_loaded():
+def test_flown_radios_names_the_link_of_each_uas_platform_and_rfd900x_for_one_that_cannot_be_loaded(tmp_path):
     assert cr.flown_radios(dict(vehicles=[dict(platform="quad_uas", base="ship")])) == {"rfd900x"}
+    raw = cr.config.read_yaml(cr.ROOT / "platforms" / "quad_uas.yaml")
+    raw["radio"]["link"]["value"] = "xbee_pro_24"
+    f = tmp_path / "xbee_uas.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    assert cr.flown_radios(dict(vehicles=[dict(platform=str(f), base="ship")])) == {"xbee_pro_24"}           # a block under another name than rfd900x works
     assert cr.flown_radios(dict(vehicles=[dict(platform="no_such_platform", base="ship")])) == {"rfd900x"}   # a ConfigError: rfd900x
+    raw["radio"]["link"]["value"] = "no_such_radio"
+    f.write_text(yaml.safe_dump(raw))
+    assert cr.flown_radios(dict(vehicles=[dict(platform=str(f), base="ship")])) == {"rfd900x"}               # refused by uas.load_platform: the default
     assert cr.flown_radios(dict(vehicles=[dict(platform=None, base="ship"), "usv", dict(platform="slocum")])) == {"rfd900x"}
     assert cr.flown_radios(dict(vehicles=[dict(platform="slocum")])) == set() and cr.flown_radios({}) == set() and cr.flown_radios(None) == set()
 
