@@ -512,7 +512,7 @@ def flown_radios(mission: dict[str, Any] | None) -> set[str]:
 # What a config/ item needs to be used by a mission. "" is every mission; "-" is none, the item is read by the DTMB validation study and no verdict.
 # A class names the vehicles that read it, "a|b" either of two: stage-3 geometry and nominal windows (`pipeline_windows`, `budget.NOMINAL_WINDOW`), the
 # FEA (`budget.FEA_CLASSES`: the glider), the free-surface case (`budget.FS_PARTS`: the USV), the reach map (`report`: a glider or a USV, each at its
-# own speed) and the class priors (`stage1.priors_for`, the stage-1b sensitivity case). Only the Seaglider reads three of `stage3.glider.*` (round 13, M-3).
+# own speed) and the class priors (`stage1.priors_for`, the stage-1b sensitivity case). Only the Seaglider reads five of `stage3.glider.*`: three geometry keys (round 13, M-3) and the stored hull collapse depth with its hull text (round 15, M-11).
 # The class priors are `stage1.ACTS` turned round (a prior is read by every class that lists it: battery_capacity_scale by the glider and the UAS, not the USV),
 # so a prior added there is counted here by the same rule (look-ahead L0 after round 13); usv_vpp_bias_brief is the stage-1b sensitivity case of usv_vpp_bias.
 CLASS_PRIORS = {k: "|".join(c for c, ks in ACTS.items() if k in ks) for ks in ACTS.values() for k in ks} | {"usv_vpp_bias_brief": "usv"}
@@ -522,7 +522,8 @@ CLASS_PRIORS = {k: "|".join(c for c, ks in ACTS.items() if k in ks) for ks in AC
 SUBGRID_SWITCH = {"gust_front": "gust_fronts", "rain_lens": "rain_lens", "ocean_sde": "ocean_sde", "diurnal_jet": "warm_layer"}
 NOMINAL_CLASS = {"glider": "glider", "usv_hull": "usv", "usv_wing": "usv", "uas": "uas"}
 STAGE3_ONLY = {"fea_elements_along": "glider", "fea_reserve_frac": "glider", "fea_min_s": "glider", "fs": "usv"}      # by the word after `stage3.`
-SEAGLIDER_ONLY = {"glider.hull_diameter_m", "glider.wing_span_m", "glider.wing_chord_m"}                              # after `stage3.`
+SEAGLIDER_ONLY = {"glider.hull_diameter_m", "glider.wing_span_m", "glider.wing_chord_m", "glider.hull_collapse_depth_m",
+                  "glider.hull_collapse_for"}                                                                          # after `stage3.`
 VEHICLE_CLASSES = ("glider", "seaglider", "slocum", "usv", "uas")
 
 

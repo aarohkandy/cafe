@@ -1590,7 +1590,9 @@ def test_r13_m3_every_stage_3_key_of_assumptions_yaml_maps_to_a_class_or_to_ever
     per_class = {k for k in keys if cr.config_scope("config/assumptions.yaml", k)}
     assert {k.removeprefix("stage3.") for k in keys if k not in per_class} == every
     assert {cr.config_scope("config/assumptions.yaml", k) for k in per_class} == {"glider", "seaglider", "slocum", "usv", "uas"}
-    assert len(per_class) == 28 and cr.config_scope("config/assumptions.yaml", "stage3.nominal.usv_wing") == "usv"
+    assert len(per_class) == 32 and cr.config_scope("config/assumptions.yaml", "stage3.nominal.usv_wing") == "usv"
+    assert {cr.config_scope("config/assumptions.yaml", f"stage3.glider.hull_collapse_{k}") for k in ("depth_m", "for")} == {"seaglider"}      # round 15 M-11
+    assert {cr.config_scope("config/assumptions.yaml", f"stage3.slocum.hull_collapse_{k}") for k in ("depth_m", "for")} == {"slocum"}
     assert cr.config_scope("config/assumptions.yaml", "dtmb5415.u_nu_rel") == "-" and cr.config_scope("config/assumptions.yaml", "waves.swell_age") == ""
     assert cr.config_scope("config/perturbations.yaml", "bulk_stress_scale") == "uas" and cr.config_scope("config/perturbations.yaml", "tp_bias") == ""
 
