@@ -296,7 +296,9 @@ class Dynamics:
 
         v0, w0 = st.v.copy(), st.w.copy()
         nudot = (tau - coriolis(v0, w0)) @ self.Minv.T
-        for _ in range(3):                                     # fixed point; the Coriolis term is small per step
+        # fixed point, 3 sweeps and no convergence check: each sweep shrinks the error by about dt/2 ||d(Coriolis)/dnu Minv||, which grows with |w| and the
+        # inertia ratio (rigid.implicit_midpoint's docstring: no "dt |w| < 1" bound). tests/test_dyn.py holds it to the converged rule within 1e-8 at dt = 1 ms for |w| = 3.7
+        for _ in range(3):
             nudot = (tau - coriolis(v0 + 0.5 * dt * nudot[:, :3], w0 + 0.5 * dt * nudot[:, 3:])) @ self.Minv.T
         if veh.kind == "uav":                                  # a crashed quad stops: no coasting, no tumbling
             dead = ~st.alive

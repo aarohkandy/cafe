@@ -1164,3 +1164,90 @@ def test_r13_l1_a_finest_ct_of_zero_is_a_nan_uncertainty_and_a_row_that_is_not_v
     rows = dt.tabulate(root)
     assert len(rows) == 4 and math.isnan(rows[0.28].u_val) and rows[0.28].validated is False and all(math.isfinite(rows[f].u_val) for f in rows if f != 0.28)
     assert "value is 0" in dt.row_notes(root)[0.28]["note"]
+
+
+# ------------------------------------------------------------------ round 15, batch C: M-2 (the report prints "not judged"), M-36 (damaged entry)
+
+def unconverged_study(tmp_path, frs=("0.20", "0.28", "0.41")):
+    """Three grids; the finest has not converged at `frs` (the stored v4 study's state) and has at Fr 0.10."""
+    root = stored(tmp_path, converging())
+    for fr in frs:
+        edit_case(root, "fine", fr, converged=False, drift=0.0075)
+    return root
+
+
+def table_ends(out):
+    """{Fr text: what the table's last column says} for the rows of `python -m cafe.pm.dtmb5415 report`."""
+    lines = [ln for ln in out.splitlines() if not ln.startswith("[") and "C_T Fr" in ln]
+    return {re.search(r"Fr (\d\.\d\d)", ln).group(1): ln.rstrip().split("  ")[-1].strip() for ln in lines}
+
+
+def test_r15_m2_report_prints_not_judged_for_a_row_whose_finest_grid_has_not_converged(tmp_path, monkeypatch, capsys):
+    """The report table said `yes` for Fr 0.20, 0.28 and 0.41 while the receipt lines under it said |E| <= U_val is not judged there: three copies of the
+    rule, one of them missing. `dtmb5415.not_judged` is the one; the table, `receipts` and the credibility table all read it."""
+    root = unconverged_study(tmp_path / "dtmb5415")
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path))
+    receipt_state()
+    assert dt.main(["report"]) == 0
+    out = capsys.readouterr().out
+    assert table_ends(out) == {"0.10": "yes", "0.20": "not judged", "0.28": "not judged", "0.41": "not judged"}
+    assert sum("is not judged: the finest grid has not converged" in x["claim"] for x in rc.OUT) == 3          # the receipts say the same of the same rows
+    assert set(dt.not_judged(root)) == {0.20, 0.28, 0.41} and dt.not_judged(root)[0.28] == ["iterative drift 0.0075 (limit 0.005)"]
+    assert dt.not_judged(tmp_path / "nothing") == {}
+
+
+def test_r15_m2_the_table_and_the_credibility_rows_agree_on_which_rows_are_not_judged(tmp_path):
+    from cafe.pm import credibility as cr
+    unconverged_study(tmp_path / "dtmb5415")
+    judged = {fr for fr, r in ((float(r["id"][-4:]), r) for r in cr._dtmb_rows(tmp_path)) if r.get("not_judged")}
+    assert judged == set(dt.not_judged(tmp_path / "dtmb5415"))
+
+
+def test_r15_m2_format_table_marks_only_the_rows_it_is_told_and_needs_one_flag_per_row():
+    rows = [vv.vv20_row("a", 1.0, 1.0, 0.1, 0.1, 0.1), vv.vv20_row("b", 1.0, 1.0, 0.1, 0.1, 0.1)]
+    out = vv.format_table(rows, not_judged=[False, True]).splitlines()
+    assert out[1].endswith("yes") and out[2].endswith("not judged")
+    assert vv.format_table(rows) == vv.format_table(rows, not_judged=[False, False])
+    with pytest.raises(ValueError, match="one flag per row"):
+        vv.format_table(rows, not_judged=[True])
+
+
+DAMAGE = {"an int": lambda c: 5, "no ct": lambda c: {k: v for k, v in c.items() if k != "ct"},
+          "no cells": lambda c: {k: v for k, v in c.items() if k != "cells"},
+          "ct null": lambda c: c | {"ct": None}, "ct text": lambda c: c | {"ct": "x"}, "ct bool": lambda c: c | {"ct": True},
+          "ct_std null": lambda c: c | {"ct_std": None}, "cells 0": lambda c: c | {"cells": 0}, "cells text": lambda c: c | {"cells": "many"},
+          "cells nan": lambda c: c | {"cells": math.nan}, "drift text": lambda c: c | {"drift": "x"}, "y_plus text": lambda c: c | {"y_plus": "hi"},
+          "iters text": lambda c: c | {"iters": "x"}, "scatter bool": lambda c: c | {"scatter": False}, "huge int": lambda c: c | {"ct": 10 ** 400}}
+
+
+@pytest.mark.parametrize("name", list(DAMAGE))
+def test_r15_m36_a_damaged_speed_entry_makes_the_file_unreadable_never_a_traceback(tmp_path, name):
+    """tabulate, row_notes and receipts raised KeyError, TypeError or ValueError on these although read_run promises a damaged file is not there."""
+    root = stored(tmp_path, converging())
+    f = root / "run_fine.json"
+    j = json.loads(f.read_text())
+    j["speeds"]["0.28"] = DAMAGE[name](j["speeds"]["0.28"])
+    f.write_text(json.dumps(j))
+    assert dt.read_run(f) is None and dt.stale_notes(root) == ["run_fine.json is unreadable (rerun the grid)"]
+    assert len(dt.tabulate(root)) == 4 and set(dt.row_notes(root)) == set(dt.CT_REF) and dt.not_judged(root) == {}        # medium and coarse still make rows
+    receipt_state()
+    assert "unreadable" in dt.receipts(root)
+
+
+def test_r15_m36_a_file_of_another_recipe_is_named_by_its_recipe_not_called_unreadable(tmp_path):
+    root = stored(tmp_path, converging())
+    (root / "run_fine.json").write_text(json.dumps(dict(grid="fine", speeds={"0.20": {}})))
+    assert dt.read_run(root / "run_fine.json") is not None and dt.stale_notes(root) == ["run_fine.json was made by recipe None, not " + dt.RECIPE]
+
+
+@pytest.mark.parametrize("case", [dict(ct=math.nan), dict(ct=math.inf, ct_std=math.inf), dict(ct_std=math.nan), dict(converged=None),
+                                  dict(y_plus=None, drift=None, drift_parts=None, scatter=None, iters=None)])
+def test_r15_m36_what_run_grid_writes_stays_readable(tmp_path, case):
+    """Not tighter than run_grid: a diverged solver's NaN or infinite C_T (round 13, M-27), the None optionals and a missing ct_std are runs."""
+    root = stored(tmp_path, converging(), **case)
+    assert dt.read_run(root / "run_fine.json") is not None and dt.stale_files(root) == []
+    f = root / "run_fine.json"
+    j = json.loads(f.read_text())
+    del j["speeds"]["0.28"]["ct_std"]
+    f.write_text(json.dumps(j))
+    assert dt.read_run(f) is not None

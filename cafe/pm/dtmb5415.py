@@ -548,15 +548,37 @@ def discretization(values: Sequence[float], cells: Sequence[float], levels: Sequ
     return max(vv.gci_two_grid(values[0], values[1], r21), spread), r21, f"Fs = 3, p = 2 assumed: {why}"
 
 
+def _real(v: Any) -> bool:
+    """An int or float, NaN and infinity included (a diverged solver's C_T is stored as one), but not a bool, a string, None or an int too big for a float."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    try:
+        float(v)
+    except OverflowError:
+        return False
+    return True
+
+
+def _speed_readable(c: Any) -> bool:
+    """Whether a stored speed entry has what `tabulate`, `row_notes` and `receipts` index and compute with: a dict with a real `ct`, a finite `cells` above 0
+    (a cell count), a real `ct_std` when present, and for the optional numbers `run_grid` stores as None when it has none (`iters`, `y_plus`, `drift`,
+    `drift_parts`, `scatter`) None or real. No tighter than `run_grid` writes: a NaN or infinite C_T, a missing `ct_std` and the None entries stay readable."""
+    return (isinstance(c, dict) and _real(c.get("ct")) and config.finite_real(c.get("cells")) and c["cells"] > 0 and ("ct_std" not in c or _real(c["ct_std"]))
+            and all(c.get(k) is None or _real(c[k]) for k in ("iters", "y_plus", "drift", "drift_parts", "scatter")))
+
+
 def read_run(f: pathlib.Path) -> dict[str, Any] | None:
-    """A run_<grid>.json as a dict; None when it cannot be one: undecodable (`run_grid` cut short by a kill), not a JSON object, or without a
-    `speeds` mapping. The one reader of these files (`run_grid`, `_runs`, `stale_files`), so a damaged file is a run that is not there and never a
-    JSONDecodeError or AttributeError in the report stage (round 9, L0; the same rule as M-4's wall-model receipts)."""
+    """A run_<grid>.json as a dict; None when it cannot be one: undecodable (`run_grid` cut short by a kill), not a JSON object, without a
+    `speeds` mapping, or (when made by this RECIPE, the only files whose entries are read) with a speed entry the readers cannot use (`_speed_readable`: an
+    int, a missing `ct` or `cells`, a null or text number); a file of another recipe stays readable so that it is named by its recipe. The one
+    reader of these files (`run_grid`, `_runs`, `stale_files`), so a damaged file is a run that is not there and never a JSONDecodeError, AttributeError,
+    KeyError, TypeError or ValueError in the report stage (round 9, L0; round 15, M-36; the same rule as M-4's wall-model receipts)."""
     try:
         d = config.json_object(f)
     except config.ConfigError:
         return None
-    return d if isinstance(d.get("speeds"), dict) else None
+    sp = d.get("speeds")
+    return d if isinstance(sp, dict) and (d.get("recipe") != RECIPE or all(_speed_readable(c) for c in sp.values())) else None
 
 
 def _stale(root: pathlib.Path) -> dict[str, str]:
@@ -627,6 +649,12 @@ def row_notes(root: pathlib.Path) -> dict[float, dict[str, Any]]:
     return out
 
 
+def not_judged(root: pathlib.Path) -> dict[float, list[str]]:
+    """{Fr: why} for the speeds `tabulate` makes a row of whose finest grid has not converged (`not_converged_reasons`, never empty here). The one place of the
+    rule that |E| <= U_val is not judged for such a row (rows 345 and 402): `receipts`, the credibility table and the `report` command all ask this."""
+    return {fr: why for fr, n in row_notes(root).items() if (why := next(iter(n["grids"].values()))["reasons"])}
+
+
 def receipts(root: Optional[pathlib.Path] = None) -> str:
     """Hull-geometry receipts when hydro.json exists; per-Froude C_T rows when two grids have run; per-case wall and convergence rows
     for every case on disk (a case that recorded none of it fails them: a required check that did not happen is not fine). -> a status line."""
@@ -638,12 +666,12 @@ def receipts(root: Optional[pathlib.Path] = None) -> str:
     rc.receipt(grp, "Lofted hull displacement at T = 0.248 m", h["displacement"], DISPLACEMENT, 0.01, "m3", SIMMAN)
     rc.receipt(grp, "Lofted hull Lwl at T = 0.248 m", h["lwl"], LWL, 0.005, "m", SIMMAN)
     rc.receipt(grp, "Lofted hull Bwl at T = 0.248 m", h["bwl"], BWL, 0.01, "m", SIMMAN)
-    rows, notes = tabulate(root), row_notes(root)
+    rows, bad = tabulate(root), not_judged(root)
     for fr, row in rows.items():
         src = "INSEAN 2340, Olivieri et al. 2001 via docs/BRIEF.md 5.2; U_D, U_input assumed (see cafe.pm.dtmb5415.ASSUMED)"
         rc.context(grp, f"C_T x1e3 at Fr {fr:.2f}: E = {row.E * 1e3:+.3f}, U_val = {row.u_val * 1e3:.3f}, U_num = {row.u_num * 1e3:.3f}",
                    row.S * 1e3, row.D * 1e3, "", src)
-        if why := next(iter(notes[fr]["grids"].values()))["reasons"]:         # round 8, M-19: the credibility table does not judge this row either (row 345)
+        if why := bad.get(fr):                                    # round 8, M-19: the credibility table does not judge this row either (row 345)
             rc.context(grp, f"C_T Fr {fr:.2f}: |E| <= U_val is not judged: the finest grid has not converged ({'; '.join(why)}; see the convergence rows)",
                        abs(row.E), row.u_val, "", src)
         else:
@@ -699,7 +727,8 @@ def main(argv: list[str]) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 2
     elif cmd == "report":
-        print(vv.format_table(list(tabulate(root).values())))
+        rows, bad = tabulate(root), not_judged(root)
+        print(vv.format_table(list(rows.values()), not_judged=[fr in bad for fr in rows]))
         print(receipts(root))
     else:
         print(__doc__)
