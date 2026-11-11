@@ -96,6 +96,25 @@ def test_a_symbolic_link_at_the_target_is_refused_unless_the_caller_follows_it(t
     assert not (tmp_path / "nowhere.json").exists()
 
 
+def test_a_link_planted_at_the_temporarys_name_after_the_create_is_not_written_through(tmp_path, monkeypatch):
+    """The temporary was made with O_EXCL and then written by name (`Path.write_text` opens again, following links and truncating): a link put at its name
+    between the two made the write land in the victim file. The text goes through the descriptor of the file we created."""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("VICTIM-ORIGINAL")
+    real_open = os.open
+
+    def swapping(path, *a, **k):
+        fd = real_open(path, *a, **k)
+        if str(path).endswith(".tmp"):
+            os.unlink(path)
+            os.symlink(victim, path)
+        return fd
+    monkeypatch.setattr(os, "open", swapping)
+    atomic.write_text(tmp_path / "status.json", "JOB-DATA")
+    monkeypatch.undo()
+    assert victim.read_text() == "VICTIM-ORIGINAL"
+
+
 def test_the_apps_job_files_refuse_a_symbolic_link_and_the_jobs_other_writes_still_work(tmp_path):
     """`hangar.Job.status` (the app, the worker and the emulator job write their files the same way) got the default."""
     job = hangar.Job(tmp_path)
@@ -449,3 +468,7 @@ def test_m37_shares_main_answers_a_bad_command_line_with_usage_and_exit_2(tmp_pa
     assert shares.main(["2", str(out), str(tmp_path / "missing.xml")], root) == 2 and "error:" in capsys.readouterr().err
     assert shares.main(["3", str(out), str(good)], root) == 2 and "3 shares for 2 test files" in capsys.readouterr().err
     assert pathlib.Path(out / "s1.args").exists()
+    a_file = tmp_path / "a_file"
+    a_file.write_text("x")
+    assert shares.main(["2", str(a_file), str(good)], root) == 2 and "error:" in capsys.readouterr().err               # an output path that is a file
+    assert shares.main(["2", str(a_file / "below"), str(good)], root) == 2 and "error:" in capsys.readouterr().err

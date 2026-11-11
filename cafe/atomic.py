@@ -13,6 +13,15 @@ def tmp_name(p: Any) -> pathlib.Path:
     return p.with_name(f".{uuid.uuid4().hex[:12]}.tmp")
 
 
+class _Created(type(pathlib.Path())):  # type: ignore[misc]
+    """The temporary as a `Path` whose `open` is the descriptor `os.open(O_EXCL)` returned, whatever the name now points to: `Path.write_text` (which the
+    tests that cut a write patch) goes through `open`, and opening the name again would follow a link planted at it after the create and write there."""
+    fd = -1
+
+    def open(self, mode: str = "r", buffering: int = -1, encoding: Any = None, errors: Any = None, newline: Any = None) -> Any:  # type: ignore[override]
+        return open(self.fd, mode, buffering, encoding, errors, newline, closefd=False)
+
+
 def write_text(p: Any, text: str, follow_symlinks: bool = False) -> None:
     """`text` in `p` through a sibling temporary and os.replace: a run killed mid-write, or a disk that fills, leaves the old file, never half of a new one,
     and no temporary behind. The temporary is made by `os.open(..., O_EXCL)` with the mode `0o600` when `p` exists and the creation mode `0o666` (the
@@ -33,7 +42,9 @@ def write_text(p: Any, text: str, follow_symlinks: bool = False) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666 if mode is None else 0o600)       # ours alone: O_EXCL fails on any existing name
     try:
         try:
-            tmp.write_text(text)
+            made = _Created(tmp)
+            made.fd = fd
+            made.write_text(text)                                                        # through fd, never by name again (round 15, security review)
             if mode is not None:
                 os.fchmod(fd, mode)
         finally:

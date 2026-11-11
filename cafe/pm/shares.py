@@ -66,20 +66,20 @@ def main(argv: list[str], root: pathlib.Path = ROOT) -> int:
         return 2
     k, out = int(argv[0]), pathlib.Path(argv[1])
     files = test_files(root)
-    try:                                     # a junit file cut or missing, or more shares than test files: an error line, not a traceback (round 15, M-37)
+    try:                                     # a junit file cut or missing, too many shares, an output that is a file: an error line, not a traceback (M-37)
         w = weights(files, file_seconds([pathlib.Path(x) for x in argv[2:]], files), root)
         shares = split(w, k)
+        assert sorted(f for s in shares for f in s) == files         # every file in exactly one share
+        out.mkdir(parents=True, exist_ok=True)
+        for old in out.glob("s*.args"):                              # a smaller K than the last run leaves no stale share behind
+            old.unlink()
+        for i, s in enumerate(shares, 1):
+            (out / f"s{i}.args").write_text("".join(f"{f}\n" for f in s) + "".join(f"--deselect={t}\n" for t in SERIAL_TESTS))
+            print(f"s{i}: {len(s)} files, planned {sum(w[f] for f in s):.0f} s")
+        (out / "serial.args").write_text("".join(f"{t}\n" for t in SERIAL_TESTS))
     except (ET.ParseError, OSError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    assert sorted(f for s in shares for f in s) == files             # every file in exactly one share
-    out.mkdir(parents=True, exist_ok=True)
-    for old in out.glob("s*.args"):                                  # a smaller K than the last run leaves no stale share behind
-        old.unlink()
-    for i, s in enumerate(shares, 1):
-        (out / f"s{i}.args").write_text("".join(f"{f}\n" for f in s) + "".join(f"--deselect={t}\n" for t in SERIAL_TESTS))
-        print(f"s{i}: {len(s)} files, planned {sum(w[f] for f in s):.0f} s")
-    (out / "serial.args").write_text("".join(f"{t}\n" for t in SERIAL_TESTS))
     return 0
 
 
