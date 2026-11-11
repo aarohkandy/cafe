@@ -66,5 +66,8 @@ def test_r15_m20_lon_median_does_not_care_where_the_antimeridian_is():
     out = cv.lon_median(m, 1)
     assert apart(out[0], 179.99) < 1e-9 and out[1] == 11.0 and np.isnan(out[2])
     assert (out[np.isfinite(out)] >= -180).all() and (out[np.isfinite(out)] < 180).all()
+    # The wrap-back into [-180, 180): `apart` cannot see it (180 and -180 are one place), so the value is pinned (round 15 M-20 adversary: `return m` survived).
+    assert cv.lon_median([179.99, -179.99]) == -180.0 and cv.lon_median([179.99, 179.99, -179.99, -179.99]) == -180.0
+    assert (cv.lon_median([[179.99, -179.99], [179.99, 179.99]], 1) == [-180.0, 179.99]).all()                    # along an axis, the slices wrap on their own
     x = np.array([-170.123456789, -165.987654321, -167.5])
     assert cv.lon_median(x) == np.median(x) and cv.lon_median(np.array([np.nan, -166.1, np.nan])) == -166.1        # bit for bit away from the line

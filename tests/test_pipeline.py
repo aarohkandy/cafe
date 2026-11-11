@@ -1217,6 +1217,7 @@ def test_r15_m20_the_longitude_of_a_window_whose_members_straddle_the_dateline_i
     run_stage(pipeline.s_windows, ctx, "windows")
     w = json.loads((ctx.run_dir / "windows" / "windows.json").read_text())["u"][0]
     assert abs((w["lon"] - 180.0 + 180.0) % 360.0 - 180.0) < 0.02 and w["lat"] == 0.0
+    assert -180.0 <= w["lon"] < 180.0                                                  # the window longitude is inside the range the lookups take, not 180.0
 
 
 def test_windows_of_a_vehicle_that_failed_come_from_the_members_that_failed(tmp_path, data):
