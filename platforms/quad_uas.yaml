@@ -105,7 +105,7 @@ controller:
 sortie:
   duration_s: {value: 1200.0, unit: s, source: "docs/BRIEF.md 6: 20 min flux-profile sortie"}
   levels_m: {value: [10.0, 25.0, 50.0, 80.0], unit: m, assumed: true, why: "stacked flux-profile legs above the deck; surface layer 10 m to above the marine boundary-layer lowest model level"}
-  leg_speed_ms: {value: 8.0, unit: m/s, assumed: true, why: "ground-relative cruise on the legs, the speed the sortie asks for in still air; against a wind w on a leg it is held to the ground speed that keeps the air within the airframe's envelope (uas.leg_speed: 12 - w upwind from w = 4 m/s, a leg into 12 m/s or more has none), as stage 3 holds its window (DECISIONS 161)"}
+  leg_speed_ms: {value: 8.0, unit: m/s, assumed: true, why: "ground-relative cruise on the legs; below max_airspeed so wind headroom remains"}
   leg_heading: {value: upwind, unit: "-", assumed: true, why: "legs run into the wind from the ship so the sensor samples air the ship has not disturbed; a compass 'to' angle in degrees overrides it"}
   rtl_height_m: {value: 15.0, unit: m, assumed: true, why: "return height above the deck, clear of the mast"}
   wp_radius_m: {value: 3.0, unit: m, source: "emulator.py Runner goto tolerance for a UAV (3 m); AC WPNAV_RADIUS is 2 m"}
@@ -116,7 +116,7 @@ sortie:
   hard_stop_factor: {value: 1.6, unit: "-", assumed: true, why: "the run for a member that cannot get home ends at duration_s times this (it ditches long before on this battery)"}
 
 launch_rule:
-  max_mean_wind_ms: {value: 12.0, unit: m/s, assumed: true, why: "do not launch if the mean wind at flight height over the sortie exceeds the operating airspeed limit: the wind at which an upwind leg has no ground speed left that keeps the air within it (uas.leg_speed), so this equals the envelope, limits.max_airspeed_ms"}
+  max_mean_wind_ms: {value: 12.0, unit: m/s, assumed: true, why: "do not launch if the mean wind at flight height over the sortie exceeds the operating airspeed limit"}
   wind_check_height_m: {value: 30.0, unit: m, assumed: true, why: "height above the deck where the forecast wind is read for the launch decision (middle of the stack)"}
   gust_lookahead_min: {value: 15.0, unit: min, assumed: true, why: "scrub if a gust front is active at the ship within this long of launch (docs/BRIEF.md 6: no launch in a gust-front window)"}
   gust_front_threshold_ms: {value: 2.0, unit: m/s, assumed: true, why: "horizontal gust perturbation above which a front is counted as active (below the 3-10 m/s of docs/BRIEF.md 2.2)"}
