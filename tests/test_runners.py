@@ -928,6 +928,81 @@ def test_r15_pb_with_every_core_claimed_the_job_still_runs_pinned_and_says_it_sh
     assert len(list((w / "cafe/tmp").glob("cpu.*"))) == len(cores_free_to_us())          # the claims of others are left
 
 
+def cpus_in_proc_stat():
+    return len(re.findall(r"^cpu\d+", pathlib.Path("/proc/stat").read_text(), re.M))
+
+
+def test_r15_l0_jobs_started_at_once_over_stale_claims_get_distinct_cores_and_none_dies(tmp_path):
+    """Round 15 look-ahead L0: the takeover of a stale claim was `rm -rf` then `mkdir` on the path, after the pid had been read. Jobs that read the same dead
+    pid each removed the other's new claim: two jobs on the same cores, and one died writing its pid into the removed directory (8 jobs over 16 stale claims:
+    cores pinned twice in 4 rounds of 6, a job dead in 3). The claim phase now runs under flock. The shell is told every CPU of /proc/stat may be used,
+    so there are as many jobs as the machine has CPUs (at most 8), one core each, all started together."""
+    n = cpus_in_proc_stat()
+    jobs_n = min(8, n)
+    w, env = proot_world(tmp_path, PM_CPUS="1")
+    (w / "bin/proot").write_text("#!/bin/sh\nsleep 2\n" + DONE)
+    log = tmp_path / "taskset.log"
+    (tmp_path / "tools" / "taskset").write_text(f'#!/bin/sh\ncase "$1" in -pc) echo "pid 1 current affinity list: 0-{n - 1}"; exit 0 ;; esac\n'
+                                                f'echo "$*" >> "{log}"\nshift 2\nexec "$@"\n')
+    (tmp_path / "tools" / "taskset").chmod(stat.S_IRWXU)
+    go = tmp_path / "go"
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    for attempt in range(4):
+        log.write_text("")
+        for old in (w / "cafe/tmp").glob("cpu.*"):
+            shutil.rmtree(old)
+        for c in range(n):
+            claim(w, c, dead.pid)
+        go.unlink(missing_ok=True)
+        wait_then_run = f'while [ ! -e "{go}" ]; do :; done; exec sh "$0" app true'
+        procs = [subprocess.Popen(["sh", "-c", wait_then_run, str(ROOT / "bin/proot_run.sh")], cwd=ROOT, env=env, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.PIPE, text=True) for _ in range(jobs_n)]
+        go.write_text("")
+        results = [(q.wait(timeout=120), q.stderr.read()) for q in procs]
+        pins = pinned(log)
+        assert [r for r, _ in results] == [0] * jobs_n, results
+        assert len(pins) == jobs_n and all(len(x) == 1 for x in pins) and len({min(x) for x in pins}) == jobs_n, (attempt, pins)
+        assert not any("sharing core" in e for _, e in results)
+        left = [d for d in (w / "cafe/tmp").glob("cpu.*")]                                # only the stale claims nobody needed
+        assert all((d / "pid").read_text().split() == [str(dead.pid)] for d in left)
+        assert len(left) == n - jobs_n
+
+
+def test_r15_l0_a_core_whose_wrapper_was_killed_but_whose_job_runs_is_not_taken_over(tmp_path):
+    """Round 15 look-ahead L0: a claim held only the wrapper's pid, and `kill -9` of the wrapper leaves the job running (docs/ORCA_RUNNER.md) with its claims
+    behind. The next job took that claim over as stale and pinned itself to cores the first job still ran on, with no warning, while the run.* directory of the
+    same job is kept until its proot ends. A claim is live while the wrapper's or the job's pid is."""
+    w, env, log = pin_world(tmp_path, 1, stand_in='#!/bin/sh\necho $$ >> "$HOME/jobpid"\nsleep 8\n' + DONE)
+    free = cores_free_to_us()
+    for c in free[1:]:
+        claim(w, c, os.getpid())                                                      # alive: this process; only free[0] is left to take
+    first = subprocess.Popen(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    job = tmp_path / "home/jobpid"                                                    # one line per job started: the first is `first`'s
+
+    def first_job():
+        return job.read_text().split()[0] if job.exists() and job.read_text().split() else ""
+    try:
+        for _ in range(200):
+            if first_job():
+                break
+            time.sleep(0.1)
+        time.sleep(0.5)                                                               # the wrapper writes the job's pid into its claims right after the start
+        first.kill()
+        first.wait()
+        r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+        assert r.returncode == 0, r.stderr
+        assert f"no free core for PM_CPUS=1, sharing core {free[0]}" in r.stderr
+        assert (w / "cafe/tmp" / f"cpu.{free[0]}" / "pid").read_text().split()[-1] == first_job()
+    finally:
+        pid = first_job()
+        if pid.isdigit():
+            try:
+                os.kill(int(pid), signal.SIGKILL)                                     # the stand-in job this test started, by its exact pid
+            except OSError:
+                pass
+
+
 @pytest.mark.parametrize("script, cpus_default", [("bin/pmx.sh", "2"), ("pm.sh", "8")])
 def test_r15_pb_the_docker_job_gets_its_pools_at_pm_cpus_as_the_proot_job_does(tmp_path, script, cpus_default):
     """The cgroup quota of `--cpus` leaves the pools at the host's CPU count (8 on homebase): 8 threads for 2 CPUs' worth of quota."""

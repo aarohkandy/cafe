@@ -20,12 +20,12 @@ XLA="--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads=$TN"
 free=$(df -Pk "$W" | awk 'NR==2{print int($4/1048576)}'); [ "$free" -ge "${CAFE_MIN_FREE_GB:-60}" ] || { echo "STOP: only $free GB free on the shared disk" >&2; exit 1; }
 mkdir -p "$C/tmp"
 alive() { st=$(sed 's/.*) //;s/ .*//' "/proc/$1/stat" 2>/dev/null) || :; [ -n "$st" ] && [ "$st" != Z ]; }          # a /proc entry whose state is not Z (below)
+any_alive() { for p in $(cat "$1"); do ! alive "$p" || return 0; done; return 1; }          # some pid in the file is alive: the one test of a run directory and of a CPU claim, so that they cannot disagree about a job
 # A run that was SIGKILLed (or lost to a container restart) leaves its run.* directory: each holds .pids (this wrapper, then its proot); one with no live pid is stale. Not a stale one without .pids: that is a run just starting.
 # Live = a /proc entry whose state is not Z: kill -0 is true for a zombie, which stays when the container's PID 1 does not reap orphans, and its directory would never be swept.
 for d in "$C"/tmp/run.*; do
-  [ -f "$d/.pids" ] || continue; live=
-  for p in $(cat "$d/.pids"); do ! alive "$p" || live=1; done
-  [ -n "$live" ] || rm -rf "$d"
+  [ -f "$d/.pids" ] || continue
+  any_alive "$d/.pids" || rm -rf "$d"
 done
 T=$(mktemp -d "$C/tmp/run.XXXXXX"); echo $$ > "$T/.pids"      # the container's /tmp, on the big disk (/ has 13 GB on orca); gone after the run, as with --rm
 # The job runs in the background, in its own process group (setsid), so that a signal to this wrapper stops it at once: proot itself ignores SIGTERM and dies of SIGKILL
@@ -35,7 +35,10 @@ CLAIMED=; trap 'rm -rf "$T"; for d in $CLAIMED; do rm -rf "$d"; done' EXIT
 stop() { [ -z "$P" ] || { kill -TERM "${G:+-}$P" 2>/dev/null || :; ( sleep "$GRACE"; kill -KILL "${G:+-}$P" 2>/dev/null ) & K=$!; wait "$P" 2>/dev/null || :; kill "$K" 2>/dev/null || :; }; exit 143; }
 trap stop INT TERM HUP
 # Pin the job to PM_CPUS cores (taskset on the host side of proot: the affinity is inherited by every tracee). The cores are the least busy ones over half a second of /proc/stat (other people's load counts, ours too), and each is claimed with
-# an atomic mkdir of $C/tmp/cpu.<n> (the wrapper's pid in it) so that the K jobs of a gate, started at the same moment, do not all pick the same two; a claim of a dead wrapper is taken over. Fewer free cores than PM_CPUS: the rest is shared with
+# an atomic mkdir of $C/tmp/cpu.<n> (the wrapper's pid in it, and the job's once it runs) so that the K jobs of a gate, started at the same moment, do not all pick the same two. A claim is stale only when neither pid is alive: a SIGKILLed wrapper
+# leaves its job running (above), and that job still holds the cores. The takeover of a stale claim (judge it, remove it, make it again) is three steps on a path, not on the claim that was judged, so the whole claim phase runs under flock on
+# $C/tmp/cpulock (never removed: a second file of that name would be a second lock); two jobs that had read the same dead pid each removed the other's new claim, pinned to the same cores, and one died on its removed directory (round 15, look-ahead L0).
+# Fewer free cores than PM_CPUS: the rest is shared with
 # the least busy claimed ones, with a warning. Not pinned: PM_CPUS at or above the CPUs this shell may use, or no taskset or /proc/stat (a warning). A race left: a claim whose wrapper died between mkdir and writing its pid stays.
 PIN=
 if command -v taskset >/dev/null 2>&1 && [ -r /proc/stat ]; then
@@ -51,17 +54,18 @@ if command -v taskset >/dev/null 2>&1 && [ -r /proc/stat ]; then
     echo "warning: could not read the CPUs this shell may use: the job is not pinned to PM_CPUS=$N cores" >&2
   elif [ "$have" -gt "$N" ]; then
     CORES=; got=0; rest=
+    if command -v flock >/dev/null 2>&1; then exec 9>"$C/tmp/cpulock"; flock 9; else echo "warning: no flock here: jobs started at the same moment may take over one stale CPU claim twice" >&2; fi
     for c in $order; do
       if [ "$got" -lt "$N" ]; then
         d="$C/tmp/cpu.$c"
         if ! mkdir "$d" 2>/dev/null; then
-          o=; [ ! -f "$d/pid" ] || read -r o < "$d/pid" || :
-          if [ -n "$o" ] && ! alive "$o"; then rm -rf "$d"; mkdir "$d" 2>/dev/null || d=; else d=; fi
+          if [ -s "$d/pid" ] && ! any_alive "$d/pid"; then rm -rf "$d"; mkdir "$d" 2>/dev/null || d=; else d=; fi
         fi
         if [ -n "$d" ]; then echo $$ > "$d/pid"; CLAIMED="$CLAIMED $d"; CORES="$CORES,$c"; got=$((got + 1)); continue; fi
       fi
       rest="$rest $c"
     done
+    exec 9>&-                                      # the lock goes here, not with the wrapper: the job would inherit the descriptor and hold it for hours
     for c in $rest; do [ "$got" -lt "$N" ] || break; CORES="$CORES,$c"; got=$((got + 1)); echo "warning: no free core for PM_CPUS=$N, sharing core $c with another job of ours" >&2; done
     CORES=${CORES#,}; PIN="taskset -c $CORES"; echo "proot_run: pinned to cores $CORES (PM_CPUS=$N), pools of $TN threads" >&2
   fi
@@ -81,7 +85,7 @@ $PIN $G "$W/bin/proot" -r "$W/root" -i "$(id -u):$(id -g)" -w /app -b /dev -b /p
   /usr/bin/env -i PATH=/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin PYTHONUNBUFFERED=1 HOME=/tmp TMPDIR=/tmp LC_ALL=C.UTF-8 \
   PYTHONPATH=/app CAFE_DATA=/data CAFE_GIT_SHA="${CAFE_GIT_SHA:-}" CAFE_GIT_DIRTY="${CAFE_GIT_DIRTY:-0}" CAFE_WORKERS="${PM_CPUS:-8}" \
   PMIX_MCA_gds=hash $THREADS XLA_FLAGS="$XLA" /bin/sh -c '"$@"; r=$?; echo $r > /tmp/.rc; exit $r' sh "$@" <&3 3<&- &
-P=$!; echo "$P" >> "$T/.pids"
+P=$!; echo "$P" >> "$T/.pids"; for d in $CLAIMED; do echo "$P" >> "$d/pid"; done          # the claims name the job too, as the run directory does
 # proot returns the exit status of the LAST process of the job to end, not of its first (rehearsed: `(sleep 3; exit 0) & exit 1` gives 0). A child that outlives the job, such as
 # the resource tracker that multiprocessing starts for spawned workers, made a failed pytest or pipeline run read rc=0. So the job writes its own status to its /tmp (= $T) and that is the exit status here;
 # A job that was killed, or a full disk, leaves none: a nonzero status from proot then stands, but its 0 proves nothing (see above), so that is a failure. The job could always exit 0 itself: this catches accidents, it is no sandbox.

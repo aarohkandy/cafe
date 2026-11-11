@@ -950,6 +950,35 @@ def test_r15_m14_the_hangars_hull_case_and_the_stage_3_window_mesh_the_hull_by_t
     assert seen["hangar"] == pytest.approx(ball.extents.max() / n) and seen["window"] == pytest.approx(0.2 / n)
 
 
+def test_r15_l0_the_hull_mesh_number_is_read_without_pyyaml_because_the_app_image_has_none(monkeypatch):
+    """Round 15 look-ahead L0: `hull_elements_along` did `import yaml`, and the live app image (requirements.txt) has no pyyaml, so every Hangar hull case
+    ended in ModuleNotFoundError there. The tests run in the cafe-pm image, which has it. The stdlib reading must give PyYAML's number from the file itself."""
+    import yaml
+    from cafe import fea
+    want = yaml.safe_load((pathlib.Path(pw.__file__).parents[3] / "config" / "assumptions.yaml").read_text())["stage3.fea_elements_along"]["value"]
+    monkeypatch.setitem(sys.modules, "yaml", None)                                       # `import yaml` raises ImportError from here, as in the app image
+    assert fea.hull_elements_along() == want == pw.assumptions()["fea_elements_along"]
+
+
+@pytest.mark.parametrize("text, want", [
+    ("stage3.fea_elements_along:\n  unit: elements\n  value: 40   # a note\n  why: x\n", 40),
+    ("a:\n  value: 3\n\nstage3.fea_elements_along:\n\n  value: 12\nb:\n  value: 3\n", 12),
+    ("a:\n  value: 3\n", "has no stage3.fea_elements_along"),
+    ("stage3.fea_elements_along:\n  unit: elements\nb:\n  value: 3\n", "has no value"),                 # the next entry's value is not this one's
+    ("stage3.fea_elements_along:\n  value: 2.5\n", "not a whole number"),
+    ("stage3.fea_elements_along:\n  value: 0\n", "below 1")])
+def test_r15_l0_the_hull_mesh_reading_takes_this_entrys_value_only_and_refuses_what_is_not_a_mesh(monkeypatch, tmp_path, text, want):
+    from cafe import fea
+    f = tmp_path / "assumptions.yaml"
+    f.write_text(text)
+    monkeypatch.setattr(fea, "ASSUMPTIONS", f)
+    if isinstance(want, int):
+        assert fea.hull_elements_along() == want
+    else:
+        with pytest.raises(ValueError, match=want):
+            fea.hull_elements_along()
+
+
 def test_r14_m31_the_stage_3_fea_row_is_not_run_when_the_buckling_factor_is_missing(monkeypatch):
     """The chain a window takes: `pipeline_windows._fea` -> child `_fea_child` -> `windows.fea_window` -> `fea.solve`. Without a factor the row is
     `run` False with the reason and carries no utilization; with one it carries the knocked-down buckling utilization as before."""

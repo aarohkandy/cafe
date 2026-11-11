@@ -1,0 +1,62 @@
+# Round 15, look-ahead L0 hand-back (branch r15-merged): the pyyaml import in the Hangar's hull case, and the CPU claims of `bin/proot_run.sh`
+
+Worktree `/Users/aaroh/Downloads/everything/cafe-r15m`, branch `r15-merged` from ac7bb13, orca dir `pm_r15m` (removed at the end). All test runs were on cafe-orca (proot, `PM_CPUS=2`); nothing on the laptop or homebase. Seven confirmed look-ahead findings are three defects: four of them are one (the pyyaml import), one is the race of the takeover of a stale CPU claim, one is the claim that names only the wrapper.
+
+What changed, by file:
+- `cafe/fea.py`: `hull_elements_along()` reads `stage3.fea_elements_along` from `config/assumptions.yaml` by line, standard library only (new module constant `ASSUMPTIONS`); a missing entry, a missing value, a value that is not a whole number and a value below 1 are a `ValueError` that names the file.
+- `bin/proot_run.sh`: `any_alive` (new, one test of "some pid in this file is alive") now serves both the `run.*` sweep and the CPU claims; the claim phase runs under `flock` on `~/cafe-worker/cafe/tmp/cpulock`; the job's pid is appended to each claim once it runs.
+- `docs/ORCA_RUNNER.md`: the sentence on the claims (line 52).
+- Tests: `tests/test_stage3.py` (2 new), `tests/test_config_docs.py` (1), `tests/test_runners.py` (2).
+- `review/orca/PROBLEMS.md`: P-R15L0-1 to P-R15L0-3.
+- No DECISIONS.md or CHANGELOG.md edit: the text is below.
+
+## L0-1. The Hangar's hull case imported pyyaml, which the app image does not install (four findings)
+
+DECISIONS row: `cafe.fea.hull_elements_along()`, the one number (`stage3.fea_elements_along`, 70) that the Hangar's hull case and stage 3's window FEA both mesh a pressure hull by (round 15, M-14), is read from `config/assumptions.yaml` by line with the standard library, not with PyYAML. The live app image (`Dockerfile`, `requirements.txt`) has no pyyaml (`cafe/atomic.py` says so, and `pyyaml` is only in `requirements-pm.txt`), and M-14's first form did `import yaml` in `cafe/fea.py`, so every Hangar run of a UUV with a hull ended in `ModuleNotFoundError` there (the FEA step's `except` in `hangar.characterize` turned it into the warning "structure NOT checked: FEA failed (ModuleNotFoundError ...)" and no `crush_depth_m`); every test runs in the cafe-pm image, which has pyyaml, so none could see it. The rule is now a test: a module of `cafe/` (the app's, not `cafe/pm`) may import only packages that the app image installs (`requirements.txt` and the `pip install pkg==x` lines of the `Dockerfile`), found through the installed metadata of both requirement files. The reading is held to PyYAML's on the file itself by a test in the cafe-pm image, so a layout of the entry that the line reader does not read fails there and not in the image. The value stays in the assumptions file (its `why` is the mesh study, `value`/`unit`/`replace_with` are the registry's): a JSON mirror was not made, it would be a second source for the number that M-14 made one. The number is 70 before and after.
+
+Amends: the M-14 row (batch B; its number was not looked up here): add "read without PyYAML, round 15 look-ahead L0". `tests/test_config_docs.py::test_r15_m14_the_app_image_copies_...` scanned only `COPY` lines; the new test is its sibling for imports.
+
+CHANGELOG: The Hangar's hull-at-depth case failed in the deployed app image with `ModuleNotFoundError: yaml`, shown as "structure NOT checked" and no crush or rated depth (round 15 M-14 read the hull mesh number with PyYAML, which only the pm image has); `cafe.fea.hull_elements_along` reads it with the standard library, and a test refuses any import in `cafe/*.py` of a package that only `requirements-pm.txt` installs (round 15, look-ahead L0).
+
+Doc sentences: none needed (the `why` of `stage3.fea_elements_along` names `cafe.fea.hull_elements_along` and still holds).
+
+Callers checked: `hull_elements_along` has one caller, `hangar.fea_cases` (line 172, `kind == "uuv"`); `pipeline_windows._fea` reads the number through `need(a, "fea_elements_along")`, the pm side's own loader, unchanged. `tests/test_stage3.py -k hangar` (rc 0, orca) and the M-14 test pass. Siblings swept: `grep "import yaml" cafe/*.py` found only `fea.py`; the new scan covers every pm-only package, not only yaml (jsonschema, h5py, zarr, sklearn, jax, pytest and the rest of `requirements-pm.txt`) and finds none. `cafe/receipts.py` and `cafe/cfd.py` (`main`) import `cafe.pm.config` and `cafe.pm.ledger`, which import yaml; both are pipeline entry points (`cfd.main`, `receipts.stamp`), not reached from `app.py`, `hangar.py`, `reach.py` or `live.py` (`hangar` imports `cfd`, whose only `cafe.pm` import on that path is `cafe.pm.vv`, standard library and scipy). Not checked: a build of the app image; the proof is the same one the findings gave (requirements and metadata) plus the test that blocks `yaml` in `sys.modules`.
+
+Tests, failing on the unfixed code (a detached worktree at ac7bb13 with the new test files, on orca, removed afterwards):
+- `tests/test_stage3.py::test_r15_l0_the_hull_mesh_number_is_read_without_pyyaml_because_the_app_image_has_none`: `ModuleNotFoundError: import of yaml halted; None in sys.modules`.
+- `tests/test_config_docs.py::test_r15_l0_no_app_module_imports_a_package_only_the_pm_image_installs`: `['fea.py:35 imports yaml']`.
+- `tests/test_stage3.py::test_r15_l0_the_hull_mesh_reading_takes_this_entrys_value_only_and_refuses_what_is_not_a_mesh` (6 cases: a trailing comment, a blank line, no entry, an entry without a value beside another entry's value, 2.5, 0) guards the new branches; on the unfixed code it fails only because `fea.ASSUMPTIONS` does not exist, so it is not evidence of a defect, only of the reading's edges.
+All pass on the fixed tree.
+
+## L0-2. Two jobs that take over one stale CPU claim at once get the same cores, and one can die
+
+DECISIONS row: The claim phase of `bin/proot_run.sh` (choose cores, claim each with `mkdir ~/cafe-worker/cafe/tmp/cpu.<n>`, take over a stale claim) runs under `flock` on `~/cafe-worker/cafe/tmp/cpulock`, released before the job starts so that the job does not inherit the lock; the file is never removed (a second file of that name would be a second lock), and a worker without `flock` says so and claims unlocked as before. The takeover of a stale claim is "read its pid, `rm -rf`, `mkdir`": three steps on a path, not on the claim that was judged, and the K jobs of a gate start together and share one least-busy order, so they reach the same stale claim. Two jobs that had read the same dead pid each removed the other's new claim and pinned to the same two cores, and the later `echo $$ > cpu.<n>/pid` under `set -e` found its directory gone and the job died (sandbox of the finding: 8 jobs over 16 stale claims, cores pinned twice in 4 rounds of 6, a job dead in 3). The "eight shares get distinct cores" of DECISIONS 840 held only when no claim was stale, which is the case after any SIGKILL or container restart.
+
+Amends: row 840 (add "claims are made under flock, round 15 L0").
+
+CHANGELOG: `bin/proot_run.sh` made the claims of CPU cores under `flock`: jobs started together over stale claims (left by a SIGKILLed wrapper or a restart) were pinned to the same cores, and one could die on a claim directory that another job had removed (round 15, look-ahead L0).
+
+Test, failing on the unfixed code: `tests/test_runners.py::test_r15_l0_jobs_started_at_once_over_stale_claims_get_distinct_cores_and_none_dies`: every CPU of `/proc/stat` has a stale claim, a stand-in `taskset` says the shell may use them all, as many wrappers as CPUs (at most 8) start together on a go file, up to 4 rounds. Unfixed: round 0, `assert (8 == 8 and True and 7 == 8)`, so two of the 8 jobs were pinned to one core (the other cores of that round: `[{10}, {11}, {12}, {14}, {15}, {16}, ...]`). Fixed: 4 rounds, every job rc 0, every core different, no "sharing" warning, and the only claims left are the stale ones nobody needed.
+
+## L0-3. A claim names the wrapper only, so a job whose wrapper was SIGKILLed loses its cores to the next job
+
+DECISIONS row: A CPU claim of `bin/proot_run.sh` holds the wrapper's pid and, once the job runs, the job's (appended next to the `run.*` directory's `.pids` entry), and it is stale only when neither pid is alive, by the one helper `any_alive` that the sweep of the `run.*` directories uses too. A `kill -9` of the wrapper leaves its job running (`docs/ORCA_RUNNER.md`), possibly for hours, and its trap does not remove the claims; the `run.*` directory waited for the job's pid, the claim did not, so the next job took the claim over with no warning and ran on cores the first still used. It now finds no free core and says `no free core ... sharing core <n>`. Left as before: a claim whose wrapper died between `mkdir` and writing its pid stays, and a wrapper SIGKILLed between the start of the job and the append of the job's pid is still seen as dead (the same window the `run.*` directory has).
+
+Amends: row 840 (same amendment as L0-2).
+
+CHANGELOG: A CPU claim of `bin/proot_run.sh` is live while the wrapper or its job is: after a `kill -9` of the wrapper the next job no longer takes over the cores of the job that still runs (round 15, look-ahead L0).
+
+Test, failing on the unfixed code: `tests/test_runners.py::test_r15_l0_a_core_whose_wrapper_was_killed_but_whose_job_runs_is_not_taken_over`: all cores but one claimed by this process, a first wrapper takes the free one with a stand-in job that sleeps, the wrapper is SIGKILLed, a second wrapper runs. Unfixed: the second one is `pinned to cores 0` with no warning (`assert 'no free core for PM_CPUS=1, sharing core 0' in ...`). Fixed: it shares core 0 with the warning and the claim's last pid is the first job's. The test kills the stand-in job at its end by the exact pid it wrote.
+
+The finding's `PM_CPUS=62` is not a case (the pin branch needs `have > N`); any smaller N takes the path.
+
+Callers of `proot_run.sh` checked: `bin/pmx.sh`, `pm.sh`, `bin/proot_suite.sh` (`job()`), all through the one wrapper; nothing else reads `cpu.*/pid` or lists `tmp/` (grep of `bin/`, `pm.sh`, the docs). The claim file now has one to three pids on separate lines; the existing claim tests write one and pass.
+
+## Gates
+
+- `ruff check cafe/pm tests`: clean. `mypy cafe/pm` (strict): clean, 55 files.
+- New tests: 5 test functions (10 cases), all pass; each of the four evidence tests above fails on ac7bb13.
+- Files run whole on orca on the fixed tree: `tests/test_runners.py` and `tests/test_audit.py` (every test passes), `tests/test_config_docs.py` (all but the two below), `tests/test_stage3.py -k hangar` (rc 0).
+- Two failures in `tests/test_config_docs.py` that are on the unmodified ac7bb13 too (checked there, same two): `test_decisions_rows_are_numbered_without_gaps_or_repeats` (P-R15B4: rows 826 to 839 missing, the documents step) and `test_r14_m15_the_makefile_and_the_runbook_say_that_make_ci_plans_the_glider_fea_out_under_the_floor_the_assumption_file_holds` (RUNBOOK line 76 still says 68.2 s where the floor is 641.1; P-R15L0-1).
+- Printed numbers of the demo: none moves. The hull mesh number is 70 before and after (the test compares the new reading with PyYAML's on the file), and `proot_run.sh` changes only which cores a job is pinned to, not what it computes. The full suite, the demo and the mutation gate were not run.
+- Not done: the app image was not built; the full suite was not run; no mutation run of `cafe/fea.py` (it is outside the mutation gate).

@@ -28,13 +28,32 @@ MATERIALS = {
 }
 
 
+ASSUMPTIONS = pathlib.Path(__file__).resolve().parents[1] / "config" / "assumptions.yaml"
+
+
 def hull_elements_along() -> int:
     """Elements along a pressure hull's length for a collapse-depth FEA: config/assumptions.yaml `stage3.fea_elements_along`, the one number the stage-3
     window's FEA (`pipeline_windows._fea`) and the Hangar's hull case (`hangar.fea_cases`) both mesh by (round 15 M-14: they used L/20 and L/70 for one hull and
-    reported two collapse depths). Its mesh study is in the `why` there."""
-    import yaml
-    doc = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / "config" / "assumptions.yaml").read_text())
-    return int(doc["stage3.fea_elements_along"]["value"])
+    reported two collapse depths). Its mesh study is in the `why` there. Read by line, standard library only: the live app image (Dockerfile, requirements.txt)
+    has no pyyaml, and `import yaml` here ended every Hangar hull case in ModuleNotFoundError there (round 15, look-ahead L0). `tests/test_stage3.py` holds this
+    reading to PyYAML's on the file itself, so a layout of the entry that this does not read fails there and not in the image."""
+    key = "stage3.fea_elements_along:"
+    lines = ASSUMPTIONS.read_text().splitlines()
+    if key not in lines:
+        raise ValueError(f"{ASSUMPTIONS} has no {key[:-1]}")
+    for line in lines[lines.index(key) + 1:]:
+        if line.strip() and not line[0].isspace():                                  # the next top-level entry: this one has no value
+            break
+        name, _, text = line.strip().partition(":")
+        if name == "value":
+            try:
+                n = int(text.split("#")[0])
+            except ValueError:
+                raise ValueError(f"{key[:-1]} in {ASSUMPTIONS}: value is {text.strip()!r}, not a whole number") from None
+            if n < 1:
+                raise ValueError(f"{key[:-1]} in {ASSUMPTIONS}: value {n} is below 1")
+            return n
+    raise ValueError(f"{key[:-1]} in {ASSUMPTIONS} has no value")
 
 
 def _gmsh():

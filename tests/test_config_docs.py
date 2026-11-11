@@ -601,6 +601,34 @@ def test_r15_pb_the_lab_user_documents_say_what_the_owner_refusal_of_pmx_is_and_
         assert refusal in orca.replace("`", ""), refusal
 
 
+def test_r15_l0_no_app_module_imports_a_package_only_the_pm_image_installs():
+    """Round 15 look-ahead L0: `cafe/fea.py` imported yaml, which requirements-pm.txt installs and requirements.txt (the app image) does not; every test runs
+    in the pm image, so none could see it. A module of `cafe/` (the app's, not `cafe/pm`) may import a package only if the app image installs it:
+    requirements.txt, or a `pip install pkg==x` line of the Dockerfile."""
+    import ast
+    import importlib.metadata as md
+
+    def dists(names):
+        return {re.split(r"[\[=<>~ ;#]", n.strip())[0].lower().replace("_", "-") for n in names if n.strip() and not n.startswith("#")}
+    app = dists(text("requirements.txt").splitlines()) | dists(re.findall(r"pip install [^\n]*?\b([\w.-]+==[\w.]+)", text("Dockerfile")))
+    pm = dists(text("requirements-pm.txt").splitlines())
+    only = set()
+    for m, ds in md.packages_distributions().items():
+        ds = {d.lower().replace("_", "-") for d in ds}
+        if ds & (pm - app) and not ds & app:
+            only.add(m)
+    # both sets are found, so the scan cannot pass by finding nothing
+    assert {"yaml", "jsonschema", "pytest"} <= only and not {"numpy", "gsw", "capytaine", "trimesh"} & only
+    hits = []
+    for f in sorted((ROOT / "cafe").glob("*.py")):
+        for node in ast.walk(ast.parse(f.read_text())):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else []
+            if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                names = [node.module]
+            hits += [f"{f.name}:{node.lineno} imports {n}" for n in names if n.split(".")[0] in only]
+    assert not hits, f"in the pm image only, not in the app image: {hits}"
+
+
 def test_r15_m14_the_app_image_copies_every_top_level_directory_the_app_modules_read():
     """Round 15 M-14: `cafe/fea.py` reads config/assumptions.yaml (the Hangar's hull mesh) and `cafe/planner.py` config/throughput.json beside the package,
     but the Dockerfile copied only `cafe/`: in the deployed image the Hangar's hull case raised FileNotFoundError. A directory that a module outside cafe/pm
