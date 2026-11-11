@@ -979,6 +979,56 @@ def test_r15_l0_the_hull_mesh_reading_takes_this_entrys_value_only_and_refuses_w
             fea.hull_elements_along()
 
 
+_MESH = "stage3.fea_elements_along:"
+_MESH_BODY = "  unit: elements\n  why: x\n"
+
+
+@pytest.mark.parametrize("name, text, want", [
+    ("octal", f"{_MESH}\n  value: 070\n{_MESH_BODY}", "refuse"),                                  # PyYAML 56, a line reader 70
+    ("hash without space", f"{_MESH}\n  value: 70#x\n{_MESH_BODY}", "refuse"),                      # PyYAML the text '70#x'
+    ("underscore", f"{_MESH}\n  value: 7_0\n{_MESH_BODY}", "refuse"),                               # PyYAML 70 (YAML 1.1), refused: not the layout
+    ("sign", f"{_MESH}\n  value: +70\n{_MESH_BODY}", "refuse"),
+    ("value twice", f"{_MESH}\n  value: 70\n{_MESH_BODY}  value: 45\n", "refuse"),                 # PyYAML 45 (the last), a first-wins reader 70
+    ("entry twice", f"{_MESH}\n  value: 70\n{_MESH_BODY}{_MESH}\n  value: 45\n", "refuse"),      # PyYAML 45
+    ("quoted key twice", f"{_MESH}\n  value: 70\n{_MESH_BODY}  \"value\": 45\n", "refuse"),
+    ("block scalar text", f"{_MESH}\n  why: >\n    value: 5\n    more\n  value: 70\n  unit: x\n", 70),   # the line inside the scalar is text
+    ("nested mapping", f"{_MESH}\n  other:\n    value: 9\n  value: 70\n", 70),
+    ("nested mapping after", f"{_MESH}\n  value: 70\n  other:\n    value: 9\n", 70),
+    ("flow collection child", f"{_MESH}\n  unit: [a,\n  value: 5]\n  value: 70\n", "refuse"),     # in a flow collection the indent means nothing
+    ("quoted text over lines", f"{_MESH}\n  why: \"a\n  value: 5\"\n  value: 70\n", "refuse"),
+    ("comment after the number", f"{_MESH}\n  value: 70   # mesh\n{_MESH_BODY}", 70)])
+def test_r15_l0_4_the_hull_mesh_reading_never_returns_a_number_pyyaml_does_not(monkeypatch, tmp_path, name, text, want):
+    """Round 15 look-ahead L0-4: the line reader that replaced `yaml.safe_load` took octal, `70#x`, the first of two `value:` lines, a second entry's
+    shadowed number and a `value:` line inside another child's text for 70 where PyYAML gave 56, a text, 45, 45 and 70, so the Hangar meshed a hull at the
+    wrong size without an error. For each layout: the reader gives the number or refuses with a ValueError, and a number it gives is the one PyYAML gives."""
+    import yaml
+    from cafe import fea
+    f = tmp_path / "assumptions.yaml"
+    f.write_text(text)
+    monkeypatch.setattr(fea, "ASSUMPTIONS", f)
+    if want == "refuse":
+        with pytest.raises(ValueError, match="stage3.fea_elements_along"):
+            fea.hull_elements_along()
+    else:
+        got = fea.hull_elements_along()
+        assert got == want == yaml.safe_load(text)["stage3.fea_elements_along"]["value"]
+
+
+@pytest.mark.parametrize("text", [f"{_MESH}  # mesh\n  value: 70\n{_MESH_BODY}", f"{_MESH}   \n  value: 70\n{_MESH_BODY}", f"{_MESH}\r\n  value: 70\r\n"])
+def test_r15_l0_4_a_comment_or_blank_after_the_key_is_the_same_entry_pyyaml_reads(monkeypatch, tmp_path, text):
+    """Round 15 look-ahead L0-4: `stage3.fea_elements_along:  # mesh` is valid YAML read as 70, and the reader found no such entry, so every Hangar hull
+    case failed in the app image for a comment. A flow mapping on the key line is refused with the reason, not as a missing entry."""
+    import yaml
+    from cafe import fea
+    f = tmp_path / "assumptions.yaml"
+    f.write_bytes(text.encode())
+    monkeypatch.setattr(fea, "ASSUMPTIONS", f)
+    assert fea.hull_elements_along() == yaml.safe_load(text)["stage3.fea_elements_along"]["value"] == 70
+    f.write_text(f"{_MESH} {{value: 70, unit: x}}\n")
+    with pytest.raises(ValueError, match="only the key, a colon and a comment are read"):
+        fea.hull_elements_along()
+
+
 def test_r14_m31_the_stage_3_fea_row_is_not_run_when_the_buckling_factor_is_missing(monkeypatch):
     """The chain a window takes: `pipeline_windows._fea` -> child `_fea_child` -> `windows.fea_window` -> `fea.solve`. Without a factor the row is
     `run` False with the reason and carries no utilization; with one it carries the knocked-down buckling utilization as before."""
