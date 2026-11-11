@@ -1190,7 +1190,7 @@ def test_r15_m18_two_windows_have_no_between_window_floor_and_the_module_says_so
     two = refit.refit([_w(0.30, 0.01), _w(0.30, 0.01)], dict(cd=0.30), floor=flr)["drag"]
     assert two["tau"] == 0 and two["sigma_between"] == 0 and two["sigma"] == pytest.approx(math.hypot(0.01 / math.sqrt(2) / 0.30, 0.05))
     one = refit.refit([_w(0.30, 0.01)], dict(cd=0.30), floor=flr)["drag"]
-    assert one["sigma_between"] == pytest.approx(0.1) and "two windows" in refit.__doc__ and "tau^2 = 0" in refit.__doc__
+    assert one["sigma_between"] == pytest.approx(0.1) and "two windows" in refit.__doc__ and "has tau^2 = 0 in about 15 %" in refit.__doc__
 
 
 @given(st.lists(st.floats(0.05, 2.0), min_size=2, max_size=8), st.floats(0.01, 0.2))
@@ -2778,20 +2778,21 @@ def _bow_res(heading, n=3):
 
 
 def test_r15_m20_the_course_over_ground_of_members_either_side_of_the_dateline_is_the_course_elsewhere():
-    """Round 15 M-20: `track_heading` took the median of the members' raw longitudes, so members at 179.99 and -179.99 gave 0 and the course across the
-    line came out 270.006 degrees where the same flight at lon 10 gives 45.000. The same flight written either way gives one heading."""
+    """Round 15 M-20: `track_heading` took the median of the members' raw longitudes, so members at 179.99 and -179.99 at one record gave 0 (the other side of
+    the globe) and the course across the line came out wrong (270.006 degrees where the same flight at lon 10 gives 45.000). The same flight written either
+    way gives one heading."""
     t = np.arange(3) * 3600.0
     step = 0.01 * np.arange(3)
 
     def res(lon0):
-        lon = np.stack([lon0 + step, lon0 + step + 0.001], 1)                                  # two members, 0.001 degrees apart in longitude
+        lon = np.stack([lon0 + step, lon0 + step + 0.02], 1)                                   # two members 0.02 degrees apart in longitude, both flying east
         lon = (lon + 180.0) % 360.0 - 180.0
         return dict(vehicles=dict(u=dict(t=t, lon=lon, lat=np.stack([0.5 * step, 0.5 * step], 1))))
-    far, near = pw.track_heading(res(179.985), "u", 3600.0), pw.track_heading(res(10.0), "u", 3600.0)
+    far, near = pw.track_heading(res(179.99), "u", 3600.0), pw.track_heading(res(10.0), "u", 3600.0)
     assert near == pytest.approx(math.degrees(math.atan2(1.0, 0.5)), abs=0.1)                  # east 0.02, north 0.01: about 63.4
     assert far == pytest.approx(near, abs=1e-6)
-    lon = res(179.985)["vehicles"]["u"]["lon"]
-    assert lon.min() < -179.0 < 179.0 < lon.max()                                              # the premise: the members straddle the line
+    lon = res(179.99)["vehicles"]["u"]["lon"]
+    assert lon[0].min() < 0.0 < lon[0].max() and abs(lon[0].min()) > 179.0                      # the premise: at the first record the members are either side of the line
 
 
 def test_r7_m27_track_heading_is_the_recorded_bow_heading_and_the_course_only_without_one():
