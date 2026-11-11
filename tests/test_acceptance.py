@@ -549,6 +549,24 @@ def test_r14_m2_a_stat_fault_that_is_neither_absent_nor_denied_propagates_from_t
     assert acc._probe(g) == "file" and acc._probe(tmp_path) == "dir" and acc._probe(tmp_path / "gone") == "absent"
 
 
+@pytest.mark.parametrize("code, want", [(errno.EACCES, "denied"), (errno.EPERM, "denied"), (errno.ENOENT, "absent"), (errno.ENOTDIR, "absent"),
+                                        (errno.ELOOP, "absent"), (errno.EBADF, "absent")])
+def test_r15_m7_every_errno_the_golden_probe_names_is_read_as_it_says(tmp_path, monkeypatch, code, want):
+    """Round 15 M-7: dropping EPERM (or any other name) from `_probe` passed the tests, which drove only EACCES by chmod and EIO. `os.stat` raises each of
+    the six errnos the docstring names: the two of a directory that cannot be searched are "denied", the four `Path.exists` reads as absent are "absent"."""
+    g = tmp_path / "g.json"
+    g.write_text("{}")
+    real = os.stat
+
+    def stat(path, *a, **k):
+        if os.fspath(path) == str(g):
+            raise OSError(code, os.strerror(code))
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(os, "stat", stat)
+    assert acc._probe(g) == want
+
+
 def test_every_run_gets_its_own_copy_of_the_pristine_emulator_table(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(acc, "_execute", lambda argv, env, log, timeout: seen.append(argv) or (0 if argv[0] == "fetch" else 1))

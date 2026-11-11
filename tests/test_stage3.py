@@ -228,6 +228,23 @@ def test_r14_m34_a_wall_cell_with_no_surface_normal_gets_no_shear_and_is_counted
     assert wm.no_shear_cells(plate) == 0 and np.asarray(plate.valid).all()
 
 
+def test_r15_m7_a_wall_cell_gets_a_normal_by_the_size_of_its_smoothed_gradient_not_by_its_being_nonzero():
+    """Round 15 M-7: `NORMAL_MIN` 1e-6 to 1e-2 or to 0.0 passed every test (the only slot tested had a gradient of exactly 0). A one-cell slot between two
+    walls with one cell missing from the upper wall has, along the slot, smoothed-solid gradients from 1e-9 to 1e-3: the dust-sized ones (below 1e-7) are
+    cells with no usable normal, the faint but real ones (1e-5 to 1e-3, a hundredth or less of a plate wall's 0.27) keep the wall model."""
+    from scipy import ndimage
+    solid = np.zeros((24, 11, 24), bool)
+    solid[:, :5], solid[:, 6:] = True, True
+    solid[12, 6, 12] = False
+    ws = wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))
+    g = np.stack(np.gradient(ndimage.gaussian_filter(solid.astype(float), 1.5)))
+    mag = np.linalg.norm(g, axis=0)[ws.cell[0], ws.cell[1], ws.cell[2]]
+    dust, faint = (mag > 0) & (mag < 1e-7), (mag > 1e-5) & (mag < 1e-3)
+    assert dust.sum() >= 4 and faint.sum() >= 4                                        # the premise: both kinds are among the wall cells
+    assert not ws.valid[dust].any() and ws.valid[faint].all()
+    assert not ws.valid[mag == 0].any()
+
+
 def test_r14_l0_a_cell_without_a_normal_has_no_friction_velocity_so_it_raises_no_eddy_viscosity_either():
     """Round 14 M-34 left `near_wall_tau` reading the u_tau of a wall cell that has no normal: the velocity there has no tangential meaning (n = 0, so the
     whole velocity counts), the log law gave u_tau 0.003 at every one of the 400 cells of a one-cell slot (20 x 20 x 20, solid below z = 6 and from z = 7,
