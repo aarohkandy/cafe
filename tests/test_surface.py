@@ -294,7 +294,7 @@ def test_r8_l0_the_digest_record_is_written_whole_or_not_at_all(ci_env, tmp_path
     real = pathlib.Path.write_text
 
     def killed(self, data, *a, **k):
-        if self.name.startswith("derived.digest"):                                      # the record or the temporary file it is written through
+        if self.name.startswith("derived.digest") or (self.name.endswith(".tmp") and self.parent == d):   # the record or its temporary (`.<12 hex>.tmp`, M-6)
             real(self, data[:10], *a, **k)
             raise OSError(28, "No space left on device")
         return real(self, data, *a, **k)

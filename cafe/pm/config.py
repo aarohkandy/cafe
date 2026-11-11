@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, hashlib, json, math, pathlib, re
+import contextlib, datetime as dt, hashlib, json, math, pathlib, re, warnings
 from collections.abc import Hashable, Iterator
 from typing import Any
 
@@ -347,7 +347,7 @@ def write_text(p: pathlib.Path, text: str) -> None:
     ledgers, the receipt store and the ingest manifests (round 14, P-R13M1). The code is `cafe.atomic.write_text` (standard library only, so the live app's
     own files use it too: round 15). An existing file keeps its permission bits (a new file gets the default
     ones); a hard link to it does not survive, because a replace gives the name a new inode and the other name keeps the old content (round 14, M-18)."""
-    atomic.write_text(p, text)
+    atomic.write_text(p, text, follow_symlinks=True)
 
 
 def write_json(p: pathlib.Path, obj: Any, end: str = "", **kw: Any) -> None:
@@ -507,6 +507,30 @@ def _unshare(node: Any) -> Any:
     return [_unshare(v) for v in node] if isinstance(node, list) else node
 
 
+def check_dive_depth(v: dict[str, Any], where: str) -> None:
+    """A glider's `task.dive_depth_m` inside the platform's `min_dive_m` to `rating_m`, else a ConfigError starting with `where`. The one copy that
+    `load_mission` and `whatif.apply` (which builds a changed mission without loading it: round 15, M-30) both call."""
+    from .physics import glider
+    P, dd = glider.load_platform(v["platform"]), v["task"]["dive_depth_m"]
+    if not P["min_dive_m"] <= dd <= P["rating_m"]:
+        raise ConfigError(f"{where}/task/dive_depth_m: {dd:g} m is outside what the {P['kind']} '{v['platform']}' "
+                          f"dives: min_dive_m {P['min_dive_m']:g} m to rating_m {P['rating_m']:g} m; use a depth in that range")
+
+
+def check_sortie_period(v: dict[str, Any], hard: float, where: str) -> None:
+    """A UAS's `sorties.every_days` not shorter than `hard` minutes (`duration_min` x the platform's `hard_stop_factor`: sorties would overlap), else a
+    ConfigError starting with `where`. The one copy that `load_mission` and `whatif.apply` both call (round 15, M-30)."""
+    so = v.get("sorties", {})
+    if so and so.get("every_days", 1) * 1440 < hard:
+        raise ConfigError(f"{where}/sorties/every_days: {so.get('every_days', 1)} d is shorter than duration_min x the platform's hard_stop_factor "
+                          f"({hard:g} min), so sorties would overlap; raise every_days to at least {hard / 1440:.3g} or shorten duration_min")
+
+
+def hard_stop_min(v: dict[str, Any], plat: dict[str, Any]) -> float:
+    """A UAS's sortie `duration_min` times its platform's (`plat`, `load_platform`) `hard_stop_factor`: the minutes a sortie may take before it is stopped."""
+    return float(v.get("sorties", {}).get("duration_min", 0)) * float(plat.get("sortie", {}).get("hard_stop_factor", {}).get("value", 1.0))
+
+
 def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str, Any]:
     """The checked mission. `set_verdict` sets the verdict cut-offs of `stats.intervals` (module state of the one mission a command runs); a mission
     loaded only to be read (the benchmark's, for its sortie-minutes) passes False and leaves them alone."""
@@ -575,28 +599,29 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
                     raise ConfigError(f"{where}: point ({lon}, {lat}) is outside the mission box ({fmt_box(m['box'])}); widen the box or move the point")
         plat, cls = load_platform(v["platform"]), _check_platform(v, where)
         if cls == "glider" and "dive_depth_m" in v.get("task", {}):
-            from .physics import glider
-            P, dd = glider.load_platform(v["platform"]), v["task"]["dive_depth_m"]
-            if not P["min_dive_m"] <= dd <= P["rating_m"]:
-                raise ConfigError(f"{where}/task/dive_depth_m: {dd:g} m is outside what the {P['kind']} '{v['platform']}' "
-                                  f"dives: min_dive_m {P['min_dive_m']:g} m to rating_m {P['rating_m']:g} m; use a depth in that range")
+            check_dive_depth(v, where)
         if "sorties" in v and cls != "uas":
             raise ConfigError(f"{where}/sorties: only a UAS (a vehicle with `base`) flies sorties; remove sorties, or add base: <the ship's id>")
         so = v.get("sorties", {})
-        hard = so.get("duration_min", 0) * float(plat.get("sortie", {}).get("hard_stop_factor", {}).get("value", 1.0))
-        if so and so.get("every_days", 1) * 1440 < hard:
-            raise ConfigError(f"{where}/sorties/every_days: {so.get('every_days', 1)} d is shorter than duration_min x the platform's hard_stop_factor "
-                              f"({hard:g} min), so sorties would overlap; raise every_days to at least {hard / 1440:.3g} or shorten duration_min")
+        hard = hard_stop_min(v, plat)
+        check_sortie_period(v, hard, where)
         if so:
             from . import stage1
             from .env import orca
-            if not len(stage1.launch_times(so, float(m["ship"]["lon"]), t0.timestamp(), t1.timestamp(), 60.0 * hard)):
+            launches = stage1.launch_times(so, float(m["ship"]["lon"]), t0.timestamp(), t1.timestamp(), 60.0 * hard)
+            if not len(launches):
                 hh, mm = (int(x) for x in so["local_solar_time"].split(":"))
                 h, mi = divmod(round(hh * 60 + mm - m["ship"]["lon"] * 4.0) % 1440, 60)
                 utc_hm = f"{h:02d}:{mi:02d}"
                 raise ConfigError(f"{where}/sorties: no launch fits in the window "
                                   f"(local_solar_time {so['local_solar_time']} at lon {m['ship']['lon']:g} is {utc_hm}Z, "
                                   f"a launch needs {hard:g} min before window.end); widen the window or change the time")
+            every = float(so.get("every_days", 1))
+            if every >= 1 and abs(every - round(every)) > 1e-9:                    # round 15, M-4: `local_solar_time` fixes the first launch only
+                hours = [f"{x // 60:02d}:{x % 60:02d}" for x in (round((lt / 60.0 + float(m["ship"]["lon"]) * 4.0) % 1440) for lt in launches[:4])]
+                more = ", ..." if len(launches) > 4 else ""
+                warnings.warn(f"{where}/sorties/every_days: {every:g} d is not a whole number of days, so local_solar_time {so['local_solar_time']} "
+                              f"holds for the first launch only; the launches fall at local solar times {', '.join(hours)}{more}", stacklevel=2)
             alt = so.get("altitudes_m", ())
             if any(b <= a for a, b in zip(alt, alt[1:], strict=False)):
                 raise ConfigError(f"{where}/sorties/altitudes_m: {list(alt)} does not rise; list the flight levels from the lowest to the highest, each once")

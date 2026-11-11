@@ -56,12 +56,12 @@ def _wrf_notes(a: Any) -> tuple[str, str]:
     state (a DX that is not finite and > 0, an SST_UPDATE that is not a whole number) is said to be not recorded, never given the orca run's value
     (12 km, frozen at 2023-03-01), which `orca.wrf_grid` guarantees only for a cache it wrote (round 14, M-7; round 13, M-30 had the old words)."""
     try:
-        dx = float(a["DX"]) / 1000
+        dx = math.nan if isinstance(a["DX"], (bool, np.bool_)) else float(a["DX"]) / 1000       # a JSON true is no spacing (float(True) is 1.0; round 15, M-5)
     except (KeyError, TypeError, ValueError, OverflowError):          # an integer too large for a float (json.loads gives a 400-digit literal as an int)
         dx = math.nan
     grid = f"{dx:g} km" if math.isfinite(dx) and dx > 0 else "grid spacing (DX) not recorded"
     try:
-        upd = float(a["SST_UPDATE"])
+        upd = math.nan if isinstance(a["SST_UPDATE"], (bool, np.bool_)) else float(a["SST_UPDATE"])
     except (KeyError, TypeError, ValueError, OverflowError):
         upd = math.nan
     if not (math.isfinite(upd) and upd == int(upd)):

@@ -335,7 +335,7 @@ def _whatif(a: argparse.Namespace) -> int:
     ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m))
     ans = whatif.answer(m, ops, base, tracks, ctx.env, ems, ctx.plan, fitted, scales, only=a.vehicle)
     what = [f"{ops['shift_h']:+g} h" if a.shift else "", f"{ops['dlon']:+g} deg lon, {ops['dlat']:+g} deg lat" if a.move else "",
-            f"drop {', '.join(a.drop)}" if a.drop else ""]
+            f"drop {', '.join(ans['dropped'])}" if ans["dropped"] else ""]            # the answer's list: `--drop usv --drop usv` is one drop
     print(f"whatif {m['name']}: " + "; ".join(x for x in what if x))
     for vid, r in ans["vehicles"].items():
         if r["method"] == "EMULATED":

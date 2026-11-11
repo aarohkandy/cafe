@@ -21,6 +21,7 @@ implies NO-GO (tested), so stopping never contradicts the final verdict.
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable
 from typing import Any
 
 import numpy as np
@@ -51,8 +52,24 @@ def _kappa(conf: float) -> float:
     return float(norm.ppf(0.5 + conf / 2))
 
 
+def _check(k: int, n: int, conf: float) -> None:
+    """The domain of the interval functions: 0 <= k <= n, n >= 1, 0 < conf < 1, else a ValueError (round 15, M-37: `wilson(5, 3)` gave a number, `wilson(0, 0)`
+    a ZeroDivisionError; `interval` was the only function that checked)."""
+    if n < 1 or not 0 <= k <= n:
+        raise ValueError(f"need 0 <= k <= n and n >= 1, got k={k}, n={n}")
+    if not 0 < conf < 1:
+        raise ValueError(f"need 0 < conf < 1, got conf={conf}")
+
+
+def _level(level: float, conf: float) -> None:
+    """The domain of `n_certify` and `n_certify_one_sided`: 0 < level < 1 and 0 < conf < 1 (a level of 0 divided by zero, a conf of 1 took log(0))."""
+    if not (0 < level < 1 and 0 < conf < 1):
+        raise ValueError(f"need 0 < level < 1 and 0 < conf < 1, got level={level}, conf={conf}")
+
+
 def wilson(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
     """Wilson score interval for k events in n trials."""
+    _check(k, n, conf)
     z = _kappa(conf)
     p = k / n
     c = (p + z * z / (2 * n)) / (1 + z * z / n)
@@ -63,6 +80,8 @@ def wilson(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
 def newcombe_diff(k1: int, n1: int, k2: int, n2: int, conf: float = 0.95) -> tuple[float, float]:
     """Newcombe (1998, Stat. Med. 17:873, method 10) hybrid score interval for p1 - p2, from the Wilson intervals (l, u) of p1 and p2:
     L = d - sqrt((p1 - l1)^2 + (u2 - p2)^2), U = d + sqrt((u1 - p1)^2 + (p2 - l2)^2), d = p1 - p2."""
+    _check(k1, n1, conf)
+    _check(k2, n2, conf)
     p1, p2 = k1 / n1, k2 / n2
     l1, u1 = wilson(k1, n1, conf)
     l2, u2 = wilson(k2, n2, conf)
@@ -72,6 +91,7 @@ def newcombe_diff(k1: int, n1: int, k2: int, n2: int, conf: float = 0.95) -> tup
 
 def agresti_coull(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
     """Agresti-Coull interval: Wald interval around p~ = (k + z^2/2)/(n + z^2)."""
+    _check(k, n, conf)
     z = _kappa(conf)
     nt = n + z * z
     pt = (k + z * z / 2) / nt
@@ -81,30 +101,50 @@ def agresti_coull(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
 
 def interval(k: int, n: int, conf: float = 0.95) -> tuple[float, float, str]:
     """Wilson at every n (the one `n_certify` solves). Returns (lo, hi, method)."""
-    if n < 1 or not 0 <= k <= n:
-        raise ValueError(f"need 0 <= k <= n and n >= 1, got k={k}, n={n}")
     return (*wilson(k, n, conf), "wilson")
 
 
 def rule_of_three(n: int) -> float:
     """Upper bound on P(fail) after n runs with zero failures: 3/n."""
+    if n < 1:
+        raise ValueError(f"need n >= 1, got n={n}")
     return 3.0 / n
 
 
 def n_certify(level: float = 0.05, conf: float = 0.95) -> int:
     """Smallest n whose zero-failure two-sided Wilson upper bound k^2/(n+k^2) is below `level` (73 at 5 %, 95 %)."""
+    _level(level, conf)
     k2 = _kappa(conf) ** 2
     return int(math.floor(k2 * (1 / level - 1))) + 1
 
 
 def n_certify_one_sided(level: float = 0.05, conf: float = 0.95) -> int:
     """Smallest n with (1 - level)^n <= 1 - conf: zero failures then rule out P(fail) >= level (59 at 5 %, 95 %)."""
+    _level(level, conf)
     return math.ceil(math.log(1 - conf) / math.log(1 - level))
 
 
 def verdict_from_p(p_fail: float) -> str:
-    """The verdict implied by a (predicted) P(fail) alone: <= 0.10 GO, > 0.40 NO-GO, else MARGINAL."""
+    """The verdict implied by a point P(fail) alone: <= 0.10 GO, > 0.40 NO-GO, else MARGINAL. It ignores the interval, which `verdict` does not: a
+    prediction that has an interval takes `verdict_band` (round 15, M-1)."""
     return "GO" if _at_least(P_FAIL_GO, p_fail) else "NO-GO" if not _at_least(P_FAIL_NOGO, p_fail) else "MARGINAL"
+
+
+def verdict_band(p_fail: float, lo: float, hi: float) -> str:
+    """`verdict` for a P(fail) with a 90 % band (lo, hi) that did not come from k failures in n members (the emulator's conformal band): the same
+    cut-offs, GO only if P(fail) <= 0.10 and the band's upper end is <= 1 - LO_SUCCESS_GO (0.25), the form of `verdict`'s "success >= 0.90 and its lower
+    bound >= 0.75"; NO-GO above 0.40; else MARGINAL. Like `verdict`, only the end of the band on the failing side enters (`lo` is taken so that a caller
+    passes the whole band). For (k / n, *interval(k, n, 0.90)) it returns what `verdict(k, n)` returns (tested for every k at n up to 60)."""
+    return "GO" if _at_least(P_FAIL_GO, p_fail) and _at_least(1 - LO_SUCCESS_GO, hi) else "NO-GO" if not _at_least(P_FAIL_NOGO, p_fail) else "MARGINAL"
+
+
+def band_in(lo: float, hi: float, want: Iterable[str]) -> bool:
+    """Whether every P(fail) in the band (lo, hi) has a verdict in `want`: the verdicts at the two ends and on both sides of each cut-off inside the band
+    (`verdict_band` with the whole band, so its GO term reads `hi`). A winner chosen among many candidates by its point estimate is shown to be in the
+    target only if its band is: the minimum over about 18 noisy estimates is biased towards the lucky one (the winner's curse; round 15, M-1)."""
+    want = tuple(want)
+    points = [lo, hi] + [x for c in (P_FAIL_GO, P_FAIL_NOGO) for x in (c, c + 1e-9) if lo <= x <= hi]       # the verdict changes only at a cut-off
+    return all(verdict_band(p, lo, hi) in want for p in points)
 
 
 def verdict(k_fail: int, n: int, conf: float = 0.90, level: float = 0.05, cert_conf: float = 0.95) -> dict[str, Any]:

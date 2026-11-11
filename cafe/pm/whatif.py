@@ -47,7 +47,7 @@ from numpy.typing import NDArray
 from scipy.stats import betabinom, binom, qmc
 
 from . import budget, par, report, stage1
-from .config import ConfigError, _in_box, fmt_box, utc
+from .config import ConfigError, _in_box, check_dive_depth, check_sortie_period, fmt_box, hard_stop_min, load_platform, utc
 from .emulator import LIMITS as LIMITS                          # the BRIEF 2.7 limits live in emulator.py (receipts() reads them too); this is the same dict
 from .emulator import Emulator, FreshDraw, conformal_rank, coverage_band, locked, read_table, store_path, write_table
 from .env.environment import OutsideData
@@ -105,8 +105,16 @@ def _points(v: dict[str, Any], ship: dict[str, Any] | None) -> list[list[float]]
 
 
 def _whole_days(h: float) -> bool:
-    """A launch shift of a whole number of days: the same time of day."""
+    """A launch shift of a whole number of days: the same time of day. Launch times are HH:MM, so the test is at one-minute resolution: 0.001 h and
+    24.001 h are not shifts at all (`_whole_days_words` says which it is)."""
     return bool(h) and int(round(h * 60)) % 1440 == 0
+
+
+def _whole_days_words(h: float) -> str:
+    """Why `_whole_days(h)` is true, for the one message of `apply` and `answer`: "is a whole number of days", or, for a shift that only rounds to one, what the
+    test is (round 15, M-31: 0.001 h was refused as 'a whole number of days')."""
+    exact = abs(h * 60.0 - 1440.0 * round(h * 60.0 / 1440.0)) < 1e-6
+    return "is a whole number of days" if exact else "rounds to a whole number of days at the one-minute resolution of launch times (HH:MM)"
 
 
 def _deploy_in_window(t: float, window: tuple[float, float]) -> bool:
@@ -127,10 +135,10 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
         if vid in drop:
             continue
         v = vehicle(m, vid)
-        h, dlon, dlat, duty = _numbers(vid, mod)
+        h, dlon, dlat, duty = _numbers(vid, mod, m["box"])
         if h and "base" in v:
             if _whole_days(h):
-                raise Invalid(f"{vid}: launching {h:+g} h later is a whole number of days, the same launch time of day: nothing changes")
+                raise Invalid(f"{vid}: launching {h:+g} h later {_whole_days_words(h)}, the same launch time of day: nothing changes")
             hh, mm = (int(x) for x in v["sorties"]["local_solar_time"].split(":"))
             tot = (hh * 60 + mm + int(round(h * 60))) % 1440
             v["sorties"]["local_solar_time"] = f"{tot // 60:02d}:{tot % 60:02d}"
@@ -164,15 +172,28 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
                 v["task"]["dive_depth_m"] = v["task"]["dive_depth_m"] * duty
             else:
                 raise Invalid(f"{vid}: the task has no duty cycle to lower (a glider dive_depth_m, UAS sorties every_days)")
+            try:                                                      # the checks `load_mission` makes of the mission it builds (round 15, M-30)
+                if "base" in v:
+                    check_sortie_period(v, hard_stop_min(v, load_platform(v["platform"])), vid)
+                else:
+                    check_dive_depth(v, vid)
+            except ConfigError as e:
+                raise Invalid(f"{vid}: duty {duty:g} gives a mission the loader would refuse: {e}") from e
     return m
 
 
-def _numbers(vid: str, mod: dict[str, Any]) -> tuple[float, float, float, float]:
-    """(shift_h, dlon, dlat, duty) of a change as floats; Invalid for a number that is not finite, or a duty that is not above 0 (the one place every
-    caller of `apply` and `answer` goes through: a shift of 1e999 h is a typo, not a ZeroDivisionError or an OverflowError)."""
+def _numbers(vid: str, mod: dict[str, Any], box: dict[str, float]) -> tuple[float, float, float, float]:
+    """(shift_h, dlon, dlat, duty) of a change as floats; Invalid for a number that is not finite, a duty that is not in (0, 1] (the documented range: a
+    duty above 1 dived deeper, or flew sorties more often, than the mission orders) and a move as wide as the mission `box` (longitude wraps, so 355 deg
+    east would be 5 deg west and 1e300 deg something else: round 15, M-29). The one place every caller of `apply` and `answer` goes through: a shift of
+    1e999 h is a typo, not a ZeroDivisionError or an OverflowError."""
     h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
-    if not all(math.isfinite(x) for x in (3600.0 * h, dlon, dlat, duty)) or duty <= 0.0:       # 3600 * h: a shift in seconds must be a number too
-        raise Invalid(f"{vid}: the change shift_h {h:g}, dlon {dlon:g}, dlat {dlat:g}, duty {duty:g} needs finite numbers and a duty above 0")
+    if not all(math.isfinite(x) for x in (3600.0 * h, dlon, dlat, duty)) or not 0.0 < duty <= 1.0:       # 3600 * h: a shift in seconds must be a number too
+        raise Invalid(f"{vid}: the change shift_h {h:g}, dlon {dlon:g}, dlat {dlat:g}, duty {duty:g} needs finite numbers and a duty above 0 and at most 1")
+    width, height = (box["lon_max"] - box["lon_min"]) % 360.0, box["lat_max"] - box["lat_min"]
+    if (dlon and abs(dlon) >= width) or (dlat and abs(dlat) >= height):
+        raise Invalid(f"{vid}: a move of {dlon:+g} deg lon, {dlat:+g} deg lat is not smaller than the mission box ({width:g} deg wide, {height:g} deg high); "
+                      f"longitude wraps, so a larger move would land somewhere else; move by less than the box")
     return h, dlon, dlat, duty
 
 
@@ -410,8 +431,10 @@ def _fits_all(mission: dict[str, Any], mods: dict[str, dict[str, Any]]) -> dict[
     """The changes of vehicles that are applied together (the UAS on one ship) shrunk until they are valid: shift and move halved together, then (a move
     that cannot be made at any size: a vehicle at the box edge) the move dropped and the shift halved with the duty kept. The same step for every
     vehicle, so a move they share stays the same one. The all-zero change only when nothing valid is left."""
-    for shift_s, move_s in [(0.5 ** k, 0.5 ** k) for k in range(5)] + [(0.5 ** k, 0.0) for k in range(5)]:
-        ms = {vid: dict(m, shift_h=m["shift_h"] * shift_s, dlon=m["dlon"] * move_s, dlat=m["dlat"] * move_s) for vid, m in mods.items()}
+    steps = [(0.5 ** k, 0.5 ** k, True) for k in range(5)] + [(0.5 ** k, 0.0, True) for k in range(5)] + [(0.5 ** k, 0.0, False) for k in range(5)]
+    for shift_s, move_s, keep in steps:                          # the last five: a duty that cannot be applied at any size is dropped (round 15, M-30)
+        ms = {vid: dict(m, shift_h=m["shift_h"] * shift_s, dlon=m["dlon"] * move_s, dlat=m["dlat"] * move_s, duty=m["duty"] if keep else 1.0)
+              for vid, m in mods.items()}
         try:
             apply(mission, ms)
             return ms
@@ -732,11 +755,12 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
                 tried.append(dict(e, reason=str(ex), invalid=True))
                 continue
             if a["status"] == "ok":
-                tried.append(dict(e, method="EMULATED", **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")}))
+                tried.append(dict(e, method="EMULATED", shown=intervals.band_in(a["lo"], a["hi"], want),
+                                  **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")}))
             else:
                 tried.append(dict(e, reason=(no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " "))))
                 left.append((len(tried) - 1, m2))
-        if not any(t["method"] == "EMULATED" and t["verdict"] in want for t in tried):
+        if not any(t["method"] == "EMULATED" and t["verdict"] in want and t["shown"] for t in tried):
             for j, m2 in left[:FALLBACK_K]:
                 cost = budget.batch_cost_s(plan, [vid])
                 if used + cost > share:
@@ -761,14 +785,18 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
                 except Invalid:                                                   # the baseline left the data: no number
                     pass
         spent += used
-        hit = [t for t in tried if t["method"] != "not evaluated" and t["verdict"] in want]
+        hit = [t for t in tried if t["method"] != "not evaluated" and t["verdict"] in want and t.get("shown", True)]       # Stage 1's verdict is the interval's
         best = min(hit, key=lambda t: t["cost"]) if hit else None
+        unshown = [t for t in tried if t["method"] == "EMULATED" and t["verdict"] in want and not t["shown"]]       # a wide band's lucky end (round 15, M-1)
+        not_shown = min(unshown, key=lambda t: t["cost"]) if best is None and unshown else None
         evaluated, invalid = sum(t["method"] != "not evaluated" for t in tried), sum(t["invalid"] for t in tried)
         out[vid] = dict(verdict=base["verdict"], p_fail=base["p_fail"], target=" or ".join(want), found=best is not None, best=best, tried=tried,
                         emulator=em is not None, evaluated=evaluated, invalid=invalid, candidates=len(tried) - invalid, wind_model=wind_model,
-                        base_2d=base_2d)
-        log(f"flip search {vid}: " + (f"{best['change']} ({best['method']})" if best else
-                                      f"nothing flips it among the {evaluated} evaluated of {len(tried) - invalid} candidates"))
+                        base_2d=base_2d, not_shown=not_shown)
+        log(f"flip search {vid}: " + (f"{best['change']} ({best['method']}), the cheapest of {evaluated} evaluated" if best else
+                                      f"nothing flips it among the {evaluated} evaluated of {len(tried) - invalid} candidates"
+                                      + (f"; not shown: {not_shown['change']} has P(fail) {not_shown['p_fail']:.3f} but its band {not_shown['lo']:.3f} to "
+                                         f"{not_shown['hi']:.3f} is not inside {' or '.join(want)}" if not_shown else "")))
     return out, spent
 
 
@@ -804,11 +832,11 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
     other UAS launched from it is a changed vehicle too, also when `only` leaves it out: it is answered with the move alone and its `ship` says why."""
     pri, marg = stage1.priors_for(mission, fitted)
     seed = int(mission["seed"])
-    drop = list(ops.get("drop", []))
+    drop = list(dict.fromkeys(ops.get("drop", [])))                                  # `--drop usv --drop usv` drops it once
     if drop and not [v for v in mission["vehicles"] if v["id"] not in drop]:        # (`apply` may return none: run_variant relies on it)
         raise Invalid(f"--drop {', '.join(drop)} would leave no vehicles; a mission needs at least one (it has {[v['id'] for v in mission['vehicles']]})")
     mod = dict(shift_h=ops.get("shift_h", 0.0), dlon=ops.get("dlon", 0.0), dlat=ops.get("dlat", 0.0))
-    _numbers("--shift/--move", mod)                                          # before `_whole_days`, which cannot take an infinity
+    _numbers("--shift/--move", mod, mission["box"])                                          # before `_whole_days`, which cannot take an infinity
     live = [v["id"] for v in mission["vehicles"] if v["id"] not in drop and (only is None or v["id"] in only)]
     for vid in only or []:
         vehicle(mission, vid)
@@ -816,7 +844,9 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
     unchanged: dict[str, str] = {}
     for vid in list(changed):                   # a UAS shifted by whole days keeps its launch time of day: apply() refuses it, the answer says so and goes on
         if "base" in vehicle(mission, vid) and _whole_days(mod["shift_h"]):
-            unchanged[vid] = f"launching {mod['shift_h']:+g} h later keeps the same launch time of day: nothing changes"
+            words = _whole_days_words(mod["shift_h"])
+            unchanged[vid] = (f"launching {mod['shift_h']:+g} h later keeps the same launch time of day: nothing changes"
+                              + ("" if words == "is a whole number of days" else f" (it {words})"))
             if mod["dlon"] or mod["dlat"]:
                 changed[vid] = dict(mod, shift_h=0.0)
             else:
@@ -828,6 +858,8 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
             if "base" in v and v["id"] not in changed and v["id"] not in drop:
                 changed[v["id"]] = dict(mod, shift_h=0.0)
                 with_ship[v["id"]] = f"the ship moved with {mover}: {mod['dlon']:+g} deg lon, {mod['dlat']:+g} deg lat"
+    if not (changed or unchanged or drop):                       # `--shift 6h --shift=-6h`, `--shift 0h`: a header and nothing else would read as an answer
+        raise Invalid("the changes cancel: nothing changes (the shifts and moves add up to zero, and nothing is dropped)")
     m2 = apply(mission, changed, drop)
     out: dict[str, Any] = {}
     for vid in changed:

@@ -1545,3 +1545,26 @@ def test_r13_l1_the_flip_search_says_that_a_ship_move_takes_the_other_uas_along(
     assert not any("ship moves" in c["change"] for c in two if c not in moves)
     assert not any("ship moves" in c["change"] for c in whatif.candidates(CI, "uas"))                          # one UAS: nobody else moves with it
     assert not any("ship moves" in c["change"] for c in whatif.candidates(two_uas(), GL))                      # a glider's move is its own
+
+
+# ---- review round 15, M-40: three one-edit mutants that the tests above let survive
+
+def test_r15_m40_a_move_across_the_antimeridian_wraps_the_deploy_the_station_and_the_waypoints():
+    """`_wrap` as the identity left -195 for a deploy at -170 moved 25 deg west (the box test is modulo 360, so it still passed), and 180 for +180. The one
+    test that moved a position by dlon used a ship at -165 and -0.5 or -0.2 and built its expectation with `_wrap` itself."""
+    m = copy.deepcopy(DEMO)
+    gl = whatif.vehicle(m, "glider_eq")
+    gl["deploy"]["lon"], gl["task"]["lon"] = -170.0, -168.0
+    out = whatif.vehicle(whatif.apply(m, {"glider_eq": dict(dlon=-25.0)}), "glider_eq")
+    assert out["deploy"]["lon"] == 165.0 and out["task"]["lon"] == 167.0
+    gl["deploy"]["lon"], gl["task"]["lon"], gl["task"]["waypoints"] = 170.0, 168.0, [[170.0, 0.0], [175.0, 1.0]]
+    out = whatif.vehicle(whatif.apply(m, {"glider_eq": dict(dlon=10.0)}), "glider_eq")
+    assert out["deploy"]["lon"] == -180.0 and out["task"]["lon"] == 178.0 and out["task"]["waypoints"] == [[-180.0, 0.0], [-175.0, 1.0]]
+    assert whatif.apply(m, {"uas": dict(dlon=-25.0)})["ship"]["lon"] == 170.0                           # the ship at -165 moved 25 deg west
+
+
+def test_r15_m40_the_period_of_a_duty_ignores_float_dust_above_a_whole_number_of_days():
+    """`math.ceil(x - 1e-9)` as `math.ceil(x)` made 3.0000000000000004 days four (row 733)."""
+    assert whatif._duty_days(3.0000000000000004, 1.0) == 3.0 and whatif._duty_days(3.0, 1.0) == 3.0
+    assert whatif._duty_days(3.0, 0.75) == 4.0 and whatif._duty_days(1.0, 0.5) == 2.0 and whatif._duty_days(1.0000001, 1.0) == 2.0
+    assert whatif._duty_days(0.5, 0.75) == pytest.approx(2 / 3)                         # under a day: not rounded

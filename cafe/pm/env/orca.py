@@ -245,8 +245,11 @@ def read_json(path: str | pathlib.Path) -> dict[str, Any] | None:
 
 
 def real_numbers(v: Any, n: int | None = None) -> bool:
-    """`v` is a list (of `n` items when given) of numbers that are not bool: the shape check of a manifest's box and times."""
-    return isinstance(v, list) and (n is None or len(v) == n) and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in v)
+    """`v` is a list (of `n` items when given) of finite real numbers (`config.finite_real`: not a bool, NaN or infinity): the shape check of a manifest's
+    box and times. An infinite box or hours would claim to cover any request, and a cache would be reused for a window it does not hold (round 15, M-5).
+    Imported where it is used because `config` pulls in scipy, which a plain ingest worker does not need until it writes."""
+    from ..config import finite_real
+    return isinstance(v, list) and (n is None or len(v) == n) and all(finite_real(x) for x in v)
 
 
 def manifest_shape(d: dict[str, Any]) -> bool:

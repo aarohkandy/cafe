@@ -61,21 +61,25 @@ def split(w: dict[str, float], k: int) -> list[list[str]]:
 
 
 def main(argv: list[str], root: pathlib.Path = ROOT) -> int:
-    if len(argv) < 2 or not argv[0].isdigit():
+    if len(argv) < 2 or not (argv[0].isascii() and argv[0].isdigit() and int(argv[0]) >= 1):     # '²' is a digit to isdigit, int() refuses it; 0 is no share
         print(__doc__)
         return 2
     k, out = int(argv[0]), pathlib.Path(argv[1])
     files = test_files(root)
-    w = weights(files, file_seconds([pathlib.Path(x) for x in argv[2:]], files), root)
-    shares = split(w, k)
-    assert sorted(f for s in shares for f in s) == files             # every file in exactly one share
-    out.mkdir(parents=True, exist_ok=True)
-    for old in out.glob("s*.args"):                                  # a smaller K than the last run leaves no stale share behind
-        old.unlink()
-    for i, s in enumerate(shares, 1):
-        (out / f"s{i}.args").write_text("".join(f"{f}\n" for f in s) + "".join(f"--deselect={t}\n" for t in SERIAL_TESTS))
-        print(f"s{i}: {len(s)} files, planned {sum(w[f] for f in s):.0f} s")
-    (out / "serial.args").write_text("".join(f"{t}\n" for t in SERIAL_TESTS))
+    try:                                     # a junit file cut or missing, too many shares, an output that is a file: an error line, not a traceback (M-37)
+        w = weights(files, file_seconds([pathlib.Path(x) for x in argv[2:]], files), root)
+        shares = split(w, k)
+        assert sorted(f for s in shares for f in s) == files         # every file in exactly one share
+        out.mkdir(parents=True, exist_ok=True)
+        for old in out.glob("s*.args"):                              # a smaller K than the last run leaves no stale share behind
+            old.unlink()
+        for i, s in enumerate(shares, 1):
+            (out / f"s{i}.args").write_text("".join(f"{f}\n" for f in s) + "".join(f"--deselect={t}\n" for t in SERIAL_TESTS))
+            print(f"s{i}: {len(s)} files, planned {sum(w[f] for f in s):.0f} s")
+        (out / "serial.args").write_text("".join(f"{t}\n" for t in SERIAL_TESTS))
+    except (ET.ParseError, OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     return 0
 
 

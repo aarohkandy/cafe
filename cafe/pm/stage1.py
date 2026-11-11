@@ -29,6 +29,7 @@ from .env.environment import OutsideData
 from .env.perturb import PerturbedEnv
 from .physics import comms, glider, uas, usv
 from .stats import intervals, sampling, sensitivity, sequential
+from .stats.sensitivity import SENS_MIN_N as SENS_MIN_N       # fewest members the first-order indices are computed from (stats.sensitivity)
 
 if TYPE_CHECKING:
     from .ledger import Ledger
@@ -42,7 +43,6 @@ DT_VEHICLE = 60.0                     # glider and USV step [s]; the ocean SDE's
 
 # per class, besides FORCING
 ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_vpp_bias",), uas=("bulk_stress_scale", "battery_capacity_scale"))
-SENS_MIN_N = 16                       # fewest members the first-order indices are computed from (stats.sensitivity: EASI harmonics vs member count)
 
 
 SUBGRID_SWITCHES = ("turbulence", "gust_fronts", "warm_layer", "rain_lens", "ocean_sde")
@@ -259,20 +259,25 @@ def fill_hs(hs: NDArray[Any], lon: NDArray[Any], lat: NDArray[Any], what: str) -
     return np.take_along_axis(hs, np.where(fw >= 0, fw, bw), 1), int((~ok).sum())
 
 
-def _link_hs(env: Any, A: tuple[NDArray[Any], ...], B: tuple[NDArray[Any], ...], tt: NDArray[Any], what: str) -> tuple[NDArray[Any], int]:
-    """Round 12, M-11. The wave height an RF link is evaluated in: `env.waves` (the member's own perturbation, members first) at both ends of the link
-    (`A`, `B`: the (n, M) arrays `_pos` returns), the larger of the two at each moment, so that the margin does not depend on which end the mission
-    names first (Hs 0.2 m at the ship and 3 m at the USV differed by 0.3 dB between the two namings). The larger is the conservative one. Each end is
-    filled on its own (`fill_hs`: a masked cell is that member's nearest finite value there, not 0; a member with no finite value at an end is OutsideData
-    naming its position), and an unknown position reads 0, no moment the link was required, which never raises the other end's value.
-    -> ((n, M) heights, the number of samples `fill_hs` replaced at the two ends together)."""
+def _link_hs(env: Any, A: tuple[NDArray[Any], ...], B: tuple[NDArray[Any], ...], tt: NDArray[Any], what: str) -> tuple[list[NDArray[Any]], int]:
+    """Round 12, M-11; round 15, M-3. The wave heights an RF link is evaluated in: `env.waves` (the member's own perturbation, members first) at both
+    ends of the link (`A`, `B`: the (n, M) arrays `_pos` returns), one (n, M) array per end, and the caller takes the worse margin of the two at each
+    moment, so the margin does not depend on which end the mission names first. Which end is worse is not the larger Hs (round 12 took it as the
+    conservative one: a rougher sea fills the interference nulls and raised the minimum margin by up to 20 dB, the optimistic side there): the field of
+    the two-ray link is |1 - r exp(j th)|, r = |rho| falling as Hs rises (`comms.ament_rho`), th the phase of the path difference; its square
+    1 + r^2 - 2 r cos(th) changes with r by 2 (r - cos th), so where cos(th) > r (the nulls and their neighbourhood) the calmer end, with the larger r,
+    is the worse one, and where cos(th) < r (the peaks, and wherever the reflection is weaker than the direct ray's projection) the rougher end is. So the
+    margin is compared, sample by sample, not one Hs chosen.
+    Each end is filled on its own (`fill_hs`: a masked cell is that member's nearest finite value there, not 0; a member with no finite value at an
+    end is OutsideData naming its position), and an unknown position reads 0 at a moment that is no moment the link was required (`d` is not finite there).
+    -> ([the (n, M) heights of end A, of end B], the number of samples `fill_hs` replaced at the two ends together)."""
     both, n_fill = [], 0
     for P in (A, B):
         h = np.asarray(env.waves(P[0].T, P[1].T, tt.T)["Hs"].value, float)
         h, k = fill_hs(np.where(np.isfinite(P[0].T) & np.isfinite(P[1].T), h, 0.0), P[0][0], P[1][0], what)
-        both.append(h)
+        both.append(h.T)
         n_fill += k
-    return np.maximum(*both).T, n_fill
+    return both, n_fill
 
 
 def _uas_radio(P: dict[str, Any]) -> dict[str, Any]:
@@ -635,8 +640,8 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         need &= live & np.isfinite(d)                                           # an unknown position is not a moment the link was required
         tt = np.broadcast_to(t[:, None], A[0].shape)                         # each member at its own position
         if lk["kind"] == "rf":
-            hs, hs_filled = _link_hs(env, A, B, tt, f"link {lk['id']}")        # the larger of the two ends: the margin is the same whichever end is named first
-            margin = comms.rf_margin(d, A[2], B[2], hs, lk["radio"])
+            hs, hs_filled = _link_hs(env, A, B, tt, f"link {lk['id']}")        # the worse margin of the two ends' Hs: the same whichever end is named first
+            margin = np.minimum(*[comms.rf_margin(d, A[2], B[2], h, lk["radio"]) for h in hs])
             valid = margin != comms.NO_LINK_DB
             method = f"two-ray over a 4/3-radius earth with divergence (Kerr), {lk['radio']} (Ament sea roughness, modelled)"
             margin_kind, invalid_kind = "RF link margin, dB", "beyond_horizon"

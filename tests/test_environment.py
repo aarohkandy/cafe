@@ -838,3 +838,11 @@ def test_r15_the_delete_advice_for_a_damaged_axis_is_one_shell_word_when_the_cac
     with pytest.raises(ConfigError, match="must be strictly increasing") as e:
         GriddedEnv(d, env_sigmas())
     assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(d / "orca")]
+
+
+def test_r15_m40_the_default_current_profile_of_the_analytic_environment_falls_to_zero_at_1000_m():
+    """Row 727: full strength at the surface, linear to 0 at 1000 m. The depth 1000 as 500 survived every test (nothing pinned the profile)."""
+    from cafe.pm.env.protocol import AnalyticEnv
+    env = AnalyticEnv(current=(1.0, 0.0))
+    got = [float(env.current(0.0, 0.0, z, 0.0).value[0]) for z in (0.0, -250.0, -500.0, -1000.0, -2000.0, 10.0)]
+    assert got == pytest.approx([1.0, 0.75, 0.5, 0.0, 0.0, 1.0])
