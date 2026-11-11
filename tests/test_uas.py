@@ -685,7 +685,7 @@ def test_the_clamp_diagnostics_carry_the_wind_the_tilt_cannot():
     overshoot), so it says nothing about the wind. The time the demand was beyond the clamp and the largest demand / clamp do."""
     plat = fast_plat()
     plat["launch_rule"]["max_mean_wind_ms"] = 99.0
-    calm, strong = fly(plat=plat, M=1), fly(wind=(10.0, 0.0), plat=plat, M=1)
+    calm, strong = fly(plat=plat, M=1), fly(wind=(13.0, 0.0), plat=plat, M=1)        # 13 m/s: beyond the 12 m/s envelope (round 15 M-10: within it the leg is slowed instead)
     assert calm["sat_s"][0] == 0.0 and calm["demand_ratio_max"][0] == 1.0
     assert strong["sat_s"][0] > 100.0 and strong["demand_ratio_max"][0] > 3.0                  # most of the 300 s sortie, asking for 3x what the clamp gives
     assert strong["max_tilt_deg"][0] < 35.5 and not strong["flags"]["attitude_exceedance"][0]  # the tilt stays at the clamp: no exceedance
@@ -697,9 +697,46 @@ def test_the_clamp_diagnostics_carry_the_wind_the_tilt_cannot():
 def test_a_gust_series_that_demands_more_than_the_clamp_shows_in_the_diagnostics():
     plat = fast_plat()
     gust = np.zeros((2, 7200, 3))
-    gust[1, :, 0] = 9.0                                              # member 1 flies in a 9 m/s mean error the launch gate never saw
+    gust[1, :, 0] = 13.0                                             # member 1 flies in a 13 m/s mean error the launch gate never saw (beyond the 12 m/s envelope)
     r = fly(plat=plat, M=2, turb=gust, heading_deg=[270.0, 270.0])   # legs run west, into the 9 m/s that blows toward the east
     assert r["sat_s"][0] < 10.0 and r["demand_ratio_max"][0] < 1.6 and r["sat_s"][1] > 100.0 and r["demand_ratio_max"][1] > 3.0
+
+
+def test_r15_m10_one_airspeed_envelope_and_one_leg_speed_rule_serve_stage_1_and_stage_3():
+    """Round 15 M-10: stage 3 held the airspeed inside the envelope by slowing the leg (DECISIONS 161) and stage 1 commanded 8 m/s of ground speed whatever the
+    wind, so upwind in 6 m/s of wind it asked the airframe for 14 m/s of air; `v_air` was stored in `derive` and read nowhere. `leg_speed` is the rule
+    (the largest ground speed along a heading that keeps |wind - s h| within the envelope); `airspeed_envelope` the envelope; both are what the sortie
+    (`_block`) and the UAS window (`uas_case`) read."""
+    from cafe.pm.stage3 import pipeline_windows as pw
+    lim, dx = P["limits"], P["aero"]["d_x"]
+    env = uas.airspeed_envelope(lim, dx)
+    assert env == min(lim["max_airspeed_ms"], G * math.tan(math.radians(lim["max_tilt_deg"])) / dx) == lim["max_airspeed_ms"] == 12.0 and 12.5 < G * math.tan(math.radians(35)) / dx < 12.7
+    assert uas.airspeed_envelope(dict(lim, max_airspeed_ms=20.0), dx) == pytest.approx(G * math.tan(math.radians(35)) / dx) and uas.airspeed_envelope(lim, 0.0) == 12.0
+    w, west, east, north = np.array([6.0, 0.0]), np.array([-1.0, 0.0]), np.array([1.0, 0.0]), np.array([0.0, 1.0])
+    s, ok = uas.leg_speed(w, west, 8.0, 12.0)                                                  # into a wind toward the east: 6 m/s of ground speed is 12 of air
+    assert ok and s == pytest.approx(6.0) and np.hypot(*(w - s * west)) == pytest.approx(12.0)
+    assert uas.leg_speed(w, east, 8.0, 12.0)[0] == 8.0 and uas.leg_speed(w, north, 8.0, 12.0)[0] == pytest.approx(8.0)       # downwind and across: the leg speed itself
+    s, ok = uas.leg_speed(np.array([14.0, 0.0]), west, 8.0, 12.0)
+    assert not ok and not uas.leg_speed(np.array([13.0, 0.0]), north, 8.0, 12.0)[1]                     # the wind alone is beyond the envelope
+    assert pw.uas_leg_speed(w, west, 8.0, 12.0) == pytest.approx(6.0) and pw.uas_leg_speed(np.array([14.0, 0.0]), west, 8.0, 12.0) is None
+    # the launch rule and the rule agree: at the platform's launch limit an upwind leg has no ground speed left, a hair above it has none at all
+    lr = P["launch_rule"]["max_mean_wind_ms"]
+    assert lr == uas.airspeed_envelope(lim, dx)
+    s, ok = uas.leg_speed(np.array([lr, 0.0]), west, 8.0, uas.airspeed_envelope(lim, dx))
+    assert ok and s == pytest.approx(0.0, abs=1e-9) and not uas.leg_speed(np.array([lr + 0.01, 0.0]), west, 8.0, uas.airspeed_envelope(lim, dx))[1]
+    prm = uas.derive(P, 3)
+    assert "v_air" not in prm and np.allclose(np.asarray(prm["v_env"]), 12.0)
+
+
+def test_r15_m10_a_leg_into_a_wind_inside_the_envelope_is_flown_at_the_speed_the_airframe_can_hold_not_at_the_commanded_one():
+    """Round 15 M-10, on the sortie: into 9 m/s (the launch rule is off) the old sortie commanded 8 m/s of ground speed, 17 m/s of air, and the lean-angle clamp
+    was exceeded for most of the 300 s (10 m/s: 100 s and more, the test above's old case); the leg is now slowed to 3 m/s of ground speed, the air stays at 12 m/s
+    (tilt 33.7 deg, inside the 35 deg limit) and the clamp is hardly touched."""
+    plat = fast_plat()
+    plat["launch_rule"]["max_mean_wind_ms"] = 99.0
+    r = fly(wind=(9.0, 0.0), plat=plat, M=1)
+    assert r["sat_s"][0] < 30.0 and r["demand_ratio_max"][0] < 3.0 and not r["flags"]["attitude_exceedance"][0]
+    assert not r["flags"]["wind_exceeds_airspeed"][0]
 
 
 # ------------------------------------------------------------------------------------------------ review round 3

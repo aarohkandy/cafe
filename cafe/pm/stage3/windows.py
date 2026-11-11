@@ -7,7 +7,6 @@ Frame: the window axes are the body axes (x forward, y left, z up, origin at the
 ground-frame environment velocity (m/s, body axes) at nest coordinates measured from the body centre at t = 0, and
 `spec.velocity` is the vehicle velocity in the same frame (the caller rotates WRF/HYCOM into body axes).
 `fea_window` maps the wall pressure onto a CalculiX shell model (cafe.fea) and returns the utilization;
-`run_windows` overlaps the FEA of window k with the LES of window k+1 in a worker thread.
 `free_surface_window` is the interFoam path (cafe.cfd, two-grid GCI), minutes to hours: tests run it at toy size only.
 """
 from __future__ import annotations
@@ -16,7 +15,6 @@ import math
 import os
 import pathlib
 import time
-from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -371,29 +369,10 @@ def fea_window(vehicle: Vehicle, points: NDArray[Any], pressure: NDArray[Any], w
     f = r.pop("field")
     return dict(utilization=float(max(stress, buckling or 0.0)), stress_utilization=float(stress),
                 buckling_utilization=None if buckling is None else float(buckling), knockdown=hangar.KNOCKDOWN if buckling is not None else None,
-                vm_p99=r["vm_p99"], vm_max=r["vm_max"], safety_factor=r["safety_factor"],
-                buckling_factor=r.get("buckling_factor"), elements=r["elements"], nodes=r["nodes"],
+                vm_p99=r["vm_p99"], safety_factor=r["safety_factor"],
+                buckling_factor=r.get("buckling_factor"), buckling_lobes=r.get("buckling_lobes"),
+                buckling_follower_correction=r.get("buckling_follower_correction"), elements=r["elements"], nodes=r["nodes"],
                 min_element_quality=tri_quality(f["nodes"], f["faces"]), hydrostatic_pa=hydro)
-
-
-def run_windows(jobs: list[tuple[Vehicle, WindowSpec]], inflow: nest.UEnv, omp_threads: int | None = None,
-                fea_kw: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-    """jobs: [(Vehicle, WindowSpec)]. LES of window k+1 runs on this thread while the FEA of window k runs in a worker
-    (CalculiX is pinned to one thread by cafe.fea; OMP_NUM_THREADS from the argument or the environment is set for the rest)."""
-    if omp_threads:
-        os.environ["OMP_NUM_THREADS"] = str(omp_threads)
-    out: list[dict[str, Any]] = []
-    pending: tuple[dict[str, Any], Future[dict[str, Any]]] | None = None
-    with ThreadPoolExecutor(1) as pool:
-        for veh, sp in jobs:
-            r = run_window(veh, sp, inflow)
-            if pending:
-                pending[0]["fea"] = pending[1].result()
-            pending = (r, pool.submit(fea_window, veh, r["wall_points"], r["wall_pressure"], **(fea_kw or {})))
-            out.append(r)
-        if pending:
-            pending[0]["fea"] = pending[1].result()
-    return out
 
 
 # ---------------------------------------------------------------------------------------------------- free surface

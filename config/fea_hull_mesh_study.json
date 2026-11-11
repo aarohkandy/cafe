@@ -1,0 +1,107 @@
+{
+ "what": "Mesh-convergence study of the default Seaglider pressure hull for stage3.fea_elements_along (round 15 M-14, batch B). Hull: ellipsoid 1.8 x 0.30 m (semi-axes 0.9, 0.15, 0.15), 8 mm Al6061, 500 m of sea water (hydrostatic load only, zero LES pressure), cafe.fea.solve through windows.fea_window(buckle=True). collapse_depth_m = 500 x buckling_factor x hangar.KNOCKDOWN (0.5); buckling_factor is the dead-load factor x the follower correction (3/4 at the 2-lobe mode, which is the lowest mode at every mesh).",
+ "where_run": "cafe-orca, proot, 2 CPUs, shared and loaded; seconds are wall time of fea_window (gmsh + the static solve + the buckling step)",
+ "hull": {
+  "length_m": 1.8,
+  "diameter_m": 0.3,
+  "thickness_m": 0.008,
+  "material": "al6061",
+  "depth_m": 500.0,
+  "knockdown": 0.5
+ },
+ "rows": [
+  {
+   "n": 20,
+   "h_m": 0.09,
+   "elements": 1408,
+   "nodes": 2818,
+   "seconds": 65,
+   "buckling_factor_dead_load": 1.94033,
+   "buckling_factor": 1.4552475,
+   "lobes_of_lowest_mode": 1.996,
+   "collapse_depth_m": 363.81,
+   "stress_utilization": 0.3671,
+   "buckling_utilization": 1.3743
+  },
+  {
+   "n": 30,
+   "h_m": 0.06,
+   "elements": 1680,
+   "nodes": 3362,
+   "seconds": 68,
+   "buckling_factor_dead_load": 1.884369,
+   "buckling_factor": 1.4132768,
+   "lobes_of_lowest_mode": 1.998,
+   "collapse_depth_m": 353.32,
+   "stress_utilization": 0.3446,
+   "buckling_utilization": 1.4152
+  },
+  {
+   "n": 45,
+   "h_m": 0.04,
+   "elements": 2944,
+   "nodes": 5890,
+   "seconds": 555,
+   "buckling_factor_dead_load": 1.779702,
+   "buckling_factor": 1.3347765,
+   "lobes_of_lowest_mode": 2.0,
+   "collapse_depth_m": 333.69,
+   "stress_utilization": 0.3111,
+   "buckling_utilization": 1.4984
+  },
+  {
+   "n": 70,
+   "h_m": 0.025714,
+   "elements": 5546,
+   "nodes": 11094,
+   "seconds": 584,
+   "buckling_factor_dead_load": 1.763331,
+   "buckling_factor": 1.3224982,
+   "lobes_of_lowest_mode": 2.001,
+   "collapse_depth_m": 330.62,
+   "stress_utilization": 0.3053,
+   "buckling_utilization": 1.5123
+  },
+  {
+   "n": 100,
+   "h_m": 0.018,
+   "elements": 10558,
+   "nodes": 21118,
+   "seconds": 645,
+   "buckling_factor_dead_load": 1.75724,
+   "buckling_factor": 1.31793,
+   "lobes_of_lowest_mode": 2.003,
+   "collapse_depth_m": 329.48,
+   "stress_utilization": 0.3067,
+   "buckling_utilization": 1.5175
+  }
+ ],
+ "hulls_at_the_chosen_mesh": [
+  {
+   "platform": "seaglider",
+   "hull": "ellipsoid 1.8 x 0.3 m, 0.008 m al6061",
+   "n": 70,
+   "elements": 5546,
+   "seconds": 654,
+   "lobes_of_lowest_mode": 2,
+   "buckling_factor": 1.32249825,
+   "collapse_depth_m": 330.62,
+   "stress_utilization": 0.3053,
+   "buckling_utilization": 1.5123,
+   "note": "the same code path as the study row, re-run as the stored figure of stage3.glider.hull_collapse_depth_m"
+  },
+  {
+   "platform": "slocum",
+   "hull": "ellipsoid 1.5 x 0.22 m, 0.008 m al6061",
+   "n": 70,
+   "elements": 4864,
+   "seconds": 450,
+   "lobes_of_lowest_mode": 2,
+   "buckling_factor": 2.6185605,
+   "collapse_depth_m": 654.64,
+   "stress_utilization": 0.2259,
+   "buckling_utilization": 0.7638,
+   "note": "the assumed Slocum G2 hull (stage3.slocum.*), the figure of stage3.slocum.hull_collapse_depth_m"
+  }
+ ]
+}

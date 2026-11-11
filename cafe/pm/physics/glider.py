@@ -122,6 +122,22 @@ def load_platform(name: str) -> dict[str, Any]:
     return P
 
 
+def hull_collapse_depth_m(P: dict[str, Any], a: dict[str, Any]) -> tuple[float | None, str]:
+    """(collapse depth [m] of the pressure hull stage 3 assumes for this glider, what it rests on). The depth is the model's own rule (`hangar.KNOCKDOWN` x the
+    follower-corrected linear buckling factor x the depth of the load) on the converged mesh of the study stored in config/assumptions.yaml
+    (`stage3.<glider|slocum>.hull_collapse_depth_m`), so it exists on a machine with no CalculiX; it was measured for ONE hull, written in
+    `hull_collapse_for` beside it, and is None (with the reason) when the hull the assumptions now describe is another one: a stored figure is never applied
+    to a hull it was not computed for. `a` is budget.stage3_assumptions(); `P` a loaded platform. Round 15 M-11."""
+    key, (length, diameter) = ("glider", (P["length_m"], a["glider.hull_diameter_m"])) if P["kind"] == "seaglider" else (
+        "slocum", (a["slocum.length_m"], a["slocum.hull_diameter_m"]))
+    now = f"ellipsoid {length:g} x {diameter:g} m, {a['glider.hull_thickness_m']:g} m {a['glider.hull_material']}"
+    if a[f"{key}.hull_collapse_for"] != now:
+        was = a[f"{key}.hull_collapse_for"]
+        return None, (f"the stored collapse depth ({a[f'{key}.hull_collapse_depth_m']:g} m) is for an {was}, not the assumed hull ({now}): "
+                      "re-run the hull study (stage3.fea_elements_along)")
+    return float(a[f"{key}.hull_collapse_depth_m"]), now
+
+
 def metres_per_deg(lat: Arr) -> tuple[Arr, Arr]:
     """(metres per degree of longitude, of latitude) at `lat` [deg]."""
     r = np.radians(np.asarray(lat, float))
