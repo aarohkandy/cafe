@@ -625,10 +625,11 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
             alt = so.get("altitudes_m", ())
             if any(b <= a for a, b in zip(alt, alt[1:], strict=False)):
                 raise ConfigError(f"{where}/sorties/altitudes_m: {list(alt)} does not rise; list the flight levels from the lowest to the highest, each once")
-            if (high := [a for a in alt if a > orca.WIND3D_TOP_M]):
+            deck = float(plat.get("sortie", {}).get("deck_height_m", {}).get("value", 0.0))      # the legs are flown at deck + altitude (round 15, P-R15BB2)
+            if (high := [a for a in alt if a + deck > orca.WIND3D_TOP_M]):
                 raise ConfigError(f"{where}/sorties/altitudes_m: {high[0]:g}: the stored WRF levels end at about {orca.WIND3D_TOP_M:g} m; "
-                                  f"the wind above that is not known; "
-                                  f"use altitudes up to {orca.WIND3D_TOP_M:g} m")
+                                  f"the wind above that is not known; altitudes are above the deck ({deck:g} m), so the wind is read at {high[0] + deck:g} m; "
+                                  f"use altitudes up to {orca.WIND3D_TOP_M - deck:g} m")
         task = v.get("task", {})
         if "task" in v and cls == "uas":
             raise ConfigError(f"{where}/task: a UAS flies sorties and takes no task; remove task")

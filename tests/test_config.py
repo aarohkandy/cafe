@@ -477,6 +477,8 @@ ROUND4 = [
     ("M-14 shore = ship", lambda d: d["shore"].update(id="ship"), r"'ship' is used by ship and shore"),
     ("M-15 1000 m", lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[10, 1000]),
      r"sorties/altitudes_m: 1000: the stored WRF levels end at about 400 m; the wind above that is not known"),
+    ("R15 P-R15BB2 deck plus 395 m", lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[10, 395]),
+     r"sorties/altitudes_m: 395: the stored WRF levels end at about 400 m; .*above the deck \(8 m\), so the wind is read at 403 m; use altitudes up to 392 m"),
 ]
 
 
@@ -490,7 +492,7 @@ def test_round4_good_variants_load(tmp_path):
     for kind, kw in (("iridium", {}), ("rf", dict(radio="rfd900x"))):                          # a glider's radio and Iridium work when it surfaces
         m = load_mission(edit(tmp_path, lambda d, kind=kind, kw=kw: _glider_link(d, kind, "surfacing", **kw)))
         assert m["links"][-1]["when"] == "surfacing"
-    load_mission(edit(tmp_path, lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[10, 400])))             # the top stored level itself is allowed
+    load_mission(edit(tmp_path, lambda d: vehicle(d, "uas")["sorties"].update(altitudes_m=[10, 392])))             # 400 m less the quad's 8 m deck is allowed
     load_mission(edit(tmp_path, lambda d: d["window"].update(end="2023-03-02T02:00:00Z")))                         # the 01:00Z launch (and 32 min) fits
     with pytest.raises(ConfigError, match=r"links/usv-shore-iridium/when: an iridium link"):                       # surfacing needs a glider at one end
         load_mission(edit(tmp_path, lambda d: d["links"][3].update(when="surfacing")))
@@ -581,7 +583,7 @@ def test_r6_m9_the_edges_of_the_ranges_and_the_shipped_missions_still_load(tmp_p
         vehicle(d, "glider_eq")["task"].update(dive_depth_m=30.0, radius_km=1000.0, lost_after_h=720.0)
         vehicle(d, "glider_2n")["task"].update(dive_depth_m=1000.0)
         vehicle(d, "uas")["launch_rules"].update(max_mean_wind_ms=60, no_gust_front_within_min=0)
-        vehicle(d, "uas")["sorties"].update(altitudes_m=[2, 10, 400])
+        vehicle(d, "uas")["sorties"].update(altitudes_m=[2, 10, 392])
     load_mission(edit(tmp_path, fn))
     for f in (config.ROOT / "missions").glob("*.yaml"):
         load_mission(f)
@@ -1554,3 +1556,15 @@ def test_r15_a_cut_write_of_a_job_status_leaves_the_status_it_replaces(tmp_path,
     with pytest.raises(OSError, match="killed"):
         job.status("running", step="bem", progress=0.6)
     assert (tmp_path / "status.json").read_bytes() == before and not list(tmp_path.glob("*.tmp"))
+
+
+def test_r15_m4_the_schema_says_local_solar_time_fixes_the_first_launch_only():
+    """Round 15 M-4 (batch A -> B: mission.json is B's file): the every_days description carries the warning load_mission gives."""
+    import json
+    schema = json.loads((config.ROOT / "cafe" / "schemas" / "mission.json").read_text())
+    def find(o, key):
+        if isinstance(o, dict):
+            return o[key] if key in o else next((r for r in (find(v, key) for v in o.values()) if r is not None), None)
+        return next((r for r in (find(v, key) for v in o) if r is not None), None) if isinstance(o, list) else None
+    every = find(schema, "every_days")["description"]
+    assert "local_solar_time fixes the first launch only" in every and "not a whole number of days" in every

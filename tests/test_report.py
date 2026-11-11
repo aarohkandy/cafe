@@ -401,6 +401,30 @@ def test_what_would_fix_it_when_nothing_flips_the_verdict(run):
     assert "no single change" not in t
 
 
+def test_r15_m1_a_fix_whose_emulator_band_reaches_outside_the_target_is_named_as_not_shown(run):
+    """Round 15 M-1 (batch A -> B): the what-if search can find an emulated candidate whose point verdict is GO but whose 90 % band is not inside GO or
+    MARGINAL. It keeps it as `not_shown`; the report said only 'none reaches GO or MARGINAL', which hid that the emulator's best candidate was close."""
+    m, plan = pm_run.make_run(run)
+    f = json.loads((run / "emulator" / "flip.json").read_text())
+    u = f["vehicles"]["uas"]
+    wide = dict(u["tried"][0], p_fail=0.04, lo=0.01, hi=0.4, shown=False)
+    u["tried"] = [wide] + u["tried"][1:]
+    u.update(found=False, best=None, not_shown=wide)
+    (run / "emulator" / "flip.json").write_text(json.dumps(f))
+    report.write(run, m, plan)
+    rep, h = load(run), (run / "report" / "index.html").read_text()
+    fix = rep["vehicles"]["uas"]["fix"]
+    assert fix["best"] is None and fix["not_shown"]["change"] == "launch the sorties 6 h later" and fix["tried"][0]["shown"] is False
+    assert fix["not_shown"]["p_fail"]["uncertainty"] == dict(kind="conformal 90 % interval (emulator)", lo=0.01, hi=0.4)
+    assert report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
+    t = plain(h)
+    assert ("none reaches GO or MARGINAL (P(fail) now 0.7); the emulator answered those in its range. The emulator's cheapest candidate that would change "
+            "the verdict, launch the sorties 6 h later, has P(fail) 0.04 but its 90 % interval (0.01 to 0.4) reaches outside GO or MARGINAL, "
+            "so it is not shown as a fix.") in t
+    assert "not shown as a fix: the emulator's 90 % interval reaches outside the target verdict" in t
+    assert rep["vehicles"]["usv"]["fix"]["not_shown"] is None and t.count("so it is not shown as a fix") == 1
+
+
 def test_what_would_fix_it_says_not_searched_when_no_candidate_was_evaluated(run):
     """M-6: 'no single change reaches GO' was printed for a vehicle whose candidates were all 'not evaluated'; it must say nothing was tried."""
     m, plan = pm_run.make_run(run)

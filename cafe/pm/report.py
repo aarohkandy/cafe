@@ -413,6 +413,7 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
         d["threshold"] = num(t["threshold"], "z-scored", ref, src + path + ".threshold") if "threshold" in t else None
         d["n"] = num(t["n"], "members", ref, src + path + ".n") if "n" in t else None
         d["same_as_baseline"] = bool(t["lo"] <= f["p_fail"] <= t["hi"]) if "p_fail" in t else None      # a flag, not a test (round 6 M-13)
+        d["shown"] = t.get("shown")                                  # False: an emulated verdict whose 90 % band is not inside the target (round 15, M-1)
         return d
     n_ev = sum(t["method"] != "not evaluated" for t in f["tried"])
     n_inv = sum(bool(t.get("invalid")) for t in f["tried"])
@@ -423,7 +424,8 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
                 evaluated=num(n_ev, "candidates", ref, counted), invalid=num(n_inv, "candidates", ref, counted),
                 candidates=num(len(f["tried"]) - n_inv, "candidates", ref, counted),
                 verdict_before=f["verdict"], p_fail_before=num(f["p_fail"], "fraction", ref, src + ".p_fail"),
-                best=one(f["best"], ".best") if f["best"] else None, tried=[one(t, f".tried[{i}]") for i, t in enumerate(f["tried"])])
+                best=one(f["best"], ".best") if f["best"] else None, not_shown=one(f["not_shown"], ".not_shown") if f.get("not_shown") else None,
+                tried=[one(t, f".tried[{i}]") for i, t in enumerate(f["tried"])])
 
 
 def _first_mode(r: dict[str, Any]) -> str | None:
@@ -1296,6 +1298,7 @@ def _top3_html(top: list[Any], floor: Any = None, quantity: str | None = None) -
     return f"<p>Top sensitivities (Sobol first-order, share of the variance of {what}, above the permutation noise floor): {items}{fl}.</p>"
 
 
+NOT_SHOWN = "not shown as a fix: the emulator's 90 % interval reaches outside the target verdict"
 SAME_AS_BASELINE = "not distinguishable from the baseline (its interval contains the baseline's P(fail))"
 
 
@@ -1306,6 +1309,8 @@ def _tried_html(t: dict[str, Any]) -> str:
     u = (t["p_fail"] or {}).get("uncertainty")
     pf = _n(t["p_fail"]) + (f" ({u['lo']:.3g} to {u['hi']:.3g})" if u else "")
     note = e(t["reason"]) + (f"{'; ' if t['reason'] else ''}{SAME_AS_BASELINE}" if t.get("same_as_baseline") else "")
+    if t.get("shown") is False:
+        note += ("; " if note else "") + NOT_SHOWN
     return f"<tr><td>{e(t['change'])}<td>{_n(t['cost'])}<td>{how}<td>{pf}<td>{e(str(t['verdict'] or ''))}<td>{note}</tr>"
 
 
@@ -1330,6 +1335,11 @@ def _fix_html(f: dict[str, Any]) -> str:
                 f"(P(fail) now {_n(f['p_fail_before'])}); "
                 + ("the emulator answered those in its range." if f["emulator_trained"]
                    else "no emulator is trained yet, so only the nearest few were run in Stage 1."))
+        ns = f.get("not_shown")
+        if ns:
+            u = ns["p_fail"]["uncertainty"]
+            line += (f" The emulator's cheapest candidate that would change the verdict, <b>{e(ns['change'])}</b>, has P(fail) {_n(ns['p_fail'])} but its 90 % "
+                     f"interval ({u['lo']:.3g} to {u['hi']:.3g}) reaches outside {e(f['target'])}, so it is not shown as a fix.")
     rows = "".join(_tried_html(t) for t in f["tried"])
     b2d = f["base_2d"]
     wm = (f"<p class=muted>{e(f['wind_model'])}" + (f" The baseline under the same model: {_badge(b2d['verdict'])} P(fail) {_n(b2d['p_fail'])}." if b2d else "")
