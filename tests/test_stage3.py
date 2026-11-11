@@ -807,7 +807,8 @@ def test_r15_m15_a_mode_of_factor_one_is_not_read_as_the_static_displacement(tmp
     from cafe import fea
 
     def block(kind, value, ux):
-        return [f"  100CL  101 {value:.9f}           2                     {kind}    1           1", " -4  DISP        4    1", " -5  D1          1    2    1    0",
+        head = f"  100CL  101 {value:.9f}           2                     {kind}    1           1"
+        return [head, " -4  DISP        4    1", " -5  D1          1    2    1    0",
                 f" -1{1:10d}{ux:12.5E}{0.0:12.5E}{0.0:12.5E}", f" -1{2:10d}{0.0:12.5E}{0.0:12.5E}{0.0:12.5E}", " -3"]
     text = ["    1C", "    2C                             2                                     1", f" -1{1:10d}{0.0:12.5E}{0.0:12.5E}{0.0:12.5E}",
             f" -1{2:10d}{1.0:12.5E}{0.0:12.5E}{0.0:12.5E}", " -3"] + block(0, 1.0, 7.0) + block(4, 0.0, 0.0) + block(4, 1.0000001, 3.0) + block(4, 2.0, 5.0)
@@ -1373,7 +1374,8 @@ def fresh_fs():
 
 def cheap(monkeypatch, **over):
     base = pw.assumptions()
-    base.update(dict(fea_elements_along=6, min_cells_thin_part=0), **over)             # (0: the toy sizes run the UAS arms under a cell)
+    # (min_cells_thin_part 0: the toy sizes run the UAS arms under a cell; fea_min_s 1: the toy hull's FEA takes seconds, not the 641 s of the real one at L/70)
+    base.update(dict(fea_elements_along=6, fea_min_s=1.0, min_cells_thin_part=0), **over)
     monkeypatch.setattr(pw, "assumptions", lambda: base)
     monkeypatch.setattr(pw, "_spawn", in_process_fea)
     monkeypatch.setattr(pw, "profile_stage3_s", lambda ctx: {"quick": 100.0, "overnight": 1e6})                # (the fake plans have no mission to plan with)
@@ -2808,7 +2810,7 @@ def test_r15_m20_the_course_over_ground_of_members_either_side_of_the_dateline_i
     assert near == pytest.approx(math.degrees(math.atan2(1.0, 0.5)), abs=0.1)                  # east 0.02, north 0.01: about 63.4
     assert far == pytest.approx(near, abs=1e-6)
     lon = res(179.99)["vehicles"]["u"]["lon"]
-    assert lon[0].min() < 0.0 < lon[0].max() and abs(lon[0].min()) > 179.0                      # the premise: at the first record the members are either side of the line
+    assert lon[0].min() < 0.0 < lon[0].max() and abs(lon[0].min()) > 179.0                    # the premise: at the first record the members straddle the line
 
 
 def test_r7_m27_track_heading_is_the_recorded_bow_heading_and_the_course_only_without_one():

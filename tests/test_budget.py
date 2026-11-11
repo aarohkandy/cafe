@@ -409,7 +409,7 @@ def test_r13_l0_m38_the_planned_fea_floor_is_the_time_the_fea_child_takes_with_i
     import yaml
     raw = yaml.safe_load((pathlib.Path(budget.__file__).parents[2] / "config" / "assumptions.yaml").read_text())["stage3.fea_min_s"]
     assert "buckling" in raw["why"] and "buckling" in raw["replace_with"]                      # it says which step it prices
-    assert "semi-axes 0.9 and 0.15 m, 8 mm Al6061" in raw["why"] and "0.15 m, 7 mm" not in raw["why"]       # round 15 M-27: the hull it prices is the default one
+    assert "semi-axes 0.9 and 0.15 m, 8 mm Al6061" in raw["why"] and "0.15 m, 7 mm" not in raw["why"]     # round 15 M-27: the default hull
 
 
 def test_r14_m15_the_ci_budget_plans_the_glider_fea_out_because_its_reserve_is_under_the_floor():
