@@ -530,7 +530,7 @@ def test_r14_m15_the_makefile_and_the_runbook_say_that_make_ci_plans_the_glider_
     """Round 14, M-15: under `--budget ci` the glider FEA reserve is 9.0 s, under `stage3.fea_min_s`, so `make ci` does not reach the FEA child (the budget
     test `test_r14_m15_*` pins the plan); the Makefile and RUNBOOK 2 said 'every stage' with no exception."""
     floor = config.assumptions()["stage3.fea_min_s"]["value"]
-    assert floor == 68.2
+    assert floor == 641.1                                  # round 15 M-14: the child at L/70 (68.2 s was L/20); RUNBOOK and row 776 carry it (batch D)
     ci_line = next(line for line in text("Makefile").splitlines() if line.startswith("ci:") and "##" in line)
     assert "the glider FEA is planned out" in ci_line and "stage3.fea_min_s" in ci_line
     rb = flat(text("docs", "RUNBOOK.md"))
@@ -599,3 +599,15 @@ def test_r15_pb_the_lab_user_documents_say_what_the_owner_refusal_of_pmx_is_and_
     assert gates and all("PM_TAKE=1 PM_HOST=cafe-orca PMX=pm_<you> " in rb[max(0, g - 60):g] for g in gates)
     for refusal in ("belongs to", "is still running", "PMX=pm_<you> is required"):
         assert refusal in orca.replace("`", ""), refusal
+
+
+def test_r15_m14_the_app_image_copies_every_top_level_directory_the_app_modules_read():
+    """Round 15 M-14: `cafe/fea.py` reads config/assumptions.yaml (the Hangar's hull mesh) and `cafe/planner.py` config/throughput.json beside the package,
+    but the Dockerfile copied only `cafe/`: in the deployed image the Hangar's hull case raised FileNotFoundError. A directory that a module outside cafe/pm
+    reads as `parents[1] / "<dir>"` or `ROOT / "<dir>"` must be a COPY line."""
+    read = set()
+    for f in (ROOT / "cafe").glob("*.py"):
+        read |= set(re.findall(r'(?:parents\[1\]\)?|\bROOT)\s*/\s*"(\w+)"', f.read_text()))
+    assert {"config"} <= read                                    # the readers above are found, so the scan cannot pass by finding nothing
+    copied = set(re.findall(r"^COPY\s+(\w+)\s+/app/\1\s*$", text("Dockerfile"), re.M))
+    assert read <= copied, f"read by cafe/*.py but not COPY'd into /app: {sorted(read - copied)}"

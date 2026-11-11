@@ -1203,6 +1203,23 @@ def test_windows_pick_the_strongest_forcing_per_class_at_least_6_h_apart(tmp_pat
     assert len({round(x, 6) for x in stresses.values()}) == 3
 
 
+def test_r15_m20_the_longitude_of_a_window_whose_members_straddle_the_dateline_is_near_the_line(tmp_path, data):
+    """Round 15 M-20: `s_windows` took `np.nanmedian` of the members' raw longitudes: members at 179.99 and -179.99 put the window at lon 0 and the environment
+    lookups of its LES (wind, current, waves) there. The window is where the members are."""
+    t = T0 + 600.0 * np.arange(217)
+    tracks = [(179.99, 0.0), (-179.99, 0.0), (179.995, 0.0), (-179.995, 0.0)]
+    ctx = window_ctx(tmp_path, {"u": track_res(t, 4, tracks, {}, "uas")}, K=1)
+
+    class Wind:                                                                   # the downloaded box ends at -162.9: a field that answers at the dateline
+        def u10(self, lon, lat, t):
+            return np.tile([5.0, 0.0], (len(lon), 1))
+    ctx._env = Wind()
+    run_stage(pipeline.s_windows, ctx, "windows")
+    w = json.loads((ctx.run_dir / "windows" / "windows.json").read_text())["u"][0]
+    assert abs((w["lon"] - 180.0 + 180.0) % 360.0 - 180.0) < 0.02 and w["lat"] == 0.0
+    assert -180.0 <= w["lon"] < 180.0                                                  # the window longitude is inside the range the lookups take, not 180.0
+
+
 def test_windows_of_a_vehicle_that_failed_come_from_the_members_that_failed(tmp_path, data):
     t = T0 + 600.0 * np.arange(217)
     tracks = [(-165.0, 0.0), (-165.0, 0.0), (-164.0, 1.0), (-164.0, 1.0)]

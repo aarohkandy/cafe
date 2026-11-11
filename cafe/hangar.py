@@ -78,8 +78,20 @@ def check(kind, m, spec):
 
 # ------------------------------------------------------------------ BEM
 
+BEM_OMEGA_LOW = 0.3   # rad/s: the surge, sway and yaw added mass of a boat is taken near the low-frequency limit (no restoring force fixes a frequency; the value has no further basis)
+
+
+def bem_omega(dof, draft):
+    """The frequency [rad/s] at which a boat's added mass in `dof` is evaluated. Heave: sqrt(g / draft), the natural frequency of a box hull (waterplane
+    area over displaced volume is 1 / draft; 8.2 rad/s at 0.145 m). Roll and pitch borrow the heave frequency: an assumption, because their own natural
+    frequencies (a few rad/s for roll, below heave's) need GM and radii of gyration that the hull spec does not carry (round 15 M-9; the comment said
+    each was evaluated near its own). Surge, sway and yaw: BEM_OMEGA_LOW."""
+    return float(np.sqrt(9.81 / max(draft, 0.02))) if dof in ("Heave", "Roll", "Pitch") else BEM_OMEGA_LOW
+
+
 def bem(m_flu, kind, cog_frd, draft=None):
-    """Added mass (and radiation damping for boats) with Capytaine. Returns 6x6 FRD about the CoG."""
+    """Added mass (and radiation damping for boats) with Capytaine. Returns 6x6 FRD about the CoG. A boat's added mass is frequency dependent; the
+    frequency of each dof is `bem_omega`'s (roll and pitch borrow the heave frequency: an assumption, not their natural frequencies)."""
     import capytaine as cpt
     cog_flu = cog_frd * [1, -1, -1]
     target = 1500     # clean, near-equilateral panels; raw CAD/loft tessellations have slivers that NaN the Green function
@@ -105,11 +117,9 @@ def bem(m_flu, kind, cog_frd, draft=None):
             A[i] = [r.added_masses[k] for k in dofs]
     else:
         body = body.immersed_part()
-        # evaluate near the natural frequencies of heave/roll/pitch, low frequency for the rest
-        V = pm.volume if pm.is_watertight else 0.1
-        w_heave = np.sqrt(9.81 / max(draft, 0.02))
+        # each dof at bem_omega's frequency: heave at its natural frequency, roll and pitch borrowing it (an assumption), the rest at a low one
         for i, d in enumerate(dofs):
-            w = w_heave if d in ("Heave", "Roll", "Pitch") else 0.3
+            w = bem_omega(d, draft)
             r = solver.solve(cpt.RadiationProblem(body=body, radiating_dof=d, water_depth=np.inf,
                                                   rho=geom.RHO_SEA, omega=w))
             A[i] = [r.added_masses[k] for k in dofs]
@@ -126,7 +136,7 @@ def _case(name, what, r, mat, extra=None):
     """One load case result row for the table the app shows."""
     sf = fea.MATERIALS[mat]["yield_"] / r["vm_p99"] if r.get("vm_p99") else None
     row = dict(name=name, what=what, safety_factor=sf, vm_p99_mpa=(r.get("vm_p99") or 0) / 1e6,
-               vm_max_mpa=(r.get("vm_max") or 0) / 1e6, u_max_mm=(r.get("u_max") or 0) * 1e3,
+               u_max_mm=(r.get("u_max") or 0) * 1e3,
                nodes=r["nodes"], reaction_N=r.get("reaction"), applied_N=float(np.linalg.norm(r["applied_force"])))
     row.update(extra or {})
     return row
@@ -159,12 +169,12 @@ def fea_cases(kind, m_flu, spec, veh, parts, work):
         hull = parts.get("hull", m_flu)
         p_ref = geom.RHO_SEA * 9.81 * REF_DEPTH
         r = run("depth", hull, "shell" if structure == "shell" else "solid", pressure=lambda c, n: np.full(len(c), p_ref),
-                steps=("static", "buckle"), h=hull.extents.max() / 70)     # L/45 read collapse ~9 % high; L/70 is converged
+                steps=("static", "buckle"), h=hull.extents.max() / fea.hull_elements_along())     # the mesh of the stage-3 window's FEA too (assumptions.yaml)
         yield_depth = REF_DEPTH * fea.MATERIALS[mat]["yield_"] / r["vm_p99"]
         buckle_depth = REF_DEPTH * r["buckling_factor"] * KNOCKDOWN   # fea.solve raises when the step finds none (round 14 M-31)
         crush = min(yield_depth, buckle_depth)
         out.update(vm_p99_at_ref=r["vm_p99"], ref_depth=REF_DEPTH, yield_depth=yield_depth,
-                   buckling_factor=r["buckling_factor"], buckle_depth=buckle_depth, knockdown=KNOCKDOWN,
+                   buckling_factor=r["buckling_factor"], buckling_lobes=r.get("buckling_lobes"), buckle_depth=buckle_depth, knockdown=KNOCKDOWN,
                    crush_depth=crush, rated_depth=crush / DEPTH_SF,
                    mode="buckling" if buckle_depth < yield_depth else "yield")
         out["cases"].append(_case("Hull at depth", f"{REF_DEPTH:.0f} m of sea water on the hull; scales linearly with depth",

@@ -9,7 +9,6 @@ import re
 import stat
 import sys
 import tempfile
-import threading
 import time
 from types import SimpleNamespace
 
@@ -226,6 +225,23 @@ def test_r14_m34_a_wall_cell_with_no_surface_normal_gets_no_shear_and_is_counted
     assert wm.yplus_fraction(st_["yplus"], ws.valid) == 0.0
     _, plate = _plate_ws()
     assert wm.no_shear_cells(plate) == 0 and np.asarray(plate.valid).all()
+
+
+def test_r15_m7_a_wall_cell_gets_a_normal_by_the_size_of_its_smoothed_gradient_not_by_its_being_nonzero():
+    """Round 15 M-7: `NORMAL_MIN` 1e-6 to 1e-2 or to 0.0 passed every test (the only slot tested had a gradient of exactly 0). A one-cell slot between two
+    walls with one cell missing from the upper wall has, along the slot, smoothed-solid gradients from 1e-9 to 1e-3: the dust-sized ones (below 1e-7) are
+    cells with no usable normal, the faint but real ones (1e-5 to 1e-3, a hundredth or less of a plate wall's 0.27) keep the wall model."""
+    from scipy import ndimage
+    solid = np.zeros((24, 11, 24), bool)
+    solid[:, :5], solid[:, 6:] = True, True
+    solid[12, 6, 12] = False
+    ws = wm.wall_set(solid, np.asarray(lbm.links(jnp.asarray(solid))))
+    g = np.stack(np.gradient(ndimage.gaussian_filter(solid.astype(float), 1.5)))
+    mag = np.linalg.norm(g, axis=0)[ws.cell[0], ws.cell[1], ws.cell[2]]
+    dust, faint = (mag > 0) & (mag < 1e-7), (mag > 1e-5) & (mag < 1e-3)
+    assert dust.sum() >= 4 and faint.sum() >= 4                                        # the premise: both kinds are among the wall cells
+    assert not ws.valid[dust].any() and ws.valid[faint].all()
+    assert not ws.valid[mag == 0].any()
 
 
 def test_r14_l0_a_cell_without_a_normal_has_no_friction_velocity_so_it_raises_no_eddy_viscosity_either():
@@ -732,6 +748,208 @@ def test_r14_m31_a_buckling_step_with_no_positive_eigenvalue_is_an_error_not_a_n
     assert "buckling_factor" not in r                                       # a static-only call has no buckling to miss
 
 
+def _s6_surface(nodes, tris, project=None):
+    """(nodes, S6 elements) from a triangle mesh: a mid-edge node on each edge (12, 23, 31), moved by `project` (a surface function) when given."""
+    nodes, mids, out = [tuple(x) for x in np.asarray(nodes, float)], {}, []
+
+    def mid(a, b):
+        k = (min(a, b), max(a, b))
+        if k not in mids:
+            m = (np.asarray(nodes[a]) + np.asarray(nodes[b])) / 2
+            nodes.append(tuple(project(m) if project else m))
+            mids[k] = len(nodes) - 1
+        return mids[k]
+    for a, b, c in tris:
+        out.append([a, b, c, mid(a, b), mid(b, c), mid(c, a)])
+    return np.array(nodes), np.array(out)
+
+
+def _tube_mode(n, R=1.0, L=4.0, nth=24, nx=12):
+    """A tube's S6 mesh (axis x) and the displacement of the buckling-like mode cos(n theta) sin(pi x / L), radial."""
+    th = np.arange(nth) * 2 * np.pi / nth
+    xs = np.linspace(0, L, nx + 1)
+    nodes = np.array([[x, R * np.cos(t), R * np.sin(t)] for x in xs for t in th])
+    ix = lambda j, i: j * nth + i % nth                                                   # noqa: E731
+    tris = []
+    for j in range(nx):
+        for i in range(nth):
+            tris += [(ix(j, i), ix(j, i + 1), ix(j + 1, i + 1)), (ix(j, i), ix(j + 1, i + 1), ix(j + 1, i))]
+    proj = lambda m: np.array([m[0], *(R * m[1:] / np.hypot(m[1], m[2]))])               # noqa: E731
+    nodes, el = _s6_surface(nodes, tris, proj)
+    t = np.arctan2(nodes[:, 2], nodes[:, 1])
+    u = np.zeros_like(nodes)
+    u[:, 1], u[:, 2] = np.cos(n * t) * np.sin(np.pi * nodes[:, 0] / L) * np.cos(t), np.cos(n * t) * np.sin(np.pi * nodes[:, 0] / L) * np.sin(t)
+    return nodes, el, u
+
+
+def test_r15_m15_the_follower_correction_is_the_ring_formula_and_the_lobe_count_of_a_mode_is_read_from_its_shape():
+    """Round 15 M-15: `buckling_factor = 0.75 x the dead-load factor` for every mode, the 2-lobe mode's correction n^2/(n^2-1) = 4/3 applied to a 3-lobe tube
+    (8/9) and a sphere (near 1). The correction is (n^2 - 1) / n^2, n the lobe count of the mode, read from the mode shape: a cos(n theta) f(x) mode of a tube
+    gives n, the many-lobed mode of a sphere a large number."""
+    from cafe import fea
+    assert fea.follower_correction(2) == 0.75 and fea.follower_correction(3) == pytest.approx(8 / 9) and fea.follower_correction(1) == 0.75
+    assert fea.follower_correction(0) == 0.75 and fea.follower_correction(18) > 0.996
+    for n in (2, 3, 4, 6):
+        nodes, el, u = _tube_mode(n)
+        assert fea.lobe_count(nodes, el, u) == pytest.approx(n, abs=0.2), n
+    # a sphere: no long axis, the mode is the zonal harmonic P_6 (degree 6): sqrt(l (l + 1)) = 6.48 whichever axis the nodes' principal axes pick
+    import trimesh
+    ball = trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+    nodes, el = _s6_surface(ball.vertices, ball.faces, lambda m: m / np.linalg.norm(m))
+    z = nodes[:, 2]
+    p6 = (231 * z ** 6 - 315 * z ** 4 + 105 * z ** 2 - 5) / 16
+    assert fea.lobe_count(nodes, el, nodes * p6[:, None]) == pytest.approx(math.sqrt(42), rel=0.08)
+
+
+def test_r15_m15_a_mode_of_factor_one_is_not_read_as_the_static_displacement(tmp_path):
+    """The static step's .frd block carries time 1.0 in its header; a buckling mode whose factor is 1.0 (1 MPa is a natural load to test with) must be read from
+    the buckling step's block, type 4, not from the static one that comes first."""
+    from cafe import fea
+
+    def block(kind, value, ux):
+        head = f"  100CL  101 {value:.9f}           2                     {kind}    1           1"
+        return [head, " -4  DISP        4    1", " -5  D1          1    2    1    0",
+                f" -1{1:10d}{ux:12.5E}{0.0:12.5E}{0.0:12.5E}", f" -1{2:10d}{0.0:12.5E}{0.0:12.5E}{0.0:12.5E}", " -3"]
+    text = ["    1C", "    2C                             2                                     1", f" -1{1:10d}{0.0:12.5E}{0.0:12.5E}{0.0:12.5E}",
+            f" -1{2:10d}{1.0:12.5E}{0.0:12.5E}{0.0:12.5E}", " -3"] + block(0, 1.0, 7.0) + block(4, 0.0, 0.0) + block(4, 1.0000001, 3.0) + block(4, 2.0, 5.0)
+    f = tmp_path / "job.frd"
+    f.write_text("\n".join(text) + "\n")
+    got = fea._frd_modes(f, np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]), [1.0, 2.0])
+    assert got[1.0][0, 0] == pytest.approx(3.0) and got[2.0][0, 0] == pytest.approx(5.0)
+
+
+def test_r15_m15_the_least_follower_corrected_factor_over_the_modes_that_can_set_it_is_the_buckling_factor(monkeypatch, tmp_path):
+    """A higher dead-load mode of 2 lobes can lie below a lower one of 4: the factor is min(correction x eigenvalue) over the modes that can set it (those
+    below the lowest / 3/4), not the correction of the lowest mode alone. Without a mode shape the correction is 3/4 for all, and the lobe count is None."""
+    from cafe import fea
+    frd = tmp_path / "job.frd"
+    frd.write_text("")
+    lobes = {1.0: 4.0, 1.2: 2.0, 1.3: 9.0, 1.5: 2.0}
+    monkeypatch.setattr(fea, "_frd_modes", lambda path, nodes, values: {v: v for v in values})
+    monkeypatch.setattr(fea, "lobe_count", lambda nodes, el, u: lobes[u])
+    got = fea._follower_buckling(frd, None, np.zeros((1, 6), int), [1.0, 1.2, 1.3, 1.5])
+    assert got == (pytest.approx(0.9), 2, 0.75)                                      # 1.2 x 3/4 = 0.9 beats 1.0 x 15/16 = 0.9375; 1.5 cannot set it
+    assert fea._follower_buckling(frd, None, np.zeros((1, 6), int), [1.0, 1.2])[0] == pytest.approx(0.9)
+    only4 = fea._follower_buckling(frd, None, np.zeros((1, 6), int), [1.0, 1.5])         # 1.5 > 1.0 / 0.75: one candidate, 4 lobes
+    assert only4 == (pytest.approx(15 / 16), 4, pytest.approx(15 / 16))
+    monkeypatch.setattr(fea, "_frd_modes", lambda path, nodes, values: {})
+    assert fea._follower_buckling(frd, None, np.zeros((1, 6), int), [1.0, 1.2]) == (0.75, None, 0.75)
+    assert fea._follower_buckling(tmp_path / "none.frd", None, np.zeros((1, 6), int), [1.0]) == (0.75, None, 0.75)
+    assert fea._follower_buckling(frd, None, None, [1.0]) == (0.75, None, 0.75)                 # a solid mesh has no S6 elements
+
+
+def test_r15_m15_a_3_lobe_tube_and_a_sphere_are_not_corrected_as_a_2_lobe_tube(tmp_path):
+    """Round 15 C-2 on the real solver: a closed tube (R 0.1, t 3 mm, L 0.6) buckles in 3 lobes under 1 MPa and the sphere in many; each is corrected by its own
+    n. Before: 3/4 of the dead-load factor for both (the tube 0.902 x the von Mises value against 1.069 expected, the sphere 21.7 % below Zoelly)."""
+    import trimesh
+    from cafe import fea
+    tube = trimesh.creation.cylinder(radius=0.1, height=0.6, sections=64)
+    tube.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0]))
+    load = lambda c, n: np.full(len(c), 1e6)                                       # noqa: E731
+    r = fea.solve(tube, "shell", "al6061", thickness=0.003, pressure=load, steps=("static", "buckle"), h=0.02, workdir=tmp_path / "t")
+    assert r["buckling_lobes"] == 3 and r["buckling_follower_correction"] == pytest.approx(8 / 9)
+    assert r["buckling_factor"] == pytest.approx(8 / 9 * r["buckling_factor_dead_load"]) and r["buckling_factor_dead_load"] > 1.0
+    E, nu, R, t, L = 68.9e9, 0.33, 0.1, 0.003, 0.6
+    a = math.pi * R / L
+    mises = E * t / R / (9 - 1 + 0.5 * a * a) * (1 / ((3 / a) ** 2 + 1) ** 2 + t * t / (12 * R * R * (1 - nu * nu)) * (9 - 1 + a * a) ** 2)     # n = 3
+    assert 0.9 < r["buckling_factor"] * 1e6 / mises < 1.25                         # 1.07 with the flat caps' restraint; 3/4 alone gave 0.90
+    ball = trimesh.creation.icosphere(subdivisions=3, radius=0.15)
+    s = fea.solve(ball, "shell", "al6061", thickness=0.003, pressure=load, steps=("static", "buckle"), h=0.04, workdir=tmp_path / "s")
+    zoelly = 2 * E / math.sqrt(3 * (1 - nu ** 2)) * (0.003 / 0.15) ** 2
+    assert s["buckling_lobes"] >= 4 and s["buckling_follower_correction"] > 0.9
+    assert s["buckling_factor"] * 1e6 / zoelly > 0.9                                # was 0.78 with 3/4 of the dead-load factor
+
+
+def test_r15_m23_no_vm_max_is_stored_because_the_largest_element_stress_is_the_meshs(monkeypatch, tmp_path):
+    """Round 15 M-23: `vm_max` was 163 MPa for a uniform sphere whose membrane stress is 25 MPa (3.8 to 6.4 x the 99th percentile, mesh dependent) and
+    was stored in the FEA row and the app's load-case table. The 99th percentile is the stress every utilization uses; the key is gone from the solver,
+    the window row and the Hangar's case table."""
+    import trimesh
+    ball = trimesh.creation.icosphere(subdivisions=1, radius=0.1)
+    fea = _fake_ccx(monkeypatch, [1.6])
+    kw = dict(thickness=0.002, pressure=lambda c, n: np.full(len(c), 1e5), steps=("static", "buckle"), h=0.08)
+    r = fea.solve(ball, "shell", "al6061", workdir=tmp_path / "a", **kw)
+    assert "vm_max" not in r and r["vm_p99"] == pytest.approx(1e6)
+    pts = _sphere_points(0.1, 40)
+    vehicle = W.Vehicle("ball", "water", 0.2, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.1, 0.1, 0.1))], material="al6061", thickness=0.002, depth=0.0)
+    w = W.fea_window(vehicle, pts, np.full(len(pts), 1e5), workdir=tmp_path / "b", h=0.08, buckle=True)
+    assert "vm_max" not in w and w["buckling_lobes"] is None
+    assert w["buckling_follower_correction"] == 0.75                                  # the fake ccx has no mode shape: the 3/4 fallback
+    assert "vm_max_mpa" not in hangar._case("x", "y", dict(r, nodes=3, applied_force=[0.0, 0.0, 0.0]), "al6061")
+
+
+def test_r15_m17_a_shell_without_a_wall_and_a_free_body_with_an_acceleration_are_refused_before_the_mesher_runs(monkeypatch):
+    """Round 15 M-17: `thickness=None` on a shell raised a TypeError from the f-string that writes the section, after gmsh had run; `body_accel` without
+    `fixed=` was dropped without a word (a free body is balanced by inertia relief and the d'Alembert loads of a body acceleration are not implemented)."""
+    import trimesh
+    from cafe import fea
+    ball = trimesh.creation.icosphere(subdivisions=1, radius=0.1)
+
+    def mesher(*a, **k):
+        raise AssertionError("the mesher ran")
+    monkeypatch.setattr(fea, "mesh_body", mesher)
+    for bad in (None, 0, -0.002, float("nan"), float("inf"), True, "2 mm"):
+        with pytest.raises(ValueError, match="needs a wall thickness"):
+            fea.solve(ball, "shell", "al6061", thickness=bad, h=0.08)
+    with pytest.raises(ValueError, match="body_accel needs fixed="):
+        fea.solve(ball, "shell", "al6061", thickness=0.002, body_accel=[0, 0, -196], h=0.08)
+    with pytest.raises(AssertionError, match="mesher ran"):                          # a clamped body with an acceleration, or a solid with no wall, is asked
+        fea.solve(ball, "shell", "al6061", thickness=0.002, body_accel=[0, 0, -196], fixed=lambda nd: nd[:, 2] < 0, h=0.08)
+    with pytest.raises(AssertionError, match="mesher ran"):
+        fea.solve(ball, "solid", "al6061", h=0.08)
+
+
+def test_r15_m16_the_modules_self_test_runs_and_the_docstring_no_longer_promises_pins_or_reactions(tmp_path):
+    """Round 15 M-16: `python -m cafe.fea` raised KeyError 'reaction' (a free body has none) before any of its asserts ran, and the docstring described a 3-2-1
+    constraint whose reactions 'should come out ~0'. The self-test is `fea.selftest`; it runs on the real solver."""
+    from cafe import fea
+    assert "3-2-1" not in fea.__doc__ and "reactions should" not in fea.__doc__ and "mean rigid motion" in fea.__doc__
+    fea.selftest(tmp_path / "selftest")
+
+
+def test_r15_m14_the_chosen_mesh_is_a_row_of_the_stored_study_within_one_percent_of_its_finest_and_the_stored_collapse_depths_are_the_studys():
+    """The mesh is chosen from a stored study (config/fea_hull_mesh_study.json), not by a number typed into the assumptions: the chosen n is a row, its
+    follower-corrected buckling factor is within 1 % of the finest mesh's (L/45 is 1.3 % away, L/20 10 %), every row's collapse depth is 500 m x factor x the
+    knockdown, and the two stored collapse depths (`stage3.glider.hull_collapse_depth_m`, `stage3.slocum.hull_collapse_depth_m`) are the study's hulls at that
+    mesh, each beside the hull text it was computed for."""
+    import pathlib
+    study = json.loads((pathlib.Path(pw.__file__).parents[3] / "config" / "fea_hull_mesh_study.json").read_text())
+    rows = {r["n"]: r for r in study["rows"]}
+    a = pw.assumptions()
+    n = a["fea_elements_along"]
+    assert n in rows and n < max(rows) and len(rows) >= 4
+    assert abs(rows[n]["buckling_factor"] / rows[max(rows)]["buckling_factor"] - 1) < 0.01
+    finest = rows[max(rows)]
+    assert abs(rows[45]["buckling_factor"] / finest["buckling_factor"] - 1) > 0.01 and rows[20]["collapse_depth_m"] > 1.05 * finest["collapse_depth_m"]
+    for r in rows.values():
+        assert r["collapse_depth_m"] == pytest.approx(study["hull"]["depth_m"] * r["buckling_factor"] * hangar.KNOCKDOWN, abs=0.01)
+    hulls = {h["platform"]: h for h in study["hulls_at_the_chosen_mesh"]}
+    for plat, key in (("seaglider", "glider"), ("slocum", "slocum")):
+        assert hulls[plat]["n"] == n and hulls[plat]["hull"] == a[f"{key}.hull_collapse_for"]
+        assert a[f"{key}.hull_collapse_depth_m"] == pytest.approx(hulls[plat]["collapse_depth_m"], abs=0.1)
+    assert hulls["seaglider"]["collapse_depth_m"] == pytest.approx(rows[n]["collapse_depth_m"], abs=0.1)
+
+
+def test_r15_m14_the_hangars_hull_case_and_the_stage_3_window_mesh_the_hull_by_the_one_number_in_the_assumptions(monkeypatch, tmp_path):
+    """Round 15 M-14: `hangar.fea_cases` meshed a hull at L/70 and `pipeline_windows._fea` the same hull at L/20, so one repo reported two collapse depths
+    (331 and 364 m for the default Seaglider hull). Both read `stage3.fea_elements_along`."""
+    import subprocess
+    import trimesh
+    from cafe import fea
+    n = pw.assumptions()["fea_elements_along"]
+    assert fea.hull_elements_along() == n
+    seen = {}
+    ball = trimesh.creation.icosphere(subdivisions=1, radius=0.1)
+    ok = dict(vm_p99=1e8, buckling_factor=1.6, nodes=3, applied_force=[0.0, 0.0, 0.0], field=None, u_max=0.0)
+    monkeypatch.setattr(fea, "solve", lambda *a, **k: seen.update(hangar=k["h"]) or ok)
+    hangar.fea_cases("uuv", ball, dict(material="al6061", structure="shell", wall_mm=2.0, mass=5.0), None, {}, tmp_path)
+    veh = W.Vehicle("g", "water", 0.2, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.1, 0.1, 0.1))], material="al6061", thickness=0.002, depth=0.0,
+                    extra=dict(fea=True))
+    monkeypatch.setattr(pw, "_spawn", lambda cmd, **k: seen.update(window=float(np.load(cmd[-2])["h"])) or subprocess.CompletedProcess(cmd, 1, "", "x"))
+    pw._fea(veh, dict(wall_points=np.zeros((1, 3)), wall_pressure=np.zeros(1)), pw.assumptions())
+    assert seen["hangar"] == pytest.approx(ball.extents.max() / n) and seen["window"] == pytest.approx(0.2 / n)
+
+
 def test_r14_m31_the_stage_3_fea_row_is_not_run_when_the_buckling_factor_is_missing(monkeypatch):
     """The chain a window takes: `pipeline_windows._fea` -> child `_fea_child` -> `windows.fea_window` -> `fea.solve`. Without a factor the row is
     `run` False with the reason and carries no utilization; with one it carries the knocked-down buckling utilization as before."""
@@ -788,27 +1006,64 @@ def test_r14_m31_hangar_depth_case_is_not_rated_without_a_buckling_factor(monkey
     assert out["buckling_factor"] == pytest.approx(0.75 * 1.6) and out["crush_depth"] == out["buckle_depth"]
 
 
+def test_r15_m9_the_boats_added_mass_is_evaluated_at_the_frequencies_its_docstring_names_and_roll_and_pitch_borrow_the_heave_one(monkeypatch):
+    """Round 15 M-9: the comment said added mass was evaluated near the natural frequencies of heave, roll and pitch; the code used the heave frequency
+    sqrt(g / draft) (8.2 rad/s at 0.145 m) for all three, against a roll frequency of a few rad/s, and a fixed 0.3 rad/s for the rest. The numbers are
+    unchanged; the text now says what they are, and a stand-in Capytaine records the frequency each dof was solved at."""
+    import sys
+    import trimesh
+    omegas = {}
+
+    class Body:
+        dofs = {n: None for n in ("Surge", "Sway", "Heave", "Roll", "Pitch", "Yaw")}
+
+        def __init__(self, **k):
+            pass
+
+        def immersed_part(self):
+            return self
+
+    class Result:
+        added_masses = {n: 1.0 for n in Body.dofs}
+        radiation_dampings = {n: 0.5 for n in Body.dofs}
+
+    class Solver:
+        def solve(self, problem):
+            omegas[problem.dof] = problem.omega
+            return Result()
+    def problem(body, radiating_dof, omega, **k):
+        return SimpleNamespace(dof=radiating_dof, omega=omega)
+    monkeypatch.setitem(sys.modules, "capytaine", SimpleNamespace(Mesh=lambda **k: None, FloatingBody=Body, rigid_body_dofs=lambda **k: None,
+                                                                  BEMSolver=Solver, RadiationProblem=problem))
+    boat = trimesh.creation.box(extents=(1.0, 0.4, 0.3))
+    out = hangar.bem(boat, "usv", np.array([0.0, 0.0, 0.0]), 0.145)
+    w_heave = math.sqrt(9.81 / 0.145)
+    assert omegas == dict(Surge=0.3, Sway=0.3, Yaw=0.3, Heave=pytest.approx(w_heave), Roll=pytest.approx(w_heave), Pitch=pytest.approx(w_heave))
+    assert hangar.bem_omega("Heave", 0.0) == pytest.approx(math.sqrt(9.81 / 0.02)) and np.array(out["added_mass"]).shape == (6, 6)
+    assert "borrow" in hangar.bem_omega.__doc__ and "borrow" in hangar.bem.__doc__ and "assumption" in hangar.bem_omega.__doc__
+
+
 def test_tri_quality():
     nodes = np.array([[0, 0, 0], [1, 0, 0], [0.5, math.sqrt(3) / 2, 0], [10, 0, 0]], float)
     assert W.tri_quality(nodes, np.array([[0, 1, 2]])) == pytest.approx(1.0)
     assert W.tri_quality(nodes, np.array([[0, 1, 2], [0, 3, 2]])) < 0.5
 
 
-def test_run_windows_overlaps_fea_with_the_next_les_window(monkeypatch):
-    seen = []
-    real = W.fea_window
+def test_r15_m25_the_pipelines_child_is_the_one_entry_point_of_the_window_fea_and_it_asks_for_the_buckling_step(monkeypatch, tmp_path):
+    """Round 15 M-25: `windows.run_windows` (its only caller a test) passed `fea_kw` alone, so its FEA left the buckling step off, which round 14 M-31 removed
+    from every path. It is gone: a window's FEA is `pipeline_windows._fea_child` -> `fea_window(..., buckle=True)`."""
+    assert not hasattr(W, "run_windows") and "run_windows" not in (W.__doc__ or "")
+    seen = {}
 
-    def spy(*a, **k):
-        seen.append(threading.get_ident())
-        return dict(utilization=0.1, spy=True)
+    def spy(veh, points, pressure, workdir=None, h=None, buckle=False):
+        seen["buckle"] = buckle
+        return dict(utilization=0.1)
     monkeypatch.setattr(W, "fea_window", spy)
-    sp = W.WindowSpec(velocity=(0.5, 0, 0), dx=0.01, steps=60, box=(2.0, 0.8, 0.8))
-    out = W.run_windows([(HULL, sp), (HULL, sp)], _uniform([0, 0, 0]), omp_threads=3)
-    assert len(out) == 2 and all(o["fea"]["spy"] for o in out)
-    assert len(seen) == 2 and all(t != threading.get_ident() for t in seen)      # FEA ran in the worker, not on the LES thread
-    assert os.environ["OMP_NUM_THREADS"] == "3"
-    assert W.fea_window is spy and real is not spy
-    assert W.run_windows([], _uniform([0, 0, 0])) == []
+    job, out = tmp_path / "job.npz", tmp_path / "out.json"
+    veh = W.Vehicle("ball", "water", 0.1, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.05, 0.05, 0.05))], material="al6061", thickness=0.002)
+    np.savez(job, vehicle=json.dumps(dataclasses.asdict(veh)), points=np.zeros((1, 3)), pressure=np.zeros(1), h=0.08)
+    assert pw._fea_child(str(job), str(out)) == 0
+    assert seen == {"buckle": True}
 
 
 # ------------------------------------------------------------------ FluidX3D plugin (against the stub in tests/fixtures)
@@ -948,9 +1203,34 @@ def test_pool_random_effects():
     assert one["tau2"] == 0 and one["se"] == pytest.approx(0.02)
     heavy = refit.pool([0.2, 0.4], [0.001, 0.1])                            # random effects: tau2 is big, so the weights even out
     assert 0.2 < heavy["mean"] < 0.3 and heavy["tau2"] > 0.01
-    for bad in (([], []), ([1.0], [0.1, 0.2]), ([1.0], [0.0])):
+    for bad in (([], []), ([1.0], [0.1, 0.2]), ([1.0], [-0.1])):
         with pytest.raises(ValueError):
             refit.pool(*bad)
+
+
+def test_r15_m19_pool_refuses_a_nan_or_infinite_input_and_has_one_policy_for_a_spread_of_zero():
+    """Round 15 M-19: `pool([1, 1.1], [nan, .01])` returned a NaN mean (NaN <= 0 is False); a zero spread raised for the drag of the one-reference branch, was
+    clamped to 1e-12 for its lift and for the per-window branch. The clamp is in `pool`, for every caller; NaN and infinity are refused."""
+    nan, inf = float("nan"), float("inf")
+    for bad in (([1.0, 1.1], [nan, 0.01]), ([1.0, nan], [0.01, 0.01]), ([1.0, 1.1], [inf, 0.01]), ([inf, 1.1], [0.1, 0.01])):
+        with pytest.raises(ValueError, match="finite"):
+            refit.pool(*bad)
+    zero = refit.pool([1.0, 1.1], [0.0, 0.01])
+    assert zero == refit.pool([1.0, 1.1], [refit.SE_FLOOR, 0.01]) and zero["mean"] == pytest.approx(1.0) and zero["se"] == pytest.approx(refit.SE_FLOOR)
+    both = [dict(cd=1.0, cd_spread=0.0, cl=0.1, cl_spread=0.0, cd_hangar=1.0, cl_hangar=0.1, added_resistance=None)]
+    one_ref, per_window = refit.refit(both, dict(cd=1.0, cl=0.1), floor={}), refit.refit(both, None, floor={})        # drag and lift alike, both branches
+    for q in ("drag", "lift"):
+        assert one_ref[q]["sigma"] < 1e-9 and per_window[q]["sigma"] < 1e-9 and one_ref[q]["mean"] == pytest.approx(per_window[q]["mean"]) == pytest.approx(1.0)
+
+
+def test_r15_m18_two_windows_have_no_between_window_floor_and_the_module_says_so():
+    """Round 15 M-18 (a stated limit, not a change): with two windows that agree, DerSimonian-Laird has tau^2 = 0 and the floor, which applies below two
+    windows, does not; the sigma is the standard error and the discretisation floor. One window gets the floor."""
+    flr = dict(between_window_frac=0.1, between_window_source="t", discretisation_frac=0.05, discretisation_source="t")
+    two = refit.refit([_w(0.30, 0.01), _w(0.30, 0.01)], dict(cd=0.30), floor=flr)["drag"]
+    assert two["tau"] == 0 and two["sigma_between"] == 0 and two["sigma"] == pytest.approx(math.hypot(0.01 / math.sqrt(2) / 0.30, 0.05))
+    one = refit.refit([_w(0.30, 0.01)], dict(cd=0.30), floor=flr)["drag"]
+    assert one["sigma_between"] == pytest.approx(0.1) and "two windows" in refit.__doc__ and "has tau^2 = 0 in about 15 %" in refit.__doc__
 
 
 @given(st.lists(st.floats(0.05, 2.0), min_size=2, max_size=8), st.floats(0.01, 0.2))
@@ -1117,7 +1397,8 @@ def fresh_fs():
 
 def cheap(monkeypatch, **over):
     base = pw.assumptions()
-    base.update(dict(fea_elements_along=6, min_cells_thin_part=0), **over)             # (0: the toy sizes run the UAS arms under a cell)
+    # (min_cells_thin_part 0: the toy sizes run the UAS arms under a cell; fea_min_s 1: the toy hull's FEA takes seconds, not the 641 s of the real one at L/70)
+    base.update(dict(fea_elements_along=6, fea_min_s=1.0, min_cells_thin_part=0), **over)
     monkeypatch.setattr(pw, "assumptions", lambda: base)
     monkeypatch.setattr(pw, "_spawn", in_process_fea)
     monkeypatch.setattr(pw, "profile_stage3_s", lambda ctx: {"quick": 100.0, "overnight": 1e6})                # (the fake plans have no mission to plan with)
@@ -1625,9 +1906,11 @@ def test_round_13_m42_a_killed_fea_window_takes_its_ccx_with_it(monkeypatch, tmp
     monkeypatch.setattr(pw, "_spawn", spawn)
     pid_file = tmp_path / "ccx.pid"
     monkeypatch.setenv("PIDFILE", str(pid_file))
-    out = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=60)
+    # the parent's deadline (4 s) is the one `_killed_at_deadline` judges the child's -9 by (round 15 M-21): the child's own watchdog fires 3 s after
+    # its imports, later than the parent's 4 s less 1 s of skew, so this -9 is the watchdog's and not an outside kill
+    out = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=4)
     assert out == dict(run=False, reason="killed: the FEA did not finish inside the window's remaining wall-clock slice")
-    assert seen["start_new_session"] is True and seen["timeout"] == 60 + pw.FS_GRACE_S and "--fea" in seen["cmd"]
+    assert seen["start_new_session"] is True and seen["timeout"] == 4 + pw.FS_GRACE_S and "--fea" in seen["cmd"]
     assert pid_file.exists(), "the stand-in never started its grandchild"
     assert _gone(int(pid_file.read_text())), "the grandchild (ccx) is still running after the FEA was killed"
     assert not pathlib.Path(seen["env"]["TMPDIR"]).exists()                                   # the parent's directory, which the child works in, is gone
@@ -1652,12 +1935,22 @@ def test_round_13_m42_a_fea_with_no_time_left_is_killed_without_starting_and_a_w
                      thickness=0.002, depth=0.0, extra=dict(fea=True))
     r = dict(wall_points=_sphere_points(0.05, 20), wall_pressure=np.zeros(20))
     calls = []
-    monkeypatch.setattr(pw, "_spawn", lambda cmd, **k: calls.append(cmd) or subprocess.CompletedProcess(cmd, -9, "", ""))
-    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=0.0)["reason"].startswith("killed: the FEA")
-    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=60.0)["reason"].startswith("killed: the FEA") and len(calls) == 1
+
+    def watchdog(cmd, **k):                                                                 # a child whose watchdog fires: -9 once the deadline has come
+        calls.append(cmd)
+        time.sleep(0.3)
+        return subprocess.CompletedProcess(cmd, -9, "", "")
+    monkeypatch.setattr(pw, "_spawn", watchdog)
+    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=0.0)["reason"].startswith("killed: the FEA") and calls == []
+    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=1.2)["reason"].startswith("killed: the FEA")             # 0.3 s of 1.2 s, less 1 s of skew
+    assert len(calls) == 1
     assert calls[0][calls[0].index("--fea") + 1] != "-"
-    pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=None)
-    assert calls[1][calls[1].index("--fea") + 1] == "-"                                       # no deadline: no watchdog
+    # round 15 M-21: a -9 well before the deadline (the OOM killer, a kill -9) is not the watchdog's, and no deadline means no watchdog to have fired
+    monkeypatch.setattr(pw, "_spawn", lambda cmd, **k: calls.append(cmd) or subprocess.CompletedProcess(cmd, -9, "", ""))
+    early = pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=60.0)
+    assert early["run"] is False and early["reason"].startswith("FEA killed by SIGKILL before its deadline") and "out of memory" in early["reason"]
+    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=None)["reason"].startswith("FEA killed by SIGKILL before its deadline")
+    assert calls[2][calls[2].index("--fea") + 1] == "-"                                       # no deadline: no watchdog
 
 
 def test_run_flags_a_row_that_claims_ok_with_a_failing_check(no_wall_receipt, monkeypatch):
@@ -1851,6 +2144,26 @@ def test_a_small_slice_runs_the_plans_size_and_the_fea_is_planned_out_when_its_r
     ctx = toy_g_ctx(no_wall_receipt, 40.0)
     r = pw.run(ctx, {"g": [WIN]}, FakeL())["g"][0]
     assert not r["fea"]["run"] and r["fea"]["reason"].startswith("not planned: the FEA reserve is 10.0 s of a 40.0 s slice, below stage3.fea_min_s")
+
+
+def test_r15_m24_a_planned_out_fea_does_not_take_its_reserve_from_the_les_kill(no_wall_receipt, monkeypatch):
+    """Round 15 M-24: `run_s = win_s - fea_s` removed `fea_reserve_frac` of the slice from the LES window's safety kill even when the FEA was planned out
+    (reserve below `fea_min_s`), so a slow machine cut the window at 0.75 of its slice for an FEA that never ran. The kill is the whole slice then; with the FEA
+    planned to run it is still 0.75 of it."""
+    seen = []
+    real = W.run_window
+
+    def spy(veh, spec, inflow, *a, **k):
+        seen.append(spec.wall_s)
+        return real(veh, spec, inflow, *a, **k)
+    monkeypatch.setattr(W, "run_window", spy)
+    cheap(monkeypatch, fea_min_s=1e9)
+    r = pw.run(toy_g_ctx(no_wall_receipt, 40.0), {"g": [WIN]}, FakeL())["g"][0]
+    assert not r["fea"]["run"] and r["fea"]["reason"].startswith("not planned") and seen == [pytest.approx(r["timing"]["wall_share_s"])]
+    seen.clear()
+    cheap(monkeypatch, fea_min_s=1.0)
+    r = pw.run(toy_g_ctx(no_wall_receipt, 40.0), {"g": [WIN]}, FakeL())["g"][0]
+    assert seen == [pytest.approx(0.75 * r["timing"]["wall_share_s"])]
 
 
 def test_viscosity_floor_is_reported_by_the_window_and_fails_the_row(no_wall_receipt, monkeypatch):
@@ -2069,7 +2382,9 @@ def test_the_hull_fs_row_failures_are_rows_with_reasons(no_wall_receipt, monkeyp
             (timeout, soon, "killed at its deadline"),
             (lambda cmd, **k: subprocess.CompletedProcess(cmd, 3, "", "Traceback\nRuntimeError: snappy: forced"), None,
              "failed (3): RuntimeError: snappy: forced"),
-            (lambda cmd, **k: subprocess.CompletedProcess(cmd, -9, "", ""), soon, "killed by its watchdog"),
+            (lambda cmd, **k: (time.sleep(0.3), subprocess.CompletedProcess(cmd, -9, "", ""))[1], time.perf_counter() + 1.2, "killed by its watchdog"),
+            (lambda cmd, **k: subprocess.CompletedProcess(cmd, -9, "", ""), soon, "killed by SIGKILL before its deadline (out of memory"),       # round 15 M-21
+            (lambda cmd, **k: subprocess.CompletedProcess(cmd, -9, "", ""), None, "killed by SIGKILL before its deadline (out of memory"),
             (lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, "", ""), None, "failed (0): no message"),
             (lambda cmd, **k: out(cmd, R=-4.0), None, "non-physical resistance (-4.0 N)"),
             (nopython, None, "window failed: no python"),
@@ -2078,7 +2393,7 @@ def test_the_hull_fs_row_failures_are_rows_with_reasons(no_wall_receipt, monkeyp
         assert not r["ok"] and r["cd"] is None and words in r["reasons"][0] and r["error"] == r["reasons"][0] and r["part"] == "hull_fs", words
     # the parent waits a grace past the child's own deadline, and for ever without one
     assert seen[0]["timeout"] == pytest.approx(50.0 + pw.FS_GRACE_S, abs=1.0) and seen[1]["timeout"] is None
-    assert len(seen) == 6                                                    # the spent deadline never starts a child
+    assert len(seen) == 8                                                    # the spent deadline never starts a child
     good = work(lambda cmd, **k: out(cmd))
     assert good["ok"] and good["gci"] == 0.05 and good["refinement_ratio"] == pytest.approx(3 ** (1 / 3)) and good["cd"] > 0
 
@@ -2503,6 +2818,24 @@ def _bow_res(heading, n=3):
     t = np.arange(n) * 3600.0
     return dict(vehicles=dict(u=dict(t=t, lon=np.stack([-170 + 0.01 * np.arange(n)] * 4, 1), lat=np.stack([0.0 + 0.01 * np.arange(n)] * 4, 1),
                                      **({} if heading is None else dict(heading=np.full((n, 4), heading))))))
+
+
+def test_r15_m20_the_course_over_ground_of_members_either_side_of_the_dateline_is_the_course_elsewhere():
+    """Round 15 M-20: `track_heading` took the median of the members' raw longitudes, so members at 179.99 and -179.99 at one record gave 0 (the other side of
+    the globe) and the course across the line came out wrong (270.006 degrees where the same flight at lon 10 gives 45.000). The same flight written either
+    way gives one heading."""
+    t = np.arange(3) * 3600.0
+    step = 0.01 * np.arange(3)
+
+    def res(lon0):
+        lon = np.stack([lon0 + step, lon0 + step + 0.02], 1)                                   # two members 0.02 degrees apart in longitude, both flying east
+        lon = (lon + 180.0) % 360.0 - 180.0
+        return dict(vehicles=dict(u=dict(t=t, lon=lon, lat=np.stack([0.5 * step, 0.5 * step], 1))))
+    far, near = pw.track_heading(res(179.99), "u", 3600.0), pw.track_heading(res(10.0), "u", 3600.0)
+    assert near == pytest.approx(math.degrees(math.atan2(1.0, 0.5)), abs=0.1)                  # east 0.02, north 0.01: about 63.4
+    assert far == pytest.approx(near, abs=1e-6)
+    lon = res(179.99)["vehicles"]["u"]["lon"]
+    assert lon[0].min() < 0.0 < lon[0].max() and abs(lon[0].min()) > 179.0                    # the premise: at the first record the members straddle the line
 
 
 def test_r7_m27_track_heading_is_the_recorded_bow_heading_and_the_course_only_without_one():

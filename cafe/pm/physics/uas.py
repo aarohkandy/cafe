@@ -125,6 +125,29 @@ def load_platform(path: Optional[str] = None) -> dict[str, Any]:
 
 # ---------------------------------------------------------------------------------------------- constants -> arrays
 
+def airspeed_envelope(limits: dict[str, Any], d_x: float) -> float:
+    """The airspeed the airframe is held to: the smaller of `limits.max_airspeed_ms` and the speed at which the rotor drag d_x v tilts it to
+    `limits.max_tilt_deg`, g tan(tilt) / d_x (12.6 m/s for the quad's 35 deg and d_x 0.545 1/s, against the 12 m/s it is rated at). The one
+    definition: stage 1's sortie (`derive`) and stage 3's UAS window (`pipeline_windows.uas_case`) both read it. A d_x of 0 (the `no_drag` fault)
+    has no tilt term."""
+    tilt = G0 * math.tan(math.radians(limits["max_tilt_deg"])) / d_x if d_x > 0 else math.inf
+    return float(min(limits["max_airspeed_ms"], tilt))
+
+
+def leg_speed(wind: Arr, heading: Arr, leg: Arr, v_max: Arr, xp: Any = np) -> tuple[Arr, Arr]:
+    """(s, ok): the largest ground speed s in [0, leg] along the unit vector `heading` for which the air relative to the airframe, |wind - s heading|, stays
+    within `v_max`, and whether there is one (False: the wind alone, or the wind across the heading, is beyond the envelope at every ground speed).
+    |w - s h|^2 <= v^2 is (s - w.h)^2 <= v^2 - |w|^2 + (w.h)^2, an interval around w.h. `wind` and `heading` are (2, ...) in the same frame (the wind
+    relative to the deck when the airframe's ground speed is the deck's plus s); `xp` is numpy for a window of stage 3, jax.numpy inside the jitted
+    sortie of stage 1: this is the one definition both read (the rule of DECISIONS 161, kept in one place by round 15 M-10). With ok False, s is the
+    unclamped upper end of an empty interval and means nothing."""
+    wh = wind[0] * heading[0] + wind[1] * heading[1]
+    d2 = v_max ** 2 - (wind[0] ** 2 + wind[1] ** 2) + wh ** 2
+    root = xp.sqrt(xp.maximum(d2, 0.0))
+    lo, hi = xp.maximum(wh - root, 0.0), xp.minimum(wh + root, leg)
+    return hi, (d2 >= 0.0) & (lo <= hi)
+
+
 def air_density(psfc: Arr, t2: Arr, q2: Arr = 0.0) -> Arr:
     """Moist-air density from surface pressure [Pa], 2 m temperature [K], specific humidity [kg/kg]."""
     return psfc / (287.05 * t2 * (1.0 + 0.608 * q2))
@@ -145,6 +168,7 @@ def derive(P: dict[str, Any], M: int, rho: Arr = 1.2, scale: Optional[dict[str, 
     def f(x: Arr) -> Arr:
         return np.broadcast_to(np.asarray(x, float), (M,)).copy()
 
+    dx_member = np.broadcast_to(np.asarray(ae["d_x"] * sc["drag"] * (0.0 if fault == "no_drag" else 1.0)), (M,))  # each member's drag
     prm = dict(
         m=af["mass_kg"] * sc["mass"], J=np.array(af["inertia_kgm2"])[:, None] * sc["mass"], arm=f(af["motor_radius_m"] / math.sqrt(2)),
         hotel=f(af["hotel_w"]), kT=kT, kQ=kQ, cq=kQ / kT, om_max=f(om_max), tau_m=f(ro["motor_time_const_s"]), eff=ro["esc_motor_eff"] * sc["eff"],
@@ -152,7 +176,8 @@ def derive(P: dict[str, Any], M: int, rho: Arr = 1.2, scale: Optional[dict[str, 
         wsign=f(-1.0 if fault == "wind_sign" else 1.0), cap=cap, iref=cap / ba["peukert_hours"], pk=f(1.0 if fault == "peukert" else ba["peukert_exponent"]),
         rint=f(ba["r_int_ohm"]), ncell=f(ba["cells"]), vref=f(4.2 * ba["cells"]), vcut=f(ba["cutoff_cell_v"] * ba["cells"]),
         reserve=f(ba["reserve_frac"]), dt_const=f(DT_PHYS if fault == "dt_const" else 0.0),
-        tilt_lim=f(math.radians(li["max_tilt_deg"])), tilt_exc=f(math.radians(li["tilt_exceedance_deg"])), v_air=f(li["max_airspeed_ms"]),
+        tilt_lim=f(math.radians(li["max_tilt_deg"])), tilt_exc=f(math.radians(li["tilt_exceedance_deg"])),
+        v_env=f([airspeed_envelope(li, float(dx)) for dx in dx_member]),
         pos_p=f(co["pos_p"]), vel_p=f(co["vel_p"]), vel_i=f(co["vel_i"]), vz_p=f(co["vel_z_p"]), vz_i=f(co["vel_z_i"]), acc_wp=f(co["accel_wp"]),
         acc_z=f(co["accel_z"]), v_up=f(co["speed_up"]), v_dn=f(co["speed_dn"]), att_p=f(co["att_p"]), rate_p=f(co["rate_p"]),
         yaw_slew=f(math.radians(co["yaw_slew_degs"])), i_max=f(co["vel_i_max"]), v_leg=f(min(so["leg_speed_ms"], li["max_airspeed_ms"])),
@@ -321,7 +346,13 @@ def _block(prm: dict[str, Any], S: St, wp: Arr, ship_p: Arr, ship_v: Arr, wind: 
     phase = jnp.where((phase == RTL) & (eh < 2.0) & (jnp.abs(e[2]) < 2.0), LAND, phase)
     phase = jnp.where((phase == LAND) & (eh > 4.0), RTL, phase)
     cap = jnp.where(phase == LAND, 3.0, prm["v_leg"])
-    sh = jnp.minimum(cap, _sqrt_ctrl(eh, prm["pos_p"], prm["acc_wp"]))
+    sh0 = jnp.minimum(cap, _sqrt_ctrl(eh, prm["pos_p"], prm["acc_wp"]))             # what the controller would ask for: the stuck monitor below judges this
+    # the ground speed along this leg is held to what keeps the air within the airframe's envelope against the wind it meets (the deck-relative wind,
+    # since the airframe moves with the deck): upwind, 8 m/s of ground speed in a 6 m/s wind is 14 m/s of air against a 12.6 m/s airframe (round 15 M-10).
+    # Where no ground speed does (the wind beyond the envelope), nothing is held: the command stays and the airframe saturates at its tilt limit.
+    ex, en = e[0] / jnp.maximum(eh, 1e-6), e[1] / jnp.maximum(eh, 1e-6)
+    s_air, can = leg_speed(wind[:2] - ship_v, (ex, en), sh0, prm["v_env"], xp=jnp)
+    sh = jnp.where(can, s_air, sh0)
     vdes_h = ship_v + e[:2] / jnp.maximum(eh, 1e-6) * sh
     vz_up = jnp.clip(_sqrt_ctrl(e[2], prm["pos_p"], prm["acc_z"]), -prm["v_dn"], prm["v_up"])
     vz = jnp.where(phase == LAND, -prm["v_land"] * jnp.clip(1 - eh / 2.5, 0.0, 1.0), vz_up)
@@ -366,7 +397,7 @@ def _block(prm: dict[str, Any], S: St, wp: Arr, ship_p: Arr, ship_v: Arr, wind: 
     rp2 = p - jnp.concatenate([ship_p + ship_v * DT_ENV, z[None]], 0)
     e2 = tgt - rp2
     eh2 = jnp.hypot(e2[0], e2[1])
-    ask = jnp.hypot(vdes_h[0] - ship_v[0], vdes_h[1] - ship_v[1])
+    ask = sh0                                                           # the uncapped ask: a leg slowed to the envelope still asks
     closing = (eh - eh2) / DT_ENV
     nohead = flying & (phase <= RTL) & (eh > 5.0) & (ask > prm["stuck_cmd"]) & (closing < prm["stuck_v"])
     stuck = jnp.where(nohead, S.stuck + DT_ENV, 0.0)

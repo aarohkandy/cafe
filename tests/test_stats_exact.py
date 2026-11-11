@@ -741,6 +741,7 @@ FACTOR1 = r"perturbation 'usv_vpp_bias': the speed factor 1 \+ x reaches .* must
     (dict(dist="uniform", lo=0.2, hi=1.0), r"hi is 1.0; .* not a percent"),
     (dict(dist="normal", mean=-30.0, value=2.0), r"mean is -30.0; .* not a percent"),
     (dict(dist="normal", mean=-0.3, value=50.0), r"value is 50.0; .* not a percent"),
+    (dict(dist="lognormal", median=50.0, value=0.5), r"median is 50.0; .* not a percent"),         # a lognormal fraction names its median (round 15 M-7)
     (dict(dist="normal", mean=-0.25, value=0.2), r"the speed factor 1 \+ x reaches -0.45 or less .*mean - 6 sd = -1.45"),      # 6 sd: past -100 %
     (dict(dist="normal", value=0.17), r"mean - 6 sd = -1.02"),                                                  # a normal with the default mean 0
 ])

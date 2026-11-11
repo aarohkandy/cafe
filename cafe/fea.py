@@ -1,11 +1,12 @@
 """FEA with CalculiX 2.21, meshed by gmsh.
 
 Hulls: quadratic shells (S6) at a wall thickness. Frames: quadratic tets (C3D10).
-A flying/swimming body has no supports, so the net applied load is balanced by an equal and
-opposite body acceleration (inertia relief by hand) and held by a statically determinate 3-2-1
-constraint whose reactions should come out ~0 (checked and reported).
+A flying/swimming body has no supports (`fixed=None`): the net applied load is balanced by mass-proportional d'Alembert forces (inertia relief by
+hand, `solve`) and the body's mean rigid motion is held by six CalculiX equations (`_mean_rigid_equations`), not by pinned nodes. Such a solve has no
+reaction, so its result has no `reaction` key; `reaction` exists only for a clamped solve (`fixed=`), where it is the clamp's force.
+`python -m cafe.fea` runs the thin-cylinder self-test (membrane stress, Windenburg-Trilling collapse, the equations' balance) and needs ccx and gmsh.
 """
-import ctypes, pathlib, re, shutil, signal, subprocess, tempfile
+import ctypes, math, pathlib, re, shutil, signal, subprocess, tempfile
 from typing import Any
 import numpy as np
 import trimesh
@@ -25,6 +26,15 @@ MATERIALS = {
     "pmma": dict(name="Acrylic (PMMA)", E=3.0e9, nu=0.37, rho=1190, yield_=70e6),
     "pom": dict(name="Acetal (POM)", E=3.1e9, nu=0.35, rho=1410, yield_=70e6),
 }
+
+
+def hull_elements_along() -> int:
+    """Elements along a pressure hull's length for a collapse-depth FEA: config/assumptions.yaml `stage3.fea_elements_along`, the one number the stage-3
+    window's FEA (`pipeline_windows._fea`) and the Hangar's hull case (`hangar.fea_cases`) both mesh by (round 15 M-14: they used L/20 and L/70 for one hull and
+    reported two collapse depths). Its mesh study is in the `why` there."""
+    import yaml
+    doc = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / "config" / "assumptions.yaml").read_text())
+    return int(doc["stage3.fea_elements_along"]["value"])
 
 
 def _gmsh():
@@ -148,6 +158,11 @@ def _mean_rigid_equations(r, mn, max_nodes=600):
     return out
 
 
+def _positive_finite(x: Any) -> bool:
+    """x is a real number (not a bool) above 0 and not infinite."""
+    return isinstance(x, (int, float, np.floating, np.integer)) and not isinstance(x, bool) and 0 < x < np.inf
+
+
 def solve(m: Any, structure: str, material: Any, thickness: Any = None, pressure: Any = None, point_loads: Any = (), steps: Any = ("static",),
           h: Any = None, workdir: Any = None, n_modes: int = 10, fixed: Any = None, body_accel: Any = None, density: Any = None) -> Any:
     """
@@ -161,10 +176,22 @@ def solve(m: Any, structure: str, material: Any, thickness: Any = None, pressure
     body_accel  [3] m/s^2 applied to all material (gravity, a hard landing, a lift at 2 g)
     density     overrides the material density (e.g. to make a hull skin carry the whole boat's mass)
 
+    A shell needs a finite positive `thickness`, and `body_accel` needs `fixed=` (a free body is balanced by inertia relief; ValueError before the mesher
+    runs). With "buckle" in `steps` the result has `buckling_factor` (the follower-pressure factor: the dead-load factor CalculiX gives, times
+    (n^2 - 1) / n^2 of the mode that sets it, n its lobe count read from the mode shape; see `_follower_buckling`), `buckling_lobes`,
+    `buckling_follower_correction`, `buckling_factor_dead_load` and the six lowest dead-load factors. The stress it reports is the 99th percentile
+    of the element von Mises stress (`vm_p99`); the largest element value is not reported, it is the mesh's.
+
     Meshing/expansion fallbacks, in order: curved quadratic elements with the wall inside the skin;
     straight-sided elements (curved ones fold on razor-thin regions); then, for shells, the wall at
     mid-surface and grown outward (inner skins of a knife-edge stem collide otherwise). The offset used is
     reported, because a wall moved outward changes the section."""
+    # refused before gmsh runs (minutes on a large hull), never as a TypeError from the f-string that writes the section, or as a load that is dropped
+    if structure == "shell" and not _positive_finite(thickness):
+        raise ValueError(f"a shell needs a wall thickness: a finite number of metres above 0, not {thickness!r}")
+    if body_accel is not None and fixed is None:
+        raise ValueError("body_accel needs fixed=: a free body is balanced by inertia relief and the d'Alembert loads of a body acceleration are not "
+                         "implemented, so the acceleration would be silently dropped")
     # CalculiX OFFSET +0.5 puts the wall INSIDE the reference surface (verified: a clamped tube with -0.5 is
     # exactly I_outside/I_inside = 1.46x too stiff). Meshes are outer skins, so the wall goes inside first.
     attempts = [(0.5, False), (0.5, True), (0.0, True), (-0.5, True)] if structure == "shell" else [(0.0, False), (0.0, True)]
@@ -295,7 +322,8 @@ def _solve(m, structure, material, thickness, pressure, point_loads, steps, h, w
     if "static" in steps:
         S = _el_stress(dat)
         vm = _mises(S)
-        out["vm_max"] = float(vm.max())
+        # no vm_max: the largest element value is set by the mesh, not the structure (163 MPa on a uniform sphere whose membrane stress is 25 MPa, round 15
+        # M-23); the 99th percentile is the stress every utilization uses (DECISIONS 730)
         out["vm_p99"] = float(np.percentile(vm, 99))
         out["safety_factor"] = mat["yield_"] / out["vm_p99"] if out["vm_p99"] > 0 else np.inf
         U, nodal_vm, Fn = _frd(work / "job.frd", nodes)
@@ -307,13 +335,12 @@ def _solve(m, structure, material, thickness, pressure, point_loads, steps, h, w
         out["field"] = dict(nodes=nodes, faces=el[:, :3] if structure == "shell" else _tet_boundary(el),
                             vm=nodal_vm, u=U)
     if "buckle" in steps:
-        pos = _buckling_factors(dat)
-        # CalculiX's linear buckling treats pressure as a dead load; sea pressure follows the surface, which
-        # lowers collapse by n^2/(n^2-1): 4/3 for the 2-lobe mode (verified: long tube 0.765 vs Bresse 0.546 MPa).
-        # Apply the conservative 3/4 to every result.
-        out["buckling_factor_dead_load"] = min(pos)
-        out["buckling_factors_dead_load"] = sorted(pos)[:6]
-        out["buckling_factor"] = 0.75 * min(pos)
+        pos = sorted(_buckling_factors(dat))
+        out["buckling_factor_dead_load"] = pos[0]
+        out["buckling_factors_dead_load"] = pos[:6]
+        # CalculiX's linear buckling treats the pressure as a dead load; sea pressure follows the surface (_follower_buckling)
+        out["buckling_factor"], out["buckling_lobes"], out["buckling_follower_correction"] = _follower_buckling(
+            work / "job.frd", nodes, el if structure == "shell" else None, pos)
     if "modes" in steps:
         fr = re.findall(r"^\s*\d+\s+[-\d.E+]+\s+[-\d.E+]+\s+([-\d.E+]+)\s+[-\d.E+]+\s*$",
                         dat.split("E I G E N V A L U E   O U T P U T")[-1].split("P A R T I C I P")[0], re.M)
@@ -333,6 +360,104 @@ def _buckling_factors(dat: str) -> list[float]:
         raise RuntimeError("CalculiX buckling step returned no positive eigenvalue (no buckling factor block in job.dat, or none above 0): "
                            "the hull's collapse is not known")
     return pos
+
+
+ISOTROPIC = 1.25            # largest over smallest principal extent of the nodes below which a hull has no long axis (a sphere)
+FOLLOWER_FLOOR = 0.75       # (n^2 - 1) / n^2 at n = 2, the least lobe count the ring formula holds for: the correction of the 2-lobe mode, and the fallback
+
+
+def follower_correction(n: int) -> float:
+    """Follower over dead-load buckling pressure of a ring or long tube in n circumferential lobes: (n^2 - 1) / n^2, 3/4 at n = 2, 8/9 at n = 3, near 1 for
+    the many lobes of a sphere. A pressure that stays normal to the deforming wall (the sea's) is less stiff against the mode than the fixed-direction load
+    CalculiX applies in a linear buckling step; the ratio is the one Bresse's n = 2 result (p = 2E/(1 - nu^2) (t/D)^3, hydrostatic) has to the dead-load
+    n = 2 result, 4/3. Verified on a long tube (FEA dead load 0.765 MPa against Bresse 0.546, ratio 1.40) and on a 3-lobe tube (round 15, reviewer C)."""
+    n = max(int(n), 2)
+    return (n * n - 1) / (n * n)
+
+
+def _frd_modes(path: pathlib.Path, nodes: Any, values: list[float]) -> dict[float, Any]:
+    """The displacement of the buckling modes of eigenvalue `values` from the ASCII .frd, mapped to the input nodes as `_frd` does (an expanded shell node
+    goes to the nearest input node, the displacements of those that share one are averaged). Each result block in the .frd carries its eigenvalue in
+    the `100CL` header line (the buckling step's zero-load base has 0; the static step's block, type 0, time 1, is never matched, so a mode of factor 1.0
+    is not read as the static displacement); a value is matched to the block whose header is within a part in 1e5 of it. A value with no block is left out."""
+    from scipy.spatial import cKDTree
+    xyz: dict[int, list[float]] = {}
+    blocks: list[tuple[float, dict[int, list[float]]]] = []
+    cur: Any = None
+    head = math.nan
+    for line in path.read_text().splitlines():
+        if line.startswith("  100CL"):
+            f = line.split()
+            head = math.nan if len(f) > 4 and f[4] == "0" else float(f[2])         # type 0 is the static step (time 1.0): a mode of factor 1.0 is not that block
+        elif line.startswith("    2C"):
+            cur = xyz
+        elif line.startswith(" -4"):
+            cur = None
+            if line.split()[1] == "DISP":
+                cur = {}
+                blocks.append((head, cur))
+        elif line.startswith(" -3"):
+            cur = None
+        elif line.startswith(" -1") and cur is not None:
+            cur[int(line[3:13])] = [float(line[13 + 12 * k: 25 + 12 * k]) for k in range((len(line) - 13) // 12)]
+    out: dict[float, Any] = {}
+    for v in values:
+        hit = [b for h, b in blocks if abs(h - v) <= 1e-5 * v]
+        if not hit:
+            continue
+        ids = np.array(sorted(hit[0]))
+        owner = cKDTree(nodes).query(np.array([xyz[i] for i in ids]))[1]
+        U = np.zeros((len(nodes), 3))
+        np.add.at(U, owner, np.array([hit[0][i][:3] for i in ids]))
+        out[v] = U / np.maximum(np.bincount(owner, minlength=len(nodes))[:, None], 1)
+    return out
+
+
+def lobe_count(nodes: Any, el: Any, u: Any) -> float:
+    """The lobe count of a shell's mode shape u (displacements at `nodes`; `el` the S6 elements, outward), from w, the displacement along the outward normal.
+    A body with a long axis (principal extents differing by more than ISOTROPIC): sqrt(integral of (dw/dtheta)^2 over the surface / integral of w^2), theta
+    the angle about the principal axis, so a mode cos(n theta) f(x) of a tube or an ellipsoid gives n. A body without one (a sphere): the whole
+    surface gradient, sqrt(integral |grad w|^2 / integral w^2) x sqrt(area / 4 pi), which is sqrt(l (l + 1)) for a spherical harmonic of degree l, since the
+    modes of a sphere are degenerate and their order about any chosen axis is arbitrary. The integrals are over the 4 corner triangles of each S6."""
+    tri = np.vstack([el[:, [0, 3, 5]], el[:, [3, 1, 4]], el[:, [5, 4, 2]], el[:, [3, 4, 5]]])
+    a, b, c = nodes[tri[:, 0]], nodes[tri[:, 1]], nodes[tri[:, 2]]
+    nn = np.cross(b - a, c - a)
+    area = np.linalg.norm(nn, axis=1) / 2
+    vn = np.zeros_like(nodes)
+    for k in range(3):
+        np.add.at(vn, tri[:, k], nn)
+    vn /= np.maximum(np.linalg.norm(vn, axis=1, keepdims=True), 1e-300)
+    w = np.einsum("ij,ij->i", u, vn)
+    ctr = ((a + b + c) / 3 * area[:, None]).sum(0) / area.sum()
+    sv, vt = np.linalg.svd(nodes - ctr, full_matrices=False)[1:]
+    wa, wb, wc = w[tri[:, 0]], w[tri[:, 1]], w[tri[:, 2]]
+    # P1 gradient of w on each triangle: ((wb - wa) (e2 x N) + (wc - wa) (N x e1)) / |N|^2
+    e1, e2 = b - a, c - a
+    grad = ((wb - wa)[:, None] * np.cross(e2, nn) + (wc - wa)[:, None] * np.cross(nn, e1)) / np.maximum((nn ** 2).sum(1), 1e-300)[:, None]
+    den = (area / 6 * (wa ** 2 + wb ** 2 + wc ** 2 + wa * wb + wb * wc + wc * wa)).sum()
+    if den <= 0:
+        return 0.0
+    if sv[0] < ISOTROPIC * sv[-1]:
+        return float(np.sqrt((area * (grad ** 2).sum(1)).sum() / den * area.sum() / (4 * np.pi)))
+    axis = vt[0]
+    p = (a + b + c) / 3 - ctr
+    r = p - np.einsum("ij,j->i", p, axis)[:, None] * axis                    # from the axis to the triangle; (axis x r) . grad w = dw/dtheta
+    dth = np.einsum("ij,ij->i", np.cross(axis, r), grad)
+    return float(np.sqrt((area * dth ** 2).sum() / den))
+
+
+def _follower_buckling(frd: pathlib.Path, nodes: Any, el: Any, pos: list[float]) -> tuple[float, Any, float]:
+    """(buckling factor of a pressure that follows the wall, the lobe count of the mode that sets it, the correction applied) from the dead-load factors
+    `pos` (ascending). A mode of n lobes is corrected by `follower_correction(n)`, so the factor is the least of correction x eigenvalue over the modes
+    that can set it (the correction is at least 3/4, so a mode above the lowest eigenvalue / 3/4 cannot); a mode's n is `lobe_count` of its shape rounded
+    to a whole number, at least 2. Without a shape (no .frd block for a mode, or a solid mesh) the correction is the 3/4 of the 2-lobe mode for all of
+    them: the conservative end, and the lobe count is None."""
+    cand = [v for v in pos if v * FOLLOWER_FLOOR <= pos[0]]
+    modes = _frd_modes(frd, nodes, cand) if el is not None and frd.exists() else {}
+    if len(modes) < len(cand):
+        return FOLLOWER_FLOOR * pos[0], None, FOLLOWER_FLOOR
+    best = min(((follower_correction(n) * v, n, follower_correction(n)) for v in cand for n in [int(round(lobe_count(nodes, el, modes[v])))]))
+    return best[0], max(best[1], 2), best[2]
 
 
 def _tet_boundary(el):
@@ -393,15 +518,14 @@ def _frd(path, nodes):
     return U / np.maximum(cnt, 1), vm, F
 
 
-if __name__ == "__main__":
-    import sys
+def selftest(workdir: Any = None) -> None:
     # Receipt 1: closed thin cylinder under external pressure -> hoop stress pR/t at mid-length,
     # and linear buckling pressure vs von Mises' formula (needs the research numbers; printed for now).
     R, t, Lc, p = 0.1, 0.003, 0.6, 1.0e6       # 1 MPa ~ 100 m depth
     cyl = trimesh.creation.cylinder(radius=R, height=Lc, sections=96)
     cyl.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0]))
     r = solve(cyl, "shell", "al6061", thickness=t, pressure=lambda c, n: np.full(len(c), p),
-              steps=("static", "buckle"), h=0.012, workdir=sys.argv[1] if len(sys.argv) > 1 else None)
+              steps=("static", "buckle"), h=0.012, workdir=workdir)
     f = r["field"]
     mid = (np.abs(f["nodes"][:, 0]) < 0.05) & (np.hypot(f["nodes"][:, 1], f["nodes"][:, 2]) > 0.98 * R)
     hoop = p * R / t
@@ -409,7 +533,8 @@ if __name__ == "__main__":
     # mid-length membrane state: hoop pR/t, axial pR/2t -> von Mises = sqrt(3)/2 * pR/t
     print(f"cyl: vm mid {vm_mid / 1e6:.2f} MPa vs membrane {np.sqrt(3) / 2 * hoop / 1e6:.2f} MPa; "
           f"radial disp inward? {np.median(np.einsum('ij,ij->i', f['u'][mid][:, 1:], f['nodes'][mid][:, 1:])) < 0}; "
-          f"buckling factor {r['buckling_factor']}; reaction {r['reaction']}; nodes {r['nodes']}")
+          f"buckling factor {r['buckling_factor']} ({r['buckling_lobes']} lobes); applied load {r['applied_force']}; nodes {r['nodes']}")
+    assert "reaction" not in r, "a free body has no supports, so no reaction"
     assert abs(vm_mid / (np.sqrt(3) / 2 * hoop) - 1) < 0.05, vm_mid
     assert np.median(np.einsum("ij,ij->i", f["u"][mid][:, 1:], f["nodes"][mid][:, 1:])) < 0, "pressure must push inward"
     # Windenburg-Trilling elastic collapse pressure of a finite cylinder between rigid-ish ends
@@ -417,5 +542,11 @@ if __name__ == "__main__":
     p_wt = 2.42 * E / (1 - nu ** 2) ** 0.75 * (t / D) ** 2.5 / (Lc / D - 0.45 * (t / D) ** 0.5)
     print(f"buckling: CalculiX {r['buckling_factor'] * p / 1e6:.3f} MPa vs Windenburg-Trilling {p_wt / 1e6:.3f} MPa")
     assert abs(r["buckling_factor"] * p / p_wt - 1) < 0.15
-    assert max(map(abs, r["reaction"])) < 1e-6 * p * np.pi * R ** 2, "inertia relief must leave ~0 reactions"
+    # the loads of a free body sum to nothing once the pressure is on the whole closed hull: no net force or moment is left to balance
+    assert np.abs(r["applied_force"]).max() < 1e-6 * p * np.pi * R ** 2 and np.abs(r["applied_moment"]).max() < 1e-6 * p * np.pi * R ** 3
     print("fea ok")
+
+
+if __name__ == "__main__":
+    import sys
+    selftest(sys.argv[1] if len(sys.argv) > 1 else None)

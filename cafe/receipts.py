@@ -477,8 +477,8 @@ def fea_receipts() -> None:
     E, nu, D = fea.MATERIALS["al6061"]["E"], fea.MATERIALS["al6061"]["nu"], 2 * R
     p_wt = 2.42 * E / (1 - nu ** 2) ** 0.75 * (t / D) ** 2.5 / (Lc / D - 0.45 * (t / D) ** 0.5)
     context("FEA", "Short capped cylinder collapse (flat 3 mm end caps)", r["buckling_factor"] * p / 1e6, p_wt / 1e6, "MPa",
-            "Windenburg-Trilling assumes simply supported ends; real caps restrain more, and the 3/4 follower "
-            "correction is conservative for this 4-lobe mode, so no clean reference")
+            "Windenburg-Trilling assumes simply supported ends; real caps restrain more, and the follower correction is that of the mode's own "
+            "lobe count ((n^2 - 1) / n^2, round 15 M-15), so no clean reference")
     # long tube: the 2-lobe collapse is end-condition free -> Bresse 2E/(1-nu^2)(t/D)^3 (hydrostatic, follower)
     tube = trimesh.creation.cylinder(radius=R, height=3.0, sections=64)
     tube.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0]))

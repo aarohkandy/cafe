@@ -13,6 +13,12 @@ the between-window spread is at least `between_window_frac` of the pooled value 
 (`discretisation_frac` of the pooled value: the larger of the assumed default and the finest stored sphere grid's distance to its
 Richardson extrapolation, nest.sphere_discretisation; a study can raise the floor, never lower it) is always added in
 quadrature. `refit(..., floor={})` pools without them.
+
+The between-window floor stops at two windows: DerSimonian-Laird has tau^2 = 0 in about 15 % (true between-window sd 5 times the standard error) to 34 %
+(2 times) of draws at k = 2, where it has least power (round 15 M-18, replicated on 20,000 draws), and in those draws sigma is the standard error and the
+discretisation floor alone: up to about 17 % (3 % at the smaller spread) short of the true spread, though over all draws the mean sigma is not short (0.0736
+against a true 0.0616, and 0.0548 against 0.0524). Three or more windows are not floored. A floor at k < 3 would widen every two-window multiplier spread
+and could move a GO/NO-GO near a threshold, so it is a stated limit (docs/PHYSICS.md), not a change.
 """
 from __future__ import annotations
 
@@ -25,6 +31,7 @@ from numpy.typing import ArrayLike
 from .. import budget
 
 MAX_ITER = 2
+SE_FLOOR = 1e-12        # the least standard error `pool` uses: a window of spread 0 has no error estimate (the free-surface row floors it too)
 
 
 def pool(means: ArrayLike, ses: ArrayLike) -> dict[str, float]:
@@ -32,8 +39,11 @@ def pool(means: ArrayLike, ses: ArrayLike) -> dict[str, float]:
     m, se = np.asarray(means, float), np.asarray(ses, float)
     if m.shape != se.shape or m.ndim != 1 or len(m) == 0:
         raise ValueError("means and ses must be 1-D arrays of equal, non-zero length")
-    if (se <= 0).any():
-        raise ValueError("standard errors must be positive")
+    if not (np.isfinite(m).all() and np.isfinite(se).all()):
+        raise ValueError("means and standard errors must be finite (a NaN is not 'not negative', and an infinite error is no estimate)")
+    if (se < 0).any():
+        raise ValueError("standard errors must not be negative")
+    se = np.maximum(se, SE_FLOOR)                                           # the one policy for a spread of exactly 0, for every caller (round 15 M-19)
     w = 1 / se ** 2
     fixed = (w * m).sum() / w.sum()
     k = len(m)
@@ -87,11 +97,11 @@ def refit(windows: list[dict[str, Any]], hangar: dict[str, Any] | None = None, f
     fl = default_floor() if floor is None else floor
     out: dict[str, dict[str, Any]] = {}
     if hangar is None:
-        out["drag"] = _multiplier([w["cd"] / w["cd_hangar"] for w in windows], [max(w["cd_spread"], 1e-12) / w["cd_hangar"] for w in windows],
+        out["drag"] = _multiplier([w["cd"] / w["cd_hangar"] for w in windows], [w["cd_spread"] / w["cd_hangar"] for w in windows],
                                   len(windows), fl)
         lw = [w for w in windows if w.get("cl_hangar")]
         if lw:
-            out["lift"] = _multiplier([w["cl"] / w["cl_hangar"] for w in lw], [max(w["cl_spread"], 1e-12) / abs(w["cl_hangar"]) for w in lw], len(lw), fl)
+            out["lift"] = _multiplier([w["cl"] / w["cl_hangar"] for w in lw], [w["cl_spread"] / abs(w["cl_hangar"]) for w in lw], len(lw), fl)
     else:
         cd = pool([w["cd"] for w in windows], [w["cd_spread"] for w in windows])
         h = hangar["cd"]
@@ -99,7 +109,7 @@ def refit(windows: list[dict[str, Any]], hangar: dict[str, Any] | None = None, f
         out["drag"] = dict(mean=cd["mean"] / h, **_sigma(cd["mean"] / h, cd["se"] / h, tau, cd["n"], fl), change_vs_hangar=cd["mean"] / h - 1, tau=tau,
                            windows=cd["n"])
         if hangar.get("cl") not in (None, 0):
-            cl = pool([w["cl"] for w in windows], [max(w["cl_spread"], 1e-12) for w in windows])
+            cl = pool([w["cl"] for w in windows], [w["cl_spread"] for w in windows])
             hl = hangar["cl"]
             tau = math.sqrt(cl["tau2"]) / abs(hl)
             out["lift"] = dict(mean=cl["mean"] / hl, **_sigma(cl["mean"] / hl, cl["se"] / abs(hl), tau, cl["n"], fl), change_vs_hangar=cl["mean"] / hl - 1,

@@ -11,7 +11,7 @@ which deliberately gives UMWM data the WW3 convention to show the receipts fail.
 """
 from __future__ import annotations
 
-import functools, os
+import functools, os, warnings
 from typing import Any
 
 import numpy as np
@@ -47,6 +47,20 @@ def wrap_about(deg: ArrayLike, centre: float) -> F:
     two. A value already within 180 of `centre` is returned unchanged (one addition of 0.0, no rounding)."""
     d = np.asarray(deg, np.float64)
     return d + 360.0 * np.round((centre - d) / 360.0)
+
+
+def lon_median(lon: ArrayLike, axis: int | None = None) -> F:
+    """Median of longitudes (degrees E) along `axis` that does not care where the antimeridian is: each slice is moved by multiples of 360 to its images
+    nearest the circular mean of its finite values, the median is taken there, and a result outside [-180, 180) is wrapped back in. A value of 179.99 and
+    one of -179.99 give 180 (-180 after the wrap), not the 0 of the raw median, which sits on the other side of the globe (round 15 M-20). A slice whose
+    values are all within 180 of each other and inside [-180, 180) comes back as the plain median, bit for bit. NaN is left out; an all-NaN slice gives NaN."""
+    a = np.asarray(lon, np.float64)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        rad = np.radians(a)
+        ref = np.degrees(np.arctan2(np.nanmean(np.sin(rad), axis=axis, keepdims=True), np.nanmean(np.cos(rad), axis=axis, keepdims=True)))
+        m = np.nanmedian(a + 360.0 * np.round((ref - a) / 360.0), axis=axis)         # `wrap_about` to the slice's own reference
+    return np.where((m < -180.0) | (m >= 180.0), np.mod(m + 180.0, 360.0) - 180.0, m)
 
 
 def vec_from_to(speed: ArrayLike, to_deg: ArrayLike) -> F:

@@ -2995,3 +2995,64 @@ def test_r13_sweep_a_cut_write_leaves_the_old_report_json(tmp_path, monkeypatch,
     with pytest.raises(OSError, match="killed"):
         report.write(tmp_path, {}, {})
     assert f.read_bytes() == before and not list(f.parent.glob("*.tmp"))
+
+
+# ---------------------------------------------------------------------------------------------------------------- round 15, batch B
+
+def test_r15_m11_a_glider_ordered_deeper_than_its_assumed_hull_collapses_gets_a_warning_beside_its_verdict_naming_both_depths():
+    """Round 15 M-11: glider_eq's MARGINAL (18 of 64 lose station) holds for a 950 m dive, and the pressure hull stage 3 assumes collapses at about 331 m
+    (QUESTIONS_FOR_LAB 4a); nothing connected the two. No cap and no change of verdict (the owner decides): a warning next to the verdict, from one function
+    (`glider.hull_collapse_depth_m`, a stored converged figure, no CalculiX), naming both depths; none when the order is within the collapse depth."""
+    from cafe.pm.physics import glider
+    a = budget.stage3_assumptions()
+    sg, sl = glider.load_platform("seaglider"), glider.load_platform("slocum")
+    c_sg, basis = glider.hull_collapse_depth_m(sg, a)
+    assert c_sg is not None and 300.0 < c_sg < 400.0 and basis == "ellipsoid 1.8 x 0.3 m, 0.008 m al6061"
+    w = report._hull_warning(dict(id="g", platform="seaglider", task=dict(dive_depth_m=950.0)))
+    assert w is not None and "950 m" in w and f"{c_sg:g} m" in w and "QUESTIONS_FOR_LAB 4a" in w and "not capped or changed" in w and "1000 m" in w
+    assert report._hull_warning(dict(id="g", platform="seaglider", task=dict(dive_depth_m=c_sg - 1.0))) is None      # within it: nothing to say
+    assert "1000 m" in report._hull_warning(dict(id="g", platform="seaglider", task=dict(dive_depth_m=1500.0))) and "ordered dive depth (1000 m)" in \
+        report._hull_warning(dict(id="g", platform="seaglider", task=dict(dive_depth_m=1500.0)))                            # the model flies min(order, rating)
+    c_sl = glider.hull_collapse_depth_m(sl, a)[0]
+    assert c_sl is not None and (report._hull_warning(dict(id="s", platform="slocum", task=dict(dive_depth_m=c_sl + 5.0))) is not None)
+    assert report._hull_warning(dict(id="s", platform="slocum", task=dict(dive_depth_m=c_sl - 5.0))) is None
+
+
+def test_r15_m11_a_stored_collapse_depth_is_not_applied_to_a_hull_it_was_not_computed_for(monkeypatch):
+    """The figure is for one hull (written beside it); when the assumed wall, diameter or material changes, the report says it did not check, not 'fine'."""
+    from cafe.pm.physics import glider
+    real = budget.stage3_assumptions()
+    monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(real, **{"glider.hull_thickness_m": 0.009}))
+    c, why = glider.hull_collapse_depth_m(glider.load_platform("seaglider"), budget.stage3_assumptions())
+    assert c is None and "re-run the hull study" in why and "0.008 m al6061" in why
+    w = report._hull_warning(dict(id="g", platform="seaglider", task=dict(dive_depth_m=950.0)))
+    assert w is not None and "was not checked" in w and "re-run the hull study" in w
+
+
+def test_r15_m11_the_demo_reports_show_the_warning_on_glider_eq_and_the_html_carries_it(full):
+    from cafe.pm.physics import glider
+    run, m, plan, paths, rep = full
+    ordered = {v["id"]: v.get("task", {}).get("dive_depth_m") for v in m["vehicles"]}
+    c = glider.hull_collapse_depth_m(glider.load_platform("seaglider"), budget.stage3_assumptions())[0]
+    assert c is not None and ordered["glider_eq"] > c
+    w = rep["vehicles"]["glider_eq"]["hull_warning"]
+    assert w and f"{ordered['glider_eq']:g} m" in w and f"{c:g} m" in w
+    assert rep["vehicles"]["usv"]["hull_warning"] is None and rep["vehicles"]["uas"]["hull_warning"] is None
+    assert w in plain((run / "report" / "index.html").read_text())                             # beside the verdict, not only in the json
+
+
+def test_r15_m13_the_report_says_the_uas_levels_are_heights_above_the_deck_and_gives_the_heights_above_the_sea(full):
+    """Round 15 M-13: altitudes_m 10, 30, 60, 100 are flown at 18, 38, 68, 108 m above the sea (deck 8 m); the schema and the report said metres, nothing
+    more. No number moves: the sentence only says what the code does (PHYSICS 11: z = deck height + the altitude)."""
+    run, m, plan, paths, rep = full
+    n = rep["vehicles"]["uas"]["uas_levels_note"]
+    assert "10, 30, 60, 100 m on a 8 m deck" in n and "18, 38, 68, 108 m above the sea" in n
+    assert n in plain((run / "report" / "index.html").read_text())
+    assert rep["vehicles"]["glider_eq"]["uas_levels_note"] is None
+    def find(o, key):
+        if isinstance(o, dict):
+            return o[key] if key in o else next((r for r in (find(v, key) for v in o.values()) if r is not None), None)
+        return next((r for r in (find(v, key) for v in o) if r is not None), None) if isinstance(o, list) else None
+    import pathlib
+    alt = find(json.loads((pathlib.Path(config.__file__).parents[1] / "schemas" / "mission.json").read_text()), "altitudes_m")["description"]
+    assert "ABOVE THE DECK" in alt and "deck_height_m" in alt

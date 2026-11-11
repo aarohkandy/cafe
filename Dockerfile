@@ -11,4 +11,5 @@ ENV PATH=/venv/bin:$PATH PYTHONUNBUFFERED=1
 ENTRYPOINT []
 WORKDIR /app
 COPY cafe /app/cafe
+COPY config /app/config
 CMD ["uvicorn", "cafe.app:app", "--host", "0.0.0.0", "--port", "8000"]

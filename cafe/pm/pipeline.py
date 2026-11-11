@@ -1348,7 +1348,7 @@ def s_windows(ctx: Context, L: Ledger) -> None:
             warnings.simplefilter("ignore", RuntimeWarning)
             # the failure instants of the selected members
             failed_at = sorted(float(x) for x in np.nanmin(first, 0)[f] if np.isfinite(x)) if f.any() else []
-        out[vid] = [dict(t=float(t[i]), stress=float(worst[i]), lon=float(np.nanmedian(lon_ok[i])), lat=float(np.nanmedian(lat_ok[i])),
+        out[vid] = [dict(t=float(t[i]), stress=float(worst[i]), lon=float(cv.lon_median(lon_ok[i])), lat=float(np.nanmedian(lat_ok[i])),
                          basis=BASIS[bool(f.any())], criterion=CRITERION[r["class"]], records=records, failed_at=failed_at) for i in idx]
         problems += [f"{vid}: {p}" for p in window_problems(t, worst, out[vid], K)]
     L.check("every_vehicle_has_a_window", all(out.values()), value=sum(map(len, out.values())))

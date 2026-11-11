@@ -31,7 +31,7 @@ import pickle
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -457,6 +457,45 @@ def _overdepth_note(v: dict[str, Any], r: dict[str, Any] | None) -> str:
     return text + "; this is the vehicle's own overshoot at that order, not a fault of the mission of another kind"
 
 
+def _hull_warning(v: dict[str, Any]) -> str | None:
+    """Round 15 M-11: the glider's verdict assumes it dives to the ordered depth (the order, or the platform's rating when that is shallower: what the
+    model flies), and the pressure hull stage 3 assumes (Al 6061, 8 mm, QUESTIONS_FOR_LAB 4a) collapses shallower than that by the model's own rule
+    (`glider.hull_collapse_depth_m`, the stored converged figure, computed on a machine with no CalculiX). The verdict is not changed or capped; the
+    warning names both depths. None when the order is within the collapse depth; a sentence saying so when the stored figure is for another hull."""
+    from cafe import hangar
+    from . import budget
+    from .physics import glider
+    try:
+        P = glider.load_platform(v["platform"])
+        collapse, basis = glider.hull_collapse_depth_m(P, budget.stage3_assumptions())
+        ordered = min(_dive_depth(v), float(P["rating_m"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if collapse is None:
+        return f"The collapse depth of the assumed pressure hull was not checked against the ordered dive depth ({ordered:g} m): {basis}."
+    if ordered <= collapse:
+        return None
+    return (f"The ordered dive depth ({ordered:g} m) is deeper than the collapse depth of the pressure hull the model assumes ({collapse:g} m: {basis}, by "
+            f"the Hangar's rule: linear buckling factor with the follower-pressure correction x the knock-down {hangar.KNOCKDOWN:g}, on the converged mesh). "
+            f"The verdict above assumes the glider dives to {ordered:g} m and is not capped or changed by this; a hull that collapses at {collapse:g} m "
+            f"could not fly it. The hull is an assumption (QUESTIONS_FOR_LAB 4a): the rated depth of the real vehicle is {P['rating_m']:g} m.")
+
+
+def _uas_levels_note(v: dict[str, Any]) -> str | None:
+    """Round 15 M-13: the flux-profile levels of the mission are heights above the deck, so they are flown at the deck height more above the sea."""
+    from .physics import uas
+    try:
+        P = uas.load_platform(v["platform"])
+        levels = [float(a) for a in (v.get("sorties") or {}).get("altitudes_m", P["sortie"]["levels_m"])]
+        deck = float(P["sortie"]["deck_height_m"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    def f(xs: Iterable[float]) -> str:
+        return ", ".join(f"{x:g}" for x in xs)
+    return (f"The flux-profile levels are heights above the deck ({f(levels)} m on a {deck:g} m deck, platform sortie.deck_height_m), so the legs are flown at "
+            f"{f(x + deck for x in levels)} m above the sea; the wind, the radio antenna height and the turbulence box are taken there.")
+
+
 def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[str, Any], src: str, overdepth: str | None = None) -> dict[str, Any]:
     """What drives a vehicle's failures: the mode of the first failure (from res.pkl, None without it) and each mode's share of the failed members."""
     k = e["k_fail"]
@@ -508,6 +547,8 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         fix=_fix(flip, vid, tr), physics=tr.physics(e["cls"]), cases=_cases(tr, vid, e["n"]),
                         **_drivers(e, res, vid, ref, src, _overdepth_note(veh[vid], ((res or {}).get("vehicles") or {}).get(vid))
                                    if e["cls"] == "glider" and "overdepth" in e["modes"] else None),
+                        hull_warning=_hull_warning(veh[vid]) if e["cls"] == "glider" else None,
+                        uas_levels_note=_uas_levels_note(veh[vid]) if e["cls"] == "uas" else None,
                         speed_ratio=_speed_ratio(e, ref, src),
                         wind3d=_opt(e.get("wind3d_fraction"), "fraction of the sortie records", ref, src + ".wind3d_fraction"),
                         authority=_authority(e.get("authority"), ref, src + ".authority"),
@@ -1390,6 +1431,12 @@ def _task_html(v: dict[str, Any]) -> str:
     return out
 
 
+def _notes_html(v: dict[str, Any]) -> str:
+    """A glider's hull warning (beside its verdict) and a UAS's level heights; each absent for a vehicle that has none."""
+    out = f"<p class=warn>{html.escape(v['hull_warning'])}</p>" if v.get("hull_warning") else ""
+    return out + (f"<p class=muted>{html.escape(v['uas_levels_note'])}</p>" if v.get("uas_levels_note") else "")
+
+
 def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     e = html.escape
     modes = ", ".join(f"{e(k)}: {_n(n)}" for k, n in v["modes"].items()) or "none"
@@ -1401,7 +1448,7 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
             f"<p>Dominant failure mode: <b>{e('none (no member failed)' if v['dominant_mode'] is None else str(v['dominant_mode']))}</b> "
             f"(all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
-            f"{_task_html(v)}{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}"
+            f"{_task_html(v)}{_notes_html(v)}{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}"
             f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'], v['sensitivity'].get('quantity'))}{_fix_html(v['fix'])}"
             f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} (assumed platform values), listed in the "
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")

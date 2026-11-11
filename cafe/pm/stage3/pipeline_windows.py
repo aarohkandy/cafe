@@ -65,6 +65,7 @@ import jax.numpy as jnp
 from numpy.typing import NDArray
 
 from .. import budget, config
+from ..env import conventions as cv
 from ..physics import glider, uas, usv
 from . import fluidx3d, freesurface, lbm, windows as W
 
@@ -123,8 +124,8 @@ def track_heading(res: dict[str, Any] | None, vid: str, t: float) -> float | Non
         return None
     r = res["vehicles"][vid]
     tt = np.asarray(r["t"], float)
-    with np.errstate(all="ignore"):
-        lon, lat = np.nanmedian(np.asarray(r["lon"], float), 1), np.nanmedian(np.asarray(r["lat"], float), 1)
+    with np.errstate(all="ignore"):                                          # (longitude about its circular mean: members either side of the dateline)
+        lon, lat = cv.lon_median(np.asarray(r["lon"], float), 1), np.nanmedian(np.asarray(r["lat"], float), 1)
     i = int(np.argmin(np.abs(tt - t)))
     j0, j1 = max(i - 1, 0), min(i + 1, len(tt) - 1)
     if j0 == j1 or not np.isfinite([lon[j0], lon[j1], lat[j0], lat[j1]]).all():
@@ -307,15 +308,11 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
 
 
 def uas_leg_speed(wind: NDArray[np.float64], heading_unit: NDArray[np.float64], leg: float, v_max: float) -> float | None:
-    """The largest ground speed s in [0, leg] along `heading_unit` for which the air relative to the airframe, |wind - s h|, stays within
-    `v_max`; None when no such speed exists (the wind alone, or the wind across the heading, is beyond the envelope). |w - s h|^2 <= v^2 is
-    (s - w.h)^2 <= v^2 - |w|^2 + (w.h)^2, an interval around w.h."""
-    wh = float(wind @ heading_unit)
-    d2 = v_max ** 2 - float(wind @ wind) + wh ** 2
-    if d2 < 0.0:
-        return None
-    lo, hi = max(wh - math.sqrt(d2), 0.0), min(wh + math.sqrt(d2), leg)
-    return None if lo > hi else hi
+    """The largest ground speed s in [0, leg] along `heading_unit` for which the air relative to the airframe, |wind - s h|, stays within `v_max`; None when
+    no such speed exists (the wind alone, or the wind across the heading, is beyond the envelope). The rule is `uas.leg_speed`, the one stage 1's sortie
+    flies by too (round 15 M-10)."""
+    s, ok = uas.leg_speed(np.asarray(wind, float), np.asarray(heading_unit, float), leg, v_max)
+    return float(s) if ok else None
 
 
 def uas_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle, a: dict[str, Any], heading: float | None) -> dict[str, Any]:
@@ -330,7 +327,7 @@ def uas_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
     if heading is None:                                                     # into the wind: the relative flow is then along the body axis
         heading = (compass(-wind[0], -wind[1]) if np.hypot(*wind) > 1e-6 else 0.0)
     dx = P["aero"]["d_x"]
-    v_max = min(P["limits"]["max_airspeed_ms"], G * math.tan(math.radians(P["limits"]["max_tilt_deg"])) / dx)
+    v_max = uas.airspeed_envelope(P["limits"], dx)
     hv = np.array([math.sin(math.radians(heading)), math.cos(math.radians(heading))])
     nominal = P["sortie"]["leg_speed_ms"]
     leg = uas_leg_speed(wind, hv, nominal, v_max)
@@ -424,14 +421,17 @@ def _fea(veh: W.Vehicle, r: dict[str, Any], a: dict[str, Any], timeout_s: float 
         job, out = pathlib.Path(wd) / "job.npz", pathlib.Path(wd) / "out.json"
         np.savez(job, vehicle=json.dumps(dataclasses.asdict(veh), default=float), points=r["wall_points"], pressure=r["wall_pressure"],
                  h=veh.length / need(a, "fea_elements_along"))
+        started = time.perf_counter()
         try:
             p = _spawn([sys.executable, "-m", __name__, "--fea", "-" if timeout_s is None else str(time.time() + timeout_s), str(job), str(out)],
                        capture_output=True, text=True, timeout=None if timeout_s is None else timeout_s + FS_GRACE_S, start_new_session=True,
                        env={**os.environ, "TMPDIR": wd}, cwd=str(pathlib.Path(__file__).resolve().parents[3]))
         except subprocess.TimeoutExpired:
             return killed
-        if p.returncode == -9:                                              # its watchdog at the deadline (the free-surface child reads -9 the same way)
+        if _killed_at_deadline(p.returncode, timeout_s, started):            # its watchdog at the deadline (the free-surface child reads -9 the same way)
             return killed
+        if p.returncode == -9:
+            return dict(run=False, reason="FEA killed by SIGKILL before its deadline (" + SIGKILL_EARLY + "): it did not finish")
         if p.returncode or not out.exists():
             return dict(run=False, reason=f"FEA failed: {(p.stderr.strip().splitlines() or ['no message'])[-1][:200]}")
         return dict(run=True, seconds=time.perf_counter() - t0, **json.loads(out.read_text()))
@@ -564,7 +564,9 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     speed = float(np.linalg.norm(vb))
     _describe(base, veh, case, vb, heading, hsrc)
     plan_cs = sizes["cell_steps_per_part"][cls]
-    fea_s = need(a, "fea_reserve_frac") * win_s if (win_s is not None and veh.extra.get("fea")) else 0.0
+    # the FEA's reserve is held back from the LES kill only when the FEA is planned to run (sizes["fea"]["runs"], the plan's own fact, below): a planned-out
+    # FEA leaves its quarter of the slice to the LES window (round 15 M-24). budget.py:186 keeps the reserve in the cell-step sizing, the plan's declared basis.
+    fea_s = need(a, "fea_reserve_frac") * win_s if (win_s is not None and veh.extra.get("fea") and sizes["fea"]["runs"]) else 0.0
     run_s = None if win_s is None else win_s - fea_s                      # the LES run's safety kill, not its size
     try:
         fit = fit_window(veh, speed, plan_cs, a, les.get("max_cells"))
@@ -635,6 +637,15 @@ FS_GRACE_S = 30.0                                                           # ho
 PARTS = budget.STAGE3_PARTS                                                 # the native-LBM parts, one budget slice each
 FS_PARTS = budget.FS_PARTS                                                  # the free-surface part: child process, own budget
 
+SIGKILL_EARLY = "out of memory or an outside kill, not the watchdog"       # what a -9 before the deadline is (round 15 M-21)
+
+
+def _killed_at_deadline(rc: int, armed_s: float | None, started: float) -> bool:
+    """A child's exit code -9 is its own watchdog's kill only if the watchdog's time had come: `armed_s` seconds after `started` (time.perf_counter(); None:
+    no watchdog was armed), less 1 s of timer skew. Before it, the -9 is the kernel's OOM killer's or somebody's `kill -9` (round 15 M-21). The one rule
+    of the FEA child (`_fea`) and the free-surface child (`_fs_work`)."""
+    return rc == -9 and armed_s is not None and time.perf_counter() - started >= armed_s - 1.0
+
 
 def _fs_fail(base: dict[str, Any], msg: str, t0: float, **extra: Any) -> dict[str, Any]:
     return dict(base, error=msg[:600], reasons=[msg[:600]], timing=dict(wall_s=time.perf_counter() - t0), **extra)
@@ -680,6 +691,7 @@ def _fs_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: 
             return _fs_fail(base, "free-surface window killed before it started: the stage-3 wall-clock share was spent before its turn came", t0)
         job.write_text(json.dumps(dict(stl=str(pathlib.Path(jobdir) / "hull.stl"), draft=geo["draft"], speeds=[speed], config=cfg,
                                        vehicle=dataclasses.asdict(veh) if fluidx3d.available(cfg)[0] else None), default=float))
+        started = time.perf_counter()
         try:
             p = _spawn([sys.executable, "-m", "cafe.pm.stage3.freesurface", str(job), str(out), str(1e9 if left is None else left)],
                        capture_output=True, text=True, timeout=None if left is None else left + FS_GRACE_S, start_new_session=True,
@@ -687,7 +699,9 @@ def _fs_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: 
         except subprocess.TimeoutExpired:
             return _fs_fail(base, f"free-surface run killed at its deadline after {time.perf_counter() - t0:.0f} s: it did not finish inside the share", t0)
         if p.returncode or not out.exists():
-            how = "killed by its watchdog at the deadline" if p.returncode == -9 else (p.stderr.strip().splitlines() or ["no message"])[-1][:300]
+            how = ("killed by its watchdog at the deadline" if _killed_at_deadline(p.returncode, left, started) else
+                   "killed by SIGKILL before its deadline (" + SIGKILL_EARLY + ")" if p.returncode == -9 else
+                   (p.stderr.strip().splitlines() or ["no message"])[-1][:300])
             return _fs_fail(base, f"free-surface run failed ({p.returncode}): {how}", t0)
         r = json.loads(out.read_text())
         r["speeds"] = {float(k): v for k, v in r["speeds"].items()}
