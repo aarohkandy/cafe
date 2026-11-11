@@ -116,6 +116,10 @@ def real_twins(data, tmp_path_factory):
         mp.setattr(budget, "plan", small_budget(budget.plan))
         mp.setitem(budget.BUDGET_S, "ci", 6000)
         mp.setattr(budget, "lbm_rate", lambda thr, gpus: (2000.0, "xlb-jax-cpu", "test: a rate low enough for toy windows"))
+        # round 15 (M-14): the shipped hull mesh is L/70 and its FEA floor 641.1 s; the twins run the L/20 hull and its 68.2 s floor as before,
+        # so the real FEA child still runs twice
+        real = budget.stage3_assumptions()
+        mp.setattr(budget, "stage3_assumptions", lambda: dict(real, fea_elements_along=20, fea_min_s=68.2))
         mp.setitem(sys.modules, "cafe.pm.stage3.pipeline_windows", real_windows)                  # whatever another module left in its place
         mp.setattr(stage3_pkg, "pipeline_windows", real_windows)
         return make_twins(tmp_path_factory.mktemp("real_twin"))
