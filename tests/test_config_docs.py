@@ -506,7 +506,11 @@ def test_r13_m38_the_questions_and_the_status_say_what_the_stored_fea_utilizatio
     """Round 13 M-38: the stage-3 FEA stores the larger of the von Mises and the knocked-down buckling utilization (hangar.KNOCKDOWN 0.5)."""
     assert "KNOCKDOWN = 0.5" in text("cafe", "hangar.py")
     q = flat(text("QUESTIONS_FOR_LAB.md"))
-    assert "4a. **The default glider hull" in q and "0.367" in q and "0.687" in q and "1.374" in q
+    mesh = config.assumptions()["stage3.fea_elements_along"]["value"]
+    study = next(r for r in json.loads(text("config", "fea_hull_mesh_study.json"))["rows"] if r["n"] == mesh)
+    stress, linear, knocked = f"{study['stress_utilization']:.3f}", f"{1 / study['buckling_factor']:.3f}", f"{study['buckling_utilization']:.3f}"
+    # round 15 M-14: the numbers are those of the converged mesh in the stored study (0.367, 0.687 and 1.374 were the L/20 mesh's)
+    assert "4a. **The default glider hull" in q and stress in q and linear in q and knocked in q
     assert "*Default:*" in q.split("4a. **The default glider hull")[1]
     st = flat(text("STATUS.md"))
     assert "knocked-down buckling" in st and "wing and arm root" in st
@@ -639,3 +643,25 @@ def test_r15_m14_the_app_image_copies_every_top_level_directory_the_app_modules_
     assert {"config"} <= read                                    # the readers above are found, so the scan cannot pass by finding nothing
     copied = set(re.findall(r"^COPY\s+(\w+)\s+/app/\1\s*$", text("Dockerfile"), re.M))
     assert read <= copied, f"read by cafe/*.py but not COPY'd into /app: {sorted(read - copied)}"
+
+
+def test_r15_m26_physics_has_a_hull_fea_section_and_the_documents_quote_the_stored_collapse_depths():
+    """Round 15 M-26 (and M-12, M-22, M-14): the equations of the hull FEA lived only in code comments. PHYSICS 14.4.1 names them; the collapse depths and
+    the floor it and QUESTIONS_FOR_LAB 4a quote are the values of config/assumptions.yaml, so a re-run study that moves them fails here until the text
+    follows."""
+    a = config.assumptions()
+    phys = flat(text("docs", "PHYSICS.md"))
+    assert "14.4.1 Hull FEA" in phys
+    sec = phys[phys.index("14.4.1 Hull FEA"):phys.index("### 14.5")]
+    for term in ("mean rigid motion", "OFFSET", "p99", "(n^2 - 1) / n^2", "Bresse", "von Mises", "Zoelly", "Windenburg-Trilling", "KNOCKDOWN",
+                 "inertia relief"):
+        assert term in sec, term
+    glider, slocum = a["stage3.glider.hull_collapse_depth_m"]["value"], a["stage3.slocum.hull_collapse_depth_m"]["value"]
+    qfl = flat(text("QUESTIONS_FOR_LAB.md"))
+    assert f"{glider} m" in sec and f"{slocum} m" in sec and f"{glider} m" in qfl
+    assert f"`stage3.fea_elements_along` ({a['stage3.fea_elements_along']['value']}" in sec
+    assert f"`stage3.fea_min_s` is {a['stage3.fea_min_s']['value']} s" in phys
+    assert "L/20" in qfl
+    # the two no-code findings are one sentence each
+    assert "cross-track current" in phys and "becalmed" in phys.split("cross-track current")[0][-600:]
+    assert "mean wall-cell density" in phys and "rho = 1" in phys[phys.index("mean wall-cell density"):][:900]
