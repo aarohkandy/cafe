@@ -7,6 +7,7 @@ to `ci`, runs go through `cli.main` in this process instead of a child process, 
 """
 import contextlib
 import copy
+import errno
 import json
 import os
 import pathlib
@@ -526,6 +527,26 @@ def test_r14_m2_a_directory_that_can_be_written_but_not_searched_refuses_a_golde
         assert "cannot be written" in acc.golden_refusal(w / "g.json", "m")
     finally:
         w.chmod(0o700)
+
+
+def test_r14_m2_a_stat_fault_that_is_neither_absent_nor_denied_propagates_from_the_golden_probe(tmp_path, monkeypatch):
+    """Round 14 gate: `_probe` names ENOENT, ENOTDIR, ELOOP and EBADF absent and EACCES and EPERM denied; any other error (here EIO, a disk fault) is a real
+    fault and propagates. Reading it as absent would let `--update-golden` write over a file it could not look at."""
+    g = tmp_path / "g.json"
+    g.write_text("{}")
+    real = os.stat
+
+    def stat(path, *a, **k):
+        if os.fspath(path) == str(g):
+            raise OSError(errno.EIO, "Input/output error")
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(os, "stat", stat)
+    with pytest.raises(OSError) as e:
+        acc._probe(g)
+    assert e.value.errno == errno.EIO
+    monkeypatch.undo()
+    assert acc._probe(g) == "file" and acc._probe(tmp_path) == "dir" and acc._probe(tmp_path / "gone") == "absent"
 
 
 def test_every_run_gets_its_own_copy_of_the_pristine_emulator_table(tmp_path, monkeypatch):
