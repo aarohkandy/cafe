@@ -326,9 +326,9 @@ stage3.fea_reserve_frac:
   why: "Share of a glider window's wall-clock slice held back for its FEA."
   replace_with: "Measured FEA time of the pressure hull at the mesh size used."
 stage3.fea_min_s:
-  value: 68.2
+  value: 641.1
   unit: "s"
-  why: "Least FEA reserve (stage3.fea_reserve_frac of a slice) at which the FEA of the pressure hull is planned to run at all. It prices the whole FEA child (gmsh + ccx on a shell mesh, the static solve AND the eigenvalue buckling step that stage3/pipeline_windows.py _fea_child turns on, which is killed at its deadline): measured once on the default Seaglider hull (ellipsoid 1.8 m x 0.15 m, 7 mm Al, h = L/20, 1408 elements) at 68.2 s, of which the static solve alone is about 26 s (cafe-orca, proot, 2 CPUs, shared and loaded; review/orca/PROBLEMS.md P-R13E1). The earlier 8 s priced no run of either kind, so a window with 8 s to 66 s of reserve was planned as running and then reported killed."
+  why: "Least FEA reserve (stage3.fea_reserve_frac of a slice) at which the FEA of the pressure hull is planned to run at all. It prices the whole FEA child (gmsh + ccx on a shell mesh, the static solve AND the eigenvalue buckling step that stage3/pipeline_windows.py _fea_child turns on, which is killed at its deadline): measured on the default Seaglider hull (ellipsoid 1.8 m long, 0.30 m diameter, i.e. semi-axes 0.9 and 0.15 m, 8 mm Al6061, h = L/70 = stage3.fea_elements_along, 5,546 elements) at 641.1 s for the whole child (cafe-orca, proot, 2 CPUs, shared and loaded; the fea_window alone took 584 to 654 s in the mesh study, config/fea_hull_mesh_study.json). The earlier 68.2 s was the same hull at h = L/20 (1,408 elements; review/orca/PROBLEMS.md P-R13E1) and went with that mesh; between L/30 (68 s) and L/45 (555 s) the cost jumps eightfold for 1.75 times the elements (P-R15BB1). A window with less reserve than this is planned out, not started and killed; a slice of four times this (fea_reserve_frac is 0.25) runs it."
   replace_with: "Measured FEA time (static plus buckling) of the run's own hull, mesh size and machine; or a plan that prices the FEA in seconds as it prices the LES."
 stage3.chunk_steps:
   value: 100

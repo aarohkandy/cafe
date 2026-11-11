@@ -738,6 +738,12 @@ def test_r15_m10_a_leg_into_a_wind_inside_the_envelope_is_flown_at_the_speed_the
     r = fly(wind=(9.0, 0.0), plat=plat, M=1)
     assert r["sat_s"][0] < 30.0 and r["demand_ratio_max"][0] < 3.0 and not r["flags"]["attitude_exceedance"][0]
     assert not r["flags"]["wind_exceeds_airspeed"][0]
+    # the flag and the rule agree: where the rule has a ground speed (11 m/s: 1 m/s of it) the airframe makes headway and the flag stays down; where it has none
+    # (13 m/s, beyond the envelope) the command stays and the airframe makes none
+    west = np.array([-1.0, 0.0])
+    assert uas.leg_speed(np.array([11.0, 0.0]), west, 8.0, 12.0)[1] and not uas.leg_speed(np.array([13.0, 0.0]), west, 8.0, 12.0)[1]
+    assert not fly(wind=(11.0, 0.0), plat=plat, M=1)["flags"]["wind_exceeds_airspeed"][0]
+    assert fly(wind=(13.0, 0.0), plat=plat, M=1)["flags"]["wind_exceeds_airspeed"][0]
 
 
 # ------------------------------------------------------------------------------------------------ review round 3

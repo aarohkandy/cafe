@@ -530,7 +530,7 @@ def test_r14_m15_the_makefile_and_the_runbook_say_that_make_ci_plans_the_glider_
     """Round 14, M-15: under `--budget ci` the glider FEA reserve is 9.0 s, under `stage3.fea_min_s`, so `make ci` does not reach the FEA child (the budget
     test `test_r14_m15_*` pins the plan); the Makefile and RUNBOOK 2 said 'every stage' with no exception."""
     floor = config.assumptions()["stage3.fea_min_s"]["value"]
-    assert floor == 68.2
+    assert floor == 641.1                                  # round 15 M-14: the child at L/70 (68.2 s was L/20); RUNBOOK and row 776 carry it (batch D)
     ci_line = next(line for line in text("Makefile").splitlines() if line.startswith("ci:") and "##" in line)
     assert "the glider FEA is planned out" in ci_line and "stage3.fea_min_s" in ci_line
     rb = flat(text("docs", "RUNBOOK.md"))
