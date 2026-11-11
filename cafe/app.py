@@ -368,9 +368,16 @@ def reach_map(design: str, lat: float, lon: float, t: str, hours: float = 24, z:
         raise HTTPException(400, str(e))
     out["sources"] = E.sources
     out["hours"] = nan2none(out["hours"])
+    warn = []
     if E.frozen:
-        out["warning"] = (f"the weather files hold one snapshot ({E.data_time:%Y-%m-%d %H:%M} UTC); it is held fixed "
-                          f"for all {hours:g} h, so treat long-range answers as rough")
+        warn.append(f"the weather files hold one snapshot ({E.data_time:%Y-%m-%d %H:%M} UTC); it is held fixed "
+                    f"for all {hours:g} h, so treat long-range answers as rough")
+    if out["outside_cells"]:
+        b = out["weather_box"]
+        warn.append(f"the loaded weather covers {b[0]:.1f} to {b[1]:.1f} N and {b[2]:.1f} to {b[3]:.1f} E; the {out['outside_cells']} grid cells beyond it "
+                    f"are shown as out of reach ('outside weather data'), not guessed from the edge")
+    if warn:
+        out["warning"] = "; ".join(warn)
     return out
 
 

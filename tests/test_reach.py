@@ -298,3 +298,176 @@ def test_one_cell_diagonal_wall_blocks_corner_cuts():
     t = reach._dijkstra(np.zeros((n, n, 2)), land, 1.0, 100.0, 1e9)
     i, j = np.indices((n, n))
     assert not np.isfinite(t[i + j > n + 3]).any()
+
+
+# ------------------------------------------------------------------ round 15, batch C: M-32 (why), M-34 (budget), M-35 (weather box), M-39 (rules)
+
+class UniformEnv:
+    """A uniform current (north, east) with an optional weather box (lat range, lon360 range) like cafe.env.Env's `lat` and `lon`, and optional land cells."""
+    def __init__(self, lat0, lon0, c=(0.0, 0.0), box=None, land=None):
+        self.fr, self.c, self.land = Frame(lat0, lon0), np.array(c, float), land
+        if box:
+            self.lat, self.lon = np.array(box[0], float), np.array(box[1], float) % 360.0
+
+    def at(self, lat, lon, t, z):
+        n = len(lat)
+        cur = np.tile(self.c, (n, 1))
+        return dict(current_ne=cur, wind_ne=cur, land=np.zeros(n, bool) if self.land is None else self.land(*self.fr.to_ne(lat, lon)))
+
+
+def fast_usv(**kw):
+    return NS(kind="usv", battery_wh=1e9, hotel_w=1.0, actuators=[], **kw)
+
+
+def test_r15_m32_a_cell_that_is_only_too_far_is_not_called_blocked(fixed_speed):
+    """Still water: 3364 cells read 'currents/winds too strong or blocked' because the search stopped at the time limit and the label tested only for inf."""
+    r = run_reach(UniformEnv(5.0, -150.0))
+    assert set(np.array(r["why"]).ravel()) == {"", "beyond endurance or time"}
+    assert set(np.array(r["why"]).ravel()) == set(np.array(run_reach(UniformEnv(5.0, -150.0), round_trip=True)["why"]).ravel())
+
+
+def test_r15_m32_a_cell_no_route_reaches_keeps_the_blocked_label_and_land_its_own(fixed_speed):
+    n, c0 = 61, 30
+    ring = lambda N, E: (np.hypot(N, E) > 6000) & (np.hypot(N, E) < 9000)      # a closed ring of land, 2 cells thick, round the launch point (cells are 1260 m)
+    r = reach.reach(fast_usv(), UniformEnv(5.0, -150.0, land=ring), 5.0, -150.0, hours=3, n=n)
+    why = np.array(r["why"])
+    assert why[c0, c0] == "" and why[c0, c0 + 3] == "" and why[c0, c0 + 6] == "land" and why[c0, c0 + 10] == "currents/winds too strong or blocked"
+
+
+def test_r15_m32_a_return_that_the_current_forbids_is_labelled_so_not_beyond_endurance(fixed_speed):
+    """V = 1 m/s in a 1.5 m/s current toward north: out to the north is fast, back is impossible. The round trip read 'beyond endurance or time' there, and
+    the advice for that (a longer horizon, a bigger battery) is wrong: no horizon brings the drone back."""
+    env = UniformEnv(5.0, -150.0, c=(1.5, 0.0))
+    one = run_reach(env)
+    rt = run_reach(env, round_trip=True)
+    h1, hr = np.array(one["hours"], float), np.array(rt["hours"], float)
+    c0 = 30
+    assert np.isfinite(h1).sum() > 50 and np.isfinite(hr).sum() == 1 and np.isfinite(hr[c0, c0])
+    went = np.isfinite(h1) & (np.arange(61)[:, None] != c0)
+    assert (np.array(rt["why"])[went] == "no way back: currents/winds too strong to return against").all()
+    assert (np.array(one["why"])[went] == "").all()
+    south = np.array(one["why"])[c0 - 10, c0]
+    assert south == "currents/winds too strong or blocked" and np.array(rt["why"])[c0 - 10, c0] == south           # not reachable even one way
+
+
+def test_r15_m32_the_labels_hold_for_the_pessimistic_map_too(fixed_speed):
+    r = run_reach(UniformEnv(5.0, -150.0), adverse=0.5)
+    assert set(np.array(r["why"]).ravel()) == {"", "beyond endurance or time"}
+
+
+@pytest.mark.parametrize("kw", [dict(hours=0.0), dict(hours=-1.0), dict(hours=float("nan")), dict(hours=3, reserve=1.0), dict(hours=3, reserve=1.5),
+                                dict(hours=3, reserve=-0.1), dict(hours=3, reserve=float("nan"))])
+def test_r15_m34_no_budget_is_refused(fixed_speed, kw):
+    """reach(veh, env, 10, -95, hours=0.0, n=9) gave radius 0 and all 81 cells reachable in 0 h."""
+    with pytest.raises(ValueError, match="no time or energy budget|reserve"):
+        reach.reach(fast_usv(), UniformEnv(10.0, -95.0), 10.0, -95.0, n=9, **kw)
+
+
+def test_r15_m34_a_reserve_of_zero_is_inside_the_documented_range(monkeypatch):
+    """[0, 1) includes 0: the whole battery may be spent. Only the upper bound was tested (a guard `0 < reserve` survived)."""
+    monkeypatch.setattr(ctrl, "cruise_speed", lambda v: V)
+    monkeypatch.setattr(ctrl, "_level_power", lambda veh, v: (10.0, True))
+    veh = NS(kind="usv", battery_wh=10.0, hotel_w=1.0, actuators=[])
+    r = reach.reach(veh, UniformEnv(10.0, -95.0), 10.0, -95.0, hours=5, n=9, reserve=0.0)
+    assert np.isfinite(np.array(r["hours"], float)).sum() > 1
+    assert reach.endurance_h(veh, V, 0.0) == pytest.approx(1.0) and reach.endurance_h(veh, V, 0.5) == pytest.approx(0.5)
+
+
+def test_r15_m35_a_point_exactly_on_the_edge_of_the_weather_box_is_inside():
+    """`_inside` is inclusive on all four edges (Env.at holds the edge value there, which is the weather at that point); a hair beyond is outside."""
+    env = UniformEnv(50.0, -150.0, box=((49.0, 51.0), (-151.0, -149.0)))
+    lat = np.array([49.0, 51.0, 50.0, 50.0, 50.0, 50.0, 48.999, 51.001, 50.0, 50.0])
+    lon = np.array([-150.0, -150.0, -151.0, -149.0, -150.0, -150.0, -150.0, -150.0, -151.001, -148.999])
+    assert reach._inside(env, lat, lon).tolist() == [True] * 6 + [False] * 4
+
+
+def test_r15_m34_an_empty_battery_is_refused(monkeypatch):
+    monkeypatch.setattr(ctrl, "cruise_speed", lambda v: V)
+    monkeypatch.setattr(ctrl, "_level_power", lambda veh, v: (50.0, True))
+    with pytest.raises(ValueError, match="no time or energy budget"):
+        reach.reach(NS(kind="usv", battery_wh=0.0, hotel_w=1.0, actuators=[]), UniformEnv(10.0, -95.0), 10.0, -95.0, hours=3, n=9)
+
+
+def test_r15_m35_cells_beyond_the_weather_box_are_blocked_not_read_from_its_edge(monkeypatch):
+    """A fast vehicle searched 270 km round a box of +-1 degree (111 km north-south, 72 km east-west at 50 N) and drew cells beyond it reachable."""
+    monkeypatch.setattr(ctrl, "cruise_speed", lambda v: 10.0)
+    monkeypatch.setattr(reach, "endurance_h", lambda *a, **k: 1e9)
+    env = UniformEnv(50.0, -150.0, box=((49.0, 51.0), (-151.0, -149.0)))
+    for rt in (False, True):
+        r = reach.reach(fast_usv(), env, 50.0, -150.0, hours=6, n=61, round_trip=rt)
+        lat, lon = np.array(r["lat"])[:, None], np.array(r["lon"])[None, :] % 360.0
+        out = (lat < 49.0) | (lat > 51.0) | (lon < 209.0) | (lon > 211.0)
+        hrs, why = np.array(r["hours"], float), np.array(r["why"])
+        assert out.sum() > 1000 and r["outside_cells"] == out.sum() and r["weather_box"] == [49.0, 51.0, 209.0, 211.0]
+        assert np.isnan(hrs[out]).all() and (why[out] == "outside weather data").all() and not np.array(r["hold"])[out].any()
+        if rt:                                                  # out and back inside 6 h: the box's corners (132 km) are too far, the rest is not
+            assert set(why[~out]) == {"", "beyond endurance or time"} and np.isfinite(hrs[~out]).sum() > 300
+        else:
+            assert np.isfinite(hrs[~out]).all() and (why[~out] == "").all()           # inside the box the vehicle gets everywhere in 6 h
+
+
+def test_r15_m35_a_launch_point_outside_the_box_is_refused_and_a_stub_without_a_box_is_unchanged(fixed_speed):
+    with pytest.raises(ValueError, match="outside the loaded weather"):
+        reach.reach(fast_usv(), UniformEnv(5.0, -150.0, box=((10.0, 12.0), (-151.0, -149.0))), 5.0, -150.0, hours=3, n=11)
+    r = run_reach(UniformEnv(5.0, -150.0))
+    assert r["outside_cells"] == 0 and r["weather_box"] is None and "outside weather data" not in set(np.array(r["why"]).ravel())
+
+
+def test_made_good_takes_an_array_of_velocities_and_agrees_with_one_at_a_time():
+    rng = np.random.default_rng(3)
+    c = rng.normal(size=(4, 5, 2))
+    d = np.array([0.6, 0.8])
+    got = reach.made_good(1.0, c, d)
+    assert got.shape == (4, 5) and all(got[i, j] == pytest.approx(reach.made_good(1.0, c[i, j], d), abs=1e-15) for i in range(4) for j in range(5))
+    assert isinstance(reach.made_good(1.0, c[0, 0], d), float)
+
+
+# --- reach.py is outside the mutation gate (row 205): these pin the rules the review's hand-made mutants broke without a test noticing (M-39)
+
+class DepthEnv:
+    """A current toward north of 0.05 + 0.002 * depth (m/s), the same at every point: the glider's band mean tells the band apart from the surface."""
+    def at(self, lat, lon, t, z):
+        z = np.asarray(z, float)
+        cur = np.stack([0.05 - 0.002 * z, np.zeros(len(lat))], -1)
+        return dict(current_ne=cur, wind_ne=cur, land=np.zeros(len(lat), bool))
+
+
+def glider(**limits):
+    return NS(kind="uuv", battery_wh=1e9, hotel_w=1.0, actuators=[NS(kind="buoy")], limits=dict(glide_speed_sim=0.3, **limits))
+
+
+@pytest.mark.parametrize("limits, mean_depth", [(dict(glide_band=(10.0, 60.0)), 35.0), (dict(), 52.5)])
+def test_r15_m39_a_glider_is_routed_through_the_mean_current_over_its_dive_band(limits, mean_depth):
+    """The band is 6 depths from top to bottom (the default 5 to 100 m); the surface current, the top only or the bottom only are different numbers."""
+    r = reach.reach(glider(**limits), DepthEnv(), 5.0, -150.0, hours=3, n=11)
+    assert r["flow_max"] == pytest.approx(0.05 + 0.002 * mean_depth, rel=1e-12)
+
+
+def test_r15_m39_endurance_is_the_battery_less_the_reserve_over_the_power(monkeypatch):
+    """A USV: P from ctrl._level_power; a glider: hotel power plus 1.0 W (assumed, row 113's pump). The horizon is the lesser of that and the hours asked."""
+    monkeypatch.setattr(ctrl, "_level_power", lambda veh, v: (50.0, True))
+    monkeypatch.setattr(ctrl, "cruise_speed", lambda v: V)
+    usv = NS(kind="usv", battery_wh=1000.0, hotel_w=3.0, actuators=[])
+    assert reach.endurance_h(usv, V, 0.2) == pytest.approx(1000 * 0.8 / 50.0) and reach.endurance_h(usv, V) == pytest.approx(1000 * 0.85 / 50.0)
+    r = reach.reach(usv, UniformEnv(5.0, -150.0), 5.0, -150.0, hours=100, n=11, reserve=0.2)
+    assert r["endurance_h"] == pytest.approx(16.0) and r["horizon_h"] == pytest.approx(16.0)
+    g = NS(kind="uuv", battery_wh=100.0, hotel_w=3.0, actuators=[NS(kind="buoy")], limits=dict(glide_speed_sim=0.3))
+    assert reach.endurance_h(g, 0.3) == pytest.approx(100 * 0.85 / 4.0)
+    assert reach.reach(g, UniformEnv(5.0, -150.0), 5.0, -150.0, hours=100, n=11)["horizon_h"] == pytest.approx(21.25)
+
+
+@pytest.mark.parametrize("c, can_hold", [(0.7, True), (0.9, False), (0.79, True), (0.81, False)])
+def test_r15_m39_a_vehicle_holds_station_in_flow_up_to_80_percent_of_its_speed(fixed_speed, c, can_hold):
+    r = run_reach(UniformEnv(5.0, -150.0, c=(c * V, 0.0)))
+    assert np.array(r["hold"]).all() == can_hold and np.array(r["hold"]).any() == can_hold
+
+
+def test_r15_m39_a_diagonal_with_one_land_corner_is_allowed_and_with_two_is_not():
+    n, c0, h = 21, 10, 100.0
+    flow = np.zeros((n, n, 2))
+    land = np.zeros((n, n), bool)
+    land[c0 + 1, c0] = True                                               # one corner of the (1, 1) step
+    t = reach._dijkstra(flow, land, 1.0, h, 1e9)
+    assert t[c0 + 1, c0 + 1] == pytest.approx(h * np.sqrt(2.0), rel=1e-12)
+    land[c0, c0 + 1] = True                                               # both corners: a cut through a wall
+    assert reach._dijkstra(flow, land, 1.0, h, 1e9)[c0 + 1, c0 + 1] > h * np.sqrt(2.0) * 1.0001

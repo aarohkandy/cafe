@@ -183,10 +183,13 @@ def vv20_row(case: str, S: float, D: float, u_num: float, u_input: float, u_D: f
     return Vv20(case, S, D, E, u_num, u_input, u_D, u_val, ratio, ratio <= 1.0)
 
 
-def format_table(rows: Sequence[Vv20], fmt: str = "{:.4g}") -> str:
-    """Plain-text V&V 20 table for logs and the credibility report."""
+def format_table(rows: Sequence[Vv20], fmt: str = "{:.4g}", not_judged: Sequence[bool] = ()) -> str:
+    """Plain-text V&V 20 table for logs and the credibility report. `not_judged[i]` (one flag per row, or none at all) prints "not judged" in place of
+    yes/no for row i: a Vv20 row cannot know that its finest grid did not converge (`vv20_row` also serves rows that have no grid), so the caller says so."""
+    if not_judged and len(not_judged) != len(rows):
+        raise ValueError(f"not_judged needs one flag per row ({len(rows)}), got {len(not_judged)}")
     head = ["case", "S", "D", "E=S-D", "U_num", "U_input", "U_D", "U_val", "|E|/U_val", "|E|<=U_val"]
     body = [[r.case, *(fmt.format(x) for x in (r.S, r.D, r.E, r.u_num, r.u_input, r.u_D, r.u_val, r.ratio)),
-             "yes" if r.validated else "no"] for r in rows]
+             "not judged" if not_judged and not_judged[i] else "yes" if r.validated else "no"] for i, r in enumerate(rows)]
     w = [max(len(row[i]) for row in [head, *body]) for i in range(len(head))]
     return "\n".join("  ".join(c.rjust(w[i]) for i, c in enumerate(row)) for row in [head, *body])

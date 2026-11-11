@@ -329,7 +329,7 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
     except ImportError as e:
         return [_row("dtmb5415", "DTMB 5415 C_T", "cafe/pm/dtmb5415.py", None, None, None, f"not run: cafe.pm.dtmb5415 cannot be imported ({e})")]
     root = data / "dtmb5415"
-    rows, notes = dtmb5415.tabulate(root), dtmb5415.row_notes(root)
+    rows, notes, bad = dtmb5415.tabulate(root), dtmb5415.row_notes(root), dtmb5415.not_judged(root)
     why = "; ".join(dtmb5415.stale_notes(root))                                # files tabulate skips (another recipe, or unreadable): this says why
     out = []
     for fr in dtmb5415.CT_REF:
@@ -337,12 +337,11 @@ def _dtmb_rows(data: pathlib.Path) -> list[dict[str, Any]]:
         if fr in rows:
             r = rows[fr]
             nt = notes[fr]
-            fine = next(iter(nt["grids"].values()))
             row = _row(f"dtmb5415:Fr{fr:.2f}", f"DTMB 5415 C_T at Fr {fr:.2f} (INSEAN 2340)", src, r.S, r.D, (r.u_num, r.u_input, r.u_D),
                        "U_D and U_input are assumed (config/assumptions.yaml dtmb5415.*); the free surface is held at the static draft; "
                        f"discretization: {nt['note']}")                      # round 7, M-5: the grid sequence's own note
-            if fine["reasons"]:                                                      # round 8, M-10: not True is not converged; the note names the causes
-                row["note"] += f"; finest grid not converged ({'; '.join(fine['reasons'])})"
+            if fr in bad:                                                            # round 8, M-10: not True is not converged; the note names the causes
+                row["note"] += f"; finest grid not converged ({'; '.join(bad[fr])})"
                 row["validated"], row["not_judged"] = None, "not judged: the finest grid has not converged"
             out.append(row)
         else:

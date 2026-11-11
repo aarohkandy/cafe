@@ -58,7 +58,7 @@ W0 = np.array([3.0, 1.0, -2.0])
 
 def test_body_rates_follow_the_implicit_midpoint_rule():
     """cafe.dyn integrates the Coriolis/gyroscopic terms with the implicit midpoint rule (3 fixed-point iterations):
-    cafe == implicit midpoint to iteration tolerance, and clearly != explicit Euler (which it used before 2026-10-29)."""
+    cafe == implicit midpoint (rigid.implicit_midpoint, Newton) to iteration tolerance, and clearly != explicit Euler (which it used before 2026-10-29)."""
     d = bare_dyn(bare(10.0, I3))
     dt, n = 1e-3, 3000
     hist, _ = spin(d, W0, dt, n)
@@ -114,8 +114,38 @@ def test_torque_free_tumble_conserves_angular_momentum_and_energy():
 
 
 def test_implicit_midpoint_reference_refuses_a_step_it_cannot_solve():
+    """Newton finds no root near the Euler step at dt |w| = 12 (found by search; it fails for 30 of 30 draws within 0.1 % of these values; round 15, M-33.
+    diag(2, 3, 5) at dt = 50 does converge, below)."""
     with pytest.raises(RuntimeError, match="did not converge"):
-        rigid.implicit_midpoint(I3, W0, 50.0)
+        rigid.implicit_midpoint(np.diag([14.8, 3.9, 15.9]), np.array([1.6, -1.0, 0.5]), 6.3)
+
+
+@pytest.mark.parametrize("inertia, w, dt", [(np.diag([3.734, 0.013, 1.545]), [-2.27, -1.69, -0.98], 0.1), (np.diag([1.0, 20.0, 400.0]), [1.0, -2.0, 0.5], 0.1),
+                                            (I3, W0, 50.0)])
+def test_implicit_midpoint_reference_solves_its_own_equation_where_the_fixed_point_did_not(inertia, w, dt):
+    """Round 15, M-33. The fixed-point iteration claimed to converge for dt |w| < 1 and raised for the first case (dt |w| = 0.3, inertia ratio 290); Newton
+    solves the midpoint equation to rounding and so keeps both invariants. The last case is the old refusal: a long step with an even inertia has a root."""
+    w = np.array(w)
+    w1 = rigid.implicit_midpoint(inertia, w, dt)
+    assert np.max(np.abs(w1 - w - dt * rigid.omega_dot(inertia, 0.5 * (w + w1)))) < 1e-12
+    for a, b in zip(rigid.invariants(inertia, w), rigid.invariants(inertia, w1), strict=True):
+        assert b == pytest.approx(a, rel=1e-12)
+
+
+@pytest.mark.parametrize("speed, ratio", [(300.0, 3.0), (300.0, 10.0), (1000.0, 3.0), (1000.0, 10.0)])
+def test_implicit_midpoint_reference_settles_at_a_large_angular_velocity_and_a_short_step(speed, ratio):
+    """Round 15, M-33 (batch C's own Newton): an absolute step test of 1e-14 is below the rounding of w itself once |w| is above about 100, so it raised
+    where the fixed point had settled (|w| = 300, dt |w| = 0.01, far inside the domain; 116 of 200 draws at ratio 3). The test is relative to |w1|."""
+    rng = np.random.default_rng(15)
+    for _ in range(100):
+        inertia = np.diag(np.sort(rng.uniform(1.0, ratio, 3)) * rng.uniform(0.5, 2.0))
+        w = rng.normal(size=3)
+        w *= speed / np.linalg.norm(w)
+        dt = 0.01 / speed
+        w1 = rigid.implicit_midpoint(inertia, w, dt)
+        assert np.max(np.abs(w1 - w - dt * rigid.omega_dot(inertia, 0.5 * (w + w1)))) < 1e-12 * speed
+    w = rigid.implicit_midpoint(np.diag([1.0, 2.0, 3.0]), np.full(3, 173.2), 0.01 / 300.0)            # the fixed point's answer, from the review
+    assert w == pytest.approx([172.1981482, 174.19608996, 172.86669454], abs=1e-6)
 
 
 def test_principal_axis_spin_conserves_everything():
