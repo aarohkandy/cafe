@@ -176,6 +176,12 @@ def solve(m: Any, structure: str, material: Any, thickness: Any = None, pressure
     body_accel  [3] m/s^2 applied to all material (gravity, a hard landing, a lift at 2 g)
     density     overrides the material density (e.g. to make a hull skin carry the whole boat's mass)
 
+    A shell needs a finite positive `thickness`, and `body_accel` needs `fixed=` (a free body is balanced by inertia relief; ValueError before the mesher
+    runs). With "buckle" in `steps` the result has `buckling_factor` (the follower-pressure factor: the dead-load factor CalculiX gives, times
+    (n^2 - 1) / n^2 of the mode that sets it, n its lobe count read from the mode shape; see `_follower_buckling`), `buckling_lobes`,
+    `buckling_follower_correction`, `buckling_factor_dead_load` and the six lowest dead-load factors. The stress it reports is the 99th percentile
+    of the element von Mises stress (`vm_p99`); the largest element value is not reported, it is the mesh's.
+
     Meshing/expansion fallbacks, in order: curved quadratic elements with the wall inside the skin;
     straight-sided elements (curved ones fold on razor-thin regions); then, for shells, the wall at
     mid-surface and grown outward (inner skins of a knife-edge stem collide otherwise). The offset used is

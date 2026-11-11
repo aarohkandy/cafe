@@ -907,6 +907,28 @@ def test_r15_m16_the_modules_self_test_runs_and_the_docstring_no_longer_promises
     fea.selftest(tmp_path / "selftest")
 
 
+def test_r15_m14_the_chosen_mesh_is_a_row_of_the_stored_study_within_one_percent_of_its_finest_and_the_stored_collapse_depths_are_the_studys():
+    """The mesh is chosen from a stored study (config/fea_hull_mesh_study.json), not by a number typed into the assumptions: the chosen n is a row, its
+    follower-corrected buckling factor is within 1 % of the finest mesh's (L/45 is 1.3 % away, L/20 10 %), every row's collapse depth is 500 m x factor x the
+    knockdown, and the two stored collapse depths (`stage3.glider.hull_collapse_depth_m`, `stage3.slocum.hull_collapse_depth_m`) are the study's hulls at that
+    mesh, each beside the hull text it was computed for."""
+    import pathlib
+    study = json.loads((pathlib.Path(pw.__file__).parents[3] / "config" / "fea_hull_mesh_study.json").read_text())
+    rows = {r["n"]: r for r in study["rows"]}
+    a = pw.assumptions()
+    n = a["fea_elements_along"]
+    assert n in rows and n < max(rows) and len(rows) >= 4
+    assert abs(rows[n]["buckling_factor"] / rows[max(rows)]["buckling_factor"] - 1) < 0.01
+    assert abs(rows[45]["buckling_factor"] / rows[max(rows)]["buckling_factor"] - 1) > 0.01 and rows[20]["collapse_depth_m"] > 1.05 * rows[max(rows)]["collapse_depth_m"]
+    for r in rows.values():
+        assert r["collapse_depth_m"] == pytest.approx(study["hull"]["depth_m"] * r["buckling_factor"] * hangar.KNOCKDOWN, abs=0.01)
+    hulls = {h["platform"]: h for h in study["hulls_at_the_chosen_mesh"]}
+    for plat, key in (("seaglider", "glider"), ("slocum", "slocum")):
+        assert hulls[plat]["n"] == n and hulls[plat]["hull"] == a[f"{key}.hull_collapse_for"]
+        assert a[f"{key}.hull_collapse_depth_m"] == pytest.approx(hulls[plat]["collapse_depth_m"], abs=0.1)
+    assert hulls["seaglider"]["collapse_depth_m"] == pytest.approx(rows[n]["collapse_depth_m"], abs=0.1)
+
+
 def test_r15_m14_the_hangars_hull_case_and_the_stage_3_window_mesh_the_hull_by_the_one_number_in_the_assumptions(monkeypatch, tmp_path):
     """Round 15 M-14: `hangar.fea_cases` meshed a hull at L/70 and `pipeline_windows._fea` the same hull at L/20, so one repo reported two collapse depths
     (331 and 364 m for the default Seaglider hull). Both read `stage3.fea_elements_along`."""
