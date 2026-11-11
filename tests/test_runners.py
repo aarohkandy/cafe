@@ -216,8 +216,11 @@ esac
     "tmux": """#!/bin/sh
 S="$HOME/tmuxstate"; mkdir -p "$S"
 case "$1" in
-  new-session) shift; while [ "$1" != -s ]; do shift; done; ( : > "$S/$2"; sh -c "$3"; rm -f "$S/$2" ) </dev/null >/dev/null 2>&1 & ;;
+  new-session) shift; while [ "$1" != -s ]; do shift; done; rm -f "$S/.env.$2"; : > "$S/$2"
+    ( sh -c "$3"; rm -f "$S/$2" "$S/.env.$2" ) </dev/null >/dev/null 2>&1 & ;;
   has-session) [ -e "$S/${3#=}" ] ;;
+  set-environment) [ -e "$S/${3#=}" ] && printf '%s=%s\\n' "$4" "$5" > "$S/.env.${3#=}" ;;
+  show-environment) grep "^$4=" "$S/.env.${3#=}" 2>/dev/null || echo "-$4" ;;
   ls) for f in "$S"/*; do [ -e "$f" ] && echo "$(basename "$f"): 1 windows (created now)"; done; exit 0 ;;
 esac
 """,
@@ -803,13 +806,14 @@ def test_pm_threads_caps_the_blas_and_openmp_pools_of_the_job(tmp_path, threads)
     assert argv.index("/usr/bin/env") < argv.index(f"OMP_NUM_THREADS={threads}") < argv.index("/bin/sh")   # in the job's environment, before its command
 
 
-def test_without_pm_threads_the_environment_of_the_job_is_as_before(tmp_path):
-    """Pipeline runs keep their libraries' own pool sizes: a thread count can change the last bits of a sum."""
+def test_without_pm_threads_the_pools_of_the_job_are_its_pm_cpus(tmp_path):
+    """Round 15 (P-R14V5, amends the test that pinned "NUM_THREADS not in argv", DECISIONS 524): with PM_THREADS unset the pools are PM_CPUS, or 8 like
+    CAFE_WORKERS."""
     w, env = proot_world(tmp_path)
     (w / "bin/proot").write_text(RECORD_ARGV)
     run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
-    argv = (tmp_path / "home/argv").read_text()
-    assert "NUM_THREADS" not in argv and "CAFE_WORKERS=8" in argv
+    argv = (tmp_path / "home/argv").read_text().splitlines()
+    assert "CAFE_WORKERS=8" in argv and "OMP_NUM_THREADS=8" in argv and "OPENBLAS_NUM_THREADS=8" in argv and "MKL_NUM_THREADS=8" in argv
 
 
 @pytest.mark.parametrize("bad", ["0", "02", "x", "2;ls", "-1", "1.5"])
@@ -818,6 +822,120 @@ def test_pm_threads_must_be_a_whole_number_from_one(tmp_path, bad):
     (w / "bin/proot").write_text(RECORD_ARGV)
     r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
     assert r.returncode == 2 and "PM_THREADS" in r.stderr and not (tmp_path / "home/argv").exists()
+
+
+# ---- round 15, P-R14V5: under proot nothing kept a job to its PM_CPUS; it is pinned to that many cores and its pools sized to it
+
+def cores_free_to_us():
+    return sorted(os.sched_getaffinity(0))
+
+
+DONE = 'echo 0 > "$PROOT_TMP_DIR/.rc"\n'          # the job's own exit status, which the wrapper insists on (see the tests above)
+
+
+def pin_world(tmp_path, cpus, stand_in=RECORD_ARGV + DONE, **extra):
+    """proot_world with a stand-in `taskset` that logs the pin and runs the rest (the query -pc goes to the real one); (world, env, log of pins)."""
+    w, env = proot_world(tmp_path, PM_CPUS=str(cpus), **extra)
+    (w / "bin/proot").write_text(stand_in)
+    log = tmp_path / "taskset.log"
+    real = shutil.which("taskset")
+    (tmp_path / "tools" / "taskset").write_text(f'#!/bin/sh\ncase "$1" in -pc) exec {real} "$@" ;; esac\necho "$*" >> "{log}"\nshift 2\nexec "$@"\n')
+    (tmp_path / "tools" / "taskset").chmod(stat.S_IRWXU)
+    return w, env, log
+
+
+def pinned(log):
+    """The core lists of the pins in `log`, one set per job."""
+    return [{int(c) for c in line.split()[1].split(",")} for line in log.read_text().splitlines()]
+
+
+def two_or_one():
+    return 2 if len(cores_free_to_us()) > 2 else 1
+
+
+def test_r15_pb_the_job_is_pinned_to_pm_cpus_cores_and_its_pools_are_sized_to_them(tmp_path):
+    """P-R14V5: a JAX matmul loop of a PM_CPUS=2 job under proot was at cpu/wall 32.1 on orca (the 32-CPU quota); pinned to 2 cores, pools at 2: 1.82."""
+    n = two_or_one()
+    w, env, log = pin_world(tmp_path, n)
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    assert r.returncode == 0, r.stderr
+    (cores,) = pinned(log)
+    assert len(cores) == n and cores <= set(cores_free_to_us())
+    assert f"pinned to cores {','.join(str(c) for c in sorted(cores))} (PM_CPUS={n})" in r.stderr
+    assert log.read_text().split()[2] in ("setsid", str(w / "bin/proot"))               # the pin is in front of proot (and of setsid)
+    argv = (tmp_path / "home/argv").read_text().splitlines()
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        assert f"{var}={n}" in argv
+    assert f"XLA_FLAGS=--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads={n}" in argv
+    assert argv.index("/usr/bin/env") < argv.index(f"OMP_NUM_THREADS={n}") < argv.index("/bin/sh")
+
+
+def test_r15_pb_pm_threads_sets_the_pools_to_its_own_number_and_the_pin_stays_at_pm_cpus(tmp_path):
+    n = two_or_one()
+    w, env, log = pin_world(tmp_path, n, PM_THREADS="1")
+    assert run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env).returncode == 0
+    argv = (tmp_path / "home/argv").read_text().splitlines()
+    assert "OMP_NUM_THREADS=1" in argv and "intra_op_parallelism_threads=1" in " ".join(argv) and len(pinned(log)[0]) == n
+
+
+def test_r15_pb_a_job_started_by_the_real_taskset_sees_only_its_pm_cpus_cores(tmp_path):
+    """Not a stand-in: the job (the stand-in proot) reads the affinity it was started with from /proc."""
+    n = two_or_one()
+    w, env = proot_world(tmp_path, PM_CPUS=str(n))
+    (w / "bin/proot").write_text('#!/bin/sh\ngrep Cpus_allowed_list /proc/self/status > "$HOME/allowed"\n' + DONE)
+    assert run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env).returncode == 0
+    listed = (tmp_path / "home/allowed").read_text().split(":")[1].strip()
+    cores = {c for part in listed.split(",") for c in range(int(part.split("-")[0]), int(part.split("-")[-1]) + 1)}
+    assert len(cores) == n and cores <= set(cores_free_to_us())
+
+
+def test_r15_pb_two_jobs_started_at_once_get_different_cores_and_their_claims_go_with_them(tmp_path):
+    """The K jobs of a gate start together; each takes the least busy cores, so without a claim they would all take the same ones."""
+    w, env, log = pin_world(tmp_path, 1, stand_in="#!/bin/sh\nsleep 3\n" + DONE)
+    jobs = [subprocess.Popen(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], cwd=ROOT, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(2)]
+    assert [j.wait(timeout=60) for j in jobs] == [0, 0]
+    a, b = pinned(log)
+    assert len(a) == len(b) == 1 and a != b
+    assert not list((w / "cafe/tmp").glob("cpu.*")) and not list((w / "cafe/tmp").glob("run.*"))
+
+
+def claim(w, core, pid):
+    d = w / "cafe/tmp" / f"cpu.{core}"
+    d.mkdir(parents=True)
+    (d / "pid").write_text(f"{pid}\n")
+
+
+def test_r15_pb_a_core_claimed_by_a_live_job_is_not_taken_and_one_claimed_by_a_dead_job_is(tmp_path):
+    w, env, log = pin_world(tmp_path, 1)
+    dead = subprocess.Popen(["true"])
+    dead.wait()
+    free = cores_free_to_us()
+    for c in free[:-1]:
+        claim(w, c, os.getpid())                                                      # alive: this process
+    claim(w, free[-1], dead.pid)                                                      # its wrapper is gone
+    assert run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env).returncode == 0
+    assert pinned(log) == [{free[-1]}]
+
+
+def test_r15_pb_with_every_core_claimed_the_job_still_runs_pinned_and_says_it_shares(tmp_path):
+    w, env, log = pin_world(tmp_path, 1)
+    for c in cores_free_to_us():
+        claim(w, c, os.getpid())
+    r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
+    assert r.returncode == 0 and "no free core for PM_CPUS=1, sharing core" in r.stderr
+    assert len(pinned(log)[0]) == 1
+    assert len(list((w / "cafe/tmp").glob("cpu.*"))) == len(cores_free_to_us())          # the claims of others are left
+
+
+@pytest.mark.parametrize("script, cpus_default", [("bin/pmx.sh", "2"), ("pm.sh", "8")])
+def test_r15_pb_the_docker_job_gets_its_pools_at_pm_cpus_as_the_proot_job_does(tmp_path, script, cpus_default):
+    """The cgroup quota of `--cpus` leaves the pools at the host's CPU count (8 on homebase): 8 threads for 2 CPUs' worth of quota."""
+    for given, n in ((None, cpus_default), ("3", "3")):
+        rc, out = sent(tmp_path, script, "true", **({} if given is None else {"PM_CPUS": given}))
+        flags = (f"-e OMP_NUM_THREADS={n} -e OPENBLAS_NUM_THREADS={n} -e MKL_NUM_THREADS={n} "
+                 f"-e 'XLA_FLAGS=--xla_cpu_multi_thread_eigen=true intra_op_parallelism_threads={n}' ")
+        assert rc == 0 and f"--cpus {n} " in out and flags in out
 
 
 # ---- round 14 M-19: a count of 20 digits is refused by its length, not left to a `[` that prints "Illegal number" and falls through
@@ -1241,3 +1359,47 @@ def test_r14_m33_a_second_sync_from_the_owning_checkout_is_refused_while_its_det
     r = run([*pmx, "true"], {k: v for k, v in env.items() if k != "TM"}, cwd=a)
     assert r.returncode == 0, r.stderr                                                                     # a finished job leaves a name only
     assert (dest / "common.py").read_text() == "three"
+
+
+def wait_for_session_to_end(home, name):
+    for _ in range(100):
+        if not (home / "tmuxstate" / name).exists():
+            return
+        time.sleep(0.1)
+
+
+def test_r15_pb_a_finished_jobs_directory_is_not_held_by_another_directory_that_reuses_its_tag(tmp_path, request):
+    """P-R14L-OPEN (f): `.pmx.job.<dir>` holds a tag, and the sync is refused while a tmux session of that name is alive. pm_a ran a job under tag `shared` and
+    finished; pm_b now runs its own job under `shared`: pm_a was refused as "still running" because of pm_b's session. pm_b's own directory stays held."""
+    home, env = live(tmp_path, "ssh", "rsync", "docker", "tmux", TM="shared")
+    release = tmp_path / "release"
+    request.addfinalizer(lambda: release.write_text(""))                          # a failed assert must not leave the job looping
+    quick, long = tmp_path / "quick.sh", tmp_path / "long.sh"
+    quick.write_text("true\n")
+    long.write_text(f"while [ ! -e {release} ]; do sleep 0.2; done\n")
+    pmx = ["sh", str(ROOT / "bin/pmx.sh")]
+    assert run([*pmx, "sh", str(quick)], {**env, "PMX": "pm_a"}).returncode == 0
+    wait_for_session_to_end(home, "shared")
+    assert run([*pmx, "sh", str(long)], {**env, "PMX": "pm_b"}).returncode == 0
+    assert (home / "tmuxstate" / "shared").exists()                               # the tag is alive, and it is pm_b's
+    plain = {k: v for k, v in env.items() if k != "TM"}
+    r = run([*pmx, "true"], {**plain, "PMX": "pm_a"})
+    assert r.returncode == 0, r.stderr                                           # pm_a has no job: it syncs
+    r = run([*pmx, "true"], {**plain, "PMX": "pm_b"})
+    assert r.returncode == 1 and "shared" in r.stderr and "still running" in r.stderr and "PM_TAKE=1" in r.stderr         # pm_b's job is real
+    release.write_text("")
+    wait_for_session_to_end(home, "shared")
+
+
+def test_r15_pb_a_session_started_before_the_directory_was_recorded_still_holds_its_directory(tmp_path):
+    """The directory is recorded in the session after the start (tmux set-environment); a session that has none (started by the previous version of
+    the script) is counted as the job of the directory that names it, so an upgrade in the middle of a gate does not open the sync. The directory has no
+    `.pmx.owner` here (a first sync by an older script): `1,/^---$/d` of GNU sed then deleted the job's name along with the empty owner's `---` line, and
+    nothing was held."""
+    home, env = live(tmp_path, "ssh", "rsync", "docker", "tmux", PMX="pm_t")
+    (home / "tmuxstate").mkdir()
+    (home / "tmuxstate" / "old").write_text("")
+    (home / "work" / "cafe").mkdir(parents=True)
+    (home / "work" / "cafe" / ".pmx.job.pm_t").write_text("old")
+    r = run(["sh", str(ROOT / "bin/pmx.sh"), "true"], env)
+    assert r.returncode == 1 and "old" in r.stderr and "still running" in r.stderr

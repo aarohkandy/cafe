@@ -588,3 +588,14 @@ def test_r14_m43_the_leave_one_out_sd_of_the_wind_fit_is_the_one_measured_and_ev
         assert sd13 in doc and "0.155 " not in doc.replace("0.1545", ""), name
     assert "-0.03 (T2N170W) to +1.14 (T5N165E)" in phys and "+0.07 to +1.14" not in phys and "0.562 to 0.610" in phys
     assert "-0.032 to +1.142" in cred and "-0.032 to +1.142" in row(589)
+
+
+def test_r15_pb_the_lab_user_documents_say_what_the_owner_refusal_of_pmx_is_and_every_gate_command_in_them_carries_pmx_and_pm_take():
+    """Round 15, P-R14L-OPEN (g): `.pmx.owner` and `PM_TAKE=1` were in CLAUDE.md and ORCA_RUNNER only, and the RUNBOOK's gate command had neither `PMX`
+    (required since round 14) nor `PM_TAKE=1`."""
+    rb, orca = flat(text("docs", "RUNBOOK.md")), flat(text("docs", "ORCA_RUNNER.md"))
+    assert ".pmx.owner" in rb and "PM_TAKE=1" in rb and "refuses (exit 1, nothing sent)" in rb
+    gates = [m.start() for m in re.finditer(r"bin/orca_gate\.sh <K> <tag>", rb)]
+    assert gates and all("PM_TAKE=1 PM_HOST=cafe-orca PMX=pm_<you> " in rb[max(0, g - 60):g] for g in gates)
+    for refusal in ("belongs to", "is still running", "PMX=pm_<you> is required"):
+        assert refusal in orca.replace("`", ""), refusal

@@ -265,6 +265,8 @@ def test_r14_m33_the_gate_needs_a_pmx_of_its_own_and_no_longer_makes_one_from_th
     """M-33: `orca_gate.sh 8 q14` synced onto pm_q14, the code tree of the q14 run, with --delete: the tag names a log, not a directory."""
     rc, out, err = sent(tmp_path, "bin/orca_gate.sh", "8", "q14", **given)
     assert (rc, out) == (2, "") and "PMX=pm_<you> is required" in err
+    # round 15: the message says what to type
+    assert "PM_TAKE=1 PM_HOST=cafe-orca PMX=pm_<you> bin/orca_gate.sh 8 q14" in err and "does not own that directory" in err
 
 
 def test_pm_entry_picks_the_worker_script_for_proot_only_and_the_docker_command_does_not_change(tmp_path):
