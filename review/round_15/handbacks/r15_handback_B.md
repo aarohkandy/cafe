@@ -57,7 +57,7 @@ CHANGELOG: "Tests pin the EPERM branch of `acceptance._probe`, the `median` fiel
 
 Doc sentences. None.
 
-Could break, checked. Nothing (tests only). Mutants, each run against the new test only: EPERM dropped, `median` dropped, NORMAL_MIN 1e-2, NORMAL_MIN 0.0: @@MUT7@@.
+Could break, checked. Nothing (tests only). Mutants, each run against the new test only: EPERM dropped, `median` dropped, NORMAL_MIN 1e-2, NORMAL_MIN 0.0: all four killed (`m7_eperm`, `m7_median`, `m7_nm_hi`, `m7_nm_zero`); on the unmutated code the three tests pass.
 
 ### M-9 (`hangar.bem` frequencies)
 
@@ -69,7 +69,7 @@ CHANGELOG: "`hangar.bem` says what frequency each degree of freedom's added mass
 
 Doc sentences. If PHYSICS or the Hangar section of the README describes the BEM frequencies, say "heave at its natural frequency, roll and pitch at that frequency by assumption, the rest at 0.3 rad/s".
 
-Could break, checked. `bem` callers: `hangar.run` (the USV path) and `receipts.py:338` (`kind="uuv"`, frequency independent, does not call `bem_omega`); `V = pm.volume ...` was an unread variable and is removed. Mutants: the docstring sentence, and Roll and Pitch dropped from the borrowing set: @@MUT9@@.
+Could break, checked. `bem` callers: `hangar.run` (the USV path) and `receipts.py:338` (`kind="uuv"`, frequency independent, does not call `bem_omega`); `V = pm.volume ...` was an unread variable and is removed. Mutants: the docstring sentence, and Roll and Pitch dropped from the borrowing set: both killed (`m9_doc`, `m9_omega`).
 
 ### M-10 (UAS airspeed cap)
 
@@ -81,7 +81,7 @@ CHANGELOG: "The UAS sortie of stage 1 holds the airframe inside its airspeed env
 
 Doc sentences. PHYSICS 11: the sentence "Pattern: stacked legs upwind ..." gets "each leg is flown at `leg_speed_ms` or, against a wind w, at the ground speed that keeps the air within min(12 m/s, g tan 35 deg / d_x) (`uas.leg_speed`): 12 - w upwind"; **the "Control authority" paragraph is out of date**: "found the demand beyond the clamp in every sortie from about 6 m/s of wind" is no longer so (median `sat_s` falls from 563 s to 9.5 s on the q15 draws) and its counts ("q6: 55 of 64 `profile_incomplete`") are q6's; the report sentence built from `authority` (clamp seconds per sortie) reads the new numbers by itself. RUNBOOK/README: any statement of the UAS threshold in wind (the 5.8 m/s of the reviewer) is replaced by "the profile no longer fits the 20 min above about 5 to 6 m/s of upwind leg". PHYSICS limitation text for `attitude_exceedance` unchanged.
 
-Could break, checked. Callers of `derive` (`fly_sortie`, `fly_sitl`, `receipts`, the `no_drag` fault: `airspeed_envelope` with `d_x` 0 has no tilt term, a test covers it through the receipts' `no_drag` run, which passes); the SITL path does not use `_block`; `test_uas.py` passes whole except the two tests that encoded the old behaviour (a 10 m/s and a 9 m/s wind inside the envelope were demanded beyond the clamp for most of the sortie): both now use a wind beyond the envelope (13 m/s) as their "strong" case, and the new sortie test pins the new behaviour (9 m/s: clamp touched for under 30 s; before more than 100 s). Mutants: the cap removed (`sh = sh0`), the interval's upper end moved: @@MUT10@@.
+Could break, checked. Callers of `derive` (`fly_sortie`, `fly_sitl`, `receipts`, the `no_drag` fault: `airspeed_envelope` with `d_x` 0 has no tilt term, a test covers it through the receipts' `no_drag` run, which passes); the SITL path does not use `_block`; `test_uas.py` passes whole except the two tests that encoded the old behaviour (a 10 m/s and a 9 m/s wind inside the envelope were demanded beyond the clamp for most of the sortie): both now use a wind beyond the envelope (13 m/s) as their "strong" case, and the new sortie test pins the new behaviour (9 m/s: clamp touched for under 30 s; before more than 100 s). Mutants: the cap removed (`sh = sh0`), the interval's upper end moved: both killed (`m10_nocap`, `m10_helper`); the flag-agreement assertions pass on the new code.
 
 ### M-11 (dive depth beyond the assumed hull's collapse depth)
 
@@ -95,7 +95,7 @@ QUESTIONS_FOR_LAB 4a (hand-over, as asked): the station-loss dependence reviewer
 
 Doc sentences. STATUS/QFL 4a: 331 m and utilization 1.512 replace 364 m and 1.374; PHYSICS.md:992 likewise.
 
-Could break, checked. `report._vehicles` gains two keys per vehicle (`hull_warning`, `uas_levels_note`; None for the other classes); `check_traceability` walks them as strings; `tests/test_report.py` passes (below). `glider.hull_collapse_depth_m` reads `a["glider.hull_*"]`, `a["slocum.*"]` and the four new keys, all in `assumptions.yaml`; `credibility` lists every `stage3.*` assumption (scope by the word after `stage3.`: `glider`, `slocum`), and its tests pass. Mutants: the warning off, the staleness guard off: @@MUT11@@.
+Could break, checked. `report._vehicles` gains two keys per vehicle (`hull_warning`, `uas_levels_note`; None for the other classes); `check_traceability` walks them as strings; `tests/test_report.py` passes (below). `glider.hull_collapse_depth_m` reads `a["glider.hull_*"]`, `a["slocum.*"]` and the four new keys, all in `assumptions.yaml`; `credibility` lists every `stage3.*` assumption (scope by the word after `stage3.`: `glider`, `slocum`), and its tests pass. Mutants: the warning off, the staleness guard off: both killed (`m11_off`, `m11_stale`).
 
 ### M-13 (UAS levels above the deck)
 
@@ -107,7 +107,7 @@ CHANGELOG: "The mission schema and the report say that a UAS's `altitudes_m` are
 
 Doc sentences. RUNBOOK:98 where `altitudes_m` is listed: "distinct and rising, metres above the deck". Sibling (not fixed, batch A's file): the 400 m check in `config.load_mission` compares the level, not deck + level (P-R15BB2).
 
-Could break, checked. Text only. Tests: `test_r15_m13_*` (note in the report json and html; the schema description). Mutants: the report sentence, the schema text: @@MUT13@@.
+Could break, checked. Text only. Tests: `test_r15_m13_*` (note in the report json and html; the schema description). Mutants: the report sentence, the schema text: both killed (`m13_note`, `m13_schema`).
 
 ### M-14 (mesh)
 
@@ -119,7 +119,7 @@ CHANGELOG: "The hull FEA of stage 3 and the Hangar mesh the hull at L/70 (`stage
 
 Doc sentences. PHYSICS.md:992 and QFL 4a: 331 m (utilization 1.512, stress utilization 0.305) replace 364 m / 1.374; README line 80 is unaffected. RUNBOOK:76 and DECISIONS 776 must carry **641.1 s** where they say 68.2 s: `tests/test_config_docs.py::test_r14_m15_the_makefile_and_the_runbook_say_that_make_ci_plans_the_glider_fea_out_under_the_floor_the_assumption_file_holds` reads `floor` from the yaml (pinned to 641.1 there) and the numbers in RUNBOOK and row 776, and **fails until batch D edits them**.
 
-Could break, checked. `need(a, "fea_elements_along")` callers (`_fea` only; the plan's `budget.stage3_plan` reads `fea_min_s` and `fea_reserve_frac`, not the mesh); tests that run the FEA through `cheap()` patch `fea_elements_along` to 6 and `fea_min_s` is read by `sizes["fea"]["runs"]` (the stage-3 tests passed; see below). `hangar.fea_cases` for a UUV now meshes at L/70 as before. The test `test_r15_m14_the_hangars_hull_case_and_the_stage_3_window_mesh_the_hull_by_the_one_number_in_the_assumptions` records `h` on both paths. Mutant: `/20` back in the Hangar: @@MUT14@@.
+Could break, checked. `need(a, "fea_elements_along")` callers (`_fea` only; the plan's `budget.stage3_plan` reads `fea_min_s` and `fea_reserve_frac`, not the mesh); tests that run the FEA through `cheap()` patch `fea_elements_along` to 6 and `fea_min_s` is read by `sizes["fea"]["runs"]` (the stage-3 tests passed; see below). `hangar.fea_cases` for a UUV now meshes at L/70 as before. The test `test_r15_m14_the_hangars_hull_case_and_the_stage_3_window_mesh_the_hull_by_the_one_number_in_the_assumptions` records `h` on both paths. Mutant: `/20` back in the Hangar: all three killed (`m14_hangar`; `m14_yaml` = the assumption back at 45; `m14_depth` = the stored glider depth back at 363.8).
 
 ### M-15 (follower correction): see the FEA section above.
 
@@ -129,7 +129,7 @@ CHANGELOG: "The follower-pressure correction of the FEA buckling factor is (n^2 
 
 Doc sentences (for C-13 / M-26 "Hull FEA" subsection): the mean-rigid-motion equations; CalculiX OFFSET +0.5 (wall inside the outer skin) and its fallbacks; p99 von Mises and why `vm_max` is not stored; Bresse (1866) 2E/(1-nu^2)(t/D)^3 hydrostatic; the ring ratio dead/follower n^2/(n^2-1); von Mises (1914) and Windenburg-Trilling for finite tubes; Zoelly 2E/sqrt(3(1-nu^2)) (t/R)^2 for the sphere; the verification table above; KNOCKDOWN 0.5 "NASA SP-8007-style" (a comment, not re-read); the mesh study and the collapse depth 331 m. The receipts' context row in `cafe/receipts.py` ("Short capped cylinder collapse") no longer says the 3/4 is "conservative for this 4-lobe mode": its value now carries that tube's own correction.
 
-Could break, checked. Consumers of `buckling_factor`: `windows.fea_window` (`1 / (lam x KNOCKDOWN)`), `hangar.fea_cases` (`buckle_depth = REF_DEPTH x factor x KNOCKDOWN`), `receipts.fea_receipts` (the bracket "Glider hull collapse pressure": the 1.5 m / 0.22 m / 7 mm hull, lowest mode presumably 2-lobe, so unchanged: it is a slow receipt, not rerun here; the long-tube row 0.5739 against Bresse is the same 3/4 case), the fake-ccx tests (no `.frd`: the 3/4 fallback, `buckling_lobes` None). Mutants: correction flat 3/4; only the lowest mode considered; the correction function returning 3/4: @@MUT15@@.
+Could break, checked. Consumers of `buckling_factor`: `windows.fea_window` (`1 / (lam x KNOCKDOWN)`), `hangar.fea_cases` (`buckle_depth = REF_DEPTH x factor x KNOCKDOWN`), `receipts.fea_receipts` (the bracket "Glider hull collapse pressure": the 1.5 m / 0.22 m / 7 mm hull, lowest mode presumably 2-lobe, so unchanged: it is a slow receipt, not rerun here; the long-tube row 0.5739 against Bresse is the same 3/4 case), the fake-ccx tests (no `.frd`: the 3/4 fallback, `buckling_lobes` None). Mutants: correction flat 3/4; only the lowest mode considered; the correction function returning 3/4: all four killed (`m15_flat`, `m15_lowest_only`, `m15_lobes`, `m15_static`).
 
 ### M-16, M-17, M-23: see the FEA section above.
 
@@ -139,7 +139,7 @@ CHANGELOG: "`cafe.fea`: the docstring and the self-test no longer describe a 3-2
 
 Doc sentences. As the M-15 list; the Hangar app's load-case table no longer has a "vm_max" column value.
 
-Could break, checked. `body_accel` callers: only `hangar.fea_cases` (the lifting case) with `fixed=`; `thickness` callers: `hangar` passes `t if struct == "shell" else None`, `fea_window` the vehicle's thickness (a positive number); `fixed=None` solid with `thickness` None unaffected. `vm_max` readers: `windows.fea_window`, `hangar._case` (both edited), a test fixture. The app's JS does not read `vm_max_mpa` (grep). Mutants: validation off (x2), `vm_max` back, the `r['reaction']` print back in `selftest`: @@MUT16@@.
+Could break, checked. `body_accel` callers: only `hangar.fea_cases` (the lifting case) with `fixed=`; `thickness` callers: `hangar` passes `t if struct == "shell" else None`, `fea_window` the vehicle's thickness (a positive number); `fixed=None` solid with `thickness` None unaffected. `vm_max` readers: `windows.fea_window`, `hangar._case` (both edited), a test fixture. The app's JS does not read `vm_max_mpa` (grep). Mutants: validation off (x2), `vm_max` back, the `r['reaction']` print back in `selftest`: all four killed (`m17_thick`, `m17_accel`, `m23_vmmax`, `m16_selftest`).
 
 ### M-18 (two-window refit floor: a stated limit)
 
@@ -151,7 +151,7 @@ CHANGELOG: "The refit module states that the between-window floor stops at two w
 
 Doc sentence. PHYSICS.md:994 (refit): "With two windows the between-window variance is estimated as 0 in 15 to 34 % of draws; the sigma then rests on the standard error and the 5 % discretisation floor. A floor for two windows is not applied."
 
-Could break, checked. Nothing (docstring and a characterisation test). Mutant: the docstring phrase changed: @@MUT18@@.
+Could break, checked. Nothing (docstring and a characterisation test). Mutant: the docstring phrase changed: killed (`m18_doc`); it first SURVIVED, because the docstring has `tau^2 = 0` elsewhere: the test now pins the figure's own sentence.
 
 ### M-19 (`refit.pool`)
 
@@ -163,7 +163,7 @@ CHANGELOG: "`refit.pool` refuses NaN and infinite inputs and has one policy for 
 
 Doc sentences. None.
 
-Could break, checked. Callers: `refit.refit` (both branches), `pipeline.s_refit` (only `ok=True` windows: finite), `tests/test_stage3.py::test_pool_random_effects` (the `([1.0], [0.0])` raise case is now a floor case; its bad list has a negative error instead). `cafe/pm/env/subgrid.py:481` has its own `_pool` (not read: said by the finding). Mutants: the finite check off; the floor off: @@MUT19@@.
+Could break, checked. Callers: `refit.refit` (both branches), `pipeline.s_refit` (only `ok=True` windows: finite), `tests/test_stage3.py::test_pool_random_effects` (the `([1.0], [0.0])` raise case is now a floor case; its bad list has a negative error instead). `cafe/pm/env/subgrid.py:481` has its own `_pool` (not read: said by the finding). Mutants: the finite check off; the floor off: both killed (`m19_finite`, `m19_floor`).
 
 ### M-20 (longitude median)
 
@@ -175,7 +175,7 @@ CHANGELOG: "The heading and the longitude of a window are taken from a median of
 
 Doc sentences. None (the demo box 165E..165W makes it live for a mission nearer the line).
 
-Could break, checked. Callers of the raw median on longitudes: `grep` finds only these two and `report._median_track`; the heading result for a non-straddling run is bit-identical (`wrap_about` adds 0.0; the final wrap only touches values outside [-180, 180)); `test_pipeline.py` and `test_stage3.py` pass (below). Mutants: raw median back at either site, helper without the images: @@MUT20@@.
+Could break, checked. Callers of the raw median on longitudes: `grep` finds only these two and `report._median_track`; the heading result for a non-straddling run is bit-identical (`wrap_about` adds 0.0; the final wrap only touches values outside [-180, 180)); `test_pipeline.py` and `test_stage3.py` pass (below). Mutants: raw median back at either site, helper without the images: all three killed (`m20_track`, `m20_window`, `m20_helper`); `m20_track` first SURVIVED, because my first test straddled the line over time, not within one record (the raw median is only wrong when members are on both sides at the same record): the test was rewritten.
 
 ### M-21 (SIGKILL is not always the deadline)
 
@@ -185,15 +185,15 @@ DECISIONS: amend 734 (the FEA child's kill) and the free-surface row: "a child's
 
 Doc sentences. None.
 
-Could break, checked. The reason strings: tests matched the prefix "killed: the FEA" (kept for the deadline case, 1645 unchanged) and "killed by its watchdog" (kept); the stub `_spawn` cases that returned -9 at once now return the new reason: `test_round_13_m42_a_fea_with_no_time_left...` and `test_the_hull_fs_row_failures_are_rows_with_reasons` are extended (a stub that sleeps 0.3 s with a 1.2 s deadline is the watchdog's; an instant -9 with 60 s or none is not). No pipeline row of q15 has a -9. Mutants: the rule always true: @@MUT21@@.
+Could break, checked. The reason strings: tests matched the prefix "killed: the FEA" (kept for the deadline case, 1645 unchanged) and "killed by its watchdog" (kept); the stub `_spawn` cases that returned -9 at once now return the new reason: `test_round_13_m42_a_fea_with_no_time_left...` and `test_the_hull_fs_row_failures_are_rows_with_reasons` are extended (a stub that sleeps 0.3 s with a 1.2 s deadline is the watchdog's; an instant -9 with 60 s or none is not). No pipeline row of q15 has a -9. Mutants: the rule always true: killed (`m21_always`).
 
 ### M-24 (FEA reserve when planned out)
 
-Code. `fea_s` in `_row` is the reserve only `and sizes["fea"]["runs"]`; `budget.py:186` (cell-steps) untouched, so cell-steps and ledger hashes do not move. DECISIONS: amend 137 and 776: "the FEA reserve is withheld from the LES window's safety kill only when the FEA is planned to run; a planned-out FEA leaves its quarter to the LES (the sizing keeps it, 137; round 15, M-24)." CHANGELOG: "A glider window whose FEA is planned out is no longer cut at 0.75 of its slice for an FEA that never runs (round 15, M-24)." Doc sentence: none. Could break, checked: only the kill (`spec.wall_s`); worst-case ci window 27 s to 36 s. Mutant: the condition removed: @@MUT24@@.
+Code. `fea_s` in `_row` is the reserve only `and sizes["fea"]["runs"]`; `budget.py:186` (cell-steps) untouched, so cell-steps and ledger hashes do not move. DECISIONS: amend 137 and 776: "the FEA reserve is withheld from the LES window's safety kill only when the FEA is planned to run; a planned-out FEA leaves its quarter to the LES (the sizing keeps it, 137; round 15, M-24)." CHANGELOG: "A glider window whose FEA is planned out is no longer cut at 0.75 of its slice for an FEA that never runs (round 15, M-24)." Doc sentence: none. Could break, checked: only the kill (`spec.wall_s`); worst-case ci window 27 s to 36 s. Mutant: the condition removed: killed (`m24_reserve`).
 
 ### M-25 (`run_windows`)
 
-Code. Deleted with its docstring line, its imports and `test_run_windows_overlaps_fea_with_the_next_les_window`; `test_r15_m25_the_pipelines_child_is_the_one_entry_point_...` asserts it is gone and that `_fea_child` asks for `buckle=True`. DECISIONS: amend 792: "`windows.run_windows`, a second FEA entry point whose default left the buckling step off, is deleted; the pipeline's `_fea_child` is the only one (round 15, M-25)." CHANGELOG: "The dead `windows.run_windows` is deleted (round 15, M-25)." Could break: callers (`grep`): only that test. Mutant: a `run_windows` defined again: @@MUT25@@.
+Code. Deleted with its docstring line, its imports and `test_run_windows_overlaps_fea_with_the_next_les_window`; `test_r15_m25_the_pipelines_child_is_the_one_entry_point_...` asserts it is gone and that `_fea_child` asks for `buckle=True`. DECISIONS: amend 792: "`windows.run_windows`, a second FEA entry point whose default left the buckling step off, is deleted; the pipeline's `_fea_child` is the only one (round 15, M-25)." CHANGELOG: "The dead `windows.run_windows` is deleted (round 15, M-25)." Could break: callers (`grep`): only that test. Mutant: a `run_windows` defined again: killed (`m25_dead`).
 
 ### M-27 (`fea_min_s` text)
 
@@ -208,4 +208,9 @@ Code. The `why` of `stage3.fea_min_s` names the default hull correctly ("ellipso
 
 ## Checked (what I ran)
 
-@@CHECKED@@
+- **Static**: `ruff check cafe/pm tests` clean; `mypy cafe/pm` (strict) clean, 55 files; no banned token (`audit.BANNED`) and no commented-out code (`audit._commented_code`) in any line I changed.
+- **Whole test files, on orca** (2 CPUs each, parallel directories; `test_stage3.py` as 6 interleaved chunks of its 188 test functions, run by node id, so not in file order): `test_uas.py` + `test_uas_exact.py` rc 0; `test_report.py` + `test_pipeline.py` rc 0; `test_stage3.py` all chunks rc 0 except one test, `test_round_13_m42_a_killed_fea_window_takes_its_ccx_with_it`, whose stand-in child is killed by its own re-based 3 s watchdog while the parent believed 60 s: under M-21's rule that -9 is "before the deadline"; the test now tells the parent 4 s (the child's watchdog fires later than that less 1 s) and it and its two neighbours pass; `test_budget.py`, `test_conventions.py`, `test_acceptance.py`, `test_stats_exact.py` green; `test_credibility.py` green after the scope fix (`credibility.SEAGLIDER_ONLY` gains the two stored-depth keys of the Seaglider hull; the test counts 32 per-class keys, was 28); `test_config_docs.py`: **two failures, both explained**: `test_decisions_rows_are_numbered_without_gaps_or_repeats` fails on 09f4ce4 itself (rows 826 to 839 do not exist until the branches merge: P-R15A-4; I ran it on a detached 09f4ce4 to be sure), and `test_r14_m15_...` fails until batch D writes 641.1 in RUNBOOK:76 and row 776. Four tests were also run alone on the final tree: the 3-lobe tube and sphere, `fea.selftest`, the Hangar BEM frequencies (real CalculiX, rc 0).
+- **Mutants** (detached worktrees `cafe-r15b-mut*`, each run against the test that names it): 35 hand-made, all killed in the end; two first survived (`m18_doc`, `m20_track`) and their tests were fixed, as said under M-18 and M-20; a mutant that removes the static-block guard of `_frd_modes` is killed by the test added for it.
+- **Probes (read only, orca, 2 CPUs, shared and loaded; scripts not committed)**: the five-mesh study and the two hulls (`config/fea_hull_mesh_study.json`); the closed-form table; the whole FEA child timed (641.1 s); `Context(...).plan["stage3"]["fea"]` for the four budgets, with 1 GPU and with none; the q15 UAS re-flown before and after (it reproduced q15's stored counts exactly before the change).
+- **Not done / not verified**: no gate, no demo run (`make acceptance`), no full-suite coverage or mutation run; the slow receipts (`fea_receipts`, which now go through the new buckling rule: the "Glider hull collapse pressure" bracket, a 1.5 m / 0.22 m / 7 mm hull whose lowest mode I expect is 2-lobe, and the long-tube row, which is the 3/4 case reproduced above at 1.051 of Bresse) were not rerun; the physical roll and pitch frequencies of M-9 are not implemented (an assumption, said so); the USV slamming and quad-frame FEA meshes in `hangar.py` (L/50, L/60) have no convergence study; the follower correction is unverified for a mode dominated by flat end caps (the 0.4 m tube); `refit` of two windows is unchanged (M-18); M-12, M-22, M-26, M-8 are not mine.
+- **Incidents**: twice I synced a new tree into `pm_r15b` with `PM_TAKE=1` while one of my own jobs was running there (a test run of mine, `r15b_t_c`, which went on and passed; and a serial stage-3 run, which I then stopped by `tmux kill-session` on its exact session name, rc 143, and replaced with the six chunks). Both are my own directories. Nothing outside `~/cafe-worker`, no `/tmp`, no other person's process or file was touched; no stash, no push, no Azure. All `pm_r15b*` directories, their job markers and `r15b_*` logs are removed at the end, by exact name.

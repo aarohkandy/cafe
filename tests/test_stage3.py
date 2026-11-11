@@ -919,7 +919,8 @@ def test_r15_m14_the_chosen_mesh_is_a_row_of_the_stored_study_within_one_percent
     n = a["fea_elements_along"]
     assert n in rows and n < max(rows) and len(rows) >= 4
     assert abs(rows[n]["buckling_factor"] / rows[max(rows)]["buckling_factor"] - 1) < 0.01
-    assert abs(rows[45]["buckling_factor"] / rows[max(rows)]["buckling_factor"] - 1) > 0.01 and rows[20]["collapse_depth_m"] > 1.05 * rows[max(rows)]["collapse_depth_m"]
+    finest = rows[max(rows)]
+    assert abs(rows[45]["buckling_factor"] / finest["buckling_factor"] - 1) > 0.01 and rows[20]["collapse_depth_m"] > 1.05 * finest["collapse_depth_m"]
     for r in rows.values():
         assert r["collapse_depth_m"] == pytest.approx(study["hull"]["depth_m"] * r["buckling_factor"] * hangar.KNOCKDOWN, abs=0.01)
     hulls = {h["platform"]: h for h in study["hulls_at_the_chosen_mesh"]}
@@ -1905,8 +1906,8 @@ def test_round_13_m42_a_killed_fea_window_takes_its_ccx_with_it(monkeypatch, tmp
     monkeypatch.setattr(pw, "_spawn", spawn)
     pid_file = tmp_path / "ccx.pid"
     monkeypatch.setenv("PIDFILE", str(pid_file))
-    # the parent's deadline (4 s) is the one `_killed_at_deadline` judges the child's -9 by (round 15 M-21): the child's own watchdog fires 3 s after its imports,
-    # which is later than the parent's 4 s less 1 s of skew, so this -9 is the watchdog's and not an outside kill
+    # the parent's deadline (4 s) is the one `_killed_at_deadline` judges the child's -9 by (round 15 M-21): the child's own watchdog fires 3 s after
+    # its imports, later than the parent's 4 s less 1 s of skew, so this -9 is the watchdog's and not an outside kill
     out = pw._fea(ball, dict(wall_points=pts, wall_pressure=np.full(len(pts), 1e5)), dict(fea_elements_along=4), timeout_s=4)
     assert out == dict(run=False, reason="killed: the FEA did not finish inside the window's remaining wall-clock slice")
     assert seen["start_new_session"] is True and seen["timeout"] == 4 + pw.FS_GRACE_S and "--fea" in seen["cmd"]
