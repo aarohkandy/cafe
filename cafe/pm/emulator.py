@@ -22,7 +22,6 @@ import importlib.util
 import itertools
 import os
 import pathlib
-import uuid
 import time
 from collections.abc import Callable, Iterator
 from typing import Any, cast
@@ -31,6 +30,7 @@ import numpy as np
 import pandas as pd
 from scipy.spatial import cKDTree
 
+from cafe import atomic
 from .config import ConfigError
 from .stats import intervals
 
@@ -93,7 +93,7 @@ def write_table(df: pd.DataFrame, path: pathlib.Path) -> None:
     """Write the table so that a reader sees the old file or the new one, never a part: to a temporary of its own name (two writers never share one)
     in the same directory, then `os.replace`."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    name = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")     # not mkstemp: its 0600 would lock other users out
+    name = atomic.tmp_name(path)                  # its own name, 17 characters whatever `path` is called (round 15, M-6)
     try:
         df.to_parquet(name) if path.suffix == ".parquet" else df.to_csv(name, index=False)
         os.replace(name, path)
@@ -257,7 +257,8 @@ class Emulator:
             return dict(status="out_of_range", **head)
         p = self.predict(x, alpha)
         res = {t: {k: float(v[0]) for k, v in r.items()} for t, r in p.items()}
-        v = intervals.verdict_from_p(res["p_fail"]["value"]) if "p_fail" in res else None
+        pf = res.get("p_fail")
+        v = intervals.verdict_band(pf["value"], pf["lo"], pf["hi"]) if pf else None          # the band counts, as in Stage 1's `verdict` (round 15, M-1)
         return dict(status="ok", verdict=v, targets=res, alpha=alpha, **head)
 
     # ---- evaluation -------------------------------------------------------------------------------------------
@@ -329,11 +330,17 @@ class Emulator:
         Candidates: each parameter alone on `steps` points of its bounds, plus the full grid of all named parameters on
         `pair_steps` points each. Cost = Euclidean norm of the changes scaled by each bound's width. Out-of-range
         candidates are ignored. Returns dict(found, ...); `change` is {name: new - old}.
+
+        The verdicts are `intervals.verdict_band` of the prediction and its conformal 90 % band, the baseline's included, as `query` gives them. The
+        winner is the cheapest of about `compared` candidates by the point estimate, and the minimum of that many noisy estimates is the lucky one, so a
+        candidate counts as a flip only if its whole band is in the verdicts other than the baseline's (`intervals.band_in`); the cheapest one that
+        changes the verdict but whose band is not inside is `not_shown`, and `found` is False when there is no other (round 15, M-1).
         """
         names = list(bounds)
         base = np.array([[x[f] for f in self.features]])
-        p0 = float(self.predict(base)["p_fail"]["value"][0])
-        v0 = intervals.verdict_from_p(p0)
+        pb = self.predict(base)["p_fail"]
+        p0 = float(pb["value"][0])
+        v0 = intervals.verdict_band(p0, float(pb["lo"][0]), float(pb["hi"][0]))
         cols = [self.features.index(n) for n in names]
         grids = [np.linspace(*bounds[n], steps) for n in names]
         singles = [np.tile(base, (steps, 1)) for _ in names]
@@ -345,13 +352,23 @@ class Emulator:
         cand = np.vstack(singles + [cf])
         width = np.maximum([bounds[n][1] - bounds[n][0] for n in names], 1e-12)
         cost = np.sqrt((((cand[:, cols] - base[:, cols]) / width) ** 2).sum(1))
-        p = self.predict(cand)["p_fail"]["value"]
-        flips = np.array([intervals.verdict_from_p(q) != v0 for q in p]) & (self._dist(cand) <= self.threshold)
-        if not flips.any():
-            return dict(found=False, base_p=p0, base_verdict=v0)
-        i = int(np.argmin(np.where(flips, cost, np.inf)))
-        return dict(found=True, base_p=p0, base_verdict=v0, p=float(p[i]), verdict=intervals.verdict_from_p(p[i]),
-                    cost=float(cost[i]), change={n: float(cand[i, j] - base[0, j]) for n, j in zip(names, cols, strict=True)})
+        pc = self.predict(cand)["p_fail"]
+        p = pc["value"]
+        inside = self._dist(cand) <= self.threshold
+        verdicts = [intervals.verdict_band(a, b, c) for a, b, c in zip(p, pc["lo"], pc["hi"], strict=True)]
+        other = tuple(v for v in ("GO", "MARGINAL", "NO-GO") if v != v0)
+        moved = np.array([v != v0 for v in verdicts]) & inside
+        shown = moved & np.array([intervals.band_in(b, c, other) for b, c in zip(pc["lo"], pc["hi"], strict=True)])
+        compared = int(inside.sum())
+        if not shown.any():
+            out: dict[str, Any] = dict(found=False, base_p=p0, base_verdict=v0, compared=compared)
+            if moved.any():
+                j = int(np.argmin(np.where(moved, cost, np.inf)))
+                out["not_shown"] = dict(p=float(p[j]), lo=float(pc["lo"][j]), hi=float(pc["hi"][j]), verdict=verdicts[j], cost=float(cost[j]))
+            return out
+        i = int(np.argmin(np.where(shown, cost, np.inf)))
+        return dict(found=True, base_p=p0, base_verdict=v0, p=float(p[i]), verdict=verdicts[i], cost=float(cost[i]), compared=compared,
+                    change={n: float(cand[i, j] - base[0, j]) for n, j in zip(names, cols, strict=True)})
 
 
 def synthetic_table(n: int, seed: int = 0, members: int = 512) -> pd.DataFrame:

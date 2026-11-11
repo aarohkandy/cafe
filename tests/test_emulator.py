@@ -68,7 +68,7 @@ def test_query_under_10_ms_and_format(fitted):
     assert r["status"] == "ok" and r["badge"] == "EMULATED" and r["verdict"] in ("GO", "MARGINAL", "NO-GO")
     pf = r["targets"]["p_fail"]
     assert 0 <= pf["lo"] <= pf["value"] <= pf["hi"] <= 1 and set(r["targets"]) == set(E.TARGETS)
-    assert r["verdict"] == I.verdict_from_p(pf["value"]) and r["n_train"] == 500
+    assert r["verdict"] == I.verdict_band(pf["value"], pf["lo"], pf["hi"]) and r["n_train"] == 500                   # round 15, M-1: the band counts
     wide = em.query(x, alpha=0.01)["targets"]["p_fail"]
     assert wide["hi"] - wide["lo"] > pf["hi"] - pf["lo"]
 
@@ -343,16 +343,19 @@ def test_flip_search_finds_the_cheapest_verdict_change(fitted):
     x = df.iloc[np.abs(em.predict(df[E.FEATURES])["p_fail"]["value"] - 0.30).argmin()][E.FEATURES].to_dict()  # the row nearest P = 0.30 (it was the lowest P)
     bounds = {"duty_cycle": (0.2, 1.0), "lon_shift_deg": (-1.0, 1.0), "deploy_shift_h": (-12.0, 12.0)}
     r = em.flip_search(x, bounds)
-    assert r["found"] and r["verdict"] != r["base_verdict"]
+    assert r["found"] and r["verdict"] != r["base_verdict"] and r["compared"] > 0
     moved = dict(x, **{k: x[k] + v for k, v in r["change"].items()})
-    assert I.verdict_from_p(em.predict(moved)["p_fail"]["value"][0]) == r["verdict"]
+    other = [v for v in ("GO", "MARGINAL", "NO-GO") if v != r["base_verdict"]]
+    band = lambda c: (lambda pf: (pf["value"][0], pf["lo"][0], pf["hi"][0]))(em.predict(c)["p_fail"])             # noqa: E731
+    assert I.verdict_band(*band(moved)) == r["verdict"] and I.band_in(band(moved)[1], band(moved)[2], other)       # round 15, M-1: the band, not the point
     assert all(bounds[k][0] - 1e-9 <= moved[k] <= bounds[k][1] + 1e-9 for k in bounds)
-    # nothing on a coarse single-parameter scan is cheaper
+    # nothing on a coarse single-parameter scan is cheaper that is shown to be another verdict
     for k, (lo, hi) in bounds.items():
         for v in np.linspace(lo, hi, 21):
             c = dict(x, **{k: v})
             if abs(v - x[k]) / (hi - lo) < r["cost"] - 1e-9 and em.distance(c) <= em.threshold:
-                assert I.verdict_from_p(em.predict(c)["p_fail"]["value"][0]) == r["base_verdict"]
+                p, plo, phi = band(c)
+                assert I.verdict_band(p, plo, phi) == r["base_verdict"] or not I.band_in(plo, phi, other)
 
 
 def test_flip_search_reports_when_nothing_flips(fitted):
@@ -440,7 +443,7 @@ def test_write_table_uses_a_temporary_of_its_own_and_leaves_none_behind_when_it_
     monkeypatch.setattr(E.os, "replace", lambda a, b: (seen.append(pathlib.Path(a).name), real(a, b)))
     E.write_table(pd.DataFrame(dict(key=["a"], x=[1.0])), t)
     E.write_table(pd.DataFrame(dict(key=["a", "b"], x=[1.0, 2.0])), t)
-    assert len(set(seen)) == 2 and "train.parquet.tmp" not in seen and all(n.startswith("train.parquet.") and n.endswith(".tmp") for n in seen)
+    assert len(set(seen)) == 2 and "train.parquet.tmp" not in seen and all(n.startswith(".") and n.endswith(".tmp") and len(n) == 17 for n in seen)  # M-6
     assert list(tmp_path.iterdir()) == [t] and len(E.read_table(t)) == 2
 
     def half(self, name, *a, **k):

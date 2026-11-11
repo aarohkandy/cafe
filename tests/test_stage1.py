@@ -2323,9 +2323,11 @@ def _split_sea(calm, rough, M):
     return PerturbedEnv(SplitSeaEnv(calm, rough, hs=1.0), {}, list(range(M)), 3, pri)
 
 
-def test_r12_m11_an_rf_links_margin_reads_the_larger_hs_of_its_two_ends_whichever_is_named_first():
+def test_r12_m11_an_rf_links_margin_reads_both_ends_hs_whichever_is_named_first():
     """C-5: Hs was read at end a only, so the same link differed by 0.3 dB (USV 3 km out) between a=usv,b=uas and a=uas,b=usv when the sea differs between
-    the ends. Here the USV (1 km north) has Hs 3 m and the ship, under the UAS, 0.2 m."""
+    the ends. Here the USV (1 km north) has Hs 3 m and the ship, under the UAS, 0.2 m. Round 15, M-3: it was the larger Hs that was used and called the
+    conservative one; a rougher sea fills the nulls, so the margin is the worse of the two seas' margins at each sample
+    (tests/test_round15_a.py::test_m3_an_rf_link_takes_the_worse_margin_of_the_two_ends_not_the_larger_hs, which also covers a path with nulls)."""
     out, _ = rf_scene(M=2, bad_samples=(0, 0))
     lk = LK["usv-uas-rf"]
     both = lambda env, a="usv", b="uas": stage1.evaluate_link(dict(lk, a=a, b=b), out, MISSION, env, 2, 3, [0, 1])
@@ -2334,7 +2336,7 @@ def test_r12_m11_an_rf_links_margin_reads_the_larger_hs_of_its_two_ends_whicheve
     rough, calm = both(_split_sea((3.0, 6.0), (3.0, 6.0), 2)), both(_split_sea((0.2, 6.0), (0.2, 6.0), 2))
     assert np.abs(rough["margin_db"] - calm["margin_db"])[10:110].max() > 0.5                   # the test can tell the two seas apart (the two-ray nulls move)
     assert np.array_equal(fwd["margin_db"], rev["margin_db"], equal_nan=True)                    # before: the two namings differ
-    assert np.array_equal(fwd["margin_db"], rough["margin_db"], equal_nan=True)                  # the larger Hs (the USV's) is the one used, in both namings
+    assert np.array_equal(fwd["margin_db"], np.minimum(rough["margin_db"], calm["margin_db"]), equal_nan=True)  # the worse of the two seas', both namings
     assert fwd["hs_filled"] == rev["hs_filled"] == 0
 
 

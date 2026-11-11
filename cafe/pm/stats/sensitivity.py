@@ -11,6 +11,9 @@ from __future__ import annotations
 
 import numpy as np
 
+SENS_MIN_N = 16        # fewest members the indices are computed from: below it `default_harmonics` (2) has lam = 2M/N of 0.25 and more, and the bias correction
+#                        S~ = S - lam/(1 - lam)(1 - S) turns noise into S1 = 1 (n = 5 gave 1.0 for noise, n = 4 a ZeroDivisionError); stage1 reads it too
+
 
 def default_harmonics(n: int) -> int:
     """M = min(6, max(2, n // 16)): the permutation-null floor of max S1 grows with M/N (lam = 2M/N); six harmonics at 32 members put it at
@@ -19,8 +22,14 @@ def default_harmonics(n: int) -> int:
 
 
 def first_order(x: np.ndarray, y: np.ndarray, harmonics: int | None = None, correct: bool = True) -> np.ndarray:
-    """S1 for each column of x (n, d) against y (n,). Values are clipped to [0, 1]. Constant y gives zeros. `harmonics` defaults to `default_harmonics(n)`."""
+    """S1 for each column of x (n, d) against y (n,). Values are clipped to [0, 1]. Constant y gives zeros. `harmonics` defaults to `default_harmonics(n)`.
+    A ValueError for fewer than SENS_MIN_N members with the default harmonics, and for any `harmonics` with 2 * harmonics >= n (lam >= 1: the correction
+    divides by 1 - lam); an explicit `harmonics` above that is the caller's choice (round 15, M-37)."""
     n, d = x.shape
+    if harmonics is None and n < SENS_MIN_N:
+        raise ValueError(f"first-order indices need at least {SENS_MIN_N} members, got {n}")
+    if harmonics is not None and 2 * harmonics >= n:
+        raise ValueError(f"{harmonics} harmonics need more than {2 * harmonics} members (lam = 2M/N must be below 1), got {n}")
     y = np.asarray(y, float) - np.mean(y)
     out = np.zeros(d)
     if not np.any(y):
