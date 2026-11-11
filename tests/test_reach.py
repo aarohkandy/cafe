@@ -363,6 +363,24 @@ def test_r15_m34_no_budget_is_refused(fixed_speed, kw):
         reach.reach(fast_usv(), UniformEnv(10.0, -95.0), 10.0, -95.0, n=9, **kw)
 
 
+def test_r15_m34_a_reserve_of_zero_is_inside_the_documented_range(monkeypatch):
+    """[0, 1) includes 0: the whole battery may be spent. Only the upper bound was tested (a guard `0 < reserve` survived)."""
+    monkeypatch.setattr(ctrl, "cruise_speed", lambda v: V)
+    monkeypatch.setattr(ctrl, "_level_power", lambda veh, v: (10.0, True))
+    veh = NS(kind="usv", battery_wh=10.0, hotel_w=1.0, actuators=[])
+    r = reach.reach(veh, UniformEnv(10.0, -95.0), 10.0, -95.0, hours=5, n=9, reserve=0.0)
+    assert np.isfinite(np.array(r["hours"], float)).sum() > 1
+    assert reach.endurance_h(veh, V, 0.0) == pytest.approx(1.0) and reach.endurance_h(veh, V, 0.5) == pytest.approx(0.5)
+
+
+def test_r15_m35_a_point_exactly_on_the_edge_of_the_weather_box_is_inside():
+    """`_inside` is inclusive on all four edges (Env.at holds the edge value there, which is the weather at that point); a hair beyond is outside."""
+    env = UniformEnv(50.0, -150.0, box=((49.0, 51.0), (-151.0, -149.0)))
+    lat = np.array([49.0, 51.0, 50.0, 50.0, 50.0, 50.0, 48.999, 51.001, 50.0, 50.0])
+    lon = np.array([-150.0, -150.0, -151.0, -149.0, -150.0, -150.0, -150.0, -150.0, -151.001, -148.999])
+    assert reach._inside(env, lat, lon).tolist() == [True] * 6 + [False] * 4
+
+
 def test_r15_m34_an_empty_battery_is_refused(monkeypatch):
     monkeypatch.setattr(ctrl, "cruise_speed", lambda v: V)
     monkeypatch.setattr(ctrl, "_level_power", lambda veh, v: (50.0, True))

@@ -26,7 +26,8 @@ def _skew(a: np.ndarray) -> np.ndarray:
 
 def implicit_midpoint(inertia: np.ndarray, w: np.ndarray, dt: float, tol: float = 1e-14, max_iter: int = 50) -> np.ndarray:
     """Solve w1 = w + dt dw/dt((w + w1)/2) by Newton's method from the explicit Euler step, with the analytic Jacobian
-    d(dw/dt)/dw = I^-1 ([I w]x - [w]x I). RuntimeError when it does not converge.
+    d(dw/dt)/dw = I^-1 ([I w]x - [w]x I). RuntimeError when it does not converge. It stops when the Newton step is below `tol` times max(1, |w1|_max): a
+    step cannot be smaller than the rounding of w1 itself (about 1e-16 |w1|), so an absolute 1e-14 never settled for |w| above about 100 (round 15, M-33).
     Not a fixed-point iteration: that one contracts only when about dt/2 ||d(dw/dt)/dw|| < 1, a bound that carries the inertia ratios and so is no
     "dt |w| < 1" (4000 random diagonal inertias, ratios up to 1e3, dt |w| = 0.3: 1817 of them failed it; round 15, M-33). Newton converged for all of 1000
     random diagonal inertias at dt |w| = 0.3 for each ratio 1, 10, 50 and 1000 (residual below 2e-14); at dt |w| = 1 it failed for 2 of 1000 at ratio 50 and
@@ -42,9 +43,9 @@ def implicit_midpoint(inertia: np.ndarray, w: np.ndarray, dt: float, tol: float 
         except np.linalg.LinAlgError:
             break
         w1 = w1 - step
-        if np.max(np.abs(step)) < tol:
+        if np.max(np.abs(step)) < tol * max(1.0, np.max(np.abs(w1))):
             return w1
-    raise RuntimeError("implicit midpoint did not converge: the step is too long for this angular velocity and inertia")
+    raise RuntimeError("implicit midpoint did not converge: Newton found no root near the Euler step (a step too long for this angular velocity and inertia)")
 
 
 def invariants(inertia: np.ndarray, w: np.ndarray) -> tuple[float, float]:

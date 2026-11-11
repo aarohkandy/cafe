@@ -132,6 +132,22 @@ def test_implicit_midpoint_reference_solves_its_own_equation_where_the_fixed_poi
         assert b == pytest.approx(a, rel=1e-12)
 
 
+@pytest.mark.parametrize("speed, ratio", [(300.0, 3.0), (300.0, 10.0), (1000.0, 3.0), (1000.0, 10.0)])
+def test_implicit_midpoint_reference_settles_at_a_large_angular_velocity_and_a_short_step(speed, ratio):
+    """Round 15, M-33 (batch C's own Newton): an absolute step test of 1e-14 is below the rounding of w itself once |w| is above about 100, so it raised
+    where the fixed point had settled (|w| = 300, dt |w| = 0.01, far inside the domain; 116 of 200 draws at ratio 3). The test is relative to |w1|."""
+    rng = np.random.default_rng(15)
+    for _ in range(100):
+        inertia = np.diag(np.sort(rng.uniform(1.0, ratio, 3)) * rng.uniform(0.5, 2.0))
+        w = rng.normal(size=3)
+        w *= speed / np.linalg.norm(w)
+        dt = 0.01 / speed
+        w1 = rigid.implicit_midpoint(inertia, w, dt)
+        assert np.max(np.abs(w1 - w - dt * rigid.omega_dot(inertia, 0.5 * (w + w1)))) < 1e-12 * speed
+    w = rigid.implicit_midpoint(np.diag([1.0, 2.0, 3.0]), np.full(3, 173.2), 0.01 / 300.0)            # the fixed point's answer, from the review
+    assert w == pytest.approx([172.1981482, 174.19608996, 172.86669454], abs=1e-6)
+
+
 def test_principal_axis_spin_conserves_everything():
     """About a principal axis w x I w = 0, so the scheme is exact: this is the regime the autopilots live in."""
     hist, _ = spin(bare_dyn(bare(10.0, I3)), [0.0, 0.0, 4.0], 1e-2, 2000)

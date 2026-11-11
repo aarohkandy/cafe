@@ -562,9 +562,11 @@ def _real(v: Any) -> bool:
 def _speed_readable(c: Any) -> bool:
     """Whether a stored speed entry has what `tabulate`, `row_notes` and `receipts` index and compute with: a dict with a real `ct`, a finite `cells` above 0
     (a cell count), a real `ct_std` when present, and for the optional numbers `run_grid` stores as None when it has none (`iters`, `y_plus`, `drift`,
-    `drift_parts`, `scatter`) None or real. No tighter than `run_grid` writes: a NaN or infinite C_T, a missing `ct_std` and the None entries stay readable."""
+    `drift_parts`, `scatter`) None or real, and `surf_level` (`discretization` puts it in a set)
+    absent, None, an int or a string. No tighter than `run_grid` writes: a NaN or infinite C_T, a missing `ct_std` and the None entries stay readable."""
     return (isinstance(c, dict) and _real(c.get("ct")) and config.finite_real(c.get("cells")) and c["cells"] > 0 and ("ct_std" not in c or _real(c["ct_std"]))
-            and all(c.get(k) is None or _real(c[k]) for k in ("iters", "y_plus", "drift", "drift_parts", "scatter")))
+            and all(c.get(k) is None or _real(c[k]) for k in ("iters", "y_plus", "drift", "drift_parts", "scatter"))
+            and isinstance(c.get("surf_level"), (type(None), int, str)))
 
 
 def read_run(f: pathlib.Path) -> dict[str, Any] | None:

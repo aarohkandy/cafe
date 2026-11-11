@@ -1217,7 +1217,8 @@ DAMAGE = {"an int": lambda c: 5, "no ct": lambda c: {k: v for k, v in c.items() 
           "ct null": lambda c: c | {"ct": None}, "ct text": lambda c: c | {"ct": "x"}, "ct bool": lambda c: c | {"ct": True},
           "ct_std null": lambda c: c | {"ct_std": None}, "cells 0": lambda c: c | {"cells": 0}, "cells text": lambda c: c | {"cells": "many"},
           "cells nan": lambda c: c | {"cells": math.nan}, "drift text": lambda c: c | {"drift": "x"}, "y_plus text": lambda c: c | {"y_plus": "hi"},
-          "iters text": lambda c: c | {"iters": "x"}, "scatter bool": lambda c: c | {"scatter": False}, "huge int": lambda c: c | {"ct": 10 ** 400}}
+          "iters text": lambda c: c | {"iters": "x"}, "scatter bool": lambda c: c | {"scatter": False}, "huge int": lambda c: c | {"ct": 10 ** 400},
+          "surf_level list": lambda c: c | {"surf_level": [1]}, "surf_level dict": lambda c: c | {"surf_level": {"a": 1}}}
 
 
 @pytest.mark.parametrize("name", list(DAMAGE))
