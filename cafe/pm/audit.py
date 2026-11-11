@@ -39,8 +39,8 @@ BANNED = re.compile(r"\b(TODO|FIXME|XXX|NotImplementedError)\b|\bplaceholder\b|p
 # The older `cafe/` modules the pipeline imports, directly (cfd, fea, emulator, reach, receipts, planner) or through them. Their banned-token scan is
 # cheap and covers all of them; ruff covers the five that pass it (`planner` has 14 loop-closure findings in numerical code that this round does not
 # touch). mypy --strict and the coverage gates are not asked of them: they are pre-mission app code, run through the pipeline and their own receipts.
-IMPORTED = [f"cafe/{m}.py" for m in ("cfd", "ctrl", "dyn", "emulator", "env", "fea", "geom", "hangar", "mission", "ocean", "planner", "reach", "receipts",
-                                     "shapes", "vehicle")]
+IMPORTED = [f"cafe/{m}.py" for m in ("atomic", "cfd", "ctrl", "dyn", "emulator", "env", "fea", "geom", "hangar", "mission", "ocean", "planner", "reach",
+                                     "receipts", "shapes", "vehicle")]
 # Scope (DECISIONS 205): BRIEF 5.5's `cafe/` is read as code and config. Outside the scan: cafe/static/index.html (its `placeholder="..."` form-field
 # attributes), cafe/static/vendor/ (third-party three.js, Leaflet), the app's own modules the pipeline does not import, lab/, report/, and the prose
 # documents other than RUNBOOK. cafe/static/app.js is scanned, with the DOM property `.placeholder` removed from a line before matching (JS_DOM_PLACEHOLDER).
@@ -469,8 +469,8 @@ def main(argv: list[str]) -> int:
         print(f"error: unknown option {bad[0]} ({', '.join(OPTIONS)})")
         return 2
     for a in argv:
-        if not a.startswith("--") and not pathlib.Path(a).is_dir():
-            print(f"error: {a} is not a run directory (the run directories are runs/quick, runs/overnight, runs/4h)")
+        if not a.startswith("--") and not (a and pathlib.Path(a).is_dir()):          # "" is Path("."): the current directory, not a run
+            print(f"error: {a or repr(a)} is not a run directory (the run directories are runs/quick, runs/overnight, runs/4h)")
             return 2
     if "--pytest-done" in argv and any(a.startswith("--") and a != "--pytest-done" for a in argv):
         print("error: --pytest-done takes no other option (it is the whole audit except pytest)")

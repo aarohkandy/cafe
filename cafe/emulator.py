@@ -13,7 +13,7 @@ JSON state out — libraries/SITL/examples/JSON/readme.md) can take a drone's pl
 import datetime as dt, json, os, pathlib, select, socket, struct, subprocess, sys, threading, time, traceback
 import numpy as np
 
-from cafe import dyn, env as envm, ctrl
+from cafe import atomic, dyn, env as envm, ctrl
 from cafe.mission import Frame, z_to_down, _float_depth
 from cafe.vehicle import G, prop_perf
 
@@ -312,7 +312,7 @@ def run(d):
     d = pathlib.Path(d)
     spec = json.loads((d / "emulation.json").read_text())
     log = lambda s: (print(s, flush=True), open(d / "log.txt", "a").write(s + "\n"))
-    status = lambda **kw: (d / "status.json").write_text(json.dumps(dict(updated=time.time(), **kw)))
+    status = lambda **kw: atomic.write_json(d / "status.json", dict(updated=time.time(), **kw))
     from cafe import hangar
     designs = d.parent.parent / "designs"
     drones = spec["drones"]
@@ -389,7 +389,7 @@ def run(d):
                 verdict="GO" if not reason else "NO-GO", p_success=1.0 if not reason else 0.0,
                 reasons=[dict(reason=reason, share=1.0)] if reason else [], legs_done=r.legs_done, err95_m=errs,
                 battery_left_p50=float(left), battery_left_p10=float(left), track=s.track, autopilot_messages=r.messages[-50:])
-        (d / "result.json").write_text(json.dumps(res, default=float))
+        atomic.write_json(d / "result.json", res, default=float)
         status(state="done", progress=1.0)
     except Exception as e:
         traceback.print_exc()

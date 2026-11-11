@@ -10,7 +10,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from cafe import geom, shapes, env as envm
+from cafe import atomic, geom, shapes, env as envm
 
 SHAPE_SAMPLES = {     # TEPEX-style examples built from simplified shapes (validation hulls come from geom.SAMPLES)
     "petrel": ("glider", dict(name="Petrel", kind="uuv", power_w=30, battery_wh=1000, hotel_w=0.6, buoyancy_cc=400,
@@ -64,8 +64,8 @@ def _startup():
             d.mkdir()
             s["make"]().export(d / "mesh.stl")
             spec = dict(s["spec"], kind=s["kind"], sample=True, units="m")
-            (d / "spec.json").write_text(json.dumps(spec))
-            (d / "status.json").write_text(json.dumps(dict(state="queued", step="waiting", progress=0.0, updated=time.time())))
+            atomic.write_json(d / "spec.json", spec)
+            atomic.write_json(d / "status.json", dict(state="queued", step="waiting", progress=0.0, updated=time.time()))
 
 
 # ------------------------------------------------------------------ designs
@@ -179,8 +179,8 @@ async def create_design(mesh: UploadFile = File(...), spec: str = Form(...)):
     m.export(d / "mesh.stl")
     if m.metadata.get("units_assumed"):
         s["units_assumed"] = m.metadata["units_assumed"]
-    (d / "spec.json").write_text(json.dumps(s))
-    (d / "status.json").write_text(json.dumps(dict(state="queued", step="waiting", progress=0.0, updated=time.time())))
+    atomic.write_json(d / "spec.json", s)
+    atomic.write_json(d / "status.json", dict(state="queued", step="waiting", progress=0.0, updated=time.time()))
     return _design_summary(d) | dict(extents=m.extents.round(4).tolist(), units_assumed=s.get("units_assumed"))
 
 
@@ -194,8 +194,8 @@ def _make_shape_design(d, shape, dims, spec):
     spec = dict(spec, **hints, shape=shape, dims=dims, kind=shapes.PARAMS[shape]["kind"], units="m")
     if spec.get("mass") in (None, "") and shapes.PARAMS[shape]["kind"] == "uuv":
         spec["mass"] = round(geom.RHO_SEA * m.volume, 2)          # trimmed neutral, as subs and gliders are
-    (d / "spec.json").write_text(json.dumps(spec))
-    (d / "status.json").write_text(json.dumps(dict(state="queued", step="waiting", progress=0.0, updated=time.time())))
+    atomic.write_json(d / "spec.json", spec)
+    atomic.write_json(d / "status.json", dict(state="queued", step="waiting", progress=0.0, updated=time.time()))
     return d
 
 
@@ -276,7 +276,7 @@ def delete_design(did: str):
 def rerun_design(did: str):
     d = _design_dir(did)
     _not_sample(d, "re-run")
-    (d / "status.json").write_text(json.dumps(dict(state="queued", step="waiting", progress=0.0, updated=time.time())))
+    atomic.write_json(d / "status.json", dict(state="queued", step="waiting", progress=0.0, updated=time.time()))
     return _design_summary(d)
 
 
@@ -450,8 +450,8 @@ def create_mission(body: dict):
     mid = uuid.uuid4().hex[:8]
     d = MISSIONS / mid
     d.mkdir(parents=True)
-    (d / "mission.json").write_text(json.dumps(body))
-    (d / "status.json").write_text(json.dumps(dict(state="queued", progress=0.0, updated=time.time())))
+    atomic.write_json(d / "mission.json", body)
+    atomic.write_json(d / "status.json", dict(state="queued", progress=0.0, updated=time.time()))
     return dict(id=mid)
 
 
@@ -500,8 +500,8 @@ def create_emulation(body: dict):
     eid = uuid.uuid4().hex[:8]
     d = EMU / eid
     d.mkdir(parents=True)
-    (d / "emulation.json").write_text(json.dumps(body))
-    (d / "status.json").write_text(json.dumps(dict(state="queued", step="waiting", progress=0.0, updated=time.time())))
+    atomic.write_json(d / "emulation.json", body)
+    atomic.write_json(d / "status.json", dict(state="queued", step="waiting", progress=0.0, updated=time.time()))
     return dict(id=eid)
 
 

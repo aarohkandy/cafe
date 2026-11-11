@@ -424,10 +424,13 @@ def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1
 
 def manifest_shape(d: dict[str, Any], whole: bool = False) -> bool:
     """Whether the parsed parts manifest `d` holds what the fetch reads of it: `parts` (absent is a fresh manifest) a dict of records with a string `sha256`.
-    `whole`: what assemble_gofs reads on top: `dataset` and `box` of the manifest, `dataset` and `server` of every part (round 14 L0, the M-22 sibling:
-    the orca and TAO manifests had this check, the ocean one was read with a bare json.loads)."""
+    A part named by a path (`../x`, `/home/u/f`) is no part (round 15). `whole`: what assemble_gofs reads on top: `dataset` and `box` of the manifest,
+    `dataset` and `server` of every part (round 14 L0, the M-22 sibling: the orca and TAO manifests had this check, the ocean one was read with a bare
+    json.loads)."""
     parts = d.get("parts", {})
     if not isinstance(parts, dict) or not all(isinstance(r, dict) and isinstance(r.get("sha256"), str) for r in parts.values()):
+        return False
+    if not all(fn and fn == pathlib.PurePath(fn).name != ".." for fn in parts):         # assemble opens, hashes and deletes by this name
         return False
     return not whole or ("parts" in d and isinstance(d.get("dataset"), str) and orca.real_numbers(d.get("box"), 4)
                          and all(isinstance(r.get(k), str) for r in parts.values() for k in ("dataset", "server")))
@@ -443,6 +446,8 @@ def assemble_gofs(pdir: Any, steps: Any, out_zarr: Any) -> pathlib.Path:
         raise ValueError(f"{pdir / 'manifest.json'} is missing or is not a parts manifest (empty, truncated or of another shape); "
                          f"delete it and rerun fetch_gofs to fetch the parts again")
     for fn, rec in man["parts"].items():
+        if not (pdir / fn).is_file():                                         # recorded and gone (deleted by hand): not a FileNotFoundError
+            raise ValueError(f"{pdir / fn}: recorded in the manifest and not a file; delete the manifest and rerun fetch_gofs to fetch the parts again")
         if _sha(pdir / fn) != rec["sha256"]:
             raise ValueError(f"{pdir / fn}: SHA-256 differs from the manifest; delete it and rerun fetch_gofs to fetch that part again")
     opened: dict[str, Any] = {}

@@ -595,7 +595,7 @@ def test_every_cafe_module_the_pipeline_imports_is_in_the_banned_token_scan():
 def test_those_modules_are_linted_where_they_pass_ruff():
     import tomllib
     inc = tomllib.loads((audit.ROOT / "pyproject.toml").read_text())["tool"]["ruff"]["include"]
-    assert {"cafe/cfd.py", "cafe/emulator.py", "cafe/fea.py", "cafe/reach.py", "cafe/receipts.py"} <= set(inc)
+    assert {"cafe/atomic.py", "cafe/cfd.py", "cafe/emulator.py", "cafe/fea.py", "cafe/reach.py", "cafe/receipts.py"} <= set(inc)
     assert "cafe/planner.py" not in inc and "cafe/planner.py" in audit.SCAN                      # scanned for banned tokens, not linted (see audit.IMPORTED)
 
 
@@ -613,7 +613,7 @@ def test_a_banned_token_in_an_imported_older_module_is_caught(tmp_path):
 
 def test_the_older_modules_the_scan_names_are_clean_today():
     older = tuple(audit.IMPORTED)
-    assert len(older) == 15 and not [h for h in audit.banned() if h.startswith(older)]
+    assert len(older) == 16 and not [h for h in audit.banned() if h.startswith(older)]
 
 
 def test_the_whole_scanned_tree_has_no_banned_token_today():
@@ -1387,3 +1387,18 @@ def test_r13_sweep_a_cut_write_leaves_the_old_pytest_receipt_and_mutation_record
     with pytest.raises(OSError, match="killed"):
         audit.main(["--mutation-record"])
     assert record.read_bytes() == before and not list(record.parent.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("argv", [[""], ["--ledgers-only", ""]])
+def test_r15_an_empty_argument_is_not_a_run_directory(argv, tmp_path, monkeypatch, capsys):
+    """`pathlib.Path("")` is `.`: the audit took an unset `$RUN` for the current directory and went on to its ledger checks (the sibling of
+    `python -m cafe.receipts ""`)."""
+    monkeypatch.chdir(tmp_path)
+
+    def never(*a, **k):
+        raise AssertionError("a step ran")
+    monkeypatch.setattr(audit, "_run", never)
+    monkeypatch.setattr(audit, "banned", never)
+    monkeypatch.setattr(audit, "ledger_problems", never)
+    assert audit.main(argv) == 2
+    assert "error: '' is not a run directory" in capsys.readouterr().out

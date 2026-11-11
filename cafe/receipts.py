@@ -673,7 +673,7 @@ def main(argv: list[str]) -> int:
             from cafe.pm.config import os_error_text
             sys.exit(f"error: nothing was stamped: {os_error_text(e)}")
         return 0
-    if len(w) > 1 or (w and not pathlib.Path(w[0]).is_dir()):
+    if len(w) > 1 or (w and not (w[0] and pathlib.Path(w[0]).is_dir())):         # "" is Path("."): the current directory, not a word
         p.error(f"{' '.join(w)!r} is not one existing results directory (the only other command is `stamp FILE...`); make the directory first, "
                 f"or give no argument for {RESULTS_DEFAULT}")
     results = pathlib.Path(w[0]) if w else pathlib.Path(RESULTS_DEFAULT)

@@ -9,7 +9,7 @@ import json, pathlib, sys, time, traceback
 import numpy as np
 import trimesh
 
-from cafe import geom, vehicle, fea, cfd, ctrl
+from cafe import atomic, geom, vehicle, fea, cfd, ctrl
 
 KNOCKDOWN = 0.5      # ponytail: linear buckling of imperfect shells under external pressure; NASA SP-8007-style
                      # knock-downs for cylinders are ~0.5-0.75. A Riks run with imperfections replaces it.
@@ -30,8 +30,7 @@ class Job:
             f.write(line + "\n")
 
     def status(self, state, step="", progress=0.0, **kw):
-        (self.d / "status.json").write_text(json.dumps(dict(state=state, step=step, progress=progress,
-                                                             updated=time.time(), **kw)))
+        atomic.write_json(self.d / "status.json", dict(state=state, step=step, progress=progress, updated=time.time(), **kw))
 
 
 # ------------------------------------------------------------------ input checks
@@ -253,7 +252,7 @@ def run(design_dir, skip=()):
                 job.log("error: " + e)
             res["errors"] = errors
             job.status("failed", "model check", 1.0, errors=errors)
-            (d / "result.json").write_text(json.dumps(res, default=_j))
+            atomic.write_json(d / "result.json", res, default=_j)
             return res
         res["geometry"] = geom.report(m, kind, spec["mass"])
         hangar = {}
@@ -352,13 +351,13 @@ def run(design_dir, skip=()):
         v2 = vehicle.build(kind, m, spec, hangar)
         res["performance"] = dict(cruise=ctrl.cruise_speed(v2), vmax=ctrl.max_speed(v2), sources=v2.sources)
         res["finished"] = time.time()
-        (d / "result.json").write_text(json.dumps(res, default=_j))
+        atomic.write_json(d / "result.json", res, default=_j)
         job.log(f"done: cruise {res['performance']['cruise']:.2f} m/s, max {res['performance']['vmax']:.2f} m/s")
         job.status("done", "ready", 1.0)
     except Exception as e:
         job.log("crashed: " + "".join(traceback.format_exception(e))[-3000:])
         res["errors"] = [f"{type(e).__name__}: {e}"]
-        (d / "result.json").write_text(json.dumps(res, default=_j))
+        atomic.write_json(d / "result.json", res, default=_j)
         job.status("failed", "error", 1.0, errors=res["errors"])
     return res
 

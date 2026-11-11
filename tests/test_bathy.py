@@ -306,3 +306,18 @@ def test_r12_l0_m25_the_row_reads_of_gebco_refuse_a_file_replaced_after_its_meta
 def test_r12_l1_m24_gebco_empty_box_names_its_edges(server, gebco, tmp_path):
     with pytest.raises(ValueError, match=r"has no grid points inside the box \(lat -2 to 2, lon 10.6 to 10.9\)"):
         b.fetch_gebco((-2, 2, 10.6, 10.9), tmp_path / "x.npz", gebco["flat"])
+
+
+@pytest.mark.parametrize("attrs", ["[]", "[1, 2]", '"text"', "7", "null", "true", "[{}]"])
+def test_r15_a_gebco_cache_whose_attrs_are_json_but_not_an_object_is_the_same_one_error(server, gebco, tmp_path, attrs):
+    """`attrs["sha256"]` on a list or a string raised TypeError, which `from_gebco` did not translate and no caller (`_gebco_cached`, `choose`) catches
+    (round 14 M-23 handled a missing array and a file that is no archive)."""
+    from cafe.pm import pipeline
+    good = b.fetch_gebco(BOX, tmp_path / "good.npz", gebco["flat"])
+    z = dict(np.load(good))
+    z["attrs"] = attrs
+    p = tmp_path / "gebco2026_x.npz"
+    np.savez(p, **z)
+    with pytest.raises(ValueError, match=rf"{p}: not a readable GEBCO cache \(TypeError.*\); delete it and refetch"):
+        b.from_gebco(p)
+    assert pipeline._gebco_cached(p) is False

@@ -638,10 +638,10 @@ def _summary(d, mission, t_end):
 if __name__ == "__main__":
     # python -m cafe.mission /work/missions/<id>   (mission.json written by the app)
     import json, pathlib, sys, traceback
-    from cafe import hangar
+    from cafe import atomic, hangar
     d = pathlib.Path(sys.argv[1])
     m = json.loads((d / "mission.json").read_text())
-    status = lambda **kw: (d / "status.json").write_text(json.dumps(dict(updated=time.time(), **kw)))
+    status = lambda **kw: atomic.write_json(d / "status.json", dict(updated=time.time(), **kw))
     try:
         designs = d.parent.parent / "designs"
         for x in m["drones"]:
@@ -650,7 +650,7 @@ if __name__ == "__main__":
                 stage=lambda s: status(state="running", progress=0.0, step=s))
         for x in m["drones"]:
             x.pop("vehicle")
-        (d / "result.json").write_text(json.dumps(r, default=hangar._j))
+        atomic.write_json(d / "result.json", r, default=hangar._j)
         status(state="done", progress=1.0)
     except Exception as e:
         traceback.print_exc()

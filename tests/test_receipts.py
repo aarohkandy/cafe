@@ -1101,3 +1101,16 @@ def test_r14_l0_a_cut_write_of_the_stamped_cfd_result_leaves_the_stamped_file_it
     assert out.read_bytes() == before and not list(out.parent.glob("*.tmp"))
     R.OUT.clear()
     assert R.stored(out, "CFD") is not None and R.OUT == []
+
+
+@pytest.mark.parametrize("argv", [[""], ["", ""], ["stamp", ""]])
+def test_r15_an_empty_argument_is_a_usage_error_not_the_current_directory(argv, tmp_path, monkeypatch, capsys):
+    """`pathlib.Path("")` is `.`, which is a directory: `python -m cafe.receipts ""` (an unset shell variable in `$RESULTS`) ran every receipt and wrote
+    receipts.json into the current directory (round 14 M-3 checked `is_dir()` and not the word)."""
+    monkeypatch.chdir(tmp_path)
+    ran = no_receipts(monkeypatch)
+    with pytest.raises(SystemExit) as e:
+        R.main(argv)
+    assert e.value.code not in (0, None) and ran == [] and list(tmp_path.iterdir()) == []
+    if argv[0] == "":
+        assert e.value.code == 2 and "usage: python -m cafe.receipts" in capsys.readouterr().err

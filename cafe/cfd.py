@@ -9,6 +9,8 @@ import json, os, pathlib, re, shutil, subprocess, sys, time
 import numpy as np
 import trimesh
 
+from cafe import atomic
+
 FOAM = "source /usr/lib/openfoam/openfoam2506/etc/bashrc >/dev/null 2>&1; "
 NPROC = int(os.environ.get("CAFE_NPROC", "6"))
 FLUIDS = {"water": dict(rho=1025.0, nu=1.19e-6), "air": dict(rho=1.20, nu=1.5e-5)}
@@ -40,7 +42,7 @@ def cached(key, stl, log, compute):
         return json.loads(f.read_text())
     r = compute()
     CACHE.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(r, default=float))
+    atomic.write_json(f, r, default=float)           # the next run reads it back: a cut file would be a JSONDecodeError, not a recompute
     return r
 
 
@@ -675,8 +677,7 @@ def main(argv: list[str]) -> pathlib.Path:
         speeds = [float(fn * np.sqrt(9.81 * L)) for fn in (0.2, 0.3, 0.4)]
         r = characterize_free_surface(stl, hs["draft"], work / sample, speeds)
     out = work / f"{sample}.{what}.json"
-    from cafe.pm.config import write_json                  # the stamped result of hours of CFD: a kill or a full disk leaves the old file, not half a new one
-    write_json(out, receipts.stamp(r), indent=1, default=float)
+    atomic.write_json(out, receipts.stamp(r), indent=1, default=float)   # hours of CFD: a kill or a full disk leaves the old file
     print(json.dumps(r, indent=1, default=float)[:3000])
     return out
 

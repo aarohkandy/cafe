@@ -7,11 +7,13 @@
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, hashlib, json, math, os, pathlib, re, shutil
+import contextlib, datetime as dt, hashlib, json, math, pathlib, re
 from collections.abc import Hashable, Iterator
 from typing import Any
 
 import yaml
+
+from cafe import atomic
 
 from .stats import intervals
 
@@ -342,18 +344,10 @@ def write_text(p: pathlib.Path, text: str) -> None:
     that `json_object` and the other readers of a stored result would then have to refuse (round 9, L0; the writer of every slow-run receipt), and no
     temporary behind. A symlink is followed, so the file it points to is the one replaced and the link stays a link (round 13, M-14). The one writer of
     a file a person or a later stage reads back: the acceptance golden, the audit records, the run's reports and ledgered JSON (round 13, M-17 sweep), the
-    ledgers, the receipt store and the ingest manifests (round 14, P-R13M1). An existing file keeps its permission bits (a new file gets the default
+    ledgers, the receipt store and the ingest manifests (round 14, P-R13M1). The code is `cafe.atomic.write_text` (standard library only, so the live app's
+    own files use it too: round 15). An existing file keeps its permission bits (a new file gets the default
     ones); a hard link to it does not survive, because a replace gives the name a new inode and the other name keeps the old content (round 14, M-18)."""
-    p = pathlib.Path(os.path.realpath(p))
-    tmp = p.with_name(p.name + ".tmp")
-    try:
-        tmp.write_text(text)
-        with contextlib.suppress(OSError):                                  # the mode of the file being replaced; a new file has none to keep
-            shutil.copymode(p, tmp)
-        os.replace(tmp, p)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    atomic.write_text(p, text)
 
 
 def write_json(p: pathlib.Path, obj: Any, end: str = "", **kw: Any) -> None:

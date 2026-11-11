@@ -9,6 +9,9 @@ The first steps (startup, JIT) are excluded from every timing.
 """
 import json, os, pathlib, platform, re, subprocess, sys, tempfile, time
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))                # `python bench/throughput.py`: the repository root is not on the path
+from cafe import atomic  # noqa: E402
+
 OUT = pathlib.Path(__file__).resolve().parents[1] / "config" / "throughput.json"
 FOAM = "source /usr/lib/openfoam/openfoam2506/etc/bashrc >/dev/null 2>&1; "
 
@@ -16,7 +19,7 @@ FOAM = "source /usr/lib/openfoam/openfoam2506/etc/bashrc >/dev/null 2>&1; "
 def save(solver, entry):
     data = json.loads(OUT.read_text()) if OUT.exists() else {}
     data[solver] = entry
-    OUT.write_text(json.dumps(data, indent=2) + "\n")
+    atomic.write_json(OUT, data, indent=2, end="\n")           # the planner reads it back: a kill mid-write must leave the old file
     print(json.dumps({solver: entry}, indent=2))
 
 
@@ -201,7 +204,7 @@ def _stage1(sizes, mission):
     data = json.loads(OUT.read_text()) if OUT.exists() else {}
     data["stage1"] = out
     data["machine"] = dict(id=platform.node(), cpu=_cpu(), cpus=os.cpu_count(), measured=time.strftime("%Y-%m-%d"))
-    OUT.write_text(json.dumps(data, indent=2) + "\n")
+    atomic.write_json(OUT, data, indent=2, end="\n")           # the planner reads it back: a kill mid-write must leave the old file
     return out
 
 

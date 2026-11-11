@@ -1404,3 +1404,94 @@ def test_r14_l0_the_delete_and_restore_advice_is_one_shell_word_per_path(tmp_pat
     assert shlex.split(msg.split("restore ")[1].split(" from the lab")[0]) == [str(tmp_path / "my runs" / "lab.zarr")]
     plain = tmp_path / "gofs_x.zarr"
     assert f"delete {plain} and run" in str(h.unreadable(plain, OSError("x")))                      # a plain path is not changed
+
+
+# ---- round 15: attack on the L0 manifest check
+
+def _victim_manifest(pdir, fn, victim, **extra):
+    import hashlib
+    rec = dict(dataset="ts3z", server="ncss", sha256=hashlib.sha256(victim.read_bytes()).hexdigest())
+    (pdir / "manifest.json").write_text(json.dumps(dict(parts={fn: rec}, dataset="GOFS", box=[1.0, 2.0, 3.0, 4.0], **extra)))
+
+
+@pytest.mark.parametrize("name", ["../victim.txt", "sub/victim.txt", "..", ".", "", "VICTIM_ABS"])
+def test_r15_a_part_named_by_a_path_is_no_part_and_assemble_deletes_nothing_outside_the_parts_directory(fx, tmp_path, name):
+    """`assemble_gofs` hashed `pdir / fn`, failed to open an unusable part and deleted it with `(pdir / fn).unlink()`, for any `fn` the manifest names: a
+    manifest that gives the hash of a file elsewhere (`../victim.txt`, an absolute path) had that file deleted, and `fetch_gofs` called the same
+    manifest a record."""
+    pdir = tmp_path / "gofs_tepex_c.parts"
+    pdir.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me")
+    (pdir / "sub").mkdir()
+    (pdir / "sub" / "victim.txt").write_text("keep me")
+    _victim_manifest(pdir, str(victim) if name == "VICTIM_ABS" else name, victim)
+    assert not h.manifest_shape(json.loads((pdir / "manifest.json").read_text()), whole=True)
+    with pytest.raises(ValueError, match="is not a parts manifest"):
+        h.assemble_gofs(pdir, mk.STEPS, tmp_path / "out.zarr")
+    assert victim.read_text() == "keep me" and (pdir / "sub" / "victim.txt").read_text() == "keep me"
+    assert h.manifest_shape(dict(parts={"gofs_x.nc": dict(sha256="a")})) and not h.manifest_shape(dict(parts={"../x": dict(sha256="a")}))
+
+
+def test_r15_a_part_the_manifest_records_and_the_directory_lacks_is_one_error_that_says_to_fetch_again(fx, tmp_path):
+    """A part deleted by hand was a FileNotFoundError out of the hash, the one failure of `assemble_gofs` that named no fix."""
+    pdir = tmp_path / "gofs_tepex_c.parts"
+    shutil.copytree(fx["gofs_parts"], pdir)
+    man = json.loads((pdir / "manifest.json").read_text())
+    gone = sorted(man["parts"])[0]
+    (pdir / gone).unlink()
+    with pytest.raises(ValueError, match=rf"{gone}: recorded in the manifest and not a file; delete the manifest and rerun fetch_gofs"):
+        h.assemble_gofs(pdir, mk.STEPS, tmp_path / "out.zarr")
+
+
+def test_r15_the_advice_to_delete_the_parts_of_two_boxes_is_one_shell_word(fx, tmp_path):
+    """`parts in {pdir} were cut to different boxes; delete {pdir} and run fetch again` is pasted: a parts directory with a space was two words (the one
+    advice of round 14 L0's quoting that no test read)."""
+    import shlex
+
+    import xarray as xr
+    p = tmp_path / "my runs" / "gofs.parts"
+    p.parent.mkdir()
+    shutil.copytree(fx["gofs_parts"], p)
+    man = json.loads((p / "manifest.json").read_text())
+    victim = sorted(fn for fn, r in man["parts"].items() if r["dataset"] == "ts3z")[0]
+    a = xr.open_dataset(p / victim).load()
+    a.isel(lat=slice(1, -1), lon=slice(2, -2)).to_netcdf(p / "cut.nc")
+    (p / "cut.nc").replace(p / victim)
+    man["parts"][victim]["sha256"] = h._sha(p / victim)
+    (p / "manifest.json").write_text(json.dumps(man))
+    with pytest.raises(ValueError, match="were cut to different boxes") as e:
+        h.assemble_gofs(p, mk.STEPS, tmp_path / "x.zarr")
+    assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(p)]
+
+
+WHOLE = dict(parts={"gofs_a.nc": dict(sha256="ab", dataset="ts3z", server="ncss")}, dataset="GOFS", box=[1.0, 2.0, 3.0, 4.0])
+
+
+@pytest.mark.parametrize("damage", [lambda m: m.pop("parts"), lambda m: m.pop("dataset"), lambda m: m.update(dataset=3), lambda m: m.pop("box"),
+                                    lambda m: m.update(box=[1.0, 2.0, 3.0]), lambda m: m.update(box=[1.0, 2.0, 3.0, "4"]),
+                                    lambda m: m["parts"]["gofs_a.nc"].pop("server"), lambda m: m["parts"]["gofs_a.nc"].pop("dataset"),
+                                    lambda m: m["parts"]["gofs_a.nc"].update(server=None)])
+def test_r15_assemble_needs_every_key_it_indexes_and_the_fetch_needs_fewer(damage, tmp_path):
+    """Each key `assemble_gofs` reads (`parts`, `dataset`, four numbers in `box`, a part's `dataset` and `server`) is checked, one at a time; a manifest
+    that lacks one is a record for `fetch_gofs` (which reads only `parts` and their `sha256`) and no manifest for `assemble_gofs`."""
+    import copy
+    m = copy.deepcopy(WHOLE)
+    assert h.manifest_shape(m, whole=True) and h.manifest_shape(m)
+    damage(m)
+    assert not h.manifest_shape(m, whole=True)
+    pdir = tmp_path / "gofs_tepex_c.parts"
+    pdir.mkdir()
+    (pdir / "manifest.json").write_text(json.dumps(m))
+    with pytest.raises(ValueError, match="is not a parts manifest"):
+        h.assemble_gofs(pdir, mk.STEPS, tmp_path / "out.zarr")
+
+
+def test_r15_a_first_fetch_does_not_call_the_manifest_it_has_not_written_yet_damaged(fx, truth, ncss, tmp_path):
+    """The log line is for a manifest that exists and is no record; a mutant that logs it for an absent file passed every test of the round 14 L0 set."""
+    logged: list[str] = []
+    _fetch(tmp_path, ncss, log=logged.append)
+    assert not any("is not a parts manifest" in x for x in logged)
+    logged.clear()
+    _fetch(tmp_path, ncss, log=logged.append)                                                   # and a good manifest is not damaged either
+    assert not any("is not a parts manifest" in x for x in logged)

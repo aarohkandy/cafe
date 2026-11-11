@@ -255,3 +255,16 @@ def test_l1_every_bench_entry_records_the_cpus_and_model_it_ran_on(tmp_path, mon
     throughput.lbm("cpu", n=8, steps=2, warm=1)
     e = json.loads(lbm_out.read_text())["jax-lbm-d3q19-cpu"]
     assert e["cpus"] == os.cpu_count() and e["cpu"] == budget.cpu_model()
+
+
+def test_r15_a_cut_write_of_the_throughput_file_leaves_the_file_the_planner_reads(tmp_path, monkeypatch, cut_writes):
+    """`save` and `stage1` wrote config/throughput.json in place (a measurement of hours): a kill left three characters, `budget` could not read the file
+    and the next `save` could not merge into it (round 15, the writers outside cafe/)."""
+    out = tmp_path / "throughput.json"
+    out.write_text(json.dumps({"lbm": {"rate": 1.0}}))
+    before = out.read_bytes()
+    monkeypatch.setattr(throughput, "OUT", out)
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        throughput.save("foam", {"rate": 2.0})
+    assert out.read_bytes() == before and not list(tmp_path.glob("*.tmp"))

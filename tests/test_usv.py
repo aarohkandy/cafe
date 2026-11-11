@@ -1316,3 +1316,14 @@ def test_r14_m9_a_speed_bias_above_minus_one_is_a_positive_factor_and_the_drawn_
     assert np.allclose(s.fac, 0.01) and (s.fac > 0).all()
     wide = usv.USVSim({**P, "vpp_bias_sd": 5.0}, 50, AnalyticEnv(), (0.0, 0.0), 0.0, dict(mode="station", station=(0.0, 1.0), seed=2))
     assert wide.fac.min() == pytest.approx(0.1)                                    # the drawn bias is clipped to >= -0.9
+
+
+@pytest.mark.parametrize("key", ["draft_nominal_m", "keel_depth_m", "iridium_antenna_height_m", "loa_m"])
+def test_r15_a_number_the_usv_file_carries_is_refused_when_it_is_text_whatever_the_key(tmp_path, key):
+    """The keys no code reads (`OPTIONAL`) are numbers too: the string exemption of the removed radio names left with them (round 14 L0)."""
+    raw = yaml.safe_load((usv.PLATFORMS / "saildrone_explorer.yaml").read_text())
+    raw["params"][key]["value"] = "2.0"
+    f = tmp_path / "old.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=rf"old\.yaml:params\.{key}: '2.0' is a string"):
+        usv.load_platform(str(f))

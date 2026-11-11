@@ -619,6 +619,15 @@ def test_r14_m34_the_window_result_counts_the_wall_cells_that_get_no_shear(monke
     assert row["value"] == 7 and row["limit"] == 0 and not row["ok"] and row["note"] == r["note"]
 
 
+def test_r15_one_wall_cell_without_a_normal_fails_the_window_as_seven_do(monkeypatch):
+    """The count is compared with 0, not with a tolerance: one cell whose drag is under-counted is a failing row (a mutant `if nns > 1` passed the 7 of
+    the test above)."""
+    monkeypatch.setattr(wm, "no_shear_cells", lambda ws: 1)
+    r = W.run_window(HULL, W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=200, box=(2.0, 0.8, 0.8), chunk=200), _uniform([0, 0, 0]))
+    row = [c for c in r["checks"] if c["name"] == "wall_cells_without_normal"]
+    assert len(row) == 1 and row[0]["value"] == 1 and row[0]["limit"] == 0 and not row[0]["ok"] and not r["ok"]
+
+
 def test_run_window_ground_frame_shifts_the_nest_with_the_vehicle():
     sp = W.WindowSpec(velocity=(0.5, 0.0, 0.0), dx=0.01, steps=400, box=(2.0, 0.8, 0.8), frame="ground")
     r = W.run_window(HULL, sp, _uniform([0, 0, 0]))
@@ -2350,6 +2359,27 @@ def test_a_cut_window_withholds_every_machine_dependent_number_so_two_cut_points
         assert {"cd", "cd_spread", "cl", "cl_spread", "checks"} <= set(r["timing"]["machine_dependent"])
         assert "withheld" in r["reasons"][0] and r["usable_for_refit"] is False
     assert e["timing"]["machine_dependent"]["cd"] != l["timing"]["machine_dependent"]["cd"]       # the numbers do differ; they are just not hashed
+
+
+def test_r15_a_cut_window_keeps_the_count_of_wall_cells_without_a_normal_in_its_row(no_wall_receipt, monkeypatch):
+    """The count belongs to the wall set, not to where the clock stopped, but a cut window kept every check of the run in `timing.machine_dependent`: the
+    row said nothing of cells whose drag is under-counted (P-R14L0-1 (3)). It is in `checks` and in the reasons, and still the same for two cut points."""
+    cheap(monkeypatch)
+    monkeypatch.setattr(wm, "no_shear_cells", lambda ws: 7)
+
+    def run_cut(step_s):
+        tick = iter(range(1, 10 ** 6))
+        monkeypatch.setattr(nest, "time", SimpleNamespace(perf_counter=lambda: step_s * next(tick), time=time.time, sleep=time.sleep))
+        return pw.run(toy_g_ctx(no_wall_receipt, 2000.0), {"g": [WIN]}, FakeL())
+    early, late = run_cut(2000.0), run_cut(600.0)
+    assert untimed(early) == untimed(late)
+    for rows in (early, late):
+        r = rows["g"][0]
+        assert r["cut"] and not r["ok"]
+        row = [c for c in r["checks"] if c["name"] == "wall_cells_without_normal"]
+        assert len(row) == 1 and row[0]["value"] == 7 and not row[0]["ok"] and "7 of " in row[0]["note"]
+        assert any("7 of " in x and "under-counted" in x for x in r["reasons"])
+        assert "wall_cells_without_normal" not in {c["name"] for c in r["timing"]["machine_dependent"]["checks"]}
 
 
 def test_a_run_that_is_not_cut_has_cut_false_and_keeps_its_numbers(no_wall_receipt, monkeypatch):

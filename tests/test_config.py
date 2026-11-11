@@ -1330,7 +1330,6 @@ BARE_COPIES = {
     "stage3/pipeline_windows.py": (1, "the job file of one child process, in a scratch directory the parent removes"),
 }
 BARE_REPLACES = {
-    "config.py": 1,
     "emulator.py": 1,                  # a unique temporary name per writer (a parquet table)
     "env/bathy.py": 1, "env/hycom.py": 3, "env/orca.py": 1, "env/remote.py": 1,         # npz and zarr stores and downloads, written as `.part` then renamed
     "ledger.py": 1,                    # copy_manifest: a byte copy of a shared file
@@ -1472,3 +1471,86 @@ def test_r14_p_r13m1_a_cut_write_of_a_ledger_a_rerecord_a_receipt_and_a_tao_mani
         tao.fetch_tao((-1.0, 1.0, 160.0, 170.0), 0.0, 7200.0, tmp_path / "tao")
     assert (f.read_bytes(), rf.read_bytes(), mf.read_bytes()) == (before, rbefore, mbefore)
     assert not list(tmp_path.rglob("*.tmp"))
+
+
+# ---- review round 15 (P-R14L0-1): the app's own files go through the standard-library writer too
+
+# The `.write_text(` calls of cafe/*.py (the live app and its jobs: no pyyaml in their image, so no `cafe.pm.config`) that are not `cafe.atomic`, with why
+# each is not a file read back. A new one fails this test: use `atomic.write_json` / `atomic.write_text`, or add the file here with its reason (DECISIONS 817).
+APP_WRITES = {
+    "app.py": (1, "the uploaded mesh, loaded by the request that wrote it; a cut upload is a failed request"),
+    "_redteam.py": (2, "a developer script that fills a scratch job directory it deletes"),
+    "_site_data.py": (1, "the site's static data files, rebuilt whole by the script that writes them"),
+    "cfd.py": (1, "an OpenFOAM dictionary in the case directory of one run"),
+    "emulator.py": (1, "the SITL parameter file in the scratch directory of one flight"),
+    "fea.py": (2, "the CalculiX input and log in the scratch directory of one solve"),
+    # bench/throughput.py (scanned with them): 1, the decomposeParDict of a scratch OpenFOAM case; its two writes of config/throughput.json, which
+    # cafe.pm.budget reads back, go through atomic.write_json
+}
+
+
+def test_r15_every_json_the_app_reads_back_is_written_through_cafe_atomic_or_named_here():
+    import ast
+    found = {}
+    for p in sorted((config.ROOT / "cafe").glob("*.py")) + [config.ROOT / "bench" / "throughput.py"]:
+        if p.name == "atomic.py":
+            continue
+        tree = ast.parse(p.read_text())
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("write_text", "write_bytes", "dump"):
+                found[p.name] = found.get(p.name, 0) + 1
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "replace" and getattr(n.func.value, "id", "") == "os":
+                found[p.name + ":os.replace"] = found.get(p.name + ":os.replace", 0) + 1
+    assert found == {**{k: v[0] for k, v in APP_WRITES.items()}, "ocean.py:os.replace": 1, "throughput.py": 1}   # ocean.py: an npz renamed from a `.part.npz`
+
+
+def test_r15_config_write_text_is_the_atomic_writer_and_a_temporary_has_a_name_of_its_own(tmp_path, monkeypatch):
+    """There is one temporary-and-replace: `config.write_text` calls `cafe.atomic.write_text` (standard library only, so the app's image can use it)."""
+    from cafe import atomic
+    seen = []
+    real = pathlib.Path.write_text
+
+    def spy(self, text, *a, **k):
+        seen.append(self.name)
+        return real(self, text, *a, **k)
+    monkeypatch.setattr(pathlib.Path, "write_text", spy)
+    f = tmp_path / "r.json"
+    config.write_text(f, "1")
+    atomic.write_text(f, "2")
+    assert f.read_text() == "2" and len(seen) == 2 and len(set(seen)) == 2 and "r.json.tmp" not in seen
+    assert all(n.startswith("r.json.") and n.endswith(".tmp") for n in seen) and not list(tmp_path.glob("*.tmp"))
+    import ast
+    imported = {a.name for n in ast.walk(ast.parse(pathlib.Path(atomic.__file__).read_text())) if isinstance(n, ast.Import) for a in n.names}
+    assert imported == {"contextlib", "json", "os", "pathlib", "shutil", "uuid"} and not any(
+        isinstance(n, ast.ImportFrom) and n.module != "typing" for n in ast.walk(ast.parse(pathlib.Path(atomic.__file__).read_text())))
+
+
+def test_r15_a_cut_write_of_the_cfd_cache_is_no_cache_and_the_next_run_computes_again(tmp_path, monkeypatch, cut_writes):
+    """`cfd.cached` wrote `<sha>.json` in place and `json.loads` read it on the next run: a kill between truncate and write left a file that raised
+    JSONDecodeError in place of the recompute that follows an absent one (P-R14L0-1 (1))."""
+    from cafe import cfd
+    monkeypatch.setattr(cfd, "CACHE", tmp_path / "cfdcache")
+    stl = tmp_path / "m.stl"
+    stl.write_bytes(b"solid")
+    calls = []
+    compute = lambda: calls.append(1) or dict(cd=0.25)                                                           # noqa: E731
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        cfd.cached(dict(k=1), stl, lambda m: None, compute)
+    assert list((tmp_path / "cfdcache").iterdir()) == []
+    monkeypatch.undo()
+    monkeypatch.setattr(cfd, "CACHE", tmp_path / "cfdcache")
+    assert cfd.cached(dict(k=1), stl, lambda m: None, compute) == dict(cd=0.25) and calls == [1, 1]
+    assert cfd.cached(dict(k=1), stl, lambda m: None, compute) == dict(cd=0.25) and calls == [1, 1]            # now it is a cache
+
+
+def test_r15_a_cut_write_of_a_job_status_leaves_the_status_it_replaces(tmp_path, cut_writes):
+    """`worker.state` reads `status.json` back: a cut file is a state of None, and a job that was running when the worker restarted is not run again."""
+    from cafe import hangar
+    job = hangar.Job(tmp_path)
+    job.status("running", step="mesh", progress=0.5)
+    before = (tmp_path / "status.json").read_bytes()
+    cut_writes()
+    with pytest.raises(OSError, match="killed"):
+        job.status("running", step="bem", progress=0.6)
+    assert (tmp_path / "status.json").read_bytes() == before and not list(tmp_path.glob("*.tmp"))

@@ -57,12 +57,12 @@ def _wrf_notes(a: Any) -> tuple[str, str]:
     (12 km, frozen at 2023-03-01), which `orca.wrf_grid` guarantees only for a cache it wrote (round 14, M-7; round 13, M-30 had the old words)."""
     try:
         dx = float(a["DX"]) / 1000
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):          # an integer too large for a float (json.loads gives a 400-digit literal as an int)
         dx = math.nan
     grid = f"{dx:g} km" if math.isfinite(dx) and dx > 0 else "grid spacing (DX) not recorded"
     try:
         upd = float(a["SST_UPDATE"])
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError, OverflowError):
         upd = math.nan
     if not (math.isfinite(upd) and upd == int(upd)):
         return grid, "SST_UPDATE not recorded"

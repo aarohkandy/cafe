@@ -213,7 +213,7 @@ def manifest_shape(m: dict[str, Any]) -> bool:
             and isinstance(files, dict) and all(isinstance(r, dict) and all(isinstance(r.get(k), str) for k in ("sha256", "mooring", "var", "mode"))
                                                 and r["mode"] in GOOD for r in files.values())
             and isinstance(sel, dict) and isinstance(pos, dict)
-            and all(isinstance(v, dict) and all(k in files and var in NC for var, k in v.items()) and orca.real_numbers(pos.get(n), 2)
+            and all(isinstance(v, dict) and all(isinstance(k, str) and k in files and var in NC for var, k in v.items()) and orca.real_numbers(pos.get(n), 2)
                     for n, v in sel.items()))
 
 

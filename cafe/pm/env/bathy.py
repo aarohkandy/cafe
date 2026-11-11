@@ -149,7 +149,7 @@ def from_gebco(path: Any) -> Bathymetry:
             attrs = json.loads(str(z["attrs"]))
             lon, lat, elev = z["lon"], z["lat"], np.ascontiguousarray(z["elevation"])
             want, doi = attrs["sha256"], attrs["doi"]
-    except (EOFError, zipfile.BadZipFile, zlib.error, KeyError, ValueError) as e:
+    except (EOFError, zipfile.BadZipFile, zlib.error, KeyError, TypeError, ValueError) as e:     # TypeError: attrs is JSON but not an object
         raise ValueError(f"{path}: not a readable GEBCO cache ({type(e).__name__}: {e}); delete it and refetch") from e
     if hashlib.sha256(elev.tobytes()).hexdigest() != want:
         raise ValueError(f"{path}: raster SHA-256 differs from the one recorded at download; delete it and refetch")

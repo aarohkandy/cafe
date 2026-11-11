@@ -612,8 +612,11 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
                "there and the rest of its slice went to the next window" if wl["diverged"] else
                f"killed: its wall-clock slice was spent before the {wl['planned_steps']} planned steps were done")
         resolution.update(cut_reason=why, diverged=bool(wl["diverged"]))        # the report says which of the two cut the run (round 9, M-24)
+        geometry = [c for c in r["checks"] if c["name"] == "wall_cells_without_normal"]        # a count of the wall set, not of the clock (round 15)
+        checks += geometry
         timing["machine_dependent"] = dict(run_steps=wl["run_steps"], cut_reason=wl["cut_reason"], cells_per_s=wl["cells_per_s"], cd=float(r["cd"]),
-                                           cd_spread=float(r["cd_spread"]), cl=float(r["cl"]), cl_spread=float(r["cl_spread"]), checks=list(r["checks"]))
+                                           cd_spread=float(r["cd_spread"]), cl=float(r["cl"]), cl_spread=float(r["cl_spread"]),
+                                           checks=[c for c in r["checks"] if c not in geometry])
         timing["wall_s"] = time.perf_counter() - t0
         return dict(base, resolution=resolution, checks=checks, ok=False, cut=True, usable_for_refit=False,
                     reasons=[why + "; its coefficients and check values are machine-dependent and withheld"] + why_failed(checks, r["resolution"], {}),

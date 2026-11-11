@@ -955,3 +955,15 @@ def test_r11_m25_a_platform_file_of_the_wrong_shape_is_a_value_error_from_the_cl
     f.write_text(yaml.safe_dump(raw))
     with pytest.raises(ValueError, match=said):
         mod.load_platform(str(f))
+
+
+@pytest.mark.parametrize("name,key", [("seaglider", "rho_ref"), ("slocum", "rho_ref"), ("seaglider", "gps_s")])
+def test_r15_a_number_the_glider_files_carry_is_refused_when_it_is_text_whatever_the_key(tmp_path, name, key):
+    """Round 14 L0 removed the string exemption of `acoustic_modem`: every key is now a number. A mutant that exempts `rho_ref` (a key no code reads) passed
+    every test."""
+    raw = yaml.safe_load((g.PLATFORMS / f"{name}.yaml").read_text())
+    raw["params"][key]["value"] = "1027.5"
+    f = tmp_path / "old.yaml"
+    f.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=rf"old\.yaml:params\.{key}: '1027.5' is a string"):
+        g.load_platform(str(f))

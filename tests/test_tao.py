@@ -655,3 +655,55 @@ def test_r13_m32_fetch_takes_a_file_with_a_nat_time_as_unusable_and_picks_anothe
     key = "T2N165E/" + bad
     assert "TIME: " in man["unusable"][key] and "NaT" in man["unusable"][key] and man["files"][key]["time_start"] is None
     assert man["selected"]["T2N165E"]["WIND"].endswith("DM100B-20230201_R_WIND_10min.nc")
+
+
+# ---- round 15, item 1(b): the shape checks of the three ingest manifests answer a bool for any JSON value, never a TypeError
+
+HOSTILE = [None, True, 0, 1.5, "s", [], [1], [[]], {}, {"a": 1}, [{}], 10 ** 400, float("nan"), float("inf")]
+
+
+def _variants(obj):
+    """Every copy of the JSON-able `obj` with one value, or one key's value, replaced by each of HOSTILE (a key stays a string: JSON has no other)."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            for h in HOSTILE:
+                yield {**obj, k: h}
+            for sub in _variants(v):
+                yield {**obj, k: sub}
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            for h in HOSTILE:
+                yield obj[:i] + [h] + obj[i + 1:]
+            for sub in _variants(v):
+                yield obj[:i] + [sub] + obj[i + 1:]
+
+
+def _tao_manifest():
+    var, mode = next(iter(tao.NC)), next(iter(tao.GOOD))
+    return dict(t0=0.0, t1=3600.0, box=[-1.0, 1.0, 160.0, 170.0], files={"m/a.nc": dict(sha256="x", mooring="m", var=var, mode=mode)},
+                selected={"m": {var: "m/a.nc"}}, positions={"m": [0.0, 165.0]})
+
+
+def test_r15_a_selected_mooring_that_maps_a_variable_to_a_list_or_a_dict_is_no_manifest_not_a_type_error():
+    """`k in files` hashed the file key: `{"WIND": []}` raised `TypeError: unhashable type: 'list'` out of `tao.manifest_shape`, so a hand-damaged manifest
+    stopped the ingest where an empty one starts the fetch again (round 14 M-22 left this one)."""
+    good = _tao_manifest()
+    assert tao.manifest_shape(good) is True
+    var = next(iter(tao.NC))
+    for bad in ([], {}, [1], {"a": 1}, 3, None):
+        assert tao.manifest_shape(dict(good, selected={"m": {var: bad}})) is False
+
+
+def test_r15_every_ingest_manifest_shape_check_answers_a_bool_for_any_one_wrong_value():
+    from cafe.pm.env import hycom, orca
+    cases = [(tao.manifest_shape, _tao_manifest(), {}),
+             (orca.manifest_shape, dict(base="b", t0="a", t1="c", hours=3, box=[1.0, 2.0, 3.0, 4.0], hours3d=["h"]), {}),
+             (hycom.manifest_shape, dict(parts={"p.nc": dict(sha256="x", dataset="d", server="s")}, dataset="d", box=[1.0, 2.0, 3.0, 4.0]), {}),
+             (hycom.manifest_shape, dict(parts={"p.nc": dict(sha256="x", dataset="d", server="s")}, dataset="d", box=[1.0, 2.0, 3.0, 4.0]), {"whole": True})]
+    n = 0
+    for fn, good, kw in cases:
+        assert fn(good, **kw) is True
+        for v in _variants(good):
+            assert isinstance(fn(v, **kw), bool), (fn.__module__, v)
+            n += 1
+    assert n > 200

@@ -811,3 +811,30 @@ def test_r14_l0_the_delete_advice_for_an_orca_store_is_one_shell_word_when_the_c
     with pytest.raises(ConfigError, match="cannot be read") as e:
         GriddedEnv(d, env_sigmas())
     assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(d / "orca")]
+
+
+@pytest.mark.parametrize("key", ["DX", "SST_UPDATE"])
+def test_r15_an_integer_too_large_for_a_float_is_not_recorded_not_an_overflow_error(key):
+    """json.loads gives a 400-digit literal as an int; `float()` of it raised OverflowError out of `_wrf_notes` (and so out of GriddedEnv), where a string
+    '1e400' was already 'not recorded' (round 14, M-7)."""
+    attrs = {"DX": "12000.0", "SST_UPDATE": "0", "SIMULATION_START_DATE": START, key: 10 ** 400}
+    assert E._wrf_notes(attrs) == ((NO_DX, FROZEN) if key == "DX" else ("12 km", NO_SST))
+
+
+def test_r15_the_delete_advice_for_a_damaged_axis_is_one_shell_word_when_the_cache_path_has_a_space(ci_env, tmp_path):
+    """Round 14 L0 quoted the path in the advice of an unreadable store and not in the advice of a damaged one, two lines apart; no test read the second."""
+    import shlex
+    import xarray as xr
+    from cafe.pm.config import ConfigError
+    d = _copy_cache(ci_env, tmp_path / "my runs")
+    ds = xr.open_zarr(d / "orca" / "wrf.zarr", consolidated=False).load()
+    x = ds["lat"].values.copy()
+    x[10] = x[9]
+    ds = ds.assign_coords(lat=x)
+    for v in ds.variables.values():
+        v.encoding.clear()
+    shutil.rmtree(d / "orca" / "wrf.zarr")
+    ds.to_zarr(d / "orca" / "wrf.zarr", mode="w")
+    with pytest.raises(ConfigError, match="must be strictly increasing") as e:
+        GriddedEnv(d, env_sigmas())
+    assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(d / "orca")]
