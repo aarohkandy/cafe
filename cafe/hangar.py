@@ -83,7 +83,7 @@ BEM_OMEGA_LOW = 0.3   # rad/s: the surge, sway and yaw added mass of a boat is t
 
 def bem_omega(dof, draft):
     """The frequency [rad/s] at which a boat's added mass in `dof` is evaluated. Heave: sqrt(g / draft), the natural frequency of a box hull (waterplane
-    area over displaced volume is 1 / draft; 8.2 rad/s at 0.145 m). Roll and pitch BORROW the heave frequency: an assumption, because their own natural
+    area over displaced volume is 1 / draft; 8.2 rad/s at 0.145 m). Roll and pitch borrow the heave frequency: an assumption, because their own natural
     frequencies (a few rad/s for roll, below heave's) need GM and radii of gyration that the hull spec does not carry (round 15 M-9; the comment said
     each was evaluated near its own). Surge, sway and yaw: BEM_OMEGA_LOW."""
     return float(np.sqrt(9.81 / max(draft, 0.02))) if dof in ("Heave", "Roll", "Pitch") else BEM_OMEGA_LOW

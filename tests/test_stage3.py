@@ -828,24 +828,25 @@ def test_r15_m15_a_3_lobe_tube_and_a_sphere_are_not_corrected_as_a_2_lobe_tube(t
     from cafe import fea
     tube = trimesh.creation.cylinder(radius=0.1, height=0.6, sections=64)
     tube.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0]))
-    r = fea.solve(tube, "shell", "al6061", thickness=0.003, pressure=lambda c, n: np.full(len(c), 1e6), steps=("static", "buckle"), h=0.02, workdir=tmp_path / "t")
+    load = lambda c, n: np.full(len(c), 1e6)                                       # noqa: E731
+    r = fea.solve(tube, "shell", "al6061", thickness=0.003, pressure=load, steps=("static", "buckle"), h=0.02, workdir=tmp_path / "t")
     assert r["buckling_lobes"] == 3 and r["buckling_follower_correction"] == pytest.approx(8 / 9)
     assert r["buckling_factor"] == pytest.approx(8 / 9 * r["buckling_factor_dead_load"]) and r["buckling_factor_dead_load"] > 1.0
     E, nu, R, t, L = 68.9e9, 0.33, 0.1, 0.003, 0.6
     a = math.pi * R / L
-    mises = E * t / R / (9 - 1 + 0.5 * a * a) * (1 / ((3 / a) ** 2 + 1) ** 2 + t * t / (12 * R * R * (1 - nu * nu)) * (9 - 1 + a * a) ** 2)      # n = 3, simply supported
+    mises = E * t / R / (9 - 1 + 0.5 * a * a) * (1 / ((3 / a) ** 2 + 1) ** 2 + t * t / (12 * R * R * (1 - nu * nu)) * (9 - 1 + a * a) ** 2)     # n = 3
     assert 0.9 < r["buckling_factor"] * 1e6 / mises < 1.25                         # 1.07 with the flat caps' restraint; 3/4 alone gave 0.90
     ball = trimesh.creation.icosphere(subdivisions=3, radius=0.15)
-    s = fea.solve(ball, "shell", "al6061", thickness=0.003, pressure=lambda c, n: np.full(len(c), 1e6), steps=("static", "buckle"), h=0.04, workdir=tmp_path / "s")
+    s = fea.solve(ball, "shell", "al6061", thickness=0.003, pressure=load, steps=("static", "buckle"), h=0.04, workdir=tmp_path / "s")
     zoelly = 2 * E / math.sqrt(3 * (1 - nu ** 2)) * (0.003 / 0.15) ** 2
     assert s["buckling_lobes"] >= 4 and s["buckling_follower_correction"] > 0.9
     assert s["buckling_factor"] * 1e6 / zoelly > 0.9                                # was 0.78 with 3/4 of the dead-load factor
 
 
 def test_r15_m23_no_vm_max_is_stored_because_the_largest_element_stress_is_the_meshs(monkeypatch, tmp_path):
-    """Round 15 M-23: `vm_max` was 163 MPa for a uniform sphere whose membrane stress is 25 MPa (3.8 to 6.4 x the 99th percentile, mesh dependent) and was stored
-    in the FEA row and the app's load-case table. The 99th percentile is the stress every utilization uses; the key is gone from the solver, the window row and the
-    Hangar's case table."""
+    """Round 15 M-23: `vm_max` was 163 MPa for a uniform sphere whose membrane stress is 25 MPa (3.8 to 6.4 x the 99th percentile, mesh dependent) and
+    was stored in the FEA row and the app's load-case table. The 99th percentile is the stress every utilization uses; the key is gone from the solver,
+    the window row and the Hangar's case table."""
     import trimesh
     ball = trimesh.creation.icosphere(subdivisions=1, radius=0.1)
     fea = _fake_ccx(monkeypatch, [1.6])
@@ -855,7 +856,8 @@ def test_r15_m23_no_vm_max_is_stored_because_the_largest_element_stress_is_the_m
     pts = _sphere_points(0.1, 40)
     vehicle = W.Vehicle("ball", "water", 0.2, [dict(type="ellipsoid", center=(0, 0, 0), radii=(0.1, 0.1, 0.1))], material="al6061", thickness=0.002, depth=0.0)
     w = W.fea_window(vehicle, pts, np.full(len(pts), 1e5), workdir=tmp_path / "b", h=0.08, buckle=True)
-    assert "vm_max" not in w and w["buckling_lobes"] is None and w["buckling_follower_correction"] == 0.75        # the fake ccx has no mode shape: the 3/4 fallback
+    assert "vm_max" not in w and w["buckling_lobes"] is None
+    assert w["buckling_follower_correction"] == 0.75                                  # the fake ccx has no mode shape: the 3/4 fallback
     assert "vm_max_mpa" not in hangar._case("x", "y", dict(r, nodes=3, applied_force=[0.0, 0.0, 0.0]), "al6061")
 
 
@@ -989,8 +991,10 @@ def test_r15_m9_the_boats_added_mass_is_evaluated_at_the_frequencies_its_docstri
         def solve(self, problem):
             omegas[problem.dof] = problem.omega
             return Result()
-    monkeypatch.setitem(sys.modules, "capytaine", SimpleNamespace(Mesh=lambda **k: None, FloatingBody=Body, rigid_body_dofs=lambda **k: None, BEMSolver=Solver,
-                                                                  RadiationProblem=lambda body, radiating_dof, omega, **k: SimpleNamespace(dof=radiating_dof, omega=omega)))
+    def problem(body, radiating_dof, omega, **k):
+        return SimpleNamespace(dof=radiating_dof, omega=omega)
+    monkeypatch.setitem(sys.modules, "capytaine", SimpleNamespace(Mesh=lambda **k: None, FloatingBody=Body, rigid_body_dofs=lambda **k: None,
+                                                                  BEMSolver=Solver, RadiationProblem=problem))
     boat = trimesh.creation.box(extents=(1.0, 0.4, 0.3))
     out = hangar.bem(boat, "usv", np.array([0.0, 0.0, 0.0]), 0.145)
     w_heave = math.sqrt(9.81 / 0.145)
@@ -1167,7 +1171,8 @@ def test_pool_random_effects():
 def test_r15_m19_pool_refuses_a_nan_or_infinite_input_and_has_one_policy_for_a_spread_of_zero():
     """Round 15 M-19: `pool([1, 1.1], [nan, .01])` returned a NaN mean (NaN <= 0 is False); a zero spread raised for the drag of the one-reference branch, was
     clamped to 1e-12 for its lift and for the per-window branch. The clamp is in `pool`, for every caller; NaN and infinity are refused."""
-    for bad in (([1.0, 1.1], [float("nan"), 0.01]), ([1.0, float("nan")], [0.01, 0.01]), ([1.0, 1.1], [float("inf"), 0.01]), ([float("inf"), 1.1], [0.1, 0.01])):
+    nan, inf = float("nan"), float("inf")
+    for bad in (([1.0, 1.1], [nan, 0.01]), ([1.0, nan], [0.01, 0.01]), ([1.0, 1.1], [inf, 0.01]), ([inf, 1.1], [0.1, 0.01])):
         with pytest.raises(ValueError, match="finite"):
             refit.pool(*bad)
     zero = refit.pool([1.0, 1.1], [0.0, 0.01])
@@ -1179,8 +1184,8 @@ def test_r15_m19_pool_refuses_a_nan_or_infinite_input_and_has_one_policy_for_a_s
 
 
 def test_r15_m18_two_windows_have_no_between_window_floor_and_the_module_says_so():
-    """Round 15 M-18 (a stated limit, not a change): with two windows that agree, DerSimonian-Laird has tau^2 = 0 and the floor, which applies below two windows,
-    does not; the sigma is the standard error and the discretisation floor. One window gets the floor."""
+    """Round 15 M-18 (a stated limit, not a change): with two windows that agree, DerSimonian-Laird has tau^2 = 0 and the floor, which applies below two
+    windows, does not; the sigma is the standard error and the discretisation floor. One window gets the floor."""
     flr = dict(between_window_frac=0.1, between_window_source="t", discretisation_frac=0.05, discretisation_source="t")
     two = refit.refit([_w(0.30, 0.01), _w(0.30, 0.01)], dict(cd=0.30), floor=flr)["drag"]
     assert two["tau"] == 0 and two["sigma_between"] == 0 and two["sigma"] == pytest.approx(math.hypot(0.01 / math.sqrt(2) / 0.30, 0.05))
@@ -1894,7 +1899,8 @@ def test_round_13_m42_a_fea_with_no_time_left_is_killed_without_starting_and_a_w
         return subprocess.CompletedProcess(cmd, -9, "", "")
     monkeypatch.setattr(pw, "_spawn", watchdog)
     assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=0.0)["reason"].startswith("killed: the FEA") and calls == []
-    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=1.2)["reason"].startswith("killed: the FEA") and len(calls) == 1      # 0.3 s of 1.2 s less 1 s of skew
+    assert pw._fea(ball, r, dict(fea_elements_along=4), timeout_s=1.2)["reason"].startswith("killed: the FEA")             # 0.3 s of 1.2 s, less 1 s of skew
+    assert len(calls) == 1
     assert calls[0][calls[0].index("--fea") + 1] != "-"
     # round 15 M-21: a -9 well before the deadline (the OOM killer, a kill -9) is not the watchdog's, and no deadline means no watchdog to have fired
     monkeypatch.setattr(pw, "_spawn", lambda cmd, **k: calls.append(cmd) or subprocess.CompletedProcess(cmd, -9, "", ""))
@@ -2772,8 +2778,8 @@ def _bow_res(heading, n=3):
 
 
 def test_r15_m20_the_course_over_ground_of_members_either_side_of_the_dateline_is_the_course_elsewhere():
-    """Round 15 M-20: `track_heading` took the median of the members' raw longitudes, so members at 179.99 and -179.99 gave 0 and the course across the line came
-    out 270.006 degrees where the same flight at lon 10 gives 45.000. The same flight written either way gives one heading."""
+    """Round 15 M-20: `track_heading` took the median of the members' raw longitudes, so members at 179.99 and -179.99 gave 0 and the course across the
+    line came out 270.006 degrees where the same flight at lon 10 gives 45.000. The same flight written either way gives one heading."""
     t = np.arange(3) * 3600.0
     step = 0.01 * np.arange(3)
 

@@ -168,7 +168,7 @@ def derive(P: dict[str, Any], M: int, rho: Arr = 1.2, scale: Optional[dict[str, 
     def f(x: Arr) -> Arr:
         return np.broadcast_to(np.asarray(x, float), (M,)).copy()
 
-    dx_member = np.broadcast_to(np.asarray(ae["d_x"] * sc["drag"] * (0.0 if fault == "no_drag" else 1.0)), (M,))      # each member's rotor drag, for its envelope
+    dx_member = np.broadcast_to(np.asarray(ae["d_x"] * sc["drag"] * (0.0 if fault == "no_drag" else 1.0)), (M,))  # each member's drag
     prm = dict(
         m=af["mass_kg"] * sc["mass"], J=np.array(af["inertia_kgm2"])[:, None] * sc["mass"], arm=f(af["motor_radius_m"] / math.sqrt(2)),
         hotel=f(af["hotel_w"]), kT=kT, kQ=kQ, cq=kQ / kT, om_max=f(om_max), tau_m=f(ro["motor_time_const_s"]), eff=ro["esc_motor_eff"] * sc["eff"],
