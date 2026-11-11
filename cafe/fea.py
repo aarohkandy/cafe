@@ -6,7 +6,7 @@ hand, `solve`) and the body's mean rigid motion is held by six CalculiX equation
 reaction, so its result has no `reaction` key; `reaction` exists only for a clamped solve (`fixed=`), where it is the clamp's force.
 `python -m cafe.fea` runs the thin-cylinder self-test (membrane stress, Windenburg-Trilling collapse, the equations' balance) and needs ccx and gmsh.
 """
-import ctypes, pathlib, re, shutil, signal, subprocess, tempfile
+import ctypes, math, pathlib, re, shutil, signal, subprocess, tempfile
 from typing import Any
 import numpy as np
 import trimesh
@@ -372,16 +372,17 @@ def follower_correction(n: int) -> float:
 def _frd_modes(path: pathlib.Path, nodes: Any, values: list[float]) -> dict[float, Any]:
     """The displacement of the buckling modes of eigenvalue `values` from the ASCII .frd, mapped to the input nodes as `_frd` does (an expanded shell node
     goes to the nearest input node, the displacements of those that share one are averaged). Each result block in the .frd carries its eigenvalue in
-    the `100CL` header line (the static step's block has time 1, the buckling step's zero-load base 0); a value is matched to the block whose header is
-    within a part in 1e5 of it. A value with no block is left out."""
+    the `100CL` header line (the buckling step's zero-load base has 0; the static step's block, type 0, time 1, is never matched, so a mode of factor 1.0
+    is not read as the static displacement); a value is matched to the block whose header is within a part in 1e5 of it. A value with no block is left out."""
     from scipy.spatial import cKDTree
     xyz: dict[int, list[float]] = {}
     blocks: list[tuple[float, dict[int, list[float]]]] = []
     cur: Any = None
-    head = 0.0
+    head = math.nan
     for line in path.read_text().splitlines():
         if line.startswith("  100CL"):
-            head = float(line.split()[2])
+            f = line.split()
+            head = math.nan if len(f) > 4 and f[4] == "0" else float(f[2])         # type 0 is the static step (time 1.0): a mode of factor 1.0 is not that block
         elif line.startswith("    2C"):
             cur = xyz
         elif line.startswith(" -4"):

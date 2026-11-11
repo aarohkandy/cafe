@@ -801,6 +801,22 @@ def test_r15_m15_the_follower_correction_is_the_ring_formula_and_the_lobe_count_
     assert fea.lobe_count(nodes, el, nodes * p6[:, None]) == pytest.approx(math.sqrt(42), rel=0.08)
 
 
+def test_r15_m15_a_mode_of_factor_one_is_not_read_as_the_static_displacement(tmp_path):
+    """The static step's .frd block carries time 1.0 in its header; a buckling mode whose factor is 1.0 (1 MPa is a natural load to test with) must be read from
+    the buckling step's block, type 4, not from the static one that comes first."""
+    from cafe import fea
+
+    def block(kind, value, ux):
+        return [f"  100CL  101 {value:.9f}           2                     {kind}    1           1", " -4  DISP        4    1", " -5  D1          1    2    1    0",
+                f" -1{1:10d}{ux:12.5E}{0.0:12.5E}{0.0:12.5E}", f" -1{2:10d}{0.0:12.5E}{0.0:12.5E}{0.0:12.5E}", " -3"]
+    text = ["    1C", "    2C                             2                                     1", f" -1{1:10d}{0.0:12.5E}{0.0:12.5E}{0.0:12.5E}",
+            f" -1{2:10d}{1.0:12.5E}{0.0:12.5E}{0.0:12.5E}", " -3"] + block(0, 1.0, 7.0) + block(4, 0.0, 0.0) + block(4, 1.0000001, 3.0) + block(4, 2.0, 5.0)
+    f = tmp_path / "job.frd"
+    f.write_text("\n".join(text) + "\n")
+    got = fea._frd_modes(f, np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]), [1.0, 2.0])
+    assert got[1.0][0, 0] == pytest.approx(3.0) and got[2.0][0, 0] == pytest.approx(5.0)
+
+
 def test_r15_m15_the_least_follower_corrected_factor_over_the_modes_that_can_set_it_is_the_buckling_factor(monkeypatch, tmp_path):
     """A higher dead-load mode of 2 lobes can lie below a lower one of 4: the factor is min(correction x eigenvalue) over the modes that can set it (those
     below the lowest / 3/4), not the correction of the lowest mode alone. Without a mode shape the correction is 3/4 for all, and the lobe count is None."""
