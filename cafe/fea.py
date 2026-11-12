@@ -66,10 +66,10 @@ def hull_elements_along() -> int:
     if not body:
         raise bad("has no value")
     indent = [len(ln) - len(ln.lstrip()) for ln in body]
-    if any("\t" in ln[:n] for ln, n in zip(body, indent)) or min(indent) < indent[0]:
+    if any("\t" in ln[:n] for ln, n in zip(body, indent, strict=True)) or min(indent) < indent[0]:
         raise bad("an entry line is indented with a tab or less than the entry's first line")
     values = []
-    for ln, n in zip(body, indent):
+    for ln, n in zip(body, indent, strict=True):
         if n > indent[0]:                                                          # the text of the child above (a block scalar, a nested mapping)
             continue
         m = re.fullmatch(r"(\w+):(?:\s+(.*))?", ln.strip())
@@ -443,7 +443,7 @@ def _frd_modes(path: pathlib.Path, nodes: Any, values: list[float]) -> dict[floa
     for line in path.read_text().splitlines():
         if line.startswith("  100CL"):
             f = line.split()
-            head = math.nan if len(f) > 4 and f[4] == "0" else float(f[2])         # type 0 is the static step (time 1.0): a mode of factor 1.0 is not that block
+            head = math.nan if len(f) > 4 and f[4] == "0" else float(f[2])        # type 0 is the static step (time 1.0): a mode of factor 1.0 is not that block
         elif line.startswith("    2C"):
             cur = xyz
         elif line.startswith(" -4"):

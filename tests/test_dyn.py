@@ -120,6 +120,14 @@ def test_implicit_midpoint_reference_refuses_a_step_it_cannot_solve():
         rigid.implicit_midpoint(np.diag([14.8, 3.9, 15.9]), np.array([1.6, -1.0, 0.5]), 6.3)
 
 
+def test_implicit_midpoint_reference_ends_in_its_own_error_when_the_newton_matrix_is_exactly_singular():
+    """A spin of 1 rad/s about the intermediate axis of diag(0.5, 3, 2) over a 2 s step: the off-diagonals of the Jacobian's 2 x 2 block are 2 and 0.5
+    times dt/2 = 1, all exact in floating point, so its second pivot is 1 - 1 = 0 and numpy raises LinAlgError on the first iteration. The function must end in
+    its own RuntimeError, not leak numpy's (round 15 gate: this was the one uncovered pair of lines of cafe/pm/physics, rigid.py 43 and 44)."""
+    with pytest.raises(RuntimeError, match="no root near the Euler step"):
+        rigid.implicit_midpoint(np.diag([0.5, 3.0, 2.0]), np.array([0.0, 0.0, 1.0]), 2.0)
+
+
 @pytest.mark.parametrize("inertia, w, dt", [(np.diag([3.734, 0.013, 1.545]), [-2.27, -1.69, -0.98], 0.1), (np.diag([1.0, 20.0, 400.0]), [1.0, -2.0, 0.5], 0.1),
                                             (I3, W0, 50.0)])
 def test_implicit_midpoint_reference_solves_its_own_equation_where_the_fixed_point_did_not(inertia, w, dt):

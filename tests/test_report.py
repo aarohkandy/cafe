@@ -3042,6 +3042,14 @@ def test_r15_m11_a_glider_ordered_deeper_than_its_assumed_hull_collapses_gets_a_
     assert report._hull_warning(dict(id="s", platform="slocum", task=dict(dive_depth_m=c_sl - 5.0))) is None
 
 
+def test_r15_m11_a_vehicle_row_with_no_platform_or_a_null_one_gets_no_hull_warning_and_no_error():
+    """The warning is an aid beside the verdict: a row it cannot read (no `platform` key, or a null one) gets None, and the report
+    is still built (round 15 gate: `except (KeyError, TypeError, ValueError)` in `_hull_warning`, report.py 474 and 475, was the only uncovered pair of lines of
+    cafe/pm outside physics)."""
+    assert report._hull_warning(dict(id="g", task=dict(dive_depth_m=950.0))) is None
+    assert report._hull_warning(dict(id="g", platform=None, task=dict(dive_depth_m=950.0))) is None
+
+
 def test_r15_m11_a_stored_collapse_depth_is_not_applied_to_a_hull_it_was_not_computed_for(monkeypatch):
     """The figure is for one hull (written beside it); when the assumed wall, diameter or material changes, the report says it did not check, not 'fine'."""
     from cafe.pm.physics import glider
