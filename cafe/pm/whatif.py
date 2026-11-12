@@ -221,7 +221,9 @@ def _when(t: float) -> str:
 
 
 def solo(mission: dict[str, Any], vid: str) -> dict[str, Any]:
-    """The mission with only this vehicle and no links: vehicles do not interact in Stage 1, so its result is the same and it costs less."""
+    """The mission with only this vehicle and no links: vehicles do not interact in Stage 1, so its physics are the same and it costs less. The
+    draws are the same only if the run is given the full mission's priors (`stage1.run(..., priors=)`, `run_batch` with its pri and marg): the
+    Latin hypercube is drawn over all columns, and a solo mission has fewer (round 16, M-1)."""
     m = copy.deepcopy(mission)
     m["vehicles"], m["links"] = [vehicle(m, vid)], []
     return m
@@ -896,16 +898,17 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
                             **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")})
         else:
             why = no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " ")
-            out[vid] = dict(base=b, method="Stage 1", why=why, flight=flight, ship=with_ship.get(vid), **_stage1(m2, vid, env, plan, fitted, scales))
+            out[vid] = dict(base=b, method="Stage 1", why=why, flight=flight, ship=with_ship.get(vid), **_stage1(m2, vid, env, plan, (pri, marg), scales))
     gone = [k["id"] for k in mission["links"] if k["a"] in drop or k["b"] in drop]
     return dict(vehicles=out, dropped=drop, links_removed=gone, unchanged=unchanged)
 
 
-def _stage1(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], fitted: dict[str, Any] | None,
+def _stage1(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], priors: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]],
             scales: dict[str, Any] | None) -> dict[str, Any]:
-    """Stage 1 at the plan's budget (the sequential run, n_min .. n_max members) for one vehicle."""
+    """Stage 1 at the plan's budget (the sequential run, n_min .. n_max members) for one vehicle. `priors` is the FULL mission's (pri, marg): the
+    solo mission's own would have fewer columns and so other Latin-hypercube draws than the base run's members (round 16, M-1)."""
     one = solo(mission, vid)
     with wind_2d(env, stage1._classes(one)[vid]):
-        r = stage1.run(one, env, plan, None, lambda *_: None, scales, fitted)
+        r = stage1.run(one, env, plan, None, lambda *_: None, scales, priors=priors)
     e = r["summary"]["vehicles"][vid]
     return dict(p_fail=e["verdict"]["p_fail"], lo=e["verdict"]["fail_lo"], hi=e["verdict"]["fail_hi"], verdict=e["verdict"]["verdict"], n=e["n"])

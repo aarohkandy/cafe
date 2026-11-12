@@ -354,7 +354,8 @@ def _whatif(a: argparse.Namespace) -> int:
         print(f"{vid}: unchanged ({why})")
     if ans["dropped"]:
         print(f"dropped {', '.join(ans['dropped'])}; links removed: {', '.join(ans['links_removed']) or 'none'}. "
-              "Other vehicles are unaffected: Stage-1 vehicles do not interact.")
+              "Other vehicles' physics are unaffected (Stage-1 vehicles do not interact); a rerun of a mission without it draws other members, "
+              "so its counts can differ from the report's by sampling noise.")
     return 0
 
 

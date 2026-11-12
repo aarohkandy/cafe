@@ -239,7 +239,9 @@ def _seq(base_seed: int, member: int, stream_name: str) -> np.random.SeedSequenc
 
 
 def member_seed(base_seed: int, member: int, stream_name: str) -> int:
-    """Deterministic 64-bit seed for (member, stream). No vehicle in the key: that is the common random numbers."""
+    """Deterministic 64-bit seed for (member, stream). No vehicle in the key: a stream is the same whichever vehicles the mission has. That holds
+    for these streams only: the Latin-hypercube columns are drawn jointly (`lhs_unit`), so the same members of a mission with another set of
+    classes, hence of columns, draw other values (round 16, M-1); `stage1.run(priors=)` keeps the columns of the base mission."""
     return int(_seq(base_seed, member, stream_name).generate_state(1, np.uint64)[0])
 
 

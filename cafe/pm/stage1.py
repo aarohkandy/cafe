@@ -934,8 +934,12 @@ def wave(n: int, batch: int, n_min: int, n_max: int, at_once: int) -> int:
 
 
 def run(mission: dict[str, Any], env: Any, plan: dict[str, Any], ledger: Ledger | None = None, log: Callable[[str], None] = print,
-        scales: dict[str, Any] | None = None, fitted: dict[str, Any] | None = None) -> dict[str, Any]:
-    pri, marg = priors_for(mission, fitted)
+        scales: dict[str, Any] | None = None, fitted: dict[str, Any] | None = None,
+        priors: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]] | None = None) -> dict[str, Any]:
+    """The sequential Stage-1 run. `priors`: the (pri, marg) pair to draw from instead of `priors_for(mission, fitted)`. The Latin hypercube is
+    drawn over every column of `marg`, so each member's draw depends on how many columns there are: a run of a changed copy of a mission (what-if)
+    passes the FULL mission's pair, or its members would be other draws than the base run's (round 16, M-1)."""
+    pri, marg = priors or priors_for(mission, fitted)
     names = list(marg)
     seed = int(mission["seed"])
     batch, n_max, n_min = plan["batch"], plan["n_max"], plan["n_min"]

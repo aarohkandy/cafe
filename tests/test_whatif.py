@@ -1044,7 +1044,7 @@ def test_the_stage_1_fallback_answer_of_a_uas_runs_in_the_10_m_profile(monkeypat
     seen = []
     monkeypatch.setattr(stage1, "run", lambda *a, **k: (seen.append(env.use_3d), dict(summary=dict(vehicles=dict(uas=dict(
         verdict=dict(p_fail=0.1, fail_lo=0.0, fail_hi=0.2, verdict="MARGINAL"), n=16)))))[1])
-    assert whatif._stage1(CI, "uas", env, plan_for(CI), None, None)["verdict"] == "MARGINAL" and seen == [False] and env.use_3d is True
+    assert whatif._stage1(CI, "uas", env, plan_for(CI), stage1.priors_for(CI), None)["verdict"] == "MARGINAL" and seen == [False] and env.use_3d is True
 
 
 def test_a_variant_that_leaves_the_data_is_rerun_one_vehicle_at_a_time_and_the_others_keep_their_rows(monkeypatch):
@@ -1609,3 +1609,19 @@ def test_r15_m40_the_period_of_a_duty_ignores_float_dust_above_a_whole_number_of
     assert whatif._duty_days(3.0000000000000004, 1.0) == 3.0 and whatif._duty_days(3.0, 1.0) == 3.0
     assert whatif._duty_days(3.0, 0.75) == 4.0 and whatif._duty_days(1.0, 0.5) == 2.0 and whatif._duty_days(1.0000001, 1.0) == 2.0
     assert whatif._duty_days(0.5, 0.75) == pytest.approx(2 / 3)                         # under a day: not rounded
+
+
+def test_the_what_if_stage_1_of_the_unchanged_mission_draws_the_members_of_the_full_run(monkeypatch):
+    """Round 16, M-1: the Latin hypercube is drawn over every column, so a solo mission run with its own (shorter) priors drew other members than the
+    base run's, and the what-if answer was not the answer of a rerun of the changed mission. With the full mission's pair it is the same members."""
+    m = storm_mission(24)
+    m["vehicles"] += [v for v in CI["vehicles"] if v["id"] == "usv"]                 # the USV adds a column (usv_vpp_bias) the solo glider does not have
+    seen = []
+    real = stage1.run_batch
+    monkeypatch.setattr(stage1, "run_batch", lambda *a, **k: seen.append(real(*a, **k)) or seen[-1])
+    plan = plan_for(m, batch=8)
+    stage1.run(m, ENV, plan, None, lambda *_: None)
+    whatif._stage1(m, GL, ENV, plan, stage1.priors_for(m), None)
+    full, one = seen
+    assert full["U"].shape[1] == one["U"].shape[1] and np.array_equal(full["U"], one["U"])
+    assert np.array_equal(stage1.failed(full["vehicles"][GL]), stage1.failed(one["vehicles"][GL]))
