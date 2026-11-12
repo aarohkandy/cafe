@@ -505,5 +505,9 @@ def test_cli_plumbing(monkeypatch, tmp_path, capsys):
 
 
 def test_measured_jax_memory_per_cell_is_at_least_the_population_array():
-    b = lbm.measure_jax_bytes_per_cell(n=24)
-    assert b >= 19 * 4 and b < 40 * 19 * 4
+    # P-R15G6: the measure is peak-RSS growth, so the first call also pays the step's one-time compile; at n = 24 that alone is thousands of
+    # B/cell (alone in a fresh process: 5,699 B/cell, over the bound), and the test passed only when an earlier test of the same shard had
+    # raised the peak already. The first call compiles and raises the peak; the second, on a grid 19 times larger, measures the grid's memory.
+    lbm.measure_jax_bytes_per_cell(n=24)
+    b = lbm.measure_jax_bytes_per_cell(n=64)
+    assert 19 * 4 <= b < 40 * 19 * 4
