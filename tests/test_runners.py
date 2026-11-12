@@ -945,7 +945,6 @@ def test_r15_l0_jobs_started_at_once_over_stale_claims_get_distinct_cores_and_no
     (tmp_path / "tools" / "taskset").write_text(f'#!/bin/sh\ncase "$1" in -pc) echo "pid 1 current affinity list: 0-{n - 1}"; exit 0 ;; esac\n'
                                                 f'echo "$*" >> "{log}"\nshift 2\nexec "$@"\n')
     (tmp_path / "tools" / "taskset").chmod(stat.S_IRWXU)
-    go = tmp_path / "go"
     dead = subprocess.Popen(["true"])
     dead.wait()
     for attempt in range(4):
@@ -954,11 +953,12 @@ def test_r15_l0_jobs_started_at_once_over_stale_claims_get_distinct_cores_and_no
             shutil.rmtree(old)
         for c in range(n):
             claim(w, c, dead.pid)
-        go.unlink(missing_ok=True)
-        wait_then_run = f'while [ ! -e "{go}" ]; do :; done; exec sh "$0" app true'
-        procs = [subprocess.Popen(["sh", "-c", wait_then_run, str(ROOT / "bin/proot_run.sh")], cwd=ROOT, env=env, stdout=subprocess.DEVNULL,
-                                  stderr=subprocess.PIPE, text=True) for _ in range(jobs_n)]
-        go.write_text("")
+        wait_then_run = 'read go; exec sh "$0" app true'                                  # blocks in read(2): P-R15G5
+        procs = [subprocess.Popen(["sh", "-c", wait_then_run, str(ROOT / "bin/proot_run.sh")], cwd=ROOT, env=env, stdin=subprocess.PIPE,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) for _ in range(jobs_n)]
+        for q in procs:
+            q.stdin.write("\n")                                                           # all started: now they go, one write each
+            q.stdin.close()
         results = [(q.wait(timeout=120), q.stderr.read()) for q in procs]
         pins = pinned(log)
         assert [r for r, _ in results] == [0] * jobs_n, results
@@ -967,6 +967,15 @@ def test_r15_l0_jobs_started_at_once_over_stale_claims_get_distinct_cores_and_no
         left = [d for d in (w / "cafe/tmp").glob("cpu.*")]                                # only the stale claims nobody needed
         assert all((d / "pid").read_text().split() == [str(dead.pid)] for d in left)
         assert len(left) == n - jobs_n
+
+
+def test_r15_g5_no_test_makes_its_children_wait_in_a_shell_loop_that_never_sleeps():
+    """P-R15G5 (gate proof1, third run): the start barrier of the L0 claim test was a shell loop on `[ ! -e go ]` with an empty body. Under proot every pass
+    is a traced system call and the one tracer, kept at 98 % CPU by the 8 spinners, never served the pytest process that had to start the rest and write
+    `go`: the shard stood still for 80 minutes. A child that must wait blocks in `read` (or sleeps in its loop)."""
+    spin = re.compile(r"\bdo\s*(:|true)\s*;\s*done\b")
+    hits = [f"{p.name}:{n}" for p in sorted((ROOT / "tests").glob("*.py")) for n, line in enumerate(p.read_text().splitlines(), 1) if spin.search(line)]
+    assert hits == []
 
 
 def test_r15_l0_a_core_whose_wrapper_was_killed_but_whose_job_runs_is_not_taken_over(tmp_path):
