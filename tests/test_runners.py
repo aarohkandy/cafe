@@ -992,7 +992,9 @@ def test_r15_l0_a_core_whose_wrapper_was_killed_but_whose_job_runs_is_not_taken_
         first.wait()
         r = run(["sh", str(ROOT / "bin/proot_run.sh"), "app", "true"], env)
         assert r.returncode == 0, r.stderr
-        assert f"no free core for PM_CPUS=1, sharing core {free[0]}" in r.stderr
+        # P-R15G4: the core it shares is the least busy claimed one, so the load decides; assert it is one of ours and free[0]'s claim is left
+        shared = re.search(r"no free core for PM_CPUS=1, sharing core (\d+) ", r.stderr)
+        assert shared and int(shared.group(1)) in free, r.stderr
         assert (w / "cafe/tmp" / f"cpu.{free[0]}" / "pid").read_text().split()[-1] == first_job()
     finally:
         pid = first_job()
