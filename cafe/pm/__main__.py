@@ -332,7 +332,7 @@ def _whatif(a: argparse.Namespace) -> int:
         else:
             print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {a.budget} budget")
             print(_model_note(False, False, False), file=sys.stderr)
-    ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m))
+    ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m), mission_hash=whatif.mission_hash(m))
     ans = whatif.answer(m, ops, base, tracks, ctx.env, ems, ctx.plan, fitted, scales, only=a.vehicle)
     what = [f"{ops['shift_h']:+g} h" if a.shift else "", f"{ops['dlon']:+g} deg lon, {ops['dlat']:+g} deg lat" if a.move else "",
             f"drop {', '.join(ans['dropped'])}" if ans["dropped"] else ""]            # the answer's list: `--drop usv --drop usv` is one drop

@@ -9,14 +9,16 @@ One row per vehicle per Stage-1 run is appended to `$CAFE_DATA/emulator/train.pa
                failed, i.e. right-censored), mode_<name> (fraction of members that failed in that mode)
     metadata   cls, scope (`budget.emulator_scope`: class, platform and window length), vehicle, mission, variant, key (a hash of mission, scope,
                class, vehicle, variant and the features: a rerun of the same mission replaces its rows, whichever directory it ran in), run_id,
-               n_members, fidelity (0 = Stage 1, 1 = Stage-1b rerun with the stage-3 refit), git_sha, code_digest
+               n_members, fidelity (0 = Stage 1, 1 = Stage-1b rerun with the stage-3 refit), git_sha, code_digest, mission_hash (`mission_hash`: the
+               mission file the run started from, without its seed, of which every variant is a change)
 
 P(fail) is over the whole window and a variant never changes the window or the platform, so no feature carries either. Vehicles of different
 classes also have different features and failure modes. There is therefore one emulator (cafe.pm.emulator.Emulator, GP plus split conformal) per
-scope, fitted on the rows of that scope made by the current code (`code_digest`; older rows stay in the table), and a query is answered only from
-the emulator of its own scope: rows of another window length or platform are another function and are never pooled. A row of a table made before
-the `scope` column is of no scope and is left out (it is counted in `unscoped_rows`). It is trained only from `MIN_ROWS` distinct feature points;
-below that `trained` is False and says why.
+scope, fitted on the rows of that scope made by the current code (`code_digest`) from the same mission (`mission_hash`); the rows of other code or
+another mission stay in the table and are counted as left out, never trained on (DECISIONS 882), and a query is answered only from the emulator
+of its own scope: rows of another window length or platform are another function and are never pooled. A row of a table made before the `scope`
+column is of no scope and is left out (it is counted in `unscoped_rows`), and one made before the `mission_hash` column is of no mission
+(`other_mission_rows`). It is trained only from `MIN_ROWS` distinct feature points; below that `trained` is False and says why.
 
 A "mission change" is a dict per vehicle: shift_h (deploy later; a UAS: its daily sorties later in the day), dlon/dlat in degrees (a UAS
 moves with its ship, and a ship moves once: two UAS on it that ask for different moves are Invalid) and duty (<= 1: glider dive depth x duty,
@@ -351,6 +353,14 @@ def targets(r: dict[str, Any]) -> dict[str, Any]:
     return dict(p_fail=float(f.mean()), t_fail_h=t_fail, **{f"mode_{k}": float(np.mean(v)) for k, v in r["fail"].items()})
 
 
+def mission_hash(mission: dict[str, Any]) -> str:
+    """The identity of the mission a run started from: its digest without `_path` (the spelling of where it was read) and `seed` (a draw, not the
+    mission; the same two keys the ingest's hash leaves out). Every training row of a run carries the hash of the run's own mission, the variants'
+    included (they are changes of it), and an emulator trains only on rows that carry the hash of the run asking."""
+    from .config import digest
+    return digest({k: v for k, v in mission.items() if k not in ("_path", "seed")})
+
+
 def row_key(row: dict[str, Any]) -> str:
     """The identity of a training row: mission, scope, class, vehicle, variant and the features, to 9 significant digits. A rerun of the same mission
     gives the same key whichever directory it ran in, so it replaces its predecessor instead of counting as new data."""
@@ -527,10 +537,13 @@ def _chance_miss(n_test: int, nominal: float, n_cal: int | None = None) -> float
 
 
 def fit_class(df: pd.DataFrame, cls: str, scope: str, path: Any, code_digest: str | None = None,
-              fresh: FreshDraw | None = None) -> tuple[Emulator | None, dict[str, Any]]:
+              fresh: FreshDraw | None = None, mission_hash: str | None = None) -> tuple[Emulator | None, dict[str, Any]]:
     """Fit the emulator of one scope (a vehicle class on one platform and window length, `budget.emulator_scope`) on its rows and score it on a
     20 % hold-out (split by distinct feature point, see `Emulator.holdout_report`; a point is the mission-defining columns, `key_cols`). With
-    `code_digest`, rows made by other code (or by code of unknown digest) stay in the table but are not trained on.
+    `code_digest`, rows made by other code (or by code of unknown digest) stay in the table but are not trained on; with `mission_hash`, so do the rows
+    of another mission or of none (a table made before the column): another mission, or another model, is another function (DECISIONS 882).
+    `info` says what was used and what was left out: `rows` (used), `stale_rows` (other code), `other_mission_rows`, `other_scope_rows`,
+    `unscoped_rows` and `left_out_rows` (the class's rows of the table that were not used, whatever the reason, incomplete rows included).
     With `fresh` (see `Emulator.holdout_report`) the hold-out also scores the emulator against P(fail) re-estimated on fresh members, and the RMSE
     gate uses the larger of the two debiased RMSEs.
     The `MIN_ROWS` gate counts distinct feature points of the scope, so reruns of one mission cannot reach it, nor can rows of another window length or
@@ -544,16 +557,22 @@ def fit_class(df: pd.DataFrame, cls: str, scope: str, path: Any, code_digest: st
         keep = (d["code_digest"] == code_digest).to_numpy() if "code_digest" in d else np.zeros(len(d), bool)
         stale = int((~keep).sum())
         d = d[keep].reset_index(drop=True)
+    foreign = 0
+    if mission_hash is not None:
+        mine = (d["mission_hash"] == mission_hash).to_numpy() if "mission_hash" in d else np.zeros(len(d), bool)
+        foreign = int((~mine).sum())
+        d = d[mine].reset_index(drop=True)
     points = int(len(d[key_cols(cls)].round(9).drop_duplicates()))
     info: dict[str, Any] = dict(trained=False, cls=cls, scope=scope, rows=int(len(d)), points=points, stale_rows=stale, unscoped_rows=unscoped,
-                                other_scope_rows=elsewhere, used=False)
+                                other_scope_rows=elsewhere, other_mission_rows=foreign, left_out_rows=int(len(of_cls) - len(d)), used=False)
     if points < MIN_ROWS:
         more = f"; only {points} of them are distinct feature points" if points < len(d) else ""
         old = f"; {stale} rows made by other code are left out" if stale else ""
         pooled = (f"; {elsewhere} {cls} rows of other platforms or window lengths are not pooled with them, since P(fail) over another window or platform is "
                   "another function" if elsewhere else "")
         legacy = f"; {unscoped} {cls} rows made before rows carried a scope are left out" if unscoped else ""
-        why = f"{len(d)} {scope} rows in the training table, {MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage){more}{old}{pooled}{legacy}"
+        other = f"; {foreign} rows of another mission, or made before rows carried the mission, are left out" if foreign else ""
+        why = f"{len(d)} {scope} rows in the training table, {MIN_ROWS} are needed (a 20 % hold-out must score 90 % coverage){more}{old}{pooled}{legacy}{other}"
         return None, dict(info, reason=why, unused_reason=why)
     if np.ptp(d["p_fail"]) == 0:
         why = f"P(fail) is {d['p_fail'].iloc[0]:.3f} in all {len(d)} {scope} rows: nothing to learn"
@@ -598,16 +617,17 @@ def fit_class(df: pd.DataFrame, cls: str, scope: str, path: Any, code_digest: st
 
 
 def train(table: Any, scopes: dict[str, str], path: Any = None, df: pd.DataFrame | None = None, code_digest: str | None = None,
-          fresh: FreshDraw | None = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
+          fresh: FreshDraw | None = None, mission_hash: str | None = None) -> dict[str, tuple[Emulator | None, dict[str, Any]]]:
     """Fit the emulator of each scope in `scopes` ({scope: class}, see `scopes`) from the stored table (all runs, all missions), or from `df` when
     given (the pipeline trains on a snapshot of the table, not on whatever the table holds by now). Only rows made by the current code are trained on:
-    `code_digest` (default: this checkout's, `pipeline.code_digest`); superseded rows stay in the file."""
+    `code_digest` (default: this checkout's, `pipeline.code_digest`) and, with `mission_hash` (`whatif.mission_hash` of the mission asking), only
+    rows of that mission; the rows left out stay in the file and are counted in each scope's info."""
     from . import pipeline
     p, _ = store_path(table)
     if df is None:
         df = read_table(p) if p.exists() else pd.DataFrame(columns=["cls"] + BASE)
     cd = code_digest or pipeline.code_digest()
-    return {sc: fit_class(df, cls, sc, path or table, cd, fresh) for sc, cls in sorted(scopes.items())}
+    return {sc: fit_class(df, cls, sc, path or table, cd, fresh, mission_hash) for sc, cls in sorted(scopes.items())}
 
 
 def snapshot(table: Any, dest: Any, run_id: str) -> tuple[pd.DataFrame, pathlib.Path]:

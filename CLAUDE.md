@@ -34,6 +34,7 @@ Read these before changing anything, in this order:
   - **`python -m cafe.pm audit [<run>]`** runs ruff, mypy and the whole suite with coverage (two passes since round 6: xdist by file, then the real-time tests), plus the banned scan, the mutation record and the ledgers of any run given. `--code-only` *skips* ruff, mypy and pytest (only the scans and ledgers); `--ledgers-only` checks only the ledgers.
   - **A quick demo run:** `bin/pmx.sh python -m cafe.pm run --mission missions/tepex_c_demo.yaml --budget quick --gpus 0 --out /data/runs/<name> --fresh`, about 5 min.
     That time is for 6 CPUs; the default through `bin/pmx.sh` is 2 CPUs and 12g, so ask for 6 CPUs and 24g of memory (`PM_CPUS` and `PM_MEM`) when the box is free.
+- The test session runs with a private `CAFE_DATA` (a temporary directory made by `tests/conftest.py`): no test reads or writes the shared `/data` (the receipts store, the cache, the emulator table; DECISIONS 881). A test that wants a data tree sets `CAFE_DATA` or patches the module constant itself.
 - The SITL ArduCopter test in `tests/test_uas.py` depends on real time and fails now and then. Rerun it before believing a failure.
 
 ## The bar for a change

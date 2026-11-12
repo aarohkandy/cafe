@@ -1,8 +1,12 @@
 """cafe.pm.env.remote against a local Range-capable server and against netCDF4's reading of the same files."""
 import email.utils
 import hashlib
+import os
 import ssl
 import struct
+import subprocess
+import sys
+import threading
 import urllib.parse
 
 import netCDF4
@@ -983,3 +987,67 @@ def test_r13_l1_a_hostile_entry_count_is_refused_at_once_not_after_reading_the_f
     assert sum(fetched) < 1 << 20, what
     ok = b"CDF\x01" + _be(0) + _be(10, remote.MAX_ENTRIES) + b"".join(_nm("d") + _be(1) for _ in range(remote.MAX_ENTRIES)) + _be(0, 0) + _be(0, 0)
     assert len(remote.parse_cdf1(lambda o, n: ok[o:o + n])[0]) == 1                  # the cap itself is accepted (the dict keeps one name)
+
+
+# ------------------------------------------------------------------ store_lock (P-R15A1)
+
+def _taker(cache):
+    """Another thread takes the lock on `cache`, then sets the event it returns."""
+    done = threading.Event()
+
+    def other():
+        with remote.store_lock(cache):
+            done.set()
+    threading.Thread(target=other, daemon=True).start()
+    return done
+
+
+def test_r16_pa_the_store_lock_makes_a_second_taker_wait_until_the_first_is_done(tmp_path):
+    with remote.store_lock(tmp_path):
+        assert (tmp_path / "derived.lock").is_file()
+        done = _taker(tmp_path)
+        assert not done.wait(0.4)                                                              # waiting, not running beside the holder
+    assert done.wait(30)                                                                       # released at the end of the block
+    with pytest.raises(RuntimeError), remote.store_lock(tmp_path):
+        raise RuntimeError("a build that died")
+    assert _taker(tmp_path).wait(30)                                                           # also released by a block that raised
+
+
+def test_r16_pa_the_store_lock_excludes_another_process(tmp_path):
+    code = ("import sys\nfrom cafe.pm.env import remote\n"
+            "with remote.store_lock(sys.argv[1]):\n    print('held', flush=True)\n    sys.stdin.readline()\n")
+    p = subprocess.Popen([sys.executable, "-c", code, str(tmp_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+                         cwd=remote.ROOT, env={**os.environ, "PYTHONPATH": str(remote.ROOT)})
+    try:
+        assert p.stdout.readline().strip() == "held"
+        done = _taker(tmp_path)
+        assert not done.wait(0.4)                                                              # the other process holds it
+    finally:
+        p.communicate("\n", timeout=30)
+    assert done.wait(30)                                                                       # it ended: the waiter got the lock
+
+
+def test_r16_pa_the_same_thread_may_take_the_store_lock_again_inside_it(tmp_path):
+    out = []
+
+    def twice():
+        with remote.store_lock(tmp_path):
+            with remote.store_lock(tmp_path):
+                out.append(1)
+        with remote.store_lock(tmp_path):                                                      # the inner release did not drop the outer hold early
+            out.append(2)
+    t = threading.Thread(target=twice, daemon=True)
+    t.start()
+    t.join(10)
+    assert out == [1, 2]
+
+
+def test_r16_pa_without_a_lock_file_a_cache_that_cannot_be_written_or_no_fcntl_the_block_runs_unlocked(tmp_path, monkeypatch):
+    with remote.store_lock(tmp_path, create=False):                                            # the audit: it makes no file
+        assert not (tmp_path / "derived.lock").exists()
+    with remote.store_lock(tmp_path / "no" / "such" / "dir"):                                  # no cache directory: nothing to wait for
+        pass
+    monkeypatch.setitem(sys.modules, "fcntl", None)                                            # not Linux
+    with remote.store_lock(tmp_path):
+        pass
+    assert not (tmp_path / "derived.lock").exists()

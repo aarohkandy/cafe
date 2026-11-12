@@ -1,4 +1,5 @@
 """Shared fixtures for the ingest tests: a Range-capable HTTP(S) server, the mini orca tree, a no-sleep clock."""
+import atexit
 import http.server
 import os
 import pathlib
@@ -6,14 +7,24 @@ import re
 import shutil
 import ssl
 import subprocess
+import tempfile
 import threading
 import types
 import urllib.parse
 
 import pytest
 
-from cafe.pm.env import orca, remote
-from tests.fixtures.orca import make_fixtures as mk
+# The data directory of the whole session is a private temporary one (P-R15Q2): `nest.SLOW_DIR`, `lbm.SLOW_DIR`, `wallmodel.SLOW_DIR`, `pipeline.DATA`
+# and `ocean.DATA` read CAFE_DATA when their module is imported, and on the runners it is /data, the shared store, so a test that ran a `slow` command
+# with its path unpatched wrote a stub into the receipts every later run reads. Set before the first cafe import; a test that needs a data tree sets
+# CAFE_DATA itself (monkeypatch), as before. REAL_DATA is what the session would have used, for the test that checks nothing reaches it.
+REAL_DATA = pathlib.Path(os.environ.get("CAFE_DATA", "/data"))
+SESSION_DATA = pathlib.Path(tempfile.mkdtemp(prefix="cafe_test_data_"))
+os.environ["CAFE_DATA"] = str(SESSION_DATA)
+atexit.register(shutil.rmtree, SESSION_DATA, ignore_errors=True)
+
+from cafe.pm.env import orca, remote  # noqa: E402
+from tests.fixtures.orca import make_fixtures as mk  # noqa: E402
 
 # Stage 1 runs in the test process unless a test asks for workers (tests/test_par.py). Set at import, not in a fixture: a module- or
 # session-scoped fixture is set up before any function-scoped one, and test_acceptance's runs planned for the container's CPUs while the

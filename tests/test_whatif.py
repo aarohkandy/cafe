@@ -484,6 +484,47 @@ def test_train_defaults_to_the_digest_of_this_checkouts_code(tmp_path):
     assert not whatif.train(tmp_path / "none.parquet", {GSC: "glider"}, df=df.assign(code_digest="superseded"))[GSC][1]["trained"]
 
 
+def test_r16_pa_rows_of_another_mission_or_of_other_code_stay_in_the_table_but_are_not_trained_on(tmp_path):
+    """P-R15A2: the shared table takes the rows of every run, other missions' and other code's included (the 12 rows of the 2-CPU demo runs of
+    round 15 moved every leaf of a later comparison). An emulator trains on the rows of the code digest and the mission hash of the run asking; the
+    rest stay, are counted as left out, and the reason of a refusal says how many."""
+    df = storm_table(160).assign(code_digest="new", mission_hash="m1")
+    df.loc[120:139, "mission_hash"] = "m2"                                      # 20 rows of another mission, same code
+    df.loc[140:, "code_digest"] = "old"                                         # 20 rows of other code, same mission
+    df.loc[150:, "mission_hash"] = "m2"                                         # 10 of them of another mission too: counted once, as other code
+    em, info = whatif.fit_class(df, "glider", GSC, tmp_path / "t.parquet", "new", mission_hash="m1")
+    assert em is not None and info["trained"]
+    assert info["rows"] == 120 and info["stale_rows"] == 20 and info["other_mission_rows"] == 20 and info["left_out_rows"] == 40
+    assert len(df) == info["rows"] + info["left_out_rows"]
+    em, info = whatif.fit_class(df.iloc[:30], "glider", GSC, tmp_path / "t.parquet", "new", mission_hash="m1")
+    assert em is None and info["reason"].startswith(f"30 {GSC} rows in the training table, 100 are needed")
+    em, info = whatif.fit_class(df.iloc[120:140], "glider", GSC, tmp_path / "t.parquet", "new", mission_hash="m1")
+    assert em is None and info["rows"] == 0 and "; 20 rows of another mission, or made before rows carried the mission, are left out" in info["reason"]
+    em, info = whatif.fit_class(df.drop(columns="mission_hash"), "glider", GSC, tmp_path / "t.parquet", "new", mission_hash="m1")
+    assert em is None and info["rows"] == 0 and info["other_mission_rows"] == 140         # no hash: not shown to be of this mission
+    em, info = whatif.fit_class(df.drop(columns="mission_hash"), "glider", GSC, tmp_path / "t.parquet", "new")
+    assert info["rows"] == 140 and info["other_mission_rows"] == 0                          # no mission asked: the old behaviour
+
+
+def test_r16_pa_train_passes_the_mission_to_every_scope_and_keeps_the_rows_in_the_file(tmp_path):
+    path = tmp_path / "train.parquet"
+    rows = storm_table(120).assign(code_digest="d1", mission_hash="m1").to_dict("records")
+    rows += storm_table(30, seed=5).assign(code_digest="d1", mission_hash="m2").to_dict("records")
+    whatif.add_rows(path, [dict(r, key=f"k{i}", run_id="r") for i, r in enumerate(rows)])
+    out = whatif.train(path, {GSC: "glider"}, code_digest="d1", mission_hash="m1")
+    assert out[GSC][1]["trained"] and out[GSC][1]["rows"] == 120 and out[GSC][1]["other_mission_rows"] == 30
+    out = whatif.train(path, {GSC: "glider"}, code_digest="d1", mission_hash="m3")
+    assert out[GSC][0] is None and out[GSC][1]["rows"] == 0 and out[GSC][1]["other_mission_rows"] == 150
+    assert len(whatif.read_table(path)) == 150                                               # filtered, never deleted
+
+
+def test_r16_pa_the_mission_hash_ignores_the_seed_and_the_path_and_nothing_else():
+    m = config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml")
+    h = whatif.mission_hash(m)
+    assert h == whatif.mission_hash(dict(m, seed=12345, _path="elsewhere/m.yaml"))
+    assert h != whatif.mission_hash(dict(m, name="other")) and h != whatif.mission_hash({**m, "vehicles": m["vehicles"][:1]})
+
+
 def test_replicates_of_one_mission_do_not_reach_the_row_gate(tmp_path):
     """M-8: 25 reruns of the demo reached 100 rows with one design point."""
     df = pd.concat([storm_table(30)] * 5, ignore_index=True)

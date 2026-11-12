@@ -1630,16 +1630,18 @@ def fake_stage1(monkeypatch):
 GS = "glider/seaglider/144h"        # the emulator scope of glider_eq in the demo mission (class, platform, window length)
 
 
-def seed_table(path, n=140, bad=False, seed=0, scope=GS):
+def seed_table(path, n=140, bad=False, seed=0, scope=GS, mission=ROOT / "missions" / "tepex_c_demo.yaml"):
     """Glider rows made by tests/test_whatif.storm_table (or pure noise when `bad`), in `scope` (default: that of the demo's glider_eq; a test that runs
-    another mission passes that mission's own, `budget.emulator_scope`): test data, as the pipeline never trains on synthetic rows."""
+    another mission passes that mission's own, `budget.emulator_scope`, and its file as `mission`): test data, as the pipeline never trains on synthetic
+    rows. They carry the code digest of this checkout and the hash of `mission`, which an emulator trains on only (DECISIONS 882)."""
     from cafe.pm import whatif
     from tests import test_whatif
     df = test_whatif.storm_table(n, seed).assign(scope=scope)
     if bad:
         df["p_fail"] = np.random.default_rng(3).uniform(0, 1, n)
-    whatif.add_rows(path, [dict(r, key=f"seed{i}", run_id="seed", mission="seed", variant="seed", n_members=512, code_digest=pipeline.code_digest())
-                           for i, r in enumerate(df.to_dict("records"))])
+    mh = whatif.mission_hash(config.load_mission(mission))
+    whatif.add_rows(path, [dict(r, key=f"seed{i}", run_id="seed", mission="seed", variant="seed", n_members=512, code_digest=pipeline.code_digest(),
+                                mission_hash=mh) for i, r in enumerate(df.to_dict("records"))])
 
 
 def test_every_run_appends_one_row_per_vehicle_and_a_rerun_replaces_them(tmp_path, table, fake_stage1):
@@ -1659,6 +1661,24 @@ def test_every_run_appends_one_row_per_vehicle_and_a_rerun_replaces_them(tmp_pat
     run_stage(pipeline.s_emulator, b, "emulator")
     df = whatif.read_table(table)
     assert len(df) == 4 and df["run_id"].nunique() == 1      # the same mission again (any directory) replaces its rows
+
+
+def test_r16_pa_the_emulator_stage_trains_on_the_rows_of_its_own_mission_and_says_how_many_it_left_out(tmp_path, table, fake_stage1):
+    """P-R15A2: rows carry the hash of the mission the run started from, an emulator trains on those only, and the ledger says per scope how many rows of
+    the table were used and how many left out (other code, another mission or none, other platforms or windows)."""
+    from cafe.pm import whatif
+    seed_table(table, n=101)                                                    # this mission's, this code's
+    other = whatif.read_table(table).iloc[:7].assign(mission_hash="another", key=[f"o{i}" for i in range(7)])
+    whatif.add_rows(table, other.to_dict("records"))                           # 7 rows of the same scope and code made for another mission
+    a = cheap_plan(synthetic_ctx(tmp_path, 48, "a"), 10.0)
+    d = run_stage(pipeline.s_emulator, a, "emulator")
+    df = whatif.read_table(table)
+    mine = df[df["run_id"] != "seed"]
+    assert len(mine) == 4 and set(mine["mission_hash"]) == {whatif.mission_hash(a.mission)}
+    info = json.loads((a.run_dir / "emulator" / "holdout.json").read_text())["glider_eq"]
+    assert info["rows"] == 102 and info["other_mission_rows"] == 7 and info["stale_rows"] == 0 and info["left_out_rows"] == info["other_scope_rows"] + 7
+    note = next(n for n in d["notes"] if n.startswith(f"emulator {GS}: 102 of the table's"))
+    assert f"{info['left_out_rows']} left out: 0 made by other code, 7 of another mission or of none, {info['other_scope_rows']} of other platforms" in note
 
 
 def test_the_variant_runs_stay_inside_the_emulator_share(tmp_path, table, fake_stage1):
@@ -3892,6 +3912,72 @@ def test_r8_m4c_a_changed_assembled_orca_store_rebuilds_the_derived_layer(tmp_pa
     run_stage(pipeline.s_ingest, ctx_for(tmp_path / "c"), "ingest")
     assert built == [1] and json.loads((ctx.cache / surface.DIGEST).read_text())["built_from"] != key0
     assert not pipeline._derived_current(ctx.cache, key0)
+
+
+def _slow_build(cache, key, built, mid, go):
+    """A stand-in for surface.build that keeps the store half written until the test lets it finish: the old store is gone, zarr.json is there, the chunk
+    and the record are not."""
+    def build(env, cache_, built_from=None, log=print):
+        built.append(built_from)
+        shutil.rmtree(cache_ / "derived.zarr", ignore_errors=True)
+        (cache_ / "derived.zarr").mkdir(parents=True)
+        (cache_ / "derived.zarr" / "zarr.json").write_text(json.dumps({"attributes": {"layout_version": surface.LAYOUT_VERSION, "built_from": built_from}}))
+        mid.set()
+        go.wait(30)
+        (cache_ / "derived.zarr" / "chunk").write_bytes(b"x" * 100)
+        config.write_json(cache_ / surface.DIGEST, dict(built_from=built_from, store_sha256=surface.store_sha256(cache_ / "derived.zarr")), indent=1)
+    return build
+
+
+def _derived_ctx(tmp_path):
+    return types.SimpleNamespace(cache=tmp_path / "cache", window_s=lambda: (0.0, 1.0), log=lambda *a: None, env=None, _env=None)
+
+
+def test_r16_pa_two_runs_that_build_the_derived_layer_at_once_make_one_good_store(tmp_path, monkeypatch):
+    """P-R15A1: two demo runs at once on one mission cache destroyed each other's derived.zarr (one died hashing it while the other deleted it). The
+    decision to build and the build are one step under the cache's lock: the second run waits, then finds the store current and builds nothing."""
+    import threading
+    ctx = _derived_ctx(tmp_path)
+    ctx.cache.mkdir()
+    built, mid, go = [], threading.Event(), threading.Event()
+    monkeypatch.setattr(surface, "build", _slow_build(ctx.cache, "K", built, mid, go))
+    monkeypatch.setattr(pipeline, "_derived_span_problem", lambda cache, window: None)
+    got = {}
+    threads = [threading.Thread(target=lambda n=n: got.update({n: pipeline._derived_record(ctx, "K")}), daemon=True) for n in "ab"]
+    threads[0].start()
+    assert mid.wait(10)
+    threads[1].start()                                                      # the second run arrives while the first one's store is half written
+    go.set()
+    for t in threads:
+        t.join(30)
+    assert built == ["K"] and got["a"] == got["b"] and got["a"]["built_from"] == "K"
+    assert pipeline._derived_current(ctx.cache, "K") and surface.store_sha256(ctx.cache / "derived.zarr") == got["a"]["store_sha256"]
+
+
+def test_r16_pa_a_run_that_checks_the_layer_while_another_builds_it_waits_and_never_reads_half_a_store(tmp_path, monkeypatch):
+    """The reader side of P-R15A1: `_derived_current` (and with it `Context.env` and the `derived_unchanged` check) on a store another run is rewriting
+    returned False at once from the half store, and the caller then deleted what the builder was writing."""
+    import threading
+    ctx = _derived_ctx(tmp_path)
+    ctx.cache.mkdir()
+    built, mid, go = [], threading.Event(), threading.Event()
+    monkeypatch.setattr(surface, "build", _slow_build(ctx.cache, "K", built, mid, go))
+    monkeypatch.setattr(pipeline, "_derived_span_problem", lambda cache, window: None)
+    builder = threading.Thread(target=lambda: pipeline._derived_record(ctx, "K"), daemon=True)
+    builder.start()
+    assert mid.wait(10)
+    seen, read = [], threading.Event()
+
+    def reader():
+        seen.append(pipeline._derived_current(ctx.cache, "K"))
+        read.set()
+    r = threading.Thread(target=reader, daemon=True)
+    r.start()
+    assert not read.wait(0.4) and seen == []                                # waiting for the build, not answering from the half store
+    go.set()
+    builder.join(30)
+    r.join(30)
+    assert seen == [True]
 
 
 def test_r8_m4_a_chunk_of_the_ocean_store_deleted_before_the_ingest_fails_the_nan_mask_check_with_the_count(tmp_path, data_copy):

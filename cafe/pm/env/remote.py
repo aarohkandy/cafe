@@ -15,8 +15,8 @@ USERTrust root in the system store). Verification is never turned off.
 """
 from __future__ import annotations
 
-import hashlib, http.client, io, json, math, os, pathlib, ssl, struct, time, urllib.error, urllib.request
-from collections.abc import Callable
+import contextlib, hashlib, http.client, io, json, math, os, pathlib, ssl, struct, threading, time, urllib.error, urllib.request
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import numpy as np
@@ -206,6 +206,40 @@ def tree_sha256(path: str | pathlib.Path) -> str:
             for b in iter(lambda: fh.read(8 << 20), b""):
                 h.update(b)
     return h.hexdigest()
+
+
+_HELD = threading.local()                 # `paths`: the lock files this thread holds
+
+
+@contextlib.contextmanager
+def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bool = True) -> Iterator[None]:
+    """An exclusive `flock` on `<cache>/<name>`, taken by whoever builds or replaces a store of the shared cache (`derived.zarr`) and by whoever reads it
+    to validate or load it, so that a reader never sees a store half built or half deleted by a run of other code that shares the cache directory
+    (P-R15A1: one run died hashing `derived.zarr` while the other deleted and rewrote it). Held by one thread at a time; the same thread may take it again
+    inside (the ingest decides and builds under it, and the build reads the environment, which reads the layer). Released when the block ends, or with the
+    process. `create=False` (the audit) never makes the file: without one, or where it cannot be opened (a cache that is not writable, no `fcntl`), the
+    block runs unlocked, since a store nobody can write has no builder to wait for."""
+    path = pathlib.Path(cache) / name
+    held: set[pathlib.Path] = _HELD.__dict__.setdefault("paths", set())
+    if path in held:
+        yield
+        return
+    try:
+        import fcntl
+        fd = os.open(path, os.O_RDWR | (os.O_CREAT if create else 0), 0o644)
+    except (ImportError, OSError):
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        held.add(path)
+        try:
+            yield
+        finally:
+            held.discard(path)
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)                                                       # (a forked child that inherited fd keeps the open file, so unlock first)
 
 
 def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bool = False) -> pathlib.Path:

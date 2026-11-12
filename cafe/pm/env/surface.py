@@ -31,7 +31,7 @@ from .. import Tagged
 from . import coare, subgrid, waves
 from . import conventions as cv
 from .grid import Axis, interp
-from .remote import tree_sha256
+from .remote import store_lock as store_lock, tree_sha256
 
 if TYPE_CHECKING:
     from .environment import GriddedEnv
@@ -63,7 +63,8 @@ store_sha256 = tree_sha256                                    # sha256 over the 
 def store_span(cache: Any) -> tuple[float, float]:
     """(first, last) time [s since 1970] of the stored hourly fields."""
     import xarray as xr
-    t = xr.open_zarr(pathlib.Path(cache) / "derived.zarr").time.values
+    with store_lock(cache):
+        t = xr.open_zarr(pathlib.Path(cache) / "derived.zarr").time.values
     return float(t[0]), float(t[-1])
 
 
@@ -129,9 +130,10 @@ def build(env: GriddedEnv, cache: Any, built_from: str | None = None, log: Calla
     ds.attrs["stokes_fit_check"] = json.dumps(fit)
     ds.attrs["layout_version"] = LAYOUT_VERSION
     ds.attrs["built_from"] = built_from
-    ds.to_zarr(cache / "derived.zarr", mode="w")
     from ..config import write_json                                          # written whole or not at all, as the Ledger is: a kill cannot leave half a record
-    write_json(cache / DIGEST, dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1)
+    with store_lock(cache):                                                  # no reader sees the store between its first chunk and its record (P-R15A1)
+        ds.to_zarr(cache / "derived.zarr", mode="w")
+        write_json(cache / DIGEST, dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1)
     if env.spec is not None and fit is None:
         log("surface layer: fewer than three restart spectra in the window, or a non-finite leave-one-out error: "
             "Stokes drift is the fit alone, tagged 0.4|u_s|")
@@ -221,7 +223,8 @@ class SurfaceLayer:
         import xarray as xr
         store = pathlib.Path(cache) / "derived.zarr"
         try:
-            d = xr.open_zarr(store).load()
+            with store_lock(cache):
+                d = xr.open_zarr(store).load()
         except Exception as e:                                         # noqa: BLE001  zarr/numcodecs raise RuntimeError, ValueError, OSError ...
             from ..config import ConfigError
             from .environment import FETCH_CMD

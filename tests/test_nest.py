@@ -1,6 +1,9 @@
 """Moving nest: shifts, refill, sponge, zero spurious force, mass conservation, vmap over vehicles, coupling helpers."""
 import json
+import os
 import pathlib
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -609,3 +612,45 @@ def test_r13_l1_the_commands_that_were_valid_still_parse_the_same(monkeypatch, t
                         lambda backend, re, d, domain, storage, progress: seen.update(lbm=(backend, re, d, domain)) or dict(cd=1.0, history=[1.0]))
     assert lbm.main(["slow", "1e4"]) == 0
     assert seen["lbm"] == ("jax", 1e4, 16, (14, 12, 12)) and (tmp_path / "lbm_sphere_1e4.json").is_file()
+
+
+# ------------------------------------------------------------------ P-R15Q2: no test writes the shared receipts store
+STORE_WRITERS = '''
+import numpy as np
+from cafe.pm.stage3 import lbm, nest, wallmodel as wm
+
+
+def test_every_slow_command_with_its_path_unpatched(monkeypatch):
+    monkeypatch.setattr(nest, "sphere_drag", lambda re, d, dom, lateral: dict(history=[1.0], cd=1.0))
+    assert nest.main(["slow", "100", "8", "12", "6", "6", "--lateral", "periodic"]) == 0
+    monkeypatch.setattr(lbm, "pick_backend", lambda: "jax")
+    monkeypatch.setattr(lbm, "sphere", lambda backend, re, d, domain, storage, progress: dict(cd=1.0, history=[1.0]))
+    assert lbm.main(["slow", "100"]) == 0
+    monkeypatch.setattr(wm, "flat_plate", lambda **k: dict(cf=0.004, force=np.ones(3)))
+    monkeypatch.setattr(wm, "channel", lambda **k: dict(cf=0.005, profile=[1.0]))
+    assert wm.main(["slow"]) == 0 and wm.main(["channel"]) == 0
+    assert nest.sphere_path("100", 8).is_file() and lbm.slow_path("sphere_100").is_file() and wm.slow_path().is_file() and wm.channel_path().is_file()
+'''
+
+
+def test_r16_pa_a_test_that_runs_a_slow_command_with_its_path_unpatched_writes_a_private_directory_never_the_shared_store(tmp_path):
+    """P-R15Q2: a 157-byte stub receipt (`nest_sphere_100_d8.json`: history [1.0], cd 1.0, 5 microseconds, lateral periodic, no `d`) sat in the shared
+    receipts store, written by a test that ran `nest slow` with `SLOW_DIR` unpatched: the paths are read from CAFE_DATA when the module is imported,
+    and on the runners that is /data. The writers (nest, lbm, wallmodel plate and channel) run unpatched in a pytest process of their own, whose
+    CAFE_DATA is a directory standing for the shared one; the conftest of this suite must keep every byte of it off that directory."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    test = tmp_path / "test_unpatched.py"
+    test.write_text(STORE_WRITERS)
+    root = pathlib.Path(__file__).resolve().parents[1]
+    env = {**os.environ, "CAFE_DATA": str(shared), "PYTHONPATH": str(root)}
+    r = subprocess.run([sys.executable, "-m", "pytest", "-p", "tests.conftest", "-p", "no:cacheprovider", "-q", "--rootdir", str(root), str(test)],
+                       cwd=root, env=env, capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    assert list(shared.rglob("*")) == []                                                       # nothing at all reached the shared directory
+
+
+def test_r16_pa_the_receipt_directories_of_the_suite_are_under_the_private_data_directory():
+    private = pathlib.Path(os.environ["CAFE_DATA"])
+    assert private.name.startswith("cafe_test_data_")
+    assert nest.SLOW_DIR == lbm.SLOW_DIR == wm.SLOW_DIR == private / "receipts"

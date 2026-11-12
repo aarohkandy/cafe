@@ -29,7 +29,7 @@ from collections.abc import Callable
 from typing import Any
 
 from .config import write_json
-from .env.remote import sha256, tree_sha256
+from .env.remote import sha256, store_lock, tree_sha256
 from .ledger import RUN_ROOT_FILES, STAGES, hashed, input_sha, real, resolve, run_roots, shared_diff
 from .physics.comms import PARAMETER_FILES
 
@@ -82,6 +82,15 @@ def _store_attr(d: pathlib.Path, key: str) -> Any:
     return None
 
 
+def _tree(f: pathlib.Path) -> str:
+    """`tree_sha256(f)`; the derived surface layer is hashed under the cache's lock (a run that shares the cache may be rebuilding it, P-R15A1), taken
+    without making the lock file: an audit writes nothing."""
+    if f.name != "derived.zarr":
+        return tree_sha256(f)
+    with store_lock(f.parent, create=False):
+        return tree_sha256(f)
+
+
 def _dir_problems(run: str, st: str, f: pathlib.Path, recorded: str | None, tree: str | None = None) -> list[str]:
     """A directory input: a zarr store carries the sha256 of the parts manifest it was assembled from, which is what the ledger recorded; and,
     when the ledger holds `tree_sha256`, the hash over every file of the store is recomputed (a changed value or a deleted chunk changes it, the
@@ -90,11 +99,11 @@ def _dir_problems(run: str, st: str, f: pathlib.Path, recorded: str | None, tree
     if recorded and have is not None and have != recorded and f.name != "derived.zarr":
         return [f"{run}: stage {st}: input {f} changed since the stage ran (store manifest {str(have)[:12]}, ledger {recorded[:12]})"]
     if tree is not None:
-        now = tree_sha256(f)
+        now = _tree(f)
         return [] if now == tree else [f"{run}: stage {st}: input {f} changed since the stage ran (tree {now[:12]} against ledger {tree[:12]}): "
                                        "delete it and run `fetch` again"]
     if recorded and f.name == "derived.zarr":  # an older ledger: the surface layer has no manifest, the ledger recorded the hash of every file
-        return [] if tree_sha256(f) == recorded else [f"{run}: stage {st}: input {f} (the derived surface layer) changed since the stage ran"]
+        return [] if _tree(f) == recorded else [f"{run}: stage {st}: input {f} (the derived surface layer) changed since the stage ran"]
     return []
 
 

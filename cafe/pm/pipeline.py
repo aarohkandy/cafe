@@ -181,11 +181,12 @@ class Context:
             from .env.environment import GriddedEnv
             e = self.mission["environment"]
             sub = None                                                                                        # built by ingest
-            if _derived_current(self.cache):
-                why = _derived_span_problem(self.cache, self.window_s())
-                if why:
-                    raise ConfigError(f"{self.cache}/derived.zarr: {why}; rerun `{fetch_cmd(self.mission_path)}` to rebuild it")
-                sub = surface.SurfaceLayer(self.cache, warm_layer=subgrid.switch(e, "warm_layer"), rain_lens=subgrid.switch(e, "rain_lens"))
+            with surface.store_lock(self.cache):                                       # the layer checked is the layer loaded (P-R15A1)
+                if _derived_current(self.cache):
+                    why = _derived_span_problem(self.cache, self.window_s())
+                    if why:
+                        raise ConfigError(f"{self.cache}/derived.zarr: {why}; rerun `{fetch_cmd(self.mission_path)}` to rebuild it")
+                    sub = surface.SurfaceLayer(self.cache, warm_layer=subgrid.switch(e, "warm_layer"), rain_lens=subgrid.switch(e, "rain_lens"))
             sig, fit = env_sigmas(), self.run_dir / "ingest" / "env_sigmas_fitted.json"
             if fit.is_file():
                 sig.update(json.loads(fit.read_text()))
@@ -534,12 +535,7 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
                  "(a land/sea mask does not move; a deleted chunk reads as NaN)")
     key = digest(dict(orca=sha256(orca_snap), ocean=hycom.open_store(store, lab=lab).attrs.get("manifest_sha256"), gebco=sha256(gebco), orca_stores=orca_trees,
                       code=ctx.code_digest))
-    if not (_derived_current(ctx.cache, key) and _derived_span_problem(ctx.cache, ctx.window_s()) is None):      # about a minute; every code edit rebuilds it
-        shutil.rmtree(ctx.cache / "derived.zarr", ignore_errors=True)
-        ctx._env = None
-        surface.build(ctx.env, ctx.cache, key, log=ctx.log)
-        ctx._env = None                                                  # rebuild with the surface layer just written
-    rec = json.loads((ctx.cache / surface.DIGEST).read_text())
+    rec = _derived_record(ctx, key)
     L.input(ctx.cache / "derived.zarr", sha=rec["store_sha256"], tree=rec["store_sha256"], kind="derived surface layer (sha256 of every file of the store)")
     L.output(_dump(rec, ctx.path("ingest", surface.DIGEST)))
     oc = ocean(ctx)
@@ -1024,6 +1020,23 @@ def _t2_rmse(ctx: Context, moor: dict[str, Any], hours: NDArray[np.float64]) -> 
     return float(np.sqrt(np.mean(d ** 2))) if d.size else None
 
 
+def _derived_record(ctx: Context, key: str) -> dict[str, Any]:
+    """The record (`derived.digest.json`) of a derived.zarr built from `key`, building the store first when it is not there, was built from another key,
+    has other bytes than it recorded or does not cover the window (about a minute; every code edit rebuilds it). The decision and the build are one step
+    under the cache's lock (`surface.store_lock`): a second run that shares the cache waits, then finds the store current (the same code) or rebuilds it
+    (other code), and never reads, hashes or deletes it half built (P-R15A1). Runs of different code on one mission cache still cannot both finish: the
+    later build is another key, so the earlier run's `derived_unchanged` check fails with 'rebuilt since' (a store per key is DECISIONS 576's open question)."""
+    from .env import surface
+    with surface.store_lock(ctx.cache):
+        if not (_derived_current(ctx.cache, key) and _derived_span_problem(ctx.cache, ctx.window_s()) is None):
+            shutil.rmtree(ctx.cache / "derived.zarr", ignore_errors=True)
+            ctx._env = None
+            surface.build(ctx.env, ctx.cache, key, log=ctx.log)
+            ctx._env = None                                              # rebuild with the surface layer just written
+        rec: dict[str, Any] = json.loads((ctx.cache / surface.DIGEST).read_text())
+    return rec
+
+
 def _derived_current(cache: pathlib.Path, key: str | None = None) -> bool:
     """derived.zarr exists and has the layout this code reads (surface.LAYOUT_VERSION). With `key` (the hash of the cache files and the code, see
     s_ingest) it also was built from exactly that and its files still hash to what `build` recorded beside it."""
@@ -1035,14 +1048,15 @@ def _derived_current(cache: pathlib.Path, key: str | None = None) -> bool:
         except (ValueError, OSError):
             return None
         return d if isinstance(d, dict) else None
-    z = read(cache / "derived.zarr" / "zarr.json")
-    if z is None or z.get("attributes", {}).get("layout_version") != surface.LAYOUT_VERSION:
-        return False
-    if key is None:
-        return True
-    rec = read(cache / surface.DIGEST) or {}
-    return bool(z["attributes"].get("built_from") == key and rec.get("built_from") == key
-                and rec.get("store_sha256") == surface.store_sha256(cache / "derived.zarr"))
+    with surface.store_lock(cache):
+        z = read(cache / "derived.zarr" / "zarr.json")
+        if z is None or z.get("attributes", {}).get("layout_version") != surface.LAYOUT_VERSION:
+            return False
+        if key is None:
+            return True
+        rec = read(cache / surface.DIGEST) or {}
+        return bool(z["attributes"].get("built_from") == key and rec.get("built_from") == key
+                    and rec.get("store_sha256") == surface.store_sha256(cache / "derived.zarr"))
 
 
 def _derived_span_problem(cache: pathlib.Path, window: tuple[float, float]) -> str | None:
@@ -1073,7 +1087,8 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
         return
     L.input(rec)
     want = json.loads(rec.read_text())["store_sha256"]
-    have = surface.store_sha256(store) if store.is_dir() else None
+    with surface.store_lock(ctx.cache):                                  # waits for a build of another run, then hashes the whole store it left
+        have = surface.store_sha256(store) if store.is_dir() else None
     L.check("derived_unchanged", have == want, value=have, limit=want, note=f"{store} hashes to what ingest recorded" if have == want
             else f"{store} is not what ingest recorded (edited or rebuilt since): rerun `{fetch_cmd(ctx.mission_path)}` and the run")
 
@@ -1496,7 +1511,8 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     pri, marg = stage1.priors_for(ctx.mission, fitted)
     seed = int(ctx.mission["seed"])
     fid = {vid: int(vid in scales) for vid in res["vehicles"]}
-    meta = dict(run_id=digest(str(ctx.run_dir.resolve()))[:12], mission=ctx.mission["name"], git_sha=ledger.git_sha(), code_digest=ctx.code_digest)
+    meta = dict(run_id=digest(str(ctx.run_dir.resolve()))[:12], mission=ctx.mission["name"], git_sha=ledger.git_sha(), code_digest=ctx.code_digest,
+                mission_hash=whatif.mission_hash(ctx.mission))
     rows = whatif.vehicle_rows(ctx.mission, res, ctx.env, fid, meta)
     train_in, snap = whatif.snapshot(ctx.table, ctx.path("emulator", "train_input"), meta["run_id"])
     L.input(snap, kind="emulator training table at the start of this stage (minus this run's rows)", source=str(ctx.table), rows=len(train_in))
@@ -1562,12 +1578,15 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
             return None
         n_fresh.append(time.perf_counter() - a)
         return m["p_fail"], m["n"]
-    ems = whatif.train(ctx.table, whatif.scopes(ctx.mission), df=train_df, fresh=fresh)
+    ems = whatif.train(ctx.table, whatif.scopes(ctx.mission), df=train_df, fresh=fresh, mission_hash=meta["mission_hash"])
     if n_fresh:
         L.note(f"fresh-draw hold-out check: {len(n_fresh)} held-out variant point(s) re-run on members used nowhere else, "
                f"{sum(n_fresh):.0f} s (not part of the hashed output)")
     out = {vid: ems[whatif.scope_of(ctx.mission, vid, r["class"])][1] for vid, r in res["vehicles"].items()}
     for sc, (em, info) in ems.items():
+        L.note(f"emulator {sc}: {info['rows']} of the table's {info['rows'] + info['left_out_rows']} {info['cls']} rows used (this code, this mission); "
+               f"{info['left_out_rows']} left out: {info['stale_rows']} made by other code, {info['other_mission_rows']} of another mission or of none, "
+               f"{info['other_scope_rows']} of other platforms or window lengths, {info['unscoped_rows']} of no scope")
         if em is None:
             L.note(f"emulator for {sc} not trained (trained: false): {info['reason']}")
             continue

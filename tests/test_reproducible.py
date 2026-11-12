@@ -75,7 +75,7 @@ def make_twins(root):
     """The CI mission twice with the same seed, each in its own run directory with its own copy of the same emulator table (140 glider rows, so
     the emulator is really trained)."""
     scope = budget.emulator_scope(config.load_mission(MISSION_PATH), "glider_eq", "glider")                 # the CI window is 36 h, not the demo's 144 h
-    seed_table(root / "start.parquet", scope=scope)
+    seed_table(root / "start.parquet", scope=scope, mission=MISSION_PATH)
     out = {}
     for name in ("a", "b"):
         (root / f"table_{name}").mkdir()

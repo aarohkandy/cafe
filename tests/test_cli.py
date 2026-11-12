@@ -503,6 +503,20 @@ def test_whatif_parses_each_argument_form(wi, capsys):
     assert wi.seen["ops"] == dict(shift_h=6.0, dlon=0.0, dlat=-1.0, drop=["uas"])
 
 
+def test_r16_pa_whatif_trains_its_emulators_on_the_rows_of_the_missions_own_hash_only(wi):
+    """P-R15A2: the CLI is the second caller of `whatif.train`; 101 rows of the demo mission (this code) and 7 of them relabelled as another mission's."""
+    from tests.test_pipeline import GS, seed_table
+    table = pipeline.emulator_table()
+    seed_table(table, n=101)
+    df = whatif.read_table(table)
+    df.loc[:6, "mission_hash"] = "another-mission"
+    whatif.write_table(df, table)
+    assert cli.main(whatif_args(wi, "--shift", "6h")) == 0
+    info = wi.seen["ems"][GS][1]
+    assert info["rows"] == 94 and info["other_mission_rows"] == 7 and info["trained"] is False
+    assert "7 rows of another mission, or made before rows carried the mission, are left out" in info["reason"]
+
+
 def test_whatif_prints_the_verdict_with_its_badge_distance_or_stage_1_n(wi, capsys):
     assert cli.main(whatif_args(wi, "--shift", "6h", "--move", "1deg W", "--drop", "glider_2n")) == 0
     out = capsys.readouterr().out.splitlines()

@@ -718,6 +718,25 @@ def test_run_orders_the_runs_and_gives_the_other_seed_plus_one(monkeypatch, tmp_
     assert any(m.startswith("PASS  run_quick:") for m in log)
 
 
+def test_r16_pa_a_shared_emulator_table_is_copied_once_before_any_run_and_every_run_is_given_that_copy(monkeypatch, tmp_path):
+    """Lines 610-611 of acceptance.py were covered by the gates only because the default table path held the real shared table of the runner
+    (/data/emulator/train.parquet); with the suite's private CAFE_DATA (DECISIONS 881) no test had a table there."""
+    shared = tmp_path / "shared" / "train.parquet"
+    shared.parent.mkdir()
+    shared.write_bytes(b"rows")
+    monkeypatch.setenv("CAFE_EMULATOR_TABLE", str(shared))
+    f, tables = Fake(tmp_path, monkeypatch), []
+    fake = acc.run_one
+    monkeypatch.setattr(acc, "run_one", lambda *a: tables.append(a[6]) or fake(*a))
+    acc.run(MISSION, 0, tmp_path / "o", golden_for(tmp_path), log=lambda s: None)
+    pristine = tmp_path / "o" / "emulator_table.parquet"
+    assert tables == [pristine] * len(f.calls) and pristine.read_bytes() == b"rows"
+    shared.unlink()
+    tables.clear()
+    acc.run(MISSION, 0, tmp_path / "o2", golden_for(tmp_path), log=lambda s: None)
+    assert tables and set(tables) == {None}                                                    # no shared table: no copy, runs make their own
+
+
 def test_l0_a_mission_inside_a_run_directory_acceptance_removes_is_refused_before_anything_is_deleted(monkeypatch, tmp_path):
     """Round 9, M-12 sibling: run_one removed out/<name> and out/<name>_fetch before its subprocesses read --mission, so `acceptance --mission
     <out>/quick/mission.yaml` deleted its own mission and failed with 'file not found'; and a mission in a later run's directory would have gone after hours."""
