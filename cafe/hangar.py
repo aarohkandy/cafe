@@ -336,7 +336,7 @@ def run(design_dir, skip=()):
               res["fea"], fields = fea_cases(kind, m, spec, v1, parts, d / "fea")
               for key, field in fields.items():
                   if field is not None:
-                      np.savez_compressed(d / f"fea_{key}.npz", **{k: np.asarray(v) for k, v in field.items()})
+                      atomic.write_with(d / f"fea_{key}.npz", lambda fh, f=field: np.savez_compressed(fh, **{k: np.asarray(v) for k, v in f.items()}))
               for c in res["fea"]["cases"]:
                   job.log(f"FEA {c['name']}: safety factor {c['safety_factor'] or float('nan'):.2f}, "
                           f"stress {c['vm_p99_mpa']:.1f} MPa (99th pct), deflection {c['u_max_mm']:.2f} mm")

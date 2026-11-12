@@ -182,7 +182,7 @@ Run them: `./run.sh python -m cafe.receipts /work/runs` (the directory must exis
 `emulator.py` ArduPilot SITL bridge · `worker.py` job queue · `receipts.py` · `app.py` + `static/`.
 
 Server: `~/services/cafe/compose.yml` on homebase (`cafe` = API, `cafe-worker` = jobs); code at
-`~/work/cafe/src` (mounted live), data at `~/work/cafe/data`. After a change, run `./sync.sh`, then
+`~/work/cafe/src` (mounted live at `/app`, so `config/` is under it too: `cafe/fea.py` reads `/app/config/assumptions.yaml`), data at `~/work/cafe/data`. After a change, run `./sync.sh` (it sends the whole tree, `config/` included; `./run.sh` sends `cafe/` and `config/`), then
 `docker restart cafe` (jobs run as fresh processes, so the worker picks up new code by itself: all of `cafe/`
 except `worker.py`, whose loop is long-lived). After changing `worker.py`, `docker restart cafe-worker`; it re-queues
 anything marked running, so a CFD characterization in progress starts over: check `/api/designs` first.

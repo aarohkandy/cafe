@@ -10,6 +10,8 @@ reachability map re-run costs nothing. If a server is down the caller falls back
 import datetime as dt, hashlib, json, os, pathlib, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 import numpy as np
 
+from cafe import atomic
+
 CACHE = pathlib.Path(os.environ.get("CAFE_WORK", "/work")) / "ocean"
 HYCOM = ("https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z",     # same experiment, same units and
          "https://tds.hycom.org/thredds/dodsC/GLBv0.08/expt_93.0/uv3z")     # 0-360 longitudes; first that covers t0
@@ -93,7 +95,7 @@ def _hycom(dataset, names, tag, t0, hours, lat_range, lon_range, max_depth, near
     out = dict(t_s=(np.asarray(th[k], float) - (t0 - EPOCH).total_seconds() / 3600) * 3600, depth=np.asarray(dep[d], float),
                lat=np.asarray(lat[j], float), lon=np.asarray(lon[i], float), **got)
     CACHE.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(f, **out)
+    atomic.write_with(f, lambda fh: np.savez_compressed(fh, **out))      # a kill leaves the old file or none (P-R15A-3)
     return out
 
 
@@ -190,7 +192,7 @@ def waves(t0, hours, lat_range, lon_range):
     secs = np.array([(dt.datetime.strptime(t, "%Y-%m-%dT%H:%M:%SZ") - t0).total_seconds() for t in tt])
     out = dict(t_s=secs, lat=np.array(la), lon=np.mod(np.array(lo), 360.0), hs=hs, tp=tp, dir_from=di)
     CACHE.mkdir(parents=True, exist_ok=True)
-    np.savez_compressed(f, **out)
+    atomic.write_with(f, lambda fh: np.savez_compressed(fh, **out))      # a kill leaves the old file or none (P-R15A-3)
     return out
 
 

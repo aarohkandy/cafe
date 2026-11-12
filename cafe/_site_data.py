@@ -13,6 +13,8 @@ Writes /work/site_data/*.json; copy them to site/data/. Everything the site draw
 import datetime as dt, json, os, pathlib, sys, time, urllib.request
 import numpy as np
 
+from cafe import atomic
+
 OUT = pathlib.Path("/work/site_data")
 BOX = dict(lat=(6.0, 19.0), lon=(-102.0, -87.0))          # padding around the chart's 7-18 N, 101-88 W
 SITE = (10.0, -95.0)                                       # TEPEX example deployment
@@ -277,7 +279,7 @@ def _hycom(key, t0, lat_r, lon_r):
         z.update(source=np.str_(name), t=(np.asarray(th[k], float) - want0) * 3600,
                  depths=np.asarray([float(dep[d]) for d in dk]), lat=np.round(lat[js], 3), lon=np.round(np.asarray(lon[is_]) - 360, 3))
         OUT.mkdir(parents=True, exist_ok=True)
-        np.savez(cache, **z)
+        atomic.write_with(cache, lambda fh: np.savez(fh, **z))      # read back by this function: a cut write must not leave a BadZipFile
         return z
     return None
 

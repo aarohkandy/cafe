@@ -2,7 +2,7 @@
 files (job status and results, the CFD cache) could not use `cafe.pm.config`, which imports it. `cafe.pm.config.write_text` calls this function, so there is
 one implementation of the temporary-and-replace (round 15, P-R14L0-1)."""
 import json, os, pathlib, stat, uuid
-from typing import Any
+from typing import Any, Callable
 
 
 def tmp_name(p: Any) -> pathlib.Path:
@@ -58,3 +58,19 @@ def write_text(p: Any, text: str, follow_symlinks: bool = False) -> None:
 def write_json(p: Any, obj: Any, end: str = "", **kw: Any) -> None:
     """`obj` as JSON (`kw` go to json.dumps) followed by `end` in `p`, by `write_text` (a symbolic link at `p` is refused)."""
     write_text(p, json.dumps(obj, **kw) + end)
+
+
+def write_with(p: Any, writer: Callable[[Any], None]) -> None:
+    """A binary file that is read back (an `.npz`) written by `writer(file_object)` into a sibling temporary and os.replace'd onto `p`: a kill or a full
+    disk leaves the old `p` or none, never half of a new zip (a half one is `BadZipFile` at the next read, not the refetch that follows an absent file), and no
+    temporary behind. The temporary has `tmp_name`'s name and is made with `O_EXCL` (`"xb"`); `writer` gets the open file, so a numpy `savez` adds no `.npz`
+    to its name (P-R15A-3). The standard library only, like `write_text`."""
+    p = pathlib.Path(p)
+    tmp = tmp_name(p)
+    try:
+        with open(tmp, "xb") as f:
+            writer(f)
+        os.replace(tmp, p)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

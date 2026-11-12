@@ -5,7 +5,7 @@ external(): one mesh, freestream BCs on every face, six inflow directions -> for
 free_surface(): fixed-attitude hull at its hydrostatic draft, resistance at several speeds.
 Each runs at two snappy levels; the difference is the Grid Convergence Index (two-grid, p=2, Fs=3).
 """
-import json, os, pathlib, re, shutil, subprocess, sys, time
+import json, os, pathlib, re, shlex, shutil, subprocess, sys, time
 import numpy as np
 import trimesh
 
@@ -54,7 +54,8 @@ def ittc57(re_):
 
 def sh(case, cmd, log):
     """Run an OpenFOAM command in `case`, log to file; raise with the log tail on failure."""
-    r = subprocess.run(["bash", "-c", FOAM + f"cd {case} && {cmd} > log.{log} 2>&1"])
+    where, logfile = shlex.quote(str(case)), shlex.quote(f"log.{log}")   # pasted into bash: quoted (P-R15A-2)
+    r = subprocess.run(["bash", "-c", FOAM + f"cd {where} && {cmd} > {logfile} 2>&1"])
     if r.returncode:
         tail = pathlib.Path(case, f"log.{log}").read_text(errors="replace")[-3000:]
         raise RuntimeError(f"{log} failed in {case}:\n{tail}")
