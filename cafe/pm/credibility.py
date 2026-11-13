@@ -67,13 +67,19 @@ LIMITATIONS = [
                         "again; "
                         "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established",
          factors=["validation", "uncertainty"], where=["platforms/saildrone_explorer.yaml", "cafe/pm/physics/usv.py"]),
-    dict(id="L19", text="the persistent wind-speed prior is a boundary moment estimate from the TAO moorings of one regime, not a measured spread: in the "
-                        "evidence run q5 11 moorings over 6 days gave 0.113 m/s, with a 95 % upper bound of about 0.5 m/s (the literature prior was 2.0 m/s), "
-                        "and regime-to-regime bias outside the window is not sampled",
+    dict(id="L19", text="the persistent wind-speed prior is an estimate from the TAO moorings of one regime, not a measured spread: it is the spread of the "
+                        "moorings' time-mean errors less its sampling variance, plus the uncertainty of the mean of the moorings, so with few moorings one "
+                        "mooring can decide it, and regime-to-regime bias outside the window is not sampled",
          factors=["uncertainty", "validation"], where=["cafe/pm/pipeline.py"]),
     dict(id="L20", text="UAS turbulence is generated at one height for all legs: one Mann box per sortie, at the deck height plus the mean of the sortie's "
                         "flight altitudes, is applied to every leg, so a leg flown at another altitude sees the length scale of that height",
          factors=["validation"], where=["cafe/pm/stage1.py", "cafe/pm/env/subgrid.py"]),
+    dict(id="L21", text="ocean currents, at the surface and at every depth, come from HYCOM/GOFS with the BRIEF 2.5 literature priors (current_speed_scale, "
+                        "current_direction_bias) and are compared with no in-situ current record: the TAO/TRITON comparison covers wind and SST only and no "
+                        "ADCP is read", factors=["validation", "uncertainty"], where=["cafe/pm/pipeline.py", "config/perturbations.yaml"]),
+    dict(id="L22", text="wave height, period and direction (UMWM) and the subsurface temperature and salinity (HYCOM/GOFS) are compared with no in-situ record "
+                        "either: no wave record and no subsurface temperature or salinity record of the moorings is read",
+         factors=["validation", "uncertainty"], where=["cafe/pm/pipeline.py", "cafe/pm/env/tao.py"]),
 ]
 
 SUBGRID = "sub-grid layer uncalibrated"
@@ -166,13 +172,36 @@ def subgrid_uncalibrated(run: pathlib.Path, root: pathlib.Path = ROOT) -> str | 
 
 def usv_speed_sampling() -> str:
     """What the stage-1 USV speed prior (`usv_vpp_bias`, uniform [lo, hi] on the fractional speed change) samples, computed from config/perturbations.yaml:
-    the half-width and range against the unbiased polar speed, the sd, and the half-width against the speed actually flown (1 + centre of it)."""
+    where the speed factor 1 + bias lies against the unbiased polar speed (below, above, or on both sides), its centre, half-width and sd, and the
+    half-width against the speed actually flown (1 + centre of it). Round 16, M-16: this said only the half-width, which reads as a speed near the polar's
+    when the whole range is 23 to 26 % below it."""
     e = sampling.load_perturbations()["usv_vpp_bias"]
-    half, centre = (e["hi"] - e["lo"]) / 2, (e["hi"] + e["lo"]) / 2
-    def pct(x: float) -> str:
-        return f"{round(100 * x, 9):.1f} %"                                                  # (2.8499999999999996 is 2.85)
-    return (f"speed factor is sampled within +-{pct(half)} of the unbiased polar speed (range {pct(2 * half)}, sd {pct(2 * half / math.sqrt(12))}; "
-            f"+-{pct(half / (1 + centre))} of the speed flown)")
+    lo, hi = e["lo"], e["hi"]
+    half, centre = (hi - lo) / 2, (hi + lo) / 2
+    def num(x: float, sign: str = "") -> str:
+        return f"{round(100 * x, 9):{sign}.1f}"                                              # (2.8499999999999996 is 2.85)
+    def pct(x: float, sign: str = "") -> str:
+        return num(x, sign) + " %"
+    where = (f"{num(abs(hi))} to {pct(abs(lo))} below" if hi <= 0 else f"{num(lo)} to {pct(hi)} above" if lo >= 0 else
+             f"from {pct(-lo)} below to {pct(hi)} above")
+    return (f"speed factor is sampled uniformly {where} the unbiased polar speed (centre {pct(centre, '+')}, half-width +-{pct(half)}, "
+            f"sd {pct(2 * half / math.sqrt(12))}; +-{pct(half / (1 + centre))} of the speed flown)")
+
+
+def wind_prior_fit(run: pathlib.Path, perts: dict[str, Any]) -> str:
+    """The sentence L19 gets in a run that fitted the wind prior: the persistent wind-speed sd this run's TAO comparison gave (ingest/priors_fitted.json
+    `wind_speed_bias`, with its 95 % upper bound), the number of moorings compared (ingest/tao_compare.json) and the literature prior it replaces. "" when
+    the run holds no fit, so the limitation then states only what holds for every run. Round 16, M-15: L19 printed the q5 fit (0.113 m/s, 11 moorings) in the
+    present tense on a run that fitted 0.5689 m/s from 14."""
+    e = (_json(run / "ingest" / "priors_fitted.json") or {}).get("wind_speed_bias")
+    if not isinstance(e, dict) or not real_ok(e.get("value")):
+        return ""
+    cmp = _json(run / "ingest" / "tao_compare.json")
+    n = len([k for k in cmp if k != "ALL"]) if cmp else 0
+    unit, lit = e.get("unit", "m/s"), (perts.get("wind_speed_bias") or {}).get("value")
+    return (f"In this run the fit gave {e['value']:.4g} {unit}" + (f" (95 % upper bound {e['value_hi95']:.4g} {unit})" if real_ok(e.get("value_hi95")) else "")
+            + (f" from the {n} moorings compared" if n else "") + (f", where the literature prior is {lit:g} {unit}" if real_ok(lit) else "")
+            + " (ingest/priors_fitted.json)")
 
 
 def data_root() -> pathlib.Path:
@@ -598,7 +627,9 @@ class Facts:
         self.vv = vv20_rows(data)
         why = subgrid_uncalibrated(run, root)
         sub = [] if why is None else [dict(SUBGRID_LIMITATION, text=why)]
-        self.limitations = LIMITATIONS[:12] + sub + LIMITATIONS[12:]                       # L13 sits between L12 and L14
+        fit = wind_prior_fit(run, self.perts)
+        lims = [dict(x, text=f"{x['text']}. {fit}") if fit and x["id"] == "L19" else x for x in LIMITATIONS]          # M-15: L19 states this run's fit
+        self.limitations = lims[:12] + sub + lims[12:]                                          # L13 sits between L12 and L14
 
     def config_used(self, file: str, key: str) -> bool:
         """Whether this mission reads the item `key` of the config/ file `file` (`config_scope`). Which keys a run read is not recorded, so this is the rule
@@ -749,13 +780,16 @@ def _validation(f: Facts) -> tuple[int, list[dict[str, Any]], list[str]]:
     if not ran:
         return 0, [], ["no validation comparison has been run"] + miss
     unj = [r["id"] for r in full if r.get("not_judged")]                                    # round 7, M-5: a finest grid that has not converged judges nothing
-    ev = [f.ev(f"{len(ran)} comparison(s) ran, {len(full)} with all uncertainty terms, {sum(bool(r['validated']) for r in full)} with |E| <= U_val, "
-               f"{sum(bool(r['informative']) for r in full)} with U_val below {UVAL_MAX_FRAC:.0%} of the reference"
-               + (f", {len(unj)} not judged (finest grid not converged)" if unj else ""), "credibility.json: vv20")]
+    judged = [r for r in full if not r.get("not_judged")]
+    # round 16, M-17: one basis for every count below: the judged rows (`validated` is None for a row that is not judged, so counting over `full` gave
+    # "1 with |E| <= U_val" beside "3 with U_val below 50 %" for four rows that all had |E| < U_val)
+    ev = [f.ev(f"{len(ran)} comparison(s) ran, {len(full)} with all uncertainty terms, {len(judged)} judged"
+               + (f" and {len(unj)} not judged (finest grid not converged)" if unj else "")
+               + f"; of the {len(judged)} judged, {sum(bool(r['validated']) for r in judged)} with |E| <= U_val and "
+               f"{sum(bool(r['informative']) for r in judged)} with U_val below {UVAL_MAX_FRAC:.0%} of the reference", "credibility.json: vv20")]
     if not full:
         return 1, ev, ["no comparison stored U_num, U_input and U_D, so |E| <= U_val cannot be assessed"] + miss
-    wide = [r["id"] for r in full if not r["informative"]]
-    judged = [r for r in full if not r.get("not_judged")]
+    wide = [r["id"] for r in judged if not r["informative"]]
     if len(judged) >= 4 and all(r["validated"] for r in judged) and not wide:
         return 3, ev, miss
     why = ["fewer than four complete comparisons, or one with |E| > U_val"]

@@ -2169,7 +2169,8 @@ def test_the_usv_card_says_the_speed_factor_is_sampled_over_its_range_only_when_
     report.write(run, m, plan)
     h = (run / "report" / "index.html").read_text()
     t = plain(h)
-    assert t.count("speed factor is sampled within +-1.4 % of the unbiased polar speed (range 2.9 %, sd 0.8 %; +-1.9 % of the speed flown)") == 1
+    assert t.count("speed factor is sampled uniformly 22.8 to 25.6 % below the unbiased polar speed "
+                   "(centre -24.2 %, half-width +-1.4 %, sd 0.8 %; +-1.9 % of the speed flown)") == 1
     assert "not an uncertainty of this model); the brief's bias case gives 30 members of 32 members (NO-GO)" in t
     assert report.check_rendered(load(run), h) == [] and load(run)["traceability_problems"] == []
 

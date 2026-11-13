@@ -464,14 +464,15 @@ LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the
            "UAS attitude exceedance cannot fire in this controller model (tilt clamp 35 deg, exceedance 42 deg)",
            "the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio again; "
            "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established",
-           "the persistent wind-speed prior is a boundary moment estimate from the TAO moorings of one regime, not a measured spread: in the evidence run "
-           "q5 11 moorings over 6 days gave 0.113 m/s, with a 95 % upper bound of about 0.5 m/s (the literature prior was 2.0 m/s), and regime-to-regime "
-           "bias outside the window is not sampled"]
+           "the persistent wind-speed prior is an estimate from the TAO moorings of one regime, not a measured spread: it is the spread of the moorings' "
+           "time-mean errors less its sampling variance, plus the uncertainty of the mean of the moorings, so with few moorings one mooring can decide it, "
+           "and regime-to-regime bias outside the window is not sampled"]
 
 
 def test_limitations_are_listed_verbatim_and_point_at_real_files():
     assert [x["text"] for x in cr.LIMITATIONS][:12] == LIMITS
-    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18", "L19", "L20"] and [x["text"] for x in cr.LIMITATIONS][12:-1] == LIMITS2
+    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18", "L19", "L20", "L21", "L22"]
+    assert [x["text"] for x in cr.LIMITATIONS][12:-3] == LIMITS2
     names = {k for k, _ in cr.FACTORS}
     for x in cr.LIMITATIONS:
         assert set(x["factors"]) <= names and x["where"]
@@ -922,7 +923,8 @@ def test_an_uncalibrated_sub_grid_layer_is_a_limitation_that_caps_validation_and
 def test_the_wind_prior_limitation_names_the_upper_bound_and_the_one_regime_and_lowers_no_cap():
     """Round 5 M-10: L19. Both factors it bears on were already capped at 2 by other limitations, so it moves no level."""
     x = next(x for x in cr.LIMITATIONS if x["id"] == "L19")
-    assert "95 % upper bound" in x["text"] and "one regime" in x["text"] and "regime-to-regime bias" in x["text"] and x["where"] == ["cafe/pm/pipeline.py"]
+    assert "one regime" in x["text"] and "one mooring can decide it" in x["text"] and "regime-to-regime bias" in x["text"]
+    assert x["where"] == ["cafe/pm/pipeline.py"]
     others = {f for y in cr.LIMITATIONS if y["id"] != "L19" for f in y["factors"]}
     assert set(x["factors"]) <= others
 
@@ -1078,7 +1080,7 @@ def test_the_usv_speed_prior_width_is_not_an_uncertainty_of_the_model(run, data)
     assert "not an uncertainty of this model" in yaml.safe_load((REAL / "config" / "perturbations.yaml").read_text())["usv_vpp_bias"]["citation"]
     u = factors(run)["uncertainty"]
     # round 8, M-20: the figure is computed from the prior
-    assert any("sampled within +-1.4 % of the unbiased polar speed" in e["what"] and "usv_vpp_bias_brief" in e["what"] for e in u["evidence"])
+    assert any("sampled uniformly 22.8 to 25.6 % below the unbiased polar speed" in e["what"] and "usv_vpp_bias_brief" in e["what"] for e in u["evidence"])
 
 
 # ---------------------------------------------------------------------------------------------------------- round 8 (K batch)
@@ -1181,13 +1183,14 @@ def test_r8_m16_the_two_modem_defaults_are_assumed_inputs_with_the_same_numbers(
 def test_r8_m20_the_usv_speed_sampling_sentence_is_computed_from_the_prior(run, data, tmp_path, monkeypatch):
     u = factors(run)["uncertainty"]
     what = next(e["what"] for e in u["evidence"] if "usv_vpp_bias_brief" in e["what"])
-    assert "within +-1.4 % of the unbiased polar speed" in what and "+-1.9 % of the speed flown" in what and "sampled over 1.4 % only" not in what
+    assert "uniformly 22.8 to 25.6 % below the unbiased polar speed (centre -24.2 %, half-width +-1.4 %" in what and "+-1.9 % of the speed flown" in what
     perts = yaml.safe_load((REAL / "config" / "perturbations.yaml").read_text())
     perts["usv_vpp_bias"].update(lo=-0.30, hi=-0.20)
     (tmp_path / "perts.yaml").write_text(yaml.safe_dump(perts))
     monkeypatch.setattr(cr.sampling, "PERTURBATIONS", tmp_path / "perts.yaml")
     what = next(e["what"] for e in factors(run)["uncertainty"]["evidence"] if "usv_vpp_bias_brief" in e["what"])
-    assert "within +-5.0 % of the unbiased polar speed" in what and "1.4 %" not in what and "+-6.7 % of the speed flown" in what
+    assert "uniformly 20.0 to 30.0 % below the unbiased polar speed (centre -25.0 %, half-width +-5.0 %" in what and "1.4 %" not in what
+    assert "+-6.7 % of the speed flown" in what
 
 
 def test_r8_m45_verification_two_says_it_does_not_run_or_read_the_tests(run):
@@ -1673,3 +1676,107 @@ def test_r14_p_r14e2_the_stored_sphere_rows_are_the_one_list_of_runs_and_a_fourt
     assert ids() == [f"{k}:Re{t}" for k in ("nest_sphere", "lbm_sphere") for t, _ in config.SPHERE_RUNS]
     monkeypatch.setattr(config, "SPHERE_RUNS", (*config.SPHERE_RUNS, ("1e5", 1e5)))
     assert "nest_sphere:Re1e5" in ids() and "lbm_sphere:Re1e5" in ids()
+
+
+# ---------------------------------------------------------------------------------------------------------- round 16 (batch B: M-7, M-15, M-16, M-17)
+
+def test_r16_m17_the_validation_evidence_counts_every_figure_over_the_judged_rows():
+    """Four rows, all |E| < U_val, one judged and three not (finest grid not converged). `validated` is None for a row that is not judged, so counting it
+    over the four said "1 with |E| <= U_val", and `informative` (set before the judged test) said "3 with U_val below 50 %" beside it."""
+    lvl, ev, miss = cr._validation(_Facts([vrow(0)] + [vrow(i, judged=False) for i in (1, 2, 3)]))
+    assert lvl == 2 and ev[0]["what"] == ("4 comparison(s) ran, 4 with all uncertainty terms, 1 judged and 3 not judged (finest grid not converged); "
+                                          "of the 1 judged, 1 with |E| <= U_val and 1 with U_val below 50% of the reference")
+    lvl, ev, _ = cr._validation(_Facts([vrow(i) for i in range(4)]))
+    assert lvl == 3 and ev[0]["what"].endswith("4 judged; of the 4 judged, 4 with |E| <= U_val and 4 with U_val below 50% of the reference")
+
+
+def test_r16_m17_a_row_that_is_not_judged_is_not_a_reason_for_the_wide_uncertainty_message():
+    wide = dict(cr._row("w", "c", "s", 1.0, 1.0, (0.6, 0.6, 0.6), ""), validated=None, not_judged="not judged: the finest grid has not converged")
+    lvl, ev, miss = cr._validation(_Facts([vrow(i) for i in range(3)] + [wide]))
+    assert lvl == 2 and "U_val is 50%" not in " ".join(miss) and "3 judged and 1 not judged" in ev[0]["what"]
+    assert cr._validation(_Facts([vrow(i) for i in range(4)] + [wide]))[0] == 3                     # four judged rows beside it (as in the test of M-42)
+
+
+def usv_prior(tmp_path, monkeypatch, lo, hi):
+    perts = yaml.safe_load((REAL / "config" / "perturbations.yaml").read_text())
+    perts["usv_vpp_bias"].update(lo=lo, hi=hi)
+    (tmp_path / "perts.yaml").write_text(yaml.safe_dump(perts))
+    monkeypatch.setattr(cr.sampling, "PERTURBATIONS", tmp_path / "perts.yaml")
+    return cr.usv_speed_sampling()
+
+
+def test_r16_m16_the_usv_speed_sentence_says_the_direction_and_the_centre_of_the_range(tmp_path, monkeypatch):
+    """The sentence gave the half-width only ("within +-1.4 % of the unbiased polar speed"), which reads as a speed near the polar's when the whole range
+    is 23 to 26 % below it. The shipped prior is uniform on [-0.2565, -0.2280]."""
+    assert cr.usv_speed_sampling() == ("speed factor is sampled uniformly 22.8 to 25.6 % below the unbiased polar speed (centre -24.2 %, half-width +-1.4 %, "
+                                       "sd 0.8 %; +-1.9 % of the speed flown)")
+    assert usv_prior(tmp_path, monkeypatch, 0.02, 0.06) == ("speed factor is sampled uniformly 2.0 to 6.0 % above the unbiased polar speed (centre +4.0 %, "
+                                                            "half-width +-2.0 %, sd 1.2 %; +-1.9 % of the speed flown)")
+    assert usv_prior(tmp_path, monkeypatch, -0.03, 0.05) == ("speed factor is sampled uniformly from 3.0 % below to 5.0 % above the unbiased polar speed "
+                                                             "(centre +1.0 %, half-width +-4.0 %, sd 2.3 %; +-4.0 % of the speed flown)")
+    assert usv_prior(tmp_path, monkeypatch, -0.04, 0.0).startswith("speed factor is sampled uniformly 0.0 to 4.0 % below")        # (not "-0.0 %")
+
+
+def test_r16_m16_the_uncertainty_evidence_prints_the_one_sentence(run, data):
+    what = next(e["what"] for e in factors(run)["uncertainty"]["evidence"] if "usv_vpp_bias_brief" in e["what"])
+    assert f"USV {cr.usv_speed_sampling()}:" in what                                       # (the report card prints it too: tests/test_report.py)
+
+
+def write_fit(run, hi=True, moorings=14):
+    (run / "ingest").mkdir(exist_ok=True)
+    e = dict(dist="normal", mean=-0.46, value=0.5689, unit="m/s", kind="data", **(dict(value_hi95=0.9572) if hi else {}))
+    (run / "ingest" / "priors_fitted.json").write_text(json.dumps(dict(wind_speed_bias=e)))
+    if moorings:
+        (run / "ingest" / "tao_compare.json").write_text(json.dumps({**{f"T{i}": {} for i in range(moorings)}, "ALL": {}}))
+
+
+def l19(run, data):
+    return next(x for x in cr.build(run, REAL, data)["limitations"] if x["id"] == "L19")["text"]
+
+
+def test_r16_m15_l19_states_the_wind_fit_of_the_run_and_no_number_of_another_run(run, data):
+    """L19 said "q5 11 moorings over 6 days gave 0.113 m/s ... upper bound of about 0.5 m/s" in the present tense on a run that fitted 0.5689 m/s from 14
+    moorings (bound 0.9572). The text that holds for every run has no number; a run with a fit gets its own."""
+    static = next(x for x in cr.LIMITATIONS if x["id"] == "L19")["text"]
+    assert not any(c.isdigit() for c in static) and l19(run, data) == static                       # no fit stored: only what holds for every run
+    write_fit(run)
+    t = l19(run, data)
+    assert t == (f"{static}. In this run the fit gave 0.5689 m/s (95 % upper bound 0.9572 m/s) from the 14 moorings compared, where the literature prior "
+                 "is 2 m/s (ingest/priors_fitted.json)")
+    assert "0.113" not in t and "q5" not in t and "11 moorings" not in t
+    assert "In this run the fit gave 0.5689 m/s (95 % upper bound 0.9572 m/s) from the 14 moorings" in cr._render(cr.build(run, REAL, data))
+    write_fit(run, hi=False, moorings=0)
+    (run / "ingest" / "tao_compare.json").unlink()
+    assert l19(run, data) == f"{static}. In this run the fit gave 0.5689 m/s, where the literature prior is 2 m/s (ingest/priors_fitted.json)"
+    (run / "ingest" / "priors_fitted.json").write_text(json.dumps(dict(wind_speed_bias=dict(value=None))))
+    assert l19(run, data) == static                                                                  # a fit with no value is no fit
+    write_fit(run, hi=False, moorings=0)
+    assert cr.wind_prior_fit(run, {}).endswith("the fit gave 0.5689 m/s (ingest/priors_fitted.json)")      # no literature prior to name
+
+
+def test_r16_m15_the_wind_fit_sentence_follows_the_stored_fit(run, data):
+    write_fit(run)
+    edit(run / "ingest" / "priors_fitted.json", lambda d: d["wind_speed_bias"].update(value=0.1545, value_hi95=0.495))
+    edit(run / "ingest" / "tao_compare.json", lambda d: d.pop("T0"))
+    assert "In this run the fit gave 0.1545 m/s (95 % upper bound 0.495 m/s) from the 13 moorings compared" in l19(run, data)
+
+
+def test_r16_m7_currents_waves_and_subsurface_state_are_listed_limitations_that_move_no_level(run, data):
+    """Nothing compares the HYCOM/GOFS currents with an in-situ record: `tao.VARS` is wind, SST, air temperature and humidity. L21 and L22 bear on factors the
+    other limitations already cap at 2, so no level moves (the table of the run is the same with and without them)."""
+    from cafe.pm.env import tao
+    assert set(tao.VARS) == {"WIND", "SST", "AIRT", "RH"}              # the claim is the code's: the day a current or wave variable is fetched, retire L21/L22
+    ids = ("L21", "L22")
+    xs = {x["id"]: x for x in cr.LIMITATIONS}
+    assert "no in-situ current record" in xs["L21"]["text"] and "ADCP" in xs["L21"]["text"] and "HYCOM/GOFS" in xs["L21"]["text"]
+    assert "wave height" in xs["L22"]["text"] and "subsurface temperature and salinity" in xs["L22"]["text"]
+    others = {f for y in cr.LIMITATIONS if y["id"] not in ids for f in y["factors"]}
+    for i in ids:
+        assert set(xs[i]["factors"]) <= others and xs[i]["where"]
+    f = cr.Facts(run, REAL, data)
+    with_ids = {x["factor"]: (x["level"], x["evidence_level"]) for x in cr.factor_table(f)}
+    assert all(i in x["limitations"] for x in cr.factor_table(f) if x["factor"] in ("validation", "uncertainty") for i in ids)
+    f.limitations = [x for x in f.limitations if x["id"] not in ids]
+    assert {x["factor"]: (x["level"], x["evidence_level"]) for x in cr.factor_table(f)} == with_ids
+    h = cr._render(cr.build(run, REAL, data))
+    assert all(html.escape(xs[i]["text"]) in h for i in ids)
