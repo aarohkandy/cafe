@@ -25,7 +25,7 @@ outputs are unchanged. Stage products live next to the ledgers:
 from __future__ import annotations
 
 import contextlib, datetime as dt, io, json, math, os, pathlib, pickle, re, shlex, shutil, time, warnings, zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -437,6 +437,22 @@ def _copy_covering(ctx: Context, L: Ledger, name: str, src: pathlib.Path, dest: 
     return d if ok else None
 
 
+@contextlib.contextmanager
+def _shared_store(ctx: Context, directory: pathlib.Path, name: str, what: str) -> Iterator[None]:
+    """Hold `directory/name` (`surface.store_lock`) while one input shared by missions is checked, fetched and checked again: the ocean store (DATA/ocean)
+    and the GEBCO cut (DATA/bathy), which two ingests of one mission, or of two missions with one box, would otherwise write over each other (round 16,
+    M-24: the first died in `to_zarr`, and a cut `.npz` was promoted half written). The second ingest says it waits, then finds the input there. These
+    locks live beside the stores in DATA, not in the mission's cache (`derived.lock`). A directory that cannot be made or written means no lock (as
+    `store_lock`): under CAFE_OFFLINE nothing is made, and the check takes a lock only if a fetch ever made the file."""
+    from .env import surface
+    if not _offline():
+        with contextlib.suppress(OSError):
+            directory.mkdir(parents=True, exist_ok=True)
+    with surface.store_lock(directory, name, create=not _offline(),
+                            wait=lambda: ctx.log(f"ingest: another run is fetching {what} ({directory / name}); waiting for it")):
+        yield
+
+
 def s_ingest(ctx: Context, L: Ledger) -> None:
     """Everything the mission needs from outside, each fetched only if not cached and good: orca (WRF + UMWM), TAO/TRITON, GEBCO, and the
     GOFS 3.1 ocean store (about 2 h for the demo box). CAFE_OFFLINE downloads nothing and fails a check naming the command instead."""
@@ -502,14 +518,18 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
                          name=store.stem)
     got = [_need(ctx, L, "orca", "the orca WRF/UMWM cache for the window", orca_covers, fetch_orca),
            _need(ctx, L, "tao", "the TAO/TRITON moorings for the box and window" + old_tao, lambda: _tao_cached(tdir, sbox, t0.timestamp(), t1.timestamp()),
-                 lambda: tao.fetch_tao(sbox, t0.timestamp(), t1.timestamp(), tdir, base=tao.BASE)),
-           _need(ctx, L, "gebco", "the GEBCO_2026 cut for the box", lambda: _gebco_cached(gebco),
-                 lambda: bathy.fetch_gebco(sbox, gebco, bathy.GEBCO_URL)),
-           _need(ctx, L, "ocean_store", f"the ocean store {store.name} for the box and window" + (f" ({short})" if short else ""),
-                 lambda: _ocean_cached(store, sbox, steps, window), fetch_ocean,
-                 hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {shlex.quote(str(ctx.mission_path))} "
-                                                                  "--path <lab HYCOM dir> "
-                                                                  "--temperature-kind <in_situ|potential>")]
+                 lambda: tao.fetch_tao(sbox, t0.timestamp(), t1.timestamp(), tdir, base=tao.BASE))]
+    with _shared_store(ctx, gebco.parent, gebco.name + ".lock", "the GEBCO cut"):  # check, fetch and check again under one hold: a second ingest waits (M-24)
+        got.append(_need(ctx, L, "gebco", "the GEBCO_2026 cut for the box", lambda: _gebco_cached(gebco),
+                         lambda: bathy.fetch_gebco(sbox, gebco, bathy.GEBCO_URL)))
+    # (a lab store is never fetched, so it is not locked)
+    lock = contextlib.nullcontext() if lab else _shared_store(ctx, store.parent, store.name + ".lock", f"the ocean store {store.name}")
+    with lock:
+        got.append(_need(ctx, L, "ocean_store", f"the ocean store {store.name} for the box and window" + (f" ({short})" if short else ""),
+                         lambda: _ocean_cached(store, sbox, steps, window), fetch_ocean,
+                         hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {shlex.quote(str(ctx.mission_path))} "
+                                                                          "--path <lab HYCOM dir> "
+                                                                          "--temperature-kind <in_situ|potential>"))
     if not all(got):
         return                                                           # the failed checks above stop the stage
     want = int((t1 - t0).total_seconds() // 3600) + 1

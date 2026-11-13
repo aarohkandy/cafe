@@ -321,3 +321,43 @@ def test_r15_a_gebco_cache_whose_attrs_are_json_but_not_an_object_is_the_same_on
     with pytest.raises(ValueError, match=rf"{p}: not a readable GEBCO cache \(TypeError.*\); delete it and refetch"):
         b.from_gebco(p)
     assert pipeline._gebco_cached(p) is False
+
+
+def test_r16_m24_two_fetches_of_one_gebco_cut_do_not_share_a_part_file(server, gebco, tmp_path, monkeypatch):
+    """`fetch_gebco` wrote `<out>.part.npz`, a fixed name: a second fetch of the same cut, started while the first was between its write and its rename,
+    truncated the file the first was about to promote, and the first's `os.replace` then failed (or promoted the second's half). Each fetch now writes a
+    temporary of its own; both finish and the cut reads back."""
+    import threading
+    out = tmp_path / "c" / "g.npz"
+    real = np.savez_compressed
+    mid, go, calls, errs = threading.Event(), threading.Event(), [], []
+
+    def savez(fh, **kw):
+        real(fh, **kw)
+        calls.append(1)
+        if len(calls) == 1:  # the first fetch has written its file and not yet renamed it
+            mid.set()
+            assert go.wait(60)
+    monkeypatch.setattr(np, "savez_compressed", savez)
+
+    def first():
+        try:
+            b.fetch_gebco(BOX, out, gebco["flat"], workers=2)
+        except BaseException as e:                                                                  # noqa: BLE001  the test reports it
+            errs.append(e)
+    t = threading.Thread(target=first, daemon=True)
+    t.start()
+    assert mid.wait(60)
+    b.fetch_gebco(BOX, out, gebco["flat"], workers=2)                                                # the second fetch runs through meanwhile
+    go.set()
+    t.join(60)
+    assert errs == [] and b.from_gebco(out).depth is not None and [p.name for p in out.parent.iterdir()] == ["g.npz"]
+
+
+def test_r16_m24_a_link_planted_at_the_old_part_name_receives_nothing(server, gebco, tmp_path):
+    out = tmp_path / "g.npz"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("VICTIM")
+    (tmp_path / "g.npz.part.npz").symlink_to(victim)
+    b.fetch_gebco(BOX, out, gebco["flat"])
+    assert victim.read_text() == "VICTIM" and b.from_gebco(out) is not None

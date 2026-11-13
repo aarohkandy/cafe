@@ -10,9 +10,10 @@ import numpy as np
 import trimesh
 
 from cafe import atomic
+from cafe.pm import par
 
 FOAM = "source /usr/lib/openfoam/openfoam2506/etc/bashrc >/dev/null 2>&1; "
-NPROC = int(os.environ.get("CAFE_NPROC", "6"))
+NPROC = par.env_count("CAFE_NPROC") or 6       # an empty one is unset, a bad one a ConfigError (DECISIONS 330), not a ValueError at import (round 16, M-26)
 FLUIDS = {"water": dict(rho=1025.0, nu=1.19e-6), "air": dict(rho=1.20, nu=1.5e-5)}
 DIRS = {"+x": (1, 0, 0), "-x": (-1, 0, 0), "+y": (0, 1, 0), "-y": (0, -1, 0), "+z": (0, 0, 1), "-z": (0, 0, -1)}
 
@@ -32,17 +33,35 @@ def dvec(d):
 CACHE = pathlib.Path(os.environ.get("CAFE_WORK", "/work")) / "cfdcache"
 
 
-def cached(key, stl, log, compute):
-    """Same mesh bytes + same case parameters -> same answer: reuse it (CFD costs minutes to hours)."""
+# The module constants that shape a CFD result: the OpenFOAM version (inside FOAM), the fluids, the directions, the snappy, field and scheme texts of both
+# recipes, and the free-surface geometry and march. `cached` hashes them, so a result outlives neither a change of the recipe nor an OpenFOAM upgrade; a
+# comment edit or another function of this file changes nothing. NPROC is not here (cores change the speed, not the answer); the cached file records it.
+# A new module constant must be named here or in NOT_SETTINGS (a test holds the two lists to the module).
+SETTINGS = ("FOAM", "FLUIDS", "DIRS", "COMMON_SCHEMES", "QUALITY", "EXT_SNAPPY", "EXT_FIELDS", "FS_FIELDS", "FS_DOMAIN", "FS_H0", "FS_Z", "FS_NZ", "FS_GRADE",
+            "FS_BOXES", "FS_ITERS", "FS_LTS", "SURF_FO")
+NOT_SETTINGS = ("NPROC", "CACHE", "SETTINGS", "NOT_SETTINGS", "MAIN_WHATS")
+
+
+def recipe() -> str:
+    """The sha-1 of `SETTINGS` as they are now (JSON, sorted keys): what a cached result was made under."""
     import hashlib
-    h = hashlib.sha1(pathlib.Path(stl).read_bytes() + json.dumps(key).encode()).hexdigest()[:16]
+    return hashlib.sha1(json.dumps({n: globals()[n] for n in SETTINGS}, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def cached(key, stl, log, compute):
+    """Same mesh bytes + same case parameters + same recipe (`recipe()`) -> same answer: reuse it (CFD costs minutes to hours). The file keeps the recipe
+    and the core count the result was made with beside the result."""
+    import hashlib
+    rec = recipe()
+    h = hashlib.sha1(pathlib.Path(stl).read_bytes() + json.dumps(key).encode() + rec.encode()).hexdigest()[:16]
     f = CACHE / f"{h}.json"
     if f.exists():
         log(f"CFD: reusing an identical earlier run ({f.name})")
-        return json.loads(f.read_text())
+        return json.loads(f.read_text())["result"]
     r = compute()
     CACHE.mkdir(parents=True, exist_ok=True)
-    atomic.write_json(f, r, default=float)           # the next run reads it back: a cut file would be a JSONDecodeError, not a recompute
+    # the next run reads it back: a cut file would be a JSONDecodeError, not a recompute
+    atomic.write_json(f, dict(recipe=rec, nproc=NPROC, result=r), default=float)
     return r
 
 
@@ -140,6 +159,16 @@ meshQualityControls
 mergeTolerance 1e-6;
 """
 
+def _body(stl):
+    """The mesh in `stl`, refused with a ValueError naming the file when it is empty or flat (an extent of zero along any axis: the cell sizes come from the
+    thinnest side, `log2(h0 / 0)` is an OverflowError and the case directory was already deleted). No relative threshold: a real foil is thin."""
+    m = trimesh.load(stl, force="mesh")
+    ext = m.extents
+    if ext is None or not np.all(np.isfinite(ext)) or ext.min() <= 0:
+        raise ValueError(f"{stl}: flat or empty mesh (extents {None if ext is None else [float(x) for x in ext]}): the CFD needs a body with volume")
+    return m
+
+
 # ---------------------------------------------------------------- external (UUV, UAV)
 
 EXT_SNAPPY = """
@@ -224,8 +253,10 @@ def external(stl, case, fluid="water", speed=1.5, dirs=tuple(DIRS), level_offset
     """Steady RANS on one mesh for several inflow directions. Returns dict per direction:
     force/moment (N, N.m, body frame) for a body moving at `speed` along that direction."""
     case = pathlib.Path(case)
+    for d in dirs:
+        dvec(d)                                         # a mistyped label is found now, not after the mesh (round 16, M-26)
+    m = _body(stl)
     shutil.rmtree(case, ignore_errors=True)
-    m = trimesh.load(stl, force="mesh")
     L = float(m.extents.max())
     fl = FLUIDS[fluid]
     # sizes: domain half-width 4L; base cell L/4; surface cell min(L/200, thinnest bbox side/16)
@@ -457,8 +488,8 @@ def free_surface(stl, draft, case, speeds, level_offset=0, cofr=(0, 0, 0), iters
     """interFoam LTS at each speed on one mesh. Hull is shifted so the waterline is z=0.
     Returns per-speed resistance (N, full hull) and vertical force (sinkage check)."""
     case = pathlib.Path(case)
+    m = _body(stl)
     shutil.rmtree(case, ignore_errors=True)
-    m = trimesh.load(stl, force="mesh")
     m.apply_translation([0, 0, -draft])
     lo, hi = m.bounds
     m.apply_translation([-(lo[0] + hi[0]) / 2, 0, 0])

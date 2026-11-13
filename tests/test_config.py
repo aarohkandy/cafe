@@ -1323,8 +1323,8 @@ BARE_WRITES = {
 # (a copy cut half way left a mission.yaml of three bytes that `report` and `whatif` reload: M-20 sibling). File name -> (calls, why it is not a risk).
 BARE_COPIES = {
     "acceptance.py": (2, "the training table copied into a fresh --out of the acceptance run, before any run reads it; a cut copy is a failed acceptance"),
-    "env/bathy.py": (1, "written to a `.part.npz` and then `os.replace`d"),
-    "env/orca.py": (1, "written to a `.tmp.npz` and then `os.replace`d"),
+    "env/bathy.py": (1, "the argument of `atomic.write_with`: a temporary of its own, O_EXCL, then `os.replace` (round 16, M-24)"),
+    "env/orca.py": (1, "the argument of `atomic.write_with`: a temporary of its own, O_EXCL, then `os.replace` (round 16, M-24)"),
     "ledger.py": (1, "copied to a `.part` and then `os.replace`d"),
     "par.py": (1, "a new numbered array in a directory this process made and removes at exit; the reader gets the path after the save returns"),
     "physics/usv.py": (1, "the optional table cache of `tables(P, cache_dir)`; no code of cafe/pm passes a directory (the tests do)"),
@@ -1333,7 +1333,7 @@ BARE_COPIES = {
 }
 BARE_REPLACES = {
     "emulator.py": 1,                  # a unique temporary name per writer (a parquet table)
-    "env/bathy.py": 1, "env/hycom.py": 3, "env/orca.py": 1, "env/remote.py": 1,         # npz and zarr stores and downloads, written as `.part` then renamed
+    "env/hycom.py": 2, "env/remote.py": 1,         # the zarr store (`write_store`) and a part (`_fetch_part`): each a temporary of its own, then renamed
     "ledger.py": 1,                    # copy_manifest: a byte copy of a shared file
 }
 
@@ -1503,7 +1503,7 @@ def test_r15_every_json_the_app_reads_back_is_written_through_cafe_atomic_or_nam
                 found[p.name] = found.get(p.name, 0) + 1
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "replace" and getattr(n.func.value, "id", "") == "os":
                 found[p.name + ":os.replace"] = found.get(p.name + ":os.replace", 0) + 1
-    assert found == {**{k: v[0] for k, v in APP_WRITES.items()}, "ocean.py:os.replace": 1, "throughput.py": 1}   # ocean.py: an npz renamed from a `.part.npz`
+    assert found == {**{k: v[0] for k, v in APP_WRITES.items()}, "throughput.py": 1}   # (until round 16 ocean.py renamed an npz from a `.part.npz` here: S2)
 
 
 def test_r15_config_write_text_is_the_atomic_writer_and_a_temporary_has_a_name_of_its_own(tmp_path, monkeypatch):

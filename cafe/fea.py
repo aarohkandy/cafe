@@ -31,6 +31,7 @@ MATERIALS = {
 ASSUMPTIONS = pathlib.Path(__file__).resolve().parents[1] / "config" / "assumptions.yaml"
 
 
+_BLANKS = " \t"                      # YAML's white space: `str.strip()` and `\s` also take U+00A0 and the other Unicode spaces, which are text there
 _MESH_KEY = re.compile(r"""["']?stage3\.fea_elements_along(?![\w.])""")
 _MESH_KEY_LINE = re.compile(r"stage3\.fea_elements_along:(?:\s+#.*|\s*)")
 _MESH_TEXT = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[|>][-+0-9]*)(?:\s+#.*)?|#.*""")   # a quoted text on one line, a block-scalar header, a comment
@@ -46,7 +47,9 @@ def hull_elements_along() -> int:
     its own line (a comment may follow), one `value:` among the entry's own children (the lines at the indent of its first child; deeper lines are the text of
     another child), written as a decimal whole number (no sign, no leading zero, no `_`) with at most ` # comment` after it, and the key written once in
     the file. A child that starts a flow collection, an anchor, a tag or an alias, or a quoted text that does not end on its line, is refused, since the
-    lines under it could then mean anything. `tests/test_stage3.py` holds this reading to PyYAML's on the file itself and on each layout it refuses."""
+    lines under it could then mean anything. A line deeper than the `value:` line that follows it is more text of the value in YAML (`70` then `more` is
+    '70 more'), so it is refused; blanks are the space and the tab only (a no-break space, U+00A0, is text: `70` and a no-break space is not 70).
+    `tests/test_stage3.py` holds this reading to PyYAML's on the file itself and on each layout it refuses."""
     def bad(why: str) -> ValueError:
         return ValueError(f"stage3.fea_elements_along in {ASSUMPTIONS}: {why}")
     lines = ASSUMPTIONS.read_text().splitlines()
@@ -59,23 +62,27 @@ def hull_elements_along() -> int:
         raise bad(f"the key line is {lines[heads[0]]!r}; only the key, a colon and a comment are read (not a flow mapping, a quoted key, an anchor or a tag)")
     body = []
     for ln in lines[heads[0] + 1:]:
-        if ln.strip() and not ln.startswith((" ", "#")):                          # the next top-level entry: this one has no more lines
+        if ln.strip(_BLANKS) and not ln.startswith((" ", "#")):                   # the next top-level entry: this one has no more lines
             break
-        if ln.strip() and not ln.lstrip().startswith("#"):
+        if ln.strip(_BLANKS) and not ln.lstrip(_BLANKS).startswith("#"):
             body.append(ln)
     if not body:
         raise bad("has no value")
-    indent = [len(ln) - len(ln.lstrip()) for ln in body]
+    indent = [len(ln) - len(ln.lstrip(_BLANKS)) for ln in body]
     if any("\t" in ln[:n] for ln, n in zip(body, indent, strict=True)) or min(indent) < indent[0]:
         raise bad("an entry line is indented with a tab or less than the entry's first line")
     values = []
+    last = ""
     for ln, n in zip(body, indent, strict=True):
         if n > indent[0]:                                                          # the text of the child above (a block scalar, a nested mapping)
+            if last == "value":
+                raise bad(f"the line {ln.strip(_BLANKS)[:40]!r} under value is more text of it in YAML, not a whole number")
             continue
-        m = re.fullmatch(r"(\w+):(?:\s+(.*))?", ln.strip())
+        m = re.fullmatch(r"(\w+):(?:[ \t]+(.*))?", ln.strip(_BLANKS))
         if m is None:
-            raise bad(f"line {ln.strip()[:40]!r} is not `name: text`")
-        text = (m[2] or "").strip()
+            raise bad(f"line {ln.strip(_BLANKS)[:40]!r} is not `name: text`")
+        last = m[1]
+        text = (m[2] or "").strip(_BLANKS)
         if m[1] == "value":
             values.append(text)
         elif text and text[0] in "[{&*!%@`\"'|>#" and not _MESH_TEXT.fullmatch(text):
@@ -84,7 +91,7 @@ def hull_elements_along() -> int:
         raise bad("has no value")
     if len(values) > 1:
         raise bad(f"has {len(values)} value lines (YAML keeps the last)")
-    m = re.fullmatch(r"(0|[1-9][0-9]*)(?:\s+#.*)?", values[0])
+    m = re.fullmatch(r"(0|[1-9][0-9]*)(?:[ \t]+#.*)?", values[0])
     if m is None:
         raise bad(f"value is {values[0]!r}, not a whole number written in decimal with no sign and no leading zero")
     if int(m[1]) < 1:

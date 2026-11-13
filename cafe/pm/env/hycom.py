@@ -36,6 +36,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from cafe import atomic
 from . import conventions as cv, orca, remote
 from .environment import FETCH_CMD, seconds
 
@@ -222,18 +223,21 @@ def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> 
     if out.is_dir() and any(out.iterdir()) and not looks_like_zarr(out):
         raise ConfigError(f"{out} exists, is not empty and holds no Zarr metadata or chunks: it would be deleted to make room for the store. "
                           "Move it away or name another path")
-    tmp = out.with_name(out.name + ".tmp")
-    shutil.rmtree(tmp, ignore_errors=True)
+    tmp = atomic.tmp_name(out)  # a directory of its own per call: a second writer of the same store no longer deletes this one's (round 16, M-24)
     n = 0
-    for ds in steps:
-        meta = dict(attrs, temperature_kind=kind, lon_convention="0..360 degrees east (continuous with the box where it touches 0 E)",
-                    depth_convention="metres, positive down", time_convention="float seconds since 1970-01-01 UTC; open with decode_times=False")
-        _append(tmp, add_teos(ds, kind), n == 0, meta)
-        n += 1
-    if n == 0:
-        raise ValueError("no time steps to write")
-    shutil.rmtree(out, ignore_errors=True)
-    os.replace(tmp, out)
+    try:
+        for ds in steps:
+            meta = dict(attrs, temperature_kind=kind, lon_convention="0..360 degrees east (continuous with the box where it touches 0 E)",
+                        depth_convention="metres, positive down", time_convention="float seconds since 1970-01-01 UTC; open with decode_times=False")
+            _append(tmp, add_teos(ds, kind), n == 0, meta)
+            n += 1
+        if n == 0:
+            raise ValueError("no time steps to write")
+        shutil.rmtree(out, ignore_errors=True)
+        os.replace(tmp, out)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)                  # (a kill -9 leaves it: its name ends in .tmp, which sync_filters and is_junk ignore)
+        raise
     return out
 
 
@@ -285,20 +289,31 @@ def _child(args: list[Any], deadline: float) -> None:
         raise RuntimeError((r.stderr.strip().splitlines() or [f"exit {r.returncode}"])[-1][:300])
 
 
+def _fetch_part(args: list[Any], path: str | pathlib.Path, deadline: float) -> None:
+    """`_child(args + [tmp])` and then `os.replace(tmp, path)`, where `tmp` is a name of its own (`atomic.tmp_name`) that this call removes whatever happened,
+    a child killed at its deadline included (round 16, M-24: the children wrote `<out>.part`, one name for two fetches of one part, and a retry overwrote it;
+    a name of its own per child would otherwise leave one half file for every timeout). `path` is whole or not there."""
+    tmp = atomic.tmp_name(path)
+    try:
+        _child([*args, tmp], deadline)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def _child_ncss(url: str, out: str) -> None:
+    """The NCSS answer in `out`, which is created here (`O_EXCL`) and is a name of the caller's choosing: `_fetch_part` gives it one of its own."""
     req = urllib.request.Request(url, headers={"User-Agent": "cafe-premission"})
-    part = out + ".part"
-    with urllib.request.urlopen(req, context=remote.context(), timeout=SOCKET_S) as r, open(part, "wb") as f:
+    with urllib.request.urlopen(req, context=remote.context(), timeout=SOCKET_S) as r, open(out, "xb") as f:
         shutil.copyfileobj(r, f, 1 << 20)
-    with open(part, "rb") as f:
+    with open(out, "rb") as f:
         head = f.read(200)
     if not (head.startswith(b"\x89HDF") or head.startswith(b"CDF")):
         raise ValueError("server answered with something that is not NetCDF: " + head.decode(errors="replace")[:150])
-    os.replace(part, out)
 
 
 def _child_dods(url: str, names: str, ta: float | str, tb: float | str, s: float | str, n: float | str, w: float | str, e: float | str, out: str) -> None:
-    """OPeNDAP read of the same box into a NetCDF part with the NCSS names (time in hours since 2000-01-01)."""
+    """OPeNDAP read of the same box into the new NetCDF file `out` with the NCSS names (time in hours since 2000-01-01)."""
     import netCDF4
     ds = netCDF4.Dataset(url)
     th = np.asarray(ds["time"][:], float)
@@ -308,7 +323,7 @@ def _child_dods(url: str, names: str, ta: float | str, tb: float | str, s: float
     i = np.where((lon >= float(w) - 0.05) & (lon <= float(e) + 0.05))[0]
     if not (len(k) and len(j) and len(i)):
         raise ValueError("OPeNDAP dataset has no data for this box/time")
-    out_ds = netCDF4.Dataset(out + ".part", "w")
+    out_ds = netCDF4.Dataset(out, "w", clobber=False)                    # created here, a name of the caller's choosing (`_fetch_part`)
     has_depth = any(ds[v].ndim == 4 for v in names.split(","))
     axes = [("time", th[k])] + ([("depth", np.asarray(ds["depth"][:], float))] if has_depth else []) + [("lat", lat[j]), ("lon", lon[i])]
     for nm, arr in axes:                            # the ssh dataset has no depth axis
@@ -323,7 +338,6 @@ def _child_dods(url: str, names: str, ta: float | str, tb: float | str, s: float
             sl = (kk,) + ((slice(None),) if v.ndim == 4 else ()) + (slice(j[0], j[-1] + 1), slice(i[0], i[-1] + 1))
             o[n_] = np.ma.filled(v[sl].astype("f4"), np.nan)
     out_ds.close()
-    os.replace(out + ".part", out)
 
 
 def _sha(path: str | pathlib.Path) -> str:
@@ -396,10 +410,10 @@ def fetch_gofs(box: Any, t0: Any, t1: Any, out_dir: Any, *, chunk_steps: int = 1
                 t = time.time()
                 try:
                     if srv == "ncss":
-                        _child(["_ncss", ncss_url(d, DATASETS[d], box, c[0], c[-1], ncss), path], deadline_s)
+                        _fetch_part(["_ncss", ncss_url(d, DATASETS[d], box, c[0], c[-1], ncss)], path, deadline_s)
                     else:
-                        _child(["_dods", f"{dods}/{d}/{dt.datetime.fromtimestamp(c[0], dt.timezone.utc).year}", ",".join(DATASETS[d]),
-                                c[0], c[-1], *box, path], deadline_s)
+                        _fetch_part(["_dods", f"{dods}/{d}/{dt.datetime.fromtimestamp(c[0], dt.timezone.utc).year}", ",".join(DATASETS[d]),
+                                     c[0], c[-1], *box], path, deadline_s)
                 except (TimeoutError, RuntimeError) as ex:
                     errs.append(f"{srv}: {ex}")
                     continue
@@ -860,7 +874,7 @@ def check_node(store: Any, nodes: Any, ncss: str = NCSS, deadline_s: float = 300
     for it, iz, ij, ii in nodes:
         t, z, la, lo = (float(ds[k].values[i]) for k, i in (("time", it), ("depth", iz), ("lat", ij), ("lon", ii)))
         f = work / f"check_{it}_{iz}_{ij}_{ii}.nc"
-        _child(["_ncss", ncss_url("ts3z", ("water_temp",), (la - 0.01, la + 0.01, lo - 0.02, lo + 0.02), t, t, ncss) + f"&vertCoord={z}", f], deadline_s)
+        _fetch_part(["_ncss", ncss_url("ts3z", ("water_temp",), (la - 0.01, la + 0.01, lo - 0.02, lo + 0.02), t, t, ncss) + f"&vertCoord={z}"], f, deadline_s)
         got = np.atleast_1d(xr.open_dataset(f).water_temp.squeeze().values)
         want = float(ds.water_temp.isel(time=it, depth=iz, lat=ij, lon=ii).values)
         none = bool(np.isnan(got).all())                       # no value at all (or an empty answer): a masked node, e.g. below the sea floor

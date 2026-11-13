@@ -684,3 +684,33 @@ def test_r13_sweep_the_ingest_manifest_writer_follows_a_symlink_and_leaves_the_l
     link.symlink_to(real)
     orca.write_json(link, {"v": 1}, indent=1)
     assert link.is_symlink() and json.loads(real.read_text()) == {"v": 1} and not list(tmp_path.glob("*.tmp"))
+
+
+def test_r16_m24_two_writers_of_one_hour_do_not_share_a_temporary(tmp_path, monkeypatch):
+    """`_save` wrote `<name>.tmp.npz`, a fixed name: two ingests of one mission fetching the same hour truncated each other's file and the first rename failed
+    with FileNotFoundError. Each call now writes a temporary of its own (`atomic.write_with`)."""
+    import threading
+    f = tmp_path / "h.npz"
+    real = np.savez
+    mid, go, calls, errs = threading.Event(), threading.Event(), [], []
+
+    def savez(fh, **kw):
+        real(fh, **kw)
+        calls.append(1)
+        if len(calls) == 1:
+            mid.set()
+            assert go.wait(60)
+    monkeypatch.setattr(np, "savez", savez)
+
+    def first():
+        try:
+            orca._save(f, dict(a=np.arange(3)))
+        except BaseException as e:                                                                  # noqa: BLE001  the test reports it
+            errs.append(e)
+    t = threading.Thread(target=first, daemon=True)
+    t.start()
+    assert mid.wait(60)
+    orca._save(f, dict(a=np.arange(3)))
+    go.set()
+    t.join(60)
+    assert errs == [] and list(np.load(f)["a"]) == [0, 1, 2] and [p.name for p in tmp_path.iterdir()] == ["h.npz"]

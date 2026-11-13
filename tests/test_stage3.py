@@ -996,7 +996,16 @@ _MESH_BODY = "  unit: elements\n  why: x\n"
     ("nested mapping after", f"{_MESH}\n  value: 70\n  other:\n    value: 9\n", 70),
     ("flow collection child", f"{_MESH}\n  unit: [a,\n  value: 5]\n  value: 70\n", "refuse"),     # in a flow collection the indent means nothing
     ("quoted text over lines", f"{_MESH}\n  why: \"a\n  value: 5\"\n  value: 70\n", "refuse"),
-    ("comment after the number", f"{_MESH}\n  value: 70   # mesh\n{_MESH_BODY}", 70)])
+    ("comment after the number", f"{_MESH}\n  value: 70   # mesh\n{_MESH_BODY}", 70),
+    ("deeper comment line after the number", f"{_MESH}\n  value: 70\n  # a note\n{_MESH_BODY}", 70),  # a comment ends the scalar: 70
+    ("continuation of another child", f"{_MESH}\n  value: 70\n  unit: elements\n    per hull\n  why: x\n", 70),  # the text of `unit`, not of the value
+    ("value continued at 4 spaces", f"{_MESH}\n  value: 70\n    more\n{_MESH_BODY}", "refuse"),                                      # PyYAML '70 more' (M-20)
+    ("value continued at 3 spaces", f"{_MESH}\n  value: 70\n   more\n{_MESH_BODY}", "refuse"),
+    ("value continued at 5 spaces", f"{_MESH}\n  value: 70\n     more\n{_MESH_BODY}", "refuse"),
+    ("value continued after a blank line", f"{_MESH}\n  value: 70\n\n    more\n{_MESH_BODY}", "refuse"),
+    ("no-break space after the number", f"{_MESH}\n  value: 70\u00a0\n{_MESH_BODY}", "refuse"),                                       # PyYAML '70\xa0' (M-20)
+    ("no-break space before a comment", f"{_MESH}\n  value: 70\u00a0# c\n{_MESH_BODY}", "refuse"),
+    ("no-break space after the colon", f"{_MESH}\n  value:\u00a070\n{_MESH_BODY}", "refuse")])
 def test_r15_l0_4_the_hull_mesh_reading_never_returns_a_number_pyyaml_does_not(monkeypatch, tmp_path, name, text, want):
     """Round 15 look-ahead L0-4: the line reader that replaced `yaml.safe_load` took octal, `70#x`, the first of two `value:` lines, a second entry's
     shadowed number and a `value:` line inside another child's text for 70 where PyYAML gave 56, a text, 45, 45 and 70, so the Hangar meshed a hull at the
@@ -1012,6 +1021,15 @@ def test_r15_l0_4_the_hull_mesh_reading_never_returns_a_number_pyyaml_does_not(m
     else:
         got = fea.hull_elements_along()
         assert got == want == yaml.safe_load(text)["stage3.fea_elements_along"]["value"]
+
+
+@pytest.mark.parametrize("text", [f"{_MESH}\n  value: 70\n    more\n{_MESH_BODY}", f"{_MESH}\n  value: 70\n   more\n{_MESH_BODY}",
+                                  f"{_MESH}\n  value: 70\n     more\n{_MESH_BODY}", f"{_MESH}\n  value: 70\u00a0\n{_MESH_BODY}"])
+def test_r16_m20_the_layouts_the_hull_mesh_reading_refuses_are_ones_where_pyyaml_does_not_give_70(text):
+    """Why the rows above refuse: `value: 70` with a deeper line under it is '70 more' in PyYAML, and a no-break space after the number is part of the text;
+    the line reader had returned 70 for each, so the app meshed the hull at 70 while the pipeline (PyYAML, pipeline_windows.py) got a string."""
+    import yaml
+    assert yaml.safe_load(text)["stage3.fea_elements_along"]["value"] != 70
 
 
 @pytest.mark.parametrize("text", [f"{_MESH}  # mesh\n  value: 70\n{_MESH_BODY}", f"{_MESH}   \n  value: 70\n{_MESH_BODY}", f"{_MESH}\r\n  value: 70\r\n"])
@@ -3514,3 +3532,15 @@ def test_r12_every_window_the_code_builds_today_is_far_below_nu_max():
     fixed += [lbm.U_LAT_SPHERE * nest.PLAN[tag][0] / re for tag, re in nest.SPHERE_RUNS]
     assert max(fixed) < wm.NU_MAX / 20
 
+
+
+def test_r16_m26_an_empty_cafe_nproc_is_replaced_by_the_planned_ranks_before_cafe_cfd_can_read_it(monkeypatch):
+    """`os.environ.setdefault` left an empty `CAFE_NPROC=` in place (an empty variable is unset for `freesurface.nproc`, DECISIONS 330), so the ranks planned
+    were not the ranks run and the later import of cafe.cfd read the empty text. An explicit count stays."""
+    monkeypatch.setenv("CAFE_WORKERS", "2")
+    monkeypatch.setenv("CAFE_NPROC", "")
+    pw.run(fake_ctx(pathlib.Path(tempfile.mkdtemp())), {}, FakeL())
+    assert os.environ["CAFE_NPROC"] == "2"
+    monkeypatch.setenv("CAFE_NPROC", "5")
+    pw.run(fake_ctx(pathlib.Path(tempfile.mkdtemp())), {}, FakeL())
+    assert os.environ["CAFE_NPROC"] == "5"

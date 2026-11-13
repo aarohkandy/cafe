@@ -82,11 +82,13 @@ def _hycom(dataset, names, tag, t0, hours, lat_range, lon_range, max_depth, near
         d = np.where(dep <= max_depth)[0]
         d = np.r_[d, d[-1] + 1] if d[-1] + 1 < len(dep) else d
         sl = [int(x) for x in (k[0], k[-1] + 1, d[0], d[-1] + 1, j[0], j[-1] + 1, i[0], i[-1] + 1)]
-        tmp = f.with_name(f"{f.stem}.{os.getpid()}.part.npz")      # per process: two missions may fetch the same box
-        _child("_slice", url.rsplit("/", 1)[0] + "/" + dataset, json.dumps(sl), json.dumps(names), tmp, deadline=HYCOM_SLICE_S)
-        z = np.load(tmp)
-        got = {n: z[n] for n in names}
-        tmp.unlink()
+        tmp = atomic.tmp_name(f)         # a name nobody can guess, of its own per call (two missions may fetch the same box); the child writes it with O_EXCL
+        try:
+            _child("_slice", url.rsplit("/", 1)[0] + "/" + dataset, json.dumps(sl), json.dumps(names), tmp, deadline=HYCOM_SLICE_S)
+            with np.load(tmp) as z:
+                got = {n: z[n] for n in names}
+        finally:
+            tmp.unlink(missing_ok=True)
     except (TimeoutError, RuntimeError):
         CACHE.mkdir(parents=True, exist_ok=True)
         down.touch()
@@ -124,9 +126,8 @@ def _axes(url):
 def _child_axes(url, out):
     import netCDF4
     ds = netCDF4.Dataset(url)
-    tmp = pathlib.Path(f"{out}.{os.getpid()}.part.npz")
-    np.savez(tmp, **{k: np.asarray(ds[k][:], float) for k in ("time", "lat", "lon", "depth")})
-    os.replace(tmp, out)
+    axes = {k: np.asarray(ds[k][:], float) for k in ("time", "lat", "lon", "depth")}
+    atomic.write_with(out, lambda fh: np.savez(fh, **axes))           # a temporary of its own, O_EXCL, then os.replace (round 16, S2)
 
 
 def _child_slice(url, sl, names, out):
@@ -134,7 +135,8 @@ def _child_slice(url, sl, names, out):
     k0, k1, d0, d1, j0, j1, i0, i1 = json.loads(sl)
     ds = netCDF4.Dataset(url)
     s = (slice(k0, k1), slice(d0, d1), slice(j0, j1), slice(i0, i1))
-    np.savez(out, **{n: np.ma.filled(ds[v][s].astype(float), np.nan) for n, v in json.loads(names).items()})
+    arrays = {n: np.ma.filled(ds[v][s].astype(float), np.nan) for n, v in json.loads(names).items()}
+    atomic.write_with(out, lambda fh: np.savez(fh, **arrays))        # the parent reads `out` only once it is whole (and the child's own temporary is O_EXCL)
 
 
 def _get(url):

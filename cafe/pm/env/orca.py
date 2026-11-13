@@ -20,6 +20,7 @@ from typing import Any, TypeVar
 import numpy as np
 from numpy.typing import NDArray
 
+from cafe import atomic
 from . import remote
 
 BASE = os.environ.get("CAFE_ORCA", "https://orca.atmos.washington.edu/data/temp/model/run_2023mar_waves_v4")
@@ -229,9 +230,7 @@ def spec_hour(t: dt.datetime, pts: dict[str, Any]) -> dict[str, NDArray[Any]]:
 
 
 def _save(path: pathlib.Path, d: dict[str, Any]) -> None:
-    tmp = path.with_name(path.name + ".tmp.npz")
-    np.savez(tmp, **d)
-    os.replace(tmp, path)
+    atomic.write_with(path, lambda fh: np.savez(fh, **d))  # a temporary of its own (two ingests of one mission write the same hour), O_EXCL, then os.replace
 
 
 def read_json(path: str | pathlib.Path) -> dict[str, Any] | None:

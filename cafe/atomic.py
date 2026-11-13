@@ -22,13 +22,14 @@ class _Created(type(pathlib.Path())):  # type: ignore[misc]
         return open(self.fd, mode, buffering, encoding, errors, newline, closefd=False)
 
 
-def write_text(p: Any, text: str, follow_symlinks: bool = False) -> None:
-    """`text` in `p` through a sibling temporary and os.replace: a run killed mid-write, or a disk that fills, leaves the old file, never half of a new one,
-    and no temporary behind. The temporary is made by `os.open(..., O_EXCL)` with the mode `0o600` when `p` exists and the creation mode `0o666` (the
-    process's umask applies) when it does not, so it is never readable more widely than the file it becomes; an existing file's permission bits are set on it
-    after the write (a new file gets the default ones); a hard link to the file does not survive, because a replace gives the name a new inode and the
-    other name keeps the old content. A symbolic link at `p` is refused (`OSError`, ELOOP) unless `follow_symlinks`: then the file it points to is the one
-    replaced and the link stays a link (the writers of a path a person names: `cafe.pm.config.write_text`). The app's job files never follow one."""
+def _replace_through(p: Any, fill: Callable[[pathlib.Path, int], None], follow_symlinks: bool) -> None:
+    """The one temporary-and-replace of this module (`write_text` and `write_with` call it, so the two never differ again: round 16, S1). `fill(tmp, fd)` writes
+    the new content through `fd`, the descriptor `os.open(..., O_EXCL)` returned (`tmp` is its name, for a `Path` that stands in for it). The temporary is
+    made with the mode `0o600` when `p` exists and the creation mode `0o666` (the process's umask applies) when it does not, so it is never readable more
+    widely than the file it becomes; an existing file's permission bits are set on it after the write (a new file gets the default ones); a hard link to
+    the file does not survive, because a replace gives the name a new inode and the other name keeps the old content. A symbolic link at `p` is refused
+    (`OSError`, ELOOP) unless `follow_symlinks`: then the file it points to is the one replaced and the link stays a link. A failed write leaves `p` as it was
+    and no temporary."""
     p = pathlib.Path(p)
     if follow_symlinks:
         p = pathlib.Path(os.path.realpath(p))
@@ -42,9 +43,7 @@ def write_text(p: Any, text: str, follow_symlinks: bool = False) -> None:
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666 if mode is None else 0o600)       # ours alone: O_EXCL fails on any existing name
     try:
         try:
-            made = _Created(tmp)
-            made.fd = fd
-            made.write_text(text)                                                        # through fd, never by name again (round 15, security review)
+            fill(tmp, fd)                                                                # through fd, never by name again (round 15, security review)
             if mode is not None:
                 os.fchmod(fd, mode)
         finally:
@@ -55,22 +54,31 @@ def write_text(p: Any, text: str, follow_symlinks: bool = False) -> None:
         raise
 
 
+def write_text(p: Any, text: str, follow_symlinks: bool = False) -> None:
+    """`text` in `p` through a sibling temporary and os.replace (`_replace_through`): a run killed mid-write, or a disk that fills, leaves the old file, never
+    half of a new one, and no temporary behind. A symbolic link at `p` is refused unless `follow_symlinks` (the writers of a path a person names:
+    `cafe.pm.config.write_text`). The app's job files never follow one."""
+    def fill(tmp: pathlib.Path, fd: int) -> None:
+        made = _Created(tmp)
+        made.fd = fd
+        made.write_text(text)
+
+    _replace_through(p, fill, follow_symlinks)
+
+
 def write_json(p: Any, obj: Any, end: str = "", **kw: Any) -> None:
     """`obj` as JSON (`kw` go to json.dumps) followed by `end` in `p`, by `write_text` (a symbolic link at `p` is refused)."""
     write_text(p, json.dumps(obj, **kw) + end)
 
 
-def write_with(p: Any, writer: Callable[[Any], None]) -> None:
+def write_with(p: Any, writer: Callable[[Any], None], follow_symlinks: bool = False) -> None:
     """A binary file that is read back (an `.npz`) written by `writer(file_object)` into a sibling temporary and os.replace'd onto `p`: a kill or a full
     disk leaves the old `p` or none, never half of a new zip (a half one is `BadZipFile` at the next read, not the refetch that follows an absent file), and no
-    temporary behind. The temporary has `tmp_name`'s name and is made with `O_EXCL` (`"xb"`); `writer` gets the open file, so a numpy `savez` adds no `.npz`
-    to its name (P-R15A-3). The standard library only, like `write_text`."""
-    p = pathlib.Path(p)
-    tmp = tmp_name(p)
-    try:
-        with open(tmp, "xb") as f:
+    temporary behind. It is `write_text`'s implementation (`_replace_through`: the temporary has `tmp_name`'s name and is made with `O_EXCL`, an existing
+    file keeps its mode, a symbolic link at `p` is refused unless `follow_symlinks`); `writer` gets a file object on the descriptor of the temporary, never a
+    second open by name, so a numpy `savez` adds no `.npz` to its name (P-R15A-3). The standard library only, like `write_text`."""
+    def fill(tmp: pathlib.Path, fd: int) -> None:
+        with open(fd, "wb", closefd=False) as f:
             writer(f)
-        os.replace(tmp, p)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+
+    _replace_through(p, fill, follow_symlinks)
