@@ -13,6 +13,9 @@ References
   divergence factor); Blake, L.V. (1980), Radar Range-Performance Analysis, ch. 5.
 - Ament, W.S. (1953), "Toward a theory of reflection by a rough surface", Proc. IRE 41(1), 142-146; Beckmann & Spizzichino
   (1963), The Scattering of EM Waves from Rough Surfaces, ch. 5: rho_s = exp[-2 (2 pi sigma_h sin(psi)/lam)^2], sigma_h = Hs/4.
+- Smooth-earth diffraction (round 16, M-14): ITU-R P.526 "Propagation by diffraction", the spherical-earth field F(X) + G(Y1) + G(Y2), with the line-of-sight
+  interpolation of ITU-R P.452 (the clearance-weighted fraction of the loss at the effective earth radius that grazes the path); checked in
+  tests/test_round16_a.py against an independent solution, the residue series of Fock / van der Pol & Bremmer (Budden 1961, ch. 9; Fock 1965).
 - Radio horizon: d = 4.12 (sqrt(ht) + sqrt(hr)) km, h in m, effective earth radius 4/3 x 6371 km
   (ITU-R P.834; Skolnik, Radar Handbook).
 - Thorp (1967), J. Acoust. Soc. Am. 42, 270; formula as printed in Stojanovic (2007) eq. (4), f in kHz.
@@ -136,6 +139,63 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     return cast(F, 20 * np.log10(4 * np.pi * r1 / lam) - 20 * np.log10(np.maximum(field, 1e-12)))
 
 
+SEA_EPS_R, SEA_SIGMA_SM = 72.8, 6.05    # the sea water of two_ray_curved_db's note (T 29 C, S 35): ASSUMED, only the lower limit of G(Y) depends on it
+# the unrounded constants of X = 2.188 beta f^(1/3) a^(-2/3) d and Y = 9.575e-3 beta f^(2/3) a^(-1/3) h (ITU-R P.526: 2.2 and 9.6e-3)
+P526_X, P526_Y = 2.188, 9.575e-3
+
+
+def _p526_f(x: FA) -> F:
+    """Distance function F(X) [dB] of the spherical-earth diffraction field: 11 + 10 log X - 17.6 X for X >= 1.6, -20 log X - 5.6488 X^1.425 below."""
+    x = np.maximum(np.asarray(x, float), 1e-12)
+    return cast(F, np.where(x >= 1.6, 11.0 + 10.0 * np.log10(np.maximum(x, 1.6)) - 17.6 * x,
+                            -20.0 * np.log10(np.minimum(x, 1.6)) - 5.6488 * np.minimum(x, 1.6) ** 1.425))
+
+
+def _p526_g(y: FA, beta: FA, k: FA) -> F:
+    """Height-gain function G(Y) [dB], B = beta Y: 17.6 sqrt(B - 1.1) - 5 log(B - 1.1) - 8 for B > 2, else 20 log(B + 0.1 B^3), never below 2 + 20 log K."""
+    b = np.maximum(beta * np.asarray(y, float), 1e-12)
+    hi = 17.6 * np.sqrt(np.maximum(b - 1.1, 1e-12)) - 5.0 * np.log10(np.maximum(b - 1.1, 1e-12)) - 8.0
+    return cast(F, np.maximum(np.where(b > 2.0, hi, 20.0 * np.log10(b + 0.1 * b ** 3)), 2.0 + 20.0 * np.log10(k)))
+
+
+def _diffraction_beyond_db(a_km: FA, d_km: FA, f_mhz: FA, ht: FA, hr: FA) -> F:
+    """The loss [dB] below free space of the diffraction field over a smooth sphere of radius a_km: -(F(X) + G(Y_t) + G(Y_r)), vertical, over sea."""
+    lam = C0 / (f_mhz * 1e6)
+    sig = 60.0 * SEA_SIGMA_SM * lam
+    k = 0.36 * (a_km * f_mhz) ** (-1.0 / 3.0) * ((SEA_EPS_R - 1.0) ** 2 + sig ** 2) ** -0.25 * np.sqrt(SEA_EPS_R ** 2 + sig ** 2)     # K_H x |eps_c|
+    beta = (1.0 + 1.6 * k ** 2 + 0.67 * k ** 4) / (1.0 + 4.5 * k ** 2 + 1.53 * k ** 4)
+    x = P526_X * beta * f_mhz ** (1.0 / 3.0) * a_km ** (-2.0 / 3.0) * d_km
+    yc = P526_Y * beta * f_mhz ** (2.0 / 3.0) * a_km ** (-1.0 / 3.0)
+    return -(_p526_f(x) + _p526_g(yc * np.asarray(ht, float), beta, k) + _p526_g(yc * np.asarray(hr, float), beta, k))
+
+
+def smooth_earth_diffraction_db(d: FA, ht: FA, hr: FA, f_hz: FA, a_eff: float = A_EFF) -> F:
+    """Smooth-earth diffraction loss [dB] BELOW free space (ITU-R P.526 spherical earth, vertical polarisation over sea) for antennas ht, hr [m] at ground
+    range d [m]. Beyond the radio horizon d_los: -(F(X) + G(Y_t) + G(Y_r)) over the 4/3 earth. Inside it, ITU-R P.452's interpolation: the loss the same
+    formula gives over the effective earth radius a_em = 500 (d / (sqrt ht + sqrt hr))^2 km that makes the path just graze, times (1 - h_se / h_req), h_se
+    the clearance of the line of sight above the sphere at the specular point, h_req = 17.456 sqrt(d1 d2 lambda / d) the clearance that costs nothing; 0 for a
+    path with h_se > h_req, and never negative. Where it is used (`two_ray_loss_db`) it is added to the free-space loss at the direct distance.
+    Checked in tests/test_round16_a.py against the residue series of the exact solution (Fock): within 2.8 dB (mostly on the optimistic side) at
+    0.5 to 3 times the horizon for five antenna pairs from 8 to 108 m over a 2.2 m antenna at 915 MHz. P.526 gives the field beyond the horizon; the
+    interpolation inside it is P.452's (ITU's own, and it too was within 2.8 dB of the exact field from half the horizon to the horizon). Elementwise."""
+    d_km = np.maximum(np.asarray(d, float), 1.0) / 1e3
+    ht, hr = np.broadcast_arrays(np.asarray(ht, float), np.asarray(hr, float))
+    a_km, f_mhz = a_eff / 1e3, np.asarray(f_hz, float) / 1e6
+    d_los = np.sqrt(2.0 * a_km) * (np.sqrt(np.maximum(ht, 0.0) / 1e3) + np.sqrt(np.maximum(hr, 0.0) / 1e3))
+    beyond = _diffraction_beyond_db(a_km, d_km, f_mhz, ht, hr)
+    with np.errstate(all="ignore"):
+        c = (ht - hr) / (ht + hr)
+        m = 250.0 * d_km ** 2 / a_km / (ht + hr)
+        b = 2.0 * np.sqrt((m + 1.0) / 3.0 / m) * np.cos(np.pi / 3.0 + np.arccos(np.clip(1.5 * c * np.sqrt(3.0 * m / (m + 1.0) ** 3), -1.0, 1.0)) / 3.0)
+        d1 = 0.5 * d_km * (1.0 + b)
+        d2 = d_km - d1
+        h_se = ((ht - 500.0 * d1 ** 2 / a_km) * d2 + (hr - 500.0 * d2 ** 2 / a_km) * d1) / d_km
+        h_req = 17.456 * np.sqrt(d1 * d2 * (C0 / (f_mhz * 1e6)) / d_km)
+        a_em = 500.0 * (d_km / (np.sqrt(ht) + np.sqrt(hr))) ** 2
+        inside = np.where(h_se > h_req, 0.0, (1.0 - h_se / h_req) * np.maximum(_diffraction_beyond_db(a_em, d_km, f_mhz, ht, hr), 0.0))
+    return cast(F, np.where(d_km >= d_los, np.maximum(beyond, 0.0), inside)[()])
+
+
 def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, a_eff: float = A_EFF) -> F:
     """Path loss [dB] over the sea: the curved-earth two-ray loss with divergence (two_ray_curved_db) while the grazing angle at the specular point
     is above psi_critical; between that limit and the radio horizon the larger of it and the plane-earth loss (FLAT_A), so the loss cannot fall
@@ -145,14 +205,19 @@ def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, a_eff: float = A_EF
     Hs 0, sampled every 1 m (every 5 cm): 0.8 dB (1.0) for a surface antenna pair, ht 2.2 m and hr 10 m; 26 dB (29) with the UAS at the top of
     its profile, ht 2.2 m and hr 108.1 m; 20 dB (34) for ht 10 m and hr 18.1 m; with Hs 1 m 2.4 dB and with Hs 3 m 0.3 dB for that last pair. The
     lost-link time of a UAS sortie is the statistic that depends on it (round 8, M-49; the earlier 0.15 dB was measured at single distances).
-    ponytail: no smooth-earth diffraction (ITU-R P.526) in the transition zone, the plane-earth loss stands in for it and is conservative by
-    construction; upgrade path is the P.526 field between psi_critical and the horizon."""
+    Round 16 (M-14): in that zone the loss is also never below the free-space loss at the direct distance plus the smooth-earth diffraction loss
+    (`smooth_earth_diffraction_db`, ITU-R P.526 with P.452's line-of-sight interpolation): the plane-earth loss is conservative only against the
+    curved loss with D, not against diffraction, which is 6 to 12 dB higher at the horizon for the demo's antennas (checked against the exact
+    residue series, tests/test_round16_a.py). The earth is the fixed 4/3 one (k = 4/3, no refractivity input). Beyond the horizon the curved loss stands
+    (rf_margin gives no link there): the diffraction field would continue it, but stage 1 reports those moments as `beyond_horizon`, not as a margin."""
     d = np.maximum(d, 1.0)
     curved = two_ray_curved_db(d, ht, hr, hs, f_hz, True, a_eff)
     _, _, h1, h2 = kerr_reflection(d, ht, hr, a_eff)
     horizon = np.sqrt(2.0 * a_eff) * (np.sqrt(np.maximum(ht, 0.0)) + np.sqrt(np.maximum(hr, 0.0)))
     transition = (np.arctan2(h1 + h2, d) < psi_critical(C0 / f_hz, a_eff)) & (d <= horizon)
-    return cast(F, np.where(transition, np.maximum(curved, two_ray_curved_db(d, ht, hr, hs, f_hz, False, FLAT_A)), curved)[()])
+    diffracted = 20 * np.log10(4 * np.pi * np.hypot(d, np.asarray(ht, float) - hr) / (C0 / f_hz)) + smooth_earth_diffraction_db(d, ht, hr, f_hz, a_eff)
+    flat = two_ray_curved_db(d, ht, hr, hs, f_hz, False, FLAT_A)
+    return cast(F, np.where(transition, np.fmax(np.maximum(curved, flat), diffracted), curved)[()])
 
 
 def _radio(radio: str | dict[str, Any]) -> dict[str, Any]:
@@ -161,11 +226,20 @@ def _radio(radio: str | dict[str, Any]) -> dict[str, Any]:
 
 def rf_margin(d: FA, ht: FA, hr: FA, hs: FA, radio: str | dict[str, Any] = "rfd900x") -> F:
     """Link margin [dB] = Pt + Gt + Gr - cable - misc - L(two-ray) - sensitivity; NO_LINK_DB beyond the radio horizon.
-    d [m] ground range; ht, hr [m] antenna heights above the surface; hs [m] significant wave height (local WRF/UMWM swh)."""
+    d [m] ground range; ht, hr [m] antenna heights above the surface; hs [m] significant wave height (local WRF/UMWM swh).
+    Round 16 (M-27): a range under 1 m is 1 m for the horizon test as for the loss (a zero range at zero heights was +119 dB: it is NO_LINK_DB now, an
+    antenna at or below the surface has no horizon), a range below zero is a ValueError (it was +102 dB at -3 m), and a NaN range or height is an unknown
+    position: the margin is NaN, never a finite number and never NO_LINK_DB (which is a known geometry with no link). A caller that asks whether the link
+    is lost writes `not margin >= 0`, so an unknown position counts as lost; one that asks whether a margin is a number tests `np.isfinite`."""
     r = _radio(radio)
-    loss = two_ray_loss_db(d, ht, hr, hs, r["center_mhz"] * 1e6)
+    dd = np.asarray(d, float)
+    if (dd < 0.0).any():
+        raise ValueError(f"rf_margin: d must be >= 0 m, got {np.min(dd):g} (a range below zero has no meaning)")
+    dd = np.maximum(dd, 1.0)
+    loss = two_ray_loss_db(dd, ht, hr, hs, r["center_mhz"] * 1e6)
     m = r["tx_dbm"] + r["gt_dbi"] + r["gr_dbi"] - r["cable_loss_db"] - r["misc_loss_db"] - loss - r["rx_sens_dbm"]
-    return np.where(np.asarray(d) <= radio_horizon_km(ht, hr) * 1e3, m, NO_LINK_DB)
+    out = np.where(dd <= radio_horizon_km(ht, hr) * 1e3, m, NO_LINK_DB)
+    return cast(F, np.where(np.isnan(dd) | np.isnan(np.asarray(ht, float)) | np.isnan(np.asarray(hr, float)), np.nan, out)[()])
 
 
 # ---------------------------------------------------------------- Iridium
@@ -173,7 +247,12 @@ def iridium_session(n_bytes: FA, rng: np.random.Generator, members: int, service
     """One message of n_bytes (scalar or (members,)) through Iridium: -> (success (members,) bool, latency_s (members,)).
     SBD is split into ceil(n/340) MO (270 MT) sessions; RUDICS is one call at 2.4 kbps. Each session is retried up to
     max_attempts; a failed attempt costs fail_cost_s. Availability and latency only, no range (BRIEF 2.8). Latency
-    = log-normal session setup (assumed) + published transfer time (SBD 5 s short .. 20 s full message)."""
+    = log-normal session setup (assumed) + published transfer time (SBD 5 s short .. 20 s full message).
+    Round 16 (M-27): `members` below 1, or a byte count that is negative or not finite, is a ValueError naming it (a negative count used to succeed)."""
+    if not isinstance(members, (int, np.integer)) or members < 1:
+        raise ValueError(f"iridium_session: members must be an integer >= 1, got {members!r}")
+    if not (np.isfinite(b := np.asarray(n_bytes, float)).all() and (b >= 0).all()):
+        raise ValueError(f"iridium_session: n_bytes must be finite and >= 0, got {n_bytes!r}")
     p = _yaml("radios.yaml")["iridium"][service]
     n = np.broadcast_to(np.asarray(n_bytes, float), (members,))
     if service == "sbd":

@@ -372,7 +372,8 @@ def test_the_credibility_report_counts_the_assumed_radio_numbers():
     from cafe.pm import credibility
     items = credibility.assumed_inputs()
     ids = {i["id"] for i in items if i["kind"] == "assumed" and i["file"] == "platforms/radios.yaml"}
-    assert len(ids) == 19 and "radios.yaml:radios.rfd900x.misc_loss_db" in ids and "radios.yaml:iridium.sbd.p_success" in ids
+    assert len(ids) == 20 and "radios.yaml:radios.rfd900x.rx_sens_dbm" in ids and "radios.yaml:radios.rfd900x.misc_loss_db" in ids
+    assert "radios.yaml:iridium.sbd.p_success" in ids
 
 
 # ---------------------------------------------------------------- M-13: the slant range, and where the budget stops being a budget
@@ -467,9 +468,10 @@ def test_within_2_km_the_curved_loss_is_the_flat_loss():
     assert c.two_ray_loss_db(2e3, 15.0, 3.0, 0.0, F915) == pytest.approx(_flat(2e3, 15.0, 3.0), abs=0.15)
 
 
-def test_the_curved_loss_is_unchanged_above_the_critical_grazing_angle_and_the_larger_of_it_and_the_flat_loss_below_it():
-    """M-8 (lead's rule): inside psi_critical the curved loss with D stands; from there to the radio horizon the loss is max(curved with D, flat), so it
-    cannot fall toward free space as D -> 0 (geometric optics fails there; diffraction is not modelled). Beyond the horizon the curved loss, unchanged."""
+def test_the_curved_loss_is_unchanged_above_the_critical_grazing_angle_and_the_larger_of_it_the_flat_loss_and_the_diffraction_loss_below_it():
+    """M-8 (lead's rule) and round 16 M-14: inside psi_critical the curved loss with D stands; from there to the radio horizon the loss is the larger of the
+    curved loss with D, the flat loss and the free-space loss plus the smooth-earth diffraction loss, so it cannot fall toward free space as D -> 0
+    (geometric optics fails there). Beyond the horizon the curved loss, unchanged."""
     ht, hr = 15.0, 3.0
     psi_c = c.psi_critical(LAM)
     assert psi_c == pytest.approx((LAM / (np.pi * c.A_EFF)) ** (1 / 3)) and 2.2e-3 < psi_c < 2.4e-3
@@ -477,11 +479,13 @@ def test_the_curved_loss_is_unchanged_above_the_critical_grazing_angle_and_the_l
     r1, r2, h1, h2 = c.kerr_reflection(d, ht, hr)
     inside = np.arctan2(h1 + h2, d) >= psi_c
     curved, flat = c.two_ray_curved_db(d, ht, hr, 0.0, F915), c.two_ray_curved_db(d, ht, hr, 0.0, F915, False, c.FLAT_A)
-    got, fs = c.two_ray_loss_db(d, ht, hr, 0.0, F915), 20 * np.log10(4 * np.pi * d / LAM)
+    got, fs = c.two_ray_loss_db(d, ht, hr, 0.0, F915), 20 * np.log10(4 * np.pi * np.hypot(d, ht - hr) / LAM)
+    diffracted = fs + c.smooth_earth_diffraction_db(d, ht, hr, F915)
     assert 0.2 < inside.mean() < 0.5 and inside[:50].all() and not inside[-50:].any()                   # the limit is at about 7 km of the 23.1 km horizon
     assert np.array_equal(got[inside], curved[inside])                                                  # inside the limit: the curved loss
-    assert np.array_equal(got[~inside], np.maximum(curved, flat)[~inside]) and np.all(got[~inside] >= curved[~inside]) and np.all(got >= fs - 6.1)
+    assert np.array_equal(got[~inside], np.maximum(np.maximum(curved, flat), diffracted)[~inside]) and np.all(got[~inside] >= curved[~inside])
     assert np.all(got[~inside] >= flat[~inside]) and (got[~inside] > curved[~inside]).any()            # the rule changes something
+    assert (diffracted[~inside] > np.maximum(curved, flat)[~inside]).any() and np.all(got >= fs - 6.1)       # the diffraction loss decides somewhere (M-14)
     far = np.array([30e3, 60e3])                                                                       # beyond the horizon: the curved loss, as before
     assert np.array_equal(c.two_ray_loss_db(far, ht, hr, 0.0, F915), c.two_ray_curved_db(far, ht, hr, 0.0, F915))
     assert c.two_ray_loss_db(2e3, ht, hr, 0.0, F915) == c.two_ray_curved_db(2e3, ht, hr, 0.0, F915)
@@ -497,14 +501,17 @@ def test_the_margin_never_rises_over_the_last_30_percent_of_the_horizon(ht, hr, 
     assert np.all(m != c.NO_LINK_DB) and np.all(np.diff(m) <= 1e-9)
 
 
-def test_the_finding_case_20_km_is_in_the_transition_zone_and_gets_the_flat_loss():
-    """M-8: 15 m / 3 m, Hs 0 at 20 km (horizon 23.09 km): the grazing angle there (0.2 mrad) is below psi_critical (2.3 mrad, reached at about 7 km), so the
-    loss is the larger of curved-with-D (122.4 dB) and flat (139.0 dB): 139.0, and the margin 13.0 dB (29.6 dB with the curved loss alone)."""
+def test_the_finding_case_20_km_is_in_the_transition_zone_and_gets_the_diffraction_loss():
+    """M-8, round 16 M-14: 15 m / 3 m, Hs 0 at 20 km (horizon 23.09 km): the grazing angle there (0.2 mrad) is below psi_critical (2.3 mrad, reached at about
+    7 km), so the loss is the largest of curved-with-D (122.4 dB), flat (139.0 dB) and free space plus the smooth-earth diffraction loss (143.9 dB): 143.9,
+    and the margin of the default radio 8.1 dB (13.0 dB with the flat loss: 5 dB less)."""
     r = c._yaml("radios.yaml")["radios"]["rfd900x"]
     budget = r["tx_dbm"] + r["gt_dbi"] + r["gr_dbi"] - r["cable_loss_db"] - r["misc_loss_db"] - r["rx_sens_dbm"]
-    assert c.two_ray_loss_db(20e3, 15.0, 3.0, 0.0, F915) == pytest.approx(c.two_ray_curved_db(20e3, 15.0, 3.0, 0.0, F915, False, c.FLAT_A))
+    fs = 20 * np.log10(4 * np.pi * np.hypot(20e3, 12.0) / LAM)
+    loss = c.two_ray_loss_db(20e3, 15.0, 3.0, 0.0, F915)
+    assert loss == pytest.approx(fs + c.smooth_earth_diffraction_db(20e3, 15.0, 3.0, F915)) == pytest.approx(143.9, abs=0.1)
     assert c.two_ray_curved_db(20e3, 15.0, 3.0, 0.0, F915) == pytest.approx(122.4, abs=0.1) and _flat(20e3, 15.0, 3.0) == pytest.approx(139.0, abs=0.1)
-    assert c.rf_margin(20e3, 15.0, 3.0, 0.0) == pytest.approx(budget - 139.0, abs=0.1) and c.rf_margin(20e3, 15.0, 3.0, 0.0) == pytest.approx(13.0, abs=0.2)
+    assert c.rf_margin(20e3, 15.0, 3.0, 0.0) == pytest.approx(budget - 143.9, abs=0.1) == pytest.approx(8.1, abs=0.2)
     assert c.rf_margin(24e3, 15.0, 3.0, 0.0) == c.NO_LINK_DB                                              # beyond the horizon: none
 
 

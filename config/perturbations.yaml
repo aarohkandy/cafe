@@ -93,3 +93,10 @@ battery_capacity_scale:
   unit: dimensionless (multiplier)
   citation: "ASSUMED (the brief names battery capacity but gives no magnitude): +-5 % 1-sigma, a typical cell-to-cell and temperature spread for a fresh lithium pack. Replace with the lab's measured pack capacities."
   kind: assumed
+solar_yield_scale:
+  dist: lognormal
+  median: 1.0
+  value: 0.20
+  unit: dimensionless (multiplier)
+  citation: "ASSUMED (round 16, M-10; the USV's net energy is near neutral and its insolation was one deterministic value): the multiplier on the shortwave the USV's panel harvests. 1-sigma 0.20 is config/assumptions.yaml env.sigma.swdown_frac, the relative error of the model's HOURLY shortwave under tropical convection (cloud placement), used here for a member's whole-window yield: wider than the error of a multi-day mean, so a conservative width; panel soiling and efficiency are not separate terms. Replace with the TAO SWRAD residual of the window mean and the lab's panel data."
+  kind: assumed

@@ -43,11 +43,11 @@ DISTS = ("normal", "lognormal", "uniform", "fixed")             # what a perturb
 # The entries every reader indexes by name (stage1.FORCING and ACTS, perturb.PerturbedEnv, config.env_sigmas); `usv_vpp_bias_brief` is the stage-1b case's, read
 # only when that case runs, where stage1.check_case names it if it is absent.
 REQUIRED = ("wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "hs_scale", "tp_bias", "current_correlation_length",
-            "bulk_stress_scale", "glider_speed_scale", "usv_vpp_bias", "battery_capacity_scale")
+            "bulk_stress_scale", "glider_speed_scale", "usv_vpp_bias", "battery_capacity_scale", "solar_yield_scale")
 # What the stage-1 code does with a sampled prior x as a speed factor: a FRACTION is read as 1 + x (stage1._run_usv: the USV flies at that factor of its
 # polar), a FACTOR as x itself. A speed factor is positive, whatever the prior says; `SUPPORT_SD` standard deviations is where a normal is taken to end.
 FRACTIONS = ("usv_vpp_bias", "usv_vpp_bias_brief")
-FACTORS = ("current_speed_scale", "hs_scale", "bulk_stress_scale", "glider_speed_scale", "battery_capacity_scale")
+FACTORS = ("current_speed_scale", "hs_scale", "bulk_stress_scale", "glider_speed_scale", "battery_capacity_scale", "solar_yield_scale")
 SUPPORT_SD = 6.0
 BIG = 1e300                                                         # a sampled value stays inside +-BIG (a lognormal above 1/BIG); floats end at 1.8e308
 

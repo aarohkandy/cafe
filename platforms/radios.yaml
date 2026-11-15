@@ -6,7 +6,7 @@ radios:
     source: "RFDesign RFD900x datasheet: 902-928 MHz (US), +30 dBm (1 W, 0-30 dBm in 1 dB steps), receiver sensitivity >121 dBm at low air data rate"
     center_mhz: 915.0
     tx_dbm: 30.0
-    rx_sens_dbm: -121.0          # low air rate only. Datasheet V1.2 lists -111 dBm @ 12 kbps and ~-98 dBm @ 200 kbps: see rfd900x_fast
+    rx_sens_dbm: {value: -121.0, unit: dBm, assumed: true, why: "assumed: the air data rate. -121 dBm is the datasheet figure at the LOWEST air rate, the best case of the radio; the datasheet V1.2 lists -111 dBm @ 12 kbps and about -98 dBm @ 200 kbps (see rfd900x_fast), so every 6 dB of sensitivity lost to a faster air rate is 6 dB less margin. Replace with the sensitivity at the air rate the lab flies."}
     gt_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted."}
     gr_dbi: {value: 2.0, unit: dBi, assumed: true, why: "assumed: stock 1/4-wave or dipole whip, 2-3 dBi. Replace with the antenna actually fitted."}
     cable_loss_db: 0.0

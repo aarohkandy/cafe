@@ -81,9 +81,12 @@ import hashlib
 import itertools
 import json
 import pathlib
+import zipfile
 from typing import Any, NamedTuple, cast
 
 import numpy as np
+
+from cafe import atomic
 
 from ..env import conventions as cv
 from ..config import platform_doc as read_yaml, platform_path
@@ -461,14 +464,19 @@ def tables(P: dict[str, Any], cache_dir: str | pathlib.Path | None = None) -> tu
     if key in _CACHE:
         return _CACHE[key]
     f = pathlib.Path(cache_dir) / f"usv_tables_{key}.npz" if cache_dir else None
+    out = None
     if f is not None and f.exists():
-        z = np.load(f)
-        out = (Polar(z["ptws"], z["ptwa"], z["pf"]), WaveTab(z["wtp"], z["wchi"], z["wu"], z["wg"]))
-    else:
+        try:
+            with np.load(f) as z:
+                out = (Polar(z["ptws"], z["ptwa"], z["pf"]), WaveTab(z["wtp"], z["wchi"], z["wu"], z["wg"]))
+        except (zipfile.BadZipFile, EOFError, OSError, ValueError, KeyError):       # a cut or foreign file (round 16, M-28): rebuilt, written whole
+            out = None
+    if out is None:
         out = (_build_polar(P), _build_waves(P))
         if f is not None:
             f.parent.mkdir(parents=True, exist_ok=True)
-            np.savez(f, ptws=out[0].tws, ptwa=out[0].twa, pf=out[0].f, wtp=out[1].tp, wchi=out[1].chi, wu=out[1].u, wg=out[1].g)
+            tab = dict(ptws=out[0].tws, ptwa=out[0].twa, pf=out[0].f, wtp=out[1].tp, wchi=out[1].chi, wu=out[1].u, wg=out[1].g)
+            atomic.write_with(f, lambda fh: np.savez(fh, **tab))                              # a temporary and os.replace: a kill leaves the old file or none
     _CACHE[key] = out
     return out
 
@@ -501,7 +509,9 @@ class USVSim:
     """M-member wing-sail USV ensemble.  `env` is a cafe.pm.env Environment, `start` = (lon, lat) scalars or (M,) arrays,
     `t0` epoch seconds.  mission: dict(mode='section'|'station', waypoints=[(lon, lat), ...] or station=(lon, lat), repeat=False,
     seed=0, plus any mission_defaults key: becalmed_after_h, track_tolerance_km, corridor_km, wp_radius_m, roll_limit_deg,
-    calm_sustain_s, stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change, > -1} (default draws N(vpp_bias_mean, vpp_bias_sd)).
+    calm_sustain_s, stall_sustain_s).  perturb: {'vpp_bias': (M,) fractional speed change, > -1} (default draws N(vpp_bias_mean, vpp_bias_sd));
+    'solar_scale' (M,)
+    the multiplier of the insolation harvested (default 1; finite and above 0). `soc_min` (M,) is the lowest state of charge reached, as a fraction of the pack.
     The wind is read at the anemometer height, the current at current_z_m; wind/current errors are the caller's environment's."""
 
     def __init__(self, params: dict[str, Any], members: int, env: Any, start: tuple[Arr, Arr], t0: float, mission: dict[str, Any],
@@ -525,9 +535,15 @@ class USVSim:
         pt = perturb or {}
         bias = pt["vpp_bias"] if "vpp_bias" in pt else draw_vpp_bias(P, M, int(md.get("seed", 0)))
         self.fac = 1.0 + np.broadcast_to(np.asarray(bias, float), (M,)).copy()
+        if not np.isfinite(self.fac).all():                  # round 16, M-25: NaN and inf passed `<= 0` and became a NaN-position member with no failure mode
+            raise ValueError(f"vpp_bias {np.asarray(bias, float)[~np.isfinite(self.fac)][0]:g}: the speed factor 1 + bias must be a finite number "
+                             "above 0 for every member")
         if (self.fac <= 0).any():                                                       # round 14, M-9: positive on every path (the drawn bias is clipped)
             raise ValueError(f"vpp_bias {np.asarray(bias, float).min():g}: the speed factor 1 + bias is {self.fac.min():g}, not > 0; the bias is a fraction "
                              f"(-0.3 for 30 % slower), not a percent")
+        self.solar = np.broadcast_to(np.asarray(pt.get("solar_scale", 1.0), float), (M,)).copy()       # round 16, M-10: insolation harvested, x
+        if not (np.isfinite(self.solar) & (self.solar > 0)).all():
+            raise ValueError(f"solar_scale must be finite and above 0 for every member, got {np.nanmin(self.solar):g}")
         lon, lat = (np.broadcast_to(np.asarray(a, float), (M,)).copy() for a in start)
         nf = ~(np.isfinite(lon) & np.isfinite(lat))                                      # round 7, M-16: a non-finite start is a labelled failure from t = 0
         self.lon, self.lat = np.where(nf, 0.0, lon), np.where(nf, 0.0, lat)               # (finite, so the step stays finite)
@@ -541,6 +557,7 @@ class USVSim:
         self.path_m = np.zeros(M)
         self.xte_max = np.zeros(M)                                                      # largest |cross-track error| (station: distance from it) [m]
         self.soc_wh = P["soc0"] * P["battery_wh"] * np.ones(M)
+        self.soc_min = self.soc_wh / P["battery_wh"]                        # the lowest state of charge so far, a fraction of the pack (round 16, M-10)
         self.acc = {"becalmed": np.zeros(M), "wing_stall_calm": np.zeros(M), "wing_stall_angle": np.zeros(M), "wind_out": np.zeros(M)}
         self.fail = {k: np.zeros(M, bool) for k in FAILS}
         self.first = {k: np.full(M, np.nan) for k in FAILS}
@@ -667,8 +684,9 @@ class USVSim:
         sw = self.env.air(self.lon, self.lat, t)["swdown"].value
         bs = ~np.isfinite(sw)                                                              # round 7, M-16: no insolation value: 0 W, and the member is labelled
         self._flag("no_current_data", bs)
-        gain = P["solar_eff"] * P["solar_area_m2"] * np.where(bs, 0.0, sw) - P["hotel_w"]
+        gain = P["solar_eff"] * P["solar_area_m2"] * self.solar * np.where(bs, 0.0, sw) - P["hotel_w"]
         self.soc_wh = np.clip(self.soc_wh + gain * dt / 3600.0, 0.0, P["battery_wh"])
+        self.soc_min = np.minimum(self.soc_min, self.soc_wh / P["battery_wh"])
         self._flag("battery", self.soc_wh <= 0.0)
 
     def run(self, seconds: float, dt: float = 60.0, record_s: float = 3600.0) -> dict[str, Any]:
@@ -686,7 +704,7 @@ class USVSim:
         """Arrays (records, M) for lon, lat, stw, sog [m/s], heading [deg], soc_wh, wp (active waypoint); t (records,);
         fail[name] (M,) bool; first[name] (M,) epoch seconds of the first occurrence, NaN if never; n_tacks (M,)."""
         h: dict[str, Any] = {k: np.array(v) for k, v in self._rec.items()}
-        h["fail"], h["first"], h["n_tacks"] = self.fail, self.first, self.n_tacks
+        h["fail"], h["first"], h["n_tacks"], h["soc_min"] = self.fail, self.first, self.n_tacks, self.soc_min
         return h
 
 

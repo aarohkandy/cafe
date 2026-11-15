@@ -524,7 +524,8 @@ def test_whatif_prints_the_verdict_with_its_badge_distance_or_stage_1_n(wi, caps
     assert out[1] == "usv: MARGINAL (P(fail) 0.180) -> GO (P(fail) 0.040) (0.010 to 0.090)  [EMULATED, training-set distance 0.80 of limit 1.90]"
     assert out[2] == "uas: NO-GO (P(fail) 0.700) -> NO-GO (P(fail) 0.500) (0.300 to 0.700)  [Stage 1, n = 32 (out of range)]"
     assert out[3] == "glider_eq: GO (P(fail) 0.000) -> GO (P(fail) 0.000)  [unchanged]"
-    assert out[4] == "dropped glider_2n; links removed: glider_2n-ship-acoustic. Other vehicles are unaffected: Stage-1 vehicles do not interact."
+    assert out[4] == ("dropped glider_2n; links removed: glider_2n-ship-acoustic. Other vehicles' physics are unaffected (Stage-1 vehicles do not interact); "
+                      "a rerun of a mission without it draws other members, so its counts can differ from the report's by sampling noise.")
 
 
 def test_whatif_says_under_the_line_what_a_deploy_shift_did_to_the_flight(wi, capsys, monkeypatch):
@@ -635,7 +636,8 @@ def test_whatif_with_the_real_engine_drops_a_vehicle_and_reports_the_links(wi, m
     assert cli.main(whatif_args(wi, "--drop", "glider_2n")) == 0
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "whatif tepex_c_demo: drop glider_2n"
-    assert out[1] == "dropped glider_2n; links removed: glider_2n-ship-acoustic. Other vehicles are unaffected: Stage-1 vehicles do not interact."
+    assert out[1] == ("dropped glider_2n; links removed: glider_2n-ship-acoustic. Other vehicles' physics are unaffected (Stage-1 vehicles do not interact); "
+                      "a rerun of a mission without it draws other members, so its counts can differ from the report's by sampling noise.")
     assert cli.main(whatif_args(wi, "--drop", "nobody")) == 2 and "no vehicle 'nobody'" in capsys.readouterr().err
 
 

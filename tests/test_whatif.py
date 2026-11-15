@@ -1625,3 +1625,28 @@ def test_the_what_if_stage_1_of_the_unchanged_mission_draws_the_members_of_the_f
     full, one = seen
     assert full["U"].shape[1] == one["U"].shape[1] and np.array_equal(full["U"], one["U"])
     assert np.array_equal(stage1.failed(full["vehicles"][GL]), stage1.failed(one["vehicles"][GL]))
+
+
+def test_a_uas_answer_compares_the_candidate_with_a_baseline_flown_in_the_same_wind_model(monkeypatch):
+    """Round 16, M-2: the report's UAS verdict flew in the WRF 3-D wind, the candidate flies in the 10 m profile (row 187), so the CLI printed a change that
+    was partly the change of wind model. The baseline is now the unchanged mission measured as the candidate is; the report's own is kept beside it."""
+    env = Env3D()
+
+    def run_batch(mission, e, members, seed, pri, marg, scales):
+        n = len(members)
+        fail = np.zeros(n, bool) if e.use_3d else np.ones(n, bool)                 # the 3-D wind is benign here, the 10 m profile is not
+        return dict(vehicles={v["id"]: dict(fail=dict(x=fail), lon=np.zeros((2, n)), **{"class": "uas"}) for v in mission["vehicles"]})
+    monkeypatch.setattr(stage1, "run_batch", run_batch)
+    monkeypatch.setattr(stage1, "run", lambda *a, **k: dict(summary=dict(vehicles=dict(uas=dict(
+        verdict=dict(p_fail=1.0, fail_lo=0.9, fail_hi=1.0, verdict="NO-GO"), n=16)))))
+    m = whatif.apply(CI, drop=["usv", "glider_1n", GL])
+    base = {"uas": dict(verdict="GO", p_fail=0.0)}
+    r = whatif.answer(m, dict(shift_h=6.0), base, {}, env, {}, plan_for(m, 4), None, None)["vehicles"]["uas"]
+    assert r["base"] == dict(verdict="NO-GO", p_fail=1.0) and r["verdict"] == "NO-GO" and env.use_3d is True          # same model on both sides
+    assert r["base_3d"] == base["uas"] and r["wind_model"] == whatif.WIND_MODEL_2D
+    # no 3-D switch: one wind model
+    plain = whatif.answer(m, dict(shift_h=6.0), base, {}, AnalyticEnv(), {}, plan_for(m, 4), None, None)["vehicles"]["uas"]
+    assert plain["base"] == base["uas"] and "wind_model" not in plain and "base_3d" not in plain
+    # no finished run: no 3-D result to keep
+    none = whatif.answer(m, dict(shift_h=6.0), {}, {}, env, {}, plan_for(m, 4), None, None)["vehicles"]["uas"]
+    assert none["base"] == dict(verdict="NO-GO", p_fail=1.0) and none["base_3d"] is None

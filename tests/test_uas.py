@@ -329,13 +329,13 @@ def test_turbulence_series_and_gust_front_arrays_enter_the_air_relative_velocity
     short = np.zeros((2, 100, 3))
     with pytest.raises(ValueError, match="turbulence series covers"):
         fly(turb=short, plat=plat)
-    n = int((300 + 60) / 0.05) + 1
+    n = int((uas.sortie_t_max(plat["sortie"]) + 60) / 0.05) + 1                                 # the longest flight plus the margin (round 16, M-29)
     turb = np.zeros((2, n, 3))
     turb[1, :, 1] = 8.0                                                                        # member 1: steady 8 m/s from the south
     r = fly(turb=turb, plat=plat, heading_deg=90.0)
     k = int(np.argmin(np.abs(r["track"]["t"] - 100.0)))
     assert r["max_wind_ms"][1] > 7.9 and r["max_wind_ms"][0] < 0.1 and r["track"]["tilt_deg"][1, k] > r["track"]["tilt_deg"][0, k] + 2.0
-    assert fly(turb=np.zeros((2, 8000, 3)), plat=plat)["landed"].all()                         # a series long enough is accepted as is
+    assert fly(turb=np.zeros((2, 11000, 3)), plat=plat)["landed"].all()                         # a series long enough is accepted as is
 
 
 def test_ship_underway_vehicle_lands_on_the_moving_deck():
@@ -696,7 +696,7 @@ def test_the_clamp_diagnostics_carry_the_wind_the_tilt_cannot():
 
 def test_a_gust_series_that_demands_more_than_the_clamp_shows_in_the_diagnostics():
     plat = fast_plat()
-    gust = np.zeros((2, 7200, 3))
+    gust = np.zeros((2, 11000, 3))                                   # 550 s: the longest flight (hard stop) of this platform plus 60 s
     gust[1, :, 0] = 13.0                                             # member 1 flies in a 13 m/s mean error the launch gate never saw (beyond the envelope)
     r = fly(plat=plat, M=2, turb=gust, heading_deg=[270.0, 270.0])   # legs run west, into the 9 m/s that blows toward the east
     assert r["sat_s"][0] < 10.0 and r["demand_ratio_max"][0] < 1.6 and r["sat_s"][1] > 100.0 and r["demand_ratio_max"][1] > 3.0

@@ -463,7 +463,8 @@ def _ship_at(ship: Ship, t: float, M: int) -> F:
 
 def make_wind(env: Any, origin: XY, deck_h: float, turb: Arr = None, gust: Optional[Ship] = None, hold: int = 20) -> WindFn:
     """wind_fn(k, t, pos(3,M)) -> (3,M): env.wind (east, north) at the vehicle, + turbulence time series row k (M,3) at the
-    50 ms step (the last row is held if the sortie outlives it) + gust(t) -> (M,3) (gust front), both supplied by the caller.
+    50 ms step (the last row is held if the sortie outlives it; `fly_sortie` and `fly_sitl` refuse a series shorter than the longest flight plus 60 s,
+    so the hold applies only inside that margin) + gust(t) -> (M,3) (gust front), both supplied by the caller.
     The mean wind is looked up every `hold` blocks (1 s) and held: the vehicle moves < 15 m in that time against a 12 km,
     hourly field, and a gridded lookup per 50 ms was most of a sortie's wall time; the fluctuations stay at 50 ms."""
     mean: dict[str, Arr] = {}
@@ -611,6 +612,20 @@ def simulate(prm: dict[str, Any], wp: Arr, ship: Ship, wind_fn: WindFn, *, M: in
                                                                          phase=np.stack(tr["phase"], 1), ewh=np.stack(tr["ewh"], 1)))
 
 
+def sortie_t_max(so: dict[str, Any]) -> float:
+    """The longest a sortie may fly [s]: the nominal `duration_s` times the platform's `hard_stop_factor` (a member that cannot get home is stopped there).
+    The one place the rule is written (round 16, M-29): the turbulence series a sortie reads must cover this plus the 60 s margin, not `duration_s` alone."""
+    return float(so["duration_s"] * so["hard_stop_factor"])
+
+
+def _turbulence_covers(turb: Arr, t_max: float) -> None:
+    """ValueError unless the turbulence series `turb` (members, steps, 3) at DT_ENV covers `t_max` seconds of flight plus the 60 s margin: `make_wind` holds
+    the last row beyond its end, which for a member that cannot get home would be constant turbulence from there on (round 16, M-29)."""
+    if turb is not None and turb.shape[1] * DT_ENV < t_max + 60.0:
+        raise ValueError(f"turbulence series covers {turb.shape[1] * DT_ENV:.0f} s, the sortie needs {t_max + 60.0:.0f} s "
+                         f"(it may fly {t_max:.0f} s before the hard stop, and the series is held at its last row beyond its end)")
+
+
 def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0.0, 0.0), plat: Optional[dict[str, Any]] = None, turb: Arr = None,
                gust: Optional[Ship] = None, link: Optional[LinkFn] = None, scale: Optional[dict[str, Any]] = None, fault: Optional[str] = None,
                dt: float = DT_PHYS, wp: Arr = None, heading_deg: Arr = None) -> dict[str, Any]:
@@ -626,8 +641,7 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
     seconds after launch the member stopped (0 for a scrubbed one)."""
     P = plat or load_platform()
     so = P["sortie"]
-    if turb is not None and turb.shape[1] * DT_ENV < so["duration_s"] + 60.0:
-        raise ValueError(f"turbulence series covers {turb.shape[1] * DT_ENV:.0f} s, the sortie needs {so['duration_s'] + 60.0:.0f} s")
+    _turbulence_covers(turb, sortie_t_max(so))
     gate = launch_check(env, ship, t_launch, P, M, origin, gust)
     sp = _ship_at(ship, t_launch, M)
     lon, lat = lonlat(origin, sp[0], sp[1])
@@ -640,7 +654,7 @@ def fly_sortie(env: Any, ship: Ship, t_launch: float, *, M: int, origin: XY = (0
     out: dict[str, Any] = {}
     if gate["ok"].any():
         out = simulate(prm, pat, ship, make_wind(env, origin, so["deck_height_m"], turb, gust), M=M, t0=t_launch,
-                       t_max=so["duration_s"] * so["hard_stop_factor"], active=gate["ok"], yaw0=yaw0, dt=dt, nsub=int(round(DT_ENV / dt)), link=link,
+                       t_max=sortie_t_max(so), active=gate["ok"], yaw0=yaw0, dt=dt, nsub=int(round(DT_ENV / dt)), link=link,
                        link_hold_s=P["radio"]["link_loss_hold_s"])
         short = out["wp_done"] / pat.shape[0] < so["min_profile_fraction"]                 # the share of the pattern reached, below the minimum
         out["flags"]["profile_incomplete"], out["t_first"]["profile_incomplete"] = short, np.asarray(out["t_end"], float)
@@ -815,6 +829,7 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
     from pymavlink import mavutil
     P = plat or load_platform()
     so = P["sortie"]
+    _turbulence_covers(turb, max_s if max_s is not None else sortie_t_max(so))
     ship0 = np.asarray(ship(t_launch), float).reshape(-1)[:2]
     lon0, lat0 = lonlat(origin, ship0[0], ship0[1])
     rho, ok = air_at_ship(env, np.atleast_1d(lon0), np.atleast_1d(lat0), t_launch)
@@ -848,7 +863,7 @@ def fly_sitl(env: Any, ship: Ship, t_launch: float, *, origin: XY = (0.0, 0.0), 
                             stdout=open(wd / "sitl.out", "w"), stderr=subprocess.STDOUT)
     sim = _Sim1(P, prm, wfn, ship0, motor_map, t_launch)
     sim.hole |= hole
-    cap = max_s if max_s is not None else so["duration_s"] * so["hard_stop_factor"]
+    cap = max_s if max_s is not None else sortie_t_max(so)
     stop = threading.Event()
     notes: list[str] = []
     att: list[tuple[Any, ...]] = []

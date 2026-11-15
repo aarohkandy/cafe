@@ -406,7 +406,7 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
     def one(t: dict[str, Any], path: str) -> dict[str, Any]:
         """A tried change: its P(fail) with the interval of its method, and how it was answered."""
         kind = "conformal 90 % interval (emulator)" if t["method"] == "EMULATED" else "Wilson interval (Stage 1)"
-        d = dict(change=t["change"], method=t["method"], reason=t["reason"], verdict=t.get("verdict"),
+        d = dict(change=t["change"], method=t["method"], reason=t["reason"], verdict=t.get("verdict"), hull_note=t.get("hull_note"),
                  cost=num(t["cost"], "notches", ref, src + path + ".cost"))
         d["p_fail"] = num(t["p_fail"], "fraction", ref, src + path + ".p_fail", dict(kind=kind, lo=t["lo"], hi=t["hi"])) if "p_fail" in t else None
         d["distance"] = num(t["distance"], "z-scored", ref, src + path + ".distance") if "distance" in t else None
@@ -459,17 +459,41 @@ def _overdepth_note(v: dict[str, Any], r: dict[str, Any] | None) -> str:
     return text + "; this is the vehicle's own overshoot at that order, not a fault of the mission of another kind"
 
 
+def _hull_collapse(platform: str) -> tuple[dict[str, Any], float | None, str]:
+    """(the glider platform, the collapse depth of the pressure hull stage 3 assumes [m] or None when it was not checked, the basis in words): the one place
+    the stored converged figure is read, for the hull warning and for the depth of a what-if candidate (round 16, M-3). KeyError, TypeError or ValueError
+    when the platform or the assumptions cannot be read."""
+    from . import budget
+    from .physics import glider
+    P = glider.load_platform(platform)
+    collapse, basis = glider.hull_collapse_depth_m(P, budget.stage3_assumptions())
+    return P, collapse, basis
+
+
+def hull_depth_note(platform: str, depth_m: float) -> str | None:
+    """Round 16, M-3. What to say beside a dive depth the what-if offers (a candidate "dive 25 % shallower"): that it is deeper than the collapse depth of
+    the assumed hull ("cannot fly it"), or that the check was not made; None when the depth is within the collapse depth or the platform cannot be read.
+    The same rule as `_hull_warning`: the depth the model flies is the lesser of the dive depth and the platform's rating."""
+    try:
+        P, collapse, basis = _hull_collapse(platform)
+        depth = min(float(depth_m), float(P["rating_m"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+    if collapse is None:
+        return f"the collapse depth of the assumed pressure hull was not checked against {depth:g} m: {basis}"
+    if depth <= collapse:
+        return None
+    return f"deeper than the collapse depth {collapse:g} m of the pressure hull the model assumes: the glider could not fly {depth:g} m (QUESTIONS_FOR_LAB 4a)"
+
+
 def _hull_warning(v: dict[str, Any]) -> str | None:
     """Round 15 M-11: the glider's verdict assumes it dives to the ordered depth (the order, or the platform's rating when that is shallower: what the
     model flies), and the pressure hull stage 3 assumes (Al 6061, 8 mm, QUESTIONS_FOR_LAB 4a) collapses shallower than that by the model's own rule
     (`glider.hull_collapse_depth_m`, the stored converged figure, computed on a machine with no CalculiX). The verdict is not changed or capped; the
     warning names both depths. None when the order is within the collapse depth; a sentence saying so when the stored figure is for another hull."""
     from cafe import hangar
-    from . import budget
-    from .physics import glider
     try:
-        P = glider.load_platform(v["platform"])
-        collapse, basis = glider.hull_collapse_depth_m(P, budget.stage3_assumptions())
+        P, collapse, basis = _hull_collapse(v["platform"])
         ordered = min(_dive_depth(v), float(P["rating_m"]))
     except (KeyError, TypeError, ValueError):
         return None
@@ -555,6 +579,9 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         wind3d=_opt(e.get("wind3d_fraction"), "fraction of the sortie records", ref, src + ".wind3d_fraction"),
                         authority=_authority(e.get("authority"), ref, src + ".authority"),
                         profile=_profile(e.get("profile"), ref, src + ".profile"),
+                        scrub=_counts(e.get("scrub"), ref, src + ".scrub", "launches",
+                                      ("launches", "scrubbed", "members_partly_scrubbed", "members_all_scrubbed")),
+                        energy=_energy(e.get("energy"), ref, src + ".energy"),
                         drift=_drift(task.get(vid, {}), e["cls"], mref, f"mission.yaml vehicles.{vid}.task.heading_to"),
                         usv_modes=_usv_modes(p, e["modes"], tr) if e["cls"] == "usv" else None,
                         uas_limits=_uas_limits(p, tr, not e.get("profile")) if e["cls"] == "uas" else None,
@@ -641,6 +668,22 @@ def _speed_ratio(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, 
                 sog=_opt(sp.get("sog_ms_median"), "m/s", ref, src + ".sog_ms_median"),
                 u10=_opt(sp.get("u10_ms_median"), "m/s", ref, src + ".u10_ms_median"),
                 chiodi=num(sp.get("calibration_ratio", CHIODI_RATIO), "-", ref, src + ".calibration_ratio"))
+
+
+def _counts(x: dict[str, Any] | None, ref: dict[str, Any], src: str, unit: str, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    """The counts of a summary block as nodes (the scrubbed launches of a UAS), or None for a summary from before the block was written."""
+    if not x:
+        return None
+    return {k: num(x[k], unit if k in ("launches", "scrubbed") else "members", ref, f"{src}.{k}") for k in keys}
+
+
+def _energy(x: dict[str, Any] | None, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
+    """A USV's battery margin from the summary (`energy`: the lowest state of charge each member reached, as a fraction of its own pack), or None."""
+    if not x:
+        return None
+    return dict(soc_min_median=num(x["soc_min_median"], "fraction", ref, src + ".soc_min_median"),
+                soc_min_p10=num(x["soc_min_p10"], "fraction", ref, src + ".soc_min_p10"),
+                soc_min_lowest=num(x["soc_min_lowest"], "fraction", ref, src + ".soc_min_lowest"), n_empty=num(x["n_empty"], "members", ref, src + ".n_empty"))
 
 
 def _profile(p: dict[str, Any] | None, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
@@ -869,11 +912,14 @@ def _env(mission: dict[str, Any], env: Any, res: dict[str, Any] | None, wins: di
     for vid, ws in (wins or {}).items():
         name, unit = FORCING[cls[vid]]
         src = f"windows/windows.json {vid}"
+        rs = ((res or {}).get("vehicles") or {}).get(vid, {}).get("surfaced") if cls[vid] == "glider" else None       # round 16, M-8: share of time seen
         forcing[vid] = dict(quantity=name, windows=[
             dict(t=tnum(w["t"], wref, f"{src}[{i}].t"),
                  forcing=num(w["stress"], unit, wref, f"{src}[{i}].stress (queried by the windows stage)", basis=w["basis"]),
                  failed_at=[tnum(x, wref, f"{src}[{i}].failed_at") for x in w.get("failed_at", [])])
-            for i, w in enumerate(ws)])
+            for i, w in enumerate(ws)],
+            surfaced=None if rs is None else num(float(np.mean(np.asarray(rs, float))), "fraction", tr.ref("stage1b", output="res.pkl"),
+                                                 f"stage1b/res.pkl vehicles.{vid}.surfaced (mean over records and members)"))
     out: dict[str, Any] = dict(forcing_at_windows=forcing if wins else {}, forcing_missing=NO_WINDOWS if wins is None else None, vehicles={})
     if env is None or res is None:
         no_env = ("The report was not given an Environment and res.pkl holds positions and flags only, so wind, Hs and current along the tracks "
@@ -1311,6 +1357,8 @@ def _tried_html(t: dict[str, Any]) -> str:
     note = e(t["reason"]) + (f"{'; ' if t['reason'] else ''}{SAME_AS_BASELINE}" if t.get("same_as_baseline") else "")
     if t.get("shown") is False:
         note += ("; " if note else "") + NOT_SHOWN
+    if t.get("hull_note"):
+        note += ("; " if note else "") + f"<b>{e(t['hull_note'])}</b>"
     return f"<tr><td>{e(t['change'])}<td>{_n(t['cost'])}<td>{how}<td>{pf}<td>{e(str(t['verdict'] or ''))}<td>{note}</tr>"
 
 
@@ -1326,7 +1374,8 @@ def _fix_html(f: dict[str, Any]) -> str:
         u = b["p_fail"]["uncertainty"]
         how = (f"EMULATED, training-set distance {_n(b['distance'])} of {_n(b['threshold'])}" if b["method"] == "EMULATED" else f"Stage 1, n = {_n(b['n'])}")
         line = (f"<b>{e(b['change'])}</b>: P(fail) {_n(f['p_fail_before'])} becomes {_n(b['p_fail'])} ({u['lo']:.3g} to {u['hi']:.3g}, {e(u['kind'])}), "
-                f"{_badge(f['verdict_before'])} to {_badge(b['verdict'])} ({how}){'; ' + SAME_AS_BASELINE if b.get('same_as_baseline') else ''}.")
+                f"{_badge(f['verdict_before'])} to {_badge(b['verdict'])} ({how}){'; ' + SAME_AS_BASELINE if b.get('same_as_baseline') else ''}."
+                + (f" <b>Note: {e(b['hull_note'])}.</b>" if b.get("hull_note") else ""))
     elif f["evaluated"]["value"] == 0:
         line = (f"<b>not searched</b>: none of the {_n(f['candidates'])} could be evaluated (no emulator answer in range, and this vehicle's share "
                 f"of the Stage-1 budget did not cover a run), so this is not a finding that nothing helps (P(fail) now {_n(f['p_fail_before'])}).")
@@ -1421,6 +1470,18 @@ def _speed_html(v: dict[str, Any]) -> str:
             out += (f" Horizontal-force demand beyond the lean-angle clamp: {_n(au['clamp_s_median'])} per sortie (median; largest {_n(au['clamp_s_max'])}), "
                     f"demand / clamp {_n(au['demand_ratio_median'])} (median), {_n(au['demand_ratio_max'])} (largest).")
         out += "</p>"
+    sc, en = v.get("scrub"), v.get("energy")
+    if sc:
+        out += (f"<p class=muted>Launches the weather gate scrubbed: {_n(sc['scrubbed'])}, of {_n(sc['launches'])} in all "
+                f"(members with some scrubbed: {_n(sc['members_partly_scrubbed'])}; "
+                f"with every launch scrubbed: {_n(sc['members_all_scrubbed'])}). "
+                "A scrubbed launch is not a failed sortie: a member fails for it only when none of its launches "
+                "flew (<code>no_sortie_flown</code>), and the shares above are over the sorties that flew.</p>")
+    if en:
+        out += (f"<p>Battery margin: the lowest state of charge each member reached, as a fraction of the pack: median {_n(en['soc_min_median'])}, "
+                f"10th percentile {_n(en['soc_min_p10'])}, lowest {_n(en['soc_min_lowest'])}; {_n(en['n_empty'])} emptied it (<code>battery</code>). "
+                "The insolation each member harvests is "
+                "scaled by an assumed prior (solar_yield_scale), so the members differ in energy as well as in weather.</p>")
     if w3:
         out += f"<p class=muted>Sortie records flown in the WRF 3-D wind field: {_n(w3)}; the rest used the 10 m wind scaled by the log profile.</p>"
     return out
@@ -1489,10 +1550,23 @@ def _granularity_html(g: dict[str, Any] | None, verdict: str = "") -> str:
             + ("." if g["ok"] else ", so this verdict is undecided: granularity (too few samples to tell the required fraction from every sample).") + "</p>")
 
 
+IRIDIUM_NOTE = ("This Iridium verdict restates assumed numbers, not modelled physics: a session succeeds with the assumed probability radios.yaml iridium.sbd "
+                "p_success and is retried up to the assumed max_attempts, the same in any sea state, weather or position (no antenna height, heel or "
+                "geometry enters it), so a member needing hundreds of samples cannot miss the required fraction by chance. It is no evidence about the "
+                "real service; replace the "
+                "numbers with the lab's own SBDIX session counts (QUESTIONS_FOR_LAB).")
+
+
+def _iridium_html(k: dict[str, Any]) -> str:
+    """The sentence beside an Iridium link's verdict (round 16, M-9): its P(fail) restates assumed numbers; it is no evidence about the real service."""
+    return f"<p class=warn>{IRIDIUM_NOTE}</p>" if str(k.get("method", "")).startswith("Iridium") else ""
+
+
 def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
     return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
             f"{_granularity_html(k['granularity'], k['verdict'])}"
+            f"{_iridium_html(k)}"
             f"<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
             f"median margin {_n(k['margin_db_median'])}{_margin_html(k)}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
@@ -1599,6 +1673,11 @@ def _env_html(env: dict[str, Any]) -> str:
                          + (f"; those members failed at {', '.join(_n(x) for x in w['failed_at'])}" if w["failed_at"] else "") for w in d["windows"])
         h += (f"<p><b>{e(vid)}</b>, {e(d['quantity'])} at the worst windows (each window is the record of the strongest analysis-field forcing; "
               f"it is not the instant a member failed): {rows}.</p>")
+        if d.get("surfaced"):
+            h += (f"<p class=muted>A glider sees this surface current only while it is at the surface, {_n(d['surfaced'])} of the window (mean over members); "
+                  "its station loss follows the flow over the depth it dives through, not this value, so the window ranked by surface current is a guide "
+                  "to the "
+                  "forcing, not the worst case for the glider.</p>")
     return h
 
 

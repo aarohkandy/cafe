@@ -42,7 +42,8 @@ DT_VEHICLE = 60.0                     # glider and USV step [s]; the ocean SDE's
 
 
 # per class, besides FORCING
-ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_vpp_bias",), uas=("bulk_stress_scale", "battery_capacity_scale"))
+ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_vpp_bias", "solar_yield_scale"),
+            uas=("bulk_stress_scale", "battery_capacity_scale"))
 
 
 SUBGRID_SWITCHES = ("turbulence", "gust_fronts", "warm_layer", "rain_lens", "ocean_sde")
@@ -72,6 +73,8 @@ def priors_for(mission: dict[str, Any], fitted: dict[str, Any] | None = None) ->
     if "uas" in cls:
         names.append("bulk_stress_scale")          # scales the surface stress u*^2 behind the Mann turbulence (see _uas_forcing)
     names.append("battery_capacity_scale")
+    if "usv" in cls:
+        names.append("solar_yield_scale")          # round 16, M-10: the USV's insolation harvested, after battery_capacity_scale
     return pri, sampling.to_marginals(pri, names)
 
 
@@ -140,7 +143,8 @@ def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
         if "radius_km" in task:
             task.setdefault("track_tolerance_km", task["radius_km"])
     d = v["deploy"]
-    sim = usv.USVSim(P, M, env, (d["lon"], d["lat"]), t0, task, perturb=dict(vpp_bias=(1 + X["usv_vpp_bias"]) * drag ** -0.5 - 1))
+    sim = usv.USVSim(P, M, env, (d["lon"], d["lat"]), t0, task, perturb=dict(vpp_bias=(1 + X["usv_vpp_bias"]) * drag ** -0.5 - 1,
+                                                                             solar_scale=X["solar_yield_scale"]))
     h = sim.run(T - t0, dt=DT_VEHICLE, record_s=DT_VEHICLE)
     g = _record_grid(h, dict(t=t0, lon=np.full(M, d["lon"]), lat=np.full(M, d["lat"]), **_no_heading(h, M)))
     k = slice(None, None, int(3600 // REC_S))                                                          # hourly, as the wind is
@@ -152,7 +156,8 @@ def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
                 fail=sim.fail, first=sim.first, sim=sim, antenna_m=P["rf_antenna_height_m"],
                 sog_ms=path_speed(g["lon"], g["lat"], g["t"]), stw_ms=np.mean(h["stw"], 0) if len(h["stw"]) else np.full(M, np.nan),
                 u10_ms=wind["u10"], wind_anem_ms=wind["anem"],
-                margin=sim.xte_max / 1e3, margin_name="maximum distance from the station" if sim.mode == "station" else "maximum cross-track error")
+                margin=sim.xte_max / 1e3, margin_name="maximum distance from the station" if sim.mode == "station" else "maximum cross-track error",
+                energy_margin=sim.soc_min)                                          # the lowest state of charge, a fraction of the pack (round 16, M-10)
 
 
 def launch_times(sorties: dict[str, Any], lon: float, t0: float, T: float, duration_s: float) -> NDArray[np.float64]:
@@ -221,7 +226,7 @@ def _uas_forcing(env: Any, mission: dict[str, Any], origin: tuple[float, float],
             w = np.asarray(env.wind(np.full(M, lon), np.full(M, lat), z, t).value, float)          # (M, 2): one point per member
             U = float(np.hypot(w[:, 0], w[:, 1]).mean())                                           # Mann advection speed
             args = (stream(f"uas/turb/{i}"), M, float(s["ustar"].value[0]), float(s["L"].value[0]), z,
-                    max(U, 1.0), so["duration_s"] * so["hard_stop_factor"] + 60.0, uas.DT_ENV)
+                    max(U, 1.0), uas.sortie_t_max(so) + 60.0, uas.DT_ENV)
             g = _fewest_boxes(args, M) * amp
             wdir = cv.to_deg(-np.asarray(env.u10(np.array([lon]), np.array([lat]), np.array([t])), float).reshape(2))   # wind FROM
             turbs[i] = subgrid.gust_enu(g, wdir)
@@ -303,7 +308,7 @@ def _uas_links(env: Any, mission: dict[str, Any], origin: tuple[float, float], t
     hr = ship_antenna_m(mission, ra)
     out: list[Callable[[float, NDArray[Any]], NDArray[np.bool_]]] = []
     for t0 in ts:
-        tg = t0 + np.arange(0.0, so["duration_s"] * so["hard_stop_factor"] + 61.0, 30.0)
+        tg = t0 + np.arange(0.0, uas.sortie_t_max(so) + 61.0, 30.0)
 
         def full(v: float, n: int = tg.size) -> NDArray[Any]:
             return np.full((M, n), v)
@@ -317,7 +322,8 @@ def _uas_links(env: Any, mission: dict[str, Any], origin: tuple[float, float], t
             j = int(np.clip(np.searchsorted(tg, t) - 1, 0, tg.size - 2))
             w = float(np.clip((t - tg[j]) / (tg[j + 1] - tg[j]), 0.0, 1.0))
             ht = so["deck_height_m"] + rel[:, 2] + ra["uas_antenna_height_above_body_m"]
-            return comms.rf_margin(np.hypot(rel[:, 0], rel[:, 1]), ht, hr, (1 - w) * hs[:, j] + w * hs[:, j + 1], radio) < 0.0
+            margin = comms.rf_margin(np.hypot(rel[:, 0], rel[:, 1]), ht, hr, (1 - w) * hs[:, j] + w * hs[:, j + 1], radio)
+            return ~(margin >= 0.0)             # not `margin < 0`: an unknown position gives a NaN margin and is a lost link, as before (round 16, M-27)
         out.append(link)
     return out
 
@@ -332,7 +338,7 @@ def _uas_setup(v: dict[str, Any], P: dict[str, Any], mission: dict[str, Any], t0
     so["levels_m"] = [float(a) for a in v["sorties"].get("altitudes_m", so["levels_m"])]
     rename = {"max_mean_wind_ms": "max_mean_wind_ms", "no_gust_front_within_min": "gust_lookahead_min"}       # mission key -> platform key
     P["launch_rule"].update({rename[a]: float(x) for a, x in lr.items() if a in rename})
-    return P, origin, launch_times(v["sorties"], origin[0], t0, T, so["duration_s"] * so["hard_stop_factor"])
+    return P, origin, launch_times(v["sorties"], origin[0], t0, T, uas.sortie_t_max(so))
 
 
 def _uas_sortie(i: int, v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], t0: float, T: float, mission: dict[str, Any],
@@ -393,7 +399,7 @@ def _run_uas(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
     east, north, alt, air = on_grid(t)
     lon, lat = uas.lonlat(origin, east, north)
     # a window per launch, the same for every batch
-    tf = np.concatenate([tl + np.arange(0.0, so["duration_s"] * so["hard_stop_factor"] + 1.0, FINE_S) for tl in ts]) if len(ts) else np.empty(0)
+    tf = np.concatenate([tl + np.arange(0.0, uas.sortie_t_max(so) + 1.0, FINE_S) for tl in ts]) if len(ts) else np.empty(0)
     fine = None
     if tf.size:                                                                    # the sorties on a 30 s grid: a 20 min sortie is 1 to 2 of the 10 min records
         fe, fn, fa, fair = on_grid(tf)
@@ -511,11 +517,23 @@ def _pos(node: str, out: dict[str, Any], mission: dict[str, Any], t: NDArray[Any
         return f(s["lon"]), f(s["lat"]), f(ship_antenna_m(mission, radio)), f(s.get("transducer_depth_m", 5.0))
     r = out[node].get("fine") or out[node]  # a UAS: its 30 s sortie grid (on the deck between sorties), not the 10 min records
 
-    def g(a: NDArray[Any]) -> NDArray[Any]:
-        return np.stack([np.interp(t, r["t"], a[:, m]) for m in range(a.shape[1])], 1)
+    def g(a: NDArray[Any], is_lon: bool = False) -> NDArray[Any]:
+        cols = []
+        for m in range(a.shape[1]):
+            y = a[:, m]
+            if is_lon:                                      # round 16, M-11: across 180 deg the short way (179.99 and -179.99 are 0.02 deg apart, not 360)
+                ok = np.isfinite(y)
+                u = np.where(ok, y, 0.0)
+                u[ok] = np.unwrap(y[ok], period=360.0)
+                moved = bool(np.any(u != np.where(ok, y, 0.0)))
+                v = np.interp(t, r["t"], np.where(ok, u, np.nan))
+                cols.append(np.mod(v + 180.0, 360.0) - 180.0 if moved else v)        # wrapped again only where a record crossed, else as they were
+            else:
+                cols.append(np.interp(t, r["t"], y))
+        return np.stack(cols, 1)
 
     h = r.get("alt", np.zeros_like(r["lon"]))
-    return g(r["lon"]), g(r["lat"]), g(h) + out[node]["antenna_m"], g(r["depth"])
+    return g(r["lon"], True), g(r["lat"]), g(h) + out[node]["antenna_m"], g(r["depth"])
 
 
 def _dist(a: tuple[NDArray[Any], ...], b: tuple[NDArray[Any], ...]) -> NDArray[Any]:
@@ -642,7 +660,7 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         if lk["kind"] == "rf":
             hs, hs_filled = _link_hs(env, A, B, tt, f"link {lk['id']}")        # the worse margin of the two ends' Hs: the same whichever end is named first
             margin = np.minimum(*[comms.rf_margin(d, A[2], B[2], h, lk["radio"]) for h in hs])
-            valid = margin != comms.NO_LINK_DB
+            valid = np.isfinite(margin) & (margin != comms.NO_LINK_DB)      # an unknown position (NaN) is no margin, as when it read NO_LINK_DB (M-27)
             method = f"two-ray over a 4/3-radius earth with divergence (Kerr), {lk['radio']} (Ament sea roughness, modelled)"
             margin_kind, invalid_kind = "RF link margin, dB", "beyond_horizon"
         else:
@@ -674,7 +692,7 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         r0 = batches[0]["vehicles"][vid]
         r: dict[str, Any] = {k: cat([b["vehicles"][vid][k] for b in batches]) for k in ("lon", "lat", "depth")}
         r["t"] = r0["t"]
-        for k in ("alt", "airborne", "surfaced", "heading", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin", "profile_margin"):
+        for k in ("alt", "airborne", "surfaced", "heading", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin", "profile_margin", "energy_margin"):
             if k in r0:
                 r[k] = cat([b["vehicles"][vid][k] for b in batches])
         for k in ("margin_name", "profile_margin_name"):
@@ -760,6 +778,13 @@ NOT_EXERCISED_NOTE = ("the link was required at no moment in any member, so no m
                       "no number of members changes that (round 9, M-17)")
 
 
+def _median_count(x: NDArray[Any]) -> int | float:
+    """The median of a count per member: a whole number as an int (as old summaries store it), an even member count's half-integer as it is (18.5, not 18:
+    the truncated figure fed `granularity_ok` and the report a count that no member-pair median is; round 16, M-4)."""
+    m = float(np.median(x))
+    return int(m) if m == int(m) else m
+
+
 def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_certify: int) -> dict[str, Any]:
     """Verdict, dominant failure mode, first time, sensitivity for every vehicle and link. A link required at no sample in any member
     (`need_count` summing to 0) has the verdict NOT EXERCISED, not GO: a pass fraction of 1.0 by default is no evidence (the vehicles have no analogue).
@@ -781,8 +806,16 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         sens = _sensitivity(names, U, f, set(FORCING) | set(ACTS[r["class"]]), r.get(key), r.get(f"{key}_name", "failure indicator"))
         out["vehicles"][vid] = dict(cls=r["class"], n=n, k_fail=int(f.sum()), verdict=v, modes=modes, dominant=dom,
                                     first_fail_t=t_first, median_fail_t=t_med, sensitivity=sens)
+        if "energy_margin" in r:                                  # the USV's battery: the lowest state of charge each member reached (round 16, M-10)
+            em = np.asarray(r["energy_margin"], float)
+            out["vehicles"][vid]["energy"] = dict(soc_min_median=float(np.nanmedian(em)), soc_min_p10=float(np.nanpercentile(em, 10)),
+                                                  soc_min_lowest=float(np.nanmin(em)), n_empty=int(np.sum(em <= 0.0)))
         if "sog_ms" in r:
             out["vehicles"][vid]["speed"] = _speed(r, next(v["platform"] for v in mission["vehicles"] if v["id"] == vid))
+        if r.get("sorties") and "scrubbed" in r:                  # the launches the weather gate refused: a scrubbed day is not a failed sortie (round 16, M-5)
+            k, L = np.asarray(r["scrubbed"], int), len(r["sorties"])
+            out["vehicles"][vid]["scrub"] = dict(launches=int(L * k.size), scrubbed=int(k.sum()), members_partly_scrubbed=int(((k > 0) & (k < L)).sum()),
+                                                 members_all_scrubbed=int((k >= L).sum()))
         if r.get("sorties") and "sat_s" in r["sorties"][0]:
             sat, ratio = (np.concatenate([np.asarray(so[k], float)[~np.asarray(so["scrubbed"], bool)] for so in r["sorties"]])
                           for k in ("sat_s", "demand_ratio_max"))
@@ -804,7 +837,7 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         sens = _sensitivity(names, U, f, set(FORCING) | {c for k in ends for c in ACTS[k]}, np.asarray(r["frac"], float),
                             "fraction of the required moments the link worked")
         kind, need = r.get("invalid_kind"), float(np.sum(r.get("need_count", 0)))
-        nc = int(np.median(r["need_count"])) if "need_count" in r else None            # required samples per member: what the required fraction is resolved on
+        nc = _median_count(r["need_count"]) if "need_count" in r else None            # required samples per member: what the required fraction is resolved on
         rf = lk_ends[lid]["required_fraction"]
         bad = float(np.sum(r["n_invalid"])) / need if kind and need else None          # of the needed samples, how many the geometry alone decided
         v = intervals.verdict(int(f.sum()), n)

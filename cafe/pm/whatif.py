@@ -692,6 +692,9 @@ def candidates(mission: dict[str, Any], vid: str) -> list[dict[str, Any]]:
             kept.append(c)
     mates = [o["id"] for o in mission["vehicles"] if "base" in o and o["id"] != vid]
     for c in kept:
+        if "base" not in v and "dive_depth_m" in v["task"] and "duty" in c["mod"]:          # a dive past the assumed hull's collapse depth: noted (M-3)
+            if note := report.hull_depth_note(v["platform"], v["task"]["dive_depth_m"] * c["mod"]["duty"]):
+                c["hull_note"] = note
         c["change"] = describe(c["mod"], v, _window(mission))
         if mates and "base" in v and ("dlon" in c["mod"] or "dlat" in c["mod"]):          # the ship is one: the others fly from the new point too
             c["change"] += f" (the ship moves, so {', '.join(mates)} launch{'es' if len(mates) == 1 else ''} from the new point too)"
@@ -769,7 +772,8 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
         tried: list[dict[str, Any]] = []
         left: list[tuple[int, dict[str, Any]]] = []
         for c in candidates(mission, vid):
-            e = dict(change=c["change"], mod=c["mod"], cost=c["cost"], method="not evaluated", reason="", invalid=False)
+            e = dict(change=c["change"], mod=c["mod"], cost=c["cost"], method="not evaluated", reason="", invalid=False,
+                     **({"hull_note": c["hull_note"]} if "hull_note" in c else {}))
             try:
                 m2 = apply(mission, {vid: c["mod"]})
                 a = predict(em, m2, vid, cls, tracks.get(vid), c["mod"], env)
@@ -887,9 +891,9 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
     for vid in changed:
         cls = stage1._classes(solo(m2, vid))[vid]
         b = base.get(vid)
-        if b is None:
-            b = measure(mission, vid, env, plan, pri, marg, scales, seed)
-            b = dict(verdict=b["verdict"], p_fail=b["p_fail"])
+        if b is None or (cls == "uas" and hasattr(env, "use_3d")):    # the report's UAS baseline flew in the 3-D wind, the candidate in the 10 m profile (M-2)
+            m0 = measure(mission, vid, env, plan, pri, marg, scales, seed)       # so: the unchanged mission measured as the candidate is, same members
+            b = dict(verdict=m0["verdict"], p_fail=m0["p_fail"])
         em, no_em = usable(ems, scope_of(m2, vid, cls))
         a = predict(em, m2, vid, cls, tracks.get(vid), mod, env)
         flight = flight_note(vehicle(mission, vid), mod["shift_h"], _window(mission))
@@ -899,6 +903,10 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
         else:
             why = no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " ")
             out[vid] = dict(base=b, method="Stage 1", why=why, flight=flight, ship=with_ship.get(vid), **_stage1(m2, vid, env, plan, (pri, marg), scales))
+    for vid, r in out.items():                              # a UAS answer is in the 10 m profile on both sides; the report's 3-D result stays beside it
+        if stage1._classes(solo(m2, vid))[vid] == "uas" and hasattr(env, "use_3d"):
+            r["wind_model"] = WIND_MODEL_2D
+            r["base_3d"] = None if base.get(vid) is None else dict(verdict=base[vid]["verdict"], p_fail=base[vid]["p_fail"])
     gone = [k["id"] for k in mission["links"] if k["a"] in drop or k["b"] in drop]
     return dict(vehicles=out, dropped=drop, links_removed=gone, unchanged=unchanged)
 

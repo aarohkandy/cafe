@@ -1327,7 +1327,7 @@ BARE_COPIES = {
     "env/orca.py": (1, "written to a `.tmp.npz` and then `os.replace`d"),
     "ledger.py": (1, "copied to a `.part` and then `os.replace`d"),
     "par.py": (1, "a new numbered array in a directory this process made and removes at exit; the reader gets the path after the save returns"),
-    "physics/usv.py": (1, "the optional table cache of `tables(P, cache_dir)`; no code of cafe/pm passes a directory (the tests do)"),
+    "physics/usv.py": (1, "the table cache of `tables(P, cache_dir)`: `np.savez` is the writer handed to `cafe.atomic.write_with` (a temporary, `os.replace`)"),
     "pipeline.py": (1, "stage 1b's copy of res.pkl: the stage ledger holds its sha-256, so a cut file is a stage that is not done"),
     "stage3/pipeline_windows.py": (1, "the job file of one child process, in a scratch directory the parent removes"),
 }

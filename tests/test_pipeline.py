@@ -2237,7 +2237,7 @@ def test_stage1_ran_with_the_tao_fitted_priors_and_one_stratified_batch(ci_runs)
     s = f.summary1
     assert s["n"] == 8 and s["certify"] is False and s["priors"]["wind_speed_bias"]["mean"] == pytest.approx(f.fitted["wind_speed_bias"]["mean"])
     assert s["priors"]["wind_speed_bias"]["sd"] == pytest.approx(f.fitted["wind_speed_bias"]["value"]) and s["priors"]["wind_speed_bias"]["sd"] < 2.0
-    assert s["names"] == stage1.FORCING + ["glider_speed_scale", "usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale"]
+    assert s["names"] == stage1.FORCING + ["glider_speed_scale", "usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale", "solar_yield_scale"]
     assert set(s["summary"]["vehicles"]) == set(CLASSES)
     assert len(s["summary"]["links"]) == 3
     assert any(i["ref"].endswith("ingest/priors_fitted.json") for i in f.ledger1["inputs"]) and f.ledger1["seeds"] == {"mission": 20230301}
@@ -2273,7 +2273,7 @@ def test_stage1_results_carry_the_platform_antennas_the_classes_and_no_simulator
     # tail masts, the RF whip, the UAS whip
     assert {k: v["antenna_m"] for k, v in res["vehicles"].items()} == {"glider_eq": 0.5, "glider_1n": 0.3, "usv": 2.2, "uas": 0.1}
     assert {k: v["class"] for k, v in res["vehicles"].items()} == CLASSES and all("sim" not in v for v in res["vehicles"].values())
-    assert res["U"].shape == (8, 10) and set(res["X"]) == set(ci_runs.first.summary1["names"])
+    assert res["U"].shape == (8, 11) and set(res["X"]) == set(ci_runs.first.summary1["names"])
     assert res["vehicles"]["uas"]["fail"].keys() >= {"no_sortie_flown", "battery_reserve"} and "station_lost" in res["vehicles"]["glider_eq"]["fail"]
     assert "swept_off_track" in res["vehicles"]["usv"]["fail"]
     assert all(v["lon"].shape == v["lat"].shape and v["lon"].shape[1] == 8 for v in res["vehicles"].values())

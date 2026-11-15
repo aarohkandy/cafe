@@ -346,6 +346,11 @@ def _whatif(a: argparse.Namespace) -> int:
             how = "unchanged"
         iv = f" ({r['lo']:.3f} to {r['hi']:.3f})" if "lo" in r else ""
         print(f"{vid}: {r['base']['verdict']} (P(fail) {r['base']['p_fail']:.3f}) -> {r['verdict']} (P(fail) {r['p_fail']:.3f}){iv}  [{how}]")
+        if r.get("wind_model"):
+            b3 = r.get("base_3d")
+            own = "" if not b3 else (f" The report's own baseline, flown in the 3-D wind, is {b3['verdict']} (P(fail) {b3['p_fail']:.3f}); "
+                                     "the baseline shown above is the unchanged mission in the 10 m profile, as the candidate.")
+            print(f"  note: {vid} {r['wind_model']}{own}")
         if r.get("flight"):
             print(f"  note: {vid} {r['flight']}")
         if r.get("ship"):

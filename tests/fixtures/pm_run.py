@@ -29,7 +29,8 @@ def mission():
 def _batch(rng, M, names, fail_frac):
     """One batch of M members: tracks, failure flags (driven by the first sampled parameter so the sensitivity has something to find), links."""
     t = T0 + 600.0 * np.arange(NT)
-    U = rng.random((M, len(names)))
+    old = [k for k in names if k != "solar_yield_scale"]               # round 16, M-10: a column added after the others must not move the draws of the others
+    U = np.hstack([rng.random((M, len(old))), np.random.default_rng(len(names)).random((M, len(names) - len(old)))])
     X = {k: U[:, i] for i, k in enumerate(names)}
     vehicles = {}
 

@@ -91,13 +91,17 @@ def test_the_class_rule_is_the_one_in_config(monkeypatch):
 
 def test_priors_follow_the_vehicle_classes_and_the_perturbation_file():
     pri, marg = stage1.priors_for(MISSION)
-    assert list(marg) == stage1.FORCING + ["glider_speed_scale", "usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale"]
+    assert list(marg) == stage1.FORCING + ["glider_speed_scale", "usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale", "solar_yield_scale"]
     assert marg["wind_speed_bias"] == dict(dist="normal", mean=0.0, sd=pri["wind_speed_bias"]["value"])
     assert marg["current_speed_scale"]["dist"] == "lognormal"
     uas_only = {"vehicles": [{"id": "u", "platform": "quad_uas", "base": "ship"}]}
     assert list(stage1.priors_for(uas_only)[1]) == stage1.FORCING + ["bulk_stress_scale", "battery_capacity_scale"]
     glider_only = {"vehicles": [{"id": "g", "platform": "seaglider"}]}
     assert list(stage1.priors_for(glider_only)[1]) == stage1.FORCING + ["glider_speed_scale", "battery_capacity_scale"]
+    usv_only = {"vehicles": [{"id": "v", "platform": "saildrone_explorer"}]}                                # round 16, M-10: the USV's insolation scale, last
+    assert list(stage1.priors_for(usv_only)[1]) == stage1.FORCING + ["usv_vpp_bias", "battery_capacity_scale", "solar_yield_scale"]
+    assert marg["solar_yield_scale"] == marg["battery_capacity_scale"] | dict(sigma=pri["solar_yield_scale"]["value"])
+    assert pri["solar_yield_scale"]["value"] == 0.20                                                        # env.sigma.swdown_frac
 
 
 def test_fitted_tao_priors_replace_the_defaults_and_nothing_else():
@@ -318,6 +322,7 @@ class FakeSim:
         self.path_m = np.array([3600.0, 7200.0])
         # glider energy; USV cross-track
         self.E, self.cap, self.xte_max, self.mode = np.array([1e5, 2e5]), np.array([4e5, 4e5]), np.array([1e3, 2e3]), "section"
+        self.soc_min = np.array([0.4, 0.8])                     # USV: the lowest state of charge reached (round 16, M-10)
 
     def run(self, duration, dt, record_s=None):
         """One record per step, the state after it (t0 + dt, t0 + 2 dt, ...), as the real simulators give."""
@@ -351,7 +356,7 @@ def test_glider_and_usv_records_start_at_the_deploy_state_on_the_t0_plus_600_k_g
     t0, T = 1_000_000.0, 1_000_000.0 + 3600.0
     env = AnalyticEnv(wind=(-5.0, 0.0))
     g = next(x for x in MISSION["vehicles"] if x["id"] == "glider_eq")
-    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2), "usv_vpp_bias": np.full(2, -0.24)}
+    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2), "usv_vpp_bias": np.full(2, -0.24), "solar_yield_scale": np.ones(2)}
     rg = stage1._run_glider(g, glider.load_platform("seaglider"), env, 2, X, t0, T)
     u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
     ru = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), env, 2, X, t0, T)
@@ -379,7 +384,7 @@ def test_glider_drift_task_has_no_station_and_takes_the_default_dive_depth(monke
 def test_usv_waypoints_become_tuples_and_the_drag_scales_the_vpp(monkeypatch):
     monkeypatch.setattr(stage1.usv, "USVSim", FakeSim)
     v = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
-    P, X = usv.load_platform("saildrone_explorer"), {"usv_vpp_bias": np.array([0.1, -0.2])}
+    P, X = usv.load_platform("saildrone_explorer"), {"usv_vpp_bias": np.array([0.1, -0.2]), "solar_yield_scale": np.ones(2)}
     r = stage1._run_usv(v, P, AnalyticEnv(wind=(-5.0, 0.0)), 2, X, 0.0, 7200.0, drag=np.array([4.0, 1.0]))
     args, kw = FakeSim.last[0], FakeSim.last[1]
     start, task = args[3], args[5]
@@ -1224,7 +1229,7 @@ def test_usv_speed_over_ground_and_wind_along_the_track_are_stored_per_member_an
             stw = np.stack([np.linspace(0.4, 1.0, n), np.linspace(1.0, 1.6, n)], 1)                      # through the water: means 0.7 and 1.3
             return dict(t=self.t0 + dt * np.arange(1, n + 1), lon=np.full((n, 2), self.start[0]), lat=lat, stw=stw, fail=self.fail, first=self.first)
     monkeypatch.setattr(stage1.usv, "USVSim", Walker)
-    r = stage1._run_usv(v, P, AnalyticEnv(wind=(-5.0, 0.0)), 2, {"usv_vpp_bias": np.zeros(2)}, 0.0, 7200.0)
+    r = stage1._run_usv(v, P, AnalyticEnv(wind=(-5.0, 0.0)), 2, {"usv_vpp_bias": np.zeros(2), "solar_yield_scale": np.ones(2)}, 0.0, 7200.0)
     assert np.allclose(r["sog_ms"], [0.5, 1.0]) and np.allclose(r["u10_ms"], 5.0)                                  # not path_m / T (9e9 here)
     assert np.allclose(r["wind_anem_ms"], 5.0 * np.log(P["anemometer_m"] / 2e-4) / np.log(10.0 / 2e-4))
     res = stage1.merge([dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"usv": dict(r, **{"class": "usv"})})] * 2)
@@ -1465,7 +1470,8 @@ def test_a_usv_station_task_runs_and_is_swept_off_at_its_radius():
         v = dict(id="u", platform="saildrone_explorer", deploy=dict(time="2023-03-01T18:00:00Z", lon=-165.0, lat=0.0),
                  task=dict(mode="station", lon=-165.0, lat=0.0, radius_km=radius))
         env = AnalyticEnv(wind=(-0.2, 0.0), current=(0.9, 0.0), hs=0.5)                                  # SPURS-2: a light wind against a strong current
-        return stage1._run_usv(v, usv.load_platform("saildrone_explorer"), env, 4, {"usv_vpp_bias": np.full(4, -0.24)}, 0.0, 6 * 3600.0)
+        X = {"usv_vpp_bias": np.full(4, -0.24), "solar_yield_scale": np.ones(4)}
+        return stage1._run_usv(v, usv.load_platform("saildrone_explorer"), env, 4, X, 0.0, 6 * 3600.0)
     tight, wide = go(1.0), go(100.0)
     assert tight["fail"]["swept_off_track"].all() and not wide["fail"]["swept_off_track"].any()
     assert wide["margin_name"] == "maximum distance from the station" and 10.0 < wide["margin"].min() and wide["margin"].max() < 25.0  # 0.9 m/s for 6 h = 19 km
@@ -1480,7 +1486,8 @@ def test_a_run_too_short_for_a_step_has_one_record_the_deploy_state():
     gx = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2)}
     rg = stage1._run_glider(v, glider.load_platform("seaglider"), strat_env(), 2, gx, t0, t0 + 30.0)
     u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
-    ru = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), AnalyticEnv(wind=(-5.0, 0.0)), 2, {"usv_vpp_bias": np.full(2, -0.24)}, t0, t0 + 30.0)
+    X = {"usv_vpp_bias": np.full(2, -0.24), "solar_yield_scale": np.ones(2)}
+    ru = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), AnalyticEnv(wind=(-5.0, 0.0)), 2, X, t0, t0 + 30.0)
     for r, d in ((rg, v["deploy"]), (ru, u["deploy"])):
         assert r["t"].tolist() == [t0] and r["lon"].shape == r["lat"].shape == r["depth"].shape == r["surfaced"].shape == (1, 2)
         assert np.all(r["lon"] == d["lon"]) and np.all(r["lat"] == d["lat"]) and r["surfaced"].all() and not any(x.any() for x in r["fail"].values())
@@ -1822,7 +1829,7 @@ def test_stage1_keeps_the_speed_through_the_water_of_a_real_usv_run():
     """M-7 (1): stw_ms is the member's mean over the steps; at a steady wind it is the polar speed, with no current it equals the speed over ground."""
     v = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
     r = stage1._run_usv(v, usv.load_platform("saildrone_explorer"), AnalyticEnv(wind=(-6.0, 0.0), hs=0.0), 2,
-                        {"usv_vpp_bias": np.full(2, -0.24)}, T0, T0 + 6 * 3600.0)
+                        {"usv_vpp_bias": np.full(2, -0.24), "solar_yield_scale": np.ones(2)}, T0, T0 + 6 * 3600.0)
     assert r["stw_ms"].shape == (2,) and np.all((r["stw_ms"] > 0.3) & (r["stw_ms"] < 3.3)) and np.allclose(r["stw_ms"], r["sog_ms"], rtol=0.08)
 
 
@@ -1897,7 +1904,7 @@ def test_a_deploy_time_with_seconds_does_not_leave_the_data(ci_full, cls, run, s
     record, a multiple of 10 steps, was then outside the data) and every member failed `left_data`; the emulator design lost those variants."""
     v = next(x for x in MISSION["vehicles"] if x["id"] == cls)
     M, T = 4, float(ci_full.tw.x[-1])
-    X = {"glider_speed_scale": np.ones(M), "battery_capacity_scale": np.ones(M), "usv_vpp_bias": np.full(M, -0.24)}
+    X = {"glider_speed_scale": np.ones(M), "battery_capacity_scale": np.ones(M), "usv_vpp_bias": np.full(M, -0.24), "solar_yield_scale": np.ones(M)}
     P = glider.load_platform("seaglider") if cls == "glider_eq" else usv.load_platform("saildrone_explorer")
     with ci_full.lenient():
         r = getattr(stage1, run)(v, P, ci_full, M, X, T - 4 * 3600.0 + sec, T)
@@ -2138,7 +2145,7 @@ def test_the_sensitivity_sentence_prints_the_index_and_its_floor_to_three_places
 def test_r7_m27_the_usv_and_glider_records_hold_the_bow_heading_which_a_current_sets_apart_from_the_course():
     t0, T = 1_000_000.0, 1_000_000.0 + 7200.0
     env = AnalyticEnv(wind=(-5.0, 0.0), current=(0.6, 0.0))                                                           # eastward, across a northbound section
-    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2), "usv_vpp_bias": np.full(2, -0.24)}
+    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2), "usv_vpp_bias": np.full(2, -0.24), "solar_yield_scale": np.ones(2)}
     u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
     ru = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), env, 2, X, t0, T)
     g = next(x for x in MISSION["vehicles"] if x["id"] == "glider_eq")
@@ -2157,7 +2164,7 @@ def test_r7_m27_the_usv_and_glider_records_hold_the_bow_heading_which_a_current_
 
 def test_r7_m27_merge_joins_the_heading_along_the_members_and_a_run_without_one_has_none():
     u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
-    X = {"usv_vpp_bias": np.full(2, -0.24)}
+    X = {"usv_vpp_bias": np.full(2, -0.24), "solar_yield_scale": np.ones(2)}
     r = stage1._run_usv(u, usv.load_platform("saildrone_explorer"), AnalyticEnv(wind=(-5.0, 0.0)), 2, X, 0.0, 3600.0)
     batch = lambda r_: dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, links={}, vehicles={"usv": dict(r_, **{"class": "usv"})})
     res = stage1.merge([batch(r)] * 2)
@@ -2393,3 +2400,55 @@ def test_r13_sweep_a_cut_write_leaves_the_old_sensitivity_cases(tmp_path, monkey
     with pytest.raises(OSError, match="killed"):
         stage1.main(["--mission", "m.yaml", "--run", str(tmp_path), "--members", "8"])
     assert f.read_bytes() == before and not list(f.parent.glob("*.tmp"))
+
+
+# ------------------------------------------------------------------------------------------------------------ round 16, batch A
+
+def test_a_uas_at_an_unknown_position_has_lost_the_link_in_the_sortie_hook():
+    """Round 16, M-27: rf_margin gives NaN for an unknown position (it gave NO_LINK_DB, which `< 0` read as lost): `margin < 0` would now call it not lost. The
+    hook is `not margin >= 0`: a state with a NaN range or a NaN height is lost, a state 300 m away at 30 m is not."""
+    rel = np.array([[300.0, 0.0, 30.0], [np.nan, 0.0, 30.0], [300.0, 0.0, np.nan]])
+    hook3, t3 = link_hook(M=3)
+    assert hook3(t3 + 100.0, rel).tolist() == [False, True, True]
+
+
+def test_an_unknown_antenna_height_is_no_margin_and_a_missed_sample_as_it_was_before_rf_margin_gave_nan():
+    """Round 16, M-27: a NaN height gave NO_LINK_DB (`valid` False, counted in n_invalid, a missed sample); it gives NaN now, which is not NO_LINK_DB, so
+    `valid` must test for a number as well: the samples are still needed, still invalid, still missed, and carry no margin."""
+    out, air = rf_scene(M=2, bad_samples=(0, 0))
+    out["uas"]["alt"][10:15, 1] = np.nan
+    r = stage1.evaluate_link(LK["usv-uas-rf"], out, MISSION, flat_env(2), 2, 3, [0, 1])
+    assert r["need_count"].tolist() == [100, 100] and r["n_invalid"].tolist() == [0, 5] and r["frac"].tolist() == [1.0, 0.95]
+    assert np.isnan(r["margin_db"][10:15, 1]).all() and np.isfinite(r["margin_db"][15:110, 1]).all()
+
+
+def test_an_even_member_count_with_a_half_integer_median_keeps_it_and_resolves_the_fraction_on_it():
+    """Round 16, M-4: need_count [14, 15, 14, 15] has the median 14.5; `int()` made it 14, and the report printed 'decided on 14 samples'. With a required
+    fraction of 0.93 (one missed sample allowed in 14.29) 14.5 resolves it and 14 did not."""
+    names = list(stage1.priors_for(MISSION)[1])
+    res = merged({}, {})
+    res["links"]["usv-uas-rf"]["need_count"] = np.array([14, 15, 14, 15] * 6)
+    m = dict(MISSION, links=[dict(lk, required_fraction=0.93) if lk["id"] == "usv-uas-rf" else lk for lk in MISSION["links"]])
+    e = stage1.summarize(res, names, m, 73)["links"]["usv-uas-rf"]
+    assert e["need_count_median"] == 14.5 and e["granularity_ok"] is True
+    assert stage1._median_count(np.array([1, 2])) == 1.5 and stage1._median_count(np.array([0, 1])) == 0.5 and stage1._median_count(np.array([3, 3])) == 3
+    assert isinstance(stage1._median_count(np.array([3, 3])), int)
+
+
+def test_the_usv_member_flies_its_own_insolation_scale_and_the_summary_gives_the_lowest_state_of_charge():
+    """Round 16, M-10: `_run_usv` hands the member's solar_yield_scale to the simulator and keeps its lowest state of charge as the USV's energy margin
+    (through `merge` and `summarize`); a mission whose USV never empties its pack still has a margin."""
+    u = next(x for x in MISSION["vehicles"] if x["id"] == "usv")
+    X = {"glider_speed_scale": np.ones(2), "battery_capacity_scale": np.ones(2), "usv_vpp_bias": np.full(2, -0.24), "solar_yield_scale": np.array([0.2, 1.0])}
+    t0 = 1_000_000.0
+    env = AnalyticEnv(wind=(-5.0, 0.0), swdown=P_USV["hotel_w"] / (P_USV["solar_eff"] * P_USV["solar_area_m2"]))       # the sun that pays the hotel load
+    r = stage1._run_usv(u, P_USV, env, 2, X, t0, t0 + 6 * 3600.0)
+    low = P_USV["soc0"] - 0.8 * P_USV["hotel_w"] * 6 / P_USV["battery_wh"]
+    assert r["energy_margin"].tolist() == pytest.approx([low, P_USV["soc0"]]) and r["sim"].solar.tolist() == [0.2, 1.0]
+    two = stage1.merge([dict(U=np.zeros((2, 1)), X={"a": np.zeros(2)}, vehicles={"usv": dict(r, **{"class": "usv"})}, links={}) for _ in range(2)])
+    assert two["vehicles"]["usv"]["energy_margin"].shape == (4,)
+    res = merged({"usv": 0.0}, {})
+    res["vehicles"]["usv"]["energy_margin"] = np.array([0.0, 0.25, 0.5, 0.75] * 6)
+    e = stage1.summarize(res, list(stage1.priors_for(MISSION)[1]), MISSION, 73)["vehicles"]["usv"]["energy"]
+    assert e == dict(soc_min_median=0.375, soc_min_p10=pytest.approx(0.0), soc_min_lowest=0.0, n_empty=6)
+    assert "energy" not in stage1.summarize(merged({"usv": 0.0}, {}), list(stage1.priors_for(MISSION)[1]), MISSION, 73)["vehicles"]["usv"]
