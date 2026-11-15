@@ -536,7 +536,7 @@ def test_r12_m6_the_assumed_count_is_of_the_platforms_the_mission_uses_not_of_th
     assert "platforms/quad_uas.yaml" in used and "config/assumptions.yaml" in used
     platforms = {f"platforms/{s}.yaml" for s in ("saildrone_explorer", "seaglider", "slocum", "modems", "radios")}      # radios: all but rfd900x
     assert set(unused) == platforms | {"config/assumptions.yaml", "config/perturbations.yaml"}
-    assert used["platforms/radios.yaml"] == 3                                  # the UAS's own radio (rfd900x), whatever the links say (round 13, M-2)
+    assert used["platforms/radios.yaml"] == 4          # the UAS's own radio (rfd900x: 2 gains, misc loss, sensitivity), whatever the links say (R16 M-6)
     assert len(c["assumed_inputs"]) > sum(used.values())                                   # the page still lists the whole catalogue
     a = report._assumed(c, dict(stage="credibility", ledger="l", receipt="r"))
     assert a["total"]["value"] == sum(used.values()) and a["catalogue"]["value"] == sum(used.values()) + sum(unused.values())
@@ -819,7 +819,7 @@ def used_ids(used, prefix):
     return {k.split(":", 1)[1] for k, u in used.items() if u and k.startswith(prefix)}
 
 
-UAS_RADIO = {f"radios.rfd900x.{k}" for k in ("gt_dbi", "gr_dbi", "misc_loss_db")}
+UAS_RADIO = {f"radios.rfd900x.{k}" for k in ("gt_dbi", "gr_dbi", "misc_loss_db", "rx_sens_dbm")}               # rx_sens_dbm: assumed since round 16, M-6
 
 
 def test_r12_l0_m6_an_iridium_only_mission_uses_the_sbd_inputs_and_nothing_else_of_radios_and_modems_but_its_uas_radio(run, data):
@@ -834,13 +834,13 @@ def test_r12_l0_m6_an_iridium_only_mission_uses_the_sbd_inputs_and_nothing_else_
     a = report._assumed(c, dict(stage="credibility", ledger="l", receipt="r"))
     n_used = sum(1 for i in c["assumed_inputs"] if i["used"] and i["kind"] != "fitted")
     assert a["total"]["value"] == n_used and a["catalogue"]["value"] > n_used
-    assert a["by_file"]["platforms/radios.yaml"]["value"] == len(sbd) + 3 and a["not_used_by_file"]["platforms/radios.yaml"]["value"] > 0
+    assert a["by_file"]["platforms/radios.yaml"]["value"] == len(sbd) + 4 and a["not_used_by_file"]["platforms/radios.yaml"]["value"] > 0
     assert "platforms/modems.yaml" in a["not_used_by_file"] and "platforms/modems.yaml" not in a["by_file"]
 
 
 def test_r12_l0_m6_the_demo_counts_the_radio_and_modem_it_flies_not_every_one_in_the_files(run, data):
     used, c = link_used(run, data, demo_mission()["links"])
-    assert used_ids(used, "radios.yaml") == {f"radios.rfd900x.{k}" for k in ("gt_dbi", "gr_dbi", "misc_loss_db")} | \
+    assert used_ids(used, "radios.yaml") == UAS_RADIO | \
         {f"iridium.sbd.{k}" for k in ("p_success", "max_attempts", "fail_cost_s", "session_setup_median_s", "session_setup_sigma")}
     assert used_ids(used, "modems.yaml") == {"defaults.anchor_margin_db", "defaults.valid_range_factor", "modems.benthos_atm960"}
     assert used["modems.yaml:modems.whoi_micromodem"] is False and used["radios.yaml:radios.xbee_pro_24.gt_dbi"] is False
