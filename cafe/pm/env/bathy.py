@@ -18,11 +18,12 @@ unit, why, what replaces it): GEBCO deep-ocean depth from satellite-predicted ba
 the grid-level quantization (a uniform distribution over the level spacing, computed, not assumed) except the open last level (an assumed
 sigma, bathy.gofs_open_level_sigma_m), UMWM unknown.
 """
-import concurrent.futures as cf, functools, hashlib, json, os, pathlib, zipfile, zlib
+import concurrent.futures as cf, functools, hashlib, json, pathlib, zipfile, zlib
 from typing import Any
 
 import numpy as np
 
+from cafe import atomic
 from .. import Tagged
 from ..config import assumptions as _assumptions
 from . import conventions as cv, remote
@@ -134,9 +135,8 @@ def fetch_gebco(box: Any, out_path: Any, url: str = GEBCO_URL, workers: int = 16
                  box=[s, n, w, e], resolution_deg=GEBCO_RES_DEG, sha256=hashlib.sha256(elev.tobytes()).hexdigest(), bytes_read=f.fetched + elev.nbytes)
     out = pathlib.Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_name(out.name + ".part.npz")
-    np.savez_compressed(tmp, lon=lons, lat=lat[j], elevation=elev, attrs=json.dumps(attrs))
-    os.replace(tmp, out)
+    # a temporary of its own (two fetches of one cut no longer share a fixed `.part.npz`), O_EXCL, then os.replace
+    atomic.write_with(out, lambda fh: np.savez_compressed(fh, lon=lons, lat=lat[j], elevation=elev, attrs=json.dumps(attrs)))
     return out
 
 

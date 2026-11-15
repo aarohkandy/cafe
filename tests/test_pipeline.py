@@ -26,6 +26,7 @@ from cafe.pm.env.environment import GriddedEnv
 from cafe.pm.env.protocol import AnalyticEnv
 from cafe.pm.physics import comms, glider, uas, usv
 from cafe.pm.stats import sampling
+from tests import lockprobe
 from tests.fixtures import pm_run
 from tests.fixtures.ci_env import make as fx
 from tests.fixtures.fakes import fake_module
@@ -4250,3 +4251,96 @@ def test_r14_l0_the_delete_advice_for_the_umwm_store_is_one_shell_word_when_the_
     with pytest.raises(config.ConfigError, match="cannot be read") as e:
         pipeline._umwm_depth(cache)
     assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(cache / "orca")]
+
+
+def test_r16_m18_context_env_checks_the_layer_and_loads_it_under_one_hold_of_the_caches_lock(tmp_path, data_copy, monkeypatch):
+    """P-R15A1: `Context.env` decided that derived.zarr is current and then read it; a null context in place of its `store_lock` left every test green, so a
+    rebuild by another run could come between the check and the load. Asked through a descriptor of its own: the lock is held at the span check and at the
+    load."""
+    ctx = ctx_for(tmp_path / "a")
+    lock = ctx.cache / "derived.lock"
+    seen = []
+    real_span, real_layer = pipeline._derived_span_problem, surface.SurfaceLayer
+    monkeypatch.setattr(pipeline, "_derived_span_problem", lambda c, w: (seen.append(lockprobe.held(lock)), real_span(c, w))[1])
+    monkeypatch.setattr(surface, "SurfaceLayer", lambda *a, **k: (seen.append(lockprobe.held(lock)), real_layer(*a, **k))[1])
+    assert ctx.env.subgrid is not None
+    assert seen == [True, True] and not lockprobe.held(lock)
+
+
+def test_r16_m18_the_derived_unchanged_check_hashes_the_store_under_the_caches_lock(tmp_path, data_copy, monkeypatch):
+    """The sibling at the end of the stages that read the layer: it hashes the whole store, which a build of another run must not be rewriting."""
+    ctx = ctx_for(tmp_path / "a")
+    ctx._env = types.SimpleNamespace(subgrid=object())
+    seen = []
+    real = surface.store_sha256
+    monkeypatch.setattr(surface, "store_sha256", lambda p: (seen.append(lockprobe.held(ctx.cache / "derived.lock")), real(p))[1])
+    L = ledger.Ledger(tmp_path / "y", "s", "h")
+    pipeline._derived_unchanged(ctx, L)
+    assert seen == [True] and [c["ok"] for c in L.d["checks"]] == [True]
+
+
+# ---- round 16, M-24: the ingest holds a lock beside each shared store while it checks, fetches and checks it again ----------------------------------------
+
+def test_r16_m24_the_gebco_cut_and_the_ocean_store_are_checked_and_fetched_under_a_lock_beside_the_store(tmp_path, data_copy, monkeypatch):
+    """Two ingests of one mission destroyed each other's ocean store (the first died in `to_zarr`) and could promote a half-written GEBCO `.npz`: both
+    fetches were unlocked. The check, the fetch and the check after it of each are one hold of `<store>.lock` in DATA (not the mission cache), and the
+    lock is free again afterwards. The fetches here are stand-ins that restore the deleted input, so the test runs offline."""
+    gebco = sorted((data_copy / "bathy").glob("gebco2026_*.npz"))[0]
+    store = _ocean_store_of(data_copy)
+    glock, slock = gebco.with_name(gebco.name + ".lock"), store.with_name(store.name + ".lock")
+    keep = tmp_path / "keep"
+    keep.mkdir()
+    shutil.copy(gebco, keep / "g.npz")
+    shutil.copytree(store, keep / "s.zarr")
+    gebco.unlink()
+    shutil.rmtree(store)
+    seen = []
+    real_g, real_o = pipeline._gebco_cached, pipeline._ocean_cached
+    monkeypatch.setattr(pipeline, "_gebco_cached", lambda p: (seen.append(("gebco check", lockprobe.held(glock))), real_g(p))[1])
+    monkeypatch.setattr(pipeline, "_ocean_cached", lambda *a, **k: (seen.append(("ocean check", lockprobe.held(slock))), real_o(*a, **k))[1])
+    fetch_g = lambda *a, **k: (seen.append(("gebco fetch", lockprobe.held(glock))), shutil.copy(keep / "g.npz", gebco))[0]                   # noqa: E731
+    fetch_o = lambda *a, **k: (seen.append(("ocean fetch", lockprobe.held(slock))), shutil.copytree(keep / "s.zarr", store))[0]               # noqa: E731
+    monkeypatch.setattr(pipeline.bathy, "fetch_gebco", fetch_g)
+    monkeypatch.setattr(pipeline.hycom, "fetch_gofs", fetch_o)
+    monkeypatch.setenv("CAFE_OFFLINE", "0")                                                        # (the tests run offline; the fetches above are stand-ins)
+    ctx = ctx_for(tmp_path / "r")
+    run_stage(pipeline.s_ingest, ctx, "ingest")
+    assert [(n, h) for n, h in seen if n.startswith("gebco")] == [("gebco check", True), ("gebco fetch", True), ("gebco check", True)]
+    assert [(n, h) for n, h in seen if n.startswith("ocean")] == [("ocean check", True), ("ocean fetch", True), ("ocean check", True)]
+    assert glock.is_file() and slock.is_file() and not lockprobe.held(glock) and not lockprobe.held(slock)
+    assert not (ctx.cache / "gofs_ci_fixture.zarr.lock").exists()                                    # beside the stores, not in the mission cache
+
+
+def test_r16_m24_a_second_ingest_says_it_waits_for_the_first_and_does_not_run_beside_it(tmp_path, monkeypatch):
+    import threading
+    monkeypatch.setenv("CAFE_OFFLINE", "0")
+    said, entered = [], threading.Event()
+    ctx = types.SimpleNamespace(log=said.append)
+    d = tmp_path / "ocean"
+
+    def second():
+        with pipeline._shared_store(ctx, d, "gofs_x.zarr.lock", "the ocean store gofs_x.zarr"):
+            entered.set()
+    with pipeline._shared_store(ctx, d, "gofs_x.zarr.lock", "the ocean store gofs_x.zarr"):
+        assert said == []                                                                          # free: no waiting line
+        t = threading.Thread(target=second, daemon=True)
+        t.start()
+        deadline = time.time() + 30
+        while not said and time.time() < deadline:
+            time.sleep(0.02)
+        assert len(said) == 1 and "another run is fetching the ocean store gofs_x.zarr" in said[0] and "waiting" in said[0] and not entered.is_set()
+    assert entered.wait(30) and len(said) == 1
+
+
+def test_r16_m24_offline_the_lock_makes_no_directory_and_no_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAFE_OFFLINE", "1")
+    ctx = types.SimpleNamespace(log=lambda m: None)
+    with pipeline._shared_store(ctx, tmp_path / "no" / "ocean", "gofs_x.zarr.lock", "x"):
+        pass
+    assert not (tmp_path / "no").exists()
+    monkeypatch.delenv("CAFE_OFFLINE")
+    with pipeline._shared_store(ctx, tmp_path / "no" / "ocean", "gofs_x.zarr.lock", "x"):          # online, the directory is made (the fetch makes it anyway)
+        assert (tmp_path / "no" / "ocean" / "gofs_x.zarr.lock").is_file()
+    (tmp_path / "ro").write_text("a file where the directory should be")                           # cannot be made: unlocked, no error
+    with pipeline._shared_store(ctx, tmp_path / "ro" / "ocean", "gofs_x.zarr.lock", "x"):
+        pass

@@ -1495,3 +1495,76 @@ def test_r15_a_first_fetch_does_not_call_the_manifest_it_has_not_written_yet_dam
     logged.clear()
     _fetch(tmp_path, ncss, log=logged.append)                                                   # and a good manifest is not damaged either
     assert not any("is not a parts manifest" in x for x in logged)
+
+
+# ---- round 16, M-24: a temporary of its own for every writer of the ocean store and of its parts ------------------------------------------------------
+
+def _steps_of(truth, n=None):
+    return (h._std(truth.isel(time=slice(i, i + 1))) for i in range(truth.sizes["time"] if n is None else n))
+
+
+def test_r16_m24_two_writers_of_one_store_no_longer_destroy_each_others_temporary(fx, truth, tmp_path):
+    """`write_store` built every store in `<out>.tmp` after `rmtree` of it: a second writer for the same store, started while the first ran, deleted the
+    first's directory and the first died in `to_zarr` with `append_dim='time' does not match any existing dataset dimensions` (reproduced on orca). Each call
+    now builds in a directory of its own; both finish, the later replacement wins, and nothing is left beside the store."""
+    out = tmp_path / "ocean" / "gofs_x.zarr"
+    out.parent.mkdir()
+    mid, go, errs = threading.Event(), threading.Event(), []
+
+    def slow():
+        for i, s in enumerate(_steps_of(truth)):
+            yield s
+            if i == 0:
+                mid.set()
+                assert go.wait(60)
+
+    def first():
+        try:
+            h.write_store(slow(), out, "in_situ", {})
+        except BaseException as e:                                                                  # noqa: BLE001  the test reports it
+            errs.append(e)
+    t = threading.Thread(target=first, daemon=True)
+    t.start()
+    assert mid.wait(60)
+    h.write_store(_steps_of(truth), out, "in_situ", {})                                              # the second writer finishes while the first is mid-way
+    go.set()
+    t.join(120)
+    assert errs == [] and h.open_store(out).sizes["time"] == truth.sizes["time"] and [p.name for p in out.parent.iterdir()] == ["gofs_x.zarr"]
+
+
+def test_r16_m24_a_store_write_that_fails_leaves_neither_a_store_nor_a_temporary_and_keeps_the_old_store(fx, truth, tmp_path):
+    out = tmp_path / "gofs_x.zarr"
+    h.write_store(_steps_of(truth), out, "in_situ", {})
+    before = sorted(str(p.relative_to(out)) for p in out.rglob("*"))
+
+    def broken():
+        yield h._std(truth.isel(time=slice(0, 1)))
+        raise OSError("disk full")
+    with pytest.raises(OSError, match="disk full"):
+        h.write_store(broken(), out, "in_situ", {})
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["gofs_x.zarr"] and sorted(str(p.relative_to(out)) for p in out.rglob("*")) == before
+
+
+def test_r16_m24_a_part_is_fetched_into_a_temporary_of_its_own_that_never_outlives_the_call(fx, ncss, dods, tmp_path, monkeypatch):
+    """`<out>.part` was one name for every fetch of a part: two fetches truncated each other's file, and a link planted at the name received the download.
+    `_fetch_part` gives the child a new name and renames it onto the part when the child is done; a child that fails, or is killed at its deadline (the
+    usual failure of a hung server), leaves no file beside the part."""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("VICTIM")
+    for n in ("a.nc", "b.nc"):
+        (tmp_path / f"{n}.part").symlink_to(victim)
+    url = h.ncss_url("ssh", ("surf_el",), h.box360(mk.BOX), mk.STEPS[0], mk.STEPS[0], ncss.base)
+    h._fetch_part(["_ncss", url], tmp_path / "a.nc", 60)
+    h._fetch_part(["_dods", str(dods / "ssh" / "2023"), "surf_el", mk.STEPS[0], mk.STEPS[1], *h.box360(mk.BOX)], tmp_path / "b.nc", 60)
+    assert victim.read_text() == "VICTIM" and (tmp_path / "a.nc").stat().st_size > 0 and (tmp_path / "b.nc").stat().st_size > 0
+    names = ["a.nc", "a.nc.part", "b.nc", "b.nc.part", "dods", "victim.txt"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == names                                       # no temporary left beside the parts
+    before = (tmp_path / "a.nc").read_bytes()
+    for fail in (RuntimeError("HYCOM read failed"), TimeoutError("no answer within 1 s")):
+        def child(args, deadline, fail=fail):
+            pathlib.Path(args[-1]).write_bytes(b"half a file")                                      # what a child that died or was killed leaves
+            raise fail
+        monkeypatch.setattr(h, "_child", child)
+        with pytest.raises(type(fail)):
+            h._fetch_part(["_ncss", url], tmp_path / "a.nc", 1)
+        assert sorted(p.name for p in tmp_path.iterdir()) == names and (tmp_path / "a.nc").read_bytes() == before

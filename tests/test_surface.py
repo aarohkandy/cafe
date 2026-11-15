@@ -9,6 +9,7 @@ from hypothesis import given, settings, strategies as st
 from cafe.pm.config import env_sigmas
 from cafe.pm.env import conventions as cv, environment as E, surface as S
 from cafe.pm.env.environment import GriddedEnv
+from tests import lockprobe
 from tests.fixtures.ci_env import make as fx
 
 DAY = 7                      # hour index 2023-03-02 01Z = 14:00 local solar time at 165W: the warm layer's afternoon peak
@@ -341,3 +342,26 @@ def test_r14_l0_the_delete_advice_for_the_derived_layer_is_one_shell_word_when_t
     with pytest.raises(ConfigError, match="derived surface layer .* cannot be read") as e:
         S.SurfaceLayer(tmp_path / "my runs")
     assert shlex.split(str(e.value).split("; delete ")[1].split(" and run")[0]) == [str(tmp_path / "my runs" / "derived.zarr")]
+
+
+def test_r16_m18_the_surface_layer_is_written_read_and_measured_under_the_caches_lock(ci_env, tmp_path, monkeypatch):
+    """P-R15A1: `build` writes derived.zarr and its record, `store_span` and `SurfaceLayer` read it, each under `store_lock(cache)`; a null context in
+    place of any of the three left every test green. Asked through a descriptor of its own at the write and at each read."""
+    import xarray as xr
+    d = tmp_path / "cache"
+    for s in ("wrf.zarr", "umwm.zarr"):
+        shutil.copytree(ci_env.cache / "orca" / s, d / "orca" / s)
+    seen = []
+    real_write, real_open = xr.Dataset.to_zarr, xr.open_zarr
+    monkeypatch.setattr(xr.Dataset, "to_zarr", lambda self, *a, **k: (seen.append(("write", lockprobe.held(d / "derived.lock"))), real_write(self, *a, **k))[1])
+
+    def opening(p, *a, **k):
+        if "derived.zarr" in str(p):                                                      # (the build reads the orca stores too, which are not the layer)
+            seen.append(("read", lockprobe.held(d / "derived.lock")))
+        return real_open(p, *a, **k)
+    monkeypatch.setattr(xr, "open_zarr", opening)
+    S.build(GriddedEnv(d, env_sigmas()), d, "k", log=lambda m: None)
+    assert seen == [("write", True)]
+    S.store_span(d)
+    S.SurfaceLayer(d)
+    assert seen == [("write", True), ("read", True), ("read", True)] and not lockprobe.held(d / "derived.lock")

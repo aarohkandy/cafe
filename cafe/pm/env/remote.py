@@ -212,13 +212,15 @@ _HELD = threading.local()                 # `paths`: the lock files this thread 
 
 
 @contextlib.contextmanager
-def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bool = True) -> Iterator[None]:
+def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bool = True, wait: Callable[[], None] | None = None) -> Iterator[None]:
     """An exclusive `flock` on `<cache>/<name>`, taken by whoever builds or replaces a store of the shared cache (`derived.zarr`) and by whoever reads it
     to validate or load it, so that a reader never sees a store half built or half deleted by a run of other code that shares the cache directory
     (P-R15A1: one run died hashing `derived.zarr` while the other deleted and rewrote it). Held by one thread at a time; the same thread may take it again
     inside (the ingest decides and builds under it, and the build reads the environment, which reads the layer). Released when the block ends, or with the
     process. `create=False` (the audit) never makes the file: without one, or where it cannot be opened (a cache that is not writable, no `fcntl`), the
-    block runs unlocked, since a store nobody can write has no builder to wait for."""
+    block runs unlocked, since a store nobody can write has no builder to wait for. `wait` is called once, before the wait, when another holds the lock
+    (the ingest says so in its log: a fetch of the ocean store takes hours). `name` makes the lock of another store beside it: the ocean store and the GEBCO
+    cut of the ingest are shared by missions and live in DATA, not in a mission's cache (round 16, M-24)."""
     path = pathlib.Path(cache) / name
     held: set[pathlib.Path] = _HELD.__dict__.setdefault("paths", set())
     if path in held:
@@ -231,7 +233,12 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
         yield
         return
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (fcntl.LOCK_NB if wait else 0))
+        except BlockingIOError:                                            # only with `wait`: someone else holds it
+            if wait:
+                wait()
+            fcntl.flock(fd, fcntl.LOCK_EX)
         held.add(path)
         try:
             yield

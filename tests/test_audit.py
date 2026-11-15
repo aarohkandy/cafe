@@ -13,6 +13,7 @@ from cafe.pm import audit, ledger
 from cafe.pm.env.remote import sha256
 from cafe.pm.env import surface
 from cafe.pm.physics import comms
+from tests import lockprobe
 from cafe.pm.ledger import Ledger
 
 
@@ -1402,3 +1403,20 @@ def test_r15_an_empty_argument_is_not_a_run_directory(argv, tmp_path, monkeypatc
     monkeypatch.setattr(audit, "ledger_problems", never)
     assert audit.main(argv) == 2
     assert "error: '' is not a run directory" in capsys.readouterr().out
+
+
+def test_r16_m18_the_audit_hashes_the_derived_layer_under_the_caches_lock_and_other_stores_without_one(tmp_path, monkeypatch):
+    """P-R15A1 (audit side): a run that shares the cache may be rebuilding derived.zarr, so the audit hashes it while holding `derived.lock`, taken without
+    making the file. A null context in place of the lock left every test green."""
+    from cafe.pm.env import remote
+    cache = tmp_path / "cache"
+    for d in ("derived.zarr", "wrf.zarr"):
+        (cache / d).mkdir(parents=True)
+        (cache / d / "x").write_bytes(b"1")
+    seen = []
+    monkeypatch.setattr(audit, "tree_sha256", lambda f: seen.append((f.name, lockprobe.held(cache / "derived.lock"))) or "h")
+    assert audit._tree(cache / "derived.zarr") == "h" and not (cache / "derived.lock").exists()                # an audit writes nothing
+    with remote.store_lock(cache):
+        pass                                                                                                 # (a build made the file)
+    assert audit._tree(cache / "derived.zarr") == "h" and audit._tree(cache / "wrf.zarr") == "h"
+    assert seen == [("derived.zarr", False), ("derived.zarr", True), ("wrf.zarr", False)]  # no file: unlocked; with one: held; another store: not locked

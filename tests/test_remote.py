@@ -7,6 +7,7 @@ import struct
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 
 import netCDF4
@@ -15,6 +16,7 @@ import pytest
 from hypothesis import HealthCheck, given, settings, strategies as st
 
 from cafe.pm.env import remote
+from tests import lockprobe
 from tests.conftest import _Handler
 
 RNG = np.random.default_rng(7)
@@ -1051,3 +1053,46 @@ def test_r16_pa_without_a_lock_file_a_cache_that_cannot_be_written_or_no_fcntl_t
     with remote.store_lock(tmp_path):
         pass
     assert not (tmp_path / "derived.lock").exists()
+
+
+# ------------------------------------------------------------------ store_lock: the release and the second take (round 16, M-18)
+
+def test_r16_m18_a_lock_is_released_at_the_end_of_its_block_and_a_second_block_takes_it_afresh(tmp_path):
+    """`held.discard(path)` as `pass` left the path in the thread's set after the block: the flock was dropped, and the next block of that thread took none
+    (the set said it already held it), so its store was unprotected. Asked through a descriptor of its own, the file is held inside every block and free
+    between them, also after a block that raised."""
+    f = tmp_path / "derived.lock"
+    with remote.store_lock(tmp_path):
+        assert lockprobe.held(f)
+    assert not lockprobe.held(f)
+    with remote.store_lock(tmp_path):
+        assert lockprobe.held(f)                                                            # afresh, not "already held by this thread"
+        with remote.store_lock(tmp_path):
+            assert lockprobe.held(f)
+        assert lockprobe.held(f)                                                            # the inner end does not release the outer hold
+    assert not lockprobe.held(f)
+    with pytest.raises(RuntimeError), remote.store_lock(tmp_path):
+        raise RuntimeError("a build that died")
+    assert not lockprobe.held(f)
+    with remote.store_lock(tmp_path):
+        assert lockprobe.held(f)
+
+
+def test_r16_m24_a_lock_of_another_name_is_a_file_of_that_name_and_wait_is_called_only_when_someone_else_holds_it(tmp_path):
+    """The ocean store and the GEBCO cut of the ingest are locked beside the stores (`<store>.lock` in DATA), not in a mission's cache; the waiter says so."""
+    said = []
+    with remote.store_lock(tmp_path, "gofs_x.zarr.lock", wait=lambda: said.append(1)):
+        assert (tmp_path / "gofs_x.zarr.lock").is_file() and not (tmp_path / "derived.lock").exists() and lockprobe.held(tmp_path / "gofs_x.zarr.lock")
+        assert said == []                                                                   # free: it did not wait
+    done = threading.Event()
+
+    def other():
+        with remote.store_lock(tmp_path, "gofs_x.zarr.lock", wait=lambda: said.append(2)):
+            done.set()
+    with remote.store_lock(tmp_path, "gofs_x.zarr.lock"):
+        threading.Thread(target=other, daemon=True).start()
+        deadline = time.time() + 30
+        while not said and time.time() < deadline:
+            time.sleep(0.02)
+        assert said == [2] and not done.is_set()                                            # told us it waits, and is waiting
+    assert done.wait(30) and said == [2]
