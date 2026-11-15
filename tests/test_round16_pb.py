@@ -29,7 +29,7 @@ def remote_copy(tmp_path, script):
     (tools / "ssh").write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n')
     # rsync [-az --delete --exclude X ...] -e <ssh> SRC azureuser@host:DEST: SRC is a directory (a trailing slash means its content); DEST is under `remote`
     (tools / "rsync").write_text(f'''#!/bin/sh
-for last; do :; done
+for a; do last=$a; done
 src=""; while [ $# -gt 1 ]; do src=$1; shift; done
 dest="{remote}/${{last#*:}}"
 mkdir -p "$dest" && cp -R "$src". "$dest" && find "$dest" -name __pycache__ -prune -exec rm -rf {{}} +
