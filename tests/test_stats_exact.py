@@ -313,7 +313,7 @@ def test_a_valid_uniform_with_a_nonzero_value_and_a_numpy_number_still_load_and_
     cfg = S.load_perturbations()
     for k, e in cfg.items():
         S.check_entry(k, e)
-    assert len(cfg) == 12 and sorted({e["dist"] for e in cfg.values()}) == ["fixed", "lognormal", "normal", "uniform"]
+    assert len(cfg) == 13 and sorted({e["dist"] for e in cfg.values()}) == ["fixed", "lognormal", "normal", "uniform"]
 
 
 def test_to_marginals_maps_value_to_sd_or_sigma_and_defaults_the_location():
