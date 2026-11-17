@@ -738,7 +738,7 @@ def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None
     return None if not low else (f"An end of this RF link has an antenna below {RF_LOW_ANTENNA_M:g} m: {', '.join(low)}. The two-ray model takes the ground "
                                  "reflection as -1, which overstates the loss for so low an antenna (by about 1 to 6 dB at 0.3 m and 11 to 16 dB at 0.1 m, "
                                  "against a Fresnel two-ray and a parabolic-equation field): this margin is conservative and a GO can show as MARGINAL "
-                                 "(CREDIBILITY, limitations).")
+                                 "(CREDIBILITY, limitation L23).")
 
 
 def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str, Any]:
