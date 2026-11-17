@@ -100,13 +100,14 @@ def replace_from(src: Any, p: Any, follow_symlinks: bool = False) -> None:
     NetCDF part: large, and the disks are nearly full). The rules are `_replace_through`'s, taken from the same `_target`: a symbolic link at `p` is refused
     (ELOOP) unless `follow_symlinks`, and an existing regular file's nine permission bits (never setuid, setgid or sticky) are put on `src` first, so a part
     made with the umask no longer changes the mode of the file it replaces (round 17, M-13 sibling). `src` is a file this process made under a name of its
-    own or under a held lock: it is opened with `O_NOFOLLOW` (a link at `src` is ELOOP) and the mode goes on that descriptor. `src` is gone afterwards, and
-    `p` has its inode; a failed call leaves `src` where it was."""
+    own or under a held lock: it is opened with `O_NOFOLLOW` whether `p` exists or not (a link at `src` is ELOOP: for a new name too, which is what the first
+    fetch of a file is; round 18, M-8) and the mode, when `p` has one to keep, goes on that descriptor. `src` is gone afterwards, and `p` has its inode; a
+    failed call leaves `src` where it was."""
     p, mode = _target(p, follow_symlinks)
-    if mode is not None:
-        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        try:
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)                    # whatever `p` is: a link at `src` is ELOOP (round 18, M-8)
+    try:
+        if mode is not None:
             os.fchmod(fd, mode)
-        finally:
-            os.close(fd)
+    finally:
+        os.close(fd)
     os.replace(src, p)

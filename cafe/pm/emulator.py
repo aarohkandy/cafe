@@ -20,7 +20,10 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import itertools
+import os
 import pathlib
+import shlex
+import stat
 import time
 from collections.abc import Callable, Iterator
 from typing import Any, cast
@@ -104,16 +107,46 @@ def write_table(df: pd.DataFrame, path: pathlib.Path) -> None:
 @contextlib.contextmanager
 def locked(path: pathlib.Path) -> Iterator[None]:
     """An exclusive lock (`fcntl.flock` on the sibling `<table>.lock`) for a read-modify-write of the table: concurrent runs queue instead of
-    overwriting each other's rows. Without `fcntl` (not Linux) there is no lock and `write_table` stays atomic."""
+    overwriting each other's rows. Without `fcntl` (not Linux) there is no lock and `write_table` stays atomic. The lock file is opened as the table's
+    writers open theirs (round 18, M-9): `O_NOFOLLOW | O_CLOEXEC`, so a link planted at its name is refused and its target is neither made nor opened, and
+    created `0o666` under the umask (a group that shares the table may take the lock; the mode of a lock that exists is never changed). A lock that cannot be
+    opened is a `ConfigError` that names the file, its owner and what to do: the run does not go on without it, because the lock is what stops two runs
+    from losing each other's rows."""
     try:
         import fcntl
     except ImportError:
         yield
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_name(path.name + ".lock"), "a") as f:
-        fcntl.flock(f, fcntl.LOCK_EX)                                    # released when f closes
+    lock = path.with_name(path.name + ".lock")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o666)
+    except OSError as e:
+        raise ConfigError(f"cannot open the emulator table's lock file {lock} ({type(e).__name__}: {e.strerror or e}); {_lock_remedy(lock)}. "
+                          "The lock stops two runs from losing each other's rows, so the run does not go on without it") from e
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
         yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)                                # (a forked child that inherited fd keeps the open file, so unlock first)
+        finally:
+            os.close(fd)
+
+
+def _lock_remedy(lock: pathlib.Path) -> str:
+    """What to do about a lock file that cannot be opened: by what stands at its name."""
+    if lock.is_symlink():
+        return f"a symbolic link stands at that name and is never followed: remove it ({lock})"
+    if lock.exists() and not lock.is_file():
+        return f"something that is not a file stands at that name: remove it ({lock})"
+    try:
+        owner = lock.owner()
+        mode = f"{stat.S_IMODE(lock.stat().st_mode):04o}"
+    except (OSError, KeyError):                                  # (KeyError: an account with no passwd entry, as in a container)
+        return "check that the directory exists and is writable by this account, and that nothing but a file stands at that name"
+    return (f"the file belongs to {owner} (mode {mode}): ask {owner} to `chmod g+w {shlex.quote(str(lock))}` (a group that shares the table), "
+            "or to remove it while no run is going on")
 
 
 class Emulator:

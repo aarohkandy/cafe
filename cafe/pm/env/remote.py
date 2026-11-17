@@ -214,7 +214,8 @@ _HELD = threading.local()                 # `paths`: the lock files this thread 
 
 
 @contextlib.contextmanager
-def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bool = True, wait: Callable[[], None] | None = None) -> Iterator[bool]:
+def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bool = True, wait: Callable[[], None] | None = None,
+               log: Callable[[str], None] | None = None) -> Iterator[bool]:
     """An exclusive `flock` on `<cache>/<name>`, taken by whoever builds or replaces a store of the shared cache (`derived.zarr`) and by whoever reads it
     to validate or load it, so that a reader never sees a store half built or half deleted by a run of other code that shares the cache directory
     (P-R15A1: one run died hashing `derived.zarr` while the other deleted and rewrote it). Held by one thread at a time; the same thread may take it again
@@ -225,7 +226,10 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
     cut of the ingest are shared by missions and live in DATA, not in a mission's cache (round 16, M-24). The file is opened with `O_NOFOLLOW`: a link planted
     at its name is no lock (the block runs unlocked, as for any other open that fails) and its target is neither made nor opened. The block gets whether the
     lock is held (True; also for the thread that already holds it) or not (False: no `fcntl`, a directory that cannot be written, a link at the name),
-    for a caller that must not rely on it (`download`, round 17, M-9)."""
+    for a caller that must not rely on it (`download`, round 17, M-9). The file is created `0o666` under the umask (round 18, M-9: `0o644` made a lock that a
+    second account sharing the directory could not open read-write, so its block ran unlocked without a word); the mode of a lock that exists is never
+    changed. `log`, when given, is called once with one line when the block runs unlocked (no `fcntl`, an open that fails), naming the lock and the reason,
+    except for `create=False` with no file there (the audit asks for none and nothing was meant to be locked); the ingest passes its logger."""
     path = pathlib.Path(cache) / name
     held: set[pathlib.Path] = _HELD.__dict__.setdefault("paths", set())
     if path in held:
@@ -233,8 +237,11 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
         return
     try:
         import fcntl
-        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_CREAT if create else 0), 0o644)
-    except (ImportError, OSError):
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_CREAT if create else 0), 0o666)
+    except (ImportError, OSError) as e:
+        if log is not None and (create or not isinstance(e, FileNotFoundError)):
+            why = "no fcntl" if isinstance(e, ImportError) else f"{type(e).__name__}: {e.strerror or e}"
+            log(f"warning: {path} is not locked ({why}); this block runs without the lock, so another run that shares the directory may write at the same time")
         yield False
         return
     try:
