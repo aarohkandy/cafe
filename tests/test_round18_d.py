@@ -81,7 +81,7 @@ def test_r18_m2_turning_any_signed_literal_of_the_keyed_code_to_the_other_sign_m
         assert moved == (not skipped), (i, target.lineno, ast.unparse(target))
         n_moved += moved
         n_kept += not moved
-    assert n_sites >= 10 and n_moved >= 10            # measured at the base commit: 10 of the file's 27 signed literals are in a keyed function (the other 17: below)
+    assert n_sites >= 10 and n_moved >= 10            # measured at the base commit: 10 of the file's 27 are in a keyed function
 
 
 def test_r18_m2_the_other_signed_literals_of_the_file_are_module_constants_that_the_recipe_hashes_with_their_signs():
@@ -145,7 +145,7 @@ def test_r18_m11_importing_cfd_with_a_huge_cafe_nproc_names_the_variable():
 
 @pytest.mark.parametrize("label", [None, ["+x"], 5, 1.5, b"+x", ("+x",), {"+x"}, object()])
 def test_r18_m11_a_direction_label_that_is_not_a_string_is_a_bad_direction_not_a_type_error(label):
-    """`dvec(None)` and `dvec(["+x"])` raised `TypeError` from `d in DIRS` (unhashable) or from `re.fullmatch`; DECISIONS 931 says a bad direction is a `ValueError`."""
+    """`dvec(None)` and `dvec(["+x"])` raised `TypeError` (`d in DIRS` unhashable, `re.fullmatch` on a non-string); DECISIONS 931 says `ValueError`."""
     with pytest.raises(ValueError, match="bad direction"):
         cfd.dvec(label)
 
@@ -232,10 +232,10 @@ def test_r18_a3_the_command_texts_of_the_openfoam_calls_are_in_the_key():
     unedited = cfd._literals(ast.unparse(ast.parse(SRC)))
 
     def sh_texts(tree):
-        return [c for fn in keyed_functions(tree) for call in ast.walk(fn) if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "sh"
-                for c in ast.walk(call) if isinstance(c, ast.Constant) and isinstance(c.value, str)]
+        calls = [x for fn in keyed_functions(tree) for x in ast.walk(fn) if isinstance(x, ast.Call) and isinstance(x.func, ast.Name) and x.func.id == "sh"]
+        return [c for call in calls for c in ast.walk(call) if isinstance(c, ast.Constant) and isinstance(c.value, str)]
     n = len(sh_texts(ast.parse(SRC)))
-    assert n >= 20                                                                  # measured: 22 text constants in 19 calls at the base commit
+    assert n >= 20                                                                  # measured at the base commit: 30 text constants in 15 calls
     for i in range(n):
         tree = ast.parse(SRC)
         target = sh_texts(tree)[i]

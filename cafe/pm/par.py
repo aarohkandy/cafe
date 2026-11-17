@@ -54,7 +54,7 @@ def env_count(name: str) -> int | None:
     if not v:
         return None
     digits = v.isascii() and v.isdecimal()                  # `int` alone takes "1_0" as 10, " 4 " as 4 and full-width digits (round 17, M-11)
-    n = int(v) if digits and len(v) <= 9 else 0             # a count of workers or cores has at most 9 digits; `int` of 4,300 is a bare ValueError (round 18, M-11)
+    n = int(v) if digits and len(v) <= 9 else 0             # at most 9 digits: `int` of 4,300 is a bare ValueError (round 18, M-11)
     if n < 1:
         from .config import ConfigError
         shown = v if len(v) <= 40 else v[:20] + "..."
