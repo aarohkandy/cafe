@@ -998,7 +998,7 @@ _MESH_BODY = "  unit: elements\n  why: x\n"
     ("quoted text over lines", f"{_MESH}\n  why: \"a\n  value: 5\"\n  value: 70\n", "refuse"),
     ("comment after the number", f"{_MESH}\n  value: 70   # mesh\n{_MESH_BODY}", 70),
     ("deeper comment line after the number", f"{_MESH}\n  value: 70\n  # a note\n{_MESH_BODY}", 70),  # a comment ends the scalar: 70
-    ("continuation of another child", f"{_MESH}\n  value: 70\n  unit: elements\n    per hull\n  why: x\n", "refuse"),  # round 18, M-10 (A-9): PyYAML 70; no deeper line
+    ("continuation of another child", f"{_MESH}\n  value: 70\n  unit: elements\n    per hull\n  why: x\n", "refuse"),  # round 18, M-10 (A-9): no deeper line
     ("value continued at 4 spaces", f"{_MESH}\n  value: 70\n    more\n{_MESH_BODY}", "refuse"),                                      # PyYAML '70 more' (M-20)
     ("value continued at 3 spaces", f"{_MESH}\n  value: 70\n   more\n{_MESH_BODY}", "refuse"),
     ("value continued at 5 spaces", f"{_MESH}\n  value: 70\n     more\n{_MESH_BODY}", "refuse"),
