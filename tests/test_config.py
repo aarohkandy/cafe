@@ -1522,7 +1522,7 @@ def test_r15_config_write_text_is_the_atomic_writer_and_a_temporary_has_a_name_o
     assert all(n.startswith(".") and n.endswith(".tmp") and len(n) == 17 for n in seen) and not list(tmp_path.glob("*.tmp"))  # M-6: 17 characters
     import ast
     imported = {a.name for n in ast.walk(ast.parse(pathlib.Path(atomic.__file__).read_text())) if isinstance(n, ast.Import) for a in n.names}
-    assert imported == {"json", "os", "pathlib", "shutil", "stat", "uuid"} and not any(
+    assert imported == {"json", "os", "pathlib", "stat", "uuid"} and not any(
         isinstance(n, ast.ImportFrom) and n.module != "typing" for n in ast.walk(ast.parse(pathlib.Path(atomic.__file__).read_text())))
 
 

@@ -178,23 +178,77 @@ def test_r17_m13_sibling_a_fetched_part_keeps_the_mode_of_the_part_it_replaces(t
 
 def test_r17_m13_replace_from_moves_a_finished_file_by_the_writers_rules(tmp_path):
     """`atomic.replace_from` (a part that cannot go through `write_with`): the content, the mode of an existing file kept, the creation mode of a new one, the
-    source removed, a link at the name refused."""
+    source gone, a link at the name refused."""
     src, dest = tmp_path / "src", tmp_path / "dest"
     src.write_bytes(b"new" * 1000)
     with umask(0o027):
+        src.chmod(0o640)
         atomic.replace_from(src, dest)
     assert dest.read_bytes() == b"new" * 1000 and mode(dest) == 0o640 and not src.exists()
     dest.chmod(0o664)
     src.write_bytes(b"newer")
-    with umask(0o077):
-        atomic.replace_from(src, dest)
+    src.chmod(0o600)                                                        # what a part made under umask 077 has
+    atomic.replace_from(src, dest)
     assert dest.read_bytes() == b"newer" and mode(dest) == 0o664 and sorted(p.name for p in tmp_path.iterdir()) == ["dest"]
     link = tmp_path / "link"
     link.symlink_to(dest)
     src.write_bytes(b"x")
     with pytest.raises(OSError) as e:
         atomic.replace_from(src, link)
-    assert e.value.errno == errno.ELOOP and dest.read_bytes() == b"newer" and src.exists()
+    assert e.value.errno == errno.ELOOP and dest.read_bytes() == b"newer" and src.exists() and link.is_symlink()
+
+
+def test_r17_m13_replace_from_is_a_rename_the_file_at_the_name_is_the_sources_inode(tmp_path):
+    """The lead's change: the first version copied the finished part through a second temporary (twice the space and the IO of a part on a disk that is 97 %
+    full). `p` is now `src`'s own inode."""
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    src.write_bytes(b"x" * 5000)
+    dest.write_bytes(b"old")
+    ino = os.stat(src).st_ino
+    atomic.replace_from(src, dest)
+    assert os.stat(dest).st_ino == ino and dest.read_bytes() == b"x" * 5000 and not src.exists()
+
+
+def test_r17_m13_replace_from_follows_a_link_only_when_asked_and_a_loop_is_eloop(tmp_path):
+    real, link, src = tmp_path / "real", tmp_path / "link", tmp_path / "src"
+    real.write_bytes(b"old")
+    real.chmod(0o664)
+    link.symlink_to(real)
+    src.write_bytes(b"new")
+    src.chmod(0o600)
+    atomic.replace_from(src, link, follow_symlinks=True)
+    assert link.is_symlink() and real.read_bytes() == b"new" and mode(real) == 0o664 and not src.exists()
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.symlink_to(b)
+    b.symlink_to(a)
+    src.write_bytes(b"x")
+    with pytest.raises(OSError) as e:
+        atomic.replace_from(src, a, follow_symlinks=True)
+    assert e.value.errno == errno.ELOOP and a.is_symlink() and b.is_symlink() and src.exists()
+
+
+def test_r17_m13_replace_from_never_widens_from_a_links_target_or_takes_special_bits(tmp_path):
+    """A link at the name is refused, so the target's mode is never read for it; a setuid file's mode goes on as its nine bits; a link as the SOURCE is
+    refused (it is opened `O_NOFOLLOW`) and nothing is replaced."""
+    dest, src = tmp_path / "dest", tmp_path / "src"
+    dest.write_bytes(b"old")
+    dest.chmod(0o4755)
+    src.write_bytes(b"new")
+    atomic.replace_from(src, dest)
+    assert mode(dest) == 0o755 and dest.read_bytes() == b"new"
+    real, srclink = tmp_path / "real", tmp_path / "srclink"
+    real.write_bytes(b"payload")
+    srclink.symlink_to(real)
+    with pytest.raises(OSError) as e:
+        atomic.replace_from(srclink, dest)
+    assert e.value.errno == errno.ELOOP and dest.read_bytes() == b"new" and srclink.is_symlink()
+
+
+def test_r17_m13_the_target_of_a_replace_that_is_not_a_regular_file_has_no_mode_to_keep(tmp_path):
+    d = tmp_path / "d"
+    d.mkdir()
+    d.chmod(0o700)
+    assert atomic._target(d, False) == (d, None) and atomic._target(tmp_path / "absent", False) == (tmp_path / "absent", None)
 
 
 @pytest.mark.parametrize("bits", [0o4755, 0o2755, 0o1777])

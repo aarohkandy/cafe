@@ -1,7 +1,7 @@
 """The one writer of a file that is read back, standard library only: the live app image (Dockerfile, requirements.txt) has no pyyaml, so the app's own
 files (job status and results, the CFD cache) could not use `cafe.pm.config`, which imports it. `cafe.pm.config.write_text` calls this function, so there is
 one implementation of the temporary-and-replace (round 15, P-R14L0-1)."""
-import json, os, pathlib, shutil, stat, uuid
+import json, os, pathlib, stat, uuid
 from typing import Any, Callable
 
 
@@ -22,15 +22,11 @@ class _Created(type(pathlib.Path())):  # type: ignore[misc]
         return open(self.fd, mode, buffering, encoding, errors, newline, closefd=False)
 
 
-def _replace_through(p: Any, fill: Callable[[pathlib.Path, int], None], follow_symlinks: bool) -> None:
-    """The one temporary-and-replace of this module (`write_text` and `write_with` call it, so the two never differ again: round 16, S1). `fill(tmp, fd)` writes
-    the new content through `fd`, the descriptor `os.open(..., O_EXCL)` returned (`tmp` is its name, for a `Path` that stands in for it). The temporary is
-    made with the mode `0o600` when `p` exists and the creation mode `0o666` (the process's umask applies) when it does not, so it is never readable more
-    widely than the file it becomes; an existing file's permission bits (owner, group and other: never setuid, setgid or sticky, round 17) are set on it after
-    the write (a new file gets the default ones); a hard link to the file does not survive, because a replace gives the name a new inode and the other name
-    keeps the old content. A symbolic link at `p` is refused
-    (`OSError`, ELOOP) unless `follow_symlinks`: then the file it points to is the one replaced and the link stays a link (a loop of links is ELOOP too: no
-    file is there to replace). A failed write leaves `p` as it was and no temporary."""
+def _target(p: Any, follow_symlinks: bool) -> tuple[pathlib.Path, int | None]:
+    """Where a replace of `p` lands and the mode the new file takes: the one place of the link and mode rules (`_replace_through` and `replace_from` share it).
+    A symbolic link at `p` is refused (`OSError`, ELOOP) unless `follow_symlinks`: then the file it points to is the target (a loop of links is ELOOP too: no
+    file is there to replace; a dangling link is not a loop, its target is made). The mode is that of an existing regular file, the nine bits of owner, group and
+    other and never setuid, setgid or sticky (round 17); None when there is none (a new name, or something that is not a regular file)."""
     p = pathlib.Path(p)
     if follow_symlinks:
         p = pathlib.Path(os.path.realpath(p))
@@ -39,9 +35,21 @@ def _replace_through(p: Any, fill: Callable[[pathlib.Path, int], None], follow_s
     elif p.is_symlink():
         raise OSError(40, "refusing to write through a symbolic link", str(p))           # 40 = ELOOP
     try:
-        mode: int | None = stat.S_IMODE(os.stat(p).st_mode) & 0o777        # the mode of the file replaced, never setuid, setgid or sticky; a new file has none
+        st = os.stat(p)
     except OSError:
-        mode = None
+        return p, None
+    return p, (stat.S_IMODE(st.st_mode) & 0o777 if stat.S_ISREG(st.st_mode) else None)
+
+
+def _replace_through(p: Any, fill: Callable[[pathlib.Path, int], None], follow_symlinks: bool) -> None:
+    """The one temporary-and-replace of this module (`write_text` and `write_with` call it, so the two never differ again: round 16, S1). `fill(tmp, fd)` writes
+    the new content through `fd`, the descriptor `os.open(..., O_EXCL)` returned (`tmp` is its name, for a `Path` that stands in for it). The temporary is
+    made with the mode `0o600` when `p` exists and the creation mode `0o666` (the process's umask applies) when it does not, so it is never readable more
+    widely than the file it becomes; an existing file's permission bits (owner, group and other: never setuid, setgid or sticky, round 17) are set on it after
+    the write (a new file gets the default ones); a hard link to the file does not survive, because a replace gives the name a new inode and the other name
+    keeps the old content. A symbolic link at `p` is refused (`OSError`, ELOOP) unless `follow_symlinks`: then the file it points to is the one replaced and
+    the link stays a link (`_target`). A failed write leaves `p` as it was and no temporary."""
+    p, mode = _target(p, follow_symlinks)
     tmp = tmp_name(p)
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666 if mode is None else 0o600)       # ours alone: O_EXCL fails on any existing name
     try:
@@ -88,13 +96,17 @@ def write_with(p: Any, writer: Callable[[Any], None], follow_symlinks: bool = Fa
 
 
 def replace_from(src: Any, p: Any, follow_symlinks: bool = False) -> None:
-    """The finished file `src` as `p`, by `_replace_through` (so by the same rules as `write_text`: a temporary of its own, the permission bits of an existing
-    `p` kept, a link at `p` refused unless `follow_symlinks`): `src` is copied through the descriptor and then removed. For a file that grows over several
-    calls or that a child process makes by name (a download's `.part`, a fetched NetCDF part) and so cannot be written by `write_with`; a bare `os.replace`
-    of it gave `p` the umask's mode of `src` (round 17, M-13 sibling). It costs one copy of the file, on the disk of `p`."""
-    def fill(tmp: pathlib.Path, fd: int) -> None:
-        with open(src, "rb") as s, open(fd, "wb", closefd=False) as f:
-            shutil.copyfileobj(s, f, 1 << 20)
-
-    _replace_through(p, fill, follow_symlinks)
-    pathlib.Path(src).unlink(missing_ok=True)
+    """The finished file `src` renamed onto `p`: no copy, so no second file on the disk and no second pass over the bytes (a download's `.part`, a fetched NetCDF
+    part: large, and the disks are nearly full). The rules are `_replace_through`'s, taken from the same `_target`: a symbolic link at `p` is refused (ELOOP)
+    unless `follow_symlinks`, and an existing regular file's nine permission bits (never setuid, setgid or sticky) are put on `src` first, so a part made with
+    the umask no longer changes the mode of the file it replaces (round 17, M-13 sibling). `src` is a file this process made under a name of its own or under
+    a held lock: it is opened with `O_NOFOLLOW` (a link at `src` is ELOOP) and the mode goes on that descriptor. `src` is gone afterwards, and `p` has its
+    inode; a failed call leaves `src` where it was."""
+    p, mode = _target(p, follow_symlinks)
+    if mode is not None:
+        fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+    os.replace(src, p)
