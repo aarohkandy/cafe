@@ -10,10 +10,11 @@ import re
 import numpy as np
 import pytest
 
-from cafe.pm import __main__ as cli, budget, config, report, stage1, whatif
+from cafe.pm import __main__ as cli, budget, config, pipeline, report, stage1, whatif
 from cafe.pm.physics import uas
 from tests.fixtures import pm_run
 from tests.test_cli import wi, whatif_args  # noqa: F401  (wi is a fixture)
+from tests.test_pipeline import cheap_plan, fake_stage1, run_stage, synthetic_ctx, table  # noqa: F401  (fake_stage1 and table are fixtures)
 from tests.test_round16_report import data_dir, full  # noqa: F401  (autouse and a fixture)
 from tests.test_whatif import ENV, GL, GSC, STORM, TRACK, plan_for, storm_em  # noqa: F401  (storm_em is a fixture)
 
@@ -65,6 +66,34 @@ def test_m1_a_share_that_covers_only_the_candidates_leaves_the_baseline_unmeasur
     cost = budget.batch_cost_s(plan, [GL])
     flips, spent = whatif.flip_search(STORM, BASE, {GL: TRACK}, ENV, {}, plan, *stage1.priors_for(STORM), None, 5, 1.5 * cost, lambda *_: None)
     assert flips[GL]["base_same"] is None and spent == cost and "base_same" in flips[GL]      # the key is there: a report of this round says "not measured"
+
+
+def test_m1_the_base_runs_own_first_batch_is_the_baseline_at_no_cost_and_needs_no_share(monkeypatch):
+    calls = fake_batch(monkeypatch)
+    plan = plan_for(STORM, 32)
+    cost = budget.batch_cost_s(plan, [GL])
+    flags = {GL: np.isin(np.arange(64), sorted(BASE_FAIL))}                                      # 15 of the 64 members, 5 of the first 32
+    flips, spent = whatif.flip_search(STORM, BASE, {GL: TRACK}, ENV, {}, plan, *stage1.priors_for(STORM), None, 5, 1.5 * cost, lambda *_: None, flags)
+    f = flips[GL]
+    assert (f["base_same"]["p_fail"], f["base_same"]["n"]) == (5 / 32, 32) and f["base_same"]["verdict"] in ("GO", "MARGINAL", "NO-GO")
+    assert spent == cost and len(calls) == 1 and calls[0] == list(range(32))                     # only the one candidate ran; the baseline was read
+    flips, _ = whatif.flip_search(STORM, BASE, {GL: TRACK}, ENV, {}, plan, *stage1.priors_for(STORM), None, 5, 10 * cost, lambda *_: None,
+                                  {GL: flags[GL][:8]})                                           # fewer flags than a batch: measured, as without them
+    assert flips[GL]["base_same"]["n"] == 32 and (flips[GL]["base_same"]["p_fail"] == 5 / 32)
+
+
+def test_m1_the_pipeline_hands_the_base_runs_failure_flags_to_the_flip_search(tmp_path, table, fake_stage1, monkeypatch):  # noqa: F811
+    seen, real = {}, whatif.flip_search
+    monkeypatch.setattr(whatif, "flip_search", lambda *a, **k: (seen.update(a=a, k=k), real(*a, **k))[1])
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48))
+    run_stage(pipeline.s_emulator, ctx, "emulator")
+    import pickle
+    res = pickle.loads((ctx.run_dir / "stage1b" / "res.pkl").read_bytes())
+    flags = seen["a"][-1]
+    assert set(flags) == set(res["vehicles"]) and all(np.array_equal(flags[v], stage1.failed(r)) and len(flags[v]) == 48 for v, r in res["vehicles"].items())
+    flip = json.loads((ctx.run_dir / "emulator" / "flip.json").read_text())["vehicles"]["usv"]
+    first = stage1.failed(res["vehicles"]["usv"])[:ctx.plan["batch"]]
+    assert flip["base_same"]["n"] == ctx.plan["batch"] and flip["base_same"]["p_fail"] == float(first.mean()) and flip["n"] == 48
 
 
 def test_m1_an_emulated_answer_needs_no_baseline_run(storm_em, monkeypatch):  # noqa: F811

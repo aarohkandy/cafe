@@ -749,7 +749,7 @@ def measure(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], p
 
 def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[str, Track], env: Any, ems: dict[str, tuple[Emulator | None, dict[str, Any]]],
                 plan: dict[str, Any], pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]], scales: dict[str, Any] | None, seed: int,
-                budget_s: float, log: Callable[[str], None] = print) -> tuple[dict[str, Any], float]:
+                budget_s: float, log: Callable[[str], None] = print, base_failed: dict[str, Any] | None = None) -> tuple[dict[str, Any], float]:
     """For each vehicle whose verdict is not GO, the cheapest single change that makes it GO (a NO-GO: at least MARGINAL).
 
     Emulator first: every candidate within the emulator's training range is answered by it. Candidates it cannot answer (no emulator, no
@@ -758,6 +758,9 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
     need goes to the next. The best candidate is the cheapest one in the target set among those answered. Each result says how many
     candidates were `evaluated`, how many are `invalid` (off the window or the box, or past the environment data: they can never be evaluated)
     and how many are `candidates` (the rest), so "nothing flips it" is never read as more than what was tried.
+    A Stage-1 row has the plan's batch of members and the base run has more, so its baseline is the unchanged mission on the same members (round 17, M-1):
+    read from `base_failed` ({vid: the base run's (members,) failure flags}: the first batch of the base run is those members, drawn alike) at no cost, else
+    measured as the candidates are (charged, and only if the share is left); a UAS in a 3-D wind is always measured, its base run flew another wind model.
     -> ({vid: result}, planned seconds of Stage 1 spent: each fallback is charged `budget.batch_cost_s`, so the search does not depend on how
     fast the machine happens to be)."""
     out: dict[str, Any] = {}
@@ -805,7 +808,12 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
         uas_3d = cls == "uas" and hasattr(env, "use_3d")
         if uas_3d:
             wind_model = WIND_MODEL_2D
-        if uas_3d or any(t["method"] == "Stage 1" for t in tried):          # the baseline as the candidates are measured (same members; a UAS: no 3-D wind)
+        flags = None if base_failed is None else base_failed.get(vid)
+        if not uas_3d and flags is not None and len(flags) >= plan["batch"] and any(t["method"] == "Stage 1" for t in tried):
+            f0 = np.asarray(flags, bool)[:plan["batch"]]                       # the base run's own first batch: the same members, nothing to run
+            v0 = intervals.verdict(int(f0.sum()), len(f0))
+            base_same = dict(verdict=v0["verdict"], p_fail=float(f0.mean()), lo=v0["fail_lo"], hi=v0["fail_hi"], n=int(len(f0)))
+        elif uas_3d or any(t["method"] == "Stage 1" for t in tried):          # the baseline as the candidates are measured (same members; a UAS: no 3-D wind)
             cost = budget.batch_cost_s(plan, [vid])
             if used + cost <= share:                                          # (M-1: the whole run's P(fail) is of another number of members than a batch)
                 try:
