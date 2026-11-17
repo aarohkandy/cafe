@@ -174,6 +174,22 @@ def test_a_the_surface_layer_build_passes_its_log_to_the_lock(ci_env, tmp_path, 
     assert any("derived.lock is not locked" in m for m in said)
 
 
+def test_a_an_error_raised_in_an_unlocked_block_does_not_carry_the_failed_open_as_its_context(tmp_path):
+    """`store_lock` yielded `False` from inside its `except` clause, so whatever the caller's block raised got the lock's `FileNotFoundError` (or the link's
+    ELOOP) as `__context__`, replacing the context the block's own code had given it (batch E's put-back test saw 'No such file ... .lock' as the first
+    failure of `write_store`)."""
+    (tmp_path / "a.lock").symlink_to(tmp_path / "nowhere")                          # a link at the name: the open fails (ELOOP), the block runs unlocked
+    for name, create in (("a.lock", True), ("none.lock", False)):                     # and no lock file at all with create=False
+        first = KeyError("the block's own first failure")
+        with pytest.raises(ValueError) as e, remote.store_lock(tmp_path, name, create=create) as held:
+            assert held is False
+            try:
+                raise first
+            except KeyError:
+                raise ValueError("the block's second failure") from first
+        assert e.value.__context__ is first and e.value.__cause__ is first
+
+
 # ---------------------------------------------------------------- job 2 (b): the leftover of a killed replace of the ocean store
 
 def _leftover(tmp_path, out, truth_ds, generation="old"):

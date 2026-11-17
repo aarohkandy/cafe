@@ -235,6 +235,7 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
     if path in held:
         yield True
         return
+    fd = -1
     try:
         import fcntl
         fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_CREAT if create else 0), 0o666)
@@ -242,7 +243,8 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
         if log is not None and (create or not isinstance(e, FileNotFoundError)):
             why = "no fcntl" if isinstance(e, ImportError) else f"{type(e).__name__}: {e.strerror or e}"
             log(f"warning: {path} is not locked ({why}); this block runs without the lock, so another run that shares the directory may write at the same time")
-        yield False
+    if fd < 0:
+        yield False                                                        # (outside the `except`: the block's errors must not take the failed open as context)
         return
     try:
         try:
