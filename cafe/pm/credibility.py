@@ -568,8 +568,9 @@ MISSION_OVERRIDES: dict[str, dict[str, tuple[str, float | None, str | None, str]
     glider={"mission_defaults.dive_depth_m": ("task.dive_depth_m", None, None, "m"),
             "mission_defaults.station_tol_m": ("task.radius_km", 5.0, "station", "km"),               # stage 1 sets both, from the task or its own 5 km and 6 h
             "mission_defaults.lost_hours": ("task.lost_after_h", 6.0, "station", "h")},
-    usv={"mission_defaults.becalmed_after_h": ("task.becalmed_after_h", None, None, "h"),          # `USVSim` merges the whole task over the platform's defaults;
-         "mission_defaults.track_tolerance_km": ("task.track_tolerance_km", None, None, "km")})     # the schema lets a task name these two (a station's radius_km too)
+    # `USVSim` merges the whole task over the platform's defaults; the schema lets a task name these two (a station's radius_km too)
+    usv={"mission_defaults.becalmed_after_h": ("task.becalmed_after_h", None, None, "h"),
+         "mission_defaults.track_tolerance_km": ("task.track_tolerance_km", None, None, "km")})
 # The mission defaults a glider's task mode reads from the platform (`GliderSim`: the station keys in station mode, the waypoint keys in section mode, none in
 # drift, which never fails on them); the dive depth is read in every mode. A key in no tuple of the mode flown is not read by the verdicts.
 GLIDER_MODE_KEYS = dict(station=("station_tol_m", "lost_hours"), section=("wp_radius_m", "unreach_hours"), drift=())

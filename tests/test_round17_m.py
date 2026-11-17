@@ -1,7 +1,7 @@
 """Round 17, the merge: what batch B's builder found outside its batch, and the link card's limitation id.
 (a) the mission report and the credibility page count the inputs a mission depends on with one function (`credibility.used_counts`);
 (b) the USV card prints the becalmed clock the verdict used, and the override table lists the USV's two task keys;
-(c) a station task that leaves out `radius_km` and `lost_after_h` gets stage 1's 5 km and 6 h, which the documents give as the defaults (DECISIONS 292, RUNBOOK 4);
+(c) a station task that leaves out `radius_km` and `lost_after_h` gets stage 1's 5 km and 6 h, the documents' defaults (DECISIONS 292, RUNBOOK 4);
 (d) the RF link card names limitation L23."""
 import copy
 import html
@@ -190,7 +190,8 @@ def test_r17_m_b_the_usv_card_prints_the_becalmed_clock_the_verdict_used(run):
     (run / "mission.yaml").write_text(yaml.safe_dump(mission))
     report.write(run, m, plan)
     u = load(run)["vehicles"]["usv"]["usv_modes"]
-    assert u["becalmed_after"]["value"] == 6.0 and u["becalmed_after"]["source"].endswith("becalmed_after_h") and "mission.yaml" not in u["becalmed_after"]["source"]
+    src = u["becalmed_after"]["source"]
+    assert u["becalmed_after"]["value"] == 6.0 and src.endswith("becalmed_after_h") and "mission.yaml" not in src
 
 
 # ---------------------------------------------------------------------------------------------------------- (c) a station task's own defaults
@@ -210,8 +211,8 @@ def mis_of(monkeypatch, task, P):
 
 
 def test_r17_m_c_a_station_task_without_radius_or_lost_after_gets_5_km_and_6_h_whatever_the_platform_file_says(monkeypatch):
-    """Decided, not a defect: DECISIONS 292 and RUNBOOK 4 give the task's defaults as `radius_km` 5 and `lost_after_h` 6 (the mission is where the lab states its
-    tolerance, QUESTIONS_FOR_LAB 5), so the platform file's `station_tol_m` and `lost_hours` are never read in any mode and the pages say which value was used."""
+    """Decided, not a defect: DECISIONS 292 and RUNBOOK 4 give the task's defaults as `radius_km` 5 and `lost_after_h` 6 (the mission is where the lab states
+    its tolerance, QUESTIONS_FOR_LAB 5), so the platform file's `station_tol_m` and `lost_hours` are never read in any mode and the pages say which was used."""
     P = copy.deepcopy(glider.load_platform("seaglider"))
     P["mission_defaults"]["station_tol_m"], P["mission_defaults"]["lost_hours"] = 8000.0, 9.0
     mis = mis_of(monkeypatch, dict(mode="station", lon=-170.0, lat=0.0), P)

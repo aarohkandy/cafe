@@ -1162,8 +1162,9 @@ def s_hangar(ctx: Context, L: Ledger) -> None:
 
 def _assumed(node: Any) -> int:
     """Number of provenance items marked assumed in a parsed platform yaml, as `credibility._prov` finds them (a leaf `assumed: true` and an entry-level
-    `assumed: "<sentence>"` alike; round 10, M-32): the FILE's count, every item whether the mission reads it or not. It is not the mission's count, which leaves
-    out what the mission replaces (`credibility.used_counts`: 'Depends on N' in the report, `platform_assumed_counts`); the two differ by those rows (round 17)."""
+    `assumed: "<sentence>"` alike; round 10, M-32): the FILE's count, every item whether the mission reads it or not. It is not the mission's count,
+    which leaves out what the mission replaces (`credibility.used_counts`: 'Depends on N' in the report, `platform_assumed_counts`); the two differ by those
+    rows (round 17)."""
     return sum(i["assumed"] for i in provenance(node))
 
 
