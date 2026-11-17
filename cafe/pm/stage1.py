@@ -44,16 +44,49 @@ DT_VEHICLE = 60.0                     # glider and USV step [s]; the ocean SDE's
 # per class, besides FORCING: the priors the class's simulator reads (credibility counts them as used by it)
 ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_vpp_bias", "solar_yield_scale"),
             uas=("bulk_stress_scale", "battery_capacity_scale"))
-# The columns each class's sensitivity quantity can feel (round 17, M-8), read from what the simulators read, not "FORCING plus ACTS": `_sensitivity` ranks
-# only these, so a column that cannot act does not set the noise floor or head the list. The glider reads the current and, at the surface, the wind (its
-# windage), no wave field; the USV reads wind, current and waves; the UAS reads no current and no waves in flight, only the wind, and Hs at the ship through
-# its sortie's link (`_uas_links`; `comms.rf_margin` takes Hs, never Tp). `solar_yield_scale` is a USV prior (ACTS) but moves only its state of charge and
-# the `battery` flag, not the cross-track error its margin is (the margin is always finite, so the failure-indicator fallback never reaches the USV).
-SENS_ACTS = dict(glider=("wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "glider_speed_scale",
-                         "battery_capacity_scale"),
-                 usv=(*FORCING, "usv_vpp_bias"),
-                 uas=("wind_speed_bias", "wind_direction_bias", "hs_scale", "bulk_stress_scale", "battery_capacity_scale"))
-LINK_ACTS = dict(rf=("hs_scale",))               # an RF link reads Hs at both ends whatever the classes at them (`_link_hs`)
+# The columns each ranked quantity can feel (round 17, M-8; round 18, M-4), read from what moves the quantity, not from what the simulator reads:
+# `tests/test_round18_c.py` perturbs every sampled column alone over its 5 to 95 % quantiles through the real `run_batch` in the CI environment and
+# asserts that the table is the set that moved, plus `UNSEEN` (a table that drifted from the simulators fails there). Keyed by (class, key of the quantity
+# in the vehicle's result). `margin` is the cross-track error or the distance from the station (a USV, a station glider) or the battery reserve margin (a
+# UAS); `energy_margin` the USV's lowest state of charge (the insolation it harvests varies in the environment, so every column that moves its track moves
+# it a little, and `solar_yield_scale` moves it most); `battery_margin` the glider's battery energy left above the reserve (hotel load and pumping: time and
+# battery size, not the current or the wind; over a sea floor above the dive depth the track would move it too, which no probe of ours reaches);
+# `profile_margin` the share of the flux pattern a sortie delivered.
+# UNSEEN: columns that can act on a quantity but that no probe of ours moves, because the probe stays far from the edge they act at: Hs ends a UAS sortie
+# only through a lost link (`_uas_links`), which needs a margin near 0 dB; the stress scale and the battery size end a sortie early (the profile share) only
+# in a flight that is already at its limit. They stay listed (a quantity that is a count of waypoints cannot show inertness at two quantiles).
+UNSEEN = {("uas", "margin"): ("hs_scale",), ("uas", "profile_margin"): ("bulk_stress_scale", "battery_capacity_scale", "hs_scale")}
+ACTING: dict[tuple[str, str], tuple[str, ...]] = {
+    ("glider", "margin"): ("wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "glider_speed_scale"),
+    ("glider", "battery_margin"): ("glider_speed_scale", "battery_capacity_scale"),
+    ("usv", "margin"): (*FORCING, "usv_vpp_bias"),
+    ("usv", "energy_margin"): (*FORCING, "usv_vpp_bias", "solar_yield_scale"),
+    ("uas", "margin"): ("wind_speed_bias", "wind_direction_bias", "bulk_stress_scale", "battery_capacity_scale", *UNSEEN[("uas", "margin")]),
+    ("uas", "profile_margin"): ("wind_speed_bias", *UNSEEN[("uas", "profile_margin")]),
+}
+# The quantity a vehicle's dominant failure mode ranks, (class, mode) -> key in its result: the quantity that failed, not the class's usual margin (a USV
+# that runs out of charge ranks its charge, not its cross-track error). A mode with no quantity of its own (becalmed, the wing stalls, a lost link, ...)
+# ranks the 0/1 failure indicator, which any column that moves any quantity of the class can move: `SENS_ACTS`.
+RANKED = {("glider", "station_lost"): "margin", ("glider", "battery"): "battery_margin", ("usv", "swept_off_track"): "margin",
+          ("usv", "battery"): "energy_margin", ("uas", "battery_reserve"): "margin", ("uas", "profile_incomplete"): "profile_margin"}
+# the names of the two quantities, for a result made before it kept them
+QUANTITY = dict(energy_margin="lowest state of charge (fraction of the pack)", battery_margin="battery energy margin")
+SENS_ACTS = {c: tuple(dict.fromkeys(k for (cc, _), cols in ACTING.items() if cc == c for k in cols)) for c in ACTS}
+# What an RF or acoustic link's outcome feels of a vehicle at its end: the columns that move its track (or, for a UAS, its flight), not its battery or its
+# insolation. A link's own: an RF link reads Hs at both ends whatever the classes there (`_link_hs`). An Iridium session's success is its own random draw,
+# so no column moves it; only which moments are required (the glider's surfacing, the UAS's flights) can, and a link `when: always` has none.
+TRACK_ACTS = dict(glider=ACTING[("glider", "margin")], usv=ACTING[("usv", "margin")], uas=("wind_speed_bias", "wind_direction_bias", "bulk_stress_scale"))
+PATTERN_ACTS = dict(glider=("glider_speed_scale",), usv=(), uas=("wind_speed_bias",))
+LINK_ACTS = dict(rf=("hs_scale",))
+
+
+def link_acts(lk: dict[str, Any], classes: dict[str, str]) -> set[str]:
+    """The sampled columns that can move a link's outcome (the fraction of its required moments that worked): see `TRACK_ACTS`. `classes`: {vehicle id: class}
+    of the vehicles in the run; an end that is not one (the ship, the shore) contributes none."""
+    ends = [classes[e] for e in (lk["a"], lk["b"]) if e in classes]
+    if lk["kind"] == "iridium":
+        return set() if lk.get("when") == "always" else {c for k in ends for c in PATTERN_ACTS[k]}
+    return {c for k in ends for c in TRACK_ACTS[k]} | set(LINK_ACTS.get(lk["kind"], ()))
 
 
 SUBGRID_SWITCHES = ("turbulence", "gust_fronts", "warm_layer", "rain_lens", "ocean_sde")
@@ -136,12 +169,15 @@ def _run_glider(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[
     h = sim.run(T - t0, dt=DT_VEHICLE)
     start = dict(t=t0, lon=np.full(M, d["lon"]), lat=np.full(M, d["lat"]))
     g = _record_grid(dict(h, surfaced=h["phase"] == 3), dict(start, depth=np.zeros(M), surfaced=np.ones(M, bool), **_no_heading(h, M)))
+    battery = 1.0 - sim.E / (sim.cap * (1.0 - P["reserve_frac"]))              # the battery energy left above the reserve, as a fraction of the usable pack
     if task["mode"] == "station":                                               # the largest excursion from the station [km]
         far = _dist((g["lon"], g["lat"]), (np.full_like(g["lon"], task["lon"]), np.full_like(g["lat"], task["lat"]))).max(0) / 1e3
         margin, what = far, "maximum distance from the station"
-    else:                                                                       # the battery energy left above the reserve, as a fraction of the usable pack
-        margin, what = 1.0 - sim.E / (sim.cap * (1.0 - P["reserve_frac"])), "battery energy margin"
-    return dict(**g, fail=h["fail"], first=h["first"], sim=sim, antenna_m=P["antenna_height_m"], margin=margin, margin_name=what)
+    else:
+        margin, what = battery, "battery energy margin"
+    # `battery_margin` is kept for every task (a station glider's `margin` is its distance): the quantity a `battery` failure ranks (round 18, M-4)
+    return dict(**g, fail=h["fail"], first=h["first"], sim=sim, antenna_m=P["antenna_height_m"], margin=margin, margin_name=what,
+                battery_margin=battery, battery_margin_name="battery energy margin")
 
 
 def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str, NDArray[Any]], t0: float, T: float,
@@ -167,7 +203,8 @@ def _run_usv(v: dict[str, Any], P: dict[str, Any], env: Any, M: int, X: dict[str
                 sog_ms=path_speed(g["lon"], g["lat"], g["t"]), stw_ms=np.mean(h["stw"], 0) if len(h["stw"]) else np.full(M, np.nan),
                 u10_ms=wind["u10"], wind_anem_ms=wind["anem"],
                 margin=sim.xte_max / 1e3, margin_name="maximum distance from the station" if sim.mode == "station" else "maximum cross-track error",
-                energy_margin=sim.soc_min)                                          # the lowest state of charge, a fraction of the pack (round 16, M-10)
+                energy_margin=sim.soc_min,                                          # the lowest state of charge, a fraction of the pack (round 16, M-10)
+                energy_margin_name=QUANTITY["energy_margin"])
 
 
 def launch_times(sorties: dict[str, Any], lon: float, t0: float, T: float, duration_s: float) -> NDArray[np.float64]:
@@ -702,10 +739,11 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         r0 = batches[0]["vehicles"][vid]
         r: dict[str, Any] = {k: cat([b["vehicles"][vid][k] for b in batches]) for k in ("lon", "lat", "depth")}
         r["t"] = r0["t"]
-        for k in ("alt", "airborne", "surfaced", "heading", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin", "profile_margin", "energy_margin"):
+        for k in ("alt", "airborne", "surfaced", "heading", "sog_ms", "stw_ms", "u10_ms", "wind_anem_ms", "margin", "profile_margin", "energy_margin",
+                  "battery_margin"):
             if k in r0:
                 r[k] = cat([b["vehicles"][vid][k] for b in batches])
-        for k in ("margin_name", "profile_margin_name"):
+        for k in ("margin_name", "profile_margin_name", "energy_margin_name", "battery_margin_name"):
             if k in r0:
                 r[k] = r0[k]
         if r0.get("fine") is not None:                       # the same sortie windows in every batch: only the members differ
@@ -745,13 +783,28 @@ def failed(r: dict[str, Any]) -> NDArray[np.bool_]:
     return np.logical_or.reduce([np.asarray(v, bool) for v in r["fail"].values()]) if r["fail"] else np.zeros(r["lon"].shape[1], bool)
 
 
+def _ranked(r: dict[str, Any], dom: str | None) -> tuple[set[str], NDArray[Any] | None, str]:
+    """(the columns that can act, the quantity (n,), its name) that the "most sensitive to" entry of vehicle `r` ranks, whose most frequent failure mode is
+    `dom` (round 18, M-4): the continuous quantity of that mode (`RANKED`), and the columns that move it (`ACTING`). A mode with no quantity of its own, a
+    result that does not hold it (one made before it was kept) or fewer than SENS_MIN_N finite values of it: no quantity, the 0/1 failure indicator, and
+    every column of the class (`SENS_ACTS`). With no failure at all nothing is ranked and the entry keeps the class's `margin` for its label."""
+    cls = r["class"]
+    key = RANKED.get((cls, dom)) if dom else "margin"
+    q = None if key is None else r.get(key)
+    if key is None or q is None or int(np.isfinite(q).sum()) < SENS_MIN_N:
+        return set(SENS_ACTS[cls]), None, "failure indicator"
+    return set(ACTING.get((cls, key), SENS_ACTS[cls])), q, r.get(f"{key}_name") or QUANTITY.get(key, "failure indicator")
+
+
 def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting: set[str], margin: NDArray[Any] | None, quantity: str) -> dict[str, Any]:
     """The "most sensitive to" entry of a vehicle or a link: dict(param, S1, noise_floor, case, quantity, text). `f` (n,) marks the members that failed.
-    The indices are first-order EASI (stats.sensitivity) over the columns that can act on it (`acting`: `SENS_ACTS`, what the class's simulator reads), so a
-    column that cannot act does not set the noise floor. They are taken on `margin` (n,), the continuous quantity named `quantity`, when the simulator
-    gave one; else on the 0/1 failure indicator, which carries too little for three failures or fewer (EASI on k ones saturates at its own
+    The indices are first-order EASI (stats.sensitivity) over the columns that can act on it (`acting`: `ACTING` for the quantity of a vehicle's dominant
+    failure mode, `link_acts` for a link), so a column that cannot act does not set the noise floor, and an outcome that no column can act on (an Iridium
+    link `when: always`) is not ranked at all (case no_acting_input). They are taken on `margin` (n,), the continuous quantity named `quantity`, when the
+    simulator gave one; else on the 0/1 failure indicator, which carries too little for three failures or fewer (EASI on k ones saturates at its own
     permutation floor), so there the minority's hypercube ranks are given instead. case: ranked / nothing_above_floor (an index was computed and none
-    clears the floor) / too_few (no index: fewer than SENS_MIN_N members, or too few failures or successes on the indicator) / all_pass / all_fail."""
+    clears the floor) / too_few (no index: fewer than SENS_MIN_N members, or too few failures or successes on the indicator) / all_pass / all_fail /
+    no_acting_input (no index: `acting` is empty, so there is nothing to rank)."""
     n, k = len(f), int(f.sum())
     out: dict[str, Any] = dict(param=None, S1={}, noise_floor=None, quantity=quantity)
     if k == 0:
@@ -761,6 +814,9 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
     if n < SENS_MIN_N:
         return dict(out, case="too_few", text=f"Only {n} members: at least {SENS_MIN_N} are needed to rank the parameters.")
     cols = [i for i, nm in enumerate(names) if nm in acting]
+    if not cols:
+        return dict(out, case="no_acting_input", text=f"No sampled input can act on the {quantity}, so none is ranked: it is decided by a draw of its own, "
+                                                       "not by a column of the perturbation table.")
     nm, Ux = [names[i] for i in cols], U[:, cols]
     row = np.ones(n, bool) if margin is None else np.isfinite(margin)
     if margin is None or row.sum() < SENS_MIN_N:
@@ -812,8 +868,7 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         first = np.fmin.reduce(firsts)[f] if dom else np.empty(0)
         t_first = float(np.nanmin(first)) if np.any(np.isfinite(first)) else None
         t_med = float(np.nanmedian(first)) if np.any(np.isfinite(first)) else None
-        key = "profile_margin" if dom == "profile_incomplete" and "profile_margin" in r else "margin"          # the margin that belongs to the dominant mode
-        sens = _sensitivity(names, U, f, set(SENS_ACTS[r["class"]]), r.get(key), r.get(f"{key}_name", "failure indicator"))
+        sens = _sensitivity(names, U, f, *_ranked(r, dom))
         out["vehicles"][vid] = dict(cls=r["class"], n=n, k_fail=int(f.sum()), verdict=v, modes=modes, dominant=dom,
                                     first_fail_t=t_first, median_fail_t=t_med, sensitivity=sens)
         if "energy_margin" in r:                                  # the USV's battery: the lowest state of charge each member reached (round 16, M-10)
@@ -843,10 +898,8 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
     for lid, r in res["links"].items():
         f = ~np.asarray(r["success"], bool)
         n = len(f)
-        ends = {res["vehicles"][e]["class"] for e in (lk_ends[lid]["a"], lk_ends[lid]["b"]) if e in res["vehicles"]}
-        acting = {c for k in ends for c in SENS_ACTS[k]} | set(LINK_ACTS.get(lk_ends[lid].get("kind", ""), ()))
-        sens = _sensitivity(names, U, f, acting, np.asarray(r["frac"], float),
-                            "fraction of the required moments the link worked")
+        acting = link_acts(lk_ends[lid], {e: res["vehicles"][e]["class"] for e in (lk_ends[lid]["a"], lk_ends[lid]["b"]) if e in res["vehicles"]})
+        sens = _sensitivity(names, U, f, acting, np.asarray(r["frac"], float), "fraction of the required moments the link worked")
         kind, need = r.get("invalid_kind"), float(np.sum(r.get("need_count", 0)))
         nc = _median_count(r["need_count"]) if "need_count" in r else None            # required samples per member: what the required fraction is resolved on
         rf = lk_ends[lid]["required_fraction"]

@@ -13,7 +13,7 @@ from tests.test_stage1 import LK, MISSION, merged, uas_inputs
 
 # ---------------------------------------------------------------- M-8: the sensitivity ranks only the columns the class's simulator reads
 GLIDER = {"wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "glider_speed_scale", "battery_capacity_scale"}
-USV = set(stage1.FORCING) | {"usv_vpp_bias"}
+USV = set(stage1.FORCING) | {"usv_vpp_bias", "solar_yield_scale"}          # round 18, M-4: the solar yield moves the battery flag, so the indicator too
 UAS = {"wind_speed_bias", "wind_direction_bias", "hs_scale", "bulk_stress_scale", "battery_capacity_scale"}
 
 
@@ -29,7 +29,8 @@ def test_r17_m8_each_vehicle_and_link_ranks_only_the_columns_its_simulator_reads
     assert v == dict(glider_eq=GLIDER, usv=USV, uas=UAS)          # no wave column for the glider, no current or Tp for the UAS, no solar yield for the USV
     kinds = {lid: lk["kind"] for lid, lk in LK.items()}
     assert set(kinds.values()) == {"rf", "acoustic", "iridium"}
-    want = {"rf": USV | UAS, "acoustic": GLIDER, "iridium": USV}                                  # the union of the two ends' columns; an RF link also reads Hs
+    # round 18, M-4: the columns that move an end's track (not its battery or its insolation); an RF link also reads Hs; an Iridium link `when: always` has none
+    want = {"rf": set(stage1.FORCING) | {"usv_vpp_bias", "bulk_stress_scale"}, "acoustic": GLIDER - {"battery_capacity_scale"}, "iridium": set()}
     for lid, kind in kinds.items():
         assert set(s["links"][lid]["sensitivity"]["S1"]) == want[kind], lid
 
@@ -39,14 +40,16 @@ def test_r17_m8_an_rf_link_reads_hs_whatever_the_classes_at_its_ends():
     glider_rf = dict(MISSION, links=[dict(LK["usv-uas-rf"], id="g-ship-rf", a="glider_eq", b="ship")])
     res["links"] = {"g-ship-rf": res["links"]["usv-uas-rf"]}
     got = stage1.summarize(res, names, glider_rf, 73)["links"]["g-ship-rf"]["sensitivity"]["S1"]
-    assert set(got) == GLIDER | {"hs_scale"} and "tp_bias" not in got
+    assert set(got) == (GLIDER - {"battery_capacity_scale"}) | {"hs_scale"} and "tp_bias" not in got
 
 
 def test_r17_m8_a_column_the_uas_cannot_feel_cannot_head_its_list():
     res, names, _ = _summary()
     j = names.index("current_direction_bias")
-    res["vehicles"]["uas"]["margin"] = res["U"][:, j].copy()                                      # a margin that is a function of the inert column alone
-    res["vehicles"]["uas"]["margin_name"] = "battery reserve margin"
+    u = res["vehicles"]["uas"]
+    u["margin"] = res["U"][:, j].copy()                                                            # a margin that is a function of the inert column alone
+    u["margin_name"] = "battery reserve margin"
+    u["fail"], u["first"] = dict(battery_reserve=u["fail"]["mode_a"]), dict(battery_reserve=u["first"]["mode_a"])      # round 18, M-4: the battery failed
     e = stage1.summarize(res, names, MISSION, 73)["vehicles"]["uas"]["sensitivity"]
     assert "current_direction_bias" not in e["S1"] and e["param"] != "current_direction_bias" and e["quantity"] == "battery reserve margin"
 
@@ -124,7 +127,7 @@ def test_r17_m8_the_usv_margin_does_not_move_with_the_solar_yield_only_its_charg
     X = dict(usv_vpp_bias=np.full(2, -0.24), solar_yield_scale=np.array([0.5, 2.0]))
     r = stage1._run_usv(v, P, AnalyticEnv(wind=(-6.0, 0.0), swdown=even), 2, X, t0, t0 + 6 * 3600.0)
     assert r["margin"][0] == r["margin"][1] > 0.0 and r["energy_margin"][0] < r["energy_margin"][1]
-    assert "solar_yield_scale" not in stage1.SENS_ACTS["usv"] and "solar_yield_scale" in stage1.ACTS["usv"]
+    assert "solar_yield_scale" not in stage1.ACTING[("usv", "margin")] and "solar_yield_scale" in stage1.ACTING[("usv", "energy_margin")]   # round 18, M-4
 
 
 # ---------------------------------------------------------------- M-19 (A-6): soc_min is the lowest state of charge, from the start value

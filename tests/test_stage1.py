@@ -1608,9 +1608,10 @@ def test_a_column_that_cannot_act_on_the_class_is_not_ranked_and_does_not_set_th
 def test_the_summary_ranks_the_margin_the_simulator_stored_and_only_the_columns_of_the_class():
     names = list(stage1.priors_for(MISSION)[1])
     res = merged({"glider_eq": 0.25, "usv": 0.25}, {"usv-uas-rf": 0.25, "glider_eq-ship-acoustic": 0.25})
-    for vid, q in (("glider_eq", "maximum distance from the station"), ("usv", "maximum cross-track error")):
+    for vid, q, mode in (("glider_eq", "maximum distance from the station", "station_lost"), ("usv", "maximum cross-track error", "swept_off_track")):
         r = res["vehicles"][vid]
         r["margin"], r["margin_name"] = -res["U"][:, 0].copy(), q
+        r["fail"], r["first"] = {mode: r["fail"]["mode_a"]}, {mode: r["first"]["mode_a"]}                       # round 18, M-4: that mode's margin is ranked
     s = stage1.summarize(res, names, MISSION, 73)
     g, u = s["vehicles"]["glider_eq"]["sensitivity"], s["vehicles"]["usv"]["sensitivity"]
     assert g["quantity"] == "maximum distance from the station" and g["param"] == names[0] and "usv_vpp_bias" not in g["S1"] and "glider_speed_scale" in g["S1"]
@@ -1619,7 +1620,8 @@ def test_the_summary_ranks_the_margin_the_simulator_stored_and_only_the_columns_
     assert s["vehicles"]["uas"]["sensitivity"]["case"] == "all_pass" and s["vehicles"]["uas"]["sensitivity"]["quantity"] == "failure indicator"
     rf = s["links"]["usv-uas-rf"]["sensitivity"]                                                         # the ends are a USV and a UAS
     assert rf["quantity"] == "fraction of the required moments the link worked" and rf["param"] == names[0]
-    assert {"usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale"} <= set(rf["S1"]) and "glider_speed_scale" not in rf["S1"]
+    assert {"usv_vpp_bias", "bulk_stress_scale", "hs_scale"} <= set(rf["S1"]) and "glider_speed_scale" not in rf["S1"]
+    assert "battery_capacity_scale" not in rf["S1"]                                                    # round 18, M-4: no end's battery moves a link
     ac = s["links"]["glider_eq-ship-acoustic"]["sensitivity"]                                           # a glider and the ship
     assert "glider_speed_scale" in ac["S1"] and "usv_vpp_bias" not in ac["S1"] and "bulk_stress_scale" not in ac["S1"]
     assert s["links"]["usv-shore-iridium"]["sensitivity"]["case"] == "all_pass"
