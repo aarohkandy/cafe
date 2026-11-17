@@ -25,26 +25,29 @@ def l23():
 
 
 # ---------------------------------------------------------------------------------------------------------------- M-3: the band is of the pair
-# (higher antenna, lower antenna, first distance [m], last distance [m] or None for the pair's radio horizon) -> model loss minus the Fresnel loss, minimum /
-# median / maximum [dB], as the docstring of two_ray_curved_db prints them to 0.1 dB (measured on orca: Hs 0, 915 MHz, 400 points, eps_c 72.8 - j118.9)
+# (higher antenna, lower antenna) -> model loss minus the Fresnel loss, minimum / median / maximum [dB], as the docstring of two_ray_curved_db prints them to
+# 0.1 dB. ONE range for every row: d = 300 m to the pair's radio horizon or 12 km, whichever is nearer, 400 points (measured on orca: Hs 0, 915 MHz,
+# eps_c 72.8 - j118.9). The round 18 first draft gave the 15 m rows from 300 m and the others from 200 m, and "within 3.3 dB" was then false.
 PAIR_BAND = {
-    (15.0, 2.2, 300.0, 12e3): (-3.3, -0.4, 0.2),
-    (15.0, 0.5, 300.0, 12e3): (-2.9, 1.3, 2.2),
-    (15.0, 0.3, 300.0, 12e3): (1.2, 5.1, 6.0),
-    (15.0, 0.1, 300.0, 12e3): (11.4, 15.1, 16.0),
-    (0.5, 0.3, 200.0, None): (9.0, 9.3, 9.3),
-    (0.3, 0.3, 200.0, None): (11.1, 11.4, 11.4),
-    (0.5, 0.5, 200.0, None): (6.3, 6.7, 6.7),
-    (2.2, 0.3, 200.0, None): (5.1, 6.2, 6.2),
-    (2.2, 0.5, 200.0, None): (1.4, 2.6, 2.7),
-    (2.2, 2.2, 200.0, 12e3): (-3.0, -1.2, 1.6),
+    (15.0, 2.2): (-3.3, -0.4, 0.2),
+    (15.0, 0.5): (-2.9, 1.3, 2.2),
+    (15.0, 0.3): (1.2, 5.1, 6.0),
+    (15.0, 0.1): (11.4, 15.1, 16.0),
+    (0.5, 0.3): (9.0, 9.3, 9.3),
+    (0.3, 0.3): (11.3, 11.4, 11.4),
+    (0.5, 0.5): (6.4, 6.7, 6.7),
+    (2.2, 0.3): (5.5, 6.2, 6.2),
+    (2.2, 0.5): (1.8, 2.6, 2.7),
+    (2.2, 2.2): (-2.4, -1.2, 1.6),
 }
+BOUND_PAIRS = [(15.0, 2.2), (15.0, 0.5), (2.2, 0.5), (2.2, 2.2)]            # "0.5 m or 2.2 m with a 2.2 m or 15 m partner"
+BOTH_LOW = [(0.5, 0.3), (0.3, 0.3), (0.5, 0.5)]                                # "both ends 0.5 m or lower"
+SLOCUM_PARTNER_2_2_OR_MORE = [(15.0, 0.3), (2.2, 0.3)]
 
 
-def band(hr, ht, d0, d1):
-    """The model's loss minus the Fresnel loss over d0 to d1 (the pair's radio horizon when d1 is None), 400 points: (minimum, median, maximum)."""
-    d1 = float(c.radio_horizon_km(ht, hr)) * 1e3 if d1 is None else d1
-    d = np.linspace(d0, d1, 400)
+def band(hr, ht, d0=300.0):
+    """The model's loss minus the Fresnel loss from d0 to the pair's radio horizon or 12 km (the nearer), 400 points: (minimum, median, maximum)."""
+    d = np.linspace(d0, min(float(c.radio_horizon_km(ht, hr)) * 1e3, 12e3), 400)
     diff = c.two_ray_loss_db(d, ht, hr, 0.0, F915) - fresnel_loss_db(d, ht, hr)
     return float(diff.min()), float(np.median(diff)), float(diff.max())
 
@@ -56,6 +59,35 @@ def test_r18_m3_the_docstring_figures_of_every_pair_are_the_measured_ones(pair):
     for g, p in zip(got, printed, strict=True):
         assert abs(g - p) <= 0.1, (pair, got)
     assert f"{printed[0]:+.1f} / {printed[1]:+.1f} / {printed[2]:+.1f}" in doc_of(c.two_ray_curved_db), pair
+
+
+def test_r18_m3_the_bound_sentences_are_true_over_the_stated_range():
+    """L23 and the docstring: 'within 3.3 dB and at worst understates the loss' for 0.5 m and 2.2 m with a 2.2 m or 15 m partner; '6 to 11 dB' when both
+    ends are 0.5 m or lower; 'about 5 dB (1 to 6 dB)' for the Slocum with a partner of 2.2 m or more; '11 to 16 dB' at 0.1 m. All over 300 m to the horizon
+    or 12 km, the range the texts state. A bound that its own figures exceed is the fault this finding was about."""
+    mins, maxs = zip(*(band(*pair)[::2] for pair in BOUND_PAIRS), strict=True)
+    assert -3.35 < min(mins) < -3.25 and max(abs(m) for m in mins + maxs) < 3.35                # 3.3 dB: the worst is 2.2 m with a 15 m partner
+    assert sorted(round(-m, 1) for m in mins if m < 0.0) == [2.4, 2.9, 3.3]                    # understated by 2.4, 2.9 and 3.3 dB; the 2.2 / 0.5 pair is over
+    lows, highs = zip(*(band(*pair)[::2] for pair in BOTH_LOW), strict=True)
+    assert round(min(lows)) == 6 and round(max(highs)) == 11
+    lows, highs = zip(*(band(*pair)[::2] for pair in SLOCUM_PARTNER_2_2_OR_MORE), strict=True)
+    assert round(min(lows)) == 1 and round(max(highs)) == 6 and 5.0 <= band(2.2, 0.3)[1] <= 6.5
+    assert round(band(15.0, 0.1)[0]) == 11 and round(band(15.0, 0.1)[2]) == 16
+    for text in ("within 3.3 dB", "6 to 11 dB", "about 5 dB", "(1 to 6 dB)", "11 to 16 dB at 0.1 m"):
+        assert text in l23() or text in doc_of(c.two_ray_curved_db), text
+
+
+def test_r18_m3_below_300_m_is_said_not_to_be_stated_and_the_200_m_figures_are_the_measured_ones():
+    """Both texts say nothing is stated nearer than 300 m, and print what 200 m gives: 0.5 m with a 15 m partner -5.0 dB at the minimum (the 3.3 dB bound does
+    not hold there), 0.3 m with a 15 m partner -0.6 dB, and a +31.9 dB maximum at one null for 2.2 m with a 15 m partner."""
+    assert round(band(15.0, 0.5, 200.0)[0], 1) == -5.0 < -3.3
+    assert round(band(15.0, 0.3, 200.0)[0], 1) == -0.6
+    assert round(band(15.0, 2.2, 200.0)[2], 1) == 31.9
+    doc = doc_of(c.two_ray_curved_db)
+    for text in ("Below 300 m none of this is stated", "understated by up to 5.0 dB", "by up to 0.6 dB", "+31.9 dB at one null"):
+        assert text in doc, text
+    assert "nearer than 300 m none of this is stated (from 200 m, 0.5 m with a 15 m partner is understated by up to 5.0 dB)" in l23()
+    assert "from 300 m to the pair's radio horizon or 12 km" in l23() and "300 m to the pair's radio horizon or to 12 km" in doc
 
 
 def test_r18_m3_the_shipped_antennas_are_the_ones_the_pairs_name():
@@ -70,17 +102,6 @@ def test_r18_m3_the_loader_accepts_an_rf_link_whose_two_ends_are_gliders(tmp_pat
     f = tmp_path / "gg.yaml"
     f.write_text(yaml.safe_dump(m))
     assert {lk["id"] for lk in config.load_mission(f)["links"]} >= {"gg-rf"}
-
-
-def test_r18_m3_both_ends_low_is_overstated_everywhere_and_the_sign_flips_at_0_5_to_2_2_m():
-    """The statements of L23 and the docstring, from the same numbers: below 0.5 m (both ends 0.5 m or lower) the loss is overstated at every distance, 6 to
-    11 dB; for 0.5 m and 2.2 m with a 2.2 m or 15 m partner it is understated at the minimum, by 3.3 dB at worst (300 m start)."""
-    for pair in ((0.5, 0.3), (0.3, 0.3), (0.5, 0.5)):
-        lo, med, hi = band(*pair, 200.0, None)
-        assert lo > 6.0 and hi < 11.5 and 6.5 < med < 11.5, (pair, lo, med, hi)
-    for pair, d0 in (((15.0, 2.2), 300.0), ((15.0, 0.5), 300.0), ((2.2, 2.2), 200.0)):
-        lo = band(*pair, d0, 12e3)[0]
-        assert -3.4 < lo < 0.0, (pair, lo)                                   # the margin is too high somewhere, by 3.3 dB at worst
 
 
 def test_r18_m3_l23_states_the_band_by_pair_and_drops_never_too_high_and_not_affected():
@@ -98,7 +119,7 @@ def test_r18_m3_l23_states_the_band_by_pair_and_drops_never_too_high_and_not_aff
 
 def test_r18_m3_l23_medians_are_those_of_the_pairs_it_names():
     for pair, word in (((0.5, 0.5), "7 dB for two Seagliders"), ((0.5, 0.3), "9 dB for a Seaglider with a Slocum"), ((0.3, 0.3), "11 dB for two Slocums")):
-        assert round(band(*pair, 200.0, None)[1]) == int(word.split()[0]), pair
+        assert round(band(*pair)[1]) == int(word.split()[0]), pair
         assert word in l23()
 
 

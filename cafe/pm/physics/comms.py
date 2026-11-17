@@ -131,23 +131,24 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     two rays cancel as the heights go to 0 (the field goes as 2 k h1 h2 / d), while the Fresnel coefficient at a grazing angle of 1 mrad is about -0.98
     with a phase, which leaves a field of about 0.03 of the free-space one (B's estimate, not re-measured). The error is a property of the PAIR of
     heights, not of one antenna. Measured against a flat-earth two-ray with the Fresnel coefficient of the same sea (eps_c 72.8 - j118.9 at 915 MHz,
-    vertical polarisation, Hs 0, 400 points; a bound, since a flat-earth two-ray has no surface wave), `two_ray_loss_db` minus the Fresnel loss,
-    minimum / median / maximum [dB] (tests/test_round18_b.py recomputes every row to 0.1 dB):
-    the other antenna 15 m, d = 300 m to 12 km: -3.3 / -0.4 / +0.2 at 2.2 m, -2.9 / +1.3 / +2.2 at 0.5 m (-5.0 as the minimum when d starts at 200 m),
-    +1.2 / +5.1 / +6.0 at 0.3 m (the Slocum's) and +11.4 / +15.1 / +16.0 at 0.1 m; reviewer B's parabolic-equation field over sea water (300 m to 16 km,
-    15 m partner) gives -3.9 / -1.5 / -0.8 at 2.2 m, -3.1 / +0.3 / +1.2 at 0.5 m, +0.5 / +4.1 / +5.1 at 0.3 m and +10.6 / +14.2 / +15.1 at 0.1 m (reviewer's,
-    not re-run);
-    both ends low, d = 200 m to the radio horizon of the pair: the Seaglider's 0.5 m with the Slocum's 0.3 m +9.0 / +9.3 / +9.3, two Slocums
-    +11.1 / +11.4 / +11.4, two Seagliders +6.3 / +6.7 / +6.7;
-    the other antenna 2.2 m (the USV's), the same range: the Slocum's 0.3 m +5.1 / +6.2 / +6.2, the Seaglider's 0.5 m +1.4 / +2.6 / +2.7, and two 2.2 m
-    ends -3.0 / -1.2 / +1.6 (reviewer B's parabolic equation for the Slocum with a 2.2 m end: -0.1 / +3.7 / +4.7).
+    vertical polarisation, Hs 0; a bound, since a flat-earth two-ray has no surface wave), over ONE range for every row, d = 300 m to the pair's radio
+    horizon or to 12 km, whichever is nearer, 400 points, `two_ray_loss_db` minus the Fresnel loss, minimum / median / maximum [dB]
+    (tests/test_round18_b.py recomputes every row and every bound below to 0.1 dB):
+    the other antenna 15 m: -3.3 / -0.4 / +0.2 at 2.2 m, -2.9 / +1.3 / +2.2 at 0.5 m, +1.2 / +5.1 / +6.0 at 0.3 m (the Slocum's) and
+    +11.4 / +15.1 / +16.0 at 0.1 m; reviewer B's parabolic-equation field over sea water (300 m to 12 km, 15 m partner) gives -3.9 / -1.5 / -0.8 at 2.2 m,
+    -3.1 / +0.3 / +1.2 at 0.5 m, +0.5 / +4.1 / +5.1 at 0.3 m and +10.6 / +14.2 / +15.1 at 0.1 m (reviewer's, not re-run);
+    both ends low: the Seaglider's 0.5 m with the Slocum's 0.3 m +9.0 / +9.3 / +9.3, two Slocums +11.3 / +11.4 / +11.4, two Seagliders
+    +6.4 / +6.7 / +6.7;
+    the other antenna 2.2 m (the USV's): the Slocum's 0.3 m +5.5 / +6.2 / +6.2, the Seaglider's 0.5 m +1.8 / +2.6 / +2.7, and two 2.2 m
+    ends -2.4 / -1.2 / +1.6 (reviewer B's parabolic equation for the Slocum with a 2.2 m end: -0.1 / +3.7 / +4.7).
     The loss is OVERSTATED for an antenna below 0.5 m, so the margin is too low and a GO can show as MARGINAL or NO-GO: by about 5 dB for an RF link to
     the Slocum's 0.3 m antenna from a partner of 2.2 m or more (1 to 6 dB), by 6 to 11 dB when both ends are 0.5 m or lower, and by 11 to 16 dB at 0.1 m.
-    When one end is 0.5 m or 2.2 m and the other 2.2 m or 15 m the model is within 3.3 dB of the Fresnel two-ray and at worst UNDERSTATES the loss:
-    by 2.9 dB (0.5 m with a 15 m partner; 5.0 dB from 200 m), 3.0 dB (two 2.2 m ends) and 3.3 dB (2.2 m with a 15 m partner), so there a margin can be too
-    high: that includes the USV's 2.2 m whip, so round 17's reading, that a low antenna's margin is conservative and the shipped antennas are unaffected,
-    held for the Slocum's 0.3 m with a 15 m partner and for no other pair. Not run: a parabolic equation for two low ends (its starter does not hold below
-    about 1 m), any distance below 200 m, and Hs above 0.
+    When one end is 0.5 m or 2.2 m and the other 2.2 m or 15 m the model is within 3.3 dB of the Fresnel two-ray over that range and at worst UNDERSTATES
+    the loss: by 2.9 dB (0.5 m with a 15 m partner), 2.4 dB (two 2.2 m ends) and 3.3 dB (2.2 m with a 15 m partner), so there a margin can be too high:
+    that includes the USV's 2.2 m whip, so round 17's reading, that a low antenna's margin is conservative and the shipped antennas are unaffected, held for
+    the Slocum's 0.3 m with a 15 m partner and for no other pair. Below 300 m none of this is stated: from 200 m the 0.5 m case with a 15 m partner is
+    understated by up to 5.0 dB, the 0.3 m case with a 15 m partner by up to 0.6 dB, and the 2.2 m case with a 15 m partner is overstated by +31.9 dB at one
+    null of that grid. Not run: a parabolic equation for two low ends (its starter does not hold below about 1 m), any distance below 200 m, and Hs above 0.
     Not changed: the Fresnel coefficient needs the sea temperature and the antenna polarisation, which the lab has not given (DECISIONS 913 to 916). The
     platform files refuse an RF antenna height below 0.1 m (physics.ANTENNA_MIN_M, round 17, M-6: at 0 the margin was a finite -43 dB at 5 km); the mission
     schema refuses a ship antenna below 0.5 m.
