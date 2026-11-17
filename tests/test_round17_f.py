@@ -354,20 +354,22 @@ def test_r17_store_lock_opens_its_file_close_on_exec_and_without_following_links
 def test_r17_m9_an_unlocked_download_uses_a_part_of_its_own_and_leaves_nothing(server, tmp_path, monkeypatch):
     """With no lock the fixed `<name>.part` would be shared by every unlocked call: the part is `atomic.tmp_name`'s, seen while the body is read, and gone
     afterwards, a failed download included."""
-    out = tmp_path / "a"
-    (tmp_path / "a.lock").symlink_to(tmp_path / "victim")
+    d = tmp_path / "d"
+    d.mkdir()
+    out = d / "a"
+    (d / "a.lock").symlink_to(d / "victim")
     u = server.put("a", b"payload" * 100)
     seen = []
     real = remote._open
 
     def spy(url, start=None, end=None, **kw):
         if end is None:
-            seen.append(sorted(p.name for p in tmp_path.iterdir()))
+            seen.append(sorted(p.name for p in d.iterdir()))
         return real(url, start, end, **kw)
     monkeypatch.setattr(remote, "_open", spy)
     assert remote.download(u, out).read_bytes() == b"payload" * 100
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["a", "a.lock"] and seen and not any("a.part" in n for names in seen for n in names)
+    assert sorted(p.name for p in d.iterdir()) == ["a", "a.lock"] and seen and not any("a.part" in n for names in seen for n in names)
     out.unlink()
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         remote.download(u, out, "0" * 64, pin=True)
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.lock"]
+    assert sorted(p.name for p in d.iterdir()) == ["a.lock"]
