@@ -76,8 +76,9 @@ def test_r16_m23_the_core_count_does_not_key_the_result_but_is_recorded_in_the_f
     assert set(d) == {"recipe", "nproc", "result"} and d["nproc"] == 6 and d["result"] == dict(cd=0.25) and d["recipe"] == cfd.recipe()
 
 
-def test_r16_m23_a_comment_or_another_function_changes_nothing_the_recipe_is_the_constants_alone():
-    """`recipe()` is a function of `SETTINGS` and of nothing else of the file, so editing a comment, a docstring or a function body keeps hours of CFD."""
+def test_r16_m23_every_module_constant_is_named_in_settings_or_not_settings():
+    """`recipe()` is a function of `SETTINGS` and of the numbers and texts in the code (round 17, M-4: tests/test_round17_e.py), so a module constant that
+    is in neither list would be a setting the key misses; a comment, a docstring or a log line keeps hours of CFD (the same file)."""
     src = (ROOT / "cafe" / "cfd.py").read_text()
     names = {t.id for n in ast.parse(src).body if isinstance(n, ast.Assign) for t in n.targets if isinstance(t, ast.Name) and t.id.isupper()}
     # a new constant must be named in one of the two lists

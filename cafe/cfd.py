@@ -5,7 +5,7 @@ external(): one mesh, freestream BCs on every face, six inflow directions -> for
 free_surface(): fixed-attitude hull at its hydrostatic draft, resistance at several speeds.
 Each runs at two snappy levels; the difference is the Grid Convergence Index (two-grid, p=2, Fs=3).
 """
-import json, os, pathlib, re, shlex, shutil, subprocess, sys, time
+import ast, functools, hashlib, json, math, os, pathlib, re, shlex, shutil, subprocess, sys, time
 import numpy as np
 import trimesh
 
@@ -23,9 +23,9 @@ def dvec(d):
     moving along +x tilted 10 deg toward +z, i.e. 10 deg angle of attack)."""
     if d in DIRS:
         return np.array(DIRS[d], float)
-    m = re.fullmatch(r"x([+-][yz])([0-9.]+)", d)
-    if not m:
-        raise ValueError(f"bad direction {d!r}")
+    m = re.fullmatch(r"x([+-][yz])([0-9]+(?:\.[0-9]+)?)", d)
+    if not m or float(m.group(2)) > 90:          # "x+z999" was a tilt of 999 degrees and "x+z1.2.3" a bare float() error (round 17, M-11)
+        raise ValueError(f"bad direction {d!r}: an axis (+x, -x, ... -z) or x[+-][yz] and an angle of 0 to 90 degrees, as x+z10")
     a = np.radians(float(m.group(2)))
     return np.cos(a) * np.array(DIRS["+x"], float) + np.sin(a) * np.array(DIRS[m.group(1)], float)
 
@@ -33,35 +33,83 @@ def dvec(d):
 CACHE = pathlib.Path(os.environ.get("CAFE_WORK", "/work")) / "cfdcache"
 
 
-# The module constants that shape a CFD result: the OpenFOAM version (inside FOAM), the fluids, the directions, the snappy, field and scheme texts of both
-# recipes, and the free-surface geometry and march. `cached` hashes them, so a result outlives neither a change of the recipe nor an OpenFOAM upgrade; a
-# comment edit or another function of this file changes nothing. NPROC is not here (cores change the speed, not the answer); the cached file records it.
-# A new module constant must be named here or in NOT_SETTINGS (a test holds the two lists to the module).
+# What shapes a CFD result is in the key twice over, so that an edit cannot miss it (round 17, M-4). (1) The module constants named in SETTINGS: the OpenFOAM
+# version (inside FOAM), the fluids, the directions, the snappy, field and scheme texts of both recipes, the free-surface geometry and march, the incidence
+# angles. (2) Every number and every text written inside the functions and classes of this file (`_code_literals`: the mesh sizes, the iteration count, the
+# averaging window, the inline fvSchemes, fvSolution and controlDict texts, the location in the mesh, and the defaults of the arguments), except in the
+# functions of NOT_KEYED, in docstrings, in `log(...)` and `print(...)` calls and in `raise` statements: a new function is keyed unless it is named there.
+# A comment edit, a log line, a new message or a code change that moves no number or text keeps the cache; NPROC is not a setting (cores change the speed, not
+# the answer; the cached file records it). What no key here covers: the logic of the code (an operator, a name, a call), `cafe.pm.vv.gci_two_grid` and the
+# other modules this one calls, and the versions of numpy, scipy and trimesh. A new module constant must be named in SETTINGS or NOT_SETTINGS (a test holds the
+# two lists to the module).
+INCIDENCE_ALPHAS = (5.0, 10.0)                  # the angles of attack of the hull-lift study (degrees); the Hangar's key reads them from here
 SETTINGS = ("FOAM", "FLUIDS", "DIRS", "COMMON_SCHEMES", "QUALITY", "EXT_SNAPPY", "EXT_FIELDS", "FS_FIELDS", "FS_DOMAIN", "FS_H0", "FS_Z", "FS_NZ", "FS_GRADE",
-            "FS_BOXES", "FS_ITERS", "FS_LTS", "SURF_FO")
-NOT_SETTINGS = ("NPROC", "CACHE", "SETTINGS", "NOT_SETTINGS", "MAIN_WHATS")
+            "FS_BOXES", "FS_ITERS", "FS_LTS", "SURF_FO", "INCIDENCE_ALPHAS")
+NOT_SETTINGS = ("NPROC", "CACHE", "SETTINGS", "NOT_SETTINGS", "MAIN_WHATS", "NOT_KEYED")
+# the key's own code, the writer's `default`, the command line
+NOT_KEYED = ("recipe", "cached", "_code_literals", "_literals", "_text_and_numbers", "_plain", "main")
+
+
+def _text_and_numbers(node):
+    """The constants under `node` in source order, as their `repr`: not a docstring, a `log(...)` or `print(...)` call or a `raise` statement."""
+    for c in ast.iter_child_nodes(node):
+        if isinstance(c, ast.Raise) or (isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in ("log", "print")):
+            continue
+        if isinstance(c, ast.Expr) and isinstance(c.value, ast.Constant) and isinstance(c.value.value, str):
+            continue
+        if isinstance(c, ast.Constant):
+            yield repr(c.value)
+        else:
+            yield from _text_and_numbers(c)
+
+
+def _literals(src: str) -> str:
+    """The sha-1 of the numbers and texts written in the functions and classes of the module text `src` (see above)."""
+    seen = [(n.name, *_text_and_numbers(n)) for n in ast.parse(src).body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name not in NOT_KEYED]
+    return hashlib.sha1(repr(seen).encode()).hexdigest()
+
+
+@functools.cache
+def _code_literals() -> str:
+    return _literals(pathlib.Path(__file__).read_text())
 
 
 def recipe() -> str:
-    """The sha-1 of `SETTINGS` as they are now (JSON, sorted keys): what a cached result was made under."""
-    import hashlib
-    return hashlib.sha1(json.dumps({n: globals()[n] for n in SETTINGS}, sort_keys=True).encode()).hexdigest()[:16]
+    """The sha-1 of `SETTINGS` as they are now and of the numbers and texts in this file's code (JSON, sorted keys): what a cached result was made under."""
+    return hashlib.sha1(json.dumps({**{n: globals()[n] for n in SETTINGS}, "code": _code_literals()}, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def _plain(o):
+    """`json.dumps`'s `default`: a numpy array or scalar as the list or number it holds, anything else as a float (a TypeError or ValueError if not)."""
+    return o.tolist() if hasattr(o, "tolist") else float(o)
 
 
 def cached(key, stl, log, compute):
     """Same mesh bytes + same case parameters + same recipe (`recipe()`) -> same answer: reuse it (CFD costs minutes to hours). The file keeps the recipe
-    and the core count the result was made with beside the result."""
-    import hashlib
+    and the core count the result was made with beside the result. A file that cannot be read back (empty, cut, not a result) is removed and the case computed
+    again; a finished result that cannot be written is returned with a warning in `log`, never lost to a read-only or full cache (round 17, M-10)."""
     rec = recipe()
     h = hashlib.sha1(pathlib.Path(stl).read_bytes() + json.dumps(key).encode() + rec.encode()).hexdigest()[:16]
     f = CACHE / f"{h}.json"
     if f.exists():
-        log(f"CFD: reusing an identical earlier run ({f.name})")
-        return json.loads(f.read_text())["result"]
+        try:
+            r = json.loads(f.read_text())["result"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log(f"CFD: the cache file {f.name} cannot be read ({type(e).__name__}: {e}); computing again")
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass                                         # a read-only cache: the write below fails too, and says so
+        else:
+            log(f"CFD: reusing an identical earlier run ({f.name})")
+            return r
     r = compute()
-    CACHE.mkdir(parents=True, exist_ok=True)
-    # the next run reads it back: a cut file would be a JSONDecodeError, not a recompute
-    atomic.write_json(f, dict(recipe=rec, nproc=NPROC, result=r), default=float)
+    try:
+        CACHE.mkdir(parents=True, exist_ok=True)
+        # the next run reads it back: a cut file would be a JSONDecodeError, not a recompute
+        atomic.write_json(f, dict(recipe=rec, nproc=NPROC, result=r), default=_plain)
+    except (OSError, TypeError, ValueError) as e:
+        log(f"warning: the CFD result was not cached, so the next run computes it again ({type(e).__name__}: {e})")
     return r
 
 
@@ -159,6 +207,17 @@ meshQualityControls
 mergeTolerance 1e-6;
 """
 
+def _finite_positive(what, *values):
+    """A `ValueError` naming `what` unless every value is a finite number above 0 (a nan speed meshed for an hour and then failed in `simpleFoam`)."""
+    for v in values:
+        try:
+            ok = math.isfinite(float(v)) and float(v) > 0
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise ValueError(f"{what} must be a finite number above 0, got {v!r}")
+
+
 def _body(stl):
     """The mesh in `stl`, refused with a ValueError naming the file when it is empty or flat (an extent of zero along any axis: the cell sizes come from the
     thinnest side, `log2(h0 / 0)` is an OverflowError and the case directory was already deleted). No relative threshold: a real foil is thin."""
@@ -253,8 +312,14 @@ def external(stl, case, fluid="water", speed=1.5, dirs=tuple(DIRS), level_offset
     """Steady RANS on one mesh for several inflow directions. Returns dict per direction:
     force/moment (N, N.m, body frame) for a body moving at `speed` along that direction."""
     case = pathlib.Path(case)
+    dirs = tuple(dirs)
+    if not dirs:
+        raise ValueError("no directions: the case would be meshed (1.2 million cells) and return nothing")
     for d in dirs:
         dvec(d)                                         # a mistyped label is found now, not after the mesh (round 16, M-26)
+    if fluid not in FLUIDS:
+        raise ValueError(f"unknown fluid {fluid!r}: one of {', '.join(FLUIDS)}")
+    _finite_positive("speed", speed)
     m = _body(stl)
     shutil.rmtree(case, ignore_errors=True)
     L = float(m.extents.max())
@@ -416,7 +481,7 @@ def characterize_external(stl, workdir, fluid, speed, cofr=(0, 0, 0), dirs=tuple
     return out["finer"]
 
 
-def characterize_incidence(stl, workdir, fluid, speed, alphas=(5.0, 10.0), planes=("+y", "+z"), cofr=(0, 0, 0), log=print):
+def characterize_incidence(stl, workdir, fluid, speed, alphas=INCIDENCE_ALPHAS, planes=("+y", "+z"), cofr=(0, 0, 0), log=print):
     """Hull lift: forward motion at each angle in `alphas` toward each plane's axis, plus the on-axis runs on the
     SAME mesh that the cross term is measured against (same-grid differencing cancels most discretization error)."""
     dirs = ("+x",) + tuple(planes) + tuple(f"x{p}{a:g}" for p in planes for a in alphas)
@@ -488,6 +553,11 @@ def free_surface(stl, draft, case, speeds, level_offset=0, cofr=(0, 0, 0), iters
     """interFoam LTS at each speed on one mesh. Hull is shifted so the waterline is z=0.
     Returns per-speed resistance (N, full hull) and vertical force (sinkage check)."""
     case = pathlib.Path(case)
+    speeds = list(speeds)
+    if not speeds:
+        raise ValueError("no speeds: the case would be meshed and return nothing")
+    _finite_positive("draft", draft)                    # before the case directory is deleted (round 17, M-11)
+    _finite_positive("speed", *speeds)
     m = _body(stl)
     shutil.rmtree(case, ignore_errors=True)
     m.apply_translation([0, 0, -draft])
