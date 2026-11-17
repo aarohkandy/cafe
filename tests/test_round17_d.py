@@ -150,13 +150,13 @@ def test_m5_the_loss_of_a_low_antenna_is_overstated_by_the_documented_band(h):
     lo, hi = LOW_ANTENNA_BAND[h]
     assert lo <= diff.min() and diff.max() <= hi, (h, diff.min(), np.median(diff), diff.max())
     if h <= 0.3:
-        assert diff.min() > 0.0                                    # conservative at every distance: the margin is too low, never too high
+        assert diff.min() > 0.0                                    # with a 15 m partner the loss is overstated at every distance (not so for 0.5 m and 2.2 m)
 
 
 def test_m5_the_docstring_of_the_two_ray_model_states_the_low_antenna_band_and_the_floor():
     doc = " ".join(c.two_ray_curved_db.__doc__.split())
     for text in ("LOW ANTENNAS", "+1.2 / +5.1 / +6.0 at 0.3 m", "+11.4 / +15.1 / +16.0", "about 5 dB for an RF link to the Slocum's 0.3 m",
-                 "12 to 16 dB at 0.1 m", "physics.ANTENNA_MIN_M"):
+                 "11 to 16 dB at 0.1 m", "physics.ANTENNA_MIN_M"):                                          # round 18, M-3: 11 (the minimum is +11.4), not 12
         assert text in doc, text
 
 
