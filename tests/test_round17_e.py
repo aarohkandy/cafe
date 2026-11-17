@@ -115,7 +115,7 @@ def test_r17_m4_a_comment_a_docstring_a_log_line_a_message_or_an_exempt_function
                      ('raise ValueError(f"{what} must be a finite number above 0, got {v!r}")', 'raise ValueError(f"{what} {v!r} is not above 0")'),
                      ("fl = FLUIDS[fluid]", "fl = FLUIDS[fluid]  # the fluid"),
                      ("def main(argv: list[str]) -> pathlib.Path:", "def main(argv: list[str], x=7) -> pathlib.Path:"),
-                     ('NPROC = par.env_count("CAFE_NPROC") or 6', 'NPROC = par.env_count("CAFE_NPROC") or 7')]:
+                     ('NPROC = _par.env_count("CAFE_NPROC") or 6', 'NPROC = _par.env_count("CAFE_NPROC") or 7')]:
         assert old in SRC, old
         assert cfd._literals(SRC.replace(old, new, 1)) == base(), old
 

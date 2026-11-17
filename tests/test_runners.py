@@ -861,7 +861,8 @@ def test_r15_pb_the_job_is_pinned_to_pm_cpus_cores_and_its_pools_are_sized_to_th
     assert r.returncode == 0, r.stderr
     (cores,) = pinned(log)
     assert len(cores) == n and cores <= set(cores_free_to_us())
-    assert f"pinned to cores {','.join(str(c) for c in sorted(cores))} (PM_CPUS={n})" in r.stderr
+    said = re.search(rf"pinned to cores ([0-9,]+) \(PM_CPUS={n}\)", r.stderr)      # in claim order (least busy first), which the load decides
+    assert said and {int(c) for c in said.group(1).split(",")} == cores and said.group(1).count(",") == n - 1
     assert log.read_text().split()[2] in ("setsid", str(w / "bin/proot"))               # the pin is in front of proot (and of setsid)
     argv = (tmp_path / "home/argv").read_text().splitlines()
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
