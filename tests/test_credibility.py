@@ -471,8 +471,8 @@ LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the
 
 def test_limitations_are_listed_verbatim_and_point_at_real_files():
     assert [x["text"] for x in cr.LIMITATIONS][:12] == LIMITS
-    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18", "L19", "L20", "L21", "L22"]
-    assert [x["text"] for x in cr.LIMITATIONS][12:-3] == LIMITS2
+    assert [x["id"] for x in cr.LIMITATIONS][12:] == ["L14", "L15", "L16", "L17", "L18", "L19", "L20", "L21", "L22", "L23"]
+    assert [x["text"] for x in cr.LIMITATIONS][12:-4] == LIMITS2
     names = {k for k, _ in cr.FACTORS}
     for x in cr.LIMITATIONS:
         assert set(x["factors"]) <= names and x["where"]
@@ -535,7 +535,8 @@ def test_r12_m6_the_assumed_count_is_of_the_platforms_the_mission_uses_not_of_th
     used, unused = {f: n for f, n in by_file(True).items() if n}, {f: n for f, n in by_file(False).items() if n}
     assert "platforms/quad_uas.yaml" in used and "config/assumptions.yaml" in used
     platforms = {f"platforms/{s}.yaml" for s in ("saildrone_explorer", "seaglider", "slocum", "modems", "radios")}      # radios: all but rfd900x
-    assert set(unused) == platforms | {"config/assumptions.yaml", "config/perturbations.yaml"}
+    assert set(unused) == platforms | {"config/assumptions.yaml", "config/perturbations.yaml", "platforms/quad_uas.yaml"}
+    assert unused["platforms/quad_uas.yaml"] == 4      # the mission's levels, wind limit, gust look-ahead and ship antenna replace the platform's (R17 M-2)
     assert used["platforms/radios.yaml"] == 4          # the UAS's own radio (rfd900x: 2 gains, misc loss, sensitivity), whatever the links say (R16 M-6)
     assert len(c["assumed_inputs"]) > sum(used.values())                                   # the page still lists the whole catalogue
     a = report._assumed(c, dict(stage="credibility", ledger="l", receipt="r"))
