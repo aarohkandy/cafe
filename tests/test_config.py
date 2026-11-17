@@ -1325,16 +1325,15 @@ BARE_COPIES = {
     "acceptance.py": (2, "the training table copied into a fresh --out of the acceptance run, before any run reads it; a cut copy is a failed acceptance"),
     "env/bathy.py": (1, "the argument of `atomic.write_with`: a temporary of its own, O_EXCL, then `os.replace` (round 16, M-24)"),
     "env/orca.py": (1, "the argument of `atomic.write_with`: a temporary of its own, O_EXCL, then `os.replace` (round 16, M-24)"),
-    "ledger.py": (1, "copied to a `.part` and then `os.replace`d"),
     "par.py": (1, "a new numbered array in a directory this process made and removes at exit; the reader gets the path after the save returns"),
     "physics/usv.py": (1, "the table cache of `tables(P, cache_dir)`: `np.savez` is the writer handed to `cafe.atomic.write_with` (a temporary, `os.replace`)"),
     "pipeline.py": (1, "stage 1b's copy of res.pkl: the stage ledger holds its sha-256, so a cut file is a stage that is not done"),
     "stage3/pipeline_windows.py": (1, "the job file of one child process, in a scratch directory the parent removes"),
 }
 BARE_REPLACES = {
-    "emulator.py": 1,                  # a unique temporary name per writer (a parquet table)
-    "env/hycom.py": 2, "env/remote.py": 1,         # the zarr store (`write_store`) and a part (`_fetch_part`): each a temporary of its own, then renamed
-    "ledger.py": 1,                    # copy_manifest: a byte copy of a shared file
+    # round 17: `emulator.write_table`, `ledger.copy_manifest`, `remote.download`'s part and `hycom._fetch_part`'s part go through `atomic.write_with` or
+    # `atomic.replace_from` (M-13 and its siblings, M-9): no bare replace is left in them
+    "env/hycom.py": 1,                             # the zarr store (`write_store`): a directory built in a temporary of its own, then renamed
 }
 
 

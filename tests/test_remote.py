@@ -855,7 +855,7 @@ def test_r13_m18_a_missing_file_is_still_missing(server):
 def test_r13_m18_download_makes_the_destination_directory(server, tmp_path):
     u = server.put("a", b"abc" * 100)
     p = remote.download(u, tmp_path / "no" / "such" / "dir" / "a")
-    assert p.read_bytes() == b"abc" * 100 and list(p.parent.iterdir()) == [p]
+    assert p.read_bytes() == b"abc" * 100 and sorted(q.name for q in p.parent.iterdir()) == ["a", "a.lock"]       # (the lock file of round 17, M-9, stays)
 
 
 # ---- round 13 batch C, after the adversary's fuzz: a damaged size or count must be a ValueError at the header, not an OSError or an allocation at the read

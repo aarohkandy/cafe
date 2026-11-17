@@ -290,13 +290,14 @@ def _child(args: list[Any], deadline: float) -> None:
 
 
 def _fetch_part(args: list[Any], path: str | pathlib.Path, deadline: float) -> None:
-    """`_child(args + [tmp])` and then `os.replace(tmp, path)`, where `tmp` is a name of its own (`atomic.tmp_name`) that this call removes whatever happened,
+    """`_child(args + [tmp])` and then `atomic.replace_from(tmp, path)`, where `tmp` is a name of its own (`atomic.tmp_name`) that this call removes whatever
+    happened,
     a child killed at its deadline included (round 16, M-24: the children wrote `<out>.part`, one name for two fetches of one part, and a retry overwrote it;
     a name of its own per child would otherwise leave one half file for every timeout). `path` is whole or not there."""
     tmp = atomic.tmp_name(path)
     try:
         _child([*args, tmp], deadline)
-        os.replace(tmp, path)
+        atomic.replace_from(tmp, path)                                 # a part that replaces a damaged one keeps its mode; a link at `path` is refused
     finally:
         tmp.unlink(missing_ok=True)
 

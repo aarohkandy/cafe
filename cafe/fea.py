@@ -33,7 +33,9 @@ ASSUMPTIONS = pathlib.Path(__file__).resolve().parents[1] / "config" / "assumpti
 
 _BLANKS = " \t"                      # YAML's white space: `str.strip()` and `\s` also take U+00A0 and the other Unicode spaces, which are text there
 _MESH_KEY = re.compile(r"""["']?stage3\.fea_elements_along(?![\w.])""")
-_MESH_KEY_LINE = re.compile(r"stage3\.fea_elements_along:(?:\s+#.*|\s*)")
+_MESH_KEY_LINE = re.compile(r"stage3\.fea_elements_along:(?: +#.*| *)")                 # spaces only after the colon: a tab is an error in PyYAML (M-14)
+_TOP_LINE = re.compile(r"\w[\w.\-]*:(?: .*)?")                                         # a top-level line: `key:` and the start of its value, nothing else
+MAX_ELEMENTS_ALONG = 500                                                          # round 17, M-14 (OD-8): about 7 times the converged mesh study's 70
 _MESH_TEXT = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[|>][-+0-9]*)(?:\s+#.*)?|#.*""")   # a quoted text on one line, a block-scalar header, a comment
 
 
@@ -43,12 +45,17 @@ def hull_elements_along() -> int:
     reported two collapse depths). Its mesh study is in the `why` there. Read by line, standard library only: the live app image (Dockerfile, requirements.txt)
     has no pyyaml, and `import yaml` here ended every Hangar hull case in ModuleNotFoundError there (round 15, look-ahead L0).
 
-    A hand reader of YAML must never return a number PyYAML would not, so it reads one layout and refuses every other (round 15 look-ahead L0-4): the key on
+    A hand reader of YAML must not return a number PyYAML would not, so it reads one layout and refuses every other (round 15 look-ahead L0-4; the layouts that
+    `tests/test_stage3.py` and `tests/test_round17_f.py` hold it to PyYAML on are the ones this claim covers): the key on
     its own line (a comment may follow), one `value:` among the entry's own children (the lines at the indent of its first child; deeper lines are the text of
     another child), written as a decimal whole number (no sign, no leading zero, no `_`) with at most ` # comment` after it, and the key written once in
     the file. A child that starts a flow collection, an anchor, a tag or an alias, or a quoted text that does not end on its line, is refused, since the
     lines under it could then mean anything. A line deeper than the `value:` line that follows it is more text of the value in YAML (`70` then `more` is
     '70 more'), so it is refused; blanks are the space and the tab only (a no-break space, U+00A0, is text: `70` and a no-break space is not 70).
+    The file must be one mapping (round 17, M-14): a line at the top level that is not a comment or `key:` (a document marker `---` or `...`, a list item, a
+    line that starts with a tab) is refused wherever it stands, since PyYAML refuses such a file or reads another document; only spaces may follow the key's
+    own colon; and a value above `MAX_ELEMENTS_ALONG` (500, about 7 times the study's 70) is refused, as h = L / value would mesh the hull into millions of
+    shell elements until the stage-3 deadline.
     `tests/test_stage3.py` holds this reading to PyYAML's on the file itself and on each layout it refuses."""
     def bad(why: str) -> ValueError:
         return ValueError(f"stage3.fea_elements_along in {ASSUMPTIONS}: {why}")
@@ -60,6 +67,9 @@ def hull_elements_along() -> int:
         raise bad(f"written {len(heads)} times (YAML keeps the last)")
     if not _MESH_KEY_LINE.fullmatch(lines[heads[0]]):
         raise bad(f"the key line is {lines[heads[0]]!r}; only the key, a colon and a comment are read (not a flow mapping, a quoted key, an anchor or a tag)")
+    for ln in lines:
+        if ln.strip(_BLANKS) and not ln.startswith((" ", "#")) and not _TOP_LINE.fullmatch(ln):
+            raise bad(f"the line {ln[:40]!r} is no `key:` at the top level (a second document `---`, a list item, a tab or a continuation)")
     body = []
     for ln in lines[heads[0] + 1:]:
         if ln.strip(_BLANKS) and not ln.startswith((" ", "#")):                   # the next top-level entry: this one has no more lines
@@ -96,6 +106,8 @@ def hull_elements_along() -> int:
         raise bad(f"value is {values[0]!r}, not a whole number written in decimal with no sign and no leading zero")
     if int(m[1]) < 1:
         raise bad(f"value {m[1]} is below 1")
+    if int(m[1]) > MAX_ELEMENTS_ALONG:
+        raise bad(f"value {m[1][:20]} is above {MAX_ELEMENTS_ALONG} (about 7 times the study's 70): millions of shell elements until the deadline")
     return int(m[1])
 
 

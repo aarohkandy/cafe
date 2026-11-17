@@ -1,5 +1,6 @@
 """Tests for cafe.pm.emulator."""
 import contextlib
+import os
 import pathlib
 import sys
 import threading
@@ -439,15 +440,15 @@ def test_write_table_uses_a_temporary_of_its_own_and_leaves_none_behind_when_it_
     """M-6: every writer renamed the one fixed `train.parquet.tmp`, so two writers raced on it and a failed write left it behind."""
     t = tmp_path / "train.parquet"
     seen = []
-    real = E.os.replace
-    monkeypatch.setattr(E.os, "replace", lambda a, b: (seen.append(pathlib.Path(a).name), real(a, b)))
+    real = os.replace                                                                          # the replace is `cafe.atomic`'s since round 17 (M-13)
+    monkeypatch.setattr(os, "replace", lambda a, b: (seen.append(pathlib.Path(a).name), real(a, b)))
     E.write_table(pd.DataFrame(dict(key=["a"], x=[1.0])), t)
     E.write_table(pd.DataFrame(dict(key=["a", "b"], x=[1.0, 2.0])), t)
     assert len(set(seen)) == 2 and "train.parquet.tmp" not in seen and all(n.startswith(".") and n.endswith(".tmp") and len(n) == 17 for n in seen)  # M-6
     assert list(tmp_path.iterdir()) == [t] and len(E.read_table(t)) == 2
 
-    def half(self, name, *a, **k):
-        pathlib.Path(name).write_bytes(b"PAR1 half a file")
+    def half(self, fh, *a, **k):                                                            # the file object of the temporary (`atomic.write_with`)
+        fh.write(b"PAR1 half a file")
         raise OSError("disk full")
     monkeypatch.setattr(pd.DataFrame, "to_parquet", half)
     with pytest.raises(OSError, match="disk full"):
