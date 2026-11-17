@@ -214,7 +214,7 @@ _HELD = threading.local()                 # `paths`: the lock files this thread 
 
 
 @contextlib.contextmanager
-def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bool = True, wait: Callable[[], None] | None = None) -> Iterator[None]:
+def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bool = True, wait: Callable[[], None] | None = None) -> Iterator[bool]:
     """An exclusive `flock` on `<cache>/<name>`, taken by whoever builds or replaces a store of the shared cache (`derived.zarr`) and by whoever reads it
     to validate or load it, so that a reader never sees a store half built or half deleted by a run of other code that shares the cache directory
     (P-R15A1: one run died hashing `derived.zarr` while the other deleted and rewrote it). Held by one thread at a time; the same thread may take it again
@@ -222,17 +222,20 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
     process. `create=False` (the audit) never makes the file: without one, or where it cannot be opened (a cache that is not writable, no `fcntl`), the
     block runs unlocked, since a store nobody can write has no builder to wait for. `wait` is called once, before the wait, when another holds the lock
     (the ingest says so in its log: a fetch of the ocean store takes hours). `name` makes the lock of another store beside it: the ocean store and the GEBCO
-    cut of the ingest are shared by missions and live in DATA, not in a mission's cache (round 16, M-24)."""
+    cut of the ingest are shared by missions and live in DATA, not in a mission's cache (round 16, M-24). The file is opened with `O_NOFOLLOW`: a link planted
+    at its name is no lock (the block runs unlocked, as for any other open that fails) and its target is neither made nor opened. The block gets whether the
+    lock is held (True; also for the thread that already holds it) or not (False: no `fcntl`, a directory that cannot be written, a link at the name),
+    for a caller that must not rely on it (`download`, round 17, M-9)."""
     path = pathlib.Path(cache) / name
     held: set[pathlib.Path] = _HELD.__dict__.setdefault("paths", set())
     if path in held:
-        yield
+        yield True
         return
     try:
         import fcntl
-        fd = os.open(path, os.O_RDWR | (os.O_CREAT if create else 0), 0o644)
+        fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC | (os.O_CREAT if create else 0), 0o644)
     except (ImportError, OSError):
-        yield
+        yield False
         return
     try:
         try:
@@ -243,7 +246,7 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
             fcntl.flock(fd, fcntl.LOCK_EX)
         held.add(path)
         try:
-            yield
+            yield True
         finally:
             held.discard(path)
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -265,20 +268,27 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
     one call is still continued from where it stopped: that is seconds, not a restart of the process, and the size and 206 are checked.
 
     One download of a `path` runs at a time (`store_lock` on `<name>.lock` beside it, threads and processes alike): a second call for the same `path` waits
-    and then finds the file made, or resumes what the first left (round 17, M-9). Where the directory cannot be written the lock is not taken."""
+    and then finds the file made, or resumes what the first left (round 17, M-9). Where the lock cannot be taken (the directory cannot be written, a link
+    stands at the lock's name) the part is a name of this call's own and nothing is resumed."""
     path = pathlib.Path(path)
     if path.exists() and (sha is None or sha256(path) == sha):
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
-    with store_lock(path.parent, path.name + ".lock"):                 # the `.part` has one name on purpose (it is resumed): one download of `path` at a time
+    with store_lock(path.parent, path.name + ".lock") as held:         # the `.part` has one name on purpose (it is resumed): one download of `path` at a time
         if path.exists() and (sha is None or sha256(path) == sha):     # the one that held the lock made it (round 17, M-9: two shared the part, and the first
             return path                                                # to finish moved it from under the other)
-        return _download(url, path, sha, pin)
+        if held:
+            return _download(url, path, sha, pin, path.with_name(path.name + ".part"))
+        part = atomic.tmp_name(path)                                   # no lock (a directory that cannot be written, a link at the lock's name): a part of this
+        try:                                                           # call's own, so that nothing collides; not resumed, removed whatever happens
+            return _download(url, path, sha, pin, part)
+        finally:
+            part.unlink(missing_ok=True)
+            part.with_name(part.name + ".id").unlink(missing_ok=True)
 
 
-def _download(url: str, path: pathlib.Path, sha: str | None, pin: bool) -> pathlib.Path:
-    """`download` past its checks, with the lock on `path` held."""
-    part = path.with_name(path.name + ".part")
+def _download(url: str, path: pathlib.Path, sha: str | None, pin: bool, part: pathlib.Path) -> pathlib.Path:
+    """`download` past its checks, into `part`."""
     mark = part.with_name(part.name + ".id")
     total, valid = _probe(url)
     ident = dict(valid, total=total)
@@ -317,8 +327,7 @@ def _download(url: str, path: pathlib.Path, sha: str | None, pin: bool) -> pathl
         part.unlink()
         mark.unlink(missing_ok=True)
         raise ValueError(f"{url}: SHA-256 mismatch against the pinned hash, download removed")
-    atomic.keep_mode(part, path)                                       # the file it replaces keeps its permission bits (round 17, M-13 sibling)
-    os.replace(part, path)
+    atomic.replace_from(part, path)                                    # the file it replaces keeps its mode; a link at `path` is refused (round 17, M-13)
     mark.unlink(missing_ok=True)
     return path
 

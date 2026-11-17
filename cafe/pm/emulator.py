@@ -91,12 +91,14 @@ def read_table(path: pathlib.Path) -> pd.DataFrame:
 def write_table(df: pd.DataFrame, path: pathlib.Path) -> None:
     """Write the table so that a reader sees the old file or the new one, never a part: `cafe.atomic.write_with` (a temporary of its own in the same
     directory, made with `O_EXCL`, then `os.replace`). The file keeps its permission bits (a run under a stricter umask no longer makes the shared table
-    unreadable to the others) and a symbolic link at `path` is followed: the file it points to is replaced and the link stays one (round 17, M-13, OD-7)."""
+    unreadable to the others) and a symbolic link at `path` is refused (ELOOP), as at every writer of a file that other runs share: a link planted in a shared
+    data directory must not redirect the write (round 17, M-13; OD-7 became "refuse the link, keep the mode"). A link in the directory part of `path` is
+    followed."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix == ".parquet":
-        atomic.write_with(path, df.to_parquet, follow_symlinks=True)
+        atomic.write_with(path, df.to_parquet)
     else:
-        atomic.write_text(path, df.to_csv(index=False), follow_symlinks=True)
+        atomic.write_with(path, lambda fh: fh.write(df.to_csv(index=False).encode()))
 
 
 @contextlib.contextmanager

@@ -1331,9 +1331,9 @@ BARE_COPIES = {
     "stage3/pipeline_windows.py": (1, "the job file of one child process, in a scratch directory the parent removes"),
 }
 BARE_REPLACES = {
-    # round 17: `emulator.write_table` and `ledger.copy_manifest` go through `atomic.write_with` (M-13, and the M-9 sibling): no bare replace is left in either
-    "env/hycom.py": 2, "env/remote.py": 1,         # the zarr store (`write_store`) and a part (`_fetch_part`): each a temporary of its own, then renamed;
-                                                   # remote.py: `download`'s one `.part`, resumed on purpose and held by `store_lock` (round 17, M-9)
+    # round 17: `emulator.write_table`, `ledger.copy_manifest`, `remote.download`'s part and `hycom._fetch_part`'s part go through `atomic.write_with` or
+    # `atomic.replace_from` (M-13 and its siblings, M-9): no bare replace is left in them
+    "env/hycom.py": 1,                             # the zarr store (`write_store`): a directory built in a temporary of its own, then renamed
 }
 
 

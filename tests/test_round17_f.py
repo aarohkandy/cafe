@@ -54,7 +54,8 @@ class _Slow:
         return self.r.read(n)
 
 
-def test_r17_m9_two_downloads_of_one_file_both_return_the_file(server, tmp_path, monkeypatch):
+@pytest.mark.parametrize("planted", [False, True], ids=["lock", "planted link at the lock name"])
+def test_r17_m9_two_downloads_of_one_file_both_return_the_file(server, tmp_path, monkeypatch, planted):
     """Two calls of `remote.download(url, out)` (two ingests, or two threads) shared `out.part`: the second started over the first's part (a server that
     sends no validator cannot tell it from another version), and the first died with `FileNotFoundError` or "stalled". Now the second waits for the lock,
     finds the file and returns it."""
@@ -63,6 +64,10 @@ def test_r17_m9_two_downloads_of_one_file_both_return_the_file(server, tmp_path,
     real = remote._open
     monkeypatch.setattr(remote, "_open", lambda url, start=None, end=None, **kw: (lambda r: _Slow(r) if end is None else r)(real(url, start, end, **kw)))
     out = tmp_path / "s2" / "a"
+    victim = tmp_path / "victim"
+    if planted:                                                            # no lock can be taken: each call has a part of its own; the target is left alone
+        out.parent.mkdir()
+        (out.parent / "a.lock").symlink_to(victim)
     got, failed = [], []
 
     def go(delay):
@@ -79,6 +84,7 @@ def test_r17_m9_two_downloads_of_one_file_both_return_the_file(server, tmp_path,
         t.join(60)
     assert failed == [] and got == [out, out] and out.read_bytes() == data
     assert sorted(p.name for p in out.parent.iterdir() if p.suffix != ".lock") == ["a"]       # no part and no record of one is left
+    assert not victim.exists()                                             # (an `O_CREAT` open followed the planted link and made it)
 
 
 def test_r17_m9_a_second_download_waits_when_the_first_holds_the_lock_and_is_not_blocked_by_a_finished_file(server, tmp_path):
@@ -118,14 +124,21 @@ def test_r17_m13_a_new_table_has_the_creation_mode_and_the_umask_applies(tmp_pat
 
 
 @pytest.mark.parametrize("suffix", [".parquet", ".csv"])
-def test_r17_m13_a_symbolic_link_at_the_table_path_is_followed_and_stays_a_link(tmp_path, suffix):
-    """OD-7: the link became a regular file and the table it pointed to kept its old rows."""
+def test_r17_m13_a_symbolic_link_at_the_table_path_is_refused_and_nothing_is_written(tmp_path, suffix):
+    """OD-7 as the lead settled it (refuse the link, keep the mode): the link became a regular file and the table it pointed to kept its old rows; a link
+    planted in a shared data directory must not redirect the write, so the table's own name is never followed (a link in the directory path still is)."""
     real, link = tmp_path / f"real{suffix}", tmp_path / f"link{suffix}"
     E.write_table(pd.DataFrame(dict(key=["a"], x=[1.0])), real)
     link.symlink_to(real)
-    E.write_table(pd.DataFrame(dict(key=["a", "b"], x=[1.0, 2.0])), link)
-    assert link.is_symlink() and len(E.read_table(real)) == 2 and len(E.read_table(link)) == 2
+    with pytest.raises(OSError) as e:
+        E.write_table(pd.DataFrame(dict(key=["a", "b"], x=[1.0, 2.0])), link)
+    assert e.value.errno == errno.ELOOP and link.is_symlink() and len(E.read_table(real)) == 1
     assert sorted(p.name for p in tmp_path.iterdir()) == sorted([real.name, link.name])
+    d = tmp_path / "dirlink"                                                # a link in the directory part of the path is followed, as before
+    d.symlink_to(tmp_path / "elsewhere", target_is_directory=True)
+    (tmp_path / "elsewhere").mkdir()
+    E.write_table(pd.DataFrame(dict(key=["a"], x=[1.0])), d / f"t{suffix}")
+    assert len(E.read_table(tmp_path / "elsewhere" / f"t{suffix}")) == 1
 
 
 def test_r17_m13_the_append_of_a_row_keeps_the_mode_and_the_lock_file_stays_beside_the_table(tmp_path):
@@ -163,12 +176,35 @@ def test_r17_m13_sibling_a_fetched_part_keeps_the_mode_of_the_part_it_replaces(t
     assert p.read_bytes() == b"whole" and mode(p) == 0o664 and sorted(q.name for q in tmp_path.iterdir()) == ["part.nc"]
 
 
-def test_r17_m13_keep_mode_leaves_a_new_name_with_its_own_mode(tmp_path):
-    tmp = tmp_path / "t"
-    tmp.write_bytes(b"x")
-    tmp.chmod(0o600)
-    atomic.keep_mode(tmp, tmp_path / "absent")
-    assert mode(tmp) == 0o600
+def test_r17_m13_replace_from_moves_a_finished_file_by_the_writers_rules(tmp_path):
+    """`atomic.replace_from` (a part that cannot go through `write_with`): the content, the mode of an existing file kept, the creation mode of a new one, the
+    source removed, a link at the name refused."""
+    src, dest = tmp_path / "src", tmp_path / "dest"
+    src.write_bytes(b"new" * 1000)
+    with umask(0o027):
+        atomic.replace_from(src, dest)
+    assert dest.read_bytes() == b"new" * 1000 and mode(dest) == 0o640 and not src.exists()
+    dest.chmod(0o664)
+    src.write_bytes(b"newer")
+    with umask(0o077):
+        atomic.replace_from(src, dest)
+    assert dest.read_bytes() == b"newer" and mode(dest) == 0o664 and sorted(p.name for p in tmp_path.iterdir()) == ["dest"]
+    link = tmp_path / "link"
+    link.symlink_to(dest)
+    src.write_bytes(b"x")
+    with pytest.raises(OSError) as e:
+        atomic.replace_from(src, link)
+    assert e.value.errno == errno.ELOOP and dest.read_bytes() == b"newer" and src.exists()
+
+
+@pytest.mark.parametrize("bits", [0o4755, 0o2755, 0o1777])
+def test_r17_m13_the_mode_kept_is_the_nine_permission_bits_never_setuid_setgid_or_sticky(tmp_path, bits):
+    """An existing file's mode went onto its replacement whole (`S_IMODE`: 0o7777), so a file that had a setuid, setgid or sticky bit kept it."""
+    f = tmp_path / "f"
+    f.write_bytes(b"old")
+    f.chmod(bits)
+    atomic.write_text(f, "new")
+    assert mode(f) == bits & 0o777 and f.read_text() == "new"
 
 
 def test_r17_m9_sibling_copy_manifest_uses_the_one_writer_keeps_the_mode_and_refuses_a_link(tmp_path):
@@ -285,3 +321,53 @@ def test_r17_m15_a_dangling_link_and_a_chain_still_work_with_follow_symlinks(tmp
     link.symlink_to(mid)
     write(link, follow_symlinks=True)                                      # the target does not exist: the link is dangling, not a loop
     assert link.is_symlink() and mid.is_symlink() and target.read_bytes() == b"x"
+
+
+# ---- the lock file is never a link's target (round 17, security review) ----------------------------------------------------------------------------------
+
+def test_r17_store_lock_does_not_follow_a_link_at_its_name_and_says_whether_it_holds_the_lock(tmp_path):
+    """A link planted at `<name>.lock` made `os.open(..., O_CREAT)` create or open its target; now the open fails and the block runs unlocked (False, as
+    for a directory that cannot be written), where a taken lock is True, also for the thread that already holds it."""
+    victim = tmp_path / "victim"
+    (tmp_path / "x.lock").symlink_to(victim)
+    with remote.store_lock(tmp_path, "x.lock") as held:
+        assert held is False
+    assert not victim.exists()
+    victim.write_text("KEEP")
+    with remote.store_lock(tmp_path, "x.lock") as held:
+        assert held is False
+    assert victim.read_text() == "KEEP"
+    with remote.store_lock(tmp_path, "y.lock") as outer:
+        with remote.store_lock(tmp_path, "y.lock") as inner:
+            assert outer is True and inner is True
+
+
+def test_r17_store_lock_opens_its_file_close_on_exec_and_without_following_links(tmp_path, monkeypatch):
+    flags = []
+    real = os.open
+    monkeypatch.setattr(os, "open", lambda p, f, *a, **k: (flags.append(f), real(p, f, *a, **k))[1])
+    with remote.store_lock(tmp_path, "z.lock"):
+        pass
+    assert len(flags) == 1 and flags[0] & os.O_NOFOLLOW and flags[0] & os.O_CLOEXEC
+
+
+def test_r17_m9_an_unlocked_download_uses_a_part_of_its_own_and_leaves_nothing(server, tmp_path, monkeypatch):
+    """With no lock the fixed `<name>.part` would be shared by every unlocked call: the part is `atomic.tmp_name`'s, seen while the body is read, and gone
+    afterwards, a failed download included."""
+    out = tmp_path / "a"
+    (tmp_path / "a.lock").symlink_to(tmp_path / "victim")
+    u = server.put("a", b"payload" * 100)
+    seen = []
+    real = remote._open
+
+    def spy(url, start=None, end=None, **kw):
+        if end is None:
+            seen.append(sorted(p.name for p in tmp_path.iterdir()))
+        return real(url, start, end, **kw)
+    monkeypatch.setattr(remote, "_open", spy)
+    assert remote.download(u, out).read_bytes() == b"payload" * 100
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a", "a.lock"] and seen and not any("a.part" in n for names in seen for n in names)
+    out.unlink()
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        remote.download(u, out, "0" * 64, pin=True)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.lock"]
