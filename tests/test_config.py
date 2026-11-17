@@ -1537,8 +1537,9 @@ def test_r15_a_cut_write_of_the_cfd_cache_is_no_cache_and_the_next_run_computes_
     calls = []
     compute = lambda: calls.append(1) or dict(cd=0.25)                                                           # noqa: E731
     cut_writes()
-    with pytest.raises(OSError, match="killed"):
-        cfd.cached(dict(k=1), stl, lambda m: None, compute)
+    said = []
+    assert cfd.cached(dict(k=1), stl, said.append, compute) == dict(cd=0.25) and calls == [1]                   # round 17, M-10: the result is returned
+    assert len(said) == 1 and said[0].startswith("warning: the CFD result was not cached") and "killed" in said[0]
     assert list((tmp_path / "cfdcache").iterdir()) == []
     monkeypatch.undo()
     monkeypatch.setattr(cfd, "CACHE", tmp_path / "cfdcache")

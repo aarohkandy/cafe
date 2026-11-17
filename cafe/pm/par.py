@@ -52,10 +52,7 @@ def env_count(name: str) -> int | None:
     v = os.environ.get(name)
     if not v:
         return None
-    try:
-        n = int(v)
-    except ValueError:
-        n = 0
+    n = int(v) if v.isascii() and v.isdecimal() else 0      # `int` alone takes "1_0" as 10, " 4 " as 4 and full-width digits (round 17, M-11)
     if n < 1:
         from .config import ConfigError
         raise ConfigError(f"{name}={v!r} is not a whole number of at least 1; set {name}=N or unset it")
