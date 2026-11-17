@@ -1,7 +1,7 @@
 # Round 18, batch C handback: M-4 and the A-2 tests of M-16
 
 Branch `r18-c` (cut from d69be8f), worktree `cafe-r18c`.
-Commits (each ends with the `Co-Authored-By: Claude Fable 5.2` line): 64f9de7 (stage1.py, the three test files), then a lint commit (line length, one unused loop variable), then this hand-back.
+Commits (each ends with the `Co-Authored-By: Claude Fable 5.2` line): 64f9de7 (stage1.py, the three test files), a lint commit (line length, one unused loop variable), a draft of this hand-back, and the final hand-back commit.
 Files touched, all in the batch's list: `cafe/pm/stage1.py`, `tests/test_stage1.py`, `tests/test_round17_c.py`, `tests/test_round18_c.py` (new). `physics/usv.py`, `physics/uas.py`, `credibility.py`, `report.py` are untouched.
 Numbering of the DECISIONS rows: C1 and C2 here; batch G numbers them after 951.
 
@@ -72,11 +72,12 @@ A-2 mutants (each a one-line `sed` on a copy in `pm_r18c_mut`, the file put back
 | `r18c_2` | `test_round18_c` (without the two probe tests) + `test_round17_c` | 1 -> fixed | 22 passed, 1 failed (the `hs` test: the shipped radio never flips; test rewritten with a weaker radio) |
 | `r18c_4` | the four vehicle probes | 0 | 4 passed |
 | `r18c_5` | the link probe and the `hs` test | 0 | 2 passed |
-| `r18c_lint1` | `ruff check cafe/pm tests`, `mypy cafe/pm` | ruff 1 (11 line-length / one B007, in my files), mypy 0 | fixed in the lint commit; see the last row |
-| `r18c_wide1` | WIDE_RESULT_PLACEHOLDER | | |
+| `r18c_lint1` | `ruff check cafe/pm tests`, `mypy cafe/pm` | ruff 1 (10 E501 and one B007, all in my files), mypy 0 | fixed in the lint commit; `r18c_lint2` below |
+| `r18c_wide1` | `-n 3` of `test_stage1`, `test_stats_exact`, `test_stats`, `test_pipeline`, `test_report`, `test_credibility`, `test_cli`, `test_reproducible`, `test_round15_a`, `test_round16_a`, `test_round16_report`, `test_round17_a`, `test_round17_b`, `test_round17_c`, `test_round17_m`, `test_round18_c`, `test_whatif`, `test_usv`, `test_perturb_env` (commit 64f9de7: every file that imports or pins `stage1`, the sensitivity, the summary, `merge` or the USV/glider result keys) | 0 | 1,968 passed by the progress-line count (no F, s, x or E) |
+| `r18c_fin1` | `-n 3` of `test_round18_c`, `test_round17_c`, `test_stage1` on the final tree (the three files the lint commit touched; the wide run was on 64f9de7) | 0 | 202 passed by the progress-line count |
 | `r18c_codeonly` | `python -m cafe.pm audit --code-only` | 1 | no banned token and no commented-out code found; the one problem is "mutation: no stored result at docs/mutation.json": that file is server-written, untracked and protected in `bin/sync_filters`, so no `pm_*` copy on orca has it (not mine; the same for any builder's tree) |
 | `r18c_demo2` | quick demo on this tree (PM_CPUS=6, PM_MEM=16g; the first start `r18c_demo` was stopped after a minute by its own tmux session name because the tree had an untracked scratch dir, and rerun clean) | 0 | below |
-LINT_FINAL_PLACEHOLDER
+| `r18c_lint2` | `ruff check cafe/pm tests`, `mypy cafe/pm` on the final tree | ruff_rc=0, mypy_rc=0 | "All checks passed!", "no issues found in 55 source files" |
 
 ## The demo against q18 (`review/round_14/q14summary.py r18c_demo q18`, plus the sensitivity entries of `stage1/summary.json`, `stage1b/summary.json`, `report/report.json`)
 
