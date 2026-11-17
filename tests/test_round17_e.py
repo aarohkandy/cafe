@@ -61,6 +61,7 @@ def keyed_functions(tree):
     ("includedAngle 150", "includedAngle 140"),                            # an inline text (twice in the file: the first is the external one)
     ("0.713 * D", "0.714 * D"),                                            # locationInMesh
     ("loc=(-0.71 * L,", "loc=(-0.72 * L,"),
+    ("loc=(-0.71 * L,", "loc=(0.71 * L,"),                                  # the sign alone (round 18, M-2)
     ("surf_level=1)", "surf_level=2)"),
     ("for sl in (1, 0):", "for sl in (2, 0):"),
     ("alphas=INCIDENCE_ALPHAS, planes=(\"+y\", \"+z\")", "alphas=INCIDENCE_ALPHAS, planes=(\"+y\", \"-z\")"),

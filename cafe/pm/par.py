@@ -48,14 +48,18 @@ def _child() -> bool:
 
 
 def env_count(name: str) -> int | None:
-    """The whole number of at least 1 in the environment variable `name`; None when it is unset or empty; anything else is a `ConfigError` naming it."""
+    """The whole number of at least 1 and at most 9 digits in the environment variable `name`; None when it is unset or empty; anything else is a `ConfigError`
+    naming it."""
     v = os.environ.get(name)
     if not v:
         return None
-    n = int(v) if v.isascii() and v.isdecimal() else 0      # `int` alone takes "1_0" as 10, " 4 " as 4 and full-width digits (round 17, M-11)
+    digits = v.isascii() and v.isdecimal()                  # `int` alone takes "1_0" as 10, " 4 " as 4 and full-width digits (round 17, M-11)
+    n = int(v) if digits and len(v) <= 9 else 0             # a count of workers or cores has at most 9 digits; `int` of 4,300 is a bare ValueError (round 18, M-11)
     if n < 1:
         from .config import ConfigError
-        raise ConfigError(f"{name}={v!r} is not a whole number of at least 1; set {name}=N or unset it")
+        shown = v if len(v) <= 40 else v[:20] + "..."
+        what = "has more than 9 digits, which is not a count of workers or cores" if digits and len(v) > 9 else "is not a whole number of at least 1"
+        raise ConfigError(f"{name}={shown!r} {what}; set {name}=N or unset it")
     return n
 
 
