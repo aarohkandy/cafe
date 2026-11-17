@@ -60,12 +60,13 @@ def test_m1_the_flip_search_measures_the_unchanged_mission_on_the_members_of_its
     assert spent == (len(rows) + 1) * cost and calls[-1] == list(range(32))                       # the baseline is a batch, charged as one
 
 
-def test_m1_a_share_that_covers_only_the_candidates_leaves_the_baseline_unmeasured_and_says_so(monkeypatch):
+def test_m1_a_share_that_covers_no_batch_leaves_the_baseline_unmeasured_and_says_so(monkeypatch):
+    """Round 18, M-1: the baseline is measured first (the rows are judged by its verdict), so it is the share that covers no batch that leaves it unmeasured."""
     fake_batch(monkeypatch)
     plan = plan_for(STORM, 32)
     cost = budget.batch_cost_s(plan, [GL])
-    flips, spent = whatif.flip_search(STORM, BASE, {GL: TRACK}, ENV, {}, plan, *stage1.priors_for(STORM), None, 5, 1.5 * cost, lambda *_: None)
-    assert flips[GL]["base_same"] is None and spent == cost and "base_same" in flips[GL]      # the key is there: a report of this round says "not measured"
+    flips, spent = whatif.flip_search(STORM, BASE, {GL: TRACK}, ENV, {}, plan, *stage1.priors_for(STORM), None, 5, 0.9 * cost, lambda *_: None)
+    assert flips[GL]["base_same"] is None and spent == 0.0 and "base_same" in flips[GL]      # the key is there: a report of this round says "not measured"
 
 
 def test_m1_the_base_runs_own_first_batch_is_the_baseline_at_no_cost_and_needs_no_share(monkeypatch):

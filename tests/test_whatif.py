@@ -751,8 +751,8 @@ def test_the_stage_1_budget_is_split_over_the_vehicles_not_spent_on_the_first(mo
     monkeypatch.setattr(whatif, "measure", lambda *a, **k: dict(p_fail=1.0, lo=0.9, hi=1.0, verdict="NO-GO", n=16))
     base = {v: dict(verdict="NO-GO", p_fail=1.0) for v in ("glider_eq", "glider_1n")}
     log = []
-    flips, spent = whatif.flip_search(m, base, {}, ENV, {}, plan, pri, marg, None, 5, 2.5 * cost, log.append)
-    assert [flips[v]["evaluated"] for v in base] == [1, 1] and spent == 2 * cost
+    flips, spent = whatif.flip_search(m, base, {}, ENV, {}, plan, pri, marg, None, 5, 4.5 * cost, log.append)   # r18 M-1: a share's 1st batch is the baseline
+    assert [flips[v]["evaluated"] for v in base] == [1, 1] and spent == 4 * cost
     for v in base:
         f = flips[v]
         assert sum(t["method"] == "Stage 1" for t in f["tried"]) == 1
@@ -761,8 +761,8 @@ def test_the_stage_1_budget_is_split_over_the_vehicles_not_spent_on_the_first(mo
     flips, spent = whatif.flip_search(m, base, {}, ENV, {}, plan, pri, marg, None, 5, 0.9 * cost, lambda *_: None)
     assert [flips[v]["evaluated"] for v in base] == [0, 0] and spent == 0.0                                 # neither gets what it cannot afford
     only = {"glider_eq": base["glider_eq"], "glider_1n": dict(verdict="GO", p_fail=0.0)}
-    flips, spent = whatif.flip_search(m, only, {}, ENV, {}, plan, pri, marg, None, 5, 2.5 * cost, lambda *_: None)
-    assert list(flips) == ["glider_eq"] and flips["glider_eq"]["evaluated"] == 2 and spent == 2 * cost       # a GO vehicle takes no share
+    flips, spent = whatif.flip_search(m, only, {}, ENV, {}, plan, pri, marg, None, 5, 3.5 * cost, lambda *_: None)
+    assert list(flips) == ["glider_eq"] and flips["glider_eq"]["evaluated"] == 2 and spent == 3 * cost       # a GO vehicle takes no share; baseline: a batch
 
 
 def test_the_search_counts_what_was_evaluated_and_what_could_never_be(monkeypatch):
@@ -1014,10 +1014,12 @@ def test_the_uas_flip_search_measures_its_baseline_as_it_measures_the_candidates
     f = flips["uas"]
     assert f["wind_model"] == whatif.WIND_MODEL_2D and f["base_2d"]["p_fail"] == 0.75 and f["base_2d"]["verdict"] == "NO-GO"
     assert env.seen and not any(env.seen) and env.use_3d is True and spent == (whatif.FALLBACK_K + 1) * cost
-    # the candidates come first: a share that covers only them leaves the baseline unmeasured, and the statement stays
+    # the baseline comes first (r18 M-1: the rows are judged by its verdict); a share that covers not even it leaves it unmeasured, and the statement stays
     env.seen.clear()
+    flips, spent = whatif.flip_search(CI, base, {}, env, {}, plan, {}, {}, None, 5, 0.9 * cost, lambda *_: None)
+    assert flips["uas"]["base_2d"] is None and flips["uas"]["wind_model"] == whatif.WIND_MODEL_2D and spent == 0.0
     flips, spent = whatif.flip_search(CI, base, {}, env, {}, plan, {}, {}, None, 5, 3.5 * cost, lambda *_: None)
-    assert flips["uas"]["base_2d"] is None and flips["uas"]["wind_model"] == whatif.WIND_MODEL_2D and spent == 3 * cost
+    assert flips["uas"]["base_2d"]["p_fail"] == 0.75 and spent == 3 * cost                            # the baseline and the two rows that fit after it
     flips, _ = whatif.flip_search(CI, base, {}, AnalyticEnv(), {}, plan, {}, {}, None, 5, 10 * cost, lambda *_: None)      # no switch: no claim
     assert flips["uas"]["wind_model"] is None and flips["uas"]["base_2d"] is None
 
@@ -1031,7 +1033,7 @@ def test_a_baseline_that_leaves_the_data_is_no_number_not_a_crash(monkeypatch):
 
     def measure(*a, **k):
         n["k"] += 1
-        if n["k"] > whatif.FALLBACK_K:                                                    # the baseline comes after the candidates
+        if n["k"] == 1:                                                                   # the baseline comes before the candidates (r18 M-1)
             raise whatif.Invalid("uas: the changed mission leaves the environment data")
         return real(*a, **k)
     monkeypatch.setattr(whatif, "measure", measure)

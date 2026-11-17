@@ -497,8 +497,8 @@ def test_whatif_parses_each_argument_form(wi, capsys):
     assert wi.seen["ops"] == dict(shift_h=0.0, dlon=-1.0, dlat=0.0, drop=[])
     cli.main(whatif_args(wi, "--move", "1deg W", "--move", "0.5deg north", "--move", "0.25 deg e"))
     assert (wi.seen["ops"]["dlon"], wi.seen["ops"]["dlat"]) == (-0.75, 0.5)
-    cli.main(whatif_args(wi, "--drop", "glider_2n", "--drop", "usv", "--vehicle", "uas", "--vehicle", "usv", "--budget", "ci"))
-    assert wi.seen["ops"]["drop"] == ["glider_2n", "usv"] and wi.seen["only"] == ["uas", "usv"] and wi.seen["plan"]["budget"] == "ci"
+    cli.main(whatif_args(wi, "--drop", "glider_2n", "--drop", "usv", "--vehicle", "uas", "--vehicle", "usv", "--budget", "quick"))
+    assert wi.seen["ops"]["drop"] == ["glider_2n", "usv"] and wi.seen["only"] == ["uas", "usv"] and wi.seen["plan"]["budget"] == "quick"   # the run's own (M-5)
     cli.main(whatif_args(wi, "--shift", "6h", "--move", "1deg S", "--drop", "uas"))
     assert wi.seen["ops"] == dict(shift_h=6.0, dlon=0.0, dlat=-1.0, drop=["uas"])
 
