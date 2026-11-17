@@ -15,6 +15,7 @@ import datetime as dt, importlib.metadata, json, math, os, pathlib, platform, re
 from types import TracebackType
 from typing import Any, Literal
 
+from cafe import atomic
 from .env.remote import sha256, tree_sha256
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -126,9 +127,8 @@ def copy_manifest(src: str | pathlib.Path, dest: str | pathlib.Path) -> dict[str
     covers nothing and the cache is fetched again, as for a manifest of the wrong shape (round 14, M-22 sibling)."""
     dest = pathlib.Path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(dest.name + ".part")
-    shutil.copyfile(src, tmp)
-    os.replace(tmp, dest)
+    with open(src, "rb") as f:
+        atomic.write_with(dest, lambda fh: shutil.copyfileobj(f, fh))      # a temporary of its own, O_EXCL, the mode kept (round 17, M-9 sibling)
     try:
         man = json.loads(dest.read_text())
     except ValueError:                                                    # not JSON (a damaged disk): no record; it covers nothing, so it is fetched again

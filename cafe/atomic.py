@@ -28,11 +28,13 @@ def _replace_through(p: Any, fill: Callable[[pathlib.Path, int], None], follow_s
     made with the mode `0o600` when `p` exists and the creation mode `0o666` (the process's umask applies) when it does not, so it is never readable more
     widely than the file it becomes; an existing file's permission bits are set on it after the write (a new file gets the default ones); a hard link to
     the file does not survive, because a replace gives the name a new inode and the other name keeps the old content. A symbolic link at `p` is refused
-    (`OSError`, ELOOP) unless `follow_symlinks`: then the file it points to is the one replaced and the link stays a link. A failed write leaves `p` as it was
-    and no temporary."""
+    (`OSError`, ELOOP) unless `follow_symlinks`: then the file it points to is the one replaced and the link stays a link (a loop of links is ELOOP too: no
+    file is there to replace). A failed write leaves `p` as it was and no temporary."""
     p = pathlib.Path(p)
     if follow_symlinks:
         p = pathlib.Path(os.path.realpath(p))
+        if p.is_symlink():                                                               # `realpath` of a loop is a name that is itself a link (round 17, M-15)
+            raise OSError(40, "symbolic link loop", str(p))                              # ELOOP, as below; a dangling link is no loop (its target is no link)
     elif p.is_symlink():
         raise OSError(40, "refusing to write through a symbolic link", str(p))           # 40 = ELOOP
     try:
@@ -82,3 +84,14 @@ def write_with(p: Any, writer: Callable[[Any], None], follow_symlinks: bool = Fa
             writer(f)
 
     _replace_through(p, fill, follow_symlinks)
+
+
+def keep_mode(tmp: Any, dest: Any) -> None:
+    """The permission bits of the existing file `dest` on `tmp`, which is about to be `os.replace`d onto it: a file made by `open` has the process's umask
+    applied and a replace gives the name that file's mode, so a run under a stricter umask made a shared file unreadable to the others (round 17, M-13). A
+    `dest` that does not exist leaves `tmp` as it is (a new file gets the default ones). For a writer that cannot go through `write_with` (a part that
+    grows over several calls, a file a child process makes by name)."""
+    try:
+        os.chmod(tmp, stat.S_IMODE(os.stat(dest).st_mode))
+    except FileNotFoundError:
+        pass

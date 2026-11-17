@@ -22,6 +22,8 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
+from cafe import atomic
+
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 EXTRA_CA = ROOT / "config" / "certs" / "incommon_rsa_server_ca2.pem"
 BLOCK = 4 << 20
@@ -260,13 +262,24 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
     the server sends a validator that can go in If-Range (a strong ETag or Last-Modified); with no record, another version, or no such validator it starts
     again from byte 0, and the resume request carries If-Range so that a file replaced in between comes back whole (round 12, M-25; look-ahead L1: a
     server with no validator cannot tell a v1 part from v2 whatever the size, and no hash is checked here to catch the splice). A transfer cut inside
-    one call is still continued from where it stopped: that is seconds, not a restart of the process, and the size and 206 are checked."""
+    one call is still continued from where it stopped: that is seconds, not a restart of the process, and the size and 206 are checked.
+
+    One download of a `path` runs at a time (`store_lock` on `<name>.lock` beside it, threads and processes alike): a second call for the same `path` waits
+    and then finds the file made, or resumes what the first left (round 17, M-9). Where the directory cannot be written the lock is not taken."""
     path = pathlib.Path(path)
     if path.exists() and (sha is None or sha256(path) == sha):
         return path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with store_lock(path.parent, path.name + ".lock"):                 # the `.part` has one name on purpose (it is resumed): one download of `path` at a time
+        if path.exists() and (sha is None or sha256(path) == sha):     # the one that held the lock made it (round 17, M-9: two shared the part, and the first
+            return path                                                # to finish moved it from under the other)
+        return _download(url, path, sha, pin)
+
+
+def _download(url: str, path: pathlib.Path, sha: str | None, pin: bool) -> pathlib.Path:
+    """`download` past its checks, with the lock on `path` held."""
     part = path.with_name(path.name + ".part")
     mark = part.with_name(part.name + ".id")
-    path.parent.mkdir(parents=True, exist_ok=True)
     total, valid = _probe(url)
     ident = dict(valid, total=total)
     try:
@@ -304,6 +317,7 @@ def download(url: str, path: str | pathlib.Path, sha: str | None = None, pin: bo
         part.unlink()
         mark.unlink(missing_ok=True)
         raise ValueError(f"{url}: SHA-256 mismatch against the pinned hash, download removed")
+    atomic.keep_mode(part, path)                                       # the file it replaces keeps its permission bits (round 17, M-13 sibling)
     os.replace(part, path)
     mark.unlink(missing_ok=True)
     return path

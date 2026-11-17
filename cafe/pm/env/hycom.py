@@ -296,6 +296,7 @@ def _fetch_part(args: list[Any], path: str | pathlib.Path, deadline: float) -> N
     tmp = atomic.tmp_name(path)
     try:
         _child([*args, tmp], deadline)
+        atomic.keep_mode(tmp, path)                                    # a part that replaces a damaged one keeps its permission bits (round 17, M-13 sibling)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
