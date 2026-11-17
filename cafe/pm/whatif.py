@@ -141,6 +141,9 @@ def apply(mission: dict[str, Any], mods: dict[str, Any] | None = None, drop: Seq
         if h and "base" in v:
             if _whole_days(h):
                 raise Invalid(f"{vid}: launching {h:+g} h later {_whole_days_words(h)}, the same launch time of day: nothing changes")
+            if abs(h) > (t1 - t0) / 3600.0:                    # round 18, M-7: a launch time is a time of day, so only a typo shifts by more than the window
+                raise Invalid(f"{vid}: launching {h:+g} h later is more than the window's {(t1 - t0) / 3600.0:g} h, outside the window "
+                              f"{m['window']['start']} .. {m['window']['end']}")
             hh, mm = (int(x) for x in v["sorties"]["local_solar_time"].split(":"))
             tot = (hh * 60 + mm + int(round(h * 60))) % 1440
             v["sorties"]["local_solar_time"] = f"{tot // 60:02d}:{tot % 60:02d}"
@@ -747,6 +750,11 @@ def measure(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], p
     return dict(p_fail=float(f.mean()), lo=v["fail_lo"], hi=v["fail_hi"], verdict=v["verdict"], n=int(len(f)))
 
 
+def _better_than(verdict: str) -> tuple[str, ...]:
+    """The verdicts a change must reach to fix `verdict`: GO or MARGINAL for a NO-GO, GO for a MARGINAL, none for a GO (there is nothing to fix)."""
+    return {"NO-GO": ("GO", "MARGINAL"), "MARGINAL": ("GO",)}.get(verdict, ())
+
+
 def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[str, Track], env: Any, ems: dict[str, tuple[Emulator | None, dict[str, Any]]],
                 plan: dict[str, Any], pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]], scales: dict[str, Any] | None, seed: int,
                 budget_s: float, log: Callable[[str], None] = print, base_failed: dict[str, Any] | None = None) -> tuple[dict[str, Any], float]:
@@ -761,6 +769,10 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
     A Stage-1 row has the plan's batch of members and the base run has more, so its baseline is the unchanged mission on the same members (round 17, M-1):
     read from `base_failed` ({vid: the base run's (members,) failure flags}: the first batch of the base run is those members, drawn alike) at no cost, else
     measured as the candidates are (charged, and only if the share is left); a UAS in a 3-D wind is always measured, its base run flew another wind model.
+    The baseline is found before a Stage-1 row is judged, and the row's target (`target_same`), its early stop and its "fix" are against that baseline's
+    VERDICT on the same members, not the whole run's (round 18, M-1; the emulated rows keep the whole run's: the emulator predicts the full ensemble). A
+    baseline that is GO on its members leaves nothing to fix, so no Stage-1 row is run; no baseline at all (the share did not cover one) leaves the whole
+    run's target, and the report says so.
     -> ({vid: result}, planned seconds of Stage 1 spent: each fallback is charged `budget.batch_cost_s`, so the search does not depend on how
     fast the machine happens to be)."""
     out: dict[str, Any] = {}
@@ -790,7 +802,32 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
             else:
                 tried.append(dict(e, reason=(no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " "))))
                 left.append((len(tried) - 1, m2))
-        if not any(t["method"] == "EMULATED" and t["verdict"] in want and t["shown"] for t in tried):
+        emulated_fix = any(t["method"] == "EMULATED" and t["verdict"] in want and t["shown"] for t in tried)
+        run_s1 = not emulated_fix and bool(left)                               # Stage 1 can be reached: a candidate the emulator did not answer, and no fix yet
+        wind_model, base_same = None, None
+        uas_3d = cls == "uas" and hasattr(env, "use_3d")
+        if uas_3d:
+            wind_model = WIND_MODEL_2D
+        flags = None if base_failed is None else base_failed.get(vid)
+        # The baseline of a Stage-1 row is found BEFORE the rows are judged: its target and its badge are the verdict of the unchanged mission on the same
+        # members, not the whole run's (round 18, M-1: round 17 moved the P(fail) to those members and left the verdict beside it on the whole run).
+        if not uas_3d and flags is not None and len(flags) >= plan["batch"] and run_s1:
+            f0 = np.asarray(flags, bool)[:plan["batch"]]                       # the base run's own first batch: the same members, nothing to run
+            v0 = intervals.verdict(int(f0.sum()), len(f0))
+            base_same = dict(verdict=v0["verdict"], p_fail=float(f0.mean()), lo=v0["fail_lo"], hi=v0["fail_hi"], n=int(len(f0)))
+        elif uas_3d or run_s1:                                                # the baseline as the candidates are measured (same members; a UAS: no 3-D wind)
+            cost = budget.batch_cost_s(plan, [vid])
+            if used + cost <= share:
+                try:
+                    b2 = measure(mission, vid, env, plan, pri, marg, scales, seed)
+                    base_same, used = dict(verdict=b2["verdict"], p_fail=b2["p_fail"], lo=b2["lo"], hi=b2["hi"], n=b2["n"]), used + cost
+                except Invalid:                                                   # the baseline left the data: no number
+                    pass
+        want_s1 = want if base_same is None else _better_than(base_same["verdict"])    # a Stage-1 row is a fix when it beats the baseline on its own members
+        if run_s1 and not want_s1:                                              # GO on these members: no Stage-1 row can be a fix, so none is run
+            for j, _ in left[:FALLBACK_K]:
+                tried[j]["reason"] += "; Stage 1 not run: the unchanged mission is already GO on the candidates' own members"
+        elif run_s1:
             for j, m2 in left[:FALLBACK_K]:
                 cost = budget.batch_cost_s(plan, [vid])
                 if used + cost > share:
@@ -802,32 +839,17 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
                     tried[j].update(reason=tried[j]["reason"] + f"; Stage 1 not run: {ex}", invalid=True)
                     continue
                 used += cost                                                # the planner's cost, never the clock: the same search on every run
-                if tried[j]["verdict"] in want:
+                if tried[j]["verdict"] in want_s1:
                     break
-        wind_model, base_same = None, None
-        uas_3d = cls == "uas" and hasattr(env, "use_3d")
-        if uas_3d:
-            wind_model = WIND_MODEL_2D
-        flags = None if base_failed is None else base_failed.get(vid)
-        if not uas_3d and flags is not None and len(flags) >= plan["batch"] and any(t["method"] == "Stage 1" for t in tried):
-            f0 = np.asarray(flags, bool)[:plan["batch"]]                       # the base run's own first batch: the same members, nothing to run
-            v0 = intervals.verdict(int(f0.sum()), len(f0))
-            base_same = dict(verdict=v0["verdict"], p_fail=float(f0.mean()), lo=v0["fail_lo"], hi=v0["fail_hi"], n=int(len(f0)))
-        elif uas_3d or any(t["method"] == "Stage 1" for t in tried):          # the baseline as the candidates are measured (same members; a UAS: no 3-D wind)
-            cost = budget.batch_cost_s(plan, [vid])
-            if used + cost <= share:                                          # (M-1: the whole run's P(fail) is of another number of members than a batch)
-                try:
-                    b2 = measure(mission, vid, env, plan, pri, marg, scales, seed)
-                    base_same, used = dict(verdict=b2["verdict"], p_fail=b2["p_fail"], lo=b2["lo"], hi=b2["hi"], n=b2["n"]), used + cost
-                except Invalid:                                                   # the baseline left the data: no number
-                    pass
         spent += used
-        hit = [t for t in tried if t["method"] != "not evaluated" and t["verdict"] in want and t.get("shown", True)]       # Stage 1's verdict is the interval's
+        hit = [t for t in tried if t["method"] != "not evaluated" and t["verdict"] in (want if t["method"] == "EMULATED" else want_s1)
+               and t.get("shown", True)]                                    # Stage 1's verdict is the interval's, against its own members' baseline
         best = min(hit, key=lambda t: t["cost"]) if hit else None
         unshown = [t for t in tried if t["method"] == "EMULATED" and t["verdict"] in want and not t["shown"]]       # a wide band's lucky end (round 15, M-1)
         not_shown = min(unshown, key=lambda t: t["cost"]) if best is None and unshown else None
         evaluated, invalid = sum(t["method"] != "not evaluated" for t in tried), sum(t["invalid"] for t in tried)
-        out[vid] = dict(verdict=base["verdict"], p_fail=base["p_fail"], target=" or ".join(want), found=best is not None, best=best, tried=tried,
+        out[vid] = dict(verdict=base["verdict"], p_fail=base["p_fail"], target=" or ".join(want),
+                        target_same=None if base_same is None else " or ".join(want_s1), found=best is not None, best=best, tried=tried,
                         emulator=em is not None, evaluated=evaluated, invalid=invalid, candidates=len(tried) - invalid, wind_model=wind_model,
                         base_2d=base_same if uas_3d else None, base_same=base_same, n=base.get("n"), not_shown=not_shown)
         log(f"flip search {vid}: " + (f"{best['change']} ({best['method']}), the cheapest of {evaluated} evaluated" if best else
@@ -864,9 +886,11 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
            only: list[str] | None = None) -> dict[str, Any]:
     """The what-if: `ops` = dict(shift_h, dlon, dlat, drop=[ids]) applied to every vehicle (or to `only`). `base` = {vid: Stage-1 verdict dict}
     of the unchanged mission. Per changed vehicle: emulator-first, else Stage 1 at `plan`. Dropped vehicles need no run: Stage-1 vehicles do not
-    interact, only the links through them go. -> dict(vehicles={vid: ...}, dropped, links_removed, unchanged={vid: why}): `unchanged` holds a UAS
-    whose launch shift is whole days (the same time of day), left out of `vehicles` unless a move applies to it. A move of a UAS moves the ship, so every
-    other UAS launched from it is a changed vehicle too, also when `only` leaves it out: it is answered with the move alone and its `ship` says why."""
+    interact, only the links through them go. -> dict(vehicles={vid: ...}, dropped, links_removed, links_not_rerun, unchanged={vid: why}): `unchanged`
+    holds a UAS whose launch shift is whole days (the same time of day), left out of `vehicles` unless a move applies to it. `links_not_rerun` are the
+    links that end at a changed vehicle (or at the ship, when it moved) and stay out of the answer: a link needs both ends' tracks, so its verdict is the
+    report's, of the unchanged mission (round 18, M-6). A move of a UAS moves the ship, so every other UAS launched from it is a changed vehicle too, also
+    when `only` leaves it out: it is answered with the move alone and its `ship` says why."""
     pri, marg = stage1.priors_for(mission, fitted)
     seed = int(mission["seed"])
     drop = list(dict.fromkeys(ops.get("drop", [])))                                  # `--drop usv --drop usv` drops it once
@@ -924,7 +948,10 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
             r["wind_model"] = WIND_MODEL_2D
             r["base_3d"] = None if base.get(vid) is None else dict(verdict=base[vid]["verdict"], p_fail=base[vid]["p_fail"])
     gone = [k["id"] for k in mission["links"] if k["a"] in drop or k["b"] in drop]
-    return dict(vehicles=out, dropped=drop, links_removed=gone, unchanged=unchanged)
+    ship = mission.get("ship", {}).get("id") if mover is not None else None            # a UAS move moves the ship, and every link that ends at it
+    ends = set(changed) | ({ship} if ship else set())
+    not_rerun = [k["id"] for k in mission["links"] if (k["a"] in ends or k["b"] in ends) and k["id"] not in gone]      # round 18, M-6: said, not rerun
+    return dict(vehicles=out, dropped=drop, links_removed=gone, unchanged=unchanged, links_not_rerun=not_rerun)
 
 
 def _stage1(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], priors: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]],

@@ -8,7 +8,8 @@
     validate  --mission M                    schema and cross-checks, nothing run
     plan      --mission M --budget B --gpus N [--gpu-mem-gb G] [--assume-gpu]   what the budget buys on this machine (a GPU that is not here is said so)
     whatif    --mission M [--run DIR] [--budget B] (--shift 48h | --move "1deg W" | --drop ID)... [--vehicle ID]...
-                                             what if: emulator-first, Stage 1 at the budget (default quick) when it cannot answer
+                                             what if: emulator-first, Stage 1 when it cannot answer, with the members of the run's own plan.json (--budget
+                                             is the run's, and only needed for a directory with no plan.json: default quick)
     hangar    --platform NAME                provenance check and the Stage-1 coefficients the platform implies
     audit     [RUN ...] [--code-only] [--ledgers-only]  the ledger/code/test audit (cafe.pm.audit)
     promote-calibration --run DIR            copy that run's stage3/subgrid_calibration.json into the tracked config/subgrid.json (a deliberate, committed act)
@@ -80,7 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("whatif")
     p.add_argument("--mission", required=True)
     p.add_argument("--run", default=None, help="a finished run of this mission: its stage-1b results are the baseline (default runs/<mission>/<budget>)")
-    p.add_argument("--budget", default="quick", choices=list(budget.BUDGET_S), help="size of the Stage-1 fallback")
+    p.add_argument("--budget", default=None, choices=list(budget.BUDGET_S),
+                   help="the budget the run was made with (default: the run's own plan.json says; quick when the directory has none). The Stage-1 fallback "
+                        "draws the members of that plan, so a different budget is refused")
     p.add_argument("--gpus", type=int, default=0)
     p.add_argument("--shift", action="append", default=[], help="deploy later by e.g. 48h, 2d; earlier as --shift=-6h; a UAS: sorties later in the day")
     p.add_argument("--move", action="append", default=[], help="move by e.g. '1deg W', '0.5deg north' (a UAS moves with its ship)")
@@ -303,7 +306,16 @@ def _whatif(a: argparse.Namespace) -> int:
         raise ConfigError("whatif needs at least one of --shift, --move, --drop")
     moves = [whatif.parse_move(x) for x in a.move]
     ops = dict(shift_h=sum(whatif.parse_shift(x) for x in a.shift), dlon=sum(d for d, _ in moves), dlat=sum(d for _, d in moves), drop=a.drop)
-    run = pathlib.Path(a.run or f"runs/{m['name']}/{a.budget}")
+    run = pathlib.Path(a.run or f"runs/{m['name']}/{a.budget or 'quick'}")
+    run_plan: dict[str, Any] | None = None
+    bud = a.budget or "quick"
+    if (run / "plan.json").is_file():                                      # round 18, M-5: the members of the Stage-1 fallback are the run's, not this budget's
+        with _run_files(run):
+            run_plan = _json_object(run / "plan.json")
+            bud = run_plan["budget"]
+            if a.budget is not None and a.budget != bud:
+                raise ConfigError(f"--budget {a.budget}: the run {run} was made with --budget {bud}, and whatif draws its members from that plan "
+                                  f"(batches of {run_plan['batch']}); leave --budget out, or use `--run` of a run made with --budget {a.budget}")
     if (copy := run / "mission.yaml").is_file():                          # the mission the run was made from: a what-if compares a change with its verdicts
         old = load_mission(copy, set_verdict=False)
         diff = sorted(k for k in m.keys() | old.keys() if k not in ("seed", "_path") and m.get(k) != old.get(k))
@@ -312,7 +324,10 @@ def _whatif(a: argparse.Namespace) -> int:
                               f"with that run's verdicts. Use `--mission {shlex.quote(str(copy))}`, or run the edited mission first")
         if m.get("seed") != old.get("seed"):
             print(f"note: the run used seed {old.get('seed')}, this file says {m.get('seed')}; the what-if draws use {m.get('seed')}")
-    ctx = pipeline.Context(a.mission, a.budget, a.gpus, run)
+    ctx = pipeline.Context(a.mission, bud, a.gpus, run)
+    if run_plan:                                                           # this machine's plan for the budget, with the run's own sizes of the ensemble
+        with _run_files(run):
+            ctx.plan.update({k: run_plan[k] for k in ("batch", "n_min", "n_max")})
     if not ctx.cache.is_dir():
         raise ConfigError(f"no environment cache at {ctx.cache}: run `{pipeline.fetch_cmd(a.mission)}` first")
     base, tracks, scales, fitted = {}, {}, None, None
@@ -330,11 +345,14 @@ def _whatif(a: argparse.Namespace) -> int:
             if line := _model_note(True, pf.is_file(), rf.is_file()):
                 print(line, file=sys.stderr)                 # stderr: the lines on stdout are the answer, which scripts read by position
         else:
-            print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {a.budget} budget")
+            print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {bud} budget")
             print(_model_note(False, False, False), file=sys.stderr)
     ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m), mission_hash=whatif.mission_hash(m))
     ans = whatif.answer(m, ops, base, tracks, ctx.env, ems, ctx.plan, fitted, scales, only=a.vehicle)
-    what = [f"{ops['shift_h']:+g} h" if a.shift else "", f"{ops['dlon']:+g} deg lon, {ops['dlat']:+g} deg lat" if a.move else "",
+    took_shift = bool(ans.get("unchanged")) or any(not r.get("ship") for r in ans["vehicles"].values())    # a vehicle that moves only with the ship took none
+    took_move = bool(ans["vehicles"])
+    what = [(f"{ops['shift_h']:+g} h" if took_shift else "(the shift applied to no vehicle)") if a.shift else "",          # round 18, M-6: what was done
+            (f"{ops['dlon']:+g} deg lon, {ops['dlat']:+g} deg lat" if took_move else "(the move applied to no vehicle)") if a.move else "",
             f"drop {', '.join(ans['dropped'])}" if ans["dropped"] else ""]            # the answer's list: `--drop usv --drop usv` is one drop
     print(f"whatif {m['name']}: " + "; ".join(x for x in what if x))
     for vid, r in ans["vehicles"].items():
@@ -360,6 +378,8 @@ def _whatif(a: argparse.Namespace) -> int:
             print(f"  note: {vid} {r['ship']}")
     for vid, why in ans.get("unchanged", {}).items():
         print(f"{vid}: unchanged ({why})")
+    if ans.get("links_not_rerun"):
+        print(f"  note: links not rerun (their verdicts are the report's, of the unchanged mission): {', '.join(ans['links_not_rerun'])}")
     if ans["dropped"]:
         print(f"dropped {', '.join(ans['dropped'])}; links removed: {', '.join(ans['links_removed']) or 'none'}. "
               "Other vehicles' physics are unaffected (Stage-1 vehicles do not interact); a rerun of a mission without it draws other members, "
