@@ -185,6 +185,25 @@ def _moved(run, names, spec, center, quantities):
     return out
 
 
+QS, M_WIDE, ROTATIONS = (0.05, 0.25, 0.5, 0.75, 0.95), 5, (0, 2)
+MOVE = 1e-6  # a quantity differs by more than this: the column acts; below it the difference is 1e-7 and less (measured on the demo)
+
+
+def _moved_wide(run, names, spec, base, quantities):
+    """The wider probe of the round 18 addendum (DECISIONS 992): {column: quantities it moved by more than MOVE}. `base` holds the draws of M_WIDE members, EACH
+    WITH ITS OWN other draws (a Latin hypercube, not the medians). A column is set alone to the 5, 25, 50, 75 and 95 % quantiles, member k at quantile
+    QS[(k + r) % 5] for each rotation r in ROTATIONS: every quantile at two members' other draws. Member by member against the base batch (the same members and
+    batch size, so the per-batch random streams are the same)."""
+    ref = quantities(run(base))
+    out = {j: set() for j in names}
+    for j in names:
+        for r in ROTATIONS:
+            col = np.array([spec[j].ppf(QS[(k + r) % len(QS)]) for k in range(M_WIDE)], float)
+            got = quantities(run(dict(base, **{j: col})))
+            out[j] |= {k for k in ref if not np.allclose(ref[k], got[k], rtol=0, atol=MOVE, equal_nan=True)}
+    return out
+
+
 PROBES = [("glider_eq", 12, dict(margin=("glider", "margin"), battery_margin=("glider", "battery_margin"))),
           ("glider_1n", 12, dict(margin=("glider", "battery_margin"), battery_margin=("glider", "battery_margin"))),     # a drift one's margin is its battery
           ("usv", 12, dict(margin=("usv", "margin"), energy_margin=("usv", "energy_margin"))),
@@ -193,17 +212,20 @@ PROBES = [("glider_eq", 12, dict(margin=("glider", "margin"), battery_margin=("g
 
 @pytest.mark.parametrize("vid,hours,keys", PROBES, ids=[p[0] for p in PROBES])
 def test_r18_m4_the_acting_table_is_the_set_of_columns_that_move_each_quantity(vid, hours, keys, ci_full):
-    """Every sampled column alone over its 5 to 95 % quantiles through the real `run_batch` on the CI environment (the gridded one: the insolation varies
-    in it, so the USV's charge feels what moves its track): the columns that moved a quantity are its row of `ACTING`, less `UNSEEN`."""
+    """Every sampled column alone over its 5, 25, 50, 75 and 95 % quantiles at several members' other draws (`_moved_wide`), through the real `run_batch` on the
+    CI environment (the gridded one: the insolation varies in it, so the USV's charge feels what moves its track): what moved a quantity is inside its row of
+    `ACTING`, and the row, less `UNSEEN` and `DEMO_ONLY` (the demo's environment moves a Slocum's battery by the current columns, this fixture's does not:
+    tests/test_round18_x.py holds those against the demo record), is what moved."""
     mission = _sub(vid, hours)
     pri, marg = stage1.priors_for(MISSION)
     spec = {k: sampling.marginal(m) for k, m in marg.items()}
-    center = {k: np.full(M2, float(spec[k].ppf(0.5))) for k in marg}
-    moved = _moved(lambda X: stage1.run_batch(mission, ci_full, [0, 1], SEED, pri, marg, X=X), list(marg), spec, center, _quantities)
+    _, base = sampling.lhs(M_WIDE, marg, np.random.SeedSequence([SEED, 0]))      # no antithetic pairs: five members, five different other draws
+    moved = _moved_wide(lambda X: stage1.run_batch(mission, ci_full, list(range(M_WIDE)), SEED, pri, marg, X=X), list(marg), spec, base, _quantities)
     for key, row in keys.items():
         got = {j for j, ks in moved.items() if key in ks}
         want = set(stage1.ACTING[row]) - set(stage1.UNSEEN.get(row, ()))
-        assert got == want, (vid, key, sorted(got ^ want))
+        assert got <= want, (vid, key, sorted(got - want))
+        assert got == want - set(stage1.DEMO_ONLY.get(row, ())), (vid, key, sorted(got ^ want))
 
 
 def test_r18_m4_every_column_that_moves_a_link_is_one_the_link_table_lists(monkeypatch):

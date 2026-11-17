@@ -44,21 +44,31 @@ DT_VEHICLE = 60.0                     # glider and USV step [s]; the ocean SDE's
 # per class, besides FORCING: the priors the class's simulator reads (credibility counts them as used by it)
 ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_vpp_bias", "solar_yield_scale"),
             uas=("bulk_stress_scale", "battery_capacity_scale"))
-# The columns each ranked quantity can feel (round 17, M-8; round 18, M-4), read from what moves the quantity, not from what the simulator reads:
-# `tests/test_round18_c.py` perturbs every sampled column alone over its 5 to 95 % quantiles through the real `run_batch` in the CI environment and
-# asserts that the table is the set that moved, plus `UNSEEN` (a table that drifted from the simulators fails there). Keyed by (class, key of the quantity
-# in the vehicle's result). `margin` is the cross-track error or the distance from the station (a USV, a station glider) or the battery reserve margin (a
-# UAS); `energy_margin` the USV's lowest state of charge (the insolation it harvests varies in the environment, so every column that moves its track moves
-# it a little, and `solar_yield_scale` moves it most); `battery_margin` the glider's battery energy left above the reserve (hotel load and pumping: time and
-# battery size, not the current or the wind; over a sea floor above the dive depth the track would move it too, which no probe of ours reaches);
-# `profile_margin` the share of the flux pattern a sortie delivered.
-# UNSEEN: columns that can act on a quantity but that no probe of ours moves, because the probe stays far from the edge they act at: Hs ends a UAS sortie
-# only through a lost link (`_uas_links`), which needs a margin near 0 dB; the stress scale and the battery size end a sortie early (the profile share) only
-# in a flight that is already at its limit. They stay listed (a quantity that is a count of waypoints cannot show inertness at two quantiles).
+# The columns each ranked quantity can feel (round 17, M-8; round 18, M-4; round 18 addendum, DECISIONS 992), read from what MOVES the quantity, not
+# from what the simulator reads. Two probes hold it. `review/round_18x/probe_acting.py` ran on the demo's own gridded environment: each of the eleven
+# sampled columns alone at its 5, 25, 50, 75 and 95 % quantiles for every one of eight members' other draws, through the real simulators; its record is
+# `review/round_18x/demo_probe.json`, and `tests/test_round18_x.py` asserts that this table is the set of columns that moved each quantity by more than
+# 1e-6 there (below it the differences were 1e-7 and less), plus `UNSEEN`. `tests/test_round18_c.py` runs the same kind of probe (five quantiles at two
+# members' other draws each) on the CI environment and asserts the table is what moved there, less `UNSEEN` and `DEMO_ONLY`. Keyed by (class, key of the
+# quantity in the vehicle's result); a row is the union over the vehicles of the class (a Seaglider on station and a Slocum drifting move the battery
+# margin by different columns). `margin` is the cross-track error or the distance from the station (a USV, a station glider) or the battery reserve
+# margin (a UAS); `energy_margin` the USV's lowest state of charge (the insolation it harvests varies in the environment, so every column that moves its
+# track moves it a little, and `solar_yield_scale` moves it most); `battery_margin` the glider's battery energy left above the reserve: the speed prior
+# and the battery size move it by 0.4 to 1.6 % of the pack on the demo (hotel load and pumping), and, on the demo only, a Slocum's moves with the
+# current columns by 0.016 % of the pack, a step at the tail quantiles (3 % of the members' spread; no mechanism was identified), where a Seaglider on
+# station moves by 5e-11 and the CI fixture's gliders by less than 1e-6; the wind columns move it by 1e-9, which is float noise; `profile_margin` the
+# share of the flux pattern a sortie delivered.
+# UNSEEN: columns that can act on a quantity but that no probe of ours moves, because the probe stays far from the edge they act at: Hs ends a UAS
+# sortie only through a lost link (`_uas_links`), which needs a margin near 0 dB; the stress scale and the battery size end a sortie early (the profile
+# share) only in a flight that is already at its limit (on the demo the stress scale moved the reserve margin by 5.6e-3 and the profile share by
+# nothing). They stay listed.
+# DEMO_ONLY: columns that moved a quantity on the demo's environment and not on the CI fixture's (so the CI probe cannot hold them; the demo record
+# does).
 UNSEEN = {("uas", "margin"): ("hs_scale",), ("uas", "profile_margin"): ("bulk_stress_scale", "battery_capacity_scale", "hs_scale")}
+DEMO_ONLY = {("glider", "battery_margin"): ("current_speed_scale", "current_direction_bias")}
 ACTING: dict[tuple[str, str], tuple[str, ...]] = {
     ("glider", "margin"): ("wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "glider_speed_scale"),
-    ("glider", "battery_margin"): ("glider_speed_scale", "battery_capacity_scale"),
+    ("glider", "battery_margin"): ("glider_speed_scale", "battery_capacity_scale", *DEMO_ONLY[("glider", "battery_margin")]),
     ("usv", "margin"): (*FORCING, "usv_vpp_bias"),
     ("usv", "energy_margin"): (*FORCING, "usv_vpp_bias", "solar_yield_scale"),
     ("uas", "margin"): ("wind_speed_bias", "wind_direction_bias", "bulk_stress_scale", "battery_capacity_scale", *UNSEEN[("uas", "margin")]),
