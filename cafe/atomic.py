@@ -25,8 +25,8 @@ class _Created(type(pathlib.Path())):  # type: ignore[misc]
 def _target(p: Any, follow_symlinks: bool) -> tuple[pathlib.Path, int | None]:
     """Where a replace of `p` lands and the mode the new file takes: the one place of the link and mode rules (`_replace_through` and `replace_from` share it).
     A symbolic link at `p` is refused (`OSError`, ELOOP) unless `follow_symlinks`: then the file it points to is the target (a loop of links is ELOOP too: no
-    file is there to replace; a dangling link is not a loop, its target is made). The mode is that of an existing regular file, the nine bits of owner, group and
-    other and never setuid, setgid or sticky (round 17); None when there is none (a new name, or something that is not a regular file)."""
+    file is there to replace; a dangling link is not a loop, its target is made). The mode is that of an existing regular file, the nine bits of owner,
+    group and other and never setuid, setgid or sticky (round 17); None when there is none (a new name, or something that is not a regular file)."""
     p = pathlib.Path(p)
     if follow_symlinks:
         p = pathlib.Path(os.path.realpath(p))
@@ -96,12 +96,12 @@ def write_with(p: Any, writer: Callable[[Any], None], follow_symlinks: bool = Fa
 
 
 def replace_from(src: Any, p: Any, follow_symlinks: bool = False) -> None:
-    """The finished file `src` renamed onto `p`: no copy, so no second file on the disk and no second pass over the bytes (a download's `.part`, a fetched NetCDF
-    part: large, and the disks are nearly full). The rules are `_replace_through`'s, taken from the same `_target`: a symbolic link at `p` is refused (ELOOP)
-    unless `follow_symlinks`, and an existing regular file's nine permission bits (never setuid, setgid or sticky) are put on `src` first, so a part made with
-    the umask no longer changes the mode of the file it replaces (round 17, M-13 sibling). `src` is a file this process made under a name of its own or under
-    a held lock: it is opened with `O_NOFOLLOW` (a link at `src` is ELOOP) and the mode goes on that descriptor. `src` is gone afterwards, and `p` has its
-    inode; a failed call leaves `src` where it was."""
+    """The finished file `src` renamed onto `p`: no copy, so no second file on the disk and no second pass over the bytes (a download's `.part`, a fetched
+    NetCDF part: large, and the disks are nearly full). The rules are `_replace_through`'s, taken from the same `_target`: a symbolic link at `p` is refused
+    (ELOOP) unless `follow_symlinks`, and an existing regular file's nine permission bits (never setuid, setgid or sticky) are put on `src` first, so a part
+    made with the umask no longer changes the mode of the file it replaces (round 17, M-13 sibling). `src` is a file this process made under a name of its
+    own or under a held lock: it is opened with `O_NOFOLLOW` (a link at `src` is ELOOP) and the mode goes on that descriptor. `src` is gone afterwards, and
+    `p` has its inode; a failed call leaves `src` where it was."""
     p, mode = _target(p, follow_symlinks)
     if mode is not None:
         fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
