@@ -1437,9 +1437,8 @@ def _fix_html(f: dict[str, Any]) -> str:
     if sm is not None:
         whole = f"the whole run's P(fail) {_n(f['p_fail_before'])}" + ("" if sm["n"] is None else f", of {_n(sm['n'])}")
         if sm["measured"]:
-            own = "" if b2d else ("The Stage-1 rows are compared with the unchanged mission on their own members: "
-                                  f"{_badge(sm['verdict'])} P(fail) {_n(sm['p_fail'])} on {_n(sm['n_rows'])}. ")
-            wm += f"<p class=muted>{own}{whole[0].upper() + whole[1:]}.</p>"
+            wm += ("<p class=muted>The Stage-1 rows are compared with the unchanged mission on their own members: "
+                   f"{_badge(sm['verdict'])} P(fail) {_n(sm['p_fail'])} on {_n(sm['n_rows'])}. {whole[0].upper() + whole[1:]}.</p>")
         else:
             wm += ("<p class=muted>The unchanged mission was not run on the Stage-1 rows' members (this vehicle's share of the Stage-1 budget was spent), so a "
                    f"Stage-1 row is compared below with {whole}, which is not of the row's members.</p>")

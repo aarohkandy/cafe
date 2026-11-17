@@ -198,13 +198,18 @@ def test_m1_a_uas_row_is_against_the_baseline_under_the_same_wind_model_and_that
     run = tmp_path / "run"
     m, plan = pm_run.make_run(run)
     same = dict(verdict="NO-GO", p_fail=0.66, lo=0.5, hi=0.8, n=16)
+    edit_json(run / "emulator" / "flip.json", lambda d: d["vehicles"]["usv"].update(n=64, base_same=same))      # another vehicle prints the same shape of node
     edit_json(run / "emulator" / "flip.json", lambda d: d["vehicles"]["uas"].update(
         wind_model="UAS what-if answers use the 10 m scaled profile for the candidate and the baseline.", base_2d=same, base_same=same, n=64,
         tried=[dict(t, method="Stage 1", n=16) if t["method"] == "EMULATED" else t for t in d["vehicles"]["uas"]["tried"]],
         best=dict(d["vehicles"]["uas"]["best"], method="Stage 1", n=16)))
     report.write(run, m, plan)
     t = plain((run / "report" / "index.html").read_text())
-    assert t.count("The baseline under the same model: NO-GO P(fail) 0.66.") == 1 and "compared with the unchanged mission on their own members" not in t
+    assert t.count("The baseline under the same model: NO-GO P(fail) 0.66.") == 1
+    assert ("compared with the unchanged mission on their own members: NO-GO P(fail) 0.66 on 16 members. "
+            "The whole run's P(fail) 0.7, of 64 members.") in t                                     # (the page prints each node)
+    rep = json.loads((run / "report" / "report.json").read_text())
+    assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
     assert "P(fail) 0.66 on the same 16 members becomes" in t
 
 
