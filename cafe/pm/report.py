@@ -31,7 +31,7 @@ import pickle
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -423,6 +423,7 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
     b2d = f.get("base_2d")
     stage1_rows = any(t["method"] == "Stage 1" for t in f["tried"])
     return dict(available=True, needed=True, found=bool(f["found"]), target=f["target"], emulator_trained=bool(f["emulator"]), wind_model=f.get("wind_model"),
+                target_same=f.get("target_same"),                  # round 18, M-1: what a Stage-1 row must reach, from its baseline; None: an older flip.json
                 base_2d=None if b2d is None else dict(verdict=b2d["verdict"], p_fail=num(b2d["p_fail"], "fraction", ref, src + ".base_2d.p_fail")),
                 same_members=None if not stage1_rows or "base_same" not in f else dict(                    # an older flip.json has no such key: nothing is said
                     measured=same is not None, n=None if f.get("n") is None else num(f["n"], "members", ref, src + ".n"),
@@ -722,27 +723,47 @@ RF_LOW_ANTENNA_M = 0.5                              # the mission schema's own f
 
 
 def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None:
-    """Round 17, M-5: the sentence for an RF link with an end below RF_LOW_ANTENNA_M. The two-ray loss takes the reflection coefficient as -1, which cancels
-    the two rays as the height goes to zero, so it overstates the loss (a conservative error: a GO can show as MARGINAL): by about 1 to 6 dB at 0.3 m and
-    11 to 16 dB at 0.1 m against a Fresnel two-ray (the sea's permittivity) and a parabolic-equation field. None when no end is that low, or the link is not
-    an RF one."""
+    """Round 17, M-5, round 18, M-3: the sentence for an RF link with a low antenna. The two-ray loss takes the reflection coefficient as -1, which cancels
+    the two rays as the height goes to zero. Its error is of the PAIR of heights (batch B's measured figures, docs/PHYSICS.md 12.1, CREDIBILITY L23: the
+    model minus a flat-earth Fresnel two-ray, one range for every figure, 300 m to the pair's radio horizon). Three cases, by the heights of the ends:
+    (1) both at or below RF_LOW_ANTENNA_M (two gliders; the loader accepts them): the loss is overstated by 6 to 11 dB (Seaglider with Slocum about 9, two
+    Slocums about 11, two Seagliders about 7); (2) one end below RF_LOW_ANTENNA_M, the other 2.2 m or higher: overstated by about 5 dB at 0.3 m (1 to 6) and
+    11 to 16 dB at 0.1 m; (3) an end of exactly RF_LOW_ANTENNA_M with no end below it: within 3.3 dB with a 2.2 m or 15 m partner and at worst UNDERSTATED
+    (2.9 dB with 15 m), so the margin can be too high; another partner (a UAS) is not measured, and the sentence says so. "Conservative" is true of (1) and
+    (2) only. None when the link is not an RF one or no end is that low (the USV's 2.2 m whip with a UAS: L23 says it)."""
     from .physics import glider, usv
     if lk["kind"] != "rf":
         return None
-    cls, low = _classes(mission), []
+    cls, heights = _classes(mission), {}
     for end in (lk["a"], lk["b"]):
         v = next((v for v in mission["vehicles"] if v["id"] == end), None)
         try:
-            h = None if v is None else float(glider.load_platform(v["platform"])["antenna_height_m"] if cls[end] == "glider"
-                                              else usv.load_platform(v["platform"])["rf_antenna_height_m"] if cls[end] == "usv" else math.inf)
+            heights[end] = None if v is None else float(glider.load_platform(v["platform"])["antenna_height_m"] if cls[end] == "glider"
+                                                         else usv.load_platform(v["platform"])["rf_antenna_height_m"] if cls[end] == "usv" else math.inf)
         except (KeyError, TypeError, ValueError):
-            h = None
-        if h is not None and h < RF_LOW_ANTENNA_M:
-            low.append(f"{end} ({h:g} m)")
-    return None if not low else (f"An end of this RF link has an antenna below {RF_LOW_ANTENNA_M:g} m: {', '.join(low)}. The two-ray model takes the ground "
-                                 "reflection as -1, which overstates the loss for so low an antenna (by about 1 to 6 dB at 0.3 m and 11 to 16 dB at 0.1 m, "
-                                 "against a Fresnel two-ray and a parabolic-equation field): this margin is conservative and a GO can show as MARGINAL "
-                                 "(CREDIBILITY, limitation L23).")
+            heights[end] = None
+    hs = list(heights.values())
+
+    def named(keep: Callable[[float], bool]) -> str:
+        return ", ".join(f"{end} ({h:g} m)" for end, h in heights.items() if h is not None and keep(h))
+    if all(h is not None and h <= RF_LOW_ANTENNA_M for h in hs):
+        return (f"Both ends of this RF link have an antenna of {RF_LOW_ANTENNA_M:g} m or lower: {named(lambda h: True)}. The two-ray model takes the ground "
+                "reflection as -1, which overstates the loss by 6 to 11 dB against a Fresnel two-ray from 300 m to the horizon (a Seaglider with a Slocum "
+                "about 9 dB, two Slocums about 11 dB, two Seagliders about 7 dB): this margin is conservative and a GO can show as MARGINAL or NO-GO "
+                "(CREDIBILITY, limitation L23).")
+    if any(h is not None and h < RF_LOW_ANTENNA_M for h in hs):
+        return (f"An end of this RF link has an antenna below {RF_LOW_ANTENNA_M:g} m: {named(lambda h: h < RF_LOW_ANTENNA_M)}. The two-ray model takes the "
+                "ground reflection as -1, which overstates the loss for so low an antenna: by about 5 dB at 0.3 m (1 to 6 dB) with a partner of 2.2 m or "
+                "more, and 11 to 16 dB at 0.1 m, against a Fresnel two-ray from 300 m to the horizon: this margin is conservative and a GO can show as "
+                "MARGINAL (CREDIBILITY, limitation L23).")
+    if any(h == RF_LOW_ANTENNA_M for h in hs):
+        other = [h for h in hs if h != RF_LOW_ANTENNA_M]                      # the partner: the end that is not at 0.5 m (a second one at 0.5 m is case 1)
+        measured = all(h in (2.2, 15.0) for h in other)
+        return (f"An end of this RF link has an antenna of {RF_LOW_ANTENNA_M:g} m: {named(lambda h: h == RF_LOW_ANTENNA_M)}. Against a Fresnel two-ray from "
+                "300 m to the horizon the two-ray model is within 3.3 dB at this height with a partner of 2.2 m or 15 m and at worst understates the loss "
+                "(by 2.9 dB with a 15 m partner), so this margin can be too high by that much; nearer than 300 m this is not stated"
+                + ("" if measured else "; other partners are not measured") + " (CREDIBILITY, limitation L23).")
+    return None
 
 
 def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str, Any]:
@@ -1413,8 +1434,11 @@ def _fix_html(f: dict[str, Any]) -> str:
         sm = f.get("same_members") if b["method"] == "Stage 1" else None
         before = (_n(f["p_fail_before"]) if sm is None else f"{_n(sm['p_fail'])} on the same {_n(sm['n_rows'])}" if sm["measured"]
                   else f"{_n(f['p_fail_before'])} on the whole run{'' if sm['n'] is None else ' of ' + _n(sm['n'])}")      # round 17, M-1
+        was = _badge(f["verdict_before"])                          # round 18, M-1: the verdict on the left is of the baseline the P(fail) on the left is of
+        if sm is not None and sm["measured"] and f.get("target_same") is not None:
+            was = _badge(sm["verdict"]) + ("" if sm["verdict"] == f["verdict_before"] else f" (whole run: {_badge(f['verdict_before'])})")
         line = (f"<b>{e(b['change'])}</b>: P(fail) {before} becomes {_n(b['p_fail'])} ({u['lo']:.3g} to {u['hi']:.3g}, {e(u['kind'])}), "
-                f"{_badge(f['verdict_before'])} to {_badge(b['verdict'])} ({how}){'; ' + SAME_AS_BASELINE if b.get('same_as_baseline') else ''}."
+                f"{was} to {_badge(b['verdict'])} ({how}){'; ' + SAME_AS_BASELINE if b.get('same_as_baseline') else ''}."
                 + (f" <b>Note: {e(b['hull_note'])}.</b>" if b.get("hull_note") else ""))
     elif f["evaluated"]["value"] == 0:
         line = (f"<b>not searched</b>: none of the {_n(f['candidates'])} could be evaluated (no emulator answer in range, and this vehicle's share "
@@ -1437,14 +1461,21 @@ def _fix_html(f: dict[str, Any]) -> str:
     if sm is not None:
         whole = f"the whole run's P(fail) {_n(f['p_fail_before'])}" + ("" if sm["n"] is None else f", of {_n(sm['n'])}")
         if sm["measured"]:
+            ts = f.get("target_same")
+            reach = "" if ts is None else (f" A Stage-1 row is a fix when it reaches {e(ts)}" if ts else
+                                           " The unchanged mission is already GO on those members, so no Stage-1 row can be a fix")
+            reach += "" if ts is None else f" (the whole run's target is {e(f['target'])})." if ts != f["target"] else "."
             wm += ("<p class=muted>The Stage-1 rows are compared with the unchanged mission on their own members: "
-                   f"{_badge(sm['verdict'])} P(fail) {_n(sm['p_fail'])} on {_n(sm['n_rows'])}. {whole[0].upper() + whole[1:]}.</p>")
+                   f"{_badge(sm['verdict'])} P(fail) {_n(sm['p_fail'])} on {_n(sm['n_rows'])}. {whole[0].upper() + whole[1:]}.{reach}</p>")
         else:
             wm += ("<p class=muted>The unchanged mission was not run on the Stage-1 rows' members (this vehicle's share of the Stage-1 budget was spent), so a "
                    f"Stage-1 row is compared below with {whole}, which is not of the row's members.</p>")
     k = len(f["tried"])
     s = "" if k == 1 else "s"
-    return (f"<p>What would fix it ({e(f['target'])}): {line}</p>{wm}<details><summary>All {k} candidate{s}: {_n(f['evaluated'])} evaluated of "
+    tgt = f["target_same"] if b and b["method"] == "Stage 1" and f.get("target_same") else f["target"]       # the target the best row was judged against
+    wm += ("<p class=muted>A change is tried on this vehicle alone: the links that end at it are not rerun for it, so a link's verdict above is of the mission "
+           "as it stands.</p>")                                                  # round 18, M-6
+    return (f"<p>What would fix it ({e(tgt)}): {line}</p>{wm}<details><summary>All {k} candidate{s}: {_n(f['evaluated'])} evaluated of "
             f"{_n(f['candidates'])} that can be evaluated, {_n(f['invalid'])} that cannot (off the window, the box or the data)</summary>"
             "<div class=scroll><table>"
             f"<tr><th>Change<th>Cost (notches)<th>Answered by<th>P(fail)<th>Verdict<th>Note</tr>{rows}</table></div></details>")

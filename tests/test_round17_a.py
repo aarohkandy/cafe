@@ -60,12 +60,13 @@ def test_m1_the_flip_search_measures_the_unchanged_mission_on_the_members_of_its
     assert spent == (len(rows) + 1) * cost and calls[-1] == list(range(32))                       # the baseline is a batch, charged as one
 
 
-def test_m1_a_share_that_covers_only_the_candidates_leaves_the_baseline_unmeasured_and_says_so(monkeypatch):
+def test_m1_a_share_that_covers_no_batch_leaves_the_baseline_unmeasured_and_says_so(monkeypatch):
+    """Round 18, M-1: the baseline is measured first (the rows are judged by its verdict), so it is the share that covers no batch that leaves it unmeasured."""
     fake_batch(monkeypatch)
     plan = plan_for(STORM, 32)
     cost = budget.batch_cost_s(plan, [GL])
-    flips, spent = whatif.flip_search(STORM, BASE, {GL: TRACK}, ENV, {}, plan, *stage1.priors_for(STORM), None, 5, 1.5 * cost, lambda *_: None)
-    assert flips[GL]["base_same"] is None and spent == cost and "base_same" in flips[GL]      # the key is there: a report of this round says "not measured"
+    flips, spent = whatif.flip_search(STORM, BASE, {GL: TRACK}, ENV, {}, plan, *stage1.priors_for(STORM), None, 5, 0.9 * cost, lambda *_: None)
+    assert flips[GL]["base_same"] is None and spent == 0.0 and "base_same" in flips[GL]      # the key is there: a report of this round says "not measured"
 
 
 def test_m1_the_base_runs_own_first_batch_is_the_baseline_at_no_cost_and_needs_no_share(monkeypatch):
@@ -258,7 +259,8 @@ def test_m5_an_rf_link_to_the_slocums_0_3_m_antenna_gets_the_sentence_and_the_ot
     for kind in ("iridium", "acoustic"):
         assert report._low_antenna_note(rf("glider_2n", "usv", kind), DEMO) is None
     assert report._low_antenna_note(rf("ship", "usv"), DEMO) is None                              # the ship is no vehicle: the mission schema's floor is 0.5 m
-    assert report._low_antenna_note(rf("glider_eq", "usv"), DEMO) is None                         # the seaglider's antenna is 0.5 m: not below it
+    # the seaglider's antenna is 0.5 m: not below it, but with the 2.2 m whip the model can understate the loss: the round 18 sentence of that case (M-3)
+    assert report._low_antenna_note(rf("glider_eq", "usv"), DEMO).startswith("An end of this RF link has an antenna of 0.5 m: glider_eq (0.5 m).")
 
 
 def test_m5_the_card_of_such_a_link_prints_it_and_the_report_is_still_traceable(tmp_path, data_dir):  # noqa: F811
