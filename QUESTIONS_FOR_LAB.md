@@ -55,7 +55,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
 
    4b. **The USV's solar panel yield and the shortwave error of the window mean** (review round 16, M-10). The USV's insolation is sampled by `solar_yield_scale`: lognormal, median 1, sigma 0.20, the `env.sigma.swdown_frac` relative error of hourly model shortwave applied to a member's whole window, **assumed**; the panel's area (2 m2) and efficiency (0.20) are the platform file's assumed numbers. Do you have the panel's measured yield, and the error of WRF's window-mean shortwave against a radiometer (the TAO SWRAD residual is the stand-in we would fit)? *Default:* sigma 0.20; the pack capacity is not sampled; the report prints the lowest state of charge of the members as the USV's battery margin (demo: median 0.7356, none emptied). *Lead's choice, awaiting the owner:* the new column re-draws every member of a mission with a USV, so the demo's counts moved by re-sampling (glider_eq 18 to 15 of 64, USV 62 to 61, UAS 61 to 62, no verdict) (DECISIONS 915); the alternative is `battery_capacity_scale` as the only USV energy input, with no new column and no insolation sampled. Default: keep the column.
 
-5. **Mission definition.** Deployment windows, waypoints, station-keeping tolerance, surfacing schedule, which
+5. **Mission definition.** Deployment windows, waypoints, station-keeping tolerance (the mission's `radius_km`, default 5 km, and `lost_after_h`, default 6 h, when the task omits them: the glider platform file's `station_tol_m` and `lost_hours` are read by no verdict, review round 17, DECISIONS 940), surfacing schedule, which
    link pairs must hold and what outage is acceptable, and the go/no-go thresholds the PIs actually use.
    *Default:* `missions/tepex_c_demo.yaml` (brief section 6; GO at P(success) >= 0.9, NO-GO below 0.6).
    *If different:* edit the mission file: `verdict: {go: ..., nogo: ...}` is read by the verdict, the stopping rule and the what-if
@@ -132,6 +132,8 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
     these angles (not computed here), another temperature or salinity changes eps_c; either way the full Fresnel option is a code change in `two_ray_curved_db` (a function of the
     grazing angle in place of -1), which moves every printed RF margin, the goldens and the parameter-file hashes (DECISIONS 652).
 
+    12d. **Low RF antennas, and the lowest antenna height a platform may have** (review round 17, M-5 and M-6; DECISIONS 925, 926, 944, 945). The Slocum's antenna is 0.3 m and the two-ray model, with its reflection coefficient of -1, overstates the loss to so low an antenna by a median 5.1 dB against a Fresnel two-ray (+15.1 dB at 0.1 m, +1.3 dB at 0.5 m, -0.4 dB at 2.2 m; `docs/PHYSICS.md` 12.1), so a margin there is too low and a GO can show as MARGINAL; limitation L23 and the link card say so. Which antenna heights do the lab's vehicles really have, and which polarisation and sea temperature (12a)? *Default:* the -1 stays; a platform's RF antenna height must be 0.1 m or above (the loader refuses lower). *Alternative:* a floor of 0.5 m with a warning below it, or the Fresnel coefficient of the assumed sea (a code change that moves every printed RF margin, the goldens and the platform-file hashes).
+
     12b. **At which air data rate does the lab fly the RFD900x USV-UAS link?** (review round 16, M-6) The default sensitivity, -121 dBm, is the radio's datasheet value at its lowest air data rate, the best case; `radios.yaml` also lists `rfd900x_fast` at -105 dBm. *Default:* the lowest rate, -121 dBm, marked assumed (DECISIONS 889); a faster rate lowers every RF margin by the difference in sensitivity (-111 dBm at 12 kbps, about -98 dBm at 200 kbps: 6 dB less margin for each step down). No demo verdict moves with it (usv-uas-rf is NO-GO because 89 % of its needed moments are beyond the horizon). *Lead's choice, awaiting the owner:* keep -121 dBm (DECISIONS 914).
 
     12c. **Is the smooth-earth diffraction loss near the radio horizon wanted?** (review round 16, M-14) The RF loss between the critical grazing angle and the horizon now includes the ITU-R P.526 smooth-earth diffraction loss (4/3-earth, vertical polarisation over sea); the plane-earth stand-in was 6 to 12 dB optimistic against it at the horizon of the demo's antennas, so printed RF margins near the horizon fall by 5 to 11 dB (the margin of a 15 m / 3 m link at 20 km 13.0 to 8.1 dB). It is within -2.8 to +0.3 dB of the exact residue-series field from 0.5 to 3 horizons for five antenna pairs; it is not verified for other frequencies, sea states, a k other than 4/3 or antenna pairs outside 8 to 108 m over 2.2 m. *Lead's choice, awaiting the owner:* keep it (DECISIONS 913); no demo verdict moves with it. *Default:* keep. *If not:* revert the transition rule to the larger of the curved and the plane-earth loss and keep the corrected wording.
@@ -155,3 +157,22 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
     the bias is solved for the 0.96 / 5.4 mean, and Stage 1 then flies 2.215 m/s at 12 m/s against Chiodi's 2.9 (24 % under; the unbiased polar's 2.92 is what `appendage_cda_m2` was fitted to).
     *Default:* the 5.4 m/s mean is met and the 12 m/s maximum is not; both rows are in the receipts table and `docs/CREDIBILITY.md` lists it as part of L02. *If the maximum matters more:*
     a different bias and a different cap, which is a recalibration (a code change).
+
+15. **Choices of review round 17 that the owner has not answered** (DECISIONS 942 to 951; each is the lead's choice, kept until the owner says otherwise).
+    15a. **How does the fix table show a Stage-1 candidate's effect?** (M-1, DECISIONS 917, 942) *Default:* against the unchanged mission on the candidate's own members (the base run's first
+    batch, free), with the whole run's P(fail) printed beside it. *Alternative:* run every candidate at the full 64 members, which doubles each candidate's cost and shrinks the number of
+    candidates tried.
+    15b. **Should a platform input the mission replaces count as used?** (M-2, DECISIONS 921, 939, 943) *Default:* no: it stays listed, marked not used, with the mission's value, and the
+    demo's used count goes 274 to 258 of 289. *Alternative:* count it as used, as the page did, which tells the lab to replace a value the run does not read.
+    15c. **Take the per-class sensitivity columns now?** (M-8, DECISIONS 923, 946) *Default:* yes: the demo's noise floors go to 0.177, 0.190 and 0.199 and the UAS's leader to wind_speed_bias;
+    the UAS keeps `hs_scale`. *Alternative:* defer, with a CREDIBILITY line saying the floor counts inert columns.
+    15d. **A symbolic link at the emulator table's own name.** (M-13, DECISIONS 934, 947) *Default:* refuse it and keep the table's mode. *Alternative:* follow it (a link planted in a shared
+    data directory would then redirect the write).
+    15e. **The largest number of elements along the hull the reader accepts.** (M-14, DECISIONS 935, 948) *Default:* 500, about 7 times the converged study's 70. *If you answer:* another number is
+    `fea.MAX_ELEMENTS_ALONG`.
+    15f. **A finished CFD result that cannot be cached.** (M-10, DECISIONS 930, 949) *Default:* warn and return it, so the next run computes again (the runners mount `/work` read-only: set
+    `CAFE_WORK` to a writable directory to keep the cache). *Alternative:* raise.
+    15g. **The CFD cache key.** (M-4, DECISIONS 929, 950) *Default:* the key hashes every number and text written in `cafe/cfd.py`'s functions, so every cache file made before round 17 is
+    computed once more (hours on homebase). *Alternative:* a list of named constants in `cfd.SETTINGS`, which misses the next literal added.
+    15h. **`CAFE_WORKERS` and `CAFE_NPROC` with a space or sign around the digits.** (M-11, DECISIONS 931, 951) *Default:* refused with a `ConfigError` naming the variable (`CAFE_WORKERS=" 4"`
+    used to be 4). *Alternative:* strip the value for `CAFE_WORKERS` only.
