@@ -143,7 +143,7 @@ def _lock_remedy(lock: pathlib.Path) -> str:
     try:
         owner = lock.owner()
         mode = f"{stat.S_IMODE(lock.stat().st_mode):04o}"
-    except (OSError, KeyError, NotImplementedError):
+    except (OSError, KeyError):                                  # (KeyError: an account with no passwd entry, as in a container)
         return "check that the directory exists and is writable by this account, and that nothing but a file stands at that name"
     return (f"the file belongs to {owner} (mode {mode}): ask {owner} to `chmod g+w {shlex.quote(str(lock))}` (a group that shares the table), "
             "or to remove it while no run is going on")

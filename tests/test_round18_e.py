@@ -99,7 +99,7 @@ def test_r18_m9_a_link_planted_at_the_emulator_lock_is_refused_and_its_target_is
     with pytest.raises(ConfigError) as e:
         with E.locked(t):
             ran.append(1)
-    assert ran == [] and not victim.exists() and str(tmp_path / "train.parquet.lock") in str(e.value) and "symbolic link" in str(e.value)
+    assert ran == [] and not victim.exists() and str(tmp_path / "train.parquet.lock") in str(e.value) and "never followed" in str(e.value)
     victim.write_text("KEEP")                                              # and an existing target is neither opened nor changed
     with pytest.raises(ConfigError):
         with E.locked(t):
