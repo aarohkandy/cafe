@@ -13,7 +13,7 @@ from tests.test_stage1 import LK, MISSION, merged, uas_inputs
 
 # ---------------------------------------------------------------- M-8: the sensitivity ranks only the columns the class's simulator reads
 GLIDER = {"wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "glider_speed_scale", "battery_capacity_scale"}
-USV = set(stage1.FORCING) | {"usv_vpp_bias", "solar_yield_scale"}          # round 18, M-4: the failure indicator of a USV is moved by its solar yield too (the battery flag)
+USV = set(stage1.FORCING) | {"usv_vpp_bias", "solar_yield_scale"}          # round 18, M-4: the solar yield moves the battery flag, so the indicator too
 UAS = {"wind_speed_bias", "wind_direction_bias", "hs_scale", "bulk_stress_scale", "battery_capacity_scale"}
 
 
@@ -49,7 +49,7 @@ def test_r17_m8_a_column_the_uas_cannot_feel_cannot_head_its_list():
     u = res["vehicles"]["uas"]
     u["margin"] = res["U"][:, j].copy()                                                            # a margin that is a function of the inert column alone
     u["margin_name"] = "battery reserve margin"
-    u["fail"], u["first"] = dict(battery_reserve=u["fail"]["mode_a"]), dict(battery_reserve=u["first"]["mode_a"])      # round 18, M-4: it ranks the battery when that failed
+    u["fail"], u["first"] = dict(battery_reserve=u["fail"]["mode_a"]), dict(battery_reserve=u["first"]["mode_a"])      # round 18, M-4: the battery failed
     e = stage1.summarize(res, names, MISSION, 73)["vehicles"]["uas"]["sensitivity"]
     assert "current_direction_bias" not in e["S1"] and e["param"] != "current_direction_bias" and e["quantity"] == "battery reserve margin"
 

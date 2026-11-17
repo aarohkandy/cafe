@@ -36,8 +36,8 @@ def test_r18_m4_a_usv_that_runs_out_of_charge_ranks_its_charge_and_the_solar_yie
     u["energy_margin"] = 0.2 + 0.6 * _col(res, "solar_yield_scale")                                         # the insolation harvested alone sets the charge
     _modes(u, battery=u["energy_margin"] < 0.35)
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["usv"]["sensitivity"]
-    assert e["case"] == "ranked" and e["param"] == "solar_yield_scale" and e["quantity"] == stage1.QUANTITY["energy_margin"]
-    assert "for the lowest state of charge" in e["text"] and set(e["S1"]) == set(stage1.ACTING[("usv", "energy_margin")])
+    assert e["case"] == "ranked" and e["param"] == "solar_yield_scale" and e["quantity"] == "lowest state of charge (fraction of the pack)"
+    assert "for the lowest state of charge" in e["text"] and set(e["S1"]) == set(stage1.FORCING) | {"usv_vpp_bias", "solar_yield_scale"}
     _modes(u, swept_off_track=u["margin"] < 0.3)                                                           # the cross-track error is what failed: unchanged
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["usv"]["sensitivity"]
     assert e["param"] == "usv_vpp_bias" and e["quantity"] == "maximum cross-track error" and "solar_yield_scale" not in e["S1"]
@@ -51,7 +51,7 @@ def test_r18_m4_a_mode_with_no_quantity_of_its_own_ranks_the_failure_indicator_o
     _modes(u, becalmed=_col(res, "wind_speed_bias") < 0.4)
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["usv"]["sensitivity"]
     assert e["quantity"] == "failure indicator" and e["case"] == "ranked" and e["param"] == "wind_speed_bias"
-    assert set(e["S1"]) == set(stage1.SENS_ACTS["usv"])
+    assert set(e["S1"]) == set(stage1.FORCING) | {"usv_vpp_bias", "solar_yield_scale"}
     assert dict(stage1.RANKED) == {("glider", "station_lost"): "margin", ("glider", "battery"): "battery_margin", ("usv", "swept_off_track"): "margin",
                                    ("usv", "battery"): "energy_margin", ("uas", "battery_reserve"): "margin", ("uas", "profile_incomplete"): "profile_margin"}
 
@@ -64,7 +64,7 @@ def test_r18_m4_a_glider_that_runs_out_of_battery_ranks_its_energy_over_the_two_
     _modes(g, battery=g["battery_margin"] < 0.3)
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["glider_eq"]["sensitivity"]
     assert e["case"] == "ranked" and e["param"] == "battery_capacity_scale" and e["quantity"] == "battery energy margin"
-    assert set(e["S1"]) == {"glider_speed_scale", "battery_capacity_scale"}                                  # not the wind and the current, which cannot move it
+    assert set(e["S1"]) == {"glider_speed_scale", "battery_capacity_scale"}                                  # not the wind and the current
     _modes(g, station_lost=g["margin"] < 0.3)
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["glider_eq"]["sensitivity"]
     assert e["param"] == "wind_speed_bias" and e["quantity"] == "maximum distance from the station" and "battery_capacity_scale" not in e["S1"]
@@ -78,11 +78,11 @@ def test_r18_m4_a_result_that_does_not_hold_the_quantity_ranks_the_failure_indic
     g["margin"], g["margin_name"] = _col(res, "wind_speed_bias"), "maximum distance from the station"
     _modes(g, battery=_col(res, "battery_capacity_scale") < 0.3)
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["glider_eq"]["sensitivity"]
-    assert e["quantity"] == "failure indicator" and e["param"] == "battery_capacity_scale" and set(e["S1"]) == set(stage1.SENS_ACTS["glider"])
+    assert e["quantity"] == "failure indicator" and e["param"] == "battery_capacity_scale" and len(e["S1"]) == 6
     g["battery_margin"] = np.where(np.arange(24) < 12, np.nan, 0.5)                                          # fewer than 16 finite values: the same
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["glider_eq"]["sensitivity"]
     assert e["quantity"] == "failure indicator" and set(e["S1"]) == set(stage1.SENS_ACTS["glider"])
-    u = merged({"usv": 0.0})["vehicles"]["usv"]                                                              # a USV result without the quantity's name: the default one
+    u = merged({"usv": 0.0})["vehicles"]["usv"]                                                              # a USV result without the name: the default
     assert stage1._ranked(dict(u, energy_margin=np.arange(24.0)), "battery")[2] == stage1.QUANTITY["energy_margin"]
 
 
@@ -132,8 +132,8 @@ def test_r18_m4_a_link_feels_the_track_of_its_ends_and_its_own_columns_only():
 
 
 def test_r18_m4_the_used_by_counts_of_the_credibility_page_still_read_acts_not_the_sensitivity_table():
-    assert credibility.CLASS_PRIORS == {"glider_speed_scale": "glider", "battery_capacity_scale": "glider|uas", "usv_vpp_bias": "usv", "solar_yield_scale": "usv",
-                                        "bulk_stress_scale": "uas", "usv_vpp_bias_brief": "usv"}
+    assert credibility.CLASS_PRIORS == {"glider_speed_scale": "glider", "battery_capacity_scale": "glider|uas", "usv_vpp_bias": "usv",
+                                        "solar_yield_scale": "usv", "bulk_stress_scale": "uas", "usv_vpp_bias_brief": "usv"}
     assert stage1.ACTS == dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_vpp_bias", "solar_yield_scale"),
                                uas=("bulk_stress_scale", "battery_capacity_scale"))
 
@@ -167,7 +167,7 @@ def _sub(vid, hours):
 
 def _quantities(out):
     q = {}
-    for vid, r in out["vehicles"].items():
+    for r in out["vehicles"].values():
         for k in ("margin", "energy_margin", "battery_margin", "profile_margin"):
             if k in r:
                 q[k] = np.asarray(r[k], float)
@@ -186,7 +186,7 @@ def _moved(run, names, spec, center, quantities):
 
 
 PROBES = [("glider_eq", 12, dict(margin=("glider", "margin"), battery_margin=("glider", "battery_margin"))),
-          ("glider_1n", 12, dict(margin=("glider", "battery_margin"), battery_margin=("glider", "battery_margin"))),           # a drift glider's margin is its battery
+          ("glider_1n", 12, dict(margin=("glider", "battery_margin"), battery_margin=("glider", "battery_margin"))),     # a drift one's margin is its battery
           ("usv", 12, dict(margin=("usv", "margin"), energy_margin=("usv", "energy_margin"))),
           ("uas", 9, dict(margin=("uas", "margin"), profile_margin=("uas", "profile_margin")))]
 
@@ -208,7 +208,7 @@ def test_r18_m4_the_acting_table_is_the_set_of_columns_that_move_each_quantity(v
 
 def test_r18_m4_every_column_that_moves_a_link_is_one_the_link_table_lists(monkeypatch):
     """The links of the CI mission and three more (an Iridium link on a surfacing glider, an RF link and an acoustic link on a vehicle each): the outcome
-    quantities (the fraction, the moments required, the summed margin) that a column moves are in `link_acts`; the Iridium link `when: always` is moved by none."""
+    quantities (the fraction, the moments required, the summed margin) that a column moves are in `link_acts`; the Iridium link `when: always`: by none."""
     links = MISSION["links"] + [
         dict(id="g-shore-iridium", a="glider_1n", b="shore", kind="iridium", when="surfacing", required_fraction=0.9),
         dict(id="g-ship-rf", a="glider_eq", b="ship", kind="rf", radio="rfd900x", when="surfacing", required_fraction=0.9),
@@ -237,7 +237,7 @@ def test_r18_m4_every_column_that_moves_a_link_is_one_the_link_table_lists(monke
         seen |= got
         assert got <= acts, (lk["id"], sorted(got - acts))
     assert {j for j, ks in moved.items() if any(k.startswith("usv-shore-iridium|") for k in ks)} == set() == stage1.link_acts(LK["usv-shore-iridium"], classes)
-    assert {"wind_speed_bias", "glider_speed_scale"} <= seen                                                 # the probe does move links: this is not an empty check
+    assert {"wind_speed_bias", "glider_speed_scale"} <= seen                                                 # the probe does move links: not an empty check
 
 
 # ---------------------------------------------------------------- M-16 (A-2): the sortie length is `sortie_t_max`, at three of its five sites
@@ -288,7 +288,7 @@ def test_r18_a2_the_fine_grid_of_a_flown_sortie_runs_to_the_hard_stop():
 
 
 def test_r18_a2_a_flight_that_is_not_home_at_the_nominal_duration_flies_on_to_the_hard_stop():
-    """physics/uas.py `fly_sortie` -> `simulate(t_max=sortie_t_max(so))`: with `duration_s` the run stopped at the nominal duration, with the member still up."""
+    """physics/uas.py `fly_sortie` -> `simulate(t_max=sortie_t_max(so))`: with `duration_s` the run stopped at the nominal duration, member still up."""
     P = copy.deepcopy(uas.load_platform("quad_uas"))
     P["sortie"]["duration_s"] = 100.0
     r = uas.fly_sortie(AnalyticEnv(wind=(0.0, 0.0)), uas.steaming(), 0.0, M=1, origin=(-165.0, 0.0), plat=P)

@@ -1611,7 +1611,7 @@ def test_the_summary_ranks_the_margin_the_simulator_stored_and_only_the_columns_
     for vid, q, mode in (("glider_eq", "maximum distance from the station", "station_lost"), ("usv", "maximum cross-track error", "swept_off_track")):
         r = res["vehicles"][vid]
         r["margin"], r["margin_name"] = -res["U"][:, 0].copy(), q
-        r["fail"], r["first"] = dict(**{mode: r["fail"]["mode_a"]}), dict(**{mode: r["first"]["mode_a"]})       # round 18, M-4: the margin of the dominant mode is ranked
+        r["fail"], r["first"] = {mode: r["fail"]["mode_a"]}, {mode: r["first"]["mode_a"]}                       # round 18, M-4: that mode's margin is ranked
     s = stage1.summarize(res, names, MISSION, 73)
     g, u = s["vehicles"]["glider_eq"]["sensitivity"], s["vehicles"]["usv"]["sensitivity"]
     assert g["quantity"] == "maximum distance from the station" and g["param"] == names[0] and "usv_vpp_bias" not in g["S1"] and "glider_speed_scale" in g["S1"]
