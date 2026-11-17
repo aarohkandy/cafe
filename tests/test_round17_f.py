@@ -242,16 +242,15 @@ def test_r17_m14_a_value_above_the_bound_is_refused(tmp_path, monkeypatch, n, ok
     if ok:
         assert _read(tmp_path, monkeypatch, text) == n == yaml.safe_load(text)["stage3.fea_elements_along"]["value"]
     else:
-        with pytest.raises(ValueError, match=f"above {fea.MAX_ELEMENTS_ALONG}"):
+        with pytest.raises(ValueError, match="above 500"):
             _read(tmp_path, monkeypatch, text)
-    assert fea.MAX_ELEMENTS_ALONG == 500
 
 
 def test_r17_m14_the_shipped_file_still_reads_and_pyyaml_agrees_within_the_bound():
     """The stage-3 pipeline reads the key with PyYAML (pipeline_windows.assumptions), the Hangar with the line reader: one number, inside the bound."""
     from cafe.pm.stage3 import pipeline_windows as pw
     want = yaml.safe_load(fea.ASSUMPTIONS.read_text())["stage3.fea_elements_along"]["value"]
-    assert fea.hull_elements_along() == want == pw.assumptions()["fea_elements_along"] and 1 <= want <= fea.MAX_ELEMENTS_ALONG
+    assert fea.hull_elements_along() == want == pw.assumptions()["fea_elements_along"] and 1 <= want <= fea.MAX_ELEMENTS_ALONG == 500
 
 
 def test_r17_m14_comments_blank_lines_and_indented_text_do_not_trip_the_top_level_rule(tmp_path, monkeypatch):
