@@ -41,9 +41,19 @@ FINE_S = 30.0                         # the UAS sorties are also kept (and their
 DT_VEHICLE = 60.0                     # glider and USV step [s]; the ocean SDE's Euler-Maruyama step is the same
 
 
-# per class, besides FORCING
+# per class, besides FORCING: the priors the class's simulator reads (credibility counts them as used by it)
 ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_vpp_bias", "solar_yield_scale"),
             uas=("bulk_stress_scale", "battery_capacity_scale"))
+# The columns each class's sensitivity quantity can feel (round 17, M-8), read from what the simulators read, not "FORCING plus ACTS": `_sensitivity` ranks
+# only these, so a column that cannot act does not set the noise floor or head the list. The glider reads the current and, at the surface, the wind (its
+# windage), no wave field; the USV reads wind, current and waves; the UAS reads no current and no waves in flight, only the wind, and Hs at the ship through
+# its sortie's link (`_uas_links`; `comms.rf_margin` takes Hs, never Tp). `solar_yield_scale` is a USV prior (ACTS) but moves only its state of charge and
+# the `battery` flag, not the cross-track error its margin is (the margin is always finite, so the failure-indicator fallback never reaches the USV).
+SENS_ACTS = dict(glider=("wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "glider_speed_scale",
+                         "battery_capacity_scale"),
+                 usv=(*FORCING, "usv_vpp_bias"),
+                 uas=("wind_speed_bias", "wind_direction_bias", "hs_scale", "bulk_stress_scale", "battery_capacity_scale"))
+LINK_ACTS = dict(rf=("hs_scale",))               # an RF link reads Hs at both ends whatever the classes at them (`_link_hs`)
 
 
 SUBGRID_SWITCHES = ("turbulence", "gust_fronts", "warm_layer", "rain_lens", "ocean_sde")
@@ -737,7 +747,7 @@ def failed(r: dict[str, Any]) -> NDArray[np.bool_]:
 
 def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting: set[str], margin: NDArray[Any] | None, quantity: str) -> dict[str, Any]:
     """The "most sensitive to" entry of a vehicle or a link: dict(param, S1, noise_floor, case, quantity, text). `f` (n,) marks the members that failed.
-    The indices are first-order EASI (stats.sensitivity) over the columns that can act on it (`acting`: the forcing errors and the class's own), so a
+    The indices are first-order EASI (stats.sensitivity) over the columns that can act on it (`acting`: `SENS_ACTS`, what the class's simulator reads), so a
     column that cannot act does not set the noise floor. They are taken on `margin` (n,), the continuous quantity named `quantity`, when the simulator
     gave one; else on the 0/1 failure indicator, which carries too little for three failures or fewer (EASI on k ones saturates at its own
     permutation floor), so there the minority's hypercube ranks are given instead. case: ranked / nothing_above_floor (an index was computed and none
@@ -803,7 +813,7 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         t_first = float(np.nanmin(first)) if np.any(np.isfinite(first)) else None
         t_med = float(np.nanmedian(first)) if np.any(np.isfinite(first)) else None
         key = "profile_margin" if dom == "profile_incomplete" and "profile_margin" in r else "margin"          # the margin that belongs to the dominant mode
-        sens = _sensitivity(names, U, f, set(FORCING) | set(ACTS[r["class"]]), r.get(key), r.get(f"{key}_name", "failure indicator"))
+        sens = _sensitivity(names, U, f, set(SENS_ACTS[r["class"]]), r.get(key), r.get(f"{key}_name", "failure indicator"))
         out["vehicles"][vid] = dict(cls=r["class"], n=n, k_fail=int(f.sum()), verdict=v, modes=modes, dominant=dom,
                                     first_fail_t=t_first, median_fail_t=t_med, sensitivity=sens)
         if "energy_margin" in r:                                  # the USV's battery: the lowest state of charge each member reached (round 16, M-10)
@@ -834,7 +844,8 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         f = ~np.asarray(r["success"], bool)
         n = len(f)
         ends = {res["vehicles"][e]["class"] for e in (lk_ends[lid]["a"], lk_ends[lid]["b"]) if e in res["vehicles"]}
-        sens = _sensitivity(names, U, f, set(FORCING) | {c for k in ends for c in ACTS[k]}, np.asarray(r["frac"], float),
+        acting = {c for k in ends for c in SENS_ACTS[k]} | set(LINK_ACTS.get(lk_ends[lid].get("kind", ""), ()))
+        sens = _sensitivity(names, U, f, acting, np.asarray(r["frac"], float),
                             "fraction of the required moments the link worked")
         kind, need = r.get("invalid_kind"), float(np.sum(r.get("need_count", 0)))
         nc = _median_count(r["need_count"]) if "need_count" in r else None            # required samples per member: what the required fraction is resolved on
