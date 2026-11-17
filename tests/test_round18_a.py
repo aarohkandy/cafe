@@ -187,40 +187,71 @@ def two_gliders(a, b):
     return m
 
 
-def test_m3_two_low_ends_get_the_sentence_of_the_pair_with_its_larger_figure_and_the_verdict_it_can_move():
+CASE1 = ("Both ends of this RF link have an antenna of 0.5 m or lower: {ends}. The two-ray model takes the ground reflection as -1, which overstates the "
+         "loss by 6 to 11 dB against a Fresnel two-ray from 300 m to the horizon (a Seaglider with a Slocum about 9 dB, two Slocums about 11 dB, two "
+         "Seagliders about 7 dB): this margin is conservative and a GO can show as MARGINAL or NO-GO (CREDIBILITY, limitation L23).")
+CASE2 = ("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m). The two-ray model takes the ground reflection as -1, which overstates the "
+         "loss for so low an antenna: by about 5 dB at 0.3 m (1 to 6 dB) with a partner of 2.2 m or more, and 11 to 16 dB at 0.1 m, against a Fresnel "
+         "two-ray from 300 m to the horizon: this margin is conservative and a GO can show as MARGINAL (CREDIBILITY, limitation L23).")
+CASE3 = ("An end of this RF link has an antenna of 0.5 m: glider_eq (0.5 m). Against a Fresnel two-ray from 300 m to the horizon the two-ray model is "
+         "within 3.3 dB at this height with a partner of 2.2 m or 15 m and at worst understates the loss (by 2.9 dB with a 15 m partner), so this "
+         "margin can be too high by that much; nearer than 300 m this is not stated{other} (CREDIBILITY, limitation L23).")
+
+
+def test_m3_case_1_both_ends_at_or_below_0_5_m_say_6_to_11_db_by_pair_and_that_a_go_can_show_as_no_go():
     for a, b, ends in (("seaglider", "slocum", "glider_eq (0.5 m), glider_2n (0.3 m)"), ("slocum", "slocum", "glider_eq (0.3 m), glider_2n (0.3 m)"),
                        ("seaglider", "seaglider", "glider_eq (0.5 m), glider_2n (0.5 m)")):          # the last: no end is below 0.5 m, both are at it
-        note = report._low_antenna_note(rf("glider_eq", "glider_2n"), two_gliders(a, b))
-        assert note and note.startswith(f"Both ends of this RF link have an antenna of 0.5 m or lower: {ends}."), (a, b, note)
-        assert "by 6 to 11 dB" in note and "this margin is too low" in note and "MARGINAL or NO-GO" in note
-        assert "a Seaglider with a Slocum about 9 dB, two Slocums about 11, two Seagliders about 7" in note and "too high" not in note
-        assert note.endswith("(CREDIBILITY, limitation L23).")
-        assert "conservative" not in note and "partner" not in note
+        assert report._low_antenna_note(rf("glider_eq", "glider_2n"), two_gliders(a, b)) == CASE1.format(ends=ends), (a, b)
+        assert report._low_antenna_note(rf("glider_2n", "glider_eq"), two_gliders(a, b)) == CASE1.format(ends=", ".join(reversed(ends.split(", ")))), (a, b)
 
 
-def test_m3_one_low_end_keeps_its_sentence_and_says_which_partner_its_band_is_for():
-    note = report._low_antenna_note(rf("glider_2n", "usv"), DEMO)
-    assert note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).") and "with a partner of 2.2 m or more" in note
-    assert "about 5 dB at 0.3 m (1 to 6) and 11 to 16 dB at 0.1 m" in note and "this margin is too low" in note
-    assert "conservative" not in note and "too high" not in note and "both" not in note.lower() and "6 to 11" not in note
-    assert report._low_antenna_note(rf("glider_eq", "usv"), DEMO) is None                           # a 0.5 m Seaglider with the 2.2 m whip: neither case
-    assert report._low_antenna_note(rf("glider_eq", "uas"), DEMO) is None
-    assert report._low_antenna_note(rf("glider_eq", "glider_2n", "acoustic"), two_gliders("slocum", "slocum")) is None
+def test_m3_case_2_one_end_below_0_5_m_with_a_partner_of_2_2_m_or_more_says_5_db_and_11_to_16_db():
+    assert report._low_antenna_note(rf("glider_2n", "usv"), DEMO) == CASE2
+    assert report._low_antenna_note(rf("glider_2n", "uas"), DEMO) == CASE2                            # the same band: a partner of 2.2 m or more
+    assert report._low_antenna_note(rf("usv", "glider_2n"), DEMO) == CASE2                            # the low end as the link's b (A-5)
 
 
-def test_m3_the_figure_of_the_pair_sentence_is_what_the_model_gives_against_a_fresnel_two_ray():
-    """'About 6 to 11 dB' for two low ends: model minus a flat-earth Fresnel two-ray (eps_c 72.8 - j118.9, 915 MHz, Hs 0), 200 m to the radio horizon,
-    400 points: written in tests/test_round17_d.py from the published formulas. Measured here (min / median / max): the pairs (0.5, 0.5) +6.3 / +6.7 /
-    +6.7 dB, (0.5, 0.3) +9.0 / +9.3 / +9.3 and (0.3, 0.3) +11.1 / +11.4 / +11.4; each band is widened by 0.4 dB. A flat-earth two-ray has no surface
-    wave: the figure is a bound."""
+def test_m3_case_3_an_end_of_exactly_0_5_m_with_a_2_2_m_partner_says_the_margin_can_be_too_high_and_what_is_not_measured():
+    """The Seaglider's 0.5 m is not below 0.5 m; with the USV's 2.2 m whip the model is within 3.3 dB and can understate the loss. Round 17's test said None."""
+    note = report._low_antenna_note(rf("glider_eq", "usv"), DEMO)
+    assert note == CASE3.format(other="") and "conservative" not in note and "overstates" not in note
+    assert report._low_antenna_note(rf("usv", "glider_eq"), DEMO) == CASE3.format(other="")
+    for other in ("uas", "ship"):                                                                      # a partner that is not 2.2 m or 15 m: not measured
+        assert report._low_antenna_note(rf("glider_eq", other), DEMO) == CASE3.format(other="; other partners are not measured"), other
+
+
+def test_m3_no_note_for_the_usv_whip_alone_a_non_rf_link_or_a_link_with_no_low_end():
+    assert report._low_antenna_note(rf("usv", "uas"), DEMO) is None
+    for kind in ("iridium", "acoustic"):
+        assert report._low_antenna_note(rf("glider_eq", "glider_2n", kind), two_gliders("slocum", "slocum")) is None
+    assert report._low_antenna_note(rf("ship", "usv"), DEMO) is None
+
+
+def fresnel_band(ht, hr):
+    """Model minus a flat-earth Fresnel two-ray (eps_c 72.8 - j118.9, 915 MHz, Hs 0): min, median, max over 400 points from 300 m to the pair's radio
+    horizon or 12 km, the one range of batch B's figures (the Fresnel two-ray is written in tests/test_round17_d.py from the published formulas)."""
     from cafe.pm.physics import comms
-    medians = []
-    for (ht, hr), (lo, hi) in {(0.5, 0.5): (5.9, 7.1), (0.5, 0.3): (8.6, 9.7), (0.3, 0.3): (10.7, 11.8)}.items():
-        d = np.linspace(200.0, np.sqrt(2.0 * comms.A_EFF) * (np.sqrt(ht) + np.sqrt(hr)), 400)          # to the radio horizon: beyond it the model is diffracted
-        diff = comms.two_ray_loss_db(d, ht, hr, 0.0, F915) - fresnel_loss_db(d, ht, hr)
-        assert lo <= diff.min() and diff.max() <= hi, (ht, hr, diff.min(), np.median(diff), diff.max())
-        medians.append(np.median(diff))
-    assert 6.0 <= min(medians) and max(medians) <= 11.5                                         # the sentence's "6 to 11" is those figures, rounded
+    d = np.linspace(300.0, min(12e3, np.sqrt(2.0 * comms.A_EFF) * (np.sqrt(ht) + np.sqrt(hr))), 400)
+    diff = comms.two_ray_loss_db(d, ht, hr, 0.0, F915) - fresnel_loss_db(d, ht, hr)
+    return diff.min(), float(np.median(diff)), diff.max()
+
+
+def test_m3_the_figures_of_the_three_sentences_are_what_the_model_gives_against_a_fresnel_two_ray():
+    """Batch B's measured values (r18_handback_B, to 0.1 dB, each band widened by 0.15 dB; a flat-earth two-ray has no surface wave: a bound)."""
+    both = {(0.5, 0.5): (6.4, 6.7), (0.5, 0.3): (9.0, 9.3), (0.3, 0.3): (11.3, 11.4)}                    # case 1: min / median, and "6 to 11"
+    for (ht, hr), (lo, med) in both.items():
+        mn, md, mx = fresnel_band(ht, hr)
+        assert lo - 0.15 <= mn and abs(md - med) <= 0.15 and mx <= 11.6, (ht, hr, mn, md, mx)
+    assert min(v[0] for v in both.values()) >= 6.0 and max(fresnel_band(*k)[2] for k in both) < 11.6
+    for hr in (2.2, 15.0):                                                                              # case 2: the Slocum, "about 5 dB (1 to 6)"
+        mn, md, mx = fresnel_band(0.3, hr)
+        assert 1.1 <= mn and mx <= 6.3 and 4.9 <= md <= 6.3, (hr, mn, md, mx)
+    mn, md, mx = fresnel_band(0.1, 15.0)
+    assert 11.2 <= mn and mx <= 16.2                                                                    # "11 to 16 dB at 0.1 m"
+    mn15, _, mx15 = fresnel_band(0.5, 15.0)                                                             # case 3: within 3.3 dB, 2.9 dB understated with 15 m
+    assert -3.0 <= mn15 <= -2.8 and mx15 <= 3.3
+    mn22, _, mx22 = fresnel_band(0.5, 2.2)
+    assert -3.3 <= mn22 and mx22 <= 3.3
 
 
 # ---- M-16 (A-5): the low end is the link's b -------------------------------------------------------------------------------------------------------------
@@ -230,7 +261,7 @@ def test_a5_a_link_whose_low_end_is_its_second_gets_the_sentence_too():
     for a, b in (("usv", "glider_2n"), ("glider_2n", "usv")):
         note = report._low_antenna_note(rf(a, b), DEMO)
         assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).")
-    assert report._low_antenna_note(rf("uas", "glider_2n"), DEMO).startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).")
+    assert report._low_antenna_note(rf("uas", "glider_2n"), DEMO) == CASE2
 
 
 # ---- M-5: whatif takes the members of its Stage-1 fallback from the run's plan.json ------------------------------------------------------------------------

@@ -31,7 +31,7 @@ import pickle
 import re
 import warnings
 from collections import Counter
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -723,15 +723,14 @@ RF_LOW_ANTENNA_M = 0.5                              # the mission schema's own f
 
 
 def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None:
-    """Round 17, M-5: the sentence for an RF link with an end below RF_LOW_ANTENNA_M. The two-ray loss takes the reflection coefficient as -1, which cancels
-    the two rays as the height goes to zero, so it overstates the loss (the margin is too
-    low: a GO can show as MARGINAL): by about 5 dB (1 to 6) at 0.3 m with a partner of 2.2 m or more, and 11 to 16 dB at 0.1 m with a 15 m one, against a
-    Fresnel two-ray (the sea's permittivity) and a parabolic-equation field. Batch B's pair figures (r18_handback_B) are the ones used: the model is not
-    "conservative" for every antenna (at 0.5 m and 2.2 m it can understate the loss by up to 3.3 dB), so the sentence is given only where it overstates.
-    Round 18, M-3: the band is of the pair. With both ends at or below RF_LOW_ANTENNA_M (two gliders: the loader accepts them) the loss is overstated by 6
-    to 11 dB (a flat-earth Fresnel two-ray, 0.5 and 0.3 m: +9, two 0.3 m ends +11, two 0.5 m ends +6), and a GO can show as NO-GO: the sentence says
-    "both ends" then, and is also given when no end is below RF_LOW_ANTENNA_M but both are at it (two Seagliders). None when neither holds, or the link
-    is not an RF one."""
+    """Round 17, M-5, round 18, M-3: the sentence for an RF link with a low antenna. The two-ray loss takes the reflection coefficient as -1, which cancels
+    the two rays as the height goes to zero. Its error is of the PAIR of heights (batch B's measured figures, docs/PHYSICS.md 12.1, CREDIBILITY L23: the
+    model minus a flat-earth Fresnel two-ray, one range for every figure, 300 m to the pair's radio horizon). Three cases, by the heights of the ends:
+    (1) both at or below RF_LOW_ANTENNA_M (two gliders; the loader accepts them): the loss is overstated by 6 to 11 dB (Seaglider with Slocum about 9, two
+    Slocums about 11, two Seagliders about 7); (2) one end below RF_LOW_ANTENNA_M, the other 2.2 m or higher: overstated by about 5 dB at 0.3 m (1 to 6) and
+    11 to 16 dB at 0.1 m; (3) an end of exactly RF_LOW_ANTENNA_M with no end below it: within 3.3 dB with a 2.2 m or 15 m partner and at worst UNDERSTATED
+    (2.9 dB with 15 m), so the margin can be too high; another partner (a UAS) is not measured, and the sentence says so. "Conservative" is true of (1) and
+    (2) only. None when the link is not an RF one or no end is that low (the USV's 2.2 m whip with a UAS: L23 says it)."""
     from .physics import glider, usv
     if lk["kind"] != "rf":
         return None
@@ -743,17 +742,28 @@ def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None
                                                          else usv.load_platform(v["platform"])["rf_antenna_height_m"] if cls[end] == "usv" else math.inf)
         except (KeyError, TypeError, ValueError):
             heights[end] = None
-    ends = ", ".join(f"{end} ({h:g} m)" for end, h in heights.items() if h is not None and h <= RF_LOW_ANTENNA_M)
-    if len(heights) == 2 and all(h is not None and h <= RF_LOW_ANTENNA_M for h in heights.values()):                   # lk["a"] != lk["b"]: two keys
-        return (f"Both ends of this RF link have an antenna of {RF_LOW_ANTENNA_M:g} m or lower: {ends}. The two-ray model takes the ground reflection as -1, "
-                "which overstates the loss for two such low antennas by 6 to 11 dB against a Fresnel two-ray (a Seaglider with a Slocum "
-                "about 9 dB, two Slocums about 11, two Seagliders about 7; a flat-earth bound: it has no surface wave): this margin is too low, and a GO "
-                "can show as MARGINAL or NO-GO (CREDIBILITY, limitation L23).")
-    low = ", ".join(f"{end} ({h:g} m)" for end, h in heights.items() if h is not None and h < RF_LOW_ANTENNA_M)
-    return None if not low else (f"An end of this RF link has an antenna below {RF_LOW_ANTENNA_M:g} m: {low}. The two-ray model takes the ground "
-                                 "reflection as -1, which overstates the loss for so low an antenna, with a partner of 2.2 m or more, by about 5 dB at 0.3 m "
-                                 "(1 to 6) and 11 to 16 dB at 0.1 m (against a Fresnel two-ray and a parabolic-equation field): this margin is too low and "
-                                 "a GO can show as MARGINAL (CREDIBILITY, limitation L23).")
+    hs = list(heights.values())
+
+    def named(keep: Callable[[float], bool]) -> str:
+        return ", ".join(f"{end} ({h:g} m)" for end, h in heights.items() if h is not None and keep(h))
+    if all(h is not None and h <= RF_LOW_ANTENNA_M for h in hs):
+        return (f"Both ends of this RF link have an antenna of {RF_LOW_ANTENNA_M:g} m or lower: {named(lambda h: True)}. The two-ray model takes the ground "
+                "reflection as -1, which overstates the loss by 6 to 11 dB against a Fresnel two-ray from 300 m to the horizon (a Seaglider with a Slocum "
+                "about 9 dB, two Slocums about 11 dB, two Seagliders about 7 dB): this margin is conservative and a GO can show as MARGINAL or NO-GO "
+                "(CREDIBILITY, limitation L23).")
+    if any(h is not None and h < RF_LOW_ANTENNA_M for h in hs):
+        return (f"An end of this RF link has an antenna below {RF_LOW_ANTENNA_M:g} m: {named(lambda h: h < RF_LOW_ANTENNA_M)}. The two-ray model takes the "
+                "ground reflection as -1, which overstates the loss for so low an antenna: by about 5 dB at 0.3 m (1 to 6 dB) with a partner of 2.2 m or "
+                "more, and 11 to 16 dB at 0.1 m, against a Fresnel two-ray from 300 m to the horizon: this margin is conservative and a GO can show as "
+                "MARGINAL (CREDIBILITY, limitation L23).")
+    if any(h == RF_LOW_ANTENNA_M for h in hs):
+        other = [h for h in hs if h != RF_LOW_ANTENNA_M]                      # the partner: the end that is not at 0.5 m (a second one at 0.5 m is case 1)
+        measured = all(h in (2.2, 15.0) for h in other)
+        return (f"An end of this RF link has an antenna of {RF_LOW_ANTENNA_M:g} m: {named(lambda h: h == RF_LOW_ANTENNA_M)}. Against a Fresnel two-ray from "
+                "300 m to the horizon the two-ray model is within 3.3 dB at this height with a partner of 2.2 m or 15 m and at worst understates the loss "
+                "(by 2.9 dB with a 15 m partner), so this margin can be too high by that much; nearer than 300 m this is not stated"
+                + ("" if measured else "; other partners are not measured") + " (CREDIBILITY, limitation L23).")
+    return None
 
 
 def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str, Any]:

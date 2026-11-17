@@ -254,12 +254,13 @@ def rf(a, b, kind="rf"):
 
 def test_m5_an_rf_link_to_the_slocums_0_3_m_antenna_gets_the_sentence_and_the_others_do_not():
     note = report._low_antenna_note(rf("glider_2n", "usv"), DEMO)
-    assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).") and "too low" in note
+    assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).") and "conservative" in note
     assert report._low_antenna_note(rf("usv", "uas"), DEMO) is None                               # 2.2 m and an airborne antenna
     for kind in ("iridium", "acoustic"):
         assert report._low_antenna_note(rf("glider_2n", "usv", kind), DEMO) is None
     assert report._low_antenna_note(rf("ship", "usv"), DEMO) is None                              # the ship is no vehicle: the mission schema's floor is 0.5 m
-    assert report._low_antenna_note(rf("glider_eq", "usv"), DEMO) is None                         # the seaglider's antenna is 0.5 m: not below it
+    # the seaglider's antenna is 0.5 m: not below it, but with the 2.2 m whip the model can understate the loss: the round 18 sentence of that case (M-3)
+    assert report._low_antenna_note(rf("glider_eq", "usv"), DEMO).startswith("An end of this RF link has an antenna of 0.5 m: glider_eq (0.5 m).")
 
 
 def test_m5_the_card_of_such_a_link_prints_it_and_the_report_is_still_traceable(tmp_path, data_dir):  # noqa: F811
