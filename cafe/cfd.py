@@ -21,9 +21,9 @@ DIRS = {"+x": (1, 0, 0), "-x": (-1, 0, 0), "+y": (0, 1, 0), "-y": (0, -1, 0), "+
 def dvec(d):
     """Unit direction for a label: an axis ("+x") or forward motion pitched/yawed toward an axis ("x+z10" =
     moving along +x tilted 10 deg toward +z, i.e. 10 deg angle of attack)."""
-    if d in DIRS:
+    if isinstance(d, str) and d in DIRS:         # a label that is not a string is a bad direction too, not a TypeError (round 18, M-11)
         return np.array(DIRS[d], float)
-    m = re.fullmatch(r"x([+-][yz])([0-9]+(?:\.[0-9]+)?)", d)
+    m = re.fullmatch(r"x([+-][yz])([0-9]+(?:\.[0-9]+)?)", d) if isinstance(d, str) else None
     if not m or float(m.group(2)) > 90:          # "x+z999" was a tilt of 999 degrees and "x+z1.2.3" a bare float() error (round 17, M-11)
         raise ValueError(f"bad direction {d!r}: an axis (+x, -x, ... -z) or x[+-][yz] and an angle of 0 to 90 degrees, as x+z10")
     a = np.radians(float(m.group(2)))
@@ -51,7 +51,16 @@ NOT_KEYED = ("recipe", "cached", "_code_literals", "_literals", "_text_and_numbe
 
 
 def _text_and_numbers(node):
-    """The constants under `node` in source order, as their `repr`: not a docstring, a `log(...)` or `print(...)` call or a `raise` statement."""
+    """The constants under `node` in source order, as their `repr`: not a docstring, a `log(...)` or `print(...)` call or a `raise` statement. A signed
+    literal is one item with its sign: `-0.71` is `UnaryOp(USub, Constant(0.71))`, and turning that minus into a plus must move the key (round 18, M-2).
+    Only the sign of a literal: `-x` and `not y` are logic, outside the key."""
+    def signed_literal(c):
+        sign = ""
+        while isinstance(c, ast.UnaryOp) and isinstance(c.op, (ast.USub, ast.UAdd, ast.Invert)):
+            sign += {ast.USub: "-", ast.UAdd: "+", ast.Invert: "~"}[type(c.op)]
+            c = c.operand
+        return sign + repr(c.value) if sign and isinstance(c, ast.Constant) else None
+
     for c in ast.iter_child_nodes(node):
         if isinstance(c, ast.Raise) or (isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id in ("log", "print")):
             continue
@@ -59,6 +68,8 @@ def _text_and_numbers(node):
             continue
         if isinstance(c, ast.Constant):
             yield repr(c.value)
+        elif (signed := signed_literal(c)) is not None:
+            yield signed
         else:
             yield from _text_and_numbers(c)
 
