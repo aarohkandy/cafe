@@ -80,10 +80,15 @@ LIMITATIONS = [
     dict(id="L22", text="wave height, period and direction (UMWM) and the subsurface temperature and salinity (HYCOM/GOFS) are compared with no in-situ record "
                         "either: no wave record and no subsurface temperature or salinity record of the moorings is read",
          factors=["validation", "uncertainty"], where=["cafe/pm/pipeline.py", "cafe/pm/env/tao.py"]),
-    dict(id="L23", text="RF links to an antenna below 0.5 m: the loss is overstated, by about 5 dB at the Slocum's 0.3 m (1 to 6 dB in two checks over 0.3 to "
-                        "12 km, 11 to 16 dB at 0.1 m): the two-ray model takes the reflection coefficient as -1, which makes the field vanish with the "
-                        "height, where the sea's own coefficient leaves a floor; a margin there is conservative, a GO can show as MARGINAL; the shipped "
-                        "UAS and USV antennas are above 0.5 m and are not affected",
+    dict(id="L23", text="RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip: the two-ray model takes the reflection coefficient as -1, "
+                        "which makes the field vanish with the height, where the sea's own coefficient leaves a floor, and the error is of the pair of "
+                        "heights; against a Fresnel two-ray with the assumed sea (flat earth, 915 MHz, Hs 0, from 300 m to the pair's radio horizon or "
+                        "12 km; a bound, as it has no surface wave) the loss is overstated for an antenna below 0.5 m, so the margin is too low and a "
+                        "GO can show as MARGINAL or NO-GO: by about 5 dB at the Slocum's 0.3 m with a partner of 2.2 m or more (1 to 6 dB), by 6 to "
+                        "11 dB when both ends are 0.5 m or lower (7 dB for two Seagliders, 9 dB for a Seaglider with a Slocum, 11 dB for two "
+                        "Slocums) and by 11 to 16 dB at 0.1 m; at 0.5 m and 2.2 m, with a partner of 2.2 m or 15 m, the model is within 3.3 dB of it "
+                        "and at worst understates the loss, so there the margin, the USV whip's included, can be too high; nearer than 300 m none of "
+                        "this is stated (from 200 m, 0.5 m with a 15 m partner is understated by up to 5.0 dB)",
          factors=["validation"], where=["cafe/pm/physics/comms.py", "platforms/slocum.yaml"]),
 ]
 

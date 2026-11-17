@@ -232,8 +232,10 @@ def test_r17_m2_each_task_mode_reads_exactly_the_keys_the_table_says(mode, task)
 def test_r17_m5_a_limitation_names_the_low_antenna_loss_and_bears_on_validation_only():
     x = {l["id"]: l for l in cr.LIMITATIONS}["L23"]
     assert [l["id"] for l in cr.LIMITATIONS][-2:] == ["L22", "L23"]
-    assert x["text"].startswith("RF links to an antenna below 0.5 m: the loss is overstated, by about 5 dB at the Slocum's 0.3 m")
-    assert "11 to 16 dB at 0.1 m" in x["text"] and "conservative" in x["text"] and x["factors"] == ["validation"]
+    # round 18, M-3: the text is by pair of heights (tests/test_round18_b.py)
+    assert x["text"].startswith("RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip:")
+    assert "by about 5 dB at the Slocum's 0.3 m" in x["text"] and "11 to 16 dB at 0.1 m" in x["text"] and "overstated" in x["text"]
+    assert x["factors"] == ["validation"]
     assert all((REAL / w).is_file() for w in x["where"])
     assert yaml.safe_load((REAL / "platforms" / "slocum.yaml").read_text())["params"]["antenna_height_m"]["value"] == 0.3
 
