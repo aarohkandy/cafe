@@ -31,12 +31,61 @@ MATERIALS = {
 ASSUMPTIONS = pathlib.Path(__file__).resolve().parents[1] / "config" / "assumptions.yaml"
 
 
-_BLANKS = " \t"                      # YAML's white space: `str.strip()` and `\s` also take U+00A0 and the other Unicode spaces, which are text there
 _MESH_KEY = re.compile(r"""["']?stage3\.fea_elements_along(?![\w.])""")
 _MESH_KEY_LINE = re.compile(r"stage3\.fea_elements_along:(?: +#.*| *)")                 # spaces only after the colon: a tab is an error in PyYAML (M-14)
-_TOP_LINE = re.compile(r"\w[\w.\-]*:(?: .*)?")                                         # a top-level line: `key:` and the start of its value, nothing else
 MAX_ELEMENTS_ALONG = 500                                                          # round 17, M-14 (OD-8): about 7 times the converged mesh study's 70
-_MESH_TEXT = re.compile(r"""(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*'|[|>][-+0-9]*)(?:\s+#.*)?|#.*""")   # a quoted text on one line, a block-scalar header, a comment
+# Round 18, M-10 (OD-11): the grammar. Only a line break, a space and the characters PyYAML reads as printable and does not treat as a line break
+# may stand in the file; no tab, no control character (\x0b, \x0c, \x1c to \x1e, \x7f), no \x85, U+2028 or U+2029 (YAML breaks lines at them, `splitlines` too,
+# but at other places).
+_BAD_CHAR = re.compile("[^\n\r\x20-\x7e\xa0-\u2027\u202a-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+_LINE = re.compile(r"( *)([A-Za-z0-9_][A-Za-z0-9_.\-]*):(?: +(.*))?")                 # indent, key, and the text after the colon and at least one space
+_DQUOTED = re.compile(r'"([^"\\]*)"(?: +#.*)?')                                          # one line, no escape (a backslash is refused: `\q` is an error)
+_SQUOTED = re.compile(r"'((?:[^']|'')*)'(?: +#.*)?")
+_NUM_LIST = re.compile(r"(\[ *-?[0-9]+(?:\.[0-9]+)?(?: *, *-?[0-9]+(?:\.[0-9]+)?)* *\])(?: +#.*)?")      # `[0.2, 3.0]`: the shipped ranges
+_NOT_PLAIN_FIRST = "[]{},#&*!|>'\"%@`?:"                                          # none starts a plain scalar (`-` does, unless a space follows)
+
+
+def _scalar(text: str) -> tuple[str, str] | None:
+    """The one-line scalar a line of the grammar may hold, as (kind, content): "null" (nothing, or a comment), "plain", "quoted" (double or single quotes,
+    closed on the line, no backslash), "list" (a flow sequence of numbers on the line: `[0.2, 3.0]`), or None for anything else (any other flow
+    collection, a block scalar, an anchor, an alias, a tag, a directive, a quote that does not end on its
+    line, text after a closing quote, a plain text with `: ` or a trailing colon in it, a `- ` or `? ` or `: `)."""
+    text = text.strip(" ")
+    if not text or text[0] == "#":
+        return "null", ""
+    if text[0] in "\"'":
+        m = (_DQUOTED if text[0] == '"' else _SQUOTED).fullmatch(text)
+        return None if m is None else ("quoted", m[1])
+    if text[0] == "[":
+        m = _NUM_LIST.fullmatch(text)
+        return None if m is None else ("list", m[1])
+    if text[0] in _NOT_PLAIN_FIRST or text[0] == "-" and (len(text) == 1 or text[1] == " "):
+        return None
+    body = text.split(" #", 1)[0].rstrip(" ")
+    return None if ": " in body or body.endswith(":") else ("plain", body)
+
+
+def _entries(lines: list[str], bad: Any) -> list[tuple[str, tuple[str, str], list[tuple[str, tuple[str, str]]]]]:
+    """The whole file as (key, scalar, children) at the grammar's two levels: a `key:` or `key: scalar` line at column 0, and under a `key:` with nothing after
+    it, `name: scalar` lines indented by exactly two spaces; blank lines and comment lines anywhere. Any other line is refused through `bad`: a deeper line
+    (whatever key it follows), a list item, a document marker, a line under a key that has a scalar, a child with no parent."""
+    out: list[tuple[str, tuple[str, str], list[tuple[str, tuple[str, str]]]]] = []
+    for n, ln in enumerate(lines, 1):
+        if not ln.strip(" ") or ln.lstrip(" ").startswith("#"):
+            continue
+        m = _LINE.fullmatch(ln)
+        sc = None if m is None else _scalar(m[3] or "")
+        if m is None or sc is None:
+            raise bad(f"line {n}, {ln[:40]!r}, is outside the grammar this reader reads (`key:` and `  name: one-line text`, the text plain or in quotes "
+                      "without a backslash or a list of numbers in brackets, no other flow collection, block scalar, list, anchor, tag or `: ` "
+                      "in a plain text)")
+        if not m[1]:
+            out.append((m[2], sc, []))
+        elif len(m[1]) == 2 and out and out[-1][1][0] == "null":
+            out[-1][2].append((m[2], sc))
+        else:
+            raise bad(f"line {n}, {ln[:40]!r}, is indented {len(m[1])} spaces: only a child of a `key:` line, indented by two spaces, may be indented")
+    return out
 
 
 def hull_elements_along() -> int:
@@ -45,21 +94,26 @@ def hull_elements_along() -> int:
     reported two collapse depths). Its mesh study is in the `why` there. Read by line, standard library only: the live app image (Dockerfile, requirements.txt)
     has no pyyaml, and `import yaml` here ended every Hangar hull case in ModuleNotFoundError there (round 15, look-ahead L0).
 
-    A hand reader of YAML must not return a number PyYAML would not, so it reads one layout and refuses every other (round 15 look-ahead L0-4; the layouts that
-    `tests/test_stage3.py` and `tests/test_round17_f.py` hold it to PyYAML on are the ones this claim covers): the key on
-    its own line (a comment may follow), one `value:` among the entry's own children (the lines at the indent of its first child; deeper lines are the text of
-    another child), written as a decimal whole number (no sign, no leading zero, no `_`) with at most ` # comment` after it, and the key written once in
-    the file. A child that starts a flow collection, an anchor, a tag or an alias, or a quoted text that does not end on its line, is refused, since the
-    lines under it could then mean anything. A line deeper than the `value:` line that follows it is more text of the value in YAML (`70` then `more` is
-    '70 more'), so it is refused; blanks are the space and the tab only (a no-break space, U+00A0, is text: `70` and a no-break space is not 70).
-    The file must be one mapping (round 17, M-14): a line at the top level that is not a comment or `key:` (a document marker `---` or `...`, a list item, a
-    line that starts with a tab) is refused wherever it stands, since PyYAML refuses such a file or reads another document; only spaces may follow the key's
-    own colon; and a value above `MAX_ELEMENTS_ALONG` (500, about 7 times the study's 70) is refused, as h = L / value would mesh the hull into millions of
-    shell elements until the stage-3 deadline.
-    `tests/test_stage3.py` holds this reading to PyYAML's on the file itself and on each layout it refuses."""
+    A hand reader of YAML must not return a number PyYAML would not. Rounds 15, 16 and 17 each closed the layouts a review found and left their neighbours, so
+    since round 18 (M-10, OD-11) the reader reads a closed grammar and refuses every line outside it, in the whole file and not only in the entry: PyYAML
+    reads the whole file, so a line it refuses anywhere makes the pipeline's reading fail where this one returned 70. The grammar: the file's characters are
+    a line break, a space and printable characters (no tab, no control character, no \x85, U+2028 or U+2029); a line is blank, a comment, `key:` or
+    `key: text` at column 0, or `  name: text` (two spaces) under a `key:` with nothing after it; the text is one line, plain (not starting with one of
+    `[]{},#&*!|>'"%@` or a backquote, `?` or `:`, or with `- `; no `: `, no trailing colon; ` #` starts a comment) or in single or double quotes closed on the
+    line (no backslash in a double-quoted text, `''` in a single-quoted one), or a one-line flow sequence of numbers (`[0.2, 3.0]`: the shipped file's ranges,
+    the one flow collection), with at most ` # comment` after it. Nothing deeper, whatever key it follows.
+    Then the entry: the key written once in the file, on its own line (a comment may follow), one `value:` among its children, a plain decimal whole number
+    (no sign, no leading zero, no `_`) from 1 to `MAX_ELEMENTS_ALONG` (500, about 7 times the study's 70: h = L / value would mesh the hull into millions of
+    shell elements until the stage-3 deadline). A shipped file that has a layout outside the grammar is refused with the line and the reason, not read.
+    `tests/test_round18_f.py` holds the claim to PyYAML by a seeded differential fuzz of the whole file: wherever this returns a number,
+    `yaml.safe_load` gives the same one (the converse is not claimed: a valid layout outside the grammar is refused)."""
     def bad(why: str) -> ValueError:
         return ValueError(f"stage3.fea_elements_along in {ASSUMPTIONS}: {why}")
-    lines = ASSUMPTIONS.read_text().splitlines()
+    text = ASSUMPTIONS.read_text()
+    if (c := _BAD_CHAR.search(text)) is not None:
+        raise bad(f"the file holds the character {c[0]!r} (a tab, a control character or a line break other than \\n and "
+                f"\\r\\n: YAML and `splitlines` read them differently)")
+    lines = text.splitlines()
     heads = [i for i, ln in enumerate(lines) if _MESH_KEY.match(ln)]
     if not heads:
         raise ValueError(f"{ASSUMPTIONS} has no stage3.fea_elements_along")
@@ -67,43 +121,15 @@ def hull_elements_along() -> int:
         raise bad(f"written {len(heads)} times (YAML keeps the last)")
     if not _MESH_KEY_LINE.fullmatch(lines[heads[0]]):
         raise bad(f"the key line is {lines[heads[0]]!r}; only the key, a colon and a comment are read (not a flow mapping, a quoted key, an anchor or a tag)")
-    for ln in lines:
-        if ln.strip(_BLANKS) and not ln.startswith((" ", "#")) and not _TOP_LINE.fullmatch(ln):
-            raise bad(f"the line {ln[:40]!r} is no `key:` at the top level (a second document `---`, a list item, a tab or a continuation)")
-    body = []
-    for ln in lines[heads[0] + 1:]:
-        if ln.strip(_BLANKS) and not ln.startswith((" ", "#")):                   # the next top-level entry: this one has no more lines
-            break
-        if ln.strip(_BLANKS) and not ln.lstrip(_BLANKS).startswith("#"):
-            body.append(ln)
-    if not body:
-        raise bad("has no value")
-    indent = [len(ln) - len(ln.lstrip(_BLANKS)) for ln in body]
-    if any("\t" in ln[:n] for ln, n in zip(body, indent, strict=True)) or min(indent) < indent[0]:
-        raise bad("an entry line is indented with a tab or less than the entry's first line")
-    values = []
-    last = ""
-    for ln, n in zip(body, indent, strict=True):
-        if n > indent[0]:                                                          # the text of the child above (a block scalar, a nested mapping)
-            if last == "value":
-                raise bad(f"the line {ln.strip(_BLANKS)[:40]!r} under value is more text of it in YAML, not a whole number")
-            continue
-        m = re.fullmatch(r"(\w+):(?:[ \t]+(.*))?", ln.strip(_BLANKS))
-        if m is None:
-            raise bad(f"line {ln.strip(_BLANKS)[:40]!r} is not `name: text`")
-        last = m[1]
-        text = (m[2] or "").strip(_BLANKS)
-        if m[1] == "value":
-            values.append(text)
-        elif text and text[0] in "[{&*!%@`\"'|>#" and not _MESH_TEXT.fullmatch(text):
-            raise bad(f"{m[1]} starts with {text[0]!r}, a form this reader does not follow")
+    entry = next(e for e in _entries(lines, bad) if e[0] == "stage3.fea_elements_along")
+    values = [sc for name, sc in entry[2] if name == "value"]
     if not values:
         raise bad("has no value")
     if len(values) > 1:
         raise bad(f"has {len(values)} value lines (YAML keeps the last)")
-    m = re.fullmatch(r"(0|[1-9][0-9]*)(?:[ \t]+#.*)?", values[0])
+    m = re.fullmatch(r"(0|[1-9][0-9]*)", values[0][1]) if values[0][0] == "plain" else None
     if m is None:
-        raise bad(f"value is {values[0]!r}, not a whole number written in decimal with no sign and no leading zero")
+        raise bad(f"value is {values[0][1]!r}, not a whole number written in decimal with no sign and no leading zero")
     if int(m[1]) < 1:
         raise bad(f"value {m[1]} is below 1")
     if int(m[1]) > MAX_ELEMENTS_ALONG:
