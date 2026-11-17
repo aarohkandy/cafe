@@ -1213,7 +1213,8 @@ def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
                 catalogue=num(sum(used.values()) + sum(rest.values()), "catalogued inputs", cred_ref, f"{src} (kind other than fitted)"),
                 by_file={f: num(n, "inputs", cred_ref, src) for f, n in sorted(used.items())},
                 not_used_by_file={f: num(n, "inputs", cred_ref, f"{src} (not used by this mission)") for f, n in sorted(rest.items())},
-                items=[dict(id=i["id"], kind=i["kind"], used=i["used"], value=i["value"], unit=i["unit"], why=i["why"], href=f"credibility.html#{i['anchor']}")
+                items=[dict(id=i["id"], kind=i["kind"], used=i["used"], value=i["value"], unit=i["unit"], why=i["why"], href=f"credibility.html#{i['anchor']}",
+                            **({"not_used": i["not_used"]} if "not_used" in i else {}))
                        for i in cred["assumed_inputs"]],
                 factors=[dict(name=f["name"], level=f"{f['level']} of 4") for f in cred["factors"]])
 

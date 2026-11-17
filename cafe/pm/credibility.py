@@ -80,6 +80,11 @@ LIMITATIONS = [
     dict(id="L22", text="wave height, period and direction (UMWM) and the subsurface temperature and salinity (HYCOM/GOFS) are compared with no in-situ record "
                         "either: no wave record and no subsurface temperature or salinity record of the moorings is read",
          factors=["validation", "uncertainty"], where=["cafe/pm/pipeline.py", "cafe/pm/env/tao.py"]),
+    dict(id="L23", text="RF links to an antenna below 0.5 m: the loss is overstated, by about 5 dB at the Slocum's 0.3 m (1 to 6 dB in two checks over 0.3 to "
+                        "12 km, 11 to 16 dB at 0.1 m): the two-ray model takes the reflection coefficient as -1, which makes the field vanish with the "
+                        "height, where the sea's own coefficient leaves a floor; a margin there is conservative, a GO can show as MARGINAL; the shipped "
+                        "UAS and USV antennas are above 0.5 m and are not affected",
+         factors=["validation"], where=["cafe/pm/physics/comms.py", "platforms/slocum.yaml"]),
 ]
 
 SUBGRID = "sub-grid layer uncalibrated"
@@ -537,6 +542,60 @@ def flown_radios(mission: dict[str, Any] | None) -> set[str]:
     return out
 
 
+# Platform inputs a mission's own entry replaces, or that its task mode never reads, so the verdicts do not use the platform's value (round 17, M-2). Per
+# class: platform path -> (the mission key that replaces it, in the vehicle's entry or under `ship.` in the mission; stage 1's own value when the mission leaves
+# the key out, or None for the platform's; the task mode that replaces it, or None for every mode; the mission key's unit). `stage1._uas_setup`,
+# `ship_antenna_m` and `_run_glider` are where each replacement happens, and a test flies them against this table (it cannot drift from stage 1).
+MISSION_OVERRIDES: dict[str, dict[str, tuple[str, float | None, str | None, str]]] = dict(
+    uas={"sortie.levels_m": ("sorties.altitudes_m", None, None, "m"), "sortie.duration_s": ("sorties.duration_min", None, None, "min"),
+         "launch_rule.max_mean_wind_ms": ("launch_rules.max_mean_wind_ms", None, None, "m/s"),
+         "launch_rule.gust_lookahead_min": ("launch_rules.no_gust_front_within_min", None, None, "min"),
+         "radio.ship_antenna_height_m": ("ship.antenna_height_m", None, None, "m")},
+    glider={"mission_defaults.dive_depth_m": ("task.dive_depth_m", None, None, "m"),
+            "mission_defaults.station_tol_m": ("task.radius_km", 5.0, "station", "km"),               # stage 1 sets both, from the task or its own 5 km and 6 h
+            "mission_defaults.lost_hours": ("task.lost_after_h", 6.0, "station", "h")})
+# The mission defaults a glider's task mode reads from the platform (`GliderSim`: the station keys in station mode, the waypoint keys in section mode, none in
+# drift, which never fails on them); the dive depth is read in every mode. A key in no tuple of the mode flown is not read by the verdicts.
+GLIDER_MODE_KEYS = dict(station=("station_tol_m", "lost_hours"), section=("wp_radius_m", "unreach_hours"), drift=())
+GLIDER_MODE_ONLY = {k for ks in GLIDER_MODE_KEYS.values() for k in ks}
+
+
+def vehicle_replaced(mission: dict[str, Any], v: dict[str, Any], cls: str) -> dict[str, tuple[str, str]]:
+    """{platform path: (the mission's value as text, why the platform's is not used)} for the inputs of the platform of vehicle `v` that this mission replaces
+    or that its task mode never reads (`MISSION_OVERRIDES`, `GLIDER_MODE_KEYS`). A value the mission leaves out is not replaced, except the two stage 1 sets
+    itself in station mode."""
+    out: dict[str, tuple[str, str]] = {}
+    mode = str((v.get("task") or {}).get("mode"))
+    for path, (mkey, own, only, unit) in MISSION_OVERRIDES.get(cls, {}).items():
+        if only not in (None, mode):
+            continue
+        val: Any = mission if mkey.startswith("ship.") else v
+        for part in mkey.split("."):
+            val = val.get(part) if isinstance(val, dict) else None
+        if val is not None:
+            out[path] = (f"{val} {unit}", f"the mission sets its own value ({val} {unit}) and the verdicts use that")
+        elif only is not None:                                                     # stage 1 sets it whether the mission gives it or not
+            out[path] = (f"{own} {unit}", f"stage 1 sets its own value ({own} {unit}, as {mkey} is not set) and the verdicts use that")
+    if cls == "glider" and mode in GLIDER_MODE_KEYS:
+        for k in GLIDER_MODE_ONLY - set(GLIDER_MODE_KEYS[mode]):
+            out[f"mission_defaults.{k}"] = ("", f"a {mode} task never reads it")
+    return out
+
+
+def mission_replaced(mission: dict[str, Any] | None, root: pathlib.Path = ROOT) -> dict[tuple[str, str], tuple[str, str]]:
+    """{(platform key, path): (the mission's value(s), why the platform's is not used)} for the platform inputs that every vehicle flying that platform replaces
+    or never reads (`vehicle_replaced`): one vehicle that reads the platform's value keeps the input used. {} for a mission that cannot be read (every input
+    then counts as used, as `flown_classes` counts every class)."""
+    per: dict[str, list[dict[str, tuple[str, str]]]] = {}
+    try:
+        for v in (mission or {}).get("vehicles", []):
+            per.setdefault(platform_key(v["platform"], root), []).append(vehicle_replaced(mission or {}, v, config.platform_class(v)))
+    except (config.ConfigError, KeyError, TypeError, AttributeError):
+        return {}
+    return {(key, path): ("; ".join(dict.fromkeys(r[path][0] for r in rows if r[path][0])), "; ".join(dict.fromkeys(r[path][1] for r in rows)))
+            for key, rows in per.items() for path in set.intersection(*(set(r) for r in rows))}
+
+
 # What a config/ item needs to be used by a mission. "" is every mission; "-" is none, the item is read by the DTMB validation study and no verdict.
 # A class names the vehicles that read it, "a|b" either of two: stage-3 geometry and nominal windows (`pipeline_windows`, `budget.NOMINAL_WINDOW`), the
 # FEA (`budget.FEA_CLASSES`: the glider), the free-surface case (`budget.FS_PARTS`: the USV), the reach map (`report`: a glider or a USV, each at its
@@ -583,8 +642,10 @@ def config_switch(file: str, key: str) -> str:
 
 def not_used_note(item: dict[str, Any]) -> str:
     """Why an item that is listed is not counted for this mission, for the pages (from its id: `assumptions.yaml:<key>`, `perturbations.yaml:<key>`, or
-    `<platform file>:<path>`)."""
+    `<platform file>:<path>`); a platform input the mission replaces carries its own text, `not_used`."""
     file, _, key = item["id"].partition(":")
+    if item.get("not_used"):                                                   # a platform input the mission replaces, or its task mode never reads
+        return str(item["not_used"])
     if file not in ("assumptions.yaml", "perturbations.yaml"):
         return "platform not used by this mission"
     scope, sw = config_scope(file, key), config_switch(file, key)
@@ -623,6 +684,7 @@ class Facts:
         self.used = {platform_key(r, root): platform_label(platform_key(r, root), platform_shipped(r, root)) for r in refs} | \
                     {t: platform_label(t, True) for t in tables}                                    # key -> the `file` of its items
         self.items = platform_items(root, [r for r in refs if not platform_shipped(r, root)])
+        self.replaced = mission_replaced(self.mission, root)                              # (platform key, path) the mission replaces: round 17, M-2
         self.perts = config.read_yaml(root / "config" / "perturbations.yaml") or {}
         self.vv = vv20_rows(data)
         why = subgrid_uncalibrated(run, root)
@@ -641,9 +703,10 @@ class Facts:
 
     def item_used(self, key: str, path: str) -> bool:
         """Whether this mission reads the platform input `path` of the platform `key` (the stem of its file; `item["key"]`). A vehicle's platform file is read
-        whole. radios.yaml and modems.yaml are catalogues of which a mission reads the entries its links name (`entries_read`), so the unit is the entry
-        (M-6, and again after round 12)."""
-        if key not in self.used:
+        whole, but for what the mission replaces or its task mode never reads (`mission_replaced`, round 17, M-2: listed, not used). radios.yaml and
+        modems.yaml are catalogues of which a mission reads the entries its links name (`entries_read`), so the unit is the entry (M-6, and again after
+        round 12)."""
+        if key not in self.used or (key, path) in self.replaced:
             return False
         if key not in ("radios", "modems"):
             return True
@@ -1092,13 +1155,17 @@ def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.
     items = assumed_inputs(root, f.run, [r for r in f.refs if not platform_shipped(r, root)])
     for it in items:                    # the catalogue lists every platform input; `used` says whether this mission flies or links through it (M-6)
         it["used"] = f.item_used(it["key"], it["path"]) if "key" in it else f.config_used(it["file"], it["id"].partition(":")[2])
+        if "key" in it and (it["key"], it["path"]) in f.replaced:          # kept in the table, so a lab that replaced it finds the row; not counted (M-2)
+            mv, it["not_used"] = f.replaced[it["key"], it["path"]]
+            it["mission_value"] = mv or None
     labels = {p.stem: platform_label(p.stem, True) for p in (root / "platforms").glob("*.yaml")} | f.used          # key -> the `file` of its items
     return dict(schema="cafe.pm.credibility/1", run=f.run.name,
                 note="Levels run 0-4 (BRIEF 5.4). The rule behind each level is this tool's reading of the factor, not the text of NASA-STD-7009B, "
                      "which was not re-read. Level 4 is never awarded automatically.",
                 levels=LEVELS, factors=factor_table(f), vv20=f.vv, limitations=f.limitations, sanity=sanity(f), assumed_inputs=items,
                 ledger_problems=f.problems,
-                platform_assumed_counts={s: sum(1 for i in items if i["file"] == lab and i["kind"] == "assumed") for s, lab in sorted(labels.items())})
+                platform_assumed_counts={s: sum(1 for i in items if i["file"] == lab and i["kind"] == "assumed" and "not_used" not in i)
+                                         for s, lab in sorted(labels.items())})                       # what the mission replaces is not depended on
 
 
 def write(run_dir: str | pathlib.Path) -> list[pathlib.Path]:
