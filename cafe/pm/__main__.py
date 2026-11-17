@@ -351,6 +351,9 @@ def _whatif(a: argparse.Namespace) -> int:
             own = "" if not b3 else (f" The report's own baseline, flown in the 3-D wind, is {b3['verdict']} (P(fail) {b3['p_fail']:.3f}); "
                                      "the baseline shown above is the unchanged mission in the 10 m profile, as the candidate.")
             print(f"  note: {vid} {r['wind_model']}{own}")
+        if (whole := r.get("base_run")) and not r.get("wind_model"):
+            print(f"  note: {vid} the baseline shown above is the unchanged mission on the same {r['base']['n']} members as the answer; the report's own "
+                  f"baseline, of the whole run's {whole['n']} members, is {whole['verdict']} (P(fail) {whole['p_fail']:.3f}).")
         if r.get("flight"):
             print(f"  note: {vid} {r['flight']}")
         if r.get("ship"):

@@ -727,7 +727,8 @@ def test_the_flip_search_charges_each_stage_1_fallback_at_the_planners_cost_not_
     monkeypatch.setattr(whatif.time, "time", lambda: next(clock))
     base = {GL: dict(verdict="NO-GO", p_fail=1.0)}
     flips, spent = whatif.flip_search(STORM, base, {GL: TRACK}, ENV, {}, plan, pri, marg, None, 5, 10 * cost, lambda *_: None)
-    assert spent == whatif.FALLBACK_K * cost and len([t for t in flips[GL]["tried"] if t["method"] == "Stage 1"]) == 3
+    assert spent == (whatif.FALLBACK_K + 1) * cost                                                       # the candidates and the baseline's batch (r17 M-1)
+    assert len([t for t in flips[GL]["tried"] if t["method"] == "Stage 1"]) == 3
     flips, spent = whatif.flip_search(STORM, base, {GL: TRACK}, ENV, {}, plan, pri, marg, None, 5, 2.5 * cost, lambda *_: None)
     assert spent == 2 * cost  # a third would pass the budget: the same on a slow machine
 
@@ -1642,11 +1643,11 @@ def test_a_uas_answer_compares_the_candidate_with_a_baseline_flown_in_the_same_w
     m = whatif.apply(CI, drop=["usv", "glider_1n", GL])
     base = {"uas": dict(verdict="GO", p_fail=0.0)}
     r = whatif.answer(m, dict(shift_h=6.0), base, {}, env, {}, plan_for(m, 4), None, None)["vehicles"]["uas"]
-    assert r["base"] == dict(verdict="NO-GO", p_fail=1.0) and r["verdict"] == "NO-GO" and env.use_3d is True          # same model on both sides
+    assert r["base"] == dict(verdict="NO-GO", p_fail=1.0, n=16) and r["verdict"] == "NO-GO" and env.use_3d is True          # same model, same 16 members
     assert r["base_3d"] == base["uas"] and r["wind_model"] == whatif.WIND_MODEL_2D
     # no 3-D switch: one wind model
     plain = whatif.answer(m, dict(shift_h=6.0), base, {}, AnalyticEnv(), {}, plan_for(m, 4), None, None)["vehicles"]["uas"]
     assert plain["base"] == base["uas"] and "wind_model" not in plain and "base_3d" not in plain
     # no finished run: no 3-D result to keep
     none = whatif.answer(m, dict(shift_h=6.0), {}, {}, env, {}, plan_for(m, 4), None, None)["vehicles"]["uas"]
-    assert none["base"] == dict(verdict="NO-GO", p_fail=1.0) and none["base_3d"] is None
+    assert none["base"] == dict(verdict="NO-GO", p_fail=1.0, n=16) and none["base_3d"] is None

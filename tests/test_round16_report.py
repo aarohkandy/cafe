@@ -94,7 +94,8 @@ def test_the_glider_window_says_how_little_of_it_the_surface_current_is_seen(ful
     assert node["value"] == pytest.approx(4 / 36) and node["source"].startswith("stage1b/res.pkl vehicles.glider_eq.surfaced")
     assert "surfaced" not in rep["environment"]["forcing_at_windows"]["uas"] or rep["environment"]["forcing_at_windows"]["uas"]["surfaced"] is None
     t = plain((run / "report" / "index.html").read_text())
-    assert re.search(r"A glider sees this surface current only while it is at the surface, 0\.1111 of the window \(mean over members\); its station loss "
+    assert re.search(r"A glider sees this surface current only while it is at the surface: it surfaced 0\.1111 of the run \(the mean over all records and "
+                     r"members, not the share of this window\); its station loss "
                      r"follows the flow over the depth it dives through, not this value", t)
     assert t.count("A glider sees this surface current only while") == 2                                    # glider_eq and glider_2n; the USV and UAS have none
 

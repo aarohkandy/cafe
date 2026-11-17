@@ -402,6 +402,7 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
     if f is None:
         return dict(available=True, needed=False)
     ref, src = tr.ref("emulator", output="flip.json"), f"emulator/flip.json vehicles.{vid}"
+    same = f.get("base_same")                                        # the unchanged mission on the Stage-1 rows' members (round 17, M-1); None: not measured
 
     def one(t: dict[str, Any], path: str) -> dict[str, Any]:
         """A tried change: its P(fail) with the interval of its method, and how it was answered."""
@@ -412,15 +413,22 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
         d["distance"] = num(t["distance"], "z-scored", ref, src + path + ".distance") if "distance" in t else None
         d["threshold"] = num(t["threshold"], "z-scored", ref, src + path + ".threshold") if "threshold" in t else None
         d["n"] = num(t["n"], "members", ref, src + path + ".n") if "n" in t else None
-        d["same_as_baseline"] = bool(t["lo"] <= f["p_fail"] <= t["hi"]) if "p_fail" in t else None      # a flag, not a test (round 6 M-13)
+        d["same_as_baseline"] = bool(t["lo"] <= (same["p_fail"] if same and t["method"] == "Stage 1" else f["p_fail"]) <= t["hi"]) if "p_fail" in t else None
+        # a flag, not a test (round 6 M-13). A Stage-1 row is tested against the baseline on its own members when there is one (round 17, M-1)
         d["shown"] = t.get("shown")                                  # False: an emulated verdict whose 90 % band is not inside the target (round 15, M-1)
         return d
     n_ev = sum(t["method"] != "not evaluated" for t in f["tried"])
     n_inv = sum(bool(t.get("invalid")) for t in f["tried"])
     counted = src + ".tried (counted by the report)"
     b2d = f.get("base_2d")
+    stage1_rows = any(t["method"] == "Stage 1" for t in f["tried"])
     return dict(available=True, needed=True, found=bool(f["found"]), target=f["target"], emulator_trained=bool(f["emulator"]), wind_model=f.get("wind_model"),
                 base_2d=None if b2d is None else dict(verdict=b2d["verdict"], p_fail=num(b2d["p_fail"], "fraction", ref, src + ".base_2d.p_fail")),
+                same_members=None if not stage1_rows or "base_same" not in f else dict(                    # an older flip.json has no such key: nothing is said
+                    measured=same is not None, n=None if f.get("n") is None else num(f["n"], "members", ref, src + ".n"),
+                    **({} if same is None else dict(verdict=same["verdict"], n_rows=num(same["n"], "members", ref, src + ".base_same.n"),
+                                                    p_fail=num(same["p_fail"], "fraction", ref, src + ".base_same.p_fail",
+                                                               dict(kind="Wilson interval (Stage 1)", lo=same["lo"], hi=same["hi"]))))),
                 evaluated=num(n_ev, "candidates", ref, counted), invalid=num(n_inv, "candidates", ref, counted),
                 candidates=num(len(f["tried"]) - n_inv, "candidates", ref, counted),
                 verdict_before=f["verdict"], p_fail_before=num(f["p_fail"], "fraction", ref, src + ".p_fail"),
@@ -519,7 +527,8 @@ def _uas_levels_note(v: dict[str, Any]) -> str | None:
     def f(xs: Iterable[float]) -> str:
         return ", ".join(f"{x:g}" for x in xs)
     return (f"The flux-profile levels are heights above the deck ({f(levels)} m on a {deck:g} m deck, platform sortie.deck_height_m), so the legs are flown at "
-            f"{f(x + deck for x in levels)} m above the sea; the wind, the radio antenna height and the turbulence box are taken there.")
+            f"{f(x + deck for x in levels)} m above the sea; the wind and the radio antenna height are taken there, and the turbulence box at the one height "
+            f"of the mean leg, {deck + sum(levels) / len(levels):g} m (limitation L20).")
 
 
 def _drivers(e: dict[str, Any], res: dict[str, Any] | None, vid: str, ref: dict[str, Any], src: str, overdepth: str | None = None) -> dict[str, Any]:
@@ -705,9 +714,37 @@ def _authority(a: dict[str, Any] | None, ref: dict[str, Any], src: str) -> dict[
                 demand_ratio_max=num(a["demand_ratio_max"], "-", ref, src + ".demand_ratio_max"))
 
 
+RF_LOW_ANTENNA_M = 0.5                              # the mission schema's own floor for the ship's antenna (mission.json); below it the two-ray model is off
+
+
+def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None:
+    """Round 17, M-5: the sentence for an RF link with an end below RF_LOW_ANTENNA_M. The two-ray loss takes the reflection coefficient as -1, which cancels
+    the two rays as the height goes to zero, so it overstates the loss (a conservative error: a GO can show as MARGINAL): by about 1 to 6 dB at 0.3 m and
+    11 to 16 dB at 0.1 m against a Fresnel two-ray (the sea's permittivity) and a parabolic-equation field. None when no end is that low, or the link is not
+    an RF one."""
+    from .physics import glider, usv
+    if lk["kind"] != "rf":
+        return None
+    cls, low = _classes(mission), []
+    for end in (lk["a"], lk["b"]):
+        v = next((v for v in mission["vehicles"] if v["id"] == end), None)
+        try:
+            h = None if v is None else float(glider.load_platform(v["platform"])["antenna_height_m"] if cls[end] == "glider"
+                                              else usv.load_platform(v["platform"])["rf_antenna_height_m"] if cls[end] == "usv" else math.inf)
+        except (KeyError, TypeError, ValueError):
+            h = None
+        if h is not None and h < RF_LOW_ANTENNA_M:
+            low.append(f"{end} ({h:g} m)")
+    return None if not low else (f"An end of this RF link has an antenna below {RF_LOW_ANTENNA_M:g} m: {', '.join(low)}. The two-ray model takes the ground "
+                                 "reflection as -1, which overstates the loss for so low an antenna (by about 1 to 6 dB at 0.3 m and 11 to 16 dB at 0.1 m, "
+                                 "against a Fresnel two-ray and a parabolic-equation field): this margin is conservative and a GO can show as MARGINAL "
+                                 "(CREDIBILITY, limitations).")
+
+
 def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str, Any]:
     ref = tr.ref("stage1b", check="lhs_stratified", output="summary.json")
     need = {lk["id"]: lk["required_fraction"] for lk in mission["links"]}
+    lk_by_id = {lk["id"]: lk for lk in mission["links"]}
     out = {}
     for lid, e in s1b["summary"]["links"].items():
         src = f"stage1b/summary.json summary.links.{lid}"
@@ -715,7 +752,7 @@ def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str,
                         top3=_top3(e, ref, src), physics=tr.physics("link"),
                         frac_median=num(e["frac_median"], "fraction", ref, src), frac_p10=num(e["frac_p10"], "fraction", ref, src),
                         margin_db_median=None if e["margin_db_median"] is None else num(e["margin_db_median"], "dB", ref, src),
-                        margin_kind=e.get("margin_kind"),
+                        margin_kind=e.get("margin_kind"), low_antenna=_low_antenna_note(lk_by_id[lid], mission),
                         frac_beyond_horizon=_opt(e.get("frac_beyond_horizon"), "fraction of the needed samples", ref, src),
                         frac_out_of_range=_opt(e.get("frac_out_of_range"), "fraction of the needed samples", ref, src),
                         granularity=_granularity(e, need.get(lid), ref, src))
@@ -1373,7 +1410,10 @@ def _fix_html(f: dict[str, Any]) -> str:
     if b:
         u = b["p_fail"]["uncertainty"]
         how = (f"EMULATED, training-set distance {_n(b['distance'])} of {_n(b['threshold'])}" if b["method"] == "EMULATED" else f"Stage 1, n = {_n(b['n'])}")
-        line = (f"<b>{e(b['change'])}</b>: P(fail) {_n(f['p_fail_before'])} becomes {_n(b['p_fail'])} ({u['lo']:.3g} to {u['hi']:.3g}, {e(u['kind'])}), "
+        sm = f.get("same_members") if b["method"] == "Stage 1" else None
+        before = (_n(f["p_fail_before"]) if sm is None else f"{_n(sm['p_fail'])} on the same {_n(sm['n_rows'])}" if sm["measured"]
+                  else f"{_n(f['p_fail_before'])} on the whole run{'' if sm['n'] is None else ' of ' + _n(sm['n'])}")      # round 17, M-1
+        line = (f"<b>{e(b['change'])}</b>: P(fail) {before} becomes {_n(b['p_fail'])} ({u['lo']:.3g} to {u['hi']:.3g}, {e(u['kind'])}), "
                 f"{_badge(f['verdict_before'])} to {_badge(b['verdict'])} ({how}){'; ' + SAME_AS_BASELINE if b.get('same_as_baseline') else ''}."
                 + (f" <b>Note: {e(b['hull_note'])}.</b>" if b.get("hull_note") else ""))
     elif f["evaluated"]["value"] == 0:
@@ -1393,6 +1433,16 @@ def _fix_html(f: dict[str, Any]) -> str:
     b2d = f["base_2d"]
     wm = (f"<p class=muted>{e(f['wind_model'])}" + (f" The baseline under the same model: {_badge(b2d['verdict'])} P(fail) {_n(b2d['p_fail'])}." if b2d else "")
           + "</p>") if f["wind_model"] else ""
+    sm = f.get("same_members")                                                    # round 17, M-1: what a Stage-1 row is compared with
+    if sm is not None:
+        whole = f"the whole run's P(fail) {_n(f['p_fail_before'])}" + ("" if sm["n"] is None else f", of {_n(sm['n'])}")
+        if sm["measured"]:
+            own = "" if b2d else ("The Stage-1 rows are compared with the unchanged mission on their own members: "
+                                  f"{_badge(sm['verdict'])} P(fail) {_n(sm['p_fail'])} on {_n(sm['n_rows'])}. ")
+            wm += f"<p class=muted>{own}{whole[0].upper() + whole[1:]}.</p>"
+        else:
+            wm += ("<p class=muted>The unchanged mission was not run on the Stage-1 rows' members (this vehicle's share of the Stage-1 budget was spent), so a "
+                   f"Stage-1 row is compared below with {whole}, which is not of the row's members.</p>")
     k = len(f["tried"])
     s = "" if k == 1 else "s"
     return (f"<p>What would fix it ({e(f['target'])}): {line}</p>{wm}<details><summary>All {k} candidate{s}: {_n(f['evaluated'])} evaluated of "
@@ -1567,6 +1617,7 @@ def _link_html(lid: str, k: dict[str, Any]) -> str:
     return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
             f"{_granularity_html(k['granularity'], k['verdict'])}"
             f"{_iridium_html(k)}"
+            + (f"<p class=warn>{e(k['low_antenna'])}</p>" if k.get("low_antenna") else "") +
             f"<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
             f"median margin {_n(k['margin_db_median'])}{_margin_html(k)}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
@@ -1674,7 +1725,8 @@ def _env_html(env: dict[str, Any]) -> str:
         h += (f"<p><b>{e(vid)}</b>, {e(d['quantity'])} at the worst windows (each window is the record of the strongest analysis-field forcing; "
               f"it is not the instant a member failed): {rows}.</p>")
         if d.get("surfaced"):
-            h += (f"<p class=muted>A glider sees this surface current only while it is at the surface, {_n(d['surfaced'])} of the window (mean over members); "
+            h += (f"<p class=muted>A glider sees this surface current only while it is at the surface: it surfaced {_n(d['surfaced'])} of the run (the mean "
+                  "over all records and members, not the share of this window); "
                   "its station loss follows the flow over the depth it dives through, not this value, so the window ranked by surface current is a guide "
                   "to the "
                   "forcing, not the worst case for the glider.</p>")

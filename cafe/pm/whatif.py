@@ -733,15 +733,16 @@ def emulate(em: Emulator, feats: dict[str, Any]) -> dict[str, Any]:
 def measure(mission: dict[str, Any], vid: str, env: Any, plan: dict[str, Any], pri: dict[str, dict[str, Any]], marg: dict[str, dict[str, Any]],
             scales: dict[str, Any] | None, seed: int, n: int | None = None, members: list[int] | None = None) -> dict[str, Any]:
     """Stage 1 for one vehicle of the (changed) mission: one batch of the plan's size, the base run's members (common random numbers) unless `members`
-    names others (the emulator's fresh-draw check)."""
-    members = members or list(range(n or plan["batch"]))
+    names others (the emulator's fresh-draw check). `n` members are run as the sequential run runs them, in blocks of the plan's batch, each its own
+    Latin hypercube, so `n` = the members of a sequential answer gives the same draws as that answer (round 17, M-1)."""
+    N = len(members) if members else n or plan["batch"]
+    blocks = [members] if members else [list(range(i, min(i + plan["batch"], N))) for i in range(0, N, plan["batch"])]        # the sequential run's blocks
     one = solo(mission, vid)
     try:
         with wind_2d(env, stage1._classes(one)[vid]):
-            r = stage1.run_batch(one, env, members, seed, pri, marg, scales)["vehicles"][vid]
+            f = np.concatenate([stage1.failed(stage1.run_batch(one, env, b, seed, pri, marg, scales)["vehicles"][vid]) for b in blocks])
     except OutsideData as e:
         raise Invalid(f"{vid}: the changed mission leaves the environment data ({e})") from e
-    f = stage1.failed(r)
     v = intervals.verdict(int(f.sum()), len(f))
     return dict(p_fail=float(f.mean()), lo=v["fail_lo"], hi=v["fail_hi"], verdict=v["verdict"], n=int(len(f)))
 
@@ -800,14 +801,16 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
                 used += cost                                                # the planner's cost, never the clock: the same search on every run
                 if tried[j]["verdict"] in want:
                     break
-        wind_model, base_2d = None, None
-        if cls == "uas" and hasattr(env, "use_3d"):                               # the baseline as the candidates are measured (no 3-D wind), if share is left
+        wind_model, base_same = None, None
+        uas_3d = cls == "uas" and hasattr(env, "use_3d")
+        if uas_3d:
             wind_model = WIND_MODEL_2D
+        if uas_3d or any(t["method"] == "Stage 1" for t in tried):          # the baseline as the candidates are measured (same members; a UAS: no 3-D wind)
             cost = budget.batch_cost_s(plan, [vid])
-            if used + cost <= share:
+            if used + cost <= share:                                          # (M-1: the whole run's P(fail) is of another number of members than a batch)
                 try:
                     b2 = measure(mission, vid, env, plan, pri, marg, scales, seed)
-                    base_2d, used = dict(verdict=b2["verdict"], p_fail=b2["p_fail"], lo=b2["lo"], hi=b2["hi"]), used + cost
+                    base_same, used = dict(verdict=b2["verdict"], p_fail=b2["p_fail"], lo=b2["lo"], hi=b2["hi"], n=b2["n"]), used + cost
                 except Invalid:                                                   # the baseline left the data: no number
                     pass
         spent += used
@@ -818,7 +821,7 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
         evaluated, invalid = sum(t["method"] != "not evaluated" for t in tried), sum(t["invalid"] for t in tried)
         out[vid] = dict(verdict=base["verdict"], p_fail=base["p_fail"], target=" or ".join(want), found=best is not None, best=best, tried=tried,
                         emulator=em is not None, evaluated=evaluated, invalid=invalid, candidates=len(tried) - invalid, wind_model=wind_model,
-                        base_2d=base_2d, not_shown=not_shown)
+                        base_2d=base_same if uas_3d else None, base_same=base_same, n=base.get("n"), not_shown=not_shown)
         log(f"flip search {vid}: " + (f"{best['change']} ({best['method']}), the cheapest of {evaluated} evaluated" if best else
                                       f"nothing flips it among the {evaluated} evaluated of {len(tried) - invalid} candidates"
                                       + (f"; not shown: {not_shown['change']} has P(fail) {not_shown['p_fail']:.3f} but its band {not_shown['lo']:.3f} to "
@@ -893,7 +896,7 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
         b = base.get(vid)
         if b is None or (cls == "uas" and hasattr(env, "use_3d")):    # the report's UAS baseline flew in the 3-D wind, the candidate in the 10 m profile (M-2)
             m0 = measure(mission, vid, env, plan, pri, marg, scales, seed)       # so: the unchanged mission measured as the candidate is, same members
-            b = dict(verdict=m0["verdict"], p_fail=m0["p_fail"])
+            b = dict(verdict=m0["verdict"], p_fail=m0["p_fail"], n=m0["n"])
         em, no_em = usable(ems, scope_of(m2, vid, cls))
         a = predict(em, m2, vid, cls, tracks.get(vid), mod, env)
         flight = flight_note(vehicle(mission, vid), mod["shift_h"], _window(mission))
@@ -902,7 +905,12 @@ def answer(mission: dict[str, Any], ops: dict[str, Any], base: dict[str, Any], t
                             **{k: a[k] for k in ("p_fail", "lo", "hi", "verdict", "distance", "threshold")})
         else:
             why = no_em if a["status"] == "no_emulator" and no_em else a["status"].replace("_", " ")
-            out[vid] = dict(base=b, method="Stage 1", why=why, flight=flight, ship=with_ship.get(vid), **_stage1(m2, vid, env, plan, (pri, marg), scales))
+            s1 = _stage1(m2, vid, env, plan, (pri, marg), scales)
+            whole = None
+            if b.get("n") not in (None, s1["n"]):                       # the baseline is of another number of members than the answer: M-1, the same members
+                m0 = measure(mission, vid, env, plan, pri, marg, scales, seed, n=s1["n"])
+                whole, b = base.get(vid), dict(verdict=m0["verdict"], p_fail=m0["p_fail"], n=m0["n"])
+            out[vid] = dict(base=b, method="Stage 1", why=why, flight=flight, ship=with_ship.get(vid), base_run=whole, **s1)
     for vid, r in out.items():                              # a UAS answer is in the 10 m profile on both sides; the report's 3-D result stays beside it
         if stage1._classes(solo(m2, vid))[vid] == "uas" and hasattr(env, "use_3d"):
             r["wind_model"] = WIND_MODEL_2D
