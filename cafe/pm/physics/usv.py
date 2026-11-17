@@ -123,7 +123,7 @@ REQUIRED = dict(
     wind_area_front_m2="nonneg", wind_area_side_m2="nonneg", wind_cd_front="nonneg", wind_cd_side="nonneg", wind_height_m="pos<=50",
     rho_water="pos", nu_water="pos", rho_air="pos", stw_cap_ms=f"pos<={WAVE_U_MAX}", chiodi_mean_sog_ms="pos", chiodi_mean_wind_ms="pos",
     chiodi_max_sog_ms="pos", chiodi_max_wind_ms="pos", chiodi_band="nonneg", sun_overpredict_lo="nonneg", sun_overpredict_hi="nonneg", battery_wh="pos<=1e6",
-    solar_area_m2="nonneg", solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="nonneg<=50",
+    solar_area_m2="nonneg", solar_eff="unit", hotel_w="nonneg<=1e4", soc0="unit", rf_antenna_height_m="antenna<=50",
     vpp_bias_mean=f"range:{VPP_BIAS_CLIP[0]}:{VPP_BIAS_CLIP[1]}", vpp_bias_sd="nonneg", current_z_m="any", tack_time_s="nonneg", tack_speed_frac="unit",
     tack_horizon_s="pos", replan_s="pos",
 )
@@ -133,6 +133,7 @@ REQUIRED = dict(
 MISSION_REQUIRED = dict(becalmed_after_h="pos", calm_sustain_s="nonneg", track_tolerance_km="pos<=1000", corridor_km="pos", wp_radius_m="pos",
                         roll_limit_deg="pos<=180", stall_sustain_s="nonneg", cap_cycles="ge1")
 OPTIONAL = ("draft_nominal_m", "keel_depth_m", "iridium_antenna_height_m")      # read by no code
+OPTIONAL_KINDS = dict(iridium_antenna_height_m="pos<=50")                       # round 17, M-6: checked when the file has it (it is not required)
 
 
 def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
@@ -161,7 +162,7 @@ def load_platform(name: str = "saildrone_explorer") -> dict[str, Any]:
         return out
 
     P = flat(raw["params"], "params")
-    check_params(REQUIRED, P, f"{path.name}:params", "saildrone_explorer")
+    check_params(REQUIRED | {k: v for k, v in OPTIONAL_KINDS.items() if k in P}, P, f"{path.name}:params", "saildrone_explorer")
     P["kind"] = raw["kind"]
     P["mission_defaults"] = flat(raw["mission_defaults"], "mission_defaults")
     check_params(MISSION_REQUIRED, P["mission_defaults"], f"{path.name}:mission_defaults", "saildrone_explorer")

@@ -90,7 +90,7 @@ REQUIRED = {
                    deck_height_m="nonneg", time_limit_factor="pos", min_profile_fraction="unit", hard_stop_factor="pos"),
     "launch_rule": dict(max_mean_wind_ms="pos", wind_check_height_m="pos", gust_lookahead_min="nonneg", gust_front_threshold_ms="pos"),
     "failure": dict(stuck_window_s="pos", stuck_closing_ms="nonneg", stuck_min_cmd_ms="nonneg"),
-    "radio": dict(link="other", link_loss_hold_s="pos", uas_antenna_height_above_body_m="nonneg", ship_antenna_height_m="nonneg"),
+    "radio": dict(link="other", link_loss_hold_s="pos", uas_antenna_height_above_body_m="nonneg", ship_antenna_height_m="range:0.5:100"),
 }
 
 
