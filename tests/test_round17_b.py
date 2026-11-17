@@ -234,7 +234,8 @@ def test_r17_m5_a_limitation_names_the_low_antenna_loss_and_bears_on_validation_
     assert [l["id"] for l in cr.LIMITATIONS][-2:] == ["L22", "L23"]
     # round 18, M-3: the text is by pair of heights (tests/test_round18_b.py)
     assert x["text"].startswith("RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip:")
-    assert "by about 5 dB at the Slocum's 0.3 m" in x["text"] and "11 to 16 dB at 0.1 m" in x["text"] and "overstated" in x["text"]
+    assert "0.3 m (the Slocum) with 2.2 m (the USV's whip) +5.5 to +6.2 dB (median +6.2), margin too low" in x["text"]   # round 18 addendum: by pair
+    assert "overstated" in x["text"]
     assert x["factors"] == ["validation"]
     assert all((REAL / w).is_file() for w in x["where"])
     assert yaml.safe_load((REAL / "platforms" / "slocum.yaml").read_text())["params"]["antenna_height_m"]["value"] == 0.3

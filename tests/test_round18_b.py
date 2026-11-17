@@ -73,8 +73,10 @@ def test_r18_m3_the_bound_sentences_are_true_over_the_stated_range():
     lows, highs = zip(*(band(*pair)[::2] for pair in SLOCUM_PARTNER_2_2_OR_MORE), strict=True)
     assert round(min(lows)) == 1 and round(max(highs)) == 6 and 5.0 <= band(2.2, 0.3)[1] <= 6.5
     assert round(band(15.0, 0.1)[0]) == 11 and round(band(15.0, 0.1)[2]) == 16
-    for text in ("within 3.3 dB", "6 to 11 dB", "about 5 dB", "(1 to 6 dB)", "11 to 16 dB at 0.1 m"):
-        assert text in l23() or text in doc_of(c.two_ray_curved_db), text
+    doc = doc_of(c.two_ray_curved_db)                                             # the round 18 addendum (DECISIONS 991): L23 prints each pair's own figures
+    for text in ("6 to 11 dB for two gliders", "about 1 to 6 dB for the Slocum", "11 to 16 dB at 0.1 m"):
+        assert text in doc, text
+    assert "within 3.3 dB" not in doc and "within 3.3 dB" not in l23()           # the pooled bound was wrong for 0.5 m with a 2.2 m partner
 
 
 def test_r18_m3_below_300_m_is_said_not_to_be_stated_and_the_200_m_figures_are_the_measured_ones():
@@ -107,10 +109,10 @@ def test_r18_m3_the_loader_accepts_an_rf_link_whose_two_ends_are_gliders(tmp_pat
 def test_r18_m3_l23_states_the_band_by_pair_and_drops_never_too_high_and_not_affected():
     t = l23()
     assert t.startswith("RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip:")
-    assert "antenna below 0.5 m" in t and t.count("6 to 11 dB") == 1 and "both ends are 0.5 m or lower" in t
-    assert "(7 dB for two Seagliders, 9 dB for a Seaglider with a Slocum, 11 dB for two Slocums)" in t
-    assert "11 to 16 dB at 0.1 m" in t and "can be too high" in t and "MARGINAL or NO-GO" in t
-    for gone in ("never too high", "not affected", "are not affected", "is conservative", "a margin there is conservative", "above 0.5 m and"):
+    assert "antenna below 0.5 m" in t and "the error is of the pair of heights and has no one direction" in t
+    assert "margin too low" in t and "margin too high" in t and "MARGINAL or NO-GO" in t and "is not measured and no band is stated for it" in t
+    for gone in ("never too high", "not affected", "are not affected", "is conservative", "a margin there is conservative", "above 0.5 m and", "within 3.3 dB",
+                 "at worst understates"):
         assert gone not in t, gone
     x = {x["id"]: x for x in cr.LIMITATIONS}["L23"]
     assert x["factors"] == ["validation"] and all((cr.ROOT / w).is_file() for w in x["where"])
@@ -118,17 +120,19 @@ def test_r18_m3_l23_states_the_band_by_pair_and_drops_never_too_high_and_not_aff
 
 
 def test_r18_m3_l23_medians_are_those_of_the_pairs_it_names():
-    for pair, word in (((0.5, 0.5), "7 dB for two Seagliders"), ((0.5, 0.3), "9 dB for a Seaglider with a Slocum"), ((0.3, 0.3), "11 dB for two Slocums")):
-        assert round(band(*pair)[1]) == int(word.split()[0]), pair
-        assert word in l23()
+    import re
+    for pair in ((0.5, 0.5), (0.3, 0.5), (0.3, 0.3)):
+        m = re.search(rf"(?<![\d.]){pair[0]:g} m \([^)]*\) with {pair[1]:g} m \([^)]*\) [+-][\d.]+ to [+-][\d.]+ dB \(median ([+-][\d.]+)\)", l23())
+        assert m and abs(float(m.group(1)) - band(pair[1], pair[0])[1]) <= 0.1, pair
 
 
 def test_r18_m3_the_docstring_has_no_conservative_for_all_and_no_unaffected_shipped_antenna():
     doc = doc_of(c.two_ray_curved_db)
-    for gone in ("never too high", "are not affected", "(the conservative direction", "12 to 16 dB at 0.1 m"):
+    for gone in ("are not affected", "(the conservative direction", "12 to 16 dB at 0.1 m", "at worst UNDERSTATES the loss: by 2.9 dB"):
         assert gone not in doc, gone
-    for text in ("LOW ANTENNAS", "both ends low", "the PAIR of heights", "11 to 16 dB at 0.1 m", "UNDERSTATES the loss", "the USV's 2.2 m whip",
-                 "about 5 dB for an RF link to the Slocum's 0.3 m antenna from a partner of 2.2 m or more", "by 6 to 11 dB when both ends are 0.5 m or lower"):
+    assert "never too high, over this range for the pairs 0.1 / 15, 0.3 / 15" in doc  # 'never too high' is said of the pairs whose minimum is positive only
+    for text in ("LOW ANTENNAS", "both ends low", "the PAIR of heights", "11 to 16 dB at 0.1 m", "UNDERSTATED", "the USV's whip",
+                 "about 1 to 6 dB for the Slocum with a partner of 2.2 m or 15 m", "6 to 11 dB for two gliders"):
         assert text in doc, text
 
 

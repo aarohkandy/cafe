@@ -36,6 +36,46 @@ ROOT = config.ROOT
 LEVELS = {0: "none: no evidence", 1: "weak: evidence exists, nothing checked it", 2: "moderate: checked by this tool's own self-checks",
           3: "strong: checked against an independent reference", 4: "very strong: independent review or field evidence (never awarded here)"}
 
+
+def pair_figures(pair: tuple[float, float]) -> str:
+    """The measured error of the -1 reflection for a pair of antenna heights [m] (the lower first, a key of `comms.LOW_ANTENNA_PAIR_BAND`) as the link card and
+    L23 print it: 'minimum to maximum dB (median)' of the model's loss minus the Fresnel loss, signed (positive: loss overstated)."""
+    lo, med, hi = comms.LOW_ANTENNA_PAIR_BAND[pair]
+    return f"{lo:+.1f} to {hi:+.1f} dB (median {med:+.1f})"
+
+
+def pair_effect(pair: tuple[float, float], short: bool = False) -> str:
+    """What the sign of that band does to the margin of an RF link between those heights: a positive minimum is a loss overstated everywhere (the margin too
+    low, a GO can show as MARGINAL or NO-GO), a negative maximum a loss understated everywhere (the margin too high), a band across zero both, with each
+    extreme. `short`: the form L23 uses per pair. The direction is decided here, from the measured minimum and maximum, and nowhere else."""
+    lo, _, hi = comms.LOW_ANTENNA_PAIR_BAND[pair]
+    if lo > 0.0:
+        return "margin too low" if short else (f"the loss is overstated by {lo:.1f} to {hi:.1f} dB, so the margin is too low by that much and a GO can show as "
+                                               "MARGINAL or NO-GO")
+    if hi < 0.0:
+        return "margin too high" if short else (f"the loss is understated by {-hi:.1f} to {-lo:.1f} dB, so the margin is too high by that much and a NO-GO or "
+                                                "MARGINAL can show as better")
+    return (f"margin too low by up to {hi:.1f} dB and too high by up to {-lo:.1f} dB" if short else
+            f"the loss is overstated by up to {hi:.1f} dB (the margin too low) and understated by up to {-lo:.1f} dB (the margin too high)")
+
+
+LOW_ANTENNA_NAMES = {0.1: "the lowest height a platform file allows", 0.3: "the Slocum", 0.5: "the Seaglider", 2.2: "the USV's whip",
+                     15.0: "the ship's mast"}
+
+
+def _l23_text() -> str:
+    pairs = "; ".join(f"{lo:g} m ({LOW_ANTENNA_NAMES[lo]}) with {hi:g} m ({LOW_ANTENNA_NAMES[hi]}) {pair_figures((lo, hi))}, "
+                      f"{pair_effect((lo, hi), True)}" for lo, hi in sorted(comms.LOW_ANTENNA_PAIR_BAND))
+    return ("RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip: the two-ray model takes the reflection coefficient as -1, which "
+            "makes the field vanish with the height, where the sea's own coefficient leaves a floor, and the error is of the pair of heights and has no "
+            "one direction; against a Fresnel two-ray with the assumed sea (flat earth, 915 MHz, Hs 0, from 300 m to the pair's radio horizon or 12 km; a "
+            "bound, as it has no surface wave) the model's loss minus the Fresnel loss, minimum to maximum, is, by the heights of the two antennas: " + pairs +
+            ". A positive figure is a loss overstated and a margin too low (a GO can show as MARGINAL or NO-GO), a negative one a loss understated and a "
+            "margin too high. A pair of heights that is not listed, such as the UAS's 18 to 108 m with the USV's 2.2 m whip, a ship mast other than 15 m "
+            "or any height between the listed ones, is not measured and no band is stated for it; nearer than 300 m none of this is stated (from 200 m, "
+            "0.5 m with a 15 m partner is understated by up to 5.0 dB)")
+
+
 # Known honesty caveats, verbatim from the lead's list. factors: NASA factors they bear on (cap 2); where: repo files that show them.
 LIMITATIONS = [
     dict(id="L01", text="acoustic 4 km MF range is true by construction", factors=["validation", "input_pedigree"],
@@ -80,15 +120,7 @@ LIMITATIONS = [
     dict(id="L22", text="wave height, period and direction (UMWM) and the subsurface temperature and salinity (HYCOM/GOFS) are compared with no in-situ record "
                         "either: no wave record and no subsurface temperature or salinity record of the moorings is read",
          factors=["validation", "uncertainty"], where=["cafe/pm/pipeline.py", "cafe/pm/env/tao.py"]),
-    dict(id="L23", text="RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip: the two-ray model takes the reflection coefficient as -1, "
-                        "which makes the field vanish with the height, where the sea's own coefficient leaves a floor, and the error is of the pair of "
-                        "heights; against a Fresnel two-ray with the assumed sea (flat earth, 915 MHz, Hs 0, from 300 m to the pair's radio horizon or "
-                        "12 km; a bound, as it has no surface wave) the loss is overstated for an antenna below 0.5 m, so the margin is too low and a "
-                        "GO can show as MARGINAL or NO-GO: by about 5 dB at the Slocum's 0.3 m with a partner of 2.2 m or more (1 to 6 dB), by 6 to "
-                        "11 dB when both ends are 0.5 m or lower (7 dB for two Seagliders, 9 dB for a Seaglider with a Slocum, 11 dB for two "
-                        "Slocums) and by 11 to 16 dB at 0.1 m; at 0.5 m and 2.2 m, with a partner of 2.2 m or 15 m, the model is within 3.3 dB of it "
-                        "and at worst understates the loss, so there the margin, the USV whip's included, can be too high; nearer than 300 m none of "
-                        "this is stated (from 200 m, 0.5 m with a 15 m partner is understated by up to 5.0 dB)",
+    dict(id="L23", text=_l23_text(),
          factors=["validation"], where=["cafe/pm/physics/comms.py", "platforms/slocum.yaml"]),
 ]
 

@@ -49,46 +49,27 @@ def _card(kind):
         return report._low_antenna_note(lk, mission)
 
 
-def _db_figures(text):
-    """Every `N dB` or `N to M dB` figure of a sentence, with an `about` dropped."""
-    return {m.group(0) for m in re.finditer(r"\d+(?:\.\d+)?(?: to \d+(?:\.\d+)?)? dB", text)}
-
-
 def test_m1_the_link_card_and_l23_and_the_docstring_and_physics_state_the_same_figures():
-    """Batch A's three card sentences and batch B's L23, `two_ray_curved_db` docstring and PHYSICS 12.1 paragraph were written by two batches: every dB figure
-    of a card sentence is in the docstring and in PHYSICS 12.1, and in L23 but for the 2.9 dB with a 15 m partner (L23 states the bound, 3.3 dB, and that it
-    can understate); the range (300 m to the horizon) and the 'nearer than 300 m is not stated' sentence agree too."""
+    """Batch A's card sentences and batch B's L23, `two_ray_curved_db` docstring and PHYSICS 12.1 paragraph were written by two batches. Since the round 18
+    addendum (DECISIONS 991) they all print the figures of `comms.LOW_ANTENNA_PAIR_BAND` row by row: every row's minimum, median and maximum is in the docstring
+    ('/' form), in L23 and in the card of a link that has that pair, and in PHYSICS 12.1; the range (300 m to the horizon) and the 'nearer than 300 m is not
+    stated' sentence agree too (tests/test_round18_x.py holds each row against a recomputation and every direction word against its sign)."""
     from cafe.pm.physics import comms
     l23 = next(x["text"] for x in credibility.LIMITATIONS if x["id"] == "L23")
     doc = " ".join(inspect.getdoc(comms.two_ray_curved_db).split())                           # (the docstring wraps lines inside a figure)
     para = " ".join(next(p for p in (ROOT / "docs" / "PHYSICS.md").read_text().split("\n\n") if p.startswith("**Low antennas**")).split())
+    for (lo, hi), (mn, md, mx) in comms.LOW_ANTENNA_PAIR_BAND.items():
+        assert f"{mn:+.1f} / {md:+.1f} / {mx:+.1f}" in doc, (lo, hi)
+        assert credibility.pair_figures((lo, hi)) in l23, (lo, hi)
+        assert f"{mn:+.1f} to {mx:+.1f}" in para and f"({md:+.1f})" in para, (lo, hi)
     cards = {k: _card(k) for k in CARD_CASES}
     assert all(cards.values())
-    seen = set()
     for kind, sentence in cards.items():
-        figs = _db_figures(sentence)
-        assert figs, kind
-        seen |= figs
-        for f in figs:
-            assert f in doc, (kind, f)                                                    # the docstring states every rounded figure
-            if f != "2.9 dB":
-                assert f in l23, (kind, f)
-    assert seen == {"6 to 11 dB", "9 dB", "11 dB", "7 dB", "5 dB", "1 to 6 dB", "11 to 16 dB", "3.3 dB", "2.9 dB"}   # a figure added to a card is checked here
-    # PHYSICS 12.1 prints the measured minimum to maximum (and median), of which the cards' figures are the rounding: check them against those
-    meas = {k: [float(x) for x in re.findall(r"[+-]\d+\.\d", para[para.index(k):][:60])[:3]]
-            for k in ("with a 15 m partner -3.3", "-2.9 to +2.2 (+1.3) at 0.5 m", "+1.2 to +6.0 (+5.1) at 0.3 m", "+11.4 to +16.0 (+15.1) at 0.1 m",
-                      "+9.0 to +9.3 (+9.3)", "+11.3 to +11.4 (+11.4)", "+6.4 to +6.7 (+6.7)")}
-    both = [meas["+9.0 to +9.3 (+9.3)"], meas["+11.3 to +11.4 (+11.4)"], meas["+6.4 to +6.7 (+6.7)"]]
-    assert f"{round(min(b[0] for b in both))} to {round(max(b[1] for b in both))} dB" == "6 to 11 dB"                  # all three both-low pairs
-    assert [f"{round(b[2])} dB" for b in both] == ["9 dB", "11 dB", "7 dB"]                          # Seaglider+Slocum, two Slocums, two Seagliders
-    assert [f"{round(x)}" for x in meas["+1.2 to +6.0 (+5.1) at 0.3 m"][:2]] == ["1", "6"] and round(meas["+1.2 to +6.0 (+5.1) at 0.3 m"][2]) == 5
-    assert [f"{round(x)}" for x in meas["+11.4 to +16.0 (+15.1) at 0.1 m"][:2]] == ["11", "16"]
-    assert abs(meas["with a 15 m partner -3.3"][0]) == 3.3 and abs(meas["-2.9 to +2.2 (+1.3) at 0.5 m"][0]) == 2.9      # the two understatements
-    assert "2.9 dB" not in l23 and "understated by up to 5.0 dB" in l23 and "5.0 dB" in doc                       # L23 gives the 200 m figure instead
-    for text in (l23, doc, para, *cards.values()):
-        assert "300 m" in text
-    for text in (l23, doc, para, cards["an end of 0.5 m"]):
-        assert re.search(r"[Nn]earer than 300 m|Below 300 m", text)
+        lo, hi = sorted(CARD_CASES[kind])
+        assert credibility.pair_figures((lo, hi)) in sentence, kind
+        assert "300 m" in sentence and "nearer than 300 m this is not stated" in sentence
+    for text in (l23, doc, para):
+        assert "300 m" in text and re.search(r"[Nn]earer than 300 m|Below 300 m", text)
     assert cards["both low"].startswith("Both ends of this RF link")
     assert cards["one below 0.5 m"].startswith("An end of this RF link has an antenna below 0.5 m:")
     assert cards["an end of 0.5 m"].startswith("An end of this RF link has an antenna of 0.5 m:")

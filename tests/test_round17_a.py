@@ -183,7 +183,8 @@ def test_m1_a_baseline_that_was_not_run_is_said_and_the_whole_runs_is_named_as_o
     rep, t, run = usv_fix(tmp_path, n=64, base_same=None)
     assert rep["vehicles"]["usv"]["fix"]["same_members"]["measured"] is False
     assert "deploy 6 h later: P(fail) 0.18 on the whole run of 64 members becomes 0 " in t
-    assert "The unchanged mission was not run on the Stage-1 rows' members (this vehicle's share of the Stage-1 budget was spent)" in t
+    assert ("The unchanged mission was not run on the Stage-1 rows' members (this vehicle's share of the Stage-1 budget did not cover a run, "
+            "or the unchanged mission leaves the environment data)") in t
     assert "compared below with the whole run's P(fail) 0.18, of 64 members, which is not of the row's members" in t
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
 
@@ -254,7 +255,8 @@ def rf(a, b, kind="rf"):
 
 def test_m5_an_rf_link_to_the_slocums_0_3_m_antenna_gets_the_sentence_and_the_others_do_not():
     note = report._low_antenna_note(rf("glider_2n", "usv"), DEMO)
-    assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).") and "conservative" in note
+    assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).")
+    assert "the margin is too low by that much" in note                                           # round 18 addendum: the pair's own direction
     assert report._low_antenna_note(rf("usv", "uas"), DEMO) is None                               # 2.2 m and an airborne antenna
     for kind in ("iridium", "acoustic"):
         assert report._low_antenna_note(rf("glider_2n", "usv", kind), DEMO) is None

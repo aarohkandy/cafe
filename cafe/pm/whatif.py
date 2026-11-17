@@ -63,6 +63,8 @@ MIN_ROWS = budget.EMULATOR_MIN_POINTS     # distinct feature points per scope (b
 #                                   with a 20 % hold-out that is 20 test points, enough to say anything of 90 % coverage. Never lowered to make a run train.
 MODES_MAX = 4                     # failure modes with their own GP (most variable first); the others stay in the table
 SHIFTS, MOVES, DUTIES = (6.0, 12.0, 24.0, 48.0), (0.5, 1.0), (0.75, 0.5)
+# where `base_same` (flip.json) came from (round 18 addendum, DECISIONS 993): read from the base run's own failure flags, no batch run, or a batch run for it
+BASE_SAME_FLAGS, BASE_SAME_RUN = "base run's failure flags", "a batch run for it"
 FALLBACK_K = 3                    # Stage-1 candidates tried, nearest first, when the emulator cannot answer
 TRAIN_FRAC = budget.TRAIN_FRAC    # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
 
@@ -814,13 +816,13 @@ def flip_search(mission: dict[str, Any], verdicts: dict[str, Any], tracks: dict[
         if not uas_3d and flags is not None and len(flags) >= plan["batch"] and run_s1:
             f0 = np.asarray(flags, bool)[:plan["batch"]]                       # the base run's own first batch: the same members, nothing to run
             v0 = intervals.verdict(int(f0.sum()), len(f0))
-            base_same = dict(verdict=v0["verdict"], p_fail=float(f0.mean()), lo=v0["fail_lo"], hi=v0["fail_hi"], n=int(len(f0)))
+            base_same = dict(verdict=v0["verdict"], p_fail=float(f0.mean()), lo=v0["fail_lo"], hi=v0["fail_hi"], n=int(len(f0)), source=BASE_SAME_FLAGS)
         elif uas_3d or run_s1:                                                # the baseline as the candidates are measured (same members; a UAS: no 3-D wind)
             cost = budget.batch_cost_s(plan, [vid])
             if used + cost <= share:
                 try:
                     b2 = measure(mission, vid, env, plan, pri, marg, scales, seed)
-                    base_same, used = dict(verdict=b2["verdict"], p_fail=b2["p_fail"], lo=b2["lo"], hi=b2["hi"], n=b2["n"]), used + cost
+                    base_same, used = dict(verdict=b2["verdict"], p_fail=b2["p_fail"], lo=b2["lo"], hi=b2["hi"], n=b2["n"], source=BASE_SAME_RUN), used + cost
                 except Invalid:                                                   # the baseline left the data: no number
                     pass
         want_s1 = want if base_same is None else _better_than(base_same["verdict"])    # a Stage-1 row is a fix when it beats the baseline on its own members
