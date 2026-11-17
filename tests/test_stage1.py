@@ -862,7 +862,8 @@ def test_summary_verdicts_dominant_mode_and_first_failure_time():
     assert "73" in g["verdict"]["note"]                                                                              # 24 members cannot certify
     h = s["vehicles"]["glider_eq"]
     # driven by U[:, 0]
-    assert 0 < h["k_fail"] < 24 and h["sensitivity"]["param"] == names[0] and set(h["sensitivity"]["S1"]) == set(stage1.FORCING) | set(stage1.ACTS["glider"])
+    # round 17, M-8: the columns the glider reads, not every forcing column
+    assert 0 < h["k_fail"] < 24 and h["sensitivity"]["param"] == names[0] and set(h["sensitivity"]["S1"]) == set(stage1.SENS_ACTS["glider"])
 
 
 def test_first_and_median_failure_are_over_every_failed_member_not_the_dominant_modes_members():
