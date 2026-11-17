@@ -215,8 +215,14 @@ def looks_like_zarr(d: pathlib.Path) -> bool:
 
 
 def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> pathlib.Path:
-    """steps: iterable of standardized one-time datasets (see _std). Adds rho/c, writes atomically (tmp dir, then rename). An existing `out_zarr` is
-    replaced only when it is empty or `looks_like_zarr` (a damaged store too, so ingest-ocean can repair it): any other directory is refused first."""
+    """steps: iterable of standardized one-time datasets (see _std). Adds rho/c and builds the store in a directory of its own (`atomic.tmp_name`), then
+    puts it in place by renames: an existing `out_zarr` is renamed aside first, the new store is renamed in, and only then is the old one deleted (round 18,
+    M-13: it was deleted first, so for as long as a delete of thousands of chunk files takes the name held nothing or half a tree, and a reader that opened it
+    then could read a missing chunk as the fill value). The name is absent for the time between two renames, never half a tree; a failure of the second
+    rename puts the old store back. A kill between them leaves the old store whole in `.<hex>.tmp` beside the name (ignored by `bin/sync_filters` and
+    `pipeline.is_junk`, to be renamed back by hand or deleted), and the next open of the name refuses it as missing and says what to run (`unreadable`). The
+    write is two renames, not one: it is no longer called atomic. An existing `out_zarr` is replaced only when it is empty or `looks_like_zarr` (a damaged
+    store too, so ingest-ocean can repair it): any other directory is refused first. A link at `out_zarr` is not replaced (ENOTDIR, as before)."""
     from ..config import ConfigError
     kind_of(kind)
     out = pathlib.Path(out_zarr)
@@ -233,8 +239,17 @@ def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> 
             n += 1
         if n == 0:
             raise ValueError("no time steps to write")
-        shutil.rmtree(out, ignore_errors=True)
-        os.replace(tmp, out)
+        old = atomic.tmp_name(out) if out.is_dir() and not out.is_symlink() else None
+        if old is not None:
+            os.replace(out, old)                                # the old store aside whole: a reader of the name sees it absent, never half deleted
+        try:
+            os.replace(tmp, out)
+        except BaseException:
+            if old is not None:
+                os.replace(old, out)                            # the new one did not go in: the old one stays the store
+            raise
+        if old is not None:
+            shutil.rmtree(old, ignore_errors=True)              # (a kill here leaves it: `.tmp`, ignored like the others)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)                  # (a kill -9 leaves it: its name ends in .tmp, which sync_filters and is_junk ignore)
         raise
