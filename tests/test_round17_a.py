@@ -254,7 +254,7 @@ def rf(a, b, kind="rf"):
 
 def test_m5_an_rf_link_to_the_slocums_0_3_m_antenna_gets_the_sentence_and_the_others_do_not():
     note = report._low_antenna_note(rf("glider_2n", "usv"), DEMO)
-    assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).") and "conservative" in note
+    assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).") and "too low" in note
     assert report._low_antenna_note(rf("usv", "uas"), DEMO) is None                               # 2.2 m and an airborne antenna
     for kind in ("iridium", "acoustic"):
         assert report._low_antenna_note(rf("glider_2n", "usv", kind), DEMO) is None

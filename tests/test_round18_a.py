@@ -192,7 +192,8 @@ def test_m3_two_low_ends_get_the_sentence_of_the_pair_with_its_larger_figure_and
                        ("seaglider", "seaglider", "glider_eq (0.5 m), glider_2n (0.5 m)")):          # the last: no end is below 0.5 m, both are at it
         note = report._low_antenna_note(rf("glider_eq", "glider_2n"), two_gliders(a, b))
         assert note and note.startswith(f"Both ends of this RF link have an antenna of 0.5 m or lower: {ends}."), (a, b, note)
-        assert "by about 6 to 11 dB" in note and "this margin is too low" in note and "MARGINAL or NO-GO" in note
+        assert "by 6 to 11 dB" in note and "this margin is too low" in note and "MARGINAL or NO-GO" in note
+        assert "a Seaglider with a Slocum about 9 dB, two Slocums about 11, two Seagliders about 7" in note and "too high" not in note
         assert note.endswith("(CREDIBILITY, limitation L23).")
         assert "conservative" not in note and "partner" not in note
 
@@ -200,7 +201,8 @@ def test_m3_two_low_ends_get_the_sentence_of_the_pair_with_its_larger_figure_and
 def test_m3_one_low_end_keeps_its_sentence_and_says_which_partner_its_band_is_for():
     note = report._low_antenna_note(rf("glider_2n", "usv"), DEMO)
     assert note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).") and "with a partner of 2.2 m or more" in note
-    assert "conservative" in note and "both" not in note.lower() and "6 to 11" not in note
+    assert "about 5 dB at 0.3 m (1 to 6) and 11 to 16 dB at 0.1 m" in note and "this margin is too low" in note
+    assert "conservative" not in note and "too high" not in note and "both" not in note.lower() and "6 to 11" not in note
     assert report._low_antenna_note(rf("glider_eq", "usv"), DEMO) is None                           # a 0.5 m Seaglider with the 2.2 m whip: neither case
     assert report._low_antenna_note(rf("glider_eq", "uas"), DEMO) is None
     assert report._low_antenna_note(rf("glider_eq", "glider_2n", "acoustic"), two_gliders("slocum", "slocum")) is None
