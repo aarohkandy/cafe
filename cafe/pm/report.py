@@ -1392,8 +1392,12 @@ def _sens_html(s: dict[str, Any]) -> str:
     return f"<code>{html.escape(s['param'])}</code> (S1 {_n(s['s1'])})"
 
 
-def _top3_html(top: list[Any], floor: Any = None, quantity: str | None = None) -> str:
-    """`quantity` is what the indices were taken on (the sensitivity entry's own: a margin, a fraction, or the failure indicator; round 5, M-2)."""
+def _top3_html(top: list[Any], floor: Any = None, quantity: str | None = None, case: str | None = None) -> str:
+    """`quantity` is what the indices were taken on (the sensitivity entry's own: a margin, a fraction, or the failure indicator; round 5, M-2). `case` is the
+    entry's: `no_acting_input` (no sampled input acts on the outcome, round 18, M-4) has no noise floor either, so it is not "none above the noise floor"."""
+    if case == "no_acting_input":
+        return ("<p class=muted>Top sensitivities: none, because no sampled input acts on this outcome (it is decided by a draw of its own), "
+                "so no noise floor was computed.</p>")
     fl = f"; the noise floor at this member count is S1 {_n(floor)}" if floor else ""
     what = "the 0/1 failure indicator" if quantity == "failure indicator" else f"the {html.escape(quantity)}" if quantity else "the ranked outcome"
     if not top:
@@ -1600,7 +1604,7 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
             f"(all modes: {modes}).<br>"
             f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
             f"{_task_html(v)}{_notes_html(v)}{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}"
-            f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'], v['sensitivity'].get('quantity'))}{_fix_html(v['fix'])}"
+            f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'], v['sensitivity'].get('quantity'), v['sensitivity'].get('case'))}{_fix_html(v['fix'])}"
             f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} (assumed platform values), listed in the "
             f"<a href='{e(v['assumed_anchor'])}'>credibility report</a>.</p></div>")
 
@@ -1651,7 +1655,7 @@ def _link_html(lid: str, k: dict[str, Any]) -> str:
             f"<p>Method: {e(k['method'])}.<br>"
             f"Fraction of required moments met: median {_n(k['frac_median'])}, 10th percentile {_n(k['frac_p10'])}; "
             f"median margin {_n(k['margin_db_median'])}{_margin_html(k)}.<br>Most sensitive to: {_sens_html(k['sensitivity'])}.</p>"
-            f"{_top3_html(k['top3'], k['sensitivity']['noise_floor'], k['sensitivity'].get('quantity'))}</div>")
+            f"{_top3_html(k['top3'], k['sensitivity']['noise_floor'], k['sensitivity'].get('quantity'), k['sensitivity'].get('case'))}</div>")
 
 
 def _svg(m: dict[str, Any], reach: dict[str, Any]) -> str:

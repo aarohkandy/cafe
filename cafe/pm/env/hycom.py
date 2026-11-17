@@ -28,7 +28,7 @@ thknss [Pa] / 9806 = m, srfhgt [m2/s2] / 9.806 = m; NERSC abfile.py (github.com/
 records; .a records padded to ((idm*jdm+4095)//4096)*4096 big-endian float32 words, values above 2**99 are land / no data;
 regional.grid.b lists `plon:  min,max = a b` lines in record order.
 """
-import concurrent.futures as cf, datetime as dt, functools, itertools, json, os, pathlib, re, shlex, shutil, subprocess, sys, threading, time
+import concurrent.futures as cf, datetime as dt, functools, hashlib, itertools, json, os, pathlib, re, shlex, shutil, subprocess, sys, threading, time, uuid
 import urllib.parse, urllib.request
 from collections.abc import Callable, Iterable, Iterator
 from typing import Any
@@ -214,13 +214,51 @@ def looks_like_zarr(d: pathlib.Path) -> bool:
     return any((d / m).exists() for m in ZARR_MARKS) or any(_is_array(c) for c in d.iterdir() if c.is_dir())
 
 
+def _aside_stem(out: pathlib.Path) -> str:
+    """`.<16 hex of the sha-256 of the store's name>.`: the start of the name the old store gets while `write_store` replaces it (`_aside_name`).
+    `atomic.tmp_name` carries nothing of the name it is made for, so the temporaries of every store in a directory look alike; this one is the
+    name of one store, which is what lets the next `write_store` of that store, and only of it, know that a directory beside it is the one an earlier write
+    left (round 18 merge, job 2 (b)). The digest, not the name itself, keeps it at 38 characters whatever the store is called (`atomic.tmp_name`'s reason)."""
+    return "." + hashlib.sha256(out.name.encode()).hexdigest()[:16] + "."
+
+
+def _aside_name(out: pathlib.Path) -> pathlib.Path:
+    return out.with_name(f"{_aside_stem(out)}{uuid.uuid4().hex[:12]}.old.tmp")
+
+
+def asides(out_zarr: Any) -> list[pathlib.Path]:
+    """The directories beside the store `out_zarr` that an earlier `write_store` of that name moved the old store to and did not delete (it was killed after
+    the first rename): exactly `<_aside_stem>[12 hex].old.tmp`, never another store's temporary or a build in progress (those are `.<12 hex>.tmp`)."""
+    out = pathlib.Path(out_zarr)
+    pat = re.compile(re.escape(_aside_stem(out)) + r"[0-9a-f]{12}\.old\.tmp")
+    try:
+        return sorted(q for q in out.parent.iterdir() if pat.fullmatch(q.name) and q.is_dir() and not q.is_symlink())
+    except OSError:
+        return []
+
+
+def _size_bytes(d: pathlib.Path) -> int:
+    """The bytes under `d`, a file that goes while it is counted (the sweep of another run) not counted."""
+    n = 0
+    for root, _, files in os.walk(d):
+        for f in files:
+            try:
+                n += os.lstat(os.path.join(root, f)).st_size
+            except OSError:
+                pass
+    return n
+
+
 def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> pathlib.Path:
     """steps: iterable of standardized one-time datasets (see _std). Adds rho/c and builds the store in a directory of its own (`atomic.tmp_name`), then
     puts it in place by renames: an existing `out_zarr` is renamed aside first, the new store is renamed in, and only then is the old one deleted (round 18,
     M-13: it was deleted first, so for as long as a delete of thousands of chunk files takes the name held nothing or half a tree, and a reader that opened it
     then could read a missing chunk as the fill value). The name is absent for the time between two renames, never half a tree; a failure of the second
-    rename puts the old store back. A kill between them leaves the old store whole in `.<hex>.tmp` beside the name (ignored by `bin/sync_filters` and
-    `pipeline.is_junk`, to be renamed back by hand or deleted), and the next open of the name refuses it as missing and says what to run (`unreadable`). The
+    rename puts the old store back. A kill between them, or after the second rename, leaves the old store whole beside the name (`asides`: a name of this
+    store's own, ignored by `bin/sync_filters` and `pipeline.is_junk`); the next open of the name, if it is missing, says so, names it and its size and how to
+    put it back (`unreadable`), and the next `write_store` of the name deletes it once its own new store is in place, but only when it holds the lock
+    `<name>.lock` (`remote.store_lock`, the one the ingest takes around every write of a store: no other writer of this name can then be between its two
+    renames, so what matches is a leftover and not a store about to be put back; without the lock, the file not there, nothing is deleted). The
     write is two renames, not one: it is no longer called atomic. An existing `out_zarr` is replaced only when it is empty or `looks_like_zarr` (a damaged
     store too, so ingest-ocean can repair it): any other directory is refused first. A link at `out_zarr` is not replaced (ENOTDIR, as before)."""
     from ..config import ConfigError
@@ -239,17 +277,21 @@ def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> 
             n += 1
         if n == 0:
             raise ValueError("no time steps to write")
-        old = atomic.tmp_name(out) if out.is_dir() and not out.is_symlink() else None
-        if old is not None:
-            os.replace(out, old)                                # the old store aside whole: a reader of the name sees it absent, never half deleted
-        try:
-            os.replace(tmp, out)
-        except BaseException:
+        with remote.store_lock(out.parent, out.name + ".lock", create=False) as held:    # (the file is the ingest's: `pipeline._shared_store` makes it)
+            old = _aside_name(out) if out.is_dir() and not out.is_symlink() else None
             if old is not None:
-                os.replace(old, out)                            # the new one did not go in: the old one stays the store
-            raise
-        if old is not None:
-            shutil.rmtree(old, ignore_errors=True)              # (a kill here leaves it: `.tmp`, ignored like the others)
+                os.replace(out, old)                            # the old store aside whole: a reader of the name sees it absent, never half deleted
+            try:
+                os.replace(tmp, out)
+            except BaseException:
+                if old is not None:
+                    os.replace(old, out)                        # the new one did not go in: the old one stays the store
+                raise
+            if old is not None:
+                shutil.rmtree(old, ignore_errors=True)          # (a kill here leaves it: `asides` finds it)
+            if held:                                            # the lock proves no other writer of this name is between its renames: what is left is a kill's
+                for q in asides(out):
+                    shutil.rmtree(q, ignore_errors=True)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)                  # (a kill -9 leaves it: its name ends in .tmp, which sync_filters and is_junk ignore)
         raise
@@ -264,10 +306,15 @@ def unreadable(path: Any, e: Exception, lab: bool | None = None) -> Exception:
     if lab is None:
         lab = not p.name.startswith("gofs")
     q = shlex.quote(str(p))                                                  # pasted into a shell: a path with a space is one word (round 14 L0)
+    note = ""
+    if not p.exists() and (left := asides(p)):                               # a kill in `write_store`'s replace left the old store beside the name
+        names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB)" for x in left)
+        note = (f"; BUT the store as it was before an earlier ingest that was killed while it replaced it is beside it: {names}: "
+                f"`mv {shlex.quote(str(left[0]))} {q}` puts it back without a download (an ingest that writes the store deletes the ones left)")
     fix = (f"restore {q} from the lab's source (`python -m cafe.pm ingest-ocean --mission ... --path DIR --temperature-kind K` writes it); "
            "the pipeline cannot download it" if lab else
            f"delete {q} and run `{FETCH_CMD} ...` again: only that part is downloaded again")
-    return ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); {fix}")
+    return ConfigError(f"environment cache file {p} cannot be read ({type(e).__name__}: {e}); {fix}{note}")
 
 
 def open_store(path: Any, cache: bool = True, lab: bool | None = None) -> Any:

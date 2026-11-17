@@ -215,7 +215,7 @@ _HELD = threading.local()                 # `paths`: the lock files this thread 
 
 @contextlib.contextmanager
 def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bool = True, wait: Callable[[], None] | None = None,
-               log: Callable[[str], None] | None = None) -> Iterator[bool]:
+               log: Callable[[str], object] | None = None) -> Iterator[bool]:
     """An exclusive `flock` on `<cache>/<name>`, taken by whoever builds or replaces a store of the shared cache (`derived.zarr`) and by whoever reads it
     to validate or load it, so that a reader never sees a store half built or half deleted by a run of other code that shares the cache directory
     (P-R15A1: one run died hashing `derived.zarr` while the other deleted and rewrote it). Held by one thread at a time; the same thread may take it again

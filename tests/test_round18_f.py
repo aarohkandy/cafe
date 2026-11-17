@@ -67,7 +67,8 @@ def test_r18_m10_a_tab_control_or_exotic_line_break_anywhere_in_the_file_is_refu
     expression's `.` or `\\s` reads one: the character in a comment, in a sibling entry's text, in a quoted text and after the entry."""
     body = {"comment": f"# a{ch}b\n{_ENTRY}", "other entry": f"o:\n  why: a{ch}b\n{_ENTRY}", "quoted text": f'o:\n  why: "a{ch}b"\n{_ENTRY}',
             "end": f"{_ENTRY}\n{ch}"}[where]
-    with pytest.raises(ValueError, match="the file holds the character"):
+    line = body[:body.index(ch)].count("\n") + 1                                       # the message names the line (round 18 merge, job 2 (g))
+    with pytest.raises(ValueError, match=f"line {line} holds the character"):
         _read(tmp_path, monkeypatch, body)
 
 

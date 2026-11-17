@@ -10,10 +10,10 @@ import numpy as np
 import trimesh
 
 from cafe import atomic
-from cafe.pm import par
+from cafe.pm import par as _par                 # the module under an alias: this file defines a function `par` below (round 18 merge, job 2 (d))
 
 FOAM = "source /usr/lib/openfoam/openfoam2506/etc/bashrc >/dev/null 2>&1; "
-NPROC = par.env_count("CAFE_NPROC") or 6       # an empty one is unset, a bad one a ConfigError (DECISIONS 330), not a ValueError at import (round 16, M-26)
+NPROC = _par.env_count("CAFE_NPROC") or 6       # an empty one is unset, a bad one a ConfigError (DECISIONS 330), not a ValueError at import (round 16, M-26)
 FLUIDS = {"water": dict(rho=1025.0, nu=1.19e-6), "air": dict(rho=1.20, nu=1.5e-5)}
 DIRS = {"+x": (1, 0, 0), "-x": (-1, 0, 0), "+y": (0, 1, 0), "-y": (0, -1, 0), "+z": (0, 0, 1), "-z": (0, 0, -1)}
 

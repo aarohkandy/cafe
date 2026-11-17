@@ -131,7 +131,7 @@ def build(env: GriddedEnv, cache: Any, built_from: str | None = None, log: Calla
     ds.attrs["layout_version"] = LAYOUT_VERSION
     ds.attrs["built_from"] = built_from
     from ..config import write_json                                          # written whole or not at all, as the Ledger is: a kill cannot leave half a record
-    with store_lock(cache):                                                  # no reader sees the store between its first chunk and its record (P-R15A1)
+    with store_lock(cache, log=log):                                         # no reader sees the store between its first chunk and its record (P-R15A1)
         ds.to_zarr(cache / "derived.zarr", mode="w")
         write_json(cache / DIGEST, dict(built_from=built_from, store_sha256=store_sha256(cache / "derived.zarr")), indent=1)
     if env.spec is not None and fit is None:

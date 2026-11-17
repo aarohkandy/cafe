@@ -5,7 +5,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-ANTENNA_MIN_M = 0.1      # round 17, M-6: below it the two-ray model of an RF link has no meaning (comms.two_ray_curved_db: 12 to 16 dB too much loss at 0.1 m)
+ANTENNA_MIN_M = 0.1      # round 17, M-6: below it the two-ray model of an RF link has no meaning (comms.two_ray_curved_db: 11 to 16 dB too much loss at 0.1 m)
 
 # kind -> (what the message says the value must be, test on the finite array); "other" (a name, a flag) only has to be present
 _RULES: dict[str, tuple[str, Callable[[Any], Any]]] = {

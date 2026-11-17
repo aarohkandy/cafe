@@ -181,7 +181,7 @@ class Context:
             from .env.environment import GriddedEnv
             e = self.mission["environment"]
             sub = None                                                                                        # built by ingest
-            with surface.store_lock(self.cache):                                       # the layer checked is the layer loaded (P-R15A1)
+            with surface.store_lock(self.cache, log=self.log):                         # the layer checked is the layer loaded (P-R15A1)
                 if _derived_current(self.cache):
                     why = _derived_span_problem(self.cache, self.window_s())
                     if why:
@@ -448,7 +448,7 @@ def _shared_store(ctx: Context, directory: pathlib.Path, name: str, what: str) -
     if not _offline():
         with contextlib.suppress(OSError):
             directory.mkdir(parents=True, exist_ok=True)
-    with surface.store_lock(directory, name, create=not _offline(),
+    with surface.store_lock(directory, name, create=not _offline(), log=ctx.log,
                             wait=lambda: ctx.log(f"ingest: another run is fetching {what} ({directory / name}); waiting for it")):
         yield
 
@@ -1047,7 +1047,7 @@ def _derived_record(ctx: Context, key: str) -> dict[str, Any]:
     (other code), and never reads, hashes or deletes it half built (P-R15A1). Runs of different code on one mission cache still cannot both finish: the
     later build is another key, so the earlier run's `derived_unchanged` check fails with 'rebuilt since' (a store per key is DECISIONS 576's open question)."""
     from .env import surface
-    with surface.store_lock(ctx.cache):
+    with surface.store_lock(ctx.cache, log=ctx.log):
         if not (_derived_current(ctx.cache, key) and _derived_span_problem(ctx.cache, ctx.window_s()) is None):
             shutil.rmtree(ctx.cache / "derived.zarr", ignore_errors=True)
             ctx._env = None
@@ -1107,7 +1107,7 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
         return
     L.input(rec)
     want = json.loads(rec.read_text())["store_sha256"]
-    with surface.store_lock(ctx.cache):                                  # waits for a build of another run, then hashes the whole store it left
+    with surface.store_lock(ctx.cache, log=ctx.log):                     # waits for a build of another run, then hashes the whole store it left
         have = surface.store_sha256(store) if store.is_dir() else None
     L.check("derived_unchanged", have == want, value=have, limit=want, note=f"{store} hashes to what ingest recorded" if have == want
             else f"{store} is not what ingest recorded (edited or rebuilt since): rerun `{fetch_cmd(ctx.mission_path)}` and the run")

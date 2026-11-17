@@ -111,8 +111,9 @@ def hull_elements_along() -> int:
         return ValueError(f"stage3.fea_elements_along in {ASSUMPTIONS}: {why}")
     text = ASSUMPTIONS.read_text()
     if (c := _BAD_CHAR.search(text)) is not None:
-        raise bad(f"the file holds the character {c[0]!r} (a tab, a control character or a line break other than \\n and "
-                f"\\r\\n: YAML and `splitlines` read them differently)")
+        raise bad(f"line {text.count(chr(10), 0, c.start()) + 1} holds the character {c[0]!r}: the grammar this reader reads allows only line breaks "
+                  "(\\n or \\r\\n), spaces and printable characters, no tab, control character or other line break "
+                  "(YAML and `splitlines` read them differently)")
     lines = text.splitlines()
     heads = [i for i, ln in enumerate(lines) if _MESH_KEY.match(ln)]
     if not heads:
