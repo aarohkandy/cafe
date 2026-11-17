@@ -991,14 +991,14 @@ _MESH_BODY = "  unit: elements\n  why: x\n"
     ("value twice", f"{_MESH}\n  value: 70\n{_MESH_BODY}  value: 45\n", "refuse"),                 # PyYAML 45 (the last), a first-wins reader 70
     ("entry twice", f"{_MESH}\n  value: 70\n{_MESH_BODY}{_MESH}\n  value: 45\n", "refuse"),      # PyYAML 45
     ("quoted key twice", f"{_MESH}\n  value: 70\n{_MESH_BODY}  \"value\": 45\n", "refuse"),
-    ("block scalar text", f"{_MESH}\n  why: >\n    value: 5\n    more\n  value: 70\n  unit: x\n", 70),   # the line inside the scalar is text
-    ("nested mapping", f"{_MESH}\n  other:\n    value: 9\n  value: 70\n", 70),
-    ("nested mapping after", f"{_MESH}\n  value: 70\n  other:\n    value: 9\n", 70),
+    ("block scalar text", f"{_MESH}\n  why: >\n    value: 5\n    more\n  value: 70\n  unit: x\n", "refuse"),   # round 18, M-10: PyYAML 70; no block scalar
+    ("nested mapping", f"{_MESH}\n  other:\n    value: 9\n  value: 70\n", "refuse"),            # round 18, M-10: PyYAML 70; nothing deeper than a child
+    ("nested mapping after", f"{_MESH}\n  value: 70\n  other:\n    value: 9\n", "refuse"),
     ("flow collection child", f"{_MESH}\n  unit: [a,\n  value: 5]\n  value: 70\n", "refuse"),     # in a flow collection the indent means nothing
     ("quoted text over lines", f"{_MESH}\n  why: \"a\n  value: 5\"\n  value: 70\n", "refuse"),
     ("comment after the number", f"{_MESH}\n  value: 70   # mesh\n{_MESH_BODY}", 70),
     ("deeper comment line after the number", f"{_MESH}\n  value: 70\n  # a note\n{_MESH_BODY}", 70),  # a comment ends the scalar: 70
-    ("continuation of another child", f"{_MESH}\n  value: 70\n  unit: elements\n    per hull\n  why: x\n", 70),  # the text of `unit`, not of the value
+    ("continuation of another child", f"{_MESH}\n  value: 70\n  unit: elements\n    per hull\n  why: x\n", "refuse"),  # round 18, M-10 (A-9): no deeper line
     ("value continued at 4 spaces", f"{_MESH}\n  value: 70\n    more\n{_MESH_BODY}", "refuse"),                                      # PyYAML '70 more' (M-20)
     ("value continued at 3 spaces", f"{_MESH}\n  value: 70\n   more\n{_MESH_BODY}", "refuse"),
     ("value continued at 5 spaces", f"{_MESH}\n  value: 70\n     more\n{_MESH_BODY}", "refuse"),

@@ -344,7 +344,7 @@ def test_r17_m14_the_shipped_file_still_reads_and_pyyaml_agrees_within_the_bound
 
 
 def test_r17_m14_comments_blank_lines_and_indented_text_do_not_trip_the_top_level_rule(tmp_path, monkeypatch):
-    text = f"# a note\n\na: 1\n  # indented note\n   \n{_KEY}  # mesh\n  value: 70\n  why: \"- x: 1\"\nb:\n  - item\n  - more\n"
+    text = f"# a note\n\na: 1\n  # indented note\n   \n{_KEY}  # mesh\n  value: 70\n  why: \"- x: 1\"\nb:\n  why: more\n"
     assert _read(tmp_path, monkeypatch, text) == 70 == yaml.safe_load(text)["stage3.fea_elements_along"]["value"]
 
 
