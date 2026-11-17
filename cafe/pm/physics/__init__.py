@@ -5,10 +5,13 @@ from typing import Any, Callable
 
 import numpy as np
 
+ANTENNA_MIN_M = 0.1      # round 17, M-6: below it the two-ray model of an RF link has no meaning (comms.two_ray_curved_db: 12 to 16 dB too much loss at 0.1 m)
+
 # kind -> (what the message says the value must be, test on the finite array); "other" (a name, a flag) only has to be present
 _RULES: dict[str, tuple[str, Callable[[Any], Any]]] = {
     "pos": ("above 0", lambda a: a > 0),
     "nonneg": ("0 or above", lambda a: a >= 0),
+    "antenna": (f"{ANTENNA_MIN_M:g} m or above", lambda a: a >= ANTENNA_MIN_M),             # round 17, M-6: an RF antenna's height above the sea
     "frac": ("from 0 up to, not including, 1", lambda a: (a >= 0) & (a < 1)),
     "unit": ("from 0 to 1", lambda a: (a >= 0) & (a <= 1)),
     "any": ("", lambda a: np.ones(np.shape(a), bool)),
@@ -19,7 +22,11 @@ _RULES: dict[str, tuple[str, Callable[[Any], Any]]] = {
 
 
 HINTS = {"r_int_ohm": "an ideal pack has no solution for the current at constant power; use 1e-6 for a near-ideal one",
-         "vpp_bias_mean": "a fraction of speed (the factor is 1 + x, so -0.2 is 20 % slower), not a percent: write -0.2 for -20 %"}          # round 8, M-11
+         "vpp_bias_mean": "a fraction of speed (the factor is 1 + x, so -0.2 is 20 % slower), not a percent: write -0.2 for -20 %",          # round 8, M-11
+         # round 17, M-6: the heights the RF link model reads; at 0 m the margin was a finite -43 dB at 5 km (+13 dB at 0.3 m)
+         "antenna_height_m": "the RF antenna tip above the water; below 0.1 m the two-ray link model has no meaning",
+         "rf_antenna_height_m": "the RF antenna above the waterline; below 0.1 m the two-ray link model has no meaning",
+         "ship_antenna_height_m": "the ship's RF antenna above the sea, 0.5 to 100 m like the mission's ship.antenna_height_m"}
 
 
 def _rule(kind: str) -> tuple[str, Callable[[Any], Any]]:
@@ -58,7 +65,8 @@ def _numeric(v: Any) -> Any:
 
 def check_params(table: dict[str, str], vals: dict[str, Any], where: str, ref: str) -> None:
     """Raise ValueError naming the file part `where`, the field and the fix when a key of `table` is missing, or when a numeric value is NaN, infinite
-    or outside its kind (`pos` > 0, `nonneg` >= 0, `frac` [0, 1), `unit` [0, 1], `any` signed, `nonzero`, `ge1`, `angle90` (0, 90);
+    or outside its kind (`pos` > 0, `nonneg` >= 0, `antenna` >= 0.1 (ANTENNA_MIN_M), `frac` [0, 1), `unit` [0, 1], `any` signed, `nonzero`, `ge1`,
+    `angle90` (0, 90);
     `<name><=max` adds a maximum, `range:lo:hi` is a closed interval, `int:lo:hi` the same for a whole number,
     `list[n]:<kind>` a list; `other` only has to exist). A listed value is a
     single number unless its kind says `list`: a list for a number is refused (round 8, M-26), and a string or a flag, alone or inside a list, is not a

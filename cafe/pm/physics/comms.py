@@ -126,8 +126,20 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     on the UAS-USV mission link from 0.2 km to the horizon the Fresnel margin is 7.4 dB lower to 23.6 dB higher at Hs 0.5 m and 2.8 dB lower to 6.9 dB
     higher at Hs 1.5 m; on the sortie hook (0.05 to 6 km, Hs 0.5 m) 7.5 dB lower to 34.7 dB higher; no sample changed its sign. No verdict of the demo
     rests on it (usv-uas-rf is NO-GO because 89 % of its needed moments are beyond the radio horizon, and the UAS lost-link mode is 0 of 64), but a link
-    whose budget is within about 8 dB at a peak is not decided by this function. Specular only: diffuse scatter is neglected, so null filling is
-    underestimated. Antenna height changing with wave elevation on small craft is NOT modelled (the roughness term stands in for it statistically).
+    whose budget is within about 8 dB at a peak is not decided by this function.
+    LOW ANTENNAS (round 17, M-5; the band above is for the UAS and the USV only): the -1 has no floor. With it the two rays cancel as the heights go to
+    0 (the field goes as 2 k h1 h2 / d), while the Fresnel coefficient at a grazing angle of 1 mrad is about -0.98 with a phase, which leaves a field of
+    about 0.03 of the free-space one (B's estimate, not re-measured). Measured against a flat-earth two-ray with the Fresnel coefficient of the same sea
+    (eps_c 72.8 - j118.9 at 915 MHz, the other antenna 15 m, Hs 0, d = 300 m to 12 km, 400 points; a bound, since a flat-earth two-ray has no surface
+    wave: reviewer B's parabolic-equation field over sea water, 300 m to 16 km, gives -2.6 to +1.0 dB at 0.5 m, +1.8 to +5.0 at 0.3 m and +12.5 to +15.2
+    at 0.1 m), `two_ray_loss_db` minus the Fresnel loss, minimum / median / maximum: -3.3 / -0.4 / +0.2 dB for an antenna of 2.2 m, -2.9 / +1.3 / +2.2
+    at 0.5 m, +1.2 / +5.1 / +6.0 at 0.3 m (the Slocum's) and +11.4 / +15.1 / +16.0 at 0.1 m. The loss is OVERSTATED and the margin too low (the
+    conservative direction: a GO can show as MARGINAL or NO-GO): by about 5 dB for an RF link to the Slocum's 0.3 m antenna and by 12 to 16 dB at 0.1 m
+    (tests/test_round17_d.py holds these figures). Not changed: the Fresnel coefficient needs the sea temperature and the antenna polarisation, which
+    the lab has not given (DECISIONS 913 to 916). The platform files refuse an RF antenna height below 0.1 m (physics.ANTENNA_MIN_M, round 17, M-6: at 0
+    the margin was a finite -43 dB at 5 km); the mission schema refuses a ship antenna below 0.5 m.
+    Specular only: diffuse scatter is neglected, so null filling is underestimated.
+    Antenna height changing with wave elevation on small craft is NOT modelled (the roughness term stands in for it statistically).
     Fades out toward the horizon (D -> 0): use two_ray_loss_db."""
     lam = C0 / f_hz
     d = np.maximum(d, 1.0)
@@ -389,7 +401,7 @@ def bellhop_available() -> bool:
 def _run_bellhop(r_m: ArrayLike, f_hz: float, z: ArrayLike, c: F, tx_depth: float, rx_depth: float, water_depth: float) -> F:
     """Incoherent TL [dB] (Bellhop 'T' option includes Thorp volume attenuation) at ranges r_m (increasing, > 0)."""
     import arlpy.uwapm as pm
-    if (bd := _bellhop_dir()) not in os.environ["PATH"].split(os.pathsep):             # arlpy shells out to `bellhop.exe`; once (round 8, M-37)
+    if (bd := _bellhop_dir()) is not None and bd not in os.environ["PATH"].split(os.pathsep):  # once (r8 M-37); None is no directory (r17 M-16)
         os.environ["PATH"] = f"{bd}{os.pathsep}{os.environ['PATH']}"
     d = -np.asarray(z, float)
     if d[0] > 0:                                                                       # Bellhop needs the surface node

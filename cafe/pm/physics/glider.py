@@ -71,7 +71,7 @@ _COMMON = dict(
     t_deep_c="range:-5:50",
     thermocline_scale_m="pos", battery_J="pos", reserve_frac="frac<=0.5", hotel_W="nonneg", pump_eta="pos", pump_time_s="nonneg", apogee_overshoot="nonneg<=5",
     attitude_J_per_dive="nonneg", iridium_Bps="pos", bytes_per_dive="nonneg", comms_W="nonneg", gps_s="nonneg", windage="nonneg<=0.2",
-    antenna_height_m="nonneg", seafloor_margin_m="nonneg", min_dive_m="nonneg",
+    antenna_height_m="antenna", seafloor_margin_m="nonneg", min_dive_m="nonneg",
 )
 REQUIRED: dict[str, dict[str, str]] = {
     "seaglider": dict(_COMMON, length_m="pos<=20", hd_a="pos", hd_b="pos", hd_c="pos", hd_s="range:-0.9:0", abs_compress="pos<=1e-3", therm_expan="pos<=1e-2",
