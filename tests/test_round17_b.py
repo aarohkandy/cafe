@@ -55,7 +55,8 @@ def test_r17_m2_the_demo_replaces_the_uas_inputs_and_the_gliders_station_and_way
     assert {p for k, p in got if k == "seaglider"} == {"mission_defaults." + k for k in
                                                        ("dive_depth_m", "station_tol_m", "lost_hours", "wp_radius_m", "unreach_hours")}
     assert {p for k, p in got if k == "slocum"} == {"mission_defaults.dive_depth_m"} | MODE_ROWS
-    assert not [k for k, _ in got if k not in ("quad_uas", "seaglider", "slocum")]
+    assert {p for k, p in got if k == "saildrone_explorer"} == {"mission_defaults.becalmed_after_h", "mission_defaults.track_tolerance_km"}      # the merge: the USV's task keys
+    assert not [k for k, _ in got if k not in ("quad_uas", "seaglider", "slocum", "saildrone_explorer")]
     assert got["seaglider", "mission_defaults.lost_hours"] == ("12.0 h", "the mission sets its own value (12.0 h) and the verdicts use that")
     assert got["seaglider", "mission_defaults.dive_depth_m"][0] == "950.0 m" and got["slocum", "mission_defaults.dive_depth_m"][0] == "500.0 m"
     assert got["quad_uas", "radio.ship_antenna_height_m"][0] == "15.0 m" and got["quad_uas", "launch_rule.gust_lookahead_min"][0] == "30 min"
@@ -75,7 +76,8 @@ def test_r17_m2_the_five_rows_the_review_names_are_listed_not_used_and_say_what_
     assert row(c, "slocum.yaml:mission_defaults.lost_hours")["mission_value"] is None            # a drift task: no mission value, the key is not read
     assert row(c, "slocum.yaml:mission_defaults.lost_hours")["not_used"] == "a drift task never reads it"
     assert row(c, "quad_uas.yaml:sortie.leg_speed_ms")["used"] is True and "not_used" not in row(c, "quad_uas.yaml:sortie.leg_speed_ms")
-    assert row(c, "saildrone_explorer.yaml:mission_defaults.becalmed_after_h")["used"] is True      # the USV's are read by the report's USV card: not touched
+    assert row(c, "saildrone_explorer.yaml:mission_defaults.becalmed_after_h")["used"] is False     # the USV card prints the task's own (round 17, the merge: test_round17_m)
+    assert row(c, "saildrone_explorer.yaml:mission_defaults.calm_sustain_s")["used"] is True        # no task key replaces the other clocks
     page = html.unescape(cr._render(c))
     assert "assumed (the mission sets its own value (12.0 h) and the verdicts use that)" in page
     cr.write(run)                                                                          # the JSON still serialises with the new fields
@@ -86,8 +88,8 @@ def test_r17_m2_the_counts_leave_out_what_the_mission_replaces_but_keep_the_rows
     c = cr.build(run, REAL, data)
     items = c["assumed_inputs"]
     off = [i for i in items if "not_used" in i]
-    assert len(off) == 14 and {i["kind"] for i in off} == {"assumed"}                       # 4 + 5 + 5 assumed; sortie.duration_s is sourced
-    for stem in ("quad_uas", "seaglider", "slocum"):
+    assert len(off) == 16 and {i["kind"] for i in off} == {"assumed"}                       # 4 + 5 + 5 + 2 (the USV's, the merge) assumed; sortie.duration_s is sourced
+    for stem in ("quad_uas", "seaglider", "slocum", "saildrone_explorer"):
         every = [i for i in items if i["file"] == f"platforms/{stem}.yaml"]
         assert c["platform_assumed_counts"][stem] == len(every) - sum("not_used" in i for i in every)
     assert c["platform_assumed_counts"] == {s: n for s, n in c["platform_assumed_counts"].items()} and c["platform_assumed_counts"]["saildrone_explorer"] > 20

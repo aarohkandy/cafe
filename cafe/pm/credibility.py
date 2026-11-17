@@ -338,6 +338,20 @@ def assumed_inputs(root: pathlib.Path = ROOT, run: pathlib.Path | None = None, e
     return items
 
 
+def used_counts(items: list[dict[str, Any]]) -> tuple[dict[str, int], dict[str, int]]:
+    """({file: n} of the listed inputs this mission depends on, {file: n} of those listed but not used): the one count behind `platform_assumed_counts` here
+    and the mission report's 'used by this mission' numbers (`report._assumed`: per file, the total, the per-vehicle 'Depends on'), so the two cannot differ.
+    An input is not used when its platform, vehicle class or switch is not flown, or the mission replaces it (`Facts.item_used`); a value this run fitted
+    from data is listed and counted in neither (round 17, a hand-back of batch B)."""
+    used: dict[str, int] = {}
+    rest: dict[str, int] = {}
+    for i in items:
+        if i["kind"] != "fitted":
+            d = used if i["used"] else rest
+            d[i["file"]] = d.get(i["file"], 0) + 1
+    return used, rest
+
+
 # ------------------------------------------------------------------------------------------------------ V&V 20 rows
 
 def _row(rid: str, case: str, source: str, S: float | None, D: float | None, u: tuple[float, float, float] | None, note: str) -> dict[str, Any]:
@@ -553,7 +567,9 @@ MISSION_OVERRIDES: dict[str, dict[str, tuple[str, float | None, str | None, str]
          "radio.ship_antenna_height_m": ("ship.antenna_height_m", None, None, "m")},
     glider={"mission_defaults.dive_depth_m": ("task.dive_depth_m", None, None, "m"),
             "mission_defaults.station_tol_m": ("task.radius_km", 5.0, "station", "km"),               # stage 1 sets both, from the task or its own 5 km and 6 h
-            "mission_defaults.lost_hours": ("task.lost_after_h", 6.0, "station", "h")})
+            "mission_defaults.lost_hours": ("task.lost_after_h", 6.0, "station", "h")},
+    usv={"mission_defaults.becalmed_after_h": ("task.becalmed_after_h", None, None, "h"),          # `USVSim` merges the whole task over the platform's defaults;
+         "mission_defaults.track_tolerance_km": ("task.track_tolerance_km", None, None, "km")})     # the schema lets a task name these two (a station's radius_km too)
 # The mission defaults a glider's task mode reads from the platform (`GliderSim`: the station keys in station mode, the waypoint keys in section mode, none in
 # drift, which never fails on them); the dive depth is read in every mode. A key in no tuple of the mode flown is not read by the verdicts.
 GLIDER_MODE_KEYS = dict(station=("station_tol_m", "lost_hours"), section=("wp_radius_m", "unreach_hours"), drift=())
@@ -565,7 +581,11 @@ def vehicle_replaced(mission: dict[str, Any], v: dict[str, Any], cls: str) -> di
     or that its task mode never reads (`MISSION_OVERRIDES`, `GLIDER_MODE_KEYS`). A value the mission leaves out is not replaced, except the two stage 1 sets
     itself in station mode."""
     out: dict[str, tuple[str, str]] = {}
-    mode = str((v.get("task") or {}).get("mode"))
+    task = dict(v.get("task") or {})
+    mode = str(task.get("mode"))
+    if cls == "usv" and mode == "station" and "radius_km" in task:                 # `stage1._run_usv`: a station's radius is its track tolerance unless given
+        task.setdefault("track_tolerance_km", task["radius_km"])
+        v = dict(v, task=task)
     for path, (mkey, own, only, unit) in MISSION_OVERRIDES.get(cls, {}).items():
         if only not in (None, mode):
             continue
@@ -1159,13 +1179,13 @@ def build(run_dir: str | pathlib.Path, root: pathlib.Path = ROOT, data: pathlib.
             mv, it["not_used"] = f.replaced[it["key"], it["path"]]
             it["mission_value"] = mv or None
     labels = {p.stem: platform_label(p.stem, True) for p in (root / "platforms").glob("*.yaml")} | f.used          # key -> the `file` of its items
+    counted = used_counts(items)[0]
     return dict(schema="cafe.pm.credibility/1", run=f.run.name,
                 note="Levels run 0-4 (BRIEF 5.4). The rule behind each level is this tool's reading of the factor, not the text of NASA-STD-7009B, "
                      "which was not re-read. Level 4 is never awarded automatically.",
                 levels=LEVELS, factors=factor_table(f), vv20=f.vv, limitations=f.limitations, sanity=sanity(f), assumed_inputs=items,
                 ledger_problems=f.problems,
-                platform_assumed_counts={s: sum(1 for i in items if i["file"] == lab and i["kind"] == "assumed" and "not_used" not in i)
-                                         for s, lab in sorted(labels.items())})                       # what the mission replaces is not depended on
+                platform_assumed_counts={s: counted.get(lab, 0) for s, lab in sorted(labels.items())})      # the report's counts, from the same function
 
 
 def write(run_dir: str | pathlib.Path) -> list[pathlib.Path]:

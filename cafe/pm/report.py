@@ -592,7 +592,7 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                                       ("launches", "scrubbed", "members_partly_scrubbed", "members_all_scrubbed")),
                         energy=_energy(e.get("energy"), ref, src + ".energy"),
                         drift=_drift(task.get(vid, {}), e["cls"], mref, f"mission.yaml vehicles.{vid}.task.heading_to"),
-                        usv_modes=_usv_modes(p, e["modes"], tr) if e["cls"] == "usv" else None,
+                        usv_modes=_usv_modes(p, e["modes"], tr, task[vid], vid) if e["cls"] == "usv" else None,
                         uas_limits=_uas_limits(p, tr, not e.get("profile")) if e["cls"] == "uas" else None,
                         verdict_stage1=before["verdict"]["verdict"] if before else None,
                         changed_by_refit=bool(before and before["verdict"]["verdict"] != e["verdict"]["verdict"]),
@@ -612,9 +612,11 @@ def _drift(task: dict[str, Any], cls: str, ref: dict[str, Any], src: str) -> dic
     return dict(heading_to=num(task.get("heading_to", 0.0), "deg", ref, src), modes=DRIFT_MODES)
 
 
-def _usv_modes(platform: str | None, modes: dict[str, Any], tr: Trace) -> dict[str, Any] | None:
+def _usv_modes(platform: str | None, modes: dict[str, Any], tr: Trace, task: dict[str, Any] | None = None, vid: str = "") -> dict[str, Any] | None:
     """The two clocks behind a USV's calm-weather failures, from the platform file: `wing_stall_calm` after the apparent wind has been below the trim
-    minimum for calm_sustain_s, `becalmed` after becalmed_after_h unable to stem the current. None for a platform without them or a run with neither mode."""
+    minimum for calm_sustain_s, `becalmed` after becalmed_after_h unable to stem the current: the task's own `becalmed_after_h` when the mission gives one
+    (`USVSim` merges the task over the platform's defaults), which is the value the verdict used (round 17, a hand-back of batch B). None for a platform
+    without them or a run with neither mode."""
     if not {"wing_stall_calm", "becalmed"} & set(modes):
         return None
     try:
@@ -624,9 +626,11 @@ def _usv_modes(platform: str | None, modes: dict[str, Any], tr: Trace) -> dict[s
     except (KeyError, TypeError, ValueError):
         return None
     ref, src = tr.ref("ingest", label="platform"), config.platform_display(platform or "")
+    own = (task or {}).get("becalmed_after_h")
+    becalmed = (num(v["becalmed_after_h"], "h", ref, src + " becalmed_after_h") if own is None
+                else num(own, "h", tr.ref("ingest", label="mission"), f"mission.yaml vehicles.{vid}.task.becalmed_after_h"))
     return dict(trim_min_aws=num(v["trim_min_aws_ms"], "m/s", ref, src + " trim_min_aws_ms"),
-                calm_sustain=num(v["calm_sustain_s"] / 60.0, "min", ref, src + " calm_sustain_s"),
-                becalmed_after=num(v["becalmed_after_h"], "h", ref, src + " becalmed_after_h"))
+                calm_sustain=num(v["calm_sustain_s"] / 60.0, "min", ref, src + " calm_sustain_s"), becalmed_after=becalmed)
 
 
 def _uas_limits(platform: str | None, tr: Trace, airspeed: bool) -> dict[str, Any] | None:
@@ -1201,12 +1205,7 @@ def _machine(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str,
 def _assumed(cred: dict[str, Any], cred_ref: dict[str, Any]) -> dict[str, Any]:
     """The assumed inputs and priors this mission's verdicts depend on (a platform or vehicle class it does not use does not count),
     and the catalogue they are part of."""
-    used: dict[str, int] = {}
-    rest: dict[str, int] = {}
-    for i in cred["assumed_inputs"]:
-        if i["kind"] != "fitted":                                          # a value this run fitted from data is listed, but not counted as assumed
-            d = used if i["used"] else rest
-            d[i["file"]] = d.get(i["file"], 0) + 1
+    used, rest = credibility.used_counts(cred["assumed_inputs"])           # the credibility page's own count (a fitted value is listed, not counted)
     src = "credibility.json assumed_inputs"
     return dict(page="credibility.html",
                 total=num(sum(used.values()), "inputs", cred_ref, f"{src} (kind other than fitted, of a platform or vehicle class this mission uses)"),

@@ -1255,8 +1255,8 @@ def test_r9_m1_a_platform_given_as_a_path_is_counted_and_keyed_whether_it_is_in_
     usv["platform"] = path
     (run / "mission.yaml").write_text(yaml.safe_dump(mission))
     c = cr.build(run, REAL, data)
-    n = c["platform_assumed_counts"]["saildrone_explorer"]
-    assert n > 20 and c["platform_assumed_counts"][path] == n
+    n = c["platform_assumed_counts"][path]                           # the copy at `path` is the file flown; the one in platforms/ is listed and not depended on
+    assert n > 20 and c["platform_assumed_counts"]["saildrone_explorer"] == 0 and n == cr.used_counts(c["assumed_inputs"])[0][path]
     assert {i["file"] for i in c["assumed_inputs"]} >= {"platforms/saildrone_explorer.yaml", path}
     ped = next(f for f in c["factors"] if f["factor"] == "input_pedigree")
     assert path in ped["evidence"][0]["file"] and "no platform file" not in " ".join(ped["missing"])
