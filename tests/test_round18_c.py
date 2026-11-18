@@ -56,7 +56,7 @@ def test_r18_m4_a_mode_with_no_quantity_of_its_own_ranks_the_failure_indicator_o
                                    ("usv", "battery"): "energy_margin", ("uas", "battery_reserve"): "margin", ("uas", "profile_incomplete"): "profile_margin"}
 
 
-def test_r18_m4_a_glider_that_runs_out_of_battery_ranks_its_energy_over_the_two_columns_that_move_it():
+def test_r18_m4_a_glider_that_runs_out_of_battery_ranks_its_energy_over_the_columns_that_move_it():
     res = merged({"glider_eq": 0.0})
     g = res["vehicles"]["glider_eq"]
     g["margin"], g["margin_name"] = _col(res, "wind_speed_bias"), "maximum distance from the station"       # a station glider's margin is its distance
@@ -64,7 +64,9 @@ def test_r18_m4_a_glider_that_runs_out_of_battery_ranks_its_energy_over_the_two_
     _modes(g, battery=g["battery_margin"] < 0.3)
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["glider_eq"]["sensitivity"]
     assert e["case"] == "ranked" and e["param"] == "battery_capacity_scale" and e["quantity"] == "battery energy margin"
-    assert set(e["S1"]) == {"glider_speed_scale", "battery_capacity_scale"}                                  # not the wind and the current
+    # the round 18 addendum (DECISIONS 992): the two current columns step a drifting Slocum's battery on the demo's ocean; the wind columns do not move it
+    assert set(e["S1"]) == {"glider_speed_scale", "battery_capacity_scale", "current_speed_scale", "current_direction_bias"}
+    assert not {"wind_speed_bias", "wind_direction_bias"} & set(e["S1"])
     _modes(g, station_lost=g["margin"] < 0.3)
     e = stage1.summarize(res, NAMES, MISSION, 73)["vehicles"]["glider_eq"]["sensitivity"]
     assert e["param"] == "wind_speed_bias" and e["quantity"] == "maximum distance from the station" and "battery_capacity_scale" not in e["S1"]

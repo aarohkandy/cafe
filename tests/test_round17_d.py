@@ -155,8 +155,9 @@ def test_m5_the_loss_of_a_low_antenna_is_overstated_by_the_documented_band(h):
 
 def test_m5_the_docstring_of_the_two_ray_model_states_the_low_antenna_band_and_the_floor():
     doc = " ".join(c.two_ray_curved_db.__doc__.split())
-    for text in ("LOW ANTENNAS", "+1.2 / +5.1 / +6.0 at 0.3 m", "+11.4 / +15.1 / +16.0", "about 5 dB for an RF link to the Slocum's 0.3 m",
-                 "11 to 16 dB at 0.1 m", "physics.ANTENNA_MIN_M"):                                          # round 18, M-3: 11 (the minimum is +11.4), not 12
+    for text in ("LOW ANTENNAS", "0.3 m with 15 m +1.2 / +5.1 / +6.0", "0.1 m with 15 m +11.4 / +15.1 / +16.0",
+                 "about 1 to 6 dB for the Slocum with a partner of 2.2 m or 15 m", "11 to 16 dB at 0.1 m", "physics.ANTENNA_MIN_M"):
+        # round 18, M-3: 11 (the minimum is +11.4), not 12; the round 18 addendum (DECISIONS 991): by pair, the Slocum with a 2.2 m or a 15 m partner
         assert text in doc, text
 
 
