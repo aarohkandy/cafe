@@ -248,3 +248,11 @@ def test_x4_a_baseline_that_was_not_run_does_not_name_one_cause_when_there_are_t
     assert rep["vehicles"]["usv"]["fix"]["same_members"]["available"] is False
     assert "(this vehicle's share of the Stage-1 budget did not cover a run, or the unchanged mission leaves the environment data)" in t
     assert "share of the Stage-1 budget was spent" not in t
+
+
+def test_x1_a_band_wholly_below_zero_reads_margin_too_high(monkeypatch):
+    """No measured pair has a loss understated everywhere today; a re-measured one would, and the direction must follow its signs (table patched)."""
+    monkeypatch.setitem(comms.LOW_ANTENNA_PAIR_BAND, (2.2, 2.2), (-2.4, -1.2, -0.3))
+    assert credibility.pair_effect((2.2, 2.2), True) == "margin too high"
+    long = credibility.pair_effect((2.2, 2.2))
+    assert "understated by 0.3 to 2.4 dB" in long and "margin is too high" in long and "too low" not in long
