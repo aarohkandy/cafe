@@ -234,7 +234,7 @@ def test_parquet_path_is_used_when_pyarrow_is_present(monkeypatch, tmp_path):
     seen = []
     monkeypatch.setattr(E.importlib.util, "find_spec", lambda name: object())
     monkeypatch.setattr(pd.DataFrame, "to_parquet", lambda self, p: (seen.append("w"), self.to_csv(p, index=False))[0])
-    monkeypatch.setattr(pd, "read_parquet", lambda p: (seen.append("r"), pd.read_csv(p))[1])
+    monkeypatch.setattr(pd, "read_parquet", lambda p, **kw: (seen.append("r"), pd.read_csv(p))[1])
     em = E.Emulator(["a"], ["p_fail"], path=tmp_path / "train.parquet")
     em.append(dict(a=1.0, p_fail=0.2))
     em.append(dict(a=2.0, p_fail=0.3))
