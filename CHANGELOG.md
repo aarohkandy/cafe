@@ -886,6 +886,7 @@ Round 18 read the q18 quick run (`runs/q18`, `d631e32`, orca, `PM_CPUS=6`) and t
   - Sensitivity (DECISIONS 992; P-R18M3 closed): the acting table is held to a probe on the demo's own gridded environment (five quantiles at eight members' other draws, `review/round_18x/`); a drifting Slocum's battery margin is moved by four columns, the two current columns added to batch C's two (on the demo's ocean only); the UAS lost no real driver (`wind_direction_bias` moves its reserve margin, not its profile share); `tests/test_round18_c.py`'s probe is the wider one.
   - `report.json` `fix.same_members` (DECISIONS 993): `measured` is true only for a baseline a batch was run for (false for one read from the base run's failure flags, null for an older `flip.json`), `available` says whether there is a baseline, `source` where it came from; `flip.json` `base_same` records its `source`; no sentence changes.
   - One sentence (DECISIONS 994): the line for a Stage-1 baseline that was not run named one cause (the share was spent) where there are two.
+- `emulator.read_table` gives pyarrow the path (`filesystem=LocalFileSystem()`), not the Python file object pandas made: a process that exited soon after reading the training table aborted with -6 after its work (P-R18X3; DECISIONS 995; `tests/test_emulator.py::test_a_process_that_reads_the_table_and_then_exits_ends_with_status_0`).
 
 ### Known issues
 
