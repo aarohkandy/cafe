@@ -616,7 +616,7 @@ def test_a_process_that_reads_the_table_and_then_exits_ends_with_status_0(tmp_pa
     E.write_table(pd.DataFrame([dict(key=f"s{j}", x=float(j), pad="p" * 400_000) for j in range(36)]), src)
     env = dict(os.environ, PYTHONPATH=str(config.ROOT))
     codes, errs = [], []
-    for wave in range(3):
+    for _ in range(3):
         go.unlink(missing_ok=True)
         procs = [subprocess.Popen([sys.executable, "-c", READER, str(src), str(go)], cwd=config.ROOT, env=env, stderr=subprocess.PIPE, text=True)
                  for _ in range(12)]
