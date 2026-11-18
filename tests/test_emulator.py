@@ -588,3 +588,40 @@ def test_the_calibration_split_falls_back_to_rows_only_without_point_columns(tmp
     em.point_cols = []
     em.fit(E.synthetic_table(12, 0))
     assert em.n_cal == 2
+
+
+READER = """
+import pathlib, sys, time
+from cafe.pm import emulator
+src, go = sys.argv[1:]
+while not pathlib.Path(go).exists():
+    time.sleep(0.01)
+for _ in range(12):
+    emulator.read_table(pathlib.Path(src))
+"""
+
+
+def test_a_process_that_reads_the_table_and_then_exits_ends_with_status_0(tmp_path):
+    """P-R18X3: `pd.read_parquet(path)` made pandas open the file and hand pyarrow a Python file object, which pyarrow's IO threads call back into;
+    a process that exited with one of them still alive ended with `terminate called without an active exception` (return code -6) after all its work
+    (a finished run could have handed the user a wrong exit status). `read_table` now gives pyarrow the path (`LocalFileSystem`).
+
+    Probabilistic, and says so: the abort needs an exit within some tens of milliseconds of a read, and contention. Measured on orca (2 pinned cores, this
+    test as written, 20 runs each): the code before the change failed 20 of 20 runs (rates per child: 36 of 300 for `read_table` alone, 88 of 900 for plain
+    `pd.read_parquet`), and after it 0 of 20 runs (0 of 300 children). A pass of this test on the old code is possible, though rare at that rate (about
+    0.88 ** 36, 1 %); a failure on the new code is a real abort."""
+    import subprocess
+    from cafe.pm import config
+    src, go = tmp_path / "t.parquet", tmp_path / "go"
+    E.write_table(pd.DataFrame([dict(key=f"s{j}", x=float(j), pad="p" * 400_000) for j in range(36)]), src)
+    env = dict(os.environ, PYTHONPATH=str(config.ROOT))
+    codes, errs = [], []
+    for wave in range(3):
+        go.unlink(missing_ok=True)
+        procs = [subprocess.Popen([sys.executable, "-c", READER, str(src), str(go)], cwd=config.ROOT, env=env, stderr=subprocess.PIPE, text=True)
+                 for _ in range(12)]
+        go.write_text("")                                                                       # all twelve start reading at once
+        for p in procs:
+            errs.append(p.communicate(timeout=600)[1])
+            codes.append(p.returncode)
+    assert codes == [0] * 36, [e for e in errs if e]

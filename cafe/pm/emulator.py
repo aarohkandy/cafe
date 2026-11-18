@@ -83,7 +83,12 @@ def read_table(path: pathlib.Path) -> pd.DataFrame:
     """The stored table. A file that cannot be read (zero bytes, truncated, not parquet/csv) is a `ConfigError` naming it: it is not treated as empty,
     because the next write would replace the rows in it without a word."""
     try:
-        return pd.read_parquet(path) if path.suffix == ".parquet" else pd.read_csv(path, float_precision="round_trip")
+        if path.suffix == ".parquet":
+            # P-R18X3: pandas, given no filesystem, opens the file and hands pyarrow a Python file object; pyarrow's IO threads call back into it, and one
+            # still alive when the process exits aborts it (-6, "terminate called without an active exception"). With a filesystem pyarrow opens the path.
+            from pyarrow.fs import LocalFileSystem
+            return pd.read_parquet(path, filesystem=LocalFileSystem())
+        return pd.read_csv(path, float_precision="round_trip")
     except FileNotFoundError:
         raise
     except (OSError, ValueError) as e:                                   # pyarrow's ArrowInvalid is a ValueError, pandas' parser and empty-data errors too
