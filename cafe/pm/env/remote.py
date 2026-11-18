@@ -210,7 +210,7 @@ def tree_sha256(path: str | pathlib.Path) -> str:
     return h.hexdigest()
 
 
-_HELD = threading.local()                 # `paths`: the lock files this thread holds
+_HELD = threading.local()                 # `ids`: the (device, inode) of each lock file this thread holds
 
 
 @contextlib.contextmanager
@@ -219,7 +219,9 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
     """An exclusive `flock` on `<cache>/<name>`, taken by whoever builds or replaces a store of the shared cache (`derived.zarr`) and by whoever reads it
     to validate or load it, so that a reader never sees a store half built or half deleted by a run of other code that shares the cache directory
     (P-R15A1: one run died hashing `derived.zarr` while the other deleted and rewrote it). Held by one thread at a time; the same thread may take it again
-    inside (the ingest decides and builds under it, and the build reads the environment, which reads the layer). Released when the block ends, or with the
+    inside (the ingest decides and builds under it, and the build reads the environment, which reads the layer), by whatever spelling of the path: a
+    hold is known by the file's own identity, the device and inode of the descriptor just opened (round 19, M-7: the text of the path let a link, a `..` or
+    a symlinked cache directory take a second `flock` on the same file, which waits for the first for ever). Released when the block ends, or with the
     process. `create=False` (the audit) never makes the file: without one, or where it cannot be opened (a cache that is not writable, no `fcntl`), the
     block runs unlocked, since a store nobody can write has no builder to wait for. `wait` is called once, before the wait, when another holds the lock
     (the ingest says so in its log: a fetch of the ocean store takes hours). `name` makes the lock of another store beside it: the ocean store and the GEBCO
@@ -231,10 +233,7 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
     changed. `log`, when given, is called once with one line when the block runs unlocked (no `fcntl`, an open that fails), naming the lock and the reason,
     except for `create=False` with no file there (the audit asks for none and nothing was meant to be locked); the ingest passes its logger."""
     path = pathlib.Path(cache) / name
-    held: set[pathlib.Path] = _HELD.__dict__.setdefault("paths", set())
-    if path in held:
-        yield True
-        return
+    held: set[tuple[int, int]] = _HELD.__dict__.setdefault("ids", set())
     fd = -1
     try:
         import fcntl
@@ -247,17 +246,22 @@ def store_lock(cache: str | pathlib.Path, name: str = "derived.lock", create: bo
         yield False                                                        # (outside the `except`: the block's errors must not take the failed open as context)
         return
     try:
+        st = os.fstat(fd)
+        key = (st.st_dev, st.st_ino)
+        if key in held:                                                    # this thread holds that very file (under this or another spelling of its path)
+            yield True
+            return
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | (fcntl.LOCK_NB if wait else 0))
         except BlockingIOError:                                            # only with `wait`: someone else holds it
             if wait:
                 wait()
             fcntl.flock(fd, fcntl.LOCK_EX)
-        held.add(path)
+        held.add(key)
         try:
             yield True
         finally:
-            held.discard(path)
+            held.discard(key)
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
         os.close(fd)                                                       # (a forked child that inherited fd keeps the open file, so unlock first)
