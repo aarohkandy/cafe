@@ -51,7 +51,7 @@ at the measured per-child rate); a failure on the new code is a real abort. Also
 - `ruff check cafe/pm tests`: rc 0. `mypy cafe/pm`: rc 0.
 - `tests/test_whatif.py tests/test_emulator.py tests/test_round18_e.py tests/test_round17_f.py`: rc 0, 295 passed (job `r18y_M`, junit `pmdata/r18y_M_junit.xml`).
 - Files that mention `read_table`, `add_rows` or `read_parquet`: `tests/test_pipeline.py tests/test_cli.py tests/test_report.py tests/test_reproducible.py
-  tests/test_round15_a.py tests/test_runners.py tests/test_acceptance.py` (job `r18y_N`): N_RESULT.
+  tests/test_round15_a.py tests/test_runners.py tests/test_acceptance.py` (job `r18y_N`): NOT FINISHED when I handed back: about 30 % through (817 tests collected by name count, progress `[ 29%]`), no failure or error so far; the job is still running (tmux session `r18y_N`, directory `pm_r18y_c`, log `~/cafe-worker/logs/r18y_N.log`, ends with `rc=N`). None of those files patches `read_parquet`; they only call `read_table`.
 
 ## Not verified
 
@@ -62,4 +62,4 @@ at the measured per-child rate); a failure on the new code is a real abort. Also
 
 ## Orca leftovers
 
-Listed by exact name in PROBLEMS P-R18Y1. None deleted by me.
+Listed by exact name in PROBLEMS P-R18Y1. None deleted by me. The tmux session `r18y_N` is still running and ends by itself; I did not kill it.
