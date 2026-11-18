@@ -300,6 +300,16 @@ def _model_note(finished: bool, fitted: bool, refit_file: bool) -> str | None:
     return f"note: this what-if is made without {' and '.join(made)} that the report's P(fail) uses ({why}), so a baseline can differ from it"
 
 
+def _plan_sizes(plan: dict[str, Any]) -> None:
+    """Round 19, M-10. The three sizes of the ensemble a what-if copies out of a run's plan.json (`batch`, `n_min`, `n_max`) are whole numbers with
+    1 <= batch and 1 <= n_min <= n_max: a zero batch was a ZeroDivisionError 24 s into the run, a string or a fraction a TypeError, and n_min above n_max an
+    answer on member counts the run never had. A ValueError raised inside `damaged_run_files` is the same "damaged or incomplete" message a missing key is."""
+    batch, n_min, n_max = (plan[k] for k in ("batch", "n_min", "n_max"))
+    if not all(type(x) is int for x in (batch, n_min, n_max)) or not 1 <= batch or not 1 <= n_min <= n_max:      # `type is int`: no bool, no float, no string
+        raise ValueError(f"plan.json has batch {batch!r}, n_min {n_min!r}, n_max {n_max!r}: whole numbers with batch at least 1 and "
+                         "1 <= n_min <= n_max are needed")
+
+
 def _whatif(a: argparse.Namespace) -> int:
     m = load_mission(a.mission)
     if not (a.shift or a.move or a.drop):
@@ -313,6 +323,7 @@ def _whatif(a: argparse.Namespace) -> int:
         with _run_files(run):
             run_plan = _json_object(run / "plan.json")
             bud = run_plan["budget"]
+            _plan_sizes(run_plan)
             if a.budget is not None and a.budget != bud:
                 raise ConfigError(f"--budget {a.budget}: the run {run} was made with --budget {bud}, and whatif draws its members from that plan "
                                   f"(batches of {run_plan['batch']}); leave --budget out, or use `--run` of a run made with --budget {a.budget}")

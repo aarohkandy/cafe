@@ -196,7 +196,8 @@ def _numbers(vid: str, mod: dict[str, Any], box: dict[str, float]) -> tuple[floa
     1e999 h is a typo, not a ZeroDivisionError or an OverflowError."""
     h, dlon, dlat, duty = (float(mod.get(k, d)) for k, d in (("shift_h", 0.0), ("dlon", 0.0), ("dlat", 0.0), ("duty", 1.0)))
     if not all(math.isfinite(x) for x in (3600.0 * h, dlon, dlat, duty)) or not 0.0 < duty <= 1.0:       # 3600 * h: a shift in seconds must be a number too
-        raise Invalid(f"{vid}: the change shift_h {h:g}, dlon {dlon:g}, dlat {dlat:g}, duty {duty:g} needs finite numbers and a duty above 0 and at most 1")
+        shown = f"{duty:g}" if float(f"{duty:g}") == duty else repr(duty)                 # "duty 1 needs ... at most 1" for 1.0000001 (round 19, M-15)
+        raise Invalid(f"{vid}: the change shift_h {h:g}, dlon {dlon:g}, dlat {dlat:g}, duty {shown} needs finite numbers and a duty above 0 and at most 1")
     width, height = (box["lon_max"] - box["lon_min"]) % 360.0, box["lat_max"] - box["lat_min"]
     if (dlon and abs(dlon) >= width) or (dlat and abs(dlat) >= height):
         raise Invalid(f"{vid}: a move of {dlon:+g} deg lon, {dlat:+g} deg lat is not smaller than the mission box ({width:g} deg wide, {height:g} deg high); "
