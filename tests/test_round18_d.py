@@ -173,7 +173,7 @@ def seed_runs(tmp_path, monkeypatch):
     """A private `$CAFE_WORK`: one old quad run beside a private cache (the shared cache on orca is never named)."""
     work = tmp_path / "work"
     (work / "runs" / "q1").mkdir(parents=True)
-    made = dict(L=1.0, dirs={"+x": dict(force=[-1.0, 0.0, 0.0])})
+    made = dict(fluid="air", rho=1.2, nu=1.5e-5, speed=10.0, L=1.0, dirs={"+x": dict(force=[-1.0, 0.0, 0.0], moment=[0.0, 0.0, 0.0], viscous=[-0.5, 0.0, 0.0])})
     (work / "runs" / "q1" / "quad.external.json").write_text(json.dumps(made))
     monkeypatch.setattr(cfd, "CACHE", work / "cfdcache")
     scratch = tmp_path / "scratch"
