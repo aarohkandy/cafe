@@ -113,7 +113,7 @@ def test_r19_m7_a_lock_held_in_one_thread_still_excludes_another_thread(tmp_path
     assert got.wait(15)
 
 
-# ---------------------------------------------------------------- M-11: a half-deleted aside is never offered, and a missing store's advice is where run and fetch print
+# ---------------------------------------------------------------- M-11: a half-deleted aside is never offered; a missing store's advice
 
 class Killed(BaseException):
     """A kill in the middle of the delete of a leftover (a BaseException, as the process dies: nothing between catches it)."""
@@ -222,7 +222,7 @@ def test_r19_m11_the_note_for_a_missing_store_names_the_leftover_and_says_what_s
     assert h.leftover_note(tmp_path / "gofs_nothing.zarr", False) == ""                 # no leftover: nothing to add
 
 
-def _kill_the_store(data_copy):
+def _kill_the_store(data_copy):  # noqa: F811
     """The ocean store of the CI tree moved to the name a killed replace leaves it under, beside the missing name."""
     store = data_copy / "ocean" / "gofs_ci_fixture.zarr"
     aside = h._aside_name(store)
@@ -230,7 +230,7 @@ def _kill_the_store(data_copy):
     return store, aside
 
 
-def test_r19_m11_run_and_fetch_print_the_leftover_where_they_meet_the_missing_store(tmp_path, data_copy, monkeypatch):
+def test_r19_m11_run_and_fetch_print_the_leftover_where_they_meet_the_missing_store(tmp_path, data_copy, monkeypatch):  # noqa: F811
     """`s_ingest` (what `run` and `fetch` both start with) found the store missing in `_ocean_cached`, before anything opened it, so only the plain
     'not cached' note came out and `hycom.open_store`'s `mv` text was never printed. Offline, and online with a fetch that fails."""
     store, aside = _kill_the_store(data_copy)
@@ -250,7 +250,7 @@ def test_r19_m11_run_and_fetch_print_the_leftover_where_they_meet_the_missing_st
     assert f"rerun `{CMD}`" in note and f"mv {aside} {store}" in note and "an ingest that writes the store deletes the ones left" in note
 
 
-def test_r19_m11_a_lab_store_that_is_missing_names_its_leftover_and_that_nothing_deletes_it(tmp_path, data_copy):
+def test_r19_m11_a_lab_store_that_is_missing_names_its_leftover_and_that_nothing_deletes_it(tmp_path, data_copy):  # noqa: F811
     lab = data_copy / "ocean" / "lab_x.zarr"
     aside = h._aside_name(lab)
     shutil.copytree(data_copy / "ocean" / "gofs_ci_fixture.zarr", aside)
@@ -262,7 +262,7 @@ def test_r19_m11_a_lab_store_that_is_missing_names_its_leftover_and_that_nothing
     assert "cafe.pm ingest-ocean" in note and f"mv {aside} {lab}" in note and "nothing deletes the leftovers of a lab store" in note
 
 
-def test_r19_m11_a_store_that_is_there_but_short_offers_no_mv(tmp_path, data_copy):
+def test_r19_m11_a_store_that_is_there_but_short_offers_no_mv(tmp_path, data_copy):  # noqa: F811
     """`mv aside store` onto a store that exists moves the aside INSIDE it: the note offers it only for a missing name."""
     store, aside = _kill_the_store(data_copy)
     shutil.copytree(aside, store)
@@ -270,7 +270,7 @@ def test_r19_m11_a_store_that_is_there_but_short_offers_no_mv(tmp_path, data_cop
     with pytest.raises(ledger.StageFailed, match="x_present: the store is not cached") as e, ledger.Ledger(ctx.run_dir, "ingest", ctx.hash) as L:
         assert pipeline._need(ctx, L, "x", "the store", lambda: False, lambda: None, leftover=lambda: h.leftover_note(store, False)) is False
     assert "mv " not in str(e.value) and "BUT" not in str(e.value)
-    with pytest.raises(ledger.StageFailed, match=f"mv {aside} ") as e2, ledger.Ledger(ctx.run_dir, "ingest2", ctx.hash) as L:      # (the same, no store)
+    with pytest.raises(ledger.StageFailed, match=f"mv {aside} "), ledger.Ledger(ctx.run_dir, "ingest2", ctx.hash) as L:      # (the same, no store)
         shutil.rmtree(store)
         assert pipeline._need(ctx, L, "x", "the store", lambda: False, lambda: None, leftover=lambda: h.leftover_note(store, False)) is False
 

@@ -260,8 +260,11 @@ def test_r18_m13_the_old_store_goes_aside_whole_the_new_one_in_and_only_then_the
     new = _store(truth, out, "new")
     kinds = [(e[0], e[1] == out, e[2] == out if e[0] == "replace" else None) for e in events]
     aside = events[0][2]
-    assert kinds == [("replace", True, False), ("replace", False, True), ("rmtree", False, None)]       # out -> aside, tmp -> out, rmtree(aside)
-    assert aside.name.startswith(".") and aside.name.endswith(".tmp") and events[0][3] == old and events[2][1] == aside and events[2][2] == old
+    # out -> aside, tmp -> out, aside -> its `.dead.tmp` name (round 19, M-11: a delete killed half way leaves a name nothing offers for `mv`), rmtree(dead)
+    assert kinds == [("replace", True, False), ("replace", False, True), ("replace", False, False), ("rmtree", False, None)]
+    dead = events[2][2]
+    assert aside.name.startswith(".") and aside.name.endswith(".old.tmp") and events[0][3] == old and events[2][1] == aside and events[2][3] == old
+    assert dead.name == aside.name.replace(".old.tmp", ".dead.tmp") and events[3][1] == dead and events[3][2] == old
     assert _tree(out) == new and new != old and _aside(tmp_path, out) == []          # the aside is gone at the end
 
 

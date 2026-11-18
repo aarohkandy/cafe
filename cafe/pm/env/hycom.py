@@ -227,7 +227,8 @@ def _aside_name(out: pathlib.Path) -> pathlib.Path:
 
 
 def _leftovers(out_zarr: Any, suffix: str) -> list[pathlib.Path]:
-    """The directories beside `out_zarr` named exactly `<_aside_stem>[12 hex]<suffix>`: a directory, never a link, never another store's or a build in progress."""
+    """The directories beside `out_zarr` named exactly `<_aside_stem>[12 hex]<suffix>`: a directory, never a link, never another store's or a build
+    in progress."""
     out = pathlib.Path(out_zarr)
     pat = re.compile(re.escape(_aside_stem(out)) + r"[0-9a-f]{12}" + re.escape(suffix))
     try:
@@ -238,14 +239,14 @@ def _leftovers(out_zarr: Any, suffix: str) -> list[pathlib.Path]:
 
 def asides(out_zarr: Any) -> list[pathlib.Path]:
     """The directories beside the store `out_zarr` that an earlier `write_store` of that name moved the old store to and did not delete (it was killed after
-    the first rename): exactly `<_aside_stem>[12 hex].old.tmp`, never another store's temporary or a build in progress (those are `.<12 hex>.tmp`). Whole, unless
-    the kill came while it was being deleted, and then it has another name (`dead`): this one is the one `unreadable` offers for `mv`."""
+    the first rename): exactly `<_aside_stem>[12 hex].old.tmp`, never another store's temporary or a build in progress (those are `.<12 hex>.tmp`).
+    Whole, unless the kill came while it was being deleted, and then it has another name (`dead`): this one is the one `unreadable` offers for `mv`."""
     return _leftovers(out_zarr, ".old.tmp")
 
 
 def dead(out_zarr: Any) -> list[pathlib.Path]:
-    """The directories beside `out_zarr` that `write_store` renamed an aside to (`<_aside_stem>[12 hex].dead.tmp`) before it deleted them, and that a kill left half
-    deleted: nothing may be put back from them and nothing reads them (round 19, M-11)."""
+    """The directories beside `out_zarr` that `write_store` renamed an aside to (`<_aside_stem>[12 hex].dead.tmp`) before it deleted them, and that a
+    kill left half deleted: nothing may be put back from them and nothing reads them (round 19, M-11)."""
     return _leftovers(out_zarr, ".dead.tmp")
 
 
@@ -312,8 +313,8 @@ def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> 
                     os.replace(old, out)                        # the new one did not go in: the old one stays the store
                 raise
             if old is not None:
-                _delete_aside(old)                              # (a kill before its rename to `.dead.tmp` leaves it whole under its name: `asides` finds it; a kill after,
-                                                                # half deleted under the `.dead.tmp` one, which nothing offers for `mv`: round 19, M-11)
+                _delete_aside(old)                              # (a kill before its rename to `.dead.tmp` leaves it whole: `asides` finds it; a kill after,
+                                                                # half deleted under the `.dead.tmp` name, which nothing offers for `mv`: round 19, M-11)
             if held:                                            # the lock proves no other writer of this name is between its renames: what is left is a kill's
                 for q in asides(out):
                     _delete_aside(q)
@@ -334,12 +335,12 @@ def leftover_note(path: Any, lab: bool) -> str:
         return ""
     q = shlex.quote(str(p))
     names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB)" for x in left)
-    sweep = ("nothing deletes the leftovers of a lab store, which is not locked: remove them by hand once the store is back (`ls -a` of its directory lists them)"
-             if lab else "an ingest that writes the store deletes the ones left")
+    sweep = ("nothing deletes the leftovers of a lab store, which is not locked: remove them by hand once the store is back (`ls -a` of its directory "
+             "lists them)" if lab else "an ingest that writes the store deletes the ones left")
     return (f"; BUT the store as it was before an earlier ingest that was killed while it replaced it is beside it: {names}: "
-            f"`mv {shlex.quote(str(left[0]))} {q}` puts it back without a download ({sweep}). A `.<12 hex>.tmp` directory beside the store may be that ingest's "
-            "new store, whole if the kill came between the two renames, but nothing tells it from the build of an ingest that is running: after the `mv`, with no "
-            "ingest running, remove it by hand")
+            f"`mv {shlex.quote(str(left[0]))} {q}` puts it back without a download ({sweep}). A `.<12 hex>.tmp` directory beside the store may be "
+            "that ingest's new store, whole if the kill came between the two renames, but nothing tells it from the build of an ingest that is running: "
+            "after the `mv`, with no ingest running, remove it by hand")
 
 
 def unreadable(path: Any, e: Exception, lab: bool | None = None) -> Exception:
