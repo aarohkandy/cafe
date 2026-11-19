@@ -1333,8 +1333,9 @@ BARE_COPIES = {
 BARE_REPLACES = {
     # round 17: `emulator.write_table`, `ledger.copy_manifest`, `remote.download`'s part and `hycom._fetch_part`'s part go through `atomic.write_with` or
     # `atomic.replace_from` (M-13 and its siblings, M-9): no bare replace is left in them
-    "env/hycom.py": 3,                             # the zarr store (`write_store`): a directory built in a temporary of its own; the old store renamed aside,
-                                                   # the new one renamed in, the old one put back if that fails (round 18, M-13: three renames, no delete first)
+    "env/hycom.py": 4,                             # the zarr store (`write_store`): a directory built in a temporary of its own; the old store renamed aside,
+                                                   # the new one renamed in, the old one put back if that fails (round 18, M-13: three renames, no delete first),
+                                                   # and the old one renamed to its `.dead.tmp` name before it is deleted (`_delete_aside`; round 19, M-11)
 }
 
 
