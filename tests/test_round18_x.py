@@ -60,10 +60,7 @@ def test_x1_a_positive_figure_is_a_margin_too_low():
 
 @pytest.mark.parametrize("pair", PAIRS)
 def test_x1_the_card_prints_the_measured_figures_and_the_direction_their_signs_give(pair, monkeypatch):
-    note = card(*pair, monkeypatch=monkeypatch)
-    if pair[0] > 0.5:
-        assert note is None  # no end at or below 0.5 m: no card sentence (L23 has the pair)
-        return
+    note = card(*pair, monkeypatch=monkeypatch)                                # round 20, M-2: the two rows with a 2.2 m lower end print too
     mn, md, mx = measured(pair)
     assert note and note.endswith("(CREDIBILITY, limitation L23).") and "not among those measured" not in note
     assert f"({pair[0]:g} m with {pair[1]:g} m)" in note

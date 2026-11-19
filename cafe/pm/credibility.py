@@ -44,11 +44,11 @@ def pair_figures(pair: tuple[float, float]) -> str:
     return f"{lo:+.1f} to {hi:+.1f} dB (median {med:+.1f})"
 
 
-def pair_effect(pair: tuple[float, float], short: bool = False) -> str:
-    """What the sign of that band does to the margin of an RF link between those heights: a positive minimum is a loss overstated everywhere (the margin too
-    low, a GO can show as MARGINAL or NO-GO), a negative maximum a loss understated everywhere (the margin too high), a band across zero both, with each
-    extreme. `short`: the form L23 uses per pair. The direction is decided here, from the measured minimum and maximum, and nowhere else."""
-    lo, _, hi = comms.LOW_ANTENNA_PAIR_BAND[pair]
+def band_effect(lo: float, hi: float, short: bool = False) -> str:
+    """What the sign of a measured band (the model's loss minus the Fresnel loss, minimum `lo` and maximum `hi` [dB]) does to the margin of an RF link: a
+    positive minimum is a loss overstated everywhere (the margin too low, a GO can show as MARGINAL or NO-GO), a negative maximum a loss understated
+    everywhere (the margin too high), a band across zero both, with each extreme. `short`: the form L23 uses. The direction is decided here, from the
+    measured minimum and maximum, and nowhere else."""
     if lo > 0.0:
         return "margin too low" if short else (f"the loss is overstated by {lo:.1f} to {hi:.1f} dB, so the margin is too low by that much and a GO can show as "
                                                "MARGINAL or NO-GO")
@@ -57,6 +57,12 @@ def pair_effect(pair: tuple[float, float], short: bool = False) -> str:
                                                 "MARGINAL can show as better")
     return (f"margin too low by up to {hi:.1f} dB and too high by up to {-lo:.1f} dB" if short else
             f"the loss is overstated by up to {hi:.1f} dB (the margin too low) and understated by up to {-lo:.1f} dB (the margin too high)")
+
+
+def pair_effect(pair: tuple[float, float], short: bool = False) -> str:
+    """`band_effect` of a row of `comms.LOW_ANTENNA_PAIR_BAND` (the pair's heights [m], the lower first)."""
+    lo, _, hi = comms.LOW_ANTENNA_PAIR_BAND[pair]
+    return band_effect(lo, hi, short)
 
 
 # Round 19, M-2: a height within this of a row of `comms.LOW_ANTENNA_PAIR_BAND` is read as that row. Measured (tests/test_round19_b.py): over 0.001 m at one end
@@ -72,6 +78,24 @@ LOW_ANTENNA_HS_BAND: dict[tuple[float, float], dict[int, tuple[float, float, flo
     (0.3, 15.0): {1: (2.0, 5.2, 6.1), 2: (2.5, 5.2, 6.1), 3: (1.5, 5.5, 6.2)},
     (0.5, 15.0): {1: (-2.0, 1.3, 2.3), 2: (-0.3, 1.5, 2.4), 3: (0.3, 1.9, 2.5)},
 }
+
+# Round 20, M-2: the envelope for an end that is not a row, the lower end of 0.55 m (`report.RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M`) to 2.2 m (the highest
+# lower height of the table) with a partner of 10 to 15 m (the ship's mast: 10 m by default, 15 m in the demo): the model's loss minus the Fresnel loss of
+# `LOW_ANTENNA_PAIR_BAND`'s own definition (Hs 0, 300 m to the pair's radio horizon or 12 km, 400 points, 915 MHz), minimum and maximum [dB] over every
+# 0.001 m of the lower end and the partners 10, 12.5 and 15 m (measured on orca, 4,953 pairs: -5.136 at 0.975 m with 15 m, +2.199 at 0.614 m with 10 m; a
+# 0.05 m grid, the first one tried, gave +2.13 and so too small a "too low"; tests/test_round20_b.py recomputes it to 0.1 dB). A bound against a Fresnel
+# two-ray with no surface wave, as every figure of L23 is; above Hs 0, below 300 m and for any other partner it is not measured.
+LOW_ANTENNA_MID_RANGE_M = (0.55, 2.2)
+LOW_ANTENNA_MID_PARTNER_M = (10.0, 15.0)
+LOW_ANTENNA_MID_BAND = (-5.1, 2.2)
+
+
+def mid_envelope() -> str:
+    """The envelope as the link card and L23 print it: the range and the partner it was measured for, and what its sign does to the margin."""
+    lo, hi = LOW_ANTENNA_MID_BAND
+    return (f"for an end of {LOW_ANTENNA_MID_RANGE_M[0]:g} to {LOW_ANTENNA_MID_RANGE_M[1]:g} m with a partner of {LOW_ANTENNA_MID_PARTNER_M[0]:g} to "
+            f"{LOW_ANTENNA_MID_PARTNER_M[1]:g} m the model's loss minus the Fresnel loss was {lo:+.1f} to {hi:+.1f} dB at Hs 0, {band_effect(lo, hi, True)}")
+
 
 LOW_ANTENNA_NAMES = {0.1: "the lowest height a platform file allows", 0.3: "the Slocum", 0.5: "the Seaglider", 2.2: "the USV's whip",
                      15.0: "the ship's mast"}
@@ -90,11 +114,14 @@ def _l23_text() -> str:
             "margin too high. These are for a calm sea (Hs 0); against the same Fresnel two-ray at a wave height of 1, 2 and 3 m, with a 15 m partner, by the "
             "lower height, " + hs +
             " (measured; the other pairs were not measured above Hs 0). A height within 0.001 m of a listed one is read as that one (over that the figures "
-            "move by under 0.1 dB, measured); a height further off is not measured, the card says so and names the nearest listed pair as biased, and moving "
-            "the lower antenna by 0.01 m moves a pair's figures by up to 1.0 dB at 0.1 m, 0.4 dB at 0.3 m and 0.2 dB at 0.5 m (under 0.1 dB at 2.2 m). "
-            "A pair of heights that is not listed, such as the UAS's 18 to 108 m with the USV's 2.2 m whip, a ship mast other than 15 m "
-            "or any height between the listed ones, is not measured and no band is stated for it; nearer than 300 m none of this is stated (from 200 m, "
-            "0.5 m with a 15 m partner is understated by up to 5.0 dB)")
+            "move by under 0.1 dB, measured); a height further off is not measured: the card says so, and within 0.05 m of a listed pair it also "
+            "names that pair as biased; moving the lower antenna by 0.01 m moves a pair's figures by up to 1.0 dB at 0.1 m, 0.4 dB at 0.3 m and "
+            "0.2 dB at 0.5 m (under 0.1 dB at 2.2 m). The card speaks for every RF link with an end of 2.2 m or lower and for none above that. For an end "
+            "of 0.55 to 2.2 m that is not a listed height it prints this envelope, which is of the range and not a band of the pair: " + mid_envelope() +
+            " (a bound; every 0.001 m of the range and the partners 10, 12.5 and 15 m, round 20). A pair of heights that is not listed, such as the UAS's "
+            "18 to 108 m with the USV's 2.2 m whip, a ship mast other than 15 m or any height between the listed ones, is not measured and no band is "
+            "stated for it, except that envelope; "
+            "nearer than 300 m none of this is stated (from 200 m, 0.5 m with a 15 m partner is understated by up to 5.0 dB)")
 
 
 # Known honesty caveats, verbatim from the lead's list. factors: NASA factors they bear on (cap 2); where: repo files that show them.
@@ -830,12 +857,25 @@ def check_counts(k: Any, n: Any, src: str) -> None:
                                  "the summary was edited or is damaged; run it again (--fresh)")
 
 
+def check_never_required(never: Any, k: Any, n: Any, src: str) -> None:
+    """Round 20, M-4: a link's `n_never_required` (the members in which no moment needed it, stage 1) is an integer 0 <= x <= `n` and, as a member that never
+    needed the link passes, no more members failed (`k` <= `n` - x) than needed it, else a ConfigError like `check_counts`'. None is a summary without the count
+    (an older run, or a batch that did not keep `need_count`). `n` and `k` are `check_counts`' and are checked before."""
+    if never is None:
+        return
+    if not (isinstance(never, int) and not isinstance(never, bool) and 0 <= never <= n - k):
+        raise config.ConfigError(f"{src}: n_never_required {never!r} of n {n!r} members with k_fail {k!r} is not a count (an integer, 0 <= n_never_required <= "
+                                 "n - k_fail: a member that never needed the link passes): the summary was edited or is damaged; run it again (--fresh)")
+
+
 def check_summary(s1b: dict[str, Any] | None, where: str = "stage1b/summary.json") -> None:
-    """`check_counts` for every vehicle and link of a stage-1b summary (an absent or empty one has none)."""
+    """`check_counts` for every vehicle and link of a stage-1b summary (an absent or empty one has none), and `check_never_required` for every link."""
     s = (s1b or {}).get("summary", {})
     for kind in ("vehicles", "links"):
         for k, e in s.get(kind, {}).items():
             check_counts(e["k_fail"], e["n"], f"{where} summary.{kind}.{k}")
+            if kind == "links":
+                check_never_required(e.get("n_never_required"), e["k_fail"], e["n"], f"{where} summary.{kind}.{k}")
 
 
 def _num(x: Any) -> float:
