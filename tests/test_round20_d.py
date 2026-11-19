@@ -42,7 +42,7 @@ def test_r20_m7_a_deeply_nested_file_is_not_seeded_not_a_recursion_error(work, c
     put(work, "q1", "quad.external.json", external())
     f = put(work, "t1", "torpedo.external.json", "[" * 100000 + "]" * 100000)
     out = not_seeded(work, capsys, f)
-    assert "recursion" in out and "seeded quad" not in out
+    assert "nested too deeply" in out and "seeded quad" not in out                 # round 21, M-9: `config.load_json`'s words, not the RecursionError's
 
 
 def test_r20_m7_a_nested_object_file_is_not_seeded_either(work, capsys):

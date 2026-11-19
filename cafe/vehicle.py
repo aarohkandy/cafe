@@ -287,7 +287,7 @@ def build(kind, mesh_flu, spec, hangar=None):
             Mo = FLU2FRD @ np.asarray(r["moment"]) / q
             Mc = Mo - np.cross(cog, F)                     # CFD moments are about the mesh origin
             fv = abs(np.dot(r["viscous"], DIRS[d])) / max(abs(np.dot(r["force"], DIRS[d])), 1e-12)
-            drag[_flip(d)] = (F, Mc, fv, vv.gci_value(r.get("gci", 0.0)))   # a NaN index is inf: not trusted (round 20, M3)
+            drag[_flip(d)] = (F, Mc, fv, vv.gci_value(r.get("gci")))   # a NaN index or a missing key is inf: not trusted (round 20, M3; round 21, M-5)
         drag_re = (c["speed"], c["nu"], c["L"])
         sources["drag"] = "cfd"
     for d, vec in DIRS.items():
@@ -341,7 +341,7 @@ def build(kind, mesh_flu, spec, hangar=None):
             V1, R1 = float(sp[0][0]), sp[0][1]["resistance"]
             low = np.linspace(0, V1, 6)[:-1]                  # below the first CFD speed: R1 (V/V1)^2, not linear
             v.resistance = (np.r_[low, [float(k) for k, _ in sp]], np.r_[R1 * (low / V1) ** 2, [r["resistance"] for _, r in sp]])
-            v.limits["resistance_gci"] = vv.worst_gci(r.get("gci", 0.0) for _, r in sp)
+            v.limits["resistance_gci"] = vv.worst_gci(r.get("gci") for _, r in sp)
             sources["resistance"] = "cfd (free surface)"
         v.windage = np.array([1.0 * _proj(m, ax) * 0.5 for ax in range(3)])   # ponytail: ~half the silhouette is above water
         sources["windage"] = "estimate (Cd 1.0 on half silhouette)"
