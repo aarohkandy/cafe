@@ -165,10 +165,12 @@ def test_m1_the_pair_is_one_verdict_when_the_two_bases_agree_and_the_page_says_w
     assert "none reaches GO or MARGINAL" in t and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
 
 
-def test_m1_a_flip_json_without_target_same_renders_with_the_whole_runs_verdict_as_it_did(tmp_path):
+def test_m1_a_flip_json_without_target_same_renders_with_the_same_members_verdict_and_names_the_whole_runs(tmp_path):
+    """Round 19, M-4: it rendered 'P(fail) 0.125 on the same 32 members ... MARGINAL to GO', the NO-GO baseline's P(fail) beside the whole run's verdict,
+    the pair this round-18 finding closed for files that have `target_same`; the left badge is now the same-members verdict (tests/test_round19_b.py)."""
     rep, t, _ = flip_report(tmp_path, base_same=dict(verdict="NO-GO", p_fail=0.125, lo=0.03, hi=0.3, n=32), n=64)       # round 17's flip.json: no target_same
     assert rep["vehicles"]["usv"]["fix"]["target_same"] is None
-    assert "P(fail) 0.125 on the same 32 members becomes 0 " in t and "MARGINAL to GO (Stage 1, n = 16 members)" in t and "whole run:" not in t
+    assert "P(fail) 0.125 on the same 32 members becomes 0 " in t and "NO-GO (whole run: MARGINAL) to GO (Stage 1, n = 16 members)" in t
     assert "What would fix it (GO): " in t and "A Stage-1 row is a fix when" not in t
 
 
@@ -187,8 +189,9 @@ def two_gliders(a, b):
     return m
 
 
-CASE = ("{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray from 300 m to the horizon its loss minus the Fresnel loss is "
-        "{figures} for this pair of heights ({pair}): {effect}; nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
+CASE = ("{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) from 300 m to the horizon its loss minus "
+        "the Fresnel loss is {figures} for this pair of heights ({pair}): {effect}; at a wave height of 1 to 3 m these figures are different (L23); nearer "
+        "than 300 m this is not stated (CREDIBILITY, limitation L23).")                              # round 19, M-3: "at Hs 0" and what it leaves out
 LOW = "the loss is overstated by {a} dB, so the margin is too low by that much and a GO can show as MARGINAL or NO-GO"
 BOTH = "the loss is overstated by up to {hi} dB (the margin too low) and understated by up to {lo} dB (the margin too high)"
 NOT_MEASURED = ("{start} The two-ray model takes the ground reflection as -1, which cancels the two rays as an antenna goes to the surface, and its error "

@@ -40,7 +40,7 @@ from numpy.typing import NDArray
 from . import budget, config, credibility
 from .config import ConfigError, json_object
 from .physics import comms
-from .stage1 import NOT_EXERCISED, _classes, path_speed as _member_speeds
+from .stage1 import NOT_EXERCISED, _classes, path_speed as _member_speeds, ship_antenna_m
 from .env.remote import sha256
 from .ledger import STAGES
 from .stats import intervals, sampling, sequential
@@ -402,9 +402,11 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
     f = flip["vehicles"].get(vid)
     if f is None:
         return dict(available=True, needed=False)
-    from .whatif import BASE_SAME_RUN                                 # whatif imports report
+    from .whatif import BASE_SAME_FLAGS, BASE_SAME_RUN                # whatif imports report
     ref, src = tr.ref("emulator", output="flip.json"), f"emulator/flip.json vehicles.{vid}"
     same = f.get("base_same")                                        # the unchanged mission on the Stage-1 rows' members (round 17, M-1); None: not measured
+    phrase = (same or {}).get("source")                              # where it came from: one of whatif's two phrases, else not known (round 19, M-13)
+    phrase = phrase if isinstance(phrase, str) else None
 
     def one(t: dict[str, Any], path: str) -> dict[str, Any]:
         """A tried change: its P(fail) with the interval of its method, and how it was answered."""
@@ -431,8 +433,8 @@ def _fix(flip: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any]:
                     # `available`: the unchanged mission's verdict and P(fail) on the Stage-1 rows' members exist, whatever they came from (what the text below
                     # needs); `measured`: a batch was RUN for them. A baseline read from the base run's failure flags (`source`) was not measured, and one
                     # from a flip.json that does not record its source (rounds 17 and 18 before DECISIONS 993) has `measured` None: unknown, not false.
-                    available=same is not None, source=None if same is None else same.get("source"),
-                    measured=False if same is None else None if "source" not in same else same["source"] == BASE_SAME_RUN,
+                    available=same is not None, source=phrase,
+                    measured=False if same is None else {BASE_SAME_FLAGS: False, BASE_SAME_RUN: True}.get(phrase or ""),
                     n=None if f.get("n") is None else num(f["n"], "members", ref, src + ".n"),
                     **({} if same is None else dict(verdict=same["verdict"], n_rows=num(same["n"], "members", ref, src + ".base_same.n"),
                                                     p_fail=num(same["p_fail"], "fraction", ref, src + ".base_same.p_fail",
@@ -727,16 +729,21 @@ def _authority(a: dict[str, Any] | None, ref: dict[str, Any], src: str) -> dict[
 
 
 RF_LOW_ANTENNA_M = 0.5                              # the mission schema's own floor for the ship's antenna (mission.json); below it the two-ray model is off
+RF_NEAR_ANTENNA_M = 0.05                            # a height up to this far above it, or off a measured row by up to this, is still told about (round 19, M-2)
 
 
 def _end_antenna_m(end: str, mission: dict[str, Any], cls: dict[str, str]) -> float | None:
-    """The RF antenna height [m] of one end of a link: a glider's or a USV's platform value, the ship's `antenna_height_m` of the mission; None where it is not
-    one number (a UAS flies at 18 to 108 m, a ship without a height, a shore or an unknown id, a platform file that cannot be read)."""
-    from .physics import glider, usv
+    """The RF antenna height [m] of one end of a link: a glider's or a USV's platform value, the ship's height as stage 1 takes it (`ship_antenna_m`: the
+    mission's `antenna_height_m`, else the UAS platform's `radio.ship_antenna_height_m`, else 10 m, which is what the link model used); None where it is not
+    one number (a UAS flies at 18 to 108 m, a shore or an unknown id, a platform file that cannot be read)."""
+    from .physics import glider, uas, usv
     try:
         v = next((v for v in mission["vehicles"] if v["id"] == end), None)
         if v is None:
-            return float(mission["ship"]["antenna_height_m"]) if end == mission["ship"]["id"] else None
+            if end != mission["ship"]["id"]:
+                return None
+            uas_v = next((x for x in mission["vehicles"] if cls.get(x["id"]) == "uas"), None)    # as stage1.evaluate_link picks the radio of the fallback
+            return ship_antenna_m(mission, uas.load_platform(uas_v["platform"])["radio"] if uas_v and "antenna_height_m" not in mission["ship"] else None)
         if cls[end] == "glider":
             return float(glider.load_platform(v["platform"])["antenna_height_m"])
         return float(usv.load_platform(v["platform"])["rf_antenna_height_m"]) if cls[end] == "usv" else None
@@ -744,44 +751,69 @@ def _end_antenna_m(end: str, mission: dict[str, Any], cls: dict[str, str]) -> fl
         return None
 
 
+def _nearest_row(known: list[float]) -> tuple[tuple[float, float], float] | None:
+    """(the row of `comms.LOW_ANTENNA_PAIR_BAND` nearest to two heights, the largest difference of a height from it [m]), or None for fewer than two heights."""
+    if len(known) != 2:
+        return None
+    return min(((row, max(abs(h - r) for h, r in zip(sorted(known), row, strict=True))) for row in comms.LOW_ANTENNA_PAIR_BAND), key=lambda x: x[1])
+
+
 def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None:
-    """Round 17, M-5, round 18, M-3, and the round 18 addendum (DECISIONS 991): the sentence for an RF link with a low antenna. The two-ray loss takes the
-    reflection coefficient as -1, which cancels the two rays as the height goes to zero. Its error is of the PAIR of heights and its DIRECTION depends on the
-    pair (`comms.LOW_ANTENNA_PAIR_BAND`: the model minus a flat-earth Fresnel two-ray, 300 m to the pair's radio horizon, measured; docs/PHYSICS.md 12.1,
-    CREDIBILITY L23). The link's two end heights map to a measured pair when, taken as a set, they are EXACTLY the heights of a row (0.1, 0.3, 0.5, 2.2, 15 m
+    """Round 17, M-5, round 18, M-3, the round 18 addendum (DECISIONS 991) and round 19, M-2 and M-3: the sentence for an RF link with a low antenna. The
+    two-ray loss takes the reflection coefficient as -1, which cancels the two rays as the height goes to zero. Its error is of the PAIR of heights and its
+    DIRECTION depends on the pair (`comms.LOW_ANTENNA_PAIR_BAND`: the model minus a flat-earth Fresnel two-ray at Hs 0, 300 m to the pair's radio horizon,
+    measured; docs/PHYSICS.md 12.1, CREDIBILITY L23). The link's two end heights map to a measured pair when, taken as a set, each is within
+    `credibility.LOW_ANTENNA_ROW_TOL_M` (0.001 m: over it a printed figure moves by under 0.1 dB, measured) of the heights of a row (0.1, 0.3, 0.5, 2.2, 15 m
     with the partner of that row); then the sentence prints that row's figures and what its signs do to the margin (`credibility.pair_effect`: too low, too
     high, or both with each extreme). Any other pair (a UAS end, a ship mast of another height, a height between the measured ones) is said to be not
-    measured, and no figure of another pair stands in for it. The note is for a link with an end at or below RF_LOW_ANTENNA_M; its start says which ends
-    ("Both ends ... 0.5 m or lower", "An end ... below 0.5 m", "An end ... of 0.5 m" are pinned by tests). None when the link is not an RF one or no end is
-    that low (the USV's 2.2 m whip with a UAS: L23 says it)."""
+    measured, and no figure of another pair stands in for it; where a pair is within RF_NEAR_ANTENNA_M of a row the sentence also says that the nearest
+    measured pair's margin is biased. The note is for a link with an end at or below RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M; its start says which ends ("Both
+    ends ... 0.5 m or lower", "An end ... below 0.5 m", "An end ... of 0.5 m" are pinned by tests; "just above 0.5 m" is the fourth). None when the link
+    is not an RF one or no end is that low (the USV's 2.2 m whip with a UAS: L23 says it)."""
     if lk["kind"] != "rf":
         return None
     cls = _classes(mission)
     heights = {end: _end_antenna_m(end, mission, cls) for end in (lk["a"], lk["b"])}
     hs = list(heights.values())
-    if not any(h is not None and h <= RF_LOW_ANTENNA_M for h in hs):
+    tol = credibility.LOW_ANTENNA_ROW_TOL_M
+    if not any(h is not None and h <= RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M for h in hs):
         return None
 
     def named(keep: Callable[[float | None], bool]) -> str:
         return ", ".join(f"{end} ({'no single height' if h is None else f'{h:g} m'})" for end, h in heights.items() if keep(h))
 
     def low(h: float | None) -> bool:
-        return h is not None and h < RF_LOW_ANTENNA_M
-    if all(h is not None and h <= RF_LOW_ANTENNA_M for h in hs):
+        return h is not None and h < RF_LOW_ANTENNA_M - tol
+
+    def at_floor(h: float | None) -> bool:
+        return h is not None and abs(h - RF_LOW_ANTENNA_M) <= tol
+    if all(h is not None and h <= RF_LOW_ANTENNA_M + tol for h in hs):
         start = f"Both ends of this RF link have an antenna of {RF_LOW_ANTENNA_M:g} m or lower: {named(lambda h: True)}."
     elif any(low(h) for h in hs):
         start = f"An end of this RF link has an antenna below {RF_LOW_ANTENNA_M:g} m: {named(low)}."
+    elif any(at_floor(h) for h in hs):
+        start = f"An end of this RF link has an antenna of {RF_LOW_ANTENNA_M:g} m: {named(at_floor)}."
     else:
-        start = f"An end of this RF link has an antenna of {RF_LOW_ANTENNA_M:g} m: {named(lambda h: h == RF_LOW_ANTENNA_M)}."
+        start = (f"An end of this RF link has an antenna just above {RF_LOW_ANTENNA_M:g} m (up to {RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M:g} m): "
+                 f"{named(lambda h: h is not None and h <= RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M)}.")
     known = sorted(h for h in hs if h is not None)
-    pair = (known[0], known[1]) if len(known) == 2 else None
-    if pair is None or pair not in comms.LOW_ANTENNA_PAIR_BAND:
-        return (f"{start} The two-ray model takes the ground reflection as -1, which cancels the two rays as an antenna goes to the surface, and its error "
+    near = _nearest_row(known)
+    if near is None or near[1] > tol:
+        text = (f"{start} The two-ray model takes the ground reflection as -1, which cancels the two rays as an antenna goes to the surface, and its error "
                 f"is of the pair of heights: this pair ({named(lambda h: True)}) is not among those measured (L23 lists them), so no error band is stated for "
-                "this margin (CREDIBILITY, limitation L23).")
-    return (f"{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray from 300 m to the horizon its loss minus the Fresnel loss "
-            f"is {credibility.pair_figures(pair)} for this pair of heights ({pair[0]:g} m with {pair[1]:g} m): {credibility.pair_effect(pair)}; nearer than "
-            "300 m this is not stated (CREDIBILITY, limitation L23).")
+                "this margin")
+        if near is not None and near[1] <= RF_NEAR_ANTENNA_M:             # off a row: the row is not this pair's, and it is not silence (round 19, M-2)
+            row = near[0]
+            text += (f"; the nearest measured pair, {row[0]:g} m with {row[1]:g} m, has a biased margin ({credibility.pair_effect(row)}), and this pair's "
+                     "figures are not that pair's (L23 says how far a height off a row moves them)")
+        return text + " (CREDIBILITY, limitation L23)."
+    row = near[0]
+    label = f"{row[0]:g} m with {row[1]:g} m"
+    shown = f"{known[0]:g} m with {known[1]:g} m"
+    heights_text = label if shown == label else f"{shown}, read as the measured {label}"
+    return (f"{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) from 300 m to the horizon its loss "
+            f"minus the Fresnel loss is {credibility.pair_figures(row)} for this pair of heights ({heights_text}): {credibility.pair_effect(row)}; at a wave "
+            "height of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
 
 
 def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str, Any]:
@@ -1457,7 +1489,7 @@ def _fix_html(f: dict[str, Any]) -> str:
         before = (_n(f["p_fail_before"]) if sm is None else f"{_n(sm['p_fail'])} on the same {_n(sm['n_rows'])}" if sm["available"]
                   else f"{_n(f['p_fail_before'])} on the whole run{'' if sm['n'] is None else ' of ' + _n(sm['n'])}")      # round 17, M-1
         was = _badge(f["verdict_before"])                          # round 18, M-1: the verdict on the left is of the baseline the P(fail) on the left is of
-        if sm is not None and sm["available"] and f.get("target_same") is not None:
+        if sm is not None and sm["available"]:                     # round 19, M-4: of an older flip.json too (one with `base_same` and no `target_same`)
             was = _badge(sm["verdict"]) + ("" if sm["verdict"] == f["verdict_before"] else f" (whole run: {_badge(f['verdict_before'])})")
         line = (f"<b>{e(b['change'])}</b>: P(fail) {before} becomes {_n(b['p_fail'])} ({u['lo']:.3g} to {u['hi']:.3g}, {e(u['kind'])}), "
                 f"{was} to {_badge(b['verdict'])} ({how}){'; ' + SAME_AS_BASELINE if b.get('same_as_baseline') else ''}."
@@ -1484,8 +1516,10 @@ def _fix_html(f: dict[str, Any]) -> str:
         whole = f"the whole run's P(fail) {_n(f['p_fail_before'])}" + ("" if sm["n"] is None else f", of {_n(sm['n'])}")
         if sm["available"]:
             ts = f.get("target_same")
-            reach = "" if ts is None else (f" A Stage-1 row is a fix when it reaches {e(ts)}" if ts else
-                                           " The unchanged mission is already GO on those members, so no Stage-1 row can be a fix")
+            reach = (f" A Stage-1 row is judged against the whole run's target, {e(f['target'])}: this file, made by an older round, does not record the "
+                     "target of the rows' own members." if ts is None else
+                     f" A Stage-1 row is a fix when it reaches {e(ts)}" if ts else
+                     " The unchanged mission is already GO on those members, so no Stage-1 row can be a fix")
             reach += "" if ts is None else f" (the whole run's target is {e(f['target'])})." if ts != f["target"] else "."
             wm += ("<p class=muted>The Stage-1 rows are compared with the unchanged mission on their own members: "
                    f"{_badge(sm['verdict'])} P(fail) {_n(sm['p_fail'])} on {_n(sm['n_rows'])}. {whole[0].upper() + whole[1:]}.{reach}</p>")

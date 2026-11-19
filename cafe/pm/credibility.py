@@ -59,6 +59,20 @@ def pair_effect(pair: tuple[float, float], short: bool = False) -> str:
             f"the loss is overstated by up to {hi:.1f} dB (the margin too low) and understated by up to {-lo:.1f} dB (the margin too high)")
 
 
+# Round 19, M-2: a height within this of a row of `comms.LOW_ANTENNA_PAIR_BAND` is read as that row. Measured (tests/test_round19_b.py): over 0.001 m at one end
+# every figure of every row moves by under 0.1 dB (0.093 dB at 0.1 m, the most sensitive); over 0.005 m the 0.1 m row moves by 0.45 dB, so no larger tolerance
+# keeps a printed figure to the table's 0.1 dB for every row.
+LOW_ANTENNA_ROW_TOL_M = 0.001
+
+# Round 19, M-3: the three pairs with a 15 m partner re-measured at Hs 1, 2 and 3 m (the table above is Hs 0): {pair: {Hs [m]: (min, median, max) [dB]}} of the
+# model's loss minus a flat-earth Fresnel two-ray whose reflection coefficient carries the same Ament factor (300 m to the radio horizon, 400 points, 915 MHz,
+# eps_c 72.8 - j118.9; tests/test_round19_b.py recomputes it to 0.1 dB). The other pairs were not measured above Hs 0.
+LOW_ANTENNA_HS_BAND: dict[tuple[float, float], dict[int, tuple[float, float, float]]] = {
+    (0.1, 15.0): {1: (10.9, 15.2, 16.0), 2: (6.1, 15.2, 15.9), 3: (2.7, 15.2, 15.6)},
+    (0.3, 15.0): {1: (2.0, 5.2, 6.1), 2: (2.5, 5.2, 6.1), 3: (1.5, 5.5, 6.2)},
+    (0.5, 15.0): {1: (-2.0, 1.3, 2.3), 2: (-0.3, 1.5, 2.4), 3: (0.3, 1.9, 2.5)},
+}
+
 LOW_ANTENNA_NAMES = {0.1: "the lowest height a platform file allows", 0.3: "the Slocum", 0.5: "the Seaglider", 2.2: "the USV's whip",
                      15.0: "the ship's mast"}
 
@@ -66,12 +80,19 @@ LOW_ANTENNA_NAMES = {0.1: "the lowest height a platform file allows", 0.3: "the 
 def _l23_text() -> str:
     pairs = "; ".join(f"{lo:g} m ({LOW_ANTENNA_NAMES[lo]}) with {hi:g} m ({LOW_ANTENNA_NAMES[hi]}) {pair_figures((lo, hi))}, "
                       f"{pair_effect((lo, hi), True)}" for lo, hi in sorted(comms.LOW_ANTENNA_PAIR_BAND))
+    hs = "; ".join(f"{lo:g} m: " + ", ".join(f"at Hs {h} m {x[0]:+.1f} to {x[2]:+.1f} dB (median {x[1]:+.1f})" for h, x in by.items())
+                   for (lo, _), by in sorted(LOW_ANTENNA_HS_BAND.items()))
     return ("RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip: the two-ray model takes the reflection coefficient as -1, which "
             "makes the field vanish with the height, where the sea's own coefficient leaves a floor, and the error is of the pair of heights and has no "
             "one direction; against a Fresnel two-ray with the assumed sea (flat earth, 915 MHz, Hs 0, from 300 m to the pair's radio horizon or 12 km; a "
             "bound, as it has no surface wave) the model's loss minus the Fresnel loss, minimum to maximum, is, by the heights of the two antennas: " + pairs +
             ". A positive figure is a loss overstated and a margin too low (a GO can show as MARGINAL or NO-GO), a negative one a loss understated and a "
-            "margin too high. A pair of heights that is not listed, such as the UAS's 18 to 108 m with the USV's 2.2 m whip, a ship mast other than 15 m "
+            "margin too high. These are for a calm sea (Hs 0); against the same Fresnel two-ray at a wave height of 1, 2 and 3 m, with a 15 m partner, by the "
+            "lower height, " + hs +
+            " (measured; the other pairs were not measured above Hs 0). A height within 0.001 m of a listed one is read as that one (over that the figures "
+            "move by under 0.1 dB, measured); a height further off is not measured, the card says so and names the nearest listed pair as biased, and moving "
+            "the lower antenna by 0.01 m moves a pair's figures by up to 1.0 dB at 0.1 m, 0.4 dB at 0.3 m and 0.2 dB at 0.5 m (under 0.1 dB at 2.2 m). "
+            "A pair of heights that is not listed, such as the UAS's 18 to 108 m with the USV's 2.2 m whip, a ship mast other than 15 m "
             "or any height between the listed ones, is not measured and no band is stated for it; nearer than 300 m none of this is stated (from 200 m, "
             "0.5 m with a 15 m partner is understated by up to 5.0 dB)")
 
