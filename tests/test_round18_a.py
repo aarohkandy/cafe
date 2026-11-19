@@ -315,16 +315,16 @@ def test_m5_a_budget_that_is_not_the_runs_is_refused_naming_both(wi, capsys):  #
 
 
 def test_m5_the_ensemble_of_the_fallback_is_the_runs_own_and_not_this_machines_plan_for_the_budget(wi):  # noqa: F811
-    edit_json(wi.run / "plan.json", lambda d: d.update(batch=24, n_min=24, n_max=72))
+    edit_json(wi.run / "plan.json", lambda d: d.update(batch=24, n_min=24, n_max=48))
     assert cli.main(whatif_args(wi, "--shift", "6h")) == 0
     p = wi.seen["plan"]
-    assert (p["batch"], p["n_min"], p["n_max"], p["budget"]) == (24, 24, 72, "quick")
+    assert (p["batch"], p["n_min"], p["n_max"], p["budget"]) == (24, 24, 48, "quick")
     assert cli.main(whatif_args(wi, "--shift", "6h", "--budget", "quick")) == 0                    # the run's own budget, spelled out, is accepted
     assert wi.seen["plan"]["batch"] == 24
 
 
 def test_m5_a_run_made_with_another_budget_is_answered_with_that_budgets_plan(wi):  # noqa: F811
-    edit_json(wi.run / "plan.json", lambda d: d.update(budget="ci"))
+    edit_json(wi.run / "plan.json", lambda d: d.update(budget="ci", batch=16, n_min=8, n_max=16))
     assert cli.main(whatif_args(wi, "--shift", "6h")) == 0 and wi.seen["plan"]["budget"] == "ci"   # no --budget needed for the run RUNBOOK invites to rerun
     assert cli.main(whatif_args(wi, "--shift", "6h", "--budget", "ci")) == 0
 

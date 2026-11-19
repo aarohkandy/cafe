@@ -110,8 +110,8 @@ def divergence_factor(d: FA, r1: FA, r2: FA, psi: FA, a: float = A_EFF) -> F:
 # The error of the -1 reflection for a low antenna, by PAIR of antenna heights [m] (the lower first): the two-ray loss minus a flat-earth Fresnel two-ray's
 # (eps_c 72.8 - j118.9, 915 MHz, vertical polarisation, Hs 0), minimum / median / maximum [dB] over 400 points from 300 m to the pair's radio horizon
 # or 12 km, measured on orca and held to 0.1 dB by tests/test_round18_x.py. Positive: the loss is overstated, the margin too low; negative: understated,
-# too high. The link card (report._low_antenna_note) and L23 (credibility.LIMITATIONS) print these figures and the direction their signs give; a pair
-# not here is not measured.
+# too high. The live band (physics/rfband.pair_band) equals these ten rows to 0.1 dB (tests/test_round18_x.py, tests/test_round21_b.py) and the link card
+# (report._low_antenna_note) and L23 (credibility.LIMITATIONS) print it; this table is the fixture it is held to; a pair not here is computed live.
 LOW_ANTENNA_PAIR_BAND: dict[tuple[float, float], tuple[float, float, float]] = {
     (0.1, 15.0): (11.4, 15.1, 16.0), (0.3, 15.0): (1.2, 5.1, 6.0), (0.5, 15.0): (-2.9, 1.3, 2.2), (2.2, 15.0): (-3.3, -0.4, 0.2),
     (0.3, 0.5): (9.0, 9.3, 9.3), (0.3, 0.3): (11.3, 11.4, 11.4), (0.5, 0.5): (6.4, 6.7, 6.7),
@@ -168,8 +168,9 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     can be too HIGH as well as too low for 0.5 m with 15 m (up to 2.9 dB too high, up to 2.2 dB too low), for two 2.2 m ends (up to 2.4 dB too high, 1.6 dB
     too low) and for 2.2 m with 15 m (up to 3.3 dB too high, 0.2 dB too low). Round 17's reading, that a low antenna's margin is conservative and the shipped
     antennas are unaffected, held for the pairs of the first group and not for the others, and round 18's first restatement (one pooled bound of 3.3 dB that 'at
-    worst understates') was wrong for 0.5 m with a 2.2 m partner, which is overstated by +1.8 to +2.7 dB. A pair that is not in the table is NOT MEASURED: a
-    UAS partner (18 to 108 m), a ship mast other than 15 m, any height between the listed ones, any pair with 0.1 m other than 15 m; no band is stated for it.
+    worst understates') was wrong for 0.5 m with a 2.2 m partner, which is overstated by +1.8 to +2.7 dB. A pair that is not in the table is computed live by
+    `physics/rfband.pair_band` and printed on the card of its link (rounds 17 to 20: 'NOT MEASURED, no band is stated'; for a UAS partner at 18 to 108 m the
+    band grows to about -13 to +44 dB).
     Below 300 m none of this is stated: from 200 m the 0.5 m case with a 15 m partner is understated by up to 5.0 dB, the 0.3 m case with a 15 m partner by
     up to 0.6 dB, and the 2.2 m case with a 15 m partner is overstated by +31.9 dB at one null of that grid. Not run: a parabolic equation for two low ends
     (its starter does not hold below about 1 m), any distance below 200 m, and Hs above 0.

@@ -161,7 +161,7 @@ def test_m3_the_hangar_warns_of_a_grid_with_no_index_wherever_it_stands_and_says
     assert "GCI up to 45%" in hangar.grid_warning(result(0.05, 0.45))
     for order in ((NAN, 0.05), (0.05, NAN), (0.05, None, 0.02), (INF,)):
         w = hangar.grid_warning(result(*order))
-        assert w and "a direction has no GCI at all" in w and "worst" in w and "verdicts lean MARGINAL" in w and "inf" not in w
+        assert w and "a direction has no GCI at all" in w and "worst" in w and "not decided by the CFD" in w and "inf" not in w
     fs = dict(fs=dict(speeds={"1.0": dict(gci=0.01), "1.5": dict(gci=NAN)}))
     assert "no GCI at all" in hangar.grid_warning(fs)
     assert "GCI up to 400%" in hangar.grid_warning(dict(cfd_aoa=dict(dirs={"x": dict(gci=4.0)}), fs=None))

@@ -256,7 +256,7 @@ def grid_warning(hangar):
     gcis = [r.get("gci") for c in (hangar.get("cfd"), hangar.get("cfd_aoa")) if c for r in c["dirs"].values()]
     gcis += [r.get("gci") for r in (hangar.get("fs") or {}).get("speeds", {}).values()]
     worst = vv.worst_gci(gcis)
-    if not gcis or worst <= vv.GCI_TRUSTED:
+    if not gcis or vv.gci_trusted(worst):
         return None
     how = f"GCI up to {worst:.0%}" if worst != float("inf") else "a direction has no GCI at all (the fine-grid value is zero or the grids are too alike), which counts as the worst"
     return (f"CFD grid study not converged: the coarse and fine meshes disagree ({how}), so the grid index cannot stand for the drag uncertainty: "

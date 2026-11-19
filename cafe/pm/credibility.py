@@ -907,8 +907,9 @@ def check_summary(s1b: dict[str, Any] | None, where: str = "stage1b/summary.json
 
 
 def _num(x: Any) -> float:
-    """A stored number read back: the pipeline writes every non-finite float as null (`ledger.clean`), and null is no number (round 11, M-1)."""
-    return math.nan if x is None else float(x)
+    """A stored number read back: the pipeline writes every non-finite float as null (`ledger.clean`), and null is no number (round 11, M-1); anything that
+    is not a finite real number (a bool, a numeral in a string, an integer too large for a float: round 21, M-9) is no number either."""
+    return float(x) if config.finite_real(x) else math.nan
 
 
 def _fmt(x: float, spec: str) -> str:
