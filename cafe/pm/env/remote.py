@@ -23,6 +23,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from cafe import atomic
+from ..jsonio import load_json
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 EXTRA_CA = ROOT / "config" / "certs" / "incommon_rsa_server_ca2.pem"
@@ -306,7 +307,7 @@ def _download(url: str, path: pathlib.Path, sha: str | None, pin: bool, part: pa
     total, valid = _probe(url)
     ident = dict(valid, total=total)
     try:
-        seen = json.loads(mark.read_text())
+        seen = load_json(mark.read_text())
     except (OSError, ValueError):
         seen = None
     ifr = _if_range(valid)

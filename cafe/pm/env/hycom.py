@@ -37,6 +37,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from cafe import atomic
+from ..jsonio import load_json
 from . import conventions as cv, orca, remote
 from .environment import FETCH_CMD, seconds
 
@@ -201,7 +202,7 @@ def _chunks_dir(c: pathlib.Path) -> bool:
 def _is_array(q: pathlib.Path) -> bool:
     """`q` is one Zarr array: v2 metadata, v3 metadata that says array, or (metadata lost) a chunk directory."""
     try:
-        meta = json.loads((q / "zarr.json").read_text()).get("node_type") if (q / "zarr.json").is_file() else None
+        meta = load_json((q / "zarr.json").read_text()).get("node_type") if (q / "zarr.json").is_file() else None
     except (OSError, ValueError, AttributeError):
         meta = None
     return (q / ".zarray").exists() or meta == "array" or (meta is None and _chunks_dir(q / "c"))

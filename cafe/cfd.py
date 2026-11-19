@@ -10,6 +10,7 @@ import numpy as np
 import trimesh
 
 from cafe import atomic
+from cafe.pm.jsonio import load_json
 from cafe.pm import par as _par                 # the module under an alias: this file defines a function `par` below (round 18 merge, job 2 (d))
 
 FOAM = "source /usr/lib/openfoam/openfoam2506/etc/bashrc >/dev/null 2>&1; "
@@ -113,7 +114,7 @@ def cached(key, stl, log, compute):
     f = CACHE / f"{h}.json"
     if f.exists():
         try:
-            r = json.loads(f.read_text())["result"]
+            r = load_json(f.read_text())["result"]
         except (OSError, ValueError, KeyError, TypeError) as e:
             log(f"CFD: the cache file {f.name} cannot be read ({type(e).__name__}: {e}); computing again")
             try:

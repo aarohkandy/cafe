@@ -841,13 +841,19 @@ def conf_ok(c: Any) -> bool:
     return real_ok(c) and 0 < c < 1
 
 
+def counts_rule() -> str:
+    """The rule of `counts_ok` as the sentence every refusal of a stored count quotes (round 21 merge, D-6: `acceptance._damage` printed a shorter rule, without
+    the bound, for an `n` above 2**53 that satisfies every clause it quoted): one text for `check_counts` and `acceptance._damage`."""
+    return f"integers, n >= 1, 0 <= k_fail <= n, n at most {intervals.MAX_COUNT}"
+
+
 def check_counts(k: Any, n: Any, src: str) -> None:
     """A stored ensemble count is an integer `n` >= 1 and an integer 0 <= `k` <= `n` (`counts_ok`), else a ConfigError (`error:`, exit 2), not the
     ZeroDivisionError or ValueError that `intervals.wilson` and `interval` raise on a count that is not one. The one rule of the credibility page and the
     report, for the stage-1b summary's ensembles and the sensitivity cases (round 11, M-5), and of `acceptance.compare` for the golden's (look-ahead L0)."""
     if not counts_ok(k, n):
-        raise config.ConfigError(f"{src}: k_fail {k!r} of n {n!r} members is not a count (integers, n >= 1, 0 <= k_fail <= n, n at most "
-                                 f"{intervals.MAX_COUNT}): the summary was edited or is damaged; run it again (--fresh)")
+        raise config.ConfigError(f"{src}: k_fail {k!r} of n {n!r} members is not a count ({counts_rule()}): the summary was edited or is damaged; "
+                                 "run it again (--fresh)")
 
 
 def check_never_required(never: Any, k: Any, n: Any, src: str) -> None:

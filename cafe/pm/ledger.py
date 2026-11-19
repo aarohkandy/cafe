@@ -16,6 +16,7 @@ from types import TracebackType
 from typing import Any, Literal
 
 from cafe import atomic
+from .jsonio import load_json
 from .env.remote import sha256, tree_sha256
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -130,7 +131,7 @@ def copy_manifest(src: str | pathlib.Path, dest: str | pathlib.Path) -> dict[str
     with open(src, "rb") as f:
         atomic.write_with(dest, lambda fh: shutil.copyfileobj(f, fh))      # a temporary of its own, O_EXCL, the mode kept (round 17, M-9 sibling)
     try:
-        man = json.loads(dest.read_text())
+        man = load_json(dest.read_text())
     except ValueError:                                                    # not JSON (a damaged disk): no record; it covers nothing, so it is fetched again
         return {}
     return man if isinstance(man, dict) else {}
@@ -345,7 +346,7 @@ def shared_diff(man: dict[str, Any], root: pathlib.Path) -> tuple[list[tuple[pat
     says. Option kept out: keeping the old parts costs disk (P-34 (c))."""
     want = {**{f"hours/{n}": h for n, h in man.get("parts", {}).items()}, **{k: r["sha256"] for k, r in man.get("files", {}).items()}}
     try:
-        live = json.loads((root / "manifest.json").read_text()).get("parts", {})
+        live = load_json((root / "manifest.json").read_text()).get("parts", {})
     except (ValueError, OSError, AttributeError):
         live = {}
     changes: list[tuple[pathlib.Path, str, str | None]] = []
@@ -378,7 +379,7 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
     if not p.exists():
         return None
     try:
-        d: dict[str, Any] = json.loads(p.read_text())
+        d: dict[str, Any] = load_json(p.read_text())
         if not isinstance(d, dict):
             raise ValueError("not a JSON object")
     except (ValueError, OSError) as e:                                   # a half-written ledger (killed or full-disk run): the stage runs again
@@ -402,7 +403,7 @@ def done(run_dir: str | pathlib.Path, stage: str, config_hash: str) -> dict[str,
                 return None
             if i.get("shared") and f.is_file():                              # a copy of a shared cache manifest: the files it names, as the audit asks
                 root = pathlib.Path(i["shared"]).parent
-                if not root.is_dir() or shared_changes(json.loads(f.read_text()), root):
+                if not root.is_dir() or shared_changes(load_json(f.read_text()), root):
                     return None
     except (KeyError, TypeError, AttributeError, ValueError) as e:        # valid JSON of the wrong shape: as a half-written ledger, the stage runs again
         print(f"note: ledger {p} is damaged or incomplete ({type(e).__name__}: {e}): the stage runs again", file=sys.stderr)
@@ -417,7 +418,7 @@ def rerecord(run_dir: str | pathlib.Path, stage: str, written: list[pathlib.Path
     p = pathlib.Path(run_dir) / "checkpoints" / stage / "ledger.json"
     if not p.is_file():
         return False
-    d = json.loads(p.read_text())
+    d = load_json(p.read_text())
     roots = run_roots(d)
     outs = {real(resolve(o["path"], run_dir, roots)): o for o in d["outputs"]}
     for w in written:

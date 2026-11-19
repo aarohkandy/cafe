@@ -11,6 +11,7 @@ import datetime as dt, hashlib, json, os, pathlib, subprocess, sys, time, urllib
 import numpy as np
 
 from cafe import atomic
+from cafe.pm.jsonio import load_json
 
 CACHE = pathlib.Path(os.environ.get("CAFE_WORK", "/work")) / "ocean"
 HYCOM = ("https://tds.hycom.org/thredds/dodsC/GLBy0.08/expt_93.0/uv3z",     # same experiment, same units and
@@ -132,10 +133,10 @@ def _child_axes(url, out):
 
 def _child_slice(url, sl, names, out):
     import netCDF4
-    k0, k1, d0, d1, j0, j1, i0, i1 = json.loads(sl)
+    k0, k1, d0, d1, j0, j1, i0, i1 = load_json(sl)
     ds = netCDF4.Dataset(url)
     s = (slice(k0, k1), slice(d0, d1), slice(j0, j1), slice(i0, i1))
-    arrays = {n: np.ma.filled(ds[v][s].astype(float), np.nan) for n, v in json.loads(names).items()}
+    arrays = {n: np.ma.filled(ds[v][s].astype(float), np.nan) for n, v in load_json(names).items()}
     atomic.write_with(out, lambda fh: np.savez(fh, **arrays))        # the parent reads `out` only once it is whole (and the child's own temporary is O_EXCL)
 
 

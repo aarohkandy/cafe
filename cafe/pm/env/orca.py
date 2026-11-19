@@ -21,6 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from cafe import atomic
+from ..jsonio import load_json
 from . import remote
 
 BASE = os.environ.get("CAFE_ORCA", "https://orca.atmos.washington.edu/data/temp/model/run_2023mar_waves_v4")
@@ -237,7 +238,7 @@ def read_json(path: str | pathlib.Path) -> dict[str, Any] | None:
     """The JSON object in `path`, or None when the file is absent, empty, truncated or not an object: the caller treats it as "no record" and fetches
     again (the writers below replace the file atomically, so only a file from an older run or a damaged disk is ever like that)."""
     try:
-        d = json.loads(pathlib.Path(path).read_text())
+        d = load_json(pathlib.Path(path).read_text())
     except (OSError, ValueError):
         return None
     return d if isinstance(d, dict) else None

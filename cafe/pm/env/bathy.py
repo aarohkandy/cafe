@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from cafe import atomic
+from ..jsonio import load_json
 from .. import Tagged
 from ..config import assumptions as _assumptions
 from . import conventions as cv, remote
@@ -146,7 +147,7 @@ def from_gebco(path: Any) -> Bathymetry:
     empty one, which no caller's `except` listed (round 14, M-23)."""
     try:
         with np.load(path) as z:
-            attrs = json.loads(str(z["attrs"]))
+            attrs = load_json(str(z["attrs"]))
             lon, lat, elev = z["lon"], z["lat"], np.ascontiguousarray(z["elevation"])
             want, doi = attrs["sha256"], attrs["doi"]
     except (EOFError, zipfile.BadZipFile, zlib.error, KeyError, TypeError, ValueError) as e:     # TypeError: attrs is JSON but not an object
@@ -242,7 +243,7 @@ def receipts(cache: Any = None, url: str | None = None) -> bool:
                 "GEBCO_2026 elevation positive up; raster SHA-256 matched the one recorded at download", rel=False)
         if url is not None:
             import h5py
-            meta = json.loads(str(z["attrs"]))
+            meta = load_json(str(z["attrs"]))
             lo, la = float(z["lon"][i]), float(z["lat"][j])
             small = fetch_gebco((la, la + 11 * GEBCO_RES_DEG, lo, lo + 11 * GEBCO_RES_DEG), pathlib.Path(cache).with_name("window_check.npz"), url)
             w = np.load(small)

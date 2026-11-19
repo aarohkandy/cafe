@@ -34,6 +34,7 @@ from typing import Any, Callable
 import numpy as np
 
 from .. import config, vv
+from ..jsonio import finite_real, load_json
 from . import windows as W
 
 SOLVER = "openfoam-pimpleFoam-les"                                           # config/throughput.json entry the free-surface case is priced with
@@ -45,7 +46,7 @@ KEEL_OVERLAP = 0.25                                                          # k
 
 def fluidx3d_config() -> dict[str, Any]:
     """config/premission.json (the `fluidx3d` key is read from it; absent = disabled)."""
-    return json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.is_file() else {}
+    return load_json(CONFIG_FILE.read_text()) if CONFIG_FILE.is_file() else {}
 
 
 # ---------------------------------------------------------------------------------------------------- geometry
@@ -119,7 +120,7 @@ def nproc() -> int:
 def rate(cores: int) -> tuple[float, str]:
     """(cell-updates/s, where from): config/throughput.json[SOLVER], interpolated between the measured core counts (clamped outside)."""
     from cafe import planner
-    b = json.loads(planner.BENCH.read_text())[SOLVER]
+    b = load_json(planner.BENCH.read_text())[SOLVER]
     xs = sorted(int(k) for k in b["cell_updates_per_s"])
     r = float(np.interp(cores, xs, [b["cell_updates_per_s"][str(k)] for k in xs]))
     return r, f"{SOLVER} measured on {b['host']} {b['measured']} at {xs} cores, interpolated to {cores}"
@@ -172,7 +173,7 @@ def two_grid(stl: str, draft: float, workdir: pathlib.Path, speeds: list[float],
 def run_child(job: str, out: str, runner: Callable[..., dict[str, Any]] | None = None) -> int:
     """Child of the stage: job = JSON (stl, draft, speeds, config, vehicle); writes windows.free_surface_window's result as JSON. The case
     lives in a temporary directory that goes away with it."""
-    j = json.loads(pathlib.Path(job).read_text())
+    j = load_json(pathlib.Path(job).read_text())
     veh = W.Vehicle(**j["vehicle"]) if j["vehicle"] else None
     with tempfile.TemporaryDirectory(prefix="fs_") as wd:
         r = W.free_surface_window(j["stl"], j["draft"], j["speeds"], wd, runner=runner or two_grid, config=j["config"], vehicle=veh)
@@ -211,7 +212,7 @@ def row_fields(r: dict[str, Any], speed: float, rho: float, area: float, cd_hang
         raise ValueError(f"the free-surface run returned a non-physical resistance ({R} N)")
     cd = R / q
     gci = s.get("gci")
-    gci_ok = gci is not None and math.isfinite(gci)
+    gci_ok = finite_real(gci)       # a bool, a text or an integer too large for a float is no index (round 21 merge: `math.isfinite` raised on the last)
     informative = gci_ok and gci <= GCI_MAX
     ratio = vv.refinement_ratio(r["cells"], r["coarse_cells"]) if r.get("cells") and r.get("coarse_cells") else None
     spread = math.hypot(gci * cd if gci_ok else 0.0, (s.get("std") or 0.0) / q)

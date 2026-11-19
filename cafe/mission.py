@@ -16,6 +16,7 @@ import datetime as dt, time
 import numpy as np
 
 from cafe import ctrl, dyn, env as envm
+from cafe.pm.jsonio import load_json
 from cafe.pm import vv
 from cafe.vehicle import RHO, G
 
@@ -62,15 +63,18 @@ def drag_sigma(v):
     CFD, 30 % estimate) combined with the measured mesh uncertainty (the GCI), and never more than an estimate's (SIG["drag_est"]). An index that cannot be
     trusted (`vv.gci_trusted` is False: NaN, which `cfd.gci` writes where it has no index, inf, a missing key, or above `vv.GCI_TRUSTED`) cannot be sampled
     as a measured spread, so any one of them, in any direction, gives the spread of an ESTIMATE, exactly (round 20, M3; round 21, M-5: an index of 1.5 gave
-    a spread of 1.5, which puts most members BELOW nominal drag, the other way from the "verdicts lean MARGINAL" the warning said). That is one line, not a
-    branch: `vv.worst_gci` reads an untrusted index as inf or as a number above `GCI_TRUSTED` (0.3), and `hypot(0.10, g)` reaches the estimate's 0.30 at
-    g = 0.283, below it, so the cap IS the trust threshold (`tests/test_round21_d.py` holds that for the constants as they are). A resistance has its
-    `resistance_gci` always (`vehicle.build` sets it), and a missing one is no index; a missing `lift_gci` is no lift study, not a converged one."""
+    a spread of 1.5, which puts most members BELOW nominal drag, the other way from the "verdicts lean MARGINAL" the warning said). That is an explicit branch
+    (round 21 merge; batch D had it as the cap alone): the trusted ones combine as `hypot(0.10, the worst)`, still never above the estimate's 0.30, which an
+    index of 0.283 to 0.3 would reach or pass, so the spread never narrows as the index worsens (`tests/test_round21_d.py` holds the constants to that). A
+    negative index is untrusted too (`vv.gci_value` reads it as inf). A resistance has its `resistance_gci` always (`vehicle.build` sets it), and a missing
+    one is no index; a missing `lift_gci` is no lift study, not a converged one."""
     if v.resistance is not None:
         gcis = [v.limits.get("resistance_gci")]
     elif v.sources.get("drag") == "cfd":
         gcis = [c[3] for c in v.drag.values()] + ([v.limits["lift_gci"]] if "lift_gci" in v.limits else [])
     else:
+        return SIG["drag_est"]
+    if not all(vv.gci_trusted(g) for g in gcis):
         return SIG["drag_est"]
     return min(float(np.hypot(SIG["drag_cfd"], vv.worst_gci(gcis))), SIG["drag_est"])
 
@@ -654,7 +658,7 @@ if __name__ == "__main__":
     import json, pathlib, sys, traceback
     from cafe import atomic, hangar
     d = pathlib.Path(sys.argv[1])
-    m = json.loads((d / "mission.json").read_text())
+    m = load_json((d / "mission.json").read_text())
     status = lambda **kw: atomic.write_json(d / "status.json", dict(updated=time.time(), **kw))
     try:
         designs = d.parent.parent / "designs"

@@ -667,7 +667,8 @@ def test_the_method_of_an_acoustic_link_is_a_string_even_when_comms_returns_one_
     monkeypatch.setattr(stage1.comms, "acoustic_link", res)
     monkeypatch.setattr(stage1.comms, "bellhop_available", lambda: False)  # round 21, M-3: with Bellhop every needed sample is refined, `res` has no profile
     r = stage1.evaluate_link(LK["glider_eq-ship-acoustic"], out, MISSION, flat_env(1), 1, 3, [0])
-    assert isinstance(r["method"], str) and "bellhop" in r["method"] and r["success"].all()
+    assert isinstance(r["method"], str) and r["success"].all()
+    assert r["method"] == stage1.comms.THORP_DECIDES_LABEL      # round 21 merge: the label is stage 1's own, the helper's (called with no profile) is not used
 
 
 def test_a_nan_position_is_not_a_moment_the_link_was_required():
@@ -1738,13 +1739,14 @@ def test_a_link_required_at_no_sample_has_the_verdict_not_exercised_and_no_other
 
 def test_a_link_needed_by_some_members_is_never_not_exercised_whatever_the_median_need():
     """Round 9 M-17 (adversary): 14 members never need the link, 10 need it and all 10 fail. The median need_count is 0, but the link was exercised:
-    NOT EXERCISED is for no member needing it, so the 10 failures keep a graded verdict; the granularity flag stays keyed on the median."""
+    NOT EXERCISED is for no member needing it, so the 10 failures keep a graded verdict. Round 21 merge: the median need (and the granularity flag it decides)
+    is over the 10 members that needed the link, 30 samples, not over all 24 with the zeros of the 14 that never did: it was 0 and False."""
     names = list(stage1.priors_for(MISSION)[1])
     res = merged({}, {})
     res["links"]["usv-uas-rf"]["need_count"] = np.array([30] * 10 + [0] * 14)
     res["links"]["usv-uas-rf"]["success"] = np.array([False] * 10 + [True] * 14)
     e = stage1.summarize(res, names, MISSION, 73)["links"]["usv-uas-rf"]
-    assert (e["n"], e["k_fail"], e["need_count_median"], e["granularity_ok"]) == (24, 10, 0, False)
+    assert (e["n"], e["k_fail"], e["need_count_median"], e["granularity_ok"]) == (24, 10, 30, True)
     assert e["verdict"]["verdict"] in ("MARGINAL", "NO-GO") and e["verdict"]["verdict"] != stage1.NOT_EXERCISED
     assert "counts nothing" not in e["verdict"]["note"] and "any member" not in e["verdict"]["note"]
     assert "median" not in stage1.NOT_EXERCISED_NOTE                               # the note says what the rule is: no member

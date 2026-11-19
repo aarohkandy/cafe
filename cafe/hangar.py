@@ -10,6 +10,7 @@ import numpy as np
 import trimesh
 
 from cafe import atomic, geom, vehicle, fea, cfd, ctrl
+from cafe.pm.jsonio import load_json
 from cafe.pm import vv
 
 KNOCKDOWN = 0.5      # ponytail: linear buckling of imperfect shells under external pressure; NASA SP-8007-style
@@ -267,7 +268,7 @@ def grid_warning(hangar):
 def run(design_dir, skip=()):
     job = Job(design_dir)
     d = job.d
-    spec = json.loads((d / "spec.json").read_text())
+    spec = load_json((d / "spec.json").read_text())
     kind = spec["kind"]
     res = dict(kind=kind, started=time.time(), warnings=[])
     try:
@@ -407,9 +408,9 @@ def _j(o):
 
 def load_vehicle(design_dir):
     d = pathlib.Path(design_dir)
-    spec = json.loads((d / "spec.json").read_text())
+    spec = load_json((d / "spec.json").read_text())
     m = trimesh.load(d / "mesh.stl", force="mesh")
-    res = json.loads((d / "result.json").read_text()) if (d / "result.json").exists() else {}
+    res = load_json((d / "result.json").read_text()) if (d / "result.json").exists() else {}
     return vehicle.build(spec["kind"], m, spec, res.get("hangar", {}))
 
 

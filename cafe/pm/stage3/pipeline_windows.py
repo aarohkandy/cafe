@@ -65,6 +65,7 @@ import jax.numpy as jnp
 from numpy.typing import NDArray
 
 from .. import budget, config
+from ..jsonio import load_json
 from ..env import conventions as cv
 from ..physics import glider, uas, usv
 from . import fluidx3d, freesurface, lbm, windows as W
@@ -402,7 +403,7 @@ def _fea_child(job: str, out: str, deadline: float | None = None) -> int:
     if deadline is not None:
         freesurface.arm_watchdog(max(deadline - time.time(), 0.0))
     z = np.load(job, allow_pickle=False)
-    veh = W.Vehicle(**json.loads(str(z["vehicle"])))
+    veh = W.Vehicle(**load_json(str(z["vehicle"])))
     r = W.fea_window(veh, z["points"], z["pressure"], workdir=base / "fea", h=float(z["h"]), buckle=True)
     pathlib.Path(out).write_text(json.dumps(r, default=float))
     return 0
@@ -434,7 +435,7 @@ def _fea(veh: W.Vehicle, r: dict[str, Any], a: dict[str, Any], timeout_s: float 
             return dict(run=False, reason="FEA killed by SIGKILL before its deadline (" + SIGKILL_EARLY + "): it did not finish")
         if p.returncode or not out.exists():
             return dict(run=False, reason=f"FEA failed: {(p.stderr.strip().splitlines() or ['no message'])[-1][:200]}")
-        return dict(run=True, seconds=time.perf_counter() - t0, **json.loads(out.read_text()))
+        return dict(run=True, seconds=time.perf_counter() - t0, **load_json(out.read_text()))
 
 
 def _jit_cache(ctx: Context) -> None:
@@ -703,7 +704,7 @@ def _fs_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: 
                    "killed by SIGKILL before its deadline (" + SIGKILL_EARLY + ")" if p.returncode == -9 else
                    (p.stderr.strip().splitlines() or ["no message"])[-1][:300])
             return _fs_fail(base, f"free-surface run failed ({p.returncode}): {how}", t0)
-        r = json.loads(out.read_text())
+        r = load_json(out.read_text())
         r["speeds"] = {float(k): v for k, v in r["speeds"].items()}
         f = freesurface.row_fields(r, speed, case["rho_h"], case["area"], case["cd_h"])
     except (OSError, ValueError, KeyError, RuntimeError) as e:

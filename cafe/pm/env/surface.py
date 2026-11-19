@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from .. import Tagged
+from ..jsonio import load_json
 from . import coare, subgrid, waves
 from . import conventions as cv
 from .grid import Axis, interp
@@ -239,7 +240,7 @@ class SurfaceLayer:
         self.D["logz0"], self.D["invL"] = np.log(self.D.pop("z0")), 1.0 / self.D.pop("L")
         self.ts, self.las, self.los = Axis(d.time_u.values), Axis(d.lat_s.values), Axis(d.lon_s.values)
         self.S = (d.stokes_e.values, d.stokes_n.values)
-        self.fit = json.loads(d.attrs.get("stokes_fit_check", "null"))
+        self.fit = load_json(d.attrs.get("stokes_fit_check", "null"))
         self.warm_layer = bool(warm_layer)
         self.cfg = subgrid.load_config()
         if not rain_lens:

@@ -53,6 +53,7 @@ from collections.abc import Callable, Iterator
 from typing import Any
 
 from . import budget, config, credibility, pipeline, receipts
+from .jsonio import load_json
 from .ledger import git_dirty, git_sha, real
 from .stage1 import NOT_EXERCISED
 from .stats import intervals, sequential
@@ -154,13 +155,13 @@ def run_one(mission: str, name: str, budget_name: str, gpus: int, out: pathlib.P
     wall = time.monotonic() - t
     rj = d / "report" / "report.json"
     return dict(base, log=out / f"{name}.log", rc=rc, wall_s=wall, ingest_s=(_ledger(d) or {}).get("wall_s"),
-                report=json.loads(rj.read_text()) if rj.is_file() else None)
+                report=load_json(rj.read_text()) if rj.is_file() else None)
 
 
 def _ledger(run: pathlib.Path) -> dict[str, Any] | None:
     """The ingest ledger of a run directory, or None."""
     p = run / "checkpoints" / "ingest" / "ledger.json"
-    return json.loads(p.read_text()) if p.is_file() else None
+    return load_json(p.read_text()) if p.is_file() else None
 
 
 def _row(name: str, ok: bool, detail: str, **values: Any) -> dict[str, Any]:
@@ -194,7 +195,7 @@ def check_label(r: dict[str, Any]) -> dict[str, Any]:
     if r["report"] is None:
         return _row(name, False, "no report to read the LES label from")
     s = r["report"]["stage3"]
-    plan = json.loads((r["dir"] / "plan.json").read_text())["les"]
+    plan = load_json((r["dir"] / "plan.json").read_text())["les"]
     page = (r["dir"] / "report" / "index.html").read_text()
     got = dict(plan_cpu_fallback=plan["cpu_fallback"], report_cpu_fallback=s["cpu_fallback"], label_in_page=html.escape(s["label"]) in page,
                label_says_cpu=s["label"].startswith("CPU fallback"))
@@ -247,7 +248,7 @@ def _damage(e: dict[str, Any], who: str) -> list[str]:
     """What an entry of a summary lacks of the numbers `compare` reads (the count, `p_fail`, `conf`): the one list of the reference's and the new entry's
     problems, so that an edited golden is a problem line whatever field was damaged (look-ahead L0, twice)."""
     bad = [] if credibility.counts_ok(e.get("k_fail"), e.get("n")) else [
-        f"k_fail {e.get('k_fail')!r} of n {e.get('n')!r} {who} is not a count (integers, n >= 1, 0 <= k_fail <= n)"]
+        f"k_fail {e.get('k_fail')!r} of n {e.get('n')!r} {who} is not a count ({credibility.counts_rule()})"]
     if not credibility.real_ok(e.get("p_fail")):
         bad.append(f"p_fail {e.get('p_fail')!r} {who} is not a finite number")
     if not credibility.conf_ok(e.get("conf")):
@@ -411,7 +412,7 @@ def golden_refusal(golden: pathlib.Path, name: str, allowed: str | None = None) 
     if kind == "absent":
         return None
     try:
-        had = json.loads(golden.read_text())["summary"]["mission"]
+        had = load_json(golden.read_text())["summary"]["mission"]
     except (OSError, ValueError, KeyError, TypeError):
         had = None
     had = had if isinstance(had, str) else None                                                  # {"summary": {"mission": 5}} is no golden either
@@ -466,7 +467,7 @@ def check_golden(r: dict[str, Any], golden: pathlib.Path, mission: str, update: 
     if kind == "absent":
         return _row("golden_diff", False, f"no golden file at {golden}" + how("write it from a quick run you have reviewed with"), missing=True)
     try:
-        g = json.loads(golden.read_text())
+        g = load_json(golden.read_text())
     except (OSError, ValueError) as e:                                 # not JSON, not UTF-8, unreadable: a problem line naming the file, not a traceback
         return _row("golden_diff", False, f"golden {golden.name} cannot be read as JSON ({type(e).__name__}: {str(e)[:100]})"
                                           + how("write a new one from a quick run you have reviewed with"), problems=[str(e)[:100]], golden=str(golden))
@@ -524,7 +525,7 @@ def normalize(rep: dict[str, Any], run_dir: pathlib.Path) -> dict[str, Any]:
         if r.get("id") == HOLDOUT or (r.get("id") == CREDIBILITY and not cred.is_file()):
             r.pop("sha256", None)
         elif r.get("id") == CREDIBILITY:
-            c = _each_str(json.loads(cred.read_text()), unrun)
+            c = _each_str(load_json(cred.read_text()), unrun)
             c.pop("run", None)
             r["sha256"] = hashlib.sha256(json.dumps(c, sort_keys=True).encode()).hexdigest()
     return out

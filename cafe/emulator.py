@@ -14,6 +14,7 @@ import datetime as dt, json, os, pathlib, select, socket, struct, subprocess, sy
 import numpy as np
 
 from cafe import atomic, dyn, env as envm, ctrl
+from cafe.pm.jsonio import load_json
 from cafe.mission import Frame, z_to_down, _float_depth
 from cafe.vehicle import G, prop_perf
 
@@ -310,7 +311,7 @@ class Runner(threading.Thread):
 
 def run(d):
     d = pathlib.Path(d)
-    spec = json.loads((d / "emulation.json").read_text())
+    spec = load_json((d / "emulation.json").read_text())
     log = lambda s: (print(s, flush=True), open(d / "log.txt", "a").write(s + "\n"))
     status = lambda **kw: atomic.write_json(d / "status.json", dict(updated=time.time(), **kw))
     from cafe import hangar

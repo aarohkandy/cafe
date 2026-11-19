@@ -45,6 +45,7 @@ import trimesh
 from scipy.interpolate import BSpline
 
 from cafe import cfd
+from .jsonio import load_json
 from cafe import receipts as rc
 from cafe.pm import config, vv
 
@@ -497,7 +498,7 @@ def run_grid(root: pathlib.Path, grid: str, max_iters: int = MAX_ITERS, log: Cal
     """interFoam LTS at the Froude numbers `frs` on one grid (GRIDS), one meshing + solve per speed so each finished speed is on disk
     (run_<grid>.json) and a restart does not repeat it. Disk is checked before every case. A file stamped with another RECIPE is refused."""
     check_froude(frs)                                    # before any work or file: a speed with no reference stopped the run after its solve
-    h = json.loads((root / "hydro.json").read_text())
+    h = load_json((root / "hydro.json").read_text())
     f = root / f"run_{grid}.json"
     out = dict(grid=grid, recipe=RECIPE, S=h["wetted_area"], surf_level=SURF_LEVEL, speeds={}) if not f.exists() else read_run(f)
     if out is None:
@@ -663,7 +664,7 @@ def receipts(root: Optional[pathlib.Path] = None) -> str:
     root = root or data_root()
     if not (root / "hydro.json").exists():
         return f"DTMB 5415: no {root}/hydro.json (run `python -m cafe.pm.dtmb5415 prepare`); no receipts emitted"
-    h = json.loads((root / "hydro.json").read_text())
+    h = load_json((root / "hydro.json").read_text())
     grp = "DTMB 5415"
     rc.receipt(grp, "Lofted hull displacement at T = 0.248 m", h["displacement"], DISPLACEMENT, 0.01, "m3", SIMMAN)
     rc.receipt(grp, "Lofted hull Lwl at T = 0.248 m", h["lwl"], LWL, 0.005, "m", SIMMAN)

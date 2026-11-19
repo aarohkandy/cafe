@@ -12,6 +12,7 @@ from typing import Any
 import numpy as np
 
 from cafe import geom, vehicle, dyn, env as envm
+from cafe.pm.jsonio import load_json
 
 OUT: list[dict[str, Any]] = []
 
@@ -91,7 +92,7 @@ def stored(path: pathlib.Path, group: str) -> tuple[dict[str, Any], str] | None:
     if not path.is_file():
         return None
     try:
-        rec = json.loads(path.read_text())
+        rec = load_json(path.read_text())
         if not isinstance(rec, dict):
             raise ValueError(f"it holds {type(rec).__name__}, not an object")
     except (OSError, ValueError) as e:

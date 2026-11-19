@@ -11,6 +11,7 @@ that double their spacing outward up to the L2b spacing, each band on its own CF
 differ by more than max_refinement_ratio: a finer level that would is coarsened to the limit (it stays in budget).
 """
 import json, math, pathlib, sys
+from cafe.pm.jsonio import load_json
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 BENCH = ROOT / "config" / "throughput.json"
@@ -54,7 +55,7 @@ def hull_cost(T, h, nu, cfl, dx_h, dx_out):
 
 def throughput(cfg, devices):
     """(cell-updates/s on `devices`, where the number came from)."""
-    b = json.loads(BENCH.read_text()).get(cfg["solver"]) if BENCH.exists() else None
+    b = load_json(BENCH.read_text()).get(cfg["solver"]) if BENCH.exists() else None
     if not b or b.get("backend") != cfg["backend"]:
         return cfg["assumed_per_device"] * devices, f"assumed {cfg['assumed_per_device']:.3g}/device ({cfg['backend']}), not measured"
     measured = {int(k): v for k, v in (b.get("cell_updates_per_s") or {}).items()}
@@ -186,7 +187,7 @@ def check(cfg):
 if __name__ == "__main__":
     args = sys.argv[1:]
     path = next((a for a in args if a.endswith(".json")), ROOT / "config" / "premission.json")
-    cfg = json.loads(pathlib.Path(path).read_text())
+    cfg = load_json(pathlib.Path(path).read_text())
     for flag, key, typ in (("--devices", "devices", int), ("--backend", "backend", str)):
         if flag in args:
             cfg[key] = typ(args[args.index(flag) + 1])

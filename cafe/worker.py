@@ -9,6 +9,7 @@ the CPUs); up to two missions at once; one emulation at a time (SITL ports are s
 import json, os, pathlib, subprocess, sys, time
 
 from cafe import atomic
+from cafe.pm.jsonio import load_json
 
 WORK = pathlib.Path(os.environ.get("CAFE_WORK", "/work"))
 KINDS = dict(designs=("cafe.hangar", 1), missions=("cafe.mission", 2), emulations=("cafe.emulator", 1))
@@ -16,8 +17,9 @@ KINDS = dict(designs=("cafe.hangar", 1), missions=("cafe.mission", 2), emulation
 
 def state(d):
     try:
-        return json.loads((d / "status.json").read_text()).get("state")
-    except (FileNotFoundError, json.JSONDecodeError):
+        st = load_json((d / "status.json").read_text())
+        return st.get("state") if isinstance(st, dict) else None                 # valid JSON that is no object (a bare `true`) is no state either
+    except (FileNotFoundError, ValueError):                       # JSONDecodeError, an oversized integer and nesting too deep (`load_json`) are ValueErrors
         return None
 
 

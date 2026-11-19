@@ -34,6 +34,7 @@ from numpy.typing import NDArray
 from scipy.stats import chi2
 
 from . import budget, ledger, par, stage1
+from .jsonio import load_json
 from .config import ConfigError, _Dumper, _yaml, assumptions, digest, env_sigmas, load_mission, utc, write_json, write_text
 from .env import bathy, conventions as cv, hycom, ocean as ocean_mod, orca, subgrid
 from .env.environment import FETCH_CMD
@@ -189,7 +190,7 @@ class Context:
                     sub = surface.SurfaceLayer(self.cache, warm_layer=subgrid.switch(e, "warm_layer"), rain_lens=subgrid.switch(e, "rain_lens"))
             sig, fit = env_sigmas(), self.run_dir / "ingest" / "env_sigmas_fitted.json"
             if fit.is_file():
-                sig.update(json.loads(fit.read_text()))
+                sig.update(load_json(fit.read_text()))
             self._env = par.adopt(GriddedEnv(self.cache, sig, ocean=ocean(self), subgrid=sub))     # one copy, shared with the stage-1 workers
         return self._env
 
@@ -1063,7 +1064,7 @@ def _derived_record(ctx: Context, key: str) -> dict[str, Any]:
             ctx._env = None
             surface.build(ctx.env, ctx.cache, key, log=ctx.log)
             ctx._env = None                                              # rebuild with the surface layer just written
-        rec: dict[str, Any] = json.loads((ctx.cache / surface.DIGEST).read_text())
+        rec: dict[str, Any] = load_json((ctx.cache / surface.DIGEST).read_text())
     return rec
 
 
@@ -1074,7 +1075,7 @@ def _derived_current(cache: pathlib.Path, key: str | None = None) -> bool:
 
     def read(f: pathlib.Path) -> dict[str, Any] | None:                  # a file cut short by a kill or a full disk is as good as missing: the layer is rebuilt
         try:
-            d = json.loads(f.read_text())
+            d = load_json(f.read_text())
         except (ValueError, OSError):
             return None
         return d if isinstance(d, dict) else None
@@ -1116,7 +1117,7 @@ def _derived_unchanged(ctx: Context, L: Ledger) -> None:
         L.check("derived_unchanged", False, note=f"{rec} is missing: ingest did not record the surface layer this stage reads")
         return
     L.input(rec)
-    want = json.loads(rec.read_text())["store_sha256"]
+    want = load_json(rec.read_text())["store_sha256"]
     with surface.store_lock(ctx.cache, log=ctx.log):                     # waits for a build of another run, then hashes the whole store it left
         have = surface.store_sha256(store) if store.is_dir() else None
     L.check("derived_unchanged", have == want, value=have, limit=want, note=f"{store} hashes to what ingest recorded" if have == want
@@ -1206,7 +1207,7 @@ def _stage1(ctx: Context, L: Ledger, name: str, scales: dict[str, Any] | None = 
     """`extra`: fields added to the stage's summary.json (stage 1b records `refit_iterations_performed`)."""
     a = time.time()
     fp = ctx.run_dir / "ingest" / "priors_fitted.json"
-    fitted = json.loads(fp.read_text()) if fp.is_file() else None
+    fitted = load_json(fp.read_text()) if fp.is_file() else None
     if fitted:
         L.input(fp)
     with _lenient(ctx.env):
@@ -1409,12 +1410,12 @@ def use_run_calibration(ctx: Context, L: Ledger) -> None:
     f = ctx.run_dir / "stage3" / "subgrid_calibration.json"
     if f.is_file():
         L.input(f)
-    subgrid.use_calibration(json.loads(f.read_text()) if f.is_file() else None)
+    subgrid.use_calibration(load_json(f.read_text()) if f.is_file() else None)
 
 
 def s_stage3(ctx: Context, L: Ledger) -> None:
     from .stage3 import pipeline_windows
-    wins = json.loads(ctx.path("windows", "windows.json").read_text())
+    wins = load_json(ctx.path("windows", "windows.json").read_text())
     L.input(ctx.path("windows", "windows.json"))
     rows = pipeline_windows.run(ctx, wins, L)
     timing = {vid: [r.pop("timing", None) for r in rs] for vid, rs in rows.items()}      # seconds and measured rates: in the ledger, not in the hashed output
@@ -1426,7 +1427,7 @@ def s_stage3(ctx: Context, L: Ledger) -> None:
 
 def s_refit(ctx: Context, L: Ledger) -> None:
     from .stage3 import nest, refit
-    rows = json.loads(ctx.path("stage3", "windows.json").read_text())
+    rows = load_json(ctx.path("stage3", "windows.json").read_text())
     L.input(ctx.path("stage3", "windows.json"))
     for tag, _ in nest.SPHERE_RUNS:                    # default_floor's discretisation floor reads these: a changed grid study reruns the refit
         for f in sorted(nest.SLOW_DIR.glob(f"nest_sphere_{tag}_d*.json")):
@@ -1475,7 +1476,7 @@ def _sensitivity_cases(ctx: Context, L: Ledger, scales: dict[str, Any]) -> None:
         return
     fp = ctx.run_dir / "ingest" / "priors_fitted.json"
     X = pickle.loads(ctx.path("stage1", "res.pkl").read_bytes())["X"]
-    fitted = json.loads(fp.read_text()) if fp.is_file() else None
+    fitted = load_json(fp.read_text()) if fp.is_file() else None
     t0 = time.perf_counter()
     with _lenient(ctx.env):
         cases = stage1.sensitivity_case(ctx.mission, ctx.env, stage1.BRIEF_PRIOR, len(next(iter(X.values()))), fitted, scales or None, X=X)
@@ -1490,7 +1491,7 @@ def s_stage1b(ctx: Context, L: Ledger) -> None:
     """Stage 1 again with the refit multipliers, once (the brief's refit loop to convergence, capped at `refit_iterations`, is not implemented: the
     refit needs usable stage-3 windows, which a CPU run does not have). The summary records `refit_iterations_performed`: 0 (stage 1 copied) or 1."""
     from .stage3 import refit as refit_mod
-    ref = json.loads(ctx.path("refit", "refit.json").read_text())
+    ref = load_json(ctx.path("refit", "refit.json").read_text())
     L.input(ctx.path("refit", "refit.json"))
     L.input(ctx.path("stage1", "res.pkl"))
     _derived_unchanged(ctx, L)
@@ -1509,10 +1510,10 @@ def s_stage1b(ctx: Context, L: Ledger) -> None:
                + ("" if ran is None else f"; the sensitivity case reran the USV in {ran:.3g} s, not charged to any share"))
         shutil.copy(ctx.path("stage1", "res.pkl"), ctx.path("stage1b", "res.pkl"))
         L.output(ctx.path("stage1b", "res.pkl"))
-        L.output(_dump(dict(json.loads(ctx.path("stage1", "summary.json").read_text()), refit_iterations_performed=0), ctx.path("stage1b", "summary.json")))
+        L.output(_dump(dict(load_json(ctx.path("stage1", "summary.json").read_text()), refit_iterations_performed=0), ctx.path("stage1b", "summary.json")))
         return
     _stage1(ctx, L, "stage1b", scales=scales, extra=dict(refit_iterations_performed=done))      # a calibrated sub-grid layer reruns stage 1 even with no refit
-    was, now = ({vid: v["verdict"] for vid, v in json.loads(ctx.path(st, "summary.json").read_text())["summary"]["vehicles"].items()}
+    was, now = ({vid: v["verdict"] for vid, v in load_json(ctx.path(st, "summary.json").read_text())["summary"]["vehicles"].items()}
                 for st in ("stage1", "stage1b"))
     changes = refit_mod.verdict_changes(was, now)
     L.check("stage1b_same_vehicles_as_stage1", set(was) == set(now), value=len(changes), note="verdict changes after the refit: " + (
@@ -1535,11 +1536,11 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
         L.input(p)
     _derived_unchanged(ctx, L)
     use_run_calibration(ctx, L)
-    summ = json.loads(ctx.path("stage1b", "summary.json").read_text())["summary"]["vehicles"]
-    refit = json.loads(ctx.path("refit", "refit.json").read_text())
+    summ = load_json(ctx.path("stage1b", "summary.json").read_text())["summary"]["vehicles"]
+    refit = load_json(ctx.path("refit", "refit.json").read_text())
     scales = {vid: r for vid, r in refit.items() if r["used"]}
     fp = ctx.run_dir / "ingest" / "priors_fitted.json"
-    fitted = json.loads(fp.read_text()) if fp.is_file() else None
+    fitted = load_json(fp.read_text()) if fp.is_file() else None
     pri, marg = stage1.priors_for(ctx.mission, fitted)
     seed = int(ctx.mission["seed"])
     fid = {vid: int(vid in scales) for vid in res["vehicles"]}

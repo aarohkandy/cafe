@@ -24,11 +24,12 @@ older than the newest file under cafe/pm, so it cannot pass without tests having
 """
 from __future__ import annotations
 
-import ast, datetime as dt, hashlib, importlib.metadata, json, pathlib, platform, re, subprocess, sys, tomllib
+import ast, datetime as dt, hashlib, importlib.metadata, pathlib, platform, re, subprocess, sys, tomllib
 from collections.abc import Callable
 from typing import Any
 
 from .config import write_json
+from .jsonio import load_json
 from .env.remote import sha256, store_lock, tree_sha256
 from .ledger import RUN_ROOT_FILES, STAGES, hashed, input_sha, real, resolve, run_roots, shared_diff
 from .physics.comms import PARAMETER_FILES
@@ -62,7 +63,7 @@ class _Unreadable(ValueError):
 def _read_json(f: pathlib.Path) -> dict[str, Any]:
     """The JSON object in `f`; a truncated or foreign file (a killed or full-disk write) is `_Unreadable`."""
     try:
-        d = json.loads(f.read_text())
+        d = load_json(f.read_text())
         if not isinstance(d, dict):
             raise ValueError("not a JSON object")
     except (ValueError, OSError) as e:

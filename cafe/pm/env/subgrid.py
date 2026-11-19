@@ -23,6 +23,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from .. import Tagged
+from ..jsonio import load_json
 from . import conventions as cv
 
 _CFG_DIR = pathlib.Path(__file__).resolve().parents[3] / "config"
@@ -30,7 +31,7 @@ _CFG_DIR = pathlib.Path(__file__).resolve().parents[3] / "config"
 
 @functools.lru_cache(maxsize=None)
 def _load(path: str) -> dict[str, Any]:
-    cfg: dict[str, Any] = json.loads(pathlib.Path(path).read_text())
+    cfg: dict[str, Any] = load_json(pathlib.Path(path).read_text())
     return cfg
 
 
@@ -517,7 +518,7 @@ def promote_calibration(run: str | pathlib.Path, path: str | pathlib.Path | None
     src, led = run / "stage3" / "subgrid_calibration.json", run / "checkpoints" / "stage3" / "ledger.json"
     if not src.is_file() or not led.is_file():
         raise ValueError(f"{run}: no stage3/subgrid_calibration.json (or no stage-3 ledger): that run did not calibrate the sub-grid layer")
-    block = json.loads(src.read_text())
+    block = load_json(src.read_text())
     if not isinstance(block, dict):
         raise ValueError(f"{src}: not a JSON object (it holds {type(block).__name__}); run the stage that writes it again")
     cal = dict(block,

@@ -177,9 +177,12 @@ def platform_doc(path: str | pathlib.Path) -> Any:
 
 
 def _finite(node: Any, path: pathlib.Path, where: str = "") -> None:
-    """Refuse a NaN or infinite number anywhere in the mission (JSON Schema's `number` accepts both and every comparison with NaN is False)."""
-    if isinstance(node, float) and not math.isfinite(node):
-        raise ConfigError(f"{path}: {where or '(top level)'}: {node!r} is not a finite number; write a number (a missing value is a missing key, not .nan)")
+    """Refuse a NaN or infinite number anywhere in the mission (JSON Schema's `number` accepts both and every comparison with NaN is False), and an integer
+    too large for a float (YAML reads a 400-digit integer as an `int`, which the schema accepts as a `number` and every later `float(x)` or product of it
+    is an OverflowError: round 21 merge, batch D's quirk). A bool is a boolean, not a number: the schema decides it."""
+    if isinstance(node, (int, float)) and not isinstance(node, bool) and not finite_real(node):
+        what = repr(node) if isinstance(node, float) else f"an integer of {len(str(node))} digits"
+        raise ConfigError(f"{path}: {where or '(top level)'}: {what} is not a finite number; write a number (a missing value is a missing key, not .nan)")
     for k, v in (node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()):
         name = v["id"] if isinstance(node, list) and isinstance(v, dict) and "id" in v else k          # a vehicle or link is named by its id
         _finite(v, path, f"{where}/{name}".lstrip("/"))

@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from cafe import atomic, geom, shapes, env as envm
+from cafe.pm.jsonio import finite_real, load_json   # stdlib only: the live image has no pyyaml, which `cafe.pm.config` imports
 
 SHAPE_SAMPLES = {     # TEPEX-style examples built from simplified shapes (validation hulls come from geom.SAMPLES)
     "petrel": ("glider", dict(name="Petrel", kind="uuv", power_w=30, battery_wh=1000, hotel_w=0.6, buoyancy_cc=400,
@@ -38,8 +39,8 @@ def _read(p, default=None):
     """The one place the app reads one of its files. A NaN or Infinity token (which Python's `json` reads and writes, and which the response encoder
     refuses: a hangar result with a direction that has no GCI was an error page, round 21, M-12) is read as null, as `hangar` now writes it."""
     try:
-        return json.loads(pathlib.Path(p).read_text(), parse_constant=lambda _: None)
-    except (FileNotFoundError, json.JSONDecodeError):
+        return load_json(pathlib.Path(p).read_text(), parse_constant=lambda _: None)
+    except (FileNotFoundError, ValueError):                       # JSONDecodeError, an oversized integer and nesting too deep (`load_json`) are ValueErrors
         return default
 
 
@@ -134,10 +135,13 @@ def clean_spec(s, need):
         elif k in SPEC_TEXT:
             v = str(v)[:200]
         elif k == "cog":
-            if not (isinstance(v, list) and len(v) == 3 and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v)):
+            if not (isinstance(v, list) and len(v) == 3 and all(finite_real(x) for x in v)):
                 raise HTTPException(400, "cog must be [x, y, z] in metres")
         elif k == "inertia":
-            a = np.asarray(v, float) if isinstance(v, list) else None
+            try:
+                a = np.asarray(v, float) if isinstance(v, list) else None
+            except (ValueError, TypeError, OverflowError):               # a ragged list, a text, an integer too large for a float
+                a = None
             if a is None or a.shape != (3, 3) or not np.isfinite(a).all() or (np.diag(a) <= 0).any():
                 raise HTTPException(400, "inertia must be a 3x3 matrix (kg m^2) with a positive diagonal")
         else:
@@ -154,7 +158,7 @@ def clean_spec(s, need):
 @app.post("/api/designs")
 async def create_design(mesh: UploadFile = File(...), spec: str = Form(...)):
     try:
-        s = json.loads(spec, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))   # no NaN/Infinity
+        s = load_json(spec, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))   # no NaN/Infinity
     except ValueError as e:
         raise HTTPException(400, f"spec must be plain JSON with finite numbers ({e})")
     if not isinstance(s, dict) or s.get("kind") not in KINDS:
@@ -217,7 +221,7 @@ def create_shape_design(body: dict):
         raise HTTPException(400, "dimensions must be numbers (metres)")
     try:
         dims = {k: float(dims.get(k, shapes.PARAMS[shape]["params"][k][1])) for k in shapes.PARAMS[shape]["params"]}
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise HTTPException(400, "dimensions must be numbers (metres)")
     errs = shapes.check(shape, dims)
     if errs:
@@ -390,8 +394,7 @@ ID_OK = re.compile(r"^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$")      # no leading dot
 
 def _point(v, what):
     """[lat, lon] or [lat, lon, z]: finite numbers, lat in [-90, 90]."""
-    if not (isinstance(v, list) and 2 <= len(v) <= 3 and all(isinstance(x, (int, float)) and not isinstance(x, bool)
-                                                              and math.isfinite(x) for x in v) and -90 <= v[0] <= 90):
+    if not (isinstance(v, list) and 2 <= len(v) <= 3 and all(finite_real(x) for x in v) and -90 <= v[0] <= 90):
         raise HTTPException(400, f"{what} must be [lat, lon] or [lat, lon, z] with finite numbers")
 
 
@@ -441,7 +444,7 @@ def check_fleet(body):
             raise HTTPException(400, "each link joins two different drones of this mission")
         try:
             mx, need = float(lk.get("max_m")), float(lk.get("need", 0.95))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise HTTPException(400, f"link {lk['a']}-{lk['b']}: max_m must be a number")
         if not (math.isfinite(mx) and mx > 0) or not (0 < need <= 1):
             raise HTTPException(400, f"link {lk['a']}-{lk['b']}: max_m > 0 and need in (0, 1]")
@@ -538,7 +541,7 @@ def live_create(body: dict):
             raise HTTPException(400, "each drone needs an id and a design id")
         if (_read(DESIGNS / x["design"] / "status.json") or {}).get("state") != "done":
             raise HTTPException(400, f"{x['id']}: design isn't characterized yet")
-        if not (isinstance(x.get("start"), list) and len(x["start"]) >= 2 and all(isinstance(v, (int, float)) and math.isfinite(v) for v in x["start"])):
+        if not (isinstance(x.get("start"), list) and len(x["start"]) >= 2 and all(finite_real(v) for v in x["start"])):
             raise HTTPException(400, f"{x['id']}: start must be [lat, lon, z]")
     check_fleet(dict(body, drones=[dict(x, legs=[{"type": "hold", "minutes": 1}]) for x in drones]))
     try:
@@ -552,7 +555,11 @@ def live_create(body: dict):
 def live_step(sid: str, body: dict):
     from cafe import live
     try:
-        return live.step(sid, float(body.get("seconds", 10)), body.get("targets") or {})
+        seconds = float(body.get("seconds", 10))
+    except (ValueError, TypeError, OverflowError):                       # an integer too large for a float is a bad number, not a 500
+        raise HTTPException(400, "seconds must be a number")
+    try:
+        return live.step(sid, seconds, body.get("targets") or {})
     except KeyError:
         raise HTTPException(404, "no such live session (sessions end after an hour idle or an API restart)")
     except (ValueError, TypeError) as e:

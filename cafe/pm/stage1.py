@@ -669,15 +669,23 @@ def _bellhop_member(env: Any, modem: str, band: str, lon: float, lat: float, t: 
 
 
 def _bellhop_label(info: dict[str, Any]) -> str:
-    """The method of an acoustic link some of whose samples Bellhop refined: `info` is `_acoustic`'s count (done, total, capped, runs_lo, runs_hi) of one
-    batch or the sum of several (`merge`), so the label describes the members the summary does."""
-    done, total, capped, lo, hi = (info[k] for k in ("done", "total", "capped", "runs_lo", "runs_hi"))
+    """The method of an acoustic link some of whose needed in-range samples Bellhop refined or was not asked about: `info` is `_acoustic`'s count (done, total,
+    capped, beyond, runs_lo, runs_hi) of one batch or the sum of several (`merge`), so the label describes the members the summary does. `total` is the
+    samples Bellhop was to refine (within the cap of a pass or a fail), `done` those it did, `beyond` those left on Thorp for being past the cap."""
+    done, total, capped, beyond, lo, hi = (info[k] for k in ("done", "total", "capped", "beyond", "runs_lo", "runs_hi"))
+    cap = f"{comms.BELLHOP_EXCESS_CAP_DB:g} dB"
+    if not total:                                                    # every needed in-range sample was beyond the cap: Bellhop was not asked at all
+        return (f"Thorp/Stojanovic budget on the slant range; Bellhop was not run: all {beyond} needed in-range samples are more than {cap} from a pass or a "
+                f"fail on Thorp, and the Bellhop excess is held within {cap}, so it cannot change which they are")
     out = f"Thorp/Stojanovic budget on the slant range, Bellhop on {done} of {total} needed in-range samples"
     if hi is not None and hi > 1:
         out += f" (the lowest of {hi if lo == hi else f'{lo} to {hi}'} runs: as named, swapped, both ends at least {comms.BELLHOP_MIN_DEPTH_M:g} m deep)"
     if capped:
         out += (f"; {capped} of them held at the assumed {comms.BELLHOP_EXCESS_CAP_DB:g} dB bound on the Bellhop excess "
                 "(no ray reached the receiver, or almost none)")
+    if beyond:
+        out += (f"; a further {beyond} needed in-range samples are more than {cap} from a pass or a fail on Thorp and keep that margin: the Bellhop excess is "
+                f"held within {cap}, so it cannot change which they are")
     return out + ("" if done == total else "; the rest Thorp only (no sound-speed profile or depth there)")
 
 
@@ -685,29 +693,34 @@ def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: ND
               A: tuple[NDArray[Any], ...], B: tuple[NDArray[Any], ...], t: NDArray[Any],
               env: Any) -> tuple[NDArray[Any], str, dict[str, Any] | None, NDArray[Any]]:
     """(margin (n, M), the method label, the Bellhop count of `_bellhop_label` or None, the spread of the run set (n, M), NaN where there is none) of the
-    acoustic link on the slant path hypot(d, dz). The Thorp budget gives every sample's margin; EVERY needed sample in range (`valid`: within
-    `comms.valid_range_m`) is re-done with Bellhop, member by member, on the GOFS sound-speed profile at the midpoint of the member's middle such sample
-    and the MEDIAN transducer depths of those samples, the lowest margin of the run set kept (round 21, M-3 and M-4: `_bellhop_member`). Round 20 refined
+    acoustic link on the slant path hypot(d, dz). The Thorp budget gives every sample's margin; every needed sample in range (`valid`: within
+    `comms.valid_range_m`) whose Thorp margin is within `comms.BELLHOP_EXCESS_CAP_DB` of zero is re-done with Bellhop, member by member, on the GOFS
+    sound-speed profile at the midpoint of the member's middle such sample and the MEDIAN transducer depths of those samples, the lowest margin of the run
+    set kept (round 21, M-3 and M-4: `_bellhop_member`). A sample beyond the cap keeps its Thorp margin and is counted in the label (`beyond`): the excess is
+    held within +-the cap in `comms.acoustic_link`, so the refined margin cannot change sign there (pass is margin > 0), and refining it would only cost time
+    (round 21 merge, measured: refining every sample took a real 4-member run at a ship distance of 20 km from 5.6 s to 53.2 s). Round 20 refined
     only the samples within +-modems.yaml ambiguous_db of 0; round 21's probes (made-up profiles) found Thorp passes up to +21 dB that Bellhop turns into
     fails, because the excess Bellhop computes (0 to 40 dB there) is larger than any fixed band. The NUMBER of Bellhop runs per member does not depend on
-    how many samples it carries (one run on a 48-point range grid, interpolated), but its time and its grid spacing depend on the span of ranges: measured
-    on orca, one call is 0.2 s to 6 km and 2 s to 20 km and 6 s to 40 km, and the 48-point grid over 0.1 to 40 km differs from a grid at every 100 m by a
-    median 0.7 dB and at most 17 dB in the excess (tropical profile). The band is kept only where Bellhop cannot refine (it is not available): those
+    how many samples it carries (one run on a range grid, interpolated: `comms.BELLHOP_GRID_M`), but its time depends on the span of ranges: measured on
+    orca, one call is 0.2 s to 6 km and 2 s to 20 km and 6 s to 40 km. The band is kept only where Bellhop cannot refine (it is not available): those
     samples keep the Thorp margin and the label says how many were ambiguous.
     (ponytail: one profile and depth pair per member and link, not per sample; per-sample runs cost ~0.2 s each, upgrade if a link's profile or depth
     changes along the track: a link `when: always` to a submerged glider spans its dive cycle, and the median depth is one number for it.)"""
     res = comms.acoustic_link(d, modem, band, wind, dz=dz)
     margin = np.array(res["margin"].value, float)
-    lab = res.get("label") or res.get("method")
-    label = lab if isinstance(lab, str) else str(np.unique(np.asarray(lab))[0])
+    # not the helper's own label: it was called with no profile, and says "no sound-speed profile supplied" for any sample in its band, needed or not
+    # (round 21 merge)
+    label = comms.THORP_DECIDES_LABEL
     spread = np.full(margin.shape, np.nan)
     if not comms.bellhop_available():
         amb = np.broadcast_to(np.asarray(res.get("ambiguous", False)), margin.shape) & need
         return margin, (f"{comms.THORP_ONLY_LABEL} ({int(amb.sum())} ambiguous samples)" if amb.any() else label), None, spread
-    refine = need & valid
-    if not refine.any():
+    cand = need & valid
+    far = cand & (np.abs(margin) > comms.BELLHOP_EXCESS_CAP_DB)
+    refine = cand & (np.abs(margin) <= comms.BELLHOP_EXCESS_CAP_DB)  # a NaN margin (no wind there) is neither: it stays NaN, a lost link, and costs no run
+    if not (refine.any() or far.any()):
         return margin, label, None, spread
-    info: dict[str, Any] = dict(done=0, total=int(refine.sum()), capped=0, runs_lo=None, runs_hi=None)
+    info: dict[str, Any] = dict(done=0, total=int(refine.sum()), capped=0, beyond=int(far.sum()), runs_lo=None, runs_hi=None)
     runs: list[int] = []
     for m in map(int, np.flatnonzero(refine.any(0))):
         i = np.flatnonzero(refine[:, m])
@@ -877,7 +890,7 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
             out["links"][lid]["bellhop_spread_db"] = cat([b["links"][lid]["bellhop_spread_db"] for b in batches])
             if infos := [x for b in batches if (x := b["links"][lid].get("bellhop")) is not None]:
                 runs = [i[k] for i in infos for k in ("runs_lo", "runs_hi") if i[k] is not None]
-                tot = {k: sum(i[k] for i in infos) for k in ("done", "total", "capped")}
+                tot = {k: sum(i[k] for i in infos) for k in ("done", "total", "capped", "beyond")}
                 out["links"][lid]["method"] = _bellhop_label(dict(tot, runs_lo=min(runs, default=None), runs_hi=max(runs, default=None)))
         out["links"][lid]["hs_filled"] = sum(b["links"][lid].get("hs_filled", 0) for b in batches)
     if "seeds" in batches[0]:
@@ -922,7 +935,8 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
     link `when: always`) is not ranked at all (case no_acting_input). They are taken on `margin` (n,), the continuous quantity named `quantity`, when the
     simulator gave one; else on the 0/1 failure indicator, which carries too little for three failures or fewer (EASI on k ones saturates at its own
     permutation floor), so there the minority's hypercube ranks are given instead. case: ranked / nothing_above_floor (an index was computed and none
-    clears the floor) / too_few (no index: fewer than SENS_MIN_N members, or too few failures or successes on the indicator) / all_pass / all_fail /
+    clears the floor) / constant (the quantity is the same in every member that has one: nothing to rank, no index; round 21 merge) / too_few (no index:
+    fewer than SENS_MIN_N members, or too few failures or successes on the indicator) / all_pass / all_fail /
     no_acting_input (no index: `acting` is empty, so there is nothing to rank)."""
     n, k = len(f), int(f.sum())
     out: dict[str, Any] = dict(param=None, S1={}, noise_floor=None, quantity=quantity)
@@ -940,6 +954,7 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
         return dict(out, case="no_acting_input", text=f"No sampled input can act on the {quantity}, so none is ranked: it is decided by a draw of its own, "
                                                        "not by a column of the perturbation table.")
     nm, Ux = [names[i] for i in cols], U[:, cols]
+    of = f" among the {n} of {total} members that needed the link" if sub else ""
     row = np.ones(n, bool) if margin is None else np.isfinite(margin)
     cens: dict[str, Any] | None = None
     if margin is None or row.sum() < SENS_MIN_N:
@@ -951,12 +966,14 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
                                                   f"their ranks among the {n} draws (0 is the lowest value) are {ranks}.")
     else:
         y = np.asarray(margin, float)
+        if y[row].min() == y[row].max():                    # no variation to explain (round 21 merge): `first_order` says zeros, which is no ranking
+            return dict(out, case="constant", text=f"The {quantity}{of} is {y[row][0]:.4g} in every one of the {int(row.sum())} members it is read from, so it "
+                                                   "does not vary and no parameter can explain it: nothing is ranked.")
         cens = _censored(y[row])
     param, s1, floor = sensitivity.dominant(nm, Ux[row], y[row])
     out.update(param=param, S1=s1, noise_floor=floor)
     if cens:
         out["censored"] = cens
-    of = f" among the {n} of {total} members that needed the link" if sub else ""
     if param is not None:
         by = f" by {s1[param] - floor:.3f}" if round(s1[param], 2) == round(floor, 2) else ""                  # agree to two places: say how far apart they are
         return dict(out, case="ranked", text=f"{param} has the largest first-order index (S1 {s1[param]:.3f}) for the {out['quantity']}{of}, "
@@ -981,7 +998,9 @@ def _median_count(x: NDArray[Any]) -> int | float:
 def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_certify: int) -> dict[str, Any]:
     """Verdict, dominant failure mode, first time, sensitivity for every vehicle and link. A link required at no sample in any member
     (`need_count` summing to 0) has the verdict NOT EXERCISED, not GO: a pass fraction of 1.0 by default is no evidence (the vehicles have no analogue).
-    A link needed by some members only is graded on all of them, whatever its median `need_count_median` (that one decides `granularity_ok`)."""
+    A link needed by some members only is graded on all of them; its `need_count_median` (which decides `granularity_ok`) is the median over the members that
+    needed it, like its pass fraction and sensitivity (round 21 merge: it was over all members and read 0, "not exercised in the median member", for a link
+    40 of 64 members never needed and 24 needed at 20 samples each)."""
     U = res["U"]
     out: dict[str, dict[str, Any]] = dict(vehicles={}, links={})
     for vid, r in res["vehicles"].items():
@@ -1035,7 +1054,9 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         frac = np.asarray(r["frac"], float)
         sens = _sensitivity(names, U[on], f[on], acting, frac[on], "fraction of the required moments the link worked", total=n)
         kind, need = r.get("invalid_kind"), float(np.sum(r.get("need_count", 0)))
-        nc = _median_count(r["need_count"]) if "need_count" in r else None            # required samples per member: what the required fraction is resolved on
+        # required samples per member that needed the link, what its required fraction is resolved on (round 21 merge: it was over all members, with the zeros
+        # of the members that never needed it)
+        nc = _median_count(np.asarray(r["need_count"])[on]) if "need_count" in r else None
         rf = lk_ends[lid]["required_fraction"]
         bad = float(np.sum(r["n_invalid"])) / need if kind and need else None          # of the needed samples, how many the geometry alone decided
         v = intervals.verdict(int(f.sum()), n)

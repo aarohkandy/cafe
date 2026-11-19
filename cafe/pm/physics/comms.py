@@ -42,6 +42,7 @@ PARAMETER_FILES = ("radios.yaml", "modems.yaml")                     # every fil
 C0 = 299792458.0
 NO_LINK_DB = -200.0                  # margin returned when a link is physically impossible (beyond the radio horizon)
 THORP_ONLY_LABEL = "Thorp only, Bellhop unavailable"
+THORP_DECIDES_LABEL = "Thorp budget decides every link"
 # The largest Bellhop excess over its own isovelocity run [dB] that `acoustic_link` believes (round 21, M-10): a field of exactly zero (no ray reached the
 # receiver) is a TL of 600 dB, an excess of about 540, and a margin nobody can read. ASSUMED, not measured: the largest finite excess seen in round 21's
 # probes was 56 dB (made-up profiles); a real shadow is thought to be 20 to 40 dB down through diffraction and scattering. A sample beyond it, in either
@@ -53,6 +54,13 @@ BELLHOP_EXCESS_CAP_DB = 60.0
 # depths [m]); the Munk-like profile is converged from 3 m (0.0 dB) and the tropical one differs by 2 to 5 dB for every pair (a depth effect, not convergence).
 # The set `stage1` takes the lowest margin of includes a run with both ends at least this deep. A choice made on made-up profiles, not a property of the sea.
 BELLHOP_MIN_DEPTH_M = 5.0
+# The range grid of one Bellhop run (round 21, merge). Bellhop is run once per member and direction on a grid spanning the member's needed ranges and the TL
+# is interpolated onto the samples. Until round 20 the grid had 48 points over the samples within +-6 dB of a pass, about 2.3 km for the default MF modem
+# (3.2 to 5.5 km at 6 m/s wind, measured in round 21), so its spacing was about 50 m; with every needed in-range sample refined the span is up to the valid
+# range (20 to 60 km) and 48 points were 0.4 to 1.3 km apart (the excess differed from a 100 m grid by up to 17 dB, tropical profile). The spacing is held at
+# the old one: BELLHOP_GRID_M = 50 m is the old spacing rounded (MEASURED as above, not tuned); the time of a run hardly depends on the number of ranges.
+BELLHOP_GRID_M = 50.0
+BELLHOP_GRID_POINTS_MIN = 48
 F = NDArray[np.float64]
 FA = float | F
 
@@ -462,11 +470,16 @@ def _run_bellhop(r_m: ArrayLike, f_hz: float, z: ArrayLike, c: F, tx_depth: floa
 
 
 def bellhop_tl(r_m: ArrayLike, f_khz: float, z: ArrayLike, c: ArrayLike, tx_depth: float = 1.0, rx_depth: float = 5.0, water_depth: float = 4000.0,
-               n_grid: int = 48) -> F:
-    """Bellhop incoherent TL [dB] for any shape of r_m: one run on an `n_grid`-point range grid spanning r_m, interpolated."""
+               n_grid: int | None = None) -> F:
+    """Bellhop incoherent TL [dB] for any shape of r_m: one run on an `n_grid`-point range grid spanning r_m, interpolated. `n_grid` None: as many points as
+    keep the grid's spacing at or below BELLHOP_GRID_M (never fewer than BELLHOP_GRID_POINTS_MIN), so a long span is not sampled more coarsely than a short
+    one."""
     r = np.asarray(r_m, float)
     lo = max(r.min(), 100.0)
-    grid = np.linspace(lo, max(r.max(), 1.02 * lo), n_grid)                           # Bellhop wants strictly increasing ranges
+    hi = max(r.max(), 1.02 * lo)
+    if n_grid is None:
+        n_grid = max(BELLHOP_GRID_POINTS_MIN, int(np.ceil((hi - lo) / BELLHOP_GRID_M)) + 1)
+    grid = np.linspace(lo, hi, n_grid)                                                # Bellhop wants strictly increasing ranges
     tl = _run_bellhop(grid, f_khz * 1e3, z, np.asarray(c, float), tx_depth, rx_depth, water_depth)
     return cast(F, np.interp(r, grid, tl))
 
@@ -503,7 +516,7 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
     tl_b, tl_i = np.full(m_t.shape, np.nan), np.full(m_t.shape, np.nan)
     capped = np.zeros(m_t.shape, bool)
     method = np.full(m_t.shape, "thorp", dtype=object)
-    margin, label = m_t.copy(), "Thorp budget decides every link"
+    margin, label = m_t.copy(), THORP_DECIDES_LABEL
     if amb.any():
         if bellhop_available() and ssp is not None:
             z, c = ssp

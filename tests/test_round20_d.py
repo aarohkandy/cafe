@@ -70,7 +70,8 @@ def test_r20_m7_a_result_with_a_direction_beyond_the_six_is_not_seeded(work, cap
 
 @pytest.mark.parametrize("gci", ["absent", None, "0.1", True, [0.1], {"v": 1}])
 def test_r20_m7_a_direction_without_a_number_in_gci_is_not_seeded(work, capsys, gci):
-    """`_site_data.py` reads `v["gci"]` of every direction (a KeyError without it); `vehicle.py` reads a missing one as 0.0, a perfect grid."""
+    """The seed refuses a direction with no number in `gci`. (Round 20: `_site_data.py` read `v["gci"]` of every direction, a KeyError without it, and
+    `vehicle.py` read a missing one as 0.0, a perfect grid; since round 21 `_site_data.gci_table` and `vv.gci_value` read it as no index, inf.)"""
     r = external()
     if gci == "absent":
         del r["dirs"]["-z"]["gci"]

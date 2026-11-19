@@ -1320,7 +1320,7 @@ def test_l0_r11_a_summary_with_n_zero_or_k_beyond_n_is_a_problem_line_not_a_zero
     ref, new = (bad, g) if which == "reference" else (g, bad)
     problems = acc.diff(ref, new, seed=seed)
     where = "in the reference" if which == "reference" else "now"
-    assert f"links rf: k_fail 0 of n 0 {where} is not a count (integers, n >= 1, 0 <= k_fail <= n)" in problems
+    assert f"links rf: k_fail 0 of n 0 {where} is not a count (integers, n >= 1, 0 <= k_fail <= n, n at most 9007199254740992)" in problems
     assert any(p.startswith("links rf: n ") for p in problems) == seed                  # the n mismatch is reported, too, where n must be the same (M-32)
     over = copy.deepcopy(g)
     over["vehicles"]["usv"]["k_fail"] = over["vehicles"]["usv"]["n"] + 1

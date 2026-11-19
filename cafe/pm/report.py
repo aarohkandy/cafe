@@ -39,6 +39,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from . import budget, config, credibility
+from .jsonio import load_json
 from .config import ConfigError, json_object
 from .physics import comms, rfband
 from .stage1 import NOT_EXERCISED, QUANTITY, _classes, path_speed as _member_speeds, ship_antenna_m
@@ -121,7 +122,7 @@ class Trace:
         if not RECEIPTS.is_file():
             return f"{RECEIPTS_NAME} is not there: run `python -m cafe.pm receipts` and rerun the report"
         try:
-            rows = json.loads(RECEIPTS.read_text())
+            rows = load_json(RECEIPTS.read_text())
         except ValueError as e:
             return f"{RECEIPTS_NAME} is not valid JSON ({e})"
         bad = _rows_problem(rows)
@@ -132,7 +133,7 @@ class Trace:
         own ledgers hold. A missing meta file or digest is as stale as a different one: nothing says the table was made by this code."""
         meta = RECEIPTS.with_name(META_NAME)
         try:
-            md = json.loads(meta.read_text())
+            md = load_json(meta.read_text())
             made, part = md.get("code_digest"), md.get("only")
         except (OSError, ValueError, AttributeError):
             return f"{RECEIPTS_NAME} has no readable {META_NAME} beside it, so nothing says which code made it: rerun `python -m cafe.pm receipts`"
@@ -1509,6 +1510,9 @@ def _top3_html(top: list[Any], floor: Any = None, quantity: str | None = None, c
     if case == "no_acting_input":
         return ("<p class=muted>Top sensitivities: none, because no sampled input acts on this outcome (it is decided by a draw of its own), "
                 "so no noise floor was computed.</p>")
+    if case == "constant":
+        return ("<p class=muted>Top sensitivities: none, because the ranked outcome does not vary between the members (it is the same number in every one), "
+                "so there is nothing to rank and no noise floor was computed.</p>")
     fl = f"; the noise floor at this member count is S1 {_n(floor)}" if floor else ""
     what = "the 0/1 failure indicator" if quantity == "failure indicator" else f"the {html.escape(quantity)}" if quantity else "the ranked outcome"
     if not top:
@@ -1722,8 +1726,8 @@ def _censored_html(v: dict[str, Any]) -> str:
     profile share at 1.0), from the record stage 1 made while ranking it, so that no quantity needs a clause of its own. A summary without the record gets
     round 20's clause for the USV's state of charge and none for any other quantity."""
     c = v["sensitivity"].get("censored")
-    if c is None:
-        return _censored_soc_html(v)
+    if c is None:                                                  # a constant quantity says it does not vary: no second clause about a tie among some rows
+        return "" if v["sensitivity"].get("case") == "constant" else _censored_soc_html(v)
     what = html.escape(v["sensitivity"].get("quantity") or "ranked outcome")
     return (f" ({_n(c['share'])} of the ranked members share the same {'lowest' if c['at'] == 'min' else 'highest'} value of the {what}, {_n(c['value'])}: "
             "a clip or a ceiling, so this index rests on the other members and on a tie among these)")
@@ -1804,8 +1808,11 @@ def _granularity_samples_html(g: dict[str, Any], verdict: str) -> str:
         return (f"<p class=warn>Required at no moment in the median member ({_n(g['need_count'])}): the link was not exercised in it, "
                 f"so its pass fraction says nothing (the mission allows {_n(g['allowed_miss'])} to be missed); {tail}</p>")
     miss = f"; one missed sample is {_n(g['one_sample'])} of them and the mission allows {_n(g['allowed_miss'])} to be missed"
+    # round 21 merge: where stage 1 took the median over the members that needed the link, the sentence says so
+    who = ("the median number of required samples per member" if not g.get("on_needed") else
+           f"the median number of required samples among the {_n(g['needed'])} that needed the link")
     return (f"<p class={'muted' if g['ok'] else 'warn'}>Each member's pass fraction is decided on {_n(g['need_count'])} "
-            f"(the median number of required samples per member){miss}"
+            f"({who}){miss}"
             + ("." if g["ok"] else ", so this verdict is undecided: granularity (too few samples to tell the required fraction from every sample).") + "</p>")
 
 
@@ -2257,5 +2264,5 @@ def self_checks(run_dir: str | pathlib.Path) -> dict[str, list[str]]:
     """The two checks the report stage records, run on the files `write` left in `run_dir/report`: each name -> its problems (empty when it holds).
     `s_report` ledgers them; `report --run` runs them before it re-records the report outputs."""
     run = pathlib.Path(run_dir)
-    rep = json.loads((run / "report" / "report.json").read_text())
+    rep = load_json((run / "report" / "report.json").read_text())
     return dict(report_traceable=check_traceability(rep), report_html_matches_json=check_rendered(rep, (run / "report" / "index.html").read_text()))

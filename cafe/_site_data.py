@@ -14,6 +14,7 @@ import datetime as dt, json, os, pathlib, sys, time, urllib.request
 import numpy as np
 
 from cafe import atomic
+from cafe.pm.jsonio import load_json
 
 OUT = pathlib.Path("/work/site_data")
 BOX = dict(lat=(6.0, 19.0), lon=(-102.0, -87.0))          # padding around the chart's 7-18 N, 101-88 W
@@ -36,7 +37,7 @@ def get(url, timeout=300):
 
 def land():
     from shapely.geometry import shape, box, mapping
-    raw = json.loads(get("https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_10m_land.geojson"))
+    raw = load_json(get("https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_10m_land.geojson"))
     b = box(BOX["lon"][0], BOX["lat"][0], BOX["lon"][1], BOX["lat"][1])
     polys = [shape(f["geometry"]).intersection(b) for f in raw["features"]]
     geom = [p.simplify(0.004, preserve_topology=True) for p in polys if not p.is_empty]
@@ -98,11 +99,11 @@ def missions():
     base = pathlib.Path("/work/missions")
     out = {}
     for key, mid in MISSIONS.items():
-        r = json.loads((base / mid / "result.json").read_text())
-        m = json.loads((base / mid / "mission.json").read_text())
+        r = load_json((base / mid / "result.json").read_text())
+        m = load_json((base / mid / "mission.json").read_text())
         drones = {}
         for d in m["drones"]:
-            spec = json.loads((pathlib.Path("/work/designs") / d["design"] / "spec.json").read_text())
+            spec = load_json((pathlib.Path("/work/designs") / d["design"] / "spec.json").read_text())
             res = r["drones"][d["id"]]
             tr = res["track"][::10]
             n, e = ne([s["lat"] for s in tr], [s["lon"] for s in tr])
@@ -136,7 +137,7 @@ def shapes():
     out = {}
     for key in ("sample-petrel", "sample-tern", "sample-quad", "sample-torpedo"):
         m = trimesh.load(f"/work/designs/{key}/mesh.stl", force="mesh")
-        spec = json.loads((pathlib.Path("/work/designs") / key / "spec.json").read_text())
+        spec = load_json((pathlib.Path("/work/designs") / key / "spec.json").read_text())
         out[key] = dict(name=spec.get("name"), extents=np.round(m.extents, 3).tolist(),
                         side=outline(m, [0, 2]), plan=outline(m, [0, 1]))
     sb = geom.sample_suboff()
@@ -154,7 +155,7 @@ def gci_table(dirs):
 def hull():
     from cafe import vehicle, geom, mission
     from cafe.hangar import load_vehicle
-    c = json.loads(pathlib.Path("/work/runs/s1/suboff.incidence.json").read_text())
+    c = load_json(pathlib.Path("/work/runs/s1/suboff.incidence.json").read_text())
     L = 4.356
     cog = np.array(geom.SAMPLES["suboff"]["spec"]["cog"], float)
     cross, _ = vehicle.hull_lift(c, cog, np.zeros((3, 3)))
@@ -202,8 +203,8 @@ def vehicles():
     out = {}
     for key in ("sample-petrel", "sample-tern", "sample-quad"):
         v = load_vehicle(f"/work/designs/{key}")
-        spec = json.loads((pathlib.Path("/work/designs") / key / "spec.json").read_text())
-        res = json.loads((pathlib.Path("/work/designs") / key / "result.json").read_text())
+        spec = load_json((pathlib.Path("/work/designs") / key / "spec.json").read_text())
+        res = load_json((pathlib.Path("/work/designs") / key / "result.json").read_text())
         d = dict(name=spec["name"], kind=v.kind, family=ctrl.family(v), battery_wh=v.battery_wh, hotel_w=v.hotel_w,
                  cruise=round(float(ctrl.cruise_speed(v)), 3), vmax=round(float(ctrl.max_speed(v)), 3), length=round(v.length, 3))
         if d["family"] == "glider":
@@ -296,7 +297,7 @@ def ocean():
     currents cannot be fetched is left out (the page then says which dates have real currents)."""
     from cafe import ocean as oc
     lat_r, lon_r = (7.0, 18.0), (-101.0, -88.0)
-    prev = json.loads((OUT / "ocean.json").read_text()) if (OUT / "ocean.json").exists() else {}
+    prev = load_json((OUT / "ocean.json").read_text()) if (OUT / "ocean.json").exists() else {}
     out = {}
     for key, t0 in (("2018", dt.datetime(2018, 2, 3, 12)), ("2023", dt.datetime(2023, 3, 7, 12))):
         want0 = (t0 - oc.EPOCH).total_seconds() / 3600
@@ -326,8 +327,8 @@ def fullsim():
     base = pathlib.Path("/work/missions")
     out = {}
     for key, mid in MISSIONS.items():
-        r = json.loads((base / mid / "result.json").read_text())
-        m = json.loads((base / mid / "mission.json").read_text())
+        r = load_json((base / mid / "result.json").read_text())
+        m = load_json((base / mid / "mission.json").read_text())
         drones = {}
         for did, d in r["drones"].items():
             eta = next((l["eta_min_p50"] for l in d["legs"] if l["type"] == "goto" and l.get("eta_min_p50") is not None), None)

@@ -5,6 +5,7 @@ os.environ.setdefault("CAFE_WORK", "/work")
 import numpy as np
 import urllib.error, urllib.parse, urllib.request
 from cafe import app as A, env as envm
+from cafe.pm.jsonio import load_json
 
 BASE = os.environ.get("CAFE_API", "http://100.108.213.121:8740")
 
@@ -14,7 +15,7 @@ class Resp:
         self.status_code, self.text, self.headers = code, body.decode(errors="replace"), {"content-type": ctype or ""}
 
     def json(self):
-        return json.loads(self.text)
+        return load_json(self.text)
 
 
 class Client:      # the deployed API over plain HTTP: tests what users actually hit

@@ -147,7 +147,7 @@ def test_x1_the_docstring_and_physics_say_the_direction_by_pair():
                  "which is overstated by +1.8 to +2.7 dB", "A pair that is not in the table is computed live by"):
         assert " ".join(text.split()) in doc, text
     para = " ".join(next(p for p in (ROOT / "docs" / "PHYSICS.md").read_text().split("\n\n") if p.startswith("**Low antennas**")).split())
-    for text in ("0.5 m with a 2.2 m partner", "not measured", "too low, never too high"):
+    for text in ("0.5 m with a 2.2 m partner", "computed live", "too low, never too high"):         # round 21 merge: "not measured" is superseded (rfband)
         assert text in para, text
 
 

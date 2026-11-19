@@ -24,7 +24,7 @@ is usually unstable, so it overstates the 4 -> 10 m shear by 2-3 % at 6 m/s (mea
 method="coare" uses cafe.pm.env.coare (imported only then) with the mooring's own air temperature, humidity and SST, which
 includes stability; compare()'s default "auto" uses it for moorings that report all three and "log" for the rest.
 """
-import datetime as dt, importlib, json, os, pathlib, re, warnings
+import datetime as dt, importlib, os, pathlib, re, warnings
 import xml.etree.ElementTree as ET        # the catalogs come from NOAA over verified TLS; expat >= 2.4.1 is safe against entity expansion
 
 import numpy as np
@@ -33,6 +33,7 @@ from numpy.typing import ArrayLike, NDArray
 from typing import Any
 
 from ..config import assumptions as _assumptions, write_json
+from ..jsonio import load_json
 from . import conventions as cv, orca, remote
 from .environment import seconds
 from .hycom import box360
@@ -221,7 +222,7 @@ def verify(out_dir: Any, man: dict[str, Any] | None = None) -> int:
     """Re-hash every file in out_dir/manifest.json (or in `man`, a parsed copy of it, which a run takes so that what it verifies is what it recorded).
     Returns how many matched; ValueError lists the missing/changed ones."""
     out = pathlib.Path(out_dir)
-    man = json.loads((out / "manifest.json").read_text()) if man is None else man
+    man = load_json((out / "manifest.json").read_text()) if man is None else man
     bad = [k for k, r in man["files"].items() if not (out / k).exists() or remote.sha256(out / k) != r["sha256"]]
     if bad:
         raise ValueError(f"{len(bad)} of {len(man['files'])} TAO files differ from the manifest SHA-256 (or are missing): {bad[:5]}; "
@@ -250,7 +251,7 @@ def unusable_selected(out_dir: Any) -> list[str]:
     `fetch_tao` never selects such a file; a cache built before that, or a file whose variable was dropped later, still hashes to its manifest, so the
     cache check asks this too and fetches again instead of failing hours later in the ingest (round 9, M-31 sibling)."""
     out = pathlib.Path(out_dir)
-    man = json.loads((out / "manifest.json").read_text())
+    man = load_json((out / "manifest.json").read_text())
     bad = []
     for sel in man["selected"].values():
         for var, key in sel.items():
@@ -267,7 +268,7 @@ def wind_gap(out_dir: Any, name: str, t0: Any = None, t1: Any = None, man: dict[
     left out of the comparison is told from a drop in the code (round 10, LB1). `man`: the parsed manifest copy, as for `verify`."""
     import xarray as xr
     out = pathlib.Path(out_dir)
-    man = json.loads((out / "manifest.json").read_text()) if man is None else man
+    man = load_json((out / "manifest.json").read_text()) if man is None else man
     a, b = (man["t0"] if t0 is None else t0), (man["t1"] if t1 is None else t1)
     keys = sorted(k for k, r in man["files"].items() if r["mooring"] == name and r["var"] == "WIND")
     if not keys:
@@ -293,7 +294,7 @@ def load_tao(out_dir: Any, t0: Any = None, t1: Any = None, man: dict[str, Any] |
     from the files fetch_tao selected; verifies the SHA-256 of every file it reads. Variables a mooring lacks are absent. `man`: the parsed manifest
     copy a run recorded (`Ledger.snapshot`); only the manifest comes from it, the files are read under `out_dir`."""
     out = pathlib.Path(out_dir)
-    man = json.loads((out / "manifest.json").read_text()) if man is None else man
+    man = load_json((out / "manifest.json").read_text()) if man is None else man
     verify(out, man)
     a, b = (man["t0"] if t0 is None else t0), (man["t1"] if t1 is None else t1)
     res: dict[str, dict[str, Any]] = {}
@@ -313,7 +314,7 @@ def load_tao(out_dir: Any, t0: Any = None, t1: Any = None, man: dict[str, Any] |
 def waves_available(out_dir: Any) -> bool:
     """True if any mooring in the box lists a wave variable. False (and a warning saying so) for TAO/TRITON, which measure
     wind, air and sea temperature, humidity, pressure, rain, radiation and subsurface T/S/currents but not waves."""
-    w = json.loads((pathlib.Path(out_dir) / "manifest.json").read_text())["waves"]
+    w = load_json((pathlib.Path(out_dir) / "manifest.json").read_text())["waves"]
     if not w["matches"]:
         warnings.warn(f"no wave data: none of the {w['checked']} TAO/TRITON files listed for the moorings in the box has a wave variable "
                       f"({', '.join(WAVE_VARS)}); compare UMWM swh against altimeter or WW3 instead", UserWarning, stacklevel=2)

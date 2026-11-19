@@ -40,6 +40,7 @@ import jax
 import jax.numpy as jnp
 
 from cafe.planner import boundary_layer
+from ..jsonio import load_json
 import cafe.receipts as cr
 from cafe.receipts import receipt, bracket
 from ..config import SPHERE_RUNS as SPHERE_RUNS, finite_real, missing_numbers, write_json
@@ -650,7 +651,7 @@ def read_stored(f: pathlib.Path, numeric: tuple[str, ...] = (), optional: tuple[
     The one reader of every stored receipt, so a hand-edited or schema-changed file is a result that is not stored (a failed row) and never a KeyError
     or TypeError (round 9 M-4)."""
     try:
-        d = json.loads(f.read_text())
+        d = load_json(f.read_text())
     except (OSError, ValueError):
         return None
     if not isinstance(d, dict):

@@ -171,14 +171,16 @@ def gci_value(g: Any) -> float:
     where there is no index; None, which is what `r.get("gci")` gives for a missing key; text, a list, an integer too large for a float). No index is an
     index that cannot be trusted, never a small one: `cfd.characterize_external` already takes inf for such a direction when it decides on a finer grid, and
     every reader (`vehicle`, `hangar`, `mission`) goes through this, with NO default for a missing key, so that they agree (round 20, M3; round 21, M-5).
-    A bool is no number. `config.finite_real` is the test."""
-    return float(g) if finite_real(g) else math.inf
+    A bool is no number. A negative one is no index either (an index is a magnitude, `cfd.gci` writes an absolute value: a hand-edited file), and is `inf` here
+    so that `worst_gci`, `gci_trusted` and every reader that takes a maximum agree with the one that asks one by one (round 21 merge). `config.finite_real`
+    is the test."""
+    return float(g) if finite_real(g) and g >= 0 else math.inf
 
 
 def gci_trusted(g: Any) -> bool:
     """Whether `g` is an index that can be read as a measured mesh uncertainty: a finite number from 0 to `GCI_TRUSTED`, both included. NaN, inf, a missing
-    key (None), any other non-number and a negative one (an index is a magnitude: a hand-edited file) are not."""
-    return 0 <= gci_value(g) <= GCI_TRUSTED
+    key (None), any other non-number and a negative one are not (`gci_value` reads them all as inf)."""
+    return gci_value(g) <= GCI_TRUSTED
 
 
 def worst_gci(gcis: Iterable[Any], default: float = 0.0) -> float:
