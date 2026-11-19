@@ -75,8 +75,17 @@ def _text_and_numbers(node):
 
 
 def _literals(src: str) -> str:
-    """The sha-1 of the numbers and texts written in the functions and classes of the module text `src` (see above)."""
-    seen = [(n.name, *_text_and_numbers(n)) for n in ast.parse(src).body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name not in NOT_KEYED]
+    """The sha-1 of the numbers and texts written in the functions and classes of the module text `src` (see above): those under a top-level `if`, `try`,
+    `with`, `for` or `while` too, and `async def` (round 19, M-9). A def inside another is not listed again: its parent is keyed whole. `defs` sits inside this
+    function so that the exempt names (`NOT_KEYED`) stay what they were."""
+    def defs(node):
+        for c in ast.iter_child_nodes(node):
+            if isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                yield c
+            else:
+                yield from defs(c)
+
+    seen = [(n.name, *_text_and_numbers(n)) for n in defs(ast.parse(src)) if n.name not in NOT_KEYED]
     return hashlib.sha1(repr(seen).encode()).hexdigest()
 
 
