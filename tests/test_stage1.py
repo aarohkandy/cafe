@@ -665,6 +665,7 @@ def test_the_method_of_an_acoustic_link_is_a_string_even_when_comms_returns_one_
     per_element = np.array(["bellhop", "bellhop"], dtype=object)
     res = lambda d, modem, band, wind, dz: dict(margin=types.SimpleNamespace(value=np.full(np.shape(d), 5.0)), method=per_element, label="")
     monkeypatch.setattr(stage1.comms, "acoustic_link", res)
+    monkeypatch.setattr(stage1.comms, "bellhop_available", lambda: False)  # round 21, M-3: with Bellhop every needed sample is refined, `res` has no profile
     r = stage1.evaluate_link(LK["glider_eq-ship-acoustic"], out, MISSION, flat_env(1), 1, 3, [0])
     assert isinstance(r["method"], str) and "bellhop" in r["method"] and r["success"].all()
 
@@ -748,8 +749,11 @@ def test_without_bellhop_or_a_profile_the_ambiguous_link_keeps_the_thorp_margin_
     assert "Bellhop on 0 of" in r["method"] and "Thorp only" in r["method"] and np.allclose(r["margin_db"], thorp, atol=0.3)
 
 
-def test_a_clear_acoustic_link_never_reaches_bellhop(monkeypatch):
-    r, calls, thorp = bellhop_scene(monkeypatch, km=1.0, depth=5.0)
+def test_an_out_of_range_acoustic_link_never_reaches_bellhop(monkeypatch):
+    """Round 21, M-3: this was `test_a_clear_acoustic_link_never_reaches_bellhop` (1 km, a Thorp margin above +6 dB, no Bellhop call). That answer moved by
+    design: every needed sample in range is refined now (tests/test_round21_a.py pins it, with the +6 dB case); what still never reaches Bellhop is a sample
+    beyond `comms.valid_range_m`, where the Thorp margin is an extrapolation and the link is out of range."""
+    r, calls, thorp = bellhop_scene(monkeypatch, km=45.0, depth=5.0)
     assert not calls and abs(thorp) > 6.0 and "Bellhop" not in r["method"]
 
 

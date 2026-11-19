@@ -45,7 +45,7 @@ def test_the_margin_of_an_acoustic_link_does_not_depend_on_which_end_is_named_fi
     assert np.array_equal(r["success"], rev["success"])
     assert np.allclose(r["margin_db"][np.isfinite(r["margin_db"])], -2.0, atol=1e-3)                   # the lower of the two
     assert r["frac"].tolist() == [0.0, 0.0] and not r["success"].any()                                  # before: one order passed (frac 1.0), one failed
-    assert sorted(set(calls)) == [(1.0, 5.0), (5.0, 1.0)]
+    assert sorted(set(calls)) == [(1.0, 5.0), (5.0, 1.0), (5.0, 5.0)]                    # round 21, M-4: and the run with both ends at least 5 m deep
 
 
 @pytest.mark.parametrize("low_first,high_first", [(7.0, 3.0), (3.0, 7.0), (5.0, 5.0)])
@@ -58,13 +58,14 @@ def test_the_margin_is_the_lower_of_the_two_directions_whichever_sends_the_large
 def test_the_label_says_the_refined_margin_is_the_lower_of_the_two_directions_only_where_bellhop_ran(monkeypatch):
     r, rev, _ = scene(monkeypatch, 7.0, 3.0)
     for x in (r, rev):
-        assert x["method"] == ("Thorp/Stojanovic budget on the slant range, Bellhop on 434 of 434 ambiguous samples (the lower of the two directions)")
+        assert x["method"] == ("Thorp/Stojanovic budget on the slant range, Bellhop on 434 of 434 needed in-range samples "  # round 21, M-3 and M-4
+                               "(the lowest of 3 runs: as named, swapped, both ends at least 5 m deep)")
     monkeypatch.setattr(comms, "bellhop_available", lambda: False)                          # no Bellhop: the Thorp number, no claim about two directions
     out, _ = acoustic_scene(M=2, far=(0, 0))
     out["glider_eq"]["lat"][:] = km_north(KM)
     out["glider_eq"]["depth"][:] = 1.0
     x = stage1.evaluate_link(link("glider_eq-ship-acoustic", when="always"), out, MISSION, flat_env(2), 2, 3, [0, 1])
-    assert "lower of the two" not in x["method"]
+    assert "lowest of" not in x["method"]
 
 
 def test_two_equal_transducer_depths_are_one_bellhop_run_and_the_same_margin(monkeypatch):
@@ -78,7 +79,7 @@ def test_two_equal_transducer_depths_are_one_bellhop_run_and_the_same_margin(mon
     env.env.sound_speed = lambda lon, lat, z, t: types.SimpleNamespace(value=1500.0 - 0.02 * np.asarray(z, float))
     monkeypatch.setattr(comms, "_run_bellhop", lambda r, f, z, c, tx, rx, wd: clipped.append((tx, rx)) or 20 * np.log10(r))
     stage1._bellhop_member(env, "benthos_atm960", "MF", -165.0, 0.0, TGRID[0], 0.2, 1.0, np.array([4500.0]), np.zeros(1), np.array([6.0]))
-    assert clipped == [(1.0, 1.0)] * 2                                                       # 0.2 m is clipped to the 1 m floor: equal to the other, one run
+    assert clipped == [(1.0, 1.0)] * 2 + [(5.0, 5.0)] * 2  # 0.2 m is clipped to the 1 m floor, equal to the other: (1, 1) and, round 21 M-4, the 5 m run
 
 
 def test_a_direction_bellhop_gives_no_number_for_does_not_hide_the_other(monkeypatch):
@@ -91,7 +92,7 @@ def test_a_direction_bellhop_gives_no_number_for_does_not_hide_the_other(monkeyp
     env.env.depth = lambda lon, lat: types.SimpleNamespace(value=np.array([4000.0]))
     env.env.sound_speed = lambda lon, lat, z, t: types.SimpleNamespace(value=1500.0 - 0.02 * np.asarray(z, float))
     m = stage1._bellhop_member(env, "benthos_atm960", "MF", -165.0, 0.0, TGRID[0], 1.0, 5.0, np.array([4500.0]), np.zeros(1), np.array([6.0]))
-    assert m is not None and np.isfinite(m).all()
+    assert m is not None and np.isfinite(m.margin).all()
 
 
 # ---------------------------------------------------------------- S1e: the time axis of a link between two UAS is the union of both sortie grids
