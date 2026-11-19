@@ -262,6 +262,14 @@ def _delete_aside(q: pathlib.Path) -> None:
     shutil.rmtree(gone, ignore_errors=True)
 
 
+def _mtime(d: pathlib.Path) -> float:
+    """When the directory `d` was last changed (a store's is the time it was built), 0 if it is gone."""
+    try:
+        return d.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _size_bytes(d: pathlib.Path) -> int:
     """The bytes under `d`, a file that goes while it is counted (the sweep of another run) not counted."""
     n = 0
@@ -334,13 +342,25 @@ def leftover_note(path: Any, lab: bool) -> str:
     if p.exists() or not (left := asides(p)):                                # (a store that is there: `mv` would put the leftover INSIDE it)
         return ""
     q = shlex.quote(str(p))
-    names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB)" for x in left)
+    left = sorted(left, key=lambda x: (_mtime(x), x.name), reverse=True)              # the newest first: `left[0]` is what `mv` offers (round 20, M-8)
+    names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB, {'newest, ' if i == 0 else 'older, '}modified "
+                      f"{dt.datetime.fromtimestamp(_mtime(x), dt.timezone.utc):%Y-%m-%d %H:%M} UTC)" for i, x in enumerate(left))
     sweep = ("nothing deletes the leftovers of a lab store, which is not locked: remove them by hand once the store is back (`ls -a` of its directory "
              "lists them)" if lab else "an ingest that writes the store deletes the ones left")
     return (f"; BUT the store as it was before an earlier ingest that was killed while it replaced it is beside it: {names}: "
             f"`mv {shlex.quote(str(left[0]))} {q}` puts it back without a download ({sweep}). A `.<12 hex>.tmp` directory beside the store may be "
             "that ingest's new store, whole if the kill came between the two renames, but nothing tells it from the build of an ingest that is running: "
             "after the `mv`, with no ingest running, remove it by hand")
+
+
+def dead_note(path: Any) -> str:
+    """"" or what to add to a message about the store `path` (there or not) when a kill left a half-deleted `.dead.tmp` beside it (`dead`): its name and
+    size, and that it is safe to delete. Nothing else finds it, and it can be a whole store's worth of a full disk (round 20, M-8)."""
+    if not (gone := dead(path)):
+        return ""
+    names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB)" for x in gone)
+    return (f"; a half-deleted leftover of an earlier ingest that was killed while it deleted the old store is beside the store: {names}: nothing reads "
+            f"it and it is safe to delete (`rm -r {' '.join(shlex.quote(str(x)) for x in gone)}`); the next ingest that writes the store deletes it too")
 
 
 def unreadable(path: Any, e: Exception, lab: bool | None = None) -> Exception:
