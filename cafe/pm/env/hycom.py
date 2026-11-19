@@ -270,6 +270,16 @@ def _mtime(d: pathlib.Path) -> float:
         return 0.0
 
 
+def _date(t: float) -> str:
+    """`t` (seconds since 1970, UTC) as `2026-11-19 14:05 UTC`, or `unknown date` for a time that has none: an absurd modification time (a far future or a
+    negative one, a clock that was wrong) is an OverflowError, a ValueError or an OSError in `datetime`, and this is in the advice that exists to help after a
+    failure (round 20, M5)."""
+    try:
+        return f"{dt.datetime.fromtimestamp(t, dt.timezone.utc):%Y-%m-%d %H:%M} UTC"
+    except (OverflowError, ValueError, OSError):
+        return "unknown date"
+
+
 def _size_bytes(d: pathlib.Path) -> int:
     """The bytes under `d`, a file that goes while it is counted (the sweep of another run) not counted."""
     n = 0
@@ -343,8 +353,7 @@ def leftover_note(path: Any, lab: bool) -> str:
         return ""
     q = shlex.quote(str(p))
     left = sorted(left, key=lambda x: (_mtime(x), x.name), reverse=True)              # the newest first: `left[0]` is what `mv` offers (round 20, M-8)
-    names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB, {'newest, ' if i == 0 else 'older, '}modified "
-                      f"{dt.datetime.fromtimestamp(_mtime(x), dt.timezone.utc):%Y-%m-%d %H:%M} UTC)" for i, x in enumerate(left))
+    names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB, {'newest, ' if i == 0 else 'older, '}modified {_date(_mtime(x))})" for i, x in enumerate(left))
     sweep = ("nothing deletes the leftovers of a lab store, which is not locked: remove them by hand once the store is back (`ls -a` of its directory "
              "lists them)" if lab else "an ingest that writes the store deletes the ones left")
     return (f"; BUT the store as it was before an earlier ingest that was killed while it replaced it is beside it: {names}: "

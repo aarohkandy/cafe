@@ -472,6 +472,11 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
     (deep isovelocity water is spherical, k=2) would double-count the spreading; the excess keeps what Thorp cannot see
     (refraction, ducts, shadow zones) and nothing else. Absolute TLs are returned too.
 
+    Bellhop's TL is not reciprocal in practice: with the two depths swapped (tx_depth, rx_depth against rx_depth, tx_depth) the same horizontal range gives a
+    different margin, by up to 26.5 dB in round 20's probes (made-up sound-speed profiles, not a measurement; the ray equations are reciprocal, so the
+    difference is Bellhop's own numerical error, probably its incoherent TL at a 1 m endpoint in a shadow: not tested). This function runs the one direction the
+    depths name; `stage1._bellhop_member` calls it for both and keeps the LOWER margin, so a link's margin does not depend on which end is named first.
+
     Returns dict: margin (Tagged), thorp_margin, ambiguous (bool), method (str per element), label (str; THORP_ONLY_LABEL
     when an ambiguous link could not be refined), tl_bellhop_db / tl_bellhop_iso_db (NaN where Bellhop did not run)."""
     r, w, dz = np.broadcast_arrays(np.asarray(r, float), np.asarray(wind, float), np.asarray(dz, float))

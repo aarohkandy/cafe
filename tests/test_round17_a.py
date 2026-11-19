@@ -145,7 +145,8 @@ def test_m1_the_whatif_command_says_which_baseline_it_prints_and_which_is_the_re
     monkeypatch.setattr(whatif, "answer", lambda *a, **k: dict(vehicles={"glider_eq": r}, dropped=[], links_removed=[]))
     cli.main(whatif_args(wi, "--shift", "6h"))
     out = capsys.readouterr().out.splitlines()
-    assert out[1] == "glider_eq: MARGINAL (P(fail) 0.156) -> MARGINAL (P(fail) 0.125) (0.100 to 0.200)  [Stage 1, n = 32 (no emulator)]"
+    assert out[1] == ("glider_eq: MARGINAL (P(fail) 0.156) -> MARGINAL (P(fail) 0.125) (0.100 to 0.200)  [Stage 1, n = 32 (no emulator)]; "
+                      "not distinguishable from the baseline (its interval contains the baseline's P(fail))")
     assert out[2] == ("  note: glider_eq the baseline shown above is the unchanged mission on the same 32 members as the answer; the report's own "
                       "baseline, of the whole run's 64 members, is NO-GO (P(fail) 0.234).")
     monkeypatch.setattr(whatif, "answer", lambda *a, **k: dict(vehicles={"glider_eq": dict(r, base_run=None)}, dropped=[], links_removed=[]))

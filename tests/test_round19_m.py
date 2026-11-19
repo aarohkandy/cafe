@@ -150,11 +150,10 @@ def test_a2_ingest_ocean_names_the_older_copy_that_a_killed_ingest_left_beside_t
     assert "nothing deletes the leftovers of a lab store" in text and "remove it by hand" in text
 
 
-def test_a2_ingest_ocean_says_nothing_when_there_is_no_older_copy_or_only_a_dead_one_or_another_stores(monkeypatch, tmp_path, capsys):
+def test_a2_ingest_ocean_says_nothing_when_there_is_no_older_copy_or_only_another_stores(monkeypatch, tmp_path, capsys):
+    """Round 20, M-8: a `.dead.tmp` of the store itself is named now (tests/test_round20_c.py); another store's leftovers are still not."""
     out = tmp_path / "lab.zarr"
     out.mkdir()
-    dead = hycom._aside_name(out).with_name(hycom._aside_name(out).name.replace(".old.tmp", ".dead.tmp"))
-    dead.mkdir()
     (tmp_path / "other.zarr").mkdir()
     hycom._aside_name(tmp_path / "other.zarr").mkdir()
     text = ingest(monkeypatch, tmp_path, capsys)

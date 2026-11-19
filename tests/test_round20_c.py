@@ -104,8 +104,10 @@ def test_m8_ingest_ocean_names_a_half_deleted_dead_tmp_beside_the_store_with_its
     out.mkdir()
     d = dead_dir(out, 2.5)
     text = ingest(monkeypatch, tmp_path, capsys)
-    assert text.startswith(f"ocean store: {out}\n") and f"note: a half-deleted `.dead.tmp` is beside the store: {d} (2.5 GB); " in text
-    assert "safe to delete by hand" in text and "nothing reads it" in text and "still beside this one" not in text          # no whole aside: only this line
+    assert text.startswith(f"ocean store: {out}\n")
+    assert (f"note: a half-deleted leftover of an earlier ingest that was killed while it deleted the old store is beside the store: {d} (2.5 GB): "
+            in text)                                                       # `hycom.dead_note`'s wording, the one the pipeline's check says too (round 20, M2)
+    assert f"safe to delete (`rm -r {d}`)" in text and "nothing reads it" in text and "still beside this one" not in text      # no whole aside: only this line
 
 
 def test_m8_ingest_ocean_names_a_whole_aside_and_a_dead_one_each_in_its_own_line_and_nothing_for_another_stores(monkeypatch, tmp_path, capsys):
@@ -119,7 +121,7 @@ def test_m8_ingest_ocean_names_a_whole_aside_and_a_dead_one_each_in_its_own_line
     hycom._aside_name(other).mkdir()
     dead_dir(other)
     lines = ingest(monkeypatch, tmp_path, capsys).splitlines()
-    assert len(lines) == 3 and f"is still beside this one: {aside};" in lines[1] and f"beside the store: {d} (0.0 GB);" in lines[2]
+    assert len(lines) == 3 and f"is still beside this one: {aside};" in lines[1] and f"beside the store: {d} (0.0 GB):" in lines[2]
 
 
 def test_m8_ingest_ocean_says_only_the_store_when_nothing_is_beside_it(monkeypatch, tmp_path, capsys):

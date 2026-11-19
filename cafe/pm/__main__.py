@@ -264,10 +264,8 @@ def _ingest_ocean(a: argparse.Namespace) -> int:
         print("note: the store as it was before an earlier ingest that was killed while it replaced it is still beside this one: "
               f"{', '.join(str(q) for q in old)}; nothing deletes the leftovers of a lab store, so remove it by hand once the new store opens "
               "(`ls -a` of its directory lists them)")
-    if gone := hycom.dead(out):                  # round 20, M-8: a kill during the delete of the old store leaves this, and no other message finds it
-        print("note: a half-deleted `.dead.tmp` is beside the store: " + ", ".join(f"{q} ({hycom._size_bytes(q) / 1e9:.1f} GB)" for q in gone)
-              + "; an earlier ingest was killed while deleting the store it replaced, nothing reads it, and it is safe to delete by hand "
-              "(the disk is not freed until it is)")
+    if note := hycom.dead_note(out):             # round 20, M-8: a kill during the delete of the old store leaves this, and no other message finds it; the
+        print("note:" + note[1:])                # one wording is `hycom.dead_note`'s (the pipeline's check says the same), which begins with "; "
     return 0
 
 
