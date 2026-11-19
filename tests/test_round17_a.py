@@ -258,12 +258,13 @@ def test_m5_an_rf_link_to_the_slocums_0_3_m_antenna_gets_the_sentence_and_the_ot
     note = report._low_antenna_note(rf("glider_2n", "usv"), DEMO)
     assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).")
     assert "the margin is too low by that much" in note                                           # round 18 addendum: the pair's own direction
-    usv_uas = report._low_antenna_note(rf("usv", "uas"), DEMO)         # 2.2 m and an airborne antenna: round 20, M-2: the card speaks, no band
-    assert usv_uas.startswith("An end of this RF link has an antenna of 0.55 to 2.2 m: usv (2.2 m).") and "no error band is stated" in usv_uas
+    usv_uas = report._low_antenna_note(rf("usv", "uas"), DEMO)         # 2.2 m and an airborne antenna: round 21, M-2: the band of each of the UAS's legs
+    assert usv_uas.startswith("The antennas of this RF link: usv (2.2 m), uas (flown at 18.1, 38.1, 68.1, 108.1 m).")
+    assert "no error band is stated" not in usv_uas
     for kind in ("iridium", "acoustic"):
         assert report._low_antenna_note(rf("glider_2n", "usv", kind), DEMO) is None
     ship_usv = report._low_antenna_note(rf("ship", "usv"), DEMO)       # the ship's 15 m mast and the 2.2 m whip: a listed row (round 20, M-2)
-    assert ship_usv.startswith("An end of this RF link has an antenna of 0.55 to 2.2 m: usv (2.2 m).") and "(2.2 m with 15 m)" in ship_usv
+    assert ship_usv.startswith("The antennas of this RF link: ship (15 m), usv (2.2 m).") and "(2.2 m with 15 m)" in ship_usv
     # the seaglider's antenna is 0.5 m: not below it, but with the 2.2 m whip the model can understate the loss: the round 18 sentence of that case (M-3)
     assert report._low_antenna_note(rf("glider_eq", "usv"), DEMO).startswith("An end of this RF link has an antenna of 0.5 m: glider_eq (0.5 m).")
 

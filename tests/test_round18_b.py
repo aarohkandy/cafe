@@ -108,9 +108,9 @@ def test_r18_m3_the_loader_accepts_an_rf_link_whose_two_ends_are_gliders(tmp_pat
 
 def test_r18_m3_l23_states_the_band_by_pair_and_drops_never_too_high_and_not_affected():
     t = l23()
-    assert t.startswith("RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip:")
+    assert t.startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip up to a UAS at 108 m:")      # round 21, M-2: the scope is every RF link
     assert "antenna below 0.5 m" in t and "the error is of the pair of heights and has no one direction" in t
-    assert "margin too low" in t and "margin too high" in t and "MARGINAL or NO-GO" in t and "is not measured and no band is stated for it" in t
+    assert "margin too low" in t and "margin too high" in t and "MARGINAL or NO-GO" in t and "none of it is a table row" in t
     for gone in ("never too high", "not affected", "are not affected", "is conservative", "a margin there is conservative", "above 0.5 m and", "within 3.3 dB",
                  "at worst understates"):
         assert gone not in t, gone

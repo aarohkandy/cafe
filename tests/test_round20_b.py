@@ -1,27 +1,25 @@
-"""Round 20, batch B: the link card above 0.55 m and at 0.55 m (M-2: the envelope for an end of 0.55 to 2.2 m, the nearest-pair sentence at 0.55 m, L23),
-what a user reads beside a GO of a link some members never needed (M-3), the check of `n_never_required` (M-4), the clause on a battery-dominated USV's
+"""Round 20, batch B: the link card above 0.55 m and at 0.55 m (M-2: the envelope for an end of 0.55 to 2.2 m, the nearest-pair sentence at 0.55 m, L23;
+round 21, M-2 replaced that with the live band of any pair: the tests of the envelope, of the nearest-pair sentences and of the cliff at 2.2 m are gone and
+tests/test_round21_b.py holds their successors), what a user reads beside a GO of a link some members never needed (M-3), the check of `n_never_required`
+(M-4), the clause on a battery-dominated USV's
 ranked state of charge (M-12) and the test of the RPi mutant (M-10). One regression test per fix, each run against 8e22951 (it must fail there) and against the
 fixed tree (it must pass); the hand-back says which job did which.
 The envelope is recomputed here from the project's own reference (`tests.test_round18_b.band`: the model's loss minus a flat-earth Fresnel two-ray at Hs 0)."""
 import json
 import re
 
-import numpy as np
 import pytest
 
 from cafe.pm import config, credibility as cr, report, stage1
-from cafe.pm.physics import comms, glider
+from cafe.pm.physics import glider
 from cafe.pm.stats import intervals
 from tests.fixtures import pm_run
 from tests.test_report import data_dir, edit_json, load, plain, set_link_fields  # noqa: F401  (data_dir is autouse)
 from tests.test_round18_a import rf
-from tests.test_round18_b import band
 from tests.test_round18_x import card
 
 ROOT = config.ROOT
 DEMO = config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml")
-TOL = cr.LOW_ANTENNA_ROW_TOL_M
-ENVELOPE = cr.mid_envelope()
 
 
 def l23():
@@ -38,130 +36,59 @@ def ship_card(h, ship_h, monkeypatch):
 
 # ------------------------------------------------------------------------------------------------------------------------- M-2: 0.55 to 2.2 m
 
-@pytest.mark.parametrize("ship_h", [10.0, 15.0])
-@pytest.mark.parametrize("h", [0.56, 0.6, 0.75, 1.0, 1.5, 2.0, 2.19])
-def test_m2_an_end_of_0_55_to_2_2_m_off_a_row_prints_the_card_and_the_measured_envelope(h, ship_h, monkeypatch):
-    """Before: None (no card at all above 0.55 m) although the margin is too high by up to 5.1 dB there."""
-    note = ship_card(h, ship_h, monkeypatch)
-    assert note and note.startswith(f"An end of this RF link has an antenna of 0.55 to 2.2 m: a ({h:g} m).")
-    assert f"this pair (a ({h:g} m), ship ({ship_h:g} m)) is not among those measured (L23 lists them), so no band of this pair is stated" in note
-    assert ENVELOPE in note and "too high by up to 5.1 dB" in note and "too low by up to 2.2 dB" in note and "dB (median" not in note
-    assert note.endswith("(CREDIBILITY, limitation L23).")
-
-
-def test_m2_the_ship_at_2_2_m_off_the_listed_15_m_is_in_the_envelope_too(monkeypatch):
-    note = ship_card(2.2, 10.0, monkeypatch)                                                      # the USV's whip under the ship's default 10 m mast: no row
-    assert note and ENVELOPE in note and "dB (median" not in note
-
-
-NO_BAND = " (L23 lists them), so no error band is stated for this margin (CREDIBILITY, limitation L23)."
-
-
-@pytest.mark.parametrize("partner", ["uas", "shore", "ship 5 m", "ship 16 m", "end 2.2 m"])
-def test_m2_a_partner_the_envelope_was_not_measured_for_gets_the_card_and_no_band(partner, monkeypatch):
-    """The USV's whip with a UAS (the demo's link): the card says it is not measured and prints no figure, not the envelope of another partner."""
-    if partner in ("uas", "shore"):
-        note = report._low_antenna_note(rf("usv", partner), DEMO)
-    elif partner == "end 2.2 m":
-        note = card(1.0, 2.2, monkeypatch)
-    else:
-        note = ship_card(1.0, 5.0 if partner == "ship 5 m" else 16.0, monkeypatch)
-    assert note and note.split("is not among those measured")[1] == NO_BAND and ENVELOPE not in note
-
-
-def test_m2_the_demos_usv_uas_link_gets_exactly_this_new_card_and_no_other_link_of_the_demo_changes():
-    """What a q22 demo shows for `usv-uas-rf` (before: no `low_antenna` text at all); the demo's three other links have no RF end below 2.2 m."""
-    assert report._low_antenna_note(rf("usv", "uas"), DEMO) == (
-        "An end of this RF link has an antenna of 0.55 to 2.2 m: usv (2.2 m). The two-ray model takes the ground reflection as -1, which cancels the two "
-        "rays as an antenna goes to the surface, and its error is of the pair of heights: this pair (usv (2.2 m), uas (no single height)) is not among "
-        "those measured (L23 lists them), so no error band is stated for this margin (CREDIBILITY, limitation L23).")
+def test_m2_the_demos_usv_uas_link_gets_exactly_this_card_and_no_other_link_of_the_demo_has_one():
+    """What a demo shows for `usv-uas-rf` (round 20: 'no error band is stated'; round 21: the band of the whip with each of the UAS's four legs, computed;
+    the figures are those of the independent reference, tests/test_round21_b.py). The demo's other links are acoustic or Iridium."""
+    note = report._low_antenna_note(rf("usv", "uas"), DEMO)
+    assert note == USV_UAS_CARD
     assert report._low_antenna_note(rf("uas", "usv"), DEMO) is not None
     assert [lk["id"] for lk in DEMO["links"] if report._low_antenna_note(lk, DEMO)] == ["usv-uas-rf"]
 
 
-def test_m2_the_whole_report_of_the_demo_run_carries_that_one_new_text(tmp_path):
+USV_UAS_CARD = ("The antennas of this RF link: usv (2.2 m), uas (flown at 18.1, 38.1, 68.1, 108.1 m). The two-ray model takes the ground "
+                "reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) at 915 MHz from 300 m to the pair's radio horizon or 12 km its "
+                "loss minus the Fresnel loss is, by pair of heights: 2.2 m with 18.1 m -3.2 to +0.6 dB (median -0.2) (10 of 400 samples are more "
+                "than 3 dB off); 2.2 m with 38.1 m -8.1 to +24.4 dB (median -1.0) (19 of 400 samples are more than 3 dB off); 2.2 m with 68.1 m "
+                "-9.9 to +30.3 dB (median -1.5) (28 of 400 samples are more than 3 dB off); 2.2 m with 108.1 m -10.8 to +39.2 dB (median -1.9) "
+                "(38 of 400 samples are more than 3 dB off); over these pairs it is -10.8 to +39.2 dB, both extremes are those of 2.2 m with "
+                "108.1 m: the loss is overstated by up to 39.2 dB (the margin too low) and understated by up to 10.8 dB (the margin too high); a "
+                "UAS is taken at each height it flies a leg at; the climbs between the legs pass other heights, which are not computed; at a wave "
+                "height of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
+
+
+def test_m2_the_whole_report_of_the_demo_run_carries_that_one_text(tmp_path):
     run = tmp_path / "run"
     m, plan = pm_run.make_run(run)
     report.write(run, m, plan)
     rep = load(run)
     notes = {lid: k["low_antenna"] for lid, k in rep["links"].items() if k["low_antenna"]}
-    assert list(notes) == ["usv-uas-rf"] and notes["usv-uas-rf"].startswith("An end of this RF link has an antenna of 0.55 to 2.2 m: usv (2.2 m).")
+    assert list(notes) == ["usv-uas-rf"] and notes["usv-uas-rf"].startswith("The antennas of this RF link: usv (2.2 m), uas (flown at ")
     assert report.check_traceability(rep) == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
     assert notes["usv-uas-rf"] in plain((run / "report" / "index.html").read_text())
 
 
-def test_m2_the_usvs_whip_with_the_ships_15_m_mast_is_a_listed_row_that_now_prints(monkeypatch):
-    """The row (2.2 m, 15 m) of `LOW_ANTENNA_PAIR_BAND` was in L23 and no card ever showed it (before: None), nor the row of two 2.2 m ends."""
+def test_m2_the_usvs_whip_with_the_ships_15_m_mast_is_a_listed_row_that_prints(monkeypatch):
+    """The row (2.2 m, 15 m) of `LOW_ANTENNA_PAIR_BAND` was in L23 and no card ever showed it (round 20: None), nor the row of two 2.2 m ends."""
     note = card(2.2, 15.0, monkeypatch)
-    assert note.startswith("An end of this RF link has an antenna of 0.55 to 2.2 m: a (2.2 m).")
+    assert note.startswith("The antennas of this RF link: a (2.2 m), ship (15 m).")
     assert "(2.2 m with 15 m)" in note and "-3.3 to +0.2 dB (median -0.4)" in note and "not among those measured" not in note and "envelope" not in note
     assert "understated by up to 3.3 dB (the margin too high)" in note and "overstated by up to 0.2 dB (the margin too low)" in note
     two = card(2.2, 2.2, monkeypatch)
-    assert two.startswith("An end of this RF link has an antenna of 0.55 to 2.2 m: a (2.2 m), b (2.2 m).") and "(2.2 m with 2.2 m)" in two
+    assert two.startswith("The antennas of this RF link: a (2.2 m), b (2.2 m).") and "(2.2 m with 2.2 m)" in two
 
 
-def test_m2_the_card_stops_above_2_2_m_where_nothing_was_measured_and_l23_says_so(monkeypatch):
-    assert card(2.3, 15.0, monkeypatch) is None and card(5.0, 15.0, monkeypatch) is None and ship_card(2.3, 10.0, monkeypatch) is None
-    assert card(2.2 + TOL / 2, 15.0, monkeypatch) is not None                                      # the row tolerance, as everywhere
-    assert "The card speaks for every RF link with an end of 2.2 m or lower and for none above that" in l23()
-
-
-def test_m2_the_nearest_pair_is_named_at_exactly_0_55_m_as_at_0_549(monkeypatch):
-    """`abs(0.55 - 0.5)` is 0.050000000000000044: the trigger admitted 0.55 m and the nearest-row test did not, so the clause that names the biased row
-    vanished at the one value the start sentence calls the limit (reviewer A, A-1)."""
-    for h in (0.549, 0.55):
-        note = card(h, 15.0, monkeypatch)
-        assert "the nearest measured pair, 0.5 m with 15 m, has a biased margin (" in note, h
-    both = card(0.3, 0.55, monkeypatch)
-    assert both.startswith("An end of this RF link has an antenna below 0.5 m: a (0.3 m).")
-    assert "the nearest measured pair, 0.3 m with 0.5 m, has a biased margin (" in both
-    assert "the nearest measured pair" not in card(0.5501 + 0.05, 15.0, monkeypatch)                  # 0.6001 m is 0.1 m off the row: nothing near
-
-
-def test_m2_a_height_of_0_55_m_gets_the_envelope_as_well_as_the_nearest_pair(monkeypatch):
-    note = card(0.55, 15.0, monkeypatch)
-    assert note.startswith("An end of this RF link has an antenna just above 0.5 m (up to 0.55 m): a (0.55 m).") and ENVELOPE in note
-    assert ENVELOPE not in card(0.549, 15.0, monkeypatch) and ENVELOPE not in card(0.51, 15.0, monkeypatch)       # below the measured range
-
-
-def test_m2_the_three_pinned_starts_and_just_above_are_unchanged_and_the_fifth_is_new(monkeypatch):
+def test_m2_the_three_pinned_starts_are_unchanged_and_every_other_pair_gets_the_plain_one(monkeypatch):
     assert card(0.5, 0.3, monkeypatch).startswith("Both ends of this RF link have an antenna of 0.5 m or lower: a (0.5 m), b (0.3 m).")
     assert card(0.3, 2.2, monkeypatch).startswith("An end of this RF link has an antenna below 0.5 m: a (0.3 m).")
     assert card(0.5, 2.2, monkeypatch).startswith("An end of this RF link has an antenna of 0.5 m: a (0.5 m).")
-    assert card(0.51, 15.0, monkeypatch).startswith("An end of this RF link has an antenna just above 0.5 m (up to 0.55 m): a (0.51 m).")
-    assert card(1.0, 15.0, monkeypatch).startswith("An end of this RF link has an antenna of 0.55 to 2.2 m: a (1 m).")
-
-
-def test_m2_the_envelope_constants_are_what_the_model_gives_against_the_fresnel_two_ray_to_0_1_db():
-    """The grid is the card's: every 0.005 m of the lower end from 0.55 to 2.2 m and the partners 10, 12.5 and 15 m (the measured figures, on a 0.001 m grid
-    and 4,953 pairs, were -5.136 and +2.199; a 0.05 m grid gave +2.13, which is why the grid is not 0.05 m)."""
-    lows = np.round(np.arange(0.55, 2.2 + 1e-9, 0.005), 4)
-    res = np.array([band(float(h), p) for p in (10.0, 12.5, 15.0) for h in lows])
-    lo, hi = float(res[:, 0].min()), float(res[:, 2].max())
-    assert abs(lo - cr.LOW_ANTENNA_MID_BAND[0]) <= 0.1 and abs(hi - cr.LOW_ANTENNA_MID_BAND[1]) <= 0.1, (lo, hi)
-    assert lo < -5.05 and 2.15 < hi < 2.25 and cr.LOW_ANTENNA_MID_BAND == (-5.1, 2.2)
-    # the worst too-high figure of any listed row is smaller (3.3 dB): the envelope is the larger risk, which is why the card prints it
-    assert min(r[0] for r in comms.LOW_ANTENNA_PAIR_BAND.values()) == -3.3 and lo < -3.3
-
-
-def test_m2_the_envelopes_range_and_partners_are_the_cards_and_the_platforms():
-    assert cr.LOW_ANTENNA_MID_RANGE_M == (report.RF_LOW_ANTENNA_M + report.RF_NEAR_ANTENNA_M, max(lo for lo, _ in comms.LOW_ANTENNA_PAIR_BAND)) == (0.55, 2.2)
-    assert cr.LOW_ANTENNA_MID_PARTNER_M == (stage1.ship_antenna_m(dict(ship={}), None), DEMO["ship"]["antenna_height_m"]) == (10.0, 15.0)
+    assert card(0.51, 15.0, monkeypatch).startswith("The antennas of this RF link: a (0.51 m), ship (15 m).")
+    assert card(1.0, 15.0, monkeypatch).startswith("The antennas of this RF link: a (1 m), ship (15 m).")
 
 
 def test_m2_l23_says_what_the_card_does():
     t = l23()
-    assert ENVELOPE in t and "-5.1 to +2.2 dB at Hs 0, margin too low by up to 2.2 dB and too high by up to 5.1 dB" in t
-    assert "within 0.05 m of a listed pair it also names that pair as biased" in t and "a height further off is not measured: the card says so" in t
-    assert "a height further off is not measured, the card says so and names the nearest listed pair as biased" not in t           # the sentence that was false
-    assert t.startswith("RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip:")
-
-
-def test_m2_l23s_claims_hold_of_the_card_a_height_off_a_row_by_more_than_0_05_m_is_not_measured_and_names_nothing(monkeypatch):
-    far = card(0.4, 15.0, monkeypatch)                                                             # 0.1 m from the rows 0.3 and 0.5
-    assert "not among those measured" in far and "nearest measured pair" not in far and ENVELOPE not in far
-    near = card(0.45, 15.0, monkeypatch)
-    assert "the nearest measured pair, 0.5 m with 15 m" in near
+    assert "The card of every RF link computes the band of the link's own pair of heights, for any heights from 0.1 m to 1000 m" in t
+    assert "for none above that" not in t and "envelope" not in t and "within 0.05 m of a listed pair" not in t and "is read as that one" not in t
 
 
 # ------------------------------------------------------------------------------------------------------------------------- M-3: the members that needed it
@@ -211,7 +138,7 @@ def test_m3_the_card_says_how_many_of_the_members_that_needed_the_link_failed_an
     assert report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
     g = rep["links"]["usv-uas-rf"]["granularity"]
     assert (g["needed"]["value"], g["needed"]["unit"], g["never_required"]["value"], g["members"]["value"]) == (n - 20, "members", 20, n) and n == 48
-    assert g["needed"]["source"] == "stage1b/summary.json summary.links.usv-uas-rf.n (less n_never_required)"
+    assert g["needed"]["source"] == "stage1b/summary.json summary.links.usv-uas-rf.n (less n_never_required)"          # a summary with no `n_needed`
     assert "counts as a pass in the P(fail) above; 5 members failed of the 28 members that needed the link." in card_of(h)
     assert sorted(set(g) - {"need_count", "ok", "one_sample", "allowed_miss"}) == ["members", "needed", "never_required"]            # one new key, no other
 
@@ -246,7 +173,7 @@ def test_m3_a_link_every_member_never_needed_does_not_say_its_members_count_as_p
     assert report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
     c = card_of(h)
     assert (f"required at no moment in {n} members, out of {n} members: in each of those it passes by default (a pass fraction of 1.0); "
-            "no member needed it.") in c
+            "no member needed it (0 members out of 48 members).") in c
     assert "counts as a pass in the P(fail) above" not in c and "failed of the" not in c
     assert "the P(fail) above counts nothing; the verdict is NOT EXERCISED, not GO" in c
     assert rep["links"]["usv-uas-rf"]["granularity"]["needed"]["value"] == 0
