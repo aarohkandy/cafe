@@ -6,15 +6,15 @@ with, and it will be reused as if they were these (round 17, M-12). Exit 1, with
 Each sample prints what happened to it (round 18, M-12): `seeded` (the entry was written), `already there` (the cache held an identical earlier run: nothing
 was written) or `NOT seeded` with the cache's warning (it could not be written; the exit is then 1). Every file is read and its shape checked first (round 19,
 M-14): one that cannot be read, is not JSON or is not a result of its case is `NOT seeded <file> - <reason>`, exit 1, and nothing is written for any sample."""
-import json, math, pathlib, sys, tempfile
+import pathlib, sys, tempfile
 import numpy as np
 from cafe import geom, cfd
+from cafe.pm.jsonio import finite_real, load_json     # stdlib only: this runs in the app image, which has no pyyaml (cafe.pm.config imports it)
 
 CASES = (("quad", "q1", "external"), ("torpedo", "t1", "external"), ("wigley", "w1", "surface"))
 
 
-def _num(x: object) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x)
+_num = finite_real                                # the one finite-real test (round 21, M-9): a 400-digit integer is no number here, not an OverflowError
 
 
 def _vec(v: object) -> bool:
@@ -53,7 +53,7 @@ def _checked(what: str, k: tuple, r: object) -> dict:
         if not isinstance(v, dict) or not all(_vec(v.get(f)) for f in ("force", "moment", "viscous")):
             raise ValueError(f"direction {d} has no `force`, `moment` and `viscous` of three numbers each")
         g = v.get("gci")                          # a number, NaN and inf included: `cfd.gci` gives NaN where it has no index, and a real file holds it
-        if not isinstance(g, (int, float)) or isinstance(g, bool):
+        if not (isinstance(g, float) or finite_real(g)):      # a float of any kind, NaN and inf included; an integer only if it is a number that fits one
             raise ValueError(f"direction {d} has no number in `gci` (the Hangar reads it)")
     return r
 
@@ -74,8 +74,8 @@ def main() -> int:
             speeds = [float(fn * np.sqrt(9.81 * hs["lwl"])) for fn in (0.2, 0.3, 0.4)]
             k = ("surface", round(hs["draft"], 4), [round(x, 3) for x in speeds])
         try:
-            r = _checked(what, k, json.loads(p.read_text()))
-        except (OSError, ValueError, RecursionError) as e:   # JSONDecodeError and UnicodeDecodeError are ValueErrors; a deeply nested file is a RecursionError
+            r = _checked(what, k, load_json(p))
+        except (OSError, ValueError) as e:   # JSONDecodeError, UnicodeDecodeError, an oversized integer and nesting too deep (`load_json`) are ValueErrors
             bad += 1
             print("NOT seeded", p, "-", e)
             continue

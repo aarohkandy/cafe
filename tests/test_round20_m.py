@@ -134,16 +134,21 @@ def fake(resistance=None, drag=None, sources=None, **limits):
 
 
 def test_m3_the_drag_spread_of_a_vehicle():
-    """Finite: unchanged (the 10 % of the CFD with the largest GCI). Not finite: no smaller than an estimate's 30 %, and the largest finite GCI still counts."""
+    """Trusted (finite and not above `vv.GCI_TRUSTED`): unchanged (the 10 % of the CFD with the largest GCI). Not trusted: exactly an estimate's 30 %. Round 21,
+    M-5 moved three pins, each by design: a finite index above 0.3 (0.4 here, which gave hypot(0.1, 0.4) = 0.41, and 0.5) now gives the estimate's spread, since
+    the wider one put most members BELOW nominal drag (`tests/test_round21_d.py` has the evidence); and a vehicle with a resistance and no `resistance_gci`
+    key is a missing index (inf), no longer a converged grid (0.0)."""
     h, est = mission.SIG["drag_cfd"], mission.SIG["drag_est"]
     cfd_ = dict(sources=dict(drag="cfd"))
     assert mission.drag_sigma(fake(drag=[0.05, 0.2], **cfd_)) == pytest.approx(np.hypot(h, 0.2))
-    assert mission.drag_sigma(fake(drag=[0.05, 0.2], lift_gci=0.4, **cfd_)) == pytest.approx(np.hypot(h, 0.4))
+    assert mission.drag_sigma(fake(drag=[0.05, 0.2], lift_gci=0.25, **cfd_)) == pytest.approx(np.hypot(h, 0.25))  # round 21: 0.4 -> 0.25
+    assert mission.drag_sigma(fake(drag=[0.05, 0.2], lift_gci=0.4, **cfd_)) == est  # round 21: was hypot(h, 0.4)
     assert mission.drag_sigma(fake(drag=[0.05, INF], **cfd_)) == est
-    assert mission.drag_sigma(fake(drag=[0.5, INF], **cfd_)) == pytest.approx(np.hypot(h, 0.5)) and np.hypot(h, 0.5) > est      # a wide finite one is kept
+    assert mission.drag_sigma(fake(drag=[0.5, INF], **cfd_)) == est and np.hypot(h, 0.5) > est  # round 21: a wide index is no wider than an estimate
     assert mission.drag_sigma(fake(drag=[0.05], lift_gci=INF, **cfd_)) == est and mission.drag_sigma(fake(drag=[INF, INF], **cfd_)) == est
     assert mission.drag_sigma(fake(resistance=1, resistance_gci=0.2)) == pytest.approx(np.hypot(h, 0.2))
-    assert mission.drag_sigma(fake(resistance=1, resistance_gci=INF)) == est and mission.drag_sigma(fake(resistance=1)) == pytest.approx(h)
+    assert mission.drag_sigma(fake(resistance=1, resistance_gci=INF)) == est and mission.drag_sigma(fake(resistance=1, resistance_gci=0.0)) == pytest.approx(h)
+    assert mission.drag_sigma(fake(resistance=1)) == est  # round 21: a missing key is inf, was h
     assert mission.drag_sigma(fake(drag=[0.9], sources=dict(drag="estimate"))) == est                                                 # no CFD: the estimate's
 
 

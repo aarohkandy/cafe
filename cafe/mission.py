@@ -16,6 +16,7 @@ import datetime as dt, time
 import numpy as np
 
 from cafe import ctrl, dyn, env as envm
+from cafe.pm import vv
 from cafe.vehicle import RHO, G
 
 EARTH = 6371000.0
@@ -58,18 +59,20 @@ def z_to_down(kind, z):
 
 def drag_sigma(v):
     """The relative spread of the drag coefficient of a vehicle: free-surface resistance for boats, the CFD drag table otherwise; model-form error (10 %
-    CFD, 30 % estimate) combined with the measured mesh uncertainty (the GCI). A GCI of inf (`vehicle` reads a NaN, which `cfd.gci` writes where it has no
-    index, as inf: not trusted) cannot be sampled: the spread is then no smaller than an estimate's (SIG["drag_est"]), and the largest finite GCI of the other
-    directions still counts (round 20, M3; before it, a NaN that came first made every member's drag NaN and one that came later was ignored)."""
+    CFD, 30 % estimate) combined with the measured mesh uncertainty (the GCI), and never more than an estimate's (SIG["drag_est"]). An index that cannot be
+    trusted (`vv.gci_trusted` is False: NaN, which `cfd.gci` writes where it has no index, inf, a missing key, or above `vv.GCI_TRUSTED`) cannot be sampled
+    as a measured spread, so any one of them, in any direction, gives the spread of an ESTIMATE, exactly (round 20, M3; round 21, M-5: an index of 1.5 gave
+    a spread of 1.5, which puts most members BELOW nominal drag, the other way from the "verdicts lean MARGINAL" the warning said). That is one line, not a
+    branch: `vv.worst_gci` reads an untrusted index as inf or as a number above `GCI_TRUSTED` (0.3), and `hypot(0.10, g)` reaches the estimate's 0.30 at
+    g = 0.283, below it, so the cap IS the trust threshold (`tests/test_round21_d.py` holds that for the constants as they are). A resistance has its
+    `resistance_gci` always (`vehicle.build` sets it), and a missing one is no index; a missing `lift_gci` is no lift study, not a converged one."""
     if v.resistance is not None:
-        gcis = [v.limits.get("resistance_gci", 0.0)]
+        gcis = [v.limits.get("resistance_gci")]
     elif v.sources.get("drag") == "cfd":
-        gcis = [c[3] for c in v.drag.values()] + [v.limits.get("lift_gci", 0.0)]
+        gcis = [c[3] for c in v.drag.values()] + ([v.limits["lift_gci"]] if "lift_gci" in v.limits else [])
     else:
         return SIG["drag_est"]
-    finite = [g for g in gcis if np.isfinite(g)]
-    sig = float(np.hypot(SIG["drag_cfd"], max(finite, default=0.0)))
-    return sig if len(finite) == len(gcis) else max(sig, SIG["drag_est"])
+    return min(float(np.hypot(SIG["drag_cfd"], vv.worst_gci(gcis))), SIG["drag_est"])
 
 
 class Drone:

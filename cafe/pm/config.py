@@ -15,6 +15,7 @@ import yaml
 
 from cafe import atomic
 
+from .jsonio import finite_real as finite_real, load_json as load_json      # defined in a module that needs no yaml, so that `vv` and `_seed` can use them
 from .stats import intervals
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -302,8 +303,8 @@ def json_object(p: pathlib.Path, fix: str = "`run` writes it, so run it again (-
     """A JSON object a run wrote and a command reads back; a corrupt file or any other JSON is a ConfigError (exit 2), not a traceback. `fix` says
     what makes the file again."""
     try:
-        d = json.loads(p.read_text())
-    except (ValueError, OSError, RecursionError) as e:                   # JSONDecodeError, UnicodeDecodeError: ValueErrors; RecursionError: nesting
+        d = load_json(p)
+    except (ValueError, OSError) as e:           # JSONDecodeError, UnicodeDecodeError, an oversized integer and nesting too deep (`load_json`): ValueErrors
         raise ConfigError(f"{p}: not a JSON object ({e}); {fix}") from e
     if not isinstance(d, dict):
         raise ConfigError(f"{p}: not a JSON object (it holds {type(d).__name__}); {fix}")
@@ -324,7 +325,9 @@ def damaged_run_files(run: pathlib.Path) -> Iterator[None]:
     try:
         yield
     # AttributeError: `.get` on a number or a list (round 12, M-7); IndexError: `mc[v]` on a list; ValueError: found by mutating every entry of the run's JSON
-    except (LookupError, ValueError, TypeError, AttributeError) as e:
+    # ArithmeticError (OverflowError, ZeroDivisionError): a stored number that is legal JSON and fails in the sum that uses it (a product of two 1e300, a zero
+    # divisor) is the same damage as a missing key, for every file and every field, not one field at a time (round 21, M-9)
+    except (LookupError, ValueError, TypeError, AttributeError, ArithmeticError) as e:
         if type(e).__module__.split(".")[0] == "cafe":
             raise
         raise ConfigError(f"{run}: damaged or incomplete ({type(e).__name__}: {e}); run it again (--fresh); "
@@ -354,15 +357,6 @@ def write_json(p: pathlib.Path, obj: Any, end: str = "", **kw: Any) -> None:
     """`obj` as JSON (`kw` go to json.dumps) followed by `end` in `p`, by `write_text`. The default writes no trailing newline: the ingest manifests are
     hashed, so their bytes must stay as they are; the golden and the audit records pass a newline as `end`."""
     write_text(p, json.dumps(obj, **kw) + end)
-
-
-def finite_real(v: Any) -> bool:
-    """A finite real number: not a bool, a string, None, NaN or infinity, nor an integer too large for a float (json.loads gives a 400-digit literal as an
-    int, and math.isfinite raises OverflowError on it)."""
-    try:
-        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
-    except OverflowError:
-        return False
 
 
 def missing_numbers(d: dict[str, Any], numeric: tuple[str, ...], optional: tuple[str, ...] = ()) -> list[str]:

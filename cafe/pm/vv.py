@@ -19,6 +19,8 @@ pass/fail, except where a caller chooses to gate on it.
 import math
 from typing import Any, Iterable, NamedTuple, Sequence
 
+from .jsonio import finite_real
+
 R_MIN = 1.3          # Celik 2008 step 2: "desirable that r be greater than 1.3" (experience, not derivation)
 FS_THREE_GRID = 1.25  # Celik 2008 eq 7
 FS_TWO_GRID = 3.0     # Roache 1998 for two grids with an assumed order
@@ -157,12 +159,26 @@ def gci_two_grid(fine: float, coarse: float, ratio: float = 2.0, p: float = 2.0,
     return float(fs * abs((coarse - fine) / fine) / (ratio ** p - 1))
 
 
+GCI_TRUSTED = 0.3
+"""The largest GCI that is read as a measured mesh uncertainty (round 21, M-5; the 30 % `hangar.grid_warning` has warned at since the Hangar began). A larger
+one, and one that is no number, is not an index of how far the answer is from the grid-converged one (SUBOFF at Re 1.2e7 gave ~150 % where the fine grid is
+within 3-8 % of the tank): `mission.drag_sigma` takes the spread of an estimate for it, and `hangar.grid_warning` warns. ASSUMED (a round figure the warning
+has always used, not a derived limit)."""
+
+
 def gci_value(g: Any) -> float:
     """A GCI as the readers of a cached or fresh CFD result take it: the number where it is a finite one, `inf` where it is not (NaN, which `cfd.gci` writes
-    where there is no index; None, text, a list). No index is an index that cannot be trusted, never a small one: `cfd.characterize_external` already takes inf
-    for such a direction when it decides on a finer grid, and every reader (`vehicle`, `hangar`, `mission`) goes through this so that they agree (round 20,
-    M3). A bool is no number."""
-    return float(g) if isinstance(g, (int, float)) and not isinstance(g, bool) and math.isfinite(g) else math.inf
+    where there is no index; None, which is what `r.get("gci")` gives for a missing key; text, a list, an integer too large for a float). No index is an
+    index that cannot be trusted, never a small one: `cfd.characterize_external` already takes inf for such a direction when it decides on a finer grid, and
+    every reader (`vehicle`, `hangar`, `mission`) goes through this, with NO default for a missing key, so that they agree (round 20, M3; round 21, M-5).
+    A bool is no number. `config.finite_real` is the test."""
+    return float(g) if finite_real(g) else math.inf
+
+
+def gci_trusted(g: Any) -> bool:
+    """Whether `g` is an index that can be read as a measured mesh uncertainty: a finite number from 0 to `GCI_TRUSTED`, both included. NaN, inf, a missing
+    key (None), any other non-number and a negative one (an index is a magnitude: a hand-edited file) are not."""
+    return 0 <= gci_value(g) <= GCI_TRUSTED
 
 
 def worst_gci(gcis: Iterable[Any], default: float = 0.0) -> float:
