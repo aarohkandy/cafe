@@ -182,8 +182,10 @@ def test_m3_a_thorp_fail_far_below_the_band_is_refined_too_and_a_gain_can_pass_i
 def test_m3_only_needed_samples_in_range_reach_bellhop(monkeypatch):
     far, calls, _ = scene(monkeypatch, km=45.0)  # beyond 10 x the vendor's 4 km: out of range
     assert not calls and far["n_invalid"].tolist() == far["need_count"].tolist() and "Bellhop" not in far["method"]
-    near, calls, _ = scene(monkeypatch, km=39.0)                                                                      # inside it
+    near, calls, _ = scene(monkeypatch, km=17.0)                  # in range and within 60 dB of a pass or a fail (round 21 merge: 39 km is beyond)
     assert calls and near["n_invalid"].tolist() == [0]
+    beyond, calls, _ = scene(monkeypatch, km=39.0)                  # in range but 100 dB below a pass: Thorp decides it, and the label says Bellhop was not run
+    assert not calls and beyond["n_invalid"].tolist() == [0] and "Bellhop was not run" in beyond["method"]
     # a link `when: surfacing`: the 40 samples the glider is submerged are not needed and are not refined; the 60 surfaced ones are
     out, _ = acoustic_scene(M=1, far=(0,))
     out["glider_eq"]["lat"][:] = km_north(2.0)
@@ -391,11 +393,11 @@ def test_the_method_of_a_merged_run_counts_every_batch_and_the_runs_of_every_mem
     res = stage1.merge([dict(U=np.zeros((1, 1)), X={"a": np.zeros(1)}, vehicles={}, links={ACOUSTIC: x}) for x in (far, a)])
     assert res["links"][ACOUSTIC]["method"] == a["method"] and res["links"][ACOUSTIC]["bellhop_spread_db"].shape[1] == 2
     # two members' sets of different sizes
-    both = dict(a, bellhop=dict(done=1, total=1, capped=0, runs_lo=2, runs_hi=2), method="x")
-    two = dict(a, bellhop=dict(done=1, total=1, capped=0, runs_lo=3, runs_hi=3), method="y")
+    both = dict(a, bellhop=dict(done=1, total=1, capped=0, beyond=0, runs_lo=2, runs_hi=2), method="x")
+    two = dict(a, bellhop=dict(done=1, total=1, capped=0, beyond=0, runs_lo=3, runs_hi=3), method="y")
     res = stage1.merge([dict(U=np.zeros((1, 1)), X={"a": np.zeros(1)}, vehicles={}, links={ACOUSTIC: x}) for x in (both, two)])
     assert "(the lowest of 2 to 3 runs:" in res["links"][ACOUSTIC]["method"] and "Bellhop on 2 of 2 needed" in res["links"][ACOUSTIC]["method"]
-    part = stage1._bellhop_label(dict(done=1, total=2, capped=0, runs_lo=None, runs_hi=None))
+    part = stage1._bellhop_label(dict(done=1, total=2, capped=0, beyond=0, runs_lo=None, runs_hi=None))
     assert part.endswith("; the rest Thorp only (no sound-speed profile or depth there)")
 
 

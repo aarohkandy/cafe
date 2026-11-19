@@ -67,7 +67,8 @@ def test_a1_a_link_that_only_some_members_needed_keeps_its_graded_verdict_and_co
     out = a19.gliders(range(0, 60), range(30, 90), M24)
     out["g2"]["surfaced"][:, 8:] = False
     e = link_summary(a19.RF, out)
-    assert e["n_never_required"] == 16 and e["verdict"]["verdict"] != stage1.NOT_EXERCISED and e["need_count_median"] == 0
+    assert e["n_never_required"] == 16 and e["verdict"]["verdict"] != stage1.NOT_EXERCISED
+    assert e["need_count_median"] == 30        # round 21 merge: the median over the 8 members that needed it (30 records each), not over all 24 (it was 0)
 
 
 # ------------------------------------------------------------------------------------------------------------ A1: what the report prints

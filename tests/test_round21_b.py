@@ -616,12 +616,16 @@ def test_m1_a_ranked_quantity_with_more_than_half_its_rows_at_one_extreme_prints
             "and on a tie among these)") in uas_card
     node = rep["links"]["usv-uas-rf"]["sensitivity"]["censored"]
     assert node["share"]["value"] == 0.75 and node["at"] == "max" and node["value"]["value"] == 1.0
-    assert h.count("share the same") == 2                                                              # no other card, no second clause on these two
+    own = built(run / "own")[1].count("share the same")    # the fixture's own acoustic link has a real record of stage 1 (batch A: 0.56 of its ranked
+    assert own == 1 and h.count("share the same") == own + 2             # members at 0.97) on the merged tree; no other card, no second clause on these two
 
 
 def test_m1_no_clause_without_a_record_and_the_older_usv_clause_only_without_one(run):
     rep, h = built(run)
-    assert "share the same" not in h and "censored" not in rep["links"]["usv-uas-rf"]["sensitivity"] and "censored" not in rep["vehicles"]["usv"]["sensitivity"]
+    assert "censored" not in rep["links"]["usv-uas-rf"]["sensitivity"] and "censored" not in rep["vehicles"]["usv"]["sensitivity"]
+    assert all("share the same" not in card_of(h, v) for v in rep["vehicles"]) and "share the same" not in card_of(h, "usv-uas-rf")
+    # the fixture's acoustic link carries a real record (batch A: the share of its ranked members at one pass fraction) and prints its clause, once
+    assert h.count("share the same") == 1 and "share the same" in card_of(h, "glider_eq-ship-acoustic")
 
 
 def test_m1_a_summary_with_a_record_does_not_also_print_round_20s_clause_for_the_usv(run):
@@ -704,10 +708,14 @@ def test_m9_real_ok_delegates_to_the_one_test(monkeypatch):
 
 
 def test_m9_a_damaged_verdict_with_an_oversized_integer_is_the_damaged_summary_message_not_a_traceback(run):
+    """In memory (nothing read it from a file: `_stat` of an entry) it is the damaged-summary message. Through a file, since the merge (batch D's `load_json`),
+    the integer is refused at the reader, before `report` sees a verdict: a ConfigError naming the file, not a traceback either."""
+    entry = lambda **v: dict(n=48, k_fail=0, verdict=dict(verdict="GO", p_fail=0.1, fail_lo=0.0, fail_hi=0.3, conf=0.9, **v))      # noqa: E731
+    with pytest.raises(config.ConfigError, match=r"verdict\.p_fail is not a finite number: the summary was edited or is damaged"):
+        report._stat(dict(entry(), verdict=dict(entry()["verdict"], p_fail=10 ** 400)), {}, "x")
+    with pytest.raises(config.ConfigError, match=r"verdict\.conf is"):
+        report._stat(dict(entry(), verdict=dict(entry()["verdict"], conf=10 ** 400)), {}, "x")
     m, plan = pm_run.make_run(run)
     edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["usv-uas-rf"]["verdict"].update(p_fail=10 ** 400))
-    with pytest.raises(config.ConfigError, match=r"verdict\.p_fail is not a finite number: the summary was edited or is damaged"):
-        report.write(run, m, plan)
-    edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["links"]["usv-uas-rf"]["verdict"].update(p_fail=0.1, conf=10 ** 400))
-    with pytest.raises(config.ConfigError, match=r"verdict\.conf is"):
+    with pytest.raises(config.ConfigError, match=r"summary\.json: not a JSON object \(an integer of 401 characters is too large for a number"):
         report.write(run, m, plan)
