@@ -1621,9 +1621,10 @@ def test_the_summary_ranks_the_margin_the_simulator_stored_and_only_the_columns_
     rf = s["links"]["usv-uas-rf"]["sensitivity"]                                                         # the ends are a USV and a UAS
     assert rf["quantity"] == "fraction of the required moments the link worked" and rf["param"] == names[0]
     assert {"usv_vpp_bias", "bulk_stress_scale", "hs_scale"} <= set(rf["S1"]) and "glider_speed_scale" not in rf["S1"]
-    assert "battery_capacity_scale" not in rf["S1"]                                                    # round 18, M-4: no end's battery moves a link
+    assert "battery_capacity_scale" in rf["S1"]                                  # round 19, M-5: a UAS's battery ends its sortie early: it moves the moments
     ac = s["links"]["glider_eq-ship-acoustic"]["sensitivity"]                                           # a glider and the ship
     assert "glider_speed_scale" in ac["S1"] and "usv_vpp_bias" not in ac["S1"] and "bulk_stress_scale" not in ac["S1"]
+    assert "battery_capacity_scale" not in ac["S1"]                                                    # a glider's own battery moves no link
     assert s["links"]["usv-shore-iridium"]["sensitivity"]["case"] == "all_pass"
 
 

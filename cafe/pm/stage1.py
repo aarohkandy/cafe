@@ -61,10 +61,11 @@ ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_v
 # UNSEEN: columns that can act on a quantity but that no probe of ours moves, because the probe stays far from the edge they act at: Hs ends a UAS
 # sortie only through a lost link (`_uas_links`), which needs a margin near 0 dB; the stress scale and the battery size end a sortie early (the profile
 # share) only in a flight that is already at its limit (on the demo the stress scale moved the reserve margin by 5.6e-3 and the profile share by
-# nothing). They stay listed.
+# nothing); the wind direction moves the profile share only where the sortie is battery-limited (it moves the edge of the battery scale at which the share
+# steps from 0.625 to 0.875; round 19, M-5), which no probe of ours reaches. They stay listed.
 # DEMO_ONLY: columns that moved a quantity on the demo's environment and not on the CI fixture's (so the CI probe cannot hold them; the demo record
 # does).
-UNSEEN = {("uas", "margin"): ("hs_scale",), ("uas", "profile_margin"): ("bulk_stress_scale", "battery_capacity_scale", "hs_scale")}
+UNSEEN = {("uas", "margin"): ("hs_scale",), ("uas", "profile_margin"): ("bulk_stress_scale", "battery_capacity_scale", "hs_scale", "wind_direction_bias")}
 DEMO_ONLY = {("glider", "battery_margin"): ("current_speed_scale", "current_direction_bias")}
 ACTING: dict[tuple[str, str], tuple[str, ...]] = {
     ("glider", "margin"): ("wind_speed_bias", "wind_direction_bias", "current_speed_scale", "current_direction_bias", "glider_speed_scale"),
@@ -82,10 +83,12 @@ RANKED = {("glider", "station_lost"): "margin", ("glider", "battery"): "battery_
 # the names of the two quantities, for a result made before it kept them
 QUANTITY = dict(energy_margin="lowest state of charge (fraction of the pack)", battery_margin="battery energy margin")
 SENS_ACTS = {c: tuple(dict.fromkeys(k for (cc, _), cols in ACTING.items() if cc == c for k in cols)) for c in ACTS}
-# What an RF or acoustic link's outcome feels of a vehicle at its end: the columns that move its track (or, for a UAS, its flight), not its battery or its
-# insolation. A link's own: an RF link reads Hs at both ends whatever the classes there (`_link_hs`). An Iridium session's success is its own random draw,
+# What an RF or acoustic link's outcome feels of a vehicle at its end: the columns that move its track (or, for a UAS, its flight: the battery size ends a
+# sortie early, so it moves the moments the link is required at, round 19, M-5), not a glider's or a USV's battery or its insolation. A link's own: an RF
+# link reads Hs at both ends whatever the classes there (`_link_hs`). An Iridium session's success is its own random draw,
 # so no column moves it; only which moments are required (the glider's surfacing, the UAS's flights) can, and a link `when: always` has none.
-TRACK_ACTS = dict(glider=ACTING[("glider", "margin")], usv=ACTING[("usv", "margin")], uas=("wind_speed_bias", "wind_direction_bias", "bulk_stress_scale"))
+TRACK_ACTS = dict(glider=ACTING[("glider", "margin")], usv=ACTING[("usv", "margin")],
+                  uas=("wind_speed_bias", "wind_direction_bias", "bulk_stress_scale", "battery_capacity_scale"))
 PATTERN_ACTS = dict(glider=("glider_speed_scale",), usv=(), uas=("wind_speed_bias",))
 LINK_ACTS = dict(rf=("hs_scale",))
 
@@ -655,17 +658,41 @@ def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: ND
     return margin, base + ("" if done == amb.sum() else "; the rest Thorp only (no sound-speed profile or depth there)")
 
 
+def _ends(out: dict[str, Any], a: str, b: str, cls: str, need: bool = False) -> list[str]:
+    """The ends of a link (a, b) that are vehicles of class `cls` in `out`: one for a glider or a UAS and the ship or the shore, two for two of them.
+    `need`: ConfigError when there is none (a link `when` a vehicle of that class is up, with none in the run, is not a link that was never required)."""
+    ends = [x for x in (a, b) if out.get(x, {}).get("class") == cls]
+    if need and not ends:
+        raise ConfigError(f"link {a} - {b}: it is required while a {cls} is up, and neither end is a {cls} among the vehicles of the run ({sorted(out)})")
+    return ends
+
+
 def _surfaced(out: dict[str, Any], a: str, b: str, t: NDArray[Any]) -> NDArray[np.bool_]:
-    """(len(t), M): the glider end of a link (a, else b) is on the surface at t (its record interpolated, more than half surfaced)."""
-    g = a if out.get(a, {}).get("class") == "glider" else b
-    return np.stack([np.interp(t, out[g]["t"], out[g]["surfaced"][:, m].astype(float)) > 0.5 for m in range(out[g]["surfaced"].shape[1])], 1)
+    """(len(t), M): EVERY glider end of a link (a, b) is on the surface at t (its record interpolated, more than half surfaced): an antenna, and a modem's
+    link, on a glider are required only while it is up, and two gliders both have to be (round 19, M-1: the first named alone made the verdict depend on the
+    order of a and b)."""
+    up = [np.stack([np.interp(t, out[g]["t"], out[g]["surfaced"][:, m].astype(float)) > 0.5 for m in range(out[g]["surfaced"].shape[1])], 1)
+          for g in _ends(out, a, b, "glider", need=True)]
+    return np.asarray(np.logical_and.reduce(up), bool)
+
+
+def _airborne(out: dict[str, Any], u: str, t: NDArray[Any]) -> NDArray[np.bool_]:
+    """(len(t), M): UAS `u` is in flight at t: its 30 s sortie grid by sample and hold (a flag is the latest sample's, for FINE_S after it; no sortie, no
+    flight), else its 10 min records interpolated."""
+    fine = out[u].get("fine")
+    if fine is None:
+        return np.stack([np.interp(t, out[u]["t"], out[u]["airborne"][:, m].astype(float)) > 0.5 for m in range(out[u]["airborne"].shape[1])], 1)
+    i = np.searchsorted(fine["t"], t, side="right") - 1
+    return np.asarray(fine["airborne"][np.maximum(i, 0)] & ((i >= 0) & (t - fine["t"][np.maximum(i, 0)] < FINE_S))[:, None])
 
 
 def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, Any], env: Any, M: int, seed: int, members: list[int],
                   used: dict[str, int] | None = None) -> dict[str, Any]:
     """Per member: the fraction of the required moments the link worked, against required_fraction. A moment before an end vehicle's deploy time
     is not required. `when: surfacing` follows the glider end (RF, acoustic and Iridium alike: an antenna on a glider works at the surface only) and
-    `uas_airborne` the UAS end, whichever way round the link names them.
+    `uas_airborne` the UAS end, whichever way round the link names them; a link with two glider ends (or two UAS ends) is required only while BOTH are up
+    (round 19, M-1), so it reads the same with a and b swapped. A member in which the link was required at no moment has `frac` 1.0 and passes (`need_count`
+    0): the summary counts those members (`n_never_required`).
     `used`: filled with the seed of the Iridium stream.
 
     `margin_db` is NaN wherever it is not a link budget: not needed, an unknown position, beyond the radio horizon (RF: the NO_LINK_DB clip) or
@@ -674,10 +701,10 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
     t0, T = utc(mission["window"]["start"]).timestamp(), utc(mission["window"]["end"]).timestamp()
     t = np.arange(t0, T + 1, REC_S)
     a, b = lk["a"], lk["b"]
-    uas_end = next((x for x in (a, b) if out.get(x, {}).get("class") == "uas"), None)
-    fine = out[uas_end].get("fine") if uas_end and lk["kind"] != "iridium" and lk["when"] == "uas_airborne" else None
-    if fine is not None:                                                        # a sortie is judged every FINE_S, the rest of the window every REC_S
-        t = np.union1d(t, fine["t"])
+    if lk["kind"] != "iridium" and lk["when"] == "uas_airborne":
+        for u in _ends(out, a, b, "uas"):
+            if out[u].get("fine") is not None:                                  # a sortie is judged every FINE_S, the rest of the window every REC_S
+                t = np.union1d(t, out[u]["fine"]["t"])
     live = np.ones((len(t), M), bool)
     for x in (a, b):                                                            # before a vehicle's deploy time its position is the deploy point
         if x in out:
@@ -704,12 +731,7 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
         if lk["when"] == "surfacing":
             need = _surfaced(out, a, b, t)
         elif lk["when"] == "uas_airborne":
-            if fine is not None:  # sample and hold: a flag is the latest sample's, for FINE_S after it; no sortie, no flight
-                i = np.searchsorted(fine["t"], t, side="right") - 1
-                need = fine["airborne"][np.maximum(i, 0)] & ((i >= 0) & (t - fine["t"][np.maximum(i, 0)] < FINE_S))[:, None]
-            else:
-                u = a if out.get(a, {}).get("class") == "uas" else b
-                need = np.stack([np.interp(t, out[u]["t"], out[u]["airborne"][:, m].astype(float)) > 0.5 for m in range(M)], 1)
+            need = np.asarray(np.logical_and.reduce([_airborne(out, u, t) for u in _ends(out, a, b, "uas", need=True)]), bool)
         else:
             need = np.ones((len(t), M), bool)
         need &= live & np.isfinite(d)                                           # an unknown position is not a moment the link was required
@@ -924,6 +946,7 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
                                  frac_out_of_range=bad if kind == "out_of_range" else None,
                                  distance_km_median=float(np.nanmedian(r["dist_m"])) / 1e3 if np.any(np.isfinite(r.get("dist_m", np.nan))) else None,
                                  need_count_median=nc, granularity_ok=None if nc is None else nc > 0 and (rf >= 1.0 or 1.0 / nc <= 1.0 - rf + 1e-12),
+                                 n_never_required=int(np.sum(np.asarray(r["need_count"]) == 0)) if "need_count" in r else None,
                                  sensitivity=sens)
     tests = [e["sensitivity"] for k in ("vehicles", "links") for e in out[k].values() if e["sensitivity"]["noise_floor"] is not None]  # a permutation test each
     for t in tests:

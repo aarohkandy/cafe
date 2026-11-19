@@ -1,6 +1,7 @@
 """Round 18, batch C: the sensitivity ranks the quantity of the dominant failure mode over the columns that move it (M-4), and the tests of round 16's UAS
 sortie length (M-16: A-2)."""
 import copy
+import types
 import warnings
 
 import numpy as np
@@ -127,7 +128,7 @@ def test_r18_m4_a_link_feels_the_track_of_its_ends_and_its_own_columns_only():
     assert stage1.link_acts(dict(lk, a="uas", when="uas_airborne"), cls) == {"wind_speed_bias"}
     assert stage1.link_acts(dict(lk, when="always"), cls) == set() == stage1.link_acts(dict(lk, a="glider_eq", when="always"), cls)
     rf = dict(a="usv", b="uas", kind="rf", when="uas_airborne")
-    assert stage1.link_acts(rf, cls) == set(stage1.FORCING) | {"usv_vpp_bias", "bulk_stress_scale"}
+    assert stage1.link_acts(rf, cls) == set(stage1.FORCING) | {"usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale"}      # M-5: the UAS's battery
     assert stage1.link_acts(dict(rf, a="glider_eq", b="ship", kind="acoustic"), cls) == set(stage1.ACTING[("glider", "margin")])
     assert stage1.link_acts(dict(rf, a="glider_eq", b="ship"), cls) == set(stage1.ACTING[("glider", "margin")]) | {"hs_scale"}
     assert stage1.link_acts(dict(rf, a="glider_eq", b="glider_1n"), cls) == set(stage1.ACTING[("glider", "margin")]) | {"hs_scale"}      # two gliders
@@ -237,11 +238,13 @@ def test_r18_m4_every_column_that_moves_a_link_is_one_the_link_table_lists(monke
         dict(id="g-shore-iridium", a="glider_1n", b="shore", kind="iridium", when="surfacing", required_fraction=0.9),
         dict(id="g-ship-rf", a="glider_eq", b="ship", kind="rf", radio="rfd900x", when="surfacing", required_fraction=0.9),
         dict(id="usv-ship-acoustic", a="usv", b="ship", kind="acoustic", modem="benthos_atm960_mf", when="always", required_fraction=0.9)]
-    mission = dict(MISSION, links=links, window=dict(start="2023-03-01T18:00:00Z", end="2023-03-02T03:00:00Z"))
+    mission = dict(MISSION, links=links, window=dict(start="2023-03-01T18:00:00Z", end="2023-03-02T12:00:00Z"))      # 18 h: a UAS sortie at its battery limit
     pri, marg = stage1.priors_for(MISSION)
     spec = {k: sampling.marginal(m) for k, m in marg.items()}
     center = {k: np.full(M2, float(spec[k].ppf(0.5))) for k in marg}
     env = AnalyticEnv(wind=(-6.0, 2.0), current=(0.15, -0.1), hs=2.0)
+    # round 19, M-5: the prior's 5 % quantile (0.92) does not reach the battery edge at which the sortie is cut
+    low_battery = types.SimpleNamespace(ppf=lambda p: 0.70 if p < 0.5 else 1.0)
 
     def quantities(out):
         q = {}
@@ -252,7 +255,10 @@ def test_r18_m4_every_column_that_moves_a_link_is_one_the_link_table_lists(monke
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        moved = _moved(lambda X: stage1.run_batch(mission, env, [0, 1], SEED, pri, marg, X=X), list(marg), spec, center, quantities)
+        run = lambda X: stage1.run_batch(mission, env, [0, 1], SEED, pri, marg, X=X)
+        moved = _moved(run, list(marg), spec, center, quantities)
+        for j, ks in _moved(run, ["battery_capacity_scale"], dict(spec, battery_capacity_scale=low_battery), center, quantities).items():
+            moved[j] |= ks
     classes = dict(glider_eq="glider", glider_1n="glider", usv="usv", uas="uas")
     seen = set()
     for lk in links:
@@ -261,7 +267,7 @@ def test_r18_m4_every_column_that_moves_a_link_is_one_the_link_table_lists(monke
         seen |= got
         assert got <= acts, (lk["id"], sorted(got - acts))
     assert {j for j, ks in moved.items() if any(k.startswith("usv-shore-iridium|") for k in ks)} == set() == stage1.link_acts(LK["usv-shore-iridium"], classes)
-    assert {"wind_speed_bias", "glider_speed_scale"} <= seen                                                 # the probe does move links: not an empty check
+    assert {"wind_speed_bias", "glider_speed_scale", "battery_capacity_scale"} <= seen                       # the probe does move links: not an empty check
 
 
 # ---------------------------------------------------------------- M-16 (A-2): the sortie length is `sortie_t_max`, at three of its five sites
