@@ -40,7 +40,7 @@ from numpy.typing import NDArray
 from . import budget, config, credibility
 from .config import ConfigError, json_object
 from .physics import comms
-from .stage1 import NOT_EXERCISED, _classes, path_speed as _member_speeds, ship_antenna_m
+from .stage1 import NOT_EXERCISED, QUANTITY, _classes, path_speed as _member_speeds, ship_antenna_m
 from .env.remote import sha256
 from .ledger import STAGES
 from .stats import intervals, sampling, sequential
@@ -752,10 +752,11 @@ def _end_antenna_m(end: str, mission: dict[str, Any], cls: dict[str, str]) -> fl
 
 
 def _nearest_row(known: list[float]) -> tuple[tuple[float, float], float] | None:
-    """(the row of `comms.LOW_ANTENNA_PAIR_BAND` nearest to two heights, the largest difference of a height from it [m]), or None for fewer than two heights."""
+    """(the row of `comms.LOW_ANTENNA_PAIR_BAND` nearest to two heights, the largest difference of a height from it [m], to 9 decimals: 0.55 m is not 0.05
+    m and a little more from 0.5 m, round 20 A-1), or None for fewer than two heights."""
     if len(known) != 2:
         return None
-    return min(((row, max(abs(h - r) for h, r in zip(sorted(known), row, strict=True))) for row in comms.LOW_ANTENNA_PAIR_BAND), key=lambda x: x[1])
+    return min(((row, round(max(abs(h - r) for h, r in zip(sorted(known), row, strict=True)), 9)) for row in comms.LOW_ANTENNA_PAIR_BAND), key=lambda x: x[1])
 
 
 def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None:
@@ -767,16 +768,20 @@ def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None
     with the partner of that row); then the sentence prints that row's figures and what its signs do to the margin (`credibility.pair_effect`: too low, too
     high, or both with each extreme). Any other pair (a UAS end, a ship mast of another height, a height between the measured ones) is said to be not
     measured, and no figure of another pair stands in for it; where a pair is within RF_NEAR_ANTENNA_M of a row the sentence also says that the nearest
-    measured pair's margin is biased. The note is for a link with an end at or below RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M; its start says which ends ("Both
-    ends ... 0.5 m or lower", "An end ... below 0.5 m", "An end ... of 0.5 m" are pinned by tests; "just above 0.5 m" is the fourth). None when the link
-    is not an RF one or no end is that low (the USV's 2.2 m whip with a UAS: L23 says it)."""
+    measured pair's margin is biased. Round 20, M-2: the note is for a link with an end up to the highest height of the table
+    (`credibility.LOW_ANTENNA_MID_RANGE_M`, 2.2 m, plus the row tolerance), so the USV's 2.2 m whip prints it too (with a UAS: "no error band is stated");
+    for an end of 0.55 to 2.2 m with a partner of 10 to 15 m it also prints the envelope measured over that range (`credibility.mid_envelope`: the margin
+    too high by up to 5.1 dB and too low by up to 2.2 dB), which is of the range and not a band of the pair. The start says which ends ("Both ends ... 0.5 m
+    or lower", "An end ... below 0.5 m", "An end ... of 0.5 m" are pinned by tests; "just above 0.5 m" is the fourth, "of 0.55 to 2.2 m" the fifth). None
+    when the link is not an RF one or no end is that low (one end above 2.2 m and the other not one height, or both above it)."""
     if lk["kind"] != "rf":
         return None
     cls = _classes(mission)
     heights = {end: _end_antenna_m(end, mission, cls) for end in (lk["a"], lk["b"])}
     hs = list(heights.values())
     tol = credibility.LOW_ANTENNA_ROW_TOL_M
-    if not any(h is not None and h <= RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M for h in hs):
+    top = credibility.LOW_ANTENNA_MID_RANGE_M[1]
+    if not any(h is not None and h <= top + tol for h in hs):
         return None
 
     def named(keep: Callable[[float | None], bool]) -> str:
@@ -793,19 +798,26 @@ def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None
         start = f"An end of this RF link has an antenna below {RF_LOW_ANTENNA_M:g} m: {named(low)}."
     elif any(at_floor(h) for h in hs):
         start = f"An end of this RF link has an antenna of {RF_LOW_ANTENNA_M:g} m: {named(at_floor)}."
-    else:
+    elif any(h is not None and h <= RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M for h in hs):
         start = (f"An end of this RF link has an antenna just above {RF_LOW_ANTENNA_M:g} m (up to {RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M:g} m): "
                  f"{named(lambda h: h is not None and h <= RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M)}.")
+    else:                                                                    # round 20, M-2: 0.55 m to the table's 2.2 m, which no sentence covered
+        start = (f"An end of this RF link has an antenna of {RF_LOW_ANTENNA_M + RF_NEAR_ANTENNA_M:g} to {top:g} m: "
+                 f"{named(lambda h: h is not None and h <= top + tol)}.")
     known = sorted(h for h in hs if h is not None)
     near = _nearest_row(known)
     if near is None or near[1] > tol:
+        lo_m, hi_m = credibility.LOW_ANTENNA_MID_RANGE_M, credibility.LOW_ANTENNA_MID_PARTNER_M
+        mid = len(known) == 2 and lo_m[0] - 1e-9 <= known[0] <= lo_m[1] + tol and hi_m[0] - tol <= known[1] <= hi_m[1] + tol     # measured: a range, not a pair
         text = (f"{start} The two-ray model takes the ground reflection as -1, which cancels the two rays as an antenna goes to the surface, and its error "
-                f"is of the pair of heights: this pair ({named(lambda h: True)}) is not among those measured (L23 lists them), so no error band is stated for "
-                "this margin")
+                f"is of the pair of heights: this pair ({named(lambda h: True)}) is not among those measured (L23 lists them), so no "
+                + ("band of this pair is stated" if mid else "error band is stated for this margin"))
         if near is not None and near[1] <= RF_NEAR_ANTENNA_M:             # off a row: the row is not this pair's, and it is not silence (round 19, M-2)
             row = near[0]
             text += (f"; the nearest measured pair, {row[0]:g} m with {row[1]:g} m, has a biased margin ({credibility.pair_effect(row)}), and this pair's "
                      "figures are not that pair's (L23 says how far a height off a row moves them)")
+        if mid:
+            text += f"; {credibility.mid_envelope()}, a bound over that range and not this pair's own band"
         return text + " (CREDIBILITY, limitation L23)."
     row = near[0]
     label = f"{row[0]:g} m with {row[1]:g} m"
@@ -846,7 +858,8 @@ def _granularity(e: dict[str, Any], required: float | None, ref: dict[str, Any],
                 one_sample=num(1.0 / n, "fraction", ref, src + ".need_count_median (1 / need_count)") if n else None,
                 allowed_miss=None if required is None else num(1.0 - required, "fraction", ref, "mission.yaml links.required_fraction (1 - required_fraction)"),
                 never_required=None if never is None or e.get("n") is None else num(never, "members", ref, src + ".n_never_required"),
-                members=None if never is None or e.get("n") is None else num(e["n"], "members", ref, src + ".n"))
+                members=None if never is None or e.get("n") is None else num(e["n"], "members", ref, src + ".n"),
+                needed=None if never is None or e.get("n") is None else num(e["n"] - never, "members", ref, src + ".n (less n_never_required)"))
 
 
 def _load_res(run: pathlib.Path, tr: Trace) -> tuple[dict[str, Any] | None, str]:
@@ -1648,6 +1661,16 @@ def _notes_html(v: dict[str, Any]) -> str:
     return out + (f"<p class=muted>{html.escape(v['uas_levels_note'])}</p>" if v.get("uas_levels_note") else "")
 
 
+def _censored_soc_html(v: dict[str, Any]) -> str:
+    """Round 20, M-12: the ranked quantity is the lowest state of charge (a USV whose dominant mode is the battery), which the simulator clips at 0, so when
+    more than half the members ended with an empty pack most of them share one value and the first-order index rests on the others and on a tie."""
+    en = v.get("energy")
+    if not en or v["sensitivity"].get("quantity") != QUANTITY["energy_margin"] or 2 * en["n_empty"]["value"] <= v["n"]["value"]:
+        return ""
+    return (f" ({_n(en['n_empty'])} of the {_n(v['n'])} ended with an empty pack: their lowest state of charge is the same 0, the clip, so this index rests "
+            "on the other members and on a tie among these)")
+
+
 def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
     e = html.escape
     modes = ", ".join(f"{e(k)}: {_n(n)}" for k, n in v["modes"].items()) or "none"
@@ -1658,7 +1681,8 @@ def _vehicle_html(vid: str, v: dict[str, Any]) -> str:
             f"{_stat_html(v)}{_usv_bias_html(v)}{_physics_html(v['physics'])}{ch}"
             f"<p>Dominant failure mode: <b>{e('none (no member failed)' if v['dominant_mode'] is None else str(v['dominant_mode']))}</b> "
             f"(all modes: {modes}).<br>"
-            f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}.</p>"
+            f"First failure: {_n(v['first_fail'])}; median failure: {_n(v['median_fail'])}.<br>Most sensitive to: {_sens_html(v['sensitivity'])}"
+            f"{_censored_soc_html(v)}.</p>"
             f"{_task_html(v)}{_notes_html(v)}{_drivers_html(v)}{_speed_html(v)}{_cases_html(v['cases'])}"
             f"{_top3_html(v['top3'], v['sensitivity']['noise_floor'], v['sensitivity'].get('quantity'), v['sensitivity'].get('case'))}{_fix_html(v['fix'])}"
             f"<p class=muted>Depends on {_n(v['assumed_platform_inputs'])} (assumed platform values), listed in the "
@@ -1676,20 +1700,24 @@ def _margin_html(k: dict[str, Any]) -> str:
     return out
 
 
-def _never_required_html(g: dict[str, Any]) -> str:
+def _never_required_html(g: dict[str, Any], k_fail: dict[str, Any] | None = None) -> str:
     """Round 19, M-1: how many members the link was required in at no moment. Stage 1 gives such a member a pass fraction of 1.0 and counts it a pass, so
-    without this sentence 'never required' reads as 'worked' whenever the median member did need the link; an older summary has no count and says nothing."""
-    k, n = g.get("never_required"), g.get("members")
+    without this sentence 'never required' reads as 'worked' whenever the median member did need the link; an older summary has no count and says nothing.
+    Round 20, M-3: those members dilute the P(fail) (3 failures of 64 is a GO, of the 24 members that needed the link a MARGINAL), so the sentence also says
+    how many of the members that needed the link failed, and where none did (the verdict is NOT EXERCISED) it does not say they count in a P(fail)."""
+    k, n, need = g.get("never_required"), g.get("members"), g.get("needed")
     if k is None or n is None or not k["value"]:
         return ""
-    return (f"<p class=warn>The link was required at no moment in {_n(k)}, out of {_n(n)}: in each of those it passes by default (a pass fraction of "
-            f"1.0) and counts as a pass in the P(fail) above.</p>")
+    head = f"The link was required at no moment in {_n(k)}, out of {_n(n)}: in each of those it passes by default (a pass fraction of 1.0)"
+    if need is None or k_fail is None or not need["value"]:
+        return f"<p class=warn>{head}; no member needed it.</p>"
+    return f"<p class=warn>{head} and counts as a pass in the P(fail) above; {_n(k_fail)} failed of the {_n(need)} that needed the link.</p>"
 
 
-def _granularity_html(g: dict[str, Any] | None, verdict: str = "") -> str:
+def _granularity_html(g: dict[str, Any] | None, verdict: str = "", k_fail: dict[str, Any] | None = None) -> str:
     if g is None:
         return ""
-    return _never_required_html(g) + _granularity_samples_html(g, verdict)
+    return _never_required_html(g, k_fail) + _granularity_samples_html(g, verdict)
 
 
 def _granularity_samples_html(g: dict[str, Any], verdict: str) -> str:
@@ -1719,7 +1747,7 @@ def _iridium_html(k: dict[str, Any]) -> str:
 def _link_html(lid: str, k: dict[str, Any]) -> str:
     e = html.escape
     return (f"<div class=card><h3>{e(lid)} {_badge(k['verdict'])}{_undecided_badge(k)}</h3>{_stat_html(k)}{_physics_html(k['physics'])}"
-            f"{_granularity_html(k['granularity'], k['verdict'])}"
+            f"{_granularity_html(k['granularity'], k['verdict'], k['k_fail'])}"
             f"{_iridium_html(k)}"
             + (f"<p class=warn>{e(k['low_antenna'])}</p>" if k.get("low_antenna") else "") +
             f"<p>Method: {e(k['method'])}.<br>"
@@ -2081,19 +2109,30 @@ PRINTED = re.compile(r'<span class=n>([^<]*)<a class=lk[^>]* data-path="([^"]*)"
 INSTANCE = re.compile(r"(?:(?<=vehicles\.)|(?<=links\.)|(?<=windows\.)|(?<=forcing_at_windows\.)|(?<=refit\.))[^.\[]+|\[\d+\]")     # an id or index
 
 
+def _no_member_never_needed(link: dict[str, Any] | None) -> bool:
+    """True for a link whose `granularity` says that no member never needed it (the count is 0): its card prints no sentence about the three counts."""
+    g = (link or {}).get("granularity") or {}
+    return bool(g.get("never_required")) and g["never_required"]["value"] == 0
+
+
 def check_rendered(rep: dict[str, Any], html_text: str) -> list[str]:
     """The HTML is rendered from the JSON; this catches a section that drops a number. Every number node's text is in the page as a whole token. And `_n`
     tags each span with the node's path in report.json (round 10, M-27: presence alone let a card that stopped printing "0 members" pass because 28
     others print it), so a node must also be printed under its own path when the page prints that shape of path for another vehicle, link or window
-    (`vehicles.*.modes.battery`). A shape the page prints nowhere is not asked for: a few nodes are in report.json only (the drawn map's deploy points)."""
+    (`vehicles.*.modes.battery`). A shape the page prints nowhere is not asked for: a few nodes are in report.json only (the drawn map's deploy points).
+    The three counts of a link's `granularity` (never required, members, needed) are the one conditional print: the card says them only where some member never
+    needed the link, so for a link whose count is 0 they are not asked for, and a run with one partly-needed link and one fully-needed one does not fail its own
+    check (round 20: it did, on the second link's `0 members`, since round 19)."""
     printed: dict[str, set[str]] = {}
     for text, paths in PRINTED.findall(html_text):
         for p in json.loads(html.unescape(paths)):
             printed.setdefault(p, set()).add(html.unescape(text))
     shapes = {INSTANCE.sub("*", p) for p in printed}
+    quiet = {f"links.{lid}.granularity.{key}" for lid, k in (rep.get("links") or {}).items() if _no_member_never_needed(k)
+             for key in ("never_required", "members", "needed")}
     bad = []
     for kind, path, node in _walk(rep):
-        if kind != "node":
+        if kind != "node" or path in quiet:
             continue
         t = _txt(node)
         if not _token(t).search(html_text) or (INSTANCE.sub("*", path) in shapes and t not in printed.get(path, ())):

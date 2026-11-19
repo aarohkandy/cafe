@@ -82,7 +82,8 @@ def test_m2_a_height_just_above_0_5_m_or_off_a_row_is_not_silence_and_not_a_band
     assert f"the nearest measured pair, 0.3 m with 0.5 m, has a biased margin ({cr.pair_effect((0.3, 0.5))})" in both
     off = card(0.302, 0.5, monkeypatch)                                                                       # 0.002 m off the 0.3 m row is not the row
     assert "the nearest measured pair, 0.3 m with 0.5 m" in off and "dB (median" not in off
-    assert card(0.55, 15.0, monkeypatch) is not None and card(0.5501, 15.0, monkeypatch) is None            # the trigger: 0.05 m above 0.5 m
+    assert card(0.55, 15.0, monkeypatch) is not None and card(0.5501, 15.0, monkeypatch) is not None        # round 20, M-2: no cliff at 0.55 m any more
+    assert card(2.3, 15.0, monkeypatch) is None                                                              # the trigger now: the table's 2.2 m
     assert "the nearest measured pair, 0.1 m with 15 m" in card(0.105, 15.0, monkeypatch)
     far = card(0.4, 15.0, monkeypatch)                                                                        # 0.1 m off every row: nothing is near
     assert "not among those measured" in far and "nearest measured pair" not in far

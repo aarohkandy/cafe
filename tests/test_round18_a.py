@@ -238,11 +238,13 @@ def test_m3_case_3_an_end_of_exactly_0_5_m_says_the_direction_of_its_pair_and_wh
     assert report._low_antenna_note(rf("glider_eq", "uas"), DEMO) == NOT_MEASURED.format(start=start, ends="glider_eq (0.5 m), uas (no single height)")
 
 
-def test_m3_no_note_for_the_usv_whip_alone_a_non_rf_link_or_a_link_with_no_low_end():
-    assert report._low_antenna_note(rf("usv", "uas"), DEMO) is None
+def test_m3_no_note_for_a_non_rf_link_and_the_usv_whip_is_no_longer_silent():
+    """Round 20, M-2: the USV's whip (2.2 m) with a UAS or with the ship's 15 m mast prints the card (it printed none; tests/test_round20_b.py has its text);
+    an acoustic or an Iridium link never does."""
+    assert report._low_antenna_note(rf("usv", "uas"), DEMO).startswith("An end of this RF link has an antenna of 0.55 to 2.2 m: usv (2.2 m).")
     for kind in ("iridium", "acoustic"):
         assert report._low_antenna_note(rf("glider_eq", "glider_2n", kind), two_gliders("slocum", "slocum")) is None
-    assert report._low_antenna_note(rf("ship", "usv"), DEMO) is None
+    assert "(2.2 m with 15 m)" in report._low_antenna_note(rf("ship", "usv"), DEMO)
 
 
 def fresnel_band(ht, hr):
