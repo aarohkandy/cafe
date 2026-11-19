@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from . import intervals
+
 SENS_MIN_N = 16        # fewest members the indices are computed from: below it `default_harmonics` (2) has lam = 2M/N of 0.25 and more, and the bias correction
 #                        S~ = S - lam/(1 - lam)(1 - S) turns noise into S1 = 1 (n = 5 gave 1.0 for noise, n = 4 a ZeroDivisionError); stage1 reads it too
 
@@ -24,16 +26,27 @@ def default_harmonics(n: int) -> int:
 def first_order(x: np.ndarray, y: np.ndarray, harmonics: int | None = None, correct: bool = True) -> np.ndarray:
     """S1 for each column of x (n, d) against y (n,). Values are clipped to [0, 1]. Constant y gives zeros. `harmonics` defaults to `default_harmonics(n)`.
     A ValueError for fewer than SENS_MIN_N members with the default harmonics, and for any `harmonics` with 2 * harmonics >= n (lam >= 1: the correction
-    divides by 1 - lam); an explicit `harmonics` above that is the caller's choice (round 15, M-37)."""
+    divides by 1 - lam); an explicit `harmonics` above that is the caller's choice (round 15, M-37).
+    Round 21, M-13: `harmonics` is a count of at least 1 (-3 gave S1 of 1 for noise) and `y` is n finite numbers (a NaN gave zeros, which read as "no
+    parameter matters"). A y of one value gives zeros whatever n is (the mean of 47 copies of 0.1 is not 0.1, and the residue ranked as 0.29), and y is
+    scaled by a power of two first, which changes no bit of S1 but keeps the squared spectrum in range (a y of 1e160 gave NaN, one of 1e-200 gave zeros)."""
     n, d = x.shape
     if harmonics is None and n < SENS_MIN_N:
         raise ValueError(f"first-order indices need at least {SENS_MIN_N} members, got {n}")
-    if harmonics is not None and 2 * harmonics >= n:
-        raise ValueError(f"{harmonics} harmonics need more than {2 * harmonics} members (lam = 2M/N must be below 1), got {n}")
-    y = np.asarray(y, float) - np.mean(y)
+    if harmonics is not None:
+        harmonics = intervals._count(harmonics, "harmonics")
+        if harmonics < 1:
+            raise ValueError(f"harmonics must be at least 1, got {harmonics}")
+        if 2 * harmonics >= n:
+            raise ValueError(f"{harmonics} harmonics need more than {2 * harmonics} members (lam = 2M/N must be below 1), got {n}")
+    y = np.asarray(y, float)
+    if y.shape != (n,) or not np.isfinite(y).all():
+        raise ValueError(f"y must be one finite number for each of the {n} rows of x, got shape {y.shape} (or a NaN or infinity in it)")
     out = np.zeros(d)
-    if not np.any(y):
+    if y.min() == y.max():
         return out
+    y = np.ldexp(y, -int(np.frexp(np.abs(y).max())[1]))              # exact: the largest |y| is now in [0.5, 1), so its square and the sums stay in range
+    y = y - np.mean(y)
     m = default_harmonics(n) if harmonics is None else harmonics
     lam = 2 * m / n
     for i in range(d):
@@ -51,6 +64,9 @@ def noise_floor(x: np.ndarray, y: np.ndarray, perms: int = 2000, level: float = 
     about 0.30 (measured, tests/test_stats.py); with six harmonics it would be 0.53 to 0.60. An S1 below it is no evidence that the parameter matters.
     2000 permutations (review round 5, M-2): the floor's own sd at 64 members falls from about 0.014 at 200 to 0.004 (tests/test_stats.py), so a driver
     0.005 above a floor is not read off one seed's noise. One test in twenty on unrelated outcomes still clears it, by construction of the 95 % level."""
+    perms = intervals._count(perms, "perms")
+    if perms < 1:
+        raise ValueError(f"perms must be at least 1, got {perms}")  # round 21, M-13: none left an empty list, and `np.quantile` of it an IndexError
     rng = np.random.default_rng(seed)
     null = [first_order(x, rng.permutation(np.asarray(y, float)), harmonics).max() for _ in range(perms)]
     return float(np.quantile(null, level))
@@ -69,6 +85,8 @@ def extreme_ranks(names: list[str], x: np.ndarray, members: np.ndarray, top: int
     parameters whose members sit farthest from the middle rank on average, most extreme first. What can be said when too few members failed (or
     survived) for an index: a perfectly known driver shows as ranks all near 0 or all near n - 1."""
     n = len(x)
+    if not np.any(members):
+        raise ValueError("members marks no row: there are no ranks to give (the mean of an empty slice is NaN)")
     rank = np.argsort(np.argsort(x, axis=0, kind="stable"), axis=0, kind="stable")
     far = np.abs(rank[members].mean(0) - (n - 1) / 2.0)
     return [(names[i], sorted(map(int, rank[members, i]))) for i in np.argsort(-far, kind="stable")[:top]]

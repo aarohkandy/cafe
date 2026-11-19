@@ -41,7 +41,10 @@ def set_thresholds(go: float, nogo: float) -> None:
     if not (_real(go, nogo) and 0 < nogo < go <= 1):
         raise ValueError(f"need 0 < nogo < go <= 1, got go={go}, nogo={nogo}")
     go, nogo = float(go), float(nogo)                          # a numpy float32 would be module state that `round` hands back as a numpy scalar
-    P_FAIL_GO, P_FAIL_NOGO, LO_SUCCESS_GO = round(1 - go, 12), round(1 - nogo, 12), min(0.75, go)
+    p_go, p_nogo = round(1 - go, 12), round(1 - nogo, 12)
+    if not p_go < p_nogo:                                      # two cut-offs inside 1e-12 of each other are one: no MARGINAL band is left (round 21, M-13)
+        raise ValueError(f"go={go} and nogo={nogo} must differ by more than 1e-12 (the P(fail) cut-offs are rounded to 12 places: {p_go} and {p_nogo})")
+    P_FAIL_GO, P_FAIL_NOGO, LO_SUCCESS_GO = p_go, p_nogo, min(0.75, go)
 
 
 def _at_least(a: float, b: float) -> bool:
@@ -146,17 +149,37 @@ def rule_of_three(n: int) -> float:
     return 3.0 / n
 
 
+def _no_count(level: float, conf: float) -> ValueError:
+    """What `n_certify` and `n_certify_one_sided` raise when the count they made is not one (round 21, M-13): a level or confidence that passes `_level` can
+    still make an infinity (`n_certify(5e-324)`: 1 / level; a conf of 1 - 1e-16: z is infinite), a NaN (0 * inf) or a count above `MAX_COUNT`, and the module's
+    answer to each is its ValueError, as for a count argument above it. The check is on the result, so no range of (level, conf) has to be listed."""
+    return ValueError(f"the certification count for level={level} and conf={conf} is not a finite count at most {MAX_COUNT} (2**53)")
+
+
 def n_certify(level: float = 0.05, conf: float = 0.95) -> int:
-    """Smallest n whose zero-failure two-sided Wilson upper bound k^2/(n+k^2) is below `level` (73 at 5 %, 95 %)."""
+    """Smallest n whose zero-failure two-sided Wilson upper bound k^2/(n+k^2) is below `level` (73 at 5 %, 95 %). A ValueError when that n is above
+    `MAX_COUNT` (a level below about 4e-16)."""
     _level(level, conf)
-    k2 = _kappa(conf) ** 2
-    return int(math.floor(k2 * (1 / level - 1))) + 1
+    level = float(level)                                           # a numpy float32 would divide in single precision, a numpy float64 warn on overflow
+    x = _kappa(conf) ** 2 * (1 / level - 1)
+    if not math.isfinite(x) or (n := math.floor(x) + 1) > MAX_COUNT:
+        raise _no_count(level, conf)
+    return n
 
 
 def n_certify_one_sided(level: float = 0.05, conf: float = 0.95) -> int:
-    """Smallest n with (1 - level)^n <= 1 - conf: zero failures then rule out P(fail) >= level (59 at 5 %, 95 %)."""
+    """Smallest n with (1 - level)^n <= 1 - conf: zero failures then rule out P(fail) >= level (59 at 5 %, 95 %). Below 1e-3 the logs are `log1p`: `1 - x`
+    rounds to 1 for x under 1.1e-16 (`log` was 0: a ZeroDivisionError for the level and a count of 0 for the confidence) and loses digits above it (a level of
+    1e-8 gave a count 1 to 3 too small). A ValueError when n is above `MAX_COUNT`."""
     _level(level, conf)
-    return math.ceil(math.log(1 - conf) / math.log(1 - level))
+    level, conf = float(level), float(conf)
+    if min(level, conf) < 1e-3:
+        x = math.log1p(-conf) / math.log1p(-level)
+    else:
+        x = math.log(1 - conf) / math.log(1 - level)
+    if not math.isfinite(x) or (n := max(1, math.ceil(x))) > MAX_COUNT:       # `max`: x is 0.0 for a conf near 5e-324, which is one member, not none
+        raise _no_count(level, conf)
+    return n
 
 
 def _closed(**ps: Any) -> None:
