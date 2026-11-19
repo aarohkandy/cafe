@@ -20,7 +20,7 @@ STOP_CONF = 0.95        # the confidence of the interval the stopper reads; the 
 def sprt_indifference(cut: float, delta: float) -> tuple[float, float]:
     """(p0, p1) = (cut - delta, cut + delta): the indifference region around a P(fail) cut-off. Both ends are probabilities, 0 < p0 < p1 < 1, which is what
     `sprt_decide` asks of them (round 20, M-9: a negative delta gave the ends the wrong way round, a NaN gave NaN)."""
-    if not (intervals._real(cut, delta) and 0 < cut - delta < cut + delta < 1):
+    if not (intervals._unit(cut) and intervals._real(delta) and abs(delta) < 1 and 0 < cut - delta < cut + delta < 1):    # a huge int: an OverflowError
         raise ValueError(f"need 0 < cut - delta < cut + delta < 1, got cut={cut}, delta={delta}")
     return cut - delta, cut + delta
 
@@ -37,7 +37,9 @@ def sprt_decide(k: int, n: int, p0: float, p1: float, alpha: float = 0.05, beta:
         raise ValueError("need 0 < p0 < p1 < 1")
     if not (intervals._unit(alpha) and intervals._unit(beta)):      # round 20, M-9: alpha 0 was a ZeroDivisionError, -1 and beta 1 a math domain error
         raise ValueError(f"need 0 < alpha < 1 and 0 < beta < 1, got alpha={alpha}, beta={beta}")
-    llr = k * math.log(p1 / p0) + (n - k) * math.log((1 - p1) / (1 - p0))
+    up = p1 / p0
+    lr = math.log(up) if math.isfinite(up) else math.log(p1) - math.log(p0)     # p0 under 5.6e-309: the ratio is inf, and 0 * inf at k = 0 a NaN
+    llr = k * lr + (n - k) * math.log((1 - p1) / (1 - p0))
     if llr >= math.log((1 - beta) / alpha):
         return "accept_nogo"
     if llr <= math.log(beta / (1 - alpha)):

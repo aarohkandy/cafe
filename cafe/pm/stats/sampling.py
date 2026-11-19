@@ -219,6 +219,8 @@ def stratification_report(u: np.ndarray) -> dict[str, Any]:
     (a p-value would be ~1 for any LHS and could not fail).
     """
     n, d = u.shape
+    if n < 1:
+        raise ValueError(f"a stratification report needs at least one member, got {n}")       # round 21, M-13: 1 / n was a ZeroDivisionError
     strata = np.floor(u * n).astype(int)
     exact = bool(all(np.array_equal(np.sort(strata[:, j]), np.arange(n)) for j in range(d)))
     ks = max(stats.kstest(u[:, j], "uniform").statistic for j in range(d))

@@ -12,6 +12,8 @@ from typing import Any, Callable
 
 import numpy as np
 
+from . import intervals
+
 
 def _mma(u: np.ndarray, g: np.ndarray, b: float, fn: Callable[[np.ndarray], np.ndarray], rng: np.random.Generator,
          length: int, width: float) -> tuple[np.ndarray, np.ndarray]:
@@ -51,6 +53,9 @@ def subset_simulation(fn: Callable[[np.ndarray], np.ndarray], d: int, target: fl
     shorter than 2. Returns dict(p, cov, levels, n_evals, converged); converged is False
     (p = 0, cov = inf) if the thresholds stop rising (ties) or max_levels is spent.
     """
+    n = intervals._count(n, "n")
+    if not intervals._unit(p0):
+        raise ValueError(f"p0 must be a probability, 0 < p0 < 1, got {p0!r}")      # round 21, M-13: inf was an OverflowError, a bool a TypeError
     rng = np.random.default_rng(seed)
     nc = int(round(n * p0))
     if nc < 1 or n // nc < 2:
