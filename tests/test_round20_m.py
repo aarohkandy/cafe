@@ -35,8 +35,8 @@ def test_m2_ingest_ocean_prints_the_wording_of_hycom_dead_note_and_no_other(monk
     out.mkdir()
     dead_dir(out, 0.5)
     lines = ingest(monkeypatch, tmp_path, capsys).splitlines()
-    assert lines == [f"ocean store: {out}", "note:" + hycom.dead_note(out)[1:]]
-    assert "safe to delete by hand" not in lines[1] and "`.dead.tmp` is beside the store" not in lines[1]            # batch C's own words are gone
+    assert lines == ["note:" + hycom.dead_note(out)[1:] + ": this ingest does, once it has written the new store", f"ocean store: {out}"]     # round 21, M-11
+    assert "safe to delete by hand" not in lines[0] and "`.dead.tmp` is beside the store" not in lines[0]            # batch C's own words are gone
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------------------------- M3

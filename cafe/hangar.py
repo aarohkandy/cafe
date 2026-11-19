@@ -247,17 +247,21 @@ def fea_cases(kind, m_flu, spec, veh, parts, work):
 
 def grid_warning(hangar):
     """The warning for a CFD grid study that is not converged, or None. A two-grid GCI is only meaningful when both grids are in the asymptotic range. When
-    the coarse grid is far off (SUBOFF at Re 1.2e7: GCI ~150 % while the fine grid is within 3-8 % of the tank), the mission Monte Carlo still uses it, which
-    is conservative; say so instead of leaving an unexplained MARGINAL. A direction with no index at all (`cfd.gci` is NaN where the fine value is zero)
-    counts as the worst, wherever it stands in the list: `max` with a NaN answers by the order, and the grid read as converged (round 20, M3)."""
-    gcis = [r.get("gci", 0.0) for c in (hangar.get("cfd"), hangar.get("cfd_aoa")) if c for r in c["dirs"].values()]
-    gcis += [r.get("gci", 0.0) for r in (hangar.get("fs") or {}).get("speeds", {}).values()]
+    the coarse grid is far off (SUBOFF at Re 1.2e7: GCI ~150 % while the fine grid is within 3-8 % of the tank), the index is not a measure of the drag
+    uncertainty at all, and `mission.drag_sigma` takes the spread of an estimate instead of it (round 21, M-5: a spread from a huge index made the sampled drag
+    mostly BELOW nominal, so "verdicts lean MARGINAL" was the other way round). That is also what happens for a direction with no index (`cfd.gci` is NaN where
+    the fine value is zero), which counts as the worst wherever it stands in the list (`max` with a NaN answers by the order, and the grid read as converged:
+    round 20, M3), and for a direction with no `gci` key at all (None, which `vv.gci_value` reads as inf: round 21, a missing key is not a converged grid).
+    The limit is `vv.GCI_TRUSTED`, the one `drag_sigma` uses."""
+    gcis = [r.get("gci") for c in (hangar.get("cfd"), hangar.get("cfd_aoa")) if c for r in c["dirs"].values()]
+    gcis += [r.get("gci") for r in (hangar.get("fs") or {}).get("speeds", {}).values()]
     worst = vv.worst_gci(gcis)
-    if not gcis or worst <= 0.3:
+    if not gcis or worst <= vv.GCI_TRUSTED:
         return None
     how = f"GCI up to {worst:.0%}" if worst != float("inf") else "a direction has no GCI at all (the fine-grid value is zero or the grids are too alike), which counts as the worst"
-    return (f"CFD grid study not converged: the coarse and fine meshes disagree ({how}), so drag "
-            "uncertainty is wide and verdicts lean MARGINAL. A finer mesh level would narrow it")
+    return (f"CFD grid study not converged: the coarse and fine meshes disagree ({how}), so the grid index cannot stand for the drag uncertainty: "
+            "the mission takes the spread of an estimate instead, and a verdict for this vehicle is not decided by the CFD. "
+            "A finer mesh level would narrow it")
 
 
 def run(design_dir, skip=()):
@@ -278,7 +282,7 @@ def run(design_dir, skip=()):
                 job.log("error: " + e)
             res["errors"] = errors
             job.status("failed", "model check", 1.0, errors=errors)
-            atomic.write_json(d / "result.json", res, default=_j)
+            _write_result(d, res)
             return res
         res["geometry"] = geom.report(m, kind, spec["mass"])
         hangar = {}
@@ -373,15 +377,22 @@ def run(design_dir, skip=()):
         v2 = vehicle.build(kind, m, spec, hangar)
         res["performance"] = dict(cruise=ctrl.cruise_speed(v2), vmax=ctrl.max_speed(v2), sources=v2.sources)
         res["finished"] = time.time()
-        atomic.write_json(d / "result.json", res, default=_j)
+        _write_result(d, res)
         job.log(f"done: cruise {res['performance']['cruise']:.2f} m/s, max {res['performance']['vmax']:.2f} m/s")
         job.status("done", "ready", 1.0)
     except Exception as e:
         job.log("crashed: " + "".join(traceback.format_exception(e))[-3000:])
         res["errors"] = [f"{type(e).__name__}: {e}"]
-        atomic.write_json(d / "result.json", res, default=_j)
+        _write_result(d, res)
         job.status("failed", "error", 1.0, errors=res["errors"])
     return res
+
+
+def _write_result(d, res):
+    """`result.json` with every non-finite number as null: Python writes NaN (the `gci` of a direction `cfd.gci` has no index for) as a bare `NaN` that no
+    JSON parser but Python's reads, and the app's response encoder refuses it (round 21, M-12). Null is what every reader takes for "no index"
+    (`vv.gci_value`), and what `app.js` shows as "no index"; one pass through `parse_constant` catches a numpy float and an array's items too."""
+    atomic.write_json(d / "result.json", json.loads(json.dumps(res, default=_j), parse_constant=lambda _: None), allow_nan=False)
 
 
 def _j(o):
