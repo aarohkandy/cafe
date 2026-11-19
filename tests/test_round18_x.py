@@ -229,14 +229,15 @@ def test_x2_the_drift_gliders_battery_margin_moves_with_the_current_columns_on_t
     assert [x > 1e-5 for x in mx["current_direction_bias"]] == [False, False, False, False, True]
 
 
-def test_x2_wind_direction_acts_on_the_uas_battery_reserve_and_not_on_its_profile_share():
+def test_x2_wind_direction_acts_on_the_uas_battery_reserve_and_on_its_profile_share_only_at_the_battery_limit():
     """Round 18 took `wind_direction_bias` out of the UAS profile share's row (its S1 there was 0.0134 in q18, under the floor): measured on the demo it
     moves the reserve margin by 2.5e-3 at some quantiles (the row still lists it) and the profile share by nothing, at 5 quantiles for 8 members'
-    other draws."""
+    other draws. Round 19 (M-5) put it back, among the `UNSEEN`: the profile share steps (0.625 to 0.875) at an edge of the battery scale, which the demo's
+    probe never reaches, and the wind direction moves that edge (reviewer B's bisection of the edge on the CI fixture)."""
     assert "wind_direction_bias" in moved("uas", "margin") and "wind_direction_bias" in stage1.ACTING[("uas", "margin")]
-    assert "wind_direction_bias" not in moved("uas", "profile_margin") and "wind_direction_bias" not in stage1.ACTING[("uas", "profile_margin")]
+    assert "wind_direction_bias" not in moved("uas", "profile_margin") and "wind_direction_bias" in stage1.ACTING[("uas", "profile_margin")]
     assert moved("uas", "profile_margin") == {"wind_speed_bias"}
-    assert set(stage1.UNSEEN[("uas", "profile_margin")]) == {"bulk_stress_scale", "battery_capacity_scale", "hs_scale"}
+    assert set(stage1.UNSEEN[("uas", "profile_margin")]) == {"bulk_stress_scale", "battery_capacity_scale", "hs_scale", "wind_direction_bias"}
 
 
 # ------------------------------------------------------------ item 4: a sentence that said a cause the code does not know

@@ -30,7 +30,8 @@ def test_r17_m8_each_vehicle_and_link_ranks_only_the_columns_its_simulator_reads
     kinds = {lid: lk["kind"] for lid, lk in LK.items()}
     assert set(kinds.values()) == {"rf", "acoustic", "iridium"}
     # round 18, M-4: the columns that move an end's track (not its battery or its insolation); an RF link also reads Hs; an Iridium link `when: always` has none
-    want = {"rf": set(stage1.FORCING) | {"usv_vpp_bias", "bulk_stress_scale"}, "acoustic": GLIDER - {"battery_capacity_scale"}, "iridium": set()}
+    want = {"rf": set(stage1.FORCING) | {"usv_vpp_bias", "bulk_stress_scale", "battery_capacity_scale"},   # round 19, M-5: the UAS end's battery
+            "acoustic": GLIDER - {"battery_capacity_scale"}, "iridium": set()}
     for lid, kind in kinds.items():
         assert set(s["links"][lid]["sensitivity"]["S1"]) == want[kind], lid
 
