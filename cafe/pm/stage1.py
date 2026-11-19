@@ -55,9 +55,18 @@ ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_v
 # margin (a UAS); `energy_margin` the USV's lowest state of charge (the insolation it harvests varies in the environment, so every column that moves its
 # track moves it a little, and `solar_yield_scale` moves it most); `battery_margin` the glider's battery energy left above the reserve: the speed prior
 # and the battery size move it by 0.4 to 1.6 % of the pack on the demo (hotel load and pumping), and, on the demo only, a Slocum's moves with the
-# current columns by 0.016 % of the pack, a step at the tail quantiles (3 % of the members' spread; no mechanism was identified), where a Seaglider on
-# station moves by 5e-11 and the CI fixture's gliders by less than 1e-6; the wind columns move it by 1e-9, which is float noise; `profile_margin` the
-# share of the flux pattern a sortie delivered.
+# current columns by 0.016 % of the pack, a step at the tail quantiles (3 % of the members' spread), where a Seaglider on station moves by 5e-11 and the
+# CI fixture's gliders by less than 1e-6; the wind columns move it by 1e-9, which the probe read as float noise; `profile_margin` the share of the flux
+# pattern a sortie delivered. The mechanism of the Slocum's step (round 19, M-6, reviewer B's toy run with a horizontal density gradient and the current
+# scaled 0 to 3 times): the step is one surfacing less in the window, a COUNT of surfacings at the window's end and not a response of the battery to the
+# current. The current moves the glider through a water whose density differs (the CI fixture has no horizontal gradient, which is why it is inert
+# there), that shifts the dive cycle (about 9,400 s) by a part in 1e4, and over 55 cycles the last ascent finishes before the window ends in one member
+# and after it in the other (54 surfacings completed instead of 55). One surfacing costs `comm_J` (3.5 W x (120 s + 250 s) + 414 J = 1709 J) plus the
+# surface pump (150.83 cc x 101325 Pa / 0.4 = 38.2 J) = 1747.2 J, which is 1.62e-4 of the usable pack (1.2e7 J x 0.9): the 1.6e-4 measured on the
+# demo. Any column that moves the glider's position can do the same with a smaller chance (the wind, through the 1 % windage while surfaced, about 30
+# times smaller): the probe's 8 members at 5 quantiles cannot exclude it, so "float noise" for the wind columns is also a statement about the probe's
+# size. The two current columns stay in the row (DECISIONS, round 19 OD-6) and raise the noise floor of a Slocum's battery row (0.155 for two columns,
+# 0.186 for four, at 64 members).
 # UNSEEN: columns that can act on a quantity but that no probe of ours moves, because the probe stays far from the edge they act at: Hs ends a UAS
 # sortie only through a lost link (`_uas_links`), which needs a margin near 0 dB; the stress scale and the battery size end a sortie early (the profile
 # share) only in a flight that is already at its limit (on the demo the stress scale moved the reserve margin by 5.6e-3 and the profile share by

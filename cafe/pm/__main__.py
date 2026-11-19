@@ -260,6 +260,10 @@ def _ingest_ocean(a: argparse.Namespace) -> int:
                           f"/data/ocean/lab_{m['name']}.zarr>}} first")
     out = hycom.ingest_lab_hycom(a.path, pipeline.ocean_box(m), spec["path"], a.temperature_kind or spec.get("temperature_kind"), a.grid)
     print(f"ocean store: {out}")
+    if old := hycom.asides(out):                  # a lab store is not locked: the write swept no `.old.tmp` that a killed ingest left (round 19)
+        print("note: the store as it was before an earlier ingest that was killed while it replaced it is still beside this one: "
+              f"{', '.join(str(q) for q in old)}; nothing deletes the leftovers of a lab store, so remove it by hand once the new store opens "
+              "(`ls -a` of its directory lists them)")
     return 0
 
 

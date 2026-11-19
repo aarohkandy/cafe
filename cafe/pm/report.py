@@ -841,9 +841,12 @@ def _granularity(e: dict[str, Any], required: float | None, ref: dict[str, Any],
     if e.get("need_count_median") is None:
         return None
     n = e["need_count_median"]
+    never = e.get("n_never_required")                               # round 19, M-1: members in which no moment needed the link (frac 1.0 there)
     return dict(need_count=num(n, "samples", ref, src + ".need_count_median"), ok=bool(e.get("granularity_ok", True)),
                 one_sample=num(1.0 / n, "fraction", ref, src + ".need_count_median (1 / need_count)") if n else None,
-                allowed_miss=None if required is None else num(1.0 - required, "fraction", ref, "mission.yaml links.required_fraction (1 - required_fraction)"))
+                allowed_miss=None if required is None else num(1.0 - required, "fraction", ref, "mission.yaml links.required_fraction (1 - required_fraction)"),
+                never_required=None if never is None or e.get("n") is None else num(never, "members", ref, src + ".n_never_required"),
+                members=None if never is None or e.get("n") is None else num(e["n"], "members", ref, src + ".n"))
 
 
 def _load_res(run: pathlib.Path, tr: Trace) -> tuple[dict[str, Any] | None, str]:
@@ -1673,9 +1676,23 @@ def _margin_html(k: dict[str, Any]) -> str:
     return out
 
 
+def _never_required_html(g: dict[str, Any]) -> str:
+    """Round 19, M-1: how many members the link was required in at no moment. Stage 1 gives such a member a pass fraction of 1.0 and counts it a pass, so
+    without this sentence 'never required' reads as 'worked' whenever the median member did need the link; an older summary has no count and says nothing."""
+    k, n = g.get("never_required"), g.get("members")
+    if k is None or n is None or not k["value"]:
+        return ""
+    return (f"<p class=warn>The link was required at no moment in {_n(k)}, out of {_n(n)}: in each of those it passes by default (a pass fraction of "
+            f"1.0) and counts as a pass in the P(fail) above.</p>")
+
+
 def _granularity_html(g: dict[str, Any] | None, verdict: str = "") -> str:
     if g is None:
         return ""
+    return _never_required_html(g) + _granularity_samples_html(g, verdict)
+
+
+def _granularity_samples_html(g: dict[str, Any], verdict: str) -> str:
     if g["need_count"]["value"] == 0:
         tail = (f"the P(fail) above counts nothing; the verdict is {NOT_EXERCISED}, not GO." if verdict == NOT_EXERCISED else
                 "the verdict is graded on the outcomes of all members, whichever of them needed the link.")        # a median of 0 is not "no member needed it"
