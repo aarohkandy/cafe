@@ -23,7 +23,8 @@ def _vec(v: object) -> bool:
 
 def _checked(what: str, k: tuple, r: object) -> dict:
     """`r` as the result `cfd.cached` would hold under the key `k`, or a `ValueError` saying what is wrong with it (round 19, M-14). The fields the Hangar
-    reads (`vehicle.py`): for `external` the fluid and speed of the key, `rho`, `nu`, `L`, and per direction the `force`, `moment` and `viscous` vectors; for
+    reads (`vehicle.py`): for `external` the fluid and speed of the key, `rho`, `nu`, `L`, and for each of the six
+    directions the `force`, `moment` and `viscous` vectors and the `gci`; for
     `surface` the speeds of the key, each with its `resistance`. A file of another shape was cached under the real key and read as a result."""
     if not isinstance(r, dict):
         raise ValueError(f"the file holds {type(r).__name__}, not a result (a JSON object)")
@@ -46,11 +47,14 @@ def _checked(what: str, k: tuple, r: object) -> dict:
     if bad:
         raise ValueError(f"no number in {', '.join(bad)}")
     dirs = r.get("dirs")
-    if not isinstance(dirs, dict) or not dirs or not set(dirs) <= set(cfd.DIRS):
-        raise ValueError(f"`dirs` is not an object of directions among {', '.join(cfd.DIRS)}")
+    if not isinstance(dirs, dict) or set(dirs) != set(cfd.DIRS):   # the Hangar reads all six; fewer is called CFD, the rest the estimate (round 20, M-7)
+        raise ValueError(f"`dirs` is not an object of all six directions, {', '.join(cfd.DIRS)}")
     for d, v in dirs.items():
         if not isinstance(v, dict) or not all(_vec(v.get(f)) for f in ("force", "moment", "viscous")):
             raise ValueError(f"direction {d} has no `force`, `moment` and `viscous` of three numbers each")
+        g = v.get("gci")                          # a number, NaN and inf included: `cfd.gci` gives NaN where it has no index, and a real file holds it
+        if not isinstance(g, (int, float)) or isinstance(g, bool):
+            raise ValueError(f"direction {d} has no number in `gci` (the Hangar reads it)")
     return r
 
 
@@ -71,7 +75,7 @@ def main() -> int:
             k = ("surface", round(hs["draft"], 4), [round(x, 3) for x in speeds])
         try:
             r = _checked(what, k, json.loads(p.read_text()))
-        except (OSError, ValueError) as e:        # JSONDecodeError and UnicodeDecodeError are ValueErrors
+        except (OSError, ValueError, RecursionError) as e:   # JSONDecodeError and UnicodeDecodeError are ValueErrors; a deeply nested file is a RecursionError
             bad += 1
             print("NOT seeded", p, "-", e)
             continue

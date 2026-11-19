@@ -334,7 +334,8 @@ def test_r17_m12_seed_reads_the_runs_beside_the_cache_and_writes_the_cache(tmp_p
     from cafe import _seed
     work = tmp_path / "work"
     (work / "runs" / "q1").mkdir(parents=True)
-    made = dict(fluid="air", rho=1.2, nu=1.5e-5, speed=10.0, L=1.0, dirs={"+x": dict(force=[-1.0, 0.0, 0.0], moment=[0.0, 0.0, 0.0], viscous=[-0.5, 0.0, 0.0])})
+    made = dict(fluid="air", rho=1.2, nu=1.5e-5, speed=10.0, L=1.0,
+                dirs={d: dict(force=[-1.0, 0.0, 0.0], moment=[0.0, 0.0, 0.0], viscous=[-0.5, 0.0, 0.0], gci=0.01) for d in cfd.DIRS})
     (work / "runs" / "q1" / "quad.external.json").write_text(json.dumps(made))
     monkeypatch.setattr(cfd, "CACHE", work / "cfdcache")
     assert _seed.main() == 0

@@ -79,7 +79,12 @@ def work(tmp_path, monkeypatch):
 
 def external(fluid="air", speed=10.0):
     return dict(fluid=fluid, rho=1.2, nu=1.5e-5, speed=speed, L=1.0,
-                dirs={"+x": dict(force=[-1.0, 0.0, 0.0], moment=[0.0, 0.0, 0.0], viscous=[-0.5, 0.0, 0.0])})
+                dirs={d: dict(force=[-1.0, 0.0, 0.0], moment=[0.0, 0.0, 0.0], viscous=[-0.5, 0.0, 0.0], gci=0.01) for d in cfd.DIRS})
+
+
+def six(**plus_x):
+    """The six directions of `external()` with the fields of `+x` replaced by `plus_x` (a bad vector in one direction, the other five good)."""
+    return {**external()["dirs"], "+x": plus_x}
 
 
 def put(work, run, name, content):
@@ -126,11 +131,11 @@ BAD_EXTERNAL = {
     "nu a bool": json.dumps({**external(), "nu": True}),
     "NaN in L": '{"fluid": "air", "rho": 1.2, "nu": 1.5e-5, "speed": 10.0, "L": NaN, "dirs": {}}',
     "no force": json.dumps(drop(external(), "dirs", "+x", "force")),
-    "a force of two numbers": json.dumps({**external(), "dirs": {"+x": dict(force=[1.0, 2.0], moment=[0, 0, 0], viscous=[0, 0, 0])}}),
-    "a force with a string": json.dumps({**external(), "dirs": {"+x": dict(force=[1.0, 2.0, "3"], moment=[0, 0, 0], viscous=[0, 0, 0])}}),
-    "a direction that is no axis": json.dumps({**external(), "dirs": {"+q": external()["dirs"]["+x"]}}),
+    "a force of two numbers": json.dumps({**external(), "dirs": six(force=[1.0, 2.0], moment=[0, 0, 0], viscous=[0, 0, 0], gci=0.0)}),
+    "a force with a string": json.dumps({**external(), "dirs": six(force=[1.0, 2.0, "3"], moment=[0, 0, 0], viscous=[0, 0, 0], gci=0.0)}),
+    "a direction that is no axis": json.dumps({**external(), "dirs": {**external()["dirs"], "+q": external()["dirs"]["+x"]}}),
     "empty dirs": json.dumps({**external(), "dirs": {}}),
-    "a direction that is a list": json.dumps({**external(), "dirs": {"+x": [1, 2, 3]}}),
+    "a direction that is a list": json.dumps({**external(), "dirs": {**external()["dirs"], "+x": [1, 2, 3]}}),
     "the fluid of another case": json.dumps(external("water", 1.5)),
     "the speed of another case": json.dumps(external("air", 5.0)),
     "invalid UTF-8": b"\xff\xfe{",
