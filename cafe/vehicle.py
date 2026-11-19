@@ -7,6 +7,7 @@ Meshes arrive in FLU (geom.py), converted here once. Every coefficient records i
 from dataclasses import dataclass, field
 import numpy as np
 import trimesh
+from cafe.pm import vv
 
 FLU2FRD = np.diag([1.0, -1.0, -1.0])
 RHO = {"water": 1025.0, "air": 1.20}
@@ -286,7 +287,7 @@ def build(kind, mesh_flu, spec, hangar=None):
             Mo = FLU2FRD @ np.asarray(r["moment"]) / q
             Mc = Mo - np.cross(cog, F)                     # CFD moments are about the mesh origin
             fv = abs(np.dot(r["viscous"], DIRS[d])) / max(abs(np.dot(r["force"], DIRS[d])), 1e-12)
-            drag[_flip(d)] = (F, Mc, fv, r.get("gci", 0.0))
+            drag[_flip(d)] = (F, Mc, fv, vv.gci_value(r.get("gci", 0.0)))   # a NaN index is inf: not trusted (round 20, M3)
         drag_re = (c["speed"], c["nu"], c["L"])
         sources["drag"] = "cfd"
     for d, vec in DIRS.items():
@@ -340,7 +341,7 @@ def build(kind, mesh_flu, spec, hangar=None):
             V1, R1 = float(sp[0][0]), sp[0][1]["resistance"]
             low = np.linspace(0, V1, 6)[:-1]                  # below the first CFD speed: R1 (V/V1)^2, not linear
             v.resistance = (np.r_[low, [float(k) for k, _ in sp]], np.r_[R1 * (low / V1) ** 2, [r["resistance"] for _, r in sp]])
-            v.limits["resistance_gci"] = max(r.get("gci", 0.0) for _, r in sp)
+            v.limits["resistance_gci"] = vv.worst_gci(r.get("gci", 0.0) for _, r in sp)
             sources["resistance"] = "cfd (free surface)"
         v.windage = np.array([1.0 * _proj(m, ax) * 0.5 for ax in range(3)])   # ponytail: ~half the silhouette is above water
         sources["windage"] = "estimate (Cd 1.0 on half silhouette)"
@@ -394,7 +395,7 @@ def hull_lift(c, cog, A3):
             if a == alphas[-1] and all("force_coarse" in c["dirs"][d] for d in (lab, "+x", p)):
                 gcis.append(gci(KF[ax], k("force_coarse", "moment_coarse")[0][ax]))
         out[ax] = (np.array(alphas, float), np.array(KFs), np.array(KMs))
-    return out, max(gcis, default=0.0)
+    return out, vv.worst_gci(gcis)
 
 
 def cross_k(entry, alpha_deg):

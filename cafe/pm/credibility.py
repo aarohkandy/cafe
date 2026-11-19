@@ -834,8 +834,9 @@ class Facts:
 
 
 def counts_ok(k: Any, n: Any) -> bool:
-    """The one rule for a stored ensemble count: an integer `n` >= 1 and an integer 0 <= `k` <= `n`."""
-    return all(isinstance(x, int) and not isinstance(x, bool) for x in (k, n)) and 0 <= k <= n and n >= 1
+    """The one rule for a stored ensemble count: an integer `n` >= 1 and an integer 0 <= `k` <= `n`, and `n` at most `intervals.MAX_COUNT` (2**53): above that
+    `intervals.verdict` is a ValueError (round 20, M-9), and a damaged summary must end in the refusal below, not in that error (round 20, M6)."""
+    return all(isinstance(x, int) and not isinstance(x, bool) for x in (k, n)) and 0 <= k <= n and 1 <= n <= intervals.MAX_COUNT
 
 
 def real_ok(x: Any) -> bool:
@@ -853,8 +854,8 @@ def check_counts(k: Any, n: Any, src: str) -> None:
     ZeroDivisionError or ValueError that `intervals.wilson` and `interval` raise on a count that is not one. The one rule of the credibility page and the
     report, for the stage-1b summary's ensembles and the sensitivity cases (round 11, M-5), and of `acceptance.compare` for the golden's (look-ahead L0)."""
     if not counts_ok(k, n):
-        raise config.ConfigError(f"{src}: k_fail {k!r} of n {n!r} members is not a count (integers, n >= 1, 0 <= k_fail <= n): "
-                                 "the summary was edited or is damaged; run it again (--fresh)")
+        raise config.ConfigError(f"{src}: k_fail {k!r} of n {n!r} members is not a count (integers, n >= 1, 0 <= k_fail <= n, n at most "
+                                 f"{intervals.MAX_COUNT}): the summary was edited or is damaged; run it again (--fresh)")
 
 
 def check_never_required(never: Any, k: Any, n: Any, src: str) -> None:

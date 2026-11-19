@@ -10,6 +10,7 @@ import numpy as np
 import trimesh
 
 from cafe import atomic, geom, vehicle, fea, cfd, ctrl
+from cafe.pm import vv
 
 KNOCKDOWN = 0.5      # ponytail: linear buckling of imperfect shells under external pressure; NASA SP-8007-style
                      # knock-downs for cylinders are ~0.5-0.75. A Riks run with imperfections replaces it.
@@ -244,6 +245,21 @@ def fea_cases(kind, m_flu, spec, veh, parts, work):
 
 # ------------------------------------------------------------------ pipeline
 
+def grid_warning(hangar):
+    """The warning for a CFD grid study that is not converged, or None. A two-grid GCI is only meaningful when both grids are in the asymptotic range. When
+    the coarse grid is far off (SUBOFF at Re 1.2e7: GCI ~150 % while the fine grid is within 3-8 % of the tank), the mission Monte Carlo still uses it, which
+    is conservative; say so instead of leaving an unexplained MARGINAL. A direction with no index at all (`cfd.gci` is NaN where the fine value is zero)
+    counts as the worst, wherever it stands in the list: `max` with a NaN answers by the order, and the grid read as converged (round 20, M3)."""
+    gcis = [r.get("gci", 0.0) for c in (hangar.get("cfd"), hangar.get("cfd_aoa")) if c for r in c["dirs"].values()]
+    gcis += [r.get("gci", 0.0) for r in (hangar.get("fs") or {}).get("speeds", {}).values()]
+    worst = vv.worst_gci(gcis)
+    if not gcis or worst <= 0.3:
+        return None
+    how = f"GCI up to {worst:.0%}" if worst != float("inf") else "a direction has no GCI at all (the fine-grid value is zero or the grids are too alike), which counts as the worst"
+    return (f"CFD grid study not converged: the coarse and fine meshes disagree ({how}), so drag "
+            "uncertainty is wide and verdicts lean MARGINAL. A finer mesh level would narrow it")
+
+
 def run(design_dir, skip=()):
     job = Job(design_dir)
     d = job.d
@@ -321,11 +337,7 @@ def run(design_dir, skip=()):
         # A two-grid GCI is only meaningful when both grids are in the asymptotic range. When the coarse grid is
         # far off (SUBOFF at Re 1.2e7: GCI ~150 % while the fine grid is within 3-8 % of the tank), the mission
         # Monte Carlo still uses it, which is conservative; say so instead of leaving an unexplained MARGINAL.
-        gcis = [r.get("gci", 0.0) for c in (hangar.get("cfd"), hangar.get("cfd_aoa")) if c for r in c["dirs"].values()]
-        gcis += [r.get("gci", 0.0) for r in (hangar.get("fs") or {}).get("speeds", {}).values()]
-        if gcis and max(gcis) > 0.3:
-            msg = (f"CFD grid study not converged: the coarse and fine meshes disagree (GCI up to {max(gcis):.0%}), so drag "
-                   "uncertainty is wide and verdicts lean MARGINAL. A finer mesh level would narrow it")
+        if msg := grid_warning(hangar):
             res["warnings"].append(msg); job.log("warning: " + msg)
 
         if "fea" not in skip:

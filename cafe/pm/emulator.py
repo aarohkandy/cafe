@@ -62,6 +62,17 @@ def _conformal_q(scores: np.ndarray, alpha: float) -> float:
     return float("inf") if k > n else float(np.partition(scores, k - 1)[k - 1])
 
 
+def _verdict_band(p: float, lo: float, hi: float) -> str:
+    """`intervals.verdict_band`, with its ValueError for a P(fail) or a band end that is not a probability (NaN, or out of 0..1: round 20, M-9, which used to
+    print NO-GO for a NaN) made into the message of a damaged emulator, which names the quantity, instead of a bare traceback (round 20, M6). The sigmoid keeps
+    every finite or infinite model-scale value in 0..1; a NaN here means the fitted model itself gave one."""
+    try:
+        return intervals.verdict_band(p, lo, hi)
+    except ValueError as e:
+        raise ConfigError(f"the emulator's P(fail) is {p!r} with a 90 % band of {lo!r} to {hi!r}, which is not a probability ({e}): the fitted emulator or the "
+                          "training table it was fitted on is damaged, so it answers nothing; move the table aside (rows in it are lost) and rerun") from e
+
+
 def _logit(p: np.ndarray, eps: float) -> np.ndarray:
     p = np.clip(p, eps, 1 - eps)
     return cast(np.ndarray, np.log(p / (1 - p)))
@@ -295,7 +306,7 @@ class Emulator:
         p = self.predict(x, alpha)
         res = {t: {k: float(v[0]) for k, v in r.items()} for t, r in p.items()}
         pf = res.get("p_fail")
-        v = intervals.verdict_band(pf["value"], pf["lo"], pf["hi"]) if pf else None          # the band counts, as in Stage 1's `verdict` (round 15, M-1)
+        v = _verdict_band(pf["value"], pf["lo"], pf["hi"]) if pf else None          # the band counts, as in Stage 1's `verdict` (round 15, M-1)
         return dict(status="ok", verdict=v, targets=res, alpha=alpha, **head)
 
     # ---- evaluation -------------------------------------------------------------------------------------------
@@ -377,7 +388,7 @@ class Emulator:
         base = np.array([[x[f] for f in self.features]])
         pb = self.predict(base)["p_fail"]
         p0 = float(pb["value"][0])
-        v0 = intervals.verdict_band(p0, float(pb["lo"][0]), float(pb["hi"][0]))
+        v0 = _verdict_band(p0, float(pb["lo"][0]), float(pb["hi"][0]))
         cols = [self.features.index(n) for n in names]
         grids = [np.linspace(*bounds[n], steps) for n in names]
         singles = [np.tile(base, (steps, 1)) for _ in names]
@@ -392,7 +403,7 @@ class Emulator:
         pc = self.predict(cand)["p_fail"]
         p = pc["value"]
         inside = self._dist(cand) <= self.threshold
-        verdicts = [intervals.verdict_band(a, b, c) for a, b, c in zip(p, pc["lo"], pc["hi"], strict=True)]
+        verdicts = [_verdict_band(a, b, c) for a, b, c in zip(p, pc["lo"], pc["hi"], strict=True)]
         other = tuple(v for v in ("GO", "MARGINAL", "NO-GO") if v != v0)
         moved = np.array([v != v0 for v in verdicts]) & inside
         shown = moved & np.array([intervals.band_in(b, c, other) for b, c in zip(pc["lo"], pc["hi"], strict=True)])

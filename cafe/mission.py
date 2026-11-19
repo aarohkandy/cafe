@@ -56,6 +56,22 @@ def z_to_down(kind, z):
     return {"uav": -float(z), "uuv": float(z), "usv": 0.0}[kind]
 
 
+def drag_sigma(v):
+    """The relative spread of the drag coefficient of a vehicle: free-surface resistance for boats, the CFD drag table otherwise; model-form error (10 %
+    CFD, 30 % estimate) combined with the measured mesh uncertainty (the GCI). A GCI of inf (`vehicle` reads a NaN, which `cfd.gci` writes where it has no
+    index, as inf: not trusted) cannot be sampled: the spread is then no smaller than an estimate's (SIG["drag_est"]), and the largest finite GCI of the other
+    directions still counts (round 20, M3; before it, a NaN that came first made every member's drag NaN and one that came later was ignored)."""
+    if v.resistance is not None:
+        gcis = [v.limits.get("resistance_gci", 0.0)]
+    elif v.sources.get("drag") == "cfd":
+        gcis = [c[3] for c in v.drag.values()] + [v.limits.get("lift_gci", 0.0)]
+    else:
+        return SIG["drag_est"]
+    finite = [g for g in gcis if np.isfinite(g)]
+    sig = float(np.hypot(SIG["drag_cfd"], max(finite, default=0.0)))
+    return sig if len(finite) == len(gcis) else max(sig, SIG["drag_est"])
+
+
 class Drone:
     def __init__(self, spec, frame, B, rng):
         self.id, self.veh = spec["id"], spec["vehicle"]
@@ -65,12 +81,7 @@ class Drone:
         self.start = np.array([n, e, z_to_down(k, spec["start"][2] if len(spec["start"]) > 2 else 0)])
         # spread of the coefficient that dominates: free-surface resistance for boats, the CFD drag table
         # otherwise; model-form error (10 % CFD, 30 % estimate) combined with the measured mesh uncertainty
-        if v.resistance is not None:
-            drag_sig = float(np.hypot(SIG["drag_cfd"], v.limits.get("resistance_gci", 0.0)))
-        elif v.sources.get("drag") == "cfd":
-            drag_sig = float(np.hypot(SIG["drag_cfd"], max([c[3] for c in v.drag.values()] + [v.limits.get("lift_gci", 0.0)])))
-        else:
-            drag_sig = SIG["drag_est"]
+        drag_sig = drag_sigma(v)
         # mean-preserving lognormal: E[scale] = 1
         self.scale = dict(drag=np.r_[1.0, np.exp(rng.normal(-drag_sig ** 2 / 2, drag_sig, B - 1))],
                           thrust=np.r_[1.0, np.clip(rng.normal(1, SIG["thrust"], B - 1), 0.7, 1.2)],

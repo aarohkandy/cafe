@@ -17,7 +17,7 @@ model is validated at that level, |E| > U_val means E is mostly model-form error
 pass/fail, except where a caller chooses to gate on it.
 """
 import math
-from typing import NamedTuple, Sequence
+from typing import Any, Iterable, NamedTuple, Sequence
 
 R_MIN = 1.3          # Celik 2008 step 2: "desirable that r be greater than 1.3" (experience, not derivation)
 FS_THREE_GRID = 1.25  # Celik 2008 eq 7
@@ -155,6 +155,20 @@ def gci_two_grid(fine: float, coarse: float, ratio: float = 2.0, p: float = 2.0,
     if fine == 0 or not (math.isfinite(ratio) and ratio > 1 and math.isfinite(p) and p > 0):
         raise ValueError(f"two-grid GCI needs a non-zero fine value, a finite ratio > 1 and a finite order > 0 (fine {fine}, ratio {ratio}, p {p})")
     return float(fs * abs((coarse - fine) / fine) / (ratio ** p - 1))
+
+
+def gci_value(g: Any) -> float:
+    """A GCI as the readers of a cached or fresh CFD result take it: the number where it is a finite one, `inf` where it is not (NaN, which `cfd.gci` writes
+    where there is no index; None, text, a list). No index is an index that cannot be trusted, never a small one: `cfd.characterize_external` already takes inf
+    for such a direction when it decides on a finer grid, and every reader (`vehicle`, `hangar`, `mission`) goes through this so that they agree (round 20,
+    M3). A bool is no number."""
+    return float(g) if isinstance(g, (int, float)) and not isinstance(g, bool) and math.isfinite(g) else math.inf
+
+
+def worst_gci(gcis: Iterable[Any], default: float = 0.0) -> float:
+    """The largest of several GCIs by `gci_value`, `default` for none; `inf` if any of them has no index, wherever it stands in the sequence (Python's `max`
+    with a NaN answers by the order: `max([nan, 0.1])` is nan and `max([0.1, nan])` is 0.1, so a result with no index could read as a converged grid)."""
+    return max((gci_value(g) for g in gcis), default=default)
 
 
 class Vv20(NamedTuple):
