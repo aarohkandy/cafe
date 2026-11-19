@@ -52,23 +52,26 @@ def _kappa(conf: float) -> float:
     return float(norm.ppf(0.5 + conf / 2))
 
 
-def _count(x: Any, name: str) -> None:
+def _count(x: Any, name: str) -> int:
     """A count is an integer: a Python `int` or a numpy integer, and not a bool (`isinstance(True, int)`). A float is refused even when it is whole (3.0), so a
-    mean of flags or `p * n` cannot pass for a sum (round 18, M-14: `wilson(1.5, 3)` gave an interval as if 1.5 members had failed)."""
+    mean of flags or `p * n` cannot pass for a sum (round 18, M-14: `wilson(1.5, 3)` gave an interval as if 1.5 members had failed). It returns the count as a
+    Python `int`, which every caller uses from then on: `4 * n * n` in a numpy `uint8`, `int8` or `int16` wraps (round 19, M-8: `wilson(np.uint8(30),
+    np.uint8(100))` was (0.0, 0.778) against (0.219, 0.396)), a Python int does not."""
     if isinstance(x, bool) or not isinstance(x, (int, np.integer)):
         raise ValueError(f"{name} must be an integer count (an int, not a bool or a float), got {x!r} ({type(x).__name__})")
+    return int(x)
 
 
-def _check(k: int, n: int, conf: float, kn: tuple[str, str] = ("k", "n")) -> None:
+def _check(k: int, n: int, conf: float, kn: tuple[str, str] = ("k", "n")) -> tuple[int, int]:
     """The domain of the interval functions: k and n integer counts, 0 <= k <= n, n >= 1, 0 < conf < 1, else a ValueError (round 15, M-37: `wilson(5, 3)` gave a
     number, `wilson(0, 0)` a ZeroDivisionError; `interval` was the only function that checked; round 18, M-14: a float or boolean count). `kn` names the two
-    arguments in the message."""
-    _count(k, kn[0])
-    _count(n, kn[1])
+    arguments in the message. Returns (k, n) as Python ints (`_count`): the caller takes them from here."""
+    k, n = _count(k, kn[0]), _count(n, kn[1])
     if n < 1 or not 0 <= k <= n:
         raise ValueError(f"need 0 <= k <= n and n >= 1, got k={k}, n={n}")
     if not 0 < conf < 1:
         raise ValueError(f"need 0 < conf < 1, got conf={conf}")
+    return k, n
 
 
 def _level(level: float, conf: float) -> None:
@@ -79,7 +82,7 @@ def _level(level: float, conf: float) -> None:
 
 def wilson(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
     """Wilson score interval for k events in n trials."""
-    _check(k, n, conf)
+    k, n = _check(k, n, conf)
     z = _kappa(conf)
     p = k / n
     c = (p + z * z / (2 * n)) / (1 + z * z / n)
@@ -90,8 +93,8 @@ def wilson(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
 def newcombe_diff(k1: int, n1: int, k2: int, n2: int, conf: float = 0.95) -> tuple[float, float]:
     """Newcombe (1998, Stat. Med. 17:873, method 10) hybrid score interval for p1 - p2, from the Wilson intervals (l, u) of p1 and p2:
     L = d - sqrt((p1 - l1)^2 + (u2 - p2)^2), U = d + sqrt((u1 - p1)^2 + (p2 - l2)^2), d = p1 - p2."""
-    _check(k1, n1, conf, ("k1", "n1"))
-    _check(k2, n2, conf, ("k2", "n2"))
+    k1, n1 = _check(k1, n1, conf, ("k1", "n1"))
+    k2, n2 = _check(k2, n2, conf, ("k2", "n2"))
     p1, p2 = k1 / n1, k2 / n2
     l1, u1 = wilson(k1, n1, conf)
     l2, u2 = wilson(k2, n2, conf)
@@ -101,7 +104,7 @@ def newcombe_diff(k1: int, n1: int, k2: int, n2: int, conf: float = 0.95) -> tup
 
 def agresti_coull(k: int, n: int, conf: float = 0.95) -> tuple[float, float]:
     """Agresti-Coull interval: Wald interval around p~ = (k + z^2/2)/(n + z^2)."""
-    _check(k, n, conf)
+    k, n = _check(k, n, conf)
     z = _kappa(conf)
     nt = n + z * z
     pt = (k + z * z / 2) / nt
@@ -116,7 +119,7 @@ def interval(k: int, n: int, conf: float = 0.95) -> tuple[float, float, str]:
 
 def rule_of_three(n: int) -> float:
     """Upper bound on P(fail) after n runs with zero failures: 3/n."""
-    _count(n, "n")
+    n = _count(n, "n")
     if n < 1:
         raise ValueError(f"need n >= 1, got n={n}")
     return 3.0 / n

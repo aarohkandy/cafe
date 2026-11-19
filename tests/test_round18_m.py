@@ -382,7 +382,7 @@ def test_e_sprt_decide_takes_python_and_numpy_integers_and_gives_the_same_answer
 
 def test_e_sprt_decide_uses_the_helper_of_the_interval_functions(monkeypatch):
     seen = []
-    monkeypatch.setattr(intervals, "_count", lambda x, name: seen.append((x, name)))
+    monkeypatch.setattr(intervals, "_count", lambda x, name: seen.append((x, name)) or x)      # round 19, M-8: `_count` returns the count
     assert Q.sprt_decide(2, 5, 0.1, 0.4) == "continue"
     assert seen == [(2, "k"), (5, "n")]
     assert Q.intervals is intervals

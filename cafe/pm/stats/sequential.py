@@ -24,9 +24,11 @@ def sprt_indifference(cut: float, delta: float) -> tuple[float, float]:
 
 def sprt_decide(k: int, n: int, p0: float, p1: float, alpha: float = 0.05, beta: float = 0.05) -> str:
     """"accept_go" | "accept_nogo" | "continue" for k failures in n runs. `k` and `n` are counts: an `int` or a numpy integer, not a bool or a float
-    (`intervals._count`, the rule of the interval functions: round 18 merge, job 2 (e))."""
-    intervals._count(k, "k")
-    intervals._count(n, "n")
+    (`intervals._count`, the rule of the interval functions: round 18 merge, job 2 (e)), taken as Python ints so a narrow numpy integer cannot wrap; `k` is
+    a count of the `n` runs, so 0 <= k <= n (round 19, M-8: `sprt_decide(5, 3, ...)` was answered)."""
+    k, n = intervals._count(k, "k"), intervals._count(n, "n")
+    if not 0 <= k <= n:
+        raise ValueError(f"need 0 <= k <= n, got k={k}, n={n}")
     if not 0 < p0 < p1 < 1:
         raise ValueError("need 0 < p0 < p1 < 1")
     llr = k * math.log(p1 / p0) + (n - k) * math.log((1 - p1) / (1 - p0))
