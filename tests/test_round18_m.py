@@ -220,7 +220,7 @@ def test_b_a_missing_store_with_a_leftover_names_it_its_size_and_how_to_put_it_b
     with pytest.raises(config.ConfigError) as e:
         h.open_store(out)
     msg = str(e.value)
-    assert str(left) in msg and " GB)" in msg and f"mv {left} {out}" in msg and "without a download" in msg and "cannot be read" in msg
+    assert str(left) in msg and " GB, newest, modified " in msg and f"mv {left} {out}" in msg and "without a download" in msg and "cannot be read" in msg
     os.replace(left, out)                                                              # the remedy it names
     assert h.open_store(out).attrs["generation"] == "old"
     lab = tmp_path / "lab_hycom.zarr"                                                  # the lab's store: 'restore from the lab's source' stays too

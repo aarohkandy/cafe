@@ -64,7 +64,7 @@ ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_v
 # member and after it in the other (54 surfacings completed instead of 55). One surfacing costs `comm_J` (3.5 W x (120 s + 250 s) + 414 J = 1709 J) plus the
 # surface pump (150.83 cc x 101325 Pa / 0.4 = 38.2 J) = 1747.2 J, which is 1.62e-4 of the usable pack (1.2e7 J x 0.9): the 1.6e-4 measured on the demo. The
 # cycle has a second event of about the same size (round 20, M-11, reviewer B's arithmetic; `glider.py` charges it at the apogee): the pump moves the same 138
-# cc (the demo's trim) against the pressure at the dive depth, 138e-6 m3 x (101325 + 505e4) Pa / 0.4 = 1776.6 J, 1.645e-4 of 1.08e7 J for a 500 m dive,
+# cc (the demo's trim) against the pressure at the dive depth, 138e-6 m3 x (101325 + 505e4) Pa / 0.4 = 1777.2 J, 1.646e-4 of 1.08e7 J for a 500 m dive,
 # against 1.6148e-4 for the surfacing. A shift of the cycle that carries the window's end across an apogee instead of a surfacing gives a step of about
 # 1.65e-4, and across both about 3.3e-4. That case is derived, not seen: every step of the demo's record (8 members at 5 quantiles) is of the surfacing's
 # size. The per-member ocean displacement (the SDE, no column at all) also moves the cycle and so which side of a step a member lands on: a second reason the
