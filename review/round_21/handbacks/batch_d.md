@@ -170,5 +170,5 @@ Cost of `load_json`: a stdlib micro-benchmark on the laptop (no project code, Py
 ## Leftovers
 
 Orca: `~/cafe-worker/cafe/pm_r21d`, `pm_r21d2`, `pm_r21d_base`, `pm_r21d_mut` (synced trees), `~/cafe-worker/cafe/pmdata/r21d_lint.sh`, `r21d_mut.py`, logs `r21d_*` in `~/cafe-worker/logs`. `pmdata/r21d_cfd`
-removed. Laptop: `/Users/aaroh/Downloads/everything/cafe-r21d-base` (a detached worktree at 7599881, to be removed with `git worktree remove`), scratch in
+removed. Laptop: the detached worktree `../cafe-r21d-base` was removed; scratch in
 `/private/tmp/claude-501/-Users-aaroh-Downloads-everything-cafe-main/e5175414-543a-42ed-83ef-98e3ca2ddc48/scratchpad/r21d`.
