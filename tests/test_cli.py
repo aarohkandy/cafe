@@ -522,7 +522,8 @@ def test_whatif_prints_the_verdict_with_its_badge_distance_or_stage_1_n(wi, caps
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "whatif tepex_c_demo: +6 h; -1 deg lon, +0 deg lat; drop glider_2n"
     assert out[1] == "usv: MARGINAL (P(fail) 0.180) -> GO (P(fail) 0.040) (0.010 to 0.090)  [EMULATED, training-set distance 0.80 of limit 1.90]"
-    assert out[2] == "uas: NO-GO (P(fail) 0.700) -> NO-GO (P(fail) 0.500) (0.300 to 0.700)  [Stage 1, n = 32 (out of range)]"
+    assert out[2] == ("uas: NO-GO (P(fail) 0.700) -> NO-GO (P(fail) 0.500) (0.300 to 0.700)  [Stage 1, n = 32 (out of range)]; "
+                      "not distinguishable from the baseline (its interval contains the baseline's P(fail))")  # round 20, M-6: base 0.700 is the interval's end
     assert out[3] == "glider_eq: GO (P(fail) 0.000) -> GO (P(fail) 0.000)  [unchanged]"
     assert out[4] == ("dropped glider_2n; links removed: glider_2n-ship-acoustic. Other vehicles' physics are unaffected (Stage-1 vehicles do not interact); "
                       "a rerun of a mission without it draws other members, so its counts can differ from the report's by sampling noise.")
