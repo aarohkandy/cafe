@@ -80,5 +80,5 @@ No verdict, count or interval moves (the batch touches no code path of a demo ru
 - Not run: the full suite, the gate, a demo (brief).
 
 ## Leftovers
-- Orca: directories `~/cafe-worker/cafe/pm_r21f`, `pm_r21f2`, `pm_r21f_base`; files `~/cafe-worker/cafe/pmdata/r21f_probe1.py` to `r21f_probe5.py` and `r21f_lint.sh`; logs `~/cafe-worker/logs/r21f_{a1,b1,c1,c2,c3,d1}.log` (all with an `rc=` line; no job running). Probes 1 to 5 are the exploration scripts (probe1: whole-grid; probe4: `log` against `log1p`).
+- Orca: directories `~/cafe-worker/cafe/pm_r21f`, `pm_r21f2`, `pm_r21f_base`; logs `~/cafe-worker/logs/r21f_{a1,b1,c1,c2,c3,d1}.log` (all with an `rc=` line; no job running). The exploration probes and the lint script were removed from `pmdata` (kept in the laptop scratch).
 - Laptop: worktrees `/Users/aaroh/Downloads/everything/cafe-r21f` (the branch) and `/Users/aaroh/Downloads/everything/cafe-r21f-base` (detached at 7599881, removed at the end); scratch `/private/tmp/claude-501/-Users-aaroh-Downloads-everything-cafe-main/e5175414-543a-42ed-83ef-98e3ca2ddc48/scratchpad/r21f`.
