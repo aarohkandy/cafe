@@ -43,11 +43,18 @@ PROBLEMS.md P-R18M2: still open; the advice now says what remains; closing it ne
 
 ## Pins moved
 
-None. No older test changed (my tests are in the new file).
+One: `tests/test_round18_e.py::test_r18_m13_the_old_store_goes_aside_whole_the_new_one_in_and_only_then_the_old_one_is_deleted` pinned the event sequence of `write_store` (out -> aside, tmp -> out, rmtree(aside)) and the aside's name ending `.tmp`. The sequence is now out -> aside, tmp -> out, aside -> its `.dead.tmp` name, rmtree(dead); the aside name must end `.old.tmp` and the dead name be its `.dead.tmp` twin. Why: M-11 inserts the rename, by design (it failed on the old pin in `r19e_grpA`, passes in `r19e_grpA2`). No other older test changed.
 
 ## Verification (orca, `~/cafe-worker/logs`)
 
-RESULTS_PLACEHOLDER
+Run as `PM_TAKE=1 PM_HOST=cafe-orca PM_RUNTIME=proot PMX=pm_r19e... PM_CPUS=2 TM=<name> bin/pmx.sh ...`, 2 CPUs, at most two jobs at once.
+
+- `tests/test_round19_e.py` alone: `r19e_2` rc 0 (before the h7/h9 split and the ruff edits); with coverage `r19e_3` rc 0: every line I added in `hycom.py` and `remote.py` is covered (the uncovered lines the report lists, e.g. hycom 236-237, 293, 304, 311-314, remote 243-244, 256, are older code covered by other files). Final tree: in `r19e_grpA2`.
+- `r19e_grpA2` rc 0 (final tree c44ea61): `test_remote.py`, `test_hycom.py`, `test_round17_f.py`, `test_round18_e.py`, `test_round18_m.py`, `test_emulator.py`, `test_ingest_fetch.py`, `test_round19_e.py` together. (`r19e_grpA` before it: rc 1, the one failure being the moved pin above.) Not run per file: one rc for the group.
+- `r19e_grpB` rc 0: `tests/test_pipeline.py` (run on the tree one commit before the ruff-only/pin commit, code identical).
+- `r19e_ruff2` rc 0 (`ruff check cafe/pm tests`), `r19e_mypy` rc 0 (`mypy cafe/pm`, 55 files). `audit.BANNED` regex over the four files: no match (run locally as a regex only).
+- Before/after of the new tests: see each finding (`r19e_base1`, `r19e_base2`, `r19e_mut1b`, `r19e_mut2b`).
+- Not run: `test_audit.py`, `test_ocean.py`, `test_surface*` (they call `store_lock` through `surface`/`audit`; the signature is unchanged).
 
 ## Not verified
 
