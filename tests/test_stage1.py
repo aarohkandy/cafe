@@ -723,7 +723,8 @@ def test_an_ambiguous_acoustic_link_is_refined_with_bellhop_on_the_gofs_profile_
     assert abs(thorp) <= 6.0                                                                              # engineered to sit in the ambiguity band
     assert np.allclose(r["margin_db"], thorp - 7.0, atol=0.3)                                             # slant range + Bellhop excess, every sample
     assert r["method"].startswith("Thorp/Stojanovic budget on the slant range, Bellhop on ") and "of" in r["method"] and "Thorp only" not in r["method"]
-    assert len(calls) == 2 and {(c["tx"], c["rx"], c["wd"]) for c in calls} == {(300.0, 5.0, 4000.0)}     # glider depth, ship transducer, the env's water depth
+    # glider depth, ship transducer, the env's water depth; both directions since round 20, M-1: (tx, rx) and (rx, tx), each the profile and isovelocity runs
+    assert len(calls) == 4 and {(c["tx"], c["rx"], c["wd"]) for c in calls} == {(300.0, 5.0, 4000.0), (5.0, 300.0, 4000.0)}
     assert calls[0]["z"][0] == 0.0 and calls[0]["z"][-1] == -4000.0 and calls[0]["c"][-1] > calls[0]["c"][0]  # the profile reached Bellhop, to the sea floor
 
 
