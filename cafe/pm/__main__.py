@@ -264,6 +264,10 @@ def _ingest_ocean(a: argparse.Namespace) -> int:
         print("note: the store as it was before an earlier ingest that was killed while it replaced it is still beside this one: "
               f"{', '.join(str(q) for q in old)}; nothing deletes the leftovers of a lab store, so remove it by hand once the new store opens "
               "(`ls -a` of its directory lists them)")
+    if gone := hycom.dead(out):                  # round 20, M-8: a kill during the delete of the old store leaves this, and no other message finds it
+        print("note: a half-deleted `.dead.tmp` is beside the store: " + ", ".join(f"{q} ({hycom._size_bytes(q) / 1e9:.1f} GB)" for q in gone)
+              + "; an earlier ingest was killed while deleting the store it replaced, nothing reads it, and it is safe to delete by hand "
+              "(the disk is not freed until it is)")
     return 0
 
 
@@ -304,14 +308,23 @@ def _model_note(finished: bool, fitted: bool, refit_file: bool) -> str | None:
     return f"note: this what-if is made without {' and '.join(made)} that the report's P(fail) uses ({why}), so a baseline can differ from it"
 
 
+PLAN_SIZE_MAX = 10**6      # round 20, M-5: batch and n_max of a plan.json at most this (the largest of any budget is 512: budget.N_MAX)
+
+
 def _plan_sizes(plan: dict[str, Any]) -> None:
     """Round 19, M-10. The three sizes of the ensemble a what-if copies out of a run's plan.json (`batch`, `n_min`, `n_max`) are whole numbers with
     1 <= batch and 1 <= n_min <= n_max: a zero batch was a ZeroDivisionError 24 s into the run, a string or a fraction a TypeError, and n_min above n_max an
-    answer on member counts the run never had. A ValueError raised inside `damaged_run_files` is the same "damaged or incomplete" message a missing key is."""
+    answer on member counts the run never had. A ValueError raised inside `damaged_run_files` is the same "damaged or incomplete" message a missing key is.
+    Round 20, M-5: `batch` and `n_max` are also at most PLAN_SIZE_MAX (10**30 was an OverflowError, or a what-if asking for as many members as it takes), and
+    `budget` is the name of a budget (a list was a TypeError, null a what-if with no plan, a number a blame on a `--budget` the user never gave)."""
+    name = plan["budget"]
     batch, n_min, n_max = (plan[k] for k in ("batch", "n_min", "n_max"))
-    if not all(type(x) is int for x in (batch, n_min, n_max)) or not 1 <= batch or not 1 <= n_min <= n_max:      # `type is int`: no bool, no float, no string
+    if type(name) is not str or name not in budget.BUDGET_S:                      # `type is str` first: a list is not hashable
+        raise ValueError(f"plan.json has budget {name!r}: one of {list(budget.BUDGET_S)} is needed")
+    if (not all(type(x) is int for x in (batch, n_min, n_max))                    # `type is int`: no bool, no float, no string
+            or not 1 <= batch <= PLAN_SIZE_MAX or not 1 <= n_min <= n_max <= PLAN_SIZE_MAX):
         raise ValueError(f"plan.json has batch {batch!r}, n_min {n_min!r}, n_max {n_max!r}: whole numbers with batch at least 1 and "
-                         "1 <= n_min <= n_max are needed")
+                         f"1 <= n_min <= n_max are needed, batch and n_max at most {PLAN_SIZE_MAX}")
 
 
 def _whatif(a: argparse.Namespace) -> int:
@@ -326,8 +339,8 @@ def _whatif(a: argparse.Namespace) -> int:
     if (run / "plan.json").is_file():                                      # round 18, M-5: the members of the Stage-1 fallback are the run's, not this budget's
         with _run_files(run):
             run_plan = _json_object(run / "plan.json")
-            bud = run_plan["budget"]
             _plan_sizes(run_plan)
+            bud = run_plan["budget"]
             if a.budget is not None and a.budget != bud:
                 raise ConfigError(f"--budget {a.budget}: the run {run} was made with --budget {bud}, and whatif draws its members from that plan "
                                   f"(batches of {run_plan['batch']}); leave --budget out, or use `--run` of a run made with --budget {a.budget}")
@@ -378,7 +391,8 @@ def _whatif(a: argparse.Namespace) -> int:
         else:
             how = "unchanged"
         iv = f" ({r['lo']:.3f} to {r['hi']:.3f})" if "lo" in r else ""
-        print(f"{vid}: {r['base']['verdict']} (P(fail) {r['base']['p_fail']:.3f}) -> {r['verdict']} (P(fail) {r['p_fail']:.3f}){iv}  [{how}]")
+        noise = f"; {report.SAME_AS_BASELINE}" if "lo" in r and r["lo"] <= r["base"]["p_fail"] <= r["hi"] else ""    # round 20, M-6: as the report's fix table
+        print(f"{vid}: {r['base']['verdict']} (P(fail) {r['base']['p_fail']:.3f}) -> {r['verdict']} (P(fail) {r['p_fail']:.3f}){iv}  [{how}]{noise}")
         if r.get("wind_model"):
             b3 = r.get("base_3d")
             own = "" if not b3 else (f" The report's own baseline, flown in the 3-D wind, is {b3['verdict']} (P(fail) {b3['p_fail']:.3f}); "
