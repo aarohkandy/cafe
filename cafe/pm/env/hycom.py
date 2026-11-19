@@ -226,15 +226,40 @@ def _aside_name(out: pathlib.Path) -> pathlib.Path:
     return out.with_name(f"{_aside_stem(out)}{uuid.uuid4().hex[:12]}.old.tmp")
 
 
-def asides(out_zarr: Any) -> list[pathlib.Path]:
-    """The directories beside the store `out_zarr` that an earlier `write_store` of that name moved the old store to and did not delete (it was killed after
-    the first rename): exactly `<_aside_stem>[12 hex].old.tmp`, never another store's temporary or a build in progress (those are `.<12 hex>.tmp`)."""
+def _leftovers(out_zarr: Any, suffix: str) -> list[pathlib.Path]:
+    """The directories beside `out_zarr` named exactly `<_aside_stem>[12 hex]<suffix>`: a directory, never a link, never another store's or a build
+    in progress."""
     out = pathlib.Path(out_zarr)
-    pat = re.compile(re.escape(_aside_stem(out)) + r"[0-9a-f]{12}\.old\.tmp")
+    pat = re.compile(re.escape(_aside_stem(out)) + r"[0-9a-f]{12}" + re.escape(suffix))
     try:
         return sorted(q for q in out.parent.iterdir() if pat.fullmatch(q.name) and q.is_dir() and not q.is_symlink())
     except OSError:
         return []
+
+
+def asides(out_zarr: Any) -> list[pathlib.Path]:
+    """The directories beside the store `out_zarr` that an earlier `write_store` of that name moved the old store to and did not delete (it was killed after
+    the first rename): exactly `<_aside_stem>[12 hex].old.tmp`, never another store's temporary or a build in progress (those are `.<12 hex>.tmp`).
+    Whole, unless the kill came while it was being deleted, and then it has another name (`dead`): this one is the one `unreadable` offers for `mv`."""
+    return _leftovers(out_zarr, ".old.tmp")
+
+
+def dead(out_zarr: Any) -> list[pathlib.Path]:
+    """The directories beside `out_zarr` that `write_store` renamed an aside to (`<_aside_stem>[12 hex].dead.tmp`) before it deleted them, and that a
+    kill left half deleted: nothing may be put back from them and nothing reads them (round 19, M-11)."""
+    return _leftovers(out_zarr, ".dead.tmp")
+
+
+def _delete_aside(q: pathlib.Path) -> None:
+    """Delete the aside `q` (a name `asides` finds) the way that leaves no half-deleted tree under a name that `unreadable` offers: rename it to its `.dead.tmp`
+    name (one rename: it is whole under the one name or the other), then delete it. If the rename fails it stays whole under its own name, and the next
+    locked write of the store sweeps it."""
+    gone = q.with_name(q.name.removesuffix(".old.tmp") + ".dead.tmp")
+    try:
+        os.replace(q, gone)
+    except OSError:
+        return
+    shutil.rmtree(gone, ignore_errors=True)
 
 
 def _size_bytes(d: pathlib.Path) -> int:
@@ -288,14 +313,34 @@ def write_store(steps: Any, out_zarr: Any, kind: Any, attrs: dict[str, Any]) -> 
                     os.replace(old, out)                        # the new one did not go in: the old one stays the store
                 raise
             if old is not None:
-                shutil.rmtree(old, ignore_errors=True)          # (a kill here leaves it: `asides` finds it)
+                _delete_aside(old)                              # (a kill before its rename to `.dead.tmp` leaves it whole: `asides` finds it; a kill after,
+                                                                # half deleted under the `.dead.tmp` name, which nothing offers for `mv`: round 19, M-11)
             if held:                                            # the lock proves no other writer of this name is between its renames: what is left is a kill's
                 for q in asides(out):
-                    shutil.rmtree(q, ignore_errors=True)
+                    _delete_aside(q)
+            for q in dead(out):                                 # nobody holds or reads a `.dead.tmp` (not even another writer: it has been moved out of use),
+                shutil.rmtree(q, ignore_errors=True)            # so it goes whether the lock is held or not (a lab store is not locked)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)                  # (a kill -9 leaves it: its name ends in .tmp, which sync_filters and is_junk ignore)
         raise
     return out
+
+
+def leftover_note(path: Any, lab: bool) -> str:
+    """"" or what to add to a message about the store `path` that is not there: the old store that a killed `write_store` left whole beside the name, its size
+    and the `mv` that puts it back (the name `asides` finds; a half-deleted one has another name and is never offered), and what stays (round 19, M-11). Said
+    by `unreadable` (the open of the missing name) and by the ingest's check for a missing store (`pipeline._need`), which is what `run` and `fetch` print."""
+    p = pathlib.Path(path)
+    if p.exists() or not (left := asides(p)):                                # (a store that is there: `mv` would put the leftover INSIDE it)
+        return ""
+    q = shlex.quote(str(p))
+    names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB)" for x in left)
+    sweep = ("nothing deletes the leftovers of a lab store, which is not locked: remove them by hand once the store is back (`ls -a` of its directory "
+             "lists them)" if lab else "an ingest that writes the store deletes the ones left")
+    return (f"; BUT the store as it was before an earlier ingest that was killed while it replaced it is beside it: {names}: "
+            f"`mv {shlex.quote(str(left[0]))} {q}` puts it back without a download ({sweep}). A `.<12 hex>.tmp` directory beside the store may be "
+            "that ingest's new store, whole if the kill came between the two renames, but nothing tells it from the build of an ingest that is running: "
+            "after the `mv`, with no ingest running, remove it by hand")
 
 
 def unreadable(path: Any, e: Exception, lab: bool | None = None) -> Exception:
@@ -306,11 +351,7 @@ def unreadable(path: Any, e: Exception, lab: bool | None = None) -> Exception:
     if lab is None:
         lab = not p.name.startswith("gofs")
     q = shlex.quote(str(p))                                                  # pasted into a shell: a path with a space is one word (round 14 L0)
-    note = ""
-    if not p.exists() and (left := asides(p)):                               # a kill in `write_store`'s replace left the old store beside the name
-        names = ", ".join(f"{x} ({_size_bytes(x) / 1e9:.1f} GB)" for x in left)
-        note = (f"; BUT the store as it was before an earlier ingest that was killed while it replaced it is beside it: {names}: "
-                f"`mv {shlex.quote(str(left[0]))} {q}` puts it back without a download (an ingest that writes the store deletes the ones left)")
+    note = leftover_note(p, lab)
     fix = (f"restore {q} from the lab's source (`python -m cafe.pm ingest-ocean --mission ... --path DIR --temperature-kind K` writes it); "
            "the pipeline cannot download it" if lab else
            f"delete {q} and run `{FETCH_CMD} ...` again: only that part is downloaded again")

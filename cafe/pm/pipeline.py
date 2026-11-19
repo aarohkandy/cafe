@@ -294,11 +294,14 @@ def _dump(obj: Any, path: pathlib.Path, **kw: Any) -> pathlib.Path:
 GOFS_DEADLINE_S = 1500.0         # hycom.fetch_gofs kills a request that has not answered in this long (it measured 193-335 s per step)
 
 
-def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], bool], fetch: Callable[[], Any], hint: str | None = None) -> bool:
+def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], bool], fetch: Callable[[], Any], hint: str | None = None,
+          leftover: Callable[[], str] | None = None) -> bool:
     """The one place a download starts. `present()` says whether the input is cached and good (hash-checked); if not, `fetch()` downloads
     it (resumable, so a rerun continues), unless CAFE_OFFLINE is set, which fails the check `<name>_present` naming the command to run
     with network access (`hint` replaces that command for inputs `fetch` cannot make). A failed download is the same failed check, with
-    the error. Returns whether the input is there."""
+    the error. `leftover` (the ocean store's) adds to the note of a check that fails what a killed replace left beside a missing store (`hycom.leftover_note`:
+    the old store, whole, and the `mv` that puts it back): `run` and `fetch` meet a missing store here, before anything opens it (round 19, M-11). Returns
+    whether the input is there."""
     note = what
     if not present():
         cmd = hint or fetch_cmd(ctx.mission_path)
@@ -315,6 +318,8 @@ def _need(ctx: Context, L: Ledger, name: str, what: str, present: Callable[[], b
             except (OSError, ValueError, LookupError, FetchError) as e:
                 note = f"fetching {what} failed ({type(e).__name__}: {e}); parts already fetched are kept, rerun `{cmd}` to resume"
     ok = present()
+    if not ok and leftover is not None:
+        note += leftover()
     L.check(f"{name}_present", ok, note=what if ok else note)
     return ok
 
@@ -526,7 +531,7 @@ def s_ingest(ctx: Context, L: Ledger) -> None:
     lock = contextlib.nullcontext() if lab else _shared_store(ctx, store.parent, store.name + ".lock", f"the ocean store {store.name}")
     with lock:
         got.append(_need(ctx, L, "ocean_store", f"the ocean store {store.name} for the box and window" + (f" ({short})" if short else ""),
-                         lambda: _ocean_cached(store, sbox, steps, window), fetch_ocean,
+                         lambda: _ocean_cached(store, sbox, steps, window), fetch_ocean, leftover=lambda: hycom.leftover_note(store, lab),
                          hint=None if spec["source"] == "gofs31" else f"python -m cafe.pm ingest-ocean --mission {shlex.quote(str(ctx.mission_path))} "
                                                                           "--path <lab HYCOM dir> "
                                                                           "--temperature-kind <in_situ|potential>"))
