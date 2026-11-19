@@ -58,15 +58,20 @@ ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_v
 # current columns by 0.016 % of the pack, a step at the tail quantiles (3 % of the members' spread), where a Seaglider on station moves by 5e-11 and the
 # CI fixture's gliders by less than 1e-6; the wind columns move it by 1e-9, which the probe read as float noise; `profile_margin` the share of the flux
 # pattern a sortie delivered. The mechanism of the Slocum's step (round 19, M-6, reviewer B's toy run with a horizontal density gradient and the current
-# scaled 0 to 3 times): the step is one surfacing less in the window, a COUNT of surfacings at the window's end and not a response of the battery to the
-# current. The current moves the glider through a water whose density differs (the CI fixture has no horizontal gradient, which is why it is inert
-# there), that shifts the dive cycle (about 9,400 s) by a part in 1e4, and over 55 cycles the last ascent finishes before the window ends in one member
-# and after it in the other (54 surfacings completed instead of 55). One surfacing costs `comm_J` (3.5 W x (120 s + 250 s) + 414 J = 1709 J) plus the
-# surface pump (150.83 cc x 101325 Pa / 0.4 = 38.2 J) = 1747.2 J, which is 1.62e-4 of the usable pack (1.2e7 J x 0.9): the 1.6e-4 measured on the
-# demo. Any column that moves the glider's position can do the same with a smaller chance (the wind, through the 1 % windage while surfaced, about 30
-# times smaller): the probe's 8 members at 5 quantiles cannot exclude it, so "float noise" for the wind columns is also a statement about the probe's
-# size. The two current columns stay in the row (DECISIONS, round 19 OD-6) and raise the noise floor of a Slocum's battery row (0.155 for two columns,
-# 0.186 for four, at 64 members).
+# scaled 0 to 3 times): the step is one discrete event less in the window, a COUNT of surfacings (or apogees, below) at the window's end and not a response of
+# the battery to the current. The current moves the glider through a water whose density differs (the CI fixture has no horizontal gradient, which is why it
+# is inert there), that shifts the dive cycle (about 9,400 s) by a part in 1e4, and over 55 cycles the last ascent finishes before the window ends in one
+# member and after it in the other (54 surfacings completed instead of 55). One surfacing costs `comm_J` (3.5 W x (120 s + 250 s) + 414 J = 1709 J) plus the
+# surface pump (150.83 cc x 101325 Pa / 0.4 = 38.2 J) = 1747.2 J, which is 1.62e-4 of the usable pack (1.2e7 J x 0.9): the 1.6e-4 measured on the demo. The
+# cycle has a second event of about the same size (round 20, M-11, reviewer B's arithmetic; `glider.py` charges it at the apogee): the pump moves the same 138
+# cc (the demo's trim) against the pressure at the dive depth, 138e-6 m3 x (101325 + 505e4) Pa / 0.4 = 1776.6 J, 1.645e-4 of 1.08e7 J for a 500 m dive,
+# against 1.6148e-4 for the surfacing. A shift of the cycle that carries the window's end across an apogee instead of a surfacing gives a step of about
+# 1.65e-4, and across both about 3.3e-4. That case is derived, not seen: every step of the demo's record (8 members at 5 quantiles) is of the surfacing's
+# size. The per-member ocean displacement (the SDE, no column at all) also moves the cycle and so which side of a step a member lands on: a second reason the
+# two current columns' index in that row carries no information. Any column that moves the glider's position can do the same with a smaller chance (the wind,
+# through the 1 % windage while surfaced, about 30 times smaller): the probe's 8 members at 5 quantiles cannot exclude it, so "float noise" for the wind
+# columns is also a statement about the probe's size. The two current columns stay in the row (DECISIONS, round 19 OD-6) and raise the noise floor of a
+# Slocum's battery row (0.155 for two columns, 0.186 for four, at 64 members).
 # UNSEEN: columns that can act on a quantity but that no probe of ours moves, because the probe stays far from the edge they act at: Hs ends a UAS
 # sortie only through a lost link (`_uas_links`), which needs a margin near 0 dB; the stress scale and the battery size end a sortie early (the profile
 # share) only in a flight that is already at its limit (on the demo the stress scale moved the reserve margin by 5.6e-3 and the profile share by
@@ -633,16 +638,21 @@ def _bellhop_member(env: Any, modem: str, band: str, lon: float, lat: float, t: 
     c = np.ravel(np.asarray(env.sound_speed(np.full(z.size, lon), np.full(z.size, lat), z, np.full(z.size, t)).value, float))
     if not np.all(np.isfinite(c)):
         return None
-    out = comms.acoustic_link(d, modem, band, wind, ssp=(z, c), tx_depth=float(np.clip(tx, 1.0, wd - 1.0)), rx_depth=float(np.clip(rx, 1.0, wd - 1.0)),
-                              water_depth=wd, dz=dz)
-    return np.asarray(out["margin"].value, float)
+    tx, rx = (float(np.clip(x, 1.0, wd - 1.0)) for x in (tx, rx))
+    # Bellhop's incoherent TL is not reciprocal in practice (round 20, M-1: the two directions differ by up to 6.8 dB on the CI fixture and 17.8 dB on a
+    # profile with a shadow zone, wherever it refines): both are run and the LOWER margin kept, so the number does not depend on which end is named first
+    # (as `_link_hs` takes the worse of its two ends). Two equal depths are one run: the two directions are the same run.
+    runs = [(tx, rx)] if tx == rx else [(tx, rx), (rx, tx)]
+    margins = [comms.acoustic_link(d, modem, band, wind, ssp=(z, c), tx_depth=p, rx_depth=q, water_depth=wd, dz=dz)["margin"].value for p, q in runs]
+    return np.asarray(np.fmin.reduce([np.asarray(m, float) for m in margins]), float)
 
 
 def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: NDArray[Any], need: NDArray[np.bool_], A: tuple[NDArray[Any], ...],
               B: tuple[NDArray[Any], ...], t: NDArray[Any], env: Any) -> tuple[NDArray[Any], str]:
     """Acoustic margin (n, M) on the slant path hypot(d, dz) and the method label. The Thorp budget decides every sample outside the
     ambiguity band; the needed samples inside it (|margin| <= modems.yaml ambiguous_db) are re-done with Bellhop, member by member, on the
-    GOFS sound-speed profile at the midpoint of the member's middle ambiguous sample and that sample's transducer depths
+    GOFS sound-speed profile at the midpoint of the member's middle ambiguous sample and that sample's transducer depths, in both directions, the lower
+    margin kept (round 20, M-1: `_bellhop_member`)
     (ponytail: one profile and depth pair per member and link, not per sample; per-sample runs cost ~0.2 s each, upgrade if a link's profile
     changes along the track). Without Bellhop, or where the environment has no profile there, those samples keep the Thorp margin and the
     label says so."""
@@ -664,6 +674,7 @@ def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: ND
         if r is not None:
             margin[i, m], done = r, done + i.size
     base = f"Thorp/Stojanovic budget on the slant range, Bellhop on {done} of {int(amb.sum())} ambiguous samples"
+    base += " (the lower of the two directions)" if done else ""
     return margin, base + ("" if done == amb.sum() else "; the rest Thorp only (no sound-speed profile or depth there)")
 
 
