@@ -655,7 +655,7 @@ def _summary(d, mission, t_end):
 
 if __name__ == "__main__":
     # python -m cafe.mission /work/missions/<id>   (mission.json written by the app)
-    import json, pathlib, sys, traceback
+    import pathlib, sys, traceback
     from cafe import atomic, hangar
     d = pathlib.Path(sys.argv[1])
     m = load_json((d / "mission.json").read_text())

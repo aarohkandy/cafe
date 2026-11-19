@@ -44,8 +44,7 @@ RAW_ISFINITE = {
     "cafe/pm/env/environment.py": (2, "of `float(a[...])` of a store attribute inside a try that catches OverflowError"),
     "cafe/pm/jsonio.py": (1, "`finite_real`, the test itself (OverflowError caught)"),
     "cafe/pm/ledger.py": (1, "`clean`: of a value that `isinstance(x, float)` says is a float"),
-    "cafe/pm/receipts.py": (3, "values computed in this process by `cafe.receipts` (floats); a stored row is read by `load_json` and its arithmetic by a "
-                               "wrapper that catches ArithmeticError"),
+    "cafe/pm/receipts.py": (3, "values computed in this process by `cafe.receipts` (floats); a stored row is read by `load_json`, so its integers fit a float"),
     "cafe/pm/report.py": (1, "`_f`: of a value that `isinstance(x, float)` says is a float"),
     "cafe/pm/stage3/fluidx3d.py": (1, "`case_dict`: the solver's own float parameters"),
     "cafe/pm/stage3/freesurface.py": (3, "`float(...)` of a stored number (read by `load_json`, an integer fits) and a float the check made"),

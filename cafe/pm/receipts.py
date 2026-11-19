@@ -309,7 +309,7 @@ def slow_group(group: str, minutes: int, scope: str, runner: Callable[[], Any], 
                     stored = [dict(d, source=f"{d.get('source', '')} [stored {stamp}]") for d in rec["rows"]] if current else []
                     for d in stored:
                         _row(group, d, {})                              # the one reader of these rows (collect): a row it cannot read is no record
-                except (KeyError, TypeError, AttributeError, ValueError, ArithmeticError):      # (lo + hi) / 2 of two integers that fit a float can overflow
+                except (KeyError, TypeError, AttributeError, ValueError):
                     why = f"the stored result at {p} is not a receipt record (missing or wrong-typed fields); the command above writes it again"
                 else:
                     from .ledger import has_commit

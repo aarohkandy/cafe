@@ -6,7 +6,7 @@ Queue = status.json files with state "queued" under designs/, missions/, emulati
 its own process (so it always uses the current code). Characterizations run one at a time (CFD takes
 the CPUs); up to two missions at once; one emulation at a time (SITL ports are shared).
 """
-import json, os, pathlib, subprocess, sys, time
+import os, pathlib, subprocess, sys, time
 
 from cafe import atomic
 from cafe.pm.jsonio import load_json

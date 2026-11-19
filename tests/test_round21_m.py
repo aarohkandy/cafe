@@ -99,7 +99,7 @@ def test_a_sample_beyond_the_cap_has_the_same_sign_refined_or_not_and_the_cap_is
         out = comms.acoustic_link(200.0 - targets, ssp=(Z, C), ambiguous_db=np.inf)
         thorp, refined = np.asarray(out["thorp_margin"], float), np.asarray(out["margin"].value, float)
         np.testing.assert_allclose(thorp, targets, atol=1e-9)
-        for t, m in zip(thorp, refined):
+        for t, m in zip(thorp, refined, strict=True):
             if abs(t) > CAP:
                 assert (m > 0) == (t > 0), (t, e, m)
             elif (m > 0) != (t > 0):

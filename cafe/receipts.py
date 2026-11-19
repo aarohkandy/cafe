@@ -5,7 +5,7 @@ the same list, so what the user sees is exactly what was tested.
 """
 from __future__ import annotations
 
-import argparse, contextlib, datetime as dt, hashlib, json, os, pathlib, platform, shlex, sys, time
+import argparse, contextlib, datetime as dt, hashlib, os, pathlib, platform, shlex, sys, time
 from collections.abc import Iterator
 from typing import Any
 
