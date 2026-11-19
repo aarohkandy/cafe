@@ -47,9 +47,11 @@ THORP_ONLY_LABEL = "Thorp only, Bellhop unavailable"
 # probes was 56 dB (made-up profiles); a real shadow is thought to be 20 to 40 dB down through diffraction and scattering. A sample beyond it, in either
 # direction (a zero field in the isovelocity run would be a gain of 540 dB), is held at this value and counted in `acoustic_link`'s `capped`.
 BELLHOP_EXCESS_CAP_DB = 60.0
-# Bellhop's incoherent TL is not converged for a transducer 1 to 2 m deep (round 21, M-4: with the receiver at 5 m, (1, 5) and (1, 2) differ from the
-# converged (5, 5), (5, 1) and (10, 10) by 12 to 34 dB on two of three made-up profiles, which agree to 0.4 dB). One of the runs of the set `stage1` takes
-# the lowest margin of puts both ends at least this deep. A choice measured on made-up profiles at 18.5 kHz and 2 to 7 km, not a property of the sea.
+# Bellhop's incoherent TL is not converged when the transmitter is shallower than about 5 m (round 21, M-4). Measured here, real Bellhop through `bellhop_tl`
+# on reviewer B's three made-up Mackenzie profiles, 4,000 m water, 2 to 7 km every 100 m, at 11.5, 18.5 and 24.5 kHz: on the sharp-thermocline profile at
+# 18.5 kHz the mean |TL - TL(10 m, 10 m)| is 48.3 dB for (1, 1), 12.1 dB for (1, 5), 0.3 dB for (5, 1), 0.1 dB for (5, 5) and (8, 8) (transmitter, receiver
+# depths [m]); the Munk-like profile is converged from 3 m (0.0 dB) and the tropical one differs by 2 to 5 dB for every pair (a depth effect, not convergence).
+# The set `stage1` takes the lowest margin of includes a run with both ends at least this deep. A choice made on made-up profiles, not a property of the sea.
 BELLHOP_MIN_DEPTH_M = 5.0
 F = NDArray[np.float64]
 FA = float | F
@@ -481,12 +483,11 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
     (deep isovelocity water is spherical, k=2) would double-count the spreading; the excess keeps what Thorp cannot see
     (refraction, ducts, shadow zones) and nothing else. Absolute TLs are returned too.
 
-    Bellhop's TL is not converged for a transducer 1 to 2 m deep (round 21, M-4, measured on made-up profiles, not on the sea: the TL with an end at 1 to 2 m
-    differs by 12 to 34 dB from the TL with both ends at 5 m or deeper, which agree to 0.4 dB in either direction), and so it is not reciprocal either: with
-    the two depths swapped (tx_depth, rx_depth against rx_depth, tx_depth) the same horizontal range gives a different margin, by up to 26.5 dB in round
-    20's probes. The ray equations are reciprocal, so the difference is Bellhop's own numerical error at a shallow end. This function runs the one
-    direction the depths name; `stage1._bellhop_member` calls it for the depths as named, swapped and floored at BELLHOP_MIN_DEPTH_M and keeps the LOWEST
-    margin, so a link's margin does not depend on which end is named first nor on a 1 m clip.
+    Bellhop's TL is not converged when the transmitter is shallower than about 5 m (round 21, M-4, measured on made-up profiles, not on the sea: see
+    BELLHOP_MIN_DEPTH_M), and so it is not reciprocal either: with the two depths swapped (tx_depth, rx_depth against rx_depth, tx_depth) the same horizontal
+    range gives a different margin, by up to 26.5 dB in round 20's probes. The ray equations are reciprocal, so the difference is Bellhop's own numerical
+    error at a shallow transmitter. This function runs the one direction the depths name; `stage1._bellhop_member` calls it for the depths as named, swapped
+    and floored at BELLHOP_MIN_DEPTH_M and keeps the LOWEST margin, so a link's margin does not depend on which end is named first nor on a 1 m clip.
 
     The excess is held within +-BELLHOP_EXCESS_CAP_DB (an assumed number): a field of zero is a TL of 600 dB, not a link that is 540 dB short.
 

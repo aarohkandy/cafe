@@ -688,10 +688,12 @@ def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: ND
     acoustic link on the slant path hypot(d, dz). The Thorp budget gives every sample's margin; EVERY needed sample in range (`valid`: within
     `comms.valid_range_m`) is re-done with Bellhop, member by member, on the GOFS sound-speed profile at the midpoint of the member's middle such sample
     and the MEDIAN transducer depths of those samples, the lowest margin of the run set kept (round 21, M-3 and M-4: `_bellhop_member`). Round 20 refined
-    only the samples within +-modems.yaml ambiguous_db of 0; round 21 measured Thorp passes up to +21 dB that Bellhop turns into fails, because the excess
-    Bellhop computes (0 to 40 dB on made-up profiles) is larger than any fixed band, and a member costs the same few runs whether it carries 1 sample or
-    400 (one run on a 48-point range grid, interpolated). The band is kept only where Bellhop cannot refine (it is not available): those samples keep the
-    Thorp margin and the label says how many were ambiguous.
+    only the samples within +-modems.yaml ambiguous_db of 0; round 21's probes (made-up profiles) found Thorp passes up to +21 dB that Bellhop turns into
+    fails, because the excess Bellhop computes (0 to 40 dB there) is larger than any fixed band. The NUMBER of Bellhop runs per member does not depend on
+    how many samples it carries (one run on a 48-point range grid, interpolated), but its time and its grid spacing depend on the span of ranges: measured
+    on orca, one call is 0.2 s to 6 km and 2 s to 20 km and 6 s to 40 km, and the 48-point grid over 0.1 to 40 km differs from a grid at every 100 m by a
+    median 0.7 dB and at most 17 dB in the excess (tropical profile). The band is kept only where Bellhop cannot refine (it is not available): those
+    samples keep the Thorp margin and the label says how many were ambiguous.
     (ponytail: one profile and depth pair per member and link, not per sample; per-sample runs cost ~0.2 s each, upgrade if a link's profile or depth
     changes along the track: a link `when: always` to a submerged glider spans its dive cycle, and the median depth is one number for it.)"""
     res = comms.acoustic_link(d, modem, band, wind, dz=dz)
