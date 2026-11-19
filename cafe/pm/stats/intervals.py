@@ -21,6 +21,7 @@ implies NO-GO (tested), so stopping never contradicts the final verdict.
 from __future__ import annotations
 
 import math
+import numbers
 from collections.abc import Iterable
 from typing import Any
 
@@ -37,8 +38,9 @@ def set_thresholds(go: float, nogo: float) -> None:
     Module state, set by `config.load_mission` for the one mission a command runs; a mission loaded only to be read
     (`load_mission(..., set_verdict=False)`) does not set it."""
     global P_FAIL_GO, P_FAIL_NOGO, LO_SUCCESS_GO
-    if not 0 < nogo < go <= 1:
+    if not (_real(go, nogo) and 0 < nogo < go <= 1):
         raise ValueError(f"need 0 < nogo < go <= 1, got go={go}, nogo={nogo}")
+    go, nogo = float(go), float(nogo)                          # a numpy float32 would be module state that `round` hands back as a numpy scalar
     P_FAIL_GO, P_FAIL_NOGO, LO_SUCCESS_GO = round(1 - go, 12), round(1 - nogo, 12), min(0.75, go)
 
 
@@ -48,17 +50,36 @@ def _at_least(a: float, b: float) -> bool:
 
 
 def _kappa(conf: float) -> float:
-    """Two-sided normal quantile for confidence `conf` (1.95996 for 0.95, 1.64485 for 0.90)."""
-    return float(norm.ppf(0.5 + conf / 2))
+    """Two-sided normal quantile for confidence `conf` (1.95996 for 0.95, 1.64485 for 0.90). `conf` is taken as a Python float: a numpy float32 would do the
+    `0.5 + conf / 2` in single precision (round 20, M-9: `wilson(3, 10, np.float32(0.5))` lower end was 0.2127148644 against the float's 0.2127148628)."""
+    return float(norm.ppf(0.5 + float(conf) / 2))
+
+
+MAX_COUNT = 2 ** 53     # the largest count any function here takes: a float holds every integer up to it, and `z * z / n` is an OverflowError beyond 1e308
+
+
+def _real(*xs: Any) -> bool:
+    """Every x is a real number (a Python or numpy int or float) and not a bool: a string, None or a boolean is not a probability, and `0 < "0.5"` is
+    a TypeError."""
+    return all(isinstance(x, numbers.Real) and not isinstance(x, bool) for x in xs)
+
+
+def _unit(x: Any, closed: bool = False) -> bool:
+    """x is a probability: 0 < x < 1, or 0 <= x <= 1 with `closed`. A NaN is none (every comparison with it is False), and a huge int compares without
+    a conversion."""
+    return _real(x) and bool(0 <= x <= 1 if closed else 0 < x < 1)
 
 
 def _count(x: Any, name: str) -> int:
     """A count is an integer: a Python `int` or a numpy integer, and not a bool (`isinstance(True, int)`). A float is refused even when it is whole (3.0), so a
     mean of flags or `p * n` cannot pass for a sum (round 18, M-14: `wilson(1.5, 3)` gave an interval as if 1.5 members had failed). It returns the count as a
     Python `int`, which every caller uses from then on: `4 * n * n` in a numpy `uint8`, `int8` or `int16` wraps (round 19, M-8: `wilson(np.uint8(30),
-    np.uint8(100))` was (0.0, 0.778) against (0.219, 0.396)), a Python int does not."""
+    np.uint8(100))` was (0.0, 0.778) against (0.219, 0.396)), a Python int does not. A count above `MAX_COUNT` is a ValueError too (round 20, M-9:
+    `wilson(1, 10**400)` was an OverflowError, which is not the module's error)."""
     if isinstance(x, bool) or not isinstance(x, (int, np.integer)):
         raise ValueError(f"{name} must be an integer count (an int, not a bool or a float), got {x!r} ({type(x).__name__})")
+    if x > MAX_COUNT:
+        raise ValueError(f"{name} must be at most {MAX_COUNT} (2**53), got {x}")
     return int(x)
 
 
@@ -69,14 +90,14 @@ def _check(k: int, n: int, conf: float, kn: tuple[str, str] = ("k", "n")) -> tup
     k, n = _count(k, kn[0]), _count(n, kn[1])
     if n < 1 or not 0 <= k <= n:
         raise ValueError(f"need 0 <= k <= n and n >= 1, got k={k}, n={n}")
-    if not 0 < conf < 1:
+    if not _unit(conf):
         raise ValueError(f"need 0 < conf < 1, got conf={conf}")
     return k, n
 
 
 def _level(level: float, conf: float) -> None:
     """The domain of `n_certify` and `n_certify_one_sided`: 0 < level < 1 and 0 < conf < 1 (a level of 0 divided by zero, a conf of 1 took log(0))."""
-    if not (0 < level < 1 and 0 < conf < 1):
+    if not (_unit(level) and _unit(conf)):
         raise ValueError(f"need 0 < level < 1 and 0 < conf < 1, got level={level}, conf={conf}")
 
 
@@ -138,9 +159,17 @@ def n_certify_one_sided(level: float = 0.05, conf: float = 0.95) -> int:
     return math.ceil(math.log(1 - conf) / math.log(1 - level))
 
 
+def _closed(**ps: Any) -> None:
+    """Each named value is a probability, 0 <= p <= 1 (a NaN is not), else a ValueError that names it: the emulator's bands are in (0, 1) by their clip."""
+    for name, p in ps.items():
+        if not _unit(p, closed=True):
+            raise ValueError(f"need 0 <= {name} <= 1, got {name}={p!r}")
+
+
 def verdict_from_p(p_fail: float) -> str:
     """The verdict implied by a point P(fail) alone: <= 0.10 GO, > 0.40 NO-GO, else MARGINAL. It ignores the interval, which `verdict` does not: a
-    prediction that has an interval takes `verdict_band` (round 15, M-1)."""
+    prediction that has an interval takes `verdict_band` (round 15, M-1). A probability is 0 to 1: a NaN was NO-GO (round 20, M-9)."""
+    _closed(p_fail=p_fail)
     return "GO" if _at_least(P_FAIL_GO, p_fail) else "NO-GO" if not _at_least(P_FAIL_NOGO, p_fail) else "MARGINAL"
 
 
@@ -148,7 +177,9 @@ def verdict_band(p_fail: float, lo: float, hi: float) -> str:
     """`verdict` for a P(fail) with a 90 % band (lo, hi) that did not come from k failures in n members (the emulator's conformal band): the same
     cut-offs, GO only if P(fail) <= 0.10 and the band's upper end is <= 1 - LO_SUCCESS_GO (0.25), the form of `verdict`'s "success >= 0.90 and its lower
     bound >= 0.75"; NO-GO above 0.40; else MARGINAL. Like `verdict`, only the end of the band on the failing side enters (`lo` is taken so that a caller
-    passes the whole band). For (k / n, *interval(k, n, 0.90)) it returns what `verdict(k, n)` returns (tested for every k at n up to 60)."""
+    passes the whole band). For (k / n, *interval(k, n, 0.90)) it returns what `verdict(k, n)` returns (tested for every k at n up to 60). The three are
+    probabilities, 0 to 1 (round 20, M-9)."""
+    _closed(p_fail=p_fail, lo=lo, hi=hi)
     return "GO" if _at_least(P_FAIL_GO, p_fail) and _at_least(1 - LO_SUCCESS_GO, hi) else "NO-GO" if not _at_least(P_FAIL_NOGO, p_fail) else "MARGINAL"
 
 
@@ -156,6 +187,7 @@ def band_in(lo: float, hi: float, want: Iterable[str]) -> bool:
     """Whether every P(fail) in the band (lo, hi) has a verdict in `want`: the verdicts at the two ends and on both sides of each cut-off inside the band
     (`verdict_band` with the whole band, so its GO term reads `hi`). A winner chosen among many candidates by its point estimate is shown to be in the
     target only if its band is: the minimum over about 18 noisy estimates is biased towards the lucky one (the winner's curse; round 15, M-1)."""
+    _closed(lo=lo, hi=hi)
     want = tuple(want)
     points = [lo, hi] + [x for c in (P_FAIL_GO, P_FAIL_NOGO) for x in (c, c + 1e-9) if lo <= x <= hi]       # the verdict changes only at a cut-off
     return all(verdict_band(p, lo, hi) in want for p in points)
@@ -165,7 +197,10 @@ def verdict(k_fail: int, n: int, conf: float = 0.90, level: float = 0.05, cert_c
     """GO / MARGINAL / NO-GO for k_fail failures in n members, with the interval and the honest caveat.
 
     `note` is "P(fail) < 3/n ..." when there are no failures and n is below `n_certify(level, cert_conf)`; it asks for 60 members only below 60.
+    The dict holds Python numbers only, whatever the caller's types (`json.dumps` refuses a numpy integer or float32; round 20, M-9).
     """
+    k_fail, n = _check(k_fail, n, conf)
+    conf = float(conf)
     lo, hi, method = interval(k_fail, n, conf)
     p = (n - k_fail) / n
     v = "GO" if (_at_least(p, 1 - P_FAIL_GO) and _at_least(1 - hi, LO_SUCCESS_GO)) else "MARGINAL" if _at_least(p, 1 - P_FAIL_NOGO) else "NO-GO"
@@ -199,10 +234,14 @@ def decided_region(k_fail: int, n: int, conf: float = 0.95) -> str | None:
 
 def coverage(n: int, p_grid: np.ndarray, conf: float = 0.95, method: str = "wilson") -> np.ndarray:
     """Exact coverage of the interval at each true p: sum of Binomial(n, p) pmf over the k whose interval holds p."""
+    _, n = _check(0, n, conf)               # a Python int: `np.arange(n + 1)` wrapped for np.uint8(255) and np.int8(127) (round 20, M-9)
+    pg = np.asarray(p_grid, dtype=float)
+    if pg.ndim != 1 or not np.all((pg >= 0) & (pg <= 1)):      # a p above 1 or a NaN was a coverage of 0.0, not an error
+        raise ValueError(f"p_grid must be a one-dimensional array of probabilities, 0 <= p <= 1, got {p_grid!r}")
     f = wilson if method == "wilson" else agresti_coull
     ks = np.arange(n + 1)
     lohi = np.array([f(int(k), n, conf) for k in ks])
-    return np.array([binom.pmf(ks, n, p)[(lohi[:, 0] <= p) & (p <= lohi[:, 1])].sum() for p in p_grid])
+    return np.array([binom.pmf(ks, n, p)[(lohi[:, 0] <= p) & (p <= lohi[:, 1])].sum() for p in pg])
 
 
 # mutation: not mutated. A receipt generator is the audit instrument, not the model: make receipts and the broken-physics tests grade it, and

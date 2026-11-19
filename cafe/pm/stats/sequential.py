@@ -18,19 +18,25 @@ STOP_CONF = 0.95        # the confidence of the interval the stopper reads; the 
 
 
 def sprt_indifference(cut: float, delta: float) -> tuple[float, float]:
-    """(p0, p1) = (cut - delta, cut + delta): the indifference region around a P(fail) cut-off."""
+    """(p0, p1) = (cut - delta, cut + delta): the indifference region around a P(fail) cut-off. Both ends are probabilities, 0 < p0 < p1 < 1, which is what
+    `sprt_decide` asks of them (round 20, M-9: a negative delta gave the ends the wrong way round, a NaN gave NaN)."""
+    if not (intervals._real(cut, delta) and 0 < cut - delta < cut + delta < 1):
+        raise ValueError(f"need 0 < cut - delta < cut + delta < 1, got cut={cut}, delta={delta}")
     return cut - delta, cut + delta
 
 
 def sprt_decide(k: int, n: int, p0: float, p1: float, alpha: float = 0.05, beta: float = 0.05) -> str:
     """"accept_go" | "accept_nogo" | "continue" for k failures in n runs. `k` and `n` are counts: an `int` or a numpy integer, not a bool or a float
     (`intervals._count`, the rule of the interval functions: round 18 merge, job 2 (e)), taken as Python ints so a narrow numpy integer cannot wrap; `k` is
-    a count of the `n` runs, so 0 <= k <= n (round 19, M-8: `sprt_decide(5, 3, ...)` was answered)."""
+    a count of the `n` runs, so 0 <= k <= n (round 19, M-8: `sprt_decide(5, 3, ...)` was answered). `p0`, `p1`, `alpha` and `beta` are probabilities, 0 to 1
+    exclusive."""
     k, n = intervals._count(k, "k"), intervals._count(n, "n")
     if not 0 <= k <= n:
         raise ValueError(f"need 0 <= k <= n, got k={k}, n={n}")
-    if not 0 < p0 < p1 < 1:
+    if not (intervals._unit(p0) and intervals._unit(p1) and p0 < p1):
         raise ValueError("need 0 < p0 < p1 < 1")
+    if not (intervals._unit(alpha) and intervals._unit(beta)):      # round 20, M-9: alpha 0 was a ZeroDivisionError, -1 and beta 1 a math domain error
+        raise ValueError(f"need 0 < alpha < 1 and 0 < beta < 1, got alpha={alpha}, beta={beta}")
     llr = k * math.log(p1 / p0) + (n - k) * math.log((1 - p1) / (1 - p0))
     if llr >= math.log((1 - beta) / alpha):
         return "accept_nogo"
@@ -46,6 +52,9 @@ def ensemble_stop(k_fail: int, n: int, conf: float = STOP_CONF, n_min: int = 0, 
     the ensemble with whatever `intervals.verdict` says. Repeated looks at a fixed-sample interval inflate its error
     rate slightly; the interval is wide (conf 0.95) and the SPRT above is the test with controlled error.
     """
+    k_fail, n = intervals._check(k_fail, n, conf)       # before the `n_min` test: `ensemble_stop(5, 3, n_min=10)` was answered (round 20, M-9)
+    n_min = intervals._count(n_min, "n_min")
+    n_max = None if n_max is None else intervals._count(n_max, "n_max")
     region = intervals.interval_region(k_fail, n, conf) if n >= n_min else None
     if region:
         return dict(stop=True, verdict=region, reason="interval inside " + region)
