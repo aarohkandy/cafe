@@ -35,8 +35,10 @@ def _bad_input(request, e):
 
 
 def _read(p, default=None):
+    """The one place the app reads one of its files. A NaN or Infinity token (which Python's `json` reads and writes, and which the response encoder
+    refuses: a hangar result with a direction that has no GCI was an error page, round 21, M-12) is read as null, as `hangar` now writes it."""
     try:
-        return json.loads(pathlib.Path(p).read_text())
+        return json.loads(pathlib.Path(p).read_text(), parse_constant=lambda _: None)
     except (FileNotFoundError, json.JSONDecodeError):
         return default
 

@@ -29,7 +29,7 @@ def test_m10_a_plan_json_with_a_bad_size_is_the_damaged_file_message_and_nothing
 
 
 def test_m10_the_sizes_a_real_plan_has_are_read_as_they_were(wi):  # noqa: F811
-    for sizes in (dict(batch=24, n_min=24, n_max=72), dict(batch=1, n_min=1, n_max=1), dict(batch=32, n_min=32, n_max=32)):
+    for sizes in (dict(batch=24, n_min=24, n_max=48), dict(batch=1, n_min=1, n_max=1), dict(batch=32, n_min=32, n_max=32)):      # round 21: n_max <= 64 (quick)
         edit_json(wi.run / "plan.json", lambda d, sizes=sizes: d.update(sizes))
         assert cli.main(whatif_args(wi, "--shift", "6h")) == 0
         assert {k: wi.seen["plan"][k] for k in sizes} == sizes

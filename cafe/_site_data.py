@@ -144,6 +144,13 @@ def shapes():
     save("shapes.json", out)
 
 
+def gci_table(dirs):
+    """The `gci` of each direction for hull.json: null where there is no index (`cfd.gci` is NaN where the fine value is zero; `vv.gci_value` reads a NaN, a
+    missing key or a non-number as inf). A NaN token is not JSON; null is what `app.js` shows as "no index" (round 21, M-12)."""
+    from cafe.pm import vv
+    return {k: None if np.isinf(g := vv.gci_value(v.get("gci"))) else round(g, 4) for k, v in dirs.items()}
+
+
 def hull():
     from cafe import vehicle, geom, mission
     from cafe.hangar import load_vehicle
@@ -183,7 +190,7 @@ def hull():
                                                     depth=[round(-s["z"][0], 2) for s in tr], pitch=[s["pitch"][0] for s in tr])
         print("dive", lift, d["verdict"], flush=True)
     save("hull.json", dict(curve=curve, roddy=roddy, cfd_angles=c["alphas"], profile=profile, dives=dives,
-                           gci={k: round(v["gci"], 4) for k, v in c["dirs"].items()}, grids=c.get("grids")))
+                           gci=gci_table(c["dirs"]), grids=c.get("grids")))
 
 
 def vehicles():

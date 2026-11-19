@@ -258,14 +258,15 @@ def _ingest_ocean(a: argparse.Namespace) -> int:
     if spec["source"] != "lab_hycom" or not spec.get("path"):
         raise ConfigError(f"{a.mission}: environment.ocean is {spec}; set it to {{source: lab_hycom, path: <where the store goes, e.g. "
                           f"/data/ocean/lab_{m['name']}.zarr>}} first")
+    # round 21, M-11: asked BEFORE the write, which deletes every `.dead.tmp` beside the store (`write_store`): asked after it, there is never one to name.
+    if note := hycom.dead_note(spec["path"]):                                      # the wording is `hycom.dead_note`'s, which begins with "; "
+        print("note:" + note[1:] + ": this ingest does, once it has written the new store", flush=True)
     out = hycom.ingest_lab_hycom(a.path, pipeline.ocean_box(m), spec["path"], a.temperature_kind or spec.get("temperature_kind"), a.grid)
     print(f"ocean store: {out}")
     if old := hycom.asides(out):                  # a lab store is not locked: the write swept no `.old.tmp` that a killed ingest left (round 19)
         print("note: the store as it was before an earlier ingest that was killed while it replaced it is still beside this one: "
               f"{', '.join(str(q) for q in old)}; nothing deletes the leftovers of a lab store, so remove it by hand once the new store opens "
               "(`ls -a` of its directory lists them)")
-    if note := hycom.dead_note(out):             # round 20, M-8: a kill during the delete of the old store leaves this, and no other message finds it; the
-        print("note:" + note[1:])                # one wording is `hycom.dead_note`'s (the pipeline's check says the same), which begins with "; "
     return 0
 
 
@@ -306,23 +307,24 @@ def _model_note(finished: bool, fitted: bool, refit_file: bool) -> str | None:
     return f"note: this what-if is made without {' and '.join(made)} that the report's P(fail) uses ({why}), so a baseline can differ from it"
 
 
-PLAN_SIZE_MAX = 10**6      # round 20, M-5: batch and n_max of a plan.json at most this (the largest of any budget is 512: budget.N_MAX)
-
-
 def _plan_sizes(plan: dict[str, Any]) -> None:
     """Round 19, M-10. The three sizes of the ensemble a what-if copies out of a run's plan.json (`batch`, `n_min`, `n_max`) are whole numbers with
     1 <= batch and 1 <= n_min <= n_max: a zero batch was a ZeroDivisionError 24 s into the run, a string or a fraction a TypeError, and n_min above n_max an
     answer on member counts the run never had. A ValueError raised inside `damaged_run_files` is the same "damaged or incomplete" message a missing key is.
-    Round 20, M-5: `batch` and `n_max` are also at most PLAN_SIZE_MAX (10**30 was an OverflowError, or a what-if asking for as many members as it takes), and
+    Round 21, M-8: the bound is the planner's own table (the tables of the run's `budget`, not a second constant): `batch` at most `budget.BATCH[name]` and not
+    above `n_max`, `n_max` at most `budget.N_MAX[name]`, which is every plan `budget.plan` writes (`n_max = min(N_MAX, n_batches * bs)`,
+    `n_min = min(N_MIN, n_max)`, `batch = min(bs, n_max)`, `bs <= BATCH`). Round 20's 10**6 was 2,000 times the largest of them: a hand-edited `batch` of 10**6
+    took a what-if to 26 GB.
     `budget` is the name of a budget (a list was a TypeError, null a what-if with no plan, a number a blame on a `--budget` the user never gave)."""
     name = plan["budget"]
     batch, n_min, n_max = (plan[k] for k in ("batch", "n_min", "n_max"))
     if type(name) is not str or name not in budget.BUDGET_S:                      # `type is str` first: a list is not hashable
         raise ValueError(f"plan.json has budget {name!r}: one of {list(budget.BUDGET_S)} is needed")
+    top_b, top_n = budget.BATCH[name], budget.N_MAX[name]
     if (not all(type(x) is int for x in (batch, n_min, n_max))                    # `type is int`: no bool, no float, no string
-            or not 1 <= batch <= PLAN_SIZE_MAX or not 1 <= n_min <= n_max <= PLAN_SIZE_MAX):
-        raise ValueError(f"plan.json has batch {batch!r}, n_min {n_min!r}, n_max {n_max!r}: whole numbers with batch at least 1 and "
-                         f"1 <= n_min <= n_max are needed, batch and n_max at most {PLAN_SIZE_MAX}")
+            or not 1 <= n_min <= n_max <= top_n or not 1 <= batch <= min(top_b, n_max)):
+        raise ValueError(f"plan.json has batch {batch!r}, n_min {n_min!r}, n_max {n_max!r}: whole numbers are needed, with 1 <= n_min <= n_max, "
+                         f"n_max at most {top_n} and batch at least 1, at most {top_b} and not above n_max, for budget {name}")
 
 
 def _whatif(a: argparse.Namespace) -> int:

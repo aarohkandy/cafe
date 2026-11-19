@@ -456,12 +456,13 @@ async function showDesign(id) {
   const r = d.result || {}, g = r.geometry || {}, f = r.fea || {}, p = r.performance || r.estimates || {}, hg = r.hangar || {};
   const facts = [];
   const fact = (k, v, extra) => facts.push(el("div", { class: "fact" }, el("dt", {}, k), el("dd", {}, v, extra || null)));
+  const gciText = (gci) => gci == null ? " no index" : ` ±${fmt(gci * 100, 0)}%`;   // null: the server's NaN (no index for this direction), not a converged grid
   if (g.length) fact("size", `${fmt(g.length, 2)} × ${fmt(g.beam, 2)} × ${fmt(g.height, 2)} m`);
   if (p.cruise) fact("cruise / max speed", `${fmt(p.cruise, 2)} / ${fmt(p.vmax, 2)} m/s`);
   if (g.draft) fact("draft · stability (GM)", `${fmt(g.draft, 3)} m · ${fmt(g.gm, 3)} m`);
   if (g.net_buoyancy_N != null) fact("net buoyancy", `${fmt(g.net_buoyancy_N, 1)} N`, el("small", {}, Math.abs(g.net_buoyancy_N) < 1 ? " neutral" : g.net_buoyancy_N > 0 ? " floats up" : " sinks"));
-  if (hg.cfd) { const q = 0.5 * hg.cfd.rho * hg.cfd.speed ** 2; for (const [dir, x] of Object.entries(hg.cfd.dirs)) { const ax = { x: 0, y: 1, z: 2 }[dir[1]], s = dir[0] === "+" ? 1 : -1; fact(`drag area ${dir}`, `${fmt(-s * x.force[ax] / q, 4)} m²`, el("small", {}, ` ±${fmt((x.gci || 0) * 100, 0)}%`)); } }
-  if (hg.fs) for (const [U, x] of Object.entries(hg.fs.speeds)) fact(`resistance @ ${fmt(+U, 2)} m/s`, `${fmt(x.resistance, 2)} N`, el("small", {}, ` ±${fmt((x.gci || 0) * 100, 0)}%`));
+  if (hg.cfd) { const q = 0.5 * hg.cfd.rho * hg.cfd.speed ** 2; for (const [dir, x] of Object.entries(hg.cfd.dirs)) { const ax = { x: 0, y: 1, z: 2 }[dir[1]], s = dir[0] === "+" ? 1 : -1; fact(`drag area ${dir}`, `${fmt(-s * x.force[ax] / q, 4)} m²`, el("small", {}, gciText(x.gci))); } }
+  if (hg.fs) for (const [U, x] of Object.entries(hg.fs.speeds)) fact(`resistance @ ${fmt(+U, 2)} m/s`, `${fmt(x.resistance, 2)} N`, el("small", {}, gciText(x.gci)));
   if (hg.bem) { const A = hg.bem.added_mass; fact("added mass surge/sway/heave", `${fmt(A[0][0], 1)} / ${fmt(A[1][1], 1)} / ${fmt(A[2][2], 1)} kg`); }
   const cases = f.cases || [];
   const sfClass = sf => sf == null ? "" : sf < 1 ? "bad" : sf < 1.5 ? "warn" : "good";

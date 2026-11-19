@@ -40,19 +40,22 @@ def test_m5_the_size_message_keeps_its_words_and_names_the_bound_and_the_budget_
 
 
 def test_m5_the_bounds_are_the_edge_not_below_it_and_every_budget_name_is_read(wi):  # noqa: F811
-    """No real plan is refused: the largest of any budget is 512 members, and 10**6 itself is accepted; each budget name of budget.py is read as it was."""
+    """Round 21, M-8: the edge is the planner's table of that budget (it was 10**6, 2,000 times the largest plan: tests/test_round21_c.py), so the plan of each
+    budget name is read as it was, with its own sizes, and one past its own table is refused."""
     assert max(budget.N_MAX.values()) < 10**6 and max(budget.BATCH.values()) < 10**6
-    edit_json(wi.run / "plan.json", lambda d: d.update(batch=10**6, n_min=1, n_max=10**6))
-    assert cli.main(whatif_args(wi, "--shift", "6h")) == 0 and wi.seen["plan"]["batch"] == 10**6 and wi.seen["plan"]["n_max"] == 10**6
     for name in budget.BUDGET_S:
-        edit_json(wi.run / "plan.json", lambda d, name=name: d.update(budget=name, batch=32, n_min=32, n_max=64))
+        edit_json(wi.run / "plan.json",
+                  lambda d, name=name: d.update(budget=name, batch=budget.BATCH[name], n_min=budget.N_MIN[name], n_max=budget.N_MAX[name]))
         wi.seen.clear()
         assert cli.main(whatif_args(wi, "--shift", "6h")) == 0 and wi.seen["plan"]["budget"] == name
+        assert wi.seen["plan"]["n_max"] == budget.N_MAX[name] and wi.seen["plan"]["batch"] == budget.BATCH[name]
+        edit_json(wi.run / "plan.json", lambda d, name=name: d.update(n_max=budget.N_MAX[name] + 1))
+        assert cli.main(whatif_args(wi, "--shift", "6h")) == 2
 
 
 def test_m5_a_sound_plan_whose_budget_differs_from_the_flag_is_still_the_flags_message(wi, capsys):  # noqa: F811
     """The plan is checked first, so the older mismatch message is reached only by a plan that is sound."""
-    edit_json(wi.run / "plan.json", lambda d: d.update(budget="ci"))
+    edit_json(wi.run / "plan.json", lambda d: d.update(budget="ci", batch=16, n_min=8, n_max=16))        # sound for ci (round 21: sizes within its tables)
     assert cli.main(whatif_args(wi, "--shift", "6h", "--budget", "quick")) == 2
     err = capsys.readouterr().err
     assert "--budget quick: the run" in err and "was made with --budget ci" in err and "damaged" not in err
@@ -104,7 +107,7 @@ def test_m8_ingest_ocean_names_a_half_deleted_dead_tmp_beside_the_store_with_its
     out.mkdir()
     d = dead_dir(out, 2.5)
     text = ingest(monkeypatch, tmp_path, capsys)
-    assert text.startswith(f"ocean store: {out}\n")
+    assert text.endswith(f"ocean store: {out}\n")                         # round 21, M-11: the note is asked, and printed, before the write
     assert (f"note: a half-deleted leftover of an earlier ingest that was killed while it deleted the old store is beside the store: {d} (2.5 GB): "
             in text)                                                       # `hycom.dead_note`'s wording, the one the pipeline's check says too (round 20, M2)
     assert f"safe to delete (`rm -r {d}`)" in text and "nothing reads it" in text and "still beside this one" not in text      # no whole aside: only this line
@@ -121,7 +124,8 @@ def test_m8_ingest_ocean_names_a_whole_aside_and_a_dead_one_each_in_its_own_line
     hycom._aside_name(other).mkdir()
     dead_dir(other)
     lines = ingest(monkeypatch, tmp_path, capsys).splitlines()
-    assert len(lines) == 3 and f"is still beside this one: {aside};" in lines[1] and f"beside the store: {d} (0.0 GB):" in lines[2]
+    assert len(lines) == 3 and f"beside the store: {d} (0.0 GB):" in lines[0] and lines[1] == f"ocean store: {out}"
+    assert f"is still beside this one: {aside};" in lines[2]
 
 
 def test_m8_ingest_ocean_says_only_the_store_when_nothing_is_beside_it(monkeypatch, tmp_path, capsys):
