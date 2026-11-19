@@ -312,3 +312,11 @@ def test_a_censored_record_beside_a_constant_case_is_still_printed_so_that_every
     """Stage 1 writes none beside the other (it returns first), but an edited summary may: the page prints what report.json holds, the check agrees."""
     rep, h = built(run, sens={"usv-uas-rf": dict(CONSTANT, censored=dict(share=1.0, at="max", value=1.0))})
     assert "share the same highest value" in card_of(h)
+
+
+def test_an_integer_too_big_for_a_float_is_not_a_real_of_the_dtmb_report():
+    """`dtmb5415._real` keeps NaN and infinity (a diverged solver's C_T) and refuses what cannot be a float at all: the two statements the gate found unrun."""
+    from cafe.pm import dtmb5415
+    assert dtmb5415._real(10 ** 400) is False
+    assert dtmb5415._real(float("nan")) is True and dtmb5415._real(float("inf")) is True and dtmb5415._real(3) is True
+    assert dtmb5415._real(True) is False and dtmb5415._real("1") is False and dtmb5415._real(None) is False
