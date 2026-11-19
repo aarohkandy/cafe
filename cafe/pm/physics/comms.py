@@ -42,6 +42,15 @@ PARAMETER_FILES = ("radios.yaml", "modems.yaml")                     # every fil
 C0 = 299792458.0
 NO_LINK_DB = -200.0                  # margin returned when a link is physically impossible (beyond the radio horizon)
 THORP_ONLY_LABEL = "Thorp only, Bellhop unavailable"
+# The largest Bellhop excess over its own isovelocity run [dB] that `acoustic_link` believes (round 21, M-10): a field of exactly zero (no ray reached the
+# receiver) is a TL of 600 dB, an excess of about 540, and a margin nobody can read. ASSUMED, not measured: the largest finite excess seen in round 21's
+# probes was 56 dB (made-up profiles); a real shadow is thought to be 20 to 40 dB down through diffraction and scattering. A sample beyond it, in either
+# direction (a zero field in the isovelocity run would be a gain of 540 dB), is held at this value and counted in `acoustic_link`'s `capped`.
+BELLHOP_EXCESS_CAP_DB = 60.0
+# Bellhop's incoherent TL is not converged for a transducer 1 to 2 m deep (round 21, M-4: with the receiver at 5 m, (1, 5) and (1, 2) differ from the
+# converged (5, 5), (5, 1) and (10, 10) by 12 to 34 dB on two of three made-up profiles, which agree to 0.4 dB). One of the runs of the set `stage1` takes
+# the lowest margin of puts both ends at least this deep. A choice measured on made-up profiles at 18.5 kHz and 2 to 7 km, not a property of the sea.
+BELLHOP_MIN_DEPTH_M = 5.0
 F = NDArray[np.float64]
 FA = float | F
 
@@ -472,19 +481,25 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
     (deep isovelocity water is spherical, k=2) would double-count the spreading; the excess keeps what Thorp cannot see
     (refraction, ducts, shadow zones) and nothing else. Absolute TLs are returned too.
 
-    Bellhop's TL is not reciprocal in practice: with the two depths swapped (tx_depth, rx_depth against rx_depth, tx_depth) the same horizontal range gives a
-    different margin, by up to 26.5 dB in round 20's probes (made-up sound-speed profiles, not a measurement; the ray equations are reciprocal, so the
-    difference is Bellhop's own numerical error, probably its incoherent TL at a 1 m endpoint in a shadow: not tested). This function runs the one direction the
-    depths name; `stage1._bellhop_member` calls it for both and keeps the LOWER margin, so a link's margin does not depend on which end is named first.
+    Bellhop's TL is not converged for a transducer 1 to 2 m deep (round 21, M-4, measured on made-up profiles, not on the sea: the TL with an end at 1 to 2 m
+    differs by 12 to 34 dB from the TL with both ends at 5 m or deeper, which agree to 0.4 dB in either direction), and so it is not reciprocal either: with
+    the two depths swapped (tx_depth, rx_depth against rx_depth, tx_depth) the same horizontal range gives a different margin, by up to 26.5 dB in round
+    20's probes. The ray equations are reciprocal, so the difference is Bellhop's own numerical error at a shallow end. This function runs the one
+    direction the depths name; `stage1._bellhop_member` calls it for the depths as named, swapped and floored at BELLHOP_MIN_DEPTH_M and keeps the LOWEST
+    margin, so a link's margin does not depend on which end is named first nor on a 1 m clip.
+
+    The excess is held within +-BELLHOP_EXCESS_CAP_DB (an assumed number): a field of zero is a TL of 600 dB, not a link that is 540 dB short.
 
     Returns dict: margin (Tagged), thorp_margin, ambiguous (bool), method (str per element), label (str; THORP_ONLY_LABEL
-    when an ambiguous link could not be refined), tl_bellhop_db / tl_bellhop_iso_db (NaN where Bellhop did not run)."""
+    when an ambiguous link could not be refined), tl_bellhop_db / tl_bellhop_iso_db (NaN where Bellhop did not run), capped (bool: the excess of that
+    sample was held at +-BELLHOP_EXCESS_CAP_DB). `ambiguous_db=inf` refines every sample (what `stage1` asks of the samples it hands over)."""
     r, w, dz = np.broadcast_arrays(np.asarray(r, float), np.asarray(wind, float), np.asarray(dz, float))
     slant = np.hypot(r, dz)
     amb_db = _yaml("modems.yaml")["defaults"]["ambiguous_db"] if ambiguous_db is None else ambiguous_db
     m_t = np.asarray(acoustic_margin(slant, modem, band, w, shipping, k), float)  # 0-d array: a numpy scalar takes no item assignment (round 9, M-25)
     amb = np.abs(m_t) <= amb_db
     tl_b, tl_i = np.full(m_t.shape, np.nan), np.full(m_t.shape, np.nan)
+    capped = np.zeros(m_t.shape, bool)
     method = np.full(m_t.shape, "thorp", dtype=object)
     margin, label = m_t.copy(), "Thorp budget decides every link"
     if amb.any():
@@ -493,7 +508,9 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
             f = float(np.mean(_band(modem, band)["f_khz"]))
             tl_b[amb] = bellhop_tl(r[amb], f, z, c, tx_depth, rx_depth, water_depth)
             tl_i[amb] = bellhop_tl(r[amb], f, z, np.full(len(np.atleast_1d(z)), c[0]), tx_depth, rx_depth, water_depth)
-            margin[amb] = acoustic_margin(slant[amb], modem, band, w[amb], shipping, k, tl_extra=tl_b[amb] - tl_i[amb])
+            excess = tl_b[amb] - tl_i[amb]
+            capped[amb] = np.abs(excess) > BELLHOP_EXCESS_CAP_DB
+            margin[amb] = acoustic_margin(slant[amb], modem, band, w[amb], shipping, k, tl_extra=np.clip(excess, -BELLHOP_EXCESS_CAP_DB, BELLHOP_EXCESS_CAP_DB))
             method[amb] = "bellhop"
             label = "Bellhop refined the ambiguous links"
         else:
@@ -501,7 +518,7 @@ def acoustic_link(r: FA, modem: str = "benthos_atm960", band: str = "MF", wind: 
             label = THORP_ONLY_LABEL if ssp is not None else "Thorp only, no sound-speed profile supplied"
     src = f"Thorp/Stojanovic budget {modem}/{band}" + (" + Bellhop" if label.startswith("Bellhop") else "")
     return dict(margin=Tagged(margin, src, None, "modelled"),
-                thorp_margin=m_t, ambiguous=amb, method=method, label=label, tl_bellhop_db=tl_b, tl_bellhop_iso_db=tl_i)
+                thorp_margin=m_t, ambiguous=amb, method=method, label=label, tl_bellhop_db=tl_b, tl_bellhop_iso_db=tl_i, capped=capped)
 
 
 # ---------------------------------------------------------------- receipts

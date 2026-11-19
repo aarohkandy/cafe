@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import concurrent.futures as cf, datetime as dt, time
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -62,12 +62,15 @@ ACTS = dict(glider=("glider_speed_scale", "battery_capacity_scale"), usv=("usv_v
 # the battery to the current. The current moves the glider through a water whose density differs (the CI fixture has no horizontal gradient, which is why it
 # is inert there), that shifts the dive cycle (about 9,400 s) by a part in 1e4, and over 55 cycles the last ascent finishes before the window ends in one
 # member and after it in the other (54 surfacings completed instead of 55). One surfacing costs `comm_J` (3.5 W x (120 s + 250 s) + 414 J = 1709 J) plus the
-# surface pump (150.83 cc x 101325 Pa / 0.4 = 38.2 J) = 1747.2 J, which is 1.62e-4 of the usable pack (1.2e7 J x 0.9): the 1.6e-4 measured on the demo. The
-# cycle has a second event of about the same size (round 20, M-11, reviewer B's arithmetic; `glider.py` charges it at the apogee): the pump moves the same 138
-# cc (the demo's trim) against the pressure at the dive depth, 138e-6 m3 x (101325 + 505e4) Pa / 0.4 = 1777.2 J, 1.646e-4 of 1.08e7 J for a 500 m dive,
+# surface pump (the trim, 138 cc on the demo: 138e-6 m3 x 101325 Pa / 0.4 = 34.96 J) = 1743.96 J, which is 1.6148e-4 of the usable pack (1.2e7 J x 0.9): the
+# 1.6e-4 measured on the demo. The trim is no platform value: it is 2 x `vbd_delta_cc` plus the neutral-VBD spread at the start position, so it depends on
+# the environment and the dive depth (138 cc on the demo, 150.86 cc in reviewer B's toy; round 21, M-14, which corrects the "platform's 150.83 cc" of rounds
+# 19 and 20). The cycle has a second event of about the same size (round 20, M-11, reviewer B's arithmetic; `glider.py` charges it at the apogee): the pump
+# moves the same 138 cc against the pressure at the dive depth, 138e-6 m3 x (101325 + 505e4) Pa / 0.4 = 1777.2 J, 1.646e-4 of 1.08e7 J for a 500 m dive,
 # against 1.6148e-4 for the surfacing. A shift of the cycle that carries the window's end across an apogee instead of a surfacing gives a step of about
-# 1.65e-4, and across both about 3.3e-4. That case is derived, not seen: every step of the demo's record (8 members at 5 quantiles) is of the surfacing's
-# size. The per-member ocean displacement (the SDE, no column at all) also moves the cycle and so which side of a step a member lands on: a second reason the
+# 1.65e-4, and across both about 3.3e-4. That step was seen in reviewer B's toy (5 of its 18 steps) and not on the demo: every step of the demo's record (8
+# members at 5 quantiles) is of the surfacing's size.
+# The per-member ocean displacement (the SDE, no column at all) also moves the cycle and so which side of a step a member lands on: a second reason the
 # two current columns' index in that row carries no information. Any column that moves the glider's position can do the same with a smaller chance (the wind,
 # through the 1 % windage while surfaced, about 30 times smaller): the probe's 8 members at 5 quantiles cannot exclude it, so "float noise" for the wind
 # columns is also a statement about the probe's size. The two current columns stay in the row (DECISIONS, round 19 OD-6) and raise the noise floor of a
@@ -624,11 +627,30 @@ def _mid(a: tuple[NDArray[Any], ...], b: tuple[NDArray[Any], ...], k: int, m: in
     return float(a[0][k, m] + 0.5 * (np.mod(b[0][k, m] - a[0][k, m] + 180.0, 360.0) - 180.0)), float(0.5 * (a[1][k, m] + b[1][k, m]))
 
 
+class _Refined(NamedTuple):
+    """One member's Bellhop refinement: the lowest margin of the run set, the spread of the set (NaN where fewer than two runs gave a number), the number
+    of runs made, and where a run's excess was held at the cap."""
+    margin: NDArray[Any]
+    spread: NDArray[Any]
+    runs: int
+    capped: NDArray[np.bool_]
+
+
+def _run_set(tx: float, rx: float) -> list[tuple[float, float]]:
+    """The (transmitter, receiver) depth pairs Bellhop is run on for one sample: as named, swapped, and both ends at least `comms.BELLHOP_MIN_DEPTH_M`
+    deep; a pair that repeats an earlier one is run once (so equal depths from 5 m down are one run, a 1 m pair beside a 5 m one are three, and two 1 m
+    ends are two: (1, 1) and (5, 5))."""
+    return list(dict.fromkeys([(tx, rx), (rx, tx), (max(tx, comms.BELLHOP_MIN_DEPTH_M), max(rx, comms.BELLHOP_MIN_DEPTH_M))]))
+
+
 def _bellhop_member(env: Any, modem: str, band: str, lon: float, lat: float, t: float, tx: float, rx: float, d: NDArray[Any], dz: NDArray[Any],
-                    wind: NDArray[Any]) -> NDArray[Any] | None:
-    """Bellhop-refined margins for one member's ambiguous samples `d` [m] (horizontal), on the sound-speed profile of `env` at the link midpoint
-    and the sample in the middle of them, in the water depth `env.depth` gives there (transducers clipped inside it). None where the
-    environment has no profile, no depth or no finite sound speed there: the caller keeps the Thorp margin and says so."""
+                    wind: NDArray[Any]) -> _Refined | None:
+    """Bellhop-refined margins for one member's samples `d` [m] (horizontal), on the sound-speed profile of `env` at the link midpoint and the sample in
+    the middle of them, in the water depth `env.depth` gives there (transducers clipped inside it). The margin is the LOWEST over `_run_set` (round 21, M-4):
+    Bellhop's incoherent TL is not converged for an end at 1 to 2 m, and not reciprocal either, so a number from one run would depend on the clip and on
+    which end is named first (as `_link_hs` takes the worse of its two ends); the spread of the set is kept so that the next configuration that does not
+    converge shows in a printed number. None where the environment has no profile, no depth or no finite sound speed there: the
+    caller keeps the Thorp margin and says so."""
     if getattr(env, "ocean", True) is None:
         return None
     wd = float(np.ravel(np.asarray(env.depth(lon, lat).value, float))[0])
@@ -639,43 +661,65 @@ def _bellhop_member(env: Any, modem: str, band: str, lon: float, lat: float, t: 
     if not np.all(np.isfinite(c)):
         return None
     tx, rx = (float(np.clip(x, 1.0, wd - 1.0)) for x in (tx, rx))
-    # Bellhop's incoherent TL is not reciprocal in practice (round 20, M-1: the two directions differ by up to 6.8 dB on the CI fixture and 17.8 dB on a
-    # profile with a shadow zone, wherever it refines): both are run and the LOWER margin kept, so the number does not depend on which end is named first
-    # (as `_link_hs` takes the worse of its two ends). Two equal depths are one run: the two directions are the same run.
-    runs = [(tx, rx)] if tx == rx else [(tx, rx), (rx, tx)]
-    margins = [comms.acoustic_link(d, modem, band, wind, ssp=(z, c), tx_depth=p, rx_depth=q, water_depth=wd, dz=dz)["margin"].value for p, q in runs]
-    return np.asarray(np.fmin.reduce([np.asarray(m, float) for m in margins]), float)
+    runs = _run_set(tx, rx)
+    res = [comms.acoustic_link(d, modem, band, wind, ssp=(z, c), tx_depth=p, rx_depth=q, water_depth=wd, ambiguous_db=np.inf, dz=dz) for p, q in runs]
+    ms = np.array([np.asarray(r["margin"].value, float) for r in res])
+    spread = np.where(np.isfinite(ms).sum(0) >= 2, np.fmax.reduce(ms) - np.fmin.reduce(ms), np.nan)
+    return _Refined(np.fmin.reduce(ms), spread, len(runs), np.logical_or.reduce([np.asarray(r["capped"], bool) for r in res]))
 
 
-def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: NDArray[Any], need: NDArray[np.bool_], A: tuple[NDArray[Any], ...],
-              B: tuple[NDArray[Any], ...], t: NDArray[Any], env: Any) -> tuple[NDArray[Any], str]:
-    """Acoustic margin (n, M) on the slant path hypot(d, dz) and the method label. The Thorp budget decides every sample outside the
-    ambiguity band; the needed samples inside it (|margin| <= modems.yaml ambiguous_db) are re-done with Bellhop, member by member, on the
-    GOFS sound-speed profile at the midpoint of the member's middle ambiguous sample and that sample's transducer depths, in both directions, the lower
-    margin kept (round 20, M-1: `_bellhop_member`)
-    (ponytail: one profile and depth pair per member and link, not per sample; per-sample runs cost ~0.2 s each, upgrade if a link's profile
-    changes along the track). Without Bellhop, or where the environment has no profile there, those samples keep the Thorp margin and the
-    label says so."""
+def _bellhop_label(info: dict[str, Any]) -> str:
+    """The method of an acoustic link some of whose samples Bellhop refined: `info` is `_acoustic`'s count (done, total, capped, runs_lo, runs_hi) of one
+    batch or the sum of several (`merge`), so the label describes the members the summary does."""
+    done, total, capped, lo, hi = (info[k] for k in ("done", "total", "capped", "runs_lo", "runs_hi"))
+    out = f"Thorp/Stojanovic budget on the slant range, Bellhop on {done} of {total} needed in-range samples"
+    if hi is not None and hi > 1:
+        out += f" (the lowest of {hi if lo == hi else f'{lo} to {hi}'} runs: as named, swapped, both ends at least {comms.BELLHOP_MIN_DEPTH_M:g} m deep)"
+    if capped:
+        out += (f"; {capped} of them held at the assumed {comms.BELLHOP_EXCESS_CAP_DB:g} dB bound on the Bellhop excess "
+                "(no ray reached the receiver, or almost none)")
+    return out + ("" if done == total else "; the rest Thorp only (no sound-speed profile or depth there)")
+
+
+def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: NDArray[Any], need: NDArray[np.bool_], valid: NDArray[np.bool_],
+              A: tuple[NDArray[Any], ...], B: tuple[NDArray[Any], ...], t: NDArray[Any],
+              env: Any) -> tuple[NDArray[Any], str, dict[str, Any] | None, NDArray[Any]]:
+    """(margin (n, M), the method label, the Bellhop count of `_bellhop_label` or None, the spread of the run set (n, M), NaN where there is none) of the
+    acoustic link on the slant path hypot(d, dz). The Thorp budget gives every sample's margin; EVERY needed sample in range (`valid`: within
+    `comms.valid_range_m`) is re-done with Bellhop, member by member, on the GOFS sound-speed profile at the midpoint of the member's middle such sample
+    and the MEDIAN transducer depths of those samples, the lowest margin of the run set kept (round 21, M-3 and M-4: `_bellhop_member`). Round 20 refined
+    only the samples within +-modems.yaml ambiguous_db of 0; round 21 measured Thorp passes up to +21 dB that Bellhop turns into fails, because the excess
+    Bellhop computes (0 to 40 dB on made-up profiles) is larger than any fixed band, and a member costs the same few runs whether it carries 1 sample or
+    400 (one run on a 48-point range grid, interpolated). The band is kept only where Bellhop cannot refine (it is not available): those samples keep the
+    Thorp margin and the label says how many were ambiguous.
+    (ponytail: one profile and depth pair per member and link, not per sample; per-sample runs cost ~0.2 s each, upgrade if a link's profile or depth
+    changes along the track: a link `when: always` to a submerged glider spans its dive cycle, and the median depth is one number for it.)"""
     res = comms.acoustic_link(d, modem, band, wind, dz=dz)
     margin = np.array(res["margin"].value, float)
     lab = res.get("label") or res.get("method")
     label = lab if isinstance(lab, str) else str(np.unique(np.asarray(lab))[0])
-    amb = np.broadcast_to(np.asarray(res.get("ambiguous", False)), margin.shape) & need
-    if not amb.any():
-        return margin, label
+    spread = np.full(margin.shape, np.nan)
     if not comms.bellhop_available():
-        return margin, f"{comms.THORP_ONLY_LABEL} ({int(amb.sum())} ambiguous samples)"
-    done = 0
-    for m in map(int, np.flatnonzero(amb.any(0))):
-        i = np.flatnonzero(amb[:, m])
+        amb = np.broadcast_to(np.asarray(res.get("ambiguous", False)), margin.shape) & need
+        return margin, (f"{comms.THORP_ONLY_LABEL} ({int(amb.sum())} ambiguous samples)" if amb.any() else label), None, spread
+    refine = need & valid
+    if not refine.any():
+        return margin, label, None, spread
+    info: dict[str, Any] = dict(done=0, total=int(refine.sum()), capped=0, runs_lo=None, runs_hi=None)
+    runs: list[int] = []
+    for m in map(int, np.flatnonzero(refine.any(0))):
+        i = np.flatnonzero(refine[:, m])
         k = int(i[i.size // 2])
         lon, lat = _mid(A, B, k, m)
-        r = _bellhop_member(env, modem, band, lon, lat, float(t[k]), float(A[3][k, m]), float(B[3][k, m]), d[i, m], dz[i, m], wind[i, m])
+        r = _bellhop_member(env, modem, band, lon, lat, float(t[k]), float(np.median(A[3][i, m])), float(np.median(B[3][i, m])), d[i, m], dz[i, m], wind[i, m])
         if r is not None:
-            margin[i, m], done = r, done + i.size
-    base = f"Thorp/Stojanovic budget on the slant range, Bellhop on {done} of {int(amb.sum())} ambiguous samples"
-    base += " (the lower of the two directions)" if done else ""
-    return margin, base + ("" if done == amb.sum() else "; the rest Thorp only (no sound-speed profile or depth there)")
+            margin[i, m], spread[i, m] = r.margin, r.spread
+            info["done"] += i.size
+            info["capped"] += int(r.capped.sum())
+            runs.append(r.runs)
+    if runs:
+        info.update(runs_lo=min(runs), runs_hi=max(runs))
+    return margin, _bellhop_label(info), info, spread
 
 
 def _ends(out: dict[str, Any], a: str, b: str, cls: str, need: bool = False) -> list[str]:
@@ -731,6 +775,7 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
             live &= (t >= out[x]["t"][0])[:, None]
     invalid_kind: str | None = None
     hs_filled = 0
+    extra: dict[str, Any] = {}
     if lk["kind"] == "iridium":
         n = len(t)
         stream = f"iridium/{lk['id']}"
@@ -770,15 +815,16 @@ def evaluate_link(lk: dict[str, Any], out: dict[str, Any], mission: dict[str, An
             dz = np.abs(A[3] - B[3])
             winds = [np.hypot(*np.moveaxis(np.asarray(env.wind(P[0].T, P[1].T, 10.0, tt.T).value, float), -1, 0)).T for P in (A, B)]       # each end's own wind
             wind = np.fmax(*winds)                                           # the larger (noisier) of the two ends, as for Hs; a non-finite one is the other's
-            margin, method = _acoustic(modem, band, d, dz, wind, need, A, B, t, env)
             valid = np.hypot(d, dz) <= comms.valid_range_m(modem, band)
+            margin, method, bellhop, spread = _acoustic(modem, band, d, dz, wind, need, valid, A, B, t, env)
+            extra = dict(bellhop=bellhop, bellhop_spread_db=spread)
             margin_kind, invalid_kind = "acoustic link margin, dB", "out_of_range"
         ok = margin > 0
     dist = np.full(M, np.nan) if lk["kind"] == "iridium" else np.array([np.median(d[need[:, m], m]) if need[:, m].any() else np.nan for m in range(M)])
     frac = np.where(need.sum(0) > 0, (ok & need).sum(0) / np.maximum(need.sum(0), 1), 1.0)
     n_invalid = (need & ~valid).sum(0) if invalid_kind else np.zeros(M, int)
     return dict(frac=frac, success=frac >= lk["required_fraction"], margin_db=np.where(need & valid, margin, np.nan), n_invalid=n_invalid,
-                need_count=need.sum(0), dist_m=dist, method=method, margin_kind=margin_kind, invalid_kind=invalid_kind, t=t, hs_filled=hs_filled)
+                need_count=need.sum(0), dist_m=dist, method=method, margin_kind=margin_kind, invalid_kind=invalid_kind, t=t, hs_filled=hs_filled, **extra)
 
 
 def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
@@ -825,6 +871,12 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
         for k in ("margin_kind", "invalid_kind"):
             if k in l0:
                 out["links"][lid][k] = l0[k]
+        if "bellhop_spread_db" in l0:                         # an acoustic link: the spread of Bellhop's run set per sample, and the label of ALL the members
+            out["links"][lid]["bellhop_spread_db"] = cat([b["links"][lid]["bellhop_spread_db"] for b in batches])
+            if infos := [x for b in batches if (x := b["links"][lid].get("bellhop")) is not None]:
+                runs = [i[k] for i in infos for k in ("runs_lo", "runs_hi") if i[k] is not None]
+                tot = {k: sum(i[k] for i in infos) for k in ("done", "total", "capped")}
+                out["links"][lid]["method"] = _bellhop_label(dict(tot, runs_lo=min(runs, default=None), runs_hi=max(runs, default=None)))
         out["links"][lid]["hs_filled"] = sum(b["links"][lid].get("hs_filled", 0) for b in batches)
     if "seeds" in batches[0]:
         out["seeds"] = {vid: {st: [b["seeds"][vid][st] for b in batches] for st in sd} for vid, sd in batches[0]["seeds"].items()}
@@ -848,8 +900,21 @@ def _ranked(r: dict[str, Any], dom: str | None) -> tuple[set[str], NDArray[Any] 
     return set(ACTING.get((cls, key), SENS_ACTS[cls])), q, r.get(f"{key}_name") or QUANTITY.get(key, "failure indicator")
 
 
-def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting: set[str], margin: NDArray[Any] | None, quantity: str) -> dict[str, Any]:
-    """The "most sensitive to" entry of a vehicle or a link: dict(param, S1, noise_floor, case, quantity, text). `f` (n,) marks the members that failed.
+def _censored(y: NDArray[Any]) -> dict[str, Any] | None:
+    """dict(share, at, value) when more than half of the values `y` sit at their minimum ("min") or at their maximum ("max", also where all of them are equal):
+    the quantity is clipped or saturated there (a state of charge clipped at 0, a link's pass fraction at 1.0), so most of its rows are one tie and the index
+    rests on the others (round 20, M-12 for the state of charge of a USV; round 21, M-1 for any ranked quantity). None otherwise."""
+    lo, hi = float(y.min()), float(y.max())
+    s_lo, s_hi = float(np.mean(y == lo)), float(np.mean(y == hi))
+    at, share = ("max", s_hi) if s_hi >= s_lo else ("min", s_lo)
+    return dict(share=share, at=at, value=hi if at == "max" else lo) if share > 0.5 else None
+
+
+def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting: set[str], margin: NDArray[Any] | None, quantity: str,
+                 total: int | None = None) -> dict[str, Any]:
+    """The "most sensitive to" entry of a vehicle or a link: dict(param, S1, noise_floor, case, quantity, text[, censored]). `f` (n,) marks the members that
+    failed. `total`: the members of the run where the n given are only those that the quantity is about (a link: the members that needed it, round 21, M-1),
+    so the texts say "n of total members"; None where they are all. `censored`: `_censored` of the ranked quantity, present only when it applies.
     The indices are first-order EASI (stats.sensitivity) over the columns that can act on it (`acting`: `ACTING` for the quantity of a vehicle's dominant
     failure mode, `link_acts` for a link), so a column that cannot act does not set the noise floor, and an outcome that no column can act on (an Iridium
     link `when: always`) is not ranked at all (case no_acting_input). They are taken on `margin` (n,), the continuous quantity named `quantity`, when the
@@ -859,18 +924,22 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
     no_acting_input (no index: `acting` is empty, so there is nothing to rank)."""
     n, k = len(f), int(f.sum())
     out: dict[str, Any] = dict(param=None, S1={}, noise_floor=None, quantity=quantity)
+    sub = total is not None and total != n                                                   # the members the quantity is about are a part of the run
     if k == 0:
         return dict(out, case="all_pass", text="No member failed, so there is no failure to attribute to a parameter.")
     if k == n:
-        return dict(out, case="all_fail", text="Every member failed, so there is no passing member to compare with and no parameter to blame.")
+        who = "Every member that needed the link" if sub else "Every member"
+        return dict(out, case="all_fail", text=f"{who} failed, so there is no passing member to compare with and no parameter to blame.")
     if n < SENS_MIN_N:
-        return dict(out, case="too_few", text=f"Only {n} members: at least {SENS_MIN_N} are needed to rank the parameters.")
+        only = f"The link was needed in only {n} of {total} members" if sub else f"Only {n} members"
+        return dict(out, case="too_few", text=f"{only}: at least {SENS_MIN_N} are needed to rank the parameters.")
     cols = [i for i, nm in enumerate(names) if nm in acting]
     if not cols:
         return dict(out, case="no_acting_input", text=f"No sampled input can act on the {quantity}, so none is ranked: it is decided by a draw of its own, "
                                                        "not by a column of the perturbation table.")
     nm, Ux = [names[i] for i in cols], U[:, cols]
     row = np.ones(n, bool) if margin is None else np.isfinite(margin)
+    cens: dict[str, Any] | None = None
     if margin is None or row.sum() < SENS_MIN_N:
         y, row, out["quantity"] = f.astype(float), np.ones(n, bool), "failure indicator"
         if min(k, n - k) < 3:
@@ -880,14 +949,18 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
                                                   f"their ranks among the {n} draws (0 is the lowest value) are {ranks}.")
     else:
         y = np.asarray(margin, float)
+        cens = _censored(y[row])
     param, s1, floor = sensitivity.dominant(nm, Ux[row], y[row])
     out.update(param=param, S1=s1, noise_floor=floor)
+    if cens:
+        out["censored"] = cens
+    of = f" among the {n} of {total} members that needed the link" if sub else ""
     if param is not None:
         by = f" by {s1[param] - floor:.3f}" if round(s1[param], 2) == round(floor, 2) else ""                  # agree to two places: say how far apart they are
-        return dict(out, case="ranked", text=f"{param} has the largest first-order index (S1 {s1[param]:.3f}) for the {out['quantity']}, "
+        return dict(out, case="ranked", text=f"{param} has the largest first-order index (S1 {s1[param]:.3f}) for the {out['quantity']}{of}, "
                                              f"above the {floor:.3f} that unrelated outcomes reach at this member count{by}.")
     top = max(s1, key=lambda p: s1[p])
-    return dict(out, case="nothing_above_floor", text=f"No parameter clears the noise floor for the {out['quantity']} (largest S1 {s1[top]:.3f}, {top}; "
+    return dict(out, case="nothing_above_floor", text=f"No parameter clears the noise floor for the {out['quantity']}{of} (largest S1 {s1[top]:.3f}, {top}; "
                                                       f"floor {floor:.3f}): the sample cannot rank them, which is not the same as none mattering.")
 
 
@@ -951,7 +1024,14 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         f = ~np.asarray(r["success"], bool)
         n = len(f)
         acting = link_acts(lk_ends[lid], {e: res["vehicles"][e]["class"] for e in (lk_ends[lid]["a"], lk_ends[lid]["b"]) if e in res["vehicles"]})
-        sens = _sensitivity(names, U, f, acting, np.asarray(r["frac"], float), "fraction of the required moments the link worked")
+        # ONE definition of "the members that needed the link" (round 21, M-1): a member with need_count 0 has frac 1.0 by default and says nothing about the
+        # link's performance, so what is ABOUT the link's performance (the sensitivity, the median and 10th percentile of the pass fraction) reads these members
+        # only. The verdict stays on all members (DECISIONS 997). A link no member needed keeps the all-member values (they are all the default), as does a
+        # result that holds no need_count.
+        n_needed = int(np.sum(np.asarray(r["need_count"]) > 0)) if "need_count" in r else None
+        on = np.asarray(r["need_count"]) > 0 if n_needed else np.ones(n, bool)
+        frac = np.asarray(r["frac"], float)
+        sens = _sensitivity(names, U[on], f[on], acting, frac[on], "fraction of the required moments the link worked", total=n)
         kind, need = r.get("invalid_kind"), float(np.sum(r.get("need_count", 0)))
         nc = _median_count(r["need_count"]) if "need_count" in r else None            # required samples per member: what the required fraction is resolved on
         rf = lk_ends[lid]["required_fraction"]
@@ -960,14 +1040,17 @@ def summarize(res: dict[str, Any], names: list[str], mission: dict[str, Any], n_
         if nc is not None and need == 0:                                          # no member needed it (a median of 0 alone is not that: 10 members may have)
             v = dict(v, verdict=NOT_EXERCISED, note=NOT_EXERCISED_NOTE)
         out["links"][lid] = dict(n=n, k_fail=int(f.sum()), verdict=v, method=r["method"],
-                                 frac_median=float(np.median(r["frac"])), frac_p10=float(np.percentile(r["frac"], 10)),
+                                 frac_median=float(np.median(frac[on])), frac_p10=float(np.percentile(frac[on], 10)),
                                  margin_db_median=float(np.nanmedian(r["margin_db"])) if np.any(np.isfinite(r["margin_db"])) else None,
                                  margin_kind=r.get("margin_kind"), frac_beyond_horizon=bad if kind == "beyond_horizon" else None,
                                  frac_out_of_range=bad if kind == "out_of_range" else None,
                                  distance_km_median=float(np.nanmedian(r["dist_m"])) / 1e3 if np.any(np.isfinite(r.get("dist_m", np.nan))) else None,
                                  need_count_median=nc, granularity_ok=None if nc is None else nc > 0 and (rf >= 1.0 or 1.0 / nc <= 1.0 - rf + 1e-12),
-                                 n_never_required=int(np.sum(np.asarray(r["need_count"]) == 0)) if "need_count" in r else None,
+                                 n_never_required=int(np.sum(np.asarray(r["need_count"]) == 0)) if "need_count" in r else None, n_needed=n_needed,
                                  sensitivity=sens)
+        if "bellhop_spread_db" in r:  # an acoustic link: how far apart the runs of Bellhop's set were, per sample (None: no sample had two runs)
+            sp = np.asarray(r["bellhop_spread_db"], float)
+            out["links"][lid]["bellhop_spread_db_median"] = float(np.nanmedian(sp)) if np.any(np.isfinite(sp)) else None
     tests = [e["sensitivity"] for k in ("vehicles", "links") for e in out[k].values() if e["sensitivity"]["noise_floor"] is not None]  # a permutation test each
     for t in tests:
         if t["case"] == "ranked":
