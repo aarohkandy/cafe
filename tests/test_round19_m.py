@@ -219,3 +219,9 @@ def test_m12_every_error_and_warning_symptom_of_the_runbooks_lock_row_is_text_th
     for s in symptoms:
         for seg in re.split(r"<[^>]*>|\.\.\.", s.split(": ", 1)[1]):
             assert len(seg.strip()) < 10 or seg in code, (s, seg)
+
+
+def test_an_end_that_is_neither_a_vehicle_nor_the_ship_has_no_antenna_height():
+    """A shore station or an unknown id is not one height: no card figure is made up for it (the line no test of the merged tree ran)."""
+    from cafe.pm import report
+    assert report._end_antenna_m("shore", {"vehicles": [], "ship": {"id": "ship"}}, {}) is None
