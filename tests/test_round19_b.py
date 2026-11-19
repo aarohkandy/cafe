@@ -1,4 +1,6 @@
-"""Round 19, batch B: the link card's antenna-pair lookup (M-2), the sea state of its figures (M-3), the fix line of an older `flip.json` (M-4),
+"""Round 19, batch B: the link card's antenna-pair lookup (M-2; round 21, M-2: the card computes the pair's band live, so the tests of the row
+lookup, its tolerance and the nearest-row sentences were replaced, see tests/test_round21_b.py), the sea state of its figures (M-3), the fix line of an older
+`flip.json` (M-4),
 `same_members.measured` (M-13) and the tests of surviving mutants of the fix line (A-3) and the credibility lines (A-4). One regression test per fix, each
 seen to fail on 51eb433 (M-2 to M-4, M-13) or to kill the mutation it names (A-3, A-4: the reviewer's mutants were written against the code they read; each
 test was run against the equivalent mutation of the fixed code, see the hand-back).
@@ -18,7 +20,6 @@ from tests.test_round18_x import card
 
 ROOT = config.ROOT
 DEMO = config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml")
-TOL = cr.LOW_ANTENNA_ROW_TOL_M
 
 
 def l23():
@@ -38,23 +39,12 @@ def test_m2_a_height_a_rounding_off_a_row_is_that_row(h, row, figures, monkeypat
     assert note and f"({row})" in note and figures in note and "not among those measured" not in note
 
 
-def test_m2_the_card_says_what_height_it_took_when_it_is_off_the_row_by_less_than_the_tolerance(monkeypatch):
+def test_m2_a_height_off_a_row_is_printed_as_it_is_and_with_its_own_live_figures(monkeypatch):
+    """Round 21, M-2: the card no longer reads a height as the nearest row ('read as the measured 0.3 m with 15 m', which needed a 0.001 m tolerance): it prints
+    the height it has and the band of that pair, computed. 0.3004 m moves the 0.3 m row's figures by under 0.1 dB, so the digits are the row's."""
     note = card(0.3004, 15.0, monkeypatch)
-    assert "(0.3004 m with 15 m, read as the measured 0.3 m with 15 m)" in note and "+1.2 to +6.0 dB" in note
-    assert "read as" not in card(0.3, 15.0, monkeypatch)
-
-
-def test_m2_the_tolerance_keeps_a_printed_figure_to_the_tables_0_1_db_and_a_larger_round_one_does_not():
-    """Measured (model minus the Fresnel two-ray, as tests/test_round18_x.py's `measured`): over 0.001 m at either end no figure of any row moves by 0.1 dB.
-    Over 0.005 m the 0.1 m row moves by 0.45 dB (0.9 dB over 0.01 m), so 0.001 m is what the table's precision allows and the next round figure is not."""
-    worst = 0.0
-    for (lo, hi) in comms.LOW_ANTENNA_PAIR_BAND:
-        base = band(hi, lo)
-        for dl in (-TOL, TOL):
-            for dh in (-TOL, 0.0, TOL):
-                worst = max(worst, max(abs(a - b) for a, b in zip(band(hi + dh, lo + dl), base, strict=True)))
-    assert worst < 0.1, worst
-    assert max(abs(a - b) for a, b in zip(band(15.0, 0.1 + 0.005), band(15.0, 0.1), strict=True)) > 0.4 and TOL == 0.001
+    assert "for this pair of heights (0.3004 m with 15 m)" in note and "+1.2 to +6.0 dB (median +5.1)" in note and "read as" not in note
+    assert "for this pair of heights (0.3 m with 15 m)" in card(0.3, 15.0, monkeypatch)
 
 
 def test_m2_the_stated_move_per_0_01_m_of_the_lower_antenna_is_what_l23_prints():
@@ -65,28 +55,18 @@ def test_m2_the_stated_move_per_0_01_m_of_the_lower_antenna_is_what_l23_prints()
                     for (lo, hi) in comms.LOW_ANTENNA_PAIR_BAND if lo == low for s in (-0.01, 0.01))
         assert worst <= up and up - worst <= 0.1, (low, worst)
     assert "1.0 dB at 0.1 m, 0.4 dB at 0.3 m and 0.2 dB at 0.5 m (under 0.1 dB at 2.2 m)" in l23()
-    assert "A height within 0.001 m of a listed one is read as that one" in l23()
 
 
-def test_m2_a_height_just_above_0_5_m_or_off_a_row_is_not_silence_and_not_a_band(monkeypatch):
-    """0.51 m (a lab's CAD height for the Seaglider's assumed 0.5 m) printed nothing, and 0.3 m beside 0.52 m was 'not among those measured' with no word of
-    the nearest pair: the card says 'not measured', prints the heights, and says the nearest measured pair's margin is biased."""
-    note = card(0.51, 15.0, monkeypatch)
-    assert note.startswith("An end of this RF link has an antenna just above 0.5 m (up to 0.55 m): a (0.51 m).")
-    assert "this pair (a (0.51 m), ship (15 m)) is not among those measured" in note and "no error band is stated for this margin" in note
-    assert f"the nearest measured pair, 0.5 m with 15 m, has a biased margin ({cr.pair_effect((0.5, 15.0))})" in note and "dB (median" not in note
-    assert note.endswith("(CREDIBILITY, limitation L23).")
-    both = card(0.3, 0.52, monkeypatch)
-    assert both.startswith("An end of this RF link has an antenna below 0.5 m: a (0.3 m).")
-    assert "this pair (a (0.3 m), b (0.52 m)) is not among those measured" in both
-    assert f"the nearest measured pair, 0.3 m with 0.5 m, has a biased margin ({cr.pair_effect((0.3, 0.5))})" in both
-    off = card(0.302, 0.5, monkeypatch)                                                                       # 0.002 m off the 0.3 m row is not the row
-    assert "the nearest measured pair, 0.3 m with 0.5 m" in off and "dB (median" not in off
-    assert card(0.55, 15.0, monkeypatch) is not None and card(0.5501, 15.0, monkeypatch) is not None        # round 20, M-2: no cliff at 0.55 m any more
-    assert card(2.3, 15.0, monkeypatch) is None                                                              # the trigger now: the table's 2.2 m
-    assert "the nearest measured pair, 0.1 m with 15 m" in card(0.105, 15.0, monkeypatch)
-    far = card(0.4, 15.0, monkeypatch)                                                                        # 0.1 m off every row: nothing is near
-    assert "not among those measured" in far and "nearest measured pair" not in far
+def test_m2_a_height_just_above_0_5_m_or_off_a_row_is_not_silence_and_not_another_pairs_figures(monkeypatch):
+    """0.51 m (a lab's CAD height for the Seaglider's assumed 0.5 m) printed nothing, and 0.3 m beside 0.52 m was 'not among those measured'. Round 21, M-2:
+    every one of them prints its own live figures (the band of that pair, from `rfband.pair_band`, which tests/test_round21_b.py holds to the independent
+    reference), no sentence about a nearest row, and no height is a cliff: 0.55 m, 2.3 m and 5 m print too."""
+    for a, b in ((0.51, 15.0), (0.3, 0.52), (0.302, 0.5), (0.55, 15.0), (0.5501, 15.0), (2.3, 15.0), (5.0, 15.0), (0.105, 15.0), (0.4, 15.0), (0.45, 15.0)):
+        note = card(a, b, monkeypatch)
+        assert note and "not among those measured" not in note and "nearest measured pair" not in note and "envelope" not in note, (a, b)
+        mn, md, mx = band(max(a, b), min(a, b))
+        assert f"is {mn:+.1f} to {mx:+.1f} dB (median {md:+.1f}) for this pair of heights" in note, (a, b, note)
+        assert note.endswith("(CREDIBILITY, limitation L23).")
 
 
 def test_m2_a_ship_without_a_height_is_the_height_stage_1_used_and_not_no_single_height(monkeypatch):
@@ -96,13 +76,14 @@ def test_m2_a_ship_without_a_height_is_the_height_stage_1_used_and_not_no_single
     mission = dict(vehicles=[dict(id="g", platform="seaglider")], ship=dict(id="ship"))
     lk = dict(kind="rf", a="g", b="ship")
     note = report._low_antenna_note(lk, mission)
-    assert "this pair (g (0.5 m), ship (10 m)) is not among those measured" in note and "no single height" not in note and "dB (median" not in note
+    mn, md, mx = band(10.0, 0.5)
+    assert "no single height" not in note and f"is {mn:+.1f} to {mx:+.1f} dB (median {md:+.1f}) for this pair of heights (0.5 m with 10 m)" in note
     with_uas = dict(mission, vehicles=[*mission["vehicles"], dict(id="u", platform="quad_uas", base="ship")])
-    assert "ship (10 m)" in report._low_antenna_note(lk, with_uas)                                          # the platform file's own 10 m
+    assert "(0.5 m with 10 m)" in report._low_antenna_note(lk, with_uas)                                    # the platform file's own 10 m
     monkeypatch.setattr(uas, "load_platform", lambda *a: dict(radio=dict(ship_antenna_height_m=15.0)))
     note = report._low_antenna_note(lk, with_uas)                                                           # a UAS platform that says 15 m: the measured pair
     assert "-2.9 to +2.2 dB" in note and "(0.5 m with 15 m)" in note
-    assert "ship (0.52 m)" in report._low_antenna_note(lk, dict(with_uas, ship=dict(id="ship", antenna_height_m=0.52)))
+    assert "(0.5 m with 0.52 m)" in report._low_antenna_note(lk, dict(with_uas, ship=dict(id="ship", antenna_height_m=0.52)))
 
 
 def test_m2_the_names_l23_gives_the_heights_are_the_platform_files_heights():
@@ -141,7 +122,8 @@ def test_m3_the_card_says_the_figures_are_for_hs_0(monkeypatch):
     """The card printed the table as 'its loss minus the Fresnel loss is +11.4 to +16.0 dB' with no sea state; at Hs 2 m the 0.1 m pair's minimum is +6.1."""
     for h in (0.1, 0.3, 0.5):
         note = card(h, 15.0, monkeypatch)
-        assert "against a Fresnel two-ray at Hs 0 (a calm sea) from 300 m to the horizon its loss minus the Fresnel loss is" in note, h
+        assert ("against a Fresnel two-ray at Hs 0 (a calm sea) at 915 MHz from 300 m to the pair's radio horizon or 12 km its loss minus the Fresnel loss is"
+                in note), h
         assert "at a wave height of 1 to 3 m these figures are different (L23)" in note, h
         assert note.endswith("nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
 

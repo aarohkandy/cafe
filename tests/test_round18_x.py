@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from cafe.pm import config, credibility, report, stage1, whatif
-from cafe.pm.physics import comms, glider
+from cafe.pm.physics import comms, glider, rfband
 from tests.test_round16_report import data_dir  # noqa: F401  (autouse)
 from tests.test_round17_d import F915
 from tests.test_round18_a import WHOLE, fake_runs, flip_report, search
@@ -43,10 +43,11 @@ def floats(text):
 # ---------------------------------------------------------------------------------------------------------------- item 1: the direction is of the pair
 
 def test_x1_the_table_is_the_measured_band_of_every_pair_to_0_1_db():
-    assert sorted(comms.LOW_ANTENNA_PAIR_BAND) == sorted(PAIRS)
+    """Round 21, M-2: the table is a test fixture now, held to the independent recomputation AND to the live band the card prints (`rfband.pair_band`)."""
+    assert sorted(comms.LOW_ANTENNA_PAIR_BAND) == sorted(PAIRS) == sorted(credibility.L23_PAIRS)
     for pair in PAIRS:
-        for got, printed in zip(measured(pair), comms.LOW_ANTENNA_PAIR_BAND[pair], strict=True):
-            assert abs(got - printed) <= 0.1, (pair, measured(pair))
+        for got, printed, live in zip(measured(pair), comms.LOW_ANTENNA_PAIR_BAND[pair], rfband.pair_band(*pair)[:3], strict=True):
+            assert abs(got - printed) <= 0.1 and abs(live - printed) <= 0.1 and f"{live:+.1f}" == f"{printed:+.1f}", (pair, measured(pair))
 
 
 def test_x1_a_positive_figure_is_a_margin_too_low():
@@ -86,18 +87,23 @@ def test_x1_the_seaglider_with_the_usv_is_too_low_not_too_high(monkeypatch):
     assert "overstated by up to 2.2 dB (the margin too low) and understated by up to 2.9 dB (the margin too high)" in with_ship
 
 
-def test_x1_a_partner_height_that_was_not_measured_is_said_to_be_not_measured(monkeypatch):
-    uas = report._low_antenna_note(dict(kind="rf", a="glider_2n", b="uas"), DEMO)  # a UAS flies at 18 to 108 m: not one of the measured heights
-    assert "is not among those measured" in uas and "no error band is stated" in uas and "uas (no single height)" in uas
-    assert "dB (median" not in uas and "too low" not in uas and "too high" not in uas                      # no other pair's figure stands in for it
-    for h2 in (0.4, 1.0, 5.0, 10.0, 15.1):  # between or beyond the measured heights, near ones included
+def test_x1_a_partner_height_that_was_not_listed_prints_its_own_figures_and_no_other_pairs(monkeypatch):
+    """Round 21, M-2 (rounds 18 to 20: 'is not among those measured ... no error band is stated'): a UAS at 18.1 to 108.1 m, a height between or beyond the
+    listed ones, a ship mast of 10 m: each prints the band of ITS pair, the independent reference's, and no word of a pair that was not measured."""
+    uas = report._low_antenna_note(dict(kind="rf", a="glider_2n", b="uas"), DEMO)
+    assert "is not among those measured" not in uas and "no error band is stated" not in uas and "uas (flown at 18.1, 38.1, 68.1, 108.1 m)" in uas
+    for h in (18.1, 38.1, 68.1, 108.1):
+        mn, md, mx = band(h, 0.3)
+        assert f"0.3 m with {h:g} m {mn:+.1f} to {mx:+.1f} dB (median {md:+.1f})" in uas, h
+    for h2 in (0.4, 1.0, 5.0, 10.0, 15.1):
         note = card(0.3, h2, monkeypatch)
-        assert "is not among those measured" in note and "dB (median" not in note, h2
+        mn, md, mx = band(h2, 0.3)
+        assert f"is {mn:+.1f} to {mx:+.1f} dB (median {md:+.1f}) for this pair of heights ({0.3:g} m with {h2:g} m)" in note, h2
     monkeypatch.undo()
-    ship10 = dict(DEMO, ship=dict(DEMO["ship"], antenna_height_m=10.0))                                    # a ship mast of 10 m is not the measured 15 m
+    ship10 = dict(DEMO, ship=dict(DEMO["ship"], antenna_height_m=10.0))                                    # a ship mast of 10 m
     note = report._low_antenna_note(dict(kind="rf", a="glider_eq", b="ship"), ship10)
-    assert "is not among those measured" in note and "dB (median" not in note
-    assert "glider_2n (0.3 m), usv (2.2 m)" not in uas                                                      # the UAS is named without a height
+    mn, md, mx = band(10.0, 0.5)
+    assert f"is {mn:+.1f} to {mx:+.1f} dB (median {md:+.1f}) for this pair of heights (0.5 m with 10 m)" in note
 
 
 def test_x1_the_start_of_each_sentence_is_the_one_round_17_and_18_pinned(monkeypatch):
@@ -108,7 +114,7 @@ def test_x1_the_start_of_each_sentence_is_the_one_round_17_and_18_pinned(monkeyp
 
 def test_x1_l23_states_every_pairs_figures_and_direction_not_a_pooled_one():
     t = {x["id"]: x for x in credibility.LIMITATIONS}["L23"]["text"]
-    assert t.startswith("RF links to a low antenna, an antenna below 0.5 m or the USV's 2.2 m whip:")
+    assert t.startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip up to a UAS at 108 m:")
     for pair in PAIRS:
         mn, md, mx = measured(pair)
         m = re.search(rf"(?<![\d.]){pair[0]:g} m \([^)]*\) with {pair[1]:g} m \([^)]*\) ([+-][\d.]+) to ([+-][\d.]+) dB \(median ([+-][\d.]+)\), "
@@ -126,7 +132,7 @@ def test_x1_l23_states_every_pairs_figures_and_direction_not_a_pooled_one():
             assert e and abs(float(e.group(1)) - mx) <= 0.1 and abs(float(e.group(2)) + mn) <= 0.1, (pair, effect)
     for gone in ("within 3.3 dB", "at worst understates", "can be too high; nearer", "so there the margin, the USV whip's included", "never too high"):
         assert gone not in t, gone
-    assert "is not measured and no band is stated for it" in t and "UAS's 18 to 108 m" in t
+    assert "none of it is a table row" in t and "the USV's whip" in t and "108.1 m (its highest)" in t
     assert "understated by up to 5.0 dB" in t and "nearer than 300 m none of this is stated" in t
 
 
@@ -249,8 +255,8 @@ def test_x4_a_baseline_that_was_not_run_does_not_name_one_cause_when_there_are_t
 
 
 def test_x1_a_band_wholly_below_zero_reads_margin_too_high(monkeypatch):
-    """No measured pair has a loss understated everywhere today; a re-measured one would, and the direction must follow its signs (table patched)."""
-    monkeypatch.setitem(comms.LOW_ANTENNA_PAIR_BAND, (2.2, 2.2), (-2.4, -1.2, -0.3))
+    """No measured pair has a loss understated everywhere today; a re-measured one would, and the direction must follow its signs (the live band patched)."""
+    monkeypatch.setattr(rfband, "pair_band", lambda h1, h2, f_hz=rfband.F_DEFAULT_HZ: (-2.4, -1.2, -0.3, 0.0))
     assert credibility.pair_effect((2.2, 2.2), True) == "margin too high"
     long = credibility.pair_effect((2.2, 2.2))
     assert "understated by 0.3 to 2.4 dB" in long and "margin is too high" in long and "too low" not in long
