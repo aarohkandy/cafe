@@ -31,7 +31,7 @@ After = r20-d. Progress characters counted from the log, rc from the log.
 |---|---|---|
 | nested `[` x 100000 (with a good quad file beside it) | FAIL (RecursionError) | pass |
 | nested `{"a":` x 100000 | FAIL | pass |
-| `dirs` of `+x` only; of five directions (each of `-z`, `+z` left out); of `-z` only (4 cases) | FAIL ("seeded") | pass |
+| `dirs` of `+x` only; of `-z` only; of five (`+x` left out; `-z` left out) (4 cases) | FAIL ("seeded") | pass |
 | gci absent / None / "0.1" / True / [0.1] / {} (6 cases) | FAIL ("seeded") | pass |
 | gci 0, 0.0, 3, 0.05, NaN, inf are seeded (6) | pass | pass (guard against a finite-only check) |
 | a seventh direction `x+y15` | pass (subset check) | pass |
@@ -77,7 +77,7 @@ No assertion was weakened or removed.
 
 ## Leftovers
 
-- Orca: `~/cafe-worker/cafe/pm_r20d` and `pm_r20d_base` (synced trees), logs `~/cafe-worker/logs/r20d_1.log` to `r20d_8.log`, finished tmux sessions gone; no running job of mine.
+- Orca: `~/cafe-worker/cafe/pm_r20d` and `pm_r20d_base` (synced trees), logs `~/cafe-worker/logs/r20d_1.log` to `r20d_8.log`, each job's log ends in rc=N, so its session has finished; no running job of mine.
   Nothing outside `~/cafe-worker`.
 - Laptop: throwaway worktree `/Users/aaroh/Downloads/everything/cafe-r20d-base` (detached at 8e22951, with the mutated-then-restored `_seed.py` and copies of my test
   files; delete with `git worktree remove --force` when the lead is done with it as evidence). Nothing pushed.
