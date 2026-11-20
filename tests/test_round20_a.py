@@ -58,7 +58,8 @@ def test_the_margin_is_the_lower_of_the_two_directions_whichever_sends_the_large
 def test_the_label_says_the_refined_margin_is_the_lower_of_the_two_directions_only_where_bellhop_ran(monkeypatch):
     r, rev, _ = scene(monkeypatch, 7.0, 3.0)
     for x in (r, rev):
-        assert x["method"] == ("Thorp/Stojanovic budget on the slant range, Bellhop on 434 of 434 needed in-range samples "  # round 21, M-3 and M-4
+        assert x["method"] == ("Thorp/Stojanovic budget on the slant range, Bellhop on 434 of 434 needed in-range samples, "
+                               "each member on one pair of transducer depths, not one per sample "  # round 21, M-3 and M-4; the depth sentence: round 22, M-3
                                "(the lowest of 3 runs: as named, swapped, both ends at least 5 m deep)")
     monkeypatch.setattr(comms, "bellhop_available", lambda: False)                          # no Bellhop: the Thorp number, no claim about two directions
     out, _ = acoustic_scene(M=2, far=(0, 0))

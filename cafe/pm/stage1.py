@@ -669,24 +669,28 @@ def _bellhop_member(env: Any, modem: str, band: str, lon: float, lat: float, t: 
 
 
 def _bellhop_label(info: dict[str, Any]) -> str:
-    """The method of an acoustic link some of whose needed in-range samples Bellhop refined or was not asked about: `info` is `_acoustic`'s count (done, total,
-    capped, beyond, runs_lo, runs_hi) of one batch or the sum of several (`merge`), so the label describes the members the summary does. `total` is the
-    samples Bellhop was to refine (within the cap of a pass or a fail), `done` those it did, `beyond` those left on Thorp for being past the cap."""
-    done, total, capped, beyond, lo, hi = (info[k] for k in ("done", "total", "capped", "beyond", "runs_lo", "runs_hi"))
+    """The method of an acoustic link some of whose needed in-range samples Bellhop refined, would have refined or was not asked about: `info` is
+    `_acoustic`'s count (done, total, capped, beyond, runs_lo, runs_hi, ran) of one batch or the sum of several (`merge`), so the label describes the members
+    the summary does, in whatever order. `total` is the samples Bellhop is to refine (within the cap of a pass or a fail), `done` those it did, `beyond`
+    those left on Thorp for being past the cap, `ran` whether Bellhop was available (False: `done` is 0 and `total` keep their Thorp margin)."""
+    done, total, capped, beyond, lo, hi, ran = (info[k] for k in ("done", "total", "capped", "beyond", "runs_lo", "runs_hi", "ran"))
     cap = f"{comms.BELLHOP_EXCESS_CAP_DB:g} dB"
+    further = (f"; a further {beyond} needed in-range samples are more than {cap} from a pass or a fail on Thorp and keep that margin: the Bellhop excess is "
+               f"held within {cap}, so it cannot change which they are") if beyond else ""
     if not total:                                                    # every needed in-range sample was beyond the cap: Bellhop was not asked at all
         return (f"Thorp/Stojanovic budget on the slant range; Bellhop was not run: all {beyond} needed in-range samples are more than {cap} from a pass or a "
                 f"fail on Thorp, and the Bellhop excess is held within {cap}, so it cannot change which they are")
+    if not ran:
+        return f"{comms.THORP_ONLY_LABEL}: {total} needed in-range samples that Bellhop would refine keep their Thorp margin{further}"
     out = f"Thorp/Stojanovic budget on the slant range, Bellhop on {done} of {total} needed in-range samples"
+    if done:
+        out += ", each member on one pair of transducer depths, not one per sample"
     if hi is not None and hi > 1:
         out += f" (the lowest of {hi if lo == hi else f'{lo} to {hi}'} runs: as named, swapped, both ends at least {comms.BELLHOP_MIN_DEPTH_M:g} m deep)"
     if capped:
         out += (f"; {capped} of them held at the assumed {comms.BELLHOP_EXCESS_CAP_DB:g} dB bound on the Bellhop excess "
                 "(no ray reached the receiver, or almost none)")
-    if beyond:
-        out += (f"; a further {beyond} needed in-range samples are more than {cap} from a pass or a fail on Thorp and keep that margin: the Bellhop excess is "
-                f"held within {cap}, so it cannot change which they are")
-    return out + ("" if done == total else "; the rest Thorp only (no sound-speed profile or depth there)")
+    return out + further + ("" if done == total else "; the rest Thorp only (no sound-speed profile or depth there)")
 
 
 def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: NDArray[Any], need: NDArray[np.bool_], valid: NDArray[np.bool_],
@@ -702,25 +706,25 @@ def _acoustic(modem: str, band: str, d: NDArray[Any], dz: NDArray[Any], wind: ND
     only the samples within +-modems.yaml ambiguous_db of 0; round 21's probes (made-up profiles) found Thorp passes up to +21 dB that Bellhop turns into
     fails, because the excess Bellhop computes (0 to 40 dB there) is larger than any fixed band. The NUMBER of Bellhop runs per member does not depend on
     how many samples it carries (one run on a range grid, interpolated: `comms.BELLHOP_GRID_M`), but its time depends on the span of ranges: measured on
-    orca, one call is 0.2 s to 6 km and 2 s to 20 km and 6 s to 40 km. The band is kept only where Bellhop cannot refine (it is not available): those
-    samples keep the Thorp margin and the label says how many were ambiguous.
+    orca, one call is 0.2 s to 6 km and 2 s to 20 km and 6 s to 40 km. Where Bellhop is not available (`make install` builds none) the same samples
+    are counted as `total` with `ran` False, keep the Thorp margin, and the label says so (round 22, M-2): one count record for both paths.
     (ponytail: one profile and depth pair per member and link, not per sample; per-sample runs cost ~0.2 s each, upgrade if a link's profile or depth
-    changes along the track: a link `when: always` to a submerged glider spans its dive cycle, and the median depth is one number for it.)"""
+    changes along the track: a link `when: always` to a submerged glider spans its dive cycle, and the median depth is one number for it. The label says
+    "each member on one pair of transducer depths", round 22, M-3.)"""
     res = comms.acoustic_link(d, modem, band, wind, dz=dz)
     margin = np.array(res["margin"].value, float)
     # not the helper's own label: it was called with no profile, and says "no sound-speed profile supplied" for any sample in its band, needed or not
     # (round 21 merge)
     label = comms.THORP_DECIDES_LABEL
     spread = np.full(margin.shape, np.nan)
-    if not comms.bellhop_available():
-        amb = np.broadcast_to(np.asarray(res.get("ambiguous", False)), margin.shape) & need
-        return margin, (f"{comms.THORP_ONLY_LABEL} ({int(amb.sum())} ambiguous samples)" if amb.any() else label), None, spread
     cand = need & valid
     far = cand & (np.abs(margin) > comms.BELLHOP_EXCESS_CAP_DB)
     refine = cand & (np.abs(margin) <= comms.BELLHOP_EXCESS_CAP_DB)  # a NaN margin (no wind there) is neither: it stays NaN, a lost link, and costs no run
     if not (refine.any() or far.any()):
         return margin, label, None, spread
-    info: dict[str, Any] = dict(done=0, total=int(refine.sum()), capped=0, beyond=int(far.sum()), runs_lo=None, runs_hi=None)
+    info: dict[str, Any] = dict(done=0, total=int(refine.sum()), capped=0, beyond=int(far.sum()), runs_lo=None, runs_hi=None, ran=comms.bellhop_available())
+    if not info["ran"]:                                       # the same count as the path that refines: the samples Bellhop would have refined keep Thorp
+        return margin, _bellhop_label(info), info, spread
     runs: list[int] = []
     for m in map(int, np.flatnonzero(refine.any(0))):
         i = np.flatnonzero(refine[:, m])
@@ -891,7 +895,8 @@ def merge(batches: list[dict[str, Any]]) -> dict[str, Any]:
             if infos := [x for b in batches if (x := b["links"][lid].get("bellhop")) is not None]:
                 runs = [i[k] for i in infos for k in ("runs_lo", "runs_hi") if i[k] is not None]
                 tot = {k: sum(i[k] for i in infos) for k in ("done", "total", "capped", "beyond")}
-                out["links"][lid]["method"] = _bellhop_label(dict(tot, runs_lo=min(runs, default=None), runs_hi=max(runs, default=None)))
+                out["links"][lid]["method"] = _bellhop_label(dict(tot, runs_lo=min(runs, default=None), runs_hi=max(runs, default=None),
+                                                                   ran=any(i["ran"] for i in infos)))
         out["links"][lid]["hs_filled"] = sum(b["links"][lid].get("hs_filled", 0) for b in batches)
     if "seeds" in batches[0]:
         out["seeds"] = {vid: {st: [b["seeds"][vid][st] for b in batches] for st in sd} for vid, sd in batches[0]["seeds"].items()}
