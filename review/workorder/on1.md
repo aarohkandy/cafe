@@ -34,6 +34,6 @@ None ran (it is called only inside a glider LES window). The Seaglider's hull wa
 - The plan's own note is wrong at this budget: it says 120 points and then "the emulator will not train from this run alone" in the same sentence (`plan.json` `emulator.note`, `trains: true`).
 
 ## What this run settles for the work order
-- Done item 3 (an emulator that trains, passes its gate and answers) holds for the UAS, on this code digest; a `whatif` command against the run is still to be made.
+- Done item 3 (an emulator that trains, passes its gate and answers) holds for the UAS, on this code digest. The command `whatif --run /data/runs/on1 --shift 30h` (job `on1_whatif`, `rc=0`, from the unchanged `8ecf0e7` tree) answered the UAS as `[EMULATED, training-set distance 0.72 of limit 2.49]`: NO-GO (P(fail) 0.961) to NO-GO (0.981, 0.939 to 0.994), not distinguishable from the baseline. The other three vehicles were answered by Stage 1, each with its emulator's reason.
 - Done items 1 and 2 need code: the USV hull CFD exists but does not converge as configured; glider CFD and CPU FEA do not exist yet.
 - The two idle `hull_fs` cases show the stage-3 gate counts the planned seconds of a case, not the measured ones.
