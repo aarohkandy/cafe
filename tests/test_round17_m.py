@@ -244,6 +244,7 @@ def test_r17_m_c_the_report_says_which_station_value_was_used_when_the_task_give
 # ---------------------------------------------------------------------------------------------------------- (d) the link card names L23
 
 def test_r17_m_d_the_low_antenna_sentence_of_the_link_card_names_the_limitation_row():
-    note = report._low_antenna_note(dict(id="x", kind="rf", a="glider_2n", b="usv"), config.load_mission(REAL / "missions" / "tepex_c_demo.yaml"))
+    demo = config.load_mission(REAL / "missions" / "tepex_c_demo.yaml")
+    note = report._low_antenna_note(dict(id="x", kind="rf", when="uas_airborne", a="glider_2n", b="usv"), demo)
     assert note and note.endswith("(CREDIBILITY, limitation L23).")
     assert "L23" in {x["id"] for x in cr.LIMITATIONS} and "antenna below 0.5 m" in {x["id"]: x for x in cr.LIMITATIONS}["L23"]["text"]

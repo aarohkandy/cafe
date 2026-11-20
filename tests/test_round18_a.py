@@ -14,7 +14,7 @@ from tests.test_cli import wi, whatif_args  # noqa: F401  (wi is a fixture)
 from tests.test_round16_report import data_dir  # noqa: F401  (autouse)
 from tests.test_round17_a import edit_json, rf, usv_fix
 from tests.test_round17_d import F915, fresnel_loss_db
-from tests.test_round18_b import band
+from tests.test_round22_b import NOTE, figs
 from tests.test_whatif import ENV, GL, GSC, TRACK, STORM, plan_for, storm_em  # noqa: F401  (storm_em is a fixture)
 
 pytestmark = pytest.mark.usefixtures("emulator_speed_not_tested")
@@ -190,17 +190,18 @@ def two_gliders(a, b):
     return m
 
 
-CASE = ("{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) at 915 MHz from 300 m to the pair's "
-        "radio horizon or 12 km its loss minus the Fresnel loss is {figures} for this pair of heights ({pair}): {effect}; {off} of 400 samples are more than "
-        "3 dB off; at a wave height of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
-# round 19, M-3: "at Hs 0" and what it leaves out; round 21, M-2: the frequency, the 12 km and the number of samples more than 3 dB off (`{off}`: measured
-# with rfband.pair_band on orca, each the count of the 400 samples of that pair)
-OFF = {"0.3 m with 0.5 m": 400, "0.3 m with 0.3 m": 400, "0.5 m with 0.5 m": 400, "0.3 m with 2.2 m": 400, "0.3 m with 15 m": 390, "0.5 m with 2.2 m": 0,
-       "0.5 m with 15 m": 0}                                  # samples of 400 more than 3 dB off, by pair (rfband.pair_band on orca; the table's own pairs)
+CASE = ("{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) at 915 MHz, over 400 evenly spaced "
+        "ranges from 300 m to the pair's radio horizon or 12 km, the model's loss minus the Fresnel loss is described by its median and by how many of the "
+        "sampled ranges are more than 3 dB off, for this pair of heights ({pair}): {figures}. {note}; at a wave height of 1 to 3 m these figures are different "
+        "(L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
+# round 19, M-3: "at Hs 0" and what it leaves out; round 21, M-2: the frequency, the 12 km and the samples more than 3 dB off; round 22, M-1: the median
+# and the counts of each sign (`figs`, from the independent reference, tests/test_round22_b.py), the note that these are not the worst case, no extreme
+PAIR_HEIGHTS = {"0.3 m with 0.5 m": (0.3, 0.5), "0.3 m with 0.3 m": (0.3, 0.3), "0.5 m with 0.5 m": (0.5, 0.5), "0.3 m with 2.2 m": (0.3, 2.2),
+                "0.3 m with 15 m": (0.3, 15.0), "0.5 m with 2.2 m": (0.5, 2.2), "0.5 m with 15 m": (0.5, 15.0)}
 
 
-def case(**kw):
-    return CASE.format(off=OFF[kw["pair"]], **kw)
+def case(start, pair):
+    return CASE.format(start=start, pair=pair, figures=figs(*PAIR_HEIGHTS[pair]), note=NOTE)
 
 
 def uas_card_ok(note, low, start):
@@ -209,38 +210,30 @@ def uas_card_ok(note, low, start):
     assert note.startswith(start) and "uas (flown at 18.1, 38.1, 68.1, 108.1 m)" in note
     assert "not among those measured" not in note and "no error band" not in note
     for h in (18.1, 38.1, 68.1, 108.1):
-        mn, md, mx = band(h, low)
-        assert f"{low:g} m with {h:g} m {mn:+.1f} to {mx:+.1f} dB (median {md:+.1f})" in note, (low, h)
+        assert f"{low:g} m with {h:g} m {figs(low, h)}" in note, (low, h)
 
 
-LOW = "the loss is overstated by {a} dB, so the margin is too low by that much and a GO can show as MARGINAL or NO-GO"
-BOTH = "the loss is overstated by up to {hi} dB (the margin too low) and understated by up to {lo} dB (the margin too high)"
-NOT_MEASURED = ("{start} The two-ray model takes the ground reflection as -1, which cancels the two rays as an antenna goes to the surface, and its error "
-                "is of the pair of heights: this pair ({ends}) is not among those measured (L23 lists them), so no error band is stated for this margin "
-                "(CREDIBILITY, limitation L23).")
-BOTH_LOW = (("seaglider", "slocum", "glider_eq (0.5 m), glider_2n (0.3 m)", "0.3 m with 0.5 m", "+9.0 to +9.3 dB (median +9.3)", "9.0 to 9.3"),
-            ("slocum", "slocum", "glider_eq (0.3 m), glider_2n (0.3 m)", "0.3 m with 0.3 m", "+11.3 to +11.4 dB (median +11.4)", "11.3 to 11.4"),
-            ("seaglider", "seaglider", "glider_eq (0.5 m), glider_2n (0.5 m)", "0.5 m with 0.5 m", "+6.4 to +6.7 dB (median +6.7)", "6.4 to 6.7"))
+BOTH_LOW = (("seaglider", "slocum", "glider_eq (0.5 m), glider_2n (0.3 m)", "0.3 m with 0.5 m"),
+            ("slocum", "slocum", "glider_eq (0.3 m), glider_2n (0.3 m)", "0.3 m with 0.3 m"),
+            ("seaglider", "seaglider", "glider_eq (0.5 m), glider_2n (0.5 m)", "0.5 m with 0.5 m"))
 
 
 def test_m3_case_1_both_ends_at_or_below_0_5_m_say_the_figures_of_their_pair_and_that_a_go_can_show_as_no_go():
     """Round 18 printed '6 to 11 dB' and the three pairs' medians in one sentence; the addendum (DECISIONS 991) prints the pair's own figures."""
-    for a, b, ends, pair, figures, a_db in BOTH_LOW:
+    for a, b, ends, pair in BOTH_LOW:
         start = f"Both ends of this RF link have an antenna of 0.5 m or lower: {ends}."
-        want = case(start=start, figures=figures, pair=pair, effect=LOW.format(a=a_db))
+        want = case(start, pair)
         assert report._low_antenna_note(rf("glider_eq", "glider_2n"), two_gliders(a, b)) == want, (a, b)
         rev = ", ".join(reversed(ends.split(", ")))
-        want = case(start=start.replace(ends, rev), figures=figures, pair=pair, effect=LOW.format(a=a_db))
+        want = case(start.replace(ends, rev), pair)
         assert report._low_antenna_note(rf("glider_2n", "glider_eq"), two_gliders(a, b)) == want, (a, b)
 
 
 def test_m3_case_2_one_end_below_0_5_m_with_a_partner_that_was_measured_says_its_figures_and_a_partner_that_was_not_is_said_not_to_be():
     start = "An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m)."
-    assert report._low_antenna_note(rf("glider_2n", "usv"), DEMO) == case(start=start, figures="+5.5 to +6.2 dB (median +6.2)", pair="0.3 m with 2.2 m",
-                                                                                 effect=LOW.format(a="5.5 to 6.2"))
+    assert report._low_antenna_note(rf("glider_2n", "usv"), DEMO) == case(start, "0.3 m with 2.2 m")
     assert report._low_antenna_note(rf("usv", "glider_2n"), DEMO) == report._low_antenna_note(rf("glider_2n", "usv"), DEMO)   # the low end as b (A-5)
-    assert report._low_antenna_note(rf("glider_2n", "ship"), DEMO) == case(start=start, figures="+1.2 to +6.0 dB (median +5.1)", pair="0.3 m with 15 m",
-                                                                                  effect=LOW.format(a="1.2 to 6.0"))      # the demo's ship mast is 15 m
+    assert report._low_antenna_note(rf("glider_2n", "ship"), DEMO) == case(start, "0.3 m with 15 m")      # the demo's ship mast is 15 m
     # a UAS (18 to 108 m) is no measured partner: the band of 2.2 m or of 15 m is not borrowed for it
     uas_card_ok(report._low_antenna_note(rf("glider_2n", "uas"), DEMO), 0.3, start + " ")
     uas_card_ok(report._low_antenna_note(rf("uas", "glider_2n"), DEMO), 0.3, start + " ")
@@ -251,11 +244,10 @@ def test_m3_case_3_an_end_of_exactly_0_5_m_says_the_direction_of_its_pair_and_wh
     first said 'at worst understates ... can be too high' for that pair (DECISIONS 991). With a 15 m partner the band crosses zero."""
     start = "An end of this RF link has an antenna of 0.5 m: glider_eq (0.5 m)."
     note = report._low_antenna_note(rf("glider_eq", "usv"), DEMO)
-    assert note == case(start=start, figures="+1.8 to +2.7 dB (median +2.6)", pair="0.5 m with 2.2 m", effect=LOW.format(a="1.8 to 2.7"))
+    assert note == case(start, "0.5 m with 2.2 m")
     assert "can be too high" not in note and "understates" not in note
     assert report._low_antenna_note(rf("usv", "glider_eq"), DEMO) == note
-    assert report._low_antenna_note(rf("glider_eq", "ship"), DEMO) == case(start=start, figures="-2.9 to +2.2 dB (median +1.3)", pair="0.5 m with 15 m",
-                                                                                  effect=BOTH.format(hi="2.2", lo="2.9"))
+    assert report._low_antenna_note(rf("glider_eq", "ship"), DEMO) == case(start, "0.5 m with 15 m")
     uas_card_ok(report._low_antenna_note(rf("glider_eq", "uas"), DEMO), 0.5, start + " ")
 
 

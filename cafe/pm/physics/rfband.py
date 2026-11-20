@@ -7,8 +7,11 @@ table four times (0.5, 0.55, 2.2 m, then every UAS link); the card now computes 
 
 The definition is that of `comms.LOW_ANTENNA_PAIR_BAND` and of tests/test_round18_b.py: Hs 0, 400 points from 300 m to the pair's radio horizon or 12 km (the
 nearer), the model's loss minus the Fresnel loss. Positive: the loss is overstated and the margin too low; negative: understated and the margin too high.
-It is a bound against a two-ray with no surface wave, at Hs 0 and not nearer than 300 m. The Fresnel two-ray is written again here from the published
+It is a difference from a two-ray with no surface wave, at Hs 0 and not nearer than 300 m. The Fresnel two-ray is written again here from the published
 formulas, as tests/test_round17_d.py writes it, and tests/test_round21_b.py compares the two to 1e-9 dB.
+Round 22, M-1: the minimum and the maximum of the 400 samples are sampling-limited (a finer sampling finds interference nulls and, for most pairs, larger
+differences), so they are returned and never printed; the median and the two signed counts are what the card and L23
+print (tests/test_round22_b.py holds them to a 40,000-point sampling).
 """
 import numpy as np
 
@@ -47,10 +50,12 @@ def valid_height(h: object) -> bool:
         return False
 
 
-def pair_band(h1: float, h2: float, f_hz: float = F_DEFAULT_HZ) -> tuple[float, float, float, float]:
-    """(minimum, median, maximum [dB] of the model's loss minus the Fresnel loss, the share of the `N_POINTS` samples more than `OFF_DB` off) for antennas at
-    heights h1 and h2 [m] above the sea, whichever is higher, at Hs 0 over `D_MIN_M` to the pair's radio horizon or `D_MAX_M`. A height that is not
-    `valid_height`, or a band that is not finite, is a ValueError: the caller says that no band is stated."""
+def pair_band(h1: float, h2: float, f_hz: float = F_DEFAULT_HZ) -> tuple[float, float, float, float, int, int]:
+    """(minimum, median, maximum [dB] of the model's loss minus the Fresnel loss, the share of the `N_POINTS` samples more than `OFF_DB` off, the number of
+    samples more than `OFF_DB` over (the loss overstated: the margin too low there), the number more than `OFF_DB` under (the margin too high there)) for
+    antennas at heights h1 and h2 [m] above the sea, whichever is higher, at Hs 0 over `D_MIN_M` to the pair's radio horizon or `D_MAX_M`. Both counts are
+    strict (a sample at exactly `OFF_DB` is in neither). A height that is not `valid_height`, or a band that is not finite, is a ValueError: the caller says
+    that no band is stated."""
     if not (valid_height(h1) and valid_height(h2) and 0.0 < f_hz < np.inf):
         raise ValueError(f"rfband.pair_band: heights {h1!r} and {h2!r} m must be from {MIN_HEIGHT_M:g} to {MAX_HEIGHT_M:g} m, "
                          f"and the frequency {f_hz!r} Hz finite and above 0")
@@ -59,4 +64,5 @@ def pair_band(h1: float, h2: float, f_hz: float = F_DEFAULT_HZ) -> tuple[float, 
     diff = comms.two_ray_loss_db(d, low, high, 0.0, f_hz) - fresnel_loss_db(d, low, high, f_hz)
     if not np.isfinite(diff).all():
         raise ValueError(f"rfband.pair_band: the band of {low:g} m with {high:g} m is not finite")
-    return float(diff.min()), float(np.median(diff)), float(diff.max()), float(np.mean(np.abs(diff) > OFF_DB))
+    over, under = int(np.sum(diff > OFF_DB)), int(np.sum(diff < -OFF_DB))
+    return float(diff.min()), float(np.median(diff)), float(diff.max()), (over + under) / N_POINTS, over, under

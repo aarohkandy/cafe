@@ -15,10 +15,11 @@ from tests.fixtures import pm_run
 from tests.test_report import _not_exercised, data_dir, edit_json, load, plain, set_link_fields  # noqa: F401  (data_dir is autouse)
 from tests.test_round17_d import F915, fresnel_loss_db
 from tests.test_round18_b import band
+from tests.test_round22_b import figs
 
 ROOT = config.ROOT
 DEMO = config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml")
-FIGURE = re.compile(r"[+-]\d+\.\d to [+-]\d+\.\d dB \(median [+-]\d+\.\d\)")
+FIGURE = re.compile(r"median [+-]\d+\.\d dB, at (?:\d+ of 400 sampled ranges|none of the 400)")
 L23_END = "(CREDIBILITY, limitation L23)."
 
 
@@ -46,7 +47,7 @@ VERIFIER = {(2.3, 10.0): (-3.4, -0.7, 0.4, 1), (3.0, 15.0): (-2.6, -0.1, 5.7, 0)
 def test_m2_the_live_band_reproduces_the_verifiers_figures_to_0_1_db(pair):
     """Before: no `rfband` (ImportError). The band the card prints for any pair is the one the merge measured for these eleven pairs, above the 2.2 m of the
     table."""
-    lo, med, hi, share = rfband.pair_band(*pair)
+    lo, med, hi, share, *_ = rfband.pair_band(*pair)
     want = VERIFIER[pair]
     assert all(abs(g - w) <= 0.1 for g, w in zip((lo, med, hi), want[:3], strict=True)), (pair, lo, med, hi)
     assert want[3] is None or abs(100 * share - want[3]) <= 1.0, (pair, share)
@@ -101,10 +102,10 @@ def test_m2_the_range_and_the_samples_are_300_m_to_the_horizon_or_12_km_in_400_p
 
 def test_m2_a_share_counts_the_samples_strictly_more_than_3_db_off(monkeypatch):
     """A model that is the Fresnel two-ray plus a constant: the band is that constant, and the share is 0 just inside 3 dB and 1 just beyond it."""
-    for shift, want in ((2.9999, 0.0), (3.0001, 1.0), (-2.9999, 0.0), (-3.0001, 1.0), (0.0, 0.0)):
+    for shift, want, signs in ((2.9999, 0.0, (0, 0)), (3.0001, 1.0, (400, 0)), (-2.9999, 0.0, (0, 0)), (-3.0001, 1.0, (0, 400)), (0.0, 0.0, (0, 0))):
         monkeypatch.setattr(comms, "two_ray_loss_db", lambda d, ht, hr, hs, f_hz, s=shift: fresnel_loss_db(d, ht, hr, f_hz) + s)
-        lo, med, hi, share = rfband.pair_band(2.2, 15.0)
-        assert (lo, med, hi) == pytest.approx((shift,) * 3, abs=1e-9) and share == want, shift
+        lo, med, hi, share, over, under = rfband.pair_band(2.2, 15.0)
+        assert (lo, med, hi) == pytest.approx((shift,) * 3, abs=1e-9) and share == want and (over, under) == signs, shift
 
 
 @pytest.mark.parametrize("h", [0.0999999, 0.0, -1.0, 1000.0001, float("nan"), float("inf"), -float("inf"), True, False, 10 ** 400, "3", None, [3.0]])
@@ -162,11 +163,11 @@ def mission_of(monkeypatch, ends, ship=None, uas_sorties=None):
     return mission
 
 
-def note_of(monkeypatch, a, b, ship=None, **kw):
+def note_of(monkeypatch, a, b, ship=None, when="uas_airborne", **kw):
     """The card of an RF link between ends `a` and `b` (each (id, (class, spec)) or "ship")."""
     ends = dict(x for x in (a, b) if x != "ship")
     mission = mission_of(monkeypatch, ends, ship=ship, **kw)
-    return report._low_antenna_note(dict(id="x", kind="rf", a="ship" if a == "ship" else a[0], b="ship" if b == "ship" else b[0]), mission)
+    return report._low_antenna_note(dict(id="x", kind="rf", when=when, a="ship" if a == "ship" else a[0], b="ship" if b == "ship" else b[0]), mission)
 
 
 def has_figure(note):
@@ -187,8 +188,7 @@ def test_m2_no_height_is_silent_two_gliders_and_a_glider_with_a_ship_over_the_wh
             b = ("b", ("glider", h2)) if kind == "glider" else "ship"
             note = note_of(monkeypatch, ("a", ("glider", h1)), b, ship=h2)
             assert has_figure(note), (h1, h2, kind, note)
-            lo, med, hi = band(max(h1, h2), min(h1, h2))
-            assert f"is {lo:+.1f} to {hi:+.1f} dB (median {med:+.1f}) for this pair of heights ({min(h1, h2):g} m with {max(h1, h2):g} m)" in note, (h1, h2)
+            assert f"for this pair of heights ({min(h1, h2):g} m with {max(h1, h2):g} m): {figs(min(h1, h2), max(h1, h2))}" in note, (h1, h2)
 
 
 @pytest.mark.parametrize("levels, deck, ant", [([10.0, 30.0, 60.0, 100.0], 8.0, 0.1), ([10.0], 8.0, 0.1), ([0.1], 0.0, 0.0), ([80.0, 350.0], 8.0, 0.1),
@@ -196,7 +196,7 @@ def test_m2_no_height_is_silent_two_gliders_and_a_glider_with_a_ship_over_the_wh
 @pytest.mark.parametrize("partner", [("usv", 2.2), ("glider", 0.3), ("glider", 0.5), ("glider", 15.0), ("uas", None)])
 def test_m2_a_uas_end_prints_the_band_of_each_of_its_legs_with_every_partner(monkeypatch, levels, deck, ant, partner):
     """Before: 'no single height', 'not among those measured', no figure. A UAS is taken at deck + level + the antenna above the body, the heights stage 1 gives
-    the link; the sentence names the heights it flew, each pair's band is the independent reference's, and the extremes over the pairs are named."""
+    the link; the sentence names the heights it flew and each pair's median and counts are the independent reference's (no extreme over the pairs)."""
     cls, h = partner
     other = ("b", ("uas", (levels, deck, ant))) if cls == "uas" else ("b", (cls, h))
     note = note_of(monkeypatch, ("u", ("uas", (levels, deck, ant))), other)
@@ -205,14 +205,10 @@ def test_m2_a_uas_end_prints_the_band_of_each_of_its_legs_with_every_partner(mon
     assert f"u (flown at {', '.join(f'{x:g}' for x in legs)} m)" in note and "the climbs between the legs pass other heights, which are not computed" in note
     pairs = sorted({tuple(sorted(p)) for p in itertools.product(legs, legs if cls == "uas" else [h])})
     for lo_h, hi_h in pairs:
-        lo, med, hi = band(hi_h, lo_h)
-        one = f"is {lo:+.1f} to {hi:+.1f} dB (median {med:+.1f}) for this pair of heights ({lo_h:g} m with {hi_h:g} m)"      # the form for a single pair
-        many = f"{lo_h:g} m with {hi_h:g} m {lo:+.1f} to {hi:+.1f} dB (median {med:+.1f})"
+        one = f"for this pair of heights ({lo_h:g} m with {hi_h:g} m): {figs(lo_h, hi_h)}"      # the form for a single pair
+        many = f"{lo_h:g} m with {hi_h:g} m {figs(lo_h, hi_h)}"
         assert (one if len(pairs) == 1 else many) in note, (lo_h, hi_h)
-    if len(pairs) > 1:
-        assert f"over these pairs it is {min(band(b_, a_)[0] for a_, b_ in pairs):+.1f} to {max(band(b_, a_)[2] for a_, b_ in pairs):+.1f} dB" in note
-    else:
-        assert "over these pairs" not in note and "for this pair of heights" in note
+    assert "over these pairs" not in note and ("by pair of heights" in note) == (len(pairs) > 1) and ("for this pair of heights" in note) == (len(pairs) == 1)
 
 
 def test_m2_the_mission_levels_win_over_the_platforms_and_both_over_the_fallback(monkeypatch):
@@ -230,8 +226,7 @@ def test_m2_a_uas_whose_levels_cannot_be_used_gets_the_two_assumed_heights_and_s
     assert has_figure(note), note
     assert "u (no single height, its flight levels could not be read: 18.1 and 108.1 m assumed)" in note
     for h in (18.1, 108.1):
-        lo, med, hi = band(h, 2.2)
-        assert f"2.2 m with {h:g} m {lo:+.1f} to {hi:+.1f} dB (median {med:+.1f})" in note
+        assert f"2.2 m with {h:g} m {figs(2.2, h)}" in note
 
 
 def test_m2_a_uas_whose_platform_file_cannot_be_read_gets_the_same(monkeypatch):
@@ -240,7 +235,7 @@ def test_m2_a_uas_whose_platform_file_cannot_be_read_gets_the_same(monkeypatch):
         def broken(p, err=err):
             raise err
         monkeypatch.setattr(uas, "load_platform", broken)
-        note = report._low_antenna_note(dict(kind="rf", a="u", b="g"), mission)
+        note = report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="u", b="g"), mission)
         assert has_figure(note) and "u (no single height, its flight levels could not be read: 18.1 and 108.1 m assumed)" in note, err
 
 
@@ -248,20 +243,19 @@ def test_m2_a_uas_whose_platform_file_cannot_be_read_gets_the_same(monkeypatch):
 def test_m2_an_end_that_is_no_vehicle_and_not_the_ship_gets_reference_heights_and_says_so(monkeypatch, who):
     """A shore or an id the mission does not have: before, 'no single height' and no figure. Now four reference heights, ASSUMED, each with its band."""
     mission = mission_of(monkeypatch, {"g": ("glider", 0.3)}, ship=15.0)
-    note = report._low_antenna_note(dict(kind="rf", a="g", b=who), mission)
+    note = report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="g", b=who), mission)
     assert has_figure(note), note
     assert f"{who} (no usable height (unreadable, or outside 0.1 to 1000 m): 0.1, 2.2, 15, 108.1 m assumed)" in note and "g (0.3 m)" in note
     for h in (0.1, 2.2, 15.0, 108.1):
-        lo, med, hi = band(max(h, 0.3), min(h, 0.3))
-        assert f"{min(h, 0.3):g} m with {max(h, 0.3):g} m {lo:+.1f} to {hi:+.1f} dB (median {med:+.1f})" in note, h
+        assert f"{min(h, 0.3):g} m with {max(h, 0.3):g} m {figs(0.3, h)}" in note, h
     assert "g (0.3 m)" in note and "An end of this RF link has an antenna below 0.5 m: g (0.3 m)." in note        # the known end is still told about
 
 
 def test_m2_two_unreadable_ends_print_the_ten_pairs_of_the_four_reference_heights(monkeypatch):
     mission = mission_of(monkeypatch, {}, ship=15.0)
-    note = report._low_antenna_note(dict(kind="rf", a="shore", b="elsewhere"), mission)
+    note = report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="shore", b="elsewhere"), mission)
     assert has_figure(note) and note.startswith("The antennas of this RF link: shore (no usable height")
-    assert len(re.findall(r"\d+ of 400 samples are more than 3 dB off\)", note)) == 10                      # {0.1, 2.2, 15, 108.1} squared, each pair once
+    assert len(re.findall(r"median [+-]\d", note)) == 10                                                      # {0.1, 2.2, 15, 108.1} squared, each pair once
 
 
 @pytest.mark.parametrize("h", [0.05, 0.0, -2.0, 1000.5, 5000.0, float("nan"), float("inf"), 10 ** 400, True, "2.2", None])
@@ -277,29 +271,27 @@ def test_m2_a_platform_height_outside_the_bands_domain_is_an_unreadable_end_neve
 def test_m2_a_ship_height_outside_the_domain_is_unreadable_too(monkeypatch, ship_h):
     mission = mission_of(monkeypatch, {"g": ("glider", 0.3)})
     mission["ship"]["antenna_height_m"] = ship_h
-    note = report._low_antenna_note(dict(kind="rf", a="g", b="ship"), mission)
+    note = report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="g", b="ship"), mission)
     assert has_figure(note) and "ship (no usable height" in note
 
 
 def test_m2_a_ship_without_a_height_is_10_m_or_the_uas_platforms_and_the_missions_wins(monkeypatch):
     note = note_of(monkeypatch, ("g", ("glider", 0.3)), "ship")
-    lo, med, hi = band(10.0, 0.3)
-    assert f"{lo:+.1f} to {hi:+.1f} dB (median {med:+.1f}) for this pair of heights (0.3 m with 10 m)" in note
+    assert f"for this pair of heights (0.3 m with 10 m): {figs(0.3, 10.0)}" in note
     mission = mission_of(monkeypatch, {"g": ("glider", 0.3), "u": ("uas", ([10.0], 8.0, 0.1))})
     monkeypatch.setattr(uas, "load_platform", lambda p: dict(sortie=dict(levels_m=[10.0], deck_height_m=8.0),
                                                               radio=dict(uas_antenna_height_above_body_m=0.1, ship_antenna_height_m=22.0)))
-    assert "(0.3 m with 22 m)" in report._low_antenna_note(dict(kind="rf", a="g", b="ship"), mission)
+    assert "(0.3 m with 22 m)" in report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="g", b="ship"), mission)
     mission["ship"]["antenna_height_m"] = 30.0
-    assert "(0.3 m with 30 m)" in report._low_antenna_note(dict(kind="rf", a="g", b="ship"), mission)
+    assert "(0.3 m with 30 m)" in report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="g", b="ship"), mission)
 
 
 def test_m2_the_link_with_the_ship_and_the_uas_prints_the_ships_15_m_against_each_leg():
     """The UAS-ship link of a mission (the demo has the UAS-USV one): the ship's 15 m mast against the four legs."""
-    note = report._low_antenna_note(dict(kind="rf", a="ship", b="uas"), DEMO)
+    note = report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="ship", b="uas"), DEMO)
     assert has_figure(note) and note.startswith("The antennas of this RF link: ship (15 m), uas (flown at 18.1, 38.1, 68.1, 108.1 m).")
     for h in (18.1, 38.1, 68.1, 108.1):
-        lo, med, hi = band(max(h, 15.0), min(h, 15.0))
-        assert f"{min(h, 15.0):g} m with {max(h, 15.0):g} m {lo:+.1f} to {hi:+.1f} dB (median {med:+.1f})" in note, h
+        assert f"{min(h, 15.0):g} m with {max(h, 15.0):g} m {figs(15.0, h)}" in note, h
 
 
 def test_m2_the_start_sentences_and_their_boundaries_at_0_5_m(monkeypatch):
@@ -327,17 +319,14 @@ def test_m2_a_link_that_is_not_rf_has_no_card_and_the_clause_about_legs_is_for_a
         assert report._low_antenna_note(dict(kind=kind, a="glider_eq", b="glider_2n"), DEMO) is None
     assert "the climbs between the legs" not in note_of(monkeypatch, ("a", ("glider", 0.3)), ("b", ("glider", 15.0)))
     assert "over these pairs" not in note_of(monkeypatch, ("a", ("glider", 0.3)), ("b", ("glider", 15.0)))
-    assert "both extremes are those of" in note_of(monkeypatch, ("u", ("uas", ([10.0, 100.0], 8.0, 0.1))), ("g", ("glider", 2.2)))
-    assert "the lowest figure is that of" in note_of(monkeypatch, ("u", ("uas", ([10.0, 100.0], 8.0, 0.1))), ("g", ("glider", 15.0)))
 
 
 def test_m2_the_radio_of_the_link_sets_the_frequency_and_an_unknown_radio_is_refused(monkeypatch):
     mission = mission_of(monkeypatch, {"a": ("glider", 0.3), "b": ("glider", 15.0)})
-    lk = dict(id="l", kind="rf", a="a", b="b")
+    lk = dict(id="l", kind="rf", when="uas_airborne", a="a", b="b")
     default, rfd, xbee = (report._low_antenna_note(dict(lk, **extra), mission) for extra in ({}, dict(radio="rfd900x"), dict(radio="xbee_pro_24")))
     assert default == rfd and "at 915 MHz" in default and "at 2440 MHz" in xbee
-    lo, med, hi, _ = rfband.pair_band(0.3, 15.0, 2440e6)
-    assert f"is {lo:+.1f} to {hi:+.1f} dB (median {med:+.1f}) for this pair" in xbee and xbee != default
+    assert f"for this pair of heights (0.3 m with 15 m): {figs(0.3, 15.0, 2440e6)}" in xbee and xbee != default
     with pytest.raises(config.ConfigError, match=r"link 'l': radio 'nope' is not in platforms/radios.yaml"):
         report._low_antenna_note(dict(lk, radio="nope"), mission)
     with pytest.raises(config.ConfigError, match="radio"):
@@ -360,31 +349,30 @@ def test_m2_the_demos_cards_are_the_one_text_q23_shows_and_report_json_traces_it
 
 
 def test_m2_l23_prints_the_live_figures_of_its_pairs_and_no_edge_of_a_table():
+    """Round 22, M-1: the figures are the median and the counts (tests/test_round22_b.py holds every pair's text to the independent reference); the ten pairs of
+    the table are still held to it (the table's medians, to 0.1 dB, in tests/test_round18_x.py), and no edge of a table is back."""
     t = l23()
     assert sorted(cr.L23_PAIRS) == sorted(comms.LOW_ANTENNA_PAIR_BAND) and sorted(cr.L23_UAS_PAIRS) == [(2.2, 18.1), (2.2, 108.1), (15.0, 18.1), (15.0, 108.1)]
     for pair in (*cr.L23_PAIRS, *cr.L23_UAS_PAIRS):
-        lo, med, hi = band(pair[1], pair[0])
-        assert f"{lo:+.1f} to {hi:+.1f} dB (median {med:+.1f})" in t, pair
-        assert cr.pair_figures(pair) == f"{rfband.pair_band(*pair)[0]:+.1f} to {rfband.pair_band(*pair)[2]:+.1f} dB (median {rfband.pair_band(*pair)[1]:+.1f})"
-    assert t.startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip up to a UAS at 108 m:")
-    assert "The card of every RF link computes the band of the link's own pair of heights, for any heights from 0.1 m to 1000 m" in t
+        assert figs(*pair) in t and cr.pair_figures(pair) == figs(*pair), pair
+    assert t.startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip to a UAS at 108 m:")
+    assert "The card of every RF link computes the same figures for the link's own pair of heights, for any heights from 0.1 m to 1000 m" in t
     for gone in ("for none above that", "0.55 to 2.2 m", "envelope", "is not measured and no band is stated for it", "is read as that one",
                  "within 0.05 m of a listed"):
         assert gone not in t, gone
-    assert "; nearer than 300 m none of this is stated (from 200 m, 0.5 m with a 15 m partner is understated by up to 5.0 dB)" in t
-    for name in ("LOW_ANTENNA_ROW_TOL_M", "LOW_ANTENNA_MID_RANGE_M", "LOW_ANTENNA_MID_PARTNER_M", "LOW_ANTENNA_MID_BAND", "mid_envelope"):
+    assert t.endswith("; nearer than 300 m none of this is stated")
+    for name in ("LOW_ANTENNA_ROW_TOL_M", "LOW_ANTENNA_MID_RANGE_M", "LOW_ANTENNA_MID_PARTNER_M", "LOW_ANTENNA_MID_BAND", "mid_envelope", "pair_effect"):
         assert not hasattr(cr, name), name
     for name in ("RF_NEAR_ANTENNA_M", "_nearest_row", "_end_antenna_m"):
         assert not hasattr(report, name), name
 
 
-def test_m2_l23_gives_the_demos_uas_pairs_with_the_number_of_samples_off_and_what_the_demo_card_says_agrees():
+def test_m2_l23_gives_the_demos_uas_pairs_and_what_the_demo_card_says_agrees():
     t = l23()
     for pair in cr.L23_UAS_PAIRS:
-        n = round(rfband.pair_band(*pair)[3] * 400)
-        assert f"{cr.pair_figures(pair)} ({n} of 400 samples more than 3 dB off)" in t, pair
-        card = report._low_antenna_note(dict(kind="rf", a="usv" if pair[0] == 2.2 else "ship", b="uas"), DEMO)
-        assert f"{pair[0]:g} m with {pair[1]:g} m {cr.pair_figures(pair)} ({n} of 400 samples are more than 3 dB off)" in card
+        assert f"{pair[0]:g} m ({cr.LOW_ANTENNA_NAMES[pair[0]]}) with {pair[1]:g} m ({cr.LOW_ANTENNA_NAMES[pair[1]]}) {figs(*pair)}" in t, pair
+        card = report._low_antenna_note(next(lk for lk in DEMO["links"] if lk["id"] == "usv-uas-rf") | dict(a="usv" if pair[0] == 2.2 else "ship"), DEMO)
+        assert f"{pair[0]:g} m with {pair[1]:g} m {figs(*pair)}" in card
 
 
 # ------------------------------------------------------------------------------------------------------------------------- M-6: the render check
