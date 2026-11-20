@@ -13,8 +13,9 @@ or that a sentence outside the vocabulary is honest. It reads these files only; 
 Kinds. KEEP:S-n: a KEEP row of the sweep (true over the whole domain; its test or reason is in the row). definition: the text defines what it names, or states
 what the code does with it. message: an error, refusal or note printed only when the condition it names holds. constant: a name, key or format, not a claim.
 receipt: the text of a receipt that carries the figure it names. limit: an input limit the code enforces. measured: a named measurement of a named case.
-history: a dated record of what an earlier round said or did. OPEN:S-n: a SCOPE or DELETE row of the sweep that is still on the tree; routed to the lead
-(the reason is always OPEN_REASON, and a comment above the row says what it is). A row whose text is edited or deleted goes stale and is removed."""
+history: a dated record of what an earlier round said or did. OPEN:S-n: a SCOPE or DELETE row of the sweep that is still on the tree;
+OPEN:K-n: a sentence the skeptic pass of batch E found false or unscoped and the sweep did not list; both are routed to the lead (the reason is always
+OPEN_REASON, and a comment above the row says what it is). A row whose text is edited or deleted goes stale and is removed."""
 import ast
 import pathlib
 import re
@@ -420,11 +421,10 @@ DOC_ALLOW = _entries(
     ],
     'docs/PHYSICS.md', [
         ('', 'the COARE profile is used up to 100 m. - 3-D hours are only the launch hour and the ne', 1, 'definition',
-         'a stated modelling limit or the name of a statistic in its own section (COARE up to 100 m, a step in Cd, a 95 % bound of'
-         ' a prior), with the number it is for'),
+         'the height to which the profile code is applied when there is no 3-D field (a stated modelling limit of that fallback, not an accuracy)'),
         ('', "at one speed gave a step of up to 2.6 times in Cd; the demo's smallest `dcp` is 3.93 m/s", 1, 'definition',
-         'a stated modelling limit or the name of a statistic in its own section (COARE up to 100 m, a step in Cd, a 95 % bound of'
-         ' a prior), with the number it is for'),
+         "measured: a step of 2.6 times in Cd (3.07e-3 against 1.19e-3 at U 8 m/s, sigH 1.5; review round 12, M-13, DECISIONS 653) that "
+         "the hard switch at one dcp gave, which the fade removes; a named case, not a bound on any other"),
         ('', 'about 1.5 at the median and at most 2.2. (This section used to say "under-predicts by ab', 1, 'measured',
          'a named measurement of a named case, or a named limit of a test (the round, pair or probe is on the line); not a bound '
          'on the card'),
@@ -540,9 +540,12 @@ DOC_ALLOW = _entries(
         ('', '`lost_after_h` above 0 and at most 720, `dive_depth_m` 1 to 2000 and, for a glider, bet', 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
-        ('', '`rating_m` (a dive depth within about 7.4 m of `rating_m` still fails `overdepth` in', 1, 'measured',
-         "a derived consequence of the glider platform's numbers (a dive depth within about 7.4 m of rating_m fails overdepth); "
-         'not in the sweep; read, not re-measured here'),
+        # K-1: the skeptic pass of batch E, not a row of the sweep. 7.4 m is the NOMINAL Seaglider's overshoot (990 m to 997.4 m): the code computes
+        # `apogee_overshoot` x `w_last` x the pump time per member (glider.py), and `glider_speed_scale` is perturbed
+        # (config/perturbations.yaml), so the overshoot,
+        # the cut-off and "every member" hold for the nominal Seaglider only; a Slocum and a perturbed member differ. The sentence names no platform.
+        ('', '`rating_m` (a dive depth within about 7.4 m of `rating_m` still fails `overdepth` in', 1, 'OPEN:K-1',
+         'OPEN: routed to the lead'),
         ('', 'above 0 and at most 1000, `ship.antenna_height_m` 0.5 to 100, `ship.tran', 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
@@ -571,9 +574,9 @@ DOC_ALLOW = _entries(
         ('', 'at least 1 in plain digits, at most 9 of them (round 18, M-11, DECISIONS 961); an empty', 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
-        ('', 'x 0.5 m/s in degrees (at most 10, reached at 24.5 days: 24.4 days gives 9.5); set', 1, 'limit',
-         'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
-         ' limit, not an accuracy'),
+        ('', 'x 0.5 m/s in degrees (at most 10, reached at 24.5 days: 24.4 days gives 9.5); set', 1, 'definition',
+         '`pipeline.MAX_PAD_DEG` = 10 caps the default pad; the day figures are arithmetic (24.4 d x 86400 x 0.5 m/s / 111,195 m per deg = 9.48,'
+         ' up to 9.5; 24.5 d = 9.52, up to 10)'),
         ('', 'it), not only the samples within about 6 dB of the margin as in round 20 and before: a', 1, 'history',
          "describes what round 20 and before refined ('within about 6 dB of the margin'): a past rule"),
         # S-20: the stability figures of a 190-pair measurement, printed as a limit (batch G, RUNBOOK 190)
@@ -602,9 +605,9 @@ DOC_ALLOW = _entries(
         ('', "n >= 1, 0 <= k_fail <= n, n at most 9007199254740992)` (and a link's `n_never_required`", 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
-        ('', 'sea point has no wind (at most 0.2 m/s) and no waves (UMWM `ust` or `swh` at or bel', 1, 'limit',
-         'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
-         ' limit, not an accuracy'),
+        ('', 'sea point has no wind (at most 0.2 m/s) and no waves (UMWM `ust` or `swh` at or bel', 1, 'definition',
+         'the ingest calm test: `pipeline.CALM_WIND_MS` = 0.2 m/s and `CALM_SWH_M` = 1e-3 m, the thresholds the code applies;'
+         ' a definition of "a calm", not an input limit'),
         ('', 'is plain digits only, and at most 9 of them (review round 17, M-11, DECISIONS 931; rou', 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
@@ -635,14 +638,33 @@ def test_s_lint_documents_every_phrase_is_classified():
 def test_s_lint_every_entry_has_a_kind_and_a_reason(allow):
     for (f, scope, ctx), (n, kind, reason) in allow.items():
         assert n >= 1 and reason.strip() and ctx == " ".join(ctx.split()) and 0 < len(ctx) <= MAX_CTX, (f, scope, ctx)
-        assert kind in KINDS or re.fullmatch(r"(KEEP|OPEN):S-\d+", kind), (f, scope, ctx, kind)
+        assert kind in KINDS or re.fullmatch(r"(KEEP|OPEN):S-\d+|OPEN:K-\d+", kind), (f, scope, ctx, kind)
         assert (kind.startswith("OPEN")) == (reason == OPEN_REASON), (f, scope, ctx)      # the one reason of a routed item; no other row may use it
 
 
+def _sweep():
+    """The verdict column of the claims sweep: {n: 'KEEP' | 'SCOPE' | 'DELETE'} from the table rows of review/round_23/merged.md."""
+    rows = re.findall(r"^\| S-(\d+) \|.*\| (KEEP|SCOPE|DELETE)\b[^|]*\|\s*$", (ROOT / "review/round_23/merged.md").read_text(encoding="utf-8"), re.M)
+    return {int(n): v for n, v in rows}
+
+
+# A KEEP row whose sweep verdict is SCOPE because a batch applied the scope (the lint holds the sentence as it now reads): S-12 (batch B printed
+# the confidence).
+SCOPE_APPLIED = {12}
+
+
 def test_s_lint_a_keep_row_names_its_sweep_row():
-    """KEEP is the sweep's word: a row of the claims sweep of review/round_23/merged.md (S-1 to S-43) that is true over the whole domain."""
-    kept = {kind for allow in (PRODUCT_ALLOW, DOC_ALLOW) for _, kind, _ in allow.values() if kind.startswith("KEEP")}
-    assert kept and all(1 <= int(k.split("-")[1]) <= 43 for k in kept), kept
+    """KEEP:S-n is a KEEP row of the claims sweep (review/round_23/merged.md) and OPEN:S-n a SCOPE or DELETE row of it: the number is read there, not only
+    range-checked. A KEEP of a SCOPE row is allowed only when a batch applied the scope (SCOPE_APPLIED)."""
+    sweep = _sweep()
+    assert sorted(sweep) == list(range(1, 44)), sorted(sweep)
+    for allow in (PRODUCT_ALLOW, DOC_ALLOW):
+        for key, (_, kind, _) in allow.items():
+            if kind.startswith("KEEP:S-"):
+                n = int(kind.split("-")[1])
+                assert sweep[n] == "KEEP" or n in SCOPE_APPLIED, (key, kind, sweep[n])
+            elif kind.startswith("OPEN:S-"):
+                assert sweep[int(kind.split("-")[1])] in ("SCOPE", "DELETE"), (key, kind)
     assert not {k for allow in (PRODUCT_ALLOW, DOC_ALLOW) for _, k, _ in allow.values() if k in ("KEEP", "OPEN")}
 
 
