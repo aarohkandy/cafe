@@ -28,3 +28,20 @@ def test_surface_cell_is_the_one_the_level_gives():
 def test_a_grid_whose_drag_is_not_positive_is_refused():
     with pytest.raises(ValueError, match="not positive"):
         probe.grid_entry("fine", _run(6, [2.0, 0, 0]), "x+z0.00", 10.0, 1.8, pathlib.Path("f"))
+
+
+def test_the_drag_bound_and_the_history_of_a_case(tmp_path):
+    label = "x+z0.00"                                                   # the flow along +x: drag = -Fx
+    run = _run(6, [-2.0, 0.5, 0.3])
+    run["dirs"][label]["force_std"] = np.array([0.01, 0.2, 0.3])
+    f = tmp_path / "postProcessing/forces/0"
+    f.mkdir(parents=True)
+    rows = ["# header"] + [f"{i} {-2.0 - (0.1 if i % 2 else 0.0)} 0 0 0 0 0 0 0 0" for i in range(1, 101)]
+    (f / "force.dat").write_text("\n".join(rows) + "\n")
+    (f / "moment.dat").write_text("\n".join(rows) + "\n")
+    g = probe.grid_entry("fine", run, label, 10.0, 1.8, tmp_path)
+    assert g["scatter_drag_bound"] == pytest.approx(0.01 / 2.0)               # |d| = (1, 0, 0): only the x std counts
+    assert g["scatter"] == pytest.approx(np.linalg.norm([0.01, 0.2, 0.3]) / 2.0)
+    assert g["drag_tail_mean_n"] == pytest.approx(2.05) and g["drag_tail_std_n"] == pytest.approx(0.05)
+    assert g["tail_iterations"] == 20 and g["history_iterations"] == 100
+    assert "drag_tail_mean_n" not in probe.grid_entry("fine", run, label, 10.0, 1.8, tmp_path / "none")
