@@ -375,7 +375,17 @@ def _whatif(a: argparse.Namespace) -> int:
         else:
             print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {bud} budget")
             print(_model_note(False, False, False), file=sys.stderr)
-    ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m), mission_hash=whatif.mission_hash(m))
+    run_digest, gate = None, {}
+    with _run_files(run):                                                  # a run whose emulator stage finished: its code digest, and its own verdict per scope
+        led = run / "checkpoints" / "emulator" / "ledger.json"
+        if led.is_file() and (lj := _json_object(led)).get("ok") is True:
+            run_digest = lj.get("code_digest")
+            if (hp := run / "emulator" / "holdout.json").is_file():
+                gate = {e["scope"]: e for e in _json_object(hp).values() if e.get("scope") and not e.get("used", True)}
+    ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m), code_digest=run_digest, mission_hash=whatif.mission_hash(m))
+    for sc, e in gate.items():                                             # the run's own gate counts: a scope it did not use goes to Stage 1
+        if sc in ems:
+            ems[sc] = (None, dict(ems[sc][1], used=False, unused_reason=e.get("unused_reason")))
     ans = whatif.answer(m, ops, base, tracks, ctx.env, ems, ctx.plan, fitted, scales, only=a.vehicle)
     took_shift = bool(ans.get("unchanged")) or any(not r.get("ship") for r in ans["vehicles"].values())    # a vehicle that moves only with the ship took none
     took_move = bool(ans["vehicles"])

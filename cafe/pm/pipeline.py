@@ -95,6 +95,15 @@ def gpu_visible() -> bool:
     return lbm.pick_backend() == "warp" or shutil.which("nvidia-smi") is not None
 
 
+TABLE_INPUT = "emulator training table at the start of this stage (minus this run's rows)"
+
+
+def _other_table(ctx: Context, d: dict[str, Any]) -> bool:
+    """True when the emulator ledger `d` trained on a snapshot of another table than the one this run names now (a resume under another
+    `--emulator-table`): the stage runs again. The table is no part of the stage's hash: two runs of one seed on tables of their own share it."""
+    return any(pathlib.Path(i["source"]).resolve() != ctx.table.resolve() for i in d["inputs"] if i.get("kind") == TABLE_INPUT)
+
+
 def emulator_table(explicit: str | pathlib.Path | None = None) -> pathlib.Path:
     """The emulator's training table: `explicit` (`run --emulator-table`), else $CAFE_EMULATOR_TABLE, else $CAFE_DATA/emulator/train.parquet."""
     return pathlib.Path(explicit or os.environ.get("CAFE_EMULATOR_TABLE") or DATA / "emulator" / "train.parquet")
@@ -1547,8 +1556,13 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     meta = dict(run_id=digest(str(ctx.run_dir.resolve()))[:12], mission=ctx.mission["name"], git_sha=ledger.git_sha(), code_digest=ctx.code_digest,
                 mission_hash=whatif.mission_hash(ctx.mission))
     rows = whatif.vehicle_rows(ctx.mission, res, ctx.env, fid, meta)
+    if hasattr(ctx.env, "use_3d"):       # a UAS base row of `res` flew in the 3-D wind, its variants' rows in the 10 m profile: it is made again as theirs are
+        base_members = list(range(ctx.plan["batch"]))
+        two_d = {r["vehicle"]: r for vid, v in res["vehicles"].items() if v["class"] == "uas"
+                 for r in whatif.run_variant(whatif.solo(ctx.mission, vid), ctx.env, base_members, seed, pri, marg, scales, fid, meta, "base")[0]}
+        rows = [two_d.get(r["vehicle"], r) for r in rows]
     train_in, snap = whatif.snapshot(ctx.table, ctx.path("emulator", "train_input"), meta["run_id"])
-    L.input(snap, kind="emulator training table at the start of this stage (minus this run's rows)", source=str(ctx.table), rows=len(train_in))
+    L.input(snap, kind=TABLE_INPUT, source=str(ctx.table), rows=len(train_in))
     sizes = budget.emulator_plan(ctx.plan)
     free = not scales and not ctx.run_dir.joinpath("stage3", "subgrid_calibration.json").is_file()      # stage 1b was a copy of stage 1
     share = budget.emulator_share_s(ctx.plan, stage1b_free=free)
@@ -1595,7 +1609,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     L.d["variant_planned_s"], L.d["variant_wall_s"] = est, [round(w, 3) for w in walls]       # timings stay out of the hashed design.json (DECISIONS 139)
     if killed:
         L.note(killed["reason"])
-    by_key = {r["key"]: r for r in rows if r["variant"] != "base"}        # the base rows are 3-D-wind UAS rows, the variants' are not: not comparable
+    by_key = {r["key"]: r for r in rows if r["variant"] != "base"}        # the variants' rows: a base row's mission is not in mvs
     n_fresh: list[float] = []
 
     def fresh(row: Any) -> tuple[float, int] | None:
@@ -1713,7 +1727,7 @@ def run(mission_path: str | pathlib.Path, budget_name: str, gpus: int, run_dir: 
     with par.limit(n), par.Pool(n):                                     # one pool for every stage: each worker starts and compiles once
         for name in STAGES:
             lp = ctx.run_dir / "checkpoints" / name / "ledger.json"
-            if not redo and ledger.done(ctx.run_dir, name, ctx.stage_hash(name)):
+            if not redo and (d := ledger.done(ctx.run_dir, name, ctx.stage_hash(name))) and not (name == "emulator" and _other_table(ctx, d)):
                 log(f"{name}: up to date (ledger {lp})")
             else:
                 a, redo = time.time(), True                                   # everything after a rerun stage reruns too
