@@ -283,10 +283,11 @@ def build(kind, mesh_flu, spec, hangar=None):
         c = hangar["cfd"]
         q = 0.5 * c["rho"] * c["speed"] ** 2
         for d, r in c["dirs"].items():
-            F = FLU2FRD @ np.asarray(r["force"]) / q
-            Mo = FLU2FRD @ np.asarray(r["moment"]) / q
+            f, vis = _vec3(r, "force", d), _vec3(r, "viscous", d)
+            F = FLU2FRD @ f / q
+            Mo = FLU2FRD @ _vec3(r, "moment", d) / q
             Mc = Mo - np.cross(cog, F)                     # CFD moments are about the mesh origin
-            fv = abs(np.dot(r["viscous"], DIRS[d])) / max(abs(np.dot(r["force"], DIRS[d])), 1e-12)
+            fv = abs(np.dot(vis, DIRS[d])) / max(abs(np.dot(f, DIRS[d])), 1e-12)
             drag[_flip(d)] = (F, Mc, fv, vv.gci_value(r.get("gci")))   # a NaN index or a missing key is inf: not trusted (round 20, M3; round 21, M-5)
         drag_re = (c["speed"], c["nu"], c["L"])
         sources["drag"] = "cfd"
@@ -355,6 +356,18 @@ def build(kind, mesh_flu, spec, hangar=None):
     return v
 
 
+def _vec3(r, key, d):
+    """`r[key]` of the result for direction `d` as three floats, or a ValueError naming the direction and the field: a null item (the NaN that `hangar` writes
+    as null), NaN, inf, an integer too large for a float or a wrong length used to be a silent NaN drag or an unnamed TypeError."""
+    try:
+        a = np.asarray(r[key], float)
+    except (TypeError, ValueError, OverflowError):
+        a = None
+    if a is None or a.shape != (3,) or not np.isfinite(a).all():
+        raise ValueError(f"direction {d}: `{key}` is not three finite numbers")
+    return a
+
+
 def hull_lift(c, cog, A3):
     """Hull lift from the incidence runs, as a cross term the on-axis table can't express:
         F(d) = sum_ax d_ax^2 F_ax  +  max(d_x, 0) d_y K_y(a_y)  +  max(d_x, 0) d_z K_z(a_z)   (per unit 0.5 rho U^2)
@@ -367,14 +380,15 @@ def hull_lift(c, cog, A3):
     point). RANS at incidence also contains the potential Munk moment, which dyn adds from added mass
     ((A v) x v); it is subtracted here so it isn't counted twice. Forward motion only.
     ponytail: odd in alpha (hulls symmetric about the plane); a stalled hull past the last angle keeps its K.
-    -> ({1: (alphas_deg, KF[n,3], KM[n,3]), 2: ...}, GCI of the normal-force coefficient at the largest angle)"""
+    -> ({1: (alphas_deg, KF[n,3], KM[n,3]), 2: ...}, the worst over the planes of the GCI of the normal-force coefficient at the largest angle; a plane with
+    no coarse force there has no index, which is inf (`vv.gci_value`); 0.0 only for no plane at all)"""
     from cafe.cfd import dvec, gci
     rho, q = c["rho"], 0.5 * c["rho"] * c["speed"] ** 2
     alphas = sorted(c.get("alphas") or [c["alpha"]])
 
-    def frd(r, F="force", M="moment"):
-        Fv = FLU2FRD @ np.asarray(r[F]) / q
-        return Fv, FLU2FRD @ np.asarray(r[M]) / q - np.cross(cog, Fv)
+    def frd(d, F="force", M="moment"):
+        Fv = FLU2FRD @ _vec3(c["dirs"][d], F, d) / q
+        return Fv, FLU2FRD @ _vec3(c["dirs"][d], M, d) / q - np.cross(cog, Fv)
 
     out, gcis = {}, []
     for p in c["planes"]:
@@ -387,13 +401,16 @@ def hull_lift(c, cog, A3):
             munk = 2 / rho * np.cross(A3 @ v, v)
 
             def k(F="force", M="moment"):
-                (Fa, Ma), (Fx, Mx), (Fs, Ms) = (frd(c["dirs"][d], F, M) for d in (lab, "+x", p))
+                (Fa, Ma), (Fx, Mx), (Fs, Ms) = (frd(d, F, M) for d in (lab, "+x", p))
                 return (Fa - v[0] ** 2 * Fx - v[ax] ** 2 * Fs) / cs, (Ma - v[0] ** 2 * Mx - v[ax] ** 2 * Ms - munk) / cs
 
             KF, KM = k()
             KFs.append(KF); KMs.append(KM)
-            if a == alphas[-1] and all("force_coarse" in c["dirs"][d] for d in (lab, "+x", p)):
-                gcis.append(gci(KF[ax], k("force_coarse", "moment_coarse")[0][ax]))
+            if a == alphas[-1]:
+                try:
+                    gcis.append(gci(KF[ax], k("force_coarse", "moment_coarse")[0][ax]))
+                except (KeyError, ValueError):             # no coarse force (a null item is one): no index, so not a converged grid
+                    gcis.append(None)
         out[ax] = (np.array(alphas, float), np.array(KFs), np.array(KMs))
     return out, vv.worst_gci(gcis)
 
