@@ -888,6 +888,33 @@ def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str,
     return out
 
 
+def _contribution(rep: dict[str, Any], mission: dict[str, Any], st3: dict[str, Any] | None) -> dict[str, Any]:
+    """Which of CFD, FEA and the emulator contributed, per vehicle and per link. CFD: the refit used the vehicle (a link: one of its ends). FEA: a
+    stage-3 row of the vehicle ran it (`fea.run`). Emulator: holdout.json says it was used, or it answered one of the vehicle's fix candidates."""
+    refit, emu = rep["stage3"]["refit"], rep["emulator"]["vehicles"]
+    rows: dict[str, Any] = {}
+    for vid, v in rep["vehicles"].items():
+        rows[vid] = dict(kind="vehicle", cfd=bool(refit.get(vid, {}).get("used")),
+                         fea=any((w.get("fea") or {}).get("run") is True for w in (st3 or {}).get(vid, [])),
+                         emulator=bool(emu.get(vid, {}).get("used")) or any(t.get("method") == "EMULATED" for t in (v["fix"].get("tried") or [])))
+    for lk in mission["links"]:
+        rows[lk["id"]] = dict(kind="link", cfd=any(rows.get(x, {}).get("cfd") is True for x in (lk["a"], lk["b"])), fea=False, emulator=False)
+    statements = ([CONTRIB_ELLIPSOID] if any(r["cfd"] for r in rows.values()) else []) + (
+        [CONTRIB_UAS] if any(v["cls"] == "uas" for v in rep["vehicles"].values()) else [])
+    return dict(rows=rows, statements=statements)
+
+
+CONTRIB_ELLIPSOID = "The CFD geometry is a set of ellipsoids from a few yaml dimensions, not CAD."
+CONTRIB_UAS = "The UAS is out: its window is the frame without rotors."
+
+
+def _contribution_html(c: dict[str, Any]) -> str:
+    rows = "".join(f"<tr><td>{html.escape(i)}" + "".join(f"<td>{'yes' if r[k] else 'no'}" for k in ("cfd", "fea", "emulator")) + "</tr>"
+                   for i, r in c["rows"].items())
+    return (f"<div class=scroll><table><tr><th>Vehicle or link<th>CFD<th>FEA<th>Emulator</tr>{rows}</table></div>"
+            + "".join(f"<p class=muted>{html.escape(x)}</p>" for x in c["statements"]))
+
+
 def _granularity(e: dict[str, Any], required: float | None, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
     """How many required samples decide a member's link (stage 1's `need_count_median`), and whether one missed sample is within what the mission allows
     (`granularity_ok`: 1 / need_count <= 1 - required_fraction). None for a summary without them (older runs). A link that is not ok is "undecided:
@@ -1395,6 +1422,7 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
         map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res, s1b), environment=_env(mission, env, res, wins, s1b, tr),
         stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref),
         assumed_inputs=_assumed(cred, cred_ref), sensitivity_scope=_sens_scope(tr))
+    rep["contribution"] = _contribution(rep, mission, st3)
     rep["sanity"] = _sanity(cred, rep["vehicles"], rep["links"], mission["name"])
     own = _jl(run / "stage3" / "subgrid_calibration.json")
     rep["subgrid"] = dict(source=("this run's stage3/subgrid_calibration.json" if own
@@ -2183,6 +2211,7 @@ def _render(rep: dict[str, Any]) -> str:
             "<p><a href='credibility.html'>Credibility report</a> | <a href='report.json'>report.json</a></p>"
             "<h2>Verdicts</h2><div class=scroll><table><tr><th>Vehicle or link<th>Verdict<th>P(fail)<th>Members"
             f"<th>Beyond radio horizon or out of acoustic range</tr>{rows}</table></div>"
+            f"{_contribution_html(rep['contribution'])}"
             f"<p class=muted>{e(rep['sensitivity_scope']['text'])}</p>"
             + "".join(f"<div id='v-{e(i)}'>{_vehicle_html(i, d)}</div>" for i, d in rep["vehicles"].items())
             + "".join(f"<div id='v-{e(i)}'>{_link_html(i, d)}</div>" for i, d in rep["links"].items())
