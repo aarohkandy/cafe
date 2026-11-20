@@ -252,8 +252,8 @@ def test_m9_a_rate_the_other_backend_is_not_asked_for_is_not_read():
 
 
 @pytest.mark.parametrize("name", ["sortie_min", "mission_days"])
-@pytest.mark.parametrize("bad", [v for v in NOT_RATES if v is not None], ids=repr)         # None is an absent figure, not a bad one
-def test_m9_the_benchmarks_sortie_minutes_and_days_are_finite_and_above_0_or_absent(name, bad):
+@pytest.mark.parametrize("bad", [v for v in NOT_COSTS if v is not None], ids=repr)           # None: absent, not bad; 0: "not known" (test_round23_m)
+def test_m9_the_benchmarks_sortie_minutes_and_days_are_finite_and_at_least_0_or_absent(name, bad):
     """Before: a NaN `sortie_min` gave a NaN factor that no test compared (`abs(nan - 1) > 1e-9` is False): the UAS cost was silently not scaled."""
     e = dict(sortie_min=120.0, mission_days=6.0)
     e[name] = bad

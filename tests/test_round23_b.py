@@ -152,7 +152,8 @@ def test_s14_the_attitude_statement_says_what_the_controller_does_and_draws_no_c
 
 def test_s15_l17_says_what_the_controller_clamps_and_not_that_the_mode_cannot_fire():
     x = {x["id"]: x for x in cr.LIMITATIONS}["L17"]
-    assert x["text"] == "the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance" and "cannot" not in x["text"]
+    assert x["text"] == ("in the shipped quad_uas.yaml the UAS controller clamps the commanded tilt at 35 deg, "
+                         "below the 42 deg of attitude exceedance") and "cannot" not in x["text"]
     li = config.load_platform("quad_uas")["limits"]
     assert li["max_tilt_deg"]["value"] == 35.0 and li["tilt_exceedance_deg"]["value"] == 42.0
     row = next(l for l in (ROOT / DOCS[0]).read_text().splitlines() if l.startswith("| L17 |"))
