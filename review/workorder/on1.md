@@ -37,3 +37,16 @@ None ran (it is called only inside a glider LES window). The Seaglider's hull wa
 - Done item 3 (an emulator that trains, passes its gate and answers) holds for the UAS, on this code digest. The command `whatif --run /data/runs/on1 --shift 30h` (job `on1_whatif`, `rc=0`, from the unchanged `8ecf0e7` tree) answered the UAS as `[EMULATED, training-set distance 0.72 of limit 2.49]`: NO-GO (P(fail) 0.961) to NO-GO (0.981, 0.939 to 0.994), not distinguishable from the baseline. The other three vehicles were answered by Stage 1, each with its emulator's reason.
 - Done items 1 and 2 need code: the USV hull CFD exists but does not converge as configured; glider CFD and CPU FEA do not exist yet.
 - The two idle `hull_fs` cases show the stage-3 gate counts the planned seconds of a case, not the measured ones.
+
+# rans_g1: one CPU RANS case of the demo Seaglider (work order step 3, the probe)
+
+`review/workorder/rans_probe.py --cores 6` on orca (job `rans_g1`, `rc=0`, 2026-11-20 20:05 UTC; `/data/runs/rans_probe/result.json`). The stage-3 glider geometry (ellipsoid hull and plate wing, 1.8 x 1.0 x 0.3 m), body-frame flow `x-z5.29` at 0.135 m/s, simpleFoam k-omega SST.
+
+| grid | cells | failed mesh checks | iterations | seconds | drag (N) | cd |
+|---|---|---|---|---|---|---|
+| coarse (14 mm) | 108,837 | 0 | 146 (converged) | 31 | 0.2366 | 0.357 |
+| fine (7 mm) | 316,218 | 0 | 1,500 (the cap) | 417 | 0.2582 | 0.390 |
+
+Refinement ratio 1.427; GCI 0.243 (the free-surface part's limit is 0.10); norm of the force's std over the drag on the fine grid 0.084 (almost all of it in the lift component). `cd_hangar` 0.301, so cd / cd_hangar is 1.29: the CFD drag is above the analytic one, not below it. Total 448 s.
+
+What it settles: a case costs minutes, not hours, and both meshes are valid; this pair of grids does not pass a 10 % GCI. A second experiment on finer grids is running (`handbacks/cfdprobe.md`).
