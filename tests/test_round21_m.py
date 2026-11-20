@@ -60,7 +60,8 @@ def test_a_sample_beyond_the_cap_is_left_on_thorp_is_never_asked_of_bellhop_and_
     assert grids and max(grids) < 3.2e3                                                    # no grid reaches the 25 km samples
     far = comms.acoustic_margin(np.hypot(25e3, 0.0), wind=6.0)
     assert far < -CAP and np.allclose(r["margin_db"][50:, 0], far, atol=1e-3) and (r["margin_db"][:50, 0] > far + 50).all()
-    head = "Thorp/Stojanovic budget on the slant range, Bellhop on 50 of 50 needed in-range samples; a further "              # 5 m and 5 m: one run
+    head = ("Thorp/Stojanovic budget on the slant range, Bellhop on 50 of 50 needed in-range samples, "                  # 5 m and 5 m: one run
+            "each member on one pair of transducer depths, not one per sample; a further ")
     assert r["method"].startswith(head)
     assert f"; a further {n - 50} needed in-range samples are more than {CAP:g} dB from a pass or a fail on Thorp and keep that margin: " in r["method"]
     assert "the rest Thorp only" not in r["method"] and r["n_invalid"].tolist() == [0]
@@ -121,7 +122,7 @@ def test_the_cap_count_is_summed_over_the_batches_of_a_merged_run(monkeypatch):
     a, _ = split_scene(monkeypatch, 3.0, 25.0, n_near=50)
     b, _ = split_scene(monkeypatch, 25.0, 25.0)
     assert a["bellhop"]["beyond"] == int(a["need_count"][0]) - 50
-    assert b["bellhop"] == dict(done=0, total=0, capped=0, beyond=int(b["need_count"][0]), runs_lo=None, runs_hi=None)
+    assert b["bellhop"] == dict(done=0, total=0, capped=0, beyond=int(b["need_count"][0]), runs_lo=None, runs_hi=None, ran=True)
     res = stage1.merge([dict(U=np.zeros((1, 1)), X={"a": np.zeros(1)}, vehicles={}, links={ACOUSTIC: x}) for x in (a, b)])
     m = res["links"][ACOUSTIC]["method"]
     nb = int(a["need_count"][0]) - 50 + int(b["need_count"][0])

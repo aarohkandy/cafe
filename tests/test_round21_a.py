@@ -195,12 +195,15 @@ def test_m3_only_needed_samples_in_range_reach_bellhop(monkeypatch):
     assert r["need_count"].tolist() == [60] and "Bellhop on 60 of 60 needed in-range samples" in r["method"]
 
 
-def test_m3_the_band_stays_where_bellhop_is_not_available(monkeypatch):
+def test_m3_without_bellhop_every_needed_in_range_sample_within_the_cap_is_counted_not_only_those_in_the_old_6_db_band(monkeypatch):
+    """Round 22, M-2: this was `test_m3_the_band_stays_where_bellhop_is_not_available`, which pinned "(N ambiguous samples)" for a Thorp margin inside +-6 dB
+    and "Thorp budget decides every link" for +18 dB: a link Bellhop would have refined, said to be decided by Thorp."""
     r, calls, thorp = scene(monkeypatch, km=4.5, depth=300.0, available=False)                                          # Thorp margin inside +-6 dB
     n = int(r["need_count"][0])
-    assert not calls and r["method"] == f"{comms.THORP_ONLY_LABEL} ({n} ambiguous samples)"
-    r, calls, thorp = scene(monkeypatch, km=1.5, available=False)                                                       # outside it: nothing was ambiguous
-    assert not calls and r["method"] == "Thorp budget decides every link"
+    tail = f"{n} needed in-range samples that Bellhop would refine keep their Thorp margin"
+    assert not calls and r["method"] == f"{comms.THORP_ONLY_LABEL}: {tail}"
+    r, calls, thorp = scene(monkeypatch, km=1.5, available=False)                                                       # +18 dB: refined too
+    assert not calls and r["method"] == f"{comms.THORP_ONLY_LABEL}: {int(r['need_count'][0])} " + tail.split(" ", 1)[1]
 
 
 def test_m3_the_helper_keeps_its_own_band_for_its_other_callers(monkeypatch):
@@ -321,7 +324,8 @@ def test_m4_the_floor_runs_inside_shallow_water_and_the_clip_comes_first(monkeyp
 def test_m4_the_label_names_the_set_only_where_more_than_one_run_was_made(monkeypatch):
     two, _, _ = scene(monkeypatch, km=3.0, depth=1.0)                                                           # glider 1 m, ship 5 m: three runs
     n = int(two["need_count"][0])
-    assert two["method"] == (f"Thorp/Stojanovic budget on the slant range, Bellhop on {n} of {n} needed in-range samples "
+    assert two["method"] == (f"Thorp/Stojanovic budget on the slant range, Bellhop on {n} of {n} needed in-range samples"
+                             ", each member on one pair of transducer depths, not one per sample "
                              "(the lowest of 3 runs: as named, swapped, both ends at least 5 m deep)")
     one, _, _ = scene(monkeypatch, km=3.0, depth=5.0)                                                           # equal 5 m ends: one run
     assert "lowest of" not in one["method"] and "Bellhop on" in one["method"] and "of" in one["method"]
@@ -393,11 +397,11 @@ def test_the_method_of_a_merged_run_counts_every_batch_and_the_runs_of_every_mem
     res = stage1.merge([dict(U=np.zeros((1, 1)), X={"a": np.zeros(1)}, vehicles={}, links={ACOUSTIC: x}) for x in (far, a)])
     assert res["links"][ACOUSTIC]["method"] == a["method"] and res["links"][ACOUSTIC]["bellhop_spread_db"].shape[1] == 2
     # two members' sets of different sizes
-    both = dict(a, bellhop=dict(done=1, total=1, capped=0, beyond=0, runs_lo=2, runs_hi=2), method="x")
-    two = dict(a, bellhop=dict(done=1, total=1, capped=0, beyond=0, runs_lo=3, runs_hi=3), method="y")
+    both = dict(a, bellhop=dict(done=1, total=1, capped=0, beyond=0, runs_lo=2, runs_hi=2, ran=True), method="x")
+    two = dict(a, bellhop=dict(done=1, total=1, capped=0, beyond=0, runs_lo=3, runs_hi=3, ran=True), method="y")
     res = stage1.merge([dict(U=np.zeros((1, 1)), X={"a": np.zeros(1)}, vehicles={}, links={ACOUSTIC: x}) for x in (both, two)])
     assert "(the lowest of 2 to 3 runs:" in res["links"][ACOUSTIC]["method"] and "Bellhop on 2 of 2 needed" in res["links"][ACOUSTIC]["method"]
-    part = stage1._bellhop_label(dict(done=1, total=2, capped=0, beyond=0, runs_lo=None, runs_hi=None))
+    part = stage1._bellhop_label(dict(done=1, total=2, capped=0, beyond=0, runs_lo=None, runs_hi=None, ran=True))
     assert part.endswith("; the rest Thorp only (no sound-speed profile or depth there)")
 
 

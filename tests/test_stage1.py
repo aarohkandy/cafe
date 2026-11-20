@@ -668,7 +668,9 @@ def test_the_method_of_an_acoustic_link_is_a_string_even_when_comms_returns_one_
     monkeypatch.setattr(stage1.comms, "bellhop_available", lambda: False)  # round 21, M-3: with Bellhop every needed sample is refined, `res` has no profile
     r = stage1.evaluate_link(LK["glider_eq-ship-acoustic"], out, MISSION, flat_env(1), 1, 3, [0])
     assert isinstance(r["method"], str) and r["success"].all()
-    assert r["method"] == stage1.comms.THORP_DECIDES_LABEL      # round 21 merge: the label is stage 1's own, the helper's (called with no profile) is not used
+    # round 21 merge: the label is stage 1's own, the helper's (called with no profile) is not used; round 22, M-2: the 60 needed in-range samples are 5 dB
+    # from a pass, so they are the ones Bellhop would refine (it is off here) and the label says Thorp kept them, not that Thorp decides every link
+    assert r["method"] == f"{stage1.comms.THORP_ONLY_LABEL}: 60 needed in-range samples that Bellhop would refine keep their Thorp margin"
 
 
 def test_a_nan_position_is_not_a_moment_the_link_was_required():
