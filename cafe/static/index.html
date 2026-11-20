@@ -3,59 +3,79 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cafe — drone deployment check</title>
+<title>cafe: simulate a robot mission</title>
 <link rel="icon" href="/static/icon.svg">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:wght@400;500&family=Spectral:ital,wght@1,400;1,600&display=swap">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Next:wght@400..800&family=Atkinson+Hyperlegible+Mono:wght@400..600&display=swap">
 <link rel="stylesheet" href="/static/vendor/leaflet.css">
 <link rel="stylesheet" href="/static/style.css?v=__V__">
 <link rel="manifest" href="/static/manifest.json">
 </head>
 <body>
 <header class="top">
-  <a class="mark" href="#plan"><span>cafe</span></a>
+  <a class="mark" href="#plan">cafe</a>
   <nav>
-    <a href="#plan" data-view="plan">Plan a deployment</a>
-    <a href="#hangar" data-view="hangar">Hangar</a>
-    <a href="#emulator" data-view="emulator">Emulator</a>
+    <a href="#plan" data-view="plan">Mission</a>
+    <a href="#hangar" data-view="hangar">Robots</a>
+    <a href="#emulator" data-view="emulator">Autopilot</a>
     <a href="#receipts" data-view="receipts">Receipts</a>
   </nav>
-  <div class="data-note" id="coverage"></div>
 </header>
 
 <main>
-  <!-- PLAN ------------------------------------------------------------------------------------>
+  <!-- MISSION: plan it on the left, see it on the map ------------------------------------------->
   <section class="view" id="view-plan">
     <aside class="panel">
-      <section class="block">
-        <h3>When</h3>
-        <input type="datetime-local" id="t0" step="3600" aria-label="Deployment time (UTC)">
-        <div class="chips" id="data-chips"></div>
-      </section>
+      <div class="tabs" role="radiogroup" aria-label="Plan or result">
+        <input type="radio" name="pane" id="tab-plan" checked><label for="tab-plan">Plan</label>
+        <input type="radio" name="pane" id="tab-result"><label for="tab-result">Result</label>
+      </div>
 
-      <section class="block">
-        <h3>Drones</h3>
-        <div id="fleet"></div>
-        <button class="ghost wide" id="add-drone">Add a drone</button>
-      </section>
+      <div class="pane" id="pane-plan">
+        <section class="block">
+          <h3>When</h3>
+          <input type="datetime-local" id="t0" step="3600" aria-label="Start of the mission (UTC)">
+          <p class="hint" id="coverage"></p>
+          <div class="chips" id="data-chips"></div>
+        </section>
 
-      <section class="block">
-        <h3>Keep in range</h3>
-        <p class="hint">Pairs that must stay close, e.g. a glider within acoustic range of the boat above it.</p>
-        <div id="links"></div>
-        <button class="ghost wide" id="add-link">Add a range requirement</button>
-      </section>
+        <section class="block">
+          <h3>Robots</h3>
+          <p class="empty">Add a robot, then click the map where it starts.</p>
+          <div id="fleet"></div>
+          <div class="adder"><select id="add-pick" aria-label="Robot to add"></select><button id="add-drone">Add to mission</button></div>
+          <p class="hint">Yours is not in the list? <a href="#hangar">Set it up under Robots</a>.</p>
+        </section>
 
-      <details class="block more">
-        <summary>Run settings</summary>
-        <label>Longest mission (hours) <input type="number" id="max-hours" value="1" min="0.1" max="48" step="0.1"></label>
-        <label>Monte Carlo runs <input type="number" id="samples" value="16" min="2" max="64"></label>
-        <label>Battery reserve to keep (%) <input type="number" id="reserve" value="15" min="0" max="80"></label>
-      </details>
+        <section class="block" id="links-block" hidden>
+          <h3>Stay in range</h3>
+          <p class="hint">Pairs that must stay close, such as a glider within acoustic range of the boat above it.</p>
+          <div id="links"></div>
+          <button class="wide" id="add-link">Add a range requirement</button>
+        </section>
 
-      <button class="go wide" id="run">Check this deployment</button>
-      <p class="hint" id="run-status"></p>
-      <div id="results"></div>
+        <details class="block more">
+          <summary>Settings</summary>
+          <div class="row">
+            <label>Longest mission (h) <input type="number" id="max-hours" value="1" min="0.1" max="48" step="0.1"></label>
+            <label>Runs <input type="number" id="samples" value="16" min="2" max="64"></label>
+            <label>Battery reserve (%) <input type="number" id="reserve" value="15" min="0" max="80"></label>
+          </div>
+          <p class="hint">Each run redraws what is not known exactly: the wind, current and waves, and the robot's drag, thrust and battery. The verdict is the share of runs that succeed.</p>
+        </details>
+      </div>
+
+      <div class="pane" id="pane-result">
+        <p class="empty" style="padding-top:18px">Nothing simulated yet. Plan a mission, then run it.</p>
+        <div id="results"></div>
+      </div>
+
+      <footer class="runbar">
+        <button class="go big wide" id="run">Run the simulation</button>
+        <progress id="run-progress" max="1" aria-label="Progress of the run" hidden></progress>
+        <p class="hint" id="run-status" aria-live="polite"></p>
+      </footer>
     </aside>
 
     <div class="stage-col">
@@ -65,51 +85,54 @@
         <div class="legend" id="legend"></div>
       </div>
       <div class="scrubber" id="scrubber" hidden>
-        <button class="ghost" id="play" aria-label="Play">Play</button>
+        <button id="play">Play</button>
         <input type="range" id="tslider" min="0" max="1" step="0.001" value="0" aria-label="Mission time">
-        <span class="mono" id="tclock">0:00</span>
+        <span class="clock" id="tclock">0:00</span>
       </div>
     </div>
   </section>
 
-  <!-- HANGAR ----------------------------------------------------------------------------------->
+  <!-- ROBOTS ------------------------------------------------------------------------------------>
   <section class="view" id="view-hangar" hidden>
     <div class="split">
       <div class="list-col">
-        <h1>Hangar</h1>
-        <p class="lede">Each design is characterized once — drag (CFD), added mass (BEM), structure (FEA) — then any deployment can use it.</p>
+        <div class="page-head"><h1>Robots</h1><button class="go" id="new-design">Add a robot</button></div>
+        <p class="lede">A robot is characterized once: its drag (CFD), added mass (BEM) and structure (FEA) are computed. After that any mission can use it.</p>
         <div id="designs"></div>
-        <button class="ghost wide" id="new-design">Add a design</button>
       </div>
       <div class="detail-col" id="design-detail">
-        <p class="empty">Pick a design to see how it was characterized, or add one.</p>
+        <p class="empty">Pick a robot to see how it was characterized, or add your own.</p>
       </div>
     </div>
   </section>
 
-  <!-- EMULATOR --------------------------------------------------------------------------------->
+  <!-- AUTOPILOT --------------------------------------------------------------------------------->
   <section class="view" id="view-emulator" hidden>
-    <div class="split">
-      <div class="list-col">
-        <h1>Emulator</h1>
-        <p class="lede">Fly a planned deployment with real autopilot firmware, or let your own code drive the drones, against the same physics and weather.</p>
-        <label>Deployment <select id="emu-mission"></select></label>
+    <div class="page">
+      <h1>Autopilot</h1>
+      <p class="lede">Fly a mission with the software that will really steer the robots: ArduPilot firmware, or your own code. Same physics, same weather.</p>
+
+      <section class="card">
+        <h2>ArduPilot firmware</h2>
+        <p class="hint">ArduCopter flies quads, ArduRover boats and ArduSub thruster-driven subs. Gliders and finned torpedoes have no ArduPilot firmware, so they keep the built-in autopilot. QGroundControl can watch on TCP 5762 (+10 for each extra robot).</p>
+        <div class="pick"><label>Mission <select id="emu-mission"></select></label></div>
         <div id="sitl"></div>
-        <h3>Drive it with your code</h3>
-        <p class="hint">Your fleet code can step the simulation and send each drone a target, from Python:</p>
+        <div id="emu-detail"><p class="empty">Run a mission first: finished missions show up here.</p></div>
+      </section>
+
+      <section class="card">
+        <h2>Your own code</h2>
+        <p class="hint">Step the simulation from Python and send each robot a target. Your code reads every robot's true position, heading, speed and battery at each step: sensor noise and dropouts are not simulated.</p>
         <pre class="code" id="api-snippet"></pre>
-      </div>
-      <div class="detail-col" id="emu-detail">
-        <p class="empty">Run a deployment on the Plan page first; it shows up here.</p>
-      </div>
+      </section>
     </div>
   </section>
 
-  <!-- RECEIPTS --------------------------------------------------------------------------------->
+  <!-- RECEIPTS ---------------------------------------------------------------------------------->
   <section class="view" id="view-receipts" hidden>
-    <div class="receipts">
+    <div class="page wide">
       <h1>Receipts</h1>
-      <p class="lede">Every claim the simulator makes, checked against a formula or a published measurement. Context rows are shown for orientation and never count as a pass.</p>
+      <p class="lede">Every claim the simulator makes, checked against a formula or a published measurement. Context rows are for orientation and never count as a pass.</p>
       <div id="receipt-summary"></div>
       <table id="receipt-table"></table>
     </div>
@@ -118,7 +141,9 @@
 
 <dialog id="design-dialog">
   <form method="dialog" id="design-form">
-    <h2>Add a design</h2>
+    <h2>Add a robot</h2>
+    <p class="hint">Characterizing it takes a while. It runs on the server; you can leave this page.</p>
+    <label>Name <input name="name" required placeholder="Petrel"></label>
     <fieldset class="seg" id="source-seg">
       <legend>Start from</legend>
       <label><input type="radio" name="source" value="shape" checked><span>A simple shape</span></label>
@@ -146,36 +171,53 @@
         <label>Nose points <select name="forward"><option>+x</option><option>-x</option><option>+y</option><option>-y</option><option>+z</option><option>-z</option></select></label>
         <label>Up is <select name="up"><option>+z</option><option>-z</option><option>+y</option><option>-y</option><option>+x</option><option>-x</option></select></label>
       </div>
+      <div class="row k-glider-file">
+        <label>Wing tip to tip (m) <input name="wing_span" type="number" step="any" placeholder="model width"></label>
+        <label>Wing chord (m) <input name="wing_chord" type="number" step="any" placeholder="0.18"></label>
+        <label>Hull diameter (m) <input name="hull_d" type="number" step="any" placeholder="from model"></label>
+      </div>
     </div>
 
-    <label>Name <input name="name" required placeholder="Petrel"></label>
-    <div class="row">
-      <label>Mass (kg) <input name="mass" type="number" step="any" placeholder="subs: blank = neutral"></label>
-      <label>Propulsion / pump power (W) <input name="power_w" type="number" step="any" required></label>
-      <label>Battery (Wh) <input name="battery_wh" type="number" step="any" required></label>
-    </div>
-    <div class="row">
-      <label>Electronics load (W) <input name="hotel_w" type="number" step="any" value="5"></label>
-      <label class="k-prop">Prop diameter (m) <input name="prop_d" type="number" step="any" placeholder="0.10"></label>
-      <label class="k-glider">Buoyancy engine (± cc) <input name="buoyancy_cc" type="number" step="any" value="400"></label>
-    </div>
-    <div class="row k-glider-file">
-      <label>Wing tip to tip (m) <input name="wing_span" type="number" step="any" placeholder="model width"></label>
-      <label>Wing chord (m) <input name="wing_chord" type="number" step="any" placeholder="0.18"></label>
-      <label>Hull diameter (m) <input name="hull_d" type="number" step="any" placeholder="from model"></label>
-    </div>
-    <div class="row">
-      <label>Material <select name="material" id="material"></select></label>
-      <label>Wall / tube thickness (mm) <input name="wall_mm" type="number" step="any" value="4"></label>
-      <label>Structure <select name="structure"><option value="shell">Hollow shell</option><option value="solid">Solid part</option></select></label>
-    </div>
+    <fieldset class="group">
+      <legend>Power and weight</legend>
+      <div class="row">
+        <label>Mass (kg) <input name="mass" type="number" step="any" placeholder="subs: blank = neutral"></label>
+        <label>Propulsion or pump (W) <input name="power_w" type="number" step="any" required></label>
+        <label>Battery (Wh) <input name="battery_wh" type="number" step="any" required></label>
+      </div>
+      <div class="row">
+        <label>Electronics load (W) <input name="hotel_w" type="number" step="any" value="5"></label>
+        <label class="k-prop">Prop diameter (m) <input name="prop_d" type="number" step="any" placeholder="0.10"></label>
+        <label class="k-glider">Buoyancy engine (± cc) <input name="buoyancy_cc" type="number" step="any" value="400"></label>
+      </div>
+    </fieldset>
+
+    <fieldset class="group">
+      <legend>Structure</legend>
+      <div class="row">
+        <label>Material <select name="material" id="material"></select></label>
+        <label>Wall or tube (mm) <input name="wall_mm" type="number" step="any" value="4"></label>
+        <label>Built as <select name="structure"><option value="shell">Hollow shell</option><option value="solid">Solid part</option></select></label>
+      </div>
+    </fieldset>
+
     <p class="hint" id="design-error"></p>
     <menu>
-      <button value="cancel" class="ghost" formnovalidate>Cancel</button>
+      <button value="cancel" formnovalidate>Cancel</button>
       <button value="ok" class="go" id="design-submit">Start characterizing</button>
     </menu>
   </form>
 </dialog>
+
+<!-- one drawing per kind of robot, seen from above with the nose up: lists, routes and the map all use them -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="g-glider" viewBox="-14 -14 28 28"><path d="M0,-12 C3,-9 3,6 2,11 L-2,11 C-3,6 -3,-9 0,-12Z M-12,-1 L12,-1 L12,2 L-12,2Z M-4,10 L4,10 L4,12 L-4,12Z" fill="currentColor"/></symbol>
+    <symbol id="g-sub" viewBox="-14 -14 28 28"><path d="M0,-12 C3.4,-9 3.4,5 2.2,9 L-2.2,9 C-3.4,5 -3.4,-9 0,-12Z M-6,8 L6,8 L6,10.6 L-6,10.6Z M-1,10 L1,10 L1,13 L-1,13Z" fill="currentColor"/></symbol>
+    <symbol id="g-boat" viewBox="-14 -14 28 28"><path d="M0,-13 C5.5,-6 5.5,6 4.5,12 L-4.5,12 C-5.5,6 -5.5,-6 0,-13Z" fill="currentColor"/></symbol>
+    <symbol id="g-quad" viewBox="-14 -14 28 28"><g fill="none" stroke="currentColor" stroke-width="2.2"><path d="M-8,-8L8,8M8,-8L-8,8"/><circle cx="-8" cy="-8" r="4"/><circle cx="8" cy="-8" r="4"/><circle cx="-8" cy="8" r="4"/><circle cx="8" cy="8" r="4"/></g><rect x="-3" y="-3" width="6" height="6" fill="currentColor"/></symbol>
+  </defs>
+</svg>
 
 <script src="/static/vendor/leaflet.js"></script>
 <script type="module" src="/static/app.js?v=__V__"></script>

@@ -49,9 +49,9 @@ Everything in `site/` is static: the quick check runs on the viewer's own machin
 
 | | How |
 |---|---|
-| **A drone** | Hangar → *Add a design*. Either a **simple shape** (torpedo AUV, buoyancy glider, cylinder pod, monohull, catamaran, quadcopter frame: a few dimensions in metres) or a **3-D model file** (STL/OBJ/PLY/glTF/3MF/STEP; for a sub, also how it moves: propeller + fins, buoyancy glider, or six-thruster ROV). Plus mass (blank for a sub = neutrally buoyant), propulsion or pump power, battery, electronics load, material and wall thickness. |
-| **Where & when** | Plan → pick the time, add drones with a start point and legs (`goto`, `hold`, `follow` another drone). |
-| **Keep in range** | Plan → *Add a range requirement*: drones A and B within N metres (3-D or horizontal), for at least X % of the time, optionally only during a time window. |
+| **A drone** | Robots → *Add a robot*. Either a **simple shape** (torpedo AUV, buoyancy glider, cylinder pod, monohull, catamaran, quadcopter frame: a few dimensions in metres) or a **3-D model file** (STL/OBJ/PLY/glTF/3MF/STEP; for a sub, also how it moves: propeller + fins, buoyancy glider, or six-thruster ROV). Plus mass (blank for a sub = neutrally buoyant), propulsion or pump power, battery, electronics load, material and wall thickness. |
+| **Where & when** | Mission → pick the time, add robots with a start point and legs (`goto`, `hold`, `follow` another drone). |
+| **Keep in range** | Mission → *Add a range requirement*: drones A and B within N metres (3-D or horizontal), for at least X % of the time, optionally only during a time window. |
 
 **Or all from one file:** put your CAD files in `lab/cad/`, fill in the numbers and the deployment in
 [`lab/fleet.json`](lab/fleet.json), then
@@ -156,7 +156,7 @@ print(st["drones"]["boat"], st["links"])
 `hours` (0.5–48, default 6) is how long the session can run; its weather and ocean are loaded when it is
 created, so the first session in a new area takes a few minutes while HYCOM currents download (cached
 after that). The built-in autopilots fly each drone to its target, so your code is tested at the level it really
-works: deciding where each drone should be. The Emulator page does the same with ArduCopter, ArduRover
+works: deciding where each drone should be. The Autopilot page does the same with ArduCopter, ArduRover
 or ArduSub SITL in the loop.
 
 ## Proof
