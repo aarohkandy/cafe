@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 import yaml
 
-from cafe.pm import __main__ as cli
+from cafe.pm import __main__ as cli, config
 from cafe.pm.config import ConfigError, load_mission
 from cafe.pm.physics import glider, uas, usv, check_params
 
@@ -50,9 +50,23 @@ CASES = [
 ]
 
 
+def reader_refuses(path):
+    """Round 22, M-5: a NaN, an infinity or an integer too large for a float is refused by `config._yaml`, the reader every loader goes through, before the
+    loader's own check (`check_params`, held directly by `test_check_params_kinds_and_non_numbers` and the r14 test of the one check) sees it. The message
+    names the file and the key; True when the reader refused, so the case's loader message is not reachable from a file."""
+    try:
+        config._yaml(path)
+    except ConfigError as e:
+        assert re.match(rf"{re.escape(str(path))}: .+: (nan|inf|-inf|an integer of \d+ digits) is not a finite number; ", str(e)), str(e)
+        return True
+    return False
+
+
 @pytest.mark.parametrize("name,edit,msg", CASES, ids=[f"{c[0]}-{i}" for i, c in enumerate(CASES)])
 def test_a_platform_with_a_missing_nan_or_unphysical_parameter_is_refused_naming_file_and_field(tmp_path, name, edit, msg):
     path = copy_of(tmp_path, name, edit)
+    if reader_refuses(path):
+        return
     with pytest.raises(ValueError, match=msg):
         LOADERS[name].load_platform(path)
 
@@ -339,6 +353,8 @@ def test_r14_a_bad_radio_link_a_leftover_radio_block_a_huge_integer_and_text_in_
     loader. M-36: `["0.0025", ...]` and `[True, 25, ...]` were read as numbers by numpy while the scalar rule refuses both. M-39: a radio block repeats
     radios.yaml's numbers."""
     path = copy_of(tmp_path, name, edit)
+    if reader_refuses(path):
+        return
     with pytest.raises(ValueError, match=msg) as e:
         LOADERS[name].load_platform(path)
     assert type(e.value) is ValueError                                                                  # not an OverflowError, which is no ValueError
