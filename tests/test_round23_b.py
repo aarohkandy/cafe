@@ -137,16 +137,15 @@ def test_s12_the_certify_statement_of_an_excluded_p_fail_says_the_bound_and_not_
 
 
 @pytest.mark.parametrize("clamp, exc", [(35.0, 42.0), (0.1, 0.2), (89.8, 89.9), (10.0, 89.9), (35.0, 35.0), (42.0, 35.0), (89.9, 0.1)])
-@pytest.mark.parametrize("profile", [True, False])
-def test_s14_the_attitude_statement_says_what_the_controller_does_and_never_that_the_mode_cannot_fire(monkeypatch, clamp, exc, profile):
-    """For a clamp below the exceedance: the controller clamps the commanded tilt at the clamp (a statement of the code path, uas.py), and no 'cannot fire'; for
-    a clamp equal to or above it: 'can fire' and no clamp sentence (the equal case is the boundary)."""
+def test_s14_the_attitude_statement_says_what_the_controller_does_and_draws_no_conclusion_on_the_verdict(monkeypatch, clamp, exc):
+    """For a clamp below the exceedance: the controller clamps the commanded tilt at the clamp (a statement of the code path, uas.py), and nothing more: no
+    'cannot fire' and no 'so the verdict rests on' (the achieved tilt is not proved to stay under the clamp for every wind; skeptic pass); for a clamp equal to
+    or above it: 'can fire' and no clamp sentence (the equal case is the boundary)."""
     monkeypatch.setattr(report, "_n", lambda n: f"{n['value']:g} deg")
-    lim = dict(tilt_clamp=dict(value=clamp), tilt_exceedance=dict(value=exc), max_airspeed=dict(value=12.0))
-    t = report._attitude_note(lim, profile)
+    t = report._attitude_note(dict(tilt_clamp=dict(value=clamp), tilt_exceedance=dict(value=exc)))
     assert "cannot" not in t
     if clamp < exc:
-        assert t.startswith(f"The controller clamps the commanded tilt at {clamp:g} deg, below the {exc:g} deg attitude exceedance, so the UAS verdict rests")
+        assert t == f"The controller clamps the commanded tilt at {clamp:g} deg, below the {exc:g} deg attitude exceedance."
     else:
         assert t.startswith("Attitude exceedance can fire in this platform") and "clamps" not in t
 
@@ -156,6 +155,8 @@ def test_s15_l17_says_what_the_controller_clamps_and_not_that_the_mode_cannot_fi
     assert x["text"] == "the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance" and "cannot" not in x["text"]
     li = config.load_platform("quad_uas")["limits"]
     assert li["max_tilt_deg"]["value"] == 35.0 and li["tilt_exceedance_deg"]["value"] == 42.0
+    row = next(l for l in (ROOT / DOCS[0]).read_text().splitlines() if l.startswith("| L17 |"))
+    assert "so the UAS verdict" not in row and "the mode fired in 0 members (q5:" in row                  # the measurement, not the inference (skeptic pass)
     for path in (DOCS[0], DOCS[1]):
         assert "it cannot fire in this controller model" not in flat(path) and "attitude exceedance cannot fire" not in flat(path).lower(), path
 
