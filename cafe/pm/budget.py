@@ -73,7 +73,8 @@ def throughput(path: str | pathlib.Path = THROUGHPUT) -> dict[str, Any]:
 def _need(v: Any, where: str, positive: bool) -> None:
     """A number the plan multiplies by, read from the throughput table (a file `load_json` leaves NaN-readable, or a dict a caller passes): finite, and
     above 0 (`positive`) or at least 0, else a PlanError that names it (round 23, M-9). A stage-1 cost is at least 0 because `make bench` writes 0 for a
-    slope it did not resolve (`slope_resolved: false`); a rate and a sortie length are above 0."""
+    slope it did not resolve (`slope_resolved: false`); a rate is above 0. A benchmark entry's sortie_min or
+    mission_days is at least 0: 0 reads as "not known" (`bench_sortie_rate` -> None)."""
     if not (finite_real(v) and (v > 0 if positive else v >= 0)):
         from .config import THROUGHPUT_FIX
         raise PlanError(f"the throughput table: {where} is {v!r}, not a finite number {'above' if positive else 'of at least'} 0; {THROUGHPUT_FIX}")
@@ -334,7 +335,7 @@ def bench_sortie_rate(e: dict[str, Any]) -> float | None:
         sm, days = max(sortie_minutes(m, stage1._classes(m)).values(), default=None), window_days(m)
     for v, name in ((sm, "sortie_min"), (days, "mission_days")):
         if v is not None:
-            _need(v, f"a stage1 entry's {name}", True)
+            _need(v, f"a stage1 entry's {name}", False)       # 0 is "not scaled" (None below), as before round 23
     return float(sm) / float(days) if sm and days else None
 
 

@@ -132,7 +132,8 @@ LIMITATIONS = [
          where=["config/assumptions.yaml", "cafe/pm/budget.py", "cafe/pm/stage3/pipeline_windows.py"]),
     dict(id="L16", text="the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
          factors=["robustness"], where=["cafe/pm/pipeline.py"]),
-    dict(id="L17", text="the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance", factors=["validation"],
+    dict(id="L17", text="in the shipped quad_uas.yaml the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance",
+         factors=["validation"],
          where=["cafe/pm/physics/uas.py", "platforms/quad_uas.yaml"]),
     dict(id="L18", text="the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio "
                         "again; "
