@@ -214,7 +214,8 @@ RAW_NP_ISFINITE = {
     "cafe/cfd.py": (2, "the mesh extents (an array from trimesh) and `gci`, a float `gci()` has just computed"),
     "cafe/mission.py": (3, "arrays and a float of the navigation error percentiles made here"),
     "cafe/ocean.py": (1, "an array of the current store read with numpy"),
-    "cafe/vehicle.py": (1, "`_vec3`: an array made by `np.asarray(raw, float)` inside a try that catches OverflowError, after each item passed `finite_real` or is a numpy number"),
+    "cafe/vehicle.py": (1, "`_vec3`: an array made by `np.asarray(raw, float)` inside a try that catches OverflowError, "
+                           "after each item passed `finite_real` or is a numpy number"),
     "cafe/pm/emulator.py": (1, "`q`: a float quantile the emulator computed"),
     "cafe/pm/env/bathy.py": (1, ARRAYS),
     "cafe/pm/env/coare.py": (3, ARRAYS),

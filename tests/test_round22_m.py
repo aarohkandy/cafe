@@ -137,15 +137,15 @@ UNUSABLE = "u (no usable height (unreadable, or outside 0.1 to 1000 m): 18.1 and
     ids=["empty", "none", "nan", "below the sea", "5 km", "huge int", "bool", "deck 0", "deck below the sea"])
 def test_a_uas_end_with_no_usable_height_gets_one_sentence_that_is_true_for_each_cause(monkeypatch, spec, usable_when_airborne, when):
     """Before: 'its flight levels could not be read', also for a deck at 0 m with an antenna 0 above the body on a link required on the deck, and for
-    levels that were read and lie outside 0.1 to 1000 m. Now: unreadable, or outside the band's heights, whichever it is; a UAS whose levels are fine and which is
-    required only while airborne keeps its legs."""
+    levels that were read and lie outside 0.1 to 1000 m. Now: unreadable, or outside the band's heights, whichever it is; a UAS whose levels are fine and
+    which is required only while airborne keeps its legs."""
     from tests.test_round21_b import has_figure, note_of
     note = note_of(monkeypatch, ("u", ("uas", spec)), ("g", ("glider", 2.2)), when=when)
     assert has_figure(note) and "flight levels" not in note and "no single height" not in note
     assert (UNUSABLE in note) == (not (usable_when_airborne and when == "uas_airborne")), (when, note)
 
 
-# ---------------------------------------------------------------------------------------------------------- tests/test_usv.py::test_table_equals_direct_coupled_solve
+# ------------------------------------------------------------------------------------------------ tests/test_usv.py::test_table_equals_direct_coupled_solve
 def tw_pair(wind_from, speed, heading, cspeed, cdir):
     """The direct current-coupled solve and the table, for arrays of states; the wind relative to the water and the angle `gam` the test of test_usv uses."""
     from cafe.pm.env import conventions as cv
@@ -169,10 +169,10 @@ def test_the_table_and_the_direct_solve_take_the_same_tack_on_a_dead_run():
 
 
 def test_the_table_equals_the_direct_solve_on_every_axis_aligned_state_with_the_test_usv_tolerances():
-    """The states Hypothesis finds are the axis-aligned ones (a heading or a wind direction of 0, 90, 180: sin and cos of a multiple of 90 deg are not exact), the
-    ones that sit on a tie. Every multiple of 15 deg of wind direction and heading, three speeds, two current speeds and the four axis currents, those with
-    |gam| above 45 deg: speed within 0.08 m/s, and where both move (above 0.5 m/s) the leeway on the same side and the track within 1.5 deg (test_usv's own
-    tolerances). The grid has dead runs in it (|gam| = 180) and no empty side."""
+    """The states Hypothesis finds are the axis-aligned ones (a heading or a wind direction of 0, 90, 180: sin and cos of a multiple of 90 deg are not
+    exact), the ones that sit on a tie. Every multiple of 15 deg of wind direction and heading, three speeds, two current speeds and the four axis currents,
+    those with |gam| above 45 deg: speed within 0.08 m/s, and where both move (above 0.5 m/s) the leeway on the same side and the track within 1.5 deg
+    (test_usv's own tolerances). The grid has dead runs in it (|gam| = 180) and no empty side."""
     deg = np.arange(0.0, 360.0, 15.0)
     wf, hd, sp, cs, cd = (x.ravel() for x in np.meshgrid(deg, deg, [1.0, 5.0, 14.0], [0.0, 0.9], [0.0, 90.0, 180.0, 270.0], indexing="ij"))
     gam, a, b = tw_pair(wf, sp, hd, cs, cd)
