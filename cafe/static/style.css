@@ -178,6 +178,7 @@ pre.code { white-space: pre; }
 .verdict dt::first-letter, .fact dt::first-letter { text-transform: uppercase; }
 .verdict dd { margin: 0; font-size: 14px; font-weight: 600; }
 #results > h3 { margin: 22px 0 0; }
+.past { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
 #results > h3 + .linkcard, #results > h3 + .verdict { border-top: 0; }
 .linkcard { padding: 12px 0; border-top: 1px solid var(--line); }
 .linkcard .hint { margin-top: 4px; }

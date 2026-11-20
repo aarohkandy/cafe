@@ -262,6 +262,23 @@ async function showReach(d) {
 // ---------------------------------------------------------------- run + results
 function say(t, err) { const h = $("#run-status"); h.textContent = t; h.classList.toggle("err", !!err); }
 // the bar under the Run button. null: busy, for a time nobody knows (queued, fetching data); a share from 0 to 1: that far through; false: put away
+const runLabel = m => `${m.t0?.replace("T", " ").slice(0, 16) || ""}: ${m.drones.join(", ")}`;
+// Earlier runs: a run takes minutes, so every finished one on the server can be opened again from a list (newest first, as the server gives them).
+async function fillRuns(open) {
+  const done = (await api("/api/missions").catch(() => [])).filter(m => m.state === "done");
+  $("#past-runs").replaceChildren(el("option", { value: "" }, done.length ? "Open an earlier run…" : "No finished run yet"),
+    ...done.map(m => el("option", { value: m.id, selected: m.id === open || null }, runLabel(m))));
+}
+async function openRun(kind, id) {
+  try {
+    const m = await api(`/api/${kind}s/${id}`);
+    if (!m.result) return say(`That ${kind} hasn't finished (${m.status?.state}).`, true);
+    if (m.mission?.t0) $("#t0").value = m.mission.t0.slice(0, 16);
+    showResult({ mission: m.mission, result: m.result }); say(`Showing ${kind} ${id}.`);
+    history.replaceState(null, "", `?${kind}=${id}#plan`);      // the address bar is a link to the run that is open
+  } catch (e) { say(e.message, true); }
+}
+$("#past-runs").onchange = e => { if (e.target.value) openRun("mission", e.target.value); };
 function progress(p) { const b = $("#run-progress"); b.hidden = p === false; if (p == null || p === false) b.removeAttribute("value"); else b.value = p; }
 $("#run").onclick = async () => {
   if (!fleet.length) return say("Add a robot first.", true);
@@ -282,6 +299,7 @@ async function pollMission(id) {
     if (st.state === "done") {
       say(`Simulated ${mmss(m.result.t_sim)} of mission time, ${m.result.samples} runs.`); showResult(m);
       history.replaceState(null, "", `?mission=${id}#plan`);      // the address bar is now a link to this result
+      fillRuns(id);
       return m;
     }
     if (st.state === "failed") { say(st.error || "The simulation failed.", true); return; }
@@ -612,7 +630,7 @@ async function loadReceipts() {
 async function loadEmulator() {
   const list = await api("/api/missions");
   const sel = $("#emu-mission");
-  sel.replaceChildren(...list.filter(m => m.state === "done").map(m => el("option", { value: m.id }, `${m.t0?.replace("T", " ").slice(0, 16) || ""}: ${m.drones.join(", ")}`)));
+  sel.replaceChildren(...list.filter(m => m.state === "done").map(m => el("option", { value: m.id }, runLabel(m))));
   sel.onchange = () => renderSitl(sel.value);
   if (sel.value) { renderSitl(sel.value); $("#emu-detail").replaceChildren(); } else $("#sitl").replaceChildren();      // with nothing to fly, the page's own line says to run a mission first
   $("#api-snippet").textContent = `import requests
@@ -665,13 +683,6 @@ function renderSitl(missionId) {
   await fillRobots();
   legend([]);
   const q = new URLSearchParams(location.search);       // ?mission=<id> or ?emulation=<id> opens a finished run
-  for (const kind of ["mission", "emulation"]) {
-    const id = q.get(kind);
-    if (!id) continue;
-    try {
-      const m = await api(`/api/${kind}s/${id}`);
-      if (m.result) { if (m.mission?.t0) $("#t0").value = m.mission.t0.slice(0, 16); showResult({ mission: m.mission, result: m.result }); say(`Showing ${kind} ${id}.`); }
-      else say(`That ${kind} hasn't finished (${m.status?.state}).`, true);
-    } catch (e) { say(e.message, true); }
-  }
+  fillRuns(q.get("mission"));
+  for (const kind of ["mission", "emulation"]) if (q.get(kind)) await openRun(kind, q.get(kind));
 })();
