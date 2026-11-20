@@ -28,3 +28,8 @@ Coverage was not measured (the one changed code line is run by every `bench_sort
 
 ## Leftovers
 Orca: pm_r23mi, pm_r23mi2, pm_r23mib and pmdata/r23mi_lint.sh removed; logs r23mi_* stay. Laptop: ../cafe-r23mi-base removed.
+
+## Skeptic pass
+- Issue 1 (budget.py:353, note says "has no sortie_min and its mission cannot be read" for a stored 0): real. `bench_sortie_rate` returns None for an absent key, a 0 `sortie_min`, or a 0 `mission_days`, and `scale_uas_costs` printed one fixed reason for all three. Fixed in the text, not in the code: the note now reads "the benchmark entry's sortie_min or mission_days is absent or 0 and its mission cannot be read; re-run `python bench/throughput.py stage1`" (cafe/pm/budget.py). `test_a_zero_benchmark_figure_leaves_the_uas_cost_unscaled_with_the_note` now pins the whole sentence (it was a prefix match). `tests/test_budget.py:534` matches only "not scaled by sortie-minutes" and still holds.
+- Run on orca (PMX pm_r23mi, 2 CPUs): tests/test_round23_m.py + tests/test_budget.py `-n 2` rc=0 (126 progress dots); `ruff check` on the two changed files clean; `mypy cafe/pm` clean (57 files).
+- Not run: full suite, gate, coverage. For the lead: nothing outside my files.

@@ -350,8 +350,8 @@ def scale_uas_costs(costs: dict[str, tuple[tuple[float, float], str]], thr: dict
         return []
     base = bench_sortie_rate(e)
     if base is None:
-        return ["UAS stage-1 cost is not scaled by sortie-minutes: the benchmark entry has no sortie_min and its mission cannot be read; re-run "
-                "`python bench/throughput.py stage1`"]
+        return ["UAS stage-1 cost is not scaled by sortie-minutes: the benchmark entry's sortie_min or mission_days is absent or 0 and its mission "
+                "cannot be read; re-run `python bench/throughput.py stage1`"]
     for vid, m in mins.items():
         f = m / days / base
         if abs(f - 1.0) > 1e-9:
