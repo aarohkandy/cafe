@@ -890,17 +890,17 @@ def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str,
 
 def _contribution(rep: dict[str, Any], mission: dict[str, Any], st3: dict[str, Any] | None) -> dict[str, Any]:
     """Which of CFD, FEA and the emulator contributed, per vehicle and per link. CFD: the refit used the vehicle (a link: one of its ends). FEA: a
-    stage-3 row of the vehicle ran it (`fea.run`). Emulator: holdout.json says it was used, or it answered one of the vehicle's fix candidates."""
-    refit, emu = rep["stage3"]["refit"], rep["emulator"]["vehicles"]
+    stage-3 row of the vehicle ran it (`fea.run`). Emulator: it answered one of the vehicle's fix candidates (a trained emulator that answered none is no)."""
+    refit = rep["stage3"]["refit"]
     rows: dict[str, Any] = {}
     for vid, v in rep["vehicles"].items():
         rows[vid] = dict(kind="vehicle", cfd=bool(refit.get(vid, {}).get("used")),
                          fea=any((w.get("fea") or {}).get("run") is True for w in (st3 or {}).get(vid, [])),
-                         emulator=bool(emu.get(vid, {}).get("used")) or any(t.get("method") == "EMULATED" for t in (v["fix"].get("tried") or [])))
+                         emulator=any(t.get("method") == "EMULATED" for t in (v["fix"].get("tried") or [])))
     for lk in mission["links"]:
         rows[lk["id"]] = dict(kind="link", cfd=any(rows.get(x, {}).get("cfd") is True for x in (lk["a"], lk["b"])), fea=False, emulator=False)
     statements = ([CONTRIB_ELLIPSOID] if any(r["cfd"] for r in rows.values()) else []) + (
-        [CONTRIB_UAS] if any(v["cls"] == "uas" for v in rep["vehicles"].values()) else [])
+        [CONTRIB_UAS] if any(v["cls"] == "uas" and not rows[vid]["cfd"] for vid, v in rep["vehicles"].items()) else [])
     return dict(rows=rows, statements=statements)
 
 

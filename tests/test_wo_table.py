@@ -42,31 +42,48 @@ def test_contribution_rows(run):
     assert rep["traceability_problems"] == [] and list(walk(rep["contribution"])) == []
 
 
-def test_contribution_fea_and_used(run, monkeypatch):
+def test_contribution_fea(run, monkeypatch):
     real = pm_run.stage3_rows
 
     def rows(vids, wins):
         r = real(vids, wins)
         r["glider_eq"][0]["fea"] = dict(run=True)
         r["usv"][0]["fea"] = dict(run=False, reason="x")
+        r["uas"][1]["fea"] = dict(run=True)                          # a window that failed its checks still ran the FEA: yes says it ran, not that it passed
         return r
     monkeypatch.setattr(pm_run, "stage3_rows", rows)
     m, plan = pm_run.make_run(run)
     report.write(run, m, plan)
     rep = load(run)
     assert table(rep)["glider_eq"]["fea"] is True and table(rep)["usv"]["fea"] is False and table(rep)["glider_2n"]["fea"] is False
+    assert table(rep)["uas"]["fea"] is True
     assert rep["ledger_problems"] == []
 
 
-def test_contribution_emulator_used_in_holdout(run):
+def test_contribution_trained_emulator_without_candidate(run):
     m, plan = pm_run.make_run(run, ledgers=False)
     p = run / "emulator" / "holdout.json"
     h = json.loads(p.read_text())
-    h["glider_eq"]["used"] = True
+    h["glider_eq"]["used"] = True                                  # trained and passed its gate, but it answered nothing for this vehicle
     p.write_text(json.dumps(h))
-    (run / "emulator" / "flip.json").unlink()                      # no fix candidate answered: the holdout alone decides
+    (run / "emulator" / "flip.json").unlink()
     report.write(run, m, plan)
-    assert table(load(run))["glider_eq"]["emulator"] is True
+    assert table(load(run))["glider_eq"]["emulator"] is False
+
+
+def test_contribution_uas_refit_used(run, monkeypatch):
+    real = pm_run.refit_rows
+
+    def refit(rows):
+        r = real(rows)
+        r["uas"] = dict(r["glider_eq"])                            # a refit that used the UAS: its CFD cell is yes, the "out" sentence has no ground
+        return r
+    monkeypatch.setattr(pm_run, "refit_rows", refit)
+    m, plan = pm_run.make_run(run, ledgers=False)
+    report.write(run, m, plan)
+    rep = load(run)
+    assert table(rep)["uas"]["cfd"] is True and report.CONTRIB_UAS not in rep["contribution"]["statements"]
+    assert {i for i, r in table(rep).items() if r["kind"] == "link" and r["cfd"]} >= {lk["id"] for lk in m["links"] if "uas" in (lk["a"], lk["b"])}
 
 
 def test_contribution_files_missing(run):
