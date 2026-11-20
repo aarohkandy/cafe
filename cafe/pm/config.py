@@ -149,7 +149,6 @@ def _yaml(path: str | pathlib.Path) -> Any:
     try:
         doc = _load(path.read_text())
         _expanded_size(doc, {}, set())                                       # before _finite, _unshare and json.dumps walk it as a tree (M-26)
-        return doc
     except UnicodeDecodeError as e:
         raise ConfigError(f"{path}: not a UTF-8 text file ({e.reason} at byte {e.start}); the mission and platform files are UTF-8 YAML") from e
     except OSError as e:
@@ -160,6 +159,8 @@ def _yaml(path: str | pathlib.Path) -> Any:
         raise ConfigError(f"{path}: not valid YAML ({e})") from e
     except RecursionError as e:                                             # a few hundred nested brackets: PyYAML recurses per level (round 13, M-22)
         raise ConfigError(f"{path}: nested too deeply to read; a mission or platform file has a few levels, not hundreds") from e
+    _finite(doc, path)                                                      # every YAML we read, radios, modems and assumptions included (round 22, M-5)
+    return doc
 
 
 read_yaml = _yaml                                                       # the one YAML reader: every config, platform and mission file goes through it
@@ -534,7 +535,6 @@ def load_mission(path: str | pathlib.Path, set_verdict: bool = True) -> dict[str
     path = pathlib.Path(path)
     doc = _yaml(path)
     _unread_keys(doc, path)
-    _finite(doc, path)
     m: dict[str, Any] = validate(doc, "mission.json", str(path))
     t0, t1 = utc(m["window"]["start"], f"{path}: window/start"), utc(m["window"]["end"], f"{path}: window/end")
     if t1 <= t0:

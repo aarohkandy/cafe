@@ -1198,7 +1198,9 @@ def test_r13_l1_env_sigmas_reads_the_priors_through_the_checked_loader(monkeypat
         cfg[key]["value"] = bad
     (tmp_path / "perturbations.yaml").write_text(yaml.safe_dump(cfg))
     monkeypatch.setattr(config, "CONFIG", tmp_path)
-    with pytest.raises(ValueError, match=f"perturbation '{key}'"):
+    # round 22, M-5: for a NaN the reader speaks first
+    words = f"{key}/value: nan is not a finite number" if bad != bad else f"perturbation '{key}'"
+    with pytest.raises(ValueError, match=words):
         config.env_sigmas()
 
 

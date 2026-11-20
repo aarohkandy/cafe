@@ -9,6 +9,7 @@ import pytest
 import yaml
 from scipy import stats as sp
 
+from cafe.pm.jsonio import finite_real
 from cafe.pm.stats import intervals as I, rare, sampling as S, sensitivity as SE, sequential as Q
 
 
@@ -277,7 +278,9 @@ def test_one_check_refuses_every_entry_that_would_give_nan_members_or_a_tracebac
     if isinstance(entry, dict):
         p = tmp_path / "p.yaml"
         p.write_text(yaml.safe_dump(dict(good=dict(dist="fixed", value=0.0, **FIELDS), e=dict(entry, **FIELDS))))
-        with pytest.raises(ValueError, match=words):
+        bad_number = any(isinstance(v, (int, float)) and not isinstance(v, bool) and not finite_real(v) for v in entry.values())
+        # round 22, M-5: the reader's refusal comes first
+        with pytest.raises(ValueError, match="e/[a-z]+: .* is not a finite number" if bad_number else words):
             S.load_perturbations(p)
     else:
         p = tmp_path / "p.yaml"
@@ -676,7 +679,8 @@ def test_r13_l1_a_fixed_correlation_length_that_is_nan_zero_or_negative_is_refus
     cfg["current_correlation_length"] = e
     p = tmp_path / "p.yaml"
     p.write_text(yaml.safe_dump(cfg))
-    with pytest.raises(ValueError, match=words):
+    bad_number = isinstance(mean, float) and not math.isfinite(mean)
+    with pytest.raises(ValueError, match="current_correlation_length/mean: .* is not a finite number" if bad_number else words):      # round 22, M-5
         S.load_perturbations(p)
 
 
