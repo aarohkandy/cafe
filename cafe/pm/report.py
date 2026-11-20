@@ -469,8 +469,8 @@ def _first_mode(r: dict[str, Any]) -> str | None:
 
 def _overdepth_note(v: dict[str, Any], r: dict[str, Any] | None) -> str:
     """Round 10, M-16: what the glider failure mode `overdepth` is. The loader accepts an ordered dive depth up to rating_m, and the vehicle sinks on past the
-    order while its pump runs (platform `apogee_overshoot`), so an order within about 7 m of the rating fails in every member; the verdict is right under the
-    model, and this says which kind of failure it is, with the peak depth measured in the members that failed this way."""
+    order while its pump runs (platform `apogee_overshoot`), so an order near the rating can fail (how near depends on the member's descent speed);
+    the verdict is right under the model, and this says which kind of failure it is, with the peak depth measured in the members that failed this way."""
     from .physics import glider
     try:
         rating: float | None = glider.load_platform(v["platform"])["rating_m"]

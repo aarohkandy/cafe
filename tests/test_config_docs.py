@@ -271,7 +271,7 @@ def test_the_runbook_names_every_mission_key_and_says_which_verdicts_to_trust():
 
 
 def test_the_runbook_does_not_say_the_planner_never_overruns_stage_1():
-    """M-53: the estimate is a lower bound (the code says so), and q8 ran 2.2 times over it (52.7 s planned, 117 s measured of a 900 s share)."""
+    """M-53 (amended round 23, S-17): the estimate is not a schedule, and q8 ran 2.2 times over it (52.7 s planned, 117 s measured of a 900 s share)."""
     rb = text("docs", "RUNBOOK.md")
     assert "never overruns" not in rb
     assert "q8 ran 2.2 times over it (52.7 s planned, 117 s measured, of a 900 s share)" in rb and "(270 s of 240 s)" in rb

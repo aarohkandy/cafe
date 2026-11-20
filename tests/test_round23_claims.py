@@ -120,20 +120,12 @@ def _entries(*groups):
 
 
 # ------------------------------------------------------------------------------------------------------------------------------- the allow-lists
-# OPEN rows are the SCOPE or DELETE rows of the sweep that are still on the tree at f71ad43 (batches A to D landed); a comment above each says which. Each
-# goes stale the moment its text is changed, and the stale test then asks for the entry to be deleted.
+# OPEN rows are the SCOPE or DELETE rows of the sweep still on the tree; a comment above each says which. Each goes stale the moment its text is
+# changed, and the stale test then asks for the entry to be deleted. The lead's merge step of round 23 fixed the last eleven (S-3, S-17, S-20, S-41, K-1).
 PRODUCT_ALLOW = _entries(
     'cafe/pm/budget.py', [
-        # 'so it is a lower bound' in STAGE1_S_BASIS (printed in plan.json and the report's plan block); batch B's hunk for batch D's file
-        ('STAGE1_S_BASIS', 'not in it, so it is a lower bound', 1, 'OPEN:S-17',
-         'OPEN: routed to the lead'),
-        ('scale_uas_costs', 'no sortie_min and its mission cannot be read; re-run `python bench/throughput.py stage1`', 1, 'message',
-         'a warning that a benchmark entry cannot be read: a condition the code checks'),
         ('emulator_plan', 'the emulator cannot train at this budget: one mission variant costs', 1, 'message',
          'the plan note printed when the computed cost of one variant exceeds the share: a condition the code checks'),
-        # '(a lower bound, not a schedule' in describe(); batch B's hunk for batch D's file
-        ('describe', 's (a lower bound, not a schedule: plan.json stage1_s_basis) on', 1, 'OPEN:S-17',
-         'OPEN: routed to the lead'),
         ('describe', 'cannot', 1, 'KEEP:S-13',
          "'can'/'cannot certify P(fail) < 5 %' is certify_possible, n_max against n_certify = 73 (tests/test_stats.py, "
          'tests/test_budget.py)'),
@@ -267,9 +259,6 @@ PRODUCT_ALLOW = _entries(
          'a ledger note on stream seeds: they are the same for every vehicle (stage-1 seed derivation, tests/test_round21_c.py)'),
         ('_stream_seed_problems', 'so the streams cannot be compared', 1, 'message',
          "the stream-seed check's refusal: no seeds to compare"),
-        # 'the planned cost is a lower bound (plan.json stage1_s_basis)' in the emulator stage's ledger note; batch B's hunk for batch D's file
-        ('s_emulator', 'the planned cost is a lower bound (plan.json stage1_s_basis) and only the kill before a', 1, 'OPEN:S-17',
-         'OPEN: routed to the lead'),
         ('s_emulator', 'emulator misses this by chance with probability', 1, 'KEEP:S-19',
          "'misses this by chance with probability': the number is whatif's computed value, not read against whatif._chance_miss by"
          ' any reviewer (flagged in the hand-back)'),
@@ -366,6 +355,15 @@ PRODUCT_ALLOW = _entries(
 )
 DOC_ALLOW = _entries(
     'QUESTIONS_FOR_LAB.md', [
+        # QUESTIONS 21a and 21d (the documents step of round 23, merged after the lint was written): records of the choice, not claims
+        ('', 'say no more about what a finer sampling would find. **This takes away the only senten', 1, 'history',
+         'a record of a round 23 choice (QUESTIONS 21): it names the deleted sentence or the lint\'s own word list, not a claim about the output'),
+        ('', "of a UAS-pair card that a finer sampling finds larger errors** (for the demo's pair of", 1, 'history',
+         'a record of a round 23 choice (QUESTIONS 21): it names the deleted sentence or the lint\'s own word list, not a claim about the output'),
+        ('', '`pair_band` call at a finer sampling per card); (c) the old hedge back (it over-wa', 1, 'history',
+         'a record of a round 23 choice (QUESTIONS 21): it names the deleted sentence or the lint\'s own word list, not a claim about the output'),
+        ('', 'most`, `cannot`, `never`, `by chance`, `finer`, `no number`, `worst`, `every`, `always`', 1, 'definition',
+         'a record of a round 23 choice (QUESTIONS 21): it names the deleted sentence or the lint\'s own word list, not a claim about the output'),
         ('', 'above 0 and at most 1000, `wp_radius_m` above 0, `roll_limit_deg` above', 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
@@ -380,9 +378,6 @@ DOC_ALLOW = _entries(
          'names the statistic or the prior it discusses (a Wilson or 95 % bound), not a claim about the output'),
         ('', '804). Its one-sided 95 % upper bound is about 0.5 m/s (`value_hi95` in `ingest/priors', 1, 'definition',
          'names the statistic or the prior it discusses (a Wilson or 95 % bound), not a claim about the output'),
-        # S-41: 'the gliders 555 and 598 km from a 4 km modem, and the USV up to 111 km': the run is not named and 598 does not match q23's 632 (batch G)
-        ('', 'a 4 km modem, and the USV up to 111 km from a ship whose radio horizon with the UA', 1, 'OPEN:S-41',
-         'OPEN: routed to the lead'),
         ('', 'moves by 0.1 dB); an end up to 0.55 m triggers the card; a height off every row says', 1, 'history',
          'row 17e, marked SUPERSEDED by the live band (DECISIONS 1045): its text is history'),
         ('', 'speaks for every RF end up to 2.2 m; for an end of 0.55 to 2.2 m with a 10 to 15 m p', 1, 'history',
@@ -540,12 +535,6 @@ DOC_ALLOW = _entries(
         ('', '`lost_after_h` above 0 and at most 720, `dive_depth_m` 1 to 2000 and, for a glider, bet', 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
-        # K-1: the skeptic pass of batch E, not a row of the sweep. 7.4 m is the NOMINAL Seaglider's overshoot (990 m to 997.4 m): the code computes
-        # `apogee_overshoot` x `w_last` x the pump time per member (glider.py), and `glider_speed_scale` is perturbed
-        # (config/perturbations.yaml), so the overshoot,
-        # the cut-off and "every member" hold for the nominal Seaglider only; a Slocum and a perturbed member differ. The sentence names no platform.
-        ('', '`rating_m` (a dive depth within about 7.4 m of `rating_m` still fails `overdepth` in', 1, 'OPEN:K-1',
-         'OPEN: routed to the lead'),
         ('', 'above 0 and at most 1000, `ship.antenna_height_m` 0.5 to 100, `ship.tran', 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
@@ -562,15 +551,6 @@ DOC_ALLOW = _entries(
          ' limit, not an accuracy'),
         ('', '`go` and the 90 % Wilson lower bound on success at least `min(0.75, go)`; below `nogo', 1, 'definition',
          "the verdict rule's own text: the Wilson bound the rule reads (the same rule as RUNBOOK 104)"),
-        # S-17 family: the stage-1 time 'is a lower bound' (batch G; same wording as budget.py:59)
-        ('', 'stage-1 time it prints is a lower bound (the longest task or the work over the workers;', 1, 'OPEN:S-17',
-         'OPEN: routed to the lead'),
-        # S-17 family: the stage-1 time 'is a lower bound' (batch G; same wording as budget.py:59)
-        ('', 'seconds, stage 1 above its lower bound and the stage 1b sensitivity case that no share', 1, 'OPEN:S-17',
-         'OPEN: routed to the lead'),
-        # S-17: 'the estimate is a lower bound and q8 ran 2.2 times over it' (batch G)
-        ('', 'share; the estimate is a lower bound and q8 ran 2.2 times over it (52.7 s planned, 11', 1, 'OPEN:S-17',
-         'OPEN: routed to the lead'),
         ('', 'at least 1 in plain digits, at most 9 of them (round 18, M-11, DECISIONS 961); an empty', 1, 'limit',
          'an input limit the code enforces (the validation table of the mission, assumptions or budget check named on the line); a'
          ' limit, not an accuracy'),
@@ -579,15 +559,6 @@ DOC_ALLOW = _entries(
          ' up to 9.5; 24.5 d = 9.52, up to 10)'),
         ('', 'it), not only the samples within about 6 dB of the margin as in round 20 and before: a', 1, 'history',
          "describes what round 20 and before refined ('within about 6 dB of the margin'): a past rule"),
-        # S-20: the stability figures of a 190-pair measurement, printed as a limit (batch G, RUNBOOK 190)
-        ('', 'the median moved by at most 0.59 dB and each count by at most 0.046 of 400 betwe', 1, 'OPEN:S-20',
-         'OPEN: routed to the lead'),
-        # S-20: the stability figures of a 190-pair measurement, printed as a limit (batch G, RUNBOOK 190)
-        ('', '0.59 dB and each count by at most 0.046 of 400 between 400 and 40,000 ranges (190 pair', 1, 'OPEN:S-20',
-         'OPEN: routed to the lead'),
-        # S-3 sibling: 'not of the worst case (review round 22, M-1': the card's note no longer says it (batch G, RUNBOOK 190)
-        ('', 'sampled ranges, not of the worst case (review round 22, M-1, DECISIONS 1057). An antenn', 1, 'OPEN:S-3',
-         'OPEN: routed to the lead'),
         ('', "to 20 printed a card only up to 2.2 m and none, or 'no error band is stated', above it", 1, 'history',
          'a dated record of what rounds 17 to 20 printed'),
         ('', '<= N_MAX`: for quick batch at most 32 and not above n_max, n_max at most 64), so `batch', 1, 'limit',

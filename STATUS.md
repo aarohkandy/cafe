@@ -29,7 +29,7 @@ in `config/premission.json`; shipped disabled). Each has a working default.
 
 `bin/run_premission` is `python -m cafe.pm run`. One command takes the two orca files plus the ocean source to `report/index.html`, `report.json` and `credibility.html`, with a sha256
 ledger per stage, resume, and a chained audit. The q2 quick run of 2026-10-31 on homebase did it end to end; the eight compute stages took 691.9 s and its cold ingest 522 s (a warm ingest takes about 6 s, so a warm quick
-run is about 700 s of the 1200 s limit; the planner's stage-1 estimate was 2.5 times high until `make bench` was rerun on 2026-11-01; with the new costs the q5 plan was 2.05 times low, 52.68 s against 108 s for 64 members, so the estimate is now called a lower bound, DECISIONS 288; the ratio is per machine: q9 on the 32-vCPU burst VM, with homebase's rates, ran stage 1 at 4.2 times its plan, DECISIONS 468).
+run is about 700 s of the 1200 s limit; the planner's stage-1 estimate was 2.5 times high until `make bench` was rerun on 2026-11-01; with the new costs the q5 plan was 2.05 times low, 52.68 s against 108 s for 64 members, so the estimate was then called a lower bound, DECISIONS 288 (since round 23 an estimate, not a bound in either direction, DECISIONS 1085); the ratio is per machine: q9 on the 32-vCPU burst VM, with homebase's rates, ran stage 1 at 4.2 times its plan, DECISIONS 468).
 
 | Stage | What it does | State |
 |---|---|---|

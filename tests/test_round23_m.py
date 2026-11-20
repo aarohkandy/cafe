@@ -37,8 +37,8 @@ def test_a_zero_benchmark_figure_leaves_the_uas_cost_unscaled_with_the_note():
     t = dict(t, stage1={k: dict(v) for k, v in t["stage1"].items()})
     t["stage1"]["uas"]["sortie_min"] = 0
     p = budget.plan("quick", 0, m, thr=t, vehicle_classes=stage1._classes(m), workers=6)
-    assert ("UAS stage-1 cost is not scaled by sortie-minutes: the benchmark entry's sortie_min or mission_days is absent or 0 and its mission cannot be read; "
-            "re-run `python bench/throughput.py stage1`") in p["notes"]
+    assert ("UAS stage-1 cost is not scaled by sortie-minutes: the benchmark entry gives no sortie_min and mission_days above 0 "
+            "(stored, or read from its mission); re-run `python bench/throughput.py stage1`") in p["notes"]
 
 
 def test_l17_names_the_shipped_file_and_its_two_numbers_are_the_files():

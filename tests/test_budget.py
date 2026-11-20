@@ -585,13 +585,13 @@ def test_the_environment_is_1_5_gb_a_day_or_the_stores_on_disk_when_they_are_lar
     assert budget.env_gb(m, tmp_path) == pytest.approx(12.0, abs=0.01)
 
 
-def test_describe_and_plan_call_the_stage_1_time_a_lower_bound_and_say_what_it_leaves_out():
+def test_describe_and_plan_call_the_stage_1_time_an_estimate_and_say_what_it_leaves_out():
     m, c = demo()
     p = budget.plan("quick", GPU, m, thr=thr(1.0, 0.05), vehicle_classes=c, workers=4)
     assert p["stage1_s_basis"].startswith("critical path: the longest task or the work over the workers")
-    assert "lower bound" in p["stage1_s_basis"] and "serial part" in p["stage1_s_basis"] and "start-up" in p["stage1_s_basis"]
+    assert "lower bound" not in p["stage1_s_basis"] and "serial part" in p["stage1_s_basis"] and "start-up" in p["stage1_s_basis"]
     line = budget.describe(p).splitlines()[1]
-    assert f"about {p['stage1_s']:.0f} s (a lower bound, not a schedule: plan.json stage1_s_basis) on 4 worker(s)" in line
+    assert f"about {p['stage1_s']:.0f} s (an estimate, not a schedule: plan.json stage1_s_basis) on 4 worker(s)" in line
 
 
 def test_the_free_surface_price_follows_the_machines_cores(monkeypatch):

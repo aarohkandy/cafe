@@ -1590,7 +1590,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     L.check("emulator_rows_appended", len(rows) == want, value=len(rows), limit=want)
     wall = sum(walls)
     L.note(f"variant runs: planned {len(variants) * est:.0f} s ({len(variants)} x {est:.0f} s), measured {wall:.0f} s, "
-           f"emulator share {share:.0f} s; the planned cost is a lower bound (plan.json stage1_s_basis) and only the kill before a variant holds "
+           f"emulator share {share:.0f} s; the planned cost is an estimate (plan.json stage1_s_basis) and only the kill before a variant holds "
            "the share (a look-ahead from measured seconds would make the number of variants depend on the clock)")
     L.d["variant_planned_s"], L.d["variant_wall_s"] = est, [round(w, 3) for w in walls]       # timings stay out of the hashed design.json (DECISIONS 139)
     if killed:

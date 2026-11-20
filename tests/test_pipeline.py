@@ -3135,7 +3135,8 @@ def test_the_emulator_ledger_has_the_planned_and_measured_variant_seconds_and_no
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
     assert "emulator_variants_within_share" not in [c["name"] for c in d["checks"]]
-    assert any(n.startswith("variant runs: planned 12 s (3 x 4 s), measured ") and "emulator share 20 s" in n and "lower bound" in n for n in d["notes"])
+    assert any(n.startswith("variant runs: planned 12 s (3 x 4 s), measured ") and "emulator share 20 s" in n and "the planned cost is an estimate" in n
+               for n in d["notes"])
     assert d["variant_planned_s"] == 4.0 and len(d["variant_wall_s"]) == 3 and all(w >= 0 for w in d["variant_wall_s"])
     # round 6 M-17: stage 1b is not "a copy" when its sensitivity case ran; the share note says why stage 1b's share is in it
     assert any("(stage 1b's share included, since no vehicle was refit)" in n for n in d["notes"]) and not any("which was a copy" in n for n in d["notes"])

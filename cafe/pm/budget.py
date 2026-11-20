@@ -57,7 +57,7 @@ WORKER_GB = 0.9
 ENV_REF_GB, ENV_REF_DEG2_DAY = 9.0, 14.0 * 34.0 * 6.0   # the one measured point (DECISIONS 267, 270): 9 GB for the 6-day demo's 14 x 34 deg padded box
 ENV_GB_PER_DEG2_DAY = ENV_REF_GB / ENV_REF_DEG2_DAY      # 0.0031 GB per deg^2 day: the environment in memory, linear in the padded area and the days
 STAGE1_S_BASIS = ("critical path: the longest task or the work over the workers; the parent's serial part (link evaluation, merge, pickling) "
-                  "and worker start-up are not in it, so it is a lower bound")
+                  "and worker start-up are not in it")
 LOAD_WARN_FRAC = 0.25             # x cpus: a rate measured with more 1-min load than this (2 on 8 CPUs) was contended by other work
 
 
@@ -350,8 +350,8 @@ def scale_uas_costs(costs: dict[str, tuple[tuple[float, float], str]], thr: dict
         return []
     base = bench_sortie_rate(e)
     if base is None:
-        return ["UAS stage-1 cost is not scaled by sortie-minutes: the benchmark entry's sortie_min or mission_days is absent or 0 and its mission "
-                "cannot be read; re-run `python bench/throughput.py stage1`"]
+        return ["UAS stage-1 cost is not scaled by sortie-minutes: the benchmark entry gives no sortie_min and mission_days above 0 (stored, or read "
+                "from its mission); re-run `python bench/throughput.py stage1`"]
     for vid, m in mins.items():
         f = m / days / base
         if abs(f - 1.0) > 1e-9:
@@ -619,7 +619,7 @@ def describe(p: dict[str, Any]) -> str:
     lines = [f"budget {p['budget']} ({p['budget_s'] / 60:.0f} min), {p['gpus']} GPU(s), {p['days']:.2f} mission days",
              f"stage 1: {p['n_min']}..{p['n_max']} members in batches of {p['batch']} "
              f"({'can' if p['certify_possible'] else 'cannot'} certify P(fail) < 5 %), about {p['stage1_s']:.0f} s "
-             f"(a lower bound, not a schedule: plan.json stage1_s_basis) on {p.get('workers', 1)} worker(s){capped(p)}"]
+             f"(an estimate, not a schedule: plan.json stage1_s_basis) on {p.get('workers', 1)} worker(s){capped(p)}"]
     for k, v in p["member_cost"].items():
         lines.append(f"  {k}: {v['s_per_batch_day']:.3g} s/batch/day + {v['s_per_member_day']:.3g} s/member/day, {v['source']}")
     L = p["les"]
