@@ -94,7 +94,7 @@ def _expected(margin, need, valid, depth, on):
         lo, hi = min(runs), max(runs)
         out += f" (the lowest of {hi if lo == hi else f'{lo} to {hi}'} runs: as named, swapped, both ends at least {comms.BELLHOP_MIN_DEPTH_M:g} m deep)"
     if capped:
-        out += f"; {capped} of them held at the assumed {CAP:g} dB bound on the Bellhop excess (no ray reached the receiver, or almost none)"
+        out += f"; {capped} of them had a Bellhop excess beyond +-{CAP:g} dB (the assumed cap) and were held at it"
     return out + _further(beyond) + ("" if done == total else "; the rest Thorp only (no sound-speed profile or depth there)"), \
         dict(done=done, total=total, capped=capped, beyond=beyond)
 

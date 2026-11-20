@@ -430,9 +430,9 @@ def test_m10_a_field_of_zero_is_a_margin_of_thorp_less_60_db_not_less_540_and_th
     r, calls, thorp = scene(monkeypatch, km=3.0, depth=5.0, excess=lambda tx, rx: 540.0)
     assert thorp > -100 and np.allclose(r["margin_db"], thorp - 60.0, atol=1e-3)
     n = int(r["need_count"][0])
-    assert f"; {n} of them held at the assumed 60 dB bound on the Bellhop excess (no ray reached the receiver, or almost none)" in r["method"]
+    assert f"; {n} of them had a Bellhop excess beyond +-60 dB (the assumed cap) and were held at it" in r["method"]
     ok, _, _ = scene(monkeypatch, km=3.0, depth=5.0, excess=lambda tx, rx: 20.0)
-    assert "held at" not in ok["method"]
+    assert "held at it" not in ok["method"]
     # a sample counts once however many runs of the set hit the bound
     two, _, _ = scene(monkeypatch, km=3.0, depth=1.0, excess=lambda tx, rx: 540.0)
-    assert f"; {int(two['need_count'][0])} of them held" in two["method"]
+    assert f"; {int(two['need_count'][0])} of them had a Bellhop excess" in two["method"]

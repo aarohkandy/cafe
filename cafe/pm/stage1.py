@@ -688,8 +688,7 @@ def _bellhop_label(info: dict[str, Any]) -> str:
     if hi is not None and hi > 1:
         out += f" (the lowest of {hi if lo == hi else f'{lo} to {hi}'} runs: as named, swapped, both ends at least {comms.BELLHOP_MIN_DEPTH_M:g} m deep)"
     if capped:
-        out += (f"; {capped} of them held at the assumed {comms.BELLHOP_EXCESS_CAP_DB:g} dB bound on the Bellhop excess "
-                "(no ray reached the receiver, or almost none)")
+        out += f"; {capped} of them had a Bellhop excess beyond +-{comms.BELLHOP_EXCESS_CAP_DB:g} dB (the assumed cap) and were held at it"
     return out + further + ("" if done == total else "; the rest Thorp only (no sound-speed profile or depth there)")
 
 
@@ -989,8 +988,8 @@ def _sensitivity(names: list[str], U: NDArray[Any], f: NDArray[np.bool_], acting
 
 
 NOT_EXERCISED = "NOT EXERCISED"
-NOT_EXERCISED_NOTE = ("the link was required at no moment in any member, so no member could fail it: P(fail) = 0 here counts nothing, and "
-                      "no number of members changes that (round 9, M-17)")
+NOT_EXERCISED_NOTE = ("the link was required at no moment in any member, so no member could fail it: P(fail) = 0 here counts nothing "
+                      "(round 9, M-17)")
 
 
 def _median_count(x: NDArray[Any]) -> int | float:
