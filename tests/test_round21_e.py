@@ -1,12 +1,15 @@
-"""Round 21, batch E (the JSON sweep, M-9) and the count message (D-6, M-13): no raw `json.loads(` / `json.load(` is left in `cafe/` outside an allow-list
-that says why, the scalar `math.isfinite` calls are the ones listed (each with its reason), every reader of a user-editable or run-written file refuses an
-oversized integer, nesting that exhausts the stack and the rest of the hostile documents with its own message or a ValueError (never an OverflowError, a
-RecursionError or a traceback), the app's request bodies and the mission YAML refuse a number that does not fit, and `acceptance._damage` quotes the one rule of
-a stored count."""
+"""Round 21, batch E (the JSON sweep, M-9) and the count message (D-6, M-13), and round 22's batch E (M-10): no raw JSON read, `math.isfinite`, `numpy.isfinite`
+or import by a computed name is left in any Python file of the repository that is shipped or run (`cafe/`, `lab/`, `bench/`, `report/`, anything new) outside an
+allow-list that gives each file's exact count and reason, found by an AST checker that is tested against every spelling the reviewers named; every reader of a
+user-editable or run-written file refuses an oversized integer, nesting that exhausts the stack and the rest of the hostile documents with its own message or a
+ValueError (never an OverflowError, a RecursionError or a traceback), the app's request bodies and the mission YAML refuse a number that does not fit, and
+`acceptance._damage` quotes the one rule of a stored count."""
 import ast
 import copy
 import math
+import os
 import pathlib
+import re
 
 import pytest
 
@@ -19,8 +22,146 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 CAFE = ROOT / "cafe"
 
 # ---------------------------------------------------------------------------------------------------------------------------- the grep tests
-# Every call of json.load / json.loads in cafe/ (any alias of the module, `from json import loads`): the ONE reader of a user-editable or run-written file is
-# `cafe.pm.jsonio.load_json` (`config.load_json`). What may stay raw, and why. The count is exact, so a site that moves or a new one fails the test.
+# Round 22, M-10: the two grep tests of round 21 walked `cafe/` only and matched four spellings (`json.loads(`, `from json import loads`, `math.isfinite`, `from
+# math import isfinite`). They are one AST checker now, over every Python file of the repository that is shipped or run, by what is IMPORTED and what is
+# ACCESSED, whatever the alias. A site is: json (the module or any other JSON parser) read through `load`, `loads`, `JSONDecoder`, a response's
+# `.json()`; `math.isfinite`; `numpy.isfinite`; and the dynamic spellings of those (`getattr(m, ...)`, `vars(m)`, `m.__dict__`, `__import__("json")`,
+# `importlib.import_module("json")`; and an import by a computed name, which can bring in any of them). The ceiling: it reads SPELLING, not data flow; a module
+# passed as an argument, kept in a dict or taken from `sys.modules` is not followed (nothing in the repository does it; a new one is found in review).
+FAMILIES = {"json": ("json", "simplejson", "orjson", "ujson", "rapidjson"), "math": ("math",), "numpy": ("numpy",)}
+SITE_NAMES = {"json": {"load", "loads", "JSONDecoder"}, "math": {"isfinite"}, "numpy": {"isfinite"}}
+MODULE_NAMES = {m: f for f, mods in FAMILIES.items() for m in mods}
+
+
+def _family(dotted):
+    return MODULE_NAMES.get((dotted or "").split(".")[0])
+
+
+def _literal(n):
+    return n.value if isinstance(n, ast.Constant) and isinstance(n.value, str) else None
+
+
+def scan_source(src):
+    """[(family, what, line)] for every site in the source text; family is json, math, numpy, or dynamic (an import by a computed name)."""
+    tree = ast.parse(src)
+    alias: dict[str, str] = {}                                   # a name that holds one of the modules (import, from-import, assignment of one)
+    importers: set[str] = set()                                  # names that are `importlib.import_module`
+    sites: list[tuple[str, str, int]] = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                if _family(a.name):
+                    alias[a.asname or a.name.split(".")[0]] = _family(a.name)
+        elif isinstance(n, ast.ImportFrom):
+            f = None if n.level else _family(n.module)
+            for a in n.names:
+                if n.module == "importlib" and a.name == "import_module":
+                    importers.add(a.asname or a.name)
+                elif f is None:
+                    if a.name in MODULE_NAMES:                  # `from somewhere import json`
+                        alias[a.asname or a.name] = MODULE_NAMES[a.name]
+                elif a.name == "*" or a.name in SITE_NAMES[f]:
+                    sites.append((f, f"from {n.module} import {a.name}", n.lineno))
+                else:                                           # `from json import decoder`: a submodule that holds JSONDecoder
+                    alias[a.asname or a.name] = f
+
+    def is_importer(n):
+        f = n.func
+        return (isinstance(f, ast.Name) and (f.id == "__import__" or f.id in importers)) or (isinstance(f, ast.Attribute) and f.attr == "import_module")
+
+    def dyn_family(e):
+        return _family(_literal(e.args[0])) if isinstance(e, ast.Call) and is_importer(e) and e.args else None
+
+    def root_family(e):
+        while isinstance(e, ast.Attribute):
+            e = e.value
+        return alias.get(e.id) if isinstance(e, ast.Name) else None
+
+    changed = True
+    while changed:                                              # `m = math`, `d = json.decoder`, `m = __import__("math")`: the target holds the module too
+        changed = False
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and n.value is not None:
+                f = root_family(n.value) or dyn_family(n.value)
+                for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                    if f and isinstance(t, ast.Name) and alias.get(t.id) != f:
+                        alias[t.id] = f
+                        changed = True
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Attribute):
+            f = root_family(n.value)
+            if f and n.attr in SITE_NAMES[f]:
+                sites.append((f, f".{n.attr}", n.lineno))
+            elif f and n.attr == "__dict__":
+                sites.append((f, "the module's __dict__", n.lineno))
+        elif isinstance(n, ast.Call):
+            fn = n.func
+            if isinstance(fn, ast.Name) and fn.id in ("getattr", "vars") and n.args:
+                f = root_family(n.args[0]) or dyn_family(n.args[0])
+                name = _literal(n.args[1]) if len(n.args) > 1 else None
+                if f and (fn.id == "vars" or name is None or name in SITE_NAMES[f]):
+                    sites.append((f, f"{fn.id}() on the module", n.lineno))
+            if is_importer(n):
+                name = _literal(n.args[0]) if n.args else None
+                if name is None:
+                    sites.append(("dynamic", "an import by a computed name", n.lineno))
+                elif _family(name):
+                    sites.append((_family(name), f"a dynamic import of {name}", n.lineno))
+            if isinstance(fn, ast.Attribute) and fn.attr == "json" and not n.args and not n.keywords:
+                sites.append(("json", ".json() of a response", n.lineno))
+    return sorted(sites, key=lambda s: s[2])
+
+
+# What is walked: every `*.py` under the repository root, and every file without an extension that starts with a python shebang, except the directories below
+# and any directory whose name starts with a dot (.git, .venv, caches). A new top-level directory with Python in it is walked: it fails until it is classified.
+NOT_WALKED = {
+    "tests": "the suite: it feeds hostile documents and reads its own fixtures on purpose; nothing of it ships or runs in a mission",
+    "review": "the review rounds' probes, merge scripts and hand-backs: run once by a reviewer or the lead, never imported by the product",
+    "mutants": "mutmut's generated copy of the code (gitignored, written by `make mutation`); the same files are walked in their place",
+}
+
+
+def python_files(root=ROOT):
+    for dirpath, dirs, files in os.walk(root):
+        here = pathlib.Path(dirpath)
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "__pycache__" and not (here == root and d in NOT_WALKED))
+        for f in sorted(files):
+            if f.endswith(".py"):
+                yield here / f
+            elif "." not in f:
+                try:
+                    with open(here / f, "rb") as fh:
+                        head = fh.readline(200)
+                except OSError:
+                    continue
+                if head.startswith(b"#!") and b"python" in head:
+                    yield here / f
+
+
+def scan_tree(root=ROOT):
+    """({family: {file: count}}, {file: [(family, what, line)]}) over `python_files(root)`."""
+    counts: dict[str, dict[str, int]] = {}
+    where: dict[str, list[tuple[str, str, int]]] = {}
+    for p in python_files(root):
+        rel = p.relative_to(root).as_posix()
+        for fam, what, line in scan_source(p.read_text()):
+            counts.setdefault(fam, {})[rel] = counts.get(fam, {}).get(rel, 0) + 1
+            where.setdefault(rel, []).append((fam, what, line))
+    return counts, where
+
+
+# Shell, make and workflow text that could run Python inline (`python -c "..."`): no reader and no finite test may be spelled in it.
+TEXT_SITE = re.compile(r"\bjson\.(?:loads?|JSONDecoder)\b|\bisfinite\b")
+
+
+def text_files(root=ROOT):
+    names = [*root.glob("*.sh"), *root.glob("Dockerfile*"), root / "Makefile", *(root / "bin").glob("*"), *(root / ".github" / "workflows").glob("*")]
+    return [p for p in sorted(set(names)) if p.is_file() and not p.name.endswith(".py")]
+
+
+# Each entry: the file, the exact number of sites, and why that number of raw sites is safe or not. The counts are exact: a site that moves is no change, and a
+# new one, or one fewer, fails the test until the entry is edited. `jsonio.load_json` is the ONE reader of a user-editable or run-written file, and
+# `jsonio.finite_real` the one test of a number that came out of JSON.
 RAW_JSON = {
     "cafe/pm/jsonio.py": (1, "the reader itself"),
     "cafe/pm/config.py": (1, "the package's own JSON schema (cafe/pm/schemas), shipped with the code: not user data"),
@@ -30,12 +171,22 @@ RAW_JSON = {
     "cafe/hangar.py": (1, "`_write_result`: the round trip of the text the same call has just dumped, to turn a non-finite float into null"),
     "cafe/app.py": (1, "the round trip of the text its own `json.dumps(..., allow_nan=False)` has just made"),
     "cafe/_tepex_api.py": (1, "a stand-alone client script of the deployed API that imports nothing of cafe: the text is an HTTP response, not a file"),
+    "cafe/_redteam.py": (6, "a developer script that replays the red-team cases through the app: five `.json()` of the app's own responses (a 400 or a body "
+                            "the app wrote with `allow_nan=False`) and one `__import__(\"json\").dumps` (a WRITER, spelled so because a local `json` shadows "
+                            "the module)"),
+    "lab/check.py": (3, "a stand-alone script a lab user runs with the standard library only (no cafe import): two reads of the app's own HTTP response, and "
+                        "the user's fleet file, which is forwarded as it is to the app, whose request bodies refuse an oversized number with a 400 (reader A, "
+                        "A-3). It does no arithmetic on a number of the file"),
+    "bench/throughput.py": (2, "a developer tool that reads back `config/throughput.json`, the file it wrote itself with `atomic.write_json`; a hand-edited "
+                               "400-digit number is a traceback of the bench, no verdict. SHOULD BE CONVERTED to `load_json` (it imports cafe already): "
+                               "hand-back, hunk 1"),
+    "report/build.py": (1, "the old report builder (`report/` is the pre-round-10 static report, in the sync filter as rewritten by the server): reads three "
+                           "JSON files the same repository wrote, quotes them into one HTML; no verdict reads its output"),
 }
 
-# Every use of math.isfinite (a call, or a reference such as `map(math.isfinite, ...)`) in cafe/: none is on a number that comes straight out of JSON. A number
-# read from a file enters through `load_json` (an integer that does not fit a float is a ValueError there: `math.isfinite` and `float` of one that fits cannot
-# overflow), a request body's through `jsonio.finite_real`, a YAML number through `config._finite`. A new use fails this test until it is listed with its
-# reason.
+# Every use of math.isfinite (a call, or a reference such as `map(math.isfinite, ...)`): none is on a number that comes straight out of JSON. A number read from
+# a file enters through `load_json` (an integer that does not fit a float is a ValueError there: `math.isfinite` and `float` of one that fits cannot overflow),
+# a request body's through `jsonio.finite_real`, a YAML number through `config._finite`. A new use fails this test until it is listed with its reason.
 RAW_ISFINITE = {
     "cafe/app.py": (4, "127 and 447: of a `float(...)` made inside a try that catches OverflowError; 327 and 353: FastAPI-typed float query parameters"),
     "cafe/cfd.py": (1, "`_finite_positive`: of `float(v)` of a design number (spec.json is read by `load_json`, so an integer fits; keyed code: not edited)"),
@@ -56,54 +207,191 @@ RAW_ISFINITE = {
     "cafe/pm/whatif.py": (2, "of floats made by `float()` of a command-line number (`mod` is built by `__main__._whatif` from `--shift`, `--move`, `--duty`)"),
 }
 
+# Every use of numpy.isfinite: on an array it never raises, but on a SCALAR that is a Python int above 2**63 it is a TypeError (`np.isfinite(2**64)`), which
+# `math.isfinite` of the same int is not. Each file says what the argument is. "arrays": a NumPy array made here (np.asarray(..., float), arithmetic, a store
+# variable, a model's state) of floats; "float": a Python float made here. Read from the sites, not traced through the callers, except where a site is named.
+ARRAYS = "arrays and floats made in this process (np.asarray(..., float), arithmetic, a store variable or a model's state), never a number straight out of JSON"
+RAW_NP_ISFINITE = {
+    "cafe/_site_data.py": (1, "`P`: a float the power sweep computed"),
+    "cafe/app.py": (1, "`clean_spec` inertia: an array made by `np.asarray(v, float)` inside a try that catches OverflowError"),
+    "cafe/cfd.py": (2, "the mesh extents (an array from trimesh) and `gci`, a float `gci()` has just computed"),
+    "cafe/hangar.py": (1, "NOT SAFE: `check`, of `spec[k]` read by `load_json` and filtered by `isinstance(v, (int, float))`: an integer of 2**64 or more is a "
+                          "TypeError (a failed design job with a traceback text, no wrong number). SHOULD BE CONVERTED to `finite_real(v)`: hand-back, hunk 2"),
+    "cafe/live.py": (1, "three floats of `float(...)` a few lines above; the OverflowError of that `float()` of a 400-digit integer is not caught there today "
+                        "(round 22 M-9, batch D, catches it): hand-back, note 3"),
+    "cafe/mission.py": (3, "arrays and a float of the navigation error percentiles made here"),
+    "cafe/ocean.py": (1, "an array of the current store read with numpy"),
+    "cafe/pm/emulator.py": (1, "`q`: a float quantile the emulator computed"),
+    "cafe/pm/env/bathy.py": (1, ARRAYS),
+    "cafe/pm/env/coare.py": (3, ARRAYS),
+    "cafe/pm/env/environment.py": (1, ARRAYS),
+    "cafe/pm/env/grid.py": (2, ARRAYS),
+    "cafe/pm/env/hycom.py": (5, ARRAYS),
+    "cafe/pm/env/perturb.py": (1, ARRAYS),
+    "cafe/pm/env/surface.py": (5, ARRAYS),
+    "cafe/pm/env/tao.py": (9, ARRAYS),
+    "cafe/pm/physics/__init__.py": (1, "an array (`a.size` is read in the same condition)"),
+    "cafe/pm/physics/comms.py": (1, "`n_bytes` after `np.asarray(n_bytes, float)`: an integer that does not fit is an OverflowError there, not a "
+                                 "TypeError (callers not traced)"),
+    "cafe/pm/physics/glider.py": (8, ARRAYS),
+    "cafe/pm/physics/rfband.py": (1, "`diff`: an array of the two curves' difference"),
+    "cafe/pm/physics/uas.py": (7, ARRAYS),
+    "cafe/pm/physics/usv.py": (12, ARRAYS),
+    "cafe/pm/pipeline.py": (31, ARRAYS),
+    "cafe/pm/report.py": (11, ARRAYS + "; a stored list becomes an array by `np.asarray(..., float)`, and `load_json` refused an integer that does not fit"),
+    "cafe/pm/stage1.py": (21, ARRAYS),
+    "cafe/pm/stage3/fluidx3d.py": (1, "`np.array(rows)` of parsed floats"),
+    "cafe/pm/stage3/nest.py": (2, ARRAYS),
+    "cafe/pm/stage3/pipeline_windows.py": (3, ARRAYS),
+    "cafe/pm/stage3/refit.py": (2, "`np.asarray(..., float)` of the means and standard errors"),
+    "cafe/pm/stats/sampling.py": (1, "`_num`, inside a try that catches OverflowError and TypeError"),
+    "cafe/pm/stats/sensitivity.py": (1, "`y`: the response array `first_order` is given (its shape is checked on the same line)"),
+    "cafe/pm/whatif.py": (3, "longitude and latitude arrays, and a list of the emulator's feature floats"),
+    "cafe/receipts.py": (1, "an array of the hull-lift grid"),
+    "cafe/shapes.py": (1, "`check`, of floats made by `float()` in `create_shape_design` inside a try that catches OverflowError"),
+}
 
-def _modules():
-    for p in sorted(CAFE.rglob("*.py")):
-        yield p.relative_to(ROOT).as_posix(), ast.parse(p.read_text())
+# Imports by a name that is computed, which can bring in `json`, `math` or `numpy` without one of the spellings above: each has its names from constants.
+RAW_DYNAMIC = {
+    "cafe/pm/ledger.py": (1, "`_version(m)`: the module names are the string constants of its callers (the packages the run records the versions of)"),
+    "cafe/pm/par.py": (2, "the module names of `STATE`, a constant tuple of four (module, attribute) pairs of this package"),
+    "cafe/pm/receipts.py": (1, "`_call(mod, fn)`: `mod` is a string constant at each caller in this file (package modules)"),
+}
+
+ALLOWED = {"json": RAW_JSON, "math": RAW_ISFINITE, "numpy": RAW_NP_ISFINITE, "dynamic": RAW_DYNAMIC}
+USE = {"json": "use `jsonio.load_json`", "math": "use `jsonio.finite_real`", "numpy": "use `jsonio.finite_real` for a scalar", "dynamic": "name the module"}
 
 
-def raw_json_calls():
-    found: dict[str, int] = {}
-    for rel, tree in _modules():
-        aliases, bare = set(), set()
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Import):
-                aliases |= {a.asname or a.name for a in n.names if a.name == "json"}
-            elif isinstance(n, ast.ImportFrom) and n.module == "json":
-                bare |= {a.asname or a.name for a in n.names if a.name in ("load", "loads")}
-        for n in ast.walk(tree):
-            if not isinstance(n, ast.Call):
-                continue
-            f = n.func
-            if (isinstance(f, ast.Attribute) and f.attr in ("load", "loads") and isinstance(f.value, ast.Name) and f.value.id in aliases) or \
-               (isinstance(f, ast.Name) and f.id in bare):
-                found[rel] = found.get(rel, 0) + 1
-    return found
+def _show(where, files):
+    return "; ".join(f"{rel}:{line} {what}" for rel in files for fam, what, line in where.get(rel, ()))
 
 
-def isfinite_uses():
-    found: dict[str, int] = {}
-    for rel, tree in _modules():
-        for n in ast.walk(tree):
-            if (isinstance(n, ast.Attribute) and n.attr == "isfinite" and isinstance(n.value, ast.Name) and n.value.id == "math") or \
-               (isinstance(n, ast.ImportFrom) and n.module == "math" and any(a.name == "isfinite" for a in n.names)):
-                found[rel] = found.get(rel, 0) + 1
-    return found
+@pytest.mark.parametrize("fam", sorted(ALLOWED))
+def test_every_raw_json_read_and_finite_test_in_any_python_file_of_the_repository_is_one_that_is_listed_with_its_reason_and_count(fam):
+    """`lab/check.py`, `bench/throughput.py` and `report/build.py` read JSON raw and were outside the walk of round 21; so were `import math as m`,
+    `from json import loads`, `getattr(json, "loads")`, `__import__("json")` and `np.isfinite` of a scalar."""
+    counts, where = scan_tree()
+    want = {k: n for k, (n, _) in ALLOWED[fam].items()}
+    got = counts.get(fam, {})
+    bad = sorted(k for k in set(got) | set(want) if got.get(k) != want.get(k))
+    assert not bad, f"{fam}: {USE[fam]} or list the site with its reason and count; now {got}, listed {want}; at {_show(where, bad)}"
+    for rel, (n, why) in ALLOWED[fam].items():
+        assert n >= 1 and len(why) > 15 and (ROOT / rel).is_file(), rel
 
 
-def test_no_raw_json_load_is_left_in_cafe_outside_the_allow_list():
-    """Before the sweep: 79 call sites in 31 files read a run's or a user's file with `json.loads`, so an integer of 400 digits (an OverflowError at the first
-    `float`, `isfinite` or product of it) or nesting of a few hundred brackets (a RecursionError) was a traceback at each of them, guarded one at a time."""
-    found = raw_json_calls()
-    assert found == {k: n for k, (n, _) in RAW_JSON.items()}, f"raw json.load(s) calls: {found}; use `jsonio.load_json` or list the call with its reason"
-    for rel, (_, why) in RAW_JSON.items():
-        assert why and (ROOT / rel).is_file(), rel
+def test_no_shell_make_or_workflow_text_spells_a_json_reader_or_a_finite_test():
+    assert text_files() and all(not TEXT_SITE.search(p.read_text()) for p in text_files()), [p.name for p in text_files() if TEXT_SITE.search(p.read_text())]
+    assert TEXT_SITE.search("python3 -c 'import json; json.loads(x)'") and TEXT_SITE.search("python -c \"import math; math.isfinite(1)\"")
 
 
-def test_every_scalar_math_isfinite_in_cafe_is_one_that_is_listed_with_its_reason():
-    found = isfinite_uses()
-    assert found == {k: n for k, (n, _) in RAW_ISFINITE.items()}, f"math.isfinite uses: {found}; use `jsonio.finite_real` or list the use with its reason"
-    assert all(why for _, why in RAW_ISFINITE.values())
+def test_the_walk_covers_everything_shipped_or_run_and_says_why_it_leaves_the_rest():
+    walked = {p.relative_to(ROOT).as_posix() for p in python_files()}
+    assert {"cafe/app.py", "cafe/pm/stage1.py", "lab/check.py", "bench/throughput.py", "report/build.py", "cafe/_redteam.py"} <= walked
+    assert not any(w.split("/")[0] in NOT_WALKED for w in walked) and len(walked) > 80
+    assert all(len(why) > 20 for why in NOT_WALKED.values()) and (ROOT / "tests").is_dir() and (ROOT / "review").is_dir()
+    top = {d.name for d in ROOT.iterdir() if d.is_dir() and not d.name.startswith(".") and any(d.rglob("*.py"))}
+    assert top - set(NOT_WALKED) == {"cafe", "lab", "bench", "report"}, f"a top-level directory with Python in it: {top}: walked automatically; say so here"
+
+
+def test_a_new_raw_site_anywhere_in_a_tree_fails_and_the_excluded_directories_do_not(tmp_path):
+    raw = "import json\njson.loads('1')\n"
+    files = {"lab/x.py": raw, "newdir/y.py": "from math import isfinite\n", "bin/tool": "#!/usr/bin/env python3\nimport json\njson.load(f)\n",
+             "setup.py": "import numpy as np\nnp.isfinite(1)\n", "tests/t.py": raw, "review/r.py": raw, "mutants/m.py": raw, ".venv/v.py": raw,
+             "bin/run.sh": "#!/bin/sh\njson.loads\n"}
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text)
+    counts, _ = scan_tree(tmp_path)
+    assert counts == {"json": {"lab/x.py": 1, "bin/tool": 1}, "math": {"newdir/y.py": 1}, "numpy": {"setup.py": 1}}
+
+
+# The spellings of the reviewers' probes, and the ordinary ones: each is fed to the checker as a source text and must be found, once each (the count is part
+# of the claim: an allow-list entry's number is what these produce).
+CAUGHT = {
+    "json.loads": ("import json\njson.loads(s)", {"json": 1}),
+    "json.load": ("import json\njson.load(f)", {"json": 1}),
+    "import json as j": ("import json as j\nj.loads(s)", {"json": 1}),
+    "alias of an alias": ("import json\na = json\nb = a\nb.loads(s)", {"json": 1}),
+    "from json import loads": ("from json import loads\nloads(s)", {"json": 1}),
+    "from json import loads as parse": ("from json import loads as parse\nparse(s)", {"json": 1}),
+    "from json import load, loads": ("from json import load, loads", {"json": 2}),
+    "from json import star": ("from json import *", {"json": 1}),
+    "from json.decoder import JSONDecoder": ("from json.decoder import JSONDecoder\nJSONDecoder().decode(s)", {"json": 1}),
+    "json.JSONDecoder().decode": ("import json\njson.JSONDecoder().decode(s)", {"json": 1}),
+    "json.decoder.JSONDecoder": ("import json.decoder\njson.decoder.JSONDecoder()", {"json": 1}),
+    "import json.decoder as d": ("import json.decoder as d\nd.JSONDecoder().raw_decode(s)", {"json": 1}),
+    "from json import decoder": ("from json import decoder\ndecoder.JSONDecoder()", {"json": 1}),
+    "d = json.decoder": ("import json\nd = json.decoder\nd.JSONDecoder()", {"json": 1}),
+    "a reference, not a call": ("import json\nlist(map(json.loads, texts))", {"json": 1}),
+    "getattr(json, 'loads')": ("import json\ngetattr(json, 'loads')(s)", {"json": 1}),
+    "getattr(json, computed)": ("import json\ngetattr(json, name)(s)", {"json": 1}),
+    "getattr on an alias": ("import json as j\ngetattr(j, 'load')", {"json": 1}),
+    "vars(json)": ("import json\nvars(json)['loads'](s)", {"json": 1}),
+    "json.__dict__": ("import json\njson.__dict__['loads'](s)", {"json": 1}),
+    "__import__('json').loads": ("__import__('json').loads(s)", {"json": 1}),
+    "importlib.import_module('json')": ("import importlib\nimportlib.import_module('json').loads(s)", {"json": 1}),
+    "from importlib import import_module as imp": ("from importlib import import_module as imp\nimp('json').loads(s)", {"json": 1}),
+    "m = __import__('json')": ("m = __import__('json')\nm.loads(s)", {"json": 2}),
+    "getattr(__import__('json'), 'loads')": ("getattr(__import__('json'), 'loads')(s)", {"json": 2}),
+    "simplejson as json": ("import simplejson as json\njson.loads(s)", {"json": 1}),
+    "orjson": ("import orjson\norjson.loads(s)", {"json": 1}),
+    "response.json()": ("r = client.get('/x')\nr.json()['a']", {"json": 1}),
+    "from somewhere import json": ("from cafe.x import json\njson.loads(s)", {"json": 1}),
+    "from . import json": ("from . import json\njson.loads(s)", {"json": 1}),
+    "walrus alias": ("import math\nif (m := math):\n    m.isfinite(1)", {"math": 1}),
+    "annotated alias": ("import math\nm: object = math\nm.isfinite(1)", {"math": 1}),
+    "inside a function and a try": ("def f(s):\n    try:\n        import json as j\n    finally:\n        pass\n    return j.loads(s)", {"json": 1}),
+    "math.isfinite": ("import math\nmath.isfinite(x)", {"math": 1}),
+    "import math as m": ("import math as m\nm.isfinite(x)", {"math": 1}),
+    "m = math": ("import math\nm = math\nm.isfinite(x)", {"math": 1}),
+    "f = math.isfinite": ("import math\nf = math.isfinite\nf(x)", {"math": 1}),
+    "map(math.isfinite, xs)": ("import math\nall(map(math.isfinite, xs))", {"math": 1}),
+    "from math import isfinite": ("from math import isfinite\nisfinite(x)", {"math": 1}),
+    "from math import isfinite as ok": ("from math import isfinite as ok\nok(x)", {"math": 1}),
+    "from math import star": ("from math import *", {"math": 1}),
+    "getattr(math, 'isfinite')": ("import math\ngetattr(math, 'isfinite')(x)", {"math": 1}),
+    "getattr(m, computed)": ("import math as m\ngetattr(m, name)(x)", {"math": 1}),
+    "__import__('math')": ("__import__('math').isfinite(x)", {"math": 1}),
+    "importlib.import_module('math')": ("import importlib\nimportlib.import_module('math')", {"math": 1}),
+    "np.isfinite": ("import numpy as np\nnp.isfinite(x)", {"numpy": 1}),
+    "np.isfinite of a scalar of a document": ("import numpy as np\ndoc = load_json(t)\nnp.isfinite(doc['x'])", {"numpy": 1}),
+    "import numpy": ("import numpy\nnumpy.isfinite(x)", {"numpy": 1}),
+    "import numpy.ma as ma": ("import numpy.ma as ma\nma.isfinite(x)", {"numpy": 1}),
+    "from numpy import isfinite": ("from numpy import isfinite\nisfinite(x)", {"numpy": 1}),
+    "from numpy import star": ("from numpy import *", {"numpy": 1}),
+    "f = np.isfinite": ("import numpy as np\nf = np.isfinite\nf(x)", {"numpy": 1}),
+    "getattr(np, 'isfinite')": ("import numpy as np\ngetattr(np, 'isfinite')(x)", {"numpy": 1}),
+    "an import by a computed name": ("m = __import__(name)\nm.loads(s)", {"dynamic": 1}),
+    "import_module(computed)": ("import importlib\nimportlib.import_module(name)", {"dynamic": 1}),
+}
+NOT_CAUGHT = {
+    "json.dumps": "import json\njson.dumps(x)",
+    "json.dump": "import json\njson.dump(x, f)",
+    "getattr(json, 'dumps')": "import json\ngetattr(json, 'dumps')(x)",
+    "math.sqrt": "import math\nmath.sqrt(2.0)",
+    "math.isnan is not this rule": "import math\nmath.isnan(x)",
+    "np.zeros": "import numpy as np\nnp.zeros(3)",
+    "np.isnan": "import numpy as np\nnp.isnan(x)",
+    "a name that is not the module": "def loads(s):\n    return s\nloads('1')\nself.isfinite(3)\nobj.json",
+    "a string and a comment": "x = 'json.loads(s) math.isfinite(x)'  # np.isfinite(y)\n",
+    "a literal import of another module": "import importlib\nimportlib.import_module('cafe.pm.env.bathy')",
+    "json used as a keyword": "client.post('/x', json=dict(a=1))",
+    "a relative import of a sibling module that is named like one": "from .json import loads\nloads(s)",
+}
+
+
+@pytest.mark.parametrize("name", sorted(CAUGHT))
+def test_the_checker_finds_each_spelling_of_a_raw_json_read_or_finite_test_once(name):
+    src, want = CAUGHT[name]
+    got: dict[str, int] = {}
+    for fam, _, _ in scan_source(src):
+        got[fam] = got.get(fam, 0) + 1
+    assert got == want, scan_source(src)
+
+
+@pytest.mark.parametrize("name", sorted(NOT_CAUGHT))
+def test_the_checker_leaves_alone_what_is_not_a_reader_or_the_rule(name):
+    assert scan_source(NOT_CAUGHT[name]) == []
 
 
 # The modules the live app image loads (it has no pyyaml, which `cafe.pm.config` imports). `cafe/receipts.py` is the pipeline's and imports config for its own
