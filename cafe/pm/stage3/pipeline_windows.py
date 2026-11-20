@@ -409,6 +409,47 @@ def _fea_child(job: str, out: str, deadline: float | None = None) -> int:
     return 0
 
 
+def _glider_vehicle_for(ctx: Context, vid: str, platform: str, a: dict[str, Any], clip: bool) -> tuple[dict[str, Any], W.Vehicle]:
+    """(platform, the glider's window vehicle with the FEA on) at the dive depth the mission orders. `clip`: at no more than the platform's `rating_m`, as
+    the model flies it (physics/glider.py); an LES row keeps the order as written (`clip` False)."""
+    P = glider.load_platform(platform)
+    dive = float([v for v in ctx.mission["vehicles"] if v["id"] == vid][0].get("task", {}).get("dive_depth_m", P["mission_defaults"]["dive_depth_m"]))
+    veh = glider_vehicle(P, a, platform, min(dive, P["rating_m"]) if clip else dive)
+    veh.extra.update(fea=True)
+    return P, veh
+
+
+def _sea_pressure_fea(veh: W.Vehicle, a: dict[str, Any], timeout_s: float | None) -> dict[str, Any]:
+    """The hull FEA of `_fea` with no LES wall pressure: the load is the sea pressure at `veh.depth` alone (a zero wall-pressure field; `fea_window` adds
+    rho g depth). A run is labelled `load` "sea pressure only" with its `depth_m`; one that did not run keeps `_fea`'s reason."""
+    r = _fea(veh, dict(wall_points=np.zeros((1, 3)), wall_pressure=np.zeros(1)), a, timeout_s)
+    return dict(r, load="sea pressure only", depth_m=veh.depth) if r["run"] else r
+
+
+def _fea_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, platform: str, a: dict[str, Any], st: dict[str, Any],
+                sizes: dict[str, Any]) -> Future[tuple[dict[str, Any], float]]:
+    """Queues the sea-pressure FEA of glider `vid` on `pool` (the one worker the free-surface cases use: they share the CPUs) or returns the finished
+    not-planned result. It runs only if the plan reserved its seconds (`sizes["fea"]["hold_s"]`, `budget.plan`: ahead of the free-surface cases, whose
+    share it leaves whole); the reserve is counted against the free-surface queue. The result is (the row's `fea`, seconds it took); never raises."""
+    done: Future[tuple[dict[str, Any], float]] = Future()
+    if st["share"] is not None and st["fea_left"] < need(a, "fea_min_s") - 1e-6:       # (a hold of several FEAs is a float sum)
+        done.set_result((dict(run=False, reason=f"not planned: the FEA reserve is {st['fea_left']:.1f} s of a {sizes['slice_s']:.1f} s slice, below "
+                                                f"stage3.fea_min_s ({need(a, 'fea_min_s')} s): use a larger --budget"), 0.0))
+        return done
+    st["fea_left"] -= need(a, "fea_min_s")
+    st["queued"] += need(a, "fea_min_s")
+
+    def work() -> tuple[dict[str, Any], float]:
+        t0 = time.perf_counter()
+        try:
+            left = None if st["deadline"] is None else st["deadline"] - time.perf_counter()
+            fea = _sea_pressure_fea(_glider_vehicle_for(ctx, vid, platform, a, clip=True)[1], a, None if left is None else max(left, 0.0))
+        except (ValueError, KeyError, RuntimeError, OSError) as e:
+            fea = dict(run=False, reason=f"FEA failed: {e}"[:300])
+        return fea, time.perf_counter() - t0
+    return pool.submit(work)
+
+
 def _fea(veh: W.Vehicle, r: dict[str, Any], a: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
     """The FEA of the pressure hull in a child process that is killed, with the ccx and gmsh it started, at `timeout_s` (a safety kill): gmsh and ccx
     cannot be interrupted from inside, and the stage's wall-clock share is not negotiable. A killed FEA is `run` False with a reason that says so."""
@@ -540,10 +581,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
     heading, hsrc = track_heading(res, vid, w["t"]), track_heading_source(res, vid, w["t"])
     try:
         if cls == "glider":
-            P = glider.load_platform(platform)
-            dive = [v for v in ctx.mission["vehicles"] if v["id"] == vid][0].get("task", {}).get("dive_depth_m", P["mission_defaults"]["dive_depth_m"])
-            veh = glider_vehicle(P, a, platform, float(dive))
-            veh.extra.update(fea=True)
+            P, veh = _glider_vehicle_for(ctx, vid, platform, a, clip=False)
             case = glider_case(ctx, w, P, veh, a, heading)
         elif cls == "usv":
             P = usv.load_platform(platform)
@@ -654,7 +692,8 @@ def _fs_fail(base: dict[str, Any], msg: str, t0: float, **extra: Any) -> dict[st
 
 def profile_stage3_s(ctx: Context) -> dict[str, float]:
     """Per `--budget` profile (smallest first), the stage-3 seconds that profile's own plan gives this mission and run: its stage-3 share after the
-    slices of the LES windows that cannot run went to stage 1 (budget.plan), times its budget. The running plan's share says nothing about the others."""
+    slices of the LES windows that cannot run went to stage 1 (budget.plan), times its budget, less the seconds it holds for the sea-pressure FEAs (they are
+    not the free-surface cases'). The running plan's share says nothing about the others."""
     p, out = ctx.plan, {}
     for name, b in sorted(budget.BUDGET_S.items(), key=lambda kv: kv[1]):
         try:
@@ -662,7 +701,7 @@ def profile_stage3_s(ctx: Context) -> dict[str, float]:
                             mem_gb=p["mem_gb"], env_gb=p["env_gb"])
         except budget.PlanError:
             continue                                                                # stage 1 cannot run in it: no case of stage 3 either
-        out[name] = q["shares"]["stage3"] * b
+        out[name] = round(max(q["shares"]["stage3"] * b - q["les"]["fea_hold_s"], 0.0), 6)       # (the share is a fraction of the budget: a rounding residue)
     return out
 
 
@@ -802,7 +841,8 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     Wall clock: the stage's share (stage_share_s) is split over the LBM windows still to run, so time a window does not use passes to the
     next; it is only a safety kill: the LES run stops after the chunk that spends its slice, the FEA gets what is left of the slice, a window
     whose turn comes with less than `stage3.min_window_s` left is not started; each of these is a row that says "killed".
-    A USV window also gets a `hull_fs` row, run in a child process while the LBM windows run (killed at the stage deadline); the rows
+    A glider whose LES part is planned out gets its hull FEA from the sea pressure alone, once, first in the same one-worker queue (`_fea_submit`), in every
+    row of that part. A USV window also gets a `hull_fs` row, run in a child process while the LBM windows run (killed at the stage deadline); the rows
     follow the LBM rows of the vehicle. A case that does not fit is a row with ok False and the minutes it needs. Every row carries
     `timing` (seconds, measured rates); pipeline.s_stage3 moves it out of the hashed output into the ledger."""
     if not os.environ.get("CAFE_NPROC"):                                    # unset or empty (an empty one is unset: DECISIONS 330)
@@ -820,8 +860,12 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     todo = [(vid, w, part) for vid, ws in wins.items() for w in ws for part in PARTS[ctx.classes[vid]]]
     _jit_cache(ctx)
     rows: dict[str, list[dict[str, Any]]] = {vid: [] for vid in wins}
-    st = dict(share=share, t_stage=t_stage, queued=0.0, deadline=None if share is None else t_stage + share)
+    st = dict(share=share, t_stage=t_stage, queued=0.0, deadline=None if share is None else t_stage + share, fea_left=float(sizes["fea"]["hold_s"]))
     with ThreadPoolExecutor(1) as pool:                                     # one free-surface case at a time: they share the CPUs
+        # a glider whose LES part is planned out has no LES pressure: its hull FEA runs from the sea pressure alone, first in the queue (a stage with no
+        # share at all, 0.0, has none: its rows keep "the window did not run")
+        fea_out = {vid: _fea_submit(pool, ctx, vid, plat[vid], a, st, sizes) for vid in budget.fea_planned_out(ctx.classes, sizes["les"]["windows"])
+                   if vid in wins and share != 0.0}
         fs = [(vid, w, _fs_submit(pool, ctx, vid, w, plat[vid], res, a, st, sizes)) for vid, ws in wins.items() if ctx.classes[vid] in FS_PARTS for w in ws]
         runs = [sizes["les"]["windows"].get(f"{vid}/{part}", dict(runs=True))["runs"] for vid, w, part in todo]       # windows budget.les_windows did not skip
         for i, (vid, w, part) in enumerate(todo):
@@ -830,6 +874,15 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
             rows[vid].append(r)
             msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error') or r['reasons'][0]}"
             ctx.log(f"stage3 {vid}/{part} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['timing']['wall_s']:.1f} s of {win_s if win_s is None else round(win_s, 1)}]")
+        for vid, fut_fea in fea_out.items():
+            fea, took = fut_fea.result()
+            for r in rows[vid]:
+                if sizes["les"]["windows"].get(f"{vid}/{r['part']}", dict(runs=True))["runs"]:
+                    continue                                                # its LES window ran: its own FEA (or its own reason) stands
+                r["fea"] = dict(fea)
+                r["timing"].update(fea_s=took, fea_seconds=r["fea"].pop("seconds", None))
+            what = f"utilisation={fea['utilization']:.3g}" if fea["run"] else fea["reason"]
+            ctx.log(f"stage3 {vid} hull FEA (sea pressure only): run={fea['run']} {what} [{took:.1f} s]")
         for vid, w, fut in fs:
             r = fut.result()
             rows[vid].append(r)

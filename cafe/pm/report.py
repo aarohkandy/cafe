@@ -536,6 +536,19 @@ def _hull_warning(v: dict[str, Any]) -> str | None:
             f"could not fly it. The hull is an assumption (QUESTIONS_FOR_LAB 4a): the rated depth of the real vehicle is {P['rating_m']:g} m.")
 
 
+def _hull_fea(st3: dict[str, Any] | None, vid: str, tr: Trace) -> dict[str, Any] | None:
+    """The glider's pressure-hull FEA from the sea pressure alone (stage 3, `pipeline_windows._sea_pressure_fea`): the first stage-3 row of `vid` that carries
+    one, with its utilisation (the larger of the stress and the knocked-down buckling one) and the two it is the larger of, each a node of
+    stage3/windows.json. None when no row has one (a window whose LES pressure loaded the FEA is not this: its row has no `load`)."""
+    for i, w in enumerate((st3 or {}).get(vid, [])):
+        f = w.get("fea") or {}
+        if f.get("run") and f.get("load") == "sea pressure only":
+            r3, src = tr.ref("stage3", output="windows.json"), f"stage3/windows.json {vid}[{i}].fea"
+            return dict(load=f["load"], depth_m=num(f["depth_m"], "m", r3, src + ".depth_m"),
+                        **{k: num(f[k], "-", r3, f"{src}.{k}") for k in ("utilization", "stress_utilization", "buckling_utilization")})
+    return None
+
+
 def _uas_levels_note(v: dict[str, Any]) -> str | None:
     """Round 15 M-13: the flux-profile levels of the mission are heights above the deck, so they are flown at the deck height more above the sea."""
     try:
@@ -581,7 +594,7 @@ def _cases(tr: Trace, vid: str, n: int) -> list[dict[str, Any]]:
 
 
 def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str, Any], cred: dict[str, Any], tr: Trace, cred_ref: dict[str, Any],
-              flip: dict[str, Any] | None = None, res: dict[str, Any] | None = None) -> dict[str, Any]:
+              flip: dict[str, Any] | None = None, res: dict[str, Any] | None = None, st3: dict[str, Any] | None = None) -> dict[str, Any]:
     ref = tr.ref("stage1b", check="lhs_stratified", output="summary.json")
     veh = {v["id"]: v for v in mission["vehicles"]}
     plat = {i: v["platform"] for i, v in veh.items()}
@@ -601,6 +614,7 @@ def _vehicles(s1b: dict[str, Any], s1: dict[str, Any] | None, mission: dict[str,
                         **_drivers(e, res, vid, ref, src, _overdepth_note(veh[vid], ((res or {}).get("vehicles") or {}).get(vid))
                                    if e["cls"] == "glider" and "overdepth" in e["modes"] else None),
                         hull_warning=_hull_warning(veh[vid]) if e["cls"] == "glider" else None,
+                        hull_fea=_hull_fea(st3, vid, tr) if e["cls"] == "glider" else None,
                         uas_levels_note=_uas_levels_note(veh[vid]) if e["cls"] == "uas" else None,
                         speed_ratio=_speed_ratio(e, ref, src),
                         wind3d=_opt(e.get("wind3d_fraction"), "fraction of the sortie records", ref, src + ".wind3d_fraction"),
@@ -1391,7 +1405,7 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
                      data_consumed=dict(inputs=[dict(ref=i["ref"], sha256=i.get("sha256"), note=i.get("note", "")) for i in ing["inputs"]],
                                         variables="cafe/schemas/wrfout.json and cafe/schemas/umwmout.json (read per hour over the mission window)")),
         verdict_source="stage1b (stage 1 rerun with the stage-3 refit multipliers; a copy of stage 1 when nothing was refit)",
-        vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res), links=_links(s1b, tr, mission),
+        vehicles=_vehicles(s1b, _jl(run / "stage1" / "summary.json"), mission, cred, tr, cred_ref, flip, res, st3), links=_links(s1b, tr, mission),
         map=_map(mission, res, why, wins, tr, cfg), reach=_reach(mission, env, tr, res, s1b), environment=_env(mission, env, res, wins, s1b, tr),
         stage3=_stage3(plan, wins, st3, refit, tr, pref), emulator=_emulator(emu, design, tr, plan), machine=_machine(plan, tr, pref),
         assumed_inputs=_assumed(cred, cred_ref), sensitivity_scope=_sens_scope(tr))
@@ -1710,6 +1724,9 @@ def _task_html(v: dict[str, Any]) -> str:
 def _notes_html(v: dict[str, Any]) -> str:
     """A glider's hull warning (beside its verdict) and a UAS's level heights; each absent for a vehicle that has none."""
     out = f"<p class=warn>{html.escape(v['hull_warning'])}</p>" if v.get("hull_warning") else ""
+    if f := v.get("hull_fea"):
+        out += (f"<p class=muted>Hull FEA (sea pressure only) at {_n(f['depth_m'])}: utilisation {_n(f['utilization'])} (stress {_n(f['stress_utilization'])}, "
+                f"buckling {_n(f['buckling_utilization'])}); above 1 the hull yields or buckles.</p>")
     return out + (f"<p class=muted>{html.escape(v['uas_levels_note'])}</p>" if v.get("uas_levels_note") else "")
 
 
