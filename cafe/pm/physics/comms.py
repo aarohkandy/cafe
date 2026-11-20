@@ -116,10 +116,12 @@ def divergence_factor(d: FA, r1: FA, r2: FA, psi: FA, a: float = A_EFF) -> F:
 
 
 # The error of the -1 reflection for a low antenna, by PAIR of antenna heights [m] (the lower first): the two-ray loss minus a flat-earth Fresnel two-ray's
-# (eps_c 72.8 - j118.9, 915 MHz, vertical polarisation, Hs 0), minimum / median / maximum [dB] over 400 points from 300 m to the pair's radio horizon
-# or 12 km, measured on orca and held to 0.1 dB by tests/test_round18_x.py. Positive: the loss is overstated, the margin too low; negative: understated,
+# (eps_c 72.8 - j118.9, 915 MHz, vertical polarisation, Hs 0), minimum / median / maximum [dB] of 400 sampled points from 300 m to the pair's radio horizon
+# or 12 km, measured on orca and held to 0.1 dB by tests/test_round18_x.py: figures of those 400 samples, not bounds (a finer sampling moves a minimum or a
+# maximum, the median hardly: round 22, DECISIONS 1057). Positive: the loss is overstated, the margin too low; negative: understated,
 # too high. The live band (physics/rfband.pair_band) equals these ten rows to 0.1 dB (tests/test_round18_x.py, tests/test_round21_b.py) and the link card
-# (report._low_antenna_note) and L23 (credibility.LIMITATIONS) print it; this table is the fixture it is held to; a pair not here is computed live.
+# (report._low_antenna_note) and L23 (credibility.LIMITATIONS) print its median and counts, no extreme; this table is the fixture it is held to; a pair
+# not here is computed live.
 LOW_ANTENNA_PAIR_BAND: dict[tuple[float, float], tuple[float, float, float]] = {
     (0.1, 15.0): (11.4, 15.1, 16.0), (0.3, 15.0): (1.2, 5.1, 6.0), (0.5, 15.0): (-2.9, 1.3, 2.2), (2.2, 15.0): (-3.3, -0.4, 0.2),
     (0.3, 0.5): (9.0, 9.3, 9.3), (0.3, 0.3): (11.3, 11.4, 11.4), (0.5, 0.5): (6.4, 6.7, 6.7),
@@ -161,27 +163,30 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     only): the -1 has no floor. With it the two rays cancel as the heights go to 0 (the field goes as 2 k h1 h2 / d), while the Fresnel coefficient at a
     grazing angle of 1 mrad is about -0.98 with a phase, which leaves a field of about 0.03 of the free-space one (B's estimate, not re-measured). The error is
     a property of the PAIR of heights, not of one antenna, and its DIRECTION depends on the pair. Measured against a flat-earth two-ray with the Fresnel
-    coefficient of the same sea (eps_c 72.8 - j118.9 at 915 MHz, vertical polarisation, Hs 0; a bound, since a flat-earth two-ray has no surface wave), over
-    ONE range for every row, d = 300 m to the pair's radio horizon or to 12 km, whichever is nearer, 400 points, `two_ray_loss_db` minus the Fresnel loss,
-    minimum / median / maximum [dB] (`LOW_ANTENNA_PAIR_BAND` is this table; tests/test_round18_x.py recomputes every row to 0.1 dB, and the sign of every
-    row decides the words the link card and L23 print): a positive figure is a loss OVERSTATED and a margin too LOW, a negative one a loss UNDERSTATED and a
-    margin too HIGH. By the antenna heights of the pair (the lower first):
+    coefficient of the same sea (eps_c 72.8 - j118.9 at 915 MHz, vertical polarisation, Hs 0; a flat-earth two-ray has no surface wave, so this is a
+    difference from it, not a bound on the error), over ONE range for every row, d = 300 m to the pair's radio horizon or to 12 km, whichever is nearer, 400
+    points, `two_ray_loss_db` minus the Fresnel loss, minimum / median / maximum [dB] of the 400 sampled differences: the figures of those samples and not
+    limits (measured on orca, 400 against 40,000 sampled ranges over 105 pairs of heights from 0.1 to 1,000 m: the minimum moves by up to 5.2 dB, the
+    maximum by up to 54.1 dB, the median by at most 0.52 dB; the card and L23 print the median and the numbers of samples more than 3 dB off, DECISIONS
+    1057) (`LOW_ANTENNA_PAIR_BAND` is this table; tests/test_round18_x.py recomputes every row to 0.1 dB, and the sign of every row decides the words the
+    link card and L23 print): a positive figure is a loss OVERSTATED and a margin too LOW, a negative one a loss UNDERSTATED and a margin too HIGH. By the
+    antenna heights of the pair (the lower first):
     0.1 m with 15 m +11.4 / +15.1 / +16.0; 0.3 m with 15 m +1.2 / +5.1 / +6.0 (the Slocum's); 0.5 m with 15 m -2.9 / +1.3 / +2.2 (the Seaglider's);
     2.2 m with 15 m -3.3 / -0.4 / +0.2 (the USV's whip); both ends low: 0.3 m with 0.5 m +9.0 / +9.3 / +9.3, two 0.3 m ends +11.3 / +11.4 / +11.4, two 0.5 m
     ends +6.4 / +6.7 / +6.7; with a 2.2 m end: 0.3 m +5.5 / +6.2 / +6.2, 0.5 m +1.8 / +2.6 / +2.7, and two 2.2 m ends -2.4 / -1.2 / +1.6. (Reviewer B's
     parabolic-equation field over sea water, 300 m to 12 km, 15 m partner, gives -3.9 / -1.5 / -0.8 at 2.2 m, -3.1 / +0.3 / +1.2 at 0.5 m, +0.5 / +4.1 / +5.1
     at 0.3 m and +10.6 / +14.2 / +15.1 at 0.1 m, and -0.1 / +3.7 / +4.7 for the Slocum with a 2.2 m end: the reviewer's, not re-run.)
-    So the margin is too LOW, never too high, over this range for the pairs 0.1 / 15, 0.3 / 15, 0.3 / 0.5, 0.3 / 0.3, 0.5 / 0.5, 0.3 / 2.2 and 0.5 / 2.2 (a
-    GO can show as MARGINAL or NO-GO: about 1 to 6 dB for the Slocum with a partner of 2.2 m or 15 m, 6 to 11 dB for two gliders, 11 to 16 dB at 0.1 m); it
-    can be too HIGH as well as too low for 0.5 m with 15 m (up to 2.9 dB too high, up to 2.2 dB too low), for two 2.2 m ends (up to 2.4 dB too high, 1.6 dB
-    too low) and for 2.2 m with 15 m (up to 3.3 dB too high, 0.2 dB too low). Round 17's reading, that a low antenna's margin is conservative and the shipped
-    antennas are unaffected, held for the pairs of the first group and not for the others, and round 18's first restatement (one pooled bound of 3.3 dB that 'at
-    worst understates') was wrong for 0.5 m with a 2.2 m partner, which is overstated by +1.8 to +2.7 dB. A pair that is not in the table is computed live by
-    `physics/rfband.pair_band` and printed on the card of its link (rounds 17 to 20: 'NOT MEASURED, no band is stated'; for a UAS partner at 18 to 108 m the
-    band grows to about -13 to +44 dB).
-    Below 300 m none of this is stated: from 200 m the 0.5 m case with a 15 m partner is understated by up to 5.0 dB, the 0.3 m case with a 15 m partner by
-    up to 0.6 dB, and the 2.2 m case with a 15 m partner is overstated by +31.9 dB at one null of that grid. Not run: a parabolic equation for two low ends
-    (its starter does not hold below about 1 m), any distance below 200 m, and Hs above 0.
+    So at the sampled ranges the margin is too LOW, never too high, for the pairs 0.1 / 15, 0.3 / 15, 0.3 / 0.5, 0.3 / 0.3, 0.5 / 0.5, 0.3 / 2.2 and 0.5 /
+    2.2 (a GO can show as MARGINAL or NO-GO: about 1 to 6 dB for the Slocum with a partner of 2.2 m or 15 m, 6 to 11 dB for two gliders, 11 to 16 dB at 0.1
+    m: the rows' own figures); it can be too HIGH as well as too low for 0.5 m with 15 m (the rows' 2.9 dB too high and 2.2 dB too low), for two 2.2 m ends
+    (2.4 dB too high, 1.6 dB too low) and for 2.2 m with 15 m (3.3 dB too high, 0.2 dB too low). Round 17's reading, that a low antenna's margin is
+    conservative and the shipped antennas are unaffected, held for the pairs of the first group and not for the others, and round 18's first restatement
+    (one pooled bound of 3.3 dB that 'at worst understates') was wrong for 0.5 m with a 2.2 m partner, which is overstated by +1.8 to +2.7 dB. A pair that
+    is not in the table is computed live by `physics/rfband.pair_band` and printed on the card of its link (rounds 17 to 20: 'NOT MEASURED, no band is
+    stated').
+    Below 300 m none of this is stated: a 400-point grid from 200 m gave -5.0 dB at its minimum for the 0.5 m case with a 15 m partner, -0.6 dB for the 0.3
+    m case with a 15 m partner and +31.9 dB at its maximum, at one null, for the 2.2 m case with a 15 m partner: figures of that grid, not limits. Not run:
+    a parabolic equation for two low ends (its starter does not hold below about 1 m), any distance below 200 m, and Hs above 0.
     Not changed: the Fresnel coefficient needs the sea temperature and the antenna polarisation, which the lab has not given (DECISIONS 913 to 916). The
     platform files refuse an RF antenna height below 0.1 m (physics.ANTENNA_MIN_M, round 17, M-6: at 0 the margin was a finite -43 dB at 5 km); the mission
     schema refuses a ship antenna below 0.5 m.

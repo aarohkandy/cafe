@@ -405,7 +405,7 @@ def through_water_table(P: dict[str, Any], pol: Polar, wind_en: Arr, current_en:
     wr = np.asarray(wind_en, float) - np.asarray(current_en, float)
     gam = np.mod(cv.from_deg(wr) - np.asarray(heading_to) + 180.0, 360.0) - 180.0
     v, beta, phi, k, aws, awa, kd = np.moveaxis(_lin(pol.f, (pol.tws, pol.twa), (cv.speed(wr), np.abs(gam))), -1, 0)
-    side = np.where(gam < 0, -1.0, 1.0)
+    side = _body(wind_en, current_en, heading_to)[4]            # the sign `through_water` takes, so the two cannot split a dead run (|gam| = 180) between tacks
     lee = -side * beta
     return dict(stw=v, track_to=cv.wrap360(np.asarray(heading_to) + lee), leeway_deg=lee, heel_deg=phi, aws=aws, awa_deg=awa,
                 K=k, kd=kd)

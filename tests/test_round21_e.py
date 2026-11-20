@@ -177,9 +177,6 @@ RAW_JSON = {
     "lab/check.py": (3, "a stand-alone script a lab user runs with the standard library only (no cafe import): two reads of the app's own HTTP response, and "
                         "the user's fleet file, which is forwarded as it is to the app, whose request bodies refuse an oversized number with a 400 (reader A, "
                         "A-3). It does no arithmetic on a number of the file"),
-    "bench/throughput.py": (2, "a developer tool that reads back `config/throughput.json`, the file it wrote itself with `atomic.write_json`; a hand-edited "
-                               "400-digit number is a traceback of the bench, no verdict. SHOULD BE CONVERTED to `load_json` (it imports cafe already): "
-                               "hand-back, hunk 1"),
     "report/build.py": (1, "the old report builder (`report/` is the pre-round-10 static report, in the sync filter as rewritten by the server): reads three "
                            "JSON files the same repository wrote, quotes them into one HTML; no verdict reads its output"),
 }
@@ -188,7 +185,7 @@ RAW_JSON = {
 # a file enters through `load_json` (an integer that does not fit a float is a ValueError there: `math.isfinite` and `float` of one that fits cannot overflow),
 # a request body's through `jsonio.finite_real`, a YAML number through `config._finite`. A new use fails this test until it is listed with its reason.
 RAW_ISFINITE = {
-    "cafe/app.py": (4, "127 and 447: of a `float(...)` made inside a try that catches OverflowError; 327 and 353: FastAPI-typed float query parameters"),
+    "cafe/app.py": (3, "127: of a `float(...)` made inside a try that catches OverflowError; 330 and 356: FastAPI-typed float query parameters"),
     "cafe/cfd.py": (1, "`_finite_positive`: of `float(v)` of a design number (spec.json is read by `load_json`, so an integer fits; keyed code: not edited)"),
     "cafe/pm/budget.py": (1, "`--gpu-mem-gb`: an argparse float"),
     "cafe/pm/config.py": (1, "`_is_float`: of `float(text)`, a string (never an OverflowError)"),
@@ -215,12 +212,9 @@ RAW_NP_ISFINITE = {
     "cafe/_site_data.py": (1, "`P`: a float the power sweep computed"),
     "cafe/app.py": (1, "`clean_spec` inertia: an array made by `np.asarray(v, float)` inside a try that catches OverflowError"),
     "cafe/cfd.py": (2, "the mesh extents (an array from trimesh) and `gci`, a float `gci()` has just computed"),
-    "cafe/hangar.py": (1, "NOT SAFE: `check`, of `spec[k]` read by `load_json` and filtered by `isinstance(v, (int, float))`: an integer of 2**64 or more is a "
-                          "TypeError (a failed design job with a traceback text, no wrong number). SHOULD BE CONVERTED to `finite_real(v)`: hand-back, hunk 2"),
-    "cafe/live.py": (1, "three floats of `float(...)` a few lines above; the OverflowError of that `float()` of a 400-digit integer is not caught there today "
-                        "(round 22 M-9, batch D, catches it): hand-back, note 3"),
     "cafe/mission.py": (3, "arrays and a float of the navigation error percentiles made here"),
     "cafe/ocean.py": (1, "an array of the current store read with numpy"),
+    "cafe/vehicle.py": (1, "`_vec3`: an array made by `np.asarray(raw, float)` inside a try that catches OverflowError, after each item passed `finite_real` or is a numpy number"),
     "cafe/pm/emulator.py": (1, "`q`: a float quantile the emulator computed"),
     "cafe/pm/env/bathy.py": (1, ARRAYS),
     "cafe/pm/env/coare.py": (3, ARRAYS),
@@ -396,7 +390,8 @@ def test_the_checker_leaves_alone_what_is_not_a_reader_or_the_rule(name):
 
 # The modules the live app image loads (it has no pyyaml, which `cafe.pm.config` imports). `cafe/receipts.py` is the pipeline's and imports config for its own
 # stored-result functions (always did): it only needs to reach the reader through `jsonio` like the others.
-APP_IMAGE = {"app.py", "hangar.py", "mission.py", "vehicle.py", "_seed.py", "worker.py", "emulator.py", "ocean.py", "cfd.py", "_site_data.py", "planner.py"}
+APP_IMAGE = {"app.py", "hangar.py", "mission.py", "vehicle.py", "_seed.py", "worker.py", "emulator.py", "ocean.py", "cfd.py", "_site_data.py",
+             "planner.py", "live.py"}
 
 
 def test_the_modules_outside_the_package_that_read_json_import_the_stdlib_only_reader_never_config():

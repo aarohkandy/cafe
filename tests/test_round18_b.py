@@ -86,8 +86,10 @@ def test_r18_m3_below_300_m_is_said_not_to_be_stated_and_the_200_m_figures_are_t
     assert round(band(15.0, 0.3, 200.0)[0], 1) == -0.6
     assert round(band(15.0, 2.2, 200.0)[2], 1) == 31.9
     doc = doc_of(c.two_ray_curved_db)
-    for text in ("Below 300 m none of this is stated", "understated by up to 5.0 dB", "by up to 0.6 dB", "+31.9 dB at one null"):
+    for text in ("Below 300 m none of this is stated", "a 400-point grid from 200 m gave -5.0 dB at its minimum", "-0.6 dB for the 0.3 m case",
+                 "+31.9 dB at its maximum, at one null", "figures of that grid, not limits"):               # round 22: the 200 m figures are a grid's extremes
         assert text in doc, text
+    assert "understated by up to" not in doc
     assert l23().endswith("nearer than 300 m none of this is stated") and "5.0 dB" not in l23()          # round 22: the 200 m clause was a 400-point extreme
     assert "from 300 m to the pair's radio horizon or 12 km" in l23() and "300 m to the pair's radio horizon or to 12 km" in doc
 
@@ -130,7 +132,7 @@ def test_r18_m3_the_docstring_has_no_conservative_for_all_and_no_unaffected_ship
     doc = doc_of(c.two_ray_curved_db)
     for gone in ("are not affected", "(the conservative direction", "12 to 16 dB at 0.1 m", "at worst UNDERSTATES the loss: by 2.9 dB"):
         assert gone not in doc, gone
-    assert "never too high, over this range for the pairs 0.1 / 15, 0.3 / 15" in doc  # 'never too high' is said of the pairs whose minimum is positive only
+    assert "never too high, for the pairs 0.1 / 15, 0.3 / 15" in doc  # said of the pairs whose sampled minimum is positive (round 22)
     for text in ("LOW ANTENNAS", "both ends low", "the PAIR of heights", "11 to 16 dB at 0.1 m", "UNDERSTATED", "the USV's whip",
                  "about 1 to 6 dB for the Slocum with a partner of 2.2 m or 15 m", "6 to 11 dB for two gliders"):
         assert text in doc, text

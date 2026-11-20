@@ -309,8 +309,6 @@ FLOAT_CALLS = {
     ("cafe/app.py", "create_shape_design"): (["float(dims.get(k, shapes.PARAMS[shape]['params'][k][1]))"],
                                             "a bool refused first, OverflowError caught, `shapes.check` bounds it"),
     ("cafe/app.py", "coverage"): (["float(lat.min())", "float(lat.max())", "float(lon.min())", "float(lon.max())"], "the weather catalogue, not a request"),
-    ("cafe/app.py", "check_fleet"): (["float(lk.get('max_m'))", "float(lk.get('need', 0.95))"],
-                                     "OPEN (batch D hand-back): accepts a bool and numeric text; OverflowError caught, then math.isfinite and the range"),
     ("cafe/app.py", "live_step"): (["float(seconds)"], "after `finite_real(seconds)`"),
     ("cafe/live.py", "create"): (["float(hours)"], "after the bool, type and range test of `hours`"),
     ("cafe/live.py", "step"): (["float(lat)", "float(lon)", "float(z)", "float(speed)", "float(np.max(d.ap.v_max))", "float(np.max(d.ap.v_max))"],

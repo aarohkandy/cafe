@@ -10,7 +10,7 @@ import numpy as np
 import trimesh
 
 from cafe import atomic, geom, vehicle, fea, cfd, ctrl
-from cafe.pm.jsonio import load_json
+from cafe.pm.jsonio import finite_real, load_json
 from cafe.pm import vv
 
 KNOCKDOWN = 0.5      # ponytail: linear buckling of imperfect shells under external pressure; NASA SP-8007-style
@@ -42,7 +42,7 @@ def check(kind, m, spec):
     errors, warnings = [], []
     for k in ("mass", "power_w", "battery_wh"):          # also guards specs written before the API checked
         v = spec.get(k)
-        if not isinstance(v, (int, float)) or not np.isfinite(v) or v <= 0:
+        if not finite_real(v) or v <= 0:
             errors.append(f"{k} must be a positive, finite number (got {v!r})")
     if errors:
         return errors, warnings

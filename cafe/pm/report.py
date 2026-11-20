@@ -797,10 +797,10 @@ def _end_heights(end: str, mission: dict[str, Any], cls: dict[str, str], when: s
         if cls.get(end) != "uas":
             return flown, True, f"{flown[0]:g} m"
         return sorted({*flown, *ground}), True, (f"on the deck at {ground[0]:g} m, " if ground else "") + f"flown at {_gs(flown)} m"
-    if cls.get(end) == "uas":
-        return list(RF_UAS_FALLBACK_M), False, f"no single height, its flight levels could not be read: {_gs(RF_UAS_FALLBACK_M, ' and ')} m assumed"
-    return list(RF_REFERENCE_M), False, (f"no usable height (unreadable, or outside {rfband.MIN_HEIGHT_M:g} to {rfband.MAX_HEIGHT_M:g} m): "
-                                         f"{_gs(RF_REFERENCE_M)} m assumed")
+    uas_end = cls.get(end) == "uas"
+    fallback = RF_UAS_FALLBACK_M if uas_end else RF_REFERENCE_M      # one sentence for every cause: unreadable, or outside the band's heights (round 22)
+    return list(fallback), False, (f"no usable height (unreadable, or outside {rfband.MIN_HEIGHT_M:g} to {rfband.MAX_HEIGHT_M:g} m): "
+                                   f"{_gs(fallback, ' and ' if uas_end else ', ')} m assumed")
 
 
 def _rf_hz(lk: dict[str, Any]) -> float:

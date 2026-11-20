@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import trimesh
 from cafe.pm import vv
+from cafe.pm.jsonio import finite_real
 
 FLU2FRD = np.diag([1.0, -1.0, -1.0])
 RHO = {"water": 1025.0, "air": 1.20}
@@ -339,6 +340,9 @@ def build(kind, mesh_flu, spec, hangar=None):
     if kind == "usv":
         if "fs" in hangar:
             sp = sorted(hangar["fs"]["speeds"].items(), key=lambda kv: float(kv[0]))
+            for U, r in sp:
+                if not finite_real(r["resistance"]):                          # a NaN written as null: named here, not a TypeError in the sum below
+                    raise ValueError(f"speed {U}: `resistance` is not a finite number")
             V1, R1 = float(sp[0][0]), sp[0][1]["resistance"]
             low = np.linspace(0, V1, 6)[:-1]                  # below the first CFD speed: R1 (V/V1)^2, not linear
             v.resistance = (np.r_[low, [float(k) for k, _ in sp]], np.r_[R1 * (low / V1) ** 2, [r["resistance"] for _, r in sp]])
@@ -360,7 +364,9 @@ def _vec3(r, key, d):
     """`r[key]` of the result for direction `d` as three floats, or a ValueError naming the direction and the field: a null item (the NaN that `hangar` writes
     as null), NaN, inf, an integer too large for a float or a wrong length used to be a silent NaN drag or an unnamed TypeError."""
     try:
-        a = np.asarray(r[key], float)
+        raw = r[key]
+        ok = len(raw) == 3 and all(finite_real(x) or isinstance(x, (np.integer, np.floating)) for x in raw)     # a bool or a numeral in text is no number
+        a = np.asarray(raw, float) if ok else None
     except (TypeError, ValueError, OverflowError):
         a = None
     if a is None or a.shape != (3,) or not np.isfinite(a).all():

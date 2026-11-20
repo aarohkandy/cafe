@@ -442,11 +442,10 @@ def check_fleet(body):
     for lk in body.get("links") or []:
         if not isinstance(lk, dict) or lk.get("a") not in ids or lk.get("b") not in ids or lk["a"] == lk["b"]:
             raise HTTPException(400, "each link joins two different drones of this mission")
-        try:
-            mx, need = float(lk.get("max_m")), float(lk.get("need", 0.95))
-        except (TypeError, ValueError, OverflowError):
+        mx, need = lk.get("max_m"), lk.get("need", 0.95)
+        if not (finite_real(mx) and finite_real(need)):
             raise HTTPException(400, f"link {lk['a']}-{lk['b']}: max_m must be a number")
-        if not (math.isfinite(mx) and mx > 0) or not (0 < need <= 1):
+        if not (mx > 0) or not (0 < need <= 1):
             raise HTTPException(400, f"link {lk['a']}-{lk['b']}: max_m > 0 and need in (0, 1]")
         if lk.get("mode", "horizontal") not in ("horizontal", "3d"):
             raise HTTPException(400, "link mode is horizontal or 3d")

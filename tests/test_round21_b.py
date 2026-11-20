@@ -221,10 +221,11 @@ def test_m2_the_mission_levels_win_over_the_platforms_and_both_over_the_fallback
 @pytest.mark.parametrize("levels", [[], None, "x", [float("nan")], [-50.0], [5000.0], [10 ** 400], [True]],
                          ids=["empty", "none", "string", "nan", "below the sea", "5 km", "huge int", "bool"])
 def test_m2_a_uas_whose_levels_cannot_be_used_gets_the_two_assumed_heights_and_says_so(monkeypatch, levels):
-    """The fix for 'no single height' and no figure: the card says it, and prints the band for 18.1 and 108.1 m (the demo's lowest and highest leg), ASSUMED."""
+    """The fix for 'no single height' and no figure: the card says it, and prints the band for 18.1 and 108.1 m (the demo's lowest and highest leg), ASSUMED.
+    Round 22: one sentence for every cause, unreadable or outside the band's heights (it said 'its flight levels could not be read' for a level of -50 m)."""
     note = note_of(monkeypatch, ("u", ("uas", (levels, 8.0, 0.1))), ("g", ("glider", 2.2)))
     assert has_figure(note), note
-    assert "u (no single height, its flight levels could not be read: 18.1 and 108.1 m assumed)" in note
+    assert "u (no usable height (unreadable, or outside 0.1 to 1000 m): 18.1 and 108.1 m assumed)" in note
     for h in (18.1, 108.1):
         assert f"2.2 m with {h:g} m {figs(2.2, h)}" in note
 
@@ -236,7 +237,7 @@ def test_m2_a_uas_whose_platform_file_cannot_be_read_gets_the_same(monkeypatch):
             raise err
         monkeypatch.setattr(uas, "load_platform", broken)
         note = report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="u", b="g"), mission)
-        assert has_figure(note) and "u (no single height, its flight levels could not be read: 18.1 and 108.1 m assumed)" in note, err
+        assert has_figure(note) and "u (no usable height (unreadable, or outside 0.1 to 1000 m): 18.1 and 108.1 m assumed)" in note, err
 
 
 @pytest.mark.parametrize("who", ["shore", "nobody"])

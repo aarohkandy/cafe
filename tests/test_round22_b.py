@@ -247,4 +247,5 @@ def test_m4_a_deck_height_the_band_does_not_cover_is_the_unreadable_end_and_neve
     for when, usable in (("always", False), ("surfacing", False), ("uas_airborne", True)):
         note = note_of(monkeypatch, ("u", spec), ("g", ("glider", 2.2)), when=when)
         assert has_figure(note), (when, note)
-        assert ("u (flown at 10 m)" in note) == usable and ("no single height" in note) == (not usable), (when, note)
+        assumed = "no usable height (unreadable, or outside 0.1 to 1000 m): 18.1 and 108.1 m assumed"
+        assert ("u (flown at 10 m)" in note) == usable and (assumed in note) == (not usable) and "flight levels" not in note, (when, note)

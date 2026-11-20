@@ -124,9 +124,9 @@ def test_x1_the_docstring_and_physics_say_the_direction_by_pair():
     for gone in ("within 3.3 dB of the Fresnel two-ray over that range and at worst UNDERSTATES",
                  "so there a margin can be too high: that includes the USV's 2.2 m whip"):
         assert gone not in doc
-    for text in ("the margin is too LOW, never too high, over this range for the pairs 0.1 / 15, 0.3 / 15, 0.3 / 0.5, 0.3 / 0.3, 0.5 / 0.5, "
-                 "0.3 / 2.2 and 0.5 / 2.2",
-                 "up to 2.9 dB too high, up to 2.2 dB too low", "up to 2.4 dB too high, 1.6 dB too low", "up to 3.3 dB too high, 0.2 dB too low",
+    for text in ("at the sampled ranges the margin is too LOW, never too high, for the pairs 0.1 / 15, 0.3 / 15, 0.3 / 0.5, 0.3 / 0.3, 0.5 / 0.5, "
+                 "0.3 / 2.2 and 0.5 / 2.2",                                                       # round 22: the rows are 400 samples, not limits
+                 "the rows' 2.9 dB too high and 2.2 dB too low", "2.4 dB too high, 1.6 dB too low", "3.3 dB too high, 0.2 dB too low",
                  "which is overstated by +1.8 to +2.7 dB", "A pair that is not in the table is computed live by"):
         assert " ".join(text.split()) in doc, text
     para = " ".join(next(p for p in (ROOT / "docs" / "PHYSICS.md").read_text().split("\n\n") if p.startswith("**Low antennas**")).split())

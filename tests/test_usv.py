@@ -5,7 +5,7 @@ import time
 import numpy as np
 import pytest
 import yaml
-from hypothesis import assume, given, settings, strategies as st
+from hypothesis import assume, example, given, settings, strategies as st
 
 from cafe import receipts as R
 from cafe.pm import Tagged
@@ -273,6 +273,7 @@ def test_current_enters_the_apparent_wind():
 
 @given(st.floats(0, 360, **fin), st.floats(0.5, 14, **fin), st.floats(0, 360, **fin), st.floats(0, 0.9, **fin),
        st.floats(0, 360, **fin))
+@example(wind_from=180.0, speed=5.0, heading=0.0, cspeed=0.0, cdir=0.0)         # a dead run: the two solves took different tacks, 5.64 deg apart (round 22)
 @settings(max_examples=40, deadline=None)
 def test_table_equals_direct_coupled_solve(wind_from, speed, heading, cspeed, cdir):
     pol, _ = usv.tables(P)
