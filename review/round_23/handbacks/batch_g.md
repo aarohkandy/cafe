@@ -16,15 +16,26 @@ Branch r23-g (worktree /Users/aaroh/Downloads/everything/cafe-r23g), base f71ad4
 Every figure comes from a hand-back, merged.md or a run named in the row: 10.5 % / 10.25 % (merge), 26 of 33 and 610 (batch B), 71 of 110 and 1,215 (C), 378 and 1,120 (D), 480 `info` combinations (A), 632.45 km and 554.7 km (merge, q23), 88.85 % and 0.88848 (PHYSICS 819, q12), -10.77 / -14.88 dB (merge's run). Nothing is measured by this step.
 
 ## Runs (this step; orca, proot, 2 CPUs per job, PMX pm_r23g*)
-(see section Results below)
+- r23g_1 and r23g_2 (first draft of the documents): stopped by exact tmux session name (rc=143, no result). r23g_3 (test_config_docs, test_round23_b, pm_r23g3): ONE failure, test_the_runbook_does_not_say_the_planner_never_overruns_stage_1 (it pins 'q8 ran 2.2 times over it (52.7 s planned, 117 s measured, of a 900 s share)' in RUNBOOK 146; I had written '...over the estimate': text changed to 'the estimate is not a schedule and q8 ran 2.2 times over it', test untouched). Before that, a lint in tests/test_round23_b.py (M-4: no '7.6 dB', 'up to 7.6', '34.7', 'within about 8 dB' in CREDIBILITY, PHYSICS, QUESTIONS) would have failed on my first QUESTIONS 21b; found by reading, fixed before it ran.
+- r23g_4 (pm_r23g4, -n 2): test_config_docs, test_round18_m, test_round18_x, test_runners, test_audit, test_conventions, test_round16_pb, test_round17_m, test_round19_m, test_round23_b, test_credibility, test_config, test_coare: rc=0, 1,237 passed, 0 failed.
+- r23g_5 (pm_r23g5, -n 2): test_budget, test_report, test_round16_report, test_round21_b, test_round18_a, test_stage3: rc=0, 1,058 passed, 0 failed.
+- r23g_6 (pm_r23g6, -n 2, on the committed tree after the last text edit but the hand-back): test_config_docs, test_round18_m, test_round18_x, test_runners, test_audit, test_conventions, test_round16_pb, test_round17_m, test_round19_m, test_round23_b, test_credibility, test_config: rc=0, 1,191 passed, 0 failed.
+- Counts are the result characters of the progress lines (CLAUDE.md). ruff and mypy not run (no code touched). The audit's banned-token scan was run by hand over RUNBOOK.md (the only document it scans): no hit.
+- Not run: the whole suite, the gate, a demo, mutation; test_pipeline, test_cli, test_par, test_stage1, test_whatif (they mention a document only in a docstring or an error message); builder M's and E's tests.
 
 ## Things I could not do or decide
 - Builder M's and E's code was not available (parallel worktrees): DECISIONS 1081 records what they were asked to do, not what they did. If their hand-backs differ (the lint's allow-list, the symmetry test, `bench_sortie_rate`, L17), amend row 1081.
 - S-42 (CREDIBILITY 171) and S-19's number: nobody's; recorded in P-R23M4. CREDIBILITY.md is not my file.
 - Budget hunk of batch B (budget.py:57-58, 603; pipeline.py:1593; tests/test_budget.py:592-594) and the rfband.py docstring hedge (rfband.py:12-13): not mine, not known to be taken; P-R23M4.
 - The plan basis printed by the report still says 'so it is a lower bound' until that hunk lands.
-- I amended no row of DECISIONS for 199, 237, 301, 332, 511 ('UAS verdict rests on ...') or 457/538 (dated history; named in row 1078).
+- PHYSICS 704's 'cannot fire' is the USV becalmed mode, not a claim of the sweep, and is unchanged. I amended no row of DECISIONS for 199, 237, 301, 332, 511 ('UAS verdict rests on ...') or 457/538 (dated history; named in row 1078).
 - The lint-phrase hazard: tests/test_round23_b.py's M-4 lint scans CREDIBILITY, PHYSICS and QUESTIONS for '7.6 dB', 'up to 7.6', '34.7', 'within about 8 dB'. My first draft of QUESTIONS 21b quoted them; fixed. Builder E's lint over the documents (up to N, at most N, by chance, no number of members, within about) will see the new text of STATUS, QUESTIONS, RUNBOOK and PHYSICS: I added no such phrase to those four (STATUS 5 lines with a hit, QUESTIONS 6, as before or fewer); HANDOFF, CHANGELOG, DECISIONS and PROBLEMS (logs) do quote the deleted sentences.
 
 ## Hostile attempts on my own text
 Read every new sentence of STATUS, HANDOFF, CHANGELOG, DECISIONS and QUESTIONS for a number or a claim not in a hand-back or merged.md; grepped the four user documents for the deleted words ('worst case', '7.6 dB', 'cannot fire', 'pure physics', 'no number of members', 'by chance', 'lower bound', 'rests on', 'ship's mast', 'at most 0.59', '0.046', 'through any alias'): the remaining hits are history rows or dated measurements, listed in row 1078 and P-R23M4; checked every table row's cell count; the first pin failure (RUNBOOK 146) was found by the tests and fixed in the text, not the test.
+
+## Leftovers
+Orca (inside ~/cafe-worker): cafe/pm_r23g, pm_r23g2, pm_r23g3, pm_r23g4, pm_r23g5, pm_r23g6 and their .pmx.job markers; logs r23g_1 to r23g_6. No tmux session of mine is alive. Laptop: worktree ../cafe-r23g (branch r23-g). Nothing is pushed. Scratch: the session scratchpad r23g/decisions.py (the script that wrote DECISIONS rows 1073 to 1084).
+
+## Commits
+df12104 (the documents), then the STATUS repair and this hand-back (see git log r23-g).
