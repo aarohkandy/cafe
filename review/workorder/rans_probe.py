@@ -1,12 +1,13 @@
 """Measurement probe for a CPU RANS case of the demo's Seaglider (work order step 3, plan step 0). Not product code, and no test.
 
 It builds the vehicle and case exactly as stage 3 does for the first glider window of a finished demo run, writes the union STL of the
-vehicle's shapes, derives the body-frame flow label and speed, then runs cafe.cfd.external twice (level_offset -1 and 0, the one label)
-and reports per grid: cells, failed_checks, seconds, iterations, drag, force_std; and refinement ratio, GCI, cd on the vehicle's ref_area,
-cd_hangar and cd / cd_hangar. cafe/cfd.py is not touched (its literals key the cache).
+vehicle's shapes, derives the body-frame flow label and speed, then runs cafe.cfd.external twice (--levels, default level_offset -1 and 0;
+--iters the cap; the one label) and reports per grid: cells, failed_checks, seconds, iterations, drag, force_std; and refinement ratio, GCI,
+cd on the vehicle's ref_area, cd_hangar and cd / cd_hangar. cafe/cfd.py is not touched (its literals key the cache).
 
 Run on orca, alone on the worker, PM_CPUS equal to --cores:
   PM_HOST=cafe-orca PM_RUNTIME=proot PMX=pm_<you> PM_CPUS=6 PM_MEM=24g TM=<name> bin/pmx.sh python review/workorder/rans_probe.py --cores 6
+  (optional: --levels 0 1 --iters 800 --out /data/runs/rans_probe2)
 Smoke (no solver):  ... PM_CPUS=2 bin/pmx.sh python review/workorder/rans_probe.py --stop-after-stl --cores 2
 Everything is written under --out (default /data/runs/rans_probe); the run dir (default /data/runs/q25) is only read.
 """
@@ -22,29 +23,52 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("CAFE_OFFLINE", "1")                       # the environment is read from the cache; nothing is fetched
 
 
+def drag_history(case_dir: pathlib.Path, label: str) -> dict:
+    """Mean and std of the drag (the force projected on the flow direction) over the last 20 % of iterations, from the case's postProcessing forces
+    (what cfd.tail_stats takes: the last 20 %, at least 20 iterations). {} when the case has no force history."""
+    from cafe import cfd
+    try:
+        f = cfd.read_forces(case_dir)["force"]
+    except RuntimeError:
+        return {}
+    drag = -(f["total"] @ cfd.dvec(label))
+    mean, std = cfd.tail_stats(drag)
+    return dict(drag_tail_mean_n=float(mean), drag_tail_std_n=float(std), drag_tail_std_rel=float(std / mean),
+                tail_iterations=int(max(int(len(drag) * 0.2), 20)), history_iterations=int(len(drag)))
+
+
 def grid_entry(name: str, r: dict, label: str, q: float, L: float, case_dir: pathlib.Path) -> dict:
-    """One grid's record of result.json; surface_cell_m is the cell the level gives (base cell L/4 halved `level` times), not the requested size."""
+    """One grid's record of result.json; surface_cell_m is the cell the level gives (base cell L/4 halved `level` times), not the requested size.
+    scatter is the norm of force_std over the drag (mostly the lift component); scatter_drag_bound = sum_i |d_i| force_std_i / drag, an upper bound
+    of the std of the projected force over the drag; drag_tail_* are the true mean and std of the drag over the last 20 % of the force history."""
     import numpy as np
     from cafe import cfd
     d = r["dirs"][label]
-    drag = float(-np.dot(d["force"], cfd.dvec(label)))
+    dv = cfd.dvec(label)
+    drag = float(-np.dot(d["force"], dv))
     if not drag > 0:
         raise ValueError(f"grid {name}: the drag {drag} N along {label} is not positive; the case in {case_dir} is kept for its logs")
     return dict(level=r["level"], surface_cell_m=L / 4 / 2 ** r["level"], cells=r["mesh"]["cells"], failed_checks=r["mesh"]["failed_checks"],
                 seconds=r["seconds"], solve_seconds=d["seconds"], mesh_seconds=r["seconds"] - d["seconds"], iterations=d["iters"],
                 drag_n=drag, force_n=d["force"], force_std_n=d["force_std"], scatter=float(np.linalg.norm(d["force_std"])) / drag,
-                cd=drag / q, case_dir=str(case_dir))
+                scatter_drag_bound=float(np.dot(np.abs(dv), d["force_std"])) / drag,
+                cd=drag / q, case_dir=str(case_dir), **drag_history(case_dir, label))
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--stop-after-stl", action="store_true", help="steps 1 to 3 only: print the label, speed, STL triangle count and watertight flag")
     ap.add_argument("--cores", type=int, default=2, help="MPI ranks of OpenFOAM (CAFE_NPROC); keep it equal to PM_CPUS")
+    ap.add_argument("--levels", type=int, nargs=2, default=[-1, 0], metavar=("A", "B"),
+                    help="the two level_offsets of cfd.external (0 is level 6 for the demo glider); A is the coarse grid, B the fine one, A < B")
+    ap.add_argument("--iters", type=int, default=1500, help="the iteration cap passed to cfd.external (its own default is 1500)")
     ap.add_argument("--out", default="/data/runs/rans_probe", help="work directory (the case directories are deleted and rebuilt)")
     ap.add_argument("--run", default="/data/runs/q25", help="finished demo run: windows.json, stage1/res.pkl and ingest/ the case is built from (read only)")
     ap.add_argument("--mission", default=str(ROOT / "missions" / "tepex_c_demo.yaml"))
     args = ap.parse_args()
     out = pathlib.Path(args.out).resolve()
+    if args.levels[0] >= args.levels[1] or args.iters < 1:
+        sys.exit(f"--levels {args.levels}: the first must be below the second; --iters {args.iters} must be at least 1")
     if not out.name.startswith("rans_probe") or str(out).startswith("/tmp"):
         sys.exit(f"--out {out}: the cases are deleted with rmtree, so the directory must be named rans_probe* and not under /tmp")
     os.environ["CAFE_NPROC"] = str(args.cores)                    # cafe.cfd reads it at import
@@ -94,6 +118,7 @@ def main() -> int:
                 stl=str(stl), stl_triangles=int(len(m.faces)), stl_watertight=watertight, stl_extents_m=[float(x) for x in m.extents],
                 stl_volume_m3=float(m.volume), stl_area_m2=float(m.area), ref_area_m2=veh.ref_area, cd_hangar=case["cd_h"], cl_hangar=case["cl_h"],
                 cd_hangar_source=case["src"], rho_hangar=case["rho_h"], solver_rho=cfd.FLUIDS["water"]["rho"], cores=cfd.NPROC,
+                levels=args.levels, iterations_cap=args.iters,
                 length_m=L, surface_cell_m=hs, base_cell_m=L / 4,
                 run_dir=args.run, mission=args.mission)
     (out / "info.json").write_text(json.dumps(info, indent=1, default=float))
@@ -106,11 +131,12 @@ def main() -> int:
     result: dict = dict(info=info, grids={})
     path = out / "result.json"
     runs = {}
-    for name, off in (("coarse", -1), ("fine", 0)):
-        r = cfd.external(str(stl), out / name, "water", speed, (label,), off, log=print)
+    for name, off in zip(("coarse", "fine"), args.levels, strict=True):
+        r = cfd.external(str(stl), out / name, "water", speed, (label,), off, iters=args.iters, log=print)
         cfd._shrink(out / name)
         runs[name] = r
         result["grids"][name] = grid_entry(name, r, label, q, L, out / name)
+        result["grids"][name].update(level_offset=off, iterations_cap=args.iters)
         path.write_text(json.dumps(result, indent=1, default=float))                # kept after each grid: a failed second grid loses nothing
     fine, coarse = result["grids"]["fine"], result["grids"]["coarse"]
     rr = vv.refinement_ratio(fine["cells"], coarse["cells"])
