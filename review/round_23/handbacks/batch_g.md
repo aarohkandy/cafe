@@ -1,0 +1,30 @@
+# Round 23, batch G hand-back (documents)
+
+Branch r23-g (worktree /Users/aaroh/Downloads/everything/cafe-r23g), base f71ad43 (round 22 closed c7ca35e + review material + batches A to D). Documents only; no file under cafe/ or tests/, no docs/CREDIBILITY.md.
+
+## What changed
+- DECISIONS.md: rows 1073 to 1084 (1073 the lead's rulings and the three owner questions marked; 1074 the RF card, L23 and the sampling note; 1075 Iridium; 1076 the Bellhop label and the NOT EXERCISED note; 1077 the 7.6 dB; 1078 the S-12/S-14 to S-17/S-33/S-40 clauses and batch B's skeptic pass; 1079 YAML and `_vec3`; 1080 app, live, plan; 1081 builder M's and E's items and the claims lint; 1082 recorded and not coded; 1083 deviations of the builders from merged.md; 1084 pins moved). Amended in place with "(amended by NNNN: ...)": 286, 477, 652, 891, 1039, 1057, 1066 ('through any alias'), 1069.
+- CHANGELOG.md: 'Review round 23' before 'Known issues'.
+- review/orca/PROBLEMS.md: P-R23M1 (D-3, D-5 unguarded, with reachability) to P-R23M7 (leftovers by exact name).
+- STATUS.md: Round 23 paragraph (section 2), 'Tests, round 23'; lines 18 (S-41), 21 (7.6 dB), 144 ('the plan is a lower bound'), 179 ('pure physics').
+- HANDOFF.md: a round 23 block at the top of section 00, header updated.
+- docs/RUNBOOK.md: 58 and 189 (632 km), 146 (S-17: 'the estimate is not a schedule and q8 ran 2.2 times over it'; the pin of tests/test_config_docs.py needs 'q8 ran 2.2 times over it (52.7 s ...'), 189 (S-36: 'conservative for the transmitter depth' deleted), 190 (S-20, S-21 and 'not of the worst case' deleted; the demo pair's -10.8 to +39.2 / -14.9 to +70.9 kept as figures of those two samplings of that pair). Line 100 needed no edit: it is true after batch C and tests/test_round23_c.py holds it (named in DECISIONS 1079).
+- docs/PHYSICS.md: 757 loses 'The UAS verdict therefore rests on the battery and on finishing the profile inside the time limit.'; 762's 'therefore rests' clause is now 'In q6, 55 of 64 members were `profile_incomplete` and 6 `battery_reserve` (...)' (the lead's ruling after batch B's skeptic pass). Every other PHYSICS sentence shared with batch B's changes (817, 819, 849, 892, 756) was read and is consistent with the code text; none needed another edit.
+- QUESTIONS_FOR_LAB.md: 12 (S-41: the demo's '555 and 598 km' and '111 km' deleted; the RF NO-GO follows from the radio horizon, 88.85 % in q12), new item 21 (21a to 21e). 12a and 20a are batch B's and were not touched.
+
+## Honest-number sources
+Every figure comes from a hand-back, merged.md or a run named in the row: 10.5 % / 10.25 % (merge), 26 of 33 and 610 (batch B), 71 of 110 and 1,215 (C), 378 and 1,120 (D), 480 `info` combinations (A), 632.45 km and 554.7 km (merge, q23), 88.85 % and 0.88848 (PHYSICS 819, q12), -10.77 / -14.88 dB (merge's run). Nothing is measured by this step.
+
+## Runs (this step; orca, proot, 2 CPUs per job, PMX pm_r23g*)
+(see section Results below)
+
+## Things I could not do or decide
+- Builder M's and E's code was not available (parallel worktrees): DECISIONS 1081 records what they were asked to do, not what they did. If their hand-backs differ (the lint's allow-list, the symmetry test, `bench_sortie_rate`, L17), amend row 1081.
+- S-42 (CREDIBILITY 171) and S-19's number: nobody's; recorded in P-R23M4. CREDIBILITY.md is not my file.
+- Budget hunk of batch B (budget.py:57-58, 603; pipeline.py:1593; tests/test_budget.py:592-594) and the rfband.py docstring hedge (rfband.py:12-13): not mine, not known to be taken; P-R23M4.
+- The plan basis printed by the report still says 'so it is a lower bound' until that hunk lands.
+- I amended no row of DECISIONS for 199, 237, 301, 332, 511 ('UAS verdict rests on ...') or 457/538 (dated history; named in row 1078).
+- The lint-phrase hazard: tests/test_round23_b.py's M-4 lint scans CREDIBILITY, PHYSICS and QUESTIONS for '7.6 dB', 'up to 7.6', '34.7', 'within about 8 dB'. My first draft of QUESTIONS 21b quoted them; fixed. Builder E's lint over the documents (up to N, at most N, by chance, no number of members, within about) will see the new text of STATUS, QUESTIONS, RUNBOOK and PHYSICS: I added no such phrase to those four (STATUS 5 lines with a hit, QUESTIONS 6, as before or fewer); HANDOFF, CHANGELOG, DECISIONS and PROBLEMS (logs) do quote the deleted sentences.
+
+## Hostile attempts on my own text
+Read every new sentence of STATUS, HANDOFF, CHANGELOG, DECISIONS and QUESTIONS for a number or a claim not in a hand-back or merged.md; grepped the four user documents for the deleted words ('worst case', '7.6 dB', 'cannot fire', 'pure physics', 'no number of members', 'by chance', 'lower bound', 'rests on', 'ship's mast', 'at most 0.59', '0.046', 'through any alias'): the remaining hits are history rows or dated measurements, listed in row 1078 and P-R23M4; checked every table row's cell count; the first pin failure (RUNBOOK 146) was found by the tests and fixed in the text, not the test.
