@@ -251,13 +251,13 @@ def test_m7_the_levels_note_puts_the_wind_and_the_antenna_at_the_legs_and_the_tu
 # ---- M-5: the link card says so when an RF link has an end below 0.5 m ---------------------------------------------------------------------------------
 
 def rf(a, b, kind="rf"):
-    return dict(id="x", kind=kind, a=a, b=b)
+    return dict(id="x", kind=kind, when="uas_airborne", a=a, b=b)
 
 
 def test_m5_an_rf_link_to_the_slocums_0_3_m_antenna_gets_the_sentence_and_the_others_do_not():
     note = report._low_antenna_note(rf("glider_2n", "usv"), DEMO)
     assert note and note.startswith("An end of this RF link has an antenna below 0.5 m: glider_2n (0.3 m).")
-    assert "the margin is too low by that much" in note                                           # round 18 addendum: the pair's own direction
+    assert "the margin is too low there" in note and "too high" not in note                      # the pair's own direction, by counts
     usv_uas = report._low_antenna_note(rf("usv", "uas"), DEMO)         # 2.2 m and an airborne antenna: round 21, M-2: the band of each of the UAS's legs
     assert usv_uas.startswith("The antennas of this RF link: usv (2.2 m), uas (flown at 18.1, 38.1, 68.1, 108.1 m).")
     assert "no error band is stated" not in usv_uas

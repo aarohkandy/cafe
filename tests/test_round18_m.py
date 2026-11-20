@@ -40,7 +40,7 @@ def _card(kind):
     heights patched in, so the sentence is the one a mission with those antennas prints."""
     ha, hb = CARD_CASES[kind]
     mission = dict(vehicles=[dict(id="a", platform="pa"), dict(id="b", platform="pb")])
-    lk = dict(kind="rf", a="a", b="b")
+    lk = dict(kind="rf", when="uas_airborne", a="a", b="b")
     from cafe.pm.physics import glider, usv
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(report, "_classes", lambda m: dict(a="glider", b="usv" if hb == 2.2 else "glider"))

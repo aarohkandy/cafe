@@ -17,6 +17,7 @@ from tests.fixtures import pm_run
 from tests.test_report import data_dir, edit_json, load, plain, set_link_fields  # noqa: F401  (data_dir is autouse)
 from tests.test_round18_a import rf
 from tests.test_round18_x import card
+from tests.test_round22_b import figs
 
 ROOT = config.ROOT
 DEMO = config.load_mission(ROOT / "missions" / "tepex_c_demo.yaml")
@@ -31,14 +32,15 @@ def ship_card(h, ship_h, monkeypatch):
     mission = dict(vehicles=[dict(id="a", platform="pa")], ship=dict(id="ship", antenna_height_m=ship_h))
     monkeypatch.setattr(report, "_classes", lambda m: dict(a="glider"))
     monkeypatch.setattr(glider, "load_platform", lambda p: dict(antenna_height_m=h))
-    return report._low_antenna_note(dict(kind="rf", a="a", b="ship"), mission)
+    return report._low_antenna_note(dict(kind="rf", when="uas_airborne", a="a", b="ship"), mission)
 
 
 # ------------------------------------------------------------------------------------------------------------------------- M-2: 0.55 to 2.2 m
 
 def test_m2_the_demos_usv_uas_link_gets_exactly_this_card_and_no_other_link_of_the_demo_has_one():
-    """What a demo shows for `usv-uas-rf` (round 20: 'no error band is stated'; round 21: the band of the whip with each of the UAS's four legs, computed;
-    the figures are those of the independent reference, tests/test_round21_b.py). The demo's other links are acoustic or Iridium."""
+    """What a demo shows for `usv-uas-rf` (round 20: 'no error band is stated'; round 21: the band of the whip with each of the UAS's four legs; round 22,
+    M-1: its median and the counts of each sign instead of the extremes, whose figures were -10.8 and +39.2 dB; the figures are those of the independent
+    reference, tests/test_round22_b.py). The demo's other links are acoustic or Iridium."""
     note = report._low_antenna_note(rf("usv", "uas"), DEMO)
     assert note == USV_UAS_CARD
     assert report._low_antenna_note(rf("uas", "usv"), DEMO) is not None
@@ -46,14 +48,18 @@ def test_m2_the_demos_usv_uas_link_gets_exactly_this_card_and_no_other_link_of_t
 
 
 USV_UAS_CARD = ("The antennas of this RF link: usv (2.2 m), uas (flown at 18.1, 38.1, 68.1, 108.1 m). The two-ray model takes the ground "
-                "reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) at 915 MHz from 300 m to the pair's radio horizon or 12 km its "
-                "loss minus the Fresnel loss is, by pair of heights: 2.2 m with 18.1 m -3.2 to +0.6 dB (median -0.2) (10 of 400 samples are more "
-                "than 3 dB off); 2.2 m with 38.1 m -8.1 to +24.4 dB (median -1.0) (19 of 400 samples are more than 3 dB off); 2.2 m with 68.1 m "
-                "-9.9 to +30.3 dB (median -1.5) (28 of 400 samples are more than 3 dB off); 2.2 m with 108.1 m -10.8 to +39.2 dB (median -1.9) "
-                "(38 of 400 samples are more than 3 dB off); over these pairs it is -10.8 to +39.2 dB, both extremes are those of 2.2 m with "
-                "108.1 m: the loss is overstated by up to 39.2 dB (the margin too low) and understated by up to 10.8 dB (the margin too high); a "
-                "UAS is taken at each height it flies a leg at; the climbs between the legs pass other heights, which are not computed; at a wave "
-                "height of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
+                "reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) at 915 MHz, over 400 evenly spaced ranges from 300 m to the pair's "
+                "radio horizon or 12 km, the model's loss minus the Fresnel loss is described by its median and by how many of the sampled ranges are "
+                "more than 3 dB off, by pair of heights: 2.2 m with 18.1 m median -0.2 dB, at 10 of 400 sampled ranges the loss is understated by more "
+                "than 3 dB (the margin is too high there), at none is it overstated by more than 3 dB; 2.2 m with 38.1 m median -1.0 dB, at 4 of 400 "
+                "sampled ranges the loss is overstated by more than 3 dB (the margin is too low there) and at 15 understated by more than 3 dB (the "
+                "margin is too high there); 2.2 m with 68.1 m median -1.5 dB, at 10 of 400 sampled ranges the loss is overstated by more than 3 dB "
+                "(the margin is too low there) and at 18 understated by more than 3 dB (the margin is too high there); 2.2 m with 108.1 m median "
+                "-1.9 dB, at 18 of 400 sampled ranges the loss is overstated by more than 3 dB (the margin is too low there) and at 20 understated "
+                "by more than 3 dB (the margin is too high there). These are figures of the 400 sampled ranges, not of the worst case: at an "
+                "interference null the model's error is larger than the median, and a finer sampling of the ranges can find a larger one; a UAS "
+                "is taken at each height it flies a leg at; the climbs between the legs pass other heights, which are not computed; at a wave height "
+                "of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
 
 
 def test_m2_the_whole_report_of_the_demo_run_carries_that_one_text(tmp_path):
@@ -71,8 +77,8 @@ def test_m2_the_usvs_whip_with_the_ships_15_m_mast_is_a_listed_row_that_prints(m
     """The row (2.2 m, 15 m) of `LOW_ANTENNA_PAIR_BAND` was in L23 and no card ever showed it (round 20: None), nor the row of two 2.2 m ends."""
     note = card(2.2, 15.0, monkeypatch)
     assert note.startswith("The antennas of this RF link: a (2.2 m), ship (15 m).")
-    assert "(2.2 m with 15 m)" in note and "-3.3 to +0.2 dB (median -0.4)" in note and "not among those measured" not in note and "envelope" not in note
-    assert "understated by up to 3.3 dB (the margin too high)" in note and "overstated by up to 0.2 dB (the margin too low)" in note
+    assert "(2.2 m with 15 m)" in note and f"): {figs(2.2, 15.0)}." in note and "not among those measured" not in note and "envelope" not in note
+    assert "median -0.4 dB" in note
     two = card(2.2, 2.2, monkeypatch)
     assert two.startswith("The antennas of this RF link: a (2.2 m), b (2.2 m).") and "(2.2 m with 2.2 m)" in two
 
@@ -87,7 +93,7 @@ def test_m2_the_three_pinned_starts_are_unchanged_and_every_other_pair_gets_the_
 
 def test_m2_l23_says_what_the_card_does():
     t = l23()
-    assert "The card of every RF link computes the band of the link's own pair of heights, for any heights from 0.1 m to 1000 m" in t
+    assert "The card of every RF link computes the same figures for the link's own pair of heights, for any heights from 0.1 m to 1000 m" in t
     assert "for none above that" not in t and "envelope" not in t and "within 0.05 m of a listed pair" not in t and "is read as that one" not in t
 
 

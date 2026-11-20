@@ -37,38 +37,36 @@ LEVELS = {0: "none: no evidence", 1: "weak: evidence exists, nothing checked it"
           3: "strong: checked against an independent reference", 4: "very strong: independent review or field evidence (never awarded here)"}
 
 
-def band_figures(lo: float, med: float, hi: float) -> str:
-    """'minimum to maximum dB (median m)' of a measured band, signed (positive: the model's loss is overstated). The one format of the link card and L23."""
-    return f"{lo:+.1f} to {hi:+.1f} dB (median {med:+.1f})"
+def band_effect(n_over: int, n_under: int) -> str:
+    """What the model's error does to the margin of an RF link, as counts of the `rfband.N_POINTS` sampled ranges more than `rfband.OFF_DB` off (the model's
+    loss minus the Fresnel loss, `rfband.pair_band`): over (the loss overstated, the margin too low there), under (understated, the margin too high there).
+    The words are decided here, from the two counts, and nowhere else (round 22, M-1: the card printed the extremes of the 400 samples as limits)."""
+    n, off = rfband.N_POINTS, f"more than {rfband.OFF_DB:g} dB"
+    if n_over and n_under:
+        return (f"at {n_over} of {n} sampled ranges the loss is overstated by {off} (the margin is too low there) and at {n_under} understated by {off} "
+                "(the margin is too high there)")
+    if n_over:
+        return f"at {n_over} of {n} sampled ranges the loss is overstated by {off} (the margin is too low there), at none is it understated by {off}"
+    if n_under:
+        return f"at {n_under} of {n} sampled ranges the loss is understated by {off} (the margin is too high there), at none is it overstated by {off}"
+    return f"at none of the {n} sampled ranges is the loss {off} off"
+
+
+SAMPLING_NOTE = (f"These are figures of the {rfband.N_POINTS} sampled ranges, not of the worst case: at an interference null the model's error is larger than "
+                 "the median, and a finer sampling of the ranges can find a larger one")
+
+
+def band_figures(med: float, n_over: int, n_under: int) -> str:
+    """The figures of the link card and L23 for one pair of heights: the median of the model's loss minus the Fresnel loss over the sampled ranges
+    (signed: positive, the loss is overstated) and `band_effect` of the two counts. The one format of both."""
+    return f"median {med:+.1f} dB, {band_effect(n_over, n_under)}"
 
 
 def pair_figures(pair: tuple[float, float]) -> str:
-    """The error of the -1 reflection for a pair of antenna heights [m] as the link card and L23 print it, computed now (`rfband.pair_band`): 'minimum to
-    maximum dB (median m)' of the model's loss minus the Fresnel loss, signed (positive: loss overstated). Round 21, M-2: it was a lookup in a table of ten
-    measured rows (`comms.LOW_ANTENNA_PAIR_BAND`, which the tests still hold the live figures to), and a pair that was not a row had no figures."""
-    lo, med, hi, _ = rfband.pair_band(*pair)
-    return band_figures(lo, med, hi)
-
-
-def band_effect(lo: float, hi: float, short: bool = False) -> str:
-    """What the sign of a measured band (the model's loss minus the Fresnel loss, minimum `lo` and maximum `hi` [dB]) does to the margin of an RF link: a
-    positive minimum is a loss overstated everywhere (the margin too low, a GO can show as MARGINAL or NO-GO), a negative maximum a loss understated
-    everywhere (the margin too high), a band across zero both, with each extreme. `short`: the form L23 uses. The direction is decided here, from the
-    measured minimum and maximum, and nowhere else."""
-    if lo > 0.0:
-        return "margin too low" if short else (f"the loss is overstated by {lo:.1f} to {hi:.1f} dB, so the margin is too low by that much and a GO can show as "
-                                               "MARGINAL or NO-GO")
-    if hi < 0.0:
-        return "margin too high" if short else (f"the loss is understated by {-hi:.1f} to {-lo:.1f} dB, so the margin is too high by that much and a NO-GO or "
-                                                "MARGINAL can show as better")
-    return (f"margin too low by up to {hi:.1f} dB and too high by up to {-lo:.1f} dB" if short else
-            f"the loss is overstated by up to {hi:.1f} dB (the margin too low) and understated by up to {-lo:.1f} dB (the margin too high)")
-
-
-def pair_effect(pair: tuple[float, float], short: bool = False) -> str:
-    """`band_effect` of the band of a pair of heights [m] (`rfband.pair_band`)."""
-    lo, _, hi, _ = rfband.pair_band(*pair)
-    return band_effect(lo, hi, short)
+    """`band_figures` of a pair of antenna heights [m], computed now (`rfband.pair_band`). Round 21, M-2: it was a lookup in a table of ten measured rows
+    (`comms.LOW_ANTENNA_PAIR_BAND`, which the tests still hold the live median to), and a pair that was not a row had no figures."""
+    _, med, _, _, n_over, n_under = rfband.pair_band(*pair)
+    return band_figures(med, n_over, n_under)
 
 
 # Round 19, M-3: the three pairs with a 15 m partner re-measured at Hs 1, 2 and 3 m (the live band is at Hs 0): {pair: {Hs [m]: (min, median, max) [dB]}} of the
@@ -92,27 +90,23 @@ L23_UAS_PAIRS = ((2.2, 18.1), (2.2, 108.1), (15.0, 18.1), (15.0, 108.1))
 def _l23_text() -> str:
     def named(pair: tuple[float, float]) -> str:
         return f"{pair[0]:g} m ({LOW_ANTENNA_NAMES[pair[0]]}) with {pair[1]:g} m ({LOW_ANTENNA_NAMES[pair[1]]})"
-    bands = {p: rfband.pair_band(*p) for p in (*L23_PAIRS, *L23_UAS_PAIRS)}               # each pair once: the text is made when this module is imported
-    pairs = "; ".join(f"{named(p)} {band_figures(*bands[p][:3])}, {band_effect(bands[p][0], bands[p][2], True)}" for p in L23_PAIRS)
-    uas_pairs = "; ".join(f"{named(p)} {band_figures(*bands[p][:3])} ({round(bands[p][3] * rfband.N_POINTS)} of {rfband.N_POINTS} samples more than "
-                          f"{rfband.OFF_DB:g} dB off)" for p in L23_UAS_PAIRS)
+    pairs = "; ".join(f"{named(p)} {pair_figures(p)}" for p in L23_PAIRS)
+    uas_pairs = "; ".join(f"{named(p)} {pair_figures(p)}" for p in L23_UAS_PAIRS)
     hs = "; ".join(f"{lo:g} m: " + ", ".join(f"at Hs {h} m {x[0]:+.1f} to {x[2]:+.1f} dB (median {x[1]:+.1f})" for h, x in by.items())
                    for (lo, _), by in sorted(LOW_ANTENNA_HS_BAND.items()))
-    return ("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip up to a UAS at 108 m: the two-ray model takes the reflection coefficient as -1, "
+    return ("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip to a UAS at 108 m: the two-ray model takes the reflection coefficient as -1, "
             "which makes the field vanish with the height, where the sea's own coefficient leaves a floor, and the error is of the pair of heights and has no "
-            "one direction, and it does not stop at any height; against a Fresnel two-ray with the assumed sea (flat earth, 915 MHz, Hs 0, from 300 m to the "
-            "pair's radio horizon or 12 km; a bound, as it has no surface wave) the model's loss minus the Fresnel loss, minimum to maximum, is, by the "
-            "heights of the two antennas: " + pairs +
-            ". A positive figure is a loss overstated and a margin too low (a GO can show as MARGINAL or NO-GO), a negative one a loss understated and a "
-            "margin too high. These are for a calm sea (Hs 0); against the same Fresnel two-ray at a wave height of 1, 2 and 3 m, with a 15 m partner, by the "
-            "lower height, " + hs +
-            " (measured; the other pairs were not measured above Hs 0). The figures move with the heights: moving the lower antenna by 0.01 m moves a pair's "
-            "figures by up to 1.0 dB at 0.1 m, 0.4 dB at 0.3 m and 0.2 dB at 0.5 m (under 0.1 dB at 2.2 m). The card of every RF link computes the band of "
-            "the link's own pair of heights, for any heights from 0.1 m to 1000 m (a UAS end at each of the heights it flies its legs at; an end whose height "
-            "cannot be read at reference heights, which the card says are assumed), and prints it with the number of the 400 samples more than 3 dB off; "
-            "none of it is a table row. It grows with the heights: for the demo's USV whip and ship mast with its UAS at its lowest and highest leg (deck 8 m, "
-            "levels 10 and 100 m, antenna 0.1 m above the body), " + uas_pairs + "; nearer than 300 m none of this is stated (from 200 m, 0.5 m with a "
-            "15 m partner is understated by up to 5.0 dB)")
+            "one direction, and it does not stop at any height; against a Fresnel two-ray with the assumed sea (flat earth, no surface wave, 915 MHz, Hs 0, "
+            f"{rfband.N_POINTS} evenly spaced ranges from 300 m to the pair's radio horizon or 12 km) the model's loss minus the Fresnel loss is described by "
+            "its median and by how many of the sampled ranges are more than 3 dB off, by the heights of the two antennas: " + pairs +
+            ". A positive median is a loss overstated and a margin too low (a GO can show as MARGINAL or NO-GO), a negative one a loss understated and a "
+            "margin too high. " + SAMPLING_NOTE + ". These are for a calm sea (Hs 0); against the same Fresnel two-ray at a wave height of 1, 2 and 3 m, "
+            "with a 15 m partner, by the lower height, " + hs +
+            " (measured; the other pairs were not measured above Hs 0). The card of every RF link computes the same figures for the link's own pair of "
+            "heights, for any heights from 0.1 m to 1000 m (a UAS end at each of the heights it flies its legs at, and at its deck height unless the link is "
+            "required only while the UAS is airborne; an end whose height cannot be read at reference heights, which the card says are assumed); none of "
+            "it is a table row. For the demo's USV whip and ship mast with its UAS at its lowest and highest leg (deck 8 m, levels 10 and 100 m, antenna "
+            "0.1 m above the body), " + uas_pairs + "; nearer than 300 m none of this is stated")
 
 
 # Known honesty caveats, verbatim from the lead's list. factors: NASA factors they bear on (cap 2); where: repo files that show them.

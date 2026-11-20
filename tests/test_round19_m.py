@@ -225,5 +225,5 @@ def test_an_end_that_is_neither_a_vehicle_nor_the_ship_has_no_antenna_height():
     """A shore station or an unknown id is not one height (the line no test of the merged tree ran). Round 21, M-2: the card does not go silent for it, and
     does not make a height up either: it takes the reference heights `report.RF_REFERENCE_M` and says they are assumed (tests/test_round21_b.py)."""
     from cafe.pm import report
-    heights, read, text = report._end_heights("shore", {"vehicles": [], "ship": {"id": "ship"}}, {})
+    heights, read, text = report._end_heights("shore", {"vehicles": [], "ship": {"id": "ship"}}, {}, "always")
     assert heights == list(report.RF_REFERENCE_M) and read is False and text.endswith("108.1 m assumed") and "no usable height" in text

@@ -765,14 +765,16 @@ def _gs(hs: Iterable[float], sep: str = ", ") -> str:
     return sep.join(f"{h:g}" for h in hs)
 
 
-def _end_heights(end: str, mission: dict[str, Any], cls: dict[str, str]) -> tuple[list[float], bool, str]:
+def _end_heights(end: str, mission: dict[str, Any], cls: dict[str, str], when: str) -> tuple[list[float], bool, str]:
     """(the antenna heights [m] of one end of an RF link that the band is computed for, whether they were read, how the card names them). A glider's or a
     USV's platform value, the ship's height as stage 1 takes it (`ship_antenna_m`: the mission's `antenna_height_m`, else the UAS platform's
     `radio.ship_antenna_height_m`, else 10 m, which is what the link model used), a UAS at every height it flies a leg at (deck + level + the antenna's height
-    above the body, as stage 1 puts the link antenna). Where a height cannot be read (a shore or an unknown id, a platform file that cannot be read, a height
-    outside `rfband.valid_height`, a UAS with no levels) the end is the reference heights `RF_UAS_FALLBACK_M` or `RF_REFERENCE_M` and the card says so: a
-    card is never silent because an end is not one number (round 21, M-2)."""
+    above the body, as stage 1 puts the link antenna) and, unless the link is `when: uas_airborne`, on the deck (deck + the antenna's height: stage 1 needs
+    the link at every record, and a UAS on the ground has `alt` 0 in its records; round 22, M-4). Where a height cannot be read (a shore or an unknown id, a
+    platform file that cannot be read, a height outside `rfband.valid_height`, a UAS with no levels) the end is the reference heights `RF_UAS_FALLBACK_M` or
+    `RF_REFERENCE_M` and the card says so: a card is never silent because an end is not one number (round 21, M-2)."""
     from .physics import glider, uas, usv
+    ground: list[float] = []
     try:
         v = next((v for v in mission["vehicles"] if v["id"] == end), None)
         if v is None:
@@ -787,11 +789,14 @@ def _end_heights(end: str, mission: dict[str, Any], cls: dict[str, str]) -> tupl
         else:
             levels, deck, radio = _uas_flight(v)
             hs = [deck + a + _real(radio["uas_antenna_height_above_body_m"]) for a in levels]
+            ground = [] if when == "uas_airborne" else [deck + _real(radio["uas_antenna_height_above_body_m"])]
     except (KeyError, TypeError, ValueError, ArithmeticError, OSError):          # a platform file that is gone or damaged, a number too large for a float
         hs = []
-    if hs and all(rfband.valid_height(h) for h in hs):
-        hs = sorted(set(hs))
-        return hs, True, (f"{hs[0]:g} m" if cls.get(end) != "uas" else f"flown at {_gs(hs)} m")
+    if hs and all(rfband.valid_height(h) for h in hs + ground):
+        flown = sorted(set(hs))
+        if cls.get(end) != "uas":
+            return flown, True, f"{flown[0]:g} m"
+        return sorted({*flown, *ground}), True, (f"on the deck at {ground[0]:g} m, " if ground else "") + f"flown at {_gs(flown)} m"
     if cls.get(end) == "uas":
         return list(RF_UAS_FALLBACK_M), False, f"no single height, its flight levels could not be read: {_gs(RF_UAS_FALLBACK_M, ' and ')} m assumed"
     return list(RF_REFERENCE_M), False, (f"no usable height (unreadable, or outside {rfband.MIN_HEIGHT_M:g} to {rfband.MAX_HEIGHT_M:g} m): "
@@ -806,21 +811,29 @@ def _rf_hz(lk: dict[str, Any]) -> float:
         raise ConfigError(f"link {lk.get('id')!r}: radio {lk.get('radio')!r} is not in platforms/radios.yaml with a numeric center_mhz: {e!r}") from e
 
 
+def _pair(p: tuple[float, ...]) -> str:
+    """A pair of heights [m] as the card names it."""
+    return f"{p[0]:g} m with {p[1]:g} m"
+
+
 def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None:
     """The sentence of an RF link card that says how far the two-ray model's -1 ground reflection is from a Fresnel two-ray for THIS link's antennas (rounds
     17 to 21: DECISIONS 925, 926, 991, 1000, 1001; docs/PHYSICS.md 12.1; CREDIBILITY L23). The model's error is a continuous function of the pair of heights
     with no height at which it starts or stops, and its direction depends on the pair, so the band is computed (`rfband.pair_band`: the model minus a flat-earth
     Fresnel two-ray at Hs 0, 300 m to the pair's radio horizon or 12 km, 400 points, at the link's own radio frequency) for every RF link, for any heights: one
-    pair for two ends that are one height each, one per leg for a UAS end (`_end_heights`), reference heights said as such for an end that cannot be read.
+    pair for two ends that are one height each, one per leg (and the deck) for a UAS end (`_end_heights`), reference heights said as such for an end that
+    cannot be read.
     Rounds 17 to 20 read a table of ten measured rows and the card went silent at its edge four times (0.5, 0.55, 2.2 m, every UAS link above that). The
-    sentence prints each pair's figures, how many of the 400 samples are more than 3 dB off, and what the signs of the figures do to the margin
-    (`credibility.band_effect`); for several pairs also the lowest and the highest figure over them and where they are. The start says which ends are
+    sentence prints each pair's median and how many of the 400 sampled ranges overstate and how many understate the loss by more than 3 dB
+    (`credibility.band_figures`), and says that these are not the worst case (`credibility.SAMPLING_NOTE`): the extremes of the 400 samples are the
+    sampling's, not the model's (round 22, M-1), so they are not printed, nor called a limit. A UAS end is at the heights stage 1 gives it for the link's
+    `when` (round 22, M-4: on the deck as well, unless `uas_airborne`). The start says which ends are
     low ("Both ends ... 0.5 m or lower", "An end ... below 0.5 m", "An end ... of 0.5 m" are pinned by tests) and names every end with its heights. None only
     for a link that is not an RF one."""
     if lk["kind"] != "rf":
         return None
     cls = _classes(mission)
-    ends = [(end, *_end_heights(end, mission, cls)) for end in (lk["a"], lk["b"])]
+    ends = [(end, *_end_heights(end, mission, cls, lk["when"])) for end in (lk["a"], lk["b"])]
     f_hz = _rf_hz(lk)
 
     def named(keep: Callable[[list[float], bool], bool]) -> str:
@@ -843,26 +856,21 @@ def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None
     if unnamed:                                                       # an end that is no one height, or no height at all, is named whatever the start says
         start += f" The other end: {', '.join(unnamed)}."
     bands = [(p, rfband.pair_band(p[0], p[1], f_hz)) for p in sorted({tuple(sorted(p)) for p in itertools.product(ends[0][1], ends[1][1])})]
-
-    def label(p: tuple[float, ...]) -> str:
-        return f"{p[0]:g} m with {p[1]:g} m"
-
-    def off(b: tuple[float, float, float, float]) -> str:
-        return f"{round(b[3] * rfband.N_POINTS)} of {rfband.N_POINTS} samples are more than {rfband.OFF_DB:g} dB off"
-    head = (f"{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) at {f_hz / 1e6:g} MHz from "
-            f"{rfband.D_MIN_M:g} m to the pair's radio horizon or {rfband.D_MAX_M / 1e3:g} km its loss minus the Fresnel loss is")
+    head = (f"{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) at {f_hz / 1e6:g} MHz, over "
+            f"{rfband.N_POINTS} evenly spaced ranges from {rfband.D_MIN_M:g} m to the pair's radio horizon or {rfband.D_MAX_M / 1e3:g} km, the model's loss "
+            "minus the Fresnel loss is described by its median and by how many of the sampled ranges are more than "
+            f"{rfband.OFF_DB:g} dB off")
     legs = ("a UAS is taken at each height it flies a leg at; the climbs between the legs pass other heights, which are not computed; "
             if any(cls.get(end) == "uas" for end, *_ in ends) else "")
-    tail = (f"{legs}at a wave height of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
+    tail = f"{legs}at a wave height of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23)."
+
+    def figures(b: tuple[float, float, float, float, int, int]) -> str:
+        return credibility.band_figures(b[1], b[4], b[5])
     if len(bands) == 1:
         p, b = bands[0]
-        return f"{head} {credibility.band_figures(*b[:3])} for this pair of heights ({label(p)}): {credibility.band_effect(b[0], b[2])}; {off(b)}; {tail}"
-    each = "; ".join(f"{label(p)} {credibility.band_figures(*b[:3])} ({off(b)})" for p, b in bands)
-    worst_lo, worst_hi = min(bands, key=lambda x: x[1][0]), max(bands, key=lambda x: x[1][2])
-    where = (f"both extremes are those of {label(worst_lo[0])}" if worst_lo[0] == worst_hi[0] else
-             f"the lowest figure is that of {label(worst_lo[0])} and the highest that of {label(worst_hi[0])}")
-    over = f"over these pairs it is {worst_lo[1][0]:+.1f} to {worst_hi[1][2]:+.1f} dB, {where}: {credibility.band_effect(worst_lo[1][0], worst_hi[1][2])}"
-    return f"{head}, by pair of heights: {each}; {over}; {tail}"
+        return f"{head}, for this pair of heights ({_pair(p)}): {figures(b)}. {credibility.SAMPLING_NOTE}; {tail}"
+    each = "; ".join(f"{_pair(p)} {figures(b)}" for p, b in bands)
+    return f"{head}, by pair of heights: {each}. {credibility.SAMPLING_NOTE}; {tail}"
 
 
 def _links(s1b: dict[str, Any], tr: Trace, mission: dict[str, Any]) -> dict[str, Any]:
