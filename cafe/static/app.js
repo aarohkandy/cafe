@@ -304,7 +304,7 @@ function badgesFor(design, kind, src) {
   if (kind === "usv" && !src?.resistance) out.push(["resistance: not computed", "No free-surface CFD for this hull: forward resistance is an estimate."]);
   return out;
 }
-const pct = r => r.p_interval && r.runs ? `${Math.round(r.p_success * 100)}% of ${r.runs} runs (90% sure the true rate is ${Math.round(r.p_interval[0] * 100)}–${Math.round(r.p_interval[1] * 100)}%)` : `${Math.round(r.p_success * 100)}%`;
+const pct = r => r.p_interval && r.runs ? `${fmt((r.p_success ?? NaN) * 100, 0)}% of ${r.runs} runs (90% sure the true rate is ${fmt((r.p_interval[0] ?? NaN) * 100, 0)}–${fmt((r.p_interval[1] ?? NaN) * 100, 0)}%)` : `${fmt((r.p_success ?? NaN) * 100, 0)}%`;
 
 function showResult(m) {
   const res = m.result, ids = m.mission.drones.map(x => x.id);
@@ -315,7 +315,7 @@ function showResult(m) {
   const parts = [];
   if (res.mode === "emulator") parts.push(el("p", { class: "chip ok" }, `Flown by real autopilot firmware: ${Object.values(res.firmware).join(", ")}`));
   if (res.fleet) {
-    const why = res.fleet.reasons.length ? res.fleet.reasons.slice(0, 3).map(x => `${x.reason} (${Math.round(x.share * 100)}% of runs)`).join("; ") : "Every drone did its job and every range requirement held, in every run.";
+    const why = res.fleet.reasons.length ? res.fleet.reasons.slice(0, 3).map(x => `${x.reason} (${fmt((x.share ?? NaN) * 100, 0)}% of runs)`).join("; ") : "Every drone did its job and every range requirement held, in every run.";
     parts.push(el("h3", {}, "Can the fleet do it?"), verdictBlock(res.fleet, "Whole deployment", `${pct(res.fleet)}. ${why}`));
   }
   for (const w of res.warnings || []) parts.push(el("p", { class: "chip warn wrap" }, w));
@@ -331,7 +331,7 @@ function showResult(m) {
     card.querySelector(".who").style.color = color(id);
     card.append(el("dl", {},
       el("div", {}, el("dt", {}, "legs"), el("dd", {}, legs || "—")),
-      el("div", {}, el("dt", {}, "battery left"), el("dd", {}, `${fmt(r.battery_left_p50 * 100, 0)}%`)),
+      el("div", {}, el("dt", {}, "battery left"), el("dd", {}, `${fmt((r.battery_left_p50 ?? NaN) * 100, 0)}%`)),
       el("div", {}, el("dt", {}, "speed"), el("dd", {}, r.cruise_mps != null ? `${fmt(r.cruise_mps, 2)} m/s` : "—"))));
     parts.push(card);
   }
@@ -363,7 +363,7 @@ function scrub(t) {
   for (const id of ids) {
     const r = rowAt(res.drones[id].track, t);
     pos[id] = [r.lat[0], r.lon[0], r.z[0]];
-    const where = kindOf(id) === "uuv" ? `${fmt(-r.z[0], 0)} m deep` : kindOf(id) === "uav" ? `${fmt(r.z[0], 0)} m up` : "on the surface";
+    const where = kindOf(id) === "uuv" ? `${fmt(-(r.z[0] ?? NaN), 0)} m deep` : kindOf(id) === "uav" ? `${fmt(r.z[0], 0)} m up` : "on the surface";
     L.circleMarker(pos[id].slice(0, 2), { radius: 7, color: "#fff", weight: 2, fillColor: color(id), fillOpacity: 1 }).bindTooltip(`${id} · ${where}`).addTo(layers.now);
   }
   for (const lk of res.links || []) {
@@ -415,9 +415,9 @@ function linkCard(lk) {
   const v = lk.verdict || (lk.p_success >= 0.9 ? "GO" : "NO-GO");     // older results carry no verdict
   return el("div", { class: "linkcard" },
     el("div", { class: "head" }, el("span", { class: "who" }, `${lk.a} ↔ ${lk.b}`),
-      el("span", { class: `call ${v === "GO" ? "good" : "bad"}` }, `${v}: within ${lk.max_m} m for ${Math.round(lk.need * 100)}% of the time in ${Math.round(lk.p_success * 100)}% of runs`)),
+      el("span", { class: `call ${v === "GO" ? "good" : "bad"}` }, `${v}: within ${lk.max_m} m for ${fmt((lk.need ?? NaN) * 100, 0)}% of the time in ${fmt((lk.p_success ?? NaN) * 100, 0)}% of runs`)),
     s,
-    el("p", { class: "hint" }, `In range ${fmt(lk.in_range_p50 * 100, 0)}% of the time in a typical run (worst 10% of runs: ${fmt(lk.in_range_p10 * 100, 0)}%). ` +
+    el("p", { class: "hint" }, `In range ${fmt((lk.in_range_p50 ?? NaN) * 100, 0)}% of the time in a typical run (worst 10% of runs: ${fmt((lk.in_range_p10 ?? NaN) * 100, 0)}%). ` +
       `Longest gap: ${fmt(lk.longest_outage_s_p50, 0)} s typical, ${fmt(lk.longest_outage_s_p90, 0)} s in a bad run.` +
       (lk.never_acquired > 0 ? ` Never got within range in ${fmt(lk.never_acquired * 100, 0)}% of runs.` : "") +
       ` Line: the nominal run. Shaded: the middle 80% of runs. Red zone: too far apart.`),
@@ -461,7 +461,7 @@ async function showDesign(id) {
   if (p.cruise) fact("cruise / max speed", `${fmt(p.cruise, 2)} / ${fmt(p.vmax, 2)} m/s`);
   if (g.draft) fact("draft · stability (GM)", `${fmt(g.draft, 3)} m · ${fmt(g.gm, 3)} m`);
   if (g.net_buoyancy_N != null) fact("net buoyancy", `${fmt(g.net_buoyancy_N, 1)} N`, el("small", {}, Math.abs(g.net_buoyancy_N) < 1 ? " neutral" : g.net_buoyancy_N > 0 ? " floats up" : " sinks"));
-  if (hg.cfd) { const q = 0.5 * hg.cfd.rho * hg.cfd.speed ** 2; for (const [dir, x] of Object.entries(hg.cfd.dirs)) { const ax = { x: 0, y: 1, z: 2 }[dir[1]], s = dir[0] === "+" ? 1 : -1; fact(`drag area ${dir}`, `${fmt(-s * x.force[ax] / q, 4)} m²`, el("small", {}, gciText(x.gci))); } }
+  if (hg.cfd) { const q = 0.5 * hg.cfd.rho * hg.cfd.speed ** 2; for (const [dir, x] of Object.entries(hg.cfd.dirs)) { const ax = { x: 0, y: 1, z: 2 }[dir[1]], s = dir[0] === "+" ? 1 : -1; fact(`drag area ${dir}`, `${fmt(-s * (x.force[ax] ?? NaN) / q, 4)} m²`, el("small", {}, gciText(x.gci))); } }
   if (hg.fs) for (const [U, x] of Object.entries(hg.fs.speeds)) fact(`resistance @ ${fmt(+U, 2)} m/s`, `${fmt(x.resistance, 2)} N`, el("small", {}, gciText(x.gci)));
   if (hg.bem) { const A = hg.bem.added_mass; fact("added mass surge/sway/heave", `${fmt(A[0][0], 1)} / ${fmt(A[1][1], 1)} / ${fmt(A[2][2], 1)} kg`); }
   const cases = f.cases || [];
@@ -575,7 +575,7 @@ async function loadReceipts() {
   for (const r of rows) {
     if (r.group !== group) { group = r.group; body.push(el("tr", { class: "group-row" }, el("td", { colspan: 6 }, group))); }
     const ref = r.kind === "bracket" ? `${fmt(r.lo, 3)} … ${fmt(r.hi, 3)}` : fmt(r.reference, 4);
-    const err = r.kind === "bracket" || r.kind === "context" ? "" : r.rel ? `${fmt(r.error * 100, 1)}% (≤${fmt(r.tol * 100, 0)}%)` : fmt(r.error, 3);
+    const err = r.kind === "bracket" || r.kind === "context" ? "" : r.rel ? `${fmt((r.error ?? NaN) * 100, 1)}% (≤${fmt((r.tol ?? NaN) * 100, 0)}%)` : fmt(r.error, 3);
     body.push(el("tr", { class: r.kind === "context" ? "context" : r.ok ? "" : "fail" },
       el("td", {}, r.claim), el("td", { class: "n" }, `${fmt(r.value, 4)} ${r.unit || ""}`), el("td", { class: "n" }, ref), el("td", { class: "n" }, err),
       el("td", {}, r.kind === "context" ? "" : el("span", { class: r.ok ? "pass" : "failt" }, r.ok ? "PASS" : "FAIL")), el("td", { class: "src" }, r.source)));

@@ -421,7 +421,7 @@ def check_fleet(body):
         for l in legs:
             if not isinstance(l, dict) or l.get("type") not in ("goto", "hold", "follow"):
                 raise HTTPException(400, f"{x['id']}: each leg is goto, hold or follow")
-            if l["type"] in ("hold", "follow") and not (isinstance(l.get("minutes"), (int, float)) and 0 < l["minutes"] <= 24 * 60):
+            if l["type"] in ("hold", "follow") and not (finite_real(l.get("minutes")) and 0 < l["minutes"] <= 24 * 60):
                 raise HTTPException(400, f"{x['id']}: {l['type']} needs minutes between 0 and 1440")
             if l["type"] == "goto" and l.get("to") != "start":
                 _point(l.get("to"), f"{x['id']}: goto point")
@@ -554,12 +554,11 @@ def live_create(body: dict):
 @app.post("/api/live/{sid}/step")
 def live_step(sid: str, body: dict):
     from cafe import live
-    try:
-        seconds = float(body.get("seconds", 10))
-    except (ValueError, TypeError, OverflowError):                       # an integer too large for a float is a bad number, not a 500
+    seconds = body.get("seconds", 10)
+    if not finite_real(seconds):                                         # no bool, text, NaN or integer too big for a float (a bad number, not a 500)
         raise HTTPException(400, "seconds must be a number")
     try:
-        return live.step(sid, seconds, body.get("targets") or {})
+        return live.step(sid, float(seconds), body.get("targets") or {})
     except KeyError:
         raise HTTPException(404, "no such live session (sessions end after an hour idle or an API restart)")
     except (ValueError, TypeError) as e:

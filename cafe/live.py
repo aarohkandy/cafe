@@ -12,6 +12,7 @@ import numpy as np
 
 from cafe import dyn
 from cafe.mission import World, TICK, z_to_down
+from cafe.pm.jsonio import finite_real   # stdlib only: the live image has no pyyaml, which `cafe.pm.config` imports
 
 SESSIONS = {}
 LOCK = threading.Lock()
@@ -68,12 +69,15 @@ def step(sid, seconds, targets):
             d = w.by_id.get(did)
             if d is None:
                 raise ValueError(f"no drone {did!r} in this session")
+            bad = ValueError(f"{did}: target needs numeric lat, lon (and optional z, speed)")
             try:
-                lat, lon, z = float(tg["lat"]), float(tg["lon"]), float(tg.get("z", 0))
-                speed = None if tg.get("speed") is None else float(tg["speed"])
-            except (KeyError, TypeError, ValueError):
-                raise ValueError(f"{did}: target needs numeric lat, lon (and optional z, speed)")
-            if not all(np.isfinite([lat, lon, z])) or not (-90 <= lat <= 90):
+                lat, lon, z, speed = tg["lat"], tg["lon"], tg.get("z", 0), tg.get("speed")
+            except (KeyError, TypeError):
+                raise bad
+            if not all(finite_real(v) for v in (lat, lon, z)) or not (speed is None or finite_real(speed)):    # no bool, text, NaN or integer too big for a float
+                raise bad
+            lat, lon, z, speed = float(lat), float(lon), float(z), None if speed is None else float(speed)
+            if not (-90 <= lat <= 90):
                 raise ValueError(f"{did}: target is not a real position")
             if speed is not None and not (0 < speed <= float(np.max(d.ap.v_max))):
                 raise ValueError(f"{did}: speed must be above 0 and at most {float(np.max(d.ap.v_max)):.2f} m/s")
