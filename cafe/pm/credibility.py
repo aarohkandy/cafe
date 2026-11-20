@@ -52,14 +52,14 @@ def band_effect(n_over: int, n_under: int) -> str:
     return f"at none of the {n} sampled ranges is the loss {off} off"
 
 
-SAMPLING_NOTE = (f"These are figures of the {rfband.N_POINTS} sampled ranges, not of the worst case: at an interference null the model's error is larger than "
-                 "the median, and a finer sampling of the ranges can find a larger one")
+SAMPLING_NOTE = f"These are figures of the {rfband.N_POINTS} sampled ranges"
 
 
 def band_figures(med: float, n_over: int, n_under: int) -> str:
     """The figures of the link card and L23 for one pair of heights: the median of the model's loss minus the Fresnel loss over the sampled ranges
-    (signed: positive, the loss is overstated) and `band_effect` of the two counts. The one format of both."""
-    return f"median {med:+.1f} dB, {band_effect(n_over, n_under)}"
+    (signed: positive, the loss is overstated) and `band_effect` of the two counts. The one format of both. A median that rounds to zero prints as +0.0, never
+    -0.0 (round 23, N-4)."""
+    return f"median {round(med, 1) + 0.0:+.1f} dB, {band_effect(n_over, n_under)}"
 
 
 def pair_figures(pair: tuple[float, float]) -> str:
@@ -78,35 +78,33 @@ LOW_ANTENNA_HS_BAND: dict[tuple[float, float], dict[int, tuple[float, float, flo
     (0.5, 15.0): {1: (-2.0, 1.3, 2.3), 2: (-0.3, 1.5, 2.4), 3: (0.3, 1.9, 2.5)},
 }
 
-LOW_ANTENNA_NAMES = {0.1: "the lowest height a platform file allows", 0.3: "the Slocum", 0.5: "the Seaglider", 2.2: "the USV's whip",
-                     15.0: "the ship's mast", 18.1: "the demo's lowest UAS leg", 108.1: "its highest"}
-
 # The pairs L23 prints figures for, the lower height first: the ten rows of `comms.LOW_ANTENNA_PAIR_BAND` (tests/test_round18_x.py holds the live figure of each
-# to that table's 0.1 dB), and the pairs of the demo's USV whip and ship mast with its lowest and highest UAS leg (deck 8 m + a level of 10 and 100 m + 0.1 m).
+# to that table's 0.1 dB), and the pairs of the demo's USV whip (2.2 m) and ship mast (15 m) with its lowest (18.1 m) and highest (108.1 m) UAS leg (deck 8 m +
+# a level of 10 and 100 m + 0.1 m). Round 23, S-8: no platform names in the ten generic pairs, which print for every mission.
 L23_PAIRS = ((0.1, 15.0), (0.3, 0.3), (0.3, 0.5), (0.3, 2.2), (0.3, 15.0), (0.5, 0.5), (0.5, 2.2), (0.5, 15.0), (2.2, 2.2), (2.2, 15.0))
 L23_UAS_PAIRS = ((2.2, 18.1), (2.2, 108.1), (15.0, 18.1), (15.0, 108.1))
 
 
 def _l23_text() -> str:
     def named(pair: tuple[float, float]) -> str:
-        return f"{pair[0]:g} m ({LOW_ANTENNA_NAMES[pair[0]]}) with {pair[1]:g} m ({LOW_ANTENNA_NAMES[pair[1]]})"
+        return f"{pair[0]:g} m with {pair[1]:g} m"
     pairs = "; ".join(f"{named(p)} {pair_figures(p)}" for p in L23_PAIRS)
     uas_pairs = "; ".join(f"{named(p)} {pair_figures(p)}" for p in L23_UAS_PAIRS)
     hs = "; ".join(f"{lo:g} m: " + ", ".join(f"at Hs {h} m {x[0]:+.1f} to {x[2]:+.1f} dB (median {x[1]:+.1f})" for h, x in by.items())
                    for (lo, _), by in sorted(LOW_ANTENNA_HS_BAND.items()))
-    return ("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip to a UAS at 108 m: the two-ray model takes the reflection coefficient as -1, "
+    return ("RF links, from an antenna below 0.5 m or one of 2.2 m to a UAS at 108 m: the two-ray model takes the reflection coefficient as -1, "
             "which makes the field vanish with the height, where the sea's own coefficient leaves a floor, and the error is of the pair of heights and has no "
-            "one direction, and it does not stop at any height; against a Fresnel two-ray with the assumed sea (flat earth, no surface wave, 915 MHz, Hs 0, "
+            "one direction; against a Fresnel two-ray with the assumed sea (flat earth, no surface wave, 915 MHz, Hs 0, "
             f"{rfband.N_POINTS} evenly spaced ranges from 300 m to the pair's radio horizon or 12 km) the model's loss minus the Fresnel loss is described by "
             "its median and by how many of the sampled ranges are more than 3 dB off, by the heights of the two antennas: " + pairs +
             ". A positive median is a loss overstated and a margin too low (a GO can show as MARGINAL or NO-GO), a negative one a loss understated and a "
-            "margin too high. " + SAMPLING_NOTE + ". These are for a calm sea (Hs 0); against the same Fresnel two-ray at a wave height of 1, 2 and 3 m, "
-            "with a 15 m partner, by the lower height, " + hs +
+            "margin too high. " + SAMPLING_NOTE + ". These are for a calm sea (Hs 0); against the same Fresnel two-ray (with the Ament roughness factor in its "
+            "reflection coefficient) at a wave height of 1, 2 and 3 m, with a 15 m partner, by the lower height, " + hs +
             " (measured; the other pairs were not measured above Hs 0). The card of every RF link computes the same figures for the link's own pair of "
             "heights, for any heights from 0.1 m to 1000 m (a UAS end at each of the heights it flies its legs at, and at its deck height unless the link is "
             "required only while the UAS is airborne; an end whose height cannot be read at reference heights, which the card says are assumed); none of "
-            "it is a table row. For the demo's USV whip and ship mast with its UAS at its lowest and highest leg (deck 8 m, levels 10 and 100 m, antenna "
-            "0.1 m above the body), " + uas_pairs + "; nearer than 300 m none of this is stated")
+            "it is a table row. For the demo's USV whip (2.2 m) and ship mast (15 m) with its UAS at its lowest (18.1 m) and highest (108.1 m) leg (deck 8 m, "
+            "levels 10 and 100 m, antenna 0.1 m above the body), " + uas_pairs + "; nearer than 300 m none of this is stated")
 
 
 # Known honesty caveats, verbatim from the lead's list. factors: NASA factors they bear on (cap 2); where: repo files that show them.
@@ -134,7 +132,7 @@ LIMITATIONS = [
          where=["config/assumptions.yaml", "cafe/pm/budget.py", "cafe/pm/stage3/pipeline_windows.py"]),
     dict(id="L16", text="the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
          factors=["robustness"], where=["cafe/pm/pipeline.py"]),
-    dict(id="L17", text="UAS attitude exceedance cannot fire in this controller model (tilt clamp 35 deg, exceedance 42 deg)", factors=["validation"],
+    dict(id="L17", text="the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance", factors=["validation"],
          where=["cafe/pm/physics/uas.py", "platforms/quad_uas.yaml"]),
     dict(id="L18", text="the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio "
                         "again; "
@@ -191,7 +189,7 @@ RULES = {
                       "3 and at least 80 % are, and no perturbation prior is of kind assumed.",
     "uncertainty": "1 verdict intervals exist; 2 and the Latin-hypercube stratification checks passed; "
                    "3 and every vehicle and link that leaves P(fail) < 5 % open (95 % Wilson lower bound on P(fail) below 5 %; "
-                   "a link with the verdict NOT EXERCISED is none, no member count decides it) has n >= n_certify, "
+                   "a link with the verdict NOT EXERCISED is none) has n >= n_certify, "
                    "and no perturbation prior is of kind assumed.",
     "robustness": "1 one ensemble ran; 2 and a first-order sensitivity clearly above chance exists (more ranked than the 5 % level allows by luck over "
                   "the report's tests), or a refit reran; "

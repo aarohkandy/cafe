@@ -56,10 +56,9 @@ USV_UAS_CARD = ("The antennas of this RF link: usv (2.2 m), uas (flown at 18.1, 
                 "margin is too high there); 2.2 m with 68.1 m median -1.5 dB, at 10 of 400 sampled ranges the loss is overstated by more than 3 dB "
                 "(the margin is too low there) and at 18 understated by more than 3 dB (the margin is too high there); 2.2 m with 108.1 m median "
                 "-1.9 dB, at 18 of 400 sampled ranges the loss is overstated by more than 3 dB (the margin is too low there) and at 20 understated "
-                "by more than 3 dB (the margin is too high there). These are figures of the 400 sampled ranges, not of the worst case: at an "
-                "interference null the model's error is larger than the median, and a finer sampling of the ranges can find a larger one; a UAS "
-                "is taken at each height it flies a leg at; the climbs between the legs pass other heights, which are not computed; at a wave height "
-                "of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
+                "by more than 3 dB (the margin is too high there). These are figures of the 400 sampled ranges; a UAS "
+                "is taken at each height it flies a leg at; the climbs between the legs pass other heights, which are not computed; "
+                "nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
 
 
 def test_m2_the_whole_report_of_the_demo_run_carries_that_one_text(tmp_path):

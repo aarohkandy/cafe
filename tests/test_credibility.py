@@ -461,7 +461,7 @@ LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the
            "no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer and the drag refit stay uncalibrated; "
            "no GPU run exists",
            "the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
-           "UAS attitude exceedance cannot fire in this controller model (tilt clamp 35 deg, exceedance 42 deg)",
+           "the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance",
            "the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio again; "
            "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established",
            "the persistent wind-speed prior is an estimate from the TAO moorings of one regime, not a measured spread: it is the spread of the moorings' "

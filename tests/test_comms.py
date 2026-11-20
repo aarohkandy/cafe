@@ -639,7 +639,7 @@ def test_r12_m12_the_fresnel_figures_in_the_two_ray_docstring_are_what_the_formu
     assert psi[g.argmin()] == pytest.approx(4.85, abs=0.05) and g.min() == pytest.approx(0.26, abs=0.005)                      # the pseudo-Brewster angle
     assert psi[(g >= 0.9) & (psi < 3.0)].max() == pytest.approx(0.29, abs=0.02)                          # "within 10 % below about 0.3 deg"
     doc = c.two_ray_curved_db.__doc__
-    assert "within 10 % of the magnitude only below about 0.3 deg" in doc and "pseudo-Brewster" in doc and "7.6 dB" in doc
+    assert "within 10 % of the magnitude only below about 0.3 deg" in doc and "pseudo-Brewster" in doc and "7.6 dB" not in doc       # round 23, C-1
     assert "valid for grazing angles below ~1-2 deg" not in doc
     # the model itself is unchanged, G = -1:
     assert c.two_ray_curved_db(2e3, 2.2, 40.0, 0.0, F915, divergence=False, a_eff=c.FLAT_A) == pytest.approx(

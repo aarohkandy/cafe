@@ -356,7 +356,7 @@ def test_m2_l23_prints_the_live_figures_of_its_pairs_and_no_edge_of_a_table():
     assert sorted(cr.L23_PAIRS) == sorted(comms.LOW_ANTENNA_PAIR_BAND) and sorted(cr.L23_UAS_PAIRS) == [(2.2, 18.1), (2.2, 108.1), (15.0, 18.1), (15.0, 108.1)]
     for pair in (*cr.L23_PAIRS, *cr.L23_UAS_PAIRS):
         assert figs(*pair) in t and cr.pair_figures(pair) == figs(*pair), pair
-    assert t.startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip to a UAS at 108 m:")
+    assert t.startswith("RF links, from an antenna below 0.5 m or one of 2.2 m to a UAS at 108 m:")
     assert "The card of every RF link computes the same figures for the link's own pair of heights, for any heights from 0.1 m to 1000 m" in t
     for gone in ("for none above that", "0.55 to 2.2 m", "envelope", "is not measured and no band is stated for it", "is read as that one",
                  "within 0.05 m of a listed"):
@@ -371,7 +371,7 @@ def test_m2_l23_prints_the_live_figures_of_its_pairs_and_no_edge_of_a_table():
 def test_m2_l23_gives_the_demos_uas_pairs_and_what_the_demo_card_says_agrees():
     t = l23()
     for pair in cr.L23_UAS_PAIRS:
-        assert f"{pair[0]:g} m ({cr.LOW_ANTENNA_NAMES[pair[0]]}) with {pair[1]:g} m ({cr.LOW_ANTENNA_NAMES[pair[1]]}) {figs(*pair)}" in t, pair
+        assert f"{pair[0]:g} m with {pair[1]:g} m {figs(*pair)}" in t, pair
         card = report._low_antenna_note(next(lk for lk in DEMO["links"] if lk["id"] == "usv-uas-rf") | dict(a="usv" if pair[0] == 2.2 else "ship"), DEMO)
         assert f"{pair[0]:g} m with {pair[1]:g} m {figs(*pair)}" in card
 

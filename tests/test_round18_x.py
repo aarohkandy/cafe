@@ -108,14 +108,14 @@ def test_x1_the_start_of_each_sentence_is_the_one_round_17_and_18_pinned(monkeyp
 
 def test_x1_l23_states_every_pairs_figures_and_direction_not_a_pooled_one():
     t = {x["id"]: x for x in credibility.LIMITATIONS}["L23"]["text"]
-    assert t.startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip to a UAS at 108 m:")
+    assert t.startswith("RF links, from an antenna below 0.5 m or one of 2.2 m to a UAS at 108 m:")
     for pair in PAIRS:
         md = measured(pair)[1]
-        m = re.search(rf"(?<![\d.]){pair[0]:g} m \([^)]*\) with {pair[1]:g} m \([^)]*\) (median ([+-][\d.]+) dB, at [^;]*?)(?=;|\. A positive)", t)
+        m = re.search(rf"(?<![\d.]){pair[0]:g} m with {pair[1]:g} m (median ([+-][\d.]+) dB, at [^;]*?)(?=;|\. A positive)", t)
         assert m and abs(float(m.group(2)) - md) <= 0.1 and m.group(1) == figs(*pair), (pair, m and m.group(0))
     for gone in ("within 3.3 dB", "at worst understates", "can be too high; nearer", "so there the margin, the USV whip's included", "never too high"):
         assert gone not in t, gone
-    assert "none of it is a table row" in t and "the USV's whip" in t and "108.1 m (its highest)" in t
+    assert "none of it is a table row" in t and "the demo's USV whip (2.2 m)" in t and "highest (108.1 m) leg" in t
     assert "nearer than 300 m none of this is stated" in t and "up to" not in t
 
 
