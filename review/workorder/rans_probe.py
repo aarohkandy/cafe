@@ -22,12 +22,26 @@ sys.path.insert(0, str(ROOT))
 os.environ.setdefault("CAFE_OFFLINE", "1")                       # the environment is read from the cache; nothing is fetched
 
 
+def grid_entry(name: str, r: dict, label: str, q: float, L: float, case_dir: pathlib.Path) -> dict:
+    """One grid's record of result.json; surface_cell_m is the cell the level gives (base cell L/4 halved `level` times), not the requested size."""
+    import numpy as np
+    from cafe import cfd
+    d = r["dirs"][label]
+    drag = float(-np.dot(d["force"], cfd.dvec(label)))
+    if not drag > 0:
+        raise ValueError(f"grid {name}: the drag {drag} N along {label} is not positive; the case in {case_dir} is kept for its logs")
+    return dict(level=r["level"], surface_cell_m=L / 4 / 2 ** r["level"], cells=r["mesh"]["cells"], failed_checks=r["mesh"]["failed_checks"],
+                seconds=r["seconds"], solve_seconds=d["seconds"], mesh_seconds=r["seconds"] - d["seconds"], iterations=d["iters"],
+                drag_n=drag, force_n=d["force"], force_std_n=d["force_std"], scatter=float(np.linalg.norm(d["force_std"])) / drag,
+                cd=drag / q, case_dir=str(case_dir))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--stop-after-stl", action="store_true", help="steps 1 to 3 only: print the label, speed, STL triangle count and watertight flag")
     ap.add_argument("--cores", type=int, default=2, help="MPI ranks of OpenFOAM (CAFE_NPROC); keep it equal to PM_CPUS")
     ap.add_argument("--out", default="/data/runs/rans_probe", help="work directory (the case directories are deleted and rebuilt)")
-    ap.add_argument("--run", default="/data/runs/q25", help="finished demo run whose windows.json, stage1/res.pkl and ingest/ the case is built from (read only)")
+    ap.add_argument("--run", default="/data/runs/q25", help="finished demo run: windows.json, stage1/res.pkl and ingest/ the case is built from (read only)")
     ap.add_argument("--mission", default=str(ROOT / "missions" / "tepex_c_demo.yaml"))
     args = ap.parse_args()
     out = pathlib.Path(args.out).resolve()
@@ -96,18 +110,14 @@ def main() -> int:
         r = cfd.external(str(stl), out / name, "water", speed, (label,), off, log=print)
         cfd._shrink(out / name)
         runs[name] = r
-        d = r["dirs"][label]
-        drag = float(-np.dot(d["force"], cfd.dvec(label)))
-        result["grids"][name] = dict(level=r["level"], surface_cell_m=hs, cells=r["mesh"]["cells"], failed_checks=r["mesh"]["failed_checks"],
-                                     seconds=r["seconds"], solve_seconds=d["seconds"], mesh_seconds=r["seconds"] - d["seconds"], iterations=d["iters"],
-                                     drag_n=drag, force_n=d["force"], force_std_n=d["force_std"], scatter=float(np.linalg.norm(d["force_std"])) / drag,
-                                     cd=drag / q, case_dir=str(out / name))
+        result["grids"][name] = grid_entry(name, r, label, q, L, out / name)
         path.write_text(json.dumps(result, indent=1, default=float))                # kept after each grid: a failed second grid loses nothing
     fine, coarse = result["grids"]["fine"], result["grids"]["coarse"]
     rr = vv.refinement_ratio(fine["cells"], coarse["cells"])
     g = cfd.gci(fine["drag_n"], coarse["drag_n"], ratio=rr)
-    result["summary"] = dict(refinement_ratio=rr, gci=g, cd=fine["cd"], cd_on_ref_area=fine["cd"], cd_hangar=case["cd_h"], cd_over_cd_hangar=fine["cd"] / case["cd_h"],
-                             total_seconds=fine["seconds"] + coarse["seconds"], note="cd uses the solver's rho (1025) and ref_area; cd_hangar uses the case's own density")
+    result["summary"] = dict(refinement_ratio=rr, gci=g, cd=fine["cd"], cd_hangar=case["cd_h"], cd_over_cd_hangar=fine["cd"] / case["cd_h"],
+                             total_seconds=fine["seconds"] + coarse["seconds"],
+                             note="cd uses the solver's rho (1025) and ref_area; cd_hangar uses the case's own density")
     path.write_text(json.dumps(result, indent=1, default=float))
     print(json.dumps(result, indent=1, default=float))
     return 0
