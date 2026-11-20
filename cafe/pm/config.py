@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-import contextlib, datetime as dt, hashlib, json, math, pathlib, re, warnings
+import contextlib, datetime as dt, decimal, hashlib, json, math, pathlib, re, warnings
 from collections.abc import Hashable, Iterator
 from typing import Any
 
@@ -44,9 +44,10 @@ class _Loader(yaml.SafeLoader):                                         # type: 
             if k.tag == "tag:yaml.org,2002:merge":
                 continue
             key = self.construct_object(k, deep=True)
-            if isinstance(key, Hashable) and key in seen:
-                raise ConfigError(f"line {k.start_mark.line + 1}: duplicate key {key!r}; a later value would silently replace an earlier one")
-            seen.add(key)
+            if isinstance(key, Hashable):                                   # an unhashable key (a list, a mapping) is PyYAML's own refusal
+                if key in seen:
+                    raise ConfigError(f"line {k.start_mark.line + 1}: duplicate key {key!r}; a later value would silently replace an earlier one")
+                seen.add(key)
         out: dict[Any, Any] = super().construct_mapping(node, deep)
         return out
 
@@ -155,7 +156,7 @@ def _yaml(path: str | pathlib.Path) -> Any:
         raise ConfigError(f"{path}: cannot be read ({e.strerror or e})") from e
     except ConfigError as e:
         raise ConfigError(f"{path}: {e}") from e
-    except yaml.YAMLError as e:
+    except (yaml.YAMLError, ValueError) as e:                               # ValueError: PyYAML's int() of 4,301 or more digits, an invalid timestamp
         raise ConfigError(f"{path}: not valid YAML ({e})") from e
     except RecursionError as e:                                             # a few hundred nested brackets: PyYAML recurses per level (round 13, M-22)
         raise ConfigError(f"{path}: nested too deeply to read; a mission or platform file has a few levels, not hundreds") from e
@@ -182,7 +183,7 @@ def _finite(node: Any, path: pathlib.Path, where: str = "") -> None:
     too large for a float (YAML reads a 400-digit integer as an `int`, which the schema accepts as a `number` and every later `float(x)` or product of it
     is an OverflowError: round 21 merge, batch D's quirk). A bool is a boolean, not a number: the schema decides it."""
     if isinstance(node, (int, float)) and not isinstance(node, bool) and not finite_real(node):
-        what = repr(node) if isinstance(node, float) else f"an integer of {len(str(node))} digits"
+        what = repr(node) if isinstance(node, float) else f"an integer of {len(decimal.Decimal(node).as_tuple().digits)} digits"
         raise ConfigError(f"{path}: {where or '(top level)'}: {what} is not a finite number; write a number (a missing value is a missing key, not .nan)")
     for k, v in (node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()):
         name = v["id"] if isinstance(node, list) and isinstance(v, dict) and "id" in v else k          # a vehicle or link is named by its id

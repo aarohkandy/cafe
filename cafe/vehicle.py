@@ -367,7 +367,7 @@ def _vec3(r, key, d):
         raw = r[key]
         ok = len(raw) == 3 and all(finite_real(x) or isinstance(x, (np.integer, np.floating)) for x in raw)     # a bool or a numeral in text is no number
         a = np.asarray(raw, float) if ok else None
-    except (TypeError, ValueError, OverflowError):
+    except (KeyError, TypeError, ValueError, OverflowError):     # a result with no such key (an older cache) is the same named ValueError
         a = None
     if a is None or a.shape != (3,) or not np.isfinite(a).all():
         raise ValueError(f"direction {d}: `{key}` is not three finite numbers")
