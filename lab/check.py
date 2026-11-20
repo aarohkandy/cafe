@@ -63,7 +63,7 @@ def wait_designs(ids):
         ds = {k: call("GET", f"/api/designs/{i}") for k, i in ids.items()}
         for k, d in ds.items():
             if d["status"] == "failed":
-                sys.exit(f"{k} failed: {'; '.join(d.get('errors') or ['see its log in the Hangar'])}")
+                sys.exit(f"{k} failed: {'; '.join(d.get('errors') or ['see its log on the Robots page'])}")
         line = "  ".join(f"{k}: {'ready' if d['status'] == 'done' else d.get('step') or d['status']}" for k, d in ds.items())
         if line != last:
             print(time.strftime("%H:%M"), line, flush=True)
