@@ -46,11 +46,10 @@ def counts_sentence(over, under):
 def figs(h1, h2, f_hz=F915):
     """What the card and L23 print for a pair of heights, from the independent reference."""
     x = ref_diff(h1, h2, 400, f_hz)
-    return f"median {float(np.median(x)):+.1f} dB, " + counts_sentence(int(np.sum(x > 3.0)), int(np.sum(x < -3.0)))
+    return f"median {round(float(np.median(x)), 1) + 0.0:+.1f} dB, " + counts_sentence(int(np.sum(x > 3.0)), int(np.sum(x < -3.0)))
 
 
-NOTE = ("These are figures of the 400 sampled ranges, not of the worst case: at an interference null the model's error is larger than the median, and a "
-        "finer sampling of the ranges can find a larger one")
+NOTE = "These are figures of the 400 sampled ranges"                              # round 23, M-2: nothing of the worst case or of a finer sampling
 
 
 # ----------------------------------------------------------------------------------------------------------------------------------------------- M-1
@@ -92,7 +91,7 @@ def test_m1_the_words_follow_the_counts_for_every_combination(over, under):
     assert cr.band_figures(0.04, over, under).startswith("median +0.0 dB, ")
 
 
-def test_m1_the_note_that_these_are_not_the_worst_case_is_the_one_sentence():
+def test_m1_the_note_that_these_are_figures_of_the_400_sampled_ranges_is_the_one_sentence():
     assert cr.SAMPLING_NOTE == NOTE
 
 
@@ -101,7 +100,7 @@ def card_of(monkeypatch, h1, h2, **kw):
     return note_of(monkeypatch, ("a", ("glider", h1)), ("b", ("glider", h2)), **kw)
 
 
-def test_m1_the_card_of_every_pair_of_the_grid_prints_the_median_and_the_counts_and_says_it_is_not_the_worst_case_and_no_limit_word(monkeypatch):
+def test_m1_the_card_of_every_pair_of_the_grid_prints_the_median_and_the_counts_and_says_it_is_of_the_400_sampled_ranges_and_no_limit_word(monkeypatch):
     """Before: the card printed 'minimum to maximum dB', 'up to', 'overstated everywhere' and the extremes of the extremes. For the 105 pairs of the verifier
     (two glider-class ends of those heights): the card has its pair's figures as the independent reference gives them, the note, none of the words that call a
     sampled extreme a limit, and no 'x to y dB' range of any two signed figures."""
@@ -127,8 +126,8 @@ def test_m1_l23_prints_the_same_figures_for_its_pairs_and_no_limit_word_and_none
     t = {x["id"]: x for x in cr.LIMITATIONS}["L23"]["text"]
     assert not BANNED_WORDS.search(t), BANNED_WORDS.search(t)
     for pair in (*cr.L23_PAIRS, *cr.L23_UAS_PAIRS):
-        assert f"{pair[0]:g} m ({cr.LOW_ANTENNA_NAMES[pair[0]]}) with {pair[1]:g} m ({cr.LOW_ANTENNA_NAMES[pair[1]]}) {figs(*pair)}" in t, pair
-    assert NOTE in t and t.startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip to a UAS at 108 m:")
+        assert f"{pair[0]:g} m with {pair[1]:g} m {figs(*pair)}" in t, pair
+    assert NOTE in t and t.startswith("RF links, from an antenna below 0.5 m or one of 2.2 m to a UAS at 108 m:")
     assert "0.01 m" not in t and "5.0 dB" not in t and "from 200 m" not in t and "It grows with the heights" not in t
     assert not re.search(r"[+-]\d+\.\d to [+-]\d+\.\d dB \(median", t.split("at Hs 1 m")[0])                  # the Hs 0 pairs have no range
     assert t.endswith("nearer than 300 m none of this is stated")
@@ -145,12 +144,12 @@ def sweep():
 def test_m1_what_is_printed_is_what_a_hundred_times_finer_sampling_gives_over_the_grid(sweep):
     """The claim of the card: the median and the counts are the sampling's to a tolerance, which the extremes are not. Over 190 pairs of heights (the verifier's
     105 and the demo's) at 915 and 2440 MHz: the printed median is within 0.6 dB of the median at 40,000 sampled ranges (measured on orca: at most 0.59 dB), and
-    each count over 400 is within 0.05 of the share of 40,000 (measured: 0.030 over, 0.046 under); the largest |difference| at 40,000 is larger than the printed
-    median for every pair, as the note says (that a finer sampling can find a larger one is the next test)."""
+    each count over 400 is within 0.05 of the share of 40,000 (measured: 0.030 over, 0.046 under). Round 23: the assertion that the largest |difference| at
+    40,000 is larger than the printed median for every pair held the sentence 'a finer sampling can find a larger one', which is deleted (it was false for the
+    pairs without a null, and this assertion passed only because those pairs exceed their median by 0.01 dB)."""
     for (p, f), (s400, s40k) in sweep.items():
         assert abs(s400[0] - s40k[0]) <= 0.6, (p, f, s400, s40k)
         assert abs(s400[1] / 400 - s40k[1] / 40000) <= 0.05 and abs(s400[2] / 400 - s40k[2] / 40000) <= 0.05, (p, f, s400, s40k)
-        assert s40k[3] > abs(s400[0]), (p, f)
 
 
 def test_m1_the_extremes_are_the_samplings_not_the_models(sweep):
@@ -160,8 +159,8 @@ def test_m1_the_extremes_are_the_samplings_not_the_models(sweep):
 
 
 def test_m1_the_hs_1_to_3_figures_l23_prints_are_the_same_at_40000_sampled_ranges_as_at_400():
-    """The nine figures of `LOW_ANTENNA_HS_BAND` print a range (the lowest to the highest of the 400): unlike the Hs 0 extremes they are not nulls (the sea's
-    roughness takes the nulls out of both curves): the same to 0.1 dB at 40,000 sampled ranges (measured on orca: to 0.01 dB)."""
+    """The nine figures of `LOW_ANTENNA_HS_BAND` print a range (the lowest to the highest of the 400): the same
+    to 0.1 dB at 40,000 sampled ranges (measured on orca: to 0.01 dB)."""
     from tests.test_round19_b import band_hs, fresnel_hs                        # (imported here: tests/test_round19_b.py imports `figs` from this file)
     for pair, by_hs in cr.LOW_ANTENNA_HS_BAND.items():
         for hs, printed in by_hs.items():

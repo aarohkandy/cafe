@@ -110,7 +110,7 @@ def test_r18_m3_the_loader_accepts_an_rf_link_whose_two_ends_are_gliders(tmp_pat
 
 def test_r18_m3_l23_states_the_band_by_pair_and_drops_never_too_high_and_not_affected():
     t = l23()
-    assert t.startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip to a UAS at 108 m:")      # round 21, M-2: the scope is every RF link
+    assert t.startswith("RF links, from an antenna below 0.5 m or one of 2.2 m to a UAS at 108 m:")      # round 21, M-2: the scope is every RF link
     assert "antenna below 0.5 m" in t and "the error is of the pair of heights and has no one direction" in t
     assert "margin too low" in t and "margin too high" in t and "MARGINAL or NO-GO" in t and "none of it is a table row" in t
     for gone in ("never too high", "not affected", "are not affected", "is conservative", "a margin there is conservative", "above 0.5 m and", "within 3.3 dB",
@@ -124,7 +124,7 @@ def test_r18_m3_l23_states_the_band_by_pair_and_drops_never_too_high_and_not_aff
 def test_r18_m3_l23_medians_are_those_of_the_pairs_it_names():
     import re
     for pair in ((0.5, 0.5), (0.3, 0.5), (0.3, 0.3)):
-        m = re.search(rf"(?<![\d.]){pair[0]:g} m \([^)]*\) with {pair[1]:g} m \([^)]*\) median ([+-][\d.]+) dB, ", l23())
+        m = re.search(rf"(?<![\d.]){pair[0]:g} m with {pair[1]:g} m median ([+-][\d.]+) dB, ", l23())
         assert m and abs(float(m.group(1)) - band(pair[1], pair[0])[1]) <= 0.1, pair
 
 

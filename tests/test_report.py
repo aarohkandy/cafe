@@ -1428,8 +1428,9 @@ def test_the_usv_block_prints_its_speed_ratio_next_to_chiodis_and_the_sanity_row
     assert report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
 
 
-def test_the_uas_block_says_attitude_exceedance_cannot_fire_and_prints_the_authority_numbers(run):
-    """M-28: the clamp (35 deg) is below the exceedance (42 deg), so the mode cannot fire. (The note's older wording, 'a battery verdict below about 12 m/s',
+def test_the_uas_block_says_the_controller_clamps_the_tilt_below_the_exceedance_and_prints_the_authority_numbers(run):
+    """M-28: the clamp (35 deg) is below the exceedance (42 deg); round 23, S-14: the page says what the controller does, not that the mode cannot fire.
+    (The note's older wording, 'a battery verdict below about 12 m/s',
     is kept for a summary without the profile count; round 4's M-1 made the verdict rest on the battery and on finishing the profile, round 5's M-26.)"""
     m, plan = pm_run.make_run(run)
     edit_json(run / "stage1b" / "summary.json", lambda d: d["summary"]["vehicles"]["uas"].update(
@@ -1438,10 +1439,11 @@ def test_the_uas_block_says_attitude_exceedance_cannot_fire_and_prints_the_autho
     rep, t = load(run), plain((run / "report" / "index.html").read_text())
     a = rep["vehicles"]["uas"]["authority"]
     assert (a["clamp_s_median"]["value"], a["demand_ratio_max"]["value"]) == (12.0, 2.5)
-    assert "Attitude exceedance cannot fire in this controller model (the tilt clamp, 35 deg, is below the 42 deg exceedance)" in t
+    assert "The controller clamps the commanded tilt at 35 deg, below the 42 deg attitude exceedance, so the UAS verdict rests on" in t
+    assert "cannot fire" not in t
     assert "the UAS verdict rests on battery alone below about 12 m/s of wind" in t
     assert "Horizontal-force demand beyond the lean-angle clamp: 12 s per sortie (median; largest 80 s)" in t
-    assert rep["vehicles"]["usv"]["authority"] is None and "cannot fire" not in plain(json.dumps(rep["vehicles"]["usv"]["speed_ratio"] or ""))
+    assert rep["vehicles"]["usv"]["authority"] is None and "clamps the commanded tilt" not in plain(json.dumps(rep["vehicles"]["usv"]["speed_ratio"] or ""))
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
 
 
@@ -1916,7 +1918,7 @@ def test_the_glider_reach_current_band_ends_at_the_depth_its_task_dives_to(run):
 def test_a_p_fail_the_ensemble_excludes_is_not_told_to_get_more_members():
     """Round 5 M-11: 'P(fail) < 5 % cannot be certified at n = 64: 73 members are needed' was printed for 60 failures of 64."""
     d = stat_block(60, 64)
-    assert "excluded by this ensemble" in d["certify_statement"] and "no number of members certifies it" in d["certify_statement"]
+    assert "excluded by this ensemble" in d["certify_statement"] and "no number of members" not in d["certify_statement"]
     assert "cannot be certified" not in d["certify_statement"]
     t = plain(report._stat_html(d))
     assert "excluded by this ensemble (lower 95 % bound 0.8" in t and "cannot be certified" not in t
@@ -2008,7 +2010,7 @@ def test_the_machine_block_prints_what_the_planner_charged_next_to_what_the_stag
     s1 = rep["machine"]["timing"]["stage1"]
     assert s1["planned"]["value"] == plan["stage1_s"] and s1["measured"]["value"] == rep["machine"]["wall_s"]["stage1"]["value"]
     assert "variants" not in rep["machine"]["timing"]
-    assert f"Stage 1: planned {plan['stage1_s']:.4g} s, measured {s1['measured']['value']:.4g} s (the plan is a lower bound: critical path" in t
+    assert f"Stage 1: planned {plan['stage1_s']:.4g} s, measured {s1['measured']['value']:.4g} s (critical path" in t
     edit_json(run / "checkpoints" / "emulator" / "ledger.json", lambda d: d.update(variant_planned_s=26.34, variant_wall_s=[31.0, 36.0, 33.0, 72.0]))
     report.write(run, m, plan)
     rep, h = load(run), (run / "report" / "index.html").read_text()
@@ -2019,7 +2021,7 @@ def test_the_machine_block_prints_what_the_planner_charged_next_to_what_the_stag
     del plan["stage1_s_basis"]                                               # an older plan without the basis, an older design without the keys
     edit_json(run / "checkpoints" / "emulator" / "ledger.json", lambda d: (d.pop("variant_planned_s"), d.pop("variant_wall_s")))
     report.write(run, m, plan)
-    assert set(load(run)["machine"]["timing"]) == {"stage1", "total"} and "the plan is a lower bound" not in (run / "report" / "index.html").read_text()
+    assert set(load(run)["machine"]["timing"]) == {"stage1", "total"} and "critical path" not in (run / "report" / "index.html").read_text()
 
 
 def test_the_plan_block_says_sitl_is_not_in_the_pipeline_instead_of_a_member_count(run):
@@ -2028,8 +2030,8 @@ def test_the_plan_block_says_sitl_is_not_in_the_pipeline_instead_of_a_member_cou
     report.write(run, m, plan)
     t = plain((run / "report" / "index.html").read_text())
     assert "sitl_members 0 members" in t and "sitl_members 4" not in t
-    assert ("ArduCopter SITL is not part of the pipeline; it runs only as the slow receipts (UAS SITL vs our controller, UAS sortie), "
-            "so the ensemble is pure physics") in t
+    assert "ArduCopter SITL is not part of the pipeline; it runs only as the slow receipts (UAS SITL vs our controller, UAS sortie)" in t
+    assert "pure physics" not in t
 
 
 def test_a_receipts_table_made_with_only_is_stale_even_when_its_digest_is_current(run):
@@ -2600,12 +2602,12 @@ def test_r9_m3_a_uas_member_that_meets_a_nan_wind_is_no_current_data_from_stage_
     assert "a hole in the input" in t and report.check_traceability(rep) == []
     assert "In this run 2 members also met a wind that was not finite in flight (no_current_data): their verdict rests on a hole in the input" in t
     quiet = plain(pm_run_page(run, m, plan, modes=dict(s["modes"], no_current_data=0), dominant="profile_incomplete"))
-    assert "also met a wind that was not finite" not in quiet and "Attitude exceedance cannot fire" in quiet
+    assert "also met a wind that was not finite" not in quiet and "The controller clamps the commanded tilt at 35 deg" in quiet
 
 
 def test_l1_the_uas_attitude_statement_is_built_from_the_platform_the_vehicle_flies(run, tmp_path):
     """Cluster 6 sibling: the sentence printed '35 deg', '42 deg' and 'below about 12 m/s' for any UAS platform, so a copy of quad_uas.yaml whose exceedance
-    is below its clamp still read 'cannot fire'."""
+    is below its clamp still read 'clamps the commanded tilt' (round 23: it read 'cannot fire')."""
     m, plan = pm_run.make_run(run)
     f = tmp_path / "mine" / "quad_uas.yaml"
     f.parent.mkdir()
@@ -2620,7 +2622,8 @@ def test_l1_the_uas_attitude_statement_is_built_from_the_platform_the_vehicle_fl
     lim = rep["vehicles"]["uas"]["uas_limits"]
     assert (lim["tilt_clamp"]["value"], lim["tilt_exceedance"]["value"], "max_airspeed" in lim) == (35.0, 30.0, False)           # it can fire: no wind named
     assert lim["tilt_exceedance"]["source"] == f"{f} limits.tilt_exceedance_deg"
-    assert "Attitude exceedance can fire in this platform (the tilt clamp, 35 deg, is not below the 30 deg exceedance)" in t and "cannot fire" not in t
+    assert "Attitude exceedance can fire in this platform (the tilt clamp, 35 deg, is not below the 30 deg exceedance)" in t
+    assert "clamps the commanded tilt" not in t
     assert rep["traceability_problems"] == [] and report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
     airspeed = "{value: %s, unit: m/s, assumed: true,\n     why: \"operating"
     f.write_text(text.replace(airspeed % "12.0", airspeed % "9.0", 1))
@@ -2628,7 +2631,8 @@ def test_l1_the_uas_attitude_statement_is_built_from_the_platform_the_vehicle_fl
     report.write(run, m, plan)
     assert load(run)["vehicles"]["uas"]["uas_limits"]["max_airspeed"]["value"] == 9.0
     t = plain((run / "report" / "index.html").read_text())
-    assert "(the tilt clamp, 35 deg, is below the 42 deg exceedance)" in t and "rests on battery alone below about 9 m/s of wind" in t
+    assert "The controller clamps the commanded tilt at 35 deg, below the 42 deg attitude exceedance" in t
+    assert "rests on battery alone below about 9 m/s of wind" in t
     assert report.check_rendered(load(run), (run / "report" / "index.html").read_text()) == [] and load(run)["vehicles"]["usv"]["uas_limits"] is None
 
 

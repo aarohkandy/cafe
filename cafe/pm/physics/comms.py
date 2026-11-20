@@ -117,8 +117,8 @@ def divergence_factor(d: FA, r1: FA, r2: FA, psi: FA, a: float = A_EFF) -> F:
 
 # The error of the -1 reflection for a low antenna, by PAIR of antenna heights [m] (the lower first): the two-ray loss minus a flat-earth Fresnel two-ray's
 # (eps_c 72.8 - j118.9, 915 MHz, vertical polarisation, Hs 0), minimum / median / maximum [dB] of 400 sampled points from 300 m to the pair's radio horizon
-# or 12 km, measured on orca and held to 0.1 dB by tests/test_round18_x.py: figures of those 400 samples, not bounds (a finer sampling moves a minimum or a
-# maximum, the median hardly: round 22, DECISIONS 1057). Positive: the loss is overstated, the margin too low; negative: understated,
+# or 12 km, measured on orca and held to 0.1 dB by tests/test_round18_x.py: figures of those 400 samples, not bounds (round 22, DECISIONS 1057;
+# round 23: no claim about what a finer sampling does). Positive: the loss is overstated, the margin too low; negative: understated,
 # too high. The live band (physics/rfband.pair_band) equals these ten rows to 0.1 dB (tests/test_round18_x.py, tests/test_round21_b.py) and the link card
 # (report._low_antenna_note) and L23 (credibility.LIMITATIONS) print its median and counts, no extreme; this table is the fixture it is held to; a pair
 # not here is computed live.
@@ -154,11 +154,11 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     about 21 km for the 108 m UAS, not inside those distances; the UAS-ship hook inside a sortie (a 15 m mast, a few hundred metres to a few km)
     is at 2 to 30 deg, where |G| is 0.26 at 5 deg and 0.65 at 20 deg. The error band of the margin against the Fresnel coefficient, as the
     reviewer measured it (a script run outside this module, with this module's geometry and G(psi) in place of -1; with -1 it reproduces this
-    function to 0.0 dB; the margin sweeps were not re-run): this model is optimistic at interference peaks, by up to 7.6 dB, and conservative at nulls;
-    on the UAS-USV mission link from 0.2 km to the horizon the Fresnel margin is 7.4 dB lower to 23.6 dB higher at Hs 0.5 m and 2.8 dB lower to 6.9 dB
-    higher at Hs 1.5 m; on the sortie hook (0.05 to 6 km, Hs 0.5 m) 7.5 dB lower to 34.7 dB higher; no sample changed its sign. No verdict of the demo
-    rests on it (usv-uas-rf is NO-GO because 89 % of its needed moments are beyond the radio horizon, and the UAS lost-link mode is 0 of 64), but a link
-    whose budget is within about 8 dB at a peak is not decided by this function.
+    function to 0.0 dB; the margin sweeps were not re-run): this model is optimistic at interference peaks and conservative at nulls (round 23, C-1: the
+    margin differs from a Fresnel two-ray in either direction; the card and L23 print the median and the counts for
+    the link's own pair); on the UAS-USV mission link from 0.2 km to the horizon, on that one grid, the Fresnel margin is 7.4 dB lower to 23.6 dB higher at
+    Hs 0.5 m and 2.8 dB lower to 6.9 dB higher at Hs 1.5 m. No verdict of the demo
+    rests on it (usv-uas-rf is NO-GO because 89 % of its needed moments are beyond the radio horizon, and the UAS lost-link mode is 0 of 64).
     LOW ANTENNAS (round 17, M-5, restated by pair in round 18, M-3, and again in the round 18 addendum, DECISIONS 991; the band above is for the UAS and the USV
     only): the -1 has no floor. With it the two rays cancel as the heights go to 0 (the field goes as 2 k h1 h2 / d), while the Fresnel coefficient at a
     grazing angle of 1 mrad is about -0.98 with a phase, which leaves a field of about 0.03 of the free-space one (B's estimate, not re-measured). The error is
@@ -166,9 +166,8 @@ def two_ray_curved_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, divergence: bool 
     coefficient of the same sea (eps_c 72.8 - j118.9 at 915 MHz, vertical polarisation, Hs 0; a flat-earth two-ray has no surface wave, so this is a
     difference from it, not a bound on the error), over ONE range for every row, d = 300 m to the pair's radio horizon or to 12 km, whichever is nearer, 400
     points, `two_ray_loss_db` minus the Fresnel loss, minimum / median / maximum [dB] of the 400 sampled differences: the figures of those samples and not
-    limits (measured on orca, 400 against 40,000 sampled ranges over 105 pairs of heights from 0.1 to 1,000 m: the minimum moves by up to 5.2 dB, the
-    maximum by up to 54.1 dB, the median by at most 0.52 dB; the card and L23 print the median and the numbers of samples more than 3 dB off, DECISIONS
-    1057) (`LOW_ANTENNA_PAIR_BAND` is this table; tests/test_round18_x.py recomputes every row to 0.1 dB, and the sign of every row decides the words the
+    limits (the card and L23 print the median and the numbers of samples more than 3 dB off, DECISIONS 1057) (`LOW_ANTENNA_PAIR_BAND` is this table;
+    tests/test_round18_x.py recomputes every row to 0.1 dB, and the sign of every row decides the words the
     link card and L23 print): a positive figure is a loss OVERSTATED and a margin too LOW, a negative one a loss UNDERSTATED and a margin too HIGH. By the
     antenna heights of the pair (the lower first):
     0.1 m with 15 m +11.4 / +15.1 / +16.0; 0.3 m with 15 m +1.2 / +5.1 / +6.0 (the Slocum's); 0.5 m with 15 m -2.9 / +1.3 / +2.2 (the Seaglider's);
@@ -265,10 +264,11 @@ def two_ray_loss_db(d: FA, ht: FA, hr: FA, hs: FA, f_hz: FA, a_eff: float = A_EF
     is above psi_critical; between that limit and the radio horizon the larger of it and the plane-earth loss (FLAT_A), so the loss cannot fall
     toward free space as D -> 0 where the geometric optics no longer holds; beyond the horizon the curved loss, unchanged (rf_margin gives no link
     there). Within 2 km the curved and the plane-earth loss agree between interference nulls and differ AT them,
-    by an amount that grows as the distance is sampled more finely (the nulls are sharp): the largest |difference| for d = 100 to 2000 m at 915 MHz,
-    Hs 0, sampled every 1 m (every 5 cm): 0.8 dB (1.0) for a surface antenna pair, ht 2.2 m and hr 10 m; 26 dB (29) with the UAS at the top of
-    its profile, ht 2.2 m and hr 108.1 m; 20 dB (34) for ht 10 m and hr 18.1 m; with Hs 1 m 2.4 dB and with Hs 3 m 0.3 dB for that last pair. The
-    lost-link time of a UAS sortie is the statistic that depends on it (round 8, M-49; the earlier 0.15 dB was measured at single distances).
+    by an amount that depends on how finely the distance is sampled (the nulls are sharp): the largest |difference| for d = 100 to 2000 m at 915 MHz,
+    Hs 0, sampled every 1 m (tests/test_comms.py::test_r8_m49 holds these figures; round 23, S-28: the figures for a 5 cm sampling and for Hs 1 m were not
+    re-measured and are gone): 0.8 dB for a surface antenna pair, ht 2.2 m and hr 10 m; 26 dB with the UAS at the top of its profile, ht 2.2 m and hr
+    108.1 m; 20 dB for ht 10 m and hr 18.1 m, and with Hs 3 m 0.3 dB for that last pair. The lost-link time of a UAS sortie is the statistic that depends
+    on it (round 8, M-49; the earlier 0.15 dB was measured at single distances).
     Round 16 (M-14): in that zone the loss is also never below the free-space loss at the direct distance plus the smooth-earth diffraction loss
     (`smooth_earth_diffraction_db`, ITU-R P.526 with P.452's line-of-sight interpolation): the plane-earth loss is conservative only against the
     curved loss with D, not against diffraction, which is 6 to 12 dB higher at the horizon for the demo's antennas (checked against the exact

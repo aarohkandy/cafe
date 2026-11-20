@@ -192,10 +192,11 @@ def two_gliders(a, b):
 
 CASE = ("{start} The two-ray model takes the ground reflection as -1; against a Fresnel two-ray at Hs 0 (a calm sea) at 915 MHz, over 400 evenly spaced "
         "ranges from 300 m to the pair's radio horizon or 12 km, the model's loss minus the Fresnel loss is described by its median and by how many of the "
-        "sampled ranges are more than 3 dB off, for this pair of heights ({pair}): {figures}. {note}; at a wave height of 1 to 3 m these figures are different "
-        "(L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
+        "sampled ranges are more than 3 dB off, for this pair of heights ({pair}): {figures}. {note}; nearer than 300 m this is not stated "
+        "(CREDIBILITY, limitation L23).")
 # round 19, M-3: "at Hs 0" and what it leaves out; round 21, M-2: the frequency, the 12 km and the samples more than 3 dB off; round 22, M-1: the median
-# and the counts of each sign (`figs`, from the independent reference, tests/test_round22_b.py), the note that these are not the worst case, no extreme
+# and the counts of each sign (`figs`, from the independent reference, tests/test_round22_b.py), the note that these are figures of the 400 sampled ranges
+# (round 23: nothing of the worst case), no extreme
 PAIR_HEIGHTS = {"0.3 m with 0.5 m": (0.3, 0.5), "0.3 m with 0.3 m": (0.3, 0.3), "0.5 m with 0.5 m": (0.5, 0.5), "0.3 m with 2.2 m": (0.3, 2.2),
                 "0.3 m with 15 m": (0.3, 15.0), "0.5 m with 2.2 m": (0.5, 2.2), "0.5 m with 15 m": (0.5, 15.0)}
 

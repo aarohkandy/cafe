@@ -234,8 +234,8 @@ def test_r17_m5_a_limitation_names_the_low_antenna_loss_and_bears_on_validation_
     x = {l["id"]: l for l in cr.LIMITATIONS}["L23"]
     assert [l["id"] for l in cr.LIMITATIONS][-2:] == ["L22", "L23"]
     # round 18, M-3: the text is by pair of heights (tests/test_round18_b.py)
-    assert x["text"].startswith("RF links, from an antenna below 0.5 m or the USV's 2.2 m whip to a UAS at 108 m:")      # round 21, M-2: every RF link
-    assert f"0.3 m (the Slocum) with 2.2 m (the USV's whip) {figs(0.3, 2.2)}" in x["text"]   # round 18 addendum: by pair (round 22: median and counts)
+    assert x["text"].startswith("RF links, from an antenna below 0.5 m or one of 2.2 m to a UAS at 108 m:")      # round 21, M-2: every RF link
+    assert f"0.3 m with 2.2 m {figs(0.3, 2.2)}" in x["text"]   # round 18 addendum: by pair (round 22: median and counts; round 23, S-8: no platform names)
     assert "overstated" in x["text"]
     assert x["factors"] == ["validation"]
     assert all((REAL / w).is_file() for w in x["where"])

@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from cafe.pm import config, credibility as cr, report, whatif
-from cafe.pm.physics import ANTENNA_MIN_M, comms, glider, uas, usv
+from cafe.pm.physics import ANTENNA_MIN_M, comms, uas, usv
 from tests.test_credibility import _Facts, vrow
 from tests.test_round16_report import data_dir  # noqa: F401  (autouse)
 from tests.test_round17_a import usv_fix
@@ -72,14 +72,14 @@ def test_m2_a_ship_without_a_height_is_the_height_stage_1_used_and_not_no_single
     assert "(0.5 m with 0.52 m)" in report._low_antenna_note(lk, dict(with_uas, ship=dict(id="ship", antenna_height_m=0.52)))
 
 
-def test_m2_the_names_l23_gives_the_heights_are_the_platform_files_heights():
-    """PE11: the names of 0.3 m and 0.5 m swapped, every figure right. The heights and the names are tied to the files they name."""
-    assert glider.load_platform("slocum")["antenna_height_m"] == 0.3 and cr.LOW_ANTENNA_NAMES[0.3] == "the Slocum"
-    assert glider.load_platform("seaglider")["antenna_height_m"] == 0.5 and cr.LOW_ANTENNA_NAMES[0.5] == "the Seaglider"
-    assert usv.load_platform("saildrone_explorer")["rf_antenna_height_m"] == 2.2 and cr.LOW_ANTENNA_NAMES[2.2] == "the USV's whip"
-    assert ANTENNA_MIN_M == 0.1 and cr.LOW_ANTENNA_NAMES[0.1] == "the lowest height a platform file allows"
-    assert DEMO["ship"]["antenna_height_m"] == 15.0 and cr.LOW_ANTENNA_NAMES[15.0] == "the ship's mast"
-    assert "0.3 m (the Slocum) with" in l23() and "0.5 m (the Seaglider) with" in l23()
+def test_m2_the_demos_heights_l23_names_are_the_platform_files_heights():
+    """PE11: the names of 0.3 m and 0.5 m swapped, every figure right. Round 23, S-8: L23 names no platform for the ten generic pairs (they print for every
+    mission) and names the demo's USV whip and ship mast only in the paragraph of the demo's UAS pairs; those two heights are tied to the files they name."""
+    assert usv.load_platform("saildrone_explorer")["rf_antenna_height_m"] == 2.2 and ANTENNA_MIN_M == 0.1
+    assert DEMO["ship"]["antenna_height_m"] == 15.0
+    assert "the demo's USV whip (2.2 m) and ship mast (15 m)" in l23() and not hasattr(cr, "LOW_ANTENNA_NAMES")
+    for gone in ("the Slocum", "the Seaglider", "the ship's mast", "the USV's whip", "the lowest height a platform file allows"):
+        assert gone not in l23(), gone
 
 
 # ------------------------------------------------------------------------------------------------------------------------------- M-3: Hs 0
@@ -110,7 +110,7 @@ def test_m3_the_card_says_the_figures_are_for_hs_0(monkeypatch):
         note = card(h, 15.0, monkeypatch)
         assert ("against a Fresnel two-ray at Hs 0 (a calm sea) at 915 MHz, over 400 evenly spaced ranges from 300 m to the pair's radio horizon or 12 km, "
                 "the model's loss minus the Fresnel loss is described by its median and by how many of the sampled ranges are more than 3 dB off" in note), h
-        assert "at a wave height of 1 to 3 m these figures are different (L23)" in note, h
+        assert "at a wave height of 1 to 3 m" not in note and "these figures are different" not in note, h        # round 23, S-4: the head names Hs 0
         assert note.endswith("nearer than 300 m this is not stated (CREDIBILITY, limitation L23).")
 
 

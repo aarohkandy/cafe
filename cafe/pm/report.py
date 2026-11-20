@@ -342,7 +342,7 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     d["decided"] = d["region"] is not None or not exercised
     d["undecided_statement"] = None if d["decided"] else _undecided(d["stop_interval"]["lo"]["value"], d["stop_interval"]["hi"]["value"])
     if exercised and not open_:
-        d["certify_statement"] = f"P(fail) < 5 % is excluded by this ensemble (lower 95 % bound {fail_lo:.2f}): no number of members certifies it."
+        d["certify_statement"] = f"P(fail) < 5 % is excluded by this ensemble (lower 95 % bound {fail_lo:.2f})."
     elif open_ and e["n"] < v["n_certify"]:
         d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members (two-sided 95 % Wilson bound) are needed "
                                   f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, one-sided 95 %).")
@@ -655,8 +655,8 @@ def _usv_modes(platform: str | None, modes: dict[str, Any], tr: Trace, task: dic
 
 def _uas_limits(platform: str | None, tr: Trace, airspeed: bool) -> dict[str, Any] | None:
     """The limits the UAS attitude statement rests on, from the platform file the vehicle flies (limits.max_tilt_deg, tilt_exceedance_deg and, for the
-    statement of a summary without the profile count that attitude exceedance cannot fire, which names it, max_airspeed_ms), as traced nodes; None when the file
-    cannot be read."""
+    statement of a summary without the profile count that the controller clamps the commanded tilt, which names it, max_airspeed_ms), as traced nodes; None when
+    the file cannot be read."""
     try:
         from .config import load_platform
         li = load_platform(platform or "")["limits"]
@@ -680,7 +680,7 @@ def _attitude_note(lim: dict[str, Any] | None, profile: bool) -> str:
         return (f"Attitude exceedance can fire in this platform (the tilt clamp, {_n(clamp)}, is not below the {_n(exc)} exceedance), so the UAS verdict "
                 "also rests on it.")
     tail = UAS_ATTITUDE_TAIL if profile else UAS_ATTITUDE_TAIL_NO_PROFILE.format(v_air=_n(lim["max_airspeed"]))
-    return f"Attitude exceedance cannot fire in this controller model (the tilt clamp, {_n(clamp)}, is below the {_n(exc)} exceedance), {tail}"
+    return f"The controller clamps the commanded tilt at {_n(clamp)}, below the {_n(exc)} attitude exceedance, {tail}"
 
 
 def _opt(x: Any, unit: str, ref: dict[str, Any], src: str) -> dict[str, Any] | None:
@@ -770,7 +770,8 @@ def _end_heights(end: str, mission: dict[str, Any], cls: dict[str, str], when: s
     USV's platform value, the ship's height as stage 1 takes it (`ship_antenna_m`: the mission's `antenna_height_m`, else the UAS platform's
     `radio.ship_antenna_height_m`, else 10 m, which is what the link model used), a UAS at every height it flies a leg at (deck + level + the antenna's height
     above the body, as stage 1 puts the link antenna) and, unless the link is `when: uas_airborne`, on the deck (deck + the antenna's height: stage 1 needs
-    the link at every record, and a UAS on the ground has `alt` 0 in its records; round 22, M-4). Where a height cannot be read (a shore or an unknown id, a
+    the link at every record, and a UAS on the ground has the deck height as its `alt` in the records, stage1.py `alt + deck_height_m`; round 22, M-4).
+    Where a height cannot be read (a shore or an unknown id, a
     platform file that cannot be read, a height outside `rfband.valid_height`, a UAS with no levels) the end is the reference heights `RF_UAS_FALLBACK_M` or
     `RF_REFERENCE_M` and the card says so: a card is never silent because an end is not one number (round 21, M-2)."""
     from .physics import glider, uas, usv
@@ -825,11 +826,11 @@ def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None
     cannot be read.
     Rounds 17 to 20 read a table of ten measured rows and the card went silent at its edge four times (0.5, 0.55, 2.2 m, every UAS link above that). The
     sentence prints each pair's median and how many of the 400 sampled ranges overstate and how many understate the loss by more than 3 dB
-    (`credibility.band_figures`), and says that these are not the worst case (`credibility.SAMPLING_NOTE`): the extremes of the 400 samples are the
-    sampling's, not the model's (round 22, M-1), so they are not printed, nor called a limit. A UAS end is at the heights stage 1 gives it for the link's
-    `when` (round 22, M-4: on the deck as well, unless `uas_airborne`). The start says which ends are
-    low ("Both ends ... 0.5 m or lower", "An end ... below 0.5 m", "An end ... of 0.5 m" are pinned by tests) and names every end with its heights. None only
-    for a link that is not an RF one."""
+    (`credibility.band_figures`), and says that these are figures of the 400 sampled ranges (`credibility.SAMPLING_NOTE`; round 23, M-2: it no longer says
+    anything of the worst case or of a finer sampling, which is false for the pairs without a null); no extreme is printed, nor called a limit (round 22,
+    M-1). A UAS end is at the heights stage 1 gives it for the link's `when` (round 22, M-4: on the deck as well, unless `uas_airborne`). The start says
+    which ends are low ("Both ends ... 0.5 m or lower", "An end ... below 0.5 m", "An end ... of 0.5 m" are pinned by tests) and names every end with its
+    heights. None only for a link that is not an RF one."""
     if lk["kind"] != "rf":
         return None
     cls = _classes(mission)
@@ -862,7 +863,7 @@ def _low_antenna_note(lk: dict[str, Any], mission: dict[str, Any]) -> str | None
             f"{rfband.OFF_DB:g} dB off")
     legs = ("a UAS is taken at each height it flies a leg at; the climbs between the legs pass other heights, which are not computed; "
             if any(cls.get(end) == "uas" for end, *_ in ends) else "")
-    tail = f"{legs}at a wave height of 1 to 3 m these figures are different (L23); nearer than 300 m this is not stated (CREDIBILITY, limitation L23)."
+    tail = f"{legs}nearer than 300 m this is not stated (CREDIBILITY, limitation L23)."
 
     def figures(b: tuple[float, float, float, float, int, int]) -> str:
         return credibility.band_figures(b[1], b[4], b[5])
@@ -1295,7 +1296,7 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
 
 
 def _timing(plan: dict[str, Any], tr: Trace, pref: dict[str, Any]) -> dict[str, Any]:
-    """What the planner charged against what the stages took (round 5, M-13): stage 1's `plan.json` stage1_s (a lower bound, `stage1_s_basis`) against its
+    """What the planner charged against what the stages took (round 5, M-13): stage 1's `plan.json` stage1_s (an estimate, `stage1_s_basis`) against its
     ledger's wall_s, and the emulator's variant runs (its ledger's `variant_planned_s` each and `variant_wall_s` measured, kept out of the hashed design.json
     by DECISIONS 139; neither is in an older run) as planned and as measured. A part whose two sides are not both there is left out."""
     out: dict[str, Any] = {}
@@ -1826,8 +1827,7 @@ def _granularity_samples_html(g: dict[str, Any], verdict: str) -> str:
 
 IRIDIUM_NOTE = ("This Iridium verdict restates assumed numbers, not modelled physics: a session succeeds with the assumed probability radios.yaml iridium.sbd "
                 "p_success and is retried up to the assumed max_attempts, the same in any sea state, weather or position (no antenna height, heel or "
-                "geometry enters it), so a member needing hundreds of samples cannot miss the required fraction by chance. It is no evidence about the "
-                "real service; replace the "
+                "geometry enters it). It is no evidence about the real service; replace the "
                 "numbers with the lab's own SBDIX session counts (QUESTIONS_FOR_LAB).")
 
 
@@ -2084,7 +2084,7 @@ def _machine_html(m: dict[str, Any]) -> str:
     s1, vr = tm.get("stage1"), tm.get("variants")
     took = ""
     if s1:
-        basis = f" (the plan is a lower bound: {e(s1['basis'])})" if s1["basis"] else ""
+        basis = f" ({e(s1['basis'])})" if s1["basis"] else ""
         took += f"<p>Stage 1: planned {_n(s1['planned'])}, measured {_n(s1['measured'])}{basis}.</p>"
     if sv := tm.get("stage1b_sensitivity"):
         took += ("<p>Stage 1b sensitivity case (the USV again under the brief's VPP bias): planned none, it is charged to no share; "
@@ -2107,7 +2107,7 @@ def _machine_html(m: dict[str, Any]) -> str:
             f"<th>Source</tr>{cost}</table></div>"
             f"<div class=scroll><table><tr><th>Stage<th>Wall time</tr>{wall}</table></div><p class=muted>{e(m['report_stage'])}.</p>{ing}"
             f"<p>Plan: {plan}. ArduCopter SITL is not part of the pipeline; it runs only as the slow receipts (<code>UAS SITL vs our controller</code>, "
-            f"<code>UAS sortie</code>), so the ensemble is pure physics.</p>{took}"
+            f"<code>UAS sortie</code>).</p>{took}"
             f"<p>Code: git {e(', '.join(m['git_sha']))}. Machine: {where}.</p>{warn}<p class=muted>{ver}</p>")
 
 

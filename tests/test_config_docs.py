@@ -430,13 +430,13 @@ def test_r12_m20_the_pad_cap_is_said_to_be_reached_at_24_5_days_in_the_runbook_a
 
 def test_r12_m12_physics_and_the_questions_state_the_fresnel_error_band_the_docstring_states():
     """Round 12 M-12: -1 was said to hold below 1 to 2 deg. PHYSICS 12.1 and QUESTIONS_FOR_LAB 12a carry what the docstring of two_ray_curved_db carries (the
-    table itself is recomputed in tests/test_comms.py): within 10 % only below about 0.3 deg, up to 7.6 dB optimistic at a peak, the polarisation question."""
+    table itself is recomputed in tests/test_comms.py): within 10 % only below about 0.3 deg, the polarisation question; round 23, C-1: no 'up to 7.6 dB',
+    no 'about 8 dB' and no 34.7 dB (tests/test_round23_b.py)."""
     sec = flat(text("docs", "PHYSICS.md"))
     sec = sec[sec.index("### 12.1 RF: two-ray over the sea"):]
     sec = sec[:sec.index("### 12.2")]
     doc = flat(str(comms.two_ray_curved_db.__doc__))
-    for part in ("within 10 % of the magnitude only below about 0.3 deg", "up to 7.6 dB", "7.4 dB lower to 23.6 dB higher", "7.5 dB lower to 34.7 dB higher",
-                 "no sample changed"):
+    for part in ("within 10 % of the magnitude only below about 0.3 deg", "7.4 dB lower to 23.6 dB higher"):
         assert part in doc and part in sec, part
     assert "pseudo-Brewster angle 4.85 deg" in sec and "valid for grazing angles below ~1-2 deg" not in doc
     q = flat(text("QUESTIONS_FOR_LAB.md"))
