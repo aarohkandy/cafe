@@ -24,10 +24,12 @@ CAFE = ROOT / "cafe"
 # ---------------------------------------------------------------------------------------------------------------------------- the grep tests
 # Round 22, M-10: the two grep tests of round 21 walked `cafe/` only and matched four spellings (`json.loads(`, `from json import loads`, `math.isfinite`, `from
 # math import isfinite`). They are one AST checker now, over every Python file of the repository that is shipped or run, by what is IMPORTED and what is
-# ACCESSED, whatever the alias. A site is: json (the module or any other JSON parser) read through `load`, `loads`, `JSONDecoder`, a response's
-# `.json()`; `math.isfinite`; `numpy.isfinite`; and the dynamic spellings of those (`getattr(m, ...)`, `vars(m)`, `m.__dict__`, `__import__("json")`,
-# `importlib.import_module("json")`; and an import by a computed name, which can bring in any of them). The ceiling: it reads SPELLING, not data flow; a module
-# passed as an argument, kept in a dict or taken from `sys.modules` is not followed (nothing in the repository does it; a new one is found in review).
+# ACCESSED, through the spellings listed here (plain, `import ... as`, `from ... import`, `getattr`) and no others. A site is: json (the module or any other
+# JSON parser) read through `load`, `loads`, `JSONDecoder`, a response's `.json()`; `math.isfinite`; `numpy.isfinite`; and the dynamic spellings of those
+# (`getattr(m, ...)`, `vars(m)`, `m.__dict__`, `__import__("json")`, `importlib.import_module("json")`; and an import by a computed name, which can bring in
+# any of them); a name assigned the module (`m = math`) holds it too. The ceiling (round 23, M-10, D-7): it reads SPELLING, not data flow. A module bound by a
+# tuple assignment (`a, b = json, 1`), a class or instance attribute (`C.j`, `self.j = json`), a dict item (`d["l"]`), an argument or `sys.modules` is not
+# followed (none was found in the repository; a new one is found in review).
 FAMILIES = {"json": ("json", "simplejson", "orjson", "ujson", "rapidjson"), "math": ("math",), "numpy": ("numpy",)}
 SITE_NAMES = {"json": {"load", "loads", "JSONDecoder"}, "math": {"isfinite"}, "numpy": {"isfinite"}}
 MODULE_NAMES = {m: f for f, mods in FAMILIES.items() for m in mods}
