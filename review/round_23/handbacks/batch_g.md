@@ -34,8 +34,14 @@ Every figure comes from a hand-back, merged.md or a run named in the row: 10.5 %
 ## Hostile attempts on my own text
 Read every new sentence of STATUS, HANDOFF, CHANGELOG, DECISIONS and QUESTIONS for a number or a claim not in a hand-back or merged.md; grepped the four user documents for the deleted words ('worst case', '7.6 dB', 'cannot fire', 'pure physics', 'no number of members', 'by chance', 'lower bound', 'rests on', 'ship's mast', 'at most 0.59', '0.046', 'through any alias'): the remaining hits are history rows or dated measurements, listed in row 1078 and P-R23M4; checked every table row's cell count; the first pin failure (RUNBOOK 146) was found by the tests and fixed in the text, not the test.
 
+## Skeptic pass
+Two minor findings, both real, both fixed in my files (documents only; no code, so no new regression test; the document-reading tests are re-run below).
+1. STATUS.md round 23 paragraph said the claims lint's 'allow-list is the complete set of absolutes a user can see'. Real: DECISIONS 1081 says the code was not read by the documents step and the lint only proves no new absolute lands unreviewed; HANDOFF 'Not covered' and merged.md list uncovered sentences. Replaced with: the allow-list is the set of constant strings in the four files that match the lint's word list and were reviewed; sentences outside that list and those files (the stage-3 and emulator report text, PHYSICS outside the grep) are not covered.
+2. '88.85 % in q12' (QUESTIONS_FOR_LAB 12, STATUS 'missing physical inputs' row at line 18) was a q12 figure next to q23 figures. Real: review/round_17/q17_vs_q16.md and round_20 reviewer_c record 0.8878 (0.8900 at q16), so the quantity moved. This step measures nothing and no q23 report.json is in the worktree, so both places now say 'about 89 %' with no run name (QUESTIONS 12's later sentence already said 89 %). Not changed: DECISIONS 652's '88.85 %', which is a dated round 12 record of what was read then, not a current claim.
+Run: r23g_7 (pm_r23g7, -n 2, orca, proot): the r23g_6 files plus test_report and test_round16_report, on the tree with both edits: rc=0, 1,459 passed, 0 failed.
+
 ## Leftovers
-Orca (inside ~/cafe-worker): cafe/pm_r23g, pm_r23g2, pm_r23g3, pm_r23g4, pm_r23g5, pm_r23g6 and their .pmx.job markers; logs r23g_1 to r23g_6. No tmux session of mine is alive. Laptop: worktree ../cafe-r23g (branch r23-g). Nothing is pushed. Scratch: the session scratchpad r23g/decisions.py (the script that wrote DECISIONS rows 1073 to 1084).
+Orca (inside ~/cafe-worker): cafe/pm_r23g, pm_r23g2, pm_r23g3, pm_r23g4, pm_r23g5, pm_r23g6, pm_r23g7 and their .pmx.job markers; logs r23g_1 to r23g_7. No tmux session of mine is alive. Laptop: worktree ../cafe-r23g (branch r23-g). Nothing is pushed. Scratch: the session scratchpad r23g/decisions.py (the script that wrote DECISIONS rows 1073 to 1084).
 
 ## Commits
 df12104 (the documents), then the STATUS repair and this hand-back (see git log r23-g).

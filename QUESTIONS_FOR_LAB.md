@@ -119,7 +119,7 @@ edit, a platform-file edit or an environment variable (`CAFE_ORCA`), not a code 
     modem), or is the glider data meant to go over Iridium? *Default:* the mission is run exactly as written and the
     report says why the link fails (range, not environment). *If a relay or a different ship position:* add it to
     `missions/tepex_c_demo.yaml` (a `ship` or a link with `a: glider_eq, b: usv`); nothing else changes.
-    The same holds for the radio: the demo's USV-to-UAS link is beyond the radio horizon for most of its needed moments (88.85 % in q12), so the RF NO-GO follows from the ship geometry, not the environment. Please give the intended positions.
+    The same holds for the radio: the demo's USV-to-UAS link is beyond the radio horizon for most of its needed moments (about 89 % in the demo), so the RF NO-GO follows from the ship geometry, not the environment. Please give the intended positions.
     *Default:* the demo's positions as given.
 
     12a. **Antenna polarisation, and the sea temperature and salinity at the RF link** (review round 12, M-12). The RF model reflects the sea with a coefficient of -1. The Fresnel
