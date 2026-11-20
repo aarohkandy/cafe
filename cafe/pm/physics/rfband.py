@@ -9,8 +9,8 @@ The definition is that of `comms.LOW_ANTENNA_PAIR_BAND` and of tests/test_round1
 nearer), the model's loss minus the Fresnel loss. Positive: the loss is overstated and the margin too low; negative: understated and the margin too high.
 It is a difference from a two-ray with no surface wave, at Hs 0 and not nearer than 300 m. The Fresnel two-ray is written again here from the published
 formulas, as tests/test_round17_d.py writes it, and tests/test_round21_b.py compares the two to 1e-9 dB.
-Round 22, M-1: the minimum and the maximum of the 400 samples are sampling-limited (a finer sampling finds interference nulls and, for most pairs, larger
-differences), so they are returned and never printed; the median and the two signed counts are what the card and L23
+Round 22, M-1: the minimum and the maximum of the 400 samples are figures of that sampling only (round 23, M-2: another sampling can give other extremes;
+for some pairs of low antennas it does not), so they are returned and never printed; the median and the two signed counts are what the card and L23
 print (tests/test_round22_b.py holds them to a 40,000-point sampling).
 """
 import numpy as np
