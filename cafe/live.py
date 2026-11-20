@@ -27,7 +27,10 @@ def create(body, load_vehicle):
             SESSIONS.pop(sid)
         if len(SESSIONS) >= MAX_SESSIONS:
             raise ValueError("too many live sessions open; end one first")
-    if not (1 <= len(body.get("drones") or []) <= MAX_DRONES):
+    drones, links = body.get("drones"), body.get("links") or []
+    if not (all(isinstance(v, list) and all(isinstance(x, dict) for x in v) for v in (drones, links)) and isinstance(body.get("t0"), str)):
+        raise ValueError("drones must be a list of objects, links a list of objects and t0 a date-time string")
+    if not (1 <= len(drones) <= MAX_DRONES):
         raise ValueError(f"a live session takes 1 to {MAX_DRONES} drones")
     from cafe import env as envm
     import datetime as dt
@@ -38,7 +41,7 @@ def create(body, load_vehicle):
     if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not (0.5 <= hours <= 48):
         raise ValueError("hours must be a number from 0.5 to 48")
     avail = envm.hours_after(t0)          # a World of H hours reads weather out to t0 + H + 2 h (mission.World)
-    mission = dict(t0=body["t0"], max_hours=max(0.5, min(float(hours), avail - 2)), samples=1, seed=body.get("seed", 0), links=body.get("links", []),
+    mission = dict(t0=body["t0"], max_hours=max(0.5, min(float(hours), avail - 2)), samples=1, seed=body.get("seed", 0), links=links,
                    drones=[dict(id=x["id"], vehicle=load_vehicle(x["design"]), start=x["start"],
                                 legs=[{"type": "external"}]) for x in body["drones"]])
     w = World(mission, B=1)

@@ -25,6 +25,8 @@ import hashlib, math, os, pathlib, platform
 from collections import Counter
 from typing import Any
 
+from .jsonio import finite_real
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 THROUGHPUT = ROOT / "config" / "throughput.json"
 
@@ -68,12 +70,23 @@ def throughput(path: str | pathlib.Path = THROUGHPUT) -> dict[str, Any]:
     return json_object(pathlib.Path(path), THROUGHPUT_FIX) if pathlib.Path(path).exists() else {}
 
 
+def _need(v: Any, where: str, positive: bool) -> None:
+    """A number the plan multiplies by, read from the throughput table (a file `load_json` leaves NaN-readable, or a dict a caller passes): finite, and
+    above 0 (`positive`) or at least 0, else a PlanError that names it (round 23, M-9). A stage-1 cost is at least 0 because `make bench` writes 0 for a
+    slope it did not resolve (`slope_resolved: false`); a rate and a sortie length are above 0."""
+    if not (finite_real(v) and (v > 0 if positive else v >= 0)):
+        from .config import THROUGHPUT_FIX
+        raise PlanError(f"the throughput table: {where} is {v!r}, not a finite number {'above' if positive else 'of at least'} 0; {THROUGHPUT_FIX}")
+
+
 def member_cost(thr: dict[str, Any], cls: str) -> tuple[tuple[float, float], str]:
     """(s per batch, s per member) per mission day for a vehicle class, and where the numbers came from: bench/ or the
     labelled fallback (homebase, 2026-10-29, real TEPEX-C mission at load ~20)."""
     e = thr.get("stage1", {}).get(cls)
     if e:
         flat = "; the bench did not resolve a per-member slope, so a batch costs the same whatever its size" if e.get("slope_resolved") is False else ""
+        for k in ("s_per_batch_day", "s_per_member_day"):
+            _need(e[k], f"stage1.{cls}.{k}", False)
         return (e["s_per_batch_day"], e["s_per_member_day"]), f"measured ({e['measured']}, {e['host']}, load {e.get('load_1min')}){flat}"
     return FALLBACK_COST[cls], "NOT MEASURED on this machine (run `make bench`): planner fallback"
 
@@ -83,10 +96,12 @@ def lbm_rate(thr: dict[str, Any], gpus: int) -> tuple[float, str, str]:
     if gpus > 0:
         e = thr.get("jax-lbm-d3q19-gpu")                                   # the key `bench/throughput.py lbm gpu` saves under
         if e:
+            _need(e["per_device"], "jax-lbm-d3q19-gpu.per_device", True)
             return e["per_device"] * gpus, "native-jax-gpu", f"measured ({e['measured']}, {e['device']})"
         return 0.95 * 20.8e9 * gpus, "xlb-warp", "projected from published benchmarks (FluidX3D RTX PRO 6000 20.8 GLUPS x 0.95 for XLB-Warp)"
     e = thr.get("jax-lbm-d3q19-cpu")
     if e:
+        _need(e["per_device"], "jax-lbm-d3q19-cpu.per_device", True)
         return e["per_device"], "native-jax-cpu", f"measured ({e['measured']}, {e.get('device', 'cpu')})"
     return 5e6, "native-jax-cpu", "NOT MEASURED (run `make bench`): planner fallback"
 
@@ -317,6 +332,9 @@ def bench_sortie_rate(e: dict[str, Any]) -> float | None:
         from .config import load_mission
         m = load_mission(ROOT / e["mission"], set_verdict=False)               # read only: its verdict block must not replace the run's
         sm, days = max(sortie_minutes(m, stage1._classes(m)).values(), default=None), window_days(m)
+    for v, name in ((sm, "sortie_min"), (days, "mission_days")):
+        if v is not None:
+            _need(v, f"a stage1 entry's {name}", True)
     return float(sm) / float(days) if sm and days else None
 
 

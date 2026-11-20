@@ -398,12 +398,23 @@ def _point(v, what):
         raise HTTPException(400, f"{what} must be [lat, lon] or [lat, lon, z] with finite numbers")
 
 
+def _body_shape(body, need_t0=False):
+    """The shape of a fleet body, before anything reads inside it: `drones` a non-empty list of objects, `links` absent or a list, `t0` a string (absent
+    only when `need_t0` is false). A 400 for each, never the AttributeError or TypeError of reading inside the wrong type (round 23, M-8)."""
+    drones, t0 = body.get("drones"), body.get("t0")
+    if not drones or not isinstance(drones, list) or not all(isinstance(x, dict) for x in drones):
+        raise HTTPException(400, "add at least one drone")
+    if not (body.get("links") is None or isinstance(body["links"], list)):
+        raise HTTPException(400, "links must be a list")
+    if not (isinstance(t0, str) or ("t0" not in body and not need_t0)):
+        raise HTTPException(400, "t0 must be a date-time string")
+    return drones
+
+
 def check_fleet(body):
     """Shared by missions and emulations: every reference must resolve, and every follow chain must
     end at a drone that is actually going somewhere (no self-follow, no A->B->A loops)."""
-    drones = body.get("drones") or []
-    if not drones or not isinstance(drones, list) or not all(isinstance(x, dict) for x in drones):
-        raise HTTPException(400, "add at least one drone")
+    drones = _body_shape(body)
     ids = [x.get("id") for x in drones]
     if any(not isinstance(i, str) or not ID_OK.match(i) for i in ids) or len(set(ids)) != len(ids):
         raise HTTPException(400, "drone names must be unique and use only letters, digits, . _ -")
@@ -450,8 +461,8 @@ def check_fleet(body):
         if lk.get("mode", "horizontal") not in ("horizontal", "3d"):
             raise HTTPException(400, "link mode is horizontal or 3d")
     mh, ns = body.get("max_hours", 6), body.get("samples", 24)
-    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (mh, ns)) or not (0 < mh <= 48) or not (1 <= ns <= 64):
-        raise HTTPException(400, "max_hours must be in (0, 48] and samples in [1, 64]")
+    if not (finite_real(mh) and isinstance(ns, int) and not isinstance(ns, bool)) or not (0 < mh <= 48) or not (1 <= ns <= 64):
+        raise HTTPException(400, "max_hours must be in (0, 48] and samples a whole number in [1, 64]")
     return drones
 
 
@@ -532,9 +543,7 @@ def get_emulation(eid: str):
 @app.post("/api/live")
 def live_create(body: dict):
     from cafe import hangar, live
-    drones = body.get("drones") or []
-    if not drones:
-        raise HTTPException(400, "add at least one drone")
+    drones = _body_shape(body, need_t0=True)
     for x in drones:
         if not ID_OK.match(str(x.get("id", ""))) or not ID_OK.match(str(x.get("design", ""))):
             raise HTTPException(400, "each drone needs an id and a design id")
