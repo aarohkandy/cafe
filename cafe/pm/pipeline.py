@@ -1562,7 +1562,7 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
                  for r in whatif.run_variant(whatif.solo(ctx.mission, vid), ctx.env, base_members, seed, pri, marg, scales, fid, meta, "base")[0]}
         rows = [two_d.get(r["vehicle"], r) for r in rows]
     train_in, snap = whatif.snapshot(ctx.table, ctx.path("emulator", "train_input"), meta["run_id"])
-    L.input(snap, kind=TABLE_INPUT, source=str(ctx.table), rows=len(train_in))
+    L.input(snap, kind=TABLE_INPUT, source=os.path.abspath(ctx.table), rows=len(train_in))
     sizes = budget.emulator_plan(ctx.plan)
     free = not scales and not ctx.run_dir.joinpath("stage3", "subgrid_calibration.json").is_file()      # stage 1b was a copy of stage 1
     share = budget.emulator_share_s(ctx.plan, stage1b_free=free)

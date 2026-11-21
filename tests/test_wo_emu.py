@@ -2,6 +2,8 @@
 a 10 m profile row, as its variants' are; (a) `whatif` trains on the rows of the run's own code and honours the run's own gate. Each test failed on the
 code of round 23 and passes with the change (review/workorder/handbacks/emu.md lists the jobs)."""
 import json
+import os
+import pathlib
 
 import pytest
 
@@ -93,3 +95,34 @@ def test_a_whatif_keeps_the_scopes_the_run_did_not_use_in_stage_1_with_the_runs_
     cli.main(whatif_args(wi, "--shift", "48h"))
     assert whatif.usable(wi.seen["ems"], GS) == (None, why)                         # Stage 1 answers, with the run's own reason
     assert wi.seen["ems"][GS][1]["used"] is False and wi.seen["ems"][GS][1]["trained"] is True
+
+
+def test_c_the_table_the_emulator_records_is_an_absolute_path(tmp_path, table, fake_stage1, monkeypatch):  # noqa: F811
+    ctx = cheap_plan(synthetic_ctx(tmp_path, 48), 10.0)
+    monkeypatch.chdir(tmp_path)
+    ctx._table = pathlib.Path(os.path.relpath(table, tmp_path))                     # `--emulator-table` as a relative path
+    d = run_stage(pipeline.s_emulator, ctx, "emulator")
+    src = next(i["source"] for i in d["inputs"] if i.get("kind") == pipeline.TABLE_INPUT)
+    assert src == str(table) and os.path.isabs(src)
+    monkeypatch.chdir(tmp_path / "caf_data")                                        # a resume from another directory names the same table, relative to it
+    ctx._table = pathlib.Path(os.path.relpath(table))
+    assert str(ctx.table) != src and not pipeline._other_table(ctx, d)
+
+
+def test_a_whatif_without_readable_run_files_answers_as_before(wi):  # noqa: F811
+    seed_table(wi.data / "emulator" / "train.parquet", n=101)
+    for text in ("[1, 2", json.dumps(dict(a=1, b="x"))):
+        (wi.run / "emulator" / "holdout.json").write_text(text)
+        cli.main(whatif_args(wi, "--shift", "48h"))
+        assert wi.seen["ems"][GS][0] is not None                                    # no gate from a hold-out that cannot be read
+    finished_emulator(wi.run, ok=True)
+    (wi.run / "checkpoints" / "emulator" / "ledger.json").write_text("[1, 2")
+    cli.main(whatif_args(wi, "--shift", "48h"))
+    assert wi.seen["ems"][GS][0] is not None
+
+
+def test_a_whatif_answers_with_its_own_fit_for_a_scope_the_run_did_not_train(wi):  # noqa: F811
+    seed_table(wi.data / "emulator" / "train.parquet", n=101)
+    (wi.run / "emulator" / "holdout.json").write_text(json.dumps(dict(glider_eq=dict(scope=GS, trained=False, used=False, unused_reason="few rows then"))))
+    cli.main(whatif_args(wi, "--shift", "48h"))
+    assert wi.seen["ems"][GS][0] is not None and wi.seen["ems"][GS][1].get("unused_reason") != "few rows then"

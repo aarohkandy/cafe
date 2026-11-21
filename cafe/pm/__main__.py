@@ -376,12 +376,15 @@ def _whatif(a: argparse.Namespace) -> int:
             print(f"note: no finished run at {run}: the baseline and every changed vehicle are run in Stage 1 at the {bud} budget")
             print(_model_note(False, False, False), file=sys.stderr)
     run_digest, gate = None, {}
-    with _run_files(run):                                                  # a run whose emulator stage finished: its code digest, and its own verdict per scope
-        led = run / "checkpoints" / "emulator" / "ledger.json"
-        if led.is_file() and (lj := _json_object(led)).get("ok") is True:
-            run_digest = lj.get("code_digest")
-            if (hp := run / "emulator" / "holdout.json").is_file():
-                gate = {e["scope"]: e for e in _json_object(hp).values() if e.get("scope") and not e.get("used", True)}
+    try:
+        with _run_files(run):                                              # a run whose emulator stage finished: its code digest, and its own verdict per scope
+            led = run / "checkpoints" / "emulator" / "ledger.json"
+            if led.is_file() and (lj := _json_object(led)).get("ok") is True:
+                run_digest = lj.get("code_digest")
+                if (hp := run / "emulator" / "holdout.json").is_file():    # only a scope trained and not accepted: a real miss, not "too few rows then"
+                    gate = {e["scope"]: e for e in _json_object(hp).values() if e.get("scope") and e.get("trained") is True and e.get("used") is False}
+    except ConfigError:                                                    # an unreadable or oddly shaped file is no run file: whatif never read them before
+        run_digest, gate = None, {}
     ems = whatif.train(pipeline.emulator_table(), whatif.scopes(m), code_digest=run_digest, mission_hash=whatif.mission_hash(m))
     for sc, e in gate.items():                                             # the run's own gate counts: a scope it did not use goes to Stage 1
         if sc in ems:
