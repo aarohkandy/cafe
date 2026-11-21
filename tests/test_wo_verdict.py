@@ -107,7 +107,7 @@ def test_a_vehicle_with_every_record_outside_the_data_has_no_window_and_the_chec
 def test_the_stokes_drift_source_says_the_uncertainty_is_a_median_absolute_error_and_the_number_is_unchanged(ci_full):
     lon, lat = float(ci_full.lou.x[12]), float(ci_full.lau.x[9])
     s = ci_full.waves(lon, lat, ci_full.tw.x[12])["stokes0"]
-    assert "median absolute speed error" in s.source and "not a standard deviation" in s.source and "leave-one-out" in s.source
+    assert "median absolute speed error" in s.source and "used as the 1-sigma uncertainty, an assumption" in s.source and "leave-one-out" in s.source
     assert np.allclose(s.uncertainty, ci_full.subgrid.fit["corrected_loo_median_speed_err"] * np.abs(s.value))      # the stored error, not rescaled
 
 

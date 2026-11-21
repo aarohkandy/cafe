@@ -1361,9 +1361,8 @@ def s_windows(ctx: Context, L: Ledger) -> None:
         t = np.asarray(r["t"])
         lon_all, lat_all = np.asarray(r["lon"]), np.asarray(r["lat"])
         ok_all = np.isfinite(lon_all)
-        inside = getattr(ctx.env, "inside", None)
-        if inside is not None:             # a member that failed by `left_data` keeps finite records outside the box, and the environment here is strict
-            ok_all &= np.asarray(inside(lon_all, lat_all, np.broadcast_to(t[:, None], lon_all.shape)), bool)
+        # a member that failed by `left_data` keeps finite records outside the box, and the environment here is strict
+        ok_all &= np.asarray(ctx.env.inside(lon_all, lat_all, np.broadcast_to(t[:, None], lon_all.shape)), bool)
         fsel = bool(f.any() and ok_all[:, f].any())            # the failed members when one has a record inside the data, else all members
         sel = f if fsel else np.ones_like(f)
         lon, lat = lon_all[:, sel], lat_all[:, sel]

@@ -280,7 +280,7 @@ class SurfaceLayer:
             return Tagged(v, "Stokes surface drift from the spectrum fitted to UMWM swh/dwp/dwd/mss (modelled)", 0.4 * np.abs(v), "modelled")
         e = self.fit["corrected_loo_median_speed_err"]
         return Tagged(v, "Stokes surface drift: fitted spectrum corrected by the 6-hourly real UMWM spectra "
-                         f"(leave-one-out median absolute speed error {100 * e:.0f} %, used as the uncertainty, not a standard deviation; "
+                         f"(leave-one-out median absolute speed error {100 * e:.0f} %, used as the 1-sigma uncertainty, an assumption; "
                          f"fit alone {100 * self.fit['fit_only_median_speed_err']:.0f} %)",
                       e * np.abs(v), "modelled")
 
