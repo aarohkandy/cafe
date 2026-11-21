@@ -157,7 +157,7 @@ CHANGELOG lines:
 
 ## Skeptic pass
 
-Seven issues, checked against the code. Jobs on cafe-orca (proot, `PMX=pm_wo_rans`, 2 CPUs): `wo_rans_skbase2` (the new tests on the tree at a76e216: they fail, see below), `wo_rans_sk1` (first run of the fixed tree: tests rc=0, ruff 12 E501 in my new lines, shortened), `wo_rans_sk2` (final tree: ruff, mypy, the files named in the task and the whole of `tests/test_stage3.py`, `tests/test_pipeline.py -k "refit or stage1b or stage3"`).
+Seven issues, checked against the code. Jobs on cafe-orca (proot, `PMX=pm_wo_rans`, 2 CPUs): `wo_rans_skbase2` (the new tests on the tree at a76e216: they fail, see below), `wo_rans_sk1` (first run of the fixed tree: tests rc=0, ruff 12 E501 in my new lines, shortened), `wo_rans_sk2` (ruff and mypy clean; its pytest step, with the whole of `tests/test_stage3.py`, was killed by me after an hour on the shared box: rc=143, no result), `wo_rans_sk3` (final tree, **rc=0**: ruff and mypy clean in sk2; `tests/test_wo_rans.py`, `test_wo_fea.py`, `test_budget.py`, `test_round23_claims.py`, `test_credibility.py`, `test_config.py`, `test_config_docs.py`, `test_round21_e.py` all passed; `tests/test_stage3.py -k "fs or free or fea or window or profile or m14 or subgrid or recalib or advice or gate"` and `tests/test_pipeline.py -k "refit or stage1b or stage3"` no failures). Not run whole: `tests/test_stage3.py`, `tests/test_report.py`, the suite.
 
 | # | verdict | what |
 |---|---|---|
