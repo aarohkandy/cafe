@@ -41,7 +41,7 @@ def main() -> int:
     from cafe.pm import ledger, pipeline
     from cafe.pm.stage3 import pipeline_windows as PW, rans
 
-    ctx = pipeline.Context(args.mission, "overnight", 0, args.run)      # the plan in memory only (the Context writes nothing; the run's own plan.json is not read)
+    ctx = pipeline.Context(args.mission, "overnight", 0, args.run)      # the plan is in memory only: the Context writes nothing
     print(json.dumps(dict(plan_rans=ctx.plan["stage3"]["rans"], plan_label=ctx.plan["les"]["label"]), default=float), flush=True)
     vid = next(v["id"] for v in ctx.mission["vehicles"] if ctx.classes[v["id"]] == "glider" and v["platform"] == "seaglider")
     platform = next(v["platform"] for v in ctx.mission["vehicles"] if v["id"] == vid)
