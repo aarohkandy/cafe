@@ -11,9 +11,9 @@ Script: `review/workorder/fs_probe.py` (one grid per run; test `tests/test_wo_fs
 | fs_c3 | 3 | 143,605 | 8000 | 6 | 35 | 2,183 | 526,254 | never | 20.907 | 0.314 | 0.0153 | 1 | 18,715 |
 | fs_c2 | 2 | 101,615 | 8000 | 6 | 17 | 1,576 | 515,661 | never | 18.408 | 0.404 | 0.0050 | 1 | 18,406 |
 | fs_f4nk (no keel) | 4 | 209,236 | 5000 | 6 | 28 | 2,750 | 380,402 | never | 6.293 | 0.726 | 0.0154 | 0 | 18,192 |
+| fs_f5 | 5 (probe's own 5th box) | 307,003 | 8000 | 6 | 41 | 5,318 | 461,806 | never | 19.855 | 0.161 | 0.0240 | 0 | 19,298 |
 
 Smoke runs before these (coarse grid, 2 cores, 300 and 500 iterations, `--settle` path included) only checked that the script and `dtmb5415._converge` run on this case; not counted.
-| fs_f5 | 5 (probe's own 5th box) | 307,003 | 8000 | 6 | 41 | 5,318 | 461,806 | never | 19.855 | 0.161 | 0.0240 | 0 | 19,298 |
 
 Six solver runs, all rc=0 (job logs `fs_c1`, `fs_f4`, `fs_c3`, `fs_f4nk`, `fs_c2`, `fs_f5`). Two ran at once, 6 cores each, on a shared worker (load average 9 to 20), so the seconds carry other people's load. "settled at" is `dtmb5415.unsettled` applied to the history every 250 iterations from 1,000 (the DTMB study's rule: drift, pressure/viscous drift, scatter <= 2 %); it was never met, in any run, because of the scatter. "failed checks" of the coarse grids 1, 2 and 3 are one skewness check (`log.checkMesh`: max skewness 5.68, 6.00 and 5.11 against 4, 8 to 10 faces); 4 and 5 boxes have none (3.63 and 2.16).
 
@@ -61,9 +61,9 @@ cd_hangar = 0.05276 (ref area 1.0582 m2, density of the case). Fine-grid cd: 4 b
 
 ## Recommendation
 
-Nothing passes: fs_iterative_scatter fails by 8 to 36 times its limit (16 % at best, 5 boxes; 25 % at the 4-box production fine grid; limit 2 %) and fs_gci by 2 to 10 times (best pair with r >= 1.3: 5/2 at 0.20; production's 4/1 at 0.98; limit 0.10). Neither is cured by more iterations or a longer run. What the numbers do support:
+Nothing passes: fs_iterative_scatter fails by 8 to 30 times its limit (16 % at best, 5 boxes; 25 % at the 4-box production fine grid; limit 2 %) and fs_gci by 2 to 10 times (best pair with r >= 1.3: 5/2 at 0.20; production's 4/1 at 0.98; limit 0.10). Neither is cured by more iterations or a longer run. What the numbers do support:
 
-- Iterations: 2,000 are enough for the mean here (4-box R 19.66 N over its 1000-2000 and over 2000-8000; the first 250 are a start-up transient, 24 N). The `--settle` loop would run to its cap on every grid (the scatter never meets 2 %) so it saves nothing; it ran correctly on the 1-box grid for two chunks (500 iterations, `converged` False, scatter 0.367, drift 0.0007) and was not run further.
+- Iterations: 2,000 are enough for the mean here (4-box R 19.59 N over its 1000-2000 and 19.66 N over 2000-8000; the first 250 are a start-up transient, 24 N). The `--settle` loop would run to its cap on every grid (the scatter never meets 2 %) so it saves nothing; it ran correctly on the 1-box grid for two chunks (500 iterations, `converged` False, scatter 0.367, drift 0.0007) and was not run further.
 - Cost at the measured rate (computed from the measured cell-updates/s, not run): 1 box about 320 s and 4 boxes about 775 s at 2,000 iterations on 6 ranks; at 8,000 iterations the runs took 1,305 s (1 box), 1,593 s (2), 2,218 s (3), 3,142 s (4), 5,359 s (5) including 14 to 41 s of meshing. The pair 4/1 run one after the other (as `two_grid` does) is 4,447 s at 8,000 iterations; 5/2 is 6,952 s.
 - If the scatter check is kept as written, no iteration or grid change within what was run can pass it. Next, in this order (none run, six runs were the limit):
   1. Find what makes the pressure force oscillate: it is in the pressure part only, with or without the keel, on all grids, with a period of 10 to 31 iterations, so it belongs to the pseudo-time march or the free surface at the hull, not to the keel. Cheapest test: the 1-box grid (320 s per 2,000 iterations) with `FS_LTS` changed in the probe process only (smaller maxCo and maxAlphaCo, larger rDeltaTSmoothingCoeff; DECISIONS comment at `cfd.py:561-570` says 0.25 scattered by +-40 % and 0.05 was too slow, so 0.1 is already the compromise), then a final stretch with a fixed small deltaT.
