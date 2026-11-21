@@ -1337,7 +1337,8 @@ def _emulator(emu: dict[str, Any] | None, design: dict[str, Any] | None, tr: Tra
                   share=num(design["share_s"], "s", dref, s), variant=num(design["variant_s"], "s", dref, s), variant_source=design["variant_s_source"],
                   variants=num(len(design["variants"]), "runs", dref, s), spent=num(design["spent_s"], "s", dref, s),
                   flip_spent=num(design["flip_spent_s"], "s", dref, s), rows_added=num(design["rows_added"], "rows", dref, s),
-                  table_rows=num(design["table_rows"], "rows", dref, s), table=design["table"], stage1b_free=bool(design["stage1b_free"]))
+                  table_rows=num(design["table_rows"], "rows", dref, s), table=design["table"], stage1b_free=bool(design["stage1b_free"]),
+                  stage1_unpriced=bool(design.get("stage1_unpriced")))
     return dict(available=True, vehicles=out, design=dd, plan_note=note, run_note=_run_note(design, plan, emu))
 
 
@@ -2106,11 +2107,12 @@ def _emulator_html(m: dict[str, Any]) -> str:
                 "figure alone.") + (f" {e(a['draws'])}" if a["draws"] else "") + "</p>")
     d = m["design"]
     if d:
+        own = (" (its own share and the seconds of stages 1 and 1b the plan does not price)" if d["stage1_unpriced"]
+               else " (the share of stage 1b included, since no vehicle was refit)" if d["stage1b_free"] else "")
         h += (f"<p>Training table {e(d['table'])}: {_n(d['table_rows'])}, {_n(d['rows_added'])} added by this run. "
               f"Variant runs of the mission: {_n(d['variants'])} "
               f"({_n(d['variant'])} each, from {e(d['variant_source'])}) were charged {_n(d['spent'])} of planned cost against the emulator share "
-              f"{_n(d['share'])}, of which {_n(d['train_budget'])} is for them"
-              f"{' (the share of stage 1b included, since no vehicle was refit)' if d['stage1b_free'] else ''}; "
+              f"{_n(d['share'])}, of which {_n(d['train_budget'])} is for them{own}; "
               f"the flip search was charged {_n(d['flip_spent'])} of planned "
               "Stage-1 cost (a planned charge, not a measurement: each stage's measured time is under Machine and budget).</p>")
         if d["variants"]["value"] == 0:

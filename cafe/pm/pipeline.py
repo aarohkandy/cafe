@@ -1605,7 +1605,9 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     df, used = whatif.add_rows(ctx.table, rows)                           # after the fit is decided: the table grows for the next run, not for this one
     L.note(f"training table {used}: {len(df)} rows now; this run trained on {len(train_df)} ({len(train_in)} from {snap.name}, {len(rows)} added by this run: "
            f"{len(res['vehicles'])} vehicles x {1 + len(variants)} missions less {len(skipped)} skipped)")
-    s1b = "stage 1b's share included, since no vehicle was refit" if free else "stage 1b reran"
+    unpriced = share > budget.emulator_own_share_s(ctx.plan, free)           # a reach budget: stages 1 and 1b gave the seconds the plan does not price
+    s1b = ("its own share and the seconds of stages 1 and 1b the plan does not price" if unpriced else
+           "stage 1b's share included, since no vehicle was refit" if free else "stage 1b reran")
     L.note(f"emulator share {share:.0f} s ({s1b}): {len(variants)} variant run(s) of "
            f"{est:.0f} s each ({sizes['variant_s_source']}); measured {', '.join(f'{w:.0f}' for w in walls)} s (timings are not in the hashed output)")
     for sk in skipped:
@@ -1681,7 +1683,8 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     L.output(_dump(dict(share_s=share, variant_s=est, variant_planned_s=est, variant_s_source=sizes["variant_s_source"], variants=variants,
                         skipped=skipped, killed=killed, spent_s=spent, flip_spent_s=fspent, rows_added=len(rows), table_rows=len(train_df),
                         table=pathlib.Path(used).name, train_input_rows=len(train_in),
-                        train_fraction=whatif.TRAIN_FRAC, planned_variants=n_var, stage1b_free=free), ctx.path("emulator", "design.json")))
+                        train_fraction=whatif.TRAIN_FRAC, planned_variants=n_var, stage1b_free=free,
+                        stage1_unpriced=unpriced), ctx.path("emulator", "design.json")))
 
 
 def s_report(ctx: Context, L: Ledger) -> None:
