@@ -14,7 +14,7 @@ Builder: Claude Fable 5.2. Runs are on cafe-orca (proot, `PMX=pm_wo_emu2`, logs 
 
 ## Tests (before = tree at 40f04c5 with the new test file)
 
-`tests/test_wo_emu2.py`: reach share at overnight gives at least 100 points; the share formula and its floor; `ci` and `quick` keep the old share; the four planned stage seconds add up to the sum of the four shares (0.95 of the budget); the plan's note; the ledger note and `design.json` of a refit run on a reach budget; the report sentence. Before: these fail on 40f04c5 (no `emulator_own_share_s`, no `stage1_unpriced`). After: job `wo_emu2_k3` (see Skeptic pass).
+`tests/test_wo_emu2.py`: reach share at overnight gives at least 100 points; the share formula and its floor; `ci` and `quick` keep the old share; the four planned stage seconds add up to the sum of the four shares (0.95 of the budget); the plan's note; the ledger note and `design.json` of a refit run on a reach budget; the report sentence. Before: job `wo_emu2_k4` (40f04c5 plus this file): all 9 cases fail (no `emulator_own_share_s`, no `stage1_unpriced`, old share and note). After: job `wo_emu2_k3` on the final tree: `ruff check cafe/pm tests` rc=0, this file + `test_round23_claims.py` + `test_budget.py` rc=0, `test_pipeline.py`/`test_report.py` `-k "emulator or share or variant"` rc=0; `wo_emu2_k2` mypy cafe/pm rc=0 (58 files).
 
 ## Printed text changed
 
