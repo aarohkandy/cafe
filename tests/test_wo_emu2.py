@@ -77,7 +77,7 @@ def test_the_plans_note_does_not_say_will_not_train_when_it_trains_and_still_doe
 
 def test_a_refit_run_on_a_reach_budget_says_what_its_share_is_made_of(tmp_path, table, fake_stage1):  # noqa: F811
     ctx = cheap_plan(synthetic_ctx(tmp_path, 48, "refit"), 100.0)                                              # glider_eq was refit
-    ctx.plan.update(budget="overnight", stage1_s=0.5)
+    ctx.plan.update(budget="overnight", stage1_s=0.5, shares=dict(budget.SHARE))   # the quick plan's shares moved stage 3 to stage 1
     d = run_stage(pipeline.s_emulator, ctx, "emulator")
     design = json.loads((ctx.run_dir / "emulator" / "design.json").read_text())
     assert design["share_s"] == pytest.approx(60.0) and design["stage1_unpriced"] and not design["stage1b_free"]          # 5 + 100 x 0.6 - 2 x 5 x 0.5
@@ -85,13 +85,13 @@ def test_a_refit_run_on_a_reach_budget_says_what_its_share_is_made_of(tmp_path, 
     assert note.startswith("emulator share 60 s (its own share and the seconds of stages 1 and 1b the plan does not price):")
     assert "since no vehicle was refit" not in note and "stage 1b reran" not in note
     free = cheap_plan(synthetic_ctx(tmp_path, 48, "free", unused_refit=True), 100.0)                           # nothing refit: stage 1b was a copy
-    free.plan.update(budget="overnight", stage1_s=0.5)
+    free.plan.update(budget="overnight", stage1_s=0.5, shares=dict(budget.SHARE))
     d = run_stage(pipeline.s_emulator, free, "emulator")
     assert json.loads((free.run_dir / "emulator" / "design.json").read_text())["share_s"] == pytest.approx(62.5)               # 5 + 100 x 0.6 - 5 x 0.5
     assert any(n.startswith("emulator share 62 s (its own share and the seconds of stages 1 and 1b the plan does not price):") for n in d["notes"])
 
 
-def test_the_report_says_the_same_of_the_share(run):
+def test_the_report_says_the_same_of_the_share(run):  # noqa: F811
     m, plan = pm_run.make_run(run)
     p = run / "emulator" / "design.json"
     d = json.loads(p.read_text())
