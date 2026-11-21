@@ -41,6 +41,10 @@ EMULATOR_VARIANTS = {"ci": 2, "quick": 6, "4h": 24, "overnight": 48}   # most mi
 EMULATOR_REACH = ("4h", "overnight")                                   # ... except on these, where the cap is the count that reaches EMULATOR_MIN_POINTS
 EMULATOR_MIN_POINTS = 100         # distinct feature points per emulator scope (`emulator_scope`) the emulator needs to train (whatif.MIN_ROWS reads this)
 EMULATOR_POINTS_MARGIN = 1.2      # variants are sized for this many times the minimum (a skipped variant or a repeated point still leaves enough)
+# seconds of stage 1 the emulator's share on an EMULATOR_REACH budget leaves for stage 1: this many times the plan's `stage1_s`, above the largest
+# measured overrun of that estimate: q8 2.2 times on homebase (52.7 s planned, 116.7 s measured; DECISIONS 444, 468), on1 2.8 times on orca (142 s
+# planned, 393 s measured; DECISIONS 1090), q9 4.2 times on the 32-vCPU burst VM (52.68 s planned, 223.05 s measured; DECISIONS 468, RUNBOOK step 4)
+STAGE1_PRICED = 5.0
 TRAIN_FRAC = 0.7                  # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
 STAGE3_PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}     # the native-LBM parts of a window, one slice of the share each
 FS_PARTS = {"usv": "hull_fs"}                                                        # the free-surface part: a child process with its own queue
@@ -565,11 +569,12 @@ def emulator_plan(p: dict[str, Any]) -> dict[str, Any]:
     """How many variant runs the emulator stage makes, from the plan only: a variant costs `batch_cost_s(plan)` (the planner's estimate from
     the measured per-vehicle costs), the variants may use `TRAIN_FRAC` of the stage's share, and at most EMULATOR_VARIANTS[budget] (on
     `EMULATOR_REACH` budgets: the count that gives the smallest class `EMULATOR_MIN_POINTS` x `EMULATOR_POINTS_MARGIN` points). Two answers
-    because the share is bigger by stage 1b's when no vehicle was refit (the rerun was a copy): `variants_refit`, `variants_no_refit`.
+    because the share is bigger when no vehicle was refit (the rerun was a copy; `emulator_share_s`): `variants_refit`, `variants_no_refit`.
     A variant adds one feature point per vehicle, so a scope of n vehicles has (variants + 1) n points after one run (`points_per_scope`, best
     case; a scope is `emulator_scope`: vehicles of one class, platform and window length, which is all one emulator is trained on; a plan made
     before `vehicle_scopes` counts per class); `trains` is False, with the numbers in `note`, when that is under `EMULATOR_MIN_POINTS` for any
-    scope: the run alone cannot train an emulator, rows must accumulate over runs of one code digest (whatif.add_rows) or the budget must be bigger."""
+    scope: the run alone cannot train an emulator, rows must accumulate over runs of one code digest (whatif.add_rows) or the budget must be bigger
+    (the note says so only then; when `trains` it gives the counts alone)."""
     est = batch_cost_s(p)
     per_scope = Counter((p.get("vehicle_scopes") or p.get("vehicle_classes", {})).values())
     smallest = min(per_scope.values(), default=1)
@@ -582,20 +587,39 @@ def emulator_plan(p: dict[str, Any]) -> dict[str, Any]:
     points = {c: (best + 1) * k for c, k in sorted(per_scope.items())} or {"": best + 1}
     short = {c: v for c, v in points.items() if v < EMULATOR_MIN_POINTS}
     avail = f"{TRAIN_FRAC:.0%} of a {emulator_share_s(p, True):.0f} s emulator share"
+    head = (f"this budget gives {min(points.values())} distinct points per emulator scope (vehicle class, platform, window length) in one run "
+            f"({best} variants of {est:.0f} s + the base mission, {avail}), {EMULATOR_MIN_POINTS} are needed")
     note = (f"the emulator cannot train at this budget: one mission variant costs {est:.0f} s of stage 1 and the variants may use {avail}, so "
-            f"{best} of {cap} variants run" if best == 0 else
-            f"this budget gives {min(points.values())} distinct points per emulator scope (vehicle class, platform, window length) in one run "
-            f"({best} variants of {est:.0f} s + the base mission, {avail}), {EMULATOR_MIN_POINTS} are needed: the emulator will not train from "
-            "this run alone; rows accumulate in the training table across runs of the same code digest")
+            f"{best} of {cap} variants run" if best == 0 else head if not short else
+            head + ": the emulator will not train from this run alone; rows accumulate in the training table across runs of the same code digest")
     return dict(variant_s=est, variant_s_source="the planner's estimate from the measured per-vehicle costs (plan.json member_cost)",
                 share_s=dict(refit=emulator_share_s(p, False), no_refit=emulator_share_s(p, True)), train_fraction=TRAIN_FRAC,
                 max_variants=cap, variants_refit=refit, variants_no_refit=no_refit, min_points=EMULATOR_MIN_POINTS, points_per_scope=points,
                 trains=not short, note=note)
 
 
-def emulator_share_s(plan: dict[str, Any], stage1b_free: bool = False) -> float:
-    """Seconds the emulator stage may spend: its own share of the budget, plus stage 1b's when no vehicle was refit (the rerun was a copy)."""
+def emulator_own_share_s(plan: dict[str, Any], stage1b_free: bool = False) -> float:
+    """The emulator's own share of the budget, plus stage 1b's when no vehicle was refit (the rerun was a copy)."""
     return float(plan["budget_s"] * (plan["shares"]["emulator"] + (plan["shares"]["stage1b"] if stage1b_free else 0.0)))
+
+
+def emulator_share_s(plan: dict[str, Any], stage1b_free: bool = False) -> float:
+    """Seconds the emulator stage may spend: its own share, plus stage 1b's when no vehicle was refit (`emulator_own_share_s`).
+
+    On `EMULATOR_REACH` budgets (the ones whose variant cap is the count that reaches `EMULATOR_MIN_POINTS`) also the seconds of the stage-1 and
+    stage-1b shares that the plan does not price for members: `budget_s` x (stage 1 + stage 1b shares) less `STAGE1_PRICED` x the plan's `stage1_s`,
+    twice when a vehicle was refit (stage 1 and its rerun), once when stage 1b was a copy; never below the own share. The planner caps stage 1 at its
+    estimate, which is a lower bound (the measured stage ran 2.2 to 4.2 times over it), and a refit makes the glider's emulator pay for CFD, so the
+    own 5 % of the budget gave 25 variants at overnight against 100 points needed. Every other budget returns the own share.
+    The four planned stage seconds fit the budget: stage 1 at `STAGE1_PRICED` x its estimate, stage 3's share, stage 1b at the same (refit) or free
+    (copy), and this share add up to the sum of the four shares, which is the budget (unless stage 1 priced that high already exceeds its own
+    share, where the floor holds and the sum is over by the excess)."""
+    own = emulator_own_share_s(plan, stage1b_free)
+    if plan["budget"] not in EMULATOR_REACH:
+        return own
+    sh, B = plan["shares"], plan["budget_s"]
+    unpriced = B * (sh["stage1"] + sh["stage1b"]) - STAGE1_PRICED * plan["stage1_s"] * (1 if stage1b_free else 2)
+    return float(max(own, B * sh["emulator"] + unpriced))
 
 
 def _batch(plan: dict[str, Any], vids: Any = None, days: float | None = None) -> tuple[float, float]:

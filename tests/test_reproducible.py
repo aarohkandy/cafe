@@ -186,8 +186,10 @@ def test_two_runs_with_the_same_seed_make_the_same_report_json_with_the_real_sta
     assert differences(a, b) == [] and json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
     rows = json.loads((t.ctx["a"].run_dir / "stage3" / "windows.json").read_text())
     flat = [r for rs in rows.values() for r in rs]
-    assert len(flat) == 6 and {r["part"] for r in flat} == {"body", "hull", "wing", "hull_fs"}
-    ran = [r for r in flat if r["part"] != "hull_fs"]
+    assert len(flat) == 7 and {r["part"] for r in flat} == {"body", "hull", "wing", "hull_fs", "body_rans"}
+    ran = [r for r in flat if r["part"] not in ("hull_fs", "body_rans")]
+    rans_row = next(r for r in flat if r["part"] == "body_rans")
+    print("PROBE_BODY_RANS", json.dumps({k: rans_row.get(k) for k in ("ok", "reasons", "cd", "resolution", "label", "error")}, default=str))
     assert not any("killed" in " ".join(r["reasons"]) or (r["resolution"] or {}).get("cut_reason") for r in ran)                        # nothing was killed
     assert sum(r["cd"] is not None for r in ran) >= 1  # a window really ran (M-8: on CPU the ci plan runs the smoke window; the rest are skipped by the plan)
     assert any(r["fea"]["run"] for r in ran)  # the glider hull's FEA ran
