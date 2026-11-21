@@ -5,7 +5,8 @@ For every window of `windows/windows.json` (`{vid: [{t, lon, lat, stress, basis}
 window's time and place, runs one wall-modelled LES window (windows.run_window) and, for the glider hull, the FEA of the pressure
 hull, and returns one row per window and part. A USV has three parts: `hull` (water, native LBM, viscous only), `wing` (air) and
 `hull_fs` (the same hull and keel through a free surface, interFoam or FluidX3D in a child process, total resistance: stage3/freesurface.py);
-the flows are different fluids or need different solvers, so one window cannot carry them all.
+the flows are different fluids or need different solvers, so one window cannot carry them all. A glider whose LES part is planned out (CPU) has one
+`body_rans` row per vehicle instead (its first window; steady RANS on two grids, in a child process: stage3/rans.py), which feeds the refit when no LES row does.
 
 Frames. The window frame is the body frame. Per class, with R the rotation of ENU into body axes, the window gets
     inflow   = R u_env          (ground-frame environment velocity at the window)
@@ -68,7 +69,7 @@ from .. import budget, config
 from ..jsonio import load_json
 from ..env import conventions as cv
 from ..physics import glider, uas, usv
-from . import fluidx3d, freesurface, lbm, windows as W
+from . import fluidx3d, freesurface, lbm, rans, windows as W
 
 if TYPE_CHECKING:
     from ..ledger import Ledger
@@ -675,6 +676,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
 FS_GRACE_S = 30.0                                                           # how long past its own deadline the parent waits for a child to die
 PARTS = budget.STAGE3_PARTS                                                 # the native-LBM parts, one budget slice each
 FS_PARTS = budget.FS_PARTS                                                  # the free-surface part: child process, own budget
+RANS_PARTS = budget.RANS_PARTS                                              # the CPU RANS part of a glider whose LES window is not run: child process, own budget
 
 SIGKILL_EARLY = "out of memory or an outside kill, not the watchdog"       # what a -9 before the deadline is (round 15 M-21)
 
@@ -800,6 +802,95 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
     return pool.submit(work)
 
 
+def _rans_gate(a: dict[str, Any], ctx: Context, left_s: float, queued_s: float) -> tuple[bool, str, float]:
+    """(fits, reason, seconds the case holds in the queue). The estimate (`stage3.glider.rans.est_s`) times its margin must fit `left_s`, the share left for the
+    RANS cases after the FEAs' hold and the free-surface cases the plan kept (`budget.rans_plan`'s share: the queue runs the RANS cases before them, so they
+    are not charged to it) less the RANS cases queued before this one (`queued_s`): a plan-time rule, not the clock. The sentence names the minutes needed, the
+    minutes left and the smallest `--budget` profile whose stage-3 share would hold it and the RANS cases queued before it."""
+    need_s = need(a, "glider.rans.est_s") * need(a, "glider.rans.margin")
+    if need_s <= left_s + 1e-6:                                             # (a share is a fraction of the budget; `rans_plan` allows the microsecond too)
+        return True, "", need_s
+    plan = ctx.plan
+    return False, (f"RANS window not run: estimated {need(a, 'glider.rans.est_s') / 60:.0f} min x {need(a, 'glider.rans.margin')} margin = {need_s / 60:.0f} min "
+                   f"(two grids, {rans.ITERS} iterations) against {max(left_s, 0) / 60:.1f} min left of the "
+                   f"{plan['shares']['stage3'] * plan['budget_s'] / 60:.0f} min stage-3 share after the FEA and the free-surface cases; "
+                   f"{freesurface.fitting_budget(queued_s + need_s, profile_stage3_s(ctx))}"), need_s
+
+
+def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: float, label: str, est_s: float, deadline: float | None,
+               t0: float) -> dict[str, Any]:
+    """Runs one RANS case in a child process (own process group, killed by its own watchdog at the deadline) and builds the row; its job directory goes away
+    with it. Never raises: a child that fails, is killed or returns nonsense gives a row with `error` and the reason."""
+    jobdir = tempfile.mkdtemp(prefix="rans_job_")
+    try:
+        job, out = pathlib.Path(jobdir) / "job.json", pathlib.Path(jobdir) / "out.json"
+        rans.write_stl(veh, pathlib.Path(jobdir) / "body.stl")
+        left = None if deadline is None else deadline - time.perf_counter()
+        if left is not None and left <= 0.0:
+            return _fs_fail(base, "RANS window killed before it started: the stage-3 wall-clock share was spent before its turn came", t0)
+        job.write_text(json.dumps(dict(stl=str(pathlib.Path(jobdir) / "body.stl"), label=label, speed=speed)))
+        started = time.perf_counter()
+        try:
+            p = _spawn([sys.executable, "-m", "cafe.pm.stage3.rans", str(job), str(out), str(1e9 if left is None else left)],
+                       capture_output=True, text=True, timeout=None if left is None else left + FS_GRACE_S, start_new_session=True,
+                       cwd=str(pathlib.Path(__file__).resolve().parents[3]))
+        except subprocess.TimeoutExpired:
+            return _fs_fail(base, f"RANS run killed at its deadline after {time.perf_counter() - t0:.0f} s: it did not finish inside the share", t0)
+        if p.returncode or not out.exists():
+            how = ("killed by its watchdog at the deadline" if _killed_at_deadline(p.returncode, left, started) else
+                   "killed by SIGKILL before its deadline (" + SIGKILL_EARLY + ")" if p.returncode == -9 else
+                   (p.stderr.strip().splitlines() or ["no message"])[-1][:300])
+            return _fs_fail(base, f"RANS run failed ({p.returncode}): {how}", t0)
+        r = load_json(out.read_text())
+        f = rans.row_fields(r, veh.ref_area, case["cd_h"])
+    except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
+        return _fs_fail(base, f"RANS window failed: {e}", t0)
+    finally:
+        shutil.rmtree(jobdir, ignore_errors=True)
+    ok = all(c["ok"] for c in f["checks"])
+    ratio = f["refinement_ratio"]
+    res = dict(source="cafe.cfd.external: OpenFOAM simpleFoam, k-omega SST, snappyHexMesh", flow_label=label, speed_ms=speed, cells_fine=r["cells"],
+               cells_coarse=r["coarse_cells"], refinement_ratio=ratio, level_offsets=r["levels"], iterations=r["iterations"], iterations_cap=r["iterations_cap"],
+               estimated_s=est_s)
+    return dict(base, resolution=res, checks=f["checks"], ok=ok, reasons=[] if ok else rans.reasons(f["checks"], r), cd=f["cd"], cd_spread=f["cd_spread"],
+                cl=None, cl_spread=None, added_resistance=f["added_resistance"], gci=f["gci"], refinement_ratio=ratio, drag_n=f["drag_n"],
+                ref_area=veh.ref_area, source=res["source"], fea=dict(run=False, reason="no structural model in this part: the hull's FEA is the body window's"),
+                timing=dict(wall_s=time.perf_counter() - t0, rans_s=r["seconds"]))
+
+
+def _rans_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, Any], platform: str, res: dict[str, Any] | None, a: dict[str, Any],
+                 st: dict[str, Any], sizes: dict[str, Any]) -> Future[dict[str, Any]]:
+    """Prepares the CPU RANS case of glider `vid` at its first window (kinematics, flow label, price), decides whether the share left for the RANS cases holds
+    it and either queues it behind the earlier ones on `pool` (one at a time: they share the CPUs) or returns the finished not-run row. The row carries no lift
+    (`cl`, `cl_spread` and `cl_hangar` are None: only the drag is solved), so the refit takes the drag alone."""
+    t0 = time.perf_counter()
+    base = _base(ctx, w, "body_rans")
+    base["label"] = rans.LABEL
+    done: Future[dict[str, Any]] = Future()
+    try:
+        P, veh = _glider_vehicle_for(ctx, vid, platform, a, clip=False)
+        heading, hsrc = track_heading(res, vid, w["t"]), track_heading_source(res, vid, w["t"])
+        case = glider_case(ctx, w, P, veh, a, heading)
+        vb = case["R"] @ (case["v"] - case["u_env"])
+        label, speed = rans.flow_label(vb)
+        _describe(base, veh, case, vb, heading, hsrc)
+        base.update(cl_hangar=None, ref_area=veh.ref_area)
+        est_s = need(a, "glider.rans.est_s")
+        left = None if sizes["rans"]["share_s"] is None else sizes["rans"]["share_s"] - st["rans_queued"]
+        held = 0.0
+        if left is not None:
+            fits, why, held = _rans_gate(a, ctx, left, st["rans_queued"])
+            if not fits:
+                done.set_result(_fs_fail(base, why, t0, resolution=dict(estimated_s=est_s, speed_ms=speed, flow_label=label, left_s=left)))
+                return done
+        st["rans_queued"] += held
+        st["queued"] += held
+    except (ValueError, KeyError, RuntimeError, OSError) as e:
+        done.set_result(_fs_fail(base, str(e), t0))
+        return done
+    return pool.submit(lambda: _rans_work(base, veh, case, speed, label, est_s, st["deadline"], t0))
+
+
 def recalibrate_subgrid(ctx: Context, rows: dict[str, list[dict[str, Any]]], L: Ledger, path: str | pathlib.Path | None = None) -> dict[str, Any] | None:
     """Stage 3's second job (BRIEF 2.2): recalibrate the sub-grid layer from the windows that passed their self-checks, and write
     run_dir/stage3/subgrid_calibration.json (or `path`): the calibration block, a hashed output of the stage that the stages after it read
@@ -843,7 +934,9 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     whose turn comes with less than `stage3.min_window_s` left is not started; each of these is a row that says "killed".
     A glider whose LES part is planned out gets its hull FEA from the sea pressure alone, once, first in the same one-worker queue (`_fea_submit`), in every
     row of that part. A USV window also gets a `hull_fs` row, run in a child process while the LBM windows run (killed at the stage deadline); the rows
-    follow the LBM rows of the vehicle. A case that does not fit is a row with ok False and the minutes it needs. Every row carries
+    follow the LBM rows of the vehicle. A glider whose LES part is planned out also gets one `body_rans` row, from its first window, queued after the FEA and
+    before the free-surface cases (`_rans_submit`; the other windows of the vehicle get no such row). A case that does not fit is a row with ok False and the
+    minutes it needs. Every row carries
     `timing` (seconds, measured rates); pipeline.s_stage3 moves it out of the hashed output into the ledger."""
     if not os.environ.get("CAFE_NPROC"):                                    # unset or empty (an empty one is unset: DECISIONS 330)
         os.environ["CAFE_NPROC"] = str(freesurface.nproc())                 # the ranks planned are the ranks run (cafe.cfd reads it at import)
@@ -860,12 +953,17 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     todo = [(vid, w, part) for vid, ws in wins.items() for w in ws for part in PARTS[ctx.classes[vid]]]
     _jit_cache(ctx)
     rows: dict[str, list[dict[str, Any]]] = {vid: [] for vid in wins}
-    st = dict(share=share, t_stage=t_stage, queued=0.0, deadline=None if share is None else t_stage + share, fea_left=float(sizes["fea"]["hold_s"]))
+    st = dict(share=share, t_stage=t_stage, queued=0.0, rans_queued=0.0, deadline=None if share is None else t_stage + share,
+              fea_left=float(sizes["fea"]["hold_s"]))
     with ThreadPoolExecutor(1) as pool:                                     # one free-surface case at a time: they share the CPUs
         # a glider whose LES part is planned out has no LES pressure: its hull FEA runs from the sea pressure alone, first in the queue (a stage with no
         # share at all, 0.0, has none: its rows keep "the window did not run")
         fea_out = {vid: _fea_submit(pool, ctx, vid, plat[vid], a, st, sizes) for vid in budget.fea_planned_out(ctx.classes, sizes["les"]["windows"])
                    if vid in wins and share != 0.0}
+        # then the CPU RANS case of each glider whose LES part is planned out (its first window only: the through-water state does not depend on the heading, so
+        # the other windows would repeat it), ahead of the free-surface cases, whose seconds the plan kept apart (`sizes["rans"]["share_s"]`)
+        rans_out = [(vid, wins[vid][0], _rans_submit(pool, ctx, vid, wins[vid][0], plat[vid], res, a, st, sizes))
+                    for vid in (sizes["rans"] or dict(vehicles=[]))["vehicles"] if wins.get(vid)]
         fs = [(vid, w, _fs_submit(pool, ctx, vid, w, plat[vid], res, a, st, sizes)) for vid, ws in wins.items() if ctx.classes[vid] in FS_PARTS for w in ws]
         runs = [sizes["les"]["windows"].get(f"{vid}/{part}", dict(runs=True))["runs"] for vid, w, part in todo]       # windows budget.les_windows did not skip
         for i, (vid, w, part) in enumerate(todo):
@@ -883,6 +981,11 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
                 r["timing"].update(fea_s=took, fea_seconds=r["fea"].pop("seconds", None))
             what = f"utilisation={fea['utilization']:.3g}" if fea["run"] else fea["reason"]
             ctx.log(f"stage3 {vid} hull FEA (sea pressure only): run={fea['run']} {what} [{took:.1f} s]")
+        for vid, w, fut in rans_out:
+            r = fut.result()
+            rows[vid].append(r)
+            msg = f"cd={r['cd']:.3g} (hangar {r['cd_hangar']:.3g})" if r.get("cd") is not None else f"error: {r.get('error')}"
+            ctx.log(f"stage3 {vid}/{RANS_PARTS[ctx.classes[vid]]} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['timing']['wall_s']:.1f} s]")
         for vid, w, fut in fs:
             r = fut.result()
             rows[vid].append(r)
@@ -890,7 +993,7 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
             ctx.log(f"stage3 {vid}/{FS_PARTS[ctx.classes[vid]]} t={w['t']:.0f}: ok={r['ok']} {msg} [{r['timing']['wall_s']:.1f} s]")
     for n in sorted({r["wetted_area_note"] for rs in rows.values() for r in rs if r.get("wetted_area_note")}):
         L.note(n)                                                               # the window hull's surface vs the platform's, once per distinct statement
-    want, got = len(todo) + len(fs), sum(len(r) for r in rows.values())
+    want, got = len(todo) + len(rans_out) + len(fs), sum(len(r) for r in rows.values())
     L.check("every_window_attempted", got == want, value=got, limit=want)
     bad = [(v, i) for v, rs in rows.items() for i, r in enumerate(rs) if r["ok"] and any(not c["ok"] for c in r["checks"])]
     L.check("no_row_claims_ok_with_a_failing_check", not bad, value=len(bad), limit=0)
