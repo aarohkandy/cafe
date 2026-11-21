@@ -3,6 +3,17 @@
 Rewritten from the code on 2026-10-31 (review round 2, M-14), at `8ee5f50` plus the round-2 fixes, and updated for review rounds 3 (DECISIONS 210 to 236), 4 (DECISIONS 237 to 265), 5 (DECISIONS 276 to 307), 6 (DECISIONS 308 to 338) and 7 (DECISIONS 341 to 392) and 8 (DECISIONS 393 to 456) and 9 (DECISIONS 461 to 516) and 10 (DECISIONS 535 to 589), 11 (DECISIONS 593 to 637) and 12 (DECISIONS 638 to 690) and 13 (DECISIONS 693 to 758); rounds 14 to 19 are in section 2 and the test paragraphs (round 17: DECISIONS 917 to 951; round 18: DECISIONS 952 to 995; round 19: DECISIONS 996 to 1016; round 20: DECISIONS 1017 to 1036; round 21: DECISIONS 1037 to 1056; round 22: DECISIONS 1057 to 1072). The earlier version of this file was the audit of the existing app against the
 spec of 2026-10-28 (`ab376fd`); it is in git history and no longer describes the repository.
 
+## Current state: the work order after round 23 (2026-11-20)
+
+- The review loop ended after round 23 (DECISIONS 1089); what comes next is `LEAD_HANDOFF/WORK_ORDER.md` (untracked).
+- The run `on1` (first `--budget overnight --gpus 0`, `8ecf0e7`, rc=0, 10,003 s of 36,000 s; `review/workorder/on1.md`, DECISIONS 1090): no verdict changed at 512 members; no LES window ran; the free-surface USV hull ran 1 of 3 cases and failed its checks, so the refit used no vehicle; no FEA ran; the emulator trained for three scopes and passed its gate for the UAS only (`whatif` answered it EMULATED).
+- Merged on branch `wo-merged`: the emulator fixes (DECISIONS 1097 to 1099), the sea-pressure-only hull FEA (1100, 1101: Seaglider utilisation 2.873 at 950 m, warning kept, verdict not capped), the contribution table (1102), the verdict fixes (1091 to 1096).
+- In build: the glider CFD part (the RANS probe is 1103). The USV hull CFD does not converge as configured (1104) and is out of this order's done.
+- Remains: the glider part's merge, the gate, the final overnight run, the fast-forward.
+- **LEAD: fill in** (the gate result)
+- **LEAD: fill in** (the final run's result)
+- The owner's open decisions: the Seaglider hull, the UAS sortie slack, the demo link positions, a GPU (QUESTIONS_FOR_LAB 22).
+
 ## 0. What is physically missing (BRIEF section 0)
 
 Every exit condition of the brief that is unmet is unmet for one of these inputs, none of which exists on this side. For each: the code path exists and is exercised by a
