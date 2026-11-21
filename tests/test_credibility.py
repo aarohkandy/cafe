@@ -462,7 +462,7 @@ LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the
            "no GPU run exists",
            "the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
            "in the shipped quad_uas.yaml the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance",
-           "the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio again; "
+           "the USV speed prior is calibrated in a scenario without current, and the mission's current may then lower the speed ratio again; "
            "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established",
            "the persistent wind-speed prior is an estimate from the TAO moorings of one regime, not a measured spread: it is the spread of the moorings' "
            "time-mean errors less its sampling variance, plus the uncertainty of the mean of the moorings, so with few moorings one mooring can decide it, "

@@ -52,9 +52,7 @@ RECEIPTS_NAME = "runs/receipts.json"                                          # 
 RECEIPTS = credibility.ROOT / RECEIPTS_NAME
 META_NAME = "receipts.meta.json"                                              # beside the table: {code_digest, git_sha, made_at} of the code that made it
 STALE = "stale: made by other code"
-USV_RATIO_NOTE = ("The mission ratio is lowered by the westward current (in the demo mission it turns a beam reach into a close-hauled course, and the speed "
-                  "through the water falls); the calibration may already include part of the current effect, a possible double penalty that is not "
-                  "established.")
+USV_RATIO_NOTE = ("The calibration may already include part of any current effect, a possible double penalty that is not established.")
 MODE_TEXT = dict(profile_incomplete="a flown sortie returned (time limit or battery reserve) before its last pattern waypoint, so it did not deliver "
                                     "the full profile",
                  no_current_data="there was no finite wind, current or wave state at the vehicle's position (a land block, a masked cell or a hole in the sea "
@@ -212,6 +210,18 @@ class Trace:
         self._row("report", rid, "output", path.name, True, sha=sha256(path))
         return dict(stage="report", ledger="checkpoints/report/ledger.json", receipt=rid)
 
+    def run_file_ref(self, name: str, label: str) -> dict[str, Any]:
+        """The receipt for a value read from a file of the run directory (`mission.yaml`, `plan.json`): the hash of that file, which the report stage's ledger
+        records as an input. The ingest config hash leaves the seed out and holds no plan (pipeline.config_hash). `label` stays the printed stage."""
+        path = self.run / name
+        if path.is_file():
+            rid = f"report:input:{name}"
+            self._row("report", rid, "input", name, True, sha=sha256(path))
+        else:
+            rid = f"report:missing-input:{name}"
+            self._row("report", rid, "missing", name, False, state="not_run")
+        return dict(stage=label, ledger="checkpoints/report/ledger.json", receipt=rid)
+
 
 def num(v: Any, unit: str, ref: dict[str, Any], source: str, unc: Any = None, **extra: Any) -> dict[str, Any]:
     return dict(value=_f(v), unit=unit, stage=ref["stage"], source=source, uncertainty=credibility._clean(unc), receipt=ref["receipt"],
@@ -342,8 +352,9 @@ def _stat(e: dict[str, Any], ref: dict[str, Any], src: str) -> dict[str, Any]:
     if exercised and not open_:
         d["certify_statement"] = f"P(fail) < 5 % is excluded by this ensemble (lower 95 % bound {fail_lo:.2f})."
     elif open_ and e["n"] < v["n_certify"]:
-        d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: {v['n_certify']} members (two-sided 95 % Wilson bound) are needed "
-                                  f"(with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, one-sided 95 %).")
+        d["certify_statement"] = (f"P(fail) < 5 % cannot be certified at n = {e['n']}: at least {v['n_certify']} members "
+                                  f"(two-sided 95 % Wilson bound) are needed (with zero failures n members only show P(fail) < 3/n = {_g(3 / e['n'])}, "
+                                  "one-sided 95 %).")
     return d
 
 
@@ -1420,14 +1431,14 @@ def build(run: pathlib.Path, mission: dict[str, Any], plan: dict[str, Any], env:
     files = (("windows", "windows.json"), ("stage3", "windows.json"), ("refit", "refit.json"), ("emulator", "holdout.json"), ("emulator", "flip.json"),
              ("emulator", "design.json"))
     wins, st3, refit, emu, flip, design = (_jl(run / d / f) for d, f in files)
-    cfg, pref = tr.ref("ingest", label="mission"), tr.ref("ingest", label="plan")
+    cfg, pref, seed_ref = tr.ref("ingest", label="mission"), tr.run_file_ref("plan.json", "plan"), tr.run_file_ref("mission.yaml", "mission")
     cred_ref = tr.file_ref(run / "report" / "credibility.json")
     ing = tr.led["ingest"] or {"inputs": []}
     b = mission["box"]
     rep: dict[str, Any] = dict(
         schema=SCHEMA, run=run.name,
         mission=dict(name=mission["name"], description=str(mission.get("description", "")).strip(), window=dict(mission["window"]),
-                     seed=num(mission["seed"], "", cfg, "mission.yaml seed"),
+                     seed=num(mission["seed"], "", seed_ref, "mission.yaml seed"),
                      box=vals([b["lon_min"], b["lon_max"], b["lat_min"], b["lat_max"]], "deg", cfg, "mission.yaml box (lon_min, lon_max, lat_min, lat_max)"),
                      data_consumed=dict(inputs=[dict(ref=i["ref"], sha256=i.get("sha256"), note=i.get("note", "")) for i in ing["inputs"]],
                                         variables="cafe/schemas/wrfout.json and cafe/schemas/umwmout.json (read per hour over the mission window)")),
@@ -1521,7 +1532,7 @@ def _stat_html(d: dict[str, Any]) -> str:
     u = d["p_fail"]["uncertainty"]
     si, th = d["stop_interval"], d["thresholds"]
     nc = d["n_certify"]                                               # None for a NOT EXERCISED link: no member count certifies it (DECISIONS 533)
-    cert = "" if nc is None else f" (certifying P(fail) &lt; 5 % needs {_n(nc)}, two-sided 95 % Wilson bound)"
+    cert = "" if nc is None else f" (certifying P(fail) &lt; 5 % needs at least {_n(nc)}, two-sided 95 % Wilson bound)"
     h = (f"<p>P(fail) = {_n(d['p_fail'])}, {u['conf']:.0%} {html.escape(u['kind'])} {u['lo']:.3g} to {u['hi']:.3g} (the verdict's own level); "
          f"{_n(d['k_fail'])} failed of {_n(d['n'])}{cert}.</p>"
          f"<p class=muted>{INTERVAL_SCOPE.format(n=_n(d['n']))}</p>"

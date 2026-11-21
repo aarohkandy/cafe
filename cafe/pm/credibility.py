@@ -135,7 +135,7 @@ LIMITATIONS = [
     dict(id="L17", text="in the shipped quad_uas.yaml the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance",
          factors=["validation"],
          where=["cafe/pm/physics/uas.py", "platforms/quad_uas.yaml"]),
-    dict(id="L18", text="the USV speed prior is calibrated in a scenario without current, and the mission's westward current then lowers the speed ratio "
+    dict(id="L18", text="the USV speed prior is calibrated in a scenario without current, and the mission's current may then lower the speed ratio "
                         "again; "
                         "whether Chiodi et al.'s 0.178 already includes currents is not known, so a double penalty is possible and not established",
          factors=["validation", "uncertainty"], where=["platforms/saildrone_explorer.yaml", "cafe/pm/physics/usv.py"]),
@@ -762,7 +762,7 @@ class Facts:
         # recorded there and nowhere else (round 11, M-2), and an edit of either after the stage ran is the run's (look-ahead L0). `pipeline.s_report` voids
         # the ledger of an earlier run of the stage while it runs, so a report built inside the stage has no such line.
         mine = f"{run.name}: stage report: "
-        self.problems = [p for p in ledger_problems(run) if ": no ledger" not in p and (not p.startswith(mine) or p.startswith(mine + "input "))]
+        self.problems = [p for p in ledger_problems(run) if (not p.startswith(mine) or p.startswith(mine + "input "))]
         self.refs = refs = {v["platform"] for v in (self.mission or {}).get("vehicles", [])}
         links = (self.mission or {}).get("links") or []
         kinds = {lk.get("kind") for lk in links}
@@ -1200,7 +1200,7 @@ def sanity(f: Facts) -> dict[str, Any] | None:
                      f"speed over ground / mean 10 m wind along the track {sp['ratio_median']:.3f} (median of the per-member ratios; no ratio at the "
                      "anemometer height in this summary, so part of the gap is the difference of the wind heights)")
             detail = (f"{shown} against Chiodi et al.'s {USV_CHIODI_RATIO} (at the anemometer height): the calibration scenario differs from the "
-                      "mission (no current, uniform wind, sailing to a station); the westward current lowers the mission ratio and the calibration may "
+                      "mission (no current, uniform wind, sailing to a station); a current in the mission may lower the ratio and the calibration may "
                       "already include part of that effect, a possible double penalty that is not established")
         rows.append(dict(id=k, expected=x["text"], allowed=x["allowed"], observed=v, k_fail=e["k_fail"], n=e["n"], agrees=agrees, detail=detail))
     return dict(mission=name, note=SANITY_NOTE, rows=rows)

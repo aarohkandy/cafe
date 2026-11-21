@@ -1367,11 +1367,17 @@ def s_windows(ctx: Context, L: Ledger) -> None:
     problems: list[str] = []
     for vid, r in res["vehicles"].items():
         f = stage1.failed(r)
-        sel = f if f.any() else np.ones_like(f)
         t = np.asarray(r["t"])
-        lon, lat = np.asarray(r["lon"])[:, sel], np.asarray(r["lat"])[:, sel]
+        lon_all, lat_all = np.asarray(r["lon"]), np.asarray(r["lat"])
+        ok_all = np.isfinite(lon_all)
+        inside = getattr(ctx.env, "inside", None)
+        if inside is not None:             # a member that failed by `left_data` keeps finite records outside the box, and the environment here is strict
+            ok_all &= np.asarray(inside(lon_all, lat_all, np.broadcast_to(t[:, None], lon_all.shape)), bool)
+        fsel = bool(f.any() and ok_all[:, f].any())            # the failed members when one has a record inside the data, else all members
+        sel = f if fsel else np.ones_like(f)
+        lon, lat = lon_all[:, sel], lat_all[:, sel]
         tt = np.broadcast_to(t[:, None], lon.shape)
-        ok = np.isfinite(lon)
+        ok = ok_all[:, sel]
         records = "all records"
         if r["class"] == "uas" and "airborne" in r:
             air = np.asarray(r["airborne"], bool)[:, sel]
@@ -1404,9 +1410,9 @@ def s_windows(ctx: Context, L: Ledger) -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             # the failure instants of the selected members
-            failed_at = sorted(float(x) for x in np.nanmin(first, 0)[f] if np.isfinite(x)) if f.any() else []
+            failed_at = sorted(float(x) for x in np.nanmin(first, 0)[f] if np.isfinite(x)) if fsel else []
         out[vid] = [dict(t=float(t[i]), stress=float(worst[i]), lon=float(cv.lon_median(lon_ok[i])), lat=float(np.nanmedian(lat_ok[i])),
-                         basis=BASIS[bool(f.any())], criterion=CRITERION[r["class"]], records=records, failed_at=failed_at) for i in idx]
+                         basis=BASIS[fsel], criterion=CRITERION[r["class"]], records=records, failed_at=failed_at) for i in idx]
         problems += [f"{vid}: {p}" for p in window_problems(t, worst, out[vid], K)]
     L.check("every_vehicle_has_a_window", all(out.values()), value=sum(map(len, out.values())))
     L.check("windows_are_the_argmax", not problems, value=len(problems), limit=0, note="; ".join(problems[:3]))
