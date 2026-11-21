@@ -74,7 +74,7 @@ only" with `depth_m`; one FEA serves all K windows (sea pressure does not depend
 D-B. The FEA runs serial in the one-worker pool the free-surface cases use, before them (they share the CPUs), and counts against the free-surface queue.
 `budget.plan` holds `fea_min_s` per planned-out glider inside the stage-3 share, only when the share also holds all the free-surface cases that fit
 (`les.fea_hold_s`, else 0: quick and ci hold 0 and the row says "not planned ... stage3.fea_min_s"); `stage3_plan` prices `fs` on the share less the hold and
-reports `fea.hold_s`, so the plan's `fs.fit` is the runtime gate's. `profile_stage3_s` is likewise net of the hold. The hold is from plan inputs only (plan.json
+reports `fea.hold_s`, so the plan's `fs.fit` is the runtime gate's (the gate allows the same microsecond: see Skeptic pass, 1). `profile_stage3_s` is likewise net of the hold. The hold is from plan inputs only (plan.json
 stays deterministic); it changes `plan.json` and so the plan hash at 4h and overnight for a CPU run (q24 and q25 plan hashes no longer match).
 
 D-C. The report prints beside the hull warning, for a glider with such a row, `vehicles.<vid>.hull_fea` (load, depth_m, utilization, stress_utilization,
@@ -97,7 +97,7 @@ CHANGELOG lines:
 
 ## Final-tree checks (orca, 2 CPUs)
 
-- wo_fea_f2 rc=0: tests/test_wo_fea.py (11), tests/test_budget.py, tests/test_round23_claims.py (no new hit), and the five tests of tests/test_stage3.py that
+- wo_fea_f2 rc=0: tests/test_wo_fea.py (12 at that run's tree: T1 to T10 with T4b and T4c), tests/test_budget.py, tests/test_round23_claims.py (no new hit), and the five tests of tests/test_stage3.py that
   read `profile_stage3_s` / the free-surface refusal clause (m14, r10_m33, the named-budgets, share-decides, smallest-profile tests).
 - wo_fea_lint2 rc=0: `ruff check cafe/pm tests` clean, `mypy cafe/pm` clean (57 files).
 - wo_fea_t3 (tree before the `profile_stage3_s` fix, 02:40 PST): tests/test_stage3.py, test_report.py, test_wo_fea.py ran with exactly one failure, m14, which
@@ -116,3 +116,33 @@ CHANGELOG lines:
 - The model Seaglider hull (8 mm Al 6061, assumed) reads utilisation 2.87 at 950 m: the hull yields or buckles in the model; the owner's option A or B (plan section 8) is unanswered. I changed no hull number.
 - QUESTIONS_FOR_LAB 4a cites `platforms/seaglider.yaml` for a wall it does not hold (it is `assumptions.yaml:203-237`); the lead may fix that sentence.
 - `_row` unclipped vs the new path clipped: the two differ only above the 1000 m rating.
+
+## Skeptic pass
+
+1. Plan `fs.fit` against the run's gate in a 1e-6 s band (budget.py:518, pipeline_windows.py:713). **Real, fixed.** `_fs_gate` now allows the same microsecond
+   `stage3_plan` adds (`need_s <= left_s + 1e-6`), so a case the plan says fits is run when the share is `(kept / budget_s) * budget_s` a few 1e-13 s below
+   `kept`. The band also existed before this change for `kept = fit * need_s` (no hold); the fix covers both. Regression test T11
+   (`test_t11_the_run_gate_runs_the_free_surface_case_the_plan_says_fits_...`): sweeps 2,000 estimates at the overnight budget with a hold of one or two FEAs,
+   builds the run's `left` as the run does, asserts the sweep reaches the band (`left < need_s`) and the gate runs every case. Before (the gate line reverted,
+   job wo_fea_t11b): fails, 129 of the 2,000 estimates in the band and refused (rc=1). After: wo_fea_sk2 rc=0 (see below). Pins moved: none. Printed sentences: none
+   (the refusal text is unchanged; it only fires less often).
+2. Report line wording (report.py:1728). **Routed to the lead.** The sentence is the plan's draft, which the plan says the lead approves; the work order names
+   only the label. Skeptic's suggestion ("in the model") is a wording change I did not make without that approval. Same for the log line.
+3. Gate-failure reason prints the held seconds left as "the FEA reserve" (pipeline_windows.py:436). **Routed to the lead** (accept as disclosed, or name the held
+   seconds). Not changed: any other sentence needs approval under section 5.
+4. Hand-back accuracy. **Fixed in this file:** "(11)" is 12 tests at the wo_fea_f2 tree (T1 to T10 plus T4b and T4c); T11 is the thirteenth. The rest is as the skeptic
+   says and as disclosed above: the before/after table for T1 to T9 uses wo_fea_t1 / wo_fea_base1; T10 was not run against the unfixed `profile_stage3_s`
+   (m14 is its before evidence); DECISIONS, CHANGELOG, STATUS, HANDOFF rows are the lead's (drafted above, per the order); no `assumptions.yaml` `fea_min_s` note and no
+   QUESTIONS 4a fix (documents, the lead's). Whole `tests/test_stage3.py`: see "Final-tree checks, second pass".
+5. `profile_stage3_s` rounds every profile to 6 decimals and floors at 0. **Not a defect, left as is.** The only callers are `freesurface.fitting_budget` (a
+   sentence in minutes) and the tests at tests/test_stage3.py:2627-2639; the rounding is what keeps the m14 pin at 0.0 when the hold takes the whole share
+   (-2e-13 otherwise). Rounding only when a hold exists would add a branch for no reader.
+
+## Final-tree checks, second pass (after fda6af7; orca, 2 CPUs)
+
+- wo_fea_sk2 rc=0: tests/test_wo_fea.py (13 with T11), tests/test_budget.py, tests/test_round23_claims.py all pass; `ruff check cafe/pm tests` clean; `mypy cafe/pm` clean (57 files).
+  (wo_fea_sk, the first run, found a 164-character comment line in the edit and failed ruff: shortened, the tests had passed.)
+- wo_fea_rep rc=0: the whole of tests/test_report.py on the final tree (199 tests).
+- wo_fea_stg: the whole of tests/test_stage3.py was started and stopped by me (exact tmux session, rc=143) after 55 of 194 tests in 32 min (box load average 17):
+  **NOT run whole on the final tree**. What did run on it: the five `profile_stage3_s` / free-surface refusal tests (wo_fea_f2, before the one-line gate change;
+  the gate change only widens `need_s <= left_s` by 1e-6 s, and no stage-3 pin sits within a microsecond of a gate boundary that I know of). The lead's whole-file run is still due.
