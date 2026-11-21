@@ -13,7 +13,7 @@ The lead paused here at the user's request, mid round 8. Everything below is exa
 - Merged on branch `wo-merged`: the emulator fixes (DECISIONS 1097 to 1099), the sea-pressure-only hull FEA (1100, 1101: Seaglider utilisation 2.873 at 950 m, warning kept, verdict not capped), the contribution table (1102), the verdict fixes (1091 to 1096).
 - In build: the glider CFD part (the RANS probe is 1103). The USV hull CFD does not converge as configured (1104) and is out of this order's done.
 - Remains: the glider part's merge, the gate, the final overnight run, the fast-forward, then the freeze steps below once.
-- **LEAD: fill in** (the gate result)
+- The gate (`bin/orca_gate.sh 13 wog1 --cov`, orca, third pass, on `44c0b00`, the final code): 9,411 tests, 0 failed, 0 errors, 0 skipped; coverage 99.994 % of 17,079 statements (one line, `stage3/pipeline_windows.py:1008`: a row whose LES window ran keeps its own FEA; reached in a real run, not in a unit test); the audit's one problem is the absent `docs/mutation.json`. The first pass (`8a0af87`) failed one stale pin (the real-stage-3 twin test's row count), the second (`b7bca15`) was green before the report fix of DECISIONS 1107.
 - **LEAD: fill in** (the final run's result)
 - The owner's open decisions: the Seaglider hull, the UAS sortie slack, the demo link positions, a GPU (QUESTIONS_FOR_LAB 22). Open problems of the batch: `review/orca/PROBLEMS.md` P-WO1 on.
 
