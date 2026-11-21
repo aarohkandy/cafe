@@ -967,6 +967,28 @@ Round 23 started early, beside the close of round 22 (its four reviewers read th
 - The cafe app's front end redrawn (DECISIONS 1086; `cafe/static/index.html`, `style.css`, `app.js`; not part of a review round): pages Mission, Robots, Autopilot, Receipts (were Plan a deployment, Hangar, Emulator, Receipts) and 'robot' throughout; a finished run opens on a Result tab with the verdict first; a robot's route is a line of stops; a robot is added by choosing it and pressing 'Add to mission'; robots are drawn on the map by kind and turned to their heading; a run shows a progress bar. Fixed on the way: wind barbs invisible in the dark theme; 'null' printed under the structure table; 'Add a range requirement' shown with fewer than two robots; a follow step that kept the id of a removed robot. Gone: the signal-flag verdict icons and the per-robot design chooser. The Autopilot page says that `/api/live` hands out true state (no sensor noise). Not run: the pytest (the text checks of `tests/test_round22_d.py` pass on a copy run on the laptop), a firmware run from the new UI. Added after the first deploy (DECISIONS 1087, 1088): the Result pane's 'Earlier runs' list reopens any finished mission on the server.
 - Gate and demo: **not run** on the round 23 tree. Pending, the lead's: the gate (`bin/orca_gate.sh`), the demo q25 on the merged tree and the rest of the list in HANDOFF section 00. Expected of q25 against q24: no verdict, count, interval, margin or array moves; the texts that move are the RF cards, L23, the Iridium note, the attitude note, the certify statement, a Bellhop label if one ran and the NOT EXERCISED note if one prints, and `report.json` loses the `uas_limits` `max_airspeed` node.
 
+### Work order: CFD, FEA and the emulator on CPU (after round 23)
+
+The review loop ended after round 23 (DECISIONS 1089). Hand-backs: `review/workorder/handbacks/`.
+
+- Measurement: the first `--budget overnight --gpus 0` run, `on1`, no code change (DECISIONS 1090; `review/workorder/on1.md`).
+- Report: the member count that certifies P(fail) < 5 % prints as 'at least N' in the certify statement and the card (1091).
+- Report: the USV ratio note and L18 no longer name the demo's westward current (1092).
+- Report: receipts of the seed and the plan values are the hashes of `mission.yaml` and `plan.json` (1093).
+- Stokes drift source text names the uncertainty as a median absolute error used as the 1-sigma, an assumption (1094).
+- A run missing a stage ledger no longer reads 'ledger chain audits clean' (1095).
+- `s_windows` no longer queries the strict environment outside the data (1096).
+- A resume under another `--emulator-table` reruns the emulator stage and those after it (1097).
+- The UAS base row of the emulator's training table is made in the 10 m profile, like its variants (1098).
+- `whatif --run` trains on the run's code digest and answers in Stage 1 a scope the run's hold-out did not use (1099).
+- Stage 3: a glider whose LES part is planned out gets a sea-pressure-only hull FEA (`_sea_pressure_fea`), at the smaller of the order and the platform's rating (1100).
+- Plan: stage 3 holds `fea_min_s` per planned-out glider (`les.fea_hold_s`, `fea.hold_s`) ahead of the free-surface cases; the FEA runs first in their queue; `profile_stage3_s` is net of it; the free-surface gate allows the microsecond `fs.fit` allows (1100).
+- Report: `vehicles.<vid>.hull_fea` and one line beside the hull warning (1101).
+- Report: contribution table after the Verdicts table (CFD, FEA, Emulator per vehicle and link) and `report.json` key `contribution` (1102).
+- `review/workorder/rans_probe.py`: one-case CPU RANS measurement of the demo Seaglider (two grids, GCI, cd against `cd_hangar`); no product change (1103).
+- `review/workorder/fs_probe.py`: one-grid measurement of the free-surface USV hull case; no product change (1104).
+- Tests: `tests/test_wo_verdict.py`, `test_wo_emu.py`, `test_wo_fea.py`, `test_wo_table.py`, `test_wo_cfdprobe.py`, `test_wo_fs.py`; pins moved in `tests/test_budget.py`, `test_credibility.py` and `test_report.py` (1091 to 1093, 1100).
+
 ### Known issues
 
 Each was checked against the committed code at `d7a618b` on 2026-10-30 before it was listed. Line numbers are those of `d7a618b`; the working tree also holds uncommitted edits to `cafe/pm/physics/*.py`, `stats/intervals.py` and `audit.py`, which were not read as part of this entry.
