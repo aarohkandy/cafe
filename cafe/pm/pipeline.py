@@ -1683,7 +1683,8 @@ def s_emulator(ctx: Context, L: Ledger) -> None:
     L.output(_dump(dict(share_s=share, variant_s=est, variant_planned_s=est, variant_s_source=sizes["variant_s_source"], variants=variants,
                         skipped=skipped, killed=killed, spent_s=spent, flip_spent_s=fspent, rows_added=len(rows), table_rows=len(train_df),
                         table=pathlib.Path(used).name, train_input_rows=len(train_in),
-                        train_fraction=whatif.TRAIN_FRAC, planned_variants=n_var, stage1b_free=free, stage1_unpriced=unpriced), ctx.path("emulator", "design.json")))
+                        train_fraction=whatif.TRAIN_FRAC, planned_variants=n_var, stage1b_free=free,
+                        stage1_unpriced=unpriced), ctx.path("emulator", "design.json")))
 
 
 def s_report(ctx: Context, L: Ledger) -> None:

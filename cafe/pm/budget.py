@@ -611,9 +611,9 @@ def emulator_share_s(plan: dict[str, Any], stage1b_free: bool = False) -> float:
     twice when a vehicle was refit (stage 1 and its rerun), once when stage 1b was a copy; never below the own share. The planner caps stage 1 at its
     estimate, which is a lower bound (the measured stage ran 2.2 to 4.2 times over it), and a refit makes the glider's emulator pay for CFD, so the
     own 5 % of the budget gave 25 variants at overnight against 100 points needed. Every other budget returns the own share.
-    The four planned stage seconds fit the budget: stage 1 at `STAGE1_PRICED` x its estimate, stage 3's share, stage 1b at the same (refit) or free
-    (copy), and this share add up to the sum of the four shares, which is the budget (unless stage 1 priced that high already exceeds its own
-    share, where the floor holds and the sum is over by the excess)."""
+    The four planned stage seconds stay inside the budget: stage 1 at `STAGE1_PRICED` x its estimate, stage 3's share, stage 1b at the same (refit)
+    or free (copy), and this share add up to the sum of the four shares, 0.95 of the budget (5 % stays slack), unless stage 1 priced that high
+    already exceeds its own share, where the floor holds and the sum is over by the excess."""
     own = emulator_own_share_s(plan, stage1b_free)
     if plan["budget"] not in EMULATOR_REACH:
         return own

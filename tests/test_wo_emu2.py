@@ -1,6 +1,7 @@
-"""Work order step 4, the emulator again: on a reach budget the emulator's share is its own plus the seconds of the stage-1 and stage-1b shares that the plan does
-not price, so a refit does not starve it (on1: 99 variants ran in 7,200 s, 1,800 s would have run 25); the plan's note no longer says 'will not train' for a plan
-that trains. Each test failed on the code of 40f04c5 and passes with the change (review/workorder/handbacks/emu2.md lists the jobs)."""
+"""Work order step 4, the emulator again: on a reach budget the emulator's share is its own plus the seconds of the stage-1 and stage-1b shares
+that the plan does not price, so a refit does not starve it (on1: 99 variants ran in 7,200 s, 1,800 s would have run 25); the plan's note no
+longer says 'will not train' for a plan that trains. Each test failed on the code of 40f04c5 and passes with the change
+(review/workorder/handbacks/emu2.md lists the jobs)."""
 import json
 
 import pytest
@@ -41,8 +42,9 @@ def test_the_reach_share_is_the_own_share_plus_the_unpriced_seconds_of_stages_1_
     assert budget.emulator_share_s(p, False) == pytest.approx(B * (sh["emulator"] + sh["stage1"] + sh["stage1b"]) - 2 * 5.0 * s1)      # stage 1 and its rerun
     assert budget.emulator_share_s(p, True) == pytest.approx(B * (sh["emulator"] + sh["stage1"] + sh["stage1b"]) - 5.0 * s1)           # stage 1b was a copy
     assert budget.emulator_share_s(p, False) > 4 * old_share(p, False) and budget.emulator_share_s(p, True) > old_share(p, True)
-    over = dict(p, stage1_s=B)                                                                                  # stage 1 priced over its share: never below the old value
-    assert budget.emulator_share_s(over, False) == pytest.approx(old_share(p, False)) and budget.emulator_share_s(over, True) == pytest.approx(old_share(p, True))
+    over = dict(p, stage1_s=B)                                                      # stage 1 priced over its share: never below the old value
+    for free in (False, True):
+        assert budget.emulator_share_s(over, free) == pytest.approx(old_share(p, free))
 
 
 @pytest.mark.parametrize("name", ["ci", "quick"])
@@ -61,7 +63,8 @@ def test_the_four_planned_stage_seconds_fit_the_budget(name):
     assert B * sh["stage1"] >= budget.STAGE1_PRICED * s1                                                        # the floor does not bind here
     refit = budget.STAGE1_PRICED * s1 + B * sh["stage3"] + budget.STAGE1_PRICED * s1 + budget.emulator_share_s(p, False)
     copy = budget.STAGE1_PRICED * s1 + B * sh["stage3"] + 0.0 + budget.emulator_share_s(p, True)
-    assert refit <= B * (1 + 1e-9) and copy <= B * (1 + 1e-9) and refit == pytest.approx(B)
+    total = sum(sh.values()) * B                                                                                # 0.95 of the budget: 5 % stays slack
+    assert total < B and refit == pytest.approx(total) and copy == pytest.approx(total)
 
 
 def test_the_plans_note_does_not_say_will_not_train_when_it_trains_and_still_does_at_quick():
