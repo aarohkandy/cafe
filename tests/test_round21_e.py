@@ -198,8 +198,8 @@ RAW_ISFINITE = {
     "cafe/pm/report.py": (1, "`_f`: of a value that `isinstance(x, float)` says is a float"),
     "cafe/pm/stage3/fluidx3d.py": (1, "`case_dict`: the solver's own float parameters"),
     "cafe/pm/stage3/freesurface.py": (3, "`float(...)` of a stored number (read by `load_json`, an integer fits) and a float the check made"),
-    "cafe/pm/stage3/rans.py": (6, "`flow_label`: of a norm the arithmetic made; `row_fields`: of `float(...)` of a stored number (read by `load_json`, an integer fits) "
-                                  "and of floats the checks made; `reasons`: of a check's value, a float"),
+    "cafe/pm/stage3/rans.py": (6, "`flow_label`: of a norm the arithmetic made; `row_fields`: of `float(...)` of a stored number (read by `load_json`, "
+                                  "an integer fits) and of floats the checks made; `reasons`: of a check's value, a float"),
     "cafe/pm/stage3/lbm.py": (1, "`positive_float`: of `float(text)` of a command-line string"),
     "cafe/pm/stats/intervals.py": (2, "of the result of the arithmetic (a float), which is the check batch F added"),
     "cafe/pm/stats/sampling.py": (3, "`_check_range`, after `_num` (which catches OverflowError) has passed every number of the entry; floats"),

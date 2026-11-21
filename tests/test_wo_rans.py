@@ -486,6 +486,13 @@ def test_t24_the_real_openfoam_meshes_the_unioned_glider_at_toy_size_and_its_for
     assert math.isfinite(mean) and std >= 0.0
 
 
+def test_t26_hull_and_wing_that_do_not_union_into_a_closed_solid_are_a_row_that_says_so(no_wall_receipt, rans_env, monkeypatch):
+    import trimesh
+    monkeypatch.setattr(trimesh.boolean, "union", lambda meshes, engine=None: trimesh.Trimesh(vertices=[[0, 0, 0], [1, 0, 0], [0, 1, 0]], faces=[[0, 1, 2]]))
+    r = body_rans(pw.run(rans_ctx(no_wall_receipt), {"g": [WIN]}, FakeL())["g"])[0]
+    assert not r["ok"] and r["error"] == "RANS window failed: the hull and wing do not union into a closed solid" and RS["calls"] == []
+
+
 # ---------------------------------------------------------------------------------------------------- the report
 
 def test_t25_the_report_shows_a_body_rans_row_beside_the_les_rows_of_its_window_and_its_traceability_holds(tmp_path, monkeypatch):
