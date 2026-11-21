@@ -8,5 +8,8 @@ Script: `review/workorder/fs_probe.py` (one grid per run; test `tests/test_wo_fs
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | fs_c1 | 1 | 70,585 | 8000 | 6 | 14 | 1,291 | 437,254 | never | 12.865 | 0.591 | 0.0016 | 1 | 18,205 |
 | fs_f4 | 4 | 209,085 | 8000 | 6 | 27 | 3,115 | 537,014 | never | 19.725 | 0.253 | 0.0308 | 0 | 19,259 |
+| fs_c3 | 3 | 143,605 | 8000 | 6 | 35 | 2,183 | 526,254 | never | 20.907 | 0.314 | 0.0153 | 1 | 18,715 |
+| fs_c2 | 2 | 101,615 | 8000 | 6 | 17 | 1,576 | 515,661 | never | 18.408 | 0.404 | 0.0050 | 1 | 18,406 |
+| fs_f4nk (no keel) | 4 | 209,236 | 5000 | 6 | 28 | 2,750 | 380,402 | never | 6.293 | 0.726 | 0.0154 | 0 | 18,192 |
 
 Smoke runs before these (coarse grid, 2 cores, 300 and 500 iterations, `--settle` path included) only checked that the script and `dtmb5415._converge` run on this case; not counted.
