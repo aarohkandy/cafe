@@ -230,6 +230,12 @@ def les_windows(budget: str, gpus: int, classes: dict[str, str], rate: float, sh
     return out
 
 
+def fea_planned_out(classes: dict[str, str], wins: dict[str, dict[str, Any]]) -> list[str]:
+    """The vehicles of the FEA classes with an LES part that does not run: their hull FEA has no LES pressure to start from and runs from the sea
+    pressure alone (stage3/pipeline_windows.py `_sea_pressure_fea`). Plan inputs only."""
+    return [vid for vid, c in classes.items() if c in FEA_CLASSES and any(not wins.get(f"{vid}/{part}", dict(runs=True))["runs"] for part in STAGE3_PARTS[c])]
+
+
 def fs_plan(classes: dict[str, str], K: int, a: dict[str, Any], share: float | None) -> dict[str, Any] | None:
     """The free-surface cases (`K` per USV): priced once, `fit` of them fit `share` (all, with no wall-clock budget). None without any case, or
     when the FluidX3D plugin replaces interFoam."""
@@ -407,12 +413,15 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     K = WINDOWS[budget]
     a = stage3_assumptions()
     wins = les_windows(budget, gpus, classes, rate, SHARE["stage3"] * B, K, a)
-    shares, skipped_s = dict(SHARE), 0.0
+    shares, skipped_s, hold = dict(SHARE), 0.0, 0.0
     if wins and not all(w["runs"] for w in wins.values()):                      # the slices of the windows that do not run go back to stage 1 ...
         s3 = SHARE["stage3"] * B
         kept = s3 * sum(w["runs"] for w in wins.values()) / len(wins)
         fs = fs_plan(classes, K, a, s3)                                         # ... but the free-surface cases keep what they fit in the whole share
-        kept = max(kept, 0.0 if fs is None else fs["fit"] * fs["need_s"])
+        fs_s = 0.0 if fs is None else fs["fit"] * fs["need_s"]
+        hold = len(fea_planned_out(classes, wins)) * a["fea_min_s"]             # ... and the sea-pressure FEA of each glider planned out (all or none)
+        hold = hold if s3 >= fs_s + hold else 0.0
+        kept = max(kept, fs_s + hold)
         skipped_s = s3 - kept
         shares.update(stage3=kept / B, stage1=SHARE["stage1"] + skipped_s / B)
     share1 = shares["stage1"] * B
@@ -446,7 +455,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     les = dict(backend=backend, rate=rate, rate_source=rate_src, windows_per_vehicle=K,
                # the share kept, not SHARE: the skipped windows gave theirs to stage 1 (round 12, M-28)
                cell_steps_per_window=shares["stage3"] * B * rate / max(K * len(classes), 1),
-               cpu_fallback=gpus == 0, windows=wins,
+               cpu_fallback=gpus == 0, windows=wins, fea_hold_s=hold,
                label=("GPU LES windows" if gpus > 0 else
                       "CPU fallback: no LES coefficients exist on this machine (no window reaches the physical lattice viscosity with this "
                       "budget's cell-updates); "
@@ -484,7 +493,9 @@ def stage3_plan(p: dict[str, Any], classes: dict[str, str], a: dict[str, Any]) -
     `runs` says whether the slice reaches `stage3.min_window_s`; `fea.runs` whether the reserve reaches `stage3.fea_min_s`. `fs` prices the
     free-surface cases (None without any, or when the FluidX3D plugin replaces interFoam): the first `fit` of `cases` fit the share, in queue
     order. `les` is `reachable` (any window reaches the physical viscosity), its `windows` and a `note`; a plan with `max_cells` (GPU memory
-    known) is refused (`memory_guard`) when a window's planned nest is over 85 % of it. A plan with no wall-clock budget (`shares`/`budget_s`
+    known) is refused (`memory_guard`) when a window's planned nest is over 85 % of it. `fea.hold_s` is the part of the share `plan` kept for the
+    sea-pressure FEAs of the gliders whose LES part is planned out (`les.fea_hold_s`); `fs` is priced on the share less it.
+    A plan with no wall-clock budget (`shares`/`budget_s`
     absent) uses `les.cell_steps_per_window` shared between the parts."""
     les = p["les"]
     K = les["windows_per_vehicle"]
@@ -501,11 +512,15 @@ def stage3_plan(p: dict[str, Any], classes: dict[str, str], a: dict[str, Any]) -
         for w in wins.values():
             if w["runs"]:
                 memory_guard(w["cells_physical"] * min(1.0, w["afford_cell_updates"] / w["need_cell_updates"]) ** 0.75, LES_BYTES_PER_CELL, les["gpu_mem_gb"])
-    fs = fs_plan(classes, K, a, share)
+    hold = float(les.get("fea_hold_s", 0.0))                                # `plan`: seconds of the share kept for the sea-pressure FEAs
+    # the share is stored as a fraction of the budget, so `share - hold` carries rounding (-2e-13 s when the cases got nothing): a microsecond keeps `fit`
+    # what `plan` priced and never negative
+    fs = fs_plan(classes, K, a, None if share is None else max(share - hold, 0.0) + (1e-6 if hold else 0.0))
     reachable = any(w["reachable"] for w in wins.values())
     return dict(share_s=share, windows_per_vehicle=K, les_parts=n_les, slice_s=slice_s, min_window_s=a["min_window_s"],
                 runs=n_les == 0 or slice_s is None or slice_s >= a["min_window_s"], compile_s=a["compile_s_guess"], les_margin=a["les_margin"],
-                fea=dict(reserve_frac=a["fea_reserve_frac"], reserve_s=fea_s, min_s=a["fea_min_s"], runs=slice_s is None or fea_s >= a["fea_min_s"]),
+                fea=dict(reserve_frac=a["fea_reserve_frac"], reserve_s=fea_s, min_s=a["fea_min_s"], runs=slice_s is None or fea_s >= a["fea_min_s"],
+                         hold_s=hold),
                 cell_steps_per_part=per_part, fs=fs,
                 les=dict(reachable=reachable, windows=wins,
                          note=("no LES coefficients exist on this machine; sub-grid and refit stay uncalibrated"
