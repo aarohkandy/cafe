@@ -50,3 +50,19 @@ None ran (it is called only inside a glider LES window). The Seaglider's hull wa
 Refinement ratio 1.427; GCI 0.243 (the free-surface part's limit is 0.10); norm of the force's std over the drag on the fine grid 0.084 (almost all of it in the lift component). `cd_hangar` 0.301, so cd / cd_hangar is 1.29: the CFD drag is above the analytic one, not below it. Total 448 s.
 
 What it settles: a case costs minutes, not hours, and both meshes are valid; this pair of grids does not pass a 10 % GCI. A second experiment on finer grids is running (`handbacks/cfdprobe.md`).
+
+# The two gliders' real RANS cases through the pipeline path (before the final run)
+
+`review/workorder/rans_real.py --cores 6` on orca, the real child through `pipeline_windows._rans_work`, then the real `s_refit` on that row alone.
+
+| | Seaglider (`wo_rans_real2`) | Slocum (`rans_slocum`, beside the gate `wog1`) |
+|---|---|---|
+| ok | true | true |
+| cd / cd_hangar | 0.3718 / 0.3014 = 1.233 | 0.3536 / 0.2840 = 1.245 |
+| cd_spread | 0.0352 | 0.0324 |
+| rans_gci (limit 0.10) | 0.0944 | 0.0917 |
+| rans_refinement_ratio (at least 1.3) | 1.596 | 1.590 |
+| rans_iterative_scatter (limit 0.02) | 0.0070 | 0.0022 |
+| failed mesh checks | 0 | 0 |
+| seconds | 856 | 727 |
+| refit | used, multiplier 1.233 | used |
