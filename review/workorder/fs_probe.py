@@ -5,8 +5,8 @@ usv_vehicle, freesurface.write_stl, usv_case, vb = R (v - u_env)), then runs ONE
 level_offset N - 4 in freesurface.GRIDS' terms, snappy surface level 0) and writes <out>/result.json: cells, failed mesh checks, seconds (mesh, solve),
 iterations run, the resistance as block means every 250 iterations over the whole history, the mean and std of the last 20 % (cfd.tail_stats, what
 production reports), the drift between the last two 1,000-iteration blocks, the vertical force, Courant numbers and y+ when the logs give them, the
-iteration at which the history first satisfies the DTMB study's rule (dtmb5415.settle/unsettled), and the cell-updates per second. The case directory keeps its logs and
-postProcessing (cfd._shrink).
+iteration at which the history first satisfies the DTMB study's rule (dtmb5415.settle/unsettled), and the cell-updates per second.
+The case directory keeps its logs and postProcessing (cfd._shrink).
 cafe/cfd.py and every other product file is untouched: the probe only patches module globals in its own process (cfd.sh, cfd.FS_BOXES for a 5th box).
 
   --settle   run interFoam through dtmb5415._converge (250-iteration restarts from 1,000 up to --iters until drift <= 0.5 % and scatter <= 2 %) and
