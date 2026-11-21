@@ -30,6 +30,7 @@ def main() -> int:
     ap.add_argument("--out", default="/data/runs/rans_real", help="work directory (everything written is under it)")
     ap.add_argument("--run", default="/data/runs/on1", help="finished demo run: windows.json, stage1/res.pkl and ingest/ the case is built from (read only)")
     ap.add_argument("--mission", default=str(ROOT / "missions" / "tepex_c_demo.yaml"))
+    ap.add_argument("--platform", default="seaglider", help="the glider platform of the demo mission to run (seaglider or slocum)")
     args = ap.parse_args()
     out = pathlib.Path(args.out).resolve()
     if not out.name.startswith("rans_real") or str(out).startswith("/tmp"):
@@ -43,7 +44,7 @@ def main() -> int:
 
     ctx = pipeline.Context(args.mission, "overnight", 0, args.run)      # the plan is in memory only: the Context writes nothing
     print(json.dumps(dict(plan_rans=ctx.plan["stage3"]["rans"], plan_label=ctx.plan["les"]["label"]), default=float), flush=True)
-    vid = next(v["id"] for v in ctx.mission["vehicles"] if ctx.classes[v["id"]] == "glider" and v["platform"] == "seaglider")
+    vid = next(v["id"] for v in ctx.mission["vehicles"] if ctx.classes[v["id"]] == "glider" and v["platform"] == args.platform)
     platform = next(v["platform"] for v in ctx.mission["vehicles"] if v["id"] == vid)
     w = json.loads((pathlib.Path(args.run) / "windows" / "windows.json").read_text())[vid][0]
     a = PW.assumptions()
