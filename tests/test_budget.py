@@ -251,7 +251,7 @@ def test_the_free_surface_cases_keep_the_share_they_fit_when_the_les_slices_go_t
     p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
     fs = budget.stage3_plan(p, CLASSES, a3())["fs"]
     hold = a3()["fea_min_s"] + a3()["glider.rans.est_s"] * a3()["glider.rans.margin"]       # the glider's sea-pressure FEA and its CPU RANS case
-    assert fs["fit"] == 1 and p["shares"]["stage3"] * 36000 == pytest.approx(fs["need_s"] + hold)   # the case that fits keeps its seconds, and the others theirs
+    assert fs["fit"] == 1 and p["shares"]["stage3"] * 36000 == pytest.approx(fs["need_s"] + hold)       # the case that fits keeps its seconds, so do the others
     assert p["shares"]["stage1"] == pytest.approx(budget.SHARE["stage1"] + budget.SHARE["stage3"] - (fs["need_s"] + hold) / 36000)
     assert budget.stage3_plan(p, CLASSES, a3())["les_parts"] == 0
     q = budget.plan("quick", 0, MISSION, thr={}, vehicle_classes=CLASSES)
