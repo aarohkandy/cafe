@@ -214,3 +214,24 @@ def test_t10_a_profile_gives_the_free_surface_cases_the_stage_3_seconds_less_the
     s = pw.profile_stage3_s(ctx)
     fs0 = budget.fs_plan(ctx.classes, budget.WINDOWS["overnight"], a, budget.SHARE["stage3"] * budget.BUDGET_S["overnight"])
     assert s["quick"] == 0.0 and s["4h"] == 0.0 and s["overnight"] == pytest.approx(fs0["fit"] * fs0["need_s"], abs=1e-3)
+
+
+def test_t11_the_run_gate_runs_the_free_surface_case_the_plan_says_fits_when_the_share_is_exactly_the_cases_and_the_hold(monkeypatch):
+    """The plan keeps `kept = fit * need_s + hold`; the run's share is `(kept / budget_s) * budget_s`, which can be a few 1e-13 s below `kept`, and the
+    gate's left is that share less the hold. Before the gate allowed a microsecond (`_fs_gate`, as `stage3_plan`'s `fit` does) the case the plan said
+    fits was refused for about one total in twenty."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(pw.freesurface, "fitting_budget", lambda *args: "a larger --budget")
+    monkeypatch.setattr(pw, "profile_stage3_s", lambda ctx: {})
+    a = budget.stage3_assumptions()
+    ctx = SimpleNamespace(plan=dict(shares=dict(stage3=0.1), budget_s=1.0))
+    B, below, refused = budget.BUDGET_S["overnight"], 0, []
+    for i in range(2000):
+        est = dict(total_s=5000.0 + 2.173 * i, cells=dict(fine=1), iters=1, cores=1, rate=1.0)
+        need_s = est["total_s"] * a["fs.margin"]
+        hold = a["fea_min_s"] * (1 + i % 2)
+        left = (((need_s + hold) / B) * B) - hold
+        below += left < need_s
+        if not pw._fs_gate(est, a, ctx, left, hold)[0]:
+            refused.append(est["total_s"])
+    assert below > 0 and not refused                       # the sweep does reach the band, and the gate runs every case in it

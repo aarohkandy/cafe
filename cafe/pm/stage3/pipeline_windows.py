@@ -710,7 +710,7 @@ def _fs_gate(est: dict[str, Any], a: dict[str, Any], ctx: Context, left_s: float
     queued (a plan-time rule, the same as budget.stage3_plan's `fs.fit`, not the clock): minutes needed, minutes available and the smallest
     `--budget` profile whose stage-3 share would hold it (and what is already queued) are in the sentence."""
     need_s = est["total_s"] * need(a, "fs.margin")
-    if need_s <= left_s:
+    if need_s <= left_s + 1e-6:                                             # (a share is a fraction of the budget; `fs.fit` allows the microsecond too)
         return True, "", need_s
     plan = ctx.plan
     return False, (f"free-surface window not run: estimated {est['total_s'] / 60:.0f} min x {need(a, 'fs.margin')} margin = {need_s / 60:.0f} min "
