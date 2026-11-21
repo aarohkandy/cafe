@@ -2055,7 +2055,8 @@ def _stage3_html(s: dict[str, Any]) -> str:
         if rf:
             d = rf["drag"]
             h += f"<p>Refit: {'used' if rf['used'] else 'not used'}" + (f" ({e(rf['reason'])})" if rf["reason"] else "")
-            h += (f"; drag multiplier mean {_n(d['mean'])}, sigma {_n(d['sigma'])}" if "mean" in d and "sigma" in d else "") + ".</p>"
+            chg = f", change vs baseline model {_n(d['change_vs_hangar'])}" if "change_vs_hangar" in d else ""       # a node of report.json: printed
+            h += (f"; drag multiplier mean {_n(d['mean'])}, sigma {_n(d['sigma'])}{chg}" if "mean" in d and "sigma" in d else "") + ".</p>"
         h += "".join(_window_html(w) for w in rows)
     return h
 

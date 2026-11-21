@@ -990,6 +990,7 @@ The review loop ended after round 23 (DECISIONS 1089). Hand-backs: `review/worko
 - Tests: `tests/test_wo_verdict.py`, `test_wo_emu.py`, `test_wo_fea.py`, `test_wo_table.py`, `test_wo_cfdprobe.py`, `test_wo_fs.py`; pins moved in `tests/test_budget.py`, `test_credibility.py` and `test_report.py` (1091 to 1093, 1100).
 - stage 3: one CPU RANS case per glider whose LES part is planned out (`body_rans`, two grids, four checks); a passing row sets the glider's drag multiplier in the refit (DECISIONS 1105); the plan's label says so where a case fits.
 - Plan: on `4h` and `overnight` the emulator's share is its own plus the unpriced seconds of stages 1 and 1b (`STAGE1_PRICED` 5.0, `emulator_own_share_s`); `emulator_plan`'s note says 'will not train' only when `trains` is false; the ledger and report sentence on the share follow (1106).
+- report: the stage-3 section prints a used refit's change against the baseline model (DECISIONS 1107); without it the report stage failed its own check on the first real refit (run on2).
 
 ### Known issues
 

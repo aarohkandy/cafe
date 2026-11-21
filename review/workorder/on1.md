@@ -66,3 +66,14 @@ What it settles: a case costs minutes, not hours, and both meshes are valid; thi
 | failed mesh checks | 0 | 0 |
 | seconds | 856 | 727 |
 | refit | used, multiplier 1.233 | used |
+
+# on2: the rehearsal (first full run with the CPU FEA and the gliders' RANS cases)
+
+`--budget overnight --gpus 0 --fresh`, orca, 6 CPUs, code `40f04c5`, 2026-11-21 08:05 UTC, beside the gate `wog1` and builder test jobs. **`rc=1`: the report stage failed its own check** `report_html_matches_json` (`stage3.refit.glider_eq.drag.change_vs_hangar: '0.2346' is not in the HTML`, and `0.2465` for glider_2n): the page printed a refit's mean and sigma and never its change, which no run had shown because no real refit had fired. Fixed (DECISIONS 1107). `report.json` was written before the check; read with `review/workorder/on2read.py`.
+
+- Walls: ingest 148 s, stage 1 407 s, stage 3 3,753 s (FEA 521 s and 328 s, RANS 874 s and 728 s, the free-surface case 1,301 s), stage 1b 495 s (a real rerun), emulator 2,245 s; 6,904 s in all.
+- **CFD:** both gliders' `body_rans` rows passed and the refit used both (`refit_iterations_performed` 1): glider_eq cd 0.3721 against 0.3014 (multiplier 1.2346, sigma 0.178; GCI 0.0905, scatter 0.0071), glider_2n cd 0.3540 against 0.2840 (1.2465, sigma 0.178; GCI 0.0893, scatter 0.0022). The USV `hull_fs` case ran and failed its checks as before (cd 0.105, spread 0.212).
+- **FEA** (sea pressure only): glider_eq 2.873 at 950 m (buckling), glider_2n 0.764 at 500 m.
+- **Verdicts** with the refitted gliders: glider_eq MARGINAL 170 of 512 (on1, analytic drag: 140 of 512); glider_2n GO 0 of 512; usv NO-GO 467; uas NO-GO 499 (both as on1).
+- **Emulator:** 25 of 35 planned variants in its 1,800 s refit share, 26 points a scope, not trained: the starvation DECISIONS 1106 fixes (this run's code predates it).
+- **Contribution table:** CFD yes and FEA yes for both gliders, CFD yes for the two glider links, everything else no.
