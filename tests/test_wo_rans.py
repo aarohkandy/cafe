@@ -19,7 +19,8 @@ from tests.test_report import load, plain
 from tests.test_stage3 import VEHICLES, WIN, FakeL, cheap, fake_ctx, planned_ctx
 
 clean_receipts, fresh_fs, no_wall_receipt = ts.clean_receipts, ts.fresh_fs, ts.no_wall_receipt                 # the fixtures of tests/test_stage3.py
-run, data, sens = tc.run, tc.data, tp.sens                                                                       # of test_credibility.py and test_pipeline.py
+data, sens = tp.data, tp.sens                                                                                    # of test_pipeline.py (the ci_fixture tree s_stage1b reads)
+needs_data = pytest.mark.usefixtures("data")
 
 OUT = dict(runs=False, skip_reason="not run: the physical lattice viscosity is out of reach", reachable=False)
 RS: dict = {}                                                                     # what the stand-in solver returns and records; reset for each test
@@ -80,7 +81,7 @@ def test_t1_a_glider_whose_les_part_is_planned_out_gets_one_rans_row_with_a_labe
     assert r["cl"] is None and r["cl_spread"] is None and r["cl_hangar"] is None and r["cd_hangar"] > 0 and r["fluid"] == "water"
     q = 0.5 * 1025.0 * RS["calls"][0]["speed"] ** 2 * r["ref_area"]
     assert r["cd"] == pytest.approx(RS["drag"] / q) and r["cd_spread"] == pytest.approx(math.hypot(RS["gci"] * r["cd"], RS["std"] / q))
-    assert r["gci"] == RS["gci"] and r["refinement_ratio"] == pytest.approx((RS["cells"] / RS["coarse_cells"]) ** (1 / 3)) > 1.3
+    assert r["gci"] == RS["gci"] and r["refinement_ratio"] == pytest.approx((RS["cells"] / RS["coarse_cells"]) ** (1 / 3)) and r["refinement_ratio"] > 1.3
     assert r["added_resistance"] == pytest.approx(r["cd"] / r["cd_hangar"] - 1.0) and r["resolution"]["cells_fine"] == RS["cells"]
     assert [c["name"] for c in r["checks"]] == ["rans_gci", "rans_refinement_ratio", "rans_iterative_scatter", "rans_mesh_checks"]
     assert all(c["ok"] and c["note"] for c in r["checks"]) and r["timing"]["rans_s"] == 12.5
@@ -109,11 +110,12 @@ def test_t3_the_label_of_the_flow_direction_takes_the_sign_of_the_vertical_compo
     assert all(cfd.dvec(rans.flow_label([1.0, 0.0, z])[0]) is not None for z in (-5.0, -0.2, 0.0, 0.2, 5.0))
 
 
+COARSE_12 = int(1_283_595 / 1.2 ** 3)                                                                              # a coarse grid 1.2 times coarser in length
 FAILS = [("rans_mesh_checks", dict(failed=1), "checkMesh failed 1 mesh check(s) (fine grid 1, coarse grid 0)"),
          ("rans_mesh_checks", dict(coarse_failed=2), "checkMesh failed 2 mesh check(s) (fine grid 0, coarse grid 2)"),
          ("rans_gci", dict(gci=0.11), "grid-convergence index 11% is above 10%"),
          ("rans_gci", dict(gci=math.nan), "no grid-convergence index"),
-         ("rans_refinement_ratio", dict(coarse_cells=int(1_283_595 / 1.2 ** 3)), "refinement ratio r = 1.20 (cells 1,283,595 / 742,818) is below 1.3"),
+         ("rans_refinement_ratio", dict(coarse_cells=COARSE_12), f"refinement ratio r = 1.20 (cells 1,283,595 / {COARSE_12:,}) is below 1.3"),
          ("rans_refinement_ratio", dict(cells=0), "refinement ratio unknown (no cell counts)"),
          ("rans_iterative_scatter", dict(std=0.03 * 0.2467), "the drag still wanders by 3.0% over the last 20 % of iterations (limit 2%): not converged"),
          ("rans_iterative_scatter", dict(std=None), "the solver reported no force history")]
@@ -163,6 +165,8 @@ def test_t6_a_child_that_fails_is_killed_or_cannot_start_is_a_row_that_says_so_a
     r = go()
     assert r["error"] == "RANS run failed (1): RuntimeError: simpleFoam diverged" and not r["ok"] and r["reasons"] == [r["error"]] and r["cd"] is None
     RS["runner"] = None
+    monkeypatch.setattr(pw, "_spawn", exits(0))                                                                  # exit 0 and no file
+    assert go()["error"] == "RANS run failed (0): no message"
     monkeypatch.setattr(pw, "_spawn", exits(-9))
     assert go()["error"] == "RANS run failed (-9): killed by SIGKILL before its deadline (out of memory or an outside kill, not the watchdog)"
     monkeypatch.setattr(pw, "_killed_at_deadline", lambda rc, armed_s, started: True)
@@ -171,8 +175,6 @@ def test_t6_a_child_that_fails_is_killed_or_cannot_start_is_a_row_that_says_so_a
     assert go()["error"].startswith("RANS run killed at its deadline after ") and go()["reasons"]
     monkeypatch.setattr(pw, "_spawn", no_python)
     assert go()["error"] == "RANS window failed: no such interpreter"
-    monkeypatch.setattr(pw, "_spawn", exits(0))                                                                  # exit 0 and no file
-    assert go()["error"] == "RANS run failed (0): no message"
 
 
 def test_t7_a_window_the_deadline_has_passed_is_not_started_and_the_job_directory_goes_away(no_wall_receipt, rans_env, monkeypatch):
@@ -250,7 +252,7 @@ MISSION = dict(window=dict(start="2023-03-01T12:00:00Z", end="2023-03-07T12:00:0
 CL2 = dict(glider_eq="glider", glider_2n="glider", usv="usv", uas="uas")
 
 
-def test_t12_the_plan_prices_the_rans_cases_after_the_fea_and_the_free_surface_cases_and_the_shares_still_sum_to_one(monkeypatch):
+def test_t12_the_plan_prices_the_rans_cases_after_the_fea_and_the_free_surface_cases_and_the_shares_still_sum_as_before(monkeypatch):
     monkeypatch.setenv("CAFE_NPROC", "6")
     a, B = budget.stage3_assumptions(), budget.BUDGET_S["overnight"]
     p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
@@ -260,7 +262,7 @@ def test_t12_the_plan_prices_the_rans_cases_after_the_fea_and_the_free_surface_c
     assert s["fs"]["fit"] >= 1 and hold == 2 * a["fea_min_s"]
     used = s["fs"]["fit"] * s["fs"]["need_s"] + hold + s["rans"]["fit"] * need
     assert used <= p["shares"]["stage3"] * B + 1e-6 and p["shares"]["stage3"] * B == pytest.approx(used)               # the share is what the three claim
-    assert sum(p["shares"].values()) == pytest.approx(1.0) and p["shares"]["stage1"] >= budget.SHARE["stage1"] - 1e-12
+    assert sum(p["shares"].values()) == pytest.approx(sum(budget.SHARE.values())) and p["shares"]["stage1"] >= budget.SHARE["stage1"] - 1e-12
     assert s["rans"]["share_s"] == pytest.approx(p["shares"]["stage3"] * B - hold - s["fs"]["fit"] * s["fs"]["need_s"])
     # a share that holds one of the two: one is planned, the other's seconds went to stage 1
     one = (B * budget.SHARE["stage3"] - hold - s["fs"]["fit"] * s["fs"]["need_s"]) / 1.5 / a["glider.rans.margin"]          # an estimate of 1.5 cases in the share left
@@ -268,7 +270,7 @@ def test_t12_the_plan_prices_the_rans_cases_after_the_fea_and_the_free_surface_c
     q = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
     t = budget.stage3_plan(q, CL2, dict(a, **{"glider.rans.est_s": one}))
     assert t["rans"]["fit"] == 1 and t["rans"]["cases"] == 2 and q["shares"]["stage1"] > p["shares"]["stage1"]
-    assert sum(q["shares"].values()) == pytest.approx(1.0) and q["shares"]["stage3"] * B == pytest.approx(t["fs"]["fit"] * t["fs"]["need_s"] + hold + one * 1.25)
+    assert sum(q["shares"].values()) == pytest.approx(sum(budget.SHARE.values())) and q["shares"]["stage3"] * B == pytest.approx(t["fs"]["fit"] * t["fs"]["need_s"] + hold + one * 1.25)
 
 
 def test_t13_what_the_plan_keeps_is_what_the_run_prices_over_a_sweep_of_estimates(monkeypatch):
@@ -283,7 +285,7 @@ def test_t13_what_the_plan_keeps_is_what_the_run_prices_over_a_sweep_of_estimate
         s = budget.stage3_plan(p, CL2, b)
         fs_s = s["fs"]["fit"] * s["fs"]["need_s"]
         want = budget.rans_plan(CL2, p["les"]["windows"], b, budget.SHARE["stage3"] * B - fs_s - p["les"]["fea_hold_s"])
-        if s["rans"]["fit"] != want["fit"] or sum(p["shares"].values()) != pytest.approx(1.0) or p["shares"]["stage1"] < budget.SHARE["stage1"] - 1e-12:
+        if s["rans"]["fit"] != want["fit"] or sum(p["shares"].values()) != pytest.approx(sum(budget.SHARE.values())) or p["shares"]["stage1"] < budget.SHARE["stage1"] - 1e-12:
             refused.append(b["glider.rans.est_s"])
         assert s["rans"]["fit"] * s["rans"]["need_s"] + fs_s + p["les"]["fea_hold_s"] <= p["shares"]["stage3"] * B + 1e-6
     assert not refused
@@ -319,15 +321,25 @@ def test_t15_the_plan_label_and_notes_drop_only_the_refit_claim_when_a_case_fits
     assert budget.stage3_plan(q, CL2, a)["les"]["note"] == "no LES coefficients exist on this machine; sub-grid and refit stay uncalibrated"
 
 
-def test_t16_the_two_new_assumptions_are_the_gliders_and_each_has_its_value_unit_why_and_replacement(run, data):
+@pytest.fixture
+def cred_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("CAFE_DATA", str(tmp_path / "data"))
+    d = tmp_path / "run"
+    d.mkdir()
+    pm_run.make_run(d)
+    return d
+
+
+def test_t16_the_two_new_assumptions_are_the_gliders_and_each_has_its_value_unit_why_and_replacement(cred_run):
     got = cr.config.assumptions()
     for k, v in (("est_s", 867.0), ("margin", 1.25)):
         e = got[f"stage3.glider.rans.{k}"]
         assert e["value"] == v and {"unit", "why", "replace_with"} <= set(e) and e["why"] and e["replace_with"]
     assert "rans_g4" in got["stage3.glider.rans.est_s"]["why"] and "2026-11-20" in got["stage3.glider.rans.est_s"]["why"]
     keys = {"stage3.glider.rans.est_s", "stage3.glider.rans.margin"}
-    assert keys <= tc.used_of(tc.only(run, {"glider_eq"}), "config/assumptions.yaml")
-    assert keys.isdisjoint(tc.used_of(tc.only(run, {"uas"}), "config/assumptions.yaml")) and keys.isdisjoint(tc.used_of(tc.only(run, {"usv"}), "config/assumptions.yaml"))
+    assert keys <= tc.used_of(tc.only(cred_run, {"glider_eq"}), "config/assumptions.yaml")
+    assert keys.isdisjoint(tc.used_of(tc.only(cred_run, {"uas"}), "config/assumptions.yaml"))
+    assert keys.isdisjoint(tc.used_of(tc.only(cred_run, {"usv"}), "config/assumptions.yaml"))
 
 
 # ---------------------------------------------------------------------------------------------------- the refit
@@ -360,6 +372,7 @@ def test_t19_a_failing_rans_row_leaves_the_glider_on_the_analytic_coefficients_a
     assert tp.refit_run(tmp_path / "2", {"glider_eq": [dict(tp.stage3_row(ok=False), part="body")]})[0]["glider_eq"]["used"] is False     # no RANS row: as it was
 
 
+@needs_data
 def test_t20_stage_1b_reruns_stage_1_with_the_refit_of_a_glider_that_has_only_a_rans_row(tmp_path, monkeypatch, sens):
     """Before: refit.json said the glider was not used, so stage 1b was a copy of stage 1 (`refit_iterations_performed` 0)."""
     ctx = tp.ctx_for(tmp_path / "r")
