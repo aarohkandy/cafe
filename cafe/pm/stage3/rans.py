@@ -147,7 +147,8 @@ def row_fields(r: dict[str, Any], area: float, cd_hangar: float) -> dict[str, An
     failed = int(r["failed_checks"]) + int(r["coarse_failed_checks"])
     spread = math.hypot(gci * cd if gci_ok else 0.0, std / q if std_ok else 0.0)
     checks = [check("rans_gci", gci, GCI_MAX, gci_ok and gci <= GCI_MAX,
-                    "two-grid GCI (Roache, Fs = 3) of the drag: the sensitivity of the drag to the grid, not a bound of the total error; fails when it is not "
+                    "two-grid GCI (Roache, Fs = 3) of the drag: the sensitivity of the drag to the grid, not a bound of the total error (the cd spread has no "
+                    "term for model-form or geometry error); fails when it is not "
                     f"finite or is above {GCI_MAX:.0%} (a multiplier that uncertain is not information)"),
               check("rans_refinement_ratio", math.nan if ratio is None else ratio, vv.R_MIN, ratio is not None and ratio >= vv.R_MIN,
                     "r = (N_fine / N_coarse)^(1/3), Celik et al. 2008's effective ratio from the cell counts: at least 1.3 or the GCI is not meaningful"),

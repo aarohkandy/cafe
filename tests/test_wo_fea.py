@@ -217,9 +217,7 @@ def test_t10_a_profile_gives_the_free_surface_cases_the_stage_3_seconds_less_the
     a = budget.stage3_assumptions()
     s = pw.profile_stage3_s(ctx)
     fs0 = budget.fs_plan(ctx.classes, budget.WINDOWS["overnight"], a, budget.SHARE["stage3"] * budget.BUDGET_S["overnight"])
-    rans = 2 * a["glider.rans.est_s"] * a["glider.rans.margin"]                          # the demo's two gliders' CPU RANS cases (step 3): not the FEAs'
-    assert s["quick"] == 0.0 and s["4h"] == pytest.approx(rans, abs=1e-3)
-    assert s["overnight"] == pytest.approx(fs0["fit"] * fs0["need_s"] + rans, abs=1e-3)
+    assert s["quick"] == 0.0 and s["4h"] == 0.0 and s["overnight"] == pytest.approx(fs0["fit"] * fs0["need_s"], abs=1e-3)   # (not the RANS cases')
 
 
 def test_t11_the_run_gate_runs_the_free_surface_case_the_plan_says_fits_when_the_share_is_exactly_the_cases_and_the_hold(monkeypatch):

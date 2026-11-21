@@ -59,6 +59,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
@@ -679,6 +680,8 @@ PARTS = budget.STAGE3_PARTS                                                 # th
 FS_PARTS = budget.FS_PARTS                                                  # the free-surface part: child process, own budget
 RANS_PARTS = budget.RANS_PARTS                                              # the CPU RANS part of a glider whose LES window is not run: child process
 
+NOT_LES = set(RANS_PARTS.values()) | set(FS_PARTS.values())                 # the parts that are not LES windows
+
 SIGKILL_EARLY = "out of memory or an outside kill, not the watchdog"       # what a -9 before the deadline is (round 15 M-21)
 
 
@@ -693,19 +696,34 @@ def _fs_fail(base: dict[str, Any], msg: str, t0: float, **extra: Any) -> dict[st
     return dict(base, error=msg[:600], reasons=[msg[:600]], timing=dict(wall_s=time.perf_counter() - t0), **extra)
 
 
-def profile_stage3_s(ctx: Context) -> dict[str, float]:
-    """Per `--budget` profile (smallest first), the stage-3 seconds that profile's own plan gives this mission and run: its stage-3 share after the
-    slices of the LES windows that cannot run went to stage 1 (budget.plan), times its budget, less the seconds it holds for the sea-pressure FEAs (they are
-    not the free-surface cases'). The running plan's share says nothing about the others."""
-    p, out = ctx.plan, {}
+def _profile_plans(ctx: Context) -> Iterator[tuple[str, float, dict[str, Any], dict[str, Any]]]:
+    """(name, budget seconds, plan, stage-3 sizes) of each `--budget` profile (smallest first) whose own plan can run stage 1 for this mission and run."""
+    p = ctx.plan
     for name, b in sorted(budget.BUDGET_S.items(), key=lambda kv: kv[1]):
         try:
             q = budget.plan(name, p["gpus"], ctx.mission, gpu_mem_gb=p["les"].get("gpu_mem_gb"), vehicle_classes=ctx.classes, workers=p["workers"],
                             mem_gb=p["mem_gb"], env_gb=p["env_gb"])
+            yield name, b, q, budget.stage3_plan(q, ctx.classes, assumptions())
         except budget.PlanError:
             continue                                                                # stage 1 cannot run in it: no case of stage 3 either
-        out[name] = round(max(q["shares"]["stage3"] * b - q["les"]["fea_hold_s"], 0.0), 6)       # (the share is a fraction of the budget: a rounding residue)
-    return out
+
+
+def _rans_s(sizes: dict[str, Any]) -> float:
+    return 0.0 if sizes["rans"] is None else sizes["rans"]["fit"] * sizes["rans"]["need_s"]
+
+
+def profile_stage3_s(ctx: Context) -> dict[str, float]:
+    """Per `--budget` profile (smallest first), the stage-3 seconds that profile's own plan gives this mission and run: its stage-3 share after the
+    slices of the LES windows that cannot run went to stage 1 (budget.plan), times its budget, less the seconds it holds for the sea-pressure FEAs and for
+    the glider's CPU RANS cases (they are not the free-surface cases'). The running plan's share says nothing about the others."""
+    # (the share is a fraction of the budget: a rounding residue)
+    return {name: round(max(q["shares"]["stage3"] * b - q["les"]["fea_hold_s"] - _rans_s(s3), 0.0), 6) for name, b, q, s3 in _profile_plans(ctx)}
+
+
+def profile_rans_s(ctx: Context) -> dict[str, float]:
+    """Per `--budget` profile (smallest first), the seconds that profile's own plan holds for the glider's CPU RANS cases (`stage3.rans`: `fit` of them at their
+    priced seconds; 0 where none fits): what the RANS gate's advice compares the RANS cases with, never the free-surface cases' seconds."""
+    return {name: _rans_s(s3) for name, b, q, s3 in _profile_plans(ctx)}
 
 
 def _fs_gate(est: dict[str, Any], a: dict[str, Any], ctx: Context, left_s: float, queued_s: float) -> tuple[bool, str, float]:
@@ -784,7 +802,8 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
         est = None if sizes["fs"] is None else sizes["fs"]["estimate"]       # priced once, in the plan (None: the FluidX3D plugin runs it)
         left = None if st["share"] is None else st["share"] - st["queued"]
         if est is not None and left is not None:
-            fits, why, held = _fs_gate(est, a, ctx, left, st["queued"])
+            # (the advice's queue leaves the RANS cases out: their seconds are not the profile's free-surface seconds)
+            fits, why, held = _fs_gate(est, a, ctx, left, st["queued"] - st["rans_queued"])
             if not fits:
                 shutil.rmtree(jobdir, ignore_errors=True)
                 done.set_result(_fs_fail(base, why, t0, resolution=dict(estimate=est, speed_ms=speed, left_s=left)))
@@ -807,7 +826,8 @@ def _rans_gate(a: dict[str, Any], ctx: Context, left_s: float, queued_s: float) 
     """(fits, reason, seconds the case holds in the queue). The estimate (`stage3.glider.rans.est_s`) times its margin must fit `left_s`, the share left for the
     RANS cases after the FEAs' hold and the free-surface cases the plan kept (`budget.rans_plan`'s share: the queue runs the RANS cases before them, so they
     are not charged to it) less the RANS cases queued before this one (`queued_s`): a plan-time rule, not the clock. The sentence names the minutes needed, the
-    minutes left and the smallest `--budget` profile whose stage-3 share would hold it and the RANS cases queued before it."""
+    minutes left and the smallest `--budget` profile whose plan holds that many seconds for the RANS cases (`profile_rans_s`: not the free-surface cases')
+    for it and the RANS cases queued before it."""
     need_s = need(a, "glider.rans.est_s") * need(a, "glider.rans.margin")
     if need_s <= left_s + 1e-6:                                             # (a share is a fraction of the budget; `rans_plan` allows the microsecond too)
         return True, "", need_s
@@ -816,13 +836,15 @@ def _rans_gate(a: dict[str, Any], ctx: Context, left_s: float, queued_s: float) 
     return False, (f"RANS window not run: estimated {est_s / 60:.0f} min x {margin} margin = {need_s / 60:.0f} min "
                    f"(two grids, {rans.ITERS} iterations) against {max(left_s, 0) / 60:.1f} min left of the "
                    f"{plan['shares']['stage3'] * plan['budget_s'] / 60:.0f} min stage-3 share after the FEA and the free-surface cases; "
-                   f"{freesurface.fitting_budget(queued_s + need_s, profile_stage3_s(ctx))}"), need_s
+                   f"{freesurface.fitting_budget(queued_s + need_s, profile_rans_s(ctx))}"), need_s
 
 
 def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed: float, label: str, est_s: float, deadline: float | None,
-               t0: float) -> dict[str, Any]:
-    """Runs one RANS case in a child process (own process group, killed by its own watchdog at the deadline) and builds the row; its job directory goes away
-    with it. Never raises: a child that fails, is killed or returns nonsense gives a row with `error` and the reason."""
+               t0: float, cap_s: float | None = None) -> dict[str, Any]:
+    """Runs one RANS case in a child process (own process group, killed by its own watchdog) and builds the row; its job directory goes away with it. The
+    watchdog is the stage deadline or, if sooner, `cap_s` after the child starts (the case's own priced seconds: a case that runs past them is killed
+    before it takes the free-surface cases' seconds, which come after it in the queue; no deadline, no cap). Never raises: a child that fails, is killed or
+    returns nonsense, or any error in preparing it, gives a row with `error` and the reason."""
     jobdir = tempfile.mkdtemp(prefix="rans_job_")
     try:
         job, out = pathlib.Path(jobdir) / "job.json", pathlib.Path(jobdir) / "out.json"
@@ -830,6 +852,8 @@ def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed
         left = None if deadline is None else deadline - time.perf_counter()
         if left is not None and left <= 0.0:
             return _fs_fail(base, "RANS window killed before it started: the stage-3 wall-clock share was spent before its turn came", t0)
+        if left is not None and cap_s is not None:
+            left = min(left, cap_s)
         job.write_text(json.dumps(dict(stl=str(pathlib.Path(jobdir) / "body.stl"), label=label, speed=speed)))
         started = time.perf_counter()
         try:
@@ -846,7 +870,7 @@ def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed
         r = load_json(out.read_text())
         assert veh.ref_area is not None, "the stage-3 vehicles always carry an analytic reference area"
         f = rans.row_fields(r, veh.ref_area, case["cd_h"])
-    except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
+    except Exception as e:                                                  # a child boundary: whatever it was (ImportError, AssertionError, ...), one row
         return _fs_fail(base, f"RANS window failed: {e}", t0)
     finally:
         shutil.rmtree(jobdir, ignore_errors=True)
@@ -892,7 +916,8 @@ def _rans_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, 
     except (ValueError, KeyError, RuntimeError, OSError) as e:
         done.set_result(_fs_fail(base, str(e), t0))
         return done
-    return pool.submit(lambda: _rans_work(base, veh, case, speed, label, est_s, st["deadline"], t0))
+    cap_s = est_s * need(a, "glider.rans.margin")
+    return pool.submit(lambda: _rans_work(base, veh, case, speed, label, est_s, st["deadline"], t0, cap_s))
 
 
 def recalibrate_subgrid(ctx: Context, rows: dict[str, list[dict[str, Any]]], L: Ledger, path: str | pathlib.Path | None = None) -> dict[str, Any] | None:
@@ -904,7 +929,7 @@ def recalibrate_subgrid(ctx: Context, rows: dict[str, list[dict[str, Any]]], L: 
     says why when nothing is written: no window passed (the CPU quick run), or windows passed but none resolved atmospheric turbulence (the
     windows' own inflow is uniform, so there is nothing to compare with the Mann layer). Returns the calibration result, or None."""
     from ..env import subgrid
-    passed = [r for rs in rows.values() for r in rs if r["ok"]]
+    passed = [r for rs in rows.values() for r in rs if r["ok"] and r["part"] not in NOT_LES]        # (a RANS or free-surface row passing is no LES window)
     series = [dict(r["inflow_series"], label=f"{vid} {r['part']} t={r['t']:.0f}") for vid, rs in rows.items() for r in rs if r["ok"] and r.get("inflow_series")]
     cal = subgrid.recalibrate(series) if series else None
     n_used = len(cal["windows"]) if cal else 0

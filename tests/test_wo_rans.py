@@ -58,6 +58,7 @@ def spawn(cmd, **kw):
 def rans_env(monkeypatch):
     cheap(monkeypatch)
     monkeypatch.setattr(pw, "_spawn", spawn)
+    monkeypatch.setattr(pw, "profile_rans_s", lambda ctx: {"quick": 100.0, "overnight": 1e6})                 # (the fake plans have no mission to plan with)
     monkeypatch.setattr(pw.W, "run_window", lambda *a, **k: pytest.fail("a window the plan skipped was run"))
 
 
@@ -85,7 +86,7 @@ def test_t1_a_glider_whose_les_part_is_planned_out_gets_one_rans_row_with_a_labe
     assert r["gci"] == RS["gci"] and r["refinement_ratio"] == pytest.approx((RS["cells"] / RS["coarse_cells"]) ** (1 / 3)) and r["refinement_ratio"] > 1.3
     assert r["added_resistance"] == pytest.approx(r["cd"] / r["cd_hangar"] - 1.0) and r["resolution"]["cells_fine"] == RS["cells"]
     assert [c["name"] for c in r["checks"]] == ["rans_gci", "rans_refinement_ratio", "rans_iterative_scatter", "rans_mesh_checks"]
-    assert all(c["ok"] and c["note"] for c in r["checks"]) and r["timing"]["rans_s"] == 12.5
+    assert all(c["ok"] and c["note"] for c in r["checks"]) and r["timing"]["rans_s"] == 12.5 and "model-form" in r["checks"][0]["note"]
     assert L.checks["every_window_attempted"] == (True, 4, 4) and L.checks["no_row_claims_ok_with_a_failing_check"][0]
     assert L.checks["every_failed_window_states_a_reason"][0]
     assert [r["part"] for r in rows if not r["ok"]] == ["body", "body", "body"]                                          # the LES rows are as they were
@@ -312,14 +313,15 @@ def test_t14_no_rans_case_is_planned_on_a_gpu_or_when_the_les_window_runs_or_for
     assert budget.rans_plan(CL2, out, a, plan["need_s"] - 1e-3)["fit"] == 0
 
 
-def test_t15_the_plan_label_and_notes_drop_only_the_refit_claim_when_a_case_fits_and_keep_the_old_text_when_none_does(monkeypatch):
+def test_t15_the_plan_label_and_notes_say_the_refit_holds_only_where_the_case_passes_when_one_fits_and_keep_the_old_text_when_none_does(monkeypatch):
     monkeypatch.setenv("CAFE_NPROC", "6")
     a = budget.stage3_assumptions()
     p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
     assert budget.stage3_plan(p, CL2, a)["rans"]["fit"] == 2
-    assert p["les"]["label"].startswith("CPU fallback") and p["les"]["label"].endswith("sub-grid stays uncalibrated") and "refit" not in p["les"]["label"]
-    assert any(n.endswith("went to stage 1; the sub-grid layer stays uncalibrated") for n in p["notes"])
-    assert budget.stage3_plan(p, CL2, a)["les"]["note"] == "no LES coefficients exist on this machine; sub-grid stays uncalibrated"
+    assert p["les"]["label"].startswith("CPU fallback") and p["les"]["label"].endswith("sub-grid stays uncalibrated; " + budget.RANS_REFIT)
+    assert budget.RANS_REFIT == "the glider's drag refit comes only from its CPU RANS case, where it passes its checks"       # a promise, not a result
+    assert any(n.endswith("went to stage 1; the sub-grid layer stays uncalibrated; " + budget.RANS_REFIT) for n in p["notes"])
+    assert budget.stage3_plan(p, CL2, a)["les"]["note"] == "no LES coefficients exist on this machine; sub-grid stays uncalibrated; " + budget.RANS_REFIT
     q = budget.plan("quick", 0, MISSION, thr={}, vehicle_classes=CL2)                                              # no case fits 20 min
     assert budget.stage3_plan(q, CL2, a)["rans"]["fit"] == 0
     assert q["les"]["label"].startswith("CPU fallback") and q["les"]["label"].endswith("sub-grid and refit stay uncalibrated")
@@ -514,3 +516,66 @@ def test_t25_the_report_shows_a_body_rans_row_beside_the_les_rows_of_its_window_
     assert len(mine) == 1 and mine[0]["label"] == "W1 body_rans" and mine[0]["coefficients"]["cd"]["value"] == 0.373 and "cl" not in mine[0]["coefficients"]
     assert [c["name"] for c in mine[0]["checks"]] == ["rans_gci", "rans_mesh_checks"] and report.check_traceability(rep) == []
     assert "W1 body_rans" in plain((run / "report" / "index.html").read_text())
+
+
+# ---- the skeptic pass
+
+def test_t27_the_rans_child_is_killed_at_its_own_priced_seconds_not_at_the_stage_deadline(no_wall_receipt, rans_env):
+    """Before: the watchdog was the whole stage deadline (about 5000 s here), so a case that overran its estimate took the free-surface cases' seconds."""
+    pw.run(rans_ctx(no_wall_receipt, share=5000.0), {"g": [WIN]}, FakeL())
+    one = pw.assumptions()["glider.rans.est_s"] * pw.assumptions()["glider.rans.margin"]
+    (spawned,) = RS["spawned"]
+    assert 1000.0 < float(spawned["cmd"][-1]) <= one and spawned["timeout"] == pytest.approx(float(spawned["cmd"][-1]) + pw.FS_GRACE_S)
+
+
+def test_t28_the_rans_advice_is_priced_on_the_rans_seconds_and_the_free_surface_advice_leaves_them_out(monkeypatch):
+    """Before: `profile_stage3_s` held the RANS seconds beside the free-surface ones, so with two RANS cases queued the RANS advice named overnight (whose
+    stage 3 holds 2 RANS cases and a free-surface one) for a third."""
+    from types import SimpleNamespace
+    from cafe.pm import config, stage1
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    m = config.load_mission("missions/tepex_c_demo.yaml")
+    plan = dict(gpus=0, workers=6, mem_gb=None, env_gb=None, les={}, shares=dict(stage3=0.1), budget_s=1000.0)
+    ctx = SimpleNamespace(mission=m, classes=stage1._classes(m), plan=plan)
+    a = budget.stage3_assumptions()
+    one = a["glider.rans.est_s"] * a["glider.rans.margin"]
+    r, f = pw.profile_rans_s(ctx), pw.profile_stage3_s(ctx)
+    fs0 = budget.fs_plan(ctx.classes, budget.WINDOWS["overnight"], a, budget.SHARE["stage3"] * budget.BUDGET_S["overnight"])
+    assert r["quick"] == 0.0 and r["4h"] == pytest.approx(2 * one) and r["overnight"] == pytest.approx(2 * one)
+    assert f["quick"] == 0.0 and f["4h"] == 0.0 and f["overnight"] == pytest.approx(fs0["fit"] * fs0["need_s"], abs=1e-3)       # the free-surface cases' alone
+    why = pw._rans_gate(a, ctx, 0.0, 2 * one)[1]
+    assert why.endswith("no --budget profile's plan holds it (the largest plan gives 36 min of stage 3)")
+    assert pw._rans_gate(a, ctx, 0.0, 0.0)[1].endswith("it would fit --budget 4h (36 min of stage 3 in that plan)")
+
+
+def test_t29_the_free_surface_advice_is_not_charged_the_rans_cases_queued_before_it(no_wall_receipt, rans_env, monkeypatch):
+    seen, gate = [], pw._fs_gate
+    monkeypatch.setattr(pw, "_fs_gate", lambda est, a, ctx, left, queued: (seen.append(queued), gate(est, a, ctx, left, queued))[1])
+    ctx = fake_ctx(no_wall_receipt, vehicles=[VEHICLES[0], VEHICLES[2]], classes=dict(g="glider", u="usv"), rate=2000.0)
+    a = pw.assumptions()
+    fs_need = budget.fs_plan(ctx.classes, 1, a, None)["need_s"]
+    ctx.plan.update(shares=dict(stage3=1.0), budget_s=fs_need + a["glider.rans.est_s"] * a["glider.rans.margin"] + 60.0)
+    ctx.plan["les"]["windows"] = {k: dict(OUT) for k in ("g/body", "u/hull", "u/wing")}
+    rows = pw.run(ctx, {"g": [WIN], "u": [WIN]}, FakeL())
+    assert body_rans(rows["g"])[0]["ok"] and len(RS["calls"]) == 1 and seen == [0.0]         # the RANS case ran, not in the FS queue
+
+
+@pytest.mark.parametrize("exc", [ImportError("no manifold backend"), AssertionError("area"), TypeError("odd"), IndexError("empty")])
+def test_t30_any_error_in_preparing_the_rans_child_is_a_row_not_a_lost_stage(no_wall_receipt, rans_env, monkeypatch, exc):
+    """Before: only OSError, ValueError, KeyError, RuntimeError and TypeError were caught; the rest came out of the future and lost the whole stage 3."""
+    def broken(*a, **k):
+        raise exc
+    monkeypatch.setattr(pw.rans, "write_stl", broken)
+    r = body_rans(pw.run(rans_ctx(no_wall_receipt), {"g": [WIN]}, FakeL())["g"])[0]
+    assert not r["ok"] and r["error"] == f"RANS window failed: {exc}" and r["reasons"] == [r["error"]] and RS["calls"] == []
+
+
+def test_t31_a_passing_rans_or_free_surface_row_is_not_a_passing_les_window_in_the_subgrid_note(tmp_path):
+    for part in ("body_rans", "hull_fs"):
+        L = FakeL()
+        assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [ts._row_ok(True, part=part)]}, L) is None
+        assert L.notes == ["sub-grid layer uncalibrated: no LES window passed its self-checks; stage3/subgrid_calibration.json was not written"]
+        assert L.checks["subgrid_calibration_written_only_from_passed_windows"][0]
+    L = FakeL()
+    assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [ts._row_ok(True), ts._row_ok(True, part="body_rans")]}, L) is None
+    assert L.notes[0].startswith("sub-grid layer uncalibrated: 1 window(s) passed but none carries a resolved inflow-turbulence series")

@@ -45,6 +45,7 @@ TRAIN_FRAC = 0.7                  # of the emulator share the variant runs may u
 STAGE3_PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}     # the native-LBM parts of a window, one slice of the share each
 FS_PARTS = {"usv": "hull_fs"}                                                        # the free-surface part: a child process with its own queue
 RANS_PARTS = {"glider": "body_rans"}                                                 # the CPU RANS part: one case per vehicle whose LES body window is not run
+RANS_REFIT = "the glider's drag refit comes only from its CPU RANS case, where it passes its checks"      # said of the refit where such a case fits
 FEA_CLASSES = ("glider",)                                                            # classes whose window carries an FEA of the pressure hull
 FALLBACK_COST = {"glider": (8.0, 0.1), "usv": (11.0, 0.1), "uas": (20.0, 0.3)}   # (s per batch, s per member) per mission day without bench
 GPU_MEM_GUARD = 0.85
@@ -445,6 +446,8 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         hold = hold if s3 >= fs_s + hold else 0.0
         # ... and the CPU RANS cases of the gliders planned out, priced on what is left after the FEAs and the free-surface cases (each claims its own seconds)
         rans = rans_plan(classes, wins, a, s3 - fs_s - hold, gpus == 0)
+        # (`max`, as for the FEA hold and the free-surface cases before: exact where no LES window runs, which is every CPU plan but the `ci` smoke window;
+        # where some do run, they and the children draw on the same kept seconds)
         kept = min(max(kept, fs_s + hold + (0.0 if rans is None else rans["fit"] * rans["need_s"])), s3)
         skipped_s = s3 - kept
         shares.update(stage3=kept / B, stage1=SHARE["stage1"] + skipped_s / B)
@@ -475,7 +478,8 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         notes.append(f"stage 3: no LES coefficients exist on this machine: {sum(not w['runs'] for w in wins.values())} of {len(wins)} window part(s) are not "
                      f"run (their physical lattice viscosity is out of reach of {rate:.2g} cell-updates/s) and {skipped_s:.0f} s of the budget went "
                      "to stage 1; "
-                     + ("the sub-grid layer stays uncalibrated" if rans and rans["fit"] else "the sub-grid layer and the refit stay uncalibrated"))
+                     + (f"the sub-grid layer stays uncalibrated; {RANS_REFIT}" if rans and rans["fit"] else
+                        "the sub-grid layer and the refit stay uncalibrated"))
     les = dict(backend=backend, rate=rate, rate_source=rate_src, windows_per_vehicle=K,
                # the share kept, not SHARE: the skipped windows gave theirs to stage 1 (round 12, M-28)
                cell_steps_per_window=shares["stage3"] * B * rate / max(K * len(classes), 1),
@@ -483,7 +487,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
                label=("GPU LES windows" if gpus > 0 else
                       "CPU fallback: no LES coefficients exist on this machine (no window reaches the physical lattice viscosity with this "
                       "budget's cell-updates); "
-                      + ("sub-grid stays uncalibrated" if rans and rans["fit"] else "sub-grid and refit stay uncalibrated") if nowhere else
+                      + (f"sub-grid stays uncalibrated; {RANS_REFIT}" if rans and rans["fit"] else "sub-grid and refit stay uncalibrated") if nowhere else
                       "CPU fallback: native JAX lattice kernel at the resolution this budget affords on CPU; coefficients are the pooled "
                       "window coefficient over the vehicle's Hangar-model value"))
     if gpus > 0 and gpu_mem_gb is not None:
@@ -552,7 +556,7 @@ def stage3_plan(p: dict[str, Any], classes: dict[str, str], a: dict[str, Any]) -
                          hold_s=hold),
                 cell_steps_per_part=per_part, fs=fs, rans=rans,
                 les=dict(reachable=reachable, windows=wins,
-                         note=(("no LES coefficients exist on this machine; sub-grid stays uncalibrated" if rans and rans["fit"] else
+                         note=((f"no LES coefficients exist on this machine; sub-grid stays uncalibrated; {RANS_REFIT}" if rans and rans["fit"] else
                                 "no LES coefficients exist on this machine; sub-grid and refit stay uncalibrated")
                                if wins and not reachable and les["cpu_fallback"] else None)))
 
