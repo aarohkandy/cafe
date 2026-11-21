@@ -93,7 +93,7 @@ def test_receipts_are_real_ledger_entries(full):
             assert r["sha256"] in [o["sha256"] for o in led["outputs"]]
         else:
             assert r["sha256"] == led["config_hash"]
-    assert kinds == {"check", "output", "config"}
+    assert kinds == {"check", "output", "config", "input"}
 
 
 def test_verdicts_match_the_ensemble(full):
@@ -134,7 +134,7 @@ def test_not_certifiable_below_n_certify(full):
     assert "3/n" in rep["vehicles"]["glider_2n"]["note"]
     d = rep["vehicles"]["glider_2n"]                                           # M-18: each sentence names the rule its number belongs to
     assert "one-sided" in d["note"] and "two-sided" in d["note"] and "60 members" in d["note"] and "(two-sided 95 % Wilson bound)" in d["certify_statement"]
-    assert "certifying P(fail) < 5 % needs 73 members, two-sided 95 % Wilson bound)" in plain((full[0] / "report" / "index.html").read_text())
+    assert "certifying P(fail) < 5 % needs at least 73 members, two-sided 95 % Wilson bound)" in plain((full[0] / "report" / "index.html").read_text())
 
 
 def test_certifiable_at_large_n(run):
@@ -2380,7 +2380,7 @@ def test_a_not_exercised_links_card_has_no_certifying_sentence_and_the_other_car
     assert "certifying" not in card and "Wilson bound)" not in card and re.search(r"\d+ members failed of \d+ members\.", card)   # ends after n
     assert rep["links"]["usv-uas-rf"]["n_certify"] is None
     other = plain(h.split("<div id='v-glider_2n'>")[1].split("<div id='v-")[0])  # round 10, M-4: a card that leaves P(fail) < 5 % open (0 of 48)
-    assert f"certifying P(fail) < 5 % needs {intervals.n_certify()} members, two-sided 95 % Wilson bound)" in other
+    assert f"certifying P(fail) < 5 % needs at least {intervals.n_certify()} members, two-sided 95 % Wilson bound)" in other
     assert rep["vehicles"]["glider_2n"]["n_certify"]["value"] == intervals.n_certify()
     assert rep["links"]["glider_eq-ship-acoustic"]["n_certify"] is None                              # 12 of 48 excludes it: no count to ask for
     assert rep["traceability_problems"] == [] and report.check_traceability(rep) == [] and report.check_rendered(rep, h) == []
@@ -2746,7 +2746,7 @@ def test_r10_m4_an_ensemble_that_excludes_p_fail_below_5_percent_has_no_member_c
     assert "certifying" not in plain(report._stat_html(d))
     d = stat_block(0, 64)                                                     # an open one keeps both
     assert d["n_certify"]["value"] == 73 and "cannot be certified at n = 64" in d["certify_statement"]
-    assert "certifying P(fail) < 5 % needs 73 members" in plain(report._stat_html(d))
+    assert "certifying P(fail) < 5 % needs at least 73 members" in plain(report._stat_html(d))
     d = stat_block(2, 80)
     assert d["n_certify"]["value"] == 73 and d["certify_statement"] is None
 
