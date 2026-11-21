@@ -127,8 +127,9 @@ LIMITATIONS = [
     dict(id="L14", text="the wind prior's persistent and short-lived parts are split from the TAO moorings over this window: "
                         "an estimate of the order, not a measurement",
          factors=["uncertainty"], where=["cafe/pm/pipeline.py", "cafe/pm/env/perturb.py", "config/perturbations.yaml"]),
-    dict(id="L15", text="no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer and the drag refit stay "
-                        "uncalibrated; no GPU run exists", factors=["validation", "robustness"],
+    dict(id="L15", text="no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer stays uncalibrated; the drag "
+                        "refit comes only from a CPU RANS (glider) or free-surface (USV) case, where the budget holds one and it passes its checks; "
+                        "no GPU run exists", factors=["validation", "robustness"],
          where=["config/assumptions.yaml", "cafe/pm/budget.py", "cafe/pm/stage3/pipeline_windows.py"]),
     dict(id="L16", text="the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
          factors=["robustness"], where=["cafe/pm/pipeline.py"]),

@@ -27,6 +27,7 @@ import tempfile
 from typing import Any, Callable
 
 import numpy as np
+from numpy.typing import NDArray
 
 from .. import vv
 from ..jsonio import finite_real, load_json
@@ -37,6 +38,13 @@ LEVELS = {"coarse": 0, "fine": 1}                                           # cf
 ITERS = 600                                                                 # simpleFoam iterations per grid
 LABEL = "RANS (OpenFOAM simpleFoam, k-omega SST), CPU, two-grid GCI"
 SIDESLIP_MAX = 1e-6                                                         # |vb_y| / |vb|: glider_case's flow has none, a label has no way to carry it
+
+
+def _dvec(label: str) -> NDArray[np.float64]:
+    """cafe.cfd.dvec (untyped, like the rest of cafe.cfd) as a typed call: the unit vector of a flow-direction label, ValueError for one it does not take."""
+    from cafe import cfd
+    f: Callable[[str], Any] = cfd.dvec
+    return np.asarray(f(label), float)
 
 
 # ---------------------------------------------------------------------------------------------------- geometry and flow
@@ -54,13 +62,12 @@ def flow_label(vb: Any) -> tuple[str, float]:
     """(the cafe.cfd direction label, the speed in m/s) of a vehicle moving at body-frame velocity `vb` through still water: "x+z<angle>" or "x-z<angle>"
     (forward motion tilted toward +z or -z, to 0.01 deg). ValueError for a velocity that is not forward motion in the x-z plane within 90 deg: the label
     cannot carry it. cfd.dvec must take the label (checked here, before any mesh)."""
-    from cafe import cfd
     v = np.asarray(vb, float)
     speed = float(np.linalg.norm(v))
     if not (math.isfinite(speed) and speed > 0.0) or v[0] <= 0.0 or abs(float(v[1])) / speed > SIDESLIP_MAX:
         raise ValueError(f"the body-frame velocity {v.tolist()} is not a forward motion in the x-z plane: the label x[+-]z<angle> cannot carry it")
     label = f"x{'+' if v[2] >= 0 else '-'}z{abs(math.degrees(math.atan2(float(v[2]), float(v[0])))):.2f}"
-    cfd.dvec(label)
+    _dvec(label)
     return label, speed
 
 
@@ -70,11 +77,13 @@ def drag_history(case_dir: str | os.PathLike[str], label: str) -> tuple[float, f
     from the case's postProcessing forces (cfd.tail_stats). This is the drag's own wobble: the norm of cfd.external's `force_std` is dominated by the lift
     and fails a settled case. None when the case has no readable force history. cfd._shrink keeps postProcessing, so it may be read before or after it."""
     from cafe import cfd
+    read: Callable[..., dict[str, Any]] = cfd.read_forces
+    tail: Callable[..., tuple[Any, Any]] = cfd.tail_stats
     try:
-        f = cfd.read_forces(case_dir)["force"]
+        f = read(case_dir)["force"]
     except (RuntimeError, ValueError):
         return None
-    mean, std = cfd.tail_stats(-(f["total"] @ cfd.dvec(label)))
+    mean, std = tail(-(f["total"] @ _dvec(label)))
     return float(mean), float(std)
 
 
@@ -85,7 +94,7 @@ def two_grid(stl: str, label: str, speed: float, workdir: pathlib.Path, log: Cal
     from cafe import cfd
     solve: Callable[..., dict[str, Any]] = cfd.external                      # cafe.cfd is untyped: called through a typed name, as freesurface does
     gci: Callable[..., float] = cfd.gci
-    unit = cfd.dvec(label)
+    unit = _dvec(label)
     out: dict[str, dict[str, Any]] = {}
     for name, off in LEVELS.items():
         r = solve(stl, workdir / name, "water", speed, (label,), level_offset=off, iters=ITERS, log=log)
@@ -98,13 +107,15 @@ def two_grid(stl: str, label: str, speed: float, workdir: pathlib.Path, log: Cal
     fine, coarse = out["fine"], out["coarse"]
     rr = vv.refinement_ratio(fine["mesh"]["cells"], coarse["mesh"]["cells"])
     return dict(rho=fine["rho"], speed=speed, label=label, cells=fine["mesh"]["cells"], coarse_cells=coarse["mesh"]["cells"],
-                failed_checks=fine["mesh"]["failed_checks"], coarse_failed_checks=coarse["mesh"]["failed_checks"], drag=fine["drag"], drag_coarse=coarse["drag"],
-                drag_std=None if fine["history"] is None else fine["history"][1], refinement_ratio=rr, gci=gci(fine["drag"], coarse["drag"], ratio=rr),
+                failed_checks=fine["mesh"]["failed_checks"], coarse_failed_checks=coarse["mesh"]["failed_checks"],
+                drag=fine["drag"], drag_coarse=coarse["drag"], drag_std=None if fine["history"] is None else fine["history"][1],
+                refinement_ratio=rr, gci=gci(fine["drag"], coarse["drag"], ratio=rr),
                 iterations=fine["dirs"][label]["iters"], seconds=fine["seconds"] + coarse["seconds"], levels=dict(LEVELS), iterations_cap=ITERS)
 
 
 def run_child(job: str, out: str, runner: Callable[..., dict[str, Any]] | None = None) -> int:
-    """Child of the stage: job = JSON (stl, label, speed); writes `two_grid`'s result as JSON. The case lives in a temporary directory that goes away with it."""
+    """Child of the stage: job = JSON (stl, label, speed); writes `two_grid`'s result as JSON. The case lives in a temporary directory that goes away
+    with it."""
     j = load_json(pathlib.Path(job).read_text())
     with tempfile.TemporaryDirectory(prefix="rans_") as wd:
         r = (runner or two_grid)(j["stl"], j["label"], j["speed"], pathlib.Path(wd))
@@ -120,30 +131,32 @@ def check(name: str, value: float, limit: float, ok: bool, note: str) -> dict[st
 def row_fields(r: dict[str, Any], area: float, cd_hangar: float) -> dict[str, Any]:
     """The coefficient fields of a `body_rans` row from `two_grid`'s result `r`: cd = the fine grid's drag over q = rho speed^2 area / 2 (the solver's own
     rho, the one its force carries, on the vehicle's reference `area`), cd_spread = the GCI-based (Fs = 3) spread (GCI x cd) with the drag's own wobble
-    added in quadrature, used as a standard error by the refit (conservative: the sensitivity to the grid, not a bound), and the four checks that decide `ok`."""
+    added in quadrature, used as a standard error by the refit (conservative: the sensitivity to the grid, not a bound), and the four checks that decide
+    `ok`."""
     q = 0.5 * float(r["rho"]) * float(r["speed"]) ** 2 * area
     drag = float(r["drag"])
     if not math.isfinite(drag) or drag <= 0.0:
         raise ValueError(f"the RANS run returned a non-physical drag ({drag} N)")
     cd = drag / q
-    gci = r.get("gci")
-    gci_ok = finite_real(gci)                                               # a bool, a text or an integer too large for a float is no index
-    std = r.get("drag_std")
-    scatter = float(std) / drag if finite_real(std) else math.nan
+    gci_ok = finite_real(r.get("gci"))                                      # a bool, a text or an integer too large for a float is no index
+    gci = float(r["gci"]) if gci_ok else math.nan
+    std_ok = finite_real(r.get("drag_std"))
+    std = float(r["drag_std"]) if std_ok else math.nan
+    scatter = std / drag if std_ok else math.nan
     ratio = vv.refinement_ratio(r["cells"], r["coarse_cells"]) if r.get("cells") and r.get("coarse_cells") else None
     failed = int(r["failed_checks"]) + int(r["coarse_failed_checks"])
-    spread = math.hypot(gci * cd if gci_ok else 0.0, (std if finite_real(std) else 0.0) / q)
-    checks = [check("rans_gci", math.nan if not gci_ok else float(gci), GCI_MAX, gci_ok and gci <= GCI_MAX,
+    spread = math.hypot(gci * cd if gci_ok else 0.0, std / q if std_ok else 0.0)
+    checks = [check("rans_gci", gci, GCI_MAX, gci_ok and gci <= GCI_MAX,
                     "two-grid GCI (Roache, Fs = 3) of the drag: the sensitivity of the drag to the grid, not a bound of the total error; fails when it is not "
                     f"finite or is above {GCI_MAX:.0%} (a multiplier that uncertain is not information)"),
               check("rans_refinement_ratio", math.nan if ratio is None else ratio, vv.R_MIN, ratio is not None and ratio >= vv.R_MIN,
                     "r = (N_fine / N_coarse)^(1/3), Celik et al. 2008's effective ratio from the cell counts: at least 1.3 or the GCI is not meaningful"),
               check("rans_iterative_scatter", scatter, SCATTER_MAX, math.isfinite(scatter) and scatter <= SCATTER_MAX,
-                    "std / mean of the drag (the force projected on the flow direction) over the last 20 % of the fine grid's iterations: a run still wandering "
-                    "has no single answer"),
+                    "std / mean of the drag (the force projected on the flow direction) over the last 20 % of the fine grid's iterations: a run still "
+                    "wandering has no single answer"),
               check("rans_mesh_checks", failed, 0.0, failed == 0,
                     "checkMesh's failed mesh checks on the fine and the coarse grid together: a drag from a mesh that fails them is not trusted")]
-    return dict(cd=cd, cd_spread=max(spread, 1e-12), gci=float(gci) if gci_ok else None, refinement_ratio=ratio, checks=checks, drag_n=drag,
+    return dict(cd=cd, cd_spread=max(spread, 1e-12), gci=gci if gci_ok else None, refinement_ratio=ratio, checks=checks, drag_n=drag,
                 added_resistance=cd / cd_hangar - 1.0)
 
 

@@ -6,7 +6,8 @@ window's time and place, runs one wall-modelled LES window (windows.run_window) 
 hull, and returns one row per window and part. A USV has three parts: `hull` (water, native LBM, viscous only), `wing` (air) and
 `hull_fs` (the same hull and keel through a free surface, interFoam or FluidX3D in a child process, total resistance: stage3/freesurface.py);
 the flows are different fluids or need different solvers, so one window cannot carry them all. A glider whose LES part is planned out (CPU) has one
-`body_rans` row per vehicle instead (its first window; steady RANS on two grids, in a child process: stage3/rans.py), which feeds the refit when no LES row does.
+`body_rans` row per vehicle instead (its first window; steady RANS on two grids, in a child process: stage3/rans.py), which feeds the refit when no LES row
+does.
 
 Frames. The window frame is the body frame. Per class, with R the rotation of ENU into body axes, the window gets
     inflow   = R u_env          (ground-frame environment velocity at the window)
@@ -676,7 +677,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
 FS_GRACE_S = 30.0                                                           # how long past its own deadline the parent waits for a child to die
 PARTS = budget.STAGE3_PARTS                                                 # the native-LBM parts, one budget slice each
 FS_PARTS = budget.FS_PARTS                                                  # the free-surface part: child process, own budget
-RANS_PARTS = budget.RANS_PARTS                                              # the CPU RANS part of a glider whose LES window is not run: child process, own budget
+RANS_PARTS = budget.RANS_PARTS                                              # the CPU RANS part of a glider whose LES window is not run: child process
 
 SIGKILL_EARLY = "out of memory or an outside kill, not the watchdog"       # what a -9 before the deadline is (round 15 M-21)
 
@@ -811,7 +812,8 @@ def _rans_gate(a: dict[str, Any], ctx: Context, left_s: float, queued_s: float) 
     if need_s <= left_s + 1e-6:                                             # (a share is a fraction of the budget; `rans_plan` allows the microsecond too)
         return True, "", need_s
     plan = ctx.plan
-    return False, (f"RANS window not run: estimated {need(a, 'glider.rans.est_s') / 60:.0f} min x {need(a, 'glider.rans.margin')} margin = {need_s / 60:.0f} min "
+    est_s, margin = need(a, "glider.rans.est_s"), need(a, "glider.rans.margin")
+    return False, (f"RANS window not run: estimated {est_s / 60:.0f} min x {margin} margin = {need_s / 60:.0f} min "
                    f"(two grids, {rans.ITERS} iterations) against {max(left_s, 0) / 60:.1f} min left of the "
                    f"{plan['shares']['stage3'] * plan['budget_s'] / 60:.0f} min stage-3 share after the FEA and the free-surface cases; "
                    f"{freesurface.fitting_budget(queued_s + need_s, profile_stage3_s(ctx))}"), need_s
@@ -842,6 +844,7 @@ def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed
                    (p.stderr.strip().splitlines() or ["no message"])[-1][:300])
             return _fs_fail(base, f"RANS run failed ({p.returncode}): {how}", t0)
         r = load_json(out.read_text())
+        assert veh.ref_area is not None, "the stage-3 vehicles always carry an analytic reference area"
         f = rans.row_fields(r, veh.ref_area, case["cd_h"])
     except (OSError, ValueError, KeyError, RuntimeError, TypeError) as e:
         return _fs_fail(base, f"RANS window failed: {e}", t0)
@@ -850,11 +853,12 @@ def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed
     ok = all(c["ok"] for c in f["checks"])
     ratio = f["refinement_ratio"]
     res = dict(source="cafe.cfd.external: OpenFOAM simpleFoam, k-omega SST, snappyHexMesh", flow_label=label, speed_ms=speed, cells_fine=r["cells"],
-               cells_coarse=r["coarse_cells"], refinement_ratio=ratio, level_offsets=r["levels"], iterations=r["iterations"], iterations_cap=r["iterations_cap"],
-               estimated_s=est_s)
+               cells_coarse=r["coarse_cells"], refinement_ratio=ratio, level_offsets=r["levels"], iterations=r["iterations"],
+               iterations_cap=r["iterations_cap"], estimated_s=est_s)
     return dict(base, resolution=res, checks=f["checks"], ok=ok, reasons=[] if ok else rans.reasons(f["checks"], r), cd=f["cd"], cd_spread=f["cd_spread"],
                 cl=None, cl_spread=None, added_resistance=f["added_resistance"], gci=f["gci"], refinement_ratio=ratio, drag_n=f["drag_n"],
-                ref_area=veh.ref_area, source=res["source"], fea=dict(run=False, reason="no structural model in this part: the hull's FEA is the body window's"),
+                ref_area=veh.ref_area, source=res["source"],
+                fea=dict(run=False, reason="no structural model in this part: the hull's FEA is the body window's"),
                 timing=dict(wall_s=time.perf_counter() - t0, rans_s=r["seconds"]))
 
 

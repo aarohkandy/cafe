@@ -244,7 +244,8 @@ def rans_vehicles(classes: dict[str, str], wins: dict[str, dict[str, Any]], cpu_
             and any(not wins.get(f"{vid}/{part}", dict(runs=True))["runs"] for part in STAGE3_PARTS[c])]
 
 
-def rans_plan(classes: dict[str, str], wins: dict[str, dict[str, Any]], a: dict[str, Any], share: float | None, cpu_fallback: bool = True) -> dict[str, Any] | None:
+def rans_plan(classes: dict[str, str], wins: dict[str, dict[str, Any]], a: dict[str, Any], share: float | None,
+              cpu_fallback: bool = True) -> dict[str, Any] | None:
     """The CPU RANS cases (one per vehicle of `rans_vehicles`, its first window): priced once from `stage3.glider.rans.*`, `fit` of them fit `share` (all, with
     no wall-clock budget). `share` is what is left of the stage-3 share after the sea-pressure FEAs and the free-surface cases (`plan`, `stage3_plan`): the
     three are priced one after the other, never each against the whole share. None without any case."""

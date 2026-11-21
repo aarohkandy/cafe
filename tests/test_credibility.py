@@ -458,7 +458,8 @@ LIMITS = ["acoustic 4 km MF range is true by construction", "the USV 12 m/s poin
           "GCI values stored before the r = (N_f/N_c)^(1/3) fix were understated"]
 # round 2 (docs/CREDIBILITY.md has the same sentences; L13 is the run-time sub-grid limitation and sits between L12 and L14)
 LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the TAO moorings over this window: an estimate of the order, not a measurement",
-           "no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer and the drag refit stay uncalibrated; "
+           "no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer stays uncalibrated; the drag "
+           "refit comes only from a CPU RANS (glider) or free-surface (USV) case, where the budget holds one and it passes its checks; "
            "no GPU run exists",
            "the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
            "in the shipped quad_uas.yaml the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance",
