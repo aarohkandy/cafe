@@ -250,6 +250,16 @@ stage3.glider.window_depth_m:
   unit: "m"
   why: "Depth where the glider's through-water flight state and the current are taken for a window (upper ocean where the current stress is)."
   replace_with: "The depth of the stress event in the stage-1 track."
+stage3.glider.rans.est_s:
+  value: 867.0
+  unit: "s"
+  why: "Wall time of one glider RANS case (stage3/rans.py: two grids at cfd.external level offsets 0 and 1, 600 simpleFoam iterations each, 6 MPI ranks): 867.3 s measured for the demo Seaglider (1.28 M cells on the fine grid; 166.8 s coarse and 700.5 s fine) on cafe-orca, proot, 2026-11-20, job rans_g4 (review/workorder/handbacks/cfdprobe.md); 405 s on 16 cores. It is the cost at 6 ranks: a run with fewer cores is slower than this and its case is killed at the stage deadline if it does not finish. The Slocum's hull and wing are other sizes and were not timed."
+  replace_with: "Measured RANS time of the run's own vehicle, mesh and machine."
+stage3.glider.rans.margin:
+  value: 1.25
+  unit: "-"
+  why: "Safety factor on stage3.glider.rans.est_s: a RANS case is started only if estimate x margin fits the share of the stage left, because a child killed at the deadline returns nothing. The same factor as stage3.fs.margin (a loaded box), not a measured spread: the case was timed once at 6 ranks (867.3 s) and once at 16 (405.1 s)."
+  replace_with: "The spread of the measured-to-estimated ratio over a few glider RANS cases."
 stage3.slocum.length_m:
   value: 1.5
   unit: "m"

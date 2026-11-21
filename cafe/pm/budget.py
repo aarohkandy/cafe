@@ -44,6 +44,8 @@ EMULATOR_POINTS_MARGIN = 1.2      # variants are sized for this many times the m
 TRAIN_FRAC = 0.7                  # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
 STAGE3_PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}     # the native-LBM parts of a window, one slice of the share each
 FS_PARTS = {"usv": "hull_fs"}                                                        # the free-surface part: a child process with its own queue
+RANS_PARTS = {"glider": "body_rans"}                                                 # the CPU RANS part: one case per vehicle whose LES body window is not run
+RANS_REFIT = "the glider's drag refit comes only from its CPU RANS case, where it passes its checks"      # said of the refit where such a case fits
 FEA_CLASSES = ("glider",)                                                            # classes whose window carries an FEA of the pressure hull
 FALLBACK_COST = {"glider": (8.0, 0.1), "usv": (11.0, 0.1), "uas": (20.0, 0.3)}   # (s per batch, s per member) per mission day without bench
 GPU_MEM_GUARD = 0.85
@@ -236,6 +238,27 @@ def fea_planned_out(classes: dict[str, str], wins: dict[str, dict[str, Any]]) ->
     return [vid for vid, c in classes.items() if c in FEA_CLASSES and any(not wins.get(f"{vid}/{part}", dict(runs=True))["runs"] for part in STAGE3_PARTS[c])]
 
 
+def rans_vehicles(classes: dict[str, str], wins: dict[str, dict[str, Any]], cpu_fallback: bool) -> list[str]:
+    """The vehicles with a CPU RANS case (`RANS_PARTS`): on a CPU plan (`cpu_fallback`), those of the RANS classes whose LES part does not run. A GPU plan,
+    or a vehicle whose LES window runs, has none. Plan inputs only."""
+    return [vid for vid, c in classes.items() if cpu_fallback and c in RANS_PARTS
+            and any(not wins.get(f"{vid}/{part}", dict(runs=True))["runs"] for part in STAGE3_PARTS[c])]
+
+
+def rans_plan(classes: dict[str, str], wins: dict[str, dict[str, Any]], a: dict[str, Any], share: float | None,
+              cpu_fallback: bool = True) -> dict[str, Any] | None:
+    """The CPU RANS cases (one per vehicle of `rans_vehicles`, its first window): priced once from `stage3.glider.rans.*`, `fit` of them fit `share` (all, with
+    no wall-clock budget). `share` is what is left of the stage-3 share after the sea-pressure FEAs and the free-surface cases (`plan`, `stage3_plan`): the
+    three are priced one after the other, never each against the whole share. None without any case."""
+    vids = rans_vehicles(classes, wins, cpu_fallback)
+    if not vids:
+        return None
+    need = float(a["glider.rans.est_s"] * a["glider.rans.margin"])
+    # (the share is stored as a fraction of the budget: a microsecond of rounding must not cost a case the plan priced)
+    fit = len(vids) if share is None else int(max(min(len(vids), (share + 1e-6) // need), 0))
+    return dict(cases=len(vids), vehicles=vids, est_s=a["glider.rans.est_s"], margin=a["glider.rans.margin"], need_s=need, share_s=share, fit=fit)
+
+
 def fs_plan(classes: dict[str, str], K: int, a: dict[str, Any], share: float | None) -> dict[str, Any] | None:
     """The free-surface cases (`K` per USV): priced once, `fit` of them fit `share` (all, with no wall-clock budget). None without any case, or
     when the FluidX3D plugin replaces interFoam."""
@@ -413,7 +436,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
     K = WINDOWS[budget]
     a = stage3_assumptions()
     wins = les_windows(budget, gpus, classes, rate, SHARE["stage3"] * B, K, a)
-    shares, skipped_s, hold = dict(SHARE), 0.0, 0.0
+    shares, skipped_s, hold, rans = dict(SHARE), 0.0, 0.0, None
     if wins and not all(w["runs"] for w in wins.values()):                      # the slices of the windows that do not run go back to stage 1 ...
         s3 = SHARE["stage3"] * B
         kept = s3 * sum(w["runs"] for w in wins.values()) / len(wins)
@@ -421,7 +444,11 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         fs_s = 0.0 if fs is None else fs["fit"] * fs["need_s"]
         hold = len(fea_planned_out(classes, wins)) * a["fea_min_s"]             # ... and the sea-pressure FEA of each glider planned out (all or none)
         hold = hold if s3 >= fs_s + hold else 0.0
-        kept = max(kept, fs_s + hold)
+        # ... and the CPU RANS cases of the gliders planned out, priced on what is left after the FEAs and the free-surface cases (each claims its own seconds)
+        rans = rans_plan(classes, wins, a, s3 - fs_s - hold, gpus == 0)
+        # (`max`, as for the FEA hold and the free-surface cases before: exact where no LES window runs, which is every CPU plan but the `ci` smoke window;
+        # where some do run, they and the children draw on the same kept seconds)
+        kept = min(max(kept, fs_s + hold + (0.0 if rans is None else rans["fit"] * rans["need_s"])), s3)
         skipped_s = s3 - kept
         shares.update(stage3=kept / B, stage1=SHARE["stage1"] + skipped_s / B)
     share1 = shares["stage1"] * B
@@ -451,7 +478,8 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
         notes.append(f"stage 3: no LES coefficients exist on this machine: {sum(not w['runs'] for w in wins.values())} of {len(wins)} window part(s) are not "
                      f"run (their physical lattice viscosity is out of reach of {rate:.2g} cell-updates/s) and {skipped_s:.0f} s of the budget went "
                      "to stage 1; "
-                     "the sub-grid layer and the refit stay uncalibrated")
+                     + (f"the sub-grid layer stays uncalibrated; {RANS_REFIT}" if rans and rans["fit"] else
+                        "the sub-grid layer and the refit stay uncalibrated"))
     les = dict(backend=backend, rate=rate, rate_source=rate_src, windows_per_vehicle=K,
                # the share kept, not SHARE: the skipped windows gave theirs to stage 1 (round 12, M-28)
                cell_steps_per_window=shares["stage3"] * B * rate / max(K * len(classes), 1),
@@ -459,7 +487,7 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
                label=("GPU LES windows" if gpus > 0 else
                       "CPU fallback: no LES coefficients exist on this machine (no window reaches the physical lattice viscosity with this "
                       "budget's cell-updates); "
-                      "sub-grid and refit stay uncalibrated" if nowhere else
+                      + (f"sub-grid stays uncalibrated; {RANS_REFIT}" if rans and rans["fit"] else "sub-grid and refit stay uncalibrated") if nowhere else
                       "CPU fallback: native JAX lattice kernel at the resolution this budget affords on CPU; coefficients are the pooled "
                       "window coefficient over the vehicle's Hangar-model value"))
     if gpus > 0 and gpu_mem_gb is not None:
@@ -494,7 +522,9 @@ def stage3_plan(p: dict[str, Any], classes: dict[str, str], a: dict[str, Any]) -
     free-surface cases (None without any, or when the FluidX3D plugin replaces interFoam): the first `fit` of `cases` fit the share, in queue
     order. `les` is `reachable` (any window reaches the physical viscosity), its `windows` and a `note`; a plan with `max_cells` (GPU memory
     known) is refused (`memory_guard`) when a window's planned nest is over 85 % of it. `fea.hold_s` is the part of the share `plan` kept for the
-    sea-pressure FEAs of the gliders whose LES part is planned out (`les.fea_hold_s`); `fs` is priced on the share less it.
+    sea-pressure FEAs of the gliders whose LES part is planned out (`les.fea_hold_s`); `fs` is priced on the share less it. `rans` prices the CPU RANS
+    cases (one per glider whose LES body window is not run, on a CPU plan; None without any) on what is left after both, `rans.fit` of them fit: the
+    queue runs the FEAs, then the RANS cases, then the free-surface cases, and the three never claim the same seconds.
     A plan with no wall-clock budget (`shares`/`budget_s`
     absent) uses `les.cell_steps_per_window` shared between the parts."""
     les = p["les"]
@@ -516,14 +546,18 @@ def stage3_plan(p: dict[str, Any], classes: dict[str, str], a: dict[str, Any]) -
     # the share is stored as a fraction of the budget, so `share - hold` carries rounding (-2e-13 s when the cases got nothing): a microsecond keeps `fit`
     # what `plan` priced and never negative
     fs = fs_plan(classes, K, a, None if share is None else max(share - hold, 0.0) + (1e-6 if hold else 0.0))
+    # the CPU RANS cases come after the FEAs and the free-surface cases in the pricing (`plan` kept their seconds on top of those): the share left after both
+    rans = rans_plan(classes, wins, a, None if share is None else max(share - hold - (0.0 if fs is None else fs["fit"] * fs["need_s"]), 0.0),
+                     bool(les.get("cpu_fallback")))
     reachable = any(w["reachable"] for w in wins.values())
     return dict(share_s=share, windows_per_vehicle=K, les_parts=n_les, slice_s=slice_s, min_window_s=a["min_window_s"],
                 runs=n_les == 0 or slice_s is None or slice_s >= a["min_window_s"], compile_s=a["compile_s_guess"], les_margin=a["les_margin"],
                 fea=dict(reserve_frac=a["fea_reserve_frac"], reserve_s=fea_s, min_s=a["fea_min_s"], runs=slice_s is None or fea_s >= a["fea_min_s"],
                          hold_s=hold),
-                cell_steps_per_part=per_part, fs=fs,
+                cell_steps_per_part=per_part, fs=fs, rans=rans,
                 les=dict(reachable=reachable, windows=wins,
-                         note=("no LES coefficients exist on this machine; sub-grid and refit stay uncalibrated"
+                         note=((f"no LES coefficients exist on this machine; sub-grid stays uncalibrated; {RANS_REFIT}" if rans and rans["fit"] else
+                                "no LES coefficients exist on this machine; sub-grid and refit stay uncalibrated")
                                if wins and not reachable and les["cpu_fallback"] else None)))
 
 

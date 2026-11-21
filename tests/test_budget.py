@@ -217,7 +217,8 @@ def test_a_cpu_plan_skips_every_les_window_that_cannot_reach_the_physical_viscos
         assert not any(x["runs"] or x["reachable"] for x in w.values()) and all(x["need_cell_updates"] > 100 * x["afford_cell_updates"] for x in w.values())
         assert all(x["skip_reason"].startswith("not run: the physical lattice viscosity") and "went to stage 1" in x["skip_reason"] for x in w.values())
         B = budget.BUDGET_S[name]
-        hold = 0.0 if name == "quick" else a3()["fea_min_s"] / B               # no FS case fits; the sea-pressure FEA keeps its seconds if they are there
+        # no FS case fits; the sea-pressure FEA keeps its seconds if they are there, and so does the glider's CPU RANS case if it fits what the FEA leaves
+        hold = 0.0 if name == "quick" else (a3()["fea_min_s"] + a3()["glider.rans.est_s"] * a3()["glider.rans.margin"]) / B
         assert p["shares"]["stage3"] == pytest.approx(hold) and p["shares"]["stage1"] == pytest.approx(budget.SHARE["stage1"] + budget.SHARE["stage3"] - hold)
         assert p["stage1_share_s"] == pytest.approx(0.75 * B - hold * B) and p["shares"]["emulator"] == budget.SHARE["emulator"]
         assert any(n.startswith("stage 3: no LES coefficients exist on this machine: 4 of 4 window part(s) are not run") for n in p["notes"])
@@ -249,8 +250,8 @@ def test_the_free_surface_cases_keep_the_share_they_fit_when_the_les_slices_go_t
     monkeypatch.setenv("CAFE_NPROC", "6")
     p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
     fs = budget.stage3_plan(p, CLASSES, a3())["fs"]
-    hold = a3()["fea_min_s"]                                                                # the glider's sea-pressure FEA
-    assert fs["fit"] == 1 and p["shares"]["stage3"] * 36000 == pytest.approx(fs["need_s"] + hold)   # the case that fits keeps its seconds, and the FEA its own
+    hold = a3()["fea_min_s"] + a3()["glider.rans.est_s"] * a3()["glider.rans.margin"]       # the glider's sea-pressure FEA and its CPU RANS case
+    assert fs["fit"] == 1 and p["shares"]["stage3"] * 36000 == pytest.approx(fs["need_s"] + hold)       # the case that fits keeps its seconds, so do the others
     assert p["shares"]["stage1"] == pytest.approx(budget.SHARE["stage1"] + budget.SHARE["stage3"] - (fs["need_s"] + hold) / 36000)
     assert budget.stage3_plan(p, CLASSES, a3())["les_parts"] == 0
     q = budget.plan("quick", 0, MISSION, thr={}, vehicle_classes=CLASSES)

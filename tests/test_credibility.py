@@ -458,7 +458,8 @@ LIMITS = ["acoustic 4 km MF range is true by construction", "the USV 12 m/s poin
           "GCI values stored before the r = (N_f/N_c)^(1/3) fix were understated"]
 # round 2 (docs/CREDIBILITY.md has the same sentences; L13 is the run-time sub-grid limitation and sits between L12 and L14)
 LIMITS2 = ["the wind prior's persistent and short-lived parts are split from the TAO moorings over this window: an estimate of the order, not a measurement",
-           "no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer and the drag refit stay uncalibrated; "
+           "no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer stays uncalibrated; the drag "
+           "refit comes only from a CPU RANS (glider) or free-surface (USV) case, where the budget holds one and it passes its checks; "
            "no GPU run exists",
            "the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
            "in the shipped quad_uas.yaml the UAS controller clamps the commanded tilt at 35 deg, below the 42 deg of attitude exceedance",
@@ -1594,7 +1595,7 @@ def test_r13_m3_every_stage_3_key_of_assumptions_yaml_maps_to_a_class_or_to_ever
     per_class = {k for k in keys if cr.config_scope("config/assumptions.yaml", k)}
     assert {k.removeprefix("stage3.") for k in keys if k not in per_class} == every
     assert {cr.config_scope("config/assumptions.yaml", k) for k in per_class} == {"glider", "seaglider", "slocum", "usv", "uas"}
-    assert len(per_class) == 32 and cr.config_scope("config/assumptions.yaml", "stage3.nominal.usv_wing") == "usv"
+    assert len(per_class) == 34 and cr.config_scope("config/assumptions.yaml", "stage3.nominal.usv_wing") == "usv"
     assert {cr.config_scope("config/assumptions.yaml", f"stage3.glider.hull_collapse_{k}") for k in ("depth_m", "for")} == {"seaglider"}      # round 15 M-11
     assert {cr.config_scope("config/assumptions.yaml", f"stage3.slocum.hull_collapse_{k}") for k in ("depth_m", "for")} == {"slocum"}
     assert cr.config_scope("config/assumptions.yaml", "dtmb5415.u_nu_rel") == "-" and cr.config_scope("config/assumptions.yaml", "waves.swell_age") == ""

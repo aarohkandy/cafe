@@ -1319,7 +1319,8 @@ BARE_WRITES = {
     "shares.py": (2, "pytest argument files, written again at the start of every suite run"),
     "stage3/fluidx3d.py": (2, "the case file and log in a scratch directory of one window"),
     "stage3/freesurface.py": (1, "the result of a child process, in its scratch directory, read by the parent that started it"),
-    "stage3/pipeline_windows.py": (2, "the same child result and the job file, both in a scratch directory"),
+    "stage3/pipeline_windows.py": (3, "the same child result and the job files (the free-surface and the RANS child's), all in a scratch directory"),
+    "stage3/rans.py": (1, "the result of a child process, in its scratch directory, read by the parent that started it"),
 }
 # The other ways a file is written in place that the scan below counts: `shutil.copy`, `copyfile` and `copy2`, and `np.save`, `savez` and `savez_compressed`
 # (a copy cut half way left a mission.yaml of three bytes that `report` and `whatif` reload: M-20 sibling). File name -> (calls, why it is not a risk).

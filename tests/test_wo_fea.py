@@ -23,6 +23,7 @@ def out_ctx(tmp, share=2000.0, hold=1.0):
     """One glider whose LES part is planned out, a stage-3 share of `share` s and `hold` s of it held for the FEA (cheap() sets fea_min_s to 1 s)."""
     ctx = planned_ctx(tmp, dict(OUT), share)
     ctx.plan["les"]["fea_hold_s"] = hold
+    ctx.plan["les"]["cpu_fallback"] = False                      # (a CPU plan also queues the glider's RANS case: tests/test_wo_rans.py)
     return ctx
 
 
@@ -193,13 +194,16 @@ def test_t9_the_plan_holds_the_fea_seconds_ahead_of_the_free_surface_cases_and_t
     # a share too small for the FEA and the cases: nothing held, the shares are what they were
     monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(a, fea_min_s=1e9))
     q = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
-    assert q["les"]["fea_hold_s"] == 0.0 and q["shares"]["stage3"] * q["budget_s"] == pytest.approx(fs0["fit"] * fs0["need_s"])
+    rq = budget.stage3_plan(q, CLASSES, dict(a, fea_min_s=1e9))["rans"]                  # the glider's CPU RANS case keeps its seconds too (step 3)
+    assert q["les"]["fea_hold_s"] == 0.0 and q["shares"]["stage3"] * q["budget_s"] == pytest.approx(fs0["fit"] * fs0["need_s"] + rq["fit"] * rq["need_s"])
     assert budget.stage3_plan(q, CLASSES, dict(a, fea_min_s=1e9))["fea"]["hold_s"] == 0.0
     monkeypatch.undo()                                                                    # two cores: no free-surface case fits the whole share
     monkeypatch.setenv("CAFE_NPROC", "2")
     two = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
     assert budget.fs_plan(CLASSES, 3, a, s3)["fit"] == 0 and two["les"]["fea_hold_s"] == a["fea_min_s"]
-    assert two["shares"]["stage3"] * two["budget_s"] == pytest.approx(a["fea_min_s"]) and budget.stage3_plan(two, CLASSES, a)["fs"]["fit"] == 0
+    r2 = budget.stage3_plan(two, CLASSES, a)["rans"]
+    assert two["shares"]["stage3"] * two["budget_s"] == pytest.approx(a["fea_min_s"] + r2["fit"] * r2["need_s"])
+    assert budget.stage3_plan(two, CLASSES, a)["fs"]["fit"] == 0
 
 
 def test_t10_a_profile_gives_the_free_surface_cases_the_stage_3_seconds_less_the_ones_the_plan_holds_for_the_fea(monkeypatch):
@@ -213,7 +217,7 @@ def test_t10_a_profile_gives_the_free_surface_cases_the_stage_3_seconds_less_the
     a = budget.stage3_assumptions()
     s = pw.profile_stage3_s(ctx)
     fs0 = budget.fs_plan(ctx.classes, budget.WINDOWS["overnight"], a, budget.SHARE["stage3"] * budget.BUDGET_S["overnight"])
-    assert s["quick"] == 0.0 and s["4h"] == 0.0 and s["overnight"] == pytest.approx(fs0["fit"] * fs0["need_s"], abs=1e-3)
+    assert s["quick"] == 0.0 and s["4h"] == 0.0 and s["overnight"] == pytest.approx(fs0["fit"] * fs0["need_s"], abs=1e-3)   # (not the RANS cases')
 
 
 def test_t11_the_run_gate_runs_the_free_surface_case_the_plan_says_fits_when_the_share_is_exactly_the_cases_and_the_hold(monkeypatch):

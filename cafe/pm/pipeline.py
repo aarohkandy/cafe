@@ -1452,8 +1452,9 @@ def s_refit(ctx: Context, L: Ledger) -> None:
         # Stage 1 has one drag multiplier per vehicle and it scales the water-side (or, for a UAS, the body) drag; a USV's wing is
         # a different flow, so its windows are pooled separately and reported, never mixed into the hull's multiplier. The multiplier
         # scales the VPP's whole through-water resistance (stage1.refit_drag: speed ~ drag^-1/2 at fixed force), so a USV's passing
-        # free-surface windows (`hull_fs`: total resistance, wave-making included) set it when there are any, else its viscous `hull` windows
-        main = next((p for p in ("hull_fs", "hull") if any(w.get("ok") and w.get("part") == p for w in ws)),
+        # free-surface windows (`hull_fs`: total resistance, wave-making included) set it when there are any, else its viscous `hull` windows. A glider's
+        # passing LES `body` windows set it, else its CPU RANS case (`body_rans`): the two are never pooled, they are different solvers
+        main = next((p for p in ("hull_fs", "hull", "body", "body_rans") if any(w.get("ok") and w.get("part") == p for w in ws)),
                     "hull" if any(w.get("part") == "hull" for w in ws) else "hull_fs" if any(w.get("part") == "hull_fs" for w in ws) else "body")
         good = [w for w in ws if w.get("ok") and w.get("part", main) == main]
         if ctx.plan["refit_iterations"] == 0:
@@ -1468,7 +1469,10 @@ def s_refit(ctx: Context, L: Ledger) -> None:
         for part in sorted(other):
             pw = [w for w in ws if w.get("ok") and w.get("part") == part]
             why = {"hull": "the hull_fs windows (total resistance with the free surface) set the multiplier; this part has no wave-making",
-                   "hull_fs": "no hull_fs window passed its checks: the viscous hull windows set the multiplier"}
+                   "hull_fs": "no hull_fs window passed its checks: the viscous hull windows set the multiplier",
+                   "body": "no LES body window passed its checks: the RANS window (body_rans) sets the multiplier",
+                   "body_rans": ("a passing LES body window sets the multiplier; LES and RANS coefficients are not pooled" if good
+                                 else "no window of this part passed its checks")}
             out[vid][f"{part}_not_used"] = dict(reason=why.get(part, "Stage 1 has no multiplier for this part"), **(refit.refit(pw) if pw else {}))
     for vid, o in out.items():
         if o["used"]:
