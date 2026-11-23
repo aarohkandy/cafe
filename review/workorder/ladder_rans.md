@@ -10,3 +10,5 @@ rans_ladder_ctl: Re 2.045e+05 U 0.13520 cells 315938/1284890 failed 0/0 it 600/6
 
 rans_ladder_re80k: Re 8.019e+04 U 0.05302 cells 315994/1284246 failed 0/0 it 600/600 s 898 drag 0.04021 (coarse 0.04187) cd 0.3948 GCI 0.0805 ratio 1.596 std_rel 0.0036/0.0059 scatter 0.1157 P 0.02569 V 0.01452 cf 0.00889/0.00469 ff(stl) 1.9140/3.6295 ff(1.6427) 1.9106/3.6230
 
+rans_ladder_re40k: Re 4.01e+04 U 0.02651 cells 315896/1284995 failed 0/0 it 271/600 s 790 drag 0.01153 (coarse 0.01140) cd 0.4530 GCI 0.0229 ratio 1.596 std_rel 0.0000/0.0052 scatter 0.1362 P 0.00651 V 0.00502 cf 0.01107/0.00663 ff(stl) 1.7643/2.9445 ff(1.6427) 1.7612/2.9393
+
