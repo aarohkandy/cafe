@@ -59,8 +59,7 @@ def _dvec(label: str) -> NDArray[np.float64]:
 def write_stl(veh: W.Vehicle, path: str | os.PathLike[str]) -> float:
     """One closed STL of the vehicle's shapes (a glider's hull and wing unioned, or a USV's bare hull alone) in the body frame the flow label is in: no shift, no keel. Returns its length (m)."""
     import trimesh
-    parts = [W.vehicle_mesh(veh, i) for i in range(len(veh.shapes))]
-    m = parts[0] if len(parts) == 1 else trimesh.boolean.union(parts, engine="manifold")
+    m = trimesh.boolean.union([W.vehicle_mesh(veh, i) for i in range(len(veh.shapes))], engine="manifold")
     if not m.is_watertight:
         raise ValueError("the hull and wing do not union into a closed solid")
     m.export(path)
