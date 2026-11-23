@@ -186,11 +186,14 @@ def test_two_runs_with_the_same_seed_make_the_same_report_json_with_the_real_sta
     assert differences(a, b) == [] and json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
     rows = json.loads((t.ctx["a"].run_dir / "stage3" / "windows.json").read_text())
     flat = [r for rs in rows.values() for r in rs]
-    assert len(flat) == 7 and {r["part"] for r in flat} == {"body", "hull", "wing", "hull_fs", "body_rans"}
+    assert len(flat) == 8 and {r["part"] for r in flat} == {"body", "hull", "wing", "hull_fs", "body_rans", "hull_rans"}
     rans_rows = [r for r in flat if r["part"] == "body_rans"]              # one CPU RANS case, for the glider whose LES part the ci plan skips (DECISIONS 1105)
     assert len(rans_rows) == 1 and not rans_rows[0]["ok"] and rans_rows[0]["cd"] is None       # the ci share (36 s) does not fit a case: refused by the gate,
     assert rans_rows[0]["reasons"] and not any("killed" in x for x in rans_rows[0]["reasons"])  # with its reason, not started and not killed
-    ran = [r for r in flat if r["part"] not in ("hull_fs", "body_rans")]
+    hull_rows = [r for r in flat if r["part"] == "hull_rans"]              # the USV's bare-hull case: refused too (the price gate or the validity gate), not killed
+    assert len(hull_rows) == 1 and not hull_rows[0]["ok"] and hull_rows[0]["cd"] is None and hull_rows[0]["reasons"]
+    assert not any("killed" in x for x in hull_rows[0]["reasons"])
+    ran = [r for r in flat if r["part"] not in ("hull_fs", "body_rans", "hull_rans")]
     assert not any("killed" in " ".join(r["reasons"]) or (r["resolution"] or {}).get("cut_reason") for r in ran)                        # nothing was killed
     assert sum(r["cd"] is not None for r in ran) >= 1  # a window really ran (M-8: on CPU the ci plan runs the smoke window; the rest are skipped by the plan)
     assert any(r["fea"]["run"] for r in ran)  # the glider hull's FEA ran

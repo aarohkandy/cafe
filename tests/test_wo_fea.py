@@ -86,7 +86,7 @@ def test_t4_the_fea_starts_before_the_free_surface_case_and_is_counted_against_i
     cheap(monkeypatch)
     order, lefts, gate = spy(monkeypatch), [], pw._fs_gate
     monkeypatch.setattr(pw, "_fs_gate", lambda est, a, ctx, left, queued: (lefts.append((left, queued)), gate(est, a, ctx, left, queued))[1])
-    ctx = fake_ctx(no_wall_receipt, vehicles=[VEHICLES[0], VEHICLES[2]], classes=dict(g="glider", u="usv"), rate=2000.0)
+    ctx = fake_ctx(no_wall_receipt, vehicles=[VEHICLES[0], VEHICLES[2]], classes=dict(g="glider", u="usv"), rate=2000.0, cpu=False)       # (no RANS cases here)
     need = budget.fs_plan(ctx.classes, 1, pw.assumptions(), None)["need_s"]
     ctx.plan.update(shares=dict(stage3=1.0), budget_s=need + 61.0)
     ctx.plan["les"].update(windows={"g/body": OUT["g/body"], "u/hull": dict(OUT["g/body"]), "u/wing": dict(OUT["g/body"])}, fea_hold_s=1.0)
@@ -194,15 +194,16 @@ def test_t9_the_plan_holds_the_fea_seconds_ahead_of_the_free_surface_cases_and_t
     # a share too small for the FEA and the cases: nothing held, the shares are what they were
     monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(a, fea_min_s=1e9))
     q = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
-    rq = budget.stage3_plan(q, CLASSES, dict(a, fea_min_s=1e9))["rans"]                  # the glider's CPU RANS case keeps its seconds too (step 3)
-    assert q["les"]["fea_hold_s"] == 0.0 and q["shares"]["stage3"] * q["budget_s"] == pytest.approx(fs0["fit"] * fs0["need_s"] + rq["fit"] * rq["need_s"])
+    sq = budget.stage3_plan(q, CLASSES, dict(a, fea_min_s=1e9))
+    rq, fq = sq["rans"], sq["fs"]                                                        # the CPU RANS cases keep their seconds too, priced before the free-surface cases
+    assert q["les"]["fea_hold_s"] == 0.0 and q["shares"]["stage3"] * q["budget_s"] == pytest.approx(fq["fit"] * fq["need_s"] + rq["held_s"])
     assert budget.stage3_plan(q, CLASSES, dict(a, fea_min_s=1e9))["fea"]["hold_s"] == 0.0
     monkeypatch.undo()                                                                    # two cores: no free-surface case fits the whole share
     monkeypatch.setenv("CAFE_NPROC", "2")
     two = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
     assert budget.fs_plan(CLASSES, 3, a, s3)["fit"] == 0 and two["les"]["fea_hold_s"] == a["fea_min_s"]
     r2 = budget.stage3_plan(two, CLASSES, a)["rans"]
-    assert two["shares"]["stage3"] * two["budget_s"] == pytest.approx(a["fea_min_s"] + r2["fit"] * r2["need_s"])
+    assert two["shares"]["stage3"] * two["budget_s"] == pytest.approx(a["fea_min_s"] + r2["held_s"])
     assert budget.stage3_plan(two, CLASSES, a)["fs"]["fit"] == 0
 
 
@@ -216,8 +217,8 @@ def test_t10_a_profile_gives_the_free_surface_cases_the_stage_3_seconds_less_the
     ctx = SimpleNamespace(mission=m, classes=stage1._classes(m), plan=dict(gpus=0, workers=6, mem_gb=None, env_gb=None, les={}))
     a = budget.stage3_assumptions()
     s = pw.profile_stage3_s(ctx)
-    fs0 = budget.fs_plan(ctx.classes, budget.WINDOWS["overnight"], a, budget.SHARE["stage3"] * budget.BUDGET_S["overnight"])
-    assert s["quick"] == 0.0 and s["4h"] == 0.0 and s["overnight"] == pytest.approx(fs0["fit"] * fs0["need_s"], abs=1e-3)   # (not the RANS cases')
+    ov = budget.stage3_plan(budget.plan("overnight", 0, m, vehicle_classes=ctx.classes, workers=6), ctx.classes, a)["fs"]    # priced after the RANS cases
+    assert s["quick"] == 0.0 and s["4h"] == 0.0 and s["overnight"] == pytest.approx(ov["fit"] * ov["need_s"], abs=1e-3)   # (not the RANS cases')
 
 
 def test_t11_the_run_gate_runs_the_free_surface_case_the_plan_says_fits_when_the_share_is_exactly_the_cases_and_the_hold(monkeypatch):
