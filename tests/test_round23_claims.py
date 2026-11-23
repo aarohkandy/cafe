@@ -225,6 +225,8 @@ PRODUCT_ALLOW = _entries(
          'model)'),
     ],
     'cafe/pm/pipeline.py', [
+        ('s_refit', 'share of the drag), so it cannot be scaled', 1, 'message',
+         'the refit reason for a passing hull_rans row without a usable drag_share: a condition the code checks (the share is missing or outside (0, 1])'),
         ('ocean_box', 'or more; the ocean fetch cannot cut that: narrow the box or lower box.pad_deg', 1, 'message',
          'the ocean-fetch refusal: the box cannot be cut'),
         ('ocean_box', '0 deg E; the GLBy ocean fetch cannot cross it: move the box east or west of 0 deg, or spli', 1, 'message',

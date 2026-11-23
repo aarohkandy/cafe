@@ -253,7 +253,8 @@ def test_t10_the_rans_cases_are_priced_in_queue_order_a_refused_glider_is_follow
     assert s["rans"]["fit"] == 2 and s["rans"]["fitted"] == ["g", "u"] and s["fs"]["fit"] == 0
 
 
-def test_t11_a_usv_gets_a_hull_rans_row_a_uas_and_a_gpu_glider_get_none_and_a_fast_boat_is_refused_by_the_validity_gate(no_wall_receipt, rans_env, monkeypatch):
+def test_t11_a_usv_gets_a_hull_rans_row_beside_a_glider_a_uas_and_a_gpu_glider_get_none(
+        no_wall_receipt, rans_env, monkeypatch):
     slow_boat(monkeypatch)
     ctx = fake_ctx(no_wall_receipt, vehicles=[VEHICLES[0], VEHICLES[2], VEHICLES[3]], classes=dict(g="glider", u="usv", q="uas"), rate=2000.0)
     ctx.plan.update(shares=dict(stage3=1.0), budget_s=1e6)
@@ -351,6 +352,14 @@ def test_t15_the_plan_label_and_notes_say_the_refit_holds_only_where_the_case_pa
     assert q["les"]["label"].startswith("CPU fallback") and q["les"]["label"].endswith("sub-grid and refit stay uncalibrated")
     assert any(n.endswith("went to stage 1; the sub-grid layer and the refit stay uncalibrated") for n in q["notes"])
     assert budget.stage3_plan(q, CL2, a)["les"]["note"] == "no LES coefficients exist on this machine; sub-grid and refit stay uncalibrated"
+    # a USV that is a RANS vehicle but whose case does not fit, while a glider's does: the glider's promise only, no USV clause
+    monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(a, **{"usv.rans.est_s": 1e6}))
+    pu = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
+    ru = budget.stage3_plan(pu, CL2, budget.stage3_assumptions())["rans"]
+    assert ru["cases"] == 3 and ru["fitted"] and all(CL2[v] == "glider" for v in ru["fitted"]) and "usv" not in ru["fitted"]
+    assert pu["les"]["label"].endswith(budget.RANS_REFIT) and "bare hull" not in pu["les"]["label"] and budget.RANS_USV not in pu["les"]["label"]
+    assert any(n.endswith(budget.RANS_REFIT) for n in pu["notes"]) and not any(budget.RANS_USV in n for n in pu["notes"])
+    assert budget.stage3_plan(pu, CL2, budget.stage3_assumptions())["les"]["note"].endswith(budget.RANS_REFIT)
 
 
 @pytest.fixture
@@ -650,6 +659,8 @@ def test_t33_the_bare_hull_case_is_the_viscous_term_at_the_solvers_reynolds_numb
                  "the polar's, before the stage-1 speed bias", "leeway -7.9 deg and heel 4.2 deg not simulated", "the rudder's induced drag left out"):
         assert text in c["src"]
     assert "2.5 x" in c["wetted_area_note"] and "fully submerged ellipsoid of draft 0.45 m with no keel" in c["wetted_area_note"]
+    assert ("so cd / cd_hangar is per unit of that surface; the multiplier is that ratio scaled to the hull term's share of the drag (DECISIONS 1109)"
+            in c["wetted_area_note"] and "the multiplier is per unit" not in c["wetted_area_note"])
     monkeypatch.setattr(pw, "_keel_drag", lambda P, stw: 1e6)                                                          # no keel term in the reference
     assert pw.usv_case(ctx, WIN, P, veh, a, 70.0, "hull_rans")["cd_h"] == c["cd_h"]
     slow_boat(monkeypatch, lee=0.0, heel=0.0)
@@ -769,6 +780,9 @@ def test_t40_a_row_that_measured_the_hull_alone_scales_the_fit_after_the_pooling
     assert plain_ratio["drag"]["mean"] == pytest.approx(0.8627)
 
 
+NO_SHARE = ("the hull_rans row passed its checks but carries no usable drag_share (the hull term's share of the drag), so it cannot be scaled")
+
+
 def test_t41_the_bare_hull_row_sets_the_usv_multiplier_and_the_box_keel_parts_do_not(tmp_path):
     rows = {"usv": [dict(tp.stage3_row(cd=1.3), part="hull"), dict(tp.stage3_row(cd=2.0), part="hull_fs"), hull_row()]}
     u = tp.refit_run(tmp_path, rows)[0]["usv"]
@@ -780,9 +794,12 @@ def test_t41_the_bare_hull_row_sets_the_usv_multiplier_and_the_box_keel_parts_do
     for bad in (None, 0.0, 1.5, math.nan, "0.3"):
         row = dict(hull_row(), drag_share=bad)
         out = tp.refit_run(tmp_path / f"b{bad}", {"usv": [row]})[0]["usv"]
-        assert out["used"] is False and out["reason"].startswith("no hull_rans window passed")
+        assert out["used"] is False and out["reason"].startswith(NO_SHARE)       # the row passed: the reason must not say it failed its checks
     gone = {k: v for k, v in hull_row().items() if k != "drag_share"}
-    assert tp.refit_run(tmp_path / "gone", {"usv": [gone]})[0]["usv"]["used"] is False
+    g = tp.refit_run(tmp_path / "gone", {"usv": [gone]})[0]["usv"]
+    assert g["used"] is False and g["reason"].startswith(NO_SHARE) and "passed its stage-3 self-checks" not in g["reason"]
+    failed = tp.refit_run(tmp_path / "failed", {"usv": [dict(hull_row(), ok=False)]})[0]["usv"]                      # a failed row keeps the old one
+    assert failed["reason"].startswith("no hull_rans window passed its stage-3 self-checks")
 
 
 @needs_data

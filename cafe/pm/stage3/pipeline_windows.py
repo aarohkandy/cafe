@@ -284,8 +284,10 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
                    info=dict(stw_ms=stw, leeway_deg=lee, heel_deg=float(np.asarray(tw["heel_deg"]))), wetted_window_m2=wetted,
                    wetted_platform_m2=P["wetted_area_m2"],
                    wetted_area_note=f"the {part} window hull is {what} with {ratio:.2f} x the platform's assumed wetted area ({wetted:.2f} vs "
-                                    f"{P['wetted_area_m2']:.2f} m2); its Hangar reference is built on the window's own surface, so the multiplier "
-                                    "is per unit of that surface")
+                                    f"{P['wetted_area_m2']:.2f} m2); its Hangar reference is built on the window's own surface, so "
+                                    + ("the multiplier is per unit of that surface" if part != "hull_rans" else
+                                       "cd / cd_hangar is per unit of that surface; the multiplier is that ratio scaled to the hull term's share of the "
+                                       "drag (DECISIONS 1109)"))
         if part == "hull_rans":                                             # the bare hull's viscous term, at the RANS solver's Reynolds number (round 7 M-28)
             from cafe import cfd
             ra, rb, rc = veh.shapes[0]["radii"]

@@ -1366,7 +1366,8 @@ def test_a_passing_hull_or_hull_fs_window_carries_the_box_keel_and_is_reported_n
     each is a candidate neither alone nor beside the bare hull. Before: a passing `hull_fs` row set it (`hull` after it)."""
     rows = {"usv": [dict(stage3_row(cd=1.3), part="hull"), dict(stage3_row(cd=2.0, spread=0.1), part="hull_fs"), dict(stage3_row(cd=3.0), part="wing")]}
     u = refit_run(tmp_path, rows)[0]["usv"]
-    assert u["used"] is False and u["reason"].startswith("no hull_rans row exists (a GPU plan runs no CPU RANS case)")
+    assert u["used"] is False and u["reason"].startswith(
+        "no hull_rans row exists (no CPU RANS case was planned: a GPU plan, or the USV's LES hull window runs)")
     assert u["hull_not_used"]["reason"] == pipeline.BOX_KEEL == u["hull_fs_not_used"]["reason"] and u["hull_fs_not_used"]["drag"]["mean"] == pytest.approx(2.0)
     only_bad = {"usv": [dict(stage3_row(ok=False, checks=[pm_run.check_row("rans_gci", 0.2, 0.1, False)]), part="hull_rans", drag_share=0.2),
                         dict(stage3_row(cd=1.3), part="hull")]}
