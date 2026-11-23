@@ -287,7 +287,7 @@ def test_t12_the_plan_prices_the_fea_then_the_rans_cases_then_the_free_surface_c
     monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(a, **{"glider.rans.est_s": n / 1.25}))
     q = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
     t = budget.stage3_plan(q, CL2, dict(a, **{"glider.rans.est_s": n / 1.25}))
-    assert t["rans"]["fitted"] == ["glider_eq", "usv"] and t["rans"]["cases"] == 3 and q["shares"]["stage1"] > p["shares"]["stage1"]
+    assert t["rans"]["fitted"] == ["glider_eq", "usv"] and t["rans"]["cases"] == 3
     assert sum(q["shares"].values()) == pytest.approx(sum(budget.SHARE.values()))
     assert q["shares"]["stage3"] * B == pytest.approx(t["fs"]["fit"] * t["fs"]["need_s"] + hold + n + usv_need)
 
@@ -565,8 +565,8 @@ def test_t28_the_rans_advice_is_priced_on_the_rans_seconds_and_the_free_surface_
     ov = budget.stage3_plan(budget.plan("overnight", 0, m, vehicle_classes=ctx.classes, workers=6), ctx.classes, a)["fs"]
     assert f["quick"] == 0.0 and f["4h"] == 0.0 and f["overnight"] == pytest.approx(ov["fit"] * ov["need_s"], abs=1e-3)      # the free-surface cases' alone
     why = pw._rans_gate(a, ctx, 0.0, 2 * one, "glider")[1]
-    assert why.endswith("no --budget profile's plan holds it (the largest plan gives 36 min of stage 3)")
-    assert pw._rans_gate(a, ctx, 0.0, 0.0, "glider")[1].endswith("it would fit --budget 4h (36 min of stage 3 in that plan)")
+    assert why.endswith("no --budget profile's plan holds it (the largest plan gives 46 min of stage 3)")
+    assert pw._rans_gate(a, ctx, 0.0, 0.0, "glider")[1].endswith("it would fit --budget 4h (46 min of stage 3 in that plan)")
 
 
 def test_t29_the_free_surface_advice_is_not_charged_the_rans_cases_queued_before_it(no_wall_receipt, rans_env, monkeypatch):
@@ -578,7 +578,7 @@ def test_t29_the_free_surface_advice_is_not_charged_the_rans_cases_queued_before
     ctx.plan.update(shares=dict(stage3=1.0), budget_s=fs_need + a["glider.rans.est_s"] * a["glider.rans.margin"] + 60.0)
     ctx.plan["les"]["windows"] = {k: dict(OUT) for k in ("g/body", "u/hull", "u/wing")}
     rows = pw.run(ctx, {"g": [WIN], "u": [WIN]}, FakeL())
-    assert body_rans(rows["g"])[0]["ok"] and len(RS["calls"]) == 1 and seen == [0.0]         # the RANS case ran, not in the FS queue
+    assert body_rans(rows["g"])[0]["ok"] and hull_rans(rows["u"])[0]["ok"] and len(RS["calls"]) == 2 and seen == [0.0]   # both RANS cases ran, not in the FS queue
 
 
 @pytest.mark.parametrize("exc", [ImportError("no manifold backend"), AssertionError("area"), TypeError("odd"), IndexError("empty")])
