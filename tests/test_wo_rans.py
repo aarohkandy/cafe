@@ -34,13 +34,13 @@ def fresh_rans():
               calls=[], spawned=[])
 
 
-def fake_two_grid(stl, label, speed, wd, log=print):
+def fake_two_grid(stl, label, speed, wd, levels=rans.LEVELS, log=print):
     """Stands in for rans.two_grid (OpenFOAM): checks that the stage handed it a real STL and returns the shape two_grid returns."""
     assert pathlib.Path(stl).stat().st_size > 1000 and cfd.dvec(label) is not None
-    RS["calls"].append(dict(stl=stl, label=label, speed=speed))
+    RS["calls"].append(dict(stl=stl, label=label, speed=speed, levels=dict(levels)))
     return dict(rho=1025.0, speed=speed, label=label, cells=RS["cells"], coarse_cells=RS["coarse_cells"], failed_checks=RS["failed"],
                 coarse_failed_checks=RS["coarse_failed"], drag=RS["drag"], drag_coarse=RS["drag_coarse"], drag_std=RS["std"], gci=RS["gci"],
-                refinement_ratio=0.0, iterations=600, seconds=12.5, levels=dict(rans.LEVELS), iterations_cap=rans.ITERS)
+                refinement_ratio=0.0, iterations=600, seconds=12.5, levels=dict(levels), iterations_cap=rans.ITERS)
 
 
 def spawn(cmd, **kw):
@@ -149,7 +149,7 @@ def test_t5_a_nonsense_result_is_a_row_that_says_so(no_wall_receipt, rans_env, b
 
 
 def test_t6_a_child_that_fails_is_killed_or_cannot_start_is_a_row_that_says_so_and_the_stage_does_not_raise(no_wall_receipt, rans_env, monkeypatch):
-    def boom(stl, label, speed, wd, log=print):
+    def boom(stl, label, speed, wd, levels=None, log=print):
         raise RuntimeError("simpleFoam diverged")
 
     def late(cmd, **k):
@@ -199,11 +199,11 @@ def test_t8_a_case_that_does_not_fit_the_share_is_a_row_with_the_gate_sentence_a
     L = FakeL()
     r = body_rans(pw.run(rans_ctx(no_wall_receipt, share=1000.0), {"g": [WIN]}, L)["g"])[0]
     why = ("RANS window not run: estimated 14 min x 1.25 margin = 18 min (two grids, 600 iterations) against 16.7 min left of the 17 min stage-3 share "
-           "after the FEA and the free-surface cases; it would fit --budget overnight (16667 min of stage 3 in that plan)")
+           "after the FEA hold and the RANS cases queued before it; it would fit --budget overnight (16667 min of stage 3 in that plan)")
     assert not r["ok"] and r["error"] == why and r["reasons"] == [why] and r["cd"] is None and RS["spawned"] == [] and r["label"] == rans.LABEL
     assert r["resolution"]["left_s"] == 1000.0 and r["resolution"]["estimated_s"] == 867.0 and L.checks["every_window_attempted"][0]
-    assert pw._rans_gate(pw.assumptions(), rans_ctx(no_wall_receipt), 1083.75, 0.0) == (True, "", 1083.75)             # exactly margin x estimate fits
-    assert not pw._rans_gate(pw.assumptions(), rans_ctx(no_wall_receipt), 1083.7, 0.0)[0]
+    assert pw._rans_gate(pw.assumptions(), rans_ctx(no_wall_receipt), 1083.75, 0.0, "glider") == (True, "", 1083.75)             # exactly margin x estimate fits
+    assert not pw._rans_gate(pw.assumptions(), rans_ctx(no_wall_receipt), 1083.7, 0.0, "glider")[0]
     quick = body_rans(pw.run(rans_ctx(no_wall_receipt, share=0.0), {"g": [WIN]}, FakeL())["g"])[0]
     assert not quick["ok"] and "against 0.0 min left of the 0 min stage-3 share" in quick["error"]
 
@@ -221,61 +221,75 @@ def test_t9_with_no_wall_clock_budget_the_case_runs_with_no_deadline_and_a_faili
     assert not bad["ok"] and bad["error"] == "the glider has no steady flight" and bad["reasons"] == [bad["error"]] and len(RS["calls"]) == 1
 
 
-def test_t10_the_rans_case_runs_before_the_free_surface_case_and_leaves_its_seconds_whole(no_wall_receipt, rans_env, monkeypatch):
-    """Two gliders and a USV on a share that holds the free-surface case and one RANS case. The RANS gate must not count the free-surface seconds as
-    its own: against the whole share both gliders' cases would pass (the queue runs them first) and the free-surface case would then be refused."""
+def slow_boat(monkeypatch, stw=0.58986, lee=-7.86, heel=4.21):
+    """The USV's polar stood in at the first demo window's state (usv_rans.md): through-water speed, leeway and heel."""
+    monkeypatch.setattr(pw.usv, "through_water", lambda P, wind, cur, heading: dict(
+        stw=np.float64(stw), track_to=np.float64(70.0), leeway_deg=np.float64(lee), heel_deg=np.float64(heel), kd=np.float64(1.0)))
+
+
+def hull_rans(rows):
+    return [r for r in rows if r["part"] == "hull_rans"]
+
+
+def test_t10_the_rans_cases_are_priced_in_queue_order_a_refused_glider_is_followed_by_the_usv_that_fits_and_the_free_surface_case_goes_last(
+        no_wall_receipt, rans_env, monkeypatch):
+    """Two gliders and a USV on a share of one glider case plus the USV's 570 s: glider 1 runs, glider 2 is refused with the gate sentence, the USV runs
+    (its price is what is left), then the free-surface case is refused. Before: the free-surface case was priced first and the USV had no case."""
     monkeypatch.setenv("CAFE_NPROC", "6")
+    slow_boat(monkeypatch)
     order, real = [], pw._spawn
     monkeypatch.setattr(pw, "_spawn", lambda cmd, **kw: (order.append("rans" if "cafe.pm.stage3.rans" in cmd else "fs"), real(cmd, **kw))[1])
     ctx = fake_ctx(no_wall_receipt, vehicles=[VEHICLES[0], VEHICLES[1], VEHICLES[2]], classes=dict(g="glider", g2="glider", u="usv"), rate=2000.0)
     a = pw.assumptions()
-    fs_need = budget.fs_plan(ctx.classes, 1, a, None)["need_s"]
-    one = a["glider.rans.est_s"] * a["glider.rans.margin"]
-    ctx.plan.update(shares=dict(stage3=1.0), budget_s=fs_need + one + 60.0)
+    one, usv_need = a["glider.rans.est_s"] * a["glider.rans.margin"], a["usv.rans.est_s"] * a["usv.rans.margin"]
+    ctx.plan.update(shares=dict(stage3=1.0), budget_s=one + usv_need + 60.0)
     ctx.plan["les"]["windows"] = {k: dict(OUT) for k in ("g/body", "g2/body", "u/hull", "u/wing")}
     rows = pw.run(ctx, {"g": [WIN], "g2": [WIN], "u": [WIN]}, FakeL())
-    assert order == ["rans", "fs"] and len(RS["calls"]) == 1
+    assert order == ["rans", "rans"] and [c["levels"] for c in RS["calls"]] == [rans.LEVELS, rans.HULL_LEVELS]
     assert body_rans(rows["g"])[0]["ok"] and not body_rans(rows["g2"])[0]["ok"] and "RANS window not run" in body_rans(rows["g2"])[0]["error"]
-    assert rows["u"][-1]["part"] == "hull_fs" and rows["u"][-1]["ok"] and rows["u"][-1]["cd"] is not None
-    assert budget.stage3_plan(ctx.plan, ctx.classes, a)["rans"]["fit"] == 1 and budget.stage3_plan(ctx.plan, ctx.classes, a)["fs"]["fit"] == 1
+    assert hull_rans(rows["u"])[0]["ok"] and rows["u"][-1]["part"] == "hull_fs" and not rows["u"][-1]["ok"] and "free-surface" in rows["u"][-1]["error"]
+    s = budget.stage3_plan(ctx.plan, ctx.classes, a)
+    assert s["rans"]["fit"] == 2 and s["rans"]["fitted"] == ["g", "u"] and s["fs"]["fit"] == 0
 
 
-def test_t11_a_usv_a_uas_and_a_glider_planned_for_a_gpu_get_no_rans_row(no_wall_receipt, rans_env):
+def test_t11_a_usv_gets_a_hull_rans_row_a_uas_and_a_gpu_glider_get_none_and_a_fast_boat_is_refused_by_the_validity_gate(no_wall_receipt, rans_env, monkeypatch):
+    slow_boat(monkeypatch)
     ctx = fake_ctx(no_wall_receipt, vehicles=[VEHICLES[0], VEHICLES[2], VEHICLES[3]], classes=dict(g="glider", u="usv", q="uas"), rate=2000.0)
     ctx.plan.update(shares=dict(stage3=1.0), budget_s=1e6)
     ctx.plan["les"]["windows"] = {k: dict(OUT) for k in ("g/body", "u/hull", "u/wing", "q/body")}
     rows = pw.run(ctx, {v: [WIN] for v in ("g", "u", "q")}, FakeL())
-    assert [v for v, rs in rows.items() if body_rans(rs)] == ["g"] and len(RS["calls"]) == 1
+    assert [v for v, rs in rows.items() if body_rans(rs)] == ["g"] and [v for v, rs in rows.items() if hull_rans(rs)] == ["u"] and len(RS["calls"]) == 2
     gpu = rans_ctx(no_wall_receipt / "gpu")
     gpu.plan["les"]["cpu_fallback"] = False
-    assert body_rans(pw.run(gpu, {"g": [WIN]}, FakeL())["g"]) == [] and len(RS["calls"]) == 1
+    assert body_rans(pw.run(gpu, {"g": [WIN]}, FakeL())["g"]) == [] and len(RS["calls"]) == 2
 
 
 MISSION = dict(window=dict(start="2023-03-01T12:00:00Z", end="2023-03-07T12:00:00Z"))
 CL2 = dict(glider_eq="glider", glider_2n="glider", usv="usv", uas="uas")
 
 
-def test_t12_the_plan_prices_the_rans_cases_after_the_fea_and_the_free_surface_cases_and_the_shares_still_sum_as_before(monkeypatch):
+def test_t12_the_plan_prices_the_fea_then_the_rans_cases_then_the_free_surface_cases_and_the_shares_still_sum_as_before(monkeypatch):
     monkeypatch.setenv("CAFE_NPROC", "6")
     a, B = budget.stage3_assumptions(), budget.BUDGET_S["overnight"]
     p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
     s = budget.stage3_plan(p, CL2, a)
-    need, hold = a["glider.rans.est_s"] * a["glider.rans.margin"], p["les"]["fea_hold_s"]
-    assert s["rans"]["cases"] == 2 and s["rans"]["vehicles"] == ["glider_eq", "glider_2n"] and s["rans"]["fit"] == 2 and s["rans"]["need_s"] == need
-    assert s["fs"]["fit"] >= 1 and hold == 2 * a["fea_min_s"]
-    used = s["fs"]["fit"] * s["fs"]["need_s"] + hold + s["rans"]["fit"] * need
+    need, usv_need, hold = a["glider.rans.est_s"] * a["glider.rans.margin"], a["usv.rans.est_s"] * a["usv.rans.margin"], p["les"]["fea_hold_s"]
+    assert s["rans"]["cases"] == 3 and s["rans"]["vehicles"] == ["glider_eq", "glider_2n", "usv"] and s["rans"]["fit"] == 3
+    assert s["rans"]["need_s"] == dict(glider_eq=need, glider_2n=need, usv=usv_need) and s["rans"]["held_s"] == pytest.approx(2 * need + usv_need)
+    assert hold == 2 * a["fea_min_s"] and s["fs"]["fit"] == 0                                    # the free-surface case no longer fits beside the three
+    used = s["fs"]["fit"] * s["fs"]["need_s"] + hold + s["rans"]["held_s"]
     assert used <= p["shares"]["stage3"] * B + 1e-6 and p["shares"]["stage3"] * B == pytest.approx(used)               # the share is what the three claim
     assert sum(p["shares"].values()) == pytest.approx(sum(budget.SHARE.values())) and p["shares"]["stage1"] >= budget.SHARE["stage1"] - 1e-12
-    assert s["rans"]["share_s"] == pytest.approx(p["shares"]["stage3"] * B - hold - s["fs"]["fit"] * s["fs"]["need_s"])
-    # a share that holds one of the two: one is planned, the other's seconds went to stage 1
-    left = B * budget.SHARE["stage3"] - hold - s["fs"]["fit"] * s["fs"]["need_s"]
-    one = left / 1.5 / a["glider.rans.margin"]                                                                       # 1.5 cases in the share left
-    monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(a, **{"glider.rans.est_s": one}))
+    assert s["rans"]["share_s"] == pytest.approx(p["shares"]["stage3"] * B - hold)                                       # priced on what the FEAs leave
+    # a share that holds the first glider's case and the USV's but not the second glider's: the USV's case still claims its seconds
+    left = B * budget.SHARE["stage3"] - hold
+    n = (left - usv_need) / 1.5                                                                                       # 1.5 glider cases in what is left once the USV's is set aside
+    monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(a, **{"glider.rans.est_s": n / 1.25}))
     q = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
-    t = budget.stage3_plan(q, CL2, dict(a, **{"glider.rans.est_s": one}))
-    assert t["rans"]["fit"] == 1 and t["rans"]["cases"] == 2 and q["shares"]["stage1"] > p["shares"]["stage1"]
+    t = budget.stage3_plan(q, CL2, dict(a, **{"glider.rans.est_s": n / 1.25}))
+    assert t["rans"]["fitted"] == ["glider_eq", "usv"] and t["rans"]["cases"] == 3 and q["shares"]["stage1"] > p["shares"]["stage1"]
     assert sum(q["shares"].values()) == pytest.approx(sum(budget.SHARE.values()))
-    assert q["shares"]["stage3"] * B == pytest.approx(t["fs"]["fit"] * t["fs"]["need_s"] + hold + one * 1.25)
+    assert q["shares"]["stage3"] * B == pytest.approx(t["fs"]["fit"] * t["fs"]["need_s"] + hold + n + usv_need)
 
 
 def test_t13_what_the_plan_keeps_is_what_the_run_prices_over_a_sweep_of_estimates(monkeypatch):
@@ -289,39 +303,45 @@ def test_t13_what_the_plan_keeps_is_what_the_run_prices_over_a_sweep_of_estimate
         p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
         s = budget.stage3_plan(p, CL2, b)
         fs_s = s["fs"]["fit"] * s["fs"]["need_s"]
-        want = budget.rans_plan(CL2, p["les"]["windows"], b, budget.SHARE["stage3"] * B - fs_s - p["les"]["fea_hold_s"])
+        want = budget.rans_plan(CL2, p["les"]["windows"], b, budget.SHARE["stage3"] * B - p["les"]["fea_hold_s"])
         total = sum(p["shares"].values())
-        if s["rans"]["fit"] != want["fit"] or total != pytest.approx(sum(budget.SHARE.values())) or p["shares"]["stage1"] < budget.SHARE["stage1"] - 1e-12:
+        if s["rans"]["fitted"] != want["fitted"] or total != pytest.approx(sum(budget.SHARE.values())) or p["shares"]["stage1"] < budget.SHARE["stage1"] - 1e-12:
             refused.append(b["glider.rans.est_s"])
-        assert s["rans"]["fit"] * s["rans"]["need_s"] + fs_s + p["les"]["fea_hold_s"] <= p["shares"]["stage3"] * B + 1e-6
+        assert s["rans"]["held_s"] + fs_s + p["les"]["fea_hold_s"] <= p["shares"]["stage3"] * B + 1e-6
     assert not refused
 
 
-def test_t14_no_rans_case_is_planned_on_a_gpu_or_when_the_les_window_runs_or_for_a_vehicle_that_is_no_glider(monkeypatch):
+def test_t14_no_rans_case_is_planned_on_a_gpu_or_when_the_les_window_runs_or_for_a_uas(monkeypatch):
     monkeypatch.setenv("CAFE_NPROC", "6")
     a = budget.stage3_assumptions()
     gpu = budget.plan("overnight", 1, MISSION, thr={}, vehicle_classes=CL2)
     assert budget.stage3_plan(gpu, CL2, a)["rans"] is None and budget.rans_plan(CL2, {}, a, None) is None
-    runs = {f"{v}/body": dict(runs=True) for v in ("glider_eq", "glider_2n")}
+    runs = {f"{v}/{part}": dict(runs=True) for v, part in (("glider_eq", "body"), ("glider_2n", "body"), ("usv", "hull"))}
     assert budget.rans_plan(CL2, runs, a, None) is None and budget.rans_vehicles(CL2, runs, True) == []
     out = {"glider_eq/body": dict(runs=False), "glider_2n/body": dict(runs=True), "usv/hull": dict(runs=False), "uas/body": dict(runs=False)}
-    assert budget.rans_vehicles(CL2, out, True) == ["glider_eq"] and budget.rans_vehicles(CL2, out, False) == []
+    assert budget.rans_vehicles(CL2, out, True) == ["glider_eq", "usv"] and budget.rans_vehicles(CL2, out, False) == []
     plan = budget.rans_plan(CL2, out, a, None)
-    assert plan["fit"] == plan["cases"] == 1 and plan["share_s"] is None
+    need, usv_need = plan["need_s"]["glider_eq"], plan["need_s"]["usv"]
+    assert plan["fit"] == plan["cases"] == 2 and plan["share_s"] is None and plan["held_s"] == need + usv_need
     assert budget.rans_plan(CL2, out, a, -5.0)["fit"] == 0
-    assert budget.rans_plan(CL2, out, a, plan["need_s"] - 1e-7)["fit"] == 1                                          # a microsecond of rounding is allowed
-    assert budget.rans_plan(CL2, out, a, plan["need_s"] - 1e-3)["fit"] == 0
+    assert budget.rans_plan(CL2, out, a, need + usv_need - 1e-7)["fit"] == 2                                         # a microsecond of rounding is allowed
+    assert budget.rans_plan(CL2, out, a, need + usv_need - 1e-3)["fitted"] == ["glider_eq"]
 
 
 def test_t15_the_plan_label_and_notes_say_the_refit_holds_only_where_the_case_passes_when_one_fits_and_keep_the_old_text_when_none_does(monkeypatch):
     monkeypatch.setenv("CAFE_NPROC", "6")
     a = budget.stage3_assumptions()
     p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
-    assert budget.stage3_plan(p, CL2, a)["rans"]["fit"] == 2
-    assert p["les"]["label"].startswith("CPU fallback") and p["les"]["label"].endswith("sub-grid stays uncalibrated; " + budget.RANS_REFIT)
-    assert budget.RANS_REFIT == "the glider's drag refit comes only from its CPU RANS case, where it passes its checks"       # a promise, not a result
-    assert any(n.endswith("went to stage 1; the sub-grid layer stays uncalibrated; " + budget.RANS_REFIT) for n in p["notes"])
-    assert budget.stage3_plan(p, CL2, a)["les"]["note"] == "no LES coefficients exist on this machine; sub-grid stays uncalibrated; " + budget.RANS_REFIT
+    assert budget.stage3_plan(p, CL2, a)["rans"]["fit"] == 3
+    both = budget.RANS_REFIT + budget.RANS_USV
+    assert p["les"]["label"].startswith("CPU fallback") and p["les"]["label"].endswith("sub-grid stays uncalibrated; " + both)
+    assert budget.RANS_REFIT == "the drag refit of a glider or USV comes only from its CPU RANS case, where it fits and passes its checks"       # a promise
+    assert budget.RANS_USV == " (the USV's case is its bare hull: it scales the hull's viscous term at the window's speed)"
+    assert any(n.endswith("went to stage 1; the sub-grid layer stays uncalibrated; " + both) for n in p["notes"])
+    assert budget.stage3_plan(p, CL2, a)["les"]["note"] == "no LES coefficients exist on this machine; sub-grid stays uncalibrated; " + both
+    g = dict(glider_eq="glider")                                                                                   # no USV: no USV clause
+    pg = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=g)
+    assert pg["les"]["label"].endswith("sub-grid stays uncalibrated; " + budget.RANS_REFIT) and budget.stage3_plan(pg, g, a)["les"]["note"].endswith(budget.RANS_REFIT)
     q = budget.plan("quick", 0, MISSION, thr={}, vehicle_classes=CL2)                                              # no case fits 20 min
     assert budget.stage3_plan(q, CL2, a)["rans"]["fit"] == 0
     assert q["les"]["label"].startswith("CPU fallback") and q["les"]["label"].endswith("sub-grid and refit stay uncalibrated")
@@ -447,7 +467,7 @@ def fake_external(calls, drags, fails):
         f = -d * cfd.dvec(label)
         write_forces(case, np.full(300, f[0]), np.full(300, f[1]), f[2] + 0.001 * np.sin(np.arange(300)))
         (pathlib.Path(case) / "processor0").mkdir()
-        return dict(fluid=fluid, rho=1025.0, nu=1.19e-6, speed=speed, L=1.8, level=6 + level_offset, mesh=dict(cells=[316_022, 1_283_595][level_offset],
+        return dict(fluid=fluid, rho=1025.0, nu=1.19e-6, speed=speed, L=1.8, level=6 + level_offset, mesh=dict(cells={0: 316_022, 1: 1_283_595, 2: 5_000_000}[level_offset],
                     failed_checks=fails[level_offset]), seconds=20.0,
                     dirs={label: dict(force=f.tolist(), force_std=[0.0, 0.0, 0.0], iters=600, seconds=10.0 + level_offset)})
     return external
@@ -540,12 +560,13 @@ def test_t28_the_rans_advice_is_priced_on_the_rans_seconds_and_the_free_surface_
     a = budget.stage3_assumptions()
     one = a["glider.rans.est_s"] * a["glider.rans.margin"]
     r, f = pw.profile_rans_s(ctx), pw.profile_stage3_s(ctx)
-    fs0 = budget.fs_plan(ctx.classes, budget.WINDOWS["overnight"], a, budget.SHARE["stage3"] * budget.BUDGET_S["overnight"])
-    assert r["quick"] == 0.0 and r["4h"] == pytest.approx(2 * one) and r["overnight"] == pytest.approx(2 * one)
-    assert f["quick"] == 0.0 and f["4h"] == 0.0 and f["overnight"] == pytest.approx(fs0["fit"] * fs0["need_s"], abs=1e-3)       # the free-surface cases' alone
-    why = pw._rans_gate(a, ctx, 0.0, 2 * one)[1]
+    usv_need = a["usv.rans.est_s"] * a["usv.rans.margin"]
+    assert r["quick"] == 0.0 and r["4h"] == pytest.approx(2 * one + usv_need) and r["overnight"] == pytest.approx(2 * one + usv_need)
+    ov = budget.stage3_plan(budget.plan("overnight", 0, m, vehicle_classes=ctx.classes, workers=6), ctx.classes, a)["fs"]
+    assert f["quick"] == 0.0 and f["4h"] == 0.0 and f["overnight"] == pytest.approx(ov["fit"] * ov["need_s"], abs=1e-3)      # the free-surface cases' alone
+    why = pw._rans_gate(a, ctx, 0.0, 2 * one, "glider")[1]
     assert why.endswith("no --budget profile's plan holds it (the largest plan gives 36 min of stage 3)")
-    assert pw._rans_gate(a, ctx, 0.0, 0.0)[1].endswith("it would fit --budget 4h (36 min of stage 3 in that plan)")
+    assert pw._rans_gate(a, ctx, 0.0, 0.0, "glider")[1].endswith("it would fit --budget 4h (36 min of stage 3 in that plan)")
 
 
 def test_t29_the_free_surface_advice_is_not_charged_the_rans_cases_queued_before_it(no_wall_receipt, rans_env, monkeypatch):
@@ -579,3 +600,131 @@ def test_t31_a_passing_rans_or_free_surface_row_is_not_a_passing_les_window_in_t
     L = FakeL()
     assert pw.recalibrate_subgrid(fake_ctx(tmp_path), {"g": [ts._row_ok(True), ts._row_ok(True, part="body_rans")]}, L) is None
     assert L.notes[0].startswith("sub-grid layer uncalibrated: 1 window(s) passed but none carries a resolved inflow-turbulence series")
+
+
+# ---------------------------------------------------------------------------------------------------- the USV's bare hull (`hull_rans`)
+
+def usv_ctx(tmp):
+    return fake_ctx(tmp, vehicles=[VEHICLES[2]], classes=dict(u="usv"), rate=2000.0)
+
+
+def usv_args():
+    a = pw.assumptions()
+    P = pw.usv.load_platform("saildrone_explorer")
+    return a, P, pw.usv_vehicle(P, a, "saildrone_explorer", "hull_rans")
+
+
+def test_t32_the_bare_hull_vehicle_is_the_ellipsoid_alone_and_its_stl_is_one_closed_solid(tmp_path):
+    """Before: `hull_rans` fell to the wing branch of `usv_vehicle` (a plate)."""
+    import trimesh
+    a, P, veh = usv_args()
+    assert len(veh.shapes) == 1 and veh.shapes[0]["type"] == "ellipsoid" and tuple(veh.shapes[0]["radii"]) == (3.25, 0.6, 0.45)
+    assert veh.ref_area == pytest.approx(math.pi * 0.6 * 0.45, rel=1e-12) and veh.fluid == "water" and veh.extra["part"] == "hull_rans"
+    assert rans.write_stl(veh, tmp_path / "h.stl") == pytest.approx(6.5)
+    m = trimesh.load(tmp_path / "h.stl")
+    assert m.is_watertight and len(m.faces) == 1280 and m.extents.tolist() == pytest.approx([6.5, 1.2, 0.9])
+    assert len(pw.usv_vehicle(P, a, "saildrone_explorer", "hull").shapes) == 2                                         # the LES hull keeps its keel
+
+
+def test_t33_the_bare_hull_case_is_the_viscous_term_at_the_solvers_reynolds_number_and_its_share_is_taken_at_the_windows_leeway_and_heel(
+        no_wall_receipt, monkeypatch):
+    slow_boat(monkeypatch)
+    a, P, veh = usv_args()
+    ctx = usv_ctx(no_wall_receipt)
+    c = pw.usv_case(ctx, WIN, P, veh, a, 70.0, "hull_rans")
+    assert c["cd_h"] == pytest.approx(0.08891, abs=1e-4) and c["residuary_share"] == pytest.approx(0.00095, abs=1e-4)
+    # the share at the window's own leeway (7.86 deg) and heel (4.21 deg): the keel's induced drag is in the whole, so it is below the 0.30 of zero leeway
+    assert 0.22 < c["drag_share"] < 0.24 and c["drag_share"] < 0.2999
+    for text in ("RANS solver's Reynolds number (3.22e+06; the window's is 4.46e+06)", "no keel, rudder, appendage or residuary term",
+                 "the polar's, before the stage-1 speed bias", "leeway -7.9 deg and heel 4.2 deg not simulated", "the rudder's induced drag left out"):
+        assert text in c["src"]
+    assert "2.5 x" in c["wetted_area_note"] and "fully submerged ellipsoid of draft 0.45 m with no keel" in c["wetted_area_note"]
+    monkeypatch.setattr(pw, "_keel_drag", lambda P, stw: 1e6)                                                          # no keel term in the reference
+    assert pw.usv_case(ctx, WIN, P, veh, a, 70.0, "hull_rans")["cd_h"] == c["cd_h"]
+    slow_boat(monkeypatch, lee=0.0, heel=0.0)
+    assert pw.usv_case(ctx, WIN, P, veh, a, 70.0, "hull_rans")["drag_share"] == pytest.approx(0.2999, abs=1e-3)       # zero leeway and heel: the keel's profile drag only
+
+
+def test_t34_a_usv_has_a_rans_case_when_its_les_hull_is_planned_out_whatever_its_wing_does():
+    cl = dict(usv="usv")
+    assert budget.rans_vehicles(cl, {"usv/hull": dict(runs=False), "usv/wing": dict(runs=True)}, True) == ["usv"]
+    assert budget.rans_vehicles(cl, {"usv/hull": dict(runs=True), "usv/wing": dict(runs=False)}, True) == []
+    assert budget.RANS_PARTS == {"glider": "body_rans", "usv": "hull_rans"}
+
+
+def test_t35_the_cases_are_priced_per_class_each_claiming_its_seconds_in_queue_order():
+    a = budget.stage3_assumptions()
+    out = {f"{v}/{p}": dict(runs=False) for v, p in (("glider_eq", "body"), ("glider_2n", "body"), ("usv", "hull"))}
+    g, u = 1083.75, 570.0
+    r = budget.rans_plan(CL2, out, a, None)
+    assert r["fit"] == 3 and r["need_s"] == dict(glider_eq=g, glider_2n=g, usv=u) and r["held_s"] == 2 * g + u
+    r = budget.rans_plan(CL2, out, a, 2 * g + u - 1.0)
+    assert r["fitted"] == ["glider_eq", "glider_2n"] and r["held_s"] == 2 * g
+    r = budget.rans_plan(CL2, out, a, g + u)
+    assert r["fitted"] == ["glider_eq", "usv"] and r["held_s"] == g + u                                                # glider_2n is refused, the USV still fits
+    assert budget.rans_plan(CL2, out, a, -5.0)["fit"] == 0
+
+
+def test_t36_plan_and_stage3_plan_agree_on_the_queue_order_fea_rans_free_surface(monkeypatch):
+    a, B = budget.stage3_assumptions(), budget.BUDGET_S
+    for cores in ("2", "6"):
+        monkeypatch.setenv("CAFE_NPROC", cores)
+        for name in ("4h", "overnight"):
+            p = budget.plan(name, 0, MISSION, thr={}, vehicle_classes=CL2)
+            s = budget.stage3_plan(p, CL2, a)
+            hold = p["les"]["fea_hold_s"]
+            assert s["rans"]["share_s"] == pytest.approx(p["shares"]["stage3"] * B[name] - hold)
+            used = hold + s["rans"]["held_s"] + (0.0 if s["fs"] is None else s["fs"]["fit"] * s["fs"]["need_s"])
+            assert p["shares"]["stage3"] * B[name] == pytest.approx(used)
+            want = budget.rans_plan(CL2, p["les"]["windows"], a, budget.SHARE["stage3"] * B[name] - hold)
+            assert s["rans"]["fitted"] == want["fitted"] and s["rans"]["held_s"] == want["held_s"]
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    ov = budget.stage3_plan(budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2), CL2, a)
+    assert ov["fs"]["fit"] == 0 and ov["rans"]["fit"] == 3                                                            # the free-surface case no longer fits there
+    one = dict(g1="glider", u1="usv")
+    p1 = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=one)
+    assert budget.stage3_plan(p1, one, a)["fs"]["fit"] == 1                                                           # beside one glider and the USV it still does
+
+
+def test_t37_the_stage_runs_the_usv_case_on_the_bare_hull_along_x_at_the_through_water_speed(no_wall_receipt, rans_env, monkeypatch):
+    """Before: `_rans_submit` took the glider path for every RANS class and a USV was an error row."""
+    slow_boat(monkeypatch)
+    ctx = usv_ctx(no_wall_receipt)
+    ctx.plan["les"]["windows"] = {k: dict(OUT) for k in ("u/hull", "u/wing")}
+    ctx.plan.update(shares=dict(stage3=1.0), budget_s=1e5)
+    L = FakeL()
+    rows = pw.run(ctx, {"u": [WIN]}, L)["u"]
+    (call,), (spawned,) = RS["calls"], RS["spawned"]
+    r = hull_rans(rows)[0]
+    assert call["label"] == "+x" and call["levels"] == rans.HULL_LEVELS and call["speed"] == pytest.approx(np.linalg.norm(r["velocity_body_ms"]), abs=1e-9)
+    assert call["speed"] == pytest.approx(0.58986, abs=1e-9) and float(spawned["cmd"][-1]) <= 570.0
+    assert r["label"] == rans.HULL_LABEL and r["cl_hangar"] is None and r["ok"] and 0.22 < r["drag_share"] < 0.24 and r["residuary_share"] < 0.01
+    assert r["fea"]["reason"].startswith("no structural model: the platform yaml has no hull or wing structure")
+    assert len(r["checks"]) == 4 and r["resolution"]["level_offsets"] == rans.HULL_LEVELS and r["part"] == "hull_rans"
+    assert L.checks["every_window_attempted"][0] and L.checks["no_row_claims_ok_with_a_failing_check"][0]
+
+
+def test_t38_a_window_whose_wave_making_the_case_would_leave_out_is_refused_and_starts_no_child(no_wall_receipt, rans_env, monkeypatch):
+    def go(stw):
+        slow_boat(monkeypatch, stw=stw)
+        ctx = usv_ctx(no_wall_receipt)
+        ctx.plan["les"]["windows"] = {k: dict(OUT) for k in ("u/hull", "u/wing")}
+        ctx.plan.update(shares=dict(stage3=1.0), budget_s=1e5)
+        return hull_rans(pw.run(ctx, {"u": [WIN]}, FakeL())["u"])[0]
+    r = go(1.2)
+    assert not r["ok"] and r["error"].startswith("RANS window not run: the model's wave-making (residuary) term is ") and r["reasons"] == [r["error"]]
+    assert "above the 1% a case with no free surface may leave out (stage3.usv.rans.residuary_share_max)" in r["error"] and RS["calls"] == []
+    assert go(1.0)["ok"] and len(RS["calls"]) == 1
+
+
+def test_t39_two_grid_takes_its_levels_and_the_child_passes_the_jobs(tmp_path, monkeypatch):
+    """Before: `two_grid` had no `levels` argument (TypeError) and the job carried none."""
+    calls = []
+    monkeypatch.setattr(cfd, "external", fake_external(calls, {1: 0.2582, 2: 0.2467}, {1: 0, 2: 0}))
+    r = rans.two_grid("h.stl", "+x", 0.59, tmp_path, levels=rans.HULL_LEVELS)
+    assert [(c["case"].name, c["level_offset"]) for c in calls] == [("coarse", 1), ("fine", 2)] and r["levels"] == {"coarse": 1, "fine": 2}
+    seen = []
+    job, out = tmp_path / "job.json", tmp_path / "out.json"
+    job.write_text(json.dumps(dict(stl="h.stl", label="+x", speed=0.59, levels=rans.HULL_LEVELS)))
+    rans.run_child(str(job), str(out), runner=lambda stl, label, speed, wd, levels: (seen.append(levels), dict(drag=1.0))[1])
+    assert seen == [rans.HULL_LEVELS] and rans.HULL_LEVELS == {"coarse": 1, "fine": 2}

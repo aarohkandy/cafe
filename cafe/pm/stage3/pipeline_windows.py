@@ -179,14 +179,16 @@ def ellipsoid_area(a: float, b: float, c: float) -> float:
 def usv_vehicle(P: dict[str, Any], a: dict[str, Any], platform: str, part: str) -> W.Vehicle:
     """The USV's window bodies carry the platform's own water (rho_water, nu_water) and air (rho_air) so the window and the Hangar reference
     run at one Reynolds number (round 7 M-28). The `hull` window is the FULLY SUBMERGED ellipsoid of semi-axes (lwl/2, beam/2, usv.hull_draft_m)
-    plus the keel, not the waterline hull; its wetted area is the ellipsoid's own surface (usv_case builds the reference on it)."""
-    if part in ("hull", "hull_fs"):
+    plus the keel, not the waterline hull; its wetted area is the ellipsoid's own surface (usv_case builds the reference on it). `hull_rans` is that
+    ellipsoid with no keel."""
+    if part in ("hull", "hull_fs", "hull_rans"):
         draft = need(a, "usv.hull_draft_m")
         kc = P["keel_area_m2"] / P["keel_span_m"]
         hull = dict(type="ellipsoid", center=(0.0, 0.0, 0.0), radii=(P["lwl_m"] / 2, P["beam_wl_m"] / 2, draft))
         keel = dict(type="plate", center=(0.0, 0.0, -(draft + P["keel_span_m"] / 2)), size=(kc, P["keel_t_c"] * kc, P["keel_span_m"]))
-        frontal = math.pi * (P["beam_wl_m"] / 2) * draft + P["keel_t_c"] * kc * P["keel_span_m"]
-        return W.Vehicle(platform, "water", P["lwl_m"], [hull, keel], ref_area=frontal, hull=0,
+        bare = part == "hull_rans"                                          # no keel: the box plate is not the model's foil (DECISIONS 1110)
+        frontal = math.pi * (P["beam_wl_m"] / 2) * draft + (0.0 if bare else P["keel_t_c"] * kc * P["keel_span_m"])
+        return W.Vehicle(platform, "water", P["lwl_m"], [hull] if bare else [hull, keel], ref_area=frontal, hull=0,
                          extra=dict(resolve_dim=min(P["beam_wl_m"], 2 * draft), part=part), nu=P["nu_water"], rho=P["rho_water"])
     c = P["wing_area_m2"] / P["wing_span_m"]
     wing = dict(type="plate", center=(0.0, 0.0, 0.0), size=(c, P["wing_span_m"], need(a, "usv.wing_t_c") * c))     # span along y: lift axis is body z
@@ -252,7 +254,9 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
              part: str, wetted_m2: float | None = None) -> dict[str, Any]:
     """The USV window's kinematics and Hangar reference. The reference is evaluated on the window's OWN wetted surface so that cd / cd_hangar is
     CFD over model on the same hull (round 7 M-10): `hull`: the ellipsoid's surface (ellipsoid_area), `hull_fs`: `wetted_m2`, the area of the
-    mesh the free-surface run uses (None: the platform's assumed wetted_area_m2). The platform's value stays what Stage 1 uses; both areas are
+    mesh the free-surface run uses (None: the platform's assumed wetted_area_m2), `hull_rans`: the ellipsoid's surface, the viscous term only, at the
+    solver's Reynolds number (that case also carries `drag_share`, the term's share of the model's whole through-water resistance at the window's own
+    leeway and heel with the rudder's induced drag left out, and `residuary_share`; DECISIONS 1108, 1109). The platform's value stays what Stage 1 uses; both areas are
     in the case (`wetted_window_m2`, `wetted_platform_m2`) and `wetted_area_note` states the ratio."""
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
     wind = _val(env.wind(lon, lat, P["anemometer_m"], t), "wind", 2)[:2]
@@ -264,14 +268,16 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
     if not stw > 0.0:
         raise ValueError("the USV makes no way through the water at this window's wind (becalmed)")
     vg = cur + stw * np.array([math.sin(math.radians(track)), math.cos(math.radians(track))])
-    if part in ("hull", "hull_fs"):
+    if part in ("hull", "hull_fs", "hull_rans"):
         lee = float(np.asarray(tw["leeway_deg"]))
         rho_w = P["rho_water"]
         r_keel = _keel_drag(P, stw)
         u_env, v = np.array([cur[0], cur[1], 0.0]), np.array([vg[0], vg[1], 0.0])
-        wetted = ellipsoid_area(*veh.shapes[0]["radii"]) if part == "hull" else P["wetted_area_m2"] if wetted_m2 is None else wetted_m2
+        wetted = ellipsoid_area(*veh.shapes[0]["radii"]) if part in ("hull", "hull_rans") else P["wetted_area_m2"] if wetted_m2 is None else wetted_m2
         ratio = wetted / P["wetted_area_m2"]
-        what = (f"a fully submerged ellipsoid of draft {veh.shapes[0]['radii'][2]:.2f} m (not the waterline hull)" if part == "hull"
+        what = (f"a fully submerged ellipsoid of draft {veh.shapes[0]['radii'][2]:.2f} m with no keel (not the waterline hull; its two halves are the "
+                "underwater hull and its mirror image)" if part == "hull_rans"
+                else f"a fully submerged ellipsoid of draft {veh.shapes[0]['radii'][2]:.2f} m (not the waterline hull)" if part == "hull"
                 else "the free-surface mesh hull")
         kin = dict(R=rotation(heading, 0.0), u_env=u_env, v=v, heading=heading, rho_h=rho_w, area=veh.ref_area, cl_h=None,
                    info=dict(stw_ms=stw, leeway_deg=lee, heel_deg=float(np.asarray(tw["heel_deg"]))), wetted_window_m2=wetted,
@@ -279,6 +285,30 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
                    wetted_area_note=f"the {part} window hull is {what} with {ratio:.2f} x the platform's assumed wetted area ({wetted:.2f} vs "
                                     f"{P['wetted_area_m2']:.2f} m2); its Hangar reference is built on the window's own surface, so the multiplier "
                                     "is per unit of that surface")
+        if part == "hull_rans":                                             # the bare hull's viscous term, at the RANS solver's Reynolds number (round 7 M-28)
+            from cafe import cfd
+            ra, rb, rc = veh.shapes[0]["radii"]
+            vol = 2.0 * math.pi / 3.0 * ra * rb * rc                        # the underwater half of the ellipsoid
+            kin["wetted_area_note"] += (f"; its underwater half displaces {vol:.2f} m3 ({vol * rho_w:.0f} kg) against the platform's "
+                                        f"{P['mass_kg'] / rho_w:.2f} m3 ({P['mass_kg']:.0f} kg), {vol * rho_w / P['mass_kg']:.1f} x (no waves are simulated)")
+            heel = float(np.asarray(tw["heel_deg"]))
+            k1 = 1.0 + P["form_factor_k"]
+            re_s, re_w = stw * P["lwl_m"] / float(cfd.FLUIDS["water"]["nu"]), stw * P["lwl_m"] / P["nu_water"]
+            r_hull = 0.5 * rho_w * stw ** 2 * wetted * float(usv.cf_ittc57(re_s)) * k1
+            heel_f = 1.0 + P["heel_resist_c"] * math.radians(heel) ** 2     # the model's heel factor on the hull term, as Stage 1 flies it
+            r_plat = 0.5 * rho_w * stw ** 2 * P["wetted_area_m2"] * float(usv.cf_ittc57(re_w)) * k1 * heel_f
+            # the VPP's whole through-water resistance at the window's own leeway and heel; the rudder's side force is left out (Yr 0), `d` reads no wind
+            r_tot = float(np.asarray(usv._forces(P, np.float64(stw), np.float64(math.radians(abs(lee))), np.float64(math.radians(heel)),
+                                                 np.asarray(tw["kd"]), np.float64(0.0), np.float64(0.0), np.float64(0.0), np.float64(0.0),
+                                                 np.float64(0.0))["d"]))
+            share = r_plat / r_tot
+            return dict(kin, cd_h=_coef(r_hull, rho_w, stw, veh.ref_area), drag_share=share,
+                        residuary_share=1.0 - r_plat / heel_f / float(usv.hull_resistance(P, np.float64(stw), 0.0)),
+                        src=f"usv.cf_ittc57 at the RANS solver's Reynolds number ({re_s:.3g}; the window's is {re_w:.3g}) x (1 + form_factor_k) on the "
+                            "window ellipsoid's surface; no keel, rudder, appendage or residuary term (the case has no keel and no free surface); this hull "
+                            f"term is {share:.1%} of the model's through-water resistance at the window's own leeway and heel (the rudder's induced drag "
+                            f"left out); stw {stw:.3f} m/s (the polar's, before the stage-1 speed bias); leeway {lee:.1f} deg and heel {heel:.1f} deg "
+                            "not simulated")
         if part == "hull_fs":                                               # the VPP's whole hull resistance, upright (the window has no heel)
             ra, rb, rc = veh.shapes[0]["radii"]                             # round 8 M-15: the displacement of the half ellipsoid below the waterline + keel
             vol = 2.0 * math.pi / 3.0 * ra * rb * rc + math.prod(veh.shapes[1]["size"])
@@ -678,7 +708,7 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
 FS_GRACE_S = 30.0                                                           # how long past its own deadline the parent waits for a child to die
 PARTS = budget.STAGE3_PARTS                                                 # the native-LBM parts, one budget slice each
 FS_PARTS = budget.FS_PARTS                                                  # the free-surface part: child process, own budget
-RANS_PARTS = budget.RANS_PARTS                                              # the CPU RANS part of a glider whose LES window is not run: child process
+RANS_PARTS = budget.RANS_PARTS                                              # the CPU RANS part of a glider or USV whose LES hull or body window is not run: child process
 
 NOT_LES = set(RANS_PARTS.values()) | set(FS_PARTS.values())                 # the parts that are not LES windows
 
@@ -709,19 +739,19 @@ def _profile_plans(ctx: Context) -> Iterator[tuple[str, float, dict[str, Any], d
 
 
 def _rans_s(sizes: dict[str, Any]) -> float:
-    return 0.0 if sizes["rans"] is None else sizes["rans"]["fit"] * sizes["rans"]["need_s"]
+    return 0.0 if sizes["rans"] is None else float(sizes["rans"]["held_s"])
 
 
 def profile_stage3_s(ctx: Context) -> dict[str, float]:
     """Per `--budget` profile (smallest first), the stage-3 seconds that profile's own plan gives this mission and run: its stage-3 share after the
     slices of the LES windows that cannot run went to stage 1 (budget.plan), times its budget, less the seconds it holds for the sea-pressure FEAs and for
-    the glider's CPU RANS cases (they are not the free-surface cases'). The running plan's share says nothing about the others."""
+    the CPU RANS cases (they are not the free-surface cases'). The running plan's share says nothing about the others."""
     # (the share is a fraction of the budget: a rounding residue)
     return {name: round(max(q["shares"]["stage3"] * b - q["les"]["fea_hold_s"] - _rans_s(s3), 0.0), 6) for name, b, q, s3 in _profile_plans(ctx)}
 
 
 def profile_rans_s(ctx: Context) -> dict[str, float]:
-    """Per `--budget` profile (smallest first), the seconds that profile's own plan holds for the glider's CPU RANS cases (`stage3.rans`: `fit` of them at their
+    """Per `--budget` profile (smallest first), the seconds that profile's own plan holds for the CPU RANS cases (`stage3.rans`: `held_s`, the cases that fit at their
     priced seconds; 0 where none fits): what the RANS gate's advice compares the RANS cases with, never the free-surface cases' seconds."""
     return {name: _rans_s(s3) for name, b, q, s3 in _profile_plans(ctx)}
 
@@ -822,20 +852,19 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
     return pool.submit(work)
 
 
-def _rans_gate(a: dict[str, Any], ctx: Context, left_s: float, queued_s: float) -> tuple[bool, str, float]:
-    """(fits, reason, seconds the case holds in the queue). The estimate (`stage3.glider.rans.est_s`) times its margin must fit `left_s`, the share left for the
-    RANS cases after the FEAs' hold and the free-surface cases the plan kept (`budget.rans_plan`'s share: the queue runs the RANS cases before them, so they
-    are not charged to it) less the RANS cases queued before this one (`queued_s`): a plan-time rule, not the clock. The sentence names the minutes needed, the
+def _rans_gate(a: dict[str, Any], ctx: Context, left_s: float, queued_s: float, cls: str) -> tuple[bool, str, float]:
+    """(fits, reason, seconds the case holds in the queue). The estimate (`stage3.<class>.rans.est_s`) times its margin must fit `left_s`, the share left for the
+    RANS cases after the FEAs' hold (`budget.rans_plan`'s share: the queue runs the RANS cases before the free-surface cases, so they are not charged to it) less the RANS cases queued before this one (`queued_s`): a plan-time rule, not the clock. The sentence names the minutes needed, the
     minutes left and the smallest `--budget` profile whose plan holds that many seconds for the RANS cases (`profile_rans_s`: not the free-surface cases')
     for it and the RANS cases queued before it."""
-    need_s = need(a, "glider.rans.est_s") * need(a, "glider.rans.margin")
+    est_s, margin = need(a, f"{cls}.rans.est_s"), need(a, f"{cls}.rans.margin")
+    need_s = est_s * margin
     if need_s <= left_s + 1e-6:                                             # (a share is a fraction of the budget; `rans_plan` allows the microsecond too)
         return True, "", need_s
     plan = ctx.plan
-    est_s, margin = need(a, "glider.rans.est_s"), need(a, "glider.rans.margin")
     return False, (f"RANS window not run: estimated {est_s / 60:.0f} min x {margin} margin = {need_s / 60:.0f} min "
                    f"(two grids, {rans.ITERS} iterations) against {max(left_s, 0) / 60:.1f} min left of the "
-                   f"{plan['shares']['stage3'] * plan['budget_s'] / 60:.0f} min stage-3 share after the FEA and the free-surface cases; "
+                   f"{plan['shares']['stage3'] * plan['budget_s'] / 60:.0f} min stage-3 share after the FEA hold and the RANS cases queued before it; "
                    f"{freesurface.fitting_budget(queued_s + need_s, profile_rans_s(ctx))}"), need_s
 
 
@@ -854,7 +883,8 @@ def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed
             return _fs_fail(base, "RANS window killed before it started: the stage-3 wall-clock share was spent before its turn came", t0)
         if left is not None and cap_s is not None:
             left = min(left, cap_s)
-        job.write_text(json.dumps(dict(stl=str(pathlib.Path(jobdir) / "body.stl"), label=label, speed=speed)))
+        job.write_text(json.dumps(dict(stl=str(pathlib.Path(jobdir) / "body.stl"), label=label, speed=speed,
+                                       levels=rans.HULL_LEVELS if base["part"] == "hull_rans" else rans.LEVELS)))
         started = time.perf_counter()
         try:
             p = _spawn([sys.executable, "-m", "cafe.pm.stage3.rans", str(job), str(out), str(1e9 if left is None else left)],
@@ -882,32 +912,49 @@ def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed
     return dict(base, resolution=res, checks=f["checks"], ok=ok, reasons=[] if ok else rans.reasons(f["checks"], r), cd=f["cd"], cd_spread=f["cd_spread"],
                 cl=None, cl_spread=None, added_resistance=f["added_resistance"], gci=f["gci"], refinement_ratio=ratio, drag_n=f["drag_n"],
                 ref_area=veh.ref_area, source=res["source"],
-                fea=dict(run=False, reason="no structural model in this part: the hull's FEA is the body window's"),
+                fea=dict(run=False, reason=("no structural model in this part: the hull's FEA is the body window's" if base["part"] == "body_rans" else
+                                            "no structural model: the platform yaml has no hull or wing structure (material, thickness) to build an FEA from")),
                 timing=dict(wall_s=time.perf_counter() - t0, rans_s=r["seconds"]))
 
 
 def _rans_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, Any], platform: str, res: dict[str, Any] | None, a: dict[str, Any],
                  st: dict[str, Any], sizes: dict[str, Any]) -> Future[dict[str, Any]]:
-    """Prepares the CPU RANS case of glider `vid` at its first window (kinematics, flow label, price), decides whether the share left for the RANS cases holds
+    """Prepares the CPU RANS case of glider or USV `vid` at its first window (kinematics, flow label, price), decides whether the share left for the RANS cases holds
     it and either queues it behind the earlier ones on `pool` (one at a time: they share the CPUs) or returns the finished not-run row. The row carries no lift
-    (`cl`, `cl_spread` and `cl_hangar` are None: only the drag is solved), so the refit takes the drag alone."""
+    (`cl`, `cl_spread` and `cl_hangar` are None: only the drag is solved), so the refit takes the drag alone. A USV's case is its bare hull along +x at the
+    through-water speed, refused when the model's residuary share at that speed is over `stage3.usv.rans.residuary_share_max`."""
     t0 = time.perf_counter()
-    base = _base(ctx, w, "body_rans")
-    base["label"] = rans.LABEL
+    cls = ctx.classes[vid]
+    part = RANS_PARTS[cls]
+    base = _base(ctx, w, part)
+    base["label"] = rans.HULL_LABEL if part == "hull_rans" else rans.LABEL
     done: Future[dict[str, Any]] = Future()
     try:
-        P, veh = _glider_vehicle_for(ctx, vid, platform, a, clip=False)
         heading, hsrc = track_heading(res, vid, w["t"]), track_heading_source(res, vid, w["t"])
-        case = glider_case(ctx, w, P, veh, a, heading)
-        vb = case["R"] @ (case["v"] - case["u_env"])
-        label, speed = rans.flow_label(vb)
+        if part == "hull_rans":                                             # upright and straight ahead at the through-water speed, as hull_fs
+            P = usv.load_platform(platform)
+            veh = usv_vehicle(P, a, platform, part)
+            case = usv_case(ctx, w, P, veh, a, heading, part)
+            vb = case["R"] @ (case["v"] - case["u_env"])
+            label, speed = "+x", float(np.linalg.norm(vb))
+        else:
+            P, veh = _glider_vehicle_for(ctx, vid, platform, a, clip=False)
+            case = glider_case(ctx, w, P, veh, a, heading)
+            vb = case["R"] @ (case["v"] - case["u_env"])
+            label, speed = rans.flow_label(vb)
         _describe(base, veh, case, vb, heading, hsrc)
-        base.update(cl_hangar=None, ref_area=veh.ref_area)
-        est_s = need(a, "glider.rans.est_s")
+        base.update(cl_hangar=None, ref_area=veh.ref_area, **{k: case[k] for k in ("drag_share", "residuary_share") if k in case})
+        est_s = need(a, f"{cls}.rans.est_s")
+        if part == "hull_rans" and case["residuary_share"] > need(a, "usv.rans.residuary_share_max"):
+            done.set_result(_fs_fail(base, f"RANS window not run: the model's wave-making (residuary) term is {case['residuary_share']:.2%} of the hull's "
+                                           f"resistance at {speed:.2f} m/s, above the {need(a, 'usv.rans.residuary_share_max'):.0%} a case with no free "
+                                           "surface may leave out (stage3.usv.rans.residuary_share_max)", t0,
+                                     resolution=dict(estimated_s=est_s, speed_ms=speed, flow_label=label)))
+            return done
         left = None if sizes["rans"]["share_s"] is None else sizes["rans"]["share_s"] - st["rans_queued"]
         held = 0.0
         if left is not None:
-            fits, why, held = _rans_gate(a, ctx, left, st["rans_queued"])
+            fits, why, held = _rans_gate(a, ctx, left, st["rans_queued"], cls)
             if not fits:
                 done.set_result(_fs_fail(base, why, t0, resolution=dict(estimated_s=est_s, speed_ms=speed, flow_label=label, left_s=left)))
                 return done
@@ -916,7 +963,7 @@ def _rans_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, 
     except (ValueError, KeyError, RuntimeError, OSError) as e:
         done.set_result(_fs_fail(base, str(e), t0))
         return done
-    cap_s = est_s * need(a, "glider.rans.margin")
+    cap_s = est_s * need(a, f"{cls}.rans.margin")
     return pool.submit(lambda: _rans_work(base, veh, case, speed, label, est_s, st["deadline"], t0, cap_s))
 
 
@@ -963,7 +1010,7 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     whose turn comes with less than `stage3.min_window_s` left is not started; each of these is a row that says "killed".
     A glider whose LES part is planned out gets its hull FEA from the sea pressure alone, once, first in the same one-worker queue (`_fea_submit`), in every
     row of that part. A USV window also gets a `hull_fs` row, run in a child process while the LBM windows run (killed at the stage deadline); the rows
-    follow the LBM rows of the vehicle. A glider whose LES part is planned out also gets one `body_rans` row, from its first window, queued after the FEA and
+    follow the LBM rows of the vehicle. A glider or USV whose LES hull or body part is planned out also gets one `body_rans` or `hull_rans` row, from its first window, queued after the FEA and
     before the free-surface cases (`_rans_submit`; the other windows of the vehicle get no such row). A case that does not fit is a row with ok False and the
     minutes it needs. Every row carries
     `timing` (seconds, measured rates); pipeline.s_stage3 moves it out of the hashed output into the ledger."""

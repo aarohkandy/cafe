@@ -15,6 +15,11 @@ limit is thin and the drag is not monotone in the cell size (levels 5, 6, 7: 0.2
 
 The case runs in a child process (own process group, killed at its deadline) so a hung mesher or solver is a row that says so; cafe/cfd.py is not
 edited (its literals key its cache).
+
+The USV's bare hull (part `hull_rans`): the ellipsoid alone, no keel and no free surface, flow along +x at the window's through-water speed (leeway and
+heel left out), level offsets 1 and 2 (HULL_LEVELS): measured on orca 2026-11-23, jobs usvr_3 and usvr_4 (review/workorder/usv_rans.md): offsets 0 and 1
+GCI 0.371, offsets 1 and 2 GCI 0.059, r 1.875, scatter 0.00002, 0 failed mesh checks, 456 s on 6 cores; the solver stops on its residual control after
+186 and 251 iterations. `row_fields`, `reasons`, `flow_label` and `drag_history` are unchanged.
 """
 from __future__ import annotations
 
@@ -37,6 +42,9 @@ from .freesurface import GCI_MAX, SCATTER_MAX, arm_watchdog
 LEVELS = {"coarse": 0, "fine": 1}                                           # cfd.external level_offset of the two grids (level 6 and 7 for the demo glider)
 ITERS = 600                                                                 # simpleFoam iterations per grid
 LABEL = "RANS (OpenFOAM simpleFoam, k-omega SST), CPU, two-grid GCI"
+HULL_LEVELS = {"coarse": 1, "fine": 2}                                      # the USV's bare hull (levels 7 and 8): offsets 0 and 1 gave GCI 0.371, these 0.059
+HULL_LABEL = ("RANS (OpenFOAM simpleFoam, k-omega SST), CPU, two-grid GCI: the USV's bare hull as a fully submerged ellipsoid (no keel, no free surface, "
+              "upright and straight ahead)")
 SIDESLIP_MAX = 1e-6                                                         # |vb_y| / |vb|: glider_case's flow has none, a label has no way to carry it
 
 
@@ -49,9 +57,10 @@ def _dvec(label: str) -> NDArray[np.float64]:
 
 # ---------------------------------------------------------------------------------------------------- geometry and flow
 def write_stl(veh: W.Vehicle, path: str | os.PathLike[str]) -> float:
-    """One closed STL of the vehicle's shapes (hull and wing, unioned) in the body frame the flow label is in: no shift, no keel. Returns its length (m)."""
+    """One closed STL of the vehicle's shapes (a glider's hull and wing unioned, or a USV's bare hull alone) in the body frame the flow label is in: no shift, no keel. Returns its length (m)."""
     import trimesh
-    m = trimesh.boolean.union([W.vehicle_mesh(veh, i) for i in range(len(veh.shapes))], engine="manifold")
+    parts = [W.vehicle_mesh(veh, i) for i in range(len(veh.shapes))]
+    m = parts[0] if len(parts) == 1 else trimesh.boolean.union(parts, engine="manifold")
     if not m.is_watertight:
         raise ValueError("the hull and wing do not union into a closed solid")
     m.export(path)
@@ -87,8 +96,9 @@ def drag_history(case_dir: str | os.PathLike[str], label: str) -> tuple[float, f
     return float(mean), float(std)
 
 
-def two_grid(stl: str, label: str, speed: float, workdir: pathlib.Path, log: Callable[[str], None] = print) -> dict[str, Any]:
-    """cafe.cfd.external on the two grids of LEVELS (one direction, ITERS iterations each, the coarse grid's case shrunk before the fine one starts) with the
+def two_grid(stl: str, label: str, speed: float, workdir: pathlib.Path, levels: dict[str, int] = LEVELS,
+             log: Callable[[str], None] = print) -> dict[str, Any]:
+    """cafe.cfd.external on the two grids of `levels` (LEVELS for a glider, HULL_LEVELS for the USV's bare hull; one direction, ITERS iterations each, the coarse grid's case shrunk before the fine one starts) with the
     fine grid's drag, the drag's tail std, the refinement ratio from the two cell counts and the GCI of the drag (Roache, p = 2, Fs = 3, at that ratio)
     against the coarse grid, and both grids' failed mesh checks. Not characterize_external: it drops the coarse grid's mesh checks and fixes its iterations."""
     from cafe import cfd
@@ -96,7 +106,7 @@ def two_grid(stl: str, label: str, speed: float, workdir: pathlib.Path, log: Cal
     gci: Callable[..., float] = cfd.gci
     unit = _dvec(label)
     out: dict[str, dict[str, Any]] = {}
-    for name, off in LEVELS.items():
+    for name, off in levels.items():
         r = solve(stl, workdir / name, "water", speed, (label,), level_offset=off, iters=ITERS, log=log)
         r["history"] = drag_history(workdir / name, label)
         cfd._shrink(workdir / name)
@@ -110,15 +120,15 @@ def two_grid(stl: str, label: str, speed: float, workdir: pathlib.Path, log: Cal
                 failed_checks=fine["mesh"]["failed_checks"], coarse_failed_checks=coarse["mesh"]["failed_checks"],
                 drag=fine["drag"], drag_coarse=coarse["drag"], drag_std=None if fine["history"] is None else fine["history"][1],
                 refinement_ratio=rr, gci=gci(fine["drag"], coarse["drag"], ratio=rr),
-                iterations=fine["dirs"][label]["iters"], seconds=fine["seconds"] + coarse["seconds"], levels=dict(LEVELS), iterations_cap=ITERS)
+                iterations=fine["dirs"][label]["iters"], seconds=fine["seconds"] + coarse["seconds"], levels=dict(levels), iterations_cap=ITERS)
 
 
 def run_child(job: str, out: str, runner: Callable[..., dict[str, Any]] | None = None) -> int:
-    """Child of the stage: job = JSON (stl, label, speed); writes `two_grid`'s result as JSON. The case lives in a temporary directory that goes away
+    """Child of the stage: job = JSON (stl, label, speed, levels); writes `two_grid`'s result as JSON. The case lives in a temporary directory that goes away
     with it."""
     j = load_json(pathlib.Path(job).read_text())
     with tempfile.TemporaryDirectory(prefix="rans_") as wd:
-        r = (runner or two_grid)(j["stl"], j["label"], j["speed"], pathlib.Path(wd))
+        r = (runner or two_grid)(j["stl"], j["label"], j["speed"], pathlib.Path(wd), levels=j["levels"])
     pathlib.Path(out).write_text(json.dumps(r, default=float))
     return 0
 

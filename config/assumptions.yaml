@@ -285,6 +285,21 @@ stage3.usv.hull_draft_m:
   unit: "m"
   why: "Vertical semi-axis of the submerged hull body in the water window; the yaml draft (2 m) is the keel, which is modelled separately. About 0.45 m for a 7 m slender hull. The `hull` window is a FULLY SUBMERGED ellipsoid of semi-axes (lwl/2, beam/2, this value), not the waterline hull: its surface (about 17 m2 for the explorer, 2.6 x the platform's assumed wetted area) is wetted all over, and the Hangar reference is evaluated on that surface (stage3/pipeline_windows.py usv_case), so the multiplier is per unit of the window's surface. The `hull_fs` window (the same ellipsoid cut at the waterline, plus the keel) displaces about 2.0 t (1.84 m3 submerged half-ellipsoid plus 0.14 m3 keel) against the platform's 0.75 t, so its wave-making resistance is for 2.7 times the displacement (its wetted-area ratio is 1.29); the `hull` window is fully submerged and displaces 3.75 t."
   replace_with: "CAD (waterline sections); a draft that gives the mesh (half ellipsoid plus keel) the platform's own displacement: c = (V_platform - V_keel) / (2 pi a b / 3) with V_platform = mass_kg / rho_water = 0.733 m3 and V_keel = 0.14 m3, about 0.145 m (0.18 m is the half ellipsoid alone and leaves the mesh at 0.875 m3, 895 kg, 19 % over)."
+stage3.usv.rans.est_s:
+  value: 456.0
+  unit: "s"
+  why: "Wall time of the USV's bare-hull RANS case (stage3/rans.py, part hull_rans: the full ellipsoid of semi-axes 3.25, 0.6, 0.45 m with no keel, two grids at cfd.external level offsets 1 and 2, a 600-iteration cap, 6 MPI ranks): 455.6 s measured on cafe-orca, proot, 2026-11-23, job usvr_4 (55.2 s for 286,514 cells and 400.4 s for 1,888,804 cells, meshing included; the solver stopped on its residual control after 186 and 251 iterations; worker load 2 to 7; review/workorder/usv_rans.md). One run, one window (0.590 m/s). It is the cost at 6 ranks: a run with fewer cores is slower and is killed at est_s x margin, and so is a window whose solve does not reach the residual control (600 iterations are about 2.4 times the fine grid's 251)."
+  replace_with: "Measured RANS time of the run's own hull, mesh and machine at the run's rank count."
+stage3.usv.rans.margin:
+  value: 1.25
+  unit: "-"
+  why: "Safety factor on stage3.usv.rans.est_s, the same as stage3.glider.rans.margin: a case is started only if estimate x margin fits the share left, and its child is killed at that many seconds (570 s). Not a measured spread: the case was timed once."
+  replace_with: "The spread of the measured-to-estimated ratio over a few USV RANS cases."
+stage3.usv.rans.residuary_share_max:
+  value: 0.01
+  unit: "-"
+  why: "The largest share of the hull's resistance that the model's wave-making term, cr0 (Fr / cr_fr_ref)^4, may have at a window's through-water speed for the bare-hull RANS case (no free surface) to run. 1 % is a tenth of the refit's between-window floor (stage3.refit.between_window_frac, 0.10) and a sixth of the case's measured GCI (0.059), so the waves the case leaves out are smaller than the uncertainty the refit already carries. With the explorer's yaml it admits through-water speeds to 1.04 m/s (Froude 0.130) and the bound moves with cr0; the demo's three windows are at 0.59 to 0.70 m/s (0.10 to 0.20 %). cr0 is itself an uncalibrated order of magnitude, and a free surface also changes the pressure on the hull, which this share does not measure."
+  replace_with: "A free-surface run or tank data of the hull at the window speeds that measures how much the waves change its resistance."
 stage3.usv.wing_t_c:
   value: 0.15
   unit: "-"
