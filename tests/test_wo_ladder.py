@@ -77,5 +77,16 @@ def test_the_hulls_result_is_half_the_double_bodys_drag_and_std_with_the_grids_c
     assert probe.half_result(dict(fine, drag_tail_std_n=None), coarse, 1025.0, 0.59)["drag_std"] is None
 
 
+def test_the_apparent_order_of_three_grids_that_follow_f0_plus_c_h_squared():
+    n = lambda h: 1e6 / h ** 3                                                     # noqa: E731  cells of a grid of spacing h
+    r = probe.apparent_order((11.0, n(1)), (14.0, n(2)), (26.0, n(4)))             # f = 10 + h^2, r = 2
+    assert r["p"] == pytest.approx(2.0, abs=1e-6) and r["f_extrapolated"] == pytest.approx(10.0)
+    assert r["e_approx_21"] == pytest.approx(3 / 11) and r["gci_fine_21"] == pytest.approx(1.25 * (3 / 11) / 3)
+    r = probe.apparent_order((10.0 + 1.0 ** 1.5, n(1)), (10.0 + 1.3 ** 1.5, n(1.3)), (10.0 + 1.9 ** 1.5, n(1.9)))   # p = 1.5, r not constant
+    assert r["p"] == pytest.approx(1.5, abs=1e-6) and r["f_extrapolated"] == pytest.approx(10.0)
+    with pytest.raises(ValueError):
+        probe.apparent_order((10.0, 1e6), (12.0, 1e5), (11.0, 1e4))                # not monotone
+
+
 def test_the_friction_only_coefficient():
     assert probe.friction_only(0.004, 8.0, 1.0) == pytest.approx(0.032)

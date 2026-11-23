@@ -115,6 +115,31 @@ def block_means(series: Any, size: int = BLOCK) -> list[float]:
     return [float(s[i:i + size].mean()) for i in range(0, len(s), size) if len(s[i:i + size]) >= size // 2]
 
 
+def apparent_order(fine: tuple[float, float], mid: tuple[float, float], coarse: tuple[float, float], fs: float = 1.25) -> dict[str, float]:
+    """Celik et al. (2008) three-grid procedure on (value, cells) of the fine, middle and coarse grid, r = (cells ratio)^(1/3): the apparent order p (iterated
+    iteration, constant or not), the Richardson-extrapolated value, the fine-middle approximate and extrapolated relative errors and GCI = fs e_a / (r21^p - 1).
+    ValueError when the three values are not monotone (the procedure has no p then)."""
+    (f1, n1), (f2, n2), (f3, n3) = fine, mid, coarse
+    r21, r32 = (n1 / n2) ** (1 / 3), (n2 / n3) ** (1 / 3)
+    e21, e32 = f2 - f1, f3 - f2
+    if e21 == 0.0 or e32 / e21 <= 0.0:
+        raise ValueError(f"the values {f1}, {f2}, {f3} are not monotone: no apparent order")
+    s = 1.0
+    p = 2.0
+    for _ in range(500):
+        q = math.log((r21 ** p - s) / (r32 ** p - s))
+        p_new = (math.log(abs(e32 / e21)) + q) / math.log(r21)
+        if abs(p_new - p) < 1e-10:
+            p = p_new
+            break
+        p = 0.5 * (p + p_new)
+    else:
+        raise ValueError("the apparent order did not converge")
+    ext = (r21 ** p * f1 - f2) / (r21 ** p - 1.0)
+    e_a = abs((f1 - f2) / f1)
+    return dict(p=p, r21=r21, r32=r32, f_extrapolated=ext, e_approx_21=e_a, e_extrapolated_21=abs((ext - f1) / ext), gci_fine_21=fs * e_a / (r21 ** p - 1.0))
+
+
 def friction_only(cf: float, s_wet: float, ref_area: float) -> float:
     """cf S_wet / A_ref: the drag coefficient of a flat plate of the wetted area at the friction line `cf`, on the reference area."""
     return cf * s_wet / ref_area
@@ -218,7 +243,13 @@ def main() -> int:
     ap.add_argument("--out", default="/data/runs/usv_rans_probe", help="work directory under /data/runs/usv_rans_*")
     ap.add_argument("--run", default="/data/runs/fin1", help="finished demo run: windows.json, stage1/res.pkl and ingest/ the case is built from (read only)")
     ap.add_argument("--mission", default=str(ROOT / "missions" / "tepex_c_demo.yaml"))
+    ap.add_argument("--three", type=float, nargs=6, metavar=("DRAG_F", "CELLS_F", "DRAG_M", "CELLS_M", "DRAG_C", "CELLS_C"),
+                    help="no solver: the three-grid apparent order and GCI (Celik 2008) of three finished grids' drags and cell counts, fine, middle, coarse")
     args = ap.parse_args()
+    if args.three:
+        a = args.three
+        print(json.dumps(apparent_order((a[0], a[1]), (a[2], a[3]), (a[4], a[5])), indent=1))
+        return 0
     out = pathlib.Path(args.out).resolve()
     check_out(out)
     if args.levels[0] >= args.levels[1] or args.iters < 1:
