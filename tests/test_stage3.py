@@ -2618,11 +2618,17 @@ def test_r10_m33_the_refusal_is_one_sentence_whether_a_profile_holds_the_case_or
 
 
 def test_review_round_6_m14_each_profile_is_judged_by_its_own_plan_not_by_the_running_plans_share(monkeypatch):
-    """The demo at 6 cores: the quick and 4h plans give stage 3 nothing (their LES slices went to stage 1), overnight's gives 118 min, so a 117 min case
+    """One glider and the USV at 6 cores: the quick and 4h plans give the free-surface case nothing (their LES slices went to stage 1),
+    overnight's gives 118 min, so a 117 min case
     fits overnight and a 10 h case fits none. The running plan's share (0 at quick) times each budget said "no profile" for both."""
     from cafe.pm import config, stage1
     monkeypatch.setenv("CAFE_NPROC", "6")
     m = config.load_mission("missions/tepex_c_demo.yaml")
+    # one glider and the USV: the RANS cases are priced before the free-surface case (DECISIONS 1110), and only beside these two does it still fit overnight
+    # (beside the demo's two gliders it does not: 295 s short at 6 cores)
+    cl = stage1._classes(m)
+    keep = [next(v for v in m["vehicles"] if cl[v["id"]] == c)["id"] for c in ("glider", "usv")]
+    m = dict(m, vehicles=[v for v in m["vehicles"] if v["id"] in keep])
     ctx = SimpleNamespace(mission=m, classes=stage1._classes(m), plan=dict(gpus=0, workers=6, mem_gb=None, env_gb=None, les={}))
     s = pw.profile_stage3_s(ctx)
     assert s["quick"] == 0.0 and s["4h"] == 0.0 and 100 * 60 < s["overnight"] < budget.SHARE["stage3"] * budget.BUDGET_S["overnight"]
