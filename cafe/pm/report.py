@@ -925,11 +925,14 @@ def _contribution(rep: dict[str, Any], mission: dict[str, Any], st3: dict[str, A
     for lk in mission["links"]:
         rows[lk["id"]] = dict(kind="link", cfd=any(rows.get(x, {}).get("cfd") is True for x in (lk["a"], lk["b"])), fea=False, emulator=False)
     statements = ([CONTRIB_ELLIPSOID] if any(r["cfd"] for r in rows.values()) else []) + (
+        [CONTRIB_USV] if any(v["cls"] == "usv" and rows[vid]["cfd"] for vid, v in rep["vehicles"].items()) else []) + (
         [CONTRIB_UAS] if any(v["cls"] == "uas" and not rows[vid]["cfd"] for vid, v in rep["vehicles"].items()) else [])
     return dict(rows=rows, statements=statements)
 
 
 CONTRIB_ELLIPSOID = "The CFD geometry is a set of ellipsoids from a few yaml dimensions, not CAD."
+CONTRIB_USV = ("The USV's CFD is its bare hull as an ellipsoid with no keel, no waves, no leeway and no heel: it scales the hull's viscous term at one "
+               "window's speed, and the rest of its drag stays the model's.")
 CONTRIB_UAS = "The UAS is out: its window is the frame without rotors."
 
 
@@ -1208,7 +1211,7 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             div = cut and bool((w.get("resolution") or {}).get("diverged"))      # ... or one that diverged in its last chunk (the same withholding)
             failed = [c["name"] for c in w.get("checks", []) if not c["ok"]]
             reasons = [str(x) for x in w.get("reasons", [])]
-            used = bool(rv and rv.get("used") and w.get("ok"))
+            used = bool(rv and rv.get("used") and w.get("ok") and w.get("part") == rv.get("part"))        # only a row of the part that set the multiplier
             if used:
                 why = None
             elif not w.get("ok"):
@@ -1216,7 +1219,7 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
                 why = "; ".join(parts + reasons + ([w["error"]] if w.get("error") and w["error"] not in reasons else [])
                                 or ([DIVERGED_REASON if div else "cut at the time limit"] if cut else [])) or "no check or error recorded"
             elif rv is not None:
-                why = rv.get("reason") or "the refit did not use this vehicle"
+                why = ((rv.get(f"{w.get('part')}_not_used") or {}).get("reason") or rv.get("reason") or "the refit did not use this vehicle")
             else:
                 why = NOT_PRESENT.format("refit/refit.json") if refit is None else "no refit entry for this vehicle"
             at = (wins or {}).get(vid, [])

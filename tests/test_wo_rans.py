@@ -728,3 +728,119 @@ def test_t39_two_grid_takes_its_levels_and_the_child_passes_the_jobs(tmp_path, m
     job.write_text(json.dumps(dict(stl="h.stl", label="+x", speed=0.59, levels=rans.HULL_LEVELS)))
     rans.run_child(str(job), str(out), runner=lambda stl, label, speed, wd, levels: (seen.append(levels), dict(drag=1.0))[1])
     assert seen == [rans.HULL_LEVELS] and rans.HULL_LEVELS == {"coarse": 1, "fine": 2}
+
+
+# ---------------------------------------------------------------------------------------------------- the refit of the USV's bare hull
+
+def hull_row(**kw):
+    """The first fin1 window's case: ratio 0.8627 on the hull's viscous term, which is 0.3 of the model's whole drag (a round share for exact checks)."""
+    return dict(tp.stage3_row(cd=0.8627, hangar=1.0, spread=0.0509), part="hull_rans", cl=None, cl_spread=None, cl_hangar=None, drag_share=0.3, **kw)
+
+
+def test_t40_a_row_that_measured_the_hull_alone_scales_the_fit_after_the_pooling_so_the_floors_stay_the_hulls(tmp_path):
+    """Before: no scoping (the multiplier was 0.8627 on the whole boat) and `hull_rans` was no part the refit knew. The sigma floors (between-window
+    0.10 and discretisation 0.05 of the mean) are those of the measured ratio, not of the scoped whole: scoping the input would have given 0.108."""
+    un = refit.refit([hull_row()])["drag"]
+    out = tp.refit_run(tmp_path, {"usv": [hull_row(), dict(tp.stage3_row(cd=3.0), part="wing")]})[0]["usv"]
+    d, s = out["drag"], 0.3
+    assert d["mean"] == pytest.approx(1 + s * (0.8627 - 1), abs=1e-12) and d["change_vs_hangar"] == pytest.approx(s * (0.8627 - 1), abs=1e-12)
+    for k in ("sigma", "sigma_statistical", "sigma_between", "sigma_discretisation", "tau"):
+        assert d[k] == pytest.approx(s * un[k], abs=1e-12)
+    assert d["sigma_statistical"] == pytest.approx(s * 0.0509, abs=1e-12) and un["sigma"] == pytest.approx(0.109, abs=2e-3) and d["sigma"] < 0.04
+    assert out["added_resistance"]["mean"] == pytest.approx(s * (0.8627 - 1), abs=1e-12) and out["drag_share"] == s and out["hull_ratio"] == pytest.approx(0.8627)
+    plain_ratio = tp.refit_run(tmp_path / "2", {"usv": [dict(hull_row(), part="body_rans")]})[0]["usv"]                   # no scoping for a whole-boat row
+    assert plain_ratio["drag"]["mean"] == pytest.approx(0.8627)
+
+
+def test_t41_the_bare_hull_row_sets_the_usv_multiplier_and_the_box_keel_parts_do_not(tmp_path):
+    rows = {"usv": [dict(tp.stage3_row(cd=1.3), part="hull"), dict(tp.stage3_row(cd=2.0), part="hull_fs"), hull_row()]}
+    u = tp.refit_run(tmp_path, rows)[0]["usv"]
+    assert u["used"] and u["part"] == "hull_rans" and u["drag"]["mean"] == pytest.approx(1 + 0.3 * (0.8627 - 1))
+    assert u["reason"].startswith("bare-hull RANS (no keel, no free surface, no leeway or heel): cd / cd_hangar 0.863 on the hull's viscous term, which is 30%")
+    assert "1 + 0.300 x (0.863 - 1)" in u["reason"] and u["reason"].endswith("Stage 1 applies this factor at each speed it sails")
+    assert u["hull_not_used"]["reason"] == pipeline.BOX_KEEL == u["hull_fs_not_used"]["reason"]
+    for bad in (None, 0.0, 1.5, math.nan, "0.3"):                                                                    # a row without a usable share is no measurement
+        row = dict(hull_row(), drag_share=bad)
+        out = tp.refit_run(tmp_path / f"b{bad}", {"usv": [row]})[0]["usv"]
+        assert out["used"] is False and out["reason"].startswith("no hull_rans window passed")
+    gone = {k: v for k, v in hull_row().items() if k != "drag_share"}
+    assert tp.refit_run(tmp_path / "gone", {"usv": [gone]})[0]["usv"]["used"] is False
+
+
+@needs_data
+def test_t42_stage_1b_reruns_stage_1_with_the_usvs_scaled_multiplier(tmp_path, monkeypatch, sens):
+    ctx = tp.ctx_for(tmp_path / "r")
+    tp.stage1_files(ctx)
+    ctx.plan["refit_iterations"] = 2
+    ctx.path("stage3", "windows.json").write_text(json.dumps({"usv": [hull_row()]}))
+    tp.run_stage(pipeline.s_refit, ctx, "refit")
+    seen, fake = [], tp.summaries(ctx, {"usv": "NO-GO"}, {"usv": "GO"})
+    monkeypatch.setattr(pipeline, "_stage1", lambda c, L, name, scales=None, extra=None: (seen.append((scales, extra)), fake(c, L, name, scales, extra))[1])
+    tp.run_stage(pipeline.s_stage1b, ctx, "stage1b")
+    (scales, extra), = seen
+    assert extra == dict(refit_iterations_performed=1) and list(scales) == ["usv"] and scales["usv"]["part"] == "hull_rans"
+    assert scales["usv"]["drag"]["mean"] == pytest.approx(1 + 0.3 * (0.8627 - 1))
+
+
+def test_t43_the_report_prints_the_usv_sentence_only_where_the_usvs_cfd_is_yes(tmp_path, monkeypatch):
+    def run_with(usv_used):
+        orig = pm_run.stage3_rows
+
+        def rows(ids, wins):
+            r = orig(ids, wins)
+            r["usv"] = [dict(w, part="hull_rans", ok=True, drag_share=0.3) for w in r["usv"][:1]] if usv_used else r["usv"]
+            return r
+        monkeypatch.setattr(pm_run, "stage3_rows", rows)
+        run = tmp_path / ("a" if usv_used else "b")
+        m, plan = pm_run.make_run(run)
+        rf = json.loads((run / "refit" / "refit.json").read_text())
+        rf["usv"] = dict(used=usv_used, part="hull_rans", drag=dict(mean=0.97, sigma=0.03, change_vs_hangar=-0.03), reason="bare-hull RANS: scoped")
+        (run / "refit" / "refit.json").write_text(json.dumps(rf))
+        report.write(run, m, plan)
+        return load(run)
+    yes, no = run_with(True), run_with(False)
+    assert report.CONTRIB_USV in yes["contribution"]["statements"] and report.CONTRIB_USV not in no["contribution"]["statements"]
+    assert report.CONTRIB_USV.startswith("The USV's CFD is its bare hull as an ellipsoid with no keel, no waves, no leeway and no heel: it scales the hull's")
+    assert report.check_rendered(yes) == [] if hasattr(report, "check_rendered") else True
+
+
+def test_t44_the_credibility_limitation_names_the_usvs_bare_hull():
+    l15 = next(x for x in cr.LIMITATIONS if x["id"] == "L15")["text"]
+    assert "a glider's hull and wing or a USV's bare hull with no keel or waves (which scales the hull's viscous term at the window's speed)" in l15
+
+
+def test_t45_the_usv_assumptions_carry_value_unit_why_and_replacement_and_are_the_usvs(cred_run):
+    got = cr.config.assumptions()
+    for k, v in (("est_s", 456.0), ("margin", 1.25), ("residuary_share_max", 0.01)):
+        e = got[f"stage3.usv.rans.{k}"]
+        assert e["value"] == v and {"unit", "why", "replace_with"} <= set(e) and e["why"] and e["replace_with"]
+        assert cr.config_scope("config/assumptions.yaml", f"stage3.usv.rans.{k}") == "usv"
+    assert "usvr_4" in got["stage3.usv.rans.est_s"]["why"] and "2026-11-23" in got["stage3.usv.rans.est_s"]["why"]
+    keys = {f"stage3.usv.rans.{k}" for k in ("est_s", "margin", "residuary_share_max")}
+    assert keys <= tc.used_of(tc.only(cred_run, {"usv"}), "config/assumptions.yaml")
+    assert keys.isdisjoint(tc.used_of(tc.only(cred_run, {"glider_eq"}), "config/assumptions.yaml"))
+
+
+def test_t46_a_passing_free_surface_row_beside_a_used_bare_hull_refit_is_not_labelled_used_and_says_why(tmp_path, monkeypatch):
+    """Before: any ok row of a used vehicle read "used in the refit", so a passing `hull_fs` row beside a used `hull_rans` refit would have."""
+    orig = pm_run.stage3_rows
+
+    def rows(ids, wins):
+        r = orig(ids, wins)
+        first = r["usv"][0]
+        r["usv"] = [dict(first, part="hull_rans", ok=True, drag_share=0.3), dict(first, part="hull_fs", ok=True)]
+        return r
+    monkeypatch.setattr(pm_run, "stage3_rows", rows)
+    run = tmp_path / "run"
+    m, plan = pm_run.make_run(run)
+    rf = json.loads((run / "refit" / "refit.json").read_text())
+    rf["usv"] = dict(used=True, part="hull_rans", drag=dict(mean=0.97, sigma=0.03, change_vs_hangar=-0.03), reason="bare-hull RANS: scoped",
+                     hull_fs_not_used=dict(reason=pipeline.BOX_KEEL))
+    (run / "refit" / "refit.json").write_text(json.dumps(rf))
+    report.write(run, m, plan)
+    rep = load(run)
+    by = {w["label"].split()[-1]: w for w in rep["stage3"]["vehicles"]["usv"]}
+    assert by["hull_rans"]["used_in_refit"] is True and by["hull_fs"]["used_in_refit"] is False
+    assert by["hull_fs"]["not_used_because"] == pipeline.BOX_KEEL and report.check_traceability(rep) == []
+    page = plain((run / "report" / "index.html").read_text())
+    assert "not used in the refit: " + pipeline.BOX_KEEL in page

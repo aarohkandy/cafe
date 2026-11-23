@@ -1440,6 +1440,24 @@ def s_stage3(ctx: Context, L: Ledger) -> None:
         L.output(ctx.run_dir / "stage3" / "subgrid_calibration.json")
 
 
+BOX_KEEL = ("not used: this part carries the keel as a square-edged plate where the model has a foil section, and a RANS run of that plate gave about 10 "
+            "times the model's keel drag (by difference with the bare hull, at one speed; DECISIONS 1110); only the bare-hull RANS part (hull_rans) may "
+            "set the USV's multiplier")
+
+
+def _scope_to_share(d: dict[str, Any], s: float) -> None:
+    """A drag fit of one term of the drag (`drag_share` s: that term's share of the model's whole through-water resistance) as a fit of the whole:
+    mean' = 1 + s (mean - 1); every sigma component, tau and the added resistance scale by s (DECISIONS 1109). In place, on one part's `refit.refit` result."""
+    dr = d["drag"]
+    dr["mean"] = 1.0 + s * (dr["mean"] - 1.0)
+    dr["change_vs_hangar"] = dr["mean"] - 1.0
+    for k in ("sigma", "sigma_statistical", "sigma_between", "sigma_discretisation", "tau"):
+        dr[k] *= s
+    if "added_resistance" in d:
+        d["added_resistance"]["mean"] *= s
+        d["added_resistance"]["sigma"] *= s
+
+
 def s_refit(ctx: Context, L: Ledger) -> None:
     from .stage3 import nest, refit
     rows = load_json(ctx.path("stage3", "windows.json").read_text())
@@ -1451,25 +1469,37 @@ def s_refit(ctx: Context, L: Ledger) -> None:
     for vid, ws in rows.items():
         # Stage 1 has one drag multiplier per vehicle and it scales the water-side (or, for a UAS, the body) drag; a USV's wing is
         # a different flow, so its windows are pooled separately and reported, never mixed into the hull's multiplier. The multiplier
-        # scales the VPP's whole through-water resistance (stage1.refit_drag: speed ~ drag^-1/2 at fixed force), so a USV's passing
-        # free-surface windows (`hull_fs`: total resistance, wave-making included) set it when there are any, else its viscous `hull` windows. A glider's
-        # passing LES `body` windows set it, else its CPU RANS case (`body_rans`): the two are never pooled, they are different solvers
-        main = next((p for p in ("hull_fs", "hull", "body", "body_rans") if any(w.get("ok") and w.get("part") == p for w in ws)),
-                    "hull" if any(w.get("part") == "hull" for w in ws) else "hull_fs" if any(w.get("part") == "hull_fs" for w in ws) else "body")
-        good = [w for w in ws if w.get("ok") and w.get("part", main) == main]
+        # scales the VPP's whole through-water resistance (stage1.refit_drag: speed ~ drag^-1/2 at fixed force). A USV's multiplier comes only from
+        # its bare-hull RANS case (`hull_rans`), scaled to the share of the drag it measured (`_scope_to_share`); its `hull` and `hull_fs` parts carry
+        # a box keel and are reported, not used (DECISIONS 1110). A glider's passing LES `body` windows set it, else its CPU RANS case (`body_rans`):
+        # the two are never pooled, they are different solvers
+        def counts(w: dict[str, Any], p: str) -> bool:                      # a hull_rans row without a usable share is no measurement of a share
+            share = w.get("drag_share")
+            return bool(w.get("ok") and w.get("part", p) == p and (p != "hull_rans" or (isinstance(share, (int, float)) and 0.0 < share <= 1.0)))
+        main = next((p for p in ("hull_rans", "body", "body_rans") if any(w.get("part") == p and counts(w, p) for w in ws)),
+                    "hull_rans" if any(w.get("part") in ("hull_rans", "hull", "hull_fs") for w in ws) else "body")
+        good = [w for w in ws if counts(w, main)]
         if ctx.plan["refit_iterations"] == 0:
             out[vid] = dict(used=False, reason="budget ci: no refit")
         elif not good:
-            out[vid] = dict(used=False, reason=f"no {main} window passed its stage-3 self-checks; "
-                                               "Stage 1 keeps the baseline model coefficients (analytic; no Hangar CFD run)",
+            none = main == "hull_rans" and not any(w.get("part") == "hull_rans" for w in ws)          # a GPU plan: no CPU RANS case was planned
+            out[vid] = dict(used=False, reason=(f"no {main} row exists (a GPU plan runs no CPU RANS case)" if none else f"no {main} window passed its stage-3 "
+                                                "self-checks") + "; Stage 1 keeps the baseline model coefficients (analytic; no Hangar CFD run)",
                             failed_checks=sorted({c["name"] for w in ws for c in w.get("checks", []) if not c["ok"]}))
         else:
             out[vid] = dict(used=True, part=main, **refit.refit(good))      # each window against its own cd_hangar
+            if main == "hull_rans":                                         # one case per USV: its first window
+                ratio, share = good[0]["cd"] / good[0]["cd_hangar"], float(good[0]["drag_share"])
+                _scope_to_share(out[vid], share)
+                out[vid].update(drag_share=share, hull_ratio=ratio, reason=(
+                    f"bare-hull RANS (no keel, no free surface, no leeway or heel): cd / cd_hangar {ratio:.3f} on the hull's viscous term, which is "
+                    f"{share:.0%} of the model's through-water resistance at the window's own leeway and heel; the keel, rudder, appendages and "
+                    f"wave-making stay the model's, so the multiplier is 1 + {share:.3f} x ({ratio:.3f} - 1); Stage 1 applies this factor at each speed "
+                    "it sails"))
         other = {w["part"] for w in ws if w.get("part", main) != main} if ctx.plan["refit_iterations"] else set()
         for part in sorted(other):
             pw = [w for w in ws if w.get("ok") and w.get("part") == part]
-            why = {"hull": "the hull_fs windows (total resistance with the free surface) set the multiplier; this part has no wave-making",
-                   "hull_fs": "no hull_fs window passed its checks: the viscous hull windows set the multiplier",
+            why = {"hull": BOX_KEEL, "hull_fs": BOX_KEEL,
                    "body": "no LES body window passed its checks: the RANS window (body_rans) sets the multiplier",
                    "body_rans": ("a passing LES body window sets the multiplier; LES and RANS coefficients are not pooled" if good
                                  else "no window of this part passed its checks")}

@@ -128,8 +128,8 @@ LIMITATIONS = [
                         "an estimate of the order, not a measurement",
          factors=["uncertainty"], where=["cafe/pm/pipeline.py", "cafe/pm/env/perturb.py", "config/perturbations.yaml"]),
     dict(id="L15", text="no LES window can reach the lattice viscosity floor on a CPU, so none is run and the sub-grid layer stays uncalibrated; the drag "
-                        "refit comes only from a CPU RANS (glider) or free-surface (USV) case, where the budget holds one and it passes its checks; "
-                        "no GPU run exists", factors=["validation", "robustness"],
+                        "refit comes only from a CPU RANS case, a glider's hull and wing or a USV's bare hull with no keel or waves (which scales the hull's "
+                        "viscous term at the window's speed), where the budget holds one and it passes its checks; no GPU run exists", factors=["validation", "robustness"],
          where=["config/assumptions.yaml", "cafe/pm/budget.py", "cafe/pm/stage3/pipeline_windows.py"]),
     dict(id="L16", text="the refit is a single pass: stage 1 is rerun once with the refitted multipliers, not looped until the verdicts stop changing",
          factors=["robustness"], where=["cafe/pm/pipeline.py"]),

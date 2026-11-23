@@ -1347,43 +1347,32 @@ def test_the_refit_uses_only_the_windows_that_passed_their_self_checks(tmp_path)
     assert out["uas"]["used"] is False and out["uas"]["failed_checks"] == [] and check_of(d, "refit_uses_only_windows_that_passed")["ok"]
 
 
+def hull_rans_row(cd=0.863, hangar=1.0, spread=0.05, share=0.23, **kw):
+    return dict(stage3_row(cd=cd, hangar=hangar, spread=spread), part="hull_rans", drag_share=share, **kw)
+
+
 def test_a_usv_wing_is_pooled_apart_from_its_hull_and_never_scales_stage1(tmp_path):
-    rows = {"usv": [dict(stage3_row(cd=1.3), part="hull"), dict(stage3_row(cd=3.0), part="wing")]}
+    rows = {"usv": [hull_rans_row(), dict(stage3_row(cd=3.0), part="wing")]}
     u = refit_run(tmp_path, rows)[0]["usv"]
-    assert u["used"] and u["part"] == "hull" and u["drag"]["windows"] == 1 and u["drag"]["mean"] == pytest.approx(1.3)
+    assert u["used"] and u["part"] == "hull_rans" and u["drag"]["windows"] == 1 and u["drag"]["mean"] == pytest.approx(1 + 0.23 * (0.863 - 1))
     assert u["wing_not_used"]["drag"]["mean"] == pytest.approx(3.0) and "no multiplier" in u["wing_not_used"]["reason"]
-    rows = {"usv": [dict(stage3_row(cd=3.0), part="wing"), dict(stage3_row(ok=False), part="hull")]}
+    rows = {"usv": [dict(stage3_row(cd=3.0), part="wing"), dict(stage3_row(ok=False), part="hull_rans", drag_share=0.23)]}
     u = refit_run(tmp_path / "2", rows)[0]["usv"]
-    assert u["used"] is False and u["reason"].startswith("no hull window passed")                  # a passing wing cannot stand in for the hull
+    assert u["used"] is False and u["reason"].startswith("no hull_rans window passed")             # a passing wing cannot stand in for the hull
 
 
-def test_a_passing_hull_fs_window_sets_the_usv_multiplier_ahead_of_the_viscous_hull(tmp_path):
-    """Stage 1's multiplier scales the whole through-water resistance (speed ~ drag^-1/2 at fixed force), so the windows that include the
-    free surface's wave-making set it; the viscous `hull` and the `wing` are reported apart."""
+def test_a_passing_hull_or_hull_fs_window_carries_the_box_keel_and_is_reported_not_used_ahead_of_nothing(tmp_path):
+    """DECISIONS 118 reversed (1110): the `hull` and `hull_fs` windows mesh the keel as a square-edged plate, so they no longer set the USV's multiplier:
+    each is a candidate neither alone nor beside the bare hull. Before: a passing `hull_fs` row set it (`hull` after it)."""
     rows = {"usv": [dict(stage3_row(cd=1.3), part="hull"), dict(stage3_row(cd=2.0, spread=0.1), part="hull_fs"), dict(stage3_row(cd=3.0), part="wing")]}
     u = refit_run(tmp_path, rows)[0]["usv"]
-    assert u["used"] and u["part"] == "hull_fs" and u["drag"]["windows"] == 1 and u["drag"]["mean"] == pytest.approx(2.0)
-    assert u["drag"]["sigma_statistical"] == pytest.approx(0.1) and u["drag"]["sigma"] > u["drag"]["sigma_statistical"]
-    assert u["drag"]["change_vs_hangar"] == pytest.approx(1.0)
-    assert u["hull_not_used"]["drag"]["mean"] == pytest.approx(1.3) and "hull_fs windows" in u["hull_not_used"]["reason"]
-    assert u["wing_not_used"]["drag"]["mean"] == pytest.approx(3.0) and "no multiplier" in u["wing_not_used"]["reason"]
-    two = {"usv": [dict(stage3_row(cd=1.8, spread=0.1), part="hull_fs"), dict(stage3_row(cd=2.2, spread=0.1), part="hull_fs"),
-                   dict(stage3_row(cd=1.3), part="hull")]}
-    assert refit_run(tmp_path / "2", two)[0]["usv"]["drag"]["windows"] == 2                      # every passing hull_fs window is pooled
-
-
-def test_without_a_passing_hull_fs_window_the_viscous_hull_still_sets_the_usv_multiplier(tmp_path):
-    bad_fs = dict(stage3_row(ok=False, cd=9.0, checks=[pm_run.check_row("fs_refinement_ratio", 1.15, 1.3, False)]), part="hull_fs")
-    rows = {"usv": [dict(stage3_row(cd=1.3), part="hull"), bad_fs]}
-    u = refit_run(tmp_path, rows)[0]["usv"]
-    assert u["used"] and u["part"] == "hull" and u["drag"]["mean"] == pytest.approx(1.3)           # the failed free-surface row (cd 9) is not used
-    assert u["hull_fs_not_used"]["reason"].startswith("no hull_fs window passed") and "drag" not in u["hull_fs_not_used"]
-    both_bad = {"usv": [dict(stage3_row(ok=False), part="hull"), bad_fs]}
-    u2 = refit_run(tmp_path / "2", both_bad)[0]["usv"]
-    assert u2["used"] is False and u2["reason"].startswith("no hull window passed") and u2["failed_checks"] == ["fs_refinement_ratio", "mach_max"]
-    only_fs = {"usv": [bad_fs]}
-    assert refit_run(tmp_path / "3", only_fs)[0]["usv"]["reason"].startswith("no hull_fs window passed")
-    ci = refit_run(tmp_path / "4", rows, refit_iterations=0)[0]["usv"]
+    assert u["used"] is False and u["reason"].startswith("no hull_rans row exists (a GPU plan runs no CPU RANS case)")
+    assert u["hull_not_used"]["reason"] == pipeline.BOX_KEEL == u["hull_fs_not_used"]["reason"] and u["hull_fs_not_used"]["drag"]["mean"] == pytest.approx(2.0)
+    only_bad = {"usv": [dict(stage3_row(ok=False, checks=[pm_run.check_row("rans_gci", 0.2, 0.1, False)]), part="hull_rans", drag_share=0.2),
+                        dict(stage3_row(cd=1.3), part="hull")]}
+    u2 = refit_run(tmp_path / "2", only_bad)[0]["usv"]
+    assert u2["used"] is False and u2["reason"].startswith("no hull_rans window passed") and u2["failed_checks"] == ["rans_gci"]
+    ci = refit_run(tmp_path / "3", rows, refit_iterations=0)[0]["usv"]
     assert ci == dict(used=False, reason="budget ci: no refit")
 
 
