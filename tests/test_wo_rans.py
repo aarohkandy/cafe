@@ -734,7 +734,7 @@ def test_t39_two_grid_takes_its_levels_and_the_child_passes_the_jobs(tmp_path, m
 
 def hull_row(**kw):
     """The first fin1 window's case: ratio 0.8627 on the hull's viscous term, which is 0.3 of the model's whole drag (a round share for exact checks)."""
-    return dict(tp.stage3_row(cd=0.8627, hangar=1.0, spread=0.0509), part="hull_rans", cl=None, cl_spread=None, cl_hangar=None, drag_share=0.3, **kw)
+    return dict(tp.stage3_row(cd=0.8627, hangar=1.0, spread=0.0509), part="hull_rans", cl=None, cl_spread=None, cl_hangar=None, drag_share=0.3, added_resistance=0.8627 - 1.0, **kw)
 
 
 def test_t40_a_row_that_measured_the_hull_alone_scales_the_fit_after_the_pooling_so_the_floors_stay_the_hulls(tmp_path):
@@ -801,7 +801,8 @@ def test_t43_the_report_prints_the_usv_sentence_only_where_the_usvs_cfd_is_yes(t
     yes, no = run_with(True), run_with(False)
     assert report.CONTRIB_USV in yes["contribution"]["statements"] and report.CONTRIB_USV not in no["contribution"]["statements"]
     assert report.CONTRIB_USV.startswith("The USV's CFD is its bare hull as an ellipsoid with no keel, no waves, no leeway and no heel: it scales the hull's")
-    assert report.check_rendered(yes) == [] if hasattr(report, "check_rendered") else True
+    assert report.check_traceability(yes) == [] and report.check_traceability(no) == []
+    assert report.check_rendered(yes, (tmp_path / "a" / "report" / "index.html").read_text()) == []
 
 
 def test_t44_the_credibility_limitation_names_the_usvs_bare_hull():
@@ -842,5 +843,6 @@ def test_t46_a_passing_free_surface_row_beside_a_used_bare_hull_refit_is_not_lab
     by = {w["label"].split()[-1]: w for w in rep["stage3"]["vehicles"]["usv"]}
     assert by["hull_rans"]["used_in_refit"] is True and by["hull_fs"]["used_in_refit"] is False
     assert by["hull_fs"]["not_used_because"] == pipeline.BOX_KEEL and report.check_traceability(rep) == []
+    assert report.check_rendered(rep, (run / "report" / "index.html").read_text()) == []
     page = plain((run / "report" / "index.html").read_text())
     assert "not used in the refit: " + pipeline.BOX_KEEL in page
