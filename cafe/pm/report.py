@@ -924,8 +924,9 @@ def _contribution(rep: dict[str, Any], mission: dict[str, Any], st3: dict[str, A
                          emulator=any(t.get("method") == "EMULATED" for t in (v["fix"].get("tried") or [])))
     for lk in mission["links"]:
         rows[lk["id"]] = dict(kind="link", cfd=any(rows.get(x, {}).get("cfd") is True for x in (lk["a"], lk["b"])), fea=False, emulator=False)
+    bare = any(v["cls"] == "usv" and rows[vid]["cfd"] and refit.get(vid, {}).get("part") == "hull_rans" for vid, v in rep["vehicles"].items())
     statements = ([CONTRIB_ELLIPSOID] if any(r["cfd"] for r in rows.values()) else []) + (
-        [CONTRIB_USV] if any(v["cls"] == "usv" and rows[vid]["cfd"] for vid, v in rep["vehicles"].items()) else []) + (
+        [CONTRIB_USV] if bare else []) + (
         [CONTRIB_UAS] if any(v["cls"] == "uas" and not rows[vid]["cfd"] for vid, v in rep["vehicles"].items()) else [])
     return dict(rows=rows, statements=statements)
 
@@ -1212,7 +1213,7 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             failed = [c["name"] for c in w.get("checks", []) if not c["ok"]]
             reasons = [str(x) for x in w.get("reasons", [])]
             # only a row of the part that set the multiplier
-            used = bool(rv and rv.get("used") and w.get("ok") and rv.get("part") in (None, w.get("part")))
+            used = bool(rv and rv.get("used") and w.get("ok") and w.get("part", rv.get("part")) == rv.get("part"))
             if used:
                 why = None
             elif not w.get("ok"):
@@ -1242,7 +1243,7 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
         if rv is not None:
             drag = rv.get("drag", {})
             keys = ("mean", "sigma", "change_vs_hangar")
-            out["refit"][vid] = dict(used=bool(rv["used"]), reason=rv.get("reason"), failed_checks=list(rv.get("failed_checks", [])),
+            out["refit"][vid] = dict(used=bool(rv["used"]), part=rv.get("part"), reason=rv.get("reason"), failed_checks=list(rv.get("failed_checks", [])),
                                      drag={k: num(drag[k], "-", rr, f"refit/refit.json {vid}.drag.{k}") for k in keys if k in drag})
     return dict(out, available=True)
 

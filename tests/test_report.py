@@ -197,6 +197,17 @@ def test_environment_queried_with_env(run):
     assert report.check_traceability(load(run)) == []
 
 
+def test_a_used_refit_without_a_part_marks_no_row_of_another_part(tmp_path):
+    """Before: `rv.get("part") in (None, ...)` read every ok row of the vehicle as used, a USV's wing or hull_fs row included."""
+    run = tmp_path / "run"
+    m, plan = pm_run.make_run(run)
+    rf = json.loads((run / "refit" / "refit.json").read_text())
+    rf["glider_eq"].pop("part")
+    (run / "refit" / "refit.json").write_text(json.dumps(rf))
+    report.write(run, m, plan)
+    assert [w["used_in_refit"] for w in load(run)["stage3"]["vehicles"]["glider_eq"]] == [False, False]
+
+
 def test_stage3_and_refit(full):
     run, _, _, _, rep = full
     s = rep["stage3"]

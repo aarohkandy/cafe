@@ -208,6 +208,22 @@ def test_t9_the_plan_holds_the_fea_seconds_ahead_of_the_free_surface_cases_and_t
     assert budget.stage3_plan(two, CLASSES, a)["fs"]["fit"] == 0
 
 
+def test_the_fea_hold_is_kept_when_it_fits_the_share_even_where_the_free_surface_case_then_does_not(monkeypatch):
+    """The rule since the RANS cases: the hold fits the share (`s3 >= hold`), the cases are priced on what is left. Before (`s3 >= fs_s + hold`) a
+    hold between `s3 - fs_s` and `s3` was dropped and the free-surface case fitted."""
+    monkeypatch.setenv("CAFE_NPROC", "6")
+    a = budget.stage3_assumptions()
+    s3 = budget.SHARE["stage3"] * budget.BUDGET_S["overnight"]
+    fs0 = budget.fs_plan(CLASSES, 3, a, s3)
+    fs_s = fs0["fit"] * fs0["need_s"]
+    assert fs0["fit"] >= 1
+    b = dict(a, fea_min_s=(s3 - fs_s) / 1 + 1.0)                                  # one glider planned out: s3 - fs_s < hold <= s3
+    monkeypatch.setattr(budget, "stage3_assumptions", lambda: b)
+    p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
+    assert budget.fea_planned_out(CLASSES, p["les"]["windows"]) == ["glider_eq"] and p["les"]["fea_hold_s"] == b["fea_min_s"] > 0
+    assert budget.stage3_plan(p, CLASSES, b)["fs"]["fit"] == 0
+
+
 def test_t10_a_profile_gives_the_free_surface_cases_the_stage_3_seconds_less_the_ones_the_plan_holds_for_the_fea(monkeypatch):
     """Before the fix to `profile_stage3_s` (job wo_fea_t3: test_review_round_6_m14 read 1282.2 s for 4h) the advice "it would fit --budget 4h" counted
     the FEA's seconds as the free-surface cases'."""

@@ -640,7 +640,12 @@ def test_t33_the_bare_hull_case_is_the_viscous_term_at_the_solvers_reynolds_numb
     c = pw.usv_case(ctx, WIN, P, veh, a, 70.0, "hull_rans")
     assert c["cd_h"] == pytest.approx(0.08891, abs=1e-4) and c["residuary_share"] == pytest.approx(0.00095, abs=1e-4)
     # the share at the window's own leeway (7.86 deg) and heel (4.21 deg): the keel's induced drag is in the whole, so it is below the 0.30 of zero leeway
-    assert 0.22 < c["drag_share"] < 0.24 and c["drag_share"] < 0.2999
+    rho, st, heel = P["rho_water"], 0.58986, math.radians(4.21)
+    r_plat = (0.5 * rho * st ** 2 * P["wetted_area_m2"] * float(pw.usv.cf_ittc57(st * P["lwl_m"] / P["nu_water"])) * (1.0 + P["form_factor_k"])
+              * (1.0 + P["heel_resist_c"] * heel ** 2))
+    r_tot = float(np.asarray(pw.usv._forces(P, np.float64(st), np.float64(math.radians(7.86)), np.float64(heel), np.float64(1.0),
+                                            *[np.float64(0.0)] * 5)["d"]))
+    assert c["drag_share"] == pytest.approx(r_plat / r_tot, rel=1e-9) and c["drag_share"] == pytest.approx(0.2296, abs=2e-4)
     for text in ("RANS solver's Reynolds number (3.22e+06; the window's is 4.46e+06)", "no keel, rudder, appendage or residuary term",
                  "the polar's, before the stage-1 speed bias", "leeway -7.9 deg and heel 4.2 deg not simulated", "the rudder's induced drag left out"):
         assert text in c["src"]
@@ -796,7 +801,7 @@ def test_t42_stage_1b_reruns_stage_1_with_the_usvs_scaled_multiplier(tmp_path, m
 
 
 def test_t43_the_report_prints_the_usv_sentence_only_where_the_usvs_cfd_is_yes(tmp_path, monkeypatch):
-    def run_with(usv_used):
+    def run_with(usv_used, part="hull_rans"):
         orig = pm_run.stage3_rows
 
         def rows(ids, wins):
@@ -804,14 +809,15 @@ def test_t43_the_report_prints_the_usv_sentence_only_where_the_usvs_cfd_is_yes(t
             r["usv"] = [dict(w, part="hull_rans", ok=True, drag_share=0.3) for w in r["usv"][:1]] if usv_used else r["usv"]
             return r
         monkeypatch.setattr(pm_run, "stage3_rows", rows)
-        run = tmp_path / ("a" if usv_used else "b")
+        run = tmp_path / ("a" if usv_used and part == "hull_rans" else "b" if not usv_used else "c")
         m, plan = pm_run.make_run(run)
         rf = json.loads((run / "refit" / "refit.json").read_text())
-        rf["usv"] = dict(used=usv_used, part="hull_rans", drag=dict(mean=0.97, sigma=0.03, change_vs_hangar=-0.03), reason="bare-hull RANS: scoped")
+        rf["usv"] = dict(used=usv_used, part=part, drag=dict(mean=0.97, sigma=0.03, change_vs_hangar=-0.03), reason="bare-hull RANS: scoped")
         (run / "refit" / "refit.json").write_text(json.dumps(rf))
         report.write(run, m, plan)
         return load(run)
-    yes, no = run_with(True), run_with(False)
+    yes, no, old = run_with(True), run_with(False), run_with(True, "hull_fs")
+    assert report.CONTRIB_USV not in old["contribution"]["statements"]            # a refit through the box-keel free-surface part: the sentence would be false
     assert report.CONTRIB_USV in yes["contribution"]["statements"] and report.CONTRIB_USV not in no["contribution"]["statements"]
     assert report.CONTRIB_USV.startswith("The USV's CFD is its bare hull as an ellipsoid with no keel, no waves, no leeway and no heel: it scales the hull's")
     assert report.check_traceability(yes) == [] and report.check_traceability(no) == []

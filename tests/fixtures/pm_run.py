@@ -116,7 +116,7 @@ def refit_rows(rows):
     for vid, ws in rows.items():
         good = [w for w in ws if w.get("ok")]
         if vid == "glider_eq":
-            out[vid] = dict(used=True, **refit_mod.refit(good, dict(cd=good[0]["cd_hangar"], cl=None)))
+            out[vid] = dict(used=True, part=good[0].get("part", "body"), **refit_mod.refit(good, dict(cd=good[0]["cd_hangar"], cl=None)))
         elif vid == "uas":
             out[vid] = dict(used=False, reason="no window passed its stage-3 self-checks; "
                                        "Stage 1 keeps the baseline model coefficients (analytic; no Hangar CFD run)",
