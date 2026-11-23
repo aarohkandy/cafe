@@ -1484,12 +1484,12 @@ def s_refit(ctx: Context, L: Ledger) -> None:
         elif not good:
             hr = main == "hull_rans"
             if hr and not any(w.get("part") == "hull_rans" for w in ws):                                  # no CPU RANS case was planned
-                why = "no hull_rans row exists (no CPU RANS case was planned: a GPU plan, or the USV's LES hull window runs)"
+                why_none = "no hull_rans row exists (no CPU RANS case was planned: a GPU plan, or the USV's LES hull window runs)"
             elif hr and any(w.get("part") == "hull_rans" and w.get("ok") for w in ws):                    # it passed, but has no usable share
-                why = "the hull_rans row passed its checks but carries no usable drag_share (the hull term's share of the drag), so it cannot be scaled"
+                why_none = "the hull_rans row passed its checks but carries no usable drag_share (the hull term's share of the drag), so it cannot be scaled"
             else:
-                why = f"no {main} window passed its stage-3 self-checks"
-            out[vid] = dict(used=False, reason=why + "; Stage 1 keeps the baseline model coefficients (analytic; no Hangar CFD run)",
+                why_none = f"no {main} window passed its stage-3 self-checks"
+            out[vid] = dict(used=False, reason=why_none + "; Stage 1 keeps the baseline model coefficients (analytic; no Hangar CFD run)",
                             failed_checks=sorted({c["name"] for w in ws for c in w.get("checks", []) if not c["ok"]}))
         else:
             out[vid] = dict(used=True, part=main, **refit.refit(good))      # each window against its own cd_hangar
