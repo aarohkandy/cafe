@@ -88,3 +88,23 @@ The mesh rule puts the first cell in 30 to 300 on average for levels 6 and 7 (71
 ## Where things are (orca, under `~/cafe-worker`)
 
 `cafe/pmdata/runs/usv_rans_a/` and `usv_rans_b/` (`result.json`, `info.json`, `usv_double.stl`, `hull_fs_reference.stl`, `coarse/` and `fine/` logs and `postProcessing`, 15 and 46 MB), job logs `logs/usvr_1.log`, `logs/usvr_2.log`; source `cafe/pm_sl_usv`.
+
+## Keel-less runs (lead, 2026-11-23): the 4.5 x is the keel's box shape
+
+`--no-keel` (added to the probe): the full ellipsoid alone, half its drag is the bare hull's. Jobs `usvr_3` (levels 0 1, `usv_rans_c`) and `usvr_4` (levels 1 2, `usv_rans_d`), 6 cores, same window and speed. The solver stopped on its residual control in both (186 to 251 iterations), unlike the runs with the keel.
+
+| job | level (offset) | cells | iterations | seconds | hull drag N (half) | pressure N | viscous N | y+ average |
+|---|---|---|---|---|---|---|---|---|
+| 3 | 6 (0) | 69,544 | about 200 | 16.2 | 7.269 | 1.741 | 5.529 | 375 |
+| 3, 4 | 7 (1) | 286,500 / 286,514 | 186 | 54.9 / 55.2 | 6.0876 / 6.0877 | 0.937 | 5.151 | 180 |
+| 4 | 8 (2) | 1,888,804 | 251 | 400.4 | 5.8005 | 0.560 | 5.241 | 91 |
+
+| pair | ratio r | GCI | scatter | failed mesh checks | the four checks |
+|---|---|---|---|---|---|
+| levels 0, 1 | 1.603 | 0.371 | 0.00005 | 0 | GCI fails |
+| levels 1, 2 | 1.875 | 0.059 | 0.00002 | 0 | all four pass, 456 s for both grids |
+
+- The Hangar model for the hull alone (the reference of the runs above minus the keel's friction and profile term, 3.711 N): 6.225 N. The bare hull's CFD drag on level 8 is 5.800 N, 0.932 of it (0.978 on level 7).
+- So the hull agrees with the model within 7 %, and the box keel carries the rest: 44.75 - 5.80 = 38.95 N for one keel against the model's 3.711 N, 10.5 times. The keel is a plate of 0.667 x 0.10 x 2.1 m with square edges (`usv_vehicle`: `type="plate"`); 79.3 N of double-body pressure drag on two keels' frontal area (0.42 m2) at q 178.3 Pa is a drag coefficient of 1.06 on frontal area, a blunt rectangular section's value. The model uses a foil's friction and profile drag.
+- Not verified: a foil-shaped keel; why the level-6 grid has no working wall layers on the bare ellipsoid (y+ 375 against 72 with the keels); the first-cell y+ on level 7 (180) is in the log layer.
+- This touches the two older USV parts too: `hull` (LES) and `hull_fs` use the same box keel, so a passing row of either would carry the box keel's drag into the refit.

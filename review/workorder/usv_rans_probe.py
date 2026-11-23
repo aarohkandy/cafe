@@ -175,8 +175,9 @@ def build(args: argparse.Namespace, out: pathlib.Path) -> tuple[dict[str, Any], 
     vb = case["R"] @ (case["v"] - case["u_env"])
     speed = float(np.linalg.norm(vb))
 
-    dveh = dataclasses.replace(veh, shapes=double_body_shapes(veh.shapes, FS.KEEL_OVERLAP))
-    m = trimesh.boolean.union([W.vehicle_mesh(dveh, i) for i in range(len(dveh.shapes))], engine="manifold")
+    dveh = dataclasses.replace(veh, shapes=veh.shapes[:1] if args.no_keel else double_body_shapes(veh.shapes, FS.KEEL_OVERLAP))
+    parts = [W.vehicle_mesh(dveh, i) for i in range(len(dveh.shapes))]
+    m = parts[0] if len(parts) == 1 else trimesh.boolean.union(parts, engine="manifold")     # --no-keel: the full ellipsoid alone
     watertight = bool(m.is_watertight)
     if not watertight:
         raise ValueError("the ellipsoid and the two keels do not union into a closed solid")
@@ -200,7 +201,7 @@ def build(args: argparse.Namespace, out: pathlib.Path) -> tuple[dict[str, Any], 
                 re_solver=speed * L / nu_s, re_hangar=speed * L / P["nu_water"], froude=speed / math.sqrt(9.81 * L), length_m=L, base_cell_m=h0,
                 surface_cell_m=hs,
                 level_offset0_level=lvl0, layers=lay, levels=args.levels, iterations_cap=args.iters, cores=args.cores, run_dir=args.run, mission=args.mission,
-                wetted_area_note=case["wetted_area_note"], hull_fs_stl_area_m2=geo["area"], hull_fs_draft_m=geo["draft"])
+                keel=not args.no_keel, keel_drag_hangar_n=PW._keel_drag(P, case["info"]["stw_ms"]), wetted_area_note=case["wetted_area_note"], hull_fs_stl_area_m2=geo["area"], hull_fs_draft_m=geo["draft"])
     return info, veh, case
 
 
@@ -240,6 +241,7 @@ def main() -> int:
     ap.add_argument("--cores", type=int, default=2, help="MPI ranks of OpenFOAM (CAFE_NPROC); keep it equal to PM_CPUS")
     ap.add_argument("--levels", type=int, nargs=2, default=[0, 1], metavar=("A", "B"), help="the two level_offsets of cfd.external, A < B (coarse, fine)")
     ap.add_argument("--iters", type=int, default=600, help="the iteration cap passed to cfd.external")
+    ap.add_argument("--no-keel", action="store_true", help="the full ellipsoid alone (half its drag is the bare hull's); compare with hangar_hull_only_n")
     ap.add_argument("--out", default="/data/runs/usv_rans_probe", help="work directory under /data/runs/usv_rans_*")
     ap.add_argument("--run", default="/data/runs/fin1", help="finished demo run: windows.json, stage1/res.pkl and ingest/ the case is built from (read only)")
     ap.add_argument("--mission", default=str(ROOT / "missions" / "tepex_c_demo.yaml"))
@@ -287,6 +289,8 @@ def main() -> int:
         cf_ittc57_re_solver=cf_s, cf_ittc57_re_hangar=cf_h, s_wet_below_m2=s_wet, s_wet_hull_body_m2=info["s_wet_hull_body_m2"],
         cd_friction_only_re_solver=friction_only(cf_s, s_wet, veh.ref_area), cd_friction_only_re_hangar=friction_only(cf_h, s_wet, veh.ref_area),
         form_factor_ittc57_re_solver=rows["cd"] * veh.ref_area / (s_wet * cf_s),
+        keel=info["keel"], hangar_hull_only_n=case["cd_h"] * q_h - info["keel_drag_hangar_n"],
+        hull_over_hangar_hull_only=None if info["keel"] else fine["hull_drag_n"] / (case["cd_h"] * q_h - info["keel_drag_hangar_n"]),
         note="cd = (double-body drag / 2) / (0.5 rho_solver speed^2 ref_area); cd_hangar uses the case's own density; rho ratio solver/hangar "
              f"{cfd.FLUIDS['water']['rho'] / info['rho_hangar']:.4f}")
     path.write_text(json.dumps(result, indent=1, default=float))
