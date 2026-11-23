@@ -15,7 +15,7 @@ def main(dirs: list) -> int:
         rows.append((r["info"]["re_length"], pathlib.Path(d).name, r))
     rows.sort(reverse=True)
     for re, name, r in rows:
-        i, g, f, c, s = r["info"], r["grids"], r["grids"]["fine"], r["grids"]["coarse"], r["summary"]
+        i, f, c, s = r["info"], r["grids"]["fine"], r["grids"]["coarse"], r["summary"]
         print(f"{name}: Re {re:.4g} U {i['speed_ms']:.5f} cells {c['cells']}/{f['cells']} failed {c['failed_checks']}/{f['failed_checks']} "
               f"it {c['iterations']}/{f['iterations']} s {s['total_seconds']:.0f} drag {f['drag_n']:.5f} (coarse {c['drag_n']:.5f}) cd {f['cd']:.4f} "
               f"GCI {s['gci']:.4f} ratio {s['refinement_ratio']:.3f} std_rel {c.get('drag_tail_std_rel', float('nan')):.4f}/"
