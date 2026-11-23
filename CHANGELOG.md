@@ -999,6 +999,8 @@ The review loop ended after round 23 (DECISIONS 1089). Hand-backs: `review/worko
 - report: a row is 'used in the refit' only if its part is the refit's part, an unused ok row prints its reason; `CONTRIB_USV` in the contribution table; credibility L15 names the USV's bare hull (1109).
 - `review/workorder/rans_real.py --usv` (the product's `_rans_submit` then `s_refit` on the first USV window of fin1); `review/workorder/usv_rans.md` (the probe's record, from branch scale-ladder).
 - Tests: `tests/test_wo_rans.py` T10 to T15, T28, T29, T32 to T39; T40 to T46 (refit scoping, report label, L15, keys); pins moved in `test_pipeline`, `test_credibility` (34 to 37 per-class keys), `test_wo_fea`, `test_budget`, `test_reproducible` and `test_stage3` (DECISIONS 1108 to 1110).
+- Merge of branch `scale-ladder` (the scale ladder's proof failed; it is a diagnostic only, nothing built into the pipeline, DECISIONS 1113): `review/workorder/ladder_verdict.md`, `ladder_rans.md`, `ladder_gpu_results.md`, `ladder_table.py`, `rans_probe.py --speed-factor`, `usv_rans_probe.py`; tests `tests/test_wo_ladder.py` and `tests/test_wo_cfdprobe.py`.
+- `cafe/pm/pipeline.py` `s_refit`: the no-refit reason string has its own variable name (`why_none`), because mypy strict refused the reuse of `why` (a dict later in the function); no behaviour change (commit b0fd1cb).
 
 ### Known issues
 
