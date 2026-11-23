@@ -256,7 +256,8 @@ def usv_case(ctx: Context, w: dict[str, Any], P: dict[str, Any], veh: W.Vehicle,
     CFD over model on the same hull (round 7 M-10): `hull`: the ellipsoid's surface (ellipsoid_area), `hull_fs`: `wetted_m2`, the area of the
     mesh the free-surface run uses (None: the platform's assumed wetted_area_m2), `hull_rans`: the ellipsoid's surface, the viscous term only, at the
     solver's Reynolds number (that case also carries `drag_share`, the term's share of the model's whole through-water resistance at the window's own
-    leeway and heel with the rudder's induced drag left out, and `residuary_share`; DECISIONS 1108, 1109). The platform's value stays what Stage 1 uses; both areas are
+    leeway and heel with the rudder's induced drag left out, and `residuary_share`; DECISIONS 1108, 1109). The platform's value stays what Stage 1
+    uses; both areas are
     in the case (`wetted_window_m2`, `wetted_platform_m2`) and `wetted_area_note` states the ratio."""
     env, t, lon, lat = ctx.env, w["t"], w["lon"], w["lat"]
     wind = _val(env.wind(lon, lat, P["anemometer_m"], t), "wind", 2)[:2]
@@ -708,7 +709,8 @@ def _row(ctx: Context, vid: str, cls: str, w: dict[str, Any], part: str, platfor
 FS_GRACE_S = 30.0                                                           # how long past its own deadline the parent waits for a child to die
 PARTS = budget.STAGE3_PARTS                                                 # the native-LBM parts, one budget slice each
 FS_PARTS = budget.FS_PARTS                                                  # the free-surface part: child process, own budget
-RANS_PARTS = budget.RANS_PARTS                                              # the CPU RANS part of a glider or USV whose LES hull or body window is not run: child process
+# the CPU RANS part of a glider or USV whose LES hull or body window is not run: child process
+RANS_PARTS = budget.RANS_PARTS
 
 NOT_LES = set(RANS_PARTS.values()) | set(FS_PARTS.values())                 # the parts that are not LES windows
 
@@ -751,7 +753,8 @@ def profile_stage3_s(ctx: Context) -> dict[str, float]:
 
 
 def profile_rans_s(ctx: Context) -> dict[str, float]:
-    """Per `--budget` profile (smallest first), the seconds that profile's own plan holds for the CPU RANS cases (`stage3.rans`: `held_s`, the cases that fit at their
+    """Per `--budget` profile (smallest first), the seconds that profile's own plan holds for the CPU RANS cases (`stage3.rans`: `held_s`, the cases
+    that fit at their
     priced seconds; 0 where none fits): what the RANS gate's advice compares the RANS cases with, never the free-surface cases' seconds."""
     return {name: _rans_s(s3) for name, b, q, s3 in _profile_plans(ctx)}
 
@@ -853,8 +856,10 @@ def _fs_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, An
 
 
 def _rans_gate(a: dict[str, Any], ctx: Context, left_s: float, queued_s: float, cls: str) -> tuple[bool, str, float]:
-    """(fits, reason, seconds the case holds in the queue). The estimate (`stage3.<class>.rans.est_s`) times its margin must fit `left_s`, the share left for the
-    RANS cases after the FEAs' hold (`budget.rans_plan`'s share: the queue runs the RANS cases before the free-surface cases, so they are not charged to it) less the RANS cases queued before this one (`queued_s`): a plan-time rule, not the clock. The sentence names the minutes needed, the
+    """(fits, reason, seconds the case holds in the queue). The estimate (`stage3.<class>.rans.est_s`) times its margin must fit `left_s`, the share
+    left for the
+    RANS cases after the FEAs' hold (`budget.rans_plan`'s share: the queue runs the RANS cases before the free-surface cases, so they are not charged
+    to it) less the RANS cases queued before this one (`queued_s`): a plan-time rule, not the clock. The sentence names the minutes needed, the
     minutes left and the smallest `--budget` profile whose plan holds that many seconds for the RANS cases (`profile_rans_s`: not the free-surface cases')
     for it and the RANS cases queued before it."""
     est_s, margin = need(a, f"{cls}.rans.est_s"), need(a, f"{cls}.rans.margin")
@@ -919,7 +924,8 @@ def _rans_work(base: dict[str, Any], veh: W.Vehicle, case: dict[str, Any], speed
 
 def _rans_submit(pool: ThreadPoolExecutor, ctx: Context, vid: str, w: dict[str, Any], platform: str, res: dict[str, Any] | None, a: dict[str, Any],
                  st: dict[str, Any], sizes: dict[str, Any]) -> Future[dict[str, Any]]:
-    """Prepares the CPU RANS case of glider or USV `vid` at its first window (kinematics, flow label, price), decides whether the share left for the RANS cases holds
+    """Prepares the CPU RANS case of glider or USV `vid` at its first window (kinematics, flow label, price), decides whether the share left for the
+    RANS cases holds
     it and either queues it behind the earlier ones on `pool` (one at a time: they share the CPUs) or returns the finished not-run row. The row carries no lift
     (`cl`, `cl_spread` and `cl_hangar` are None: only the drag is solved), so the refit takes the drag alone. A USV's case is its bare hull along +x at the
     through-water speed, refused when the model's residuary share at that speed is over `stage3.usv.rans.residuary_share_max`."""
@@ -1010,7 +1016,8 @@ def run(ctx: Context, wins: dict[str, list[dict[str, Any]]], L: Ledger) -> dict[
     whose turn comes with less than `stage3.min_window_s` left is not started; each of these is a row that says "killed".
     A glider whose LES part is planned out gets its hull FEA from the sea pressure alone, once, first in the same one-worker queue (`_fea_submit`), in every
     row of that part. A USV window also gets a `hull_fs` row, run in a child process while the LBM windows run (killed at the stage deadline); the rows
-    follow the LBM rows of the vehicle. A glider or USV whose LES hull or body part is planned out also gets one `body_rans` or `hull_rans` row, from its first window, queued after the FEA and
+    follow the LBM rows of the vehicle. A glider or USV whose LES hull or body part is planned out also gets one `body_rans` or `hull_rans` row, from
+    its first window, queued after the FEA and
     before the free-surface cases (`_rans_submit`; the other windows of the vehicle get no such row). A case that does not fit is a row with ok False and the
     minutes it needs. Every row carries
     `timing` (seconds, measured rates); pipeline.s_stage3 moves it out of the hashed output into the ledger."""

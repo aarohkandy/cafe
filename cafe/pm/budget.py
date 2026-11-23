@@ -48,8 +48,10 @@ STAGE1_PRICED = 5.0
 TRAIN_FRAC = 0.7                  # of the emulator share the variant runs may use; the rest is for the flip search's Stage-1 fallback
 STAGE3_PARTS = {"glider": ("body",), "usv": ("hull", "wing"), "uas": ("body",)}     # the native-LBM parts of a window, one slice of the share each
 FS_PARTS = {"usv": "hull_fs"}                                                        # the free-surface part: a child process with its own queue
-RANS_PARTS = {"glider": "body_rans", "usv": "hull_rans"}                             # the CPU RANS part: one case per vehicle whose LES hull or body window is not run
-RANS_REFIT = "the drag refit of a glider or USV comes only from its CPU RANS case, where it fits and passes its checks"      # said of the refit where such a case fits
+# the CPU RANS part: one case per vehicle whose LES hull or body window is not run
+RANS_PARTS = {"glider": "body_rans", "usv": "hull_rans"}
+# said of the refit where such a case fits
+RANS_REFIT = "the drag refit of a glider or USV comes only from its CPU RANS case, where it fits and passes its checks"
 RANS_USV = " (the USV's case is its bare hull: it scales the hull's viscous term at the window's speed)"      # ... and, where a USV's case fits, this too
 FEA_CLASSES = ("glider",)                                                            # classes whose window carries an FEA of the pressure hull
 FALLBACK_COST = {"glider": (8.0, 0.1), "usv": (11.0, 0.1), "uas": (20.0, 0.3)}   # (s per batch, s per member) per mission day without bench
@@ -503,7 +505,8 @@ def plan(budget: str, gpus: int, mission: dict[str, Any], thr: dict[str, Any] | 
                label=("GPU LES windows" if gpus > 0 else
                       "CPU fallback: no LES coefficients exist on this machine (no window reaches the physical lattice viscosity with this "
                       "budget's cell-updates); "
-                      + (f"sub-grid stays uncalibrated; {rans_refit_text(rans, classes)}" if rans and rans["fit"] else "sub-grid and refit stay uncalibrated") if nowhere else
+                      + (f"sub-grid stays uncalibrated; {rans_refit_text(rans, classes)}" if rans and rans["fit"]
+                         else "sub-grid and refit stay uncalibrated") if nowhere else
                       "CPU fallback: native JAX lattice kernel at the resolution this budget affords on CPU; coefficients are the pooled "
                       "window coefficient over the vehicle's Hangar-model value"))
     if gpus > 0 and gpu_mem_gb is not None:
@@ -573,7 +576,8 @@ def stage3_plan(p: dict[str, Any], classes: dict[str, str], a: dict[str, Any]) -
                          hold_s=hold),
                 cell_steps_per_part=per_part, fs=fs, rans=rans,
                 les=dict(reachable=reachable, windows=wins,
-                         note=((f"no LES coefficients exist on this machine; sub-grid stays uncalibrated; {rans_refit_text(rans, classes)}" if rans and rans["fit"] else
+                         note=((f"no LES coefficients exist on this machine; sub-grid stays uncalibrated; {rans_refit_text(rans, classes)}"
+                                if rans and rans["fit"] else
                                 "no LES coefficients exist on this machine; sub-grid and refit stay uncalibrated")
                                if wins and not reachable and les["cpu_fallback"] else None)))
 

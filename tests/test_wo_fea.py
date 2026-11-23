@@ -195,7 +195,8 @@ def test_t9_the_plan_holds_the_fea_seconds_ahead_of_the_free_surface_cases_and_t
     monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(a, fea_min_s=1e9))
     q = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
     sq = budget.stage3_plan(q, CLASSES, dict(a, fea_min_s=1e9))
-    rq, fq = sq["rans"], sq["fs"]                                                        # the CPU RANS cases keep their seconds too, priced before the free-surface cases
+    # the CPU RANS cases keep their seconds too, priced before the free-surface cases
+    rq, fq = sq["rans"], sq["fs"]
     assert q["les"]["fea_hold_s"] == 0.0 and q["shares"]["stage3"] * q["budget_s"] == pytest.approx(fq["fit"] * fq["need_s"] + rq["held_s"])
     assert budget.stage3_plan(q, CLASSES, dict(a, fea_min_s=1e9))["fea"]["hold_s"] == 0.0
     monkeypatch.undo()                                                                    # two cores: no free-surface case fits the whole share

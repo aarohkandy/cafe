@@ -1211,7 +1211,8 @@ def _stage3(plan: dict[str, Any], wins: dict[str, Any] | None, st3: dict[str, An
             div = cut and bool((w.get("resolution") or {}).get("diverged"))      # ... or one that diverged in its last chunk (the same withholding)
             failed = [c["name"] for c in w.get("checks", []) if not c["ok"]]
             reasons = [str(x) for x in w.get("reasons", [])]
-            used = bool(rv and rv.get("used") and w.get("ok") and rv.get("part") in (None, w.get("part")))        # only a row of the part that set the multiplier
+            # only a row of the part that set the multiplier
+            used = bool(rv and rv.get("used") and w.get("ok") and rv.get("part") in (None, w.get("part")))
             if used:
                 why = None
             elif not w.get("ok"):

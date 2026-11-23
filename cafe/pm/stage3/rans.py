@@ -57,7 +57,8 @@ def _dvec(label: str) -> NDArray[np.float64]:
 
 # ---------------------------------------------------------------------------------------------------- geometry and flow
 def write_stl(veh: W.Vehicle, path: str | os.PathLike[str]) -> float:
-    """One closed STL of the vehicle's shapes (a glider's hull and wing unioned, or a USV's bare hull alone) in the body frame the flow label is in: no shift, no keel. Returns its length (m)."""
+    """One closed STL of the vehicle's shapes (a glider's hull and wing unioned, or a USV's bare hull alone) in the body frame the flow label is in:
+    no shift, no keel. Returns its length (m)."""
     import trimesh
     m = trimesh.boolean.union([W.vehicle_mesh(veh, i) for i in range(len(veh.shapes))], engine="manifold")
     if not m.is_watertight:
@@ -97,7 +98,8 @@ def drag_history(case_dir: str | os.PathLike[str], label: str) -> tuple[float, f
 
 def two_grid(stl: str, label: str, speed: float, workdir: pathlib.Path, levels: dict[str, int] = LEVELS,
              log: Callable[[str], None] = print) -> dict[str, Any]:
-    """cafe.cfd.external on the two grids of `levels` (LEVELS for a glider, HULL_LEVELS for the USV's bare hull; one direction, ITERS iterations each, the coarse grid's case shrunk before the fine one starts) with the
+    """cafe.cfd.external on the two grids of `levels` (LEVELS for a glider, HULL_LEVELS for the USV's bare hull; one direction, ITERS iterations
+    each, the coarse grid's case shrunk before the fine one starts) with the
     fine grid's drag, the drag's tail std, the refinement ratio from the two cell counts and the GCI of the drag (Roache, p = 2, Fs = 3, at that ratio)
     against the coarse grid, and both grids' failed mesh checks. Not characterize_external: it drops the coarse grid's mesh checks and fixes its iterations."""
     from cafe import cfd

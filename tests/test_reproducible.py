@@ -190,7 +190,8 @@ def test_two_runs_with_the_same_seed_make_the_same_report_json_with_the_real_sta
     rans_rows = [r for r in flat if r["part"] == "body_rans"]              # one CPU RANS case, for the glider whose LES part the ci plan skips (DECISIONS 1105)
     assert len(rans_rows) == 1 and not rans_rows[0]["ok"] and rans_rows[0]["cd"] is None       # the ci share (36 s) does not fit a case: refused by the gate,
     assert rans_rows[0]["reasons"] and not any("killed" in x for x in rans_rows[0]["reasons"])  # with its reason, not started and not killed
-    hull_rows = [r for r in flat if r["part"] == "hull_rans"]              # the USV's bare-hull case: refused too (the price gate or the validity gate), not killed
+    # the USV's bare-hull case: refused too (the price gate or the validity gate), not killed
+    hull_rows = [r for r in flat if r["part"] == "hull_rans"]
     assert len(hull_rows) == 1 and not hull_rows[0]["ok"] and hull_rows[0]["cd"] is None and hull_rows[0]["reasons"]
     assert not any("killed" in x for x in hull_rows[0]["reasons"])
     ran = [r for r in flat if r["part"] not in ("hull_fs", "body_rans", "hull_rans")]

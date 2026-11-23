@@ -202,7 +202,8 @@ def test_t8_a_case_that_does_not_fit_the_share_is_a_row_with_the_gate_sentence_a
            "after the FEA hold and the RANS cases queued before it; it would fit --budget overnight (16667 min of stage 3 in that plan)")
     assert not r["ok"] and r["error"] == why and r["reasons"] == [why] and r["cd"] is None and RS["spawned"] == [] and r["label"] == rans.LABEL
     assert r["resolution"]["left_s"] == 1000.0 and r["resolution"]["estimated_s"] == 867.0 and L.checks["every_window_attempted"][0]
-    assert pw._rans_gate(pw.assumptions(), rans_ctx(no_wall_receipt), 1083.75, 0.0, "glider") == (True, "", 1083.75)             # exactly margin x estimate fits
+    # exactly margin x estimate fits
+    assert pw._rans_gate(pw.assumptions(), rans_ctx(no_wall_receipt), 1083.75, 0.0, "glider") == (True, "", 1083.75)
     assert not pw._rans_gate(pw.assumptions(), rans_ctx(no_wall_receipt), 1083.7, 0.0, "glider")[0]
     quick = body_rans(pw.run(rans_ctx(no_wall_receipt, share=0.0), {"g": [WIN]}, FakeL())["g"])[0]
     assert not quick["ok"] and "against 0.0 min left of the 0 min stage-3 share" in quick["error"]
@@ -283,7 +284,8 @@ def test_t12_the_plan_prices_the_fea_then_the_rans_cases_then_the_free_surface_c
     assert s["rans"]["share_s"] == pytest.approx(p["shares"]["stage3"] * B - hold)                                       # priced on what the FEAs leave
     # a share that holds the first glider's case and the USV's but not the second glider's: the USV's case still claims its seconds
     left = B * budget.SHARE["stage3"] - hold
-    n = (left - usv_need) / 1.5                                                                                       # 1.5 glider cases in what is left once the USV's is set aside
+    # 1.5 glider cases in what is left once the USV's is set aside
+    n = (left - usv_need) / 1.5
     monkeypatch.setattr(budget, "stage3_assumptions", lambda: dict(a, **{"glider.rans.est_s": n / 1.25}))
     q = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2)
     t = budget.stage3_plan(q, CL2, dict(a, **{"glider.rans.est_s": n / 1.25}))
@@ -305,7 +307,8 @@ def test_t13_what_the_plan_keeps_is_what_the_run_prices_over_a_sweep_of_estimate
         fs_s = s["fs"]["fit"] * s["fs"]["need_s"]
         want = budget.rans_plan(CL2, p["les"]["windows"], b, budget.SHARE["stage3"] * B - p["les"]["fea_hold_s"])
         total = sum(p["shares"].values())
-        if s["rans"]["fitted"] != want["fitted"] or total != pytest.approx(sum(budget.SHARE.values())) or p["shares"]["stage1"] < budget.SHARE["stage1"] - 1e-12:
+        if (s["rans"]["fitted"] != want["fitted"] or total != pytest.approx(sum(budget.SHARE.values()))
+                or p["shares"]["stage1"] < budget.SHARE["stage1"] - 1e-12):
             refused.append(b["glider.rans.est_s"])
         assert s["rans"]["held_s"] + fs_s + p["les"]["fea_hold_s"] <= p["shares"]["stage3"] * B + 1e-6
     assert not refused
@@ -341,7 +344,8 @@ def test_t15_the_plan_label_and_notes_say_the_refit_holds_only_where_the_case_pa
     assert budget.stage3_plan(p, CL2, a)["les"]["note"] == "no LES coefficients exist on this machine; sub-grid stays uncalibrated; " + both
     g = dict(glider_eq="glider")                                                                                   # no USV: no USV clause
     pg = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=g)
-    assert pg["les"]["label"].endswith("sub-grid stays uncalibrated; " + budget.RANS_REFIT) and budget.stage3_plan(pg, g, a)["les"]["note"].endswith(budget.RANS_REFIT)
+    assert pg["les"]["label"].endswith("sub-grid stays uncalibrated; " + budget.RANS_REFIT) and budget.stage3_plan(pg, g,
+    a)["les"]["note"].endswith(budget.RANS_REFIT)
     q = budget.plan("quick", 0, MISSION, thr={}, vehicle_classes=CL2)                                              # no case fits 20 min
     assert budget.stage3_plan(q, CL2, a)["rans"]["fit"] == 0
     assert q["les"]["label"].startswith("CPU fallback") and q["les"]["label"].endswith("sub-grid and refit stay uncalibrated")
@@ -467,7 +471,8 @@ def fake_external(calls, drags, fails):
         f = -d * cfd.dvec(label)
         write_forces(case, np.full(300, f[0]), np.full(300, f[1]), f[2] + 0.001 * np.sin(np.arange(300)))
         (pathlib.Path(case) / "processor0").mkdir()
-        return dict(fluid=fluid, rho=1025.0, nu=1.19e-6, speed=speed, L=1.8, level=6 + level_offset, mesh=dict(cells={0: 316_022, 1: 1_283_595, 2: 5_000_000}[level_offset],
+        return dict(fluid=fluid, rho=1025.0, nu=1.19e-6, speed=speed, L=1.8, level=6 + level_offset, mesh=dict(cells={0: 316_022, 1: 1_283_595, 2:
+        5_000_000}[level_offset],
                     failed_checks=fails[level_offset]), seconds=20.0,
                     dirs={label: dict(force=f.tolist(), force_std=[0.0, 0.0, 0.0], iters=600, seconds=10.0 + level_offset)})
     return external
@@ -578,7 +583,8 @@ def test_t29_the_free_surface_advice_is_not_charged_the_rans_cases_queued_before
     ctx.plan.update(shares=dict(stage3=1.0), budget_s=fs_need + a["glider.rans.est_s"] * a["glider.rans.margin"] + 60.0)
     ctx.plan["les"]["windows"] = {k: dict(OUT) for k in ("g/body", "u/hull", "u/wing")}
     rows = pw.run(ctx, {"g": [WIN], "u": [WIN]}, FakeL())
-    assert body_rans(rows["g"])[0]["ok"] and hull_rans(rows["u"])[0]["ok"] and len(RS["calls"]) == 2 and seen == [0.0]   # both RANS cases ran, not in the FS queue
+    # both RANS cases ran, not in the FS queue
+    assert body_rans(rows["g"])[0]["ok"] and hull_rans(rows["u"])[0]["ok"] and len(RS["calls"]) == 2 and seen == [0.0]
 
 
 @pytest.mark.parametrize("exc", [ImportError("no manifold backend"), AssertionError("area"), TypeError("odd"), IndexError("empty")])
@@ -642,7 +648,8 @@ def test_t33_the_bare_hull_case_is_the_viscous_term_at_the_solvers_reynolds_numb
     monkeypatch.setattr(pw, "_keel_drag", lambda P, stw: 1e6)                                                          # no keel term in the reference
     assert pw.usv_case(ctx, WIN, P, veh, a, 70.0, "hull_rans")["cd_h"] == c["cd_h"]
     slow_boat(monkeypatch, lee=0.0, heel=0.0)
-    assert pw.usv_case(ctx, WIN, P, veh, a, 70.0, "hull_rans")["drag_share"] == pytest.approx(0.2999, abs=1e-3)       # zero leeway and heel: the keel's profile drag only
+    # zero leeway and heel: the keel's profile drag only
+    assert pw.usv_case(ctx, WIN, P, veh, a, 70.0, "hull_rans")["drag_share"] == pytest.approx(0.2999, abs=1e-3)
 
 
 def test_t34_a_usv_has_a_rans_case_when_its_les_hull_is_planned_out_whatever_its_wing_does():
@@ -661,7 +668,8 @@ def test_t35_the_cases_are_priced_per_class_each_claiming_its_seconds_in_queue_o
     r = budget.rans_plan(CL2, out, a, 2 * g + u - 1.0)
     assert r["fitted"] == ["glider_eq", "glider_2n"] and r["held_s"] == 2 * g
     r = budget.rans_plan(CL2, out, a, g + u)
-    assert r["fitted"] == ["glider_eq", "usv"] and r["held_s"] == g + u                                                # glider_2n is refused, the USV still fits
+    # glider_2n is refused, the USV still fits
+    assert r["fitted"] == ["glider_eq", "usv"] and r["held_s"] == g + u
     assert budget.rans_plan(CL2, out, a, -5.0)["fit"] == 0
 
 
@@ -680,10 +688,12 @@ def test_t36_plan_and_stage3_plan_agree_on_the_queue_order_fea_rans_free_surface
             assert s["rans"]["fitted"] == want["fitted"] and s["rans"]["held_s"] == want["held_s"]
     monkeypatch.setenv("CAFE_NPROC", "6")
     ov = budget.stage3_plan(budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CL2), CL2, a)
-    assert ov["fs"]["fit"] == 0 and ov["rans"]["fit"] == 3                                                            # the free-surface case no longer fits there
+    # the free-surface case no longer fits there
+    assert ov["fs"]["fit"] == 0 and ov["rans"]["fit"] == 3
     one = dict(g1="glider", u1="usv")
     p1 = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=one)
-    assert budget.stage3_plan(p1, one, a)["fs"]["fit"] == 1                                                           # beside one glider and the USV it still does
+    # beside one glider and the USV it still does
+    assert budget.stage3_plan(p1, one, a)["fs"]["fit"] == 1
 
 
 def test_t37_the_stage_runs_the_usv_case_on_the_bare_hull_along_x_at_the_through_water_speed(no_wall_receipt, rans_env, monkeypatch):
@@ -734,7 +744,8 @@ def test_t39_two_grid_takes_its_levels_and_the_child_passes_the_jobs(tmp_path, m
 
 def hull_row(**kw):
     """The first fin1 window's case: ratio 0.8627 on the hull's viscous term, which is 0.3 of the model's whole drag (a round share for exact checks)."""
-    return dict(tp.stage3_row(cd=0.8627, hangar=1.0, spread=0.0509), part="hull_rans", cl=None, cl_spread=None, cl_hangar=None, drag_share=0.3, added_resistance=0.8627 - 1.0, **kw)
+    return dict(tp.stage3_row(cd=0.8627, hangar=1.0, spread=0.0509), part="hull_rans", cl=None, cl_spread=None, cl_hangar=None, drag_share=0.3,
+    added_resistance=0.8627 - 1.0, **kw)
 
 
 def test_t40_a_row_that_measured_the_hull_alone_scales_the_fit_after_the_pooling_so_the_floors_stay_the_hulls(tmp_path):
@@ -747,7 +758,8 @@ def test_t40_a_row_that_measured_the_hull_alone_scales_the_fit_after_the_pooling
     for k in ("sigma", "sigma_statistical", "sigma_between", "sigma_discretisation", "tau"):
         assert d[k] == pytest.approx(s * un[k], abs=1e-12)
     assert d["sigma_statistical"] == pytest.approx(s * 0.0509, abs=1e-12) and un["sigma"] == pytest.approx(0.109, abs=2e-3) and d["sigma"] < 0.04
-    assert out["added_resistance"]["mean"] == pytest.approx(s * (0.8627 - 1), abs=1e-12) and out["drag_share"] == s and out["hull_ratio"] == pytest.approx(0.8627)
+    assert out["added_resistance"]["mean"] == pytest.approx(s * (0.8627 - 1), abs=1e-12) and out["drag_share"] == s
+    assert out["hull_ratio"] == pytest.approx(0.8627)
     plain_ratio = tp.refit_run(tmp_path / "2", {"usv": [dict(hull_row(), part="body_rans")]})[0]["usv"]                   # no scoping for a whole-boat row
     assert plain_ratio["drag"]["mean"] == pytest.approx(0.8627)
 
@@ -759,7 +771,8 @@ def test_t41_the_bare_hull_row_sets_the_usv_multiplier_and_the_box_keel_parts_do
     assert u["reason"].startswith("bare-hull RANS (no keel, no free surface, no leeway or heel): cd / cd_hangar 0.863 on the hull's viscous term, which is 30%")
     assert "1 + 0.300 x (0.863 - 1)" in u["reason"] and u["reason"].endswith("Stage 1 applies this factor at each speed it sails")
     assert u["hull_not_used"]["reason"] == pipeline.BOX_KEEL == u["hull_fs_not_used"]["reason"]
-    for bad in (None, 0.0, 1.5, math.nan, "0.3"):                                                                    # a row without a usable share is no measurement
+    # a row without a usable share is no measurement
+    for bad in (None, 0.0, 1.5, math.nan, "0.3"):
         row = dict(hull_row(), drag_share=bad)
         out = tp.refit_run(tmp_path / f"b{bad}", {"usv": [row]})[0]["usv"]
         assert out["used"] is False and out["reason"].startswith("no hull_rans window passed")

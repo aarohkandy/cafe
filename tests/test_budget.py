@@ -217,7 +217,8 @@ def test_a_cpu_plan_skips_every_les_window_that_cannot_reach_the_physical_viscos
         assert not any(x["runs"] or x["reachable"] for x in w.values()) and all(x["need_cell_updates"] > 100 * x["afford_cell_updates"] for x in w.values())
         assert all(x["skip_reason"].startswith("not run: the physical lattice viscosity") and "went to stage 1" in x["skip_reason"] for x in w.values())
         B = budget.BUDGET_S[name]
-        # no FS case fits; the sea-pressure FEA keeps its seconds if they are there, and so do the glider's and the USV's CPU RANS cases if they fit what the FEA leaves
+        # no FS case fits; the sea-pressure FEA keeps its seconds if they are there, and so do the glider's and the USV's CPU RANS cases if they fit
+        # what the FEA leaves
         hold = 0.0 if name == "quick" else (a3()["fea_min_s"] + a3()["glider.rans.est_s"] * a3()["glider.rans.margin"]
                                             + a3()["usv.rans.est_s"] * a3()["usv.rans.margin"]) / B
         assert p["shares"]["stage3"] == pytest.approx(hold) and p["shares"]["stage1"] == pytest.approx(budget.SHARE["stage1"] + budget.SHARE["stage3"] - hold)
@@ -251,7 +252,8 @@ def test_the_free_surface_cases_keep_the_share_they_fit_when_the_les_slices_go_t
     monkeypatch.setenv("CAFE_NPROC", "6")
     p = budget.plan("overnight", 0, MISSION, thr={}, vehicle_classes=CLASSES)
     fs = budget.stage3_plan(p, CLASSES, a3())["fs"]
-    hold = (a3()["fea_min_s"] + a3()["glider.rans.est_s"] * a3()["glider.rans.margin"]       # the glider's sea-pressure FEA and the CPU RANS cases of glider and USV
+    # the glider's sea-pressure FEA and the CPU RANS cases of glider and USV
+    hold = (a3()["fea_min_s"] + a3()["glider.rans.est_s"] * a3()["glider.rans.margin"]
             + a3()["usv.rans.est_s"] * a3()["usv.rans.margin"])
     assert fs["fit"] == 1 and p["shares"]["stage3"] * 36000 == pytest.approx(fs["need_s"] + hold)       # the case that fits keeps its seconds, so do the others
     assert p["shares"]["stage1"] == pytest.approx(budget.SHARE["stage1"] + budget.SHARE["stage3"] - (fs["need_s"] + hold) / 36000)
