@@ -45,3 +45,13 @@ def test_the_drag_bound_and_the_history_of_a_case(tmp_path):
     assert g["drag_tail_mean_n"] == pytest.approx(2.05) and g["drag_tail_std_n"] == pytest.approx(0.05)
     assert g["tail_iterations"] == 20 and g["history_iterations"] == 100
     assert "drag_tail_mean_n" not in probe.grid_entry("fine", run, label, 10.0, 1.8, tmp_path / "none")
+
+
+def test_form_factors_and_the_slope_of_the_ladder():
+    f = probe.form_factors(0.4, 0.07, 1.4, 2.0e5)                          # ITTC-57: 0.075 / (log10 2e5 - 2)^2 = 0.075 / 3.3010^2
+    assert f["cf_ittc57"] == pytest.approx(0.075 / (np.log10(2.0e5) - 2) ** 2) and f["cf_blasius"] == pytest.approx(1.328 / np.sqrt(2.0e5))
+    assert f["ff_blasius"] == pytest.approx(0.4 * 0.07 / (1.4 * f["cf_blasius"])) and f["ff_ittc57"] == pytest.approx(0.4 * 0.07 / (1.4 * f["cf_ittc57"]))
+    b, se = probe.loglog_slope([1e4, 2e4, 4e4, 8e4], [3 * r ** -0.1 for r in (1e4, 2e4, 4e4, 8e4)])    # an exact power law: slope -0.1, no scatter
+    assert b == pytest.approx(-0.1) and se == pytest.approx(0, abs=1e-12)
+    b, se = probe.loglog_slope([1, 2, 4, 8], [1, 1.1, 0.9, 1.0])
+    assert se > 0
