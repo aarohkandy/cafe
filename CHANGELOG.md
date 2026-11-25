@@ -1001,6 +1001,7 @@ The review loop ended after round 23 (DECISIONS 1089). Hand-backs: `review/worko
 - Tests: `tests/test_wo_rans.py` T10 to T15, T28, T29, T32 to T39; T40 to T46 (refit scoping, report label, L15, keys); pins moved in `test_pipeline`, `test_credibility` (34 to 37 per-class keys), `test_wo_fea`, `test_budget`, `test_reproducible` and `test_stage3` (DECISIONS 1108 to 1110).
 - Merge of branch `scale-ladder` (the scale ladder's proof failed; it is a diagnostic only, nothing built into the pipeline, DECISIONS 1113): `review/workorder/ladder_verdict.md`, `ladder_rans.md`, `ladder_gpu_results.md`, `ladder_table.py`, `rans_probe.py --speed-factor`, `usv_rans_probe.py`; tests `tests/test_wo_ladder.py` and `tests/test_wo_cfdprobe.py`.
 - `cafe/pm/pipeline.py` `s_refit`: the no-refit reason string has its own variable name (`why_none`), because mypy strict refused the reuse of `why` (a dict later in the function); no behaviour change (commit b0fd1cb).
+- Run hr1 (the overnight demo run on `fe34859`, orca, `rc=0`): `review/workorder/hr1.md`, `hr1read.py`, `hr1chk.sh`; the blanks left for it in DECISIONS 1108 to 1110, QUESTIONS 22h, STATUS and HANDOFF are filled (USV multiplier 0.9685 from `hull_rans`, verdict NO-GO unchanged); gate `wog1` on `b0fd1cb`: 9,444 tests, 0 failed, coverage 99.994 %. `premission-step4` fast-forwarded to `hull-rans`.
 
 ### Known issues
 
